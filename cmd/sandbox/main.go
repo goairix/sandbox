@@ -35,7 +35,7 @@ func main() {
 	var rt runtime.Runtime
 	switch cfg.Runtime.Type {
 	case "docker":
-		rt, err = docker.New(ctx, cfg.Runtime.Docker.Host)
+		rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
 		if err != nil {
 			log.Fatalf("failed to create docker runtime: %v", err)
 		}

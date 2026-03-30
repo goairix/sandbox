@@ -50,9 +50,10 @@ type PoolConfig struct {
 
 // ImagesConfig holds sandbox container image settings per language.
 type ImagesConfig struct {
-	Python string `mapstructure:"python"`
-	NodeJS string `mapstructure:"nodejs"`
-	Bash   string `mapstructure:"bash"`
+	Python  string `mapstructure:"python"`
+	NodeJS  string `mapstructure:"nodejs"`
+	Bash    string `mapstructure:"bash"`
+	Gateway string `mapstructure:"gateway"`
 }
 
 // StorageConfig holds storage backend settings.
@@ -216,6 +217,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("images.python", "sandbox-python:latest")
 	v.SetDefault("images.nodejs", "sandbox-nodejs:latest")
 	v.SetDefault("images.bash", "sandbox-bash:latest")
+	v.SetDefault("images.gateway", "sandbox-gateway:latest")
 
 	// Storage — Redis
 	v.SetDefault("storage.state.redis.addr", "localhost:6379")

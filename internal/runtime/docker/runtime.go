@@ -13,12 +13,14 @@ import (
 
 // Runtime implements runtime.Runtime using Docker.
 type Runtime struct {
-	cli       *dockerclient.Client
-	networkID string
+	cli               *dockerclient.Client
+	isolatedNetworkID string
+	openNetworkID     string
+	gatewayImage      string
 }
 
 // New creates a new Docker runtime.
-func New(ctx context.Context, host string) (*Runtime, error) {
+func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 	opts := []dockerclient.Opt{
 		dockerclient.WithAPIVersionNegotiation(),
 	}
@@ -31,37 +33,77 @@ func New(ctx context.Context, host string) (*Runtime, error) {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
 
-	netID, err := ensureNetwork(ctx, cli)
+	isolatedID, openID, err := ensureNetworks(ctx, cli)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Runtime{cli: cli, networkID: netID}, nil
+	// Best-effort cleanup of orphaned resources from previous runs
+	_ = cleanupOrphanedResources(ctx, cli)
+
+	if gatewayImage == "" {
+		gatewayImage = defaultGatewayImage
+	}
+
+	return &Runtime{
+		cli:               cli,
+		isolatedNetworkID: isolatedID,
+		openNetworkID:     openID,
+		gatewayImage:      gatewayImage,
+	}, nil
 }
 
-// Close releases resources held by the Docker runtime, including the Docker client connection.
+// Close releases resources held by the Docker runtime.
 func (r *Runtime) Close() error {
 	return r.cli.Close()
 }
 
 func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
-	containerID, err := createContainer(ctx, r.cli, spec, r.networkID)
+	var networkID string
+	var pairNetworkID, gatewayIP string
+
+	if spec.NetworkEnabled {
+		// Create a gateway sidecar pair for network-enabled sandboxes.
+		// The sandbox connects to an isolated pair network, and the gateway
+		// bridges it to the open network with optional whitelist filtering.
+		var gatewayID string
+		var err error
+		pairNetworkID, gatewayID, gatewayIP, err = createSandboxPair(
+			ctx, r.cli, spec.ID, r.openNetworkID, r.gatewayImage, spec.NetworkWhitelist,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create gateway pair: %w", err)
+		}
+		_ = gatewayID // tracked via labels, cleaned up in RemoveSandbox
+		networkID = pairNetworkID
+	} else {
+		// No network access — use the shared isolated network
+		networkID = r.isolatedNetworkID
+	}
+
+	containerID, err := createContainer(ctx, r.cli, spec, networkID)
 	if err != nil {
+		if pairNetworkID != "" {
+			_ = removeSandboxPair(ctx, r.cli, spec.ID)
+		}
 		return nil, err
 	}
 
 	// Start the container
 	if err := r.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		_ = r.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		if pairNetworkID != "" {
+			_ = removeSandboxPair(ctx, r.cli, spec.ID)
+		}
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
-	// Apply network whitelist if configured
-	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
-		if err := applyNetworkWhitelist(ctx, r, containerID, spec); err != nil {
-			// Clean up the created sandbox on failure
+	// Set the sandbox's default route to the gateway
+	if gatewayIP != "" {
+		if err := setupSandboxRoute(ctx, r.cli, containerID, gatewayIP); err != nil {
 			_ = r.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
-			return nil, fmt.Errorf("apply network whitelist: %w", err)
+			_ = removeSandboxPair(ctx, r.cli, spec.ID)
+			return nil, fmt.Errorf("setup sandbox route: %w", err)
 		}
 	}
 
@@ -83,7 +125,28 @@ func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
-	return r.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	// Inspect container to find sandbox ID for gateway/network cleanup
+	var sandboxID string
+	info, err := r.cli.ContainerInspect(ctx, id)
+	if err == nil && info.Config != nil && info.Config.Labels != nil {
+		sandboxID = info.Config.Labels["sandbox.id"]
+	}
+
+	// Remove the sandbox container
+	removeErr := r.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	if removeErr != nil && dockerclient.IsErrNotFound(removeErr) {
+		removeErr = nil
+	}
+
+	// Always attempt gateway/network cleanup regardless of container removal result
+	if sandboxID != "" {
+		_ = removeSandboxPair(ctx, r.cli, sandboxID)
+	}
+
+	if removeErr != nil {
+		return fmt.Errorf("remove container: %w", removeErr)
+	}
+	return nil
 }
 
 func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxInfo, error) {

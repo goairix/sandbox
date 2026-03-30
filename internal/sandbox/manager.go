@@ -79,15 +79,8 @@ func (m *Manager) Stop(ctx context.Context) {
 
 // Create creates a new sandbox.
 func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
-	pool, ok := m.pools[cfg.Language]
-	if !ok {
+	if _, ok := m.pools[cfg.Language]; !ok {
 		return nil, fmt.Errorf("unsupported language: %s", cfg.Language)
-	}
-
-	// Acquire a warm container from the pool
-	info, err := pool.Acquire(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("acquire container: %w", err)
 	}
 
 	timeout := cfg.Timeout
@@ -99,6 +92,26 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	m.counter++
 	id := fmt.Sprintf("sb-%d-%d", time.Now().Unix(), m.counter)
 	m.mu.Unlock()
+
+	var info *runtime.SandboxInfo
+	var err error
+
+	if cfg.Network.Enabled {
+		// Network-enabled sandboxes must be created directly (not from pool)
+		// because the container must be on the correct network from the start.
+		spec := m.buildSpec(id, cfg)
+		info, err = m.runtime.CreateSandbox(ctx, spec)
+		if err != nil {
+			return nil, fmt.Errorf("create sandbox: %w", err)
+		}
+	} else {
+		// Isolated sandboxes use the warm pool
+		pool := m.pools[cfg.Language]
+		info, err = pool.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("acquire container: %w", err)
+		}
+	}
 
 	sb := &Sandbox{
 		ID:        id,
@@ -382,5 +395,32 @@ func buildInstallCommand(lang Language, deps []Dependency) string {
 		return "npm install --no-save " + strings.Join(pkgs, " ")
 	default:
 		return ""
+	}
+}
+
+// buildSpec constructs a runtime.SandboxSpec from sandbox config.
+// Used for network-enabled sandboxes that bypass the pool.
+func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
+	// Determine image from pool config
+	var image string
+	if pcfg, ok := m.config.PoolConfigs[cfg.Language]; ok {
+		image = pcfg.Image
+	}
+
+	return runtime.SandboxSpec{
+		ID:               id,
+		Image:            image,
+		Memory:           cfg.Resources.Memory,
+		CPU:              cfg.Resources.CPU,
+		Disk:             cfg.Resources.Disk,
+		NetworkEnabled:   cfg.Network.Enabled,
+		NetworkWhitelist: cfg.Network.Whitelist,
+		ReadOnlyRootFS:   false,
+		RunAsUser:        1000,
+		PidLimit:         100,
+		Labels: map[string]string{
+			"sandbox.language": string(cfg.Language),
+			"sandbox.id":      id,
+		},
 	}
 }

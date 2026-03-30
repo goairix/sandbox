@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/docker/docker/api/types/container"
+	dnetwork "github.com/docker/docker/api/types/network"
 	dockerclient "github.com/docker/docker/client"
 
 	"github.com/goairix/sandbox/internal/runtime"
@@ -73,8 +74,10 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 	hostConfig.CapDrop = []string{"ALL"}
 	hostConfig.CapAdd = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"}
 
-	// Add NET_ADMIN if network whitelist rules need to be applied via iptables
-	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
+	// Network-enabled sandboxes need NET_ADMIN for initial route setup (exec as root).
+	// The sandbox process runs as UID 1000 which cannot use NET_ADMIN
+	// (non-root processes don't retain effective capabilities in Docker).
+	if spec.NetworkEnabled {
 		hostConfig.CapAdd = append(hostConfig.CapAdd, "NET_ADMIN")
 	}
 
@@ -119,18 +122,26 @@ func createContainer(ctx context.Context, cli *dockerclient.Client, spec runtime
 		return "", err
 	}
 
-	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, spec.ID)
-	if err != nil {
-		return "", fmt.Errorf("create container: %w", err)
+	// Specify the target network at creation time to avoid connecting to the
+	// default bridge network. This is critical for network isolation.
+	var networkingConfig *dnetwork.NetworkingConfig
+	if networkID != "" {
+		// We need the network name for EndpointsConfig key.
+		// Inspect the network to get its name.
+		netInspect, inspectErr := cli.NetworkInspect(ctx, networkID, dnetwork.InspectOptions{})
+		if inspectErr != nil {
+			return "", fmt.Errorf("inspect network: %w", inspectErr)
+		}
+		networkingConfig = &dnetwork.NetworkingConfig{
+			EndpointsConfig: map[string]*dnetwork.EndpointSettings{
+				netInspect.Name: {},
+			},
+		}
 	}
 
-	// Connect to sandbox network
-	if networkID != "" {
-		if err := cli.NetworkConnect(ctx, networkID, resp.ID, nil); err != nil {
-			// cleanup on failure
-			_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-			return "", fmt.Errorf("connect network: %w", err)
-		}
+	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkingConfig, nil, spec.ID)
+	if err != nil {
+		return "", fmt.Errorf("create container: %w", err)
 	}
 
 	return resp.ID, nil
