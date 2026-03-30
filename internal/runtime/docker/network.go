@@ -86,10 +86,12 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 
 	pairNetName := pairNetworkPrefix + sandboxID
 
-	// 1. Create the pair network (internal)
+	// 1. Create the pair network.
+	// Not marked as internal so Docker's embedded DNS (127.0.0.11) can resolve
+	// external domains. Network isolation is enforced by routing all traffic
+	// through the gateway via ip route replace.
 	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
 		Driver:     "bridge",
-		Internal:   true,
 		Attachable: true,
 		Labels: map[string]string{
 			"sandbox.managed": "true",
@@ -167,7 +169,7 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 		cleanup()
 		return "", "", "", fmt.Errorf("create gateway exec: %w", err)
 	}
-	if err := cli.ContainerExecStart(ctx, gatewayID, container.ExecStartOptions{}); err != nil {
+	if err := cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
 		cleanup()
 		return "", "", "", fmt.Errorf("start gateway exec: %w", err)
 	}
@@ -250,7 +252,7 @@ func setupSandboxRoute(ctx context.Context, cli *dockerclient.Client, containerI
 	if err != nil {
 		return fmt.Errorf("create route exec: %w", err)
 	}
-	if err := cli.ContainerExecStart(ctx, containerID, container.ExecStartOptions{}); err != nil {
+	if err := cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
 		return fmt.Errorf("start route exec: %w", err)
 	}
 	return waitExecDone(ctx, cli, execResp.ID)

@@ -47,6 +47,12 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 			Disk:   req.Resources.Disk,
 		}
 	}
+	if req.Network != nil {
+		cfg.Network = sandbox.NetworkConfig{
+			Enabled:   req.Network.Enabled,
+			Whitelist: req.Network.Whitelist,
+		}
+	}
 
 	sb, err := h.manager.Create(ctx, cfg)
 	if err != nil {
