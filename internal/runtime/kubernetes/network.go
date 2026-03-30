@@ -34,28 +34,42 @@ func ensureNetworkPolicy(ctx context.Context, client kubernetes.Interface, names
 		Ports: []networkingv1.NetworkPolicyPort{dnsPortUDP, dnsPortTCP},
 	})
 
-	// Allow whitelisted CIDRs
+	// Allow whitelisted CIDRs (resolve domain names to IPs first)
 	for _, entry := range whitelist {
-		cidr := entry
+		var cidrs []string
 		if ip := net.ParseIP(entry); ip != nil {
-			// Pure IP, convert to CIDR
 			if ip.To4() != nil {
-				cidr = entry + "/32"
+				cidrs = append(cidrs, entry+"/32")
 			} else {
-				cidr = entry + "/128"
+				cidrs = append(cidrs, entry+"/128")
 			}
-		} else if _, _, err := net.ParseCIDR(entry); err != nil {
-			return fmt.Errorf("invalid whitelist entry %q: must be a valid IP or CIDR", entry)
+		} else if _, _, err := net.ParseCIDR(entry); err == nil {
+			cidrs = append(cidrs, entry)
+		} else {
+			// Treat as domain name, resolve to IPs
+			ips, lookupErr := net.LookupIP(entry)
+			if lookupErr != nil {
+				return fmt.Errorf("resolve whitelist domain %q: %w", entry, lookupErr)
+			}
+			for _, ip := range ips {
+				if ip.To4() != nil {
+					cidrs = append(cidrs, ip.String()+"/32")
+				} else {
+					cidrs = append(cidrs, ip.String()+"/128")
+				}
+			}
 		}
-		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR: cidr,
+		for _, cidr := range cidrs {
+			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+				To: []networkingv1.NetworkPolicyPeer{
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR: cidr,
+						},
 					},
 				},
-			},
-		})
+			})
+		}
 	}
 
 	policy := &networkingv1.NetworkPolicy{

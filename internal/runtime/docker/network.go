@@ -78,13 +78,10 @@ func ensureOneNetwork(ctx context.Context, cli *dockerclient.Client, name string
 // The gateway container performs NAT + whitelist filtering via iptables.
 // Returns the pair network ID, gateway container ID, and gateway IP on the pair network.
 func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID, openNetworkID, gatewayImage string, whitelist []string) (pairNetworkID, gatewayID, gatewayIP string, err error) {
-	// Validate whitelist entries
-	for _, entry := range whitelist {
-		if net.ParseIP(entry) == nil {
-			if _, _, err := net.ParseCIDR(entry); err != nil {
-				return "", "", "", fmt.Errorf("invalid whitelist entry %q: must be a valid IP or CIDR", entry)
-			}
-		}
+	// Resolve whitelist entries: IPs/CIDRs pass through, domain names are resolved to IPs
+	resolved, err := resolveWhitelist(whitelist)
+	if err != nil {
+		return "", "", "", err
 	}
 
 	pairNetName := pairNetworkPrefix + sandboxID
@@ -160,7 +157,7 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 	}
 
 	// 5. Configure NAT + whitelist rules inside the gateway
-	iptablesCmd := buildGatewayIptablesCmd(whitelist)
+	iptablesCmd := buildGatewayIptablesCmd(resolved)
 	execCfg := container.ExecOptions{
 		Cmd:  []string{"sh", "-c", iptablesCmd},
 		User: "root",
@@ -304,6 +301,33 @@ func waitExecDone(ctx context.Context, cli *dockerclient.Client, execID string) 
 		case <-ticker.C:
 		}
 	}
+}
+
+// resolveWhitelist processes whitelist entries: IPs and CIDRs pass through unchanged,
+// domain names are resolved to their IP addresses.
+func resolveWhitelist(entries []string) ([]string, error) {
+	var resolved []string
+	for _, entry := range entries {
+		if net.ParseIP(entry) != nil {
+			resolved = append(resolved, entry)
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err == nil {
+			resolved = append(resolved, entry)
+			continue
+		}
+		// Treat as domain name, resolve to IPs
+		ips, err := net.LookupIP(entry)
+		if err != nil {
+			return nil, fmt.Errorf("resolve whitelist domain %q: %w", entry, err)
+		}
+		for _, ip := range ips {
+			if ip.To4() != nil {
+				resolved = append(resolved, ip.String())
+			}
+		}
+	}
+	return resolved, nil
 }
 
 // cleanupOrphanedResources cleans up leftover gateway containers, pair networks,
