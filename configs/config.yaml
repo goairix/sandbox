@@ -85,6 +85,10 @@ storage:
 # Security — sandbox isolation and resource limits
 # -----------------------------------------------------------------------------
 security:
+  # API key for authentication. Empty string disables auth.
+  api_key: ""
+  # Rate limit (requests per second per client IP). 0 = disabled.
+  rate_limit: 0
   # Maximum wall-clock time (seconds) allowed for a single execution.
   exec_timeout_seconds: 30
   # Memory limit per sandbox (e.g. "256Mi", "1Gi").

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,8 +19,9 @@ type ManagerConfig struct {
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
 type Manager struct {
-	runtime runtime.Runtime
-	config  ManagerConfig
+	runtime  runtime.Runtime
+	config   ManagerConfig
+	sessions *SessionStore // optional, for persistent sandboxes
 
 	pools     map[Language]*Pool
 	sandboxes map[string]*Sandbox
@@ -40,6 +42,11 @@ func NewManager(rt runtime.Runtime, cfg ManagerConfig) *Manager {
 		pools:     pools,
 		sandboxes: make(map[string]*Sandbox),
 	}
+}
+
+// SetSessionStore sets an optional SessionStore for persistent sandbox state.
+func (m *Manager) SetSessionStore(ss *SessionStore) {
+	m.sessions = ss
 }
 
 // Start initializes the manager and warms up pools.
@@ -88,23 +95,52 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		RuntimeID: info.RuntimeID,
 	}
 
+	// Install dependencies if requested
+	if len(cfg.Dependencies) > 0 {
+		installCmd := buildInstallCommand(cfg.Language, cfg.Dependencies)
+		if installCmd != "" {
+			if _, err := m.runtime.Exec(ctx, info.RuntimeID, runtime.ExecRequest{
+				Command: installCmd,
+				WorkDir: "/workspace",
+				Timeout: 120, // 2 min for dependency install
+			}); err != nil {
+				// Cleanup on failure
+				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+				return nil, fmt.Errorf("install dependencies: %w", err)
+			}
+		}
+	}
+
 	m.mu.Lock()
 	m.sandboxes[id] = sb
 	m.mu.Unlock()
+
+	// Persist persistent sandboxes to session store
+	if cfg.Mode == ModePersistent && m.sessions != nil {
+		if err := m.sessions.Save(ctx, sb); err != nil {
+			// Log but don't fail — in-memory state is still valid
+			_ = err
+		}
+	}
 
 	return sb, nil
 }
 
 // Get retrieves a sandbox by ID.
-func (m *Manager) Get(_ context.Context, id string) (*Sandbox, error) {
+func (m *Manager) Get(ctx context.Context, id string) (*Sandbox, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	sb, ok := m.sandboxes[id]
-	if !ok {
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+	m.mu.RUnlock()
+	if ok {
+		return sb, nil
 	}
-	return sb, nil
+
+	// Fall back to session store for persistent sandboxes
+	if m.sessions != nil {
+		return m.sessions.Load(ctx, id)
+	}
+
+	return nil, fmt.Errorf("sandbox not found: %s", id)
 }
 
 // Destroy removes a sandbox.
@@ -118,6 +154,11 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	sb.State = StateDestroying
 	delete(m.sandboxes, id)
 	m.mu.Unlock()
+
+	// Clean up session store
+	if m.sessions != nil {
+		_ = m.sessions.Remove(ctx, id)
+	}
 
 	// Remove the container
 	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
@@ -228,4 +269,35 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	m.mu.RUnlock()
 
 	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
+}
+
+// buildInstallCommand generates the shell command to install dependencies
+// based on the sandbox language.
+func buildInstallCommand(lang Language, deps []Dependency) string {
+	if len(deps) == 0 {
+		return ""
+	}
+	var pkgs []string
+	for _, d := range deps {
+		if d.Version != "" {
+			switch lang {
+			case LangPython:
+				pkgs = append(pkgs, d.Name+"=="+d.Version)
+			case LangNodeJS:
+				pkgs = append(pkgs, d.Name+"@"+d.Version)
+			default:
+				pkgs = append(pkgs, d.Name)
+			}
+		} else {
+			pkgs = append(pkgs, d.Name)
+		}
+	}
+	switch lang {
+	case LangPython:
+		return "pip install --no-cache-dir " + strings.Join(pkgs, " ")
+	case LangNodeJS:
+		return "npm install --no-save " + strings.Join(pkgs, " ")
+	default:
+		return ""
+	}
 }

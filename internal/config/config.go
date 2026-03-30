@@ -79,6 +79,8 @@ type ObjectStorageConfig struct {
 
 // SecurityConfig holds sandbox security constraints.
 type SecurityConfig struct {
+	APIKey             string   `mapstructure:"api_key"`
+	RateLimit          int      `mapstructure:"rate_limit"` // requests per second, 0 = disabled
 	ExecTimeoutSeconds int      `mapstructure:"exec_timeout_seconds"`
 	MaxMemory          string   `mapstructure:"max_memory"`
 	MaxDisk            string   `mapstructure:"max_disk"`

@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-sandbox
+  labels:
+    app: sandbox
+    release: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: sandbox
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: sandbox
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-sandbox
+      containers:
+        - name: sandbox
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.config.server.port }}
+              protocol: TCP
+          env:
+            - name: SANDBOX_SERVER_PORT
+              value: "{{ .Values.config.server.port }}"
+            - name: SANDBOX_RUNTIME_TYPE
+              value: "{{ .Values.config.runtime.type }}"
+            - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
+              value: "{{ .Values.config.runtime.kubernetes.namespace }}"
+            - name: SANDBOX_POOL_MIN_SIZE
+              value: "{{ .Values.config.pool.minSize }}"
+            - name: SANDBOX_POOL_MAX_SIZE
+              value: "{{ .Values.config.pool.maxSize }}"
+            - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
+              value: "{{ .Values.config.storage.state.redis.addr }}"
+            - name: SANDBOX_STORAGE_OBJECT_PROVIDER
+              value: "{{ .Values.config.storage.object.provider }}"
+            - name: SANDBOX_STORAGE_OBJECT_BUCKET
+              value: "{{ .Values.config.storage.object.bucket }}"
+            - name: SANDBOX_STORAGE_OBJECT_REGION
+              value: "{{ .Values.config.storage.object.region }}"
+            - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
+              value: "{{ .Values.config.security.execTimeoutSeconds }}"
+            - name: SANDBOX_SECURITY_MAX_MEMORY
+              value: "{{ .Values.config.security.maxMemory }}"
+            - name: SANDBOX_SECURITY_MAX_PIDS
+              value: "{{ .Values.config.security.maxPids }}"
+          {{- if .Values.config.security.apiKey }}
+            - name: SANDBOX_SECURITY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-sandbox
+                  key: api-key
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.config.server.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.config.server.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5

@@ -1,0 +1,52 @@
+replicaCount: 2
+
+image:
+  repository: sandbox
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+config:
+  server:
+    port: 8080
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: sandbox
+  pool:
+    minSize: 3
+    maxSize: 20
+  storage:
+    state:
+      redis:
+        addr: redis:6379
+    object:
+      provider: s3
+      bucket: sandbox-storage
+      region: us-east-1
+  security:
+    apiKey: ""
+    rateLimit: 100
+    execTimeoutSeconds: 30
+    maxMemory: 256Mi
+    maxPids: 100
+
+networkPolicy:
+  enabled: true

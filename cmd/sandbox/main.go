@@ -13,6 +13,7 @@ import (
 	"github.com/goairix/sandbox/internal/config"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/runtime/docker"
+	k8sruntime "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/sandbox"
 )
 
@@ -37,7 +38,10 @@ func main() {
 			log.Fatalf("failed to create docker runtime: %v", err)
 		}
 	case "kubernetes":
-		log.Fatal("kubernetes runtime not yet implemented")
+		rt, err = k8sruntime.New(cfg.Runtime.Kubernetes.Kubeconfig, cfg.Runtime.Kubernetes.Namespace)
+		if err != nil {
+			log.Fatalf("failed to create kubernetes runtime: %v", err)
+		}
 	default:
 		log.Fatalf("unknown runtime type: %s", cfg.Runtime.Type)
 	}
@@ -71,7 +75,7 @@ func main() {
 	mgr.Start(ctx)
 
 	h := handler.NewHandler(mgr)
-	router := api.SetupRouter(h, "", 0)
+	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit)
 	server := api.NewServer(router, cfg.Server.Host, cfg.Server.Port)
 
 	// Graceful shutdown
@@ -82,13 +86,13 @@ func main() {
 		log.Println("shutting down...")
 		cancel()
 		mgr.Stop(context.Background())
-		if err := server.Stop(context.Background()); err != nil {
+		if err = server.Stop(context.Background()); err != nil {
 			log.Printf("server shutdown error: %v", err)
 		}
 	}()
 
 	log.Printf("starting sandbox API server on %s:%d", cfg.Server.Host, cfg.Server.Port)
-	if err := server.Start(); err != nil {
+	if err = server.Start(); err != nil {
 		log.Printf("server stopped: %v", err)
 	}
 }
