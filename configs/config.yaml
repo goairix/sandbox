@@ -1,0 +1,105 @@
+# =============================================================================
+# Sandbox Service Configuration
+# =============================================================================
+# All values below are the defaults. Override by editing this file, or by
+# setting environment variables prefixed with SANDBOX_, e.g.:
+#   SANDBOX_SERVER_PORT=9090
+#   SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
+# Nested keys use underscores as separators in env var names, e.g.:
+#   SANDBOX_STORAGE_OBJECT_ACCESS_KEY=my-key
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Server — HTTP API server settings
+# -----------------------------------------------------------------------------
+server:
+  # TCP port the HTTP server listens on.
+  port: 8080
+  # Network interface to bind. Use 0.0.0.0 to listen on all interfaces.
+  host: "0.0.0.0"
+
+# -----------------------------------------------------------------------------
+# Runtime — sandbox execution backend
+# -----------------------------------------------------------------------------
+runtime:
+  # Backend type. Supported values: "docker", "kubernetes"
+  type: "docker"
+
+  # Docker-specific settings (used when type = "docker")
+  docker:
+    # Docker daemon socket or TCP address.
+    # Leave empty to use the default socket (/var/run/docker.sock on Linux).
+    host: ""
+
+  # Kubernetes-specific settings (used when type = "kubernetes")
+  kubernetes:
+    # Path to the kubeconfig file.
+    # Leave empty to use the in-cluster service account credentials.
+    kubeconfig: ""
+    # Kubernetes namespace where sandbox pods are created.
+    namespace: ""
+
+# -----------------------------------------------------------------------------
+# Pool — pre-warmed sandbox pool settings
+# -----------------------------------------------------------------------------
+pool:
+  # Minimum number of idle sandboxes to keep ready.
+  min_size: 3
+  # Maximum number of sandboxes in the pool.
+  max_size: 20
+  # How often (in seconds) to refill the pool back to min_size.
+  refill_interval_seconds: 10
+
+# -----------------------------------------------------------------------------
+# Storage — state and object storage backends
+# -----------------------------------------------------------------------------
+storage:
+  # State storage (sandbox lifecycle tracking)
+  state:
+    redis:
+      # Redis server address in host:port format.
+      addr: "localhost:6379"
+      # Redis authentication password. Leave empty for no authentication.
+      password: ""
+      # Redis database index (0–15).
+      db: 0
+
+  # Object storage (sandbox artifacts, output files, etc.)
+  object:
+    # Storage provider. Supported values: "s3", "cos", "obs", "oss", "local"
+    provider: "local"
+    # Bucket name (not used for the "local" provider).
+    bucket: ""
+    # Storage region (provider-dependent).
+    region: ""
+    # Custom endpoint URL (optional, for private / compatible storage).
+    endpoint: ""
+    # Access key ID.
+    access_key: ""
+    # Secret access key.
+    secret_key: ""
+    # Local directory for the "local" provider.
+    local_path: "/tmp/sandbox-storage"
+
+# -----------------------------------------------------------------------------
+# Security — sandbox isolation and resource limits
+# -----------------------------------------------------------------------------
+security:
+  # Maximum wall-clock time (seconds) allowed for a single execution.
+  exec_timeout_seconds: 30
+  # Memory limit per sandbox (e.g. "256Mi", "1Gi").
+  max_memory: "256Mi"
+  # Disk quota per sandbox (e.g. "100Mi", "1Gi").
+  max_disk: "100Mi"
+  # Maximum number of processes / threads per sandbox.
+  max_pids: 100
+  # Whether outbound network access is allowed inside the sandbox.
+  network_enabled: false
+  # CIDR ranges the sandbox is allowed to reach when network_enabled = true.
+  # network_whitelist:
+  #   - "10.0.0.0/8"
+  #   - "192.168.0.0/16"
+  network_whitelist: []
+  # Path to a custom seccomp profile JSON file.
+  # Leave empty to use the container runtime default profile.
+  seccomp_profile: ""

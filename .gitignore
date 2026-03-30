@@ -28,6 +28,7 @@ go.work.sum
 
 # ide
 .idea
+.claude
 
 # miscellaneous
 DS_Store
