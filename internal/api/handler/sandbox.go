@@ -1,0 +1,101 @@
+package handler
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/pkg/types"
+)
+
+func (h *Handler) CreateSandbox(c *gin.Context) {
+	var req types.CreateSandboxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Error:   "invalid_request",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	cfg := sandbox.SandboxConfig{
+		Language: sandbox.Language(req.Language),
+		Mode:     sandbox.Mode(req.Mode),
+		Timeout:  req.Timeout,
+	}
+
+	if req.Resources != nil {
+		cfg.Resources = sandbox.ResourceLimits{
+			Memory: req.Resources.Memory,
+			CPU:    req.Resources.CPU,
+			Disk:   req.Resources.Disk,
+		}
+	}
+
+	if req.Network != nil {
+		cfg.Network = sandbox.NetworkConfig{
+			Enabled:   req.Network.Enabled,
+			Whitelist: req.Network.Whitelist,
+		}
+	}
+
+	for _, dep := range req.Dependencies {
+		cfg.Dependencies = append(cfg.Dependencies, sandbox.Dependency{
+			Name:    dep.Name,
+			Version: dep.Version,
+		})
+	}
+
+	sb, err := h.manager.Create(c.Request.Context(), cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
+			Error:   "create_failed",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, types.SandboxResponse{
+		ID:        sb.ID,
+		Language:  string(sb.Config.Language),
+		Mode:      string(sb.Config.Mode),
+		State:     string(sb.State),
+		CreatedAt: sb.CreatedAt,
+	})
+}
+
+func (h *Handler) GetSandbox(c *gin.Context) {
+	id := c.Param("id")
+
+	sb, err := h.manager.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Error:   "not_found",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, types.SandboxResponse{
+		ID:        sb.ID,
+		Language:  string(sb.Config.Language),
+		Mode:      string(sb.Config.Mode),
+		State:     string(sb.State),
+		CreatedAt: sb.CreatedAt,
+	})
+}
+
+func (h *Handler) DestroySandbox(c *gin.Context) {
+	id := c.Param("id")
+
+	if err := h.manager.Destroy(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Error:   "not_found",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "sandbox destroyed"})
+}

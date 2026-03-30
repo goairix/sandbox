@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  sandbox-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SANDBOX_RUNTIME_TYPE=docker
+      - SANDBOX_RUNTIME_DOCKER_HOST=unix:///var/run/docker.sock
+      - SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
+      - SANDBOX_STORAGE_OBJECT_PROVIDER=local
+      - SANDBOX_STORAGE_OBJECT_LOCAL_PATH=/data/storage
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-storage:/data/storage
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  sandbox-storage:
+  redis-data:
