@@ -25,8 +25,25 @@ func (h *Handler) ExecSync(c *gin.Context) {
 		return
 	}
 
+	// Get sandbox to determine language
+	sb, err := h.manager.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	command, err := buildCommand(sb.Config.Language, req.Code)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
 	execReq := runtime.ExecRequest{
-		Command: req.Command,
+		Command: command,
 		Stdin:   req.Stdin,
 		Timeout: req.Timeout,
 		Env:     req.Env,
@@ -59,8 +76,25 @@ func (h *Handler) ExecStream(c *gin.Context) {
 		return
 	}
 
+	// Get sandbox to determine language
+	sb, err := h.manager.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	command, err := buildCommand(sb.Config.Language, req.Code)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
 	execReq := runtime.ExecRequest{
-		Command: req.Command,
+		Command: command,
 		Stdin:   req.Stdin,
 		Timeout: req.Timeout,
 		Env:     req.Env,

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,21 @@ import (
 
 // validDepRegexp validates dependency names and versions to prevent command injection.
 var validDepRegexp = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+const randSuffixLen = 5
+
+// randSuffix generates a random lowercase alphanumeric string of length n.
+func randSuffix(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	for i := range b {
+		b[i] = alphabet[b[i]%byte(len(alphabet))]
+	}
+	return string(b)
+}
 
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
@@ -31,7 +47,6 @@ type Manager struct {
 	pools     map[Language]*Pool
 	sandboxes map[string]*Sandbox
 	mu        sync.RWMutex
-	counter   int
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -89,8 +104,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	}
 
 	m.mu.Lock()
-	m.counter++
-	id := fmt.Sprintf("sb-%d-%d", time.Now().Unix(), m.counter)
+	id := fmt.Sprintf("sb-%s-%s", cfg.Language, randSuffix(randSuffixLen))
 	m.mu.Unlock()
 
 	var info *runtime.SandboxInfo

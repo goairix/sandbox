@@ -25,7 +25,6 @@ type Pool struct {
 
 	mu        sync.Mutex
 	available []*runtime.SandboxInfo
-	counter   int
 	refilling bool
 }
 
@@ -113,10 +112,7 @@ func (p *Pool) Drain(ctx context.Context) {
 }
 
 func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
-	p.mu.Lock()
-	p.counter++
-	id := fmt.Sprintf("pool-%s-%d", p.config.Language, p.counter)
-	p.mu.Unlock()
+	id := fmt.Sprintf("pool-%s-%s", p.config.Language, randSuffix(randSuffixLen))
 
 	spec := runtime.SandboxSpec{
 		ID:    id,

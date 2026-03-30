@@ -58,9 +58,18 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 	// Use context.WithoutCancel so Destroy completes even if client disconnects
 	defer h.manager.Destroy(context.WithoutCancel(ctx), sb.ID)
 
+	// Build command from language and code
+	command, err := buildCommand(sandbox.Language(req.Language), req.Code)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
 	// Execute
 	result, err := h.manager.Exec(ctx, sb.ID, runtime.ExecRequest{
-		Command: req.Command,
+		Command: command,
 		Stdin:   req.Stdin,
 		Timeout: req.Timeout,
 		Env:     req.Env,
@@ -121,8 +130,17 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	// Use context.WithoutCancel so Destroy completes even if client disconnects
 	defer h.manager.Destroy(context.WithoutCancel(ctx), sb.ID)
 
+	// Build command from language and code
+	command2, err := buildCommand(sandbox.Language(req.Language), req.Code)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
 	ch, err := h.manager.ExecStream(ctx, sb.ID, runtime.ExecRequest{
-		Command: req.Command,
+		Command: command2,
 		Stdin:   req.Stdin,
 		Timeout: req.Timeout,
 		Env:     req.Env,

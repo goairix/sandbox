@@ -1,7 +1,7 @@
 package types
 
 type ExecRequest struct {
-	Command string            `json:"command" binding:"required"`
+	Code    string            `json:"code" binding:"required"`
 	Stdin   string            `json:"stdin,omitempty" binding:"max=1048576"`
 	Timeout int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
 	Env     map[string]string `json:"env,omitempty"`
@@ -17,7 +17,7 @@ type ExecResponse struct {
 // ExecuteRequest is for one-shot execution (no pre-created sandbox).
 type ExecuteRequest struct {
 	Language     string            `json:"language" binding:"required,oneof=python nodejs bash"`
-	Command      string            `json:"command" binding:"required"`
+	Code         string            `json:"code" binding:"required"`
 	Stdin        string            `json:"stdin,omitempty" binding:"max=1048576"`
 	Timeout      int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
 	Env          map[string]string `json:"env,omitempty"`

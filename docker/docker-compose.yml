@@ -11,11 +11,29 @@ services:
       - SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
       - SANDBOX_STORAGE_OBJECT_PROVIDER=local
       - SANDBOX_STORAGE_OBJECT_LOCAL_PATH=/data/storage
+      - SANDBOX_SECURITY_API_KEY=***REDACTED_API_KEY***
+      - SANDBOX_IMAGES_GATEWAY=sandbox-gateway:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-storage:/data/storage
     depends_on:
       - redis
+      - sandbox-images
+
+  # Build all sandbox images before starting the API server
+  sandbox-images:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../docker/images:/images:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        docker build -t sandbox-python:latest /images/python &&
+        docker build -t sandbox-nodejs:latest /images/nodejs &&
+        docker build -t sandbox-bash:latest /images/bash &&
+        docker build -t sandbox-gateway:latest /images/gateway &&
+        echo "All sandbox images built successfully"
 
   redis:
     image: redis:7-alpine

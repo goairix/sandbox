@@ -17,7 +17,7 @@ RUN apk add --no-cache \
     coreutils \
     grep \
     sed \
-    awk \
+    gawk \
     imagemagick \
     ffmpeg \
     python3 \

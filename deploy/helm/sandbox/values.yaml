@@ -33,6 +33,11 @@ config:
   pool:
     minSize: 3
     maxSize: 20
+  images:
+    python: "sandbox-python:latest"
+    nodejs: "sandbox-nodejs:latest"
+    bash: "sandbox-bash:latest"
+    gateway: "sandbox-gateway:latest"
   storage:
     state:
       redis:
@@ -45,6 +50,7 @@ config:
     apiKey: ""
     rateLimit: 100
     execTimeoutSeconds: 30
+    sandboxTimeoutSeconds: 3600
     maxMemory: 256Mi
     maxPids: 100
 

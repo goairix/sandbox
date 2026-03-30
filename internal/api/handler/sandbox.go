@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -126,4 +127,18 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "sandbox destroyed"})
+}
+
+// buildCommand wraps raw code with the appropriate interpreter command based on language.
+func buildCommand(lang sandbox.Language, code string) (string, error) {
+	switch lang {
+	case sandbox.LangPython:
+		return fmt.Sprintf("python3 <<'SANDBOX_EOF'\n%s\nSANDBOX_EOF", code), nil
+	case sandbox.LangNodeJS:
+		return fmt.Sprintf("node <<'SANDBOX_EOF'\n%s\nSANDBOX_EOF", code), nil
+	case sandbox.LangBash:
+		return code, nil
+	default:
+		return "", fmt.Errorf("unsupported language: %s", lang)
+	}
 }

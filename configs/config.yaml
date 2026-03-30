@@ -19,6 +19,15 @@ server:
   host: "0.0.0.0"
 
 # -----------------------------------------------------------------------------
+# Images — sandbox container images
+# -----------------------------------------------------------------------------
+images:
+  python: "sandbox-python:latest"
+  nodejs: "sandbox-nodejs:latest"
+  bash: "sandbox-bash:latest"
+  gateway: "sandbox-gateway:latest"
+
+# -----------------------------------------------------------------------------
 # Runtime — sandbox execution backend
 # -----------------------------------------------------------------------------
 runtime:
@@ -91,6 +100,8 @@ security:
   rate_limit: 0
   # Maximum wall-clock time (seconds) allowed for a single execution.
   exec_timeout_seconds: 30
+  # Maximum sandbox lifetime in seconds (0 = no limit). Default: 3600 (1 hour).
+  sandbox_timeout_seconds: 3600
   # Memory limit per sandbox (e.g. "256Mi", "1Gi").
   max_memory: "256Mi"
   # Disk quota per sandbox (e.g. "100Mi", "1Gi").

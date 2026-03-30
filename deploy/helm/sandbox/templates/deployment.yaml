@@ -38,6 +38,14 @@ spec:
               value: "{{ .Values.config.pool.minSize }}"
             - name: SANDBOX_POOL_MAX_SIZE
               value: "{{ .Values.config.pool.maxSize }}"
+            - name: SANDBOX_IMAGES_PYTHON
+              value: "{{ .Values.config.images.python }}"
+            - name: SANDBOX_IMAGES_NODEJS
+              value: "{{ .Values.config.images.nodejs }}"
+            - name: SANDBOX_IMAGES_BASH
+              value: "{{ .Values.config.images.bash }}"
+            - name: SANDBOX_IMAGES_GATEWAY
+              value: "{{ .Values.config.images.gateway }}"
             - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
               value: "{{ .Values.config.storage.state.redis.addr }}"
             - name: SANDBOX_STORAGE_OBJECT_PROVIDER
@@ -48,6 +56,8 @@ spec:
               value: "{{ .Values.config.storage.object.region }}"
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
+            - name: SANDBOX_SECURITY_SANDBOX_TIMEOUT_SECONDS
+              value: "{{ .Values.config.security.sandboxTimeoutSeconds }}"
             - name: SANDBOX_SECURITY_MAX_MEMORY
               value: "{{ .Values.config.security.maxMemory }}"
             - name: SANDBOX_SECURITY_MAX_PIDS
