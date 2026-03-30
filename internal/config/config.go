@@ -118,10 +118,10 @@ func Load(path string) (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
-	// Explicitly bind every key so that env vars are honoured even when no
-	// config file is present (viper only resolves env vars for keys it already
-	// knows about via SetDefault, config file, or explicit BindEnv).
-	for _, key := range allKeys() {
+	// Explicitly bind every known key so that env vars are honoured even when
+	// no config file is present. Using v.AllKeys() (populated by SetDefault
+	// and ReadInConfig) avoids maintaining a separate manual key list.
+	for _, key := range v.AllKeys() {
 		if err := v.BindEnv(key); err != nil {
 			return nil, fmt.Errorf("config: bind env for %q: %w", key, err)
 		}
@@ -177,35 +177,3 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.seccomp_profile", "")
 }
 
-// allKeys returns the canonical dot-separated key list that matches the
-// defaults registered in setDefaults.  Used for explicit BindEnv calls.
-func allKeys() []string {
-	return []string{
-		"server.port",
-		"server.host",
-		"runtime.type",
-		"runtime.docker.host",
-		"runtime.kubernetes.kubeconfig",
-		"runtime.kubernetes.namespace",
-		"pool.min_size",
-		"pool.max_size",
-		"pool.refill_interval_seconds",
-		"storage.state.redis.addr",
-		"storage.state.redis.password",
-		"storage.state.redis.db",
-		"storage.object.provider",
-		"storage.object.bucket",
-		"storage.object.region",
-		"storage.object.endpoint",
-		"storage.object.access_key",
-		"storage.object.secret_key",
-		"storage.object.local_path",
-		"security.exec_timeout_seconds",
-		"security.max_memory",
-		"security.max_disk",
-		"security.max_pids",
-		"security.network_enabled",
-		"security.network_whitelist",
-		"security.seccomp_profile",
-	}
-}
