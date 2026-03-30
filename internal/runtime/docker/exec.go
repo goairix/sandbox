@@ -87,10 +87,11 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
 	// Enforce timeout
+	var cancel context.CancelFunc
 	if req.Timeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
-		defer cancel()
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
 
 	workDir := req.WorkDir
@@ -115,22 +116,27 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, execConfig)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
 
 	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("exec attach: %w", err)
 	}
 
 	ch := make(chan runtime.StreamEvent, 64)
 
 	go func() {
+		defer cancel()
 		defer close(ch)
 		defer attachResp.Close()
 
 		stdoutPR, stdoutPW := io.Pipe()
 		stderrPR, stderrPW := io.Pipe()
+		defer stdoutPR.Close()
+		defer stderrPR.Close()
 
 		go func() {
 			_, _ = stdcopy.StdCopy(stdoutPW, stderrPW, attachResp.Reader)

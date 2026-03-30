@@ -22,7 +22,7 @@ func testStore(t *testing.T) *Store {
 	if addr == "" {
 		addr = "localhost:6379"
 	}
-	s, err := New(Options{Addr: addr})
+	s, err := New(context.Background(), Options{Addr: addr})
 	require.NoError(t, err)
 	return s
 }

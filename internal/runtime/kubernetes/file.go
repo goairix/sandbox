@@ -98,7 +98,7 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 // listFilesInPod lists files in a directory inside a pod.
 func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
-		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", dirPath),
+		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
 		WorkDir: "/workspace",
 	})
 	if err != nil {

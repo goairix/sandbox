@@ -9,12 +9,43 @@ import (
 	"github.com/goairix/sandbox/pkg/types"
 )
 
+// isValidLanguage checks whether the language string is a known value.
+func isValidLanguage(lang string) bool {
+	switch sandbox.Language(lang) {
+	case sandbox.LangPython, sandbox.LangNodeJS, sandbox.LangBash:
+		return true
+	}
+	return false
+}
+
+// isValidMode checks whether the mode string is a known value.
+func isValidMode(mode string) bool {
+	switch sandbox.Mode(mode) {
+	case sandbox.ModeEphemeral, sandbox.ModePersistent:
+		return true
+	}
+	return false
+}
+
 func (h *Handler) CreateSandbox(c *gin.Context) {
 	var req types.CreateSandboxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Error:   "invalid_request",
 			Message: err.Error(),
+		})
+		return
+	}
+
+	if !isValidLanguage(req.Language) {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: "invalid language, must be one of: python, nodejs, bash",
+		})
+		return
+	}
+
+	if !isValidMode(req.Mode) {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: "invalid mode, must be one of: ephemeral, persistent",
 		})
 		return
 	}
@@ -50,7 +81,6 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	sb, err := h.manager.Create(c.Request.Context(), cfg)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Error:   "create_failed",
 			Message: err.Error(),
 		})
 		return
@@ -71,7 +101,6 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 	sb, err := h.manager.Get(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Error:   "not_found",
 			Message: err.Error(),
 		})
 		return
@@ -91,7 +120,6 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 
 	if err := h.manager.Destroy(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Error:   "not_found",
 			Message: err.Error(),
 		})
 		return

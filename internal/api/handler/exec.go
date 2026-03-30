@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,7 +20,6 @@ func (h *Handler) ExecSync(c *gin.Context) {
 	var req types.ExecRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Error:   "invalid_request",
 			Message: err.Error(),
 		})
 		return
@@ -35,7 +35,6 @@ func (h *Handler) ExecSync(c *gin.Context) {
 	result, err := h.manager.Exec(c.Request.Context(), id, execReq)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Error:   "exec_failed",
 			Message: err.Error(),
 		})
 		return
@@ -55,7 +54,6 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	var req types.ExecRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Error:   "invalid_request",
 			Message: err.Error(),
 		})
 		return
@@ -71,7 +69,6 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	ch, err := h.manager.ExecStream(c.Request.Context(), id, execReq)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Error:   "exec_failed",
 			Message: err.Error(),
 		})
 		return
@@ -86,36 +83,61 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	start := time.Now()
 	flusher, _ := c.Writer.(http.Flusher)
 
-	for event := range ch {
-		var eventType string
-		var data any
-
-		switch event.Type {
-		case runtime.StreamStdout:
-			eventType = "stdout"
-			data = types.SSEStdoutData{Content: event.Content}
-		case runtime.StreamStderr:
-			eventType = "stderr"
-			data = types.SSEStderrData{Content: event.Content}
-		case runtime.StreamDone:
-			eventType = "done"
-			exitCode, _ := strconv.Atoi(event.Content)
-			data = types.SSEDoneData{
-				ExitCode: exitCode,
-				Elapsed:  time.Since(start).Seconds(),
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			// Client disconnected
+			return
+		case event, ok := <-ch:
+			if !ok {
+				// Channel closed
+				return
 			}
-		case runtime.StreamError:
-			eventType = "error"
-			data = types.SSEErrorData{
-				Error:   "exec_error",
-				Message: event.Content,
-			}
-		}
 
-		jsonData, _ := json.Marshal(data)
-		fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
-		if flusher != nil {
-			flusher.Flush()
+			var eventType string
+			var data any
+
+			switch event.Type {
+			case runtime.StreamStdout:
+				eventType = "stdout"
+				data = types.SSEStdoutData{Content: event.Content}
+			case runtime.StreamStderr:
+				eventType = "stderr"
+				data = types.SSEStderrData{Content: event.Content}
+			case runtime.StreamDone:
+				eventType = "done"
+				exitCode, err := strconv.Atoi(event.Content)
+				if err != nil {
+					log.Printf("failed to parse exit code %q: %v", event.Content, err)
+					exitCode = -1
+				}
+				data = types.SSEDoneData{
+					ExitCode: exitCode,
+					Elapsed:  time.Since(start).Seconds(),
+				}
+			case runtime.StreamError:
+				eventType = "error"
+				data = types.SSEErrorData{
+					Error:   "exec_error",
+					Message: event.Content,
+				}
+			default:
+				// Unknown event type, skip
+				log.Printf("unknown stream event type: %v", event.Type)
+				continue
+			}
+
+			jsonData, err := json.Marshal(data)
+			if err != nil {
+				log.Printf("failed to marshal SSE data: %v", err)
+				errData := types.SSEErrorData{Error: "marshal_error", Message: "failed to serialize event"}
+				jsonData, _ = json.Marshal(errData)
+				eventType = "error"
+			}
+			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 	}
 }

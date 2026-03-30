@@ -11,6 +11,12 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
+// shellEscape wraps a string in single quotes with proper escaping
+// to prevent shell injection.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
 	return r.cli.CopyToContainer(ctx, id, destPath, reader, container.CopyToContainerOptions{})
 }
@@ -25,7 +31,7 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", dirPath),
+		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
 		WorkDir: "/workspace",
 	})
 	if err != nil {

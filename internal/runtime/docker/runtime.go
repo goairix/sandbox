@@ -39,6 +39,11 @@ func New(ctx context.Context, host string) (*Runtime, error) {
 	return &Runtime{cli: cli, networkID: netID}, nil
 }
 
+// Close releases resources held by the Docker runtime, including the Docker client connection.
+func (r *Runtime) Close() error {
+	return r.cli.Close()
+}
+
 func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
 	containerID, err := createContainer(ctx, r.cli, spec, r.networkID)
 	if err != nil {
@@ -54,8 +59,9 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	// Apply network whitelist if configured
 	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
 		if err := applyNetworkWhitelist(ctx, r, containerID, spec); err != nil {
-			// Non-fatal: log but don't fail sandbox creation
-			_ = err
+			// Clean up the created sandbox on failure
+			_ = r.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+			return nil, fmt.Errorf("apply network whitelist: %w", err)
 		}
 	}
 

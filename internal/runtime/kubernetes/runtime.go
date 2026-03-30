@@ -61,7 +61,9 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	// Apply network policy if whitelist is configured
 	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
 		if err := ensureNetworkPolicy(ctx, r.client, r.namespace, spec.ID, spec.NetworkWhitelist); err != nil {
-			_ = err // non-fatal
+			// Clean up the created pod on failure
+			_ = deletePod(ctx, r.client, r.namespace, pod.Name)
+			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
 	}
 
@@ -74,11 +76,17 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 }
 
 func (r *Runtime) StartSandbox(_ context.Context, _ string) error {
-	// Pods don't have a start/stop semantic like containers
+	// Kubernetes pods do not support pause/resume semantics like Docker containers.
+	// Once a pod is created, it runs until deleted. StartSandbox is a no-op for K8s.
+	// Callers should use CreateSandbox to launch a new pod instead.
 	return nil
 }
 
 func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
+	// Kubernetes pods cannot be stopped and restarted. The only way to "stop" a pod
+	// is to delete it. Note this is a destructive operation: the pod and its ephemeral
+	// storage are permanently removed. Callers should be aware that StopSandbox on K8s
+	// is equivalent to RemoveSandbox without network policy cleanup.
 	return deletePod(ctx, r.client, r.namespace, id)
 }
 

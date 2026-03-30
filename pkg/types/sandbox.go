@@ -5,7 +5,7 @@ import "time"
 type CreateSandboxRequest struct {
 	Language     string           `json:"language" binding:"required,oneof=python nodejs bash"`
 	Mode         string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
-	Timeout      int              `json:"timeout,omitempty"`
+	Timeout      int              `json:"timeout,omitempty" binding:"min=0,max=3600"`
 	Resources    *ResourceLimits  `json:"resources,omitempty"`
 	Network      *NetworkConfig   `json:"network,omitempty"`
 	Dependencies []DependencySpec `json:"dependencies,omitempty"`
@@ -36,7 +36,6 @@ type SandboxResponse struct {
 }
 
 type ErrorResponse struct {
-	Error   string `json:"error"`
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }

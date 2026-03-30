@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"net"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -17,19 +18,35 @@ func ensureNetworkPolicy(ctx context.Context, client kubernetes.Interface, names
 	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
 
 	udp := corev1.ProtocolUDP
+	tcp := corev1.ProtocolTCP
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 
-	// Always allow DNS
-	dnsPort := networkingv1.NetworkPolicyPort{
+	// Always allow DNS (both UDP and TCP)
+	dnsPortUDP := networkingv1.NetworkPolicyPort{
 		Protocol: &udp,
 		Port:     &intstr.IntOrString{IntVal: 53},
 	}
+	dnsPortTCP := networkingv1.NetworkPolicyPort{
+		Protocol: &tcp,
+		Port:     &intstr.IntOrString{IntVal: 53},
+	}
 	egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-		Ports: []networkingv1.NetworkPolicyPort{dnsPort},
+		Ports: []networkingv1.NetworkPolicyPort{dnsPortUDP, dnsPortTCP},
 	})
 
 	// Allow whitelisted CIDRs
-	for _, cidr := range whitelist {
+	for _, entry := range whitelist {
+		cidr := entry
+		if ip := net.ParseIP(entry); ip != nil {
+			// Pure IP, convert to CIDR
+			if ip.To4() != nil {
+				cidr = entry + "/32"
+			} else {
+				cidr = entry + "/128"
+			}
+		} else if _, _, err := net.ParseCIDR(entry); err != nil {
+			return fmt.Errorf("invalid whitelist entry %q: must be a valid IP or CIDR", entry)
+		}
 		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
 			To: []networkingv1.NetworkPolicyPeer{
 				{

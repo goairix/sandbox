@@ -72,23 +72,34 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]object.ObjectInfo, error) {
-	opt := &cos.BucketGetOptions{
-		Prefix: prefix,
-	}
-	result, _, err := s.client.Bucket.Get(ctx, opt)
-	if err != nil {
-		return nil, err
+	var objs []object.ObjectInfo
+	marker := ""
+
+	for {
+		opt := &cos.BucketGetOptions{
+			Prefix: prefix,
+			Marker: marker,
+		}
+		result, _, err := s.client.Bucket.Get(ctx, opt)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, item := range result.Contents {
+			modTime, _ := time.Parse(time.RFC3339, item.LastModified)
+			objs = append(objs, object.ObjectInfo{
+				Key:          item.Key,
+				Size:         int64(item.Size),
+				LastModified: modTime,
+			})
+		}
+
+		if !result.IsTruncated {
+			break
+		}
+		marker = result.NextMarker
 	}
 
-	var objs []object.ObjectInfo
-	for _, item := range result.Contents {
-		modTime, _ := time.Parse(time.RFC3339, item.LastModified)
-		objs = append(objs, object.ObjectInfo{
-			Key:          item.Key,
-			Size:         int64(item.Size),
-			LastModified: modTime,
-		})
-	}
 	return objs, nil
 }
 

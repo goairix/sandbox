@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -26,7 +27,7 @@ func Auth(apiKey string) gin.HandlerFunc {
 		}
 
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != apiKey {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "unauthorized",
 				"message": "invalid API key",

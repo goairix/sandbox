@@ -46,19 +46,29 @@ func (s *Store) Delete(_ context.Context, key string) error {
 }
 
 func (s *Store) List(_ context.Context, prefix string) ([]object.ObjectInfo, error) {
-	result, err := s.bucket.ListObjects(alioss.Prefix(prefix))
-	if err != nil {
-		return nil, err
+	var objs []object.ObjectInfo
+	marker := ""
+
+	for {
+		result, err := s.bucket.ListObjects(alioss.Prefix(prefix), alioss.Marker(marker))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, obj := range result.Objects {
+			objs = append(objs, object.ObjectInfo{
+				Key:          obj.Key,
+				Size:         obj.Size,
+				LastModified: obj.LastModified,
+			})
+		}
+
+		if !result.IsTruncated {
+			break
+		}
+		marker = result.NextMarker
 	}
 
-	var objs []object.ObjectInfo
-	for _, obj := range result.Objects {
-		objs = append(objs, object.ObjectInfo{
-			Key:          obj.Key,
-			Size:         obj.Size,
-			LastModified: obj.LastModified,
-		})
-	}
 	return objs, nil
 }
 

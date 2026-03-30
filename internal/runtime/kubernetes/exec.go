@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
+
+var validEnvKeyRegexp = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// shellEscape wraps a string in single quotes with proper escaping
+// to prevent shell injection.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
 
 // execInPod executes a command synchronously inside a pod.
 func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
@@ -33,15 +42,18 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 		workDir = "/workspace"
 	}
 
-	cmd := []string{"sh", "-c", fmt.Sprintf("cd %s && %s", workDir, req.Command)}
+	cmd := []string{"sh", "-c", fmt.Sprintf("cd %s && %s", shellEscape(workDir), req.Command)}
 
-	// Build env prefix
+	// Build env prefix with proper escaping
 	var envPrefix string
 	for k, v := range req.Env {
-		envPrefix += fmt.Sprintf("export %s=%s; ", k, v)
+		if !validEnvKeyRegexp.MatchString(k) {
+			return nil, fmt.Errorf("invalid environment variable name: %q", k)
+		}
+		envPrefix += fmt.Sprintf("export %s=%s; ", k, shellEscape(v))
 	}
 	if envPrefix != "" {
-		cmd = []string{"sh", "-c", envPrefix + fmt.Sprintf("cd %s && %s", workDir, req.Command)}
+		cmd = []string{"sh", "-c", envPrefix + fmt.Sprintf("cd %s && %s", shellEscape(workDir), req.Command)}
 	}
 
 	execReq := client.CoreV1().RESTClient().Post().
@@ -95,10 +107,11 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 // execStreamInPod executes a command in a pod with streaming output.
 func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
 	// Enforce timeout
+	var cancel context.CancelFunc
 	if req.Timeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
-		defer cancel()
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
 
 	workDir := req.WorkDir
@@ -106,7 +119,20 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 		workDir = "/workspace"
 	}
 
-	cmd := []string{"sh", "-c", fmt.Sprintf("cd %s && %s", workDir, req.Command)}
+	cmd := []string{"sh", "-c", fmt.Sprintf("cd %s && %s", shellEscape(workDir), req.Command)}
+
+	// Build env prefix with proper escaping (same as execInPod)
+	var envPrefix string
+	for k, v := range req.Env {
+		if !validEnvKeyRegexp.MatchString(k) {
+			cancel()
+			return nil, fmt.Errorf("invalid environment variable name: %q", k)
+		}
+		envPrefix += fmt.Sprintf("export %s=%s; ", k, shellEscape(v))
+	}
+	if envPrefix != "" {
+		cmd = []string{"sh", "-c", envPrefix + fmt.Sprintf("cd %s && %s", shellEscape(workDir), req.Command)}
+	}
 
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -122,6 +148,7 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 
 	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("create executor: %w", err)
 	}
 
@@ -131,7 +158,10 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 	stderrPR, stderrPW := io.Pipe()
 
 	go func() {
+		defer cancel()
 		defer close(ch)
+		defer stdoutPR.Close()
+		defer stderrPR.Close()
 
 		// Run exec in background
 		execDone := make(chan error, 1)

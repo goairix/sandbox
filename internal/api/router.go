@@ -1,16 +1,35 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/api/handler"
 	"github.com/goairix/sandbox/internal/api/middleware"
 )
 
+// BodySizeLimit returns a middleware that limits the size of request bodies.
+func BodySizeLimit(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
+
 // SetupRouter configures all routes.
 func SetupRouter(h *handler.Handler, apiKey string, rateLimit int) *gin.Engine {
 	r := gin.New()
+	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
+
+	// Limit multipart memory to 32MB
+	r.MaxMultipartMemory = 32 << 20
+
+	// Limit request body size to 64MB
+	r.Use(BodySizeLimit(64 << 20))
 
 	// Health check (no auth)
 	r.GET("/health", func(c *gin.Context) {

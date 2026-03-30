@@ -3,7 +3,9 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -24,7 +26,13 @@ type Pool struct {
 	mu        sync.Mutex
 	available []*runtime.SandboxInfo
 	counter   int
+	refilling bool
 }
+
+const (
+	maxRefillRetries = 10
+	maxRefillBackoff = 30 * time.Second
+)
 
 // NewPool creates a new container pool.
 func NewPool(rt runtime.Runtime, cfg PoolConfig) *Pool {
@@ -85,6 +93,12 @@ func (p *Pool) Size() int {
 	return len(p.available)
 }
 
+// NotifyRemoved notifies the pool that a container from this pool was removed,
+// triggering an async refill if needed.
+func (p *Pool) NotifyRemoved() {
+	go p.refillIfNeeded(context.Background())
+}
+
 // Drain destroys all warm containers in the pool.
 func (p *Pool) Drain(ctx context.Context) {
 	p.mu.Lock()
@@ -94,7 +108,7 @@ func (p *Pool) Drain(ctx context.Context) {
 	p.mu.Unlock()
 
 	for _, info := range items {
-		_ = p.runtime.RemoveSandbox(ctx, info.ID)
+		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
 	}
 }
 
@@ -121,24 +135,67 @@ func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
 
 func (p *Pool) refillIfNeeded(ctx context.Context) {
 	p.mu.Lock()
-	need := p.config.MinSize - len(p.available)
-	if need <= 0 {
+	if p.refilling {
 		p.mu.Unlock()
 		return
 	}
+	if len(p.available) >= p.config.MinSize {
+		p.mu.Unlock()
+		return
+	}
+	p.refilling = true
 	p.mu.Unlock()
 
-	for i := 0; i < need; i++ {
+	defer func() {
+		p.mu.Lock()
+		p.refilling = false
+		p.mu.Unlock()
+	}()
+
+	consecutiveFailures := 0
+
+	for {
+		p.mu.Lock()
+		if len(p.available) >= p.config.MinSize {
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			log.Printf("refillIfNeeded: context cancelled, stopping refill for pool %s", p.config.Language)
+			return
+		default:
+		}
+
 		info, err := p.createWarm(ctx)
 		if err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= maxRefillRetries {
+				log.Printf("refillIfNeeded: giving up after %d consecutive failures for pool %s", consecutiveFailures, p.config.Language)
+				return
+			}
+			backoff := time.Duration(1<<(consecutiveFailures-1)) * time.Second
+			if backoff > maxRefillBackoff {
+				backoff = maxRefillBackoff
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				log.Printf("refillIfNeeded: context cancelled during backoff for pool %s", p.config.Language)
+				return
+			}
 			continue
 		}
+		consecutiveFailures = 0
 		p.mu.Lock()
 		if len(p.available) < p.config.MaxSize {
 			p.available = append(p.available, info)
 		} else {
 			// Pool is full, discard
-			go func() { _ = p.runtime.RemoveSandbox(context.Background(), info.ID) }()
+			runtimeID := info.RuntimeID
+			go func() { _ = p.runtime.RemoveSandbox(context.Background(), runtimeID) }()
 		}
 		p.mu.Unlock()
 	}

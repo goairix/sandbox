@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,12 +23,28 @@ func New(basePath string) *Store {
 	return &Store{basePath: basePath}
 }
 
-func (s *Store) fullPath(key string) string {
-	return filepath.Join(s.basePath, filepath.FromSlash(key))
+func (s *Store) fullPath(key string) (string, error) {
+	joined := filepath.Join(s.basePath, filepath.FromSlash(key))
+	resolved, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("local store: resolve path: %w", err)
+	}
+	base, err := filepath.Abs(s.basePath)
+	if err != nil {
+		return "", fmt.Errorf("local store: resolve base path: %w", err)
+	}
+	// Ensure the resolved path is within the base path
+	if !strings.HasPrefix(resolved, base+string(filepath.Separator)) && resolved != base {
+		return "", fmt.Errorf("local store: path %q escapes base directory", key)
+	}
+	return resolved, nil
 }
 
 func (s *Store) Put(_ context.Context, key string, reader io.Reader, _ int64) error {
-	path := s.fullPath(key)
+	path, err := s.fullPath(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -35,13 +52,19 @@ func (s *Store) Put(_ context.Context, key string, reader io.Reader, _ int64) er
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, reader)
-	return err
+	_, copyErr := io.Copy(f, reader)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	path := s.fullPath(key)
+	path, err := s.fullPath(key)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -50,11 +73,18 @@ func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error) {
 }
 
 func (s *Store) Delete(_ context.Context, key string) error {
-	return os.Remove(s.fullPath(key))
+	path, err := s.fullPath(key)
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 func (s *Store) List(_ context.Context, prefix string) ([]object.ObjectInfo, error) {
-	dir := s.fullPath(prefix)
+	dir, err := s.fullPath(prefix)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -85,7 +115,11 @@ func (s *Store) List(_ context.Context, prefix string) ([]object.ObjectInfo, err
 }
 
 func (s *Store) Exists(_ context.Context, key string) (bool, error) {
-	_, err := os.Stat(s.fullPath(key))
+	path, err := s.fullPath(key)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
 	if err == nil {
 		return true, nil
 	}

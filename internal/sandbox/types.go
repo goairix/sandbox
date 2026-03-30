@@ -69,5 +69,6 @@ type Sandbox struct {
 	CreatedAt time.Time     `json:"created_at"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	// RuntimeID is the container/pod ID in the underlying runtime
-	RuntimeID string `json:"runtime_id"`
+	RuntimeID string        `json:"runtime_id"`
+	Timeout   time.Duration `json:"timeout"` // max sandbox lifetime
 }

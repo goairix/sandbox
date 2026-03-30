@@ -6,7 +6,9 @@ metadata:
     app: sandbox
     release: {{ .Release.Name }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app: sandbox

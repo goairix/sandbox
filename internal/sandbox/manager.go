@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
+
+// validDepRegexp validates dependency names and versions to prevent command injection.
+var validDepRegexp = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
@@ -27,6 +32,9 @@ type Manager struct {
 	sandboxes map[string]*Sandbox
 	mu        sync.RWMutex
 	counter   int
+
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 // NewManager creates a new SandboxManager.
@@ -41,6 +49,7 @@ func NewManager(rt runtime.Runtime, cfg ManagerConfig) *Manager {
 		config:    cfg,
 		pools:     pools,
 		sandboxes: make(map[string]*Sandbox),
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -54,10 +63,15 @@ func (m *Manager) Start(ctx context.Context) {
 	for _, pool := range m.pools {
 		pool.WarmUp(ctx)
 	}
+	m.wg.Add(1)
+	go m.reapExpiredSandboxes()
 }
 
 // Stop drains all pools and cleans up.
 func (m *Manager) Stop(ctx context.Context) {
+	close(m.stopCh)
+	m.wg.Wait()
+
 	for _, pool := range m.pools {
 		pool.Drain(ctx)
 	}
@@ -93,6 +107,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		RuntimeID: info.RuntimeID,
+		Timeout:   time.Duration(timeout) * time.Second,
 	}
 
 	// Install dependencies if requested
@@ -126,21 +141,31 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	return sb, nil
 }
 
-// Get retrieves a sandbox by ID.
-func (m *Manager) Get(ctx context.Context, id string) (*Sandbox, error) {
+// Get retrieves a sandbox by ID. Returns a copy to prevent external data races.
+func (m *Manager) Get(ctx context.Context, id string) (Sandbox, error) {
 	m.mu.RLock()
 	sb, ok := m.sandboxes[id]
-	m.mu.RUnlock()
 	if ok {
-		return sb, nil
+		cp := *sb
+		m.mu.RUnlock()
+		return cp, nil
 	}
+	m.mu.RUnlock()
 
 	// Fall back to session store for persistent sandboxes
 	if m.sessions != nil {
-		return m.sessions.Load(ctx, id)
+		sbPtr, err := m.sessions.Load(ctx, id)
+		if err != nil {
+			return Sandbox{}, err
+		}
+		// Register into in-memory map so subsequent lookups find it directly
+		m.mu.Lock()
+		m.sandboxes[id] = sbPtr
+		m.mu.Unlock()
+		return *sbPtr, nil
 	}
 
-	return nil, fmt.Errorf("sandbox not found: %s", id)
+	return Sandbox{}, fmt.Errorf("sandbox not found: %s", id)
 }
 
 // Destroy removes a sandbox.
@@ -165,28 +190,35 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		return fmt.Errorf("remove sandbox: %w", err)
 	}
 
+	// Notify pool so it can refill
+	if pool, ok := m.pools[sb.Config.Language]; ok {
+		pool.NotifyRemoved()
+	}
+
 	return nil
 }
 
 // Exec executes a command in a sandbox synchronously.
 func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
-	m.mu.RLock()
+	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
-		m.mu.RUnlock()
+		m.mu.Unlock()
 		return nil, fmt.Errorf("sandbox not found: %s", id)
 	}
-	m.mu.RUnlock()
-
-	m.mu.Lock()
 	sb.State = StateRunning
 	sb.UpdatedAt = time.Now()
+	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
 
-	result, err := m.runtime.Exec(ctx, sb.RuntimeID, req)
+	result, err := m.runtime.Exec(ctx, runtimeID, req)
 
 	m.mu.Lock()
-	sb.State = StateIdle
+	if err != nil {
+		sb.State = StateError
+	} else {
+		sb.State = StateIdle
+	}
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
 
@@ -195,23 +227,22 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 // ExecStream executes a command in a sandbox with streaming output.
 func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
-	m.mu.RLock()
+	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
-		m.mu.RUnlock()
+		m.mu.Unlock()
 		return nil, fmt.Errorf("sandbox not found: %s", id)
 	}
-	m.mu.RUnlock()
-
-	m.mu.Lock()
 	sb.State = StateRunning
 	sb.UpdatedAt = time.Now()
+	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
 
-	ch, err := m.runtime.ExecStream(ctx, sb.RuntimeID, req)
+	ch, err := m.runtime.ExecStream(ctx, runtimeID, req)
 	if err != nil {
 		m.mu.Lock()
-		sb.State = StateIdle
+		sb.State = StateError
+		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		return nil, err
 	}
@@ -221,7 +252,14 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	go func() {
 		defer close(outCh)
 		for event := range ch {
-			outCh <- event
+			select {
+			case outCh <- event:
+			case <-ctx.Done():
+				// Drain remaining events to avoid blocking the upstream goroutine
+				for range ch {
+				}
+				return
+			}
 		}
 		m.mu.Lock()
 		sb.State = StateIdle
@@ -271,6 +309,40 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
 }
 
+// reapExpiredSandboxes periodically checks for sandboxes that have exceeded
+// their timeout and destroys them.
+func (m *Manager) reapExpiredSandboxes() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.reapOnce()
+		}
+	}
+}
+
+func (m *Manager) reapOnce() {
+	now := time.Now()
+	var expired []string
+
+	m.mu.RLock()
+	for id, sb := range m.sandboxes {
+		if sb.Timeout > 0 && now.Sub(sb.CreatedAt) > sb.Timeout {
+			expired = append(expired, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, id := range expired {
+		_ = m.Destroy(context.Background(), id)
+	}
+}
+
 // buildInstallCommand generates the shell command to install dependencies
 // based on the sandbox language.
 func buildInstallCommand(lang Language, deps []Dependency) string {
@@ -279,6 +351,14 @@ func buildInstallCommand(lang Language, deps []Dependency) string {
 	}
 	var pkgs []string
 	for _, d := range deps {
+		if !validDepRegexp.MatchString(d.Name) {
+			log.Printf("WARNING: skipping dependency with invalid name: %q", d.Name)
+			continue
+		}
+		if d.Version != "" && !validDepRegexp.MatchString(d.Version) {
+			log.Printf("WARNING: skipping dependency %q with invalid version: %q", d.Name, d.Version)
+			continue
+		}
 		if d.Version != "" {
 			switch lang {
 			case LangPython:
@@ -291,6 +371,9 @@ func buildInstallCommand(lang Language, deps []Dependency) string {
 		} else {
 			pkgs = append(pkgs, d.Name)
 		}
+	}
+	if len(pkgs) == 0 {
+		return ""
 	}
 	switch lang {
 	case LangPython:

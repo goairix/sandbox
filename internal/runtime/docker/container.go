@@ -31,7 +31,7 @@ func imageForSpec(spec runtime.SandboxSpec) string {
 }
 
 // createContainerConfig builds Docker container configuration from a SandboxSpec.
-func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *container.HostConfig) {
+func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *container.HostConfig, error) {
 	config := &container.Config{
 		Image:      imageForSpec(spec),
 		Labels:     spec.Labels,
@@ -44,7 +44,11 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 	// Parse memory limit
 	var memoryBytes int64
 	if spec.Memory != "" {
-		memoryBytes = parseMemory(spec.Memory)
+		var err error
+		memoryBytes, err = parseMemory(spec.Memory)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse memory: %w", err)
+		}
 	}
 
 	hostConfig := &container.HostConfig{
@@ -69,28 +73,38 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 	hostConfig.CapDrop = []string{"ALL"}
 	hostConfig.CapAdd = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"}
 
+	// Add NET_ADMIN if network whitelist rules need to be applied via iptables
+	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
+		hostConfig.CapAdd = append(hostConfig.CapAdd, "NET_ADMIN")
+	}
+
 	// Run as non-root user
 	if spec.RunAsUser > 0 {
 		config.User = fmt.Sprintf("%d", spec.RunAsUser)
 	}
 
-	return config, hostConfig
+	return config, hostConfig, nil
 }
 
-// parseMemory converts "256Mi" to bytes.
-func parseMemory(s string) int64 {
+// parseMemory converts "256Mi" to bytes. Returns an error if the input is invalid.
+func parseMemory(s string) (int64, error) {
 	var value int64
 	var unit string
-	_, _ = fmt.Sscanf(s, "%d%s", &value, &unit)
+	n, _ := fmt.Sscanf(s, "%d%s", &value, &unit)
+	if n == 0 || value <= 0 {
+		return 0, fmt.Errorf("invalid memory format: %q", s)
+	}
 	switch unit {
 	case "Ki":
-		return value * 1024
+		return value * 1024, nil
 	case "Mi":
-		return value * 1024 * 1024
+		return value * 1024 * 1024, nil
 	case "Gi":
-		return value * 1024 * 1024 * 1024
+		return value * 1024 * 1024 * 1024, nil
+	case "":
+		return value, nil
 	default:
-		return value
+		return 0, fmt.Errorf("unknown memory unit: %q in %q", unit, s)
 	}
 }
 
@@ -100,7 +114,10 @@ func int64Ptr(v int64) *int64 {
 
 // createContainer creates a Docker container from spec.
 func createContainer(ctx context.Context, cli *dockerclient.Client, spec runtime.SandboxSpec, networkID string) (string, error) {
-	config, hostConfig := createContainerConfig(spec)
+	config, hostConfig, err := createContainerConfig(spec)
+	if err != nil {
+		return "", err
+	}
 
 	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, spec.ID)
 	if err != nil {

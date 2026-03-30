@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"fmt"
+	"time"
+	"net"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -60,6 +62,12 @@ func applyNetworkWhitelist(ctx context.Context, r *Runtime, containerID string, 
 	rules = append(rules, "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT")
 
 	for _, dest := range spec.NetworkWhitelist {
+		// Validate that dest is a valid IP or CIDR to prevent command injection
+		if net.ParseIP(dest) == nil {
+			if _, _, err := net.ParseCIDR(dest); err != nil {
+				return fmt.Errorf("invalid network whitelist entry %q: must be a valid IP or CIDR", dest)
+			}
+		}
 		rules = append(rules, fmt.Sprintf("iptables -A OUTPUT -d %s -j ACCEPT", dest))
 	}
 
@@ -78,6 +86,27 @@ func applyNetworkWhitelist(ctx context.Context, r *Runtime, containerID string, 
 
 	if err := r.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
 		return fmt.Errorf("start whitelist exec: %w", err)
+	}
+
+	// Poll until exec completes and check exit code
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		inspect, err := r.cli.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return fmt.Errorf("inspect whitelist exec: %w", err)
+		}
+		if !inspect.Running {
+			if inspect.ExitCode != 0 {
+				return fmt.Errorf("whitelist exec failed with exit code %d", inspect.ExitCode)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 
 	return nil

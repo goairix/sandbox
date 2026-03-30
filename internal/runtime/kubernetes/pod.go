@@ -29,12 +29,18 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		resources.Limits = corev1.ResourceList{}
 		resources.Requests = corev1.ResourceList{}
 		if spec.Memory != "" {
-			mem := resource.MustParse(spec.Memory)
+			mem, err := resource.ParseQuantity(spec.Memory)
+			if err != nil {
+				return nil, fmt.Errorf("parse memory quantity %q: %w", spec.Memory, err)
+			}
 			resources.Limits[corev1.ResourceMemory] = mem
 			resources.Requests[corev1.ResourceMemory] = mem
 		}
 		if spec.CPU != "" {
-			cpu := resource.MustParse(spec.CPU)
+			cpu, err := resource.ParseQuantity(spec.CPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse cpu quantity %q: %w", spec.CPU, err)
+			}
 			resources.Limits[corev1.ResourceCPU] = cpu
 			resources.Requests[corev1.ResourceCPU] = cpu
 		}

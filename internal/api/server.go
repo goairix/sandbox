@@ -20,8 +20,12 @@ func NewServer(engine *gin.Engine, host string, port int) *Server {
 	return &Server{
 		engine: engine,
 		httpServer: &http.Server{
-			Addr:    fmt.Sprintf("%s:%d", host, port),
-			Handler: engine,
+			Addr:              fmt.Sprintf("%s:%d", host, port),
+			Handler:           engine,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      120 * time.Second, // longer for SSE
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		},
 	}
 }

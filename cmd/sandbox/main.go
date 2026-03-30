@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,31 +48,44 @@ func main() {
 		log.Fatalf("unknown runtime type: %s", cfg.Runtime.Type)
 	}
 
-	// Build pool configs
+	// Build pool configs — read images from config, fall back to defaults
+	pythonImage := cfg.Images.Python
+	if pythonImage == "" {
+		pythonImage = "sandbox-python:latest"
+	}
+	nodejsImage := cfg.Images.NodeJS
+	if nodejsImage == "" {
+		nodejsImage = "sandbox-nodejs:latest"
+	}
+	bashImage := cfg.Images.Bash
+	if bashImage == "" {
+		bashImage = "sandbox-bash:latest"
+	}
+
 	poolConfigs := map[sandbox.Language]sandbox.PoolConfig{
 		sandbox.LangPython: {
 			Language: sandbox.LangPython,
 			MinSize:  cfg.Pool.MinSize,
 			MaxSize:  cfg.Pool.MaxSize,
-			Image:    "sandbox-python:latest",
+			Image:    pythonImage,
 		},
 		sandbox.LangNodeJS: {
 			Language: sandbox.LangNodeJS,
 			MinSize:  cfg.Pool.MinSize,
 			MaxSize:  cfg.Pool.MaxSize,
-			Image:    "sandbox-nodejs:latest",
+			Image:    nodejsImage,
 		},
 		sandbox.LangBash: {
 			Language: sandbox.LangBash,
 			MinSize:  cfg.Pool.MinSize,
 			MaxSize:  cfg.Pool.MaxSize,
-			Image:    "sandbox-bash:latest",
+			Image:    bashImage,
 		},
 	}
 
 	mgr := sandbox.NewManager(rt, sandbox.ManagerConfig{
 		PoolConfigs:    poolConfigs,
-		DefaultTimeout: cfg.Security.ExecTimeoutSeconds,
+		DefaultTimeout: cfg.Security.SandboxTimeoutSeconds,
 	})
 	mgr.Start(ctx)
 
@@ -79,20 +94,32 @@ func main() {
 	server := api.NewServer(router, cfg.Server.Host, cfg.Server.Port)
 
 	// Graceful shutdown
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("shutting down...")
 		cancel()
 		mgr.Stop(context.Background())
-		if err = server.Stop(context.Background()); err != nil {
-			log.Printf("server shutdown error: %v", err)
+		if shutdownErr := server.Stop(context.Background()); shutdownErr != nil {
+			log.Printf("server shutdown error: %v", shutdownErr)
 		}
 	}()
 
 	log.Printf("starting sandbox API server on %s:%d", cfg.Server.Host, cfg.Server.Port)
-	if err = server.Start(); err != nil {
-		log.Printf("server stopped: %v", err)
+	if err = server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("server error: %v", err)
+		// Cancel context to trigger cleanup in the shutdown goroutine, then
+		// exit immediately — do not wait for a signal that will never arrive.
+		cancel()
+		mgr.Stop(context.Background())
+		log.Println("shutdown complete")
+		return
 	}
+
+	// Wait for graceful shutdown to complete (signal-triggered path)
+	<-shutdownDone
+	log.Println("shutdown complete")
 }

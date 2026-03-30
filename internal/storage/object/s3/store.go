@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/goairix/sandbox/internal/storage/object"
 )
@@ -94,22 +96,32 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]object.ObjectInfo, error) {
-	output, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+	var result []object.ObjectInfo
+	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(prefix),
-	})
-	if err != nil {
-		return nil, err
 	}
 
-	var result []object.ObjectInfo
-	for _, obj := range output.Contents {
-		result = append(result, object.ObjectInfo{
-			Key:          aws.ToString(obj.Key),
-			Size:         aws.ToInt64(obj.Size),
-			LastModified: aws.ToTime(obj.LastModified),
-		})
+	for {
+		output, err := s.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, obj := range output.Contents {
+			result = append(result, object.ObjectInfo{
+				Key:          aws.ToString(obj.Key),
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: aws.ToTime(obj.LastModified),
+			})
+		}
+
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		input.ContinuationToken = output.NextContinuationToken
 	}
+
 	return result, nil
 }
 
@@ -119,8 +131,13 @@ func (s *Store) Exists(ctx context.Context, key string) (bool, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		// Check if it's a not-found error
-		return false, nil
+		// Distinguish not-found from other errors
+		var notFound *types.NotFound
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &notFound) || errors.As(err, &noSuchKey) {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }

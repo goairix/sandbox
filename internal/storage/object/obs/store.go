@@ -3,6 +3,8 @@ package obs
 import (
 	"context"
 	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	huaweiobs "github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
@@ -68,25 +70,36 @@ func (s *Store) Delete(_ context.Context, key string) error {
 }
 
 func (s *Store) List(_ context.Context, prefix string) ([]object.ObjectInfo, error) {
-	input := &huaweiobs.ListObjectsInput{
-		Bucket: s.bucket,
-		ListObjsInput: huaweiobs.ListObjsInput{
-			Prefix: prefix,
-		},
-	}
-	output, err := s.client.ListObjects(input)
-	if err != nil {
-		return nil, err
+	var result []object.ObjectInfo
+	marker := ""
+
+	for {
+		input := &huaweiobs.ListObjectsInput{
+			Bucket: s.bucket,
+			ListObjsInput: huaweiobs.ListObjsInput{
+				Prefix: prefix,
+			},
+			Marker: marker,
+		}
+		output, err := s.client.ListObjects(input)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, obj := range output.Contents {
+			result = append(result, object.ObjectInfo{
+				Key:          obj.Key,
+				Size:         obj.Size,
+				LastModified: obj.LastModified,
+			})
+		}
+
+		if !output.IsTruncated {
+			break
+		}
+		marker = output.NextMarker
 	}
 
-	var result []object.ObjectInfo
-	for _, obj := range output.Contents {
-		result = append(result, object.ObjectInfo{
-			Key:          obj.Key,
-			Size:         obj.Size,
-			LastModified: obj.LastModified,
-		})
-	}
 	return result, nil
 }
 
@@ -97,7 +110,15 @@ func (s *Store) Exists(_ context.Context, key string) (bool, error) {
 	}
 	_, err := s.client.GetObjectMetadata(input)
 	if err != nil {
-		return false, nil
+		// OBS returns HTTP 404 for non-existent objects
+		if obsErr, ok := err.(huaweiobs.ObsError); ok && obsErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		// Also check for common "NoSuchKey" error code in the message
+		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "404") {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }

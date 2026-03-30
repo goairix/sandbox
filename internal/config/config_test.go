@@ -11,7 +11,10 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	// No file, no env vars — should return all defaults
+	// api_key is required by validation, set via env
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-api-key")
+
+	// No file, no other env vars — should return all defaults
 	cfg, err := config.Load("")
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
@@ -91,6 +94,7 @@ storage:
     local_path: "/data/sandbox"
 
 security:
+  api_key: "test-yaml-api-key"
   exec_timeout_seconds: 60
   max_memory: "512Mi"
   max_disk: "200Mi"
@@ -172,6 +176,7 @@ func TestEnvOverrides(t *testing.T) {
 		"SANDBOX_STORAGE_OBJECT_SECRET_KEY":     "env-secret-key",
 		"SANDBOX_STORAGE_OBJECT_LOCAL_PATH":     "/env/sandbox-storage",
 		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS": "120",
+		"SANDBOX_SECURITY_API_KEY":              "env-api-key",
 		"SANDBOX_SECURITY_MAX_MEMORY":           "1Gi",
 		"SANDBOX_SECURITY_MAX_DISK":             "500Mi",
 		"SANDBOX_SECURITY_MAX_PIDS":             "500",
@@ -222,4 +227,36 @@ func TestEnvOverrides(t *testing.T) {
 func TestLoadNonExistentFile(t *testing.T) {
 	_, err := config.Load("/nonexistent/path/config.yaml")
 	assert.Error(t, err)
+}
+
+func TestValidateEmptyAPIKey(t *testing.T) {
+	// Without api_key env, Load should fail validation
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key")
+}
+
+func TestValidateInvalidPoolSize(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_POOL_MAX_SIZE", "0")
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "pool.max_size")
+}
+
+func TestValidateInvalidPort(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_SERVER_PORT", "0")
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "server.port")
+}
+
+func TestValidateKubernetesNamespaceRequired(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_RUNTIME_TYPE", "kubernetes")
+	// namespace is empty by default
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "namespace")
 }
