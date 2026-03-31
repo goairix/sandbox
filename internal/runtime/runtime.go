@@ -36,6 +36,9 @@ type Runtime interface {
 
 	// ListFiles lists files in a directory inside the sandbox.
 	ListFiles(ctx context.Context, id string, dirPath string) ([]FileInfo, error)
+
+	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
+	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error
 }
 
 // FileInfo holds file metadata from inside a sandbox.

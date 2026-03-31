@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -105,4 +106,23 @@ func ensureNetworkPolicy(ctx context.Context, client kubernetes.Interface, names
 func deleteNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string) error {
 	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
 	return client.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, policyName, metav1.DeleteOptions{})
+}
+
+// updateNetworkPolicy updates or creates/deletes a network policy for a sandbox.
+func updateNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string, enabled bool, whitelist []string) error {
+	if !enabled {
+		err := deleteNetworkPolicy(ctx, client, namespace, sandboxID)
+		if err != nil && !strings.Contains(err.Error(), "not found") {
+			return err
+		}
+		return nil
+	}
+
+	// Delete existing policy first, then recreate
+	_ = deleteNetworkPolicy(ctx, client, namespace, sandboxID)
+
+	if len(whitelist) > 0 {
+		return ensureNetworkPolicy(ctx, client, namespace, sandboxID, whitelist)
+	}
+	return nil
 }

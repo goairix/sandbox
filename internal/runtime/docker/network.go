@@ -305,6 +305,34 @@ func waitExecDone(ctx context.Context, cli *dockerclient.Client, execID string) 
 	}
 }
 
+// hasExistingGateway checks if a gateway sidecar exists for the given sandbox.
+func hasExistingGateway(ctx context.Context, cli *dockerclient.Client, sandboxID string) bool {
+	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("label", "sandbox.id="+sandboxID),
+			filters.Arg("label", "sandbox.role=gateway"),
+		),
+	})
+	return err == nil && len(gwContainers) > 0
+}
+
+// findGatewayID returns the container ID of the gateway for the given sandbox.
+func findGatewayID(ctx context.Context, cli *dockerclient.Client, sandboxID string) (string, error) {
+	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("label", "sandbox.id="+sandboxID),
+			filters.Arg("label", "sandbox.role=gateway"),
+		),
+	})
+	if err != nil {
+		return "", fmt.Errorf("list gateway containers: %w", err)
+	}
+	if len(gwContainers) == 0 {
+		return "", fmt.Errorf("no gateway found for sandbox %s", sandboxID)
+	}
+	return gwContainers[0].ID, nil
+}
+
 // resolveWhitelist processes whitelist entries: IPs and CIDRs pass through unchanged,
 // domain names are resolved to their IP addresses.
 func resolveWhitelist(entries []string) ([]string, error) {

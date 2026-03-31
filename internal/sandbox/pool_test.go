@@ -80,6 +80,10 @@ func (m *mockRuntime) ListFiles(context.Context, string, string) ([]runtime.File
 	return nil, nil
 }
 
+func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string) error {
+	return nil
+}
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{

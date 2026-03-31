@@ -39,3 +39,13 @@ type ErrorResponse struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
+
+type UpdateNetworkRequest struct {
+	Enabled   bool     `json:"enabled"`
+	Whitelist []string `json:"whitelist,omitempty"`
+}
+
+type UpdateNetworkResponse struct {
+	Enabled   bool     `json:"enabled"`
+	Whitelist []string `json:"whitelist"`
+}

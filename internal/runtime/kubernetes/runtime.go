@@ -129,3 +129,7 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	return listFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, dirPath)
 }
+
+func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
+	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist)
+}

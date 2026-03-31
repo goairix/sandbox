@@ -129,6 +129,30 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "sandbox destroyed"})
 }
 
+func (h *Handler) UpdateNetwork(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.UpdateNetworkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	if err := h.manager.UpdateNetwork(c.Request.Context(), id, req.Enabled, req.Whitelist); err != nil {
+		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, types.UpdateNetworkResponse{
+		Enabled:   req.Enabled,
+		Whitelist: req.Whitelist,
+	})
+}
+
 // buildCommand wraps raw code with the appropriate interpreter command based on language.
 func buildCommand(lang sandbox.Language, code string) (string, error) {
 	switch lang {

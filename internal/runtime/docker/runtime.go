@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -172,4 +173,80 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 		State:     state,
 		CreatedAt: created,
 	}, nil
+}
+
+func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled bool, whitelist []string) error {
+	// Get sandbox ID from container — use the container name which equals spec.ID
+	info, err := r.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return fmt.Errorf("inspect container: %w", err)
+	}
+	// Docker container names start with "/", strip it
+	sandboxID := strings.TrimPrefix(info.Name, "/")
+
+	hasGateway := hasExistingGateway(ctx, r.cli, sandboxID)
+
+	if enabled && !hasGateway {
+		// Enable network: create gateway pair and connect sandbox
+		pairNetworkID, _, gatewayIP, err := createSandboxPair(
+			ctx, r.cli, sandboxID, r.openNetworkID, r.gatewayImage, whitelist,
+		)
+		if err != nil {
+			return fmt.Errorf("create gateway pair: %w", err)
+		}
+
+		// Connect sandbox container to the pair network
+		if err := r.cli.NetworkConnect(ctx, pairNetworkID, containerID, nil); err != nil {
+			_ = removeSandboxPair(ctx, r.cli, sandboxID)
+			return fmt.Errorf("connect sandbox to pair network: %w", err)
+		}
+
+		// Set default route through gateway
+		if err := setupSandboxRoute(ctx, r.cli, containerID, gatewayIP); err != nil {
+			_ = removeSandboxPair(ctx, r.cli, sandboxID)
+			return fmt.Errorf("setup sandbox route: %w", err)
+		}
+
+		return nil
+	}
+
+	if enabled && hasGateway {
+		// Update whitelist: re-run iptables rules in existing gateway
+		resolved, err := resolveWhitelist(whitelist)
+		if err != nil {
+			return err
+		}
+
+		gatewayID, err := findGatewayID(ctx, r.cli, sandboxID)
+		if err != nil {
+			return err
+		}
+
+		// Flush and rebuild iptables rules
+		flushCmd := "iptables -F FORWARD && iptables -t nat -F POSTROUTING"
+		iptablesCmd := flushCmd + " && " + buildGatewayIptablesCmd(resolved)
+
+		execCfg := container.ExecOptions{
+			Cmd:  []string{"sh", "-c", iptablesCmd},
+			User: "root",
+		}
+		execResp, err := r.cli.ContainerExecCreate(ctx, gatewayID, execCfg)
+		if err != nil {
+			return fmt.Errorf("create iptables exec: %w", err)
+		}
+		if err := r.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+			return fmt.Errorf("start iptables exec: %w", err)
+		}
+		return waitExecDone(ctx, r.cli, execResp.ID)
+	}
+
+	if !enabled && hasGateway {
+		// Disable network: disconnect sandbox from pair network and clean up
+		pairNetName := pairNetworkPrefix + sandboxID
+		_ = r.cli.NetworkDisconnect(ctx, pairNetName, containerID, true)
+		return removeSandboxPair(ctx, r.cli, sandboxID)
+	}
+
+	// !enabled && !hasGateway — already disabled, nothing to do
+	return nil
 }

@@ -72,14 +72,10 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 
 	// Drop all capabilities, add only needed ones
 	hostConfig.CapDrop = []string{"ALL"}
-	hostConfig.CapAdd = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"}
-
-	// Network-enabled sandboxes need NET_ADMIN for initial route setup (exec as root).
-	// The sandbox process runs as UID 1000 which cannot use NET_ADMIN
-	// (non-root processes don't retain effective capabilities in Docker).
-	if spec.NetworkEnabled {
-		hostConfig.CapAdd = append(hostConfig.CapAdd, "NET_ADMIN")
-	}
+	// NET_ADMIN is needed for dynamic network setup (ip route replace).
+	// It is safe because the sandbox process runs as UID 1000 which cannot
+	// use NET_ADMIN (non-root processes don't retain effective capabilities).
+	hostConfig.CapAdd = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "NET_ADMIN"}
 
 	// Run as non-root user
 	if spec.RunAsUser > 0 {

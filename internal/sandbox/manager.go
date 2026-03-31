@@ -336,6 +336,30 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
 }
 
+// UpdateNetwork dynamically updates network access for a running sandbox.
+func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox not found: %s", id)
+	}
+	runtimeID := sb.RuntimeID
+	m.mu.Unlock()
+
+	if err := m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	sb.Config.Network.Enabled = enabled
+	sb.Config.Network.Whitelist = whitelist
+	sb.UpdatedAt = time.Now()
+	m.mu.Unlock()
+
+	return nil
+}
+
 // reapExpiredSandboxes periodically checks for sandboxes that have exceeded
 // their timeout and destroys them.
 func (m *Manager) reapExpiredSandboxes() {
