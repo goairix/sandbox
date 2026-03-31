@@ -1,10 +1,14 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 
@@ -18,15 +22,60 @@ func shellEscape(s string) string {
 }
 
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
-	return r.cli.CopyToContainer(ctx, id, destPath, reader, container.CopyToContainerOptions{})
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("read file content: %w", err)
+	}
+
+	// Docker CopyToContainer expects a tar archive.
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	hdr := &tar.Header{
+		Name:    filepath.Base(destPath),
+		Mode:    0644,
+		Size:    int64(len(content)),
+		ModTime: time.Now(),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("write tar header: %w", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		return fmt.Errorf("write tar content: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("close tar: %w", err)
+	}
+
+	dir := filepath.Dir(destPath)
+	return r.cli.CopyToContainer(ctx, id, dir, &buf, container.CopyToContainerOptions{})
 }
 
 func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
-	reader, _, err := r.cli.CopyFromContainer(ctx, id, srcPath)
+	tarReader, _, err := r.cli.CopyFromContainer(ctx, id, srcPath)
 	if err != nil {
 		return nil, err
 	}
-	return reader, nil
+
+	// Docker returns a tar archive; extract the single file from it.
+	tr := tar.NewReader(tarReader)
+	_, err = tr.Next()
+	if err != nil {
+		tarReader.Close()
+		return nil, fmt.Errorf("read tar entry: %w", err)
+	}
+
+	// Return a reader that reads file content and closes the underlying tar stream.
+	return &tarEntryReader{Reader: tr, closer: tarReader}, nil
+}
+
+// tarEntryReader wraps a tar.Reader entry and closes the underlying stream.
+type tarEntryReader struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *tarEntryReader) Close() error {
+	return r.closer.Close()
 }
 
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
