@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"time"
+
 	"github.com/goairix/sandbox/internal/api"
 	"github.com/goairix/sandbox/internal/api/handler"
 	"github.com/goairix/sandbox/internal/config"
@@ -18,6 +20,7 @@ import (
 	k8sruntime "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/storage"
+	redisstate "github.com/goairix/sandbox/internal/storage/state/redis"
 )
 
 func main() {
@@ -69,6 +72,22 @@ func main() {
 		},
 		DefaultTimeout: cfg.Security.SandboxTimeoutSeconds,
 	})
+
+	// Initialize session store for persistent sandbox state
+	if cfg.Storage.State.Redis.Addr != "" {
+		store, storeErr := redisstate.New(ctx, redisstate.Options{
+			Addr:     cfg.Storage.State.Redis.Addr,
+			Password: cfg.Storage.State.Redis.Password,
+			DB:       cfg.Storage.State.Redis.DB,
+		})
+		if storeErr != nil {
+			log.Fatalf("failed to create redis state store: %v", storeErr)
+		}
+		ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
+		mgr.SetSessionStore(sandbox.NewSessionStore(store, ttl))
+		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
+	}
+
 	mgr.Start(ctx)
 
 	h := handler.NewHandler(mgr)
