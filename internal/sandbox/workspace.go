@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -117,16 +119,30 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	return sb.Workspace, nil
 }
 
-// syncToContainer uploads all files from ScopedFS into the container /workspace.
+// syncToContainer builds a single tar archive from all files in ScopedFS
+// and uploads it to the container in one API call.
 func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
-	return m.syncDir(ctx, scoped, runtimeID, ".")
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	if err := m.addDirToTar(ctx, tw, scoped, "."); err != nil {
+		tw.Close()
+		return fmt.Errorf("build tar archive: %w", err)
+	}
+	tw.Close()
+
+	if buf.Len() == 0 {
+		return nil // nothing to sync
+	}
+
+	return m.runtime.UploadArchive(ctx, runtimeID, "/workspace", &buf)
 }
 
-// syncDir recursively syncs a directory from ScopedFS into the container.
-func (m *Manager) syncDir(ctx context.Context, scoped storage.ScopedFS, runtimeID, dir string) error {
+// addDirToTar recursively adds all files and directories from ScopedFS into the tar writer.
+func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storage.ScopedFS, dir string) error {
 	files, err := scoped.List(ctx, dir)
 	if err != nil {
-		return fmt.Errorf("list %q: %w", dir, err)
+		return err
 	}
 
 	for _, fi := range files {
@@ -144,7 +160,16 @@ func (m *Manager) syncDir(ctx context.Context, scoped storage.ScopedFS, runtimeI
 		}
 
 		if fi.IsDir() {
-			if err := m.syncDir(ctx, scoped, runtimeID, relPath); err != nil {
+			// Add directory entry to tar
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     relPath + "/",
+				Typeflag: tar.TypeDir,
+				Mode:     0755,
+				ModTime:  fi.ModTime(),
+			}); err != nil {
+				return err
+			}
+			if err := m.addDirToTar(ctx, tw, scoped, relPath); err != nil {
 				return err
 			}
 			continue
@@ -152,21 +177,33 @@ func (m *Manager) syncDir(ctx context.Context, scoped storage.ScopedFS, runtimeI
 
 		reader, err := scoped.Open(ctx, relPath)
 		if err != nil {
-			return fmt.Errorf("open %q: %w", relPath, err)
+			return err
 		}
 
-		destPath := filepath.Join("/workspace", relPath)
-		uploadErr := m.runtime.UploadFile(ctx, runtimeID, destPath, reader)
+		content, err := io.ReadAll(reader)
 		reader.Close()
-		if uploadErr != nil {
-			return fmt.Errorf("upload %q: %w", destPath, uploadErr)
+		if err != nil {
+			return err
+		}
+
+		if err := tw.WriteHeader(&tar.Header{
+			Name:    relPath,
+			Size:    int64(len(content)),
+			Mode:    0644,
+			ModTime: fi.ModTime(),
+		}); err != nil {
+			return err
+		}
+		if _, err := tw.Write(content); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-// syncFromContainer downloads all files from container /workspace into ScopedFS.
+// syncFromContainer downloads the entire /workspace directory from the container
+// as a single tar archive and extracts it into ScopedFS.
 func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID string) error {
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
@@ -175,66 +212,47 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
 	}
 
-	return m.syncFromDir(ctx, scoped, runtimeID, "/workspace")
-}
-
-// syncFromDir recursively downloads files from a container directory into ScopedFS.
-func (m *Manager) syncFromDir(ctx context.Context, scoped storage.ScopedFS, runtimeID, containerDir string) error {
-	files, err := m.runtime.ListFiles(ctx, runtimeID, containerDir)
+	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
-		return fmt.Errorf("list container files %q: %w", containerDir, err)
+		return fmt.Errorf("download workspace: %w", err)
 	}
+	defer tarReader.Close()
 
-	for _, fi := range files {
-		// Skip the directory entry itself (find returns the queried dir as first result)
-		if fi.Path == containerDir+"/"+filepath.Base(containerDir) && fi.IsDir {
+	tr := tar.NewReader(tarReader)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		// Strip the root "workspace/" prefix added by Docker/tar
+		name := strings.TrimPrefix(hdr.Name, "workspace/")
+		if name == "" {
 			continue
 		}
 
-		if fi.IsDir {
-			// Recurse into subdirectory
-			subDir := containerDir + "/" + fi.Name
-			// Ensure directory exists in ScopedFS
-			relDir := m.containerPathToRelative(subDir)
-			_ = scoped.MakeDir(ctx, relDir, 0755)
-			if err := m.syncFromDir(ctx, scoped, runtimeID, subDir); err != nil {
-				return err
-			}
+		if hdr.Typeflag == tar.TypeDir {
+			_ = scoped.MakeDir(ctx, strings.TrimRight(name, "/"), 0755)
 			continue
 		}
 
-		relPath := m.containerPathToRelative(fi.Path)
-
-		reader, err := m.runtime.DownloadFile(ctx, runtimeID, fi.Path)
+		writer, err := scoped.Create(ctx, name)
 		if err != nil {
-			return fmt.Errorf("download %q: %w", fi.Path, err)
+			return fmt.Errorf("create %q: %w", name, err)
 		}
 
-		writer, err := scoped.Create(ctx, relPath)
-		if err != nil {
-			reader.Close()
-			return fmt.Errorf("create %q: %w", relPath, err)
-		}
-
-		_, copyErr := io.Copy(writer, reader)
-		reader.Close()
+		_, copyErr := io.Copy(writer, tr)
 		closeErr := writer.Close()
 		if copyErr != nil {
-			return fmt.Errorf("copy %q: %w", relPath, copyErr)
+			return fmt.Errorf("write %q: %w", name, copyErr)
 		}
 		if closeErr != nil {
-			return fmt.Errorf("flush %q to storage: %w", relPath, closeErr)
+			return fmt.Errorf("flush %q to storage: %w", name, closeErr)
 		}
 	}
 
 	return nil
-}
-
-// containerPathToRelative converts a container absolute path to a path relative to /workspace.
-func (m *Manager) containerPathToRelative(containerPath string) string {
-	const prefix = "/workspace/"
-	if strings.HasPrefix(containerPath, prefix) {
-		return containerPath[len(prefix):]
-	}
-	return filepath.Base(containerPath)
 }
