@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dysodeng/fs"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage"
 )
 
 // validDepRegexp validates dependency names and versions to prevent command injection.
@@ -40,31 +42,35 @@ type ManagerConfig struct {
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
 type Manager struct {
-	runtime  runtime.Runtime
-	config   ManagerConfig
-	sessions *SessionStore // optional, for persistent sandboxes
+	runtime    runtime.Runtime
+	filesystem fs.FileSystem
+	config     ManagerConfig
+	sessions   *SessionStore // optional, for persistent sandboxes
 
-	pools     map[Language]*Pool
-	sandboxes map[string]*Sandbox
-	mu        sync.RWMutex
+	pools      map[Language]*Pool
+	sandboxes  map[string]*Sandbox
+	workspaces map[string]storage.ScopedFS // sandbox ID -> ScopedFS
+	mu         sync.RWMutex
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
 // NewManager creates a new SandboxManager.
-func NewManager(rt runtime.Runtime, cfg ManagerConfig) *Manager {
+func NewManager(rt runtime.Runtime, fsys fs.FileSystem, cfg ManagerConfig) *Manager {
 	pools := make(map[Language]*Pool)
 	for lang, pcfg := range cfg.PoolConfigs {
 		pools[lang] = NewPool(rt, pcfg)
 	}
 
 	return &Manager{
-		runtime:   rt,
-		config:    cfg,
-		pools:     pools,
-		sandboxes: make(map[string]*Sandbox),
-		stopCh:    make(chan struct{}),
+		runtime:    rt,
+		filesystem: fsys,
+		config:     cfg,
+		pools:      pools,
+		sandboxes:  make(map[string]*Sandbox),
+		workspaces: make(map[string]storage.ScopedFS),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -165,6 +171,17 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}
 	}
 
+	// Auto-mount workspace if specified
+	if cfg.WorkspacePath != "" {
+		if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
+			_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+			m.mu.Lock()
+			delete(m.sandboxes, id)
+			m.mu.Unlock()
+			return nil, fmt.Errorf("mount workspace: %w", err)
+		}
+	}
+
 	return sb, nil
 }
 
@@ -210,6 +227,17 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	// Clean up session store
 	if m.sessions != nil {
 		_ = m.sessions.Remove(ctx, id)
+	}
+
+	// Best-effort sync workspace back before destroying
+	m.mu.RLock()
+	_, hasWS := m.workspaces[id]
+	m.mu.RUnlock()
+	if hasWS {
+		_ = m.syncFromContainer(ctx, id, sb.RuntimeID)
+		m.mu.Lock()
+		delete(m.workspaces, id)
+		m.mu.Unlock()
 	}
 
 	// Remove the container

@@ -79,6 +79,8 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		})
 	}
 
+	cfg.WorkspacePath = req.WorkspacePath
+
 	sb, err := h.manager.Create(c.Request.Context(), cfg)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, types.ErrorResponse{

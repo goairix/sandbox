@@ -17,6 +17,7 @@ import (
 	"github.com/goairix/sandbox/internal/runtime/docker"
 	k8sruntime "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/internal/storage"
 )
 
 func main() {
@@ -46,6 +47,12 @@ func main() {
 		}
 	default:
 		log.Fatalf("unknown runtime type: %s", cfg.Runtime.Type)
+	}
+
+	// Initialize filesystem
+	fsys, err := storage.NewFileSystem(cfg.Storage.FileSystem)
+	if err != nil {
+		log.Fatalf("failed to create filesystem: %v", err)
 	}
 
 	// Build pool configs — read images from config, fall back to defaults
@@ -83,7 +90,7 @@ func main() {
 		},
 	}
 
-	mgr := sandbox.NewManager(rt, sandbox.ManagerConfig{
+	mgr := sandbox.NewManager(rt, fsys, sandbox.ManagerConfig{
 		PoolConfigs:    poolConfigs,
 		DefaultTimeout: cfg.Security.SandboxTimeoutSeconds,
 	})

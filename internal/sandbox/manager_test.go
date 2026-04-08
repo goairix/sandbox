@@ -11,7 +11,7 @@ import (
 
 func TestManager_CreateEphemeralSandbox(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, ManagerConfig{
+	mgr := NewManager(rt, nil, ManagerConfig{
 		PoolConfigs: map[Language]PoolConfig{
 			LangPython: {Language: LangPython, MinSize: 2, MaxSize: 10, Image: "sandbox-python:latest"},
 		},
@@ -37,7 +37,7 @@ func TestManager_CreateEphemeralSandbox(t *testing.T) {
 
 func TestManager_CreatePersistentSandbox(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, ManagerConfig{
+	mgr := NewManager(rt, nil, ManagerConfig{
 		PoolConfigs: map[Language]PoolConfig{
 			LangNodeJS: {Language: LangNodeJS, MinSize: 1, MaxSize: 5, Image: "sandbox-nodejs:latest"},
 		},
@@ -67,7 +67,7 @@ func TestManager_CreatePersistentSandbox(t *testing.T) {
 
 func TestManager_Destroy(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, ManagerConfig{
+	mgr := NewManager(rt, nil, ManagerConfig{
 		PoolConfigs: map[Language]PoolConfig{
 			LangBash: {Language: LangBash, MinSize: 1, MaxSize: 5, Image: "sandbox-bash:latest"},
 		},
