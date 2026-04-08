@@ -130,11 +130,17 @@ func (m *Manager) syncDir(ctx context.Context, scoped storage.ScopedFS, runtimeI
 	}
 
 	for _, fi := range files {
-		relPath := dir
-		if relPath == "." {
-			relPath = fi.Name()
-		} else {
-			relPath = filepath.Join(dir, fi.Name())
+		// Extract just the base name — MinIO returns full object keys (e.g.
+		// "workspaces/user123/project-a/hello.txt") while local FS returns
+		// just "hello.txt". Use filepath.Base to normalize.
+		baseName := filepath.Base(strings.TrimRight(fi.Name(), "/"))
+		if baseName == "." || baseName == "" {
+			continue
+		}
+
+		relPath := baseName
+		if dir != "." {
+			relPath = filepath.Join(dir, baseName)
 		}
 
 		if fi.IsDir() {
