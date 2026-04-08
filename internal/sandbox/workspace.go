@@ -212,9 +212,12 @@ func (m *Manager) syncFromDir(ctx context.Context, scoped storage.ScopedFS, runt
 
 		_, copyErr := io.Copy(writer, reader)
 		reader.Close()
-		writer.Close()
+		closeErr := writer.Close()
 		if copyErr != nil {
 			return fmt.Errorf("copy %q: %w", relPath, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("flush %q to storage: %w", relPath, closeErr)
 		}
 	}
 
