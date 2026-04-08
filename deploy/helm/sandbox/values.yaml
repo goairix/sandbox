@@ -34,18 +34,23 @@ config:
     minSize: 3
     maxSize: 20
   images:
-    python: "sandbox-python:latest"
-    nodejs: "sandbox-nodejs:latest"
-    bash: "sandbox-bash:latest"
+    sandbox: "sandbox:latest"
     gateway: "sandbox-gateway:latest"
   storage:
     state:
       redis:
         addr: redis:6379
-    object:
+        password: ""
+        db: 0
+    filesystem:
       provider: s3
       bucket: sandbox-storage
       region: us-east-1
+      endpoint: ""
+      accessKey: ""
+      secretKey: ""
+      subPath: ""
+      useSSL: false
   security:
     apiKey: ""
     rateLimit: 100

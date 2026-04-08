@@ -38,22 +38,32 @@ spec:
               value: "{{ .Values.config.pool.minSize }}"
             - name: SANDBOX_POOL_MAX_SIZE
               value: "{{ .Values.config.pool.maxSize }}"
-            - name: SANDBOX_IMAGES_PYTHON
-              value: "{{ .Values.config.images.python }}"
-            - name: SANDBOX_IMAGES_NODEJS
-              value: "{{ .Values.config.images.nodejs }}"
-            - name: SANDBOX_IMAGES_BASH
-              value: "{{ .Values.config.images.bash }}"
+            - name: SANDBOX_IMAGES_SANDBOX
+              value: "{{ .Values.config.images.sandbox }}"
             - name: SANDBOX_IMAGES_GATEWAY
               value: "{{ .Values.config.images.gateway }}"
             - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
               value: "{{ .Values.config.storage.state.redis.addr }}"
-            - name: SANDBOX_STORAGE_OBJECT_PROVIDER
-              value: "{{ .Values.config.storage.object.provider }}"
-            - name: SANDBOX_STORAGE_OBJECT_BUCKET
-              value: "{{ .Values.config.storage.object.bucket }}"
-            - name: SANDBOX_STORAGE_OBJECT_REGION
-              value: "{{ .Values.config.storage.object.region }}"
+            - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
+              value: "{{ .Values.config.storage.state.redis.password }}"
+            - name: SANDBOX_STORAGE_STATE_REDIS_DB
+              value: "{{ .Values.config.storage.state.redis.db }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
+              value: "{{ .Values.config.storage.filesystem.provider }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET
+              value: "{{ .Values.config.storage.filesystem.bucket }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_REGION
+              value: "{{ .Values.config.storage.filesystem.region }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_ENDPOINT
+              value: "{{ .Values.config.storage.filesystem.endpoint }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY
+              value: "{{ .Values.config.storage.filesystem.accessKey }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
+              value: "{{ .Values.config.storage.filesystem.secretKey }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_SUB_PATH
+              value: "{{ .Values.config.storage.filesystem.subPath }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
+              value: "{{ .Values.config.storage.filesystem.useSSL }}"
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
             - name: SANDBOX_SECURITY_SANDBOX_TIMEOUT_SECONDS
