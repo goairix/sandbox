@@ -15,6 +15,9 @@ import (
 )
 
 // NewFileSystem creates a fs.FileSystem from the given configuration.
+// Object-storage drivers (s3, cos, oss, obs, minio) are wrapped with
+// NewFixedListFS to work around a bug in their List implementation that
+// strips trailing "/" from the prefix, breaking directory content listing.
 func NewFileSystem(cfg config.FileSystemConfig) (fs.FileSystem, error) {
 	switch cfg.Provider {
 	case "local":
@@ -27,7 +30,7 @@ func NewFileSystem(cfg config.FileSystemConfig) (fs.FileSystem, error) {
 		})
 
 	case "s3":
-		return s3.New(s3.Config{
+		fsys, err := s3.New(s3.Config{
 			Region:          cfg.Region,
 			Endpoint:        cfg.Endpoint,
 			AccessKeyID:     cfg.AccessKey,
@@ -35,35 +38,51 @@ func NewFileSystem(cfg config.FileSystemConfig) (fs.FileSystem, error) {
 			BucketName:      cfg.Bucket,
 			SubPath:         cfg.SubPath,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return NewFixedListFS(fsys), nil
 
 	case "cos":
-		return txcos.New(txcos.Config{
+		fsys, err := txcos.New(txcos.Config{
 			BucketURL: cfg.Endpoint,
 			SecretID:  cfg.AccessKey,
 			SecretKey: cfg.SecretKey,
 			SubPath:   cfg.SubPath,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return NewFixedListFS(fsys), nil
 
 	case "oss":
-		return alioss.New(alioss.Config{
+		fsys, err := alioss.New(alioss.Config{
 			Endpoint:        cfg.Endpoint,
 			AccessKeyID:     cfg.AccessKey,
 			SecretAccessKey: cfg.SecretKey,
 			BucketName:      cfg.Bucket,
 			SubPath:         cfg.SubPath,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return NewFixedListFS(fsys), nil
 
 	case "obs":
-		return hwobs.New(hwobs.Config{
+		fsys, err := hwobs.New(hwobs.Config{
 			Endpoint:        cfg.Endpoint,
 			AccessKeyID:     cfg.AccessKey,
 			SecretAccessKey: cfg.SecretKey,
 			BucketName:      cfg.Bucket,
 			SubPath:         cfg.SubPath,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return NewFixedListFS(fsys), nil
 
 	case "minio":
-		return minio.New(minio.Config{
+		fsys, err := minio.New(minio.Config{
 			Endpoint:        cfg.Endpoint,
 			AccessKeyID:     cfg.AccessKey,
 			SecretAccessKey: cfg.SecretKey,
@@ -71,6 +90,10 @@ func NewFileSystem(cfg config.FileSystemConfig) (fs.FileSystem, error) {
 			BucketName:      cfg.Bucket,
 			SubPath:         cfg.SubPath,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return NewFixedListFS(fsys), nil
 
 	default:
 		return nil, fmt.Errorf("storage: unsupported filesystem provider: %q", cfg.Provider)
