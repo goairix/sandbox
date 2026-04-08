@@ -18,6 +18,7 @@ services:
       - SANDBOX_STORAGE_FILESYSTEM_USE_SSL=${STORAGE_USE_SSL:-false}
       - SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH=${STORAGE_LOCAL_PATH:-/data/storage}
       - SANDBOX_SECURITY_API_KEY=${SECURITY_API_KEY:-***REDACTED_API_KEY***}
+      - SANDBOX_IMAGES_SANDBOX=sandbox:latest
       - SANDBOX_IMAGES_GATEWAY=sandbox-gateway:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -34,9 +35,7 @@ services:
     entrypoint: ["sh", "-c"]
     command:
       - |
-        docker build -t sandbox-python:latest /images/python &&
-        docker build -t sandbox-nodejs:latest /images/nodejs &&
-        docker build -t sandbox-bash:latest /images/bash &&
+        docker build -t sandbox:latest /images/sandbox &&
         docker build -t sandbox-gateway:latest /images/gateway &&
         echo "All sandbox images built successfully"
 
@@ -48,5 +47,4 @@ services:
       - redis-data:/data
 
 volumes:
-  sandbox-storage:
   redis-data:

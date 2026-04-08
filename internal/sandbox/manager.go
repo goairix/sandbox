@@ -19,7 +19,7 @@ import (
 // validDepRegexp validates dependency names and versions to prevent command injection.
 var validDepRegexp = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
-const randSuffixLen = 5
+const randSuffixLen = 10
 
 // randSuffix generates a random lowercase alphanumeric string of length n.
 func randSuffix(n int) string {
@@ -36,7 +36,7 @@ func randSuffix(n int) string {
 
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
-	PoolConfigs    map[Language]PoolConfig
+	PoolConfig     PoolConfig
 	DefaultTimeout int // seconds
 }
 
@@ -47,7 +47,7 @@ type Manager struct {
 	config     ManagerConfig
 	sessions   *SessionStore // optional, for persistent sandboxes
 
-	pools      map[Language]*Pool
+	pool       *Pool
 	sandboxes  map[string]*Sandbox
 	workspaces map[string]storage.ScopedFS // sandbox ID -> ScopedFS
 	mu         sync.RWMutex
@@ -58,16 +58,11 @@ type Manager struct {
 
 // NewManager creates a new SandboxManager.
 func NewManager(rt runtime.Runtime, fsys fs.FileSystem, cfg ManagerConfig) *Manager {
-	pools := make(map[Language]*Pool)
-	for lang, pcfg := range cfg.PoolConfigs {
-		pools[lang] = NewPool(rt, pcfg)
-	}
-
 	return &Manager{
 		runtime:    rt,
 		filesystem: fsys,
 		config:     cfg,
-		pools:      pools,
+		pool:       NewPool(rt, cfg.PoolConfig),
 		sandboxes:  make(map[string]*Sandbox),
 		workspaces: make(map[string]storage.ScopedFS),
 		stopCh:     make(chan struct{}),
@@ -79,55 +74,45 @@ func (m *Manager) SetSessionStore(ss *SessionStore) {
 	m.sessions = ss
 }
 
-// Start initializes the manager and warms up pools.
+// Start initializes the manager and warms up the pool.
+// It first removes any orphaned pool containers left over from a previous
+// process that exited without cleanup (e.g. crash, SIGKILL).
 func (m *Manager) Start(ctx context.Context) {
-	for _, pool := range m.pools {
-		pool.WarmUp(ctx)
-	}
+	m.cleanupOrphanedPoolContainers(ctx)
+	m.pool.WarmUp(ctx)
 	m.wg.Add(1)
 	go m.reapExpiredSandboxes()
 }
 
-// Stop drains all pools and cleans up.
+// Stop drains the pool and cleans up.
 func (m *Manager) Stop(ctx context.Context) {
 	close(m.stopCh)
 	m.wg.Wait()
-
-	for _, pool := range m.pools {
-		pool.Drain(ctx)
-	}
+	m.pool.Drain(ctx)
 }
 
 // Create creates a new sandbox.
 func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
-	if _, ok := m.pools[cfg.Language]; !ok {
-		return nil, fmt.Errorf("unsupported language: %s", cfg.Language)
-	}
-
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = m.config.DefaultTimeout
 	}
 
 	m.mu.Lock()
-	id := fmt.Sprintf("sb-%s-%s", cfg.Language, randSuffix(randSuffixLen))
+	id := fmt.Sprintf("sandbox-%s", randSuffix(randSuffixLen))
 	m.mu.Unlock()
 
 	var info *runtime.SandboxInfo
 	var err error
 
 	if cfg.Network.Enabled {
-		// Network-enabled sandboxes must be created directly (not from pool)
-		// because the container must be on the correct network from the start.
 		spec := m.buildSpec(id, cfg)
 		info, err = m.runtime.CreateSandbox(ctx, spec)
 		if err != nil {
 			return nil, fmt.Errorf("create sandbox: %w", err)
 		}
 	} else {
-		// Isolated sandboxes use the warm pool
-		pool := m.pools[cfg.Language]
-		info, err = pool.Acquire(ctx)
+		info, err = m.pool.Acquire(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
@@ -148,7 +133,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	// Install dependencies if requested
 	if len(cfg.Dependencies) > 0 {
-		installCmd := buildInstallCommand(cfg.Language, cfg.Dependencies)
+		installCmd := buildInstallCommand(cfg.Dependencies)
 		if installCmd != "" {
 			if _, err := m.runtime.Exec(ctx, info.RuntimeID, runtime.ExecRequest{
 				Command: installCmd,
@@ -249,9 +234,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	}
 
 	// Notify pool so it can refill
-	if pool, ok := m.pools[sb.Config.Language]; ok {
-		pool.NotifyRemoved()
-	}
+	m.pool.NotifyRemoved()
 
 	return nil
 }
@@ -425,13 +408,32 @@ func (m *Manager) reapOnce() {
 	}
 }
 
-// buildInstallCommand generates the shell command to install dependencies
-// based on the sandbox language.
-func buildInstallCommand(lang Language, deps []Dependency) string {
+// cleanupOrphanedPoolContainers removes pool containers left over from a
+// previous process that exited without graceful shutdown.
+func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
+	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{
+		"sandbox.pool": "true",
+	})
+	if err != nil {
+		log.Printf("failed to list orphaned pool containers: %v", err)
+		return
+	}
+	for _, c := range containers {
+		log.Printf("removing orphaned pool container %s", c.RuntimeID)
+		_ = m.runtime.RemoveSandbox(ctx, c.RuntimeID)
+	}
+	if len(containers) > 0 {
+		log.Printf("cleaned up %d orphaned pool container(s)", len(containers))
+	}
+}
+
+// buildInstallCommand generates the shell command to install dependencies,
+// grouping by package manager (pip/npm).
+func buildInstallCommand(deps []Dependency) string {
 	if len(deps) == 0 {
 		return ""
 	}
-	var pkgs []string
+	var pipPkgs, npmPkgs []string
 	for _, d := range deps {
 		if !validDepRegexp.MatchString(d.Name) {
 			log.Printf("WARNING: skipping dependency with invalid name: %q", d.Name)
@@ -441,44 +443,38 @@ func buildInstallCommand(lang Language, deps []Dependency) string {
 			log.Printf("WARNING: skipping dependency %q with invalid version: %q", d.Name, d.Version)
 			continue
 		}
-		if d.Version != "" {
-			switch lang {
-			case LangPython:
-				pkgs = append(pkgs, d.Name+"=="+d.Version)
-			case LangNodeJS:
-				pkgs = append(pkgs, d.Name+"@"+d.Version)
-			default:
-				pkgs = append(pkgs, d.Name)
+		pkg := d.Name
+		switch d.Manager {
+		case "pip":
+			if d.Version != "" {
+				pkg += "==" + d.Version
 			}
-		} else {
-			pkgs = append(pkgs, d.Name)
+			pipPkgs = append(pipPkgs, pkg)
+		case "npm":
+			if d.Version != "" {
+				pkg += "@" + d.Version
+			}
+			npmPkgs = append(npmPkgs, pkg)
+		default:
+			log.Printf("WARNING: skipping dependency %q with unknown manager: %q", d.Name, d.Manager)
 		}
 	}
-	if len(pkgs) == 0 {
-		return ""
+	var cmds []string
+	if len(pipPkgs) > 0 {
+		cmds = append(cmds, "pip install --no-cache-dir "+strings.Join(pipPkgs, " "))
 	}
-	switch lang {
-	case LangPython:
-		return "pip install --no-cache-dir " + strings.Join(pkgs, " ")
-	case LangNodeJS:
-		return "npm install --no-save " + strings.Join(pkgs, " ")
-	default:
-		return ""
+	if len(npmPkgs) > 0 {
+		cmds = append(cmds, "npm install --no-save "+strings.Join(npmPkgs, " "))
 	}
+	return strings.Join(cmds, " && ")
 }
 
 // buildSpec constructs a runtime.SandboxSpec from sandbox config.
 // Used for network-enabled sandboxes that bypass the pool.
 func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
-	// Determine image from pool config
-	var image string
-	if pcfg, ok := m.config.PoolConfigs[cfg.Language]; ok {
-		image = pcfg.Image
-	}
-
 	return runtime.SandboxSpec{
 		ID:               id,
-		Image:            image,
+		Image:            m.config.PoolConfig.Image,
 		Memory:           cfg.Resources.Memory,
 		CPU:              cfg.Resources.CPU,
 		Disk:             cfg.Resources.Disk,
@@ -488,8 +484,7 @@ func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
 		RunAsUser:        1000,
 		PidLimit:         100,
 		Labels: map[string]string{
-			"sandbox.language": string(cfg.Language),
-			"sandbox.id":      id,
+			"sandbox.id": id,
 		},
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -145,4 +147,44 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {
 	// Kubernetes pods cannot be renamed; this is a no-op.
 	return nil
+}
+
+func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
+	var parts []string
+	for k, v := range labels {
+		parts = append(parts, k+"="+v)
+	}
+	selector := ""
+	if len(parts) > 0 {
+		selector = joinStrings(parts, ",")
+	}
+
+	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	result := make([]runtime.SandboxInfo, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		result = append(result, runtime.SandboxInfo{
+			ID:        pod.Labels["sandbox.id"],
+			RuntimeID: pod.Name,
+			State:     podStateString(pod.Status.Phase),
+			CreatedAt: pod.CreationTimestamp.Time,
+		})
+	}
+	return result, nil
+}
+
+func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += sep + p
+	}
+	return result
 }

@@ -96,13 +96,16 @@ func (m *mockRuntime) RenameSandbox(context.Context, string, string) error {
 	return nil
 }
 
+func (m *mockRuntime) ListSandboxes(_ context.Context, _ map[string]string) ([]runtime.SandboxInfo, error) {
+	return nil, nil
+}
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{
-		Language: LangPython,
-		MinSize:  2,
-		MaxSize:  10,
-		Image:    "sandbox-python:latest",
+		MinSize: 2,
+		MaxSize: 10,
+		Image:   "sandbox:latest",
 	})
 
 	ctx := context.Background()
@@ -123,10 +126,9 @@ func TestPool_Acquire(t *testing.T) {
 func TestPool_Release(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{
-		Language: LangPython,
-		MinSize:  2,
-		MaxSize:  10,
-		Image:    "sandbox-python:latest",
+		MinSize: 2,
+		MaxSize: 10,
+		Image:   "sandbox:latest",
 	})
 
 	ctx := context.Background()

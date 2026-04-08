@@ -3,7 +3,6 @@ package types
 import "time"
 
 type CreateSandboxRequest struct {
-	Language      string           `json:"language" binding:"required,oneof=python nodejs bash"`
 	Mode          string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
 	Timeout       int              `json:"timeout,omitempty" binding:"min=0,max=3600"`
 	Resources     *ResourceLimits  `json:"resources,omitempty"`
@@ -25,12 +24,12 @@ type NetworkConfig struct {
 
 type DependencySpec struct {
 	Name    string `json:"name" binding:"required"`
-	Version string `json:"version" binding:"required"`
+	Version string `json:"version,omitempty"`
+	Manager string `json:"manager" binding:"required,oneof=pip npm"`
 }
 
 type SandboxResponse struct {
 	ID        string    `json:"id"`
-	Language  string    `json:"language"`
 	Mode      string    `json:"mode"`
 	State     string    `json:"state"`
 	RuntimeID string    `json:"runtime_id"`

@@ -48,11 +48,9 @@ type PoolConfig struct {
 	RefillIntervalSeconds int `mapstructure:"refill_interval_seconds"`
 }
 
-// ImagesConfig holds sandbox container image settings per language.
+// ImagesConfig holds sandbox container image settings.
 type ImagesConfig struct {
-	Python  string `mapstructure:"python"`
-	NodeJS  string `mapstructure:"nodejs"`
-	Bash    string `mapstructure:"bash"`
+	Sandbox string `mapstructure:"sandbox"`
 	Gateway string `mapstructure:"gateway"`
 }
 
@@ -216,9 +214,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("pool.refill_interval_seconds", 10)
 
 	// Images
-	v.SetDefault("images.python", "sandbox-python:latest")
-	v.SetDefault("images.nodejs", "sandbox-nodejs:latest")
-	v.SetDefault("images.bash", "sandbox-bash:latest")
+	v.SetDefault("images.sandbox", "sandbox:latest")
 	v.SetDefault("images.gateway", "sandbox-gateway:latest")
 
 	// Storage — Redis

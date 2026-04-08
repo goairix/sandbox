@@ -37,13 +37,6 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		return
 	}
 
-	if !isValidLanguage(req.Language) {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Message: "invalid language, must be one of: python, nodejs, bash",
-		})
-		return
-	}
-
 	if !isValidMode(req.Mode) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Message: "invalid mode, must be one of: ephemeral, persistent",
@@ -52,9 +45,8 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	}
 
 	cfg := sandbox.SandboxConfig{
-		Language: sandbox.Language(req.Language),
-		Mode:     sandbox.Mode(req.Mode),
-		Timeout:  req.Timeout,
+		Mode:    sandbox.Mode(req.Mode),
+		Timeout: req.Timeout,
 	}
 
 	if req.Resources != nil {
@@ -76,6 +68,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		cfg.Dependencies = append(cfg.Dependencies, sandbox.Dependency{
 			Name:    dep.Name,
 			Version: dep.Version,
+			Manager: dep.Manager,
 		})
 	}
 
@@ -91,7 +84,6 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, types.SandboxResponse{
 		ID:        sb.ID,
-		Language:  string(sb.Config.Language),
 		Mode:      string(sb.Config.Mode),
 		State:     string(sb.State),
 		RuntimeID: sb.RuntimeID,
@@ -112,7 +104,6 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 
 	c.JSON(http.StatusOK, types.SandboxResponse{
 		ID:        sb.ID,
-		Language:  string(sb.Config.Language),
 		Mode:      string(sb.Config.Mode),
 		State:     string(sb.State),
 		RuntimeID: sb.RuntimeID,

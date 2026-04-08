@@ -10,15 +10,14 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
-// PoolConfig configures a container pool for a specific language.
+// PoolConfig configures the container pool.
 type PoolConfig struct {
-	Language Language
-	MinSize  int
-	MaxSize  int
-	Image    string
+	MinSize int
+	MaxSize int
+	Image   string
 }
 
-// Pool manages a pool of warm containers for a specific language.
+// Pool manages a pool of warm containers.
 type Pool struct {
 	runtime runtime.Runtime
 	config  PoolConfig
@@ -79,7 +78,7 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 		}
 
 		// Stale container, discard and try next
-		log.Printf("pool %s: discarding stale container %s", p.config.Language, info.RuntimeID)
+		log.Printf("pool: discarding stale container %s", info.RuntimeID)
 		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
 	}
 
@@ -122,14 +121,13 @@ func (p *Pool) Drain(ctx context.Context) {
 }
 
 func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
-	id := fmt.Sprintf("pool-%s-%s", p.config.Language, randSuffix(randSuffixLen))
+	id := fmt.Sprintf("sandbox-pool-%s", randSuffix(randSuffixLen))
 
 	spec := runtime.SandboxSpec{
 		ID:    id,
 		Image: p.config.Image,
 		Labels: map[string]string{
-			"sandbox.pool":     "true",
-			"sandbox.language": string(p.config.Language),
+			"sandbox.pool": "true",
 		},
 		ReadOnlyRootFS: false, // warm containers need writable FS for dependency install
 		RunAsUser:      1000,
@@ -170,7 +168,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
-			log.Printf("refillIfNeeded: context cancelled, stopping refill for pool %s", p.config.Language)
+			log.Printf("refillIfNeeded: context cancelled, stopping refill")
 			return
 		default:
 		}
@@ -179,7 +177,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 		if err != nil {
 			consecutiveFailures++
 			if consecutiveFailures >= maxRefillRetries {
-				log.Printf("refillIfNeeded: giving up after %d consecutive failures for pool %s", consecutiveFailures, p.config.Language)
+				log.Printf("refillIfNeeded: giving up after %d consecutive failures", consecutiveFailures)
 				return
 			}
 			backoff := time.Duration(1<<(consecutiveFailures-1)) * time.Second
@@ -189,7 +187,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				log.Printf("refillIfNeeded: context cancelled during backoff for pool %s", p.config.Language)
+				log.Printf("refillIfNeeded: context cancelled during backoff")
 				return
 			}
 			continue

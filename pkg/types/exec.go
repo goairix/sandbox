@@ -1,10 +1,11 @@
 package types
 
 type ExecRequest struct {
-	Code    string            `json:"code" binding:"required"`
-	Stdin   string            `json:"stdin,omitempty" binding:"max=1048576"`
-	Timeout int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
-	Env     map[string]string `json:"env,omitempty"`
+	Language string            `json:"language" binding:"required,oneof=python nodejs bash"`
+	Code     string            `json:"code" binding:"required"`
+	Stdin    string            `json:"stdin,omitempty" binding:"max=1048576"`
+	Timeout  int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
+	Env      map[string]string `json:"env,omitempty"`
 }
 
 type ExecResponse struct {

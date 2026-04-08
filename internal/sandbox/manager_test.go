@@ -12,9 +12,7 @@ import (
 func TestManager_CreateEphemeralSandbox(t *testing.T) {
 	rt := newMockRuntime()
 	mgr := NewManager(rt, nil, ManagerConfig{
-		PoolConfigs: map[Language]PoolConfig{
-			LangPython: {Language: LangPython, MinSize: 2, MaxSize: 10, Image: "sandbox-python:latest"},
-		},
+		PoolConfig:     PoolConfig{MinSize: 2, MaxSize: 10, Image: "sandbox:latest"},
 		DefaultTimeout: 30,
 	})
 
@@ -25,22 +23,18 @@ func TestManager_CreateEphemeralSandbox(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sb, err := mgr.Create(ctx, SandboxConfig{
-		Language: LangPython,
-		Mode:     ModeEphemeral,
-		Timeout:  30,
+		Mode:    ModeEphemeral,
+		Timeout: 30,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StateReady, sb.State)
-	assert.Equal(t, LangPython, sb.Config.Language)
 	assert.Equal(t, ModeEphemeral, sb.Config.Mode)
 }
 
 func TestManager_CreatePersistentSandbox(t *testing.T) {
 	rt := newMockRuntime()
 	mgr := NewManager(rt, nil, ManagerConfig{
-		PoolConfigs: map[Language]PoolConfig{
-			LangNodeJS: {Language: LangNodeJS, MinSize: 1, MaxSize: 5, Image: "sandbox-nodejs:latest"},
-		},
+		PoolConfig:     PoolConfig{MinSize: 1, MaxSize: 5, Image: "sandbox:latest"},
 		DefaultTimeout: 60,
 	})
 
@@ -51,9 +45,8 @@ func TestManager_CreatePersistentSandbox(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sb, err := mgr.Create(ctx, SandboxConfig{
-		Language: LangNodeJS,
-		Mode:     ModePersistent,
-		Timeout:  60,
+		Mode:    ModePersistent,
+		Timeout: 60,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StateReady, sb.State)
@@ -68,9 +61,7 @@ func TestManager_CreatePersistentSandbox(t *testing.T) {
 func TestManager_Destroy(t *testing.T) {
 	rt := newMockRuntime()
 	mgr := NewManager(rt, nil, ManagerConfig{
-		PoolConfigs: map[Language]PoolConfig{
-			LangBash: {Language: LangBash, MinSize: 1, MaxSize: 5, Image: "sandbox-bash:latest"},
-		},
+		PoolConfig:     PoolConfig{MinSize: 1, MaxSize: 5, Image: "sandbox:latest"},
 		DefaultTimeout: 30,
 	})
 
@@ -81,8 +72,7 @@ func TestManager_Destroy(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sb, err := mgr.Create(ctx, SandboxConfig{
-		Language: LangBash,
-		Mode:     ModeEphemeral,
+		Mode: ModeEphemeral,
 	})
 	require.NoError(t, err)
 

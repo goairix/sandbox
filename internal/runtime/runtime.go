@@ -48,6 +48,9 @@ type Runtime interface {
 
 	// RenameSandbox renames a sandbox container/pod for easier identification.
 	RenameSandbox(ctx context.Context, id string, newName string) error
+
+	// ListSandboxes returns sandboxes matching the given labels.
+	ListSandboxes(ctx context.Context, labels map[string]string) ([]SandboxInfo, error)
 }
 
 // FileInfo holds file metadata from inside a sandbox.

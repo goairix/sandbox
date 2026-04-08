@@ -36,6 +36,7 @@ const (
 type Dependency struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	Manager string `json:"manager"` // "pip" or "npm"
 }
 
 // ResourceLimits defines resource constraints for a sandbox.
@@ -60,7 +61,6 @@ type WorkspaceInfo struct {
 
 // SandboxConfig holds all configuration for creating a sandbox.
 type SandboxConfig struct {
-	Language      Language       `json:"language"`
 	Mode          Mode           `json:"mode"`
 	Timeout       int            `json:"timeout"` // seconds, max sandbox lifetime
 	Resources     ResourceLimits `json:"resources"`

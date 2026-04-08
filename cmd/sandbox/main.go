@@ -55,43 +55,18 @@ func main() {
 		log.Fatalf("failed to create filesystem: %v", err)
 	}
 
-	// Build pool configs — read images from config, fall back to defaults
-	pythonImage := cfg.Images.Python
-	if pythonImage == "" {
-		pythonImage = "sandbox-python:latest"
-	}
-	nodejsImage := cfg.Images.NodeJS
-	if nodejsImage == "" {
-		nodejsImage = "sandbox-nodejs:latest"
-	}
-	bashImage := cfg.Images.Bash
-	if bashImage == "" {
-		bashImage = "sandbox-bash:latest"
-	}
-
-	poolConfigs := map[sandbox.Language]sandbox.PoolConfig{
-		sandbox.LangPython: {
-			Language: sandbox.LangPython,
-			MinSize:  cfg.Pool.MinSize,
-			MaxSize:  cfg.Pool.MaxSize,
-			Image:    pythonImage,
-		},
-		sandbox.LangNodeJS: {
-			Language: sandbox.LangNodeJS,
-			MinSize:  cfg.Pool.MinSize,
-			MaxSize:  cfg.Pool.MaxSize,
-			Image:    nodejsImage,
-		},
-		sandbox.LangBash: {
-			Language: sandbox.LangBash,
-			MinSize:  cfg.Pool.MinSize,
-			MaxSize:  cfg.Pool.MaxSize,
-			Image:    bashImage,
-		},
+	// Build pool config
+	sandboxImage := cfg.Images.Sandbox
+	if sandboxImage == "" {
+		sandboxImage = "sandbox:latest"
 	}
 
 	mgr := sandbox.NewManager(rt, fsys, sandbox.ManagerConfig{
-		PoolConfigs:    poolConfigs,
+		PoolConfig: sandbox.PoolConfig{
+			MinSize: cfg.Pool.MinSize,
+			MaxSize: cfg.Pool.MaxSize,
+			Image:   sandboxImage,
+		},
 		DefaultTimeout: cfg.Security.SandboxTimeoutSeconds,
 	})
 	mgr.Start(ctx)

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
@@ -25,16 +26,14 @@ func (h *Handler) ExecSync(c *gin.Context) {
 		return
 	}
 
-	// Get sandbox to determine language
-	sb, err := h.manager.Get(c.Request.Context(), id)
-	if err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
+	if !isValidLanguage(req.Language) {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: "invalid language, must be one of: python, nodejs, bash",
 		})
 		return
 	}
 
-	command, err := buildCommand(sb.Config.Language, req.Code)
+	command, err := buildCommand(sandbox.Language(req.Language), req.Code)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Message: err.Error(),
@@ -76,16 +75,14 @@ func (h *Handler) ExecStream(c *gin.Context) {
 		return
 	}
 
-	// Get sandbox to determine language
-	sb, err := h.manager.Get(c.Request.Context(), id)
-	if err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
+	if !isValidLanguage(req.Language) {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: "invalid language, must be one of: python, nodejs, bash",
 		})
 		return
 	}
 
-	command, err := buildCommand(sb.Config.Language, req.Code)
+	command, err := buildCommand(sandbox.Language(req.Language), req.Code)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Message: err.Error(),

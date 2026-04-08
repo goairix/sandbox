@@ -36,9 +36,8 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 
 	// Create ephemeral sandbox
 	cfg := sandbox.SandboxConfig{
-		Language: sandbox.Language(req.Language),
-		Mode:     sandbox.ModeEphemeral,
-		Timeout:  req.Timeout,
+		Mode:    sandbox.ModeEphemeral,
+		Timeout: req.Timeout,
 	}
 	if req.Resources != nil {
 		cfg.Resources = sandbox.ResourceLimits{
@@ -52,6 +51,13 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 			Enabled:   req.Network.Enabled,
 			Whitelist: req.Network.Whitelist,
 		}
+	}
+	for _, dep := range req.Dependencies {
+		cfg.Dependencies = append(cfg.Dependencies, sandbox.Dependency{
+			Name:    dep.Name,
+			Version: dep.Version,
+			Manager: dep.Manager,
+		})
 	}
 
 	sb, err := h.manager.Create(ctx, cfg)
@@ -114,9 +120,8 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	cfg := sandbox.SandboxConfig{
-		Language: sandbox.Language(req.Language),
-		Mode:     sandbox.ModeEphemeral,
-		Timeout:  req.Timeout,
+		Mode:    sandbox.ModeEphemeral,
+		Timeout: req.Timeout,
 	}
 	if req.Resources != nil {
 		cfg.Resources = sandbox.ResourceLimits{

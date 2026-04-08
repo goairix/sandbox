@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	dockerclient "github.com/docker/docker/client"
 
 	"github.com/goairix/sandbox/internal/runtime"
@@ -253,4 +254,37 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled
 
 func (r *Runtime) RenameSandbox(ctx context.Context, id string, newName string) error {
 	return r.cli.ContainerRename(ctx, id, newName)
+}
+
+func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
+	args := filters.NewArgs()
+	for k, v := range labels {
+		args.Add("label", k+"="+v)
+	}
+
+	containers, err := r.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: args,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+
+	result := make([]runtime.SandboxInfo, 0, len(containers))
+	for _, c := range containers {
+		state := "unknown"
+		switch c.State {
+		case "running":
+			state = "running"
+		case "exited", "dead":
+			state = c.State
+		}
+		result = append(result, runtime.SandboxInfo{
+			ID:        c.Labels["sandbox.id"],
+			RuntimeID: c.ID,
+			State:     state,
+			CreatedAt: time.Unix(c.Created, 0),
+		})
+	}
+	return result, nil
 }
