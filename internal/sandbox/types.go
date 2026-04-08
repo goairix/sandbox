@@ -53,8 +53,9 @@ type NetworkConfig struct {
 
 // WorkspaceInfo holds metadata about a mounted workspace.
 type WorkspaceInfo struct {
-	RootPath  string    `json:"root_path"`
-	MountedAt time.Time `json:"mounted_at"`
+	RootPath     string    `json:"root_path"`
+	MountedAt    time.Time `json:"mounted_at"`
+	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
 }
 
 // SandboxConfig holds all configuration for creating a sandbox.

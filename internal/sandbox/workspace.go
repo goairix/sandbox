@@ -6,10 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 )
 
@@ -39,14 +42,21 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		return fmt.Errorf("sync to container: %w", err)
 	}
 
+	now := time.Now()
 	m.mu.Lock()
 	m.workspaces[sandboxID] = scoped
 	sb.Workspace = &WorkspaceInfo{
-		RootPath:  rootPath,
-		MountedAt: time.Now(),
+		RootPath:     rootPath,
+		MountedAt:    now,
+		LastSyncedAt: now,
 	}
-	sb.UpdatedAt = time.Now()
+	sb.UpdatedAt = now
 	m.mu.Unlock()
+
+	// Persist workspace info to session store
+	if m.sessions != nil {
+		_ = m.sessions.Save(ctx, sb)
+	}
 
 	return nil
 }
@@ -76,6 +86,11 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	sb.Workspace = nil
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
+
+	// Persist workspace removal to session store
+	if m.sessions != nil {
+		_ = m.sessions.Save(ctx, sb)
+	}
 
 	return nil
 }
@@ -206,16 +221,115 @@ func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storag
 	return nil
 }
 
-// syncFromContainer downloads the entire /workspace directory from the container
-// as a single tar archive and extracts it into ScopedFS.
+// syncFromContainer incrementally syncs changed files from the container back to storage.
+// It compares container file modification times against the last sync timestamp
+// and only writes files that were modified since then. Files deleted in the container
+// are also removed from storage. Mount sets LastSyncedAt, so every syncFromContainer
+// is incremental.
 func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID string) error {
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
+	sb := m.sandboxes[sandboxID]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
 	}
 
+	// LastSyncedAt is set at mount time; use it as the change detection baseline.
+	var cutoff int64
+	if sb != nil && sb.Workspace != nil && !sb.Workspace.LastSyncedAt.IsZero() {
+		cutoff = sb.Workspace.LastSyncedAt.Unix()
+	}
+
+	// Get container file manifest via exec
+	manifest, err := m.containerFileManifest(ctx, runtimeID)
+	if err != nil {
+		// Fall back to full sync if manifest collection fails
+		log.Printf("container manifest failed, falling back to full sync: %v", err)
+		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID); err != nil {
+			return err
+		}
+		m.updateLastSyncedAt(sb)
+		if m.sessions != nil && sb != nil {
+			_ = m.sessions.Save(ctx, sb)
+		}
+		return nil
+	}
+
+	// Get storage file set
+	storageFiles, err := m.storageFileSet(ctx, scoped, ".")
+	if err != nil {
+		log.Printf("storage file listing failed, falling back to full sync: %v", err)
+		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID); err != nil {
+			return err
+		}
+		m.updateLastSyncedAt(sb)
+		if m.sessions != nil && sb != nil {
+			_ = m.sessions.Save(ctx, sb)
+		}
+		return nil
+	}
+
+	// Compute changed files: container files with modtime > cutoff
+	changedSet := make(map[string]struct{})
+	for path, modtime := range manifest {
+		if strings.HasSuffix(path, "/") {
+			continue // skip directories
+		}
+		if cutoff == 0 || modtime > cutoff {
+			changedSet[path] = struct{}{}
+		}
+	}
+
+	// Compute deleted files: in storage but not in container
+	var deletedFiles []string
+	for path := range storageFiles {
+		if _, exists := manifest[path]; !exists {
+			deletedFiles = append(deletedFiles, path)
+		}
+	}
+
+	// Nothing to do
+	if len(changedSet) == 0 && len(deletedFiles) == 0 {
+		m.updateLastSyncedAt(sb)
+		if m.sessions != nil && sb != nil {
+			_ = m.sessions.Save(ctx, sb)
+		}
+		return nil
+	}
+
+	// Download tar and selectively extract only changed files
+	if len(changedSet) > 0 {
+		if err := m.downloadChangedFiles(ctx, scoped, runtimeID, changedSet); err != nil {
+			return fmt.Errorf("download changed files: %w", err)
+		}
+	}
+
+	// Remove deleted files from storage
+	for _, path := range deletedFiles {
+		_ = scoped.Remove(ctx, path)
+	}
+
+	m.updateLastSyncedAt(sb)
+	if m.sessions != nil && sb != nil {
+		_ = m.sessions.Save(ctx, sb)
+	}
+	return nil
+}
+
+// updateLastSyncedAt updates the LastSyncedAt timestamp under lock.
+func (m *Manager) updateLastSyncedAt(sb *Sandbox) {
+	if sb == nil || sb.Workspace == nil {
+		return
+	}
+	m.mu.Lock()
+	sb.Workspace.LastSyncedAt = time.Now()
+	sb.UpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+// fullSyncFromContainer downloads the entire /workspace as a tar and extracts all files.
+func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
 	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
 		return fmt.Errorf("download workspace: %w", err)
@@ -232,7 +346,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			return fmt.Errorf("read tar entry: %w", err)
 		}
 
-		// Strip the root "workspace/" prefix added by Docker/tar
 		name := strings.TrimPrefix(hdr.Name, "workspace/")
 		if name == "" {
 			continue
@@ -256,6 +369,144 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if closeErr != nil {
 			return fmt.Errorf("flush %q to storage: %w", name, closeErr)
 		}
+	}
+
+	return nil
+}
+
+// downloadChangedFiles downloads the workspace tar and only extracts files in changedSet.
+func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.ScopedFS, runtimeID string, changedSet map[string]struct{}) error {
+	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
+	if err != nil {
+		return fmt.Errorf("download workspace: %w", err)
+	}
+	defer tarReader.Close()
+
+	tr := tar.NewReader(tarReader)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		name := strings.TrimPrefix(hdr.Name, "workspace/")
+		if name == "" {
+			continue
+		}
+
+		if hdr.Typeflag == tar.TypeDir {
+			_ = scoped.MakeDir(ctx, strings.TrimRight(name, "/"), 0755)
+			continue
+		}
+
+		// Only write files that are in the changed set
+		if _, changed := changedSet[name]; !changed {
+			continue
+		}
+
+		writer, err := scoped.Create(ctx, name)
+		if err != nil {
+			return fmt.Errorf("create %q: %w", name, err)
+		}
+
+		_, copyErr := io.Copy(writer, tr)
+		closeErr := writer.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write %q: %w", name, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("flush %q to storage: %w", name, closeErr)
+		}
+	}
+
+	return nil
+}
+
+// containerFileManifest runs `find` inside the container and returns a map of
+// relative path → modification time (unix seconds).
+// Directory entries have a trailing "/".
+func (m *Manager) containerFileManifest(ctx context.Context, runtimeID string) (map[string]int64, error) {
+	result, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
+		Command: "find /workspace -not -path /workspace -printf '%P\\t%Y\\t%T@\\n'",
+		WorkDir: "/workspace",
+		Timeout: 30,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exec find: %w", err)
+	}
+
+	manifest := make(map[string]int64)
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+
+		path := parts[0]
+		fileType := parts[1]
+
+		// Parse modtime (float like "1712345678.123456")
+		dotIdx := strings.Index(parts[2], ".")
+		tsStr := parts[2]
+		if dotIdx > 0 {
+			tsStr = parts[2][:dotIdx]
+		}
+		modtime, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		if fileType == "d" {
+			manifest[path+"/"] = modtime
+		} else {
+			manifest[path] = modtime
+		}
+	}
+
+	return manifest, nil
+}
+
+// storageFileSet recursively lists all files in ScopedFS and returns their relative paths.
+func (m *Manager) storageFileSet(ctx context.Context, scoped storage.ScopedFS, dir string) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	if err := m.walkStorageFiles(ctx, scoped, dir, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// walkStorageFiles recursively walks ScopedFS directories, collecting file paths.
+func (m *Manager) walkStorageFiles(ctx context.Context, scoped storage.ScopedFS, dir string, result map[string]struct{}) error {
+	files, err := scoped.List(ctx, dir)
+	if err != nil {
+		return err
+	}
+
+	for _, fi := range files {
+		baseName := filepath.Base(strings.TrimRight(fi.Name(), "/"))
+		if baseName == "." || baseName == "" {
+			continue
+		}
+
+		relPath := baseName
+		if dir != "." {
+			relPath = filepath.Join(dir, baseName)
+		}
+
+		if fi.IsDir() {
+			if err := m.walkStorageFiles(ctx, scoped, relPath, result); err != nil {
+				return err
+			}
+			continue
+		}
+
+		result[relPath] = struct{}{}
 	}
 
 	return nil

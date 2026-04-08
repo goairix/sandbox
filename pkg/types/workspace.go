@@ -25,7 +25,8 @@ type SyncWorkspaceResponse struct {
 }
 
 type WorkspaceInfoResponse struct {
-	Mounted   bool      `json:"mounted"`
-	RootPath  string    `json:"root_path,omitempty"`
-	MountedAt time.Time `json:"mounted_at,omitempty"`
+	Mounted      bool      `json:"mounted"`
+	RootPath     string    `json:"root_path,omitempty"`
+	MountedAt    time.Time `json:"mounted_at,omitempty"`
+	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
 }
