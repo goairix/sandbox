@@ -95,6 +95,67 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	return pr, nil
 }
 
+// uploadArchiveToPod uploads a tar archive into a pod, extracting at destDir.
+func uploadArchiveToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destDir string, archive io.Reader) error {
+	execReq := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   []string{"tar", "xf", "-", "-C", destDir},
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
+	if err != nil {
+		return fmt.Errorf("create executor: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, archive); err != nil {
+		return fmt.Errorf("buffer archive: %w", err)
+	}
+
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin: &buf,
+	})
+}
+
+// downloadDirFromPod downloads an entire directory from a pod as a tar archive.
+func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) (io.ReadCloser, error) {
+	execReq := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   []string{"tar", "cf", "-", "-C", "/", strings.TrimPrefix(dirPath, "/")},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
+	if err != nil {
+		return nil, fmt.Errorf("create executor: %w", err)
+	}
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Stdout: pw,
+		})
+		pw.CloseWithError(err)
+	}()
+
+	return pr, nil
+}
+
 // listFilesInPod lists files in a directory inside a pod.
 func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{

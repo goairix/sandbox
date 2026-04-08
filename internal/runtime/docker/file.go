@@ -78,6 +78,18 @@ func (r *tarEntryReader) Close() error {
 	return r.closer.Close()
 }
 
+func (r *Runtime) UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error {
+	return r.cli.CopyToContainer(ctx, id, destDir, archive, container.CopyToContainerOptions{})
+}
+
+func (r *Runtime) DownloadDir(ctx context.Context, id string, dirPath string) (io.ReadCloser, error) {
+	reader, _, err := r.cli.CopyFromContainer(ctx, id, dirPath)
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
+}
+
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := r.Exec(ctx, id, runtime.ExecRequest{
 		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),

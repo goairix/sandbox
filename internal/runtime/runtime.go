@@ -37,6 +37,12 @@ type Runtime interface {
 	// ListFiles lists files in a directory inside the sandbox.
 	ListFiles(ctx context.Context, id string, dirPath string) ([]FileInfo, error)
 
+	// UploadArchive uploads a tar archive to the sandbox, extracting it at destDir.
+	UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error
+
+	// DownloadDir downloads an entire directory from the sandbox as a tar archive.
+	DownloadDir(ctx context.Context, id string, dirPath string) (io.ReadCloser, error)
+
 	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
 	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error
 

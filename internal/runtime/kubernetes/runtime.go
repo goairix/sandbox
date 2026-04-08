@@ -126,6 +126,14 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 	return downloadFileFromPod(ctx, r.client, r.restConfig, r.namespace, id, srcPath)
 }
 
+func (r *Runtime) UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error {
+	return uploadArchiveToPod(ctx, r.client, r.restConfig, r.namespace, id, destDir, archive)
+}
+
+func (r *Runtime) DownloadDir(ctx context.Context, id string, dirPath string) (io.ReadCloser, error) {
+	return downloadDirFromPod(ctx, r.client, r.restConfig, r.namespace, id, dirPath)
+}
+
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	return listFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, dirPath)
 }

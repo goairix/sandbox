@@ -80,6 +80,14 @@ func (m *mockRuntime) ListFiles(context.Context, string, string) ([]runtime.File
 	return nil, nil
 }
 
+func (m *mockRuntime) UploadArchive(context.Context, string, string, io.Reader) error {
+	return nil
+}
+
+func (m *mockRuntime) DownloadDir(context.Context, string, string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
 func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string) error {
 	return nil
 }
