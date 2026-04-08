@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/docker/docker v27.5.1+incompatible
-	github.com/dysodeng/fs v0.3.6
+	github.com/dysodeng/fs v0.3.7
 	github.com/gin-gonic/gin v1.12.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/spf13/viper v1.21.0
