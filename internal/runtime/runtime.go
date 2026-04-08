@@ -39,6 +39,9 @@ type Runtime interface {
 
 	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
 	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error
+
+	// RenameSandbox renames a sandbox container/pod for easier identification.
+	RenameSandbox(ctx context.Context, id string, newName string) error
 }
 
 // FileInfo holds file metadata from inside a sandbox.

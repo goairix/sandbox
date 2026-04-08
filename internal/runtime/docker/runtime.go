@@ -250,3 +250,7 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled
 	// !enabled && !hasGateway — already disabled, nothing to do
 	return nil
 }
+
+func (r *Runtime) RenameSandbox(ctx context.Context, id string, newName string) error {
+	return r.cli.ContainerRename(ctx, id, newName)
+}

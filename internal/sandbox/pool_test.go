@@ -84,6 +84,10 @@ func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string) err
 	return nil
 }
 
+func (m *mockRuntime) RenameSandbox(context.Context, string, string) error {
+	return nil
+}
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{

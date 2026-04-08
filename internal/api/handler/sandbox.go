@@ -94,6 +94,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		Language:  string(sb.Config.Language),
 		Mode:      string(sb.Config.Mode),
 		State:     string(sb.State),
+		RuntimeID: sb.RuntimeID,
 		CreatedAt: sb.CreatedAt,
 	})
 }
@@ -114,6 +115,7 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 		Language:  string(sb.Config.Language),
 		Mode:      string(sb.Config.Mode),
 		State:     string(sb.State),
+		RuntimeID: sb.RuntimeID,
 		CreatedAt: sb.CreatedAt,
 	})
 }

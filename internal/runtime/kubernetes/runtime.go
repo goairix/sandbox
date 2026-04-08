@@ -133,3 +133,8 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
 	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist)
 }
+
+func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {
+	// Kubernetes pods cannot be renamed; this is a no-op.
+	return nil
+}

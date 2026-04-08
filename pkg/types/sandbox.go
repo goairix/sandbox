@@ -33,6 +33,7 @@ type SandboxResponse struct {
 	Language  string    `json:"language"`
 	Mode      string    `json:"mode"`
 	State     string    `json:"state"`
+	RuntimeID string    `json:"runtime_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

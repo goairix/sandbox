@@ -133,6 +133,9 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}
 	}
 
+	// Rename container for easier identification (best-effort)
+	_ = m.runtime.RenameSandbox(ctx, info.RuntimeID, id)
+
 	sb := &Sandbox{
 		ID:        id,
 		Config:    cfg,
