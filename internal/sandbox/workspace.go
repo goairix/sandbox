@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage"
@@ -168,23 +169,35 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
 	}
 
-	files, err := m.runtime.ListFiles(ctx, runtimeID, "/workspace")
+	return m.syncFromDir(ctx, scoped, runtimeID, "/workspace")
+}
+
+// syncFromDir recursively downloads files from a container directory into ScopedFS.
+func (m *Manager) syncFromDir(ctx context.Context, scoped storage.ScopedFS, runtimeID, containerDir string) error {
+	files, err := m.runtime.ListFiles(ctx, runtimeID, containerDir)
 	if err != nil {
-		return fmt.Errorf("list container files: %w", err)
+		return fmt.Errorf("list container files %q: %w", containerDir, err)
 	}
 
 	for _, fi := range files {
-		if fi.IsDir {
+		// Skip the directory entry itself (find returns the queried dir as first result)
+		if fi.Path == containerDir+"/"+filepath.Base(containerDir) && fi.IsDir {
 			continue
 		}
 
-		// Compute relative path from /workspace
-		relPath := fi.Path
-		if len(relPath) > len("/workspace/") {
-			relPath = relPath[len("/workspace/"):]
-		} else {
-			relPath = fi.Name
+		if fi.IsDir {
+			// Recurse into subdirectory
+			subDir := containerDir + "/" + fi.Name
+			// Ensure directory exists in ScopedFS
+			relDir := m.containerPathToRelative(subDir)
+			_ = scoped.MakeDir(ctx, relDir, 0755)
+			if err := m.syncFromDir(ctx, scoped, runtimeID, subDir); err != nil {
+				return err
+			}
+			continue
 		}
+
+		relPath := m.containerPathToRelative(fi.Path)
 
 		reader, err := m.runtime.DownloadFile(ctx, runtimeID, fi.Path)
 		if err != nil {
@@ -206,4 +219,13 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	}
 
 	return nil
+}
+
+// containerPathToRelative converts a container absolute path to a path relative to /workspace.
+func (m *Manager) containerPathToRelative(containerPath string) string {
+	const prefix = "/workspace/"
+	if strings.HasPrefix(containerPath, prefix) {
+		return containerPath[len(prefix):]
+	}
+	return filepath.Base(containerPath)
 }
