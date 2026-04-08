@@ -35,7 +35,7 @@ func (m *mockRuntime) CreateSandbox(_ context.Context, spec runtime.SandboxSpec)
 		State:     "running",
 		CreatedAt: time.Now(),
 	}
-	m.sandboxes[spec.ID] = info
+	m.sandboxes[info.RuntimeID] = info
 	return info, nil
 }
 

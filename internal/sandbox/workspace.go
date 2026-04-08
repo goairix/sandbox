@@ -166,6 +166,8 @@ func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storag
 				Typeflag: tar.TypeDir,
 				Mode:     0755,
 				ModTime:  fi.ModTime(),
+				Uid:      1000,
+				Gid:      1000,
 			}); err != nil {
 				return err
 			}
@@ -191,6 +193,8 @@ func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storag
 			Size:    int64(len(content)),
 			Mode:    0644,
 			ModTime: fi.ModTime(),
+			Uid:     1000,
+			Gid:     1000,
 		}); err != nil {
 			return err
 		}

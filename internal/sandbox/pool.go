@@ -59,21 +59,31 @@ func (p *Pool) WarmUp(ctx context.Context) {
 }
 
 // Acquire takes a warm container from the pool. If none available, creates one on-demand.
+// Stale containers (e.g. removed by Docker restart) are automatically discarded.
 func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
-	p.mu.Lock()
-	if len(p.available) > 0 {
+	for {
+		p.mu.Lock()
+		if len(p.available) == 0 {
+			p.mu.Unlock()
+			break
+		}
 		info := p.available[0]
 		p.available = p.available[1:]
 		p.mu.Unlock()
 
-		// Trigger async refill if below min
-		go p.refillIfNeeded(context.Background())
+		// Verify container is still alive
+		got, err := p.runtime.GetSandbox(ctx, info.RuntimeID)
+		if err == nil && got != nil && got.State != "exited" && got.State != "dead" && got.State != "" {
+			go p.refillIfNeeded(context.Background())
+			return info, nil
+		}
 
-		return info, nil
+		// Stale container, discard and try next
+		log.Printf("pool %s: discarding stale container %s", p.config.Language, info.RuntimeID)
+		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
 	}
-	p.mu.Unlock()
 
-	// No warm containers, create on-demand
+	// No healthy warm containers, create on-demand
 	return p.createWarm(ctx)
 }
 

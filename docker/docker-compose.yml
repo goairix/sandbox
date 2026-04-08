@@ -21,7 +21,6 @@ services:
       - SANDBOX_IMAGES_GATEWAY=sandbox-gateway:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - sandbox-storage:/data/storage
     depends_on:
       - redis
       - sandbox-images
