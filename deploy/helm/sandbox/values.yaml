@@ -29,7 +29,8 @@ config:
   runtime:
     type: kubernetes
     kubernetes:
-      namespace: sandbox
+      # Namespace for sandbox pods. Defaults to the Helm release namespace if empty.
+      namespace: ""
   pool:
     minSize: 3
     maxSize: 20

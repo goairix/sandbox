@@ -1,7 +1,9 @@
+{{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}-sandbox
+  namespace: {{ .Release.Namespace }}
   labels:
     app: sandbox
     release: {{ .Release.Name }}
@@ -33,7 +35,7 @@ spec:
             - name: SANDBOX_RUNTIME_TYPE
               value: "{{ .Values.config.runtime.type }}"
             - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
-              value: "{{ .Values.config.runtime.kubernetes.namespace }}"
+              value: "{{ $sandboxNs }}"
             - name: SANDBOX_POOL_MIN_SIZE
               value: "{{ .Values.config.pool.minSize }}"
             - name: SANDBOX_POOL_MAX_SIZE

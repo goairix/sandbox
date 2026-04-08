@@ -740,18 +740,39 @@ docker-compose up -d
 
 ### 10.2 Kubernetes + Helm（生产环境）
 
+**基础部署（所有资源在同一 namespace）：**
+
 ```bash
 helm install sandbox deploy/helm/sandbox/ \
-  --set security.apiKey=your-key \
-  --set images.sandbox=your-registry/sandbox:latest
+  -n sandbox --create-namespace \
+  --set config.security.apiKey=your-key \
+  --set config.images.sandbox=your-registry/sandbox:latest
 ```
+
+**自定义 sandbox pod namespace（API 与 sandbox pods 分离）：**
+
+```bash
+helm install sandbox deploy/helm/sandbox/ \
+  -n sandbox --create-namespace \
+  --set config.runtime.kubernetes.namespace=sandbox-runners \
+  --set config.security.apiKey=your-key
+```
+
+此配置下：
+- API 服务部署在 `sandbox` namespace
+- 动态创建的沙箱 pod 运行在 `sandbox-runners` namespace
+- RBAC 自动配置跨命名空间权限（Role 在 `sandbox-runners`，ServiceAccount 在 `sandbox`）
+
+**Namespace 规则：**
+- `config.runtime.kubernetes.namespace` 为空时（默认），sandbox pods 与 Helm release 在同一 namespace
+- 设置后，sandbox pods 限定在指定 namespace，API 可以在不同 namespace
 
 特性：
 - 多副本部署（共享 Redis 状态）
 - HPA 自动伸缩（基于 CPU）
 - NetworkPolicy 出站控制
+- RBAC 授权 ServiceAccount 管理 pods、pods/exec、NetworkPolicies
 - Pod 安全标准
-- ServiceAccount + RBAC
 
 ---
 
