@@ -6,7 +6,7 @@
 #   SANDBOX_SERVER_PORT=9090
 #   SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
 # Nested keys use underscores as separators in env var names, e.g.:
-#   SANDBOX_STORAGE_OBJECT_ACCESS_KEY=my-key
+#   SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY=my-key
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -73,15 +73,16 @@ storage:
       # Redis database index (0–15).
       db: 0
 
-  # Object storage (sandbox artifacts, output files, etc.)
-  object:
-    # Storage provider. Supported values: "s3", "cos", "obs", "oss", "local"
+  # Filesystem storage (workspace persistent storage)
+  filesystem:
+    # Storage provider. Supported values: "local", "s3", "cos", "oss", "obs", "minio"
     provider: "local"
     # Bucket name (not used for the "local" provider).
     bucket: ""
     # Storage region (provider-dependent).
     region: ""
     # Custom endpoint URL (optional, for private / compatible storage).
+    # For COS, this is the full bucket URL (e.g. "https://bucket-xxx.cos.ap-guangzhou.myqcloud.com").
     endpoint: ""
     # Access key ID.
     access_key: ""
@@ -89,6 +90,10 @@ storage:
     secret_key: ""
     # Local directory for the "local" provider.
     local_path: "/tmp/sandbox-storage"
+    # Sub-path prefix within the bucket / root directory (optional).
+    sub_path: ""
+    # Use SSL for MinIO connections (only used when provider = "minio").
+    use_ssl: false
 
 # -----------------------------------------------------------------------------
 # Security — sandbox isolation and resource limits
