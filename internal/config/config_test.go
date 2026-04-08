@@ -39,14 +39,16 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "", cfg.Storage.State.Redis.Password)
 	assert.Equal(t, 0, cfg.Storage.State.Redis.DB)
 
-	// Storage.Object defaults
-	assert.Equal(t, "local", cfg.Storage.Object.Provider)
-	assert.Equal(t, "", cfg.Storage.Object.Bucket)
-	assert.Equal(t, "", cfg.Storage.Object.Region)
-	assert.Equal(t, "", cfg.Storage.Object.Endpoint)
-	assert.Equal(t, "", cfg.Storage.Object.AccessKey)
-	assert.Equal(t, "", cfg.Storage.Object.SecretKey)
-	assert.Equal(t, "/tmp/sandbox-storage", cfg.Storage.Object.LocalPath)
+	// Storage.FileSystem defaults
+	assert.Equal(t, "local", cfg.Storage.FileSystem.Provider)
+	assert.Equal(t, "", cfg.Storage.FileSystem.Bucket)
+	assert.Equal(t, "", cfg.Storage.FileSystem.Region)
+	assert.Equal(t, "", cfg.Storage.FileSystem.Endpoint)
+	assert.Equal(t, "", cfg.Storage.FileSystem.AccessKey)
+	assert.Equal(t, "", cfg.Storage.FileSystem.SecretKey)
+	assert.Equal(t, "/tmp/sandbox-storage", cfg.Storage.FileSystem.LocalPath)
+	assert.Equal(t, "", cfg.Storage.FileSystem.SubPath)
+	assert.False(t, cfg.Storage.FileSystem.UseSSL)
 
 	// Security defaults
 	assert.Equal(t, 30, cfg.Security.ExecTimeoutSeconds)
@@ -84,7 +86,7 @@ storage:
       addr: "redis.example.com:6379"
       password: "secret"
       db: 1
-  object:
+  filesystem:
     provider: "s3"
     bucket: "my-bucket"
     region: "us-east-1"
@@ -92,6 +94,8 @@ storage:
     access_key: "AKIAIOSFODNN7EXAMPLE"
     secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
     local_path: "/data/sandbox"
+    sub_path: "workspaces"
+    use_ssl: true
 
 security:
   api_key: "test-yaml-api-key"
@@ -134,14 +138,16 @@ security:
 	assert.Equal(t, "secret", cfg.Storage.State.Redis.Password)
 	assert.Equal(t, 1, cfg.Storage.State.Redis.DB)
 
-	// Storage.Object
-	assert.Equal(t, "s3", cfg.Storage.Object.Provider)
-	assert.Equal(t, "my-bucket", cfg.Storage.Object.Bucket)
-	assert.Equal(t, "us-east-1", cfg.Storage.Object.Region)
-	assert.Equal(t, "https://s3.amazonaws.com", cfg.Storage.Object.Endpoint)
-	assert.Equal(t, "AKIAIOSFODNN7EXAMPLE", cfg.Storage.Object.AccessKey)
-	assert.Equal(t, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", cfg.Storage.Object.SecretKey)
-	assert.Equal(t, "/data/sandbox", cfg.Storage.Object.LocalPath)
+	// Storage.FileSystem
+	assert.Equal(t, "s3", cfg.Storage.FileSystem.Provider)
+	assert.Equal(t, "my-bucket", cfg.Storage.FileSystem.Bucket)
+	assert.Equal(t, "us-east-1", cfg.Storage.FileSystem.Region)
+	assert.Equal(t, "https://s3.amazonaws.com", cfg.Storage.FileSystem.Endpoint)
+	assert.Equal(t, "AKIAIOSFODNN7EXAMPLE", cfg.Storage.FileSystem.AccessKey)
+	assert.Equal(t, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", cfg.Storage.FileSystem.SecretKey)
+	assert.Equal(t, "/data/sandbox", cfg.Storage.FileSystem.LocalPath)
+	assert.Equal(t, "workspaces", cfg.Storage.FileSystem.SubPath)
+	assert.True(t, cfg.Storage.FileSystem.UseSSL)
 
 	// Security
 	assert.Equal(t, 60, cfg.Security.ExecTimeoutSeconds)
@@ -156,32 +162,32 @@ security:
 func TestEnvOverrides(t *testing.T) {
 	// Set env vars before loading; clean up after
 	envVars := map[string]string{
-		"SANDBOX_SERVER_PORT":                   "7070",
-		"SANDBOX_SERVER_HOST":                   "localhost",
-		"SANDBOX_RUNTIME_TYPE":                  "kubernetes",
-		"SANDBOX_RUNTIME_DOCKER_HOST":           "tcp://docker.example.com:2376",
-		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG": "/root/.kube/config",
-		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":  "production",
-		"SANDBOX_POOL_MIN_SIZE":                 "10",
-		"SANDBOX_POOL_MAX_SIZE":                 "100",
-		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":  "30",
-		"SANDBOX_STORAGE_STATE_REDIS_ADDR":      "cache.example.com:6379",
-		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":  "redispass",
-		"SANDBOX_STORAGE_STATE_REDIS_DB":        "2",
-		"SANDBOX_STORAGE_OBJECT_PROVIDER":       "cos",
-		"SANDBOX_STORAGE_OBJECT_BUCKET":         "env-bucket",
-		"SANDBOX_STORAGE_OBJECT_REGION":         "ap-guangzhou",
-		"SANDBOX_STORAGE_OBJECT_ENDPOINT":       "https://cos.ap-guangzhou.myqcloud.com",
-		"SANDBOX_STORAGE_OBJECT_ACCESS_KEY":     "env-access-key",
-		"SANDBOX_STORAGE_OBJECT_SECRET_KEY":     "env-secret-key",
-		"SANDBOX_STORAGE_OBJECT_LOCAL_PATH":     "/env/sandbox-storage",
-		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS": "120",
-		"SANDBOX_SECURITY_API_KEY":              "env-api-key",
-		"SANDBOX_SECURITY_MAX_MEMORY":           "1Gi",
-		"SANDBOX_SECURITY_MAX_DISK":             "500Mi",
-		"SANDBOX_SECURITY_MAX_PIDS":             "500",
-		"SANDBOX_SECURITY_NETWORK_ENABLED":      "true",
-		"SANDBOX_SECURITY_SECCOMP_PROFILE":      "/etc/seccomp/custom.json",
+		"SANDBOX_SERVER_PORT":                        "7070",
+		"SANDBOX_SERVER_HOST":                        "localhost",
+		"SANDBOX_RUNTIME_TYPE":                       "kubernetes",
+		"SANDBOX_RUNTIME_DOCKER_HOST":                "tcp://docker.example.com:2376",
+		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG":      "/root/.kube/config",
+		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":       "production",
+		"SANDBOX_POOL_MIN_SIZE":                      "10",
+		"SANDBOX_POOL_MAX_SIZE":                      "100",
+		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":       "30",
+		"SANDBOX_STORAGE_STATE_REDIS_ADDR":           "cache.example.com:6379",
+		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":       "redispass",
+		"SANDBOX_STORAGE_STATE_REDIS_DB":             "2",
+		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":        "cos",
+		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":          "env-bucket",
+		"SANDBOX_STORAGE_FILESYSTEM_REGION":          "ap-guangzhou",
+		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":        "https://cos.ap-guangzhou.myqcloud.com",
+		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":      "env-access-key",
+		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":      "env-secret-key",
+		"SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH":      "/env/sandbox-storage",
+		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS":      "120",
+		"SANDBOX_SECURITY_API_KEY":                   "env-api-key",
+		"SANDBOX_SECURITY_MAX_MEMORY":                "1Gi",
+		"SANDBOX_SECURITY_MAX_DISK":                  "500Mi",
+		"SANDBOX_SECURITY_MAX_PIDS":                  "500",
+		"SANDBOX_SECURITY_NETWORK_ENABLED":           "true",
+		"SANDBOX_SECURITY_SECCOMP_PROFILE":           "/etc/seccomp/custom.json",
 	}
 
 	for k, v := range envVars {
@@ -208,13 +214,13 @@ func TestEnvOverrides(t *testing.T) {
 	assert.Equal(t, "redispass", cfg.Storage.State.Redis.Password)
 	assert.Equal(t, 2, cfg.Storage.State.Redis.DB)
 
-	assert.Equal(t, "cos", cfg.Storage.Object.Provider)
-	assert.Equal(t, "env-bucket", cfg.Storage.Object.Bucket)
-	assert.Equal(t, "ap-guangzhou", cfg.Storage.Object.Region)
-	assert.Equal(t, "https://cos.ap-guangzhou.myqcloud.com", cfg.Storage.Object.Endpoint)
-	assert.Equal(t, "env-access-key", cfg.Storage.Object.AccessKey)
-	assert.Equal(t, "env-secret-key", cfg.Storage.Object.SecretKey)
-	assert.Equal(t, "/env/sandbox-storage", cfg.Storage.Object.LocalPath)
+	assert.Equal(t, "cos", cfg.Storage.FileSystem.Provider)
+	assert.Equal(t, "env-bucket", cfg.Storage.FileSystem.Bucket)
+	assert.Equal(t, "ap-guangzhou", cfg.Storage.FileSystem.Region)
+	assert.Equal(t, "https://cos.ap-guangzhou.myqcloud.com", cfg.Storage.FileSystem.Endpoint)
+	assert.Equal(t, "env-access-key", cfg.Storage.FileSystem.AccessKey)
+	assert.Equal(t, "env-secret-key", cfg.Storage.FileSystem.SecretKey)
+	assert.Equal(t, "/env/sandbox-storage", cfg.Storage.FileSystem.LocalPath)
 
 	assert.Equal(t, 120, cfg.Security.ExecTimeoutSeconds)
 	assert.Equal(t, "1Gi", cfg.Security.MaxMemory)
@@ -259,4 +265,32 @@ func TestValidateKubernetesNamespaceRequired(t *testing.T) {
 	_, err := config.Load("")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "namespace")
+}
+
+func TestLoad_FileSystemConfig_Defaults(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+
+	assert.Equal(t, "local", cfg.Storage.FileSystem.Provider)
+	assert.Equal(t, "/tmp/sandbox-storage", cfg.Storage.FileSystem.LocalPath)
+	assert.Equal(t, "", cfg.Storage.FileSystem.SubPath)
+	assert.False(t, cfg.Storage.FileSystem.UseSSL)
+}
+
+func TestLoad_FileSystemConfig_EnvOverride(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_STORAGE_FILESYSTEM_PROVIDER", "s3")
+	t.Setenv("SANDBOX_STORAGE_FILESYSTEM_BUCKET", "my-bucket")
+	t.Setenv("SANDBOX_STORAGE_FILESYSTEM_REGION", "us-east-1")
+	t.Setenv("SANDBOX_STORAGE_FILESYSTEM_SUB_PATH", "workspaces")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+
+	assert.Equal(t, "s3", cfg.Storage.FileSystem.Provider)
+	assert.Equal(t, "my-bucket", cfg.Storage.FileSystem.Bucket)
+	assert.Equal(t, "us-east-1", cfg.Storage.FileSystem.Region)
+	assert.Equal(t, "workspaces", cfg.Storage.FileSystem.SubPath)
 }

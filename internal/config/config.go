@@ -58,8 +58,8 @@ type ImagesConfig struct {
 
 // StorageConfig holds storage backend settings.
 type StorageConfig struct {
-	State  StateStorageConfig  `mapstructure:"state"`
-	Object ObjectStorageConfig `mapstructure:"object"`
+	State      StateStorageConfig `mapstructure:"state"`
+	FileSystem FileSystemConfig   `mapstructure:"filesystem"`
 }
 
 // StateStorageConfig holds state storage settings.
@@ -74,9 +74,9 @@ type RedisConfig struct {
 	DB       int    `mapstructure:"db"`
 }
 
-// ObjectStorageConfig holds object storage settings.
-// Provider can be one of: s3, cos, obs, oss, local.
-type ObjectStorageConfig struct {
+// FileSystemConfig holds filesystem storage settings.
+// Provider can be one of: local, s3, cos, oss, obs, minio.
+type FileSystemConfig struct {
 	Provider  string `mapstructure:"provider"`
 	Bucket    string `mapstructure:"bucket"`
 	Region    string `mapstructure:"region"`
@@ -84,6 +84,8 @@ type ObjectStorageConfig struct {
 	AccessKey string `mapstructure:"access_key"`
 	SecretKey string `mapstructure:"secret_key"`
 	LocalPath string `mapstructure:"local_path"`
+	SubPath   string `mapstructure:"sub_path"`
+	UseSSL    bool   `mapstructure:"use_ssl"`
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -224,14 +226,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.state.redis.password", "")
 	v.SetDefault("storage.state.redis.db", 0)
 
-	// Storage — Object
-	v.SetDefault("storage.object.provider", "local")
-	v.SetDefault("storage.object.bucket", "")
-	v.SetDefault("storage.object.region", "")
-	v.SetDefault("storage.object.endpoint", "")
-	v.SetDefault("storage.object.access_key", "")
-	v.SetDefault("storage.object.secret_key", "")
-	v.SetDefault("storage.object.local_path", "/tmp/sandbox-storage")
+	// Storage — FileSystem
+	v.SetDefault("storage.filesystem.provider", "local")
+	v.SetDefault("storage.filesystem.bucket", "")
+	v.SetDefault("storage.filesystem.region", "")
+	v.SetDefault("storage.filesystem.endpoint", "")
+	v.SetDefault("storage.filesystem.access_key", "")
+	v.SetDefault("storage.filesystem.secret_key", "")
+	v.SetDefault("storage.filesystem.local_path", "/tmp/sandbox-storage")
+	v.SetDefault("storage.filesystem.sub_path", "")
+	v.SetDefault("storage.filesystem.use_ssl", false)
 
 	// Security
 	v.SetDefault("security.api_key", "")
