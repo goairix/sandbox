@@ -3,12 +3,13 @@ package types
 import "time"
 
 type CreateSandboxRequest struct {
-	Language     string           `json:"language" binding:"required,oneof=python nodejs bash"`
-	Mode         string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
-	Timeout      int              `json:"timeout,omitempty" binding:"min=0,max=3600"`
-	Resources    *ResourceLimits  `json:"resources,omitempty"`
-	Network      *NetworkConfig   `json:"network,omitempty"`
-	Dependencies []DependencySpec `json:"dependencies,omitempty"`
+	Language      string           `json:"language" binding:"required,oneof=python nodejs bash"`
+	Mode          string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
+	Timeout       int              `json:"timeout,omitempty" binding:"min=0,max=3600"`
+	Resources     *ResourceLimits  `json:"resources,omitempty"`
+	Network       *NetworkConfig   `json:"network,omitempty"`
+	Dependencies  []DependencySpec `json:"dependencies,omitempty"`
+	WorkspacePath string           `json:"workspace_path,omitempty"`
 }
 
 type ResourceLimits struct {

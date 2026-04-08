@@ -51,14 +51,21 @@ type NetworkConfig struct {
 	Whitelist []string `json:"whitelist"` // allowed domains
 }
 
+// WorkspaceInfo holds metadata about a mounted workspace.
+type WorkspaceInfo struct {
+	RootPath  string    `json:"root_path"`
+	MountedAt time.Time `json:"mounted_at"`
+}
+
 // SandboxConfig holds all configuration for creating a sandbox.
 type SandboxConfig struct {
-	Language     Language       `json:"language"`
-	Mode         Mode           `json:"mode"`
-	Timeout      int            `json:"timeout"` // seconds, max sandbox lifetime
-	Resources    ResourceLimits `json:"resources"`
-	Network      NetworkConfig  `json:"network"`
-	Dependencies []Dependency   `json:"dependencies"`
+	Language      Language       `json:"language"`
+	Mode          Mode           `json:"mode"`
+	Timeout       int            `json:"timeout"` // seconds, max sandbox lifetime
+	Resources     ResourceLimits `json:"resources"`
+	Network       NetworkConfig  `json:"network"`
+	Dependencies  []Dependency   `json:"dependencies"`
+	WorkspacePath string         `json:"workspace_path,omitempty"`
 }
 
 // Sandbox represents a running sandbox instance.
@@ -69,6 +76,7 @@ type Sandbox struct {
 	CreatedAt time.Time     `json:"created_at"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	// RuntimeID is the container/pod ID in the underlying runtime
-	RuntimeID string        `json:"runtime_id"`
-	Timeout   time.Duration `json:"timeout"` // max sandbox lifetime
+	RuntimeID string         `json:"runtime_id"`
+	Timeout   time.Duration  `json:"timeout"` // max sandbox lifetime
+	Workspace *WorkspaceInfo `json:"workspace,omitempty"`
 }
