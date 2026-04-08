@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/docker/docker v27.5.1+incompatible
+	github.com/dysodeng/fs v0.3.6
 	github.com/gin-gonic/gin v1.12.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/spf13/viper v1.21.0
@@ -47,7 +48,6 @@ require (
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/dysodeng/fs v0.3.6 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
