@@ -57,6 +57,12 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int) *gin.Engine {
 	v1.GET("/sandboxes/:id/files/download", h.DownloadFile)
 	v1.GET("/sandboxes/:id/files/list", h.ListFiles)
 
+	// Workspace operations
+	v1.POST("/sandboxes/:id/workspace/mount", h.MountWorkspace)
+	v1.POST("/sandboxes/:id/workspace/unmount", h.UnmountWorkspace)
+	v1.POST("/sandboxes/:id/workspace/sync", h.SyncWorkspace)
+	v1.GET("/sandboxes/:id/workspace/info", h.GetWorkspaceInfo)
+
 	// One-shot execution
 	v1.POST("/execute", h.ExecuteOneShot)
 	v1.POST("/execute/stream", h.ExecuteOneShotStream)
