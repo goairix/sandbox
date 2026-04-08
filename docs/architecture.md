@@ -688,7 +688,32 @@ func NewFileSystem(cfg FileSystemConfig) (fs.FileSystem, error) {
 }
 ```
 
-### 9.2 ScopedFS — 存储后端路径隔离
+#### 工作空间与存储后端的关系
+
+工作空间文件存储在存储后端中，通过 tar 归档在存储后端和容器之间复制——**不是 Docker volume mount**。
+
+```
+存储后端                                     容器
+(Local/S3/MinIO/...)                        /workspace/
+└── user123/project-a/      ── tar ──▶      ├── main.py
+    ├── main.py             (挂载时上传)     └── data/
+    └── data/                                   └── input.csv
+        └── input.csv
+                            ◀── tar ──      修改后的文件
+                            (增量同步回存储)  写回存储后端
+```
+
+无论底层是 Local、S3 还是 MinIO，上层 ScopedFS 和 sync 逻辑完全一致，差异仅在 `fs.FileSystem` 的 I/O 实现。
+
+#### 存储后端选型注意事项
+
+| 后端 | 适用场景 | 限制 |
+|------|----------|------|
+| **local** | 开发调试 | 文件在 API 进程所在主机的磁盘上；Docker Compose 下 API 跑在容器内，需额外挂载宿主机目录才能持久化；不支持多副本共享 |
+| **s3/cos/oss/obs** | 生产环境 | 需要配置 Bucket、AccessKey 等；天然支持多副本共享 |
+| **minio** | 自建对象存储 | 兼容 S3 协议；适合不依赖云厂商的场景 |
+
+**Local 模式注意：** API 进程重启不影响文件（在磁盘上），但 API 容器重建会丢失数据（容器内临时存储）。生产环境应使用对象存储后端。
 
 ScopedFS 的保护对象是**存储后端**（MinIO/S3/本地磁盘），不是容器内文件系统。它确保 workspace sync 操作不会读写 `rootPath` 以外的存储文件。
 
