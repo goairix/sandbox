@@ -5,19 +5,19 @@ compatibility: Requires a running Sandbox API service (default http://localhost:
 allowed-tools: Bash(curl:*) Bash(jq:*)
 metadata:
   author: goairix
-  version: "1.0"
+  version: "2.0"
 ---
 
 # Sandbox Code Execution
 
-Execute untrusted code safely in isolated containers. The sandbox automatically creates a container, runs the code, and destroys the container.
+Execute untrusted code safely in isolated containers. The sandbox automatically creates a unified container (supporting Python, Node.js/TypeScript, and Bash), runs the code, and destroys the container.
 
 ## Configuration
 
 Set these environment variables before use (or use defaults):
 
 - `SANDBOX_API_URL` — Sandbox API base URL (default: `http://localhost:8080`)
-- `SANDBOX_API_KEY` — API authentication key (default: `***REDACTED_API_KEY***`)
+- `SANDBOX_API_KEY` — API authentication key
 
 ## One-shot Execution
 
@@ -27,7 +27,7 @@ Run code and get the result in a single call. The sandbox is created and destroy
 
 ```bash
 curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
-  -H "Authorization: Bearer ${SANDBOX_API_KEY:-***REDACTED_API_KEY***}" \
+  -H "Authorization: Bearer ${SANDBOX_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg code "$CODE" '{language: "python", code: $code}')"
 ```
@@ -36,7 +36,7 @@ curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
 
 ```bash
 curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
-  -H "Authorization: Bearer ${SANDBOX_API_KEY:-***REDACTED_API_KEY***}" \
+  -H "Authorization: Bearer ${SANDBOX_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg code "$CODE" '{language: "nodejs", code: $code}')"
 ```
@@ -45,7 +45,7 @@ curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
 
 ```bash
 curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
-  -H "Authorization: Bearer ${SANDBOX_API_KEY:-***REDACTED_API_KEY***}" \
+  -H "Authorization: Bearer ${SANDBOX_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg code "$CODE" '{language: "bash", code: $code}')"
 ```
@@ -60,7 +60,11 @@ curl -s -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute" \
   "network": {
     "enabled": true,
     "whitelist": ["www.example.com", "10.0.0.0/8"]
-  }
+  },
+  "dependencies": [
+    {"name": "flask", "version": "3.0.0", "manager": "pip"},
+    {"name": "express", "version": "4.18.2", "manager": "npm"}
+  ]
 }
 ```
 
@@ -84,7 +88,7 @@ For long-running code, use the streaming endpoint to get real-time output:
 
 ```bash
 curl -s -N -X POST "${SANDBOX_API_URL:-http://localhost:8080}/api/v1/execute/stream" \
-  -H "Authorization: Bearer ${SANDBOX_API_KEY:-***REDACTED_API_KEY***}" \
+  -H "Authorization: Bearer ${SANDBOX_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg code "$CODE" '{language: "python", code: $code}')"
 ```
@@ -134,12 +138,6 @@ Use `scripts/execute_with_network.sh` when the code needs to fetch external data
 
 ```bash
 scripts/execute_with_network.sh python 'import urllib.request; print(urllib.request.urlopen("http://example.com").read()[:200])' 'example.com'
-```
-
-### Install and use packages
-
-```bash
-scripts/execute.sh python 'import subprocess; subprocess.run(["pip","install","requests"], capture_output=True); import requests; print(requests.get("http://httpbin.org/get").status_code)'
 ```
 
 ## Error Handling
