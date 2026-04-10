@@ -16,6 +16,19 @@ import (
 	"github.com/goairix/sandbox/internal/storage"
 )
 
+// isExcluded reports whether path should be skipped during workspace sync.
+// A path is excluded if it equals any exclude entry or starts with an exclude
+// entry followed by "/". For example, exclude entry ".agent" matches ".agent",
+// ".agent/", ".agent/skills/code.yaml", etc.
+func isExcluded(path string, exclude []string) bool {
+	for _, e := range exclude {
+		if path == e || strings.HasPrefix(path, e+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
 func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string) error {
 	m.mu.RLock()
