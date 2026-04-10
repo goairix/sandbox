@@ -16,7 +16,8 @@ type UnmountWorkspaceResponse struct {
 }
 
 type SyncWorkspaceRequest struct {
-	Direction string `json:"direction" binding:"required,oneof=to_container from_container"`
+	Direction string   `json:"direction" binding:"required,oneof=to_container from_container"`
+	Exclude   []string `json:"exclude,omitempty"`
 }
 
 type SyncWorkspaceResponse struct {

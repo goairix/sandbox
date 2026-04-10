@@ -90,7 +90,7 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		return fmt.Errorf("no workspace mounted for sandbox %s", sandboxID)
 	}
 
-	if err := m.syncFromContainer(ctx, sandboxID, runtimeID); err != nil {
+	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, nil); err != nil {
 		return fmt.Errorf("sync from container: %w", err)
 	}
 
@@ -109,7 +109,8 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 }
 
 // SyncWorkspace manually syncs files in the given direction.
-func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string) error {
+// exclude is an optional list of path prefixes to skip during from_container sync.
+func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string, exclude []string) error {
 	m.mu.RLock()
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
@@ -128,7 +129,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	case "to_container":
 		return m.syncToContainer(ctx, scoped, runtimeID)
 	case "from_container":
-		return m.syncFromContainer(ctx, sandboxID, runtimeID)
+		return m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
 	default:
 		return fmt.Errorf("invalid sync direction: %s", direction)
 	}
@@ -239,7 +240,7 @@ func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storag
 // and only writes files that were modified since then. Files deleted in the container
 // are also removed from storage. Mount sets LastSyncedAt, so every syncFromContainer
 // is incremental.
-func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID string) error {
+func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID string, exclude []string) error {
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
 	sb := m.sandboxes[sandboxID]

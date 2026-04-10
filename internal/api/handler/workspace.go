@@ -62,7 +62,7 @@ func (h *Handler) SyncWorkspace(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.SyncWorkspace(c.Request.Context(), id, req.Direction); err != nil {
+	if err := h.manager.SyncWorkspace(c.Request.Context(), id, req.Direction, req.Exclude); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return

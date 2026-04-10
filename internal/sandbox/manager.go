@@ -222,7 +222,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	_, hasWS := m.workspaces[id]
 	m.mu.RUnlock()
 	if hasWS {
-		_ = m.syncFromContainer(ctx, id, sb.RuntimeID)
+		_ = m.syncFromContainer(ctx, id, sb.RuntimeID, nil)
 		m.mu.Lock()
 		delete(m.workspaces, id)
 		m.mu.Unlock()
