@@ -260,7 +260,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	if err != nil {
 		// Fall back to full sync if manifest collection fails
 		log.Printf("container manifest failed, falling back to full sync: %v", err)
-		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID); err != nil {
+		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}
 		m.updateLastSyncedAt(sb)
@@ -274,7 +274,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	storageFiles, err := m.storageFileSet(ctx, scoped, ".")
 	if err != nil {
 		log.Printf("storage file listing failed, falling back to full sync: %v", err)
-		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID); err != nil {
+		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}
 		m.updateLastSyncedAt(sb)
@@ -290,6 +290,9 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if strings.HasSuffix(path, "/") {
 			continue // skip directories
 		}
+		if isExcluded(path, exclude) {
+			continue
+		}
 		if cutoff == 0 || modtime > cutoff {
 			changedSet[path] = struct{}{}
 		}
@@ -298,6 +301,9 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// Compute deleted files: in storage but not in container
 	var deletedFiles []string
 	for path := range storageFiles {
+		if isExcluded(path, exclude) {
+			continue
+		}
 		if _, exists := manifest[path]; !exists {
 			deletedFiles = append(deletedFiles, path)
 		}
@@ -314,7 +320,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 	// Download tar and selectively extract only changed files
 	if len(changedSet) > 0 {
-		if err := m.downloadChangedFiles(ctx, scoped, runtimeID, changedSet); err != nil {
+		if err := m.downloadChangedFiles(ctx, scoped, runtimeID, changedSet, exclude); err != nil {
 			return fmt.Errorf("download changed files: %w", err)
 		}
 	}
@@ -343,7 +349,7 @@ func (m *Manager) updateLastSyncedAt(sb *Sandbox) {
 }
 
 // fullSyncFromContainer downloads the entire /workspace as a tar and extracts all files.
-func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
+func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string, exclude []string) error {
 	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
 		return fmt.Errorf("download workspace: %w", err)
@@ -362,6 +368,10 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 
 		name := strings.TrimPrefix(hdr.Name, "workspace/")
 		if name == "" {
+			continue
+		}
+
+		if isExcluded(name, exclude) {
 			continue
 		}
 
@@ -389,7 +399,7 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 }
 
 // downloadChangedFiles downloads the workspace tar and only extracts files in changedSet.
-func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.ScopedFS, runtimeID string, changedSet map[string]struct{}) error {
+func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.ScopedFS, runtimeID string, changedSet map[string]struct{}, exclude []string) error {
 	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
 		return fmt.Errorf("download workspace: %w", err)
@@ -408,6 +418,10 @@ func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.Scope
 
 		name := strings.TrimPrefix(hdr.Name, "workspace/")
 		if name == "" {
+			continue
+		}
+
+		if isExcluded(name, exclude) {
 			continue
 		}
 
