@@ -10,11 +10,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 )
+
+// maxConcurrentReads limits the number of parallel file reads from storage
+// during syncToContainer. This bounds memory usage and avoids overwhelming
+// cloud storage backends with too many concurrent HTTP requests.
+const maxConcurrentReads = 8
+
+// fileEntry holds metadata and content for a single file or directory,
+// collected during the parallel-read phase of syncToContainer.
+type fileEntry struct {
+	relPath string
+	isDir   bool
+	size    int64
+	modTime time.Time
+	content []byte // nil for directories
+}
 
 // isExcluded reports whether path should be skipped during workspace sync.
 // A path is excluded if it equals any exclude entry or starts with an exclude
@@ -148,36 +164,72 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	return sb.Workspace, nil
 }
 
-// syncToContainer builds a single tar archive from all files in ScopedFS
-// and uploads it to the container in one API call.
+// syncToContainer collects all files from ScopedFS with parallel reads,
+// builds a single tar archive, and uploads it to the container.
 func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
+	// Phase 1: walk the directory tree to collect file metadata (sequential).
+	var entries []fileEntry
+	if err := m.collectFiles(ctx, scoped, ".", &entries); err != nil {
+		return fmt.Errorf("collect files: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Phase 2: read file contents concurrently.
+	if err := m.readFilesConcurrent(ctx, scoped, entries); err != nil {
+		return fmt.Errorf("read files: %w", err)
+	}
+
+	// Phase 3: build tar archive from pre-loaded data (sequential, tar requires it).
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-
-	if err := m.addDirToTar(ctx, tw, scoped, "."); err != nil {
-		tw.Close()
-		return fmt.Errorf("build tar archive: %w", err)
+	for _, e := range entries {
+		if e.isDir {
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     e.relPath + "/",
+				Typeflag: tar.TypeDir,
+				Mode:     0755,
+				ModTime:  e.modTime,
+				Uid:      1000,
+				Gid:      1000,
+			}); err != nil {
+				tw.Close()
+				return fmt.Errorf("write dir header %q: %w", e.relPath, err)
+			}
+			continue
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name:    e.relPath,
+			Size:    int64(len(e.content)),
+			Mode:    0644,
+			ModTime: e.modTime,
+			Uid:     1000,
+			Gid:     1000,
+		}); err != nil {
+			tw.Close()
+			return fmt.Errorf("write file header %q: %w", e.relPath, err)
+		}
+		if _, err := tw.Write(e.content); err != nil {
+			tw.Close()
+			return fmt.Errorf("write file content %q: %w", e.relPath, err)
+		}
 	}
 	tw.Close()
-
-	if buf.Len() == 0 {
-		return nil // nothing to sync
-	}
 
 	return m.runtime.UploadArchive(ctx, runtimeID, "/workspace", &buf)
 }
 
-// addDirToTar recursively adds all files and directories from ScopedFS into the tar writer.
-func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storage.ScopedFS, dir string) error {
+// collectFiles recursively walks the ScopedFS directory tree and appends
+// file/directory metadata to entries. File content is NOT read here.
+func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir string, entries *[]fileEntry) error {
 	files, err := scoped.List(ctx, dir)
 	if err != nil {
 		return err
 	}
 
 	for _, fi := range files {
-		// Extract just the base name — MinIO returns full object keys (e.g.
-		// "workspaces/user123/project-a/hello.txt") while local FS returns
-		// just "hello.txt". Use filepath.Base to normalize.
+		// Normalize: MinIO returns full object keys, local FS returns base names.
 		baseName := filepath.Base(strings.TrimRight(fi.Name(), "/"))
 		if baseName == "." || baseName == "" {
 			continue
@@ -188,51 +240,74 @@ func (m *Manager) addDirToTar(ctx context.Context, tw *tar.Writer, scoped storag
 			relPath = filepath.Join(dir, baseName)
 		}
 
+		*entries = append(*entries, fileEntry{
+			relPath: relPath,
+			isDir:   fi.IsDir(),
+			size:    fi.Size(),
+			modTime: fi.ModTime(),
+		})
+
 		if fi.IsDir() {
-			// Add directory entry to tar
-			if err := tw.WriteHeader(&tar.Header{
-				Name:     relPath + "/",
-				Typeflag: tar.TypeDir,
-				Mode:     0755,
-				ModTime:  fi.ModTime(),
-				Uid:      1000,
-				Gid:      1000,
-			}); err != nil {
+			if err := m.collectFiles(ctx, scoped, relPath, entries); err != nil {
 				return err
 			}
-			if err := m.addDirToTar(ctx, tw, scoped, relPath); err != nil {
-				return err
-			}
-			continue
-		}
-
-		reader, err := scoped.Open(ctx, relPath)
-		if err != nil {
-			return err
-		}
-
-		content, err := io.ReadAll(reader)
-		reader.Close()
-		if err != nil {
-			return err
-		}
-
-		if err := tw.WriteHeader(&tar.Header{
-			Name:    relPath,
-			Size:    int64(len(content)),
-			Mode:    0644,
-			ModTime: fi.ModTime(),
-			Uid:     1000,
-			Gid:     1000,
-		}); err != nil {
-			return err
-		}
-		if _, err := tw.Write(content); err != nil {
-			return err
 		}
 	}
-
 	return nil
+}
+
+// readFilesConcurrent reads file contents in parallel using a bounded worker pool.
+// Directory entries are skipped. On any read failure the first error is returned.
+func (m *Manager) readFilesConcurrent(ctx context.Context, scoped storage.ScopedFS, entries []fileEntry) error {
+	sem := make(chan struct{}, maxConcurrentReads)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i := range entries {
+		if entries[i].isDir {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+			mu.Lock()
+			failed := firstErr != nil
+			mu.Unlock()
+			if failed {
+				return
+			}
+
+			reader, err := scoped.Open(ctx, entries[idx].relPath)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("open %q: %w", entries[idx].relPath, err)
+				}
+				mu.Unlock()
+				return
+			}
+			content, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("read %q: %w", entries[idx].relPath, err)
+				}
+				mu.Unlock()
+				return
+			}
+			entries[idx].content = content
+		}(i)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // syncFromContainer incrementally syncs changed files from the container back to storage.

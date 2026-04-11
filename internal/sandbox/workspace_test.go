@@ -95,6 +95,38 @@ func TestSyncFromContainer_ExcludeFiltering(t *testing.T) {
 	assert.NotContains(t, deletedFiles, ".agent/SOUL.md")
 }
 
+func TestCollectFiles(t *testing.T) {
+	mock := &mockScopedFS{
+		dirs: map[string][]fs.FileInfo{
+			".": {
+				mockFileInfo{name: "subdir", dir: true, modTime: time.Unix(1000, 0)},
+				mockFileInfo{name: "hello.txt", size: 5, modTime: time.Unix(2000, 0)},
+			},
+			"subdir": {
+				mockFileInfo{name: "nested.py", size: 20, modTime: time.Unix(3000, 0)},
+			},
+		},
+	}
+
+	mgr := &Manager{}
+	var entries []fileEntry
+	err := mgr.collectFiles(context.Background(), mock, ".", &entries)
+	require.NoError(t, err)
+
+	require.Len(t, entries, 3)
+
+	assert.Equal(t, "subdir", entries[0].relPath)
+	assert.True(t, entries[0].isDir)
+
+	assert.Equal(t, "subdir/nested.py", entries[1].relPath)
+	assert.False(t, entries[1].isDir)
+	assert.Equal(t, int64(20), entries[1].size)
+
+	assert.Equal(t, "hello.txt", entries[2].relPath)
+	assert.False(t, entries[2].isDir)
+	assert.Equal(t, int64(5), entries[2].size)
+}
+
 // --- mock infrastructure for workspace streaming tests ---
 
 type mockFileInfo struct {
@@ -164,7 +196,3 @@ func (m *mockScopedFS) RelativePath(context.Context, string, ...fs.Option) (stri
 }
 func (m *mockScopedFS) ChangeDir(context.Context, string) error { return nil }
 func (m *mockScopedFS) WorkingDir() string                      { return "." }
-
-// Ensure unused imports are referenced (will be used by later tasks)
-var _ = require.New
-var _ = strings.Contains
