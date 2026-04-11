@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
@@ -29,7 +27,6 @@ type fileEntry struct {
 	isDir   bool
 	size    int64
 	modTime time.Time
-	content []byte // nil for directories
 }
 
 // isExcluded reports whether path should be skipped during workspace sync.
@@ -164,8 +161,9 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	return sb.Workspace, nil
 }
 
-// syncToContainer collects all files from ScopedFS with parallel reads,
-// builds a single tar archive, and uploads it to the container.
+// syncToContainer collects file metadata from ScopedFS, then streams a tar
+// archive directly to the container via io.Pipe, overlapping storage reads,
+// tar construction, and container upload.
 func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
 	// Phase 1: walk the directory tree to collect file metadata (sequential).
 	var entries []fileEntry
@@ -176,48 +174,33 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 		return nil
 	}
 
-	// Phase 2: read file contents concurrently.
-	if err := m.readFilesConcurrent(ctx, scoped, entries); err != nil {
-		return fmt.Errorf("read files: %w", err)
+	// Phase 2: streaming pipeline — tar writes stream directly to UploadArchive.
+	pr, pw := io.Pipe()
+
+	uploadErrCh := make(chan error, 1)
+	go func() {
+		uploadErrCh <- m.runtime.UploadArchive(ctx, runtimeID, "/workspace", pr)
+	}()
+
+	writeErr := m.writeTarStream(ctx, scoped, entries, pw)
+	if writeErr != nil {
+		pw.CloseWithError(writeErr)
+	} else {
+		pw.Close()
 	}
 
-	// Phase 3: build tar archive from pre-loaded data (sequential, tar requires it).
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	for _, e := range entries {
-		if e.isDir {
-			if err := tw.WriteHeader(&tar.Header{
-				Name:     e.relPath + "/",
-				Typeflag: tar.TypeDir,
-				Mode:     0755,
-				ModTime:  e.modTime,
-				Uid:      1000,
-				Gid:      1000,
-			}); err != nil {
-				tw.Close()
-				return fmt.Errorf("write dir header %q: %w", e.relPath, err)
-			}
-			continue
-		}
-		if err := tw.WriteHeader(&tar.Header{
-			Name:    e.relPath,
-			Size:    int64(len(e.content)),
-			Mode:    0644,
-			ModTime: e.modTime,
-			Uid:     1000,
-			Gid:     1000,
-		}); err != nil {
-			tw.Close()
-			return fmt.Errorf("write file header %q: %w", e.relPath, err)
-		}
-		if _, err := tw.Write(e.content); err != nil {
-			tw.Close()
-			return fmt.Errorf("write file content %q: %w", e.relPath, err)
-		}
-	}
-	tw.Close()
+	uploadErr := <-uploadErrCh
 
-	return m.runtime.UploadArchive(ctx, runtimeID, "/workspace", &buf)
+	if writeErr != nil && uploadErr != nil {
+		return fmt.Errorf("upload archive: %w", uploadErr)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write tar stream: %w", writeErr)
+	}
+	if uploadErr != nil {
+		return fmt.Errorf("upload archive: %w", uploadErr)
+	}
+	return nil
 }
 
 // writeTarStream writes all entries as a tar archive to w, prefetching file
@@ -353,60 +336,6 @@ func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir
 		}
 	}
 	return nil
-}
-
-// readFilesConcurrent reads file contents in parallel using a bounded worker pool.
-// Directory entries are skipped. On any read failure the first error is returned.
-func (m *Manager) readFilesConcurrent(ctx context.Context, scoped storage.ScopedFS, entries []fileEntry) error {
-	sem := make(chan struct{}, maxConcurrentReads)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var firstErr error
-
-	for i := range entries {
-		if entries[i].isDir {
-			continue
-		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			if ctx.Err() != nil {
-				return
-			}
-			mu.Lock()
-			failed := firstErr != nil
-			mu.Unlock()
-			if failed {
-				return
-			}
-
-			reader, err := scoped.Open(ctx, entries[idx].relPath)
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("open %q: %w", entries[idx].relPath, err)
-				}
-				mu.Unlock()
-				return
-			}
-			content, err := io.ReadAll(reader)
-			reader.Close()
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("read %q: %w", entries[idx].relPath, err)
-				}
-				mu.Unlock()
-				return
-			}
-			entries[idx].content = content
-		}(i)
-	}
-	wg.Wait()
-	return firstErr
 }
 
 // syncFromContainer incrementally syncs changed files from the container back to storage.
