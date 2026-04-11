@@ -220,6 +220,105 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 	return m.runtime.UploadArchive(ctx, runtimeID, "/workspace", &buf)
 }
 
+// writeTarStream writes all entries as a tar archive to w, prefetching file
+// contents concurrently using a bounded worker pool of maxConcurrentReads.
+func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, entries []fileEntry, w io.Writer) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+
+	type readResult struct {
+		reader io.ReadCloser
+		err    error
+	}
+
+	sem := make(chan struct{}, maxConcurrentReads)
+	resultChs := make([]chan readResult, len(entries))
+
+	// Launch prefetch goroutines for all file entries.
+	for i, e := range entries {
+		if e.isDir {
+			continue
+		}
+		ch := make(chan readResult, 1)
+		resultChs[i] = ch
+		go func(entry fileEntry, ch chan<- readResult) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				ch <- readResult{err: ctx.Err()}
+				return
+			}
+			reader, err := scoped.Open(ctx, entry.relPath)
+			if err != nil {
+				ch <- readResult{err: fmt.Errorf("open %q: %w", entry.relPath, err)}
+				return
+			}
+			ch <- readResult{reader: reader}
+		}(e, ch)
+	}
+
+	// cleanup drains and closes any unconsumed readers from index start onward.
+	cleanup := func(start int) {
+		for j := start; j < len(entries); j++ {
+			if resultChs[j] != nil {
+				if res := <-resultChs[j]; res.reader != nil {
+					res.reader.Close()
+				}
+			}
+		}
+	}
+
+	// Consume results in entry order, writing tar entries sequentially.
+	for i, e := range entries {
+		if e.isDir {
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     e.relPath + "/",
+				Typeflag: tar.TypeDir,
+				Mode:     0755,
+				ModTime:  e.modTime,
+				Uid:      1000,
+				Gid:      1000,
+			}); err != nil {
+				cleanup(i)
+				return fmt.Errorf("write dir header %q: %w", e.relPath, err)
+			}
+			continue
+		}
+
+		res := <-resultChs[i]
+		if res.err != nil {
+			cleanup(i + 1)
+			return res.err
+		}
+
+		if err := tw.WriteHeader(&tar.Header{
+			Name:    e.relPath,
+			Size:    e.size,
+			Mode:    0644,
+			ModTime: e.modTime,
+			Uid:     1000,
+			Gid:     1000,
+		}); err != nil {
+			res.reader.Close()
+			cleanup(i + 1)
+			return fmt.Errorf("write file header %q: %w", e.relPath, err)
+		}
+
+		_, copyErr := io.Copy(tw, res.reader)
+		res.reader.Close()
+		if copyErr != nil {
+			cleanup(i + 1)
+			return fmt.Errorf("write file content %q: %w", e.relPath, copyErr)
+		}
+	}
+
+	return nil
+}
+
 // collectFiles recursively walks the ScopedFS directory tree and appends
 // file/directory metadata to entries. File content is NOT read here.
 func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir string, entries *[]fileEntry) error {

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
@@ -125,6 +126,100 @@ func TestCollectFiles(t *testing.T) {
 	assert.Equal(t, "hello.txt", entries[2].relPath)
 	assert.False(t, entries[2].isDir)
 	assert.Equal(t, int64(5), entries[2].size)
+}
+
+func TestWriteTarStream_ProducesValidTar(t *testing.T) {
+	mock := &mockScopedFS{
+		files: map[string][]byte{
+			"hello.txt":      []byte("hello"),
+			"subdir/main.py": []byte("print('hi')"),
+		},
+	}
+
+	entries := []fileEntry{
+		{relPath: "subdir", isDir: true, modTime: time.Unix(1000, 0)},
+		{relPath: "subdir/main.py", isDir: false, size: 11, modTime: time.Unix(2000, 0)},
+		{relPath: "hello.txt", isDir: false, size: 5, modTime: time.Unix(3000, 0)},
+	}
+
+	mgr := &Manager{}
+	var buf bytes.Buffer
+	err := mgr.writeTarStream(context.Background(), mock, entries, &buf)
+	require.NoError(t, err)
+
+	// Verify tar contents
+	tr := tar.NewReader(&buf)
+	var names []string
+	contents := make(map[string]string)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		names = append(names, hdr.Name)
+		if hdr.Typeflag != tar.TypeDir {
+			data, _ := io.ReadAll(tr)
+			contents[hdr.Name] = string(data)
+		}
+	}
+
+	assert.Equal(t, []string{"subdir/", "subdir/main.py", "hello.txt"}, names)
+	assert.Equal(t, "print('hi')", contents["subdir/main.py"])
+	assert.Equal(t, "hello", contents["hello.txt"])
+}
+
+func TestWriteTarStream_OpenError_CleansUpReaders(t *testing.T) {
+	mock := &mockScopedFS{
+		files: map[string][]byte{
+			"a.txt": []byte("aaa"),
+			"c.txt": []byte("ccc"),
+		},
+		openErr: map[string]error{
+			"b.txt": fmt.Errorf("permission denied"),
+		},
+	}
+
+	entries := []fileEntry{
+		{relPath: "a.txt", isDir: false, size: 3, modTime: time.Unix(1000, 0)},
+		{relPath: "b.txt", isDir: false, size: 3, modTime: time.Unix(2000, 0)},
+		{relPath: "c.txt", isDir: false, size: 3, modTime: time.Unix(3000, 0)},
+	}
+
+	mgr := &Manager{}
+	var buf bytes.Buffer
+	err := mgr.writeTarStream(context.Background(), mock, entries, &buf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permission denied")
+}
+
+func TestWriteTarStream_EmptyEntries(t *testing.T) {
+	mgr := &Manager{}
+	var buf bytes.Buffer
+	err := mgr.writeTarStream(context.Background(), nil, nil, &buf)
+	require.NoError(t, err)
+	assert.Equal(t, 0, buf.Len())
+}
+
+func TestWriteTarStream_ContextCancelled(t *testing.T) {
+	mock := &mockScopedFS{
+		files: map[string][]byte{
+			"a.txt": []byte("aaa"),
+		},
+	}
+
+	entries := []fileEntry{
+		{relPath: "a.txt", isDir: false, size: 3, modTime: time.Unix(1000, 0)},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	mgr := &Manager{}
+	var buf bytes.Buffer
+	err := mgr.writeTarStream(ctx, mock, entries, &buf)
+	require.Error(t, err)
 }
 
 // --- mock infrastructure for workspace streaming tests ---
