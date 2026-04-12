@@ -5,7 +5,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-sandbox
+  name: {{ .Release.Name }}-api
   namespace: {{ .Release.Namespace }}
   labels:
     app: sandbox
@@ -24,7 +24,7 @@ spec:
         app: sandbox
         release: {{ .Release.Name }}
     spec:
-      serviceAccountName: {{ .Release.Name }}-sandbox
+      serviceAccountName: {{ .Release.Name }}-api
       containers:
         - name: sandbox
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -86,7 +86,7 @@ spec:
             - name: SANDBOX_SECURITY_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-sandbox
+                  name: {{ .Release.Name }}-api
                   key: api-key
           {{- end }}
           resources:

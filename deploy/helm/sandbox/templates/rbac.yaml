@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ .Release.Name }}-sandbox
+  name: {{ .Release.Name }}-api
   namespace: {{ $sandboxNs }}
   labels:
     app: sandbox
@@ -21,7 +21,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Release.Name }}-sandbox
+  name: {{ .Release.Name }}-api
   namespace: {{ $sandboxNs }}
   labels:
     app: sandbox
@@ -29,8 +29,8 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ .Release.Name }}-sandbox
+  name: {{ .Release.Name }}-api
 subjects:
   - kind: ServiceAccount
-    name: {{ .Release.Name }}-sandbox
+    name: {{ .Release.Name }}-api
     namespace: {{ .Release.Namespace }}

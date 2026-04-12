@@ -2,7 +2,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-sandbox-default
+  name: {{ .Release.Name }}-api-default
   namespace: {{ .Release.Namespace }}
   labels:
     app: sandbox
