@@ -1,4 +1,7 @@
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
+{{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled }}
+{{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled }}
+{{- $redisDB := ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,11 +48,16 @@ spec:
             - name: SANDBOX_IMAGES_GATEWAY
               value: "{{ .Values.config.images.gateway }}"
             - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
-              value: "{{ .Values.config.storage.state.redis.addr }}"
+              value: "{{ $redisAddr }}"
+            {{- if $redisPassword }}
             - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
-              value: "{{ .Values.config.storage.state.redis.password }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ternary (printf "%s-redis" .Release.Name) (printf "%s-sandbox" .Release.Name) .Values.redis.enabled }}
+                  key: password
+            {{- end }}
             - name: SANDBOX_STORAGE_STATE_REDIS_DB
-              value: "{{ .Values.config.storage.state.redis.db }}"
+              value: "{{ $redisDB }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
               value: "{{ .Values.config.storage.filesystem.provider }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET

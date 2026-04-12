@@ -1,0 +1,124 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-redis
+    release: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: 6379
+      protocol: TCP
+  selector:
+    app: sandbox-redis
+    release: {{ .Release.Name }}
+---
+# Headless service required by StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-redis
+    release: {{ .Release.Name }}
+spec:
+  clusterIP: None
+  ports:
+    - port: 6379
+      targetPort: 6379
+      protocol: TCP
+  selector:
+    app: sandbox-redis
+    release: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-redis
+    release: {{ .Release.Name }}
+spec:
+  serviceName: {{ .Release.Name }}-redis-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-redis
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-redis
+        release: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          ports:
+            - containerPort: 6379
+              protocol: TCP
+          {{- if .Values.redis.password }}
+          args:
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+          {{- end }}
+          {{- if .Values.redis.persistence.enabled }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          {{- end }}
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command:
+                {{- if .Values.redis.password }}
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping
+                {{- else }}
+                - redis-cli
+                - ping
+                {{- end }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                {{- if .Values.redis.password }}
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping
+                {{- else }}
+                - redis-cli
+                - ping
+                {{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  {{- if .Values.redis.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.redis.persistence.storageClass }}
+        storageClassName: {{ .Values.redis.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
+  {{- end }}
+{{- end }}

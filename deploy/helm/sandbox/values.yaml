@@ -23,6 +23,32 @@ autoscaling:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
+# Redis configuration
+redis:
+  # Use the built-in Redis deployment (set to false to use an external Redis)
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 1Gi
+  password: ""
+  # External Redis (used when redis.enabled is false)
+  external:
+    addr: ""
+    password: ""
+    db: 0
+
 config:
   server:
     port: 8080
@@ -38,11 +64,6 @@ config:
     sandbox: "sandbox:latest"
     gateway: "sandbox-gateway:latest"
   storage:
-    state:
-      redis:
-        addr: redis:6379
-        password: ""
-        db: 0
     filesystem:
       provider: s3
       bucket: sandbox-storage
@@ -52,6 +73,8 @@ config:
       secretKey: ""
       subPath: ""
       useSSL: false
+  workspace:
+    autoSyncIntervalSeconds: 0
   security:
     apiKey: ""
     rateLimit: 100
