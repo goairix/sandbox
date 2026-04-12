@@ -74,6 +74,8 @@ spec:
               value: "{{ .Values.config.storage.filesystem.subPath }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
+            - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
+              value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
             - name: SANDBOX_SECURITY_SANDBOX_TIMEOUT_SECONDS

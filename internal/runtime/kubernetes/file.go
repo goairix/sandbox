@@ -60,7 +60,9 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 	}
 
 	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin: &buf,
+		Stdin:  &buf,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
 	})
 }
 
@@ -88,6 +90,7 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	go func() {
 		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: pw,
+			Stderr: io.Discard,
 		})
 		pw.CloseWithError(err)
 	}()
@@ -121,7 +124,9 @@ func uploadArchiveToPod(ctx context.Context, client kubernetes.Interface, restCo
 	}
 
 	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin: &buf,
+		Stdin:  &buf,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
 	})
 }
 
@@ -149,6 +154,7 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 	go func() {
 		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: pw,
+			Stderr: io.Discard,
 		})
 		pw.CloseWithError(err)
 	}()
@@ -177,7 +183,9 @@ func execPipeInPod(ctx context.Context, client kubernetes.Interface, restConfig 
 	}
 
 	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin: io.NopCloser(stdin),
+		Stdin:  io.NopCloser(stdin),
+		Stdout: io.Discard,
+		Stderr: io.Discard,
 	})
 }
 

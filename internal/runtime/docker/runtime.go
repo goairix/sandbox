@@ -293,3 +293,8 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 	}
 	return result, nil
 }
+
+func (r *Runtime) IsStateful() bool {
+	// Docker containers do not survive a process restart; they must be recreated.
+	return false
+}

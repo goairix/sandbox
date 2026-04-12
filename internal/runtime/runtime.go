@@ -59,6 +59,13 @@ type Runtime interface {
 
 	// ListSandboxes returns sandboxes matching the given labels.
 	ListSandboxes(ctx context.Context, labels map[string]string) ([]SandboxInfo, error)
+
+	// IsStateful reports whether sandbox pods/containers survive a process
+	// restart independently (true for Kubernetes, false for Docker).
+	// When true, Start restores persistent sandboxes synchronously before
+	// cleaning up orphaned pool containers, so live pods are not mistakenly
+	// deleted.
+	IsStateful() bool
 }
 
 // FileInfo holds file metadata from inside a sandbox.

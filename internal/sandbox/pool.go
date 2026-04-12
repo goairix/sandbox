@@ -70,9 +70,9 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 		p.available = p.available[1:]
 		p.mu.Unlock()
 
-		// Verify container is still alive
+		// Verify container is still alive and running
 		got, err := p.runtime.GetSandbox(ctx, info.RuntimeID)
-		if err == nil && got != nil && got.State != "exited" && got.State != "dead" && got.State != "" {
+		if err == nil && got != nil && got.State == "running" {
 			go p.refillIfNeeded(context.Background())
 			return info, nil
 		}

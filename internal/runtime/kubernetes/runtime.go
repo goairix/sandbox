@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -154,25 +156,29 @@ func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {
 }
 
 func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string]*string) error {
-	pod, err := getPod(ctx, r.client, r.namespace, id)
-	if err != nil {
-		return fmt.Errorf("get pod: %w", err)
-	}
-
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
-	}
+	// Build a merge-patch that only touches the labels we care about.
+	// Using Patch avoids the GET+PUT race (409 Conflict on resourceVersion mismatch)
+	// and sidesteps admission webhooks that reject full pod Updates.
+	labelMap := make(map[string]interface{}, len(labels))
 	for k, v := range labels {
 		if v == nil {
-			delete(pod.Labels, k)
+			labelMap[k] = nil // JSON merge-patch: null removes the key
 		} else {
-			pod.Labels[k] = *v
+			labelMap[k] = *v
 		}
 	}
-
-	_, err = r.client.CoreV1().Pods(r.namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": labelMap,
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return fmt.Errorf("update pod labels: %w", err)
+		return fmt.Errorf("marshal label patch: %w", err)
+	}
+	_, err = r.client.CoreV1().Pods(r.namespace).Patch(ctx, id, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("patch pod labels: %w", err)
 	}
 	return nil
 }
@@ -204,6 +210,12 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 		})
 	}
 	return result, nil
+}
+
+func (r *Runtime) IsStateful() bool {
+	// Kubernetes pods survive a process restart independently; they must be
+	// restored (not recreated) on startup.
+	return true
 }
 
 func joinStrings(parts []string, sep string) string {

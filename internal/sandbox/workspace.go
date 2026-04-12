@@ -264,6 +264,7 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 				ModTime:  e.modTime,
 				Uid:      1000,
 				Gid:      1000,
+				Format:   tar.FormatPAX,
 			}); err != nil {
 				cleanup(i)
 				return fmt.Errorf("write dir header %q: %w", e.relPath, err)
@@ -284,6 +285,7 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 			ModTime: e.modTime,
 			Uid:     1000,
 			Gid:     1000,
+			Format:  tar.FormatPAX,
 		}); err != nil {
 			cleanup(i + 1)
 			return fmt.Errorf("write file header %q: %w", e.relPath, err)

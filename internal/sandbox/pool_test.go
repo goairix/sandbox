@@ -108,6 +108,8 @@ func (m *mockRuntime) ListSandboxes(_ context.Context, _ map[string]string) ([]r
 	return nil, nil
 }
 
+func (m *mockRuntime) IsStateful() bool { return false }
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{

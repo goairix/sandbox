@@ -82,20 +82,29 @@ func (m *Manager) SetSessionStore(ss *SessionStore) {
 // It first removes any orphaned pool containers left over from a previous
 // process that exited without cleanup (e.g. crash, SIGKILL).
 func (m *Manager) Start(ctx context.Context) {
-	// Clean up orphaned pool containers from previous run BEFORE warming up,
-	// so new pool containers don't get caught in the cleanup.
-	m.cleanupOrphanedPoolContainers(ctx)
-	m.pool.WarmUp(ctx)
+	if m.runtime.IsStateful() {
+		// Stateful runtimes (e.g. Kubernetes): pods survive process restarts, so
+		// we must restore persistent sandboxes synchronously first. This registers
+		// their RuntimeIDs in m.sandboxes before cleanupOrphanedPoolContainers
+		// runs, preventing live pods from being mistakenly deleted as orphans.
+		m.restorePersistentSandboxes(ctx)
+		m.cleanupOrphanedPoolContainers(ctx)
+		m.pool.WarmUp(ctx)
+	} else {
+		// Non-stateful runtimes (e.g. Docker): containers are gone after restart,
+		// so cleanup first, then warm up, then restore in background to avoid
+		// blocking API startup.
+		m.cleanupOrphanedPoolContainers(ctx)
+		m.pool.WarmUp(ctx)
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.restorePersistentSandboxes(ctx)
+		}()
+	}
 
 	m.wg.Add(1)
 	go m.reapExpiredSandboxes()
-
-	// Restore persistent sandboxes in background to avoid blocking API startup.
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.restorePersistentSandboxes(ctx)
-	}()
 
 	if m.config.AutoSyncIntervalSeconds > 0 {
 		m.wg.Add(1)
@@ -146,9 +155,12 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		if err != nil {
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
-		// Remove pool label so cleanup won't touch this container (effective on K8s).
+		// Remove pool label and update sandbox.id so the pod is correctly
+		// identified after being taken from the pool (effective on K8s).
+		nilVal := (*string)(nil)
 		_ = m.runtime.UpdateLabels(ctx, info.RuntimeID, map[string]*string{
-			"sandbox.pool": nil,
+			"sandbox.pool": nilVal,
+			"sandbox.id":   &id,
 		})
 	}
 
@@ -527,10 +539,10 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 			continue
 		}
 
-		// Check if the container still exists
-		_, rtErr := m.runtime.GetSandbox(ctx, sbPtr.RuntimeID)
-		if rtErr != nil {
-			// Container gone — recreate it
+		// Check if the container still exists and is running
+		existingInfo, rtErr := m.runtime.GetSandbox(ctx, sbPtr.RuntimeID)
+		if rtErr != nil || existingInfo == nil || existingInfo.State != "running" {
+			// Container gone or not healthy — recreate it
 			log.Printf("sandbox %s: container %s gone, recreating", id, sbPtr.RuntimeID)
 			newInfo, recreateErr := m.recreateSandbox(ctx, sbPtr)
 			if recreateErr != nil {
@@ -576,7 +588,12 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 // recreateSandbox creates a new container for a persistent sandbox whose
 // container was lost (e.g. docker-compose restart).
 func (m *Manager) recreateSandbox(ctx context.Context, sb *Sandbox) (*runtime.SandboxInfo, error) {
-	spec := m.buildSpec(sb.ID, sb.Config)
+	// Use the original RuntimeID as the pod/container name so the identity is
+	// consistent across restarts. On Docker, RenameSandbox will rename it to
+	// sb.ID afterwards; on Kubernetes, pod names are immutable so RuntimeID is
+	// the permanent name.
+	spec := m.buildSpec(sb.RuntimeID, sb.Config)
+	spec.Labels["sandbox.id"] = sb.ID
 
 	// Restore bind mount if applicable
 	if sb.Workspace != nil && sb.Workspace.BindMounted && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal {
