@@ -176,6 +176,7 @@ SANDBOX_IMAGES_SANDBOX=sandbox:latest
 | `storage.filesystem.local_path` | `/tmp/sandbox-storage` | 本地存储目录 |
 | `storage.filesystem.bucket` | | 云存储 Bucket 名称 |
 | `storage.filesystem.sub_path` | | Bucket 内前缀路径 |
+| `workspace.auto_sync_interval_seconds` | `0`（禁用） | 工作空间自动同步间隔（秒），0 表示禁用 |
 
 ## 架构
 

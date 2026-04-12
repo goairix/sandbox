@@ -323,7 +323,13 @@ type Runtime interface {
 
     // 管理
     RenameSandbox(ctx, id, name) error
+    UpdateLabels(ctx, id, labels) error
     ListSandboxes(ctx, labels) ([]SandboxInfo, error)
+
+    // IsStateful 报告 pod/容器是否在进程重启后独立存活。
+    // true（Kubernetes）：重启时先恢复持久化沙箱再清理孤儿池容器。
+    // false（Docker）：容器随进程消失，清理后直接 WarmUp。
+    IsStateful() bool
 }
 ```
 
@@ -643,9 +649,16 @@ main():
   4. 创建 Manager + Pool
   5. 连接 Redis → 创建 SessionStore → 注入 Manager
   6. Manager.Start():
-     a. 清理孤儿池容器 (label: sandbox.pool=true)
-     b. Pool.WarmUp() → 创建 MinSize 个预热容器
-     c. 启动后台过期清理协程 (每 10 秒)
+     Docker 运行时:
+       a. 清理孤儿池容器 (label: sandbox.pool=true)
+       b. Pool.WarmUp() → 创建 MinSize 个预热容器
+       c. 后台异步恢复 persistent 沙箱（不阻塞 API 启动）
+     Kubernetes 运行时 (IsStateful=true):
+       a. 同步恢复 persistent 沙箱（注册 RuntimeID，防止被误删）
+       b. 清理孤儿池容器
+       c. Pool.WarmUp()
+     d. 启动后台过期清理协程 (每 10 秒)
+     e. 若 auto_sync_interval_seconds > 0，启动工作空间自动同步协程
   7. 启动 HTTP 服务
   8. 注册信号处理 (SIGINT/SIGTERM)
 ```
@@ -667,7 +680,8 @@ main():
 | 场景 | 影响 | 恢复机制 |
 |------|------|----------|
 | API 优雅关闭 | 池容器被 Drain | 重启后重新 WarmUp |
-| API 崩溃/SIGKILL | 池容器成为孤儿 | 重启时 `cleanupOrphanedPoolContainers()` 通过 label 清理 |
+| API 崩溃/SIGKILL（Docker） | 池容器成为孤儿 | 重启时 `cleanupOrphanedPoolContainers()` 通过 label 清理 |
+| API 崩溃/SIGKILL（K8s） | Pod 仍在运行 | 重启时先 `restorePersistentSandboxes()` 注册存活 Pod，再清理孤儿池 Pod |
 | Docker 重启 | 池中容器消失 | `Pool.Acquire()` 检测 stale 容器并丢弃，按需创建 |
 | Persistent 沙箱恢复 | 内存 map 清空 | `Manager.Get()` 从 Redis 加载并重建 |
 
