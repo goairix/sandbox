@@ -68,6 +68,14 @@ func (m *mockRuntime) ExecStream(context.Context, string, runtime.ExecRequest) (
 	return nil, nil
 }
 
+func (m *mockRuntime) ExecPipe(context.Context, string, []string, io.Reader) error {
+	return nil
+}
+
+func (m *mockRuntime) UpdateLabels(context.Context, string, map[string]*string) error {
+	return nil
+}
+
 func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, _ io.Reader) error {
 	return nil
 }

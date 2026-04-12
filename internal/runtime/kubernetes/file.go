@@ -156,6 +156,31 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 	return pr, nil
 }
 
+// execPipeInPod executes a command in a pod with an io.Reader connected to stdin.
+func execPipeInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName string, cmd []string, stdin io.Reader) error {
+	execReq := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   cmd,
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
+	if err != nil {
+		return fmt.Errorf("create executor: %w", err)
+	}
+
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin: io.NopCloser(stdin),
+	})
+}
+
 // listFilesInPod lists files in a directory inside a pod.
 func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{

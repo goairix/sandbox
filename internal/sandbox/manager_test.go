@@ -11,7 +11,7 @@ import (
 
 func TestManager_CreateEphemeralSandbox(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, nil, ManagerConfig{
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
 		PoolConfig:     PoolConfig{MinSize: 2, MaxSize: 10, Image: "sandbox:latest"},
 		DefaultTimeout: 30,
 	})
@@ -33,7 +33,7 @@ func TestManager_CreateEphemeralSandbox(t *testing.T) {
 
 func TestManager_CreatePersistentSandbox(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, nil, ManagerConfig{
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
 		PoolConfig:     PoolConfig{MinSize: 1, MaxSize: 5, Image: "sandbox:latest"},
 		DefaultTimeout: 60,
 	})
@@ -60,7 +60,7 @@ func TestManager_CreatePersistentSandbox(t *testing.T) {
 
 func TestManager_Destroy(t *testing.T) {
 	rt := newMockRuntime()
-	mgr := NewManager(rt, nil, ManagerConfig{
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
 		PoolConfig:     PoolConfig{MinSize: 1, MaxSize: 5, Image: "sandbox:latest"},
 		DefaultTimeout: 30,
 	})

@@ -15,9 +15,11 @@ func TestNewFileSystem_Local(t *testing.T) {
 		LocalPath: dir,
 	}
 
-	fsys, err := NewFileSystem(cfg)
+	fsys, meta, err := NewFileSystem(cfg)
 	require.NoError(t, err)
 	assert.NotNil(t, fsys)
+	assert.Equal(t, ProviderLocal, meta.Provider)
+	assert.Equal(t, dir, meta.LocalPath)
 }
 
 func TestNewFileSystem_LocalEmptyPath(t *testing.T) {
@@ -26,7 +28,7 @@ func TestNewFileSystem_LocalEmptyPath(t *testing.T) {
 		LocalPath: "",
 	}
 
-	_, err := NewFileSystem(cfg)
+	_, _, err := NewFileSystem(cfg)
 	assert.Error(t, err)
 }
 
@@ -35,7 +37,7 @@ func TestNewFileSystem_UnknownProvider(t *testing.T) {
 		Provider: "unknown",
 	}
 
-	_, err := NewFileSystem(cfg)
+	_, _, err := NewFileSystem(cfg)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported filesystem provider")
 }

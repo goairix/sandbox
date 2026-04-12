@@ -9,12 +9,13 @@ import (
 
 // Config is the root configuration structure for the sandbox service.
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Runtime  RuntimeConfig  `mapstructure:"runtime"`
-	Pool     PoolConfig     `mapstructure:"pool"`
-	Images   ImagesConfig   `mapstructure:"images"`
-	Storage  StorageConfig  `mapstructure:"storage"`
-	Security SecurityConfig `mapstructure:"security"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Runtime   RuntimeConfig   `mapstructure:"runtime"`
+	Pool      PoolConfig      `mapstructure:"pool"`
+	Images    ImagesConfig    `mapstructure:"images"`
+	Storage   StorageConfig   `mapstructure:"storage"`
+	Workspace WorkspaceConfig `mapstructure:"workspace"`
+	Security  SecurityConfig  `mapstructure:"security"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -84,6 +85,14 @@ type FileSystemConfig struct {
 	LocalPath string `mapstructure:"local_path"`
 	SubPath   string `mapstructure:"sub_path"`
 	UseSSL    bool   `mapstructure:"use_ssl"`
+}
+
+// WorkspaceConfig holds workspace sync strategy settings.
+type WorkspaceConfig struct {
+	// AutoSyncIntervalSeconds is the interval between automatic sync-from-container
+	// cycles. Set to 0 to disable auto-sync. Recommended: 30 for long-running
+	// agent sessions.
+	AutoSyncIntervalSeconds int `mapstructure:"auto_sync_interval_seconds"`
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -193,6 +202,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: security.exec_timeout_seconds must be > 0, got %d", c.Security.ExecTimeoutSeconds)
 	}
 
+	// Workspace auto-sync
+	if c.Workspace.AutoSyncIntervalSeconds < 0 {
+		return fmt.Errorf("config: workspace.auto_sync_interval_seconds must be >= 0, got %d", c.Workspace.AutoSyncIntervalSeconds)
+	}
+
 	return nil
 }
 
@@ -232,6 +246,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.filesystem.local_path", "/tmp/sandbox-storage")
 	v.SetDefault("storage.filesystem.sub_path", "")
 	v.SetDefault("storage.filesystem.use_ssl", false)
+
+	// Workspace
+	v.SetDefault("workspace.auto_sync_interval_seconds", 0)
 
 	// Security
 	v.SetDefault("security.api_key", "")

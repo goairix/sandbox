@@ -161,11 +161,12 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	return sb.Workspace, nil
 }
 
-// syncToContainer collects file metadata from ScopedFS, then streams a tar
-// archive directly to the container via io.Pipe, overlapping storage reads,
-// tar construction, and container upload.
+// syncToContainer collects file metadata from ScopedFS, concurrently reads
+// file contents, and streams a tar archive into the container via exec pipe.
+// The container-side "tar xf -" process consumes data in real-time, keeping
+// memory usage proportional to the concurrency window rather than total size.
 func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
-	// Phase 1: walk the directory tree to collect file metadata (sequential).
+	// Phase 1: walk the directory tree to collect file metadata.
 	var entries []fileEntry
 	if err := m.collectFiles(ctx, scoped, ".", &entries); err != nil {
 		return fmt.Errorf("collect files: %w", err)
@@ -174,12 +175,13 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 		return nil
 	}
 
-	// Phase 2: streaming pipeline — tar writes stream directly to UploadArchive.
+	// Phase 2: stream tar into container via exec pipe.
 	pr, pw := io.Pipe()
 
-	uploadErrCh := make(chan error, 1)
+	execErrCh := make(chan error, 1)
 	go func() {
-		uploadErrCh <- m.runtime.UploadArchive(ctx, runtimeID, "/workspace", pr)
+		execErrCh <- m.runtime.ExecPipe(ctx, runtimeID,
+			[]string{"tar", "xf", "-", "-C", "/workspace"}, pr)
 	}()
 
 	writeErr := m.writeTarStream(ctx, scoped, entries, pw)
@@ -189,39 +191,34 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 		pw.Close()
 	}
 
-	uploadErr := <-uploadErrCh
+	execErr := <-execErrCh
 
-	if writeErr != nil && uploadErr != nil {
-		return fmt.Errorf("upload archive: %w", uploadErr)
-	}
 	if writeErr != nil {
 		return fmt.Errorf("write tar stream: %w", writeErr)
 	}
-	if uploadErr != nil {
-		return fmt.Errorf("upload archive: %w", uploadErr)
+	if execErr != nil {
+		return fmt.Errorf("exec tar extract: %w", execErr)
 	}
 	return nil
 }
 
-// writeTarStream writes all entries as a tar archive to w, prefetching file
-// contents concurrently using a bounded worker pool of maxConcurrentReads.
+// writeTarStream writes all entries as a tar archive to w, reading files
+// concurrently (up to maxConcurrentReads) to reduce I/O latency.
 func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, entries []fileEntry, w io.Writer) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
 	tw := tar.NewWriter(w)
-	defer tw.Close()
 
 	type readResult struct {
-		reader io.ReadCloser
-		err    error
+		content []byte
+		err     error
 	}
 
 	sem := make(chan struct{}, maxConcurrentReads)
 	resultChs := make([]chan readResult, len(entries))
 
-	// Launch prefetch goroutines for all file entries.
 	for i, e := range entries {
 		if e.isDir {
 			continue
@@ -240,22 +237,24 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 				ch <- readResult{err: fmt.Errorf("open %q: %w", entry.relPath, err)}
 				return
 			}
-			ch <- readResult{reader: reader}
+			data, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				ch <- readResult{err: fmt.Errorf("read %q: %w", entry.relPath, err)}
+				return
+			}
+			ch <- readResult{content: data}
 		}(e, ch)
 	}
 
-	// cleanup drains and closes any unconsumed readers from index start onward.
 	cleanup := func(start int) {
 		for j := start; j < len(entries); j++ {
 			if resultChs[j] != nil {
-				if res := <-resultChs[j]; res.reader != nil {
-					res.reader.Close()
-				}
+				<-resultChs[j]
 			}
 		}
 	}
 
-	// Consume results in entry order, writing tar entries sequentially.
 	for i, e := range entries {
 		if e.isDir {
 			if err := tw.WriteHeader(&tar.Header{
@@ -280,26 +279,23 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 
 		if err := tw.WriteHeader(&tar.Header{
 			Name:    e.relPath,
-			Size:    e.size,
+			Size:    int64(len(res.content)),
 			Mode:    0644,
 			ModTime: e.modTime,
 			Uid:     1000,
 			Gid:     1000,
 		}); err != nil {
-			res.reader.Close()
 			cleanup(i + 1)
 			return fmt.Errorf("write file header %q: %w", e.relPath, err)
 		}
 
-		_, copyErr := io.Copy(tw, res.reader)
-		res.reader.Close()
-		if copyErr != nil {
+		if _, err := tw.Write(res.content); err != nil {
 			cleanup(i + 1)
-			return fmt.Errorf("write file content %q: %w", e.relPath, copyErr)
+			return fmt.Errorf("write file content %q: %w", e.relPath, err)
 		}
 	}
 
-	return nil
+	return tw.Close()
 }
 
 // collectFiles recursively walks the ScopedFS directory tree and appends
@@ -350,6 +346,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
+	}
+
+	// Bind-mounted workspaces share the host filesystem directly — no sync needed.
+	if sb != nil && sb.Workspace != nil && sb.Workspace.BindMounted {
+		return nil
 	}
 
 	// LastSyncedAt is set at mount time; use it as the change detection baseline.

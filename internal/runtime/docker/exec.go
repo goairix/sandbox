@@ -85,6 +85,48 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	}, nil
 }
 
+func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin io.Reader) error {
+	execConfig := container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, execConfig)
+	if err != nil {
+		return fmt.Errorf("exec create: %w", err)
+	}
+
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("exec attach: %w", err)
+	}
+	defer attachResp.Close()
+
+	// Drain stdout/stderr in background to prevent the exec from blocking.
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_, _ = io.Copy(io.Discard, attachResp.Reader)
+	}()
+
+	// Stream stdin to the exec process.
+	_, _ = io.Copy(attachResp.Conn, stdin)
+	_ = attachResp.CloseWrite()
+
+	<-doneCh
+
+	inspectResp, err := r.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return fmt.Errorf("exec inspect: %w", err)
+	}
+	if inspectResp.ExitCode != 0 {
+		return fmt.Errorf("exec exited with code %d", inspectResp.ExitCode)
+	}
+	return nil
+}
+
 func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
 	// Enforce timeout
 	var cancel context.CancelFunc

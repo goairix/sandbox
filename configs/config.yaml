@@ -96,6 +96,16 @@ storage:
     use_ssl: false
 
 # -----------------------------------------------------------------------------
+# Workspace — workspace sync strategy
+# -----------------------------------------------------------------------------
+workspace:
+  # Automatic sync interval in seconds. When > 0, a background goroutine
+  # periodically syncs changed files from containers back to storage,
+  # reducing data loss if a container crashes between manual syncs.
+  # Set to 0 to disable. Recommended: 30 for long-running agent sessions.
+  auto_sync_interval_seconds: 0
+
+# -----------------------------------------------------------------------------
 # Security — sandbox isolation and resource limits
 # -----------------------------------------------------------------------------
 security:

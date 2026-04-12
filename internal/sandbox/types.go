@@ -57,6 +57,7 @@ type WorkspaceInfo struct {
 	RootPath     string    `json:"root_path"`
 	MountedAt    time.Time `json:"mounted_at"`
 	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
+	BindMounted  bool      `json:"bind_mounted,omitempty"`
 }
 
 // SandboxConfig holds all configuration for creating a sandbox.

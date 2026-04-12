@@ -256,6 +256,11 @@ func (r *Runtime) RenameSandbox(ctx context.Context, id string, newName string) 
 	return r.cli.ContainerRename(ctx, id, newName)
 }
 
+func (r *Runtime) UpdateLabels(_ context.Context, _ string, _ map[string]*string) error {
+	// Docker container labels are immutable after creation.
+	return nil
+}
+
 func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
 	args := filters.NewArgs()
 	for k, v := range labels {

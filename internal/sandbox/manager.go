@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -36,14 +37,16 @@ func randSuffix(n int) string {
 
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
-	PoolConfig     PoolConfig
-	DefaultTimeout int // seconds
+	PoolConfig              PoolConfig
+	DefaultTimeout          int // seconds
+	AutoSyncIntervalSeconds int // 0 = disabled
 }
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
 type Manager struct {
 	runtime    runtime.Runtime
 	filesystem fs.FileSystem
+	fsMeta     *storage.FileSystemMeta
 	config     ManagerConfig
 	sessions   *SessionStore // optional, for persistent sandboxes
 
@@ -57,10 +60,11 @@ type Manager struct {
 }
 
 // NewManager creates a new SandboxManager.
-func NewManager(rt runtime.Runtime, fsys fs.FileSystem, cfg ManagerConfig) *Manager {
+func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSystemMeta, cfg ManagerConfig) *Manager {
 	return &Manager{
 		runtime:    rt,
 		filesystem: fsys,
+		fsMeta:     fsMeta,
 		config:     cfg,
 		pool:       NewPool(rt, cfg.PoolConfig),
 		sandboxes:  make(map[string]*Sandbox),
@@ -78,10 +82,25 @@ func (m *Manager) SetSessionStore(ss *SessionStore) {
 // It first removes any orphaned pool containers left over from a previous
 // process that exited without cleanup (e.g. crash, SIGKILL).
 func (m *Manager) Start(ctx context.Context) {
+	// Clean up orphaned pool containers from previous run BEFORE warming up,
+	// so new pool containers don't get caught in the cleanup.
 	m.cleanupOrphanedPoolContainers(ctx)
 	m.pool.WarmUp(ctx)
+
 	m.wg.Add(1)
 	go m.reapExpiredSandboxes()
+
+	// Restore persistent sandboxes in background to avoid blocking API startup.
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.restorePersistentSandboxes(ctx)
+	}()
+
+	if m.config.AutoSyncIntervalSeconds > 0 {
+		m.wg.Add(1)
+		go m.autoSyncWorkspaces()
+	}
 }
 
 // Stop drains the pool and cleans up.
@@ -104,9 +123,20 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	var info *runtime.SandboxInfo
 	var err error
+	var bindMounted bool
 
-	if cfg.Network.Enabled {
+	useBindMount := cfg.WorkspacePath != "" && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal
+
+	if cfg.Network.Enabled || useBindMount {
 		spec := m.buildSpec(id, cfg)
+		if useBindMount {
+			hostPath := m.resolveLocalWorkspacePath(cfg.WorkspacePath)
+			spec.Mounts = append(spec.Mounts, runtime.Mount{
+				HostPath:      hostPath,
+				ContainerPath: "/workspace",
+			})
+			bindMounted = true
+		}
 		info, err = m.runtime.CreateSandbox(ctx, spec)
 		if err != nil {
 			return nil, fmt.Errorf("create sandbox: %w", err)
@@ -116,6 +146,10 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		if err != nil {
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
+		// Remove pool label so cleanup won't touch this container (effective on K8s).
+		_ = m.runtime.UpdateLabels(ctx, info.RuntimeID, map[string]*string{
+			"sandbox.pool": nil,
+		})
 	}
 
 	// Rename container for easier identification (best-effort)
@@ -161,12 +195,23 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	// Auto-mount workspace if specified
 	if cfg.WorkspacePath != "" {
-		if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
-			_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
-			m.mu.Lock()
-			delete(m.sandboxes, id)
-			m.mu.Unlock()
-			return nil, fmt.Errorf("mount workspace: %w", err)
+		if bindMounted {
+			// Bind mount: just register the scoped FS, no file copy needed.
+			if err := m.registerWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
+				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+				m.mu.Lock()
+				delete(m.sandboxes, id)
+				m.mu.Unlock()
+				return nil, fmt.Errorf("register workspace: %w", err)
+			}
+		} else {
+			if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
+				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+				m.mu.Lock()
+				delete(m.sandboxes, id)
+				m.mu.Unlock()
+				return nil, fmt.Errorf("mount workspace: %w", err)
+			}
 		}
 	}
 
@@ -175,39 +220,59 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 // Get retrieves a sandbox by ID. Returns a copy to prevent external data races.
 func (m *Manager) Get(ctx context.Context, id string) (Sandbox, error) {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	return *sb, nil
+}
+
+// resolve looks up a sandbox by ID: first in memory, then in the session store.
+// Returns a pointer to the in-memory Sandbox (caller must hold no lock).
+func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 	m.mu.RLock()
 	sb, ok := m.sandboxes[id]
-	if ok {
-		cp := *sb
-		m.mu.RUnlock()
-		return cp, nil
-	}
 	m.mu.RUnlock()
+	if ok {
+		return sb, nil
+	}
 
 	// Fall back to session store for persistent sandboxes
 	if m.sessions != nil {
 		sbPtr, err := m.sessions.Load(ctx, id)
 		if err != nil {
-			return Sandbox{}, err
+			return nil, err
 		}
+		log.Printf("sandbox %s: restored from session store (container %s)", id, sbPtr.RuntimeID)
 		// Register into in-memory map so subsequent lookups find it directly
 		m.mu.Lock()
 		m.sandboxes[id] = sbPtr
 		m.mu.Unlock()
-		return *sbPtr, nil
+
+		// Restore workspace ScopedFS if workspace was mounted
+		if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
+			scoped, fsErr := storage.NewScopedFS(m.filesystem, sbPtr.Workspace.RootPath)
+			if fsErr == nil {
+				m.mu.Lock()
+				m.workspaces[id] = scoped
+				m.mu.Unlock()
+			}
+		}
+
+		return sbPtr, nil
 	}
 
-	return Sandbox{}, fmt.Errorf("sandbox not found: %s", id)
+	return nil, fmt.Errorf("sandbox not found: %s", id)
 }
 
 // Destroy removes a sandbox.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
-	m.mu.Lock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return err
 	}
+
+	m.mu.Lock()
 	sb.State = StateDestroying
 	delete(m.sandboxes, id)
 	m.mu.Unlock()
@@ -241,12 +306,12 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 // Exec executes a command in a sandbox synchronously.
 func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
-	m.mu.Lock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
 	}
+
+	m.mu.Lock()
 	sb.State = StateRunning
 	sb.UpdatedAt = time.Now()
 	runtimeID := sb.RuntimeID
@@ -268,12 +333,12 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 // ExecStream executes a command in a sandbox with streaming output.
 func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
-	m.mu.Lock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
 	}
+
+	m.mu.Lock()
 	sb.State = StateRunning
 	sb.UpdatedAt = time.Now()
 	runtimeID := sb.RuntimeID
@@ -313,39 +378,30 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 
 // UploadFile uploads a file into a sandbox.
 func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
-	m.mu.RLock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.RUnlock()
-		return fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return err
 	}
-	m.mu.RUnlock()
 
 	return m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, reader)
 }
 
 // DownloadFile downloads a file from a sandbox.
 func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
-	m.mu.RLock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.RUnlock()
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	m.mu.RUnlock()
 
 	return m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
 }
 
 // ListFiles lists files in a sandbox directory.
 func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
-	m.mu.RLock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.RUnlock()
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	m.mu.RUnlock()
 
 	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
 }
@@ -408,8 +464,144 @@ func (m *Manager) reapOnce() {
 	}
 }
 
+// autoSyncWorkspaces periodically syncs changed files from all mounted
+// workspaces back to storage. This reduces data loss if a container crashes
+// between manual syncs.
+func (m *Manager) autoSyncWorkspaces() {
+	defer m.wg.Done()
+	interval := time.Duration(m.config.AutoSyncIntervalSeconds) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.autoSyncOnce()
+		}
+	}
+}
+
+func (m *Manager) autoSyncOnce() {
+	m.mu.RLock()
+	type syncTarget struct {
+		sandboxID string
+		runtimeID string
+	}
+	var targets []syncTarget
+	for id := range m.workspaces {
+		if sb, ok := m.sandboxes[id]; ok {
+			targets = append(targets, syncTarget{sandboxID: id, runtimeID: sb.RuntimeID})
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, t := range targets {
+		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, nil); err != nil {
+			log.Printf("auto-sync failed for sandbox %s: %v", t.sandboxID, err)
+		}
+	}
+}
+
+// restorePersistentSandboxes reloads all persistent sandboxes from the session
+// store at startup. If a container is gone, it recreates the container and
+// re-syncs the workspace.
+func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
+	if m.sessions == nil {
+		return
+	}
+
+	ids, err := m.sessions.List(ctx)
+	if err != nil {
+		log.Printf("failed to list persistent sandboxes: %v", err)
+		return
+	}
+
+	var restored, recreated, failed int
+	for _, id := range ids {
+		sbPtr, err := m.sessions.Load(ctx, id)
+		if err != nil {
+			log.Printf("sandbox %s: failed to load from session store: %v", id, err)
+			failed++
+			continue
+		}
+
+		// Check if the container still exists
+		_, rtErr := m.runtime.GetSandbox(ctx, sbPtr.RuntimeID)
+		if rtErr != nil {
+			// Container gone — recreate it
+			log.Printf("sandbox %s: container %s gone, recreating", id, sbPtr.RuntimeID)
+			newInfo, recreateErr := m.recreateSandbox(ctx, sbPtr)
+			if recreateErr != nil {
+				log.Printf("sandbox %s: failed to recreate: %v", id, recreateErr)
+				_ = m.sessions.Remove(ctx, id)
+				failed++
+				continue
+			}
+			sbPtr.RuntimeID = newInfo.RuntimeID
+			sbPtr.State = StateReady
+			sbPtr.UpdatedAt = time.Now()
+			_ = m.sessions.Save(ctx, sbPtr)
+			recreated++
+		}
+
+		// Register into in-memory map
+		m.sandboxes[id] = sbPtr
+
+		// Restore workspace ScopedFS and sync if needed
+		if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
+			scoped, fsErr := storage.NewScopedFS(m.filesystem, sbPtr.Workspace.RootPath)
+			if fsErr == nil {
+				m.workspaces[id] = scoped
+				// Re-sync files to the new container (skip for bind mount)
+				if !sbPtr.Workspace.BindMounted {
+					if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID); syncErr != nil {
+						log.Printf("sandbox %s: workspace re-sync failed: %v", id, syncErr)
+					}
+				}
+			} else {
+				log.Printf("sandbox %s: failed to restore workspace: %v", id, fsErr)
+			}
+		}
+
+		restored++
+	}
+
+	if restored > 0 || failed > 0 {
+		log.Printf("persistent sandboxes: %d restored (%d recreated), %d failed", restored, recreated, failed)
+	}
+}
+
+// recreateSandbox creates a new container for a persistent sandbox whose
+// container was lost (e.g. docker-compose restart).
+func (m *Manager) recreateSandbox(ctx context.Context, sb *Sandbox) (*runtime.SandboxInfo, error) {
+	spec := m.buildSpec(sb.ID, sb.Config)
+
+	// Restore bind mount if applicable
+	if sb.Workspace != nil && sb.Workspace.BindMounted && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal {
+		hostPath := m.resolveLocalWorkspacePath(sb.Workspace.RootPath)
+		spec.Mounts = append(spec.Mounts, runtime.Mount{
+			HostPath:      hostPath,
+			ContainerPath: "/workspace",
+		})
+	}
+
+	info, err := m.runtime.CreateSandbox(ctx, spec)
+	if err != nil {
+		return nil, fmt.Errorf("create container: %w", err)
+	}
+
+	// Rename for identification
+	_ = m.runtime.RenameSandbox(ctx, info.RuntimeID, sb.ID)
+
+	return info, nil
+}
+
 // cleanupOrphanedPoolContainers removes pool containers left over from a
 // previous process that exited without graceful shutdown.
+// Must be called AFTER restorePersistentSandboxes so that active containers
+// are already registered in m.sandboxes.
 func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{
 		"sandbox.pool": "true",
@@ -418,12 +610,26 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 		log.Printf("failed to list orphaned pool containers: %v", err)
 		return
 	}
+
+	// Build set of runtime IDs belonging to restored persistent sandboxes
+	activeRuntimeIDs := make(map[string]struct{})
+	m.mu.RLock()
+	for _, sb := range m.sandboxes {
+		activeRuntimeIDs[sb.RuntimeID] = struct{}{}
+	}
+	m.mu.RUnlock()
+
+	var removed int
 	for _, c := range containers {
+		if _, active := activeRuntimeIDs[c.RuntimeID]; active {
+			continue // in use by a persistent sandbox
+		}
 		log.Printf("removing orphaned pool container %s", c.RuntimeID)
 		_ = m.runtime.RemoveSandbox(ctx, c.RuntimeID)
+		removed++
 	}
-	if len(containers) > 0 {
-		log.Printf("cleaned up %d orphaned pool container(s)", len(containers))
+	if removed > 0 {
+		log.Printf("cleaned up %d orphaned pool container(s)", removed)
 	}
 }
 
@@ -487,4 +693,39 @@ func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
 			"sandbox.id": id,
 		},
 	}
+}
+
+// resolveLocalWorkspacePath returns the absolute host path for a workspace.
+func (m *Manager) resolveLocalWorkspacePath(workspacePath string) string {
+	if m.fsMeta == nil {
+		return workspacePath
+	}
+	return filepath.Join(m.fsMeta.LocalPath, workspacePath)
+}
+
+// registerWorkspace registers a ScopedFS for a bind-mounted workspace without
+// copying files (they are already visible via the mount).
+func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath string) error {
+	scoped, err := storage.NewScopedFS(m.filesystem, rootPath)
+	if err != nil {
+		return fmt.Errorf("create scoped filesystem: %w", err)
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	sb := m.sandboxes[sandboxID]
+	m.workspaces[sandboxID] = scoped
+	sb.Workspace = &WorkspaceInfo{
+		RootPath:     rootPath,
+		MountedAt:    now,
+		LastSyncedAt: now,
+		BindMounted:  true,
+	}
+	sb.UpdatedAt = now
+	m.mu.Unlock()
+
+	if m.sessions != nil {
+		_ = m.sessions.Save(ctx, sb)
+	}
+	return nil
 }

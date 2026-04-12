@@ -120,6 +120,10 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	return execStreamInPod(ctx, r.client, r.restConfig, r.namespace, id, req)
 }
 
+func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin io.Reader) error {
+	return execPipeInPod(ctx, r.client, r.restConfig, r.namespace, id, cmd, stdin)
+}
+
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
 	return uploadFileToPod(ctx, r.client, r.restConfig, r.namespace, id, destPath, reader)
 }
@@ -146,6 +150,30 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {
 	// Kubernetes pods cannot be renamed; this is a no-op.
+	return nil
+}
+
+func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string]*string) error {
+	pod, err := getPod(ctx, r.client, r.namespace, id)
+	if err != nil {
+		return fmt.Errorf("get pod: %w", err)
+	}
+
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	for k, v := range labels {
+		if v == nil {
+			delete(pod.Labels, k)
+		} else {
+			pod.Labels[k] = *v
+		}
+	}
+
+	_, err = r.client.CoreV1().Pods(r.namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("update pod labels: %w", err)
+	}
 	return nil
 }
 

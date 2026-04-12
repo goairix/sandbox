@@ -53,6 +53,24 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		securityContext.RunAsUser = &spec.RunAsUser
 	}
 
+	// Determine workspace volume source: HostPath if a /workspace mount is
+	// specified, otherwise EmptyDir.
+	workspaceVolume := corev1.VolumeSource{
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
+	}
+	for _, m := range spec.Mounts {
+		if m.ContainerPath == "/workspace" {
+			hostPathType := corev1.HostPathDirectory
+			workspaceVolume = corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: m.HostPath,
+					Type: &hostPathType,
+				},
+			}
+			break
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      spec.ID,
@@ -83,10 +101,8 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 			},
 			Volumes: []corev1.Volume{
 				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
+					Name:         "workspace",
+					VolumeSource: workspaceVolume,
 				},
 				{
 					Name: "tmp",

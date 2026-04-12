@@ -65,6 +65,15 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 		},
 	}
 
+	// Apply bind mounts
+	for _, m := range spec.Mounts {
+		opt := "rw"
+		if m.ReadOnly {
+			opt = "ro"
+		}
+		hostConfig.Binds = append(hostConfig.Binds, fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, opt))
+	}
+
 	if spec.SeccompProfile != "" {
 		hostConfig.SecurityOpt = append(hostConfig.SecurityOpt,
 			fmt.Sprintf("seccomp=%s", spec.SeccompProfile))

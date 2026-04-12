@@ -60,4 +60,13 @@ type SandboxSpec struct {
 	SeccompProfile string
 	// Labels for identification
 	Labels map[string]string
+	// Mounts specifies host paths to bind-mount into the container.
+	Mounts []Mount
+}
+
+// Mount describes a host-to-container bind mount.
+type Mount struct {
+	HostPath      string // absolute path on the host
+	ContainerPath string // absolute path inside the container
+	ReadOnly      bool
 }

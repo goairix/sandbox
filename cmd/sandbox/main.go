@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Initialize filesystem
-	fsys, err := storage.NewFileSystem(cfg.Storage.FileSystem)
+	fsys, fsMeta, err := storage.NewFileSystem(cfg.Storage.FileSystem)
 	if err != nil {
 		log.Fatalf("failed to create filesystem: %v", err)
 	}
@@ -64,13 +64,14 @@ func main() {
 		sandboxImage = "sandbox:latest"
 	}
 
-	mgr := sandbox.NewManager(rt, fsys, sandbox.ManagerConfig{
+	mgr := sandbox.NewManager(rt, fsys, fsMeta, sandbox.ManagerConfig{
 		PoolConfig: sandbox.PoolConfig{
 			MinSize: cfg.Pool.MinSize,
 			MaxSize: cfg.Pool.MaxSize,
 			Image:   sandboxImage,
 		},
-		DefaultTimeout: cfg.Security.SandboxTimeoutSeconds,
+		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
+		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,
 	})
 
 	// Initialize session store for persistent sandbox state

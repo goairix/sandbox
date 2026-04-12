@@ -43,11 +43,19 @@ type Runtime interface {
 	// DownloadDir downloads an entire directory from the sandbox as a tar archive.
 	DownloadDir(ctx context.Context, id string, dirPath string) (io.ReadCloser, error)
 
+	// ExecPipe executes a command in the sandbox with an io.Reader connected to
+	// its stdin. This enables streaming data into the container (e.g. piping a
+	// tar archive to "tar xf -") without buffering the entire payload in memory.
+	ExecPipe(ctx context.Context, id string, cmd []string, stdin io.Reader) error
+
 	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
 	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error
 
 	// RenameSandbox renames a sandbox container/pod for easier identification.
 	RenameSandbox(ctx context.Context, id string, newName string) error
+
+	// UpdateLabels patches labels on a sandbox. Use a nil value to remove a label.
+	UpdateLabels(ctx context.Context, id string, labels map[string]*string) error
 
 	// ListSandboxes returns sandboxes matching the given labels.
 	ListSandboxes(ctx context.Context, labels map[string]string) ([]SandboxInfo, error)
