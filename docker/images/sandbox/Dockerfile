@@ -1,9 +1,10 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # System tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget jq git openssh-client zip unzip \
-    findutils gawk imagemagick ffmpeg \
+RUN apt-get update
+RUN apt-get install -y --no-install-recommends \
+    curl wget jq git openssh-client zip unzip
+RUN apt-get install -y findutils gawk imagemagick ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20

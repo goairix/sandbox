@@ -32,4 +32,4 @@ docker/.env
 .claude
 
 # miscellaneous
-DS_Store
+.DS_Store

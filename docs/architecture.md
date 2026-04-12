@@ -822,3 +822,17 @@ helm install sandbox deploy/helm/sandbox/ \
 ### 为什么 Pool.Acquire 要验证容器存活？
 
 Docker 可能重启或容器被外部移除，Pool 中的容器 ID 过时。取出时验证存活状态，stale 容器自动丢弃，避免后续操作失败。
+
+---
+
+## 待讨论问题
+
+### sandbox 超时时任务仍在运行的处理策略
+
+**位置**：`internal/sandbox/manager.go` `reapOnce()`
+
+**现状**：`reapOnce` 只判断 `now.Sub(sb.CreatedAt) > sb.Timeout`，不检查 `State`，超时即调用 `Destroy`，哪怕 sandbox 当前处于 `StateRunning`（有任务在执行中）。
+
+**待决策**：
+1. **强制销毁**：超时就是超时，不管任务是否在跑，直接 destroy。适合严格资源隔离，用户需自行控制任务时长。
+2. **宽限期**：超时时若 `State == StateRunning`，先标记为"待销毁"，等任务结束后再销毁；同时设最大宽限时间（如额外 60s），超过宽限强制销毁。
