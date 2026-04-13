@@ -218,9 +218,15 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 		var modTime int64
 		fmt.Sscanf(parts[3], "%d", &modTime)
 
+		fullPath := dirPath + "/" + parts[0]
+		// Skip the directory itself (find lists the query dir as an entry).
+		if fullPath == dirPath || strings.TrimRight(fullPath, "/") == strings.TrimRight(dirPath, "/") {
+			continue
+		}
+
 		files = append(files, runtime.FileInfo{
 			Name:    parts[0],
-			Path:    dirPath + "/" + parts[0],
+			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
 			ModTime: modTime,
