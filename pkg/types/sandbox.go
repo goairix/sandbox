@@ -8,7 +8,8 @@ type CreateSandboxRequest struct {
 	Resources     *ResourceLimits  `json:"resources,omitempty"`
 	Network       *NetworkConfig   `json:"network,omitempty"`
 	Dependencies  []DependencySpec `json:"dependencies,omitempty"`
-	WorkspacePath string           `json:"workspace_path,omitempty"`
+	WorkspacePath        string           `json:"workspace_path,omitempty"`
+	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
 }
 
 type ResourceLimits struct {

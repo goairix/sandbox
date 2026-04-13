@@ -73,6 +73,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	}
 
 	cfg.WorkspacePath = req.WorkspacePath
+	cfg.WorkspaceSyncExclude = req.WorkspaceSyncExclude
 
 	sb, err := h.manager.Create(c.Request.Context(), cfg)
 	if err != nil {

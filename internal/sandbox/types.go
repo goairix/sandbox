@@ -58,6 +58,7 @@ type WorkspaceInfo struct {
 	MountedAt    time.Time `json:"mounted_at"`
 	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
 	BindMounted  bool      `json:"bind_mounted,omitempty"`
+	SyncExclude  []string  `json:"sync_exclude,omitempty"`
 }
 
 // SandboxConfig holds all configuration for creating a sandbox.
@@ -67,7 +68,8 @@ type SandboxConfig struct {
 	Resources     ResourceLimits `json:"resources"`
 	Network       NetworkConfig  `json:"network"`
 	Dependencies  []Dependency   `json:"dependencies"`
-	WorkspacePath string         `json:"workspace_path,omitempty"`
+	WorkspacePath        string         `json:"workspace_path,omitempty"`
+	WorkspaceSyncExclude []string       `json:"workspace_sync_exclude,omitempty"`
 }
 
 // Sandbox represents a running sandbox instance.

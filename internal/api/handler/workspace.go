@@ -18,7 +18,7 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.MountWorkspace(c.Request.Context(), id, req.RootPath); err != nil {
+	if err := h.manager.MountWorkspace(c.Request.Context(), id, req.RootPath, req.Exclude); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return

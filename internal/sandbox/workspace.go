@@ -43,7 +43,8 @@ func isExcluded(path string, exclude []string) bool {
 }
 
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
-func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string) error {
+// exclude is an optional list of path prefixes to skip during all subsequent syncs.
+func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
 	m.mu.RLock()
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
@@ -75,6 +76,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		RootPath:     rootPath,
 		MountedAt:    now,
 		LastSyncedAt: now,
+		SyncExclude:  exclude,
 	}
 	sb.UpdatedAt = now
 	m.mu.Unlock()
@@ -103,7 +105,7 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		return fmt.Errorf("no workspace mounted for sandbox %s", sandboxID)
 	}
 
-	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, nil); err != nil {
+	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, sb.Workspace.SyncExclude); err != nil {
 		return fmt.Errorf("sync from container: %w", err)
 	}
 

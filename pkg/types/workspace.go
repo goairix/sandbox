@@ -3,7 +3,8 @@ package types
 import "time"
 
 type MountWorkspaceRequest struct {
-	RootPath string `json:"root_path" binding:"required"`
+	RootPath string   `json:"root_path" binding:"required"`
+	Exclude  []string `json:"exclude,omitempty"`
 }
 
 type MountWorkspaceResponse struct {

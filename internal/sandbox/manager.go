@@ -217,7 +217,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 				return nil, fmt.Errorf("register workspace: %w", err)
 			}
 		} else {
-			if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
+			if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath, cfg.WorkspaceSyncExclude); err != nil {
 				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
 				m.mu.Lock()
 				delete(m.sandboxes, id)
@@ -498,19 +498,24 @@ func (m *Manager) autoSyncWorkspaces() {
 func (m *Manager) autoSyncOnce() {
 	m.mu.RLock()
 	type syncTarget struct {
-		sandboxID string
-		runtimeID string
+		sandboxID   string
+		runtimeID   string
+		syncExclude []string
 	}
 	var targets []syncTarget
 	for id := range m.workspaces {
 		if sb, ok := m.sandboxes[id]; ok {
-			targets = append(targets, syncTarget{sandboxID: id, runtimeID: sb.RuntimeID})
+			var exclude []string
+			if sb.Workspace != nil {
+				exclude = sb.Workspace.SyncExclude
+			}
+			targets = append(targets, syncTarget{sandboxID: id, runtimeID: sb.RuntimeID, syncExclude: exclude})
 		}
 	}
 	m.mu.RUnlock()
 
 	for _, t := range targets {
-		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, nil); err != nil {
+		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
 			log.Printf("auto-sync failed for sandbox %s: %v", t.sandboxID, err)
 		}
 	}
