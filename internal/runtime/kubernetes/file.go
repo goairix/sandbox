@@ -32,6 +32,8 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 		Name: destPath,
 		Size: int64(len(content)),
 		Mode: 0644,
+		Uid:  1000,
+		Gid:  1000,
 	}); err != nil {
 		return fmt.Errorf("tar header: %w", err)
 	}

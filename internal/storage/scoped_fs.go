@@ -9,7 +9,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 )
 
 // ErrPathEscaped is returned when a path attempts to escape the scoped root directory.

@@ -3,13 +3,13 @@ package storage
 import (
 	"fmt"
 
-	"github.com/dysodeng/fs"
-	"github.com/dysodeng/fs/driver/alioss"
-	"github.com/dysodeng/fs/driver/hwobs"
-	"github.com/dysodeng/fs/driver/local"
-	"github.com/dysodeng/fs/driver/minio"
-	"github.com/dysodeng/fs/driver/s3"
-	"github.com/dysodeng/fs/driver/txcos"
+	"github.com/goairix/fs"
+	"github.com/goairix/fs/driver/alioss"
+	"github.com/goairix/fs/driver/hwobs"
+	"github.com/goairix/fs/driver/local"
+	"github.com/goairix/fs/driver/minio"
+	"github.com/goairix/fs/driver/s3"
+	"github.com/goairix/fs/driver/txcos"
 
 	"github.com/goairix/sandbox/internal/config"
 )

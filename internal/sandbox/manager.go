@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 )

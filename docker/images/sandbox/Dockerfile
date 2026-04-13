@@ -26,6 +26,13 @@ RUN pip install --no-cache-dir \
     sympy==1.13.3 \
     beautifulsoup4==4.12.3
 
+# Python 文档处理库
+RUN pip install --no-cache-dir \
+    pymupdf \
+    reportlab \
+    openpyxl \
+    python-docx
+
 # TypeScript + global Node packages
 RUN npm install -g \
     typescript@5.6.3 \

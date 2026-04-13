@@ -2,12 +2,12 @@
 
 ## Summary
 
-Replace the existing `internal/storage/object` layer with `github.com/dysodeng/fs` (`fs.FileSystem`), and integrate `ScopedFS` as a per-sandbox workspace that restricts all file operations within a designated root directory. Workspaces can be attached at sandbox creation or mounted/unmounted dynamically via new API endpoints. Mounting syncs files from the storage backend into the container's `/workspace`; unmounting syncs back.
+Replace the existing `internal/storage/object` layer with `github.com/goairix/fs` (`fs.FileSystem`), and integrate `ScopedFS` as a per-sandbox workspace that restricts all file operations within a designated root directory. Workspaces can be attached at sandbox creation or mounted/unmounted dynamically via new API endpoints. Mounting syncs files from the storage backend into the container's `/workspace`; unmounting syncs back.
 
 ## Motivation
 
 - The current `object.Store` interface is limited (Put/Get/Delete/List/Exists/PresignedURL) and not used by any upstream code.
-- `github.com/dysodeng/fs` provides a richer `FileSystem` interface (directories, copy, move, rename, metadata, multipart upload) with drivers for local, S3, AliOSS, HuaweiOBS, TencentCOS, and MinIO.
+- `github.com/goairix/fs` provides a richer `FileSystem` interface (directories, copy, move, rename, metadata, multipart upload) with drivers for local, S3, AliOSS, HuaweiOBS, TencentCOS, and MinIO.
 - `ScopedFS` wraps `fs.FileSystem` with path confinement (prevents directory traversal) and working-directory semantics, making it ideal for per-sandbox workspace isolation.
 
 ## Part 1: Replace `object.Store` with `fs.FileSystem`
@@ -15,14 +15,14 @@ Replace the existing `internal/storage/object` layer with `github.com/dysodeng/f
 ### Changes
 
 1. **Delete** `internal/storage/object/` (all subdirectories and files).
-2. **Add dependency** `github.com/dysodeng/fs` to `go.mod`.
+2. **Add dependency** `github.com/goairix/fs` to `go.mod`.
 3. **Update `config.go`**: Rename `ObjectStorageConfig` to `FileSystemConfig`. Map provider names to `fs` driver constructors:
-   - `local` -> `github.com/dysodeng/fs/driver/local`
-   - `s3` -> `github.com/dysodeng/fs/driver/s3`
-   - `cos` -> `github.com/dysodeng/fs/driver/txcos`
-   - `oss` -> `github.com/dysodeng/fs/driver/alioss`
-   - `obs` -> `github.com/dysodeng/fs/driver/hwobs`
-   - `minio` -> `github.com/dysodeng/fs/driver/minio`
+   - `local` -> `github.com/goairix/fs/driver/local`
+   - `s3` -> `github.com/goairix/fs/driver/s3`
+   - `cos` -> `github.com/goairix/fs/driver/txcos`
+   - `oss` -> `github.com/goairix/fs/driver/alioss`
+   - `obs` -> `github.com/goairix/fs/driver/hwobs`
+   - `minio` -> `github.com/goairix/fs/driver/minio`
 4. **New file** `internal/storage/filesystem.go`: Factory function `NewFileSystem(cfg config.FileSystemConfig) (fs.FileSystem, error)` that creates the appropriate driver based on `cfg.Provider`.
 5. **Update `main.go`**: Call `storage.NewFileSystem(cfg.Storage.FileSystem)` at startup, pass the instance to `Manager`.
 
@@ -246,7 +246,7 @@ The storage path itself is NOT deleted - it persists for future use.
 | `pkg/types/sandbox.go` | Modify | Add WorkspacePath to CreateSandboxRequest |
 | `pkg/types/workspace.go` | Create | Workspace request/response types |
 | `cmd/sandbox/main.go` | Modify | Initialize fs.FileSystem, pass to Manager |
-| `go.mod` | Modify | Add github.com/dysodeng/fs dependency |
+| `go.mod` | Modify | Add github.com/goairix/fs dependency |
 
 ## Error Handling
 

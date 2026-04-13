@@ -370,9 +370,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			return err
 		}
 		m.updateLastSyncedAt(sb)
-		if m.sessions != nil && sb != nil {
-			_ = m.sessions.Save(ctx, sb)
-		}
+		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -384,9 +382,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			return err
 		}
 		m.updateLastSyncedAt(sb)
-		if m.sessions != nil && sb != nil {
-			_ = m.sessions.Save(ctx, sb)
-		}
+		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -418,9 +414,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// Nothing to do
 	if len(changedSet) == 0 && len(deletedFiles) == 0 {
 		m.updateLastSyncedAt(sb)
-		if m.sessions != nil && sb != nil {
-			_ = m.sessions.Save(ctx, sb)
-		}
+		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -437,9 +431,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	}
 
 	m.updateLastSyncedAt(sb)
-	if m.sessions != nil && sb != nil {
-		_ = m.sessions.Save(ctx, sb)
-	}
+	m.saveSessionIfAlive(ctx, sandboxID, sb)
 	return nil
 }
 
@@ -452,6 +444,23 @@ func (m *Manager) updateLastSyncedAt(sb *Sandbox) {
 	sb.Workspace.LastSyncedAt = time.Now()
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
+}
+
+// saveSessionIfAlive persists sb to the session store only if the sandbox is
+// still registered in the in-memory map. This prevents a concurrent Destroy
+// (which removes the sandbox from the map and deletes the Redis key) from
+// having its key re-created by an in-flight autoSync goroutine that captured
+// the sb pointer before Destroy ran.
+func (m *Manager) saveSessionIfAlive(ctx context.Context, sandboxID string, sb *Sandbox) {
+	if m.sessions == nil || sb == nil {
+		return
+	}
+	m.mu.RLock()
+	_, alive := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if alive {
+		_ = m.sessions.Save(ctx, sb)
+	}
 }
 
 // fullSyncFromContainer downloads the entire /workspace as a tar and extracts all files.

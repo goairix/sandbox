@@ -35,6 +35,8 @@ func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, re
 		Mode:    0644,
 		Size:    int64(len(content)),
 		ModTime: time.Now(),
+		Uid:     1000,
+		Gid:     1000,
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("write tar header: %w", err)

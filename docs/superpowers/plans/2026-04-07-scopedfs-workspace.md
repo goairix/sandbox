@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the `object.Store` storage layer with `github.com/dysodeng/fs` (`fs.FileSystem`) and integrate `ScopedFS` as a per-sandbox workspace with mount/unmount/sync capabilities.
+**Goal:** Replace the `object.Store` storage layer with `github.com/goairix/fs` (`fs.FileSystem`) and integrate `ScopedFS` as a per-sandbox workspace with mount/unmount/sync capabilities.
 
 **Architecture:** A shared `fs.FileSystem` instance (created from config at startup) replaces the old `object.Store`. Each sandbox can optionally mount a workspace via `ScopedFS`, which confines all file operations to a root path on the storage backend. Mounting syncs files from storage into the container `/workspace`; unmounting syncs back. Workspace lifecycle is independent of sandbox lifecycle — storage paths persist after sandbox destruction.
 
-**Tech Stack:** Go 1.25, `github.com/dysodeng/fs` (v0.3.6), Gin HTTP framework, Docker/Kubernetes runtime, `testify` for testing.
+**Tech Stack:** Go 1.25, `github.com/goairix/fs` (v0.3.6), Gin HTTP framework, Docker/Kubernetes runtime, `testify` for testing.
 
 ---
 
@@ -29,11 +29,11 @@
 | `internal/api/handler/workspace.go` | **Create** | Workspace HTTP handlers |
 | `internal/api/router.go` | **Modify** | Register workspace routes |
 | `cmd/sandbox/main.go` | **Modify** | Initialize `fs.FileSystem`, pass to Manager |
-| `go.mod` / `go.sum` | **Modify** | Add `github.com/dysodeng/fs` dependency |
+| `go.mod` / `go.sum` | **Modify** | Add `github.com/goairix/fs` dependency |
 
 ---
 
-### Task 1: Add `github.com/dysodeng/fs` dependency and delete old `object.Store`
+### Task 1: Add `github.com/goairix/fs` dependency and delete old `object.Store`
 
 **Files:**
 - Delete: `internal/storage/object/` (entire directory)
@@ -48,7 +48,7 @@ rm -rf internal/storage/object
 - [ ] **Step 2: Add the `fs` dependency**
 
 ```bash
-cd /Users/dysodeng/project/go/cloud/sandbox && go get github.com/dysodeng/fs@latest
+cd /Users/dysodeng/project/go/cloud/sandbox && go get github.com/goairix/fs@latest
 ```
 
 - [ ] **Step 3: Tidy modules to remove unused cloud SDK dependencies**
@@ -68,7 +68,7 @@ Expected: Build succeeds. The deleted `object` package was not imported by any u
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A && git commit -m "refactor(storage): remove object.Store, add github.com/dysodeng/fs dependency"
+git add -A && git commit -m "refactor(storage): remove object.Store, add github.com/goairix/fs dependency"
 ```
 
 ---
@@ -267,13 +267,13 @@ package storage
 import (
 	"fmt"
 
-	"github.com/dysodeng/fs"
-	"github.com/dysodeng/fs/driver/alioss"
-	"github.com/dysodeng/fs/driver/hwobs"
-	"github.com/dysodeng/fs/driver/local"
-	"github.com/dysodeng/fs/driver/minio"
-	"github.com/dysodeng/fs/driver/s3"
-	"github.com/dysodeng/fs/driver/txcos"
+	"github.com/goairix/fs"
+	"github.com/goairix/fs/driver/alioss"
+	"github.com/goairix/fs/driver/hwobs"
+	"github.com/goairix/fs/driver/local"
+	"github.com/goairix/fs/driver/minio"
+	"github.com/goairix/fs/driver/s3"
+	"github.com/goairix/fs/driver/txcos"
 
 	"github.com/goairix/sandbox/internal/config"
 )
@@ -377,7 +377,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dysodeng/fs/driver/local"
+	"github.com/goairix/fs/driver/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -639,7 +639,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 )
 
 // ErrPathEscaped is returned when a path attempts to escape the scoped root directory.
@@ -1076,7 +1076,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"

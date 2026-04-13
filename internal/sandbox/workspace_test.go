@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,9 +231,14 @@ type mockFileInfo struct {
 	modTime time.Time
 }
 
-func (m mockFileInfo) Name() string       { return m.name }
-func (m mockFileInfo) Size() int64        { return m.size }
-func (m mockFileInfo) Mode() os.FileMode  { if m.dir { return os.ModeDir | 0755 }; return 0644 }
+func (m mockFileInfo) Name() string { return m.name }
+func (m mockFileInfo) Size() int64  { return m.size }
+func (m mockFileInfo) Mode() os.FileMode {
+	if m.dir {
+		return os.ModeDir | 0755
+	}
+	return 0644
+}
 func (m mockFileInfo) ModTime() time.Time { return m.modTime }
 func (m mockFileInfo) IsDir() bool        { return m.dir }
 func (m mockFileInfo) Sys() interface{}   { return nil }
@@ -274,14 +279,16 @@ func (m *mockScopedFS) Create(context.Context, string, ...fs.Option) (io.WriteCl
 func (m *mockScopedFS) OpenFile(context.Context, string, int, os.FileMode, ...fs.Option) (io.ReadWriteCloser, error) {
 	return nil, nil
 }
-func (m *mockScopedFS) Remove(context.Context, string, ...fs.Option) error              { return nil }
-func (m *mockScopedFS) Copy(context.Context, string, string, ...fs.Option) error        { return nil }
-func (m *mockScopedFS) Move(context.Context, string, string, ...fs.Option) error        { return nil }
-func (m *mockScopedFS) Rename(context.Context, string, string, ...fs.Option) error      { return nil }
-func (m *mockScopedFS) Stat(context.Context, string, ...fs.Option) (fs.FileInfo, error) { return nil, nil }
-func (m *mockScopedFS) Exists(context.Context, string, ...fs.Option) (bool, error)      { return false, nil }
-func (m *mockScopedFS) IsDir(context.Context, string, ...fs.Option) (bool, error)       { return false, nil }
-func (m *mockScopedFS) IsFile(context.Context, string, ...fs.Option) (bool, error)      { return false, nil }
+func (m *mockScopedFS) Remove(context.Context, string, ...fs.Option) error         { return nil }
+func (m *mockScopedFS) Copy(context.Context, string, string, ...fs.Option) error   { return nil }
+func (m *mockScopedFS) Move(context.Context, string, string, ...fs.Option) error   { return nil }
+func (m *mockScopedFS) Rename(context.Context, string, string, ...fs.Option) error { return nil }
+func (m *mockScopedFS) Stat(context.Context, string, ...fs.Option) (fs.FileInfo, error) {
+	return nil, nil
+}
+func (m *mockScopedFS) Exists(context.Context, string, ...fs.Option) (bool, error) { return false, nil }
+func (m *mockScopedFS) IsDir(context.Context, string, ...fs.Option) (bool, error)  { return false, nil }
+func (m *mockScopedFS) IsFile(context.Context, string, ...fs.Option) (bool, error) { return false, nil }
 func (m *mockScopedFS) SignFullUrl(context.Context, string, ...fs.Option) (string, error) {
 	return "", nil
 }

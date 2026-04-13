@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dysodeng/fs/driver/local"
+	"github.com/goairix/fs/driver/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

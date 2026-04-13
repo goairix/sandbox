@@ -6,7 +6,7 @@
 
 **Architecture:** 保留 collectFiles 元数据遍历阶段，用 io.Pipe 连接 writeTarStream（新方法，含有序预取池）和 UploadArchive，数据流式通过而非缓冲。删除 readFilesConcurrent。
 
-**Tech Stack:** Go stdlib（archive/tar, io, context）, github.com/dysodeng/fs, github.com/stretchr/testify
+**Tech Stack:** Go stdlib（archive/tar, io, context）, github.com/goairix/fs, github.com/stretchr/testify
 
 ---
 
@@ -108,7 +108,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dysodeng/fs"
+	"github.com/goairix/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
