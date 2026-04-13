@@ -8,7 +8,7 @@
 
 ## 目录结构
 
-```
+```uq
 sdk/
 ├── go/
 │   ├── go.mod              # module: github.com/goairix/sandbox-sdk-go
@@ -67,9 +67,9 @@ client := sandbox.NewClient(baseURL, apiKey,
 `Sandbox` 对象内部持有 `*Client` 和沙箱 ID，封装常见工作流。
 
 ```go
-// 创建沙箱
+// 创建沙箱，Mode 不传默认为 ModeEphemeral
 sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
-    Mode:      "ephemeral",  // 或 "persistent"
+    Mode:      sandbox.ModePersistent,  // 不传则默认 ModeEphemeral
     Timeout:   300,
     Resources: &sandbox.ResourceLimits{Memory: "256Mi"},
     Network:   &sandbox.NetworkConfig{Enabled: true, Whitelist: []string{"api.openai.com"}},
@@ -126,7 +126,20 @@ var (
 
 ## 类型定义（types.go）
 
-SDK 自定义类型，镜像服务端 `pkg/types`，但不依赖服务端包：
+SDK 自定义类型，镜像服务端 `pkg/types`，但不依赖服务端包。
+
+Mode 使用类型常量：
+
+```go
+type Mode string
+
+const (
+    ModeEphemeral  Mode = "ephemeral"
+    ModePersistent Mode = "persistent"
+)
+```
+
+类型列表：
 
 - `CreateSandboxRequest` / `SandboxResponse`
 - `ExecRequest` / `ExecResponse`
