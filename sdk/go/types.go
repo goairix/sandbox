@@ -47,8 +47,9 @@ type CreateSandboxRequest struct {
 	Timeout       int              `json:"timeout,omitempty"`
 	Resources     *ResourceLimits  `json:"resources,omitempty"`
 	Network       *NetworkConfig   `json:"network,omitempty"`
-	Dependencies  []DependencySpec `json:"dependencies,omitempty"`
-	WorkspacePath string           `json:"workspace_path,omitempty"`
+	Dependencies         []DependencySpec `json:"dependencies,omitempty"`
+	WorkspacePath        string           `json:"workspace_path,omitempty"`
+	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
 }
 
 // SandboxResponse is returned by sandbox lifecycle endpoints.
@@ -125,7 +126,8 @@ type FileUploadResponse struct {
 
 // MountWorkspaceRequest is the request body for POST /api/v1/sandboxes/:id/workspace/mount.
 type MountWorkspaceRequest struct {
-	RootPath string `json:"root_path"`
+	RootPath string   `json:"root_path"`
+	Exclude  []string `json:"exclude,omitempty"`
 }
 
 // MountWorkspaceResponse is returned by the mount workspace endpoint.

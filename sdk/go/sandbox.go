@@ -7,12 +7,13 @@ import (
 
 // SandboxOptions configures a new sandbox created via NewSandbox.
 type SandboxOptions struct {
-	Mode          Mode
-	Timeout       int
-	Resources     *ResourceLimits
-	Network       *NetworkConfig
-	Dependencies  []DependencySpec
-	WorkspacePath string
+	Mode                 Mode
+	Timeout              int
+	Resources            *ResourceLimits
+	Network              *NetworkConfig
+	Dependencies         []DependencySpec
+	WorkspacePath        string
+	WorkspaceSyncExclude []string
 }
 
 // Sandbox is a high-level handle to a running sandbox instance.
@@ -32,12 +33,13 @@ func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox,
 		mode = ModeEphemeral
 	}
 	req := CreateSandboxRequest{
-		Mode:          mode,
-		Timeout:       opts.Timeout,
-		Resources:     opts.Resources,
-		Network:       opts.Network,
-		Dependencies:  opts.Dependencies,
-		WorkspacePath: opts.WorkspacePath,
+		Mode:                 mode,
+		Timeout:              opts.Timeout,
+		Resources:            opts.Resources,
+		Network:              opts.Network,
+		Dependencies:         opts.Dependencies,
+		WorkspacePath:        opts.WorkspacePath,
+		WorkspaceSyncExclude: opts.WorkspaceSyncExclude,
 	}
 	resp, err := c.CreateSandbox(ctx, req)
 	if err != nil {
@@ -73,8 +75,9 @@ func (s *Sandbox) ListFiles(ctx context.Context, dir string) (FileListResponse, 
 }
 
 // MountWorkspace mounts a workspace by root path.
-func (s *Sandbox) MountWorkspace(ctx context.Context, rootPath string) error {
-	_, err := s.client.MountWorkspace(ctx, s.id, MountWorkspaceRequest{RootPath: rootPath})
+// exclude is an optional list of path prefixes to skip during all syncs.
+func (s *Sandbox) MountWorkspace(ctx context.Context, rootPath string, exclude ...string) error {
+	_, err := s.client.MountWorkspace(ctx, s.id, MountWorkspaceRequest{RootPath: rootPath, Exclude: exclude})
 	return err
 }
 
