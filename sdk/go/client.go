@@ -72,7 +72,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return fmt.Errorf("sandbox: build request: %w", err)
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -177,7 +177,7 @@ func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Rea
 		pr.CloseWithError(err)
 		return FileUploadResponse{}, fmt.Errorf("sandbox: build request: %w", err)
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
 	resp, err := c.httpClient.Do(req)
@@ -200,7 +200,7 @@ func (c *Client) DownloadFile(ctx context.Context, id, remotePath string) (io.Re
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: build request: %w", err)
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: http: %w", err)

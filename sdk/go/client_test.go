@@ -31,8 +31,8 @@ func TestClientCreateSandbox(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get("X-API-Key") != "test-key" {
-			t.Error("missing X-API-Key header")
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Error("missing or invalid Authorization header")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(want)
