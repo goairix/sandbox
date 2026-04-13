@@ -194,7 +194,7 @@ func execPipeInPod(ctx context.Context, client kubernetes.Interface, restConfig 
 // listFilesInPod lists files in a directory inside a pod.
 func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
-		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
+		Command: fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
 		WorkDir: "/workspace",
 	})
 	if err != nil {
@@ -219,10 +219,6 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 		fmt.Sscanf(parts[3], "%d", &modTime)
 
 		fullPath := dirPath + "/" + parts[0]
-		// Skip the directory itself (find lists the query dir as an entry).
-		if fullPath == dirPath || strings.TrimRight(fullPath, "/") == strings.TrimRight(dirPath, "/") {
-			continue
-		}
 
 		files = append(files, runtime.FileInfo{
 			Name:    parts[0],

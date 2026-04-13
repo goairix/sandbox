@@ -94,7 +94,7 @@ func (r *Runtime) DownloadDir(ctx context.Context, id string, dirPath string) (i
 
 func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	result, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: fmt.Sprintf("find %s -maxdepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
+		Command: fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%Y\\t%%T@\\n'", shellEscape(dirPath)),
 		WorkDir: "/workspace",
 	})
 	if err != nil {
@@ -119,10 +119,6 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 		fmt.Sscanf(parts[3], "%d", &modTime)
 
 		fullPath := dirPath + "/" + parts[0]
-		// Skip the directory itself (find lists the query dir as an entry).
-		if fullPath == dirPath || strings.TrimRight(fullPath, "/") == strings.TrimRight(dirPath, "/") {
-			continue
-		}
 
 		files = append(files, runtime.FileInfo{
 			Name:    parts[0],
