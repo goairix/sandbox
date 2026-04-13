@@ -11,6 +11,14 @@ const (
 	ModePersistent Mode = "persistent"
 )
 
+// SyncDirection specifies the direction of a workspace sync operation.
+type SyncDirection string
+
+const (
+	SyncDirectionFromContainer SyncDirection = "from_container"
+	SyncDirectionToContainer   SyncDirection = "to_container"
+)
+
 // ResourceLimits specifies resource constraints for a sandbox.
 type ResourceLimits struct {
 	Memory string `json:"memory,omitempty"`
@@ -128,8 +136,8 @@ type MountWorkspaceResponse struct {
 
 // SyncWorkspaceRequest is the request body for POST /api/v1/sandboxes/:id/workspace/sync.
 type SyncWorkspaceRequest struct {
-	Direction string   `json:"direction"` // "to_container" | "from_container"
-	Exclude   []string `json:"exclude,omitempty"`
+	Direction SyncDirection `json:"direction"` // SyncDirectionToContainer | SyncDirectionFromContainer
+	Exclude   []string      `json:"exclude,omitempty"`
 }
 
 // SyncWorkspaceResponse is returned by the sync workspace endpoint.

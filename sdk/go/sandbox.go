@@ -7,11 +7,12 @@ import (
 
 // SandboxOptions configures a new sandbox created via NewSandbox.
 type SandboxOptions struct {
-	Mode         Mode
-	Timeout      int
-	Resources    *ResourceLimits
-	Network      *NetworkConfig
-	Dependencies []DependencySpec
+	Mode          Mode
+	Timeout       int
+	Resources     *ResourceLimits
+	Network       *NetworkConfig
+	Dependencies  []DependencySpec
+	WorkspacePath string
 }
 
 // Sandbox is a high-level handle to a running sandbox instance.
@@ -31,11 +32,12 @@ func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox,
 		mode = ModeEphemeral
 	}
 	req := CreateSandboxRequest{
-		Mode:         mode,
-		Timeout:      opts.Timeout,
-		Resources:    opts.Resources,
-		Network:      opts.Network,
-		Dependencies: opts.Dependencies,
+		Mode:          mode,
+		Timeout:       opts.Timeout,
+		Resources:     opts.Resources,
+		Network:       opts.Network,
+		Dependencies:  opts.Dependencies,
+		WorkspacePath: opts.WorkspacePath,
 	}
 	resp, err := c.CreateSandbox(ctx, req)
 	if err != nil {
@@ -83,12 +85,12 @@ func (s *Sandbox) UnmountWorkspace(ctx context.Context) error {
 
 // Sync syncs the workspace from container to host (from_container direction).
 func (s *Sandbox) Sync(ctx context.Context) (SyncWorkspaceResponse, error) {
-	return s.client.SyncWorkspace(ctx, s.id, SyncWorkspaceRequest{Direction: "from_container"})
+	return s.client.SyncWorkspace(ctx, s.id, SyncWorkspaceRequest{Direction: SyncDirectionFromContainer})
 }
 
 // SyncTo syncs the workspace from host to container (to_container direction).
 func (s *Sandbox) SyncTo(ctx context.Context) (SyncWorkspaceResponse, error) {
-	return s.client.SyncWorkspace(ctx, s.id, SyncWorkspaceRequest{Direction: "to_container"})
+	return s.client.SyncWorkspace(ctx, s.id, SyncWorkspaceRequest{Direction: SyncDirectionToContainer})
 }
 
 // WorkspaceInfo returns the current workspace status.

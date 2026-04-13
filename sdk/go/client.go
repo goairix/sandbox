@@ -33,9 +33,11 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithHTTPClient replaces the underlying *http.Client.
+// The provided client is copied to avoid mutating the caller's value.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
-		c.httpClient = hc
+		copied := *hc
+		c.httpClient = &copied
 	}
 }
 
@@ -106,6 +108,11 @@ func (c *Client) decodeError(resp *http.Response) error {
 	}
 }
 
+// sandboxBase returns the base path for a sandbox, with the id properly escaped.
+func (c *Client) sandboxBase(id string) string {
+	return "/api/v1/sandboxes/" + url.PathEscape(id)
+}
+
 // CreateSandbox creates a new sandbox. POST /api/v1/sandboxes
 func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxResponse, error) {
 	var resp SandboxResponse
@@ -115,24 +122,24 @@ func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (S
 // GetSandbox retrieves sandbox details. GET /api/v1/sandboxes/:id
 func (c *Client) GetSandbox(ctx context.Context, id string) (SandboxResponse, error) {
 	var resp SandboxResponse
-	return resp, c.do(ctx, http.MethodGet, "/api/v1/sandboxes/"+id, nil, &resp)
+	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id), nil, &resp)
 }
 
 // DestroySandbox destroys a sandbox. DELETE /api/v1/sandboxes/:id
 func (c *Client) DestroySandbox(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+id, nil, nil)
+	return c.do(ctx, http.MethodDelete, c.sandboxBase(id), nil, nil)
 }
 
 // UpdateNetwork updates network config. PUT /api/v1/sandboxes/:id/network
 func (c *Client) UpdateNetwork(ctx context.Context, id string, req UpdateNetworkRequest) (UpdateNetworkResponse, error) {
 	var resp UpdateNetworkResponse
-	return resp, c.do(ctx, http.MethodPut, "/api/v1/sandboxes/"+id+"/network", req, &resp)
+	return resp, c.do(ctx, http.MethodPut, c.sandboxBase(id)+"/network", req, &resp)
 }
 
 // Exec executes code in a sandbox. POST /api/v1/sandboxes/:id/exec
 func (c *Client) Exec(ctx context.Context, id string, req ExecRequest) (ExecResponse, error) {
 	var resp ExecResponse
-	return resp, c.do(ctx, http.MethodPost, "/api/v1/sandboxes/"+id+"/exec", req, &resp)
+	return resp, c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/exec", req, &resp)
 }
 
 // Execute runs a one-shot execution. POST /api/v1/execute
@@ -142,24 +149,32 @@ func (c *Client) Execute(ctx context.Context, req ExecuteRequest) (ExecResponse,
 }
 
 // UploadFile uploads a file to the sandbox. POST /api/v1/sandboxes/:id/files/upload
+// The file content is streamed via io.Pipe to avoid buffering the entire file in memory.
 func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Reader) (FileUploadResponse, error) {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	fw, err := mw.CreateFormFile("file", filepath.Base(remotePath))
-	if err != nil {
-		return FileUploadResponse{}, fmt.Errorf("sandbox: create form file: %w", err)
-	}
-	if _, err := io.Copy(fw, r); err != nil {
-		return FileUploadResponse{}, fmt.Errorf("sandbox: copy file: %w", err)
-	}
-	_ = mw.WriteField("path", remotePath)
-	if err := mw.Close(); err != nil {
-		return FileUploadResponse{}, fmt.Errorf("sandbox: close multipart writer: %w", err)
-	}
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		fw, err := mw.CreateFormFile("file", filepath.Base(remotePath))
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: create form file: %w", err))
+			return
+		}
+		if _, err := io.Copy(fw, r); err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: copy file: %w", err))
+			return
+		}
+		if err := mw.WriteField("path", remotePath); err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: write field: %w", err))
+			return
+		}
+		pw.CloseWithError(mw.Close())
+	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/api/v1/sandboxes/"+id+"/files/upload", &buf)
+		c.baseURL+c.sandboxBase(id)+"/files/upload", pr)
 	if err != nil {
+		pr.CloseWithError(err)
 		return FileUploadResponse{}, fmt.Errorf("sandbox: build request: %w", err)
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
@@ -180,7 +195,7 @@ func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Rea
 // DownloadFile downloads a file from the sandbox. GET /api/v1/sandboxes/:id/files/download
 // Caller is responsible for closing the returned ReadCloser.
 func (c *Client) DownloadFile(ctx context.Context, id, remotePath string) (io.ReadCloser, error) {
-	u := c.baseURL + "/api/v1/sandboxes/" + id + "/files/download?path=" + url.QueryEscape(remotePath)
+	u := c.baseURL + c.sandboxBase(id) + "/files/download?path=" + url.QueryEscape(remotePath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: build request: %w", err)
@@ -200,29 +215,29 @@ func (c *Client) DownloadFile(ctx context.Context, id, remotePath string) (io.Re
 // ListFiles lists files in a directory. GET /api/v1/sandboxes/:id/files/list
 func (c *Client) ListFiles(ctx context.Context, id, dir string) (FileListResponse, error) {
 	var resp FileListResponse
-	path := "/api/v1/sandboxes/" + id + "/files/list?path=" + url.QueryEscape(dir)
+	path := c.sandboxBase(id) + "/files/list?path=" + url.QueryEscape(dir)
 	return resp, c.do(ctx, http.MethodGet, path, nil, &resp)
 }
 
 // MountWorkspace mounts a workspace. POST /api/v1/sandboxes/:id/workspace/mount
 func (c *Client) MountWorkspace(ctx context.Context, id string, req MountWorkspaceRequest) (MountWorkspaceResponse, error) {
 	var resp MountWorkspaceResponse
-	return resp, c.do(ctx, http.MethodPost, "/api/v1/sandboxes/"+id+"/workspace/mount", req, &resp)
+	return resp, c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/workspace/mount", req, &resp)
 }
 
 // UnmountWorkspace unmounts the workspace. POST /api/v1/sandboxes/:id/workspace/unmount
 func (c *Client) UnmountWorkspace(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/api/v1/sandboxes/"+id+"/workspace/unmount", nil, nil)
+	return c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/workspace/unmount", nil, nil)
 }
 
 // SyncWorkspace syncs the workspace. POST /api/v1/sandboxes/:id/workspace/sync
 func (c *Client) SyncWorkspace(ctx context.Context, id string, req SyncWorkspaceRequest) (SyncWorkspaceResponse, error) {
 	var resp SyncWorkspaceResponse
-	return resp, c.do(ctx, http.MethodPost, "/api/v1/sandboxes/"+id+"/workspace/sync", req, &resp)
+	return resp, c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/workspace/sync", req, &resp)
 }
 
 // GetWorkspaceInfo returns workspace status. GET /api/v1/sandboxes/:id/workspace/info
 func (c *Client) GetWorkspaceInfo(ctx context.Context, id string) (WorkspaceInfoResponse, error) {
 	var resp WorkspaceInfoResponse
-	return resp, c.do(ctx, http.MethodGet, "/api/v1/sandboxes/"+id+"/workspace/info", nil, &resp)
+	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id)+"/workspace/info", nil, &resp)
 }

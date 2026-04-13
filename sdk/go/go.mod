@@ -1,3 +1,3 @@
 module github.com/goairix/sandbox-sdk-go
 
-go 1.25.8
+go 1.21

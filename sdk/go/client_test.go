@@ -81,3 +81,125 @@ func TestClientErrorResponse(t *testing.T) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestClientDestroySandbox(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/sandboxes/sb-del" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err := client.DestroySandbox(context.Background(), "sb-del"); err != nil {
+		t.Fatalf("DestroySandbox error: %v", err)
+	}
+}
+
+func TestClientUpdateNetwork(t *testing.T) {
+	want := sandbox.UpdateNetworkResponse{Enabled: true, Whitelist: []string{"api.openai.com"}}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/sandboxes/sb-net/network" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.UpdateNetwork(context.Background(), "sb-net", sandbox.UpdateNetworkRequest{
+		Enabled: true, Whitelist: []string{"api.openai.com"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateNetwork error: %v", err)
+	}
+	if !got.Enabled || len(got.Whitelist) != 1 || got.Whitelist[0] != "api.openai.com" {
+		t.Errorf("unexpected response: %+v", got)
+	}
+}
+
+func TestClientListFiles(t *testing.T) {
+	want := sandbox.FileListResponse{
+		Path:  "/workspace",
+		Files: []sandbox.FileInfo{{Name: "main.py", Path: "/workspace/main.py", Size: 10}},
+	}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/sandboxes/sb-ls/files/list" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.ListFiles(context.Background(), "sb-ls", "/workspace")
+	if err != nil {
+		t.Fatalf("ListFiles error: %v", err)
+	}
+	if got.Path != "/workspace" || len(got.Files) != 1 || got.Files[0].Name != "main.py" {
+		t.Errorf("unexpected response: %+v", got)
+	}
+}
+
+func TestClientMountWorkspace(t *testing.T) {
+	want := sandbox.MountWorkspaceResponse{RootPath: "/data/user123"}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-mnt/workspace/mount" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.MountWorkspace(context.Background(), "sb-mnt", sandbox.MountWorkspaceRequest{RootPath: "/data/user123"})
+	if err != nil {
+		t.Fatalf("MountWorkspace error: %v", err)
+	}
+	if got.RootPath != "/data/user123" {
+		t.Errorf("RootPath = %q, want %q", got.RootPath, "/data/user123")
+	}
+}
+
+func TestClientUnmountWorkspace(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-umnt/workspace/unmount" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err := client.UnmountWorkspace(context.Background(), "sb-umnt"); err != nil {
+		t.Fatalf("UnmountWorkspace error: %v", err)
+	}
+}
+
+func TestClientSyncWorkspace(t *testing.T) {
+	want := sandbox.SyncWorkspaceResponse{Direction: "from_container", Message: "synced"}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-sync/workspace/sync" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.SyncWorkspace(context.Background(), "sb-sync", sandbox.SyncWorkspaceRequest{
+		Direction: sandbox.SyncDirectionFromContainer,
+	})
+	if err != nil {
+		t.Fatalf("SyncWorkspace error: %v", err)
+	}
+	if got.Direction != "from_container" {
+		t.Errorf("Direction = %q, want %q", got.Direction, "from_container")
+	}
+}
+
+func TestClientGetWorkspaceInfo(t *testing.T) {
+	want := sandbox.WorkspaceInfoResponse{Mounted: true, RootPath: "/data/user123"}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/sandboxes/sb-info/workspace/info" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.GetWorkspaceInfo(context.Background(), "sb-info")
+	if err != nil {
+		t.Fatalf("GetWorkspaceInfo error: %v", err)
+	}
+	if !got.Mounted || got.RootPath != "/data/user123" {
+		t.Errorf("unexpected response: %+v", got)
+	}
+}
+
