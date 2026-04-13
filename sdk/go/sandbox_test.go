@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	sandbox "github.com/goairix/sandbox-sdk-go"
+	sandbox "github.com/goairix/sandbox/sdk/go"
 )
 
 func newSandboxTestServer(t *testing.T, sandboxID string) (*httptest.Server, *sandbox.Client) {

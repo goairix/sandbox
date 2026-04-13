@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	sandbox "github.com/goairix/sandbox-sdk-go"
+	sandbox "github.com/goairix/sandbox/sdk/go"
 )
 
 func newTestServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *sandbox.Client) {

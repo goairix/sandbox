@@ -3,7 +3,7 @@ package sandbox_test
 import (
 	"testing"
 
-	sandbox "github.com/goairix/sandbox-sdk-go"
+	sandbox "github.com/goairix/sandbox/sdk/go"
 )
 
 func TestModeConstants(t *testing.T) {

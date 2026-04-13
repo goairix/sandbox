@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	sandbox "github.com/goairix/sandbox-sdk-go"
+	sandbox "github.com/goairix/sandbox/sdk/go"
 )
 
 func TestSandboxErrorIs(t *testing.T) {

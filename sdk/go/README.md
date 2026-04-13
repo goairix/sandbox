@@ -5,7 +5,7 @@ Go SDK for the [Sandbox](https://github.com/goairix/sandbox) execution service.
 ## Installation
 
 ```bash
-go get github.com/goairix/sandbox-sdk-go
+go get github.com/goairix/sandbox/sdk/go
 ```
 
 Requires Go 1.21+.
@@ -13,7 +13,7 @@ Requires Go 1.21+.
 ## Quick Start
 
 ```go
-import sandbox "github.com/goairix/sandbox-sdk-go"
+import sandbox "github.com/goairix/sandbox/sdk/go"
 
 client := sandbox.NewClient("http://localhost:8080", "your-api-key")
 
