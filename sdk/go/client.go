@@ -241,3 +241,35 @@ func (c *Client) GetWorkspaceInfo(ctx context.Context, id string) (WorkspaceInfo
 	var resp WorkspaceInfoResponse
 	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id)+"/workspace/info", nil, &resp)
 }
+
+// ListSkills lists all agent skills in the sandbox. GET /api/v1/sandboxes/:id/skills
+func (c *Client) ListSkills(ctx context.Context, id string) (SkillListResponse, error) {
+	var resp SkillListResponse
+	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id)+"/skills", nil, &resp)
+}
+
+// GetSkill returns the full content and file list of a skill. GET /api/v1/sandboxes/:id/skills/:name
+func (c *Client) GetSkill(ctx context.Context, id, name string) (SkillResponse, error) {
+	var resp SkillResponse
+	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id)+"/skills/"+url.PathEscape(name), nil, &resp)
+}
+
+// GetSkillFile returns the raw content of an attached skill file. GET /api/v1/sandboxes/:id/skills/:name/files/*filepath
+// Caller is responsible for closing the returned ReadCloser.
+func (c *Client) GetSkillFile(ctx context.Context, id, name, filePath string) (io.ReadCloser, error) {
+	u := c.baseURL + c.sandboxBase(id) + "/skills/" + url.PathEscape(name) + "/files/" + filePath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: http: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, c.decodeError(resp)
+	}
+	return resp.Body, nil
+}

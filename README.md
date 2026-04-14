@@ -140,6 +140,9 @@ curl -X POST http://localhost:8080/api/v1/execute/stream \
 | POST | `/api/v1/sandboxes/:id/workspace/unmount` | 卸载工作空间 |
 | POST | `/api/v1/sandboxes/:id/workspace/sync` | 手动同步工作空间 |
 | GET | `/api/v1/sandboxes/:id/workspace/info` | 获取工作空间信息 |
+| GET | `/api/v1/sandboxes/:id/skills` | 列出 agent skills |
+| GET | `/api/v1/sandboxes/:id/skills/:name` | 获取 skill 详情（frontmatter + 正文 + 附属文件列表）|
+| GET | `/api/v1/sandboxes/:id/skills/:name/files/*filepath` | 读取 skill 附属文件内容 |
 
 ## 配置
 

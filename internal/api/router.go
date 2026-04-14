@@ -63,6 +63,11 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int) *gin.Engine {
 	v1.POST("/sandboxes/:id/workspace/sync", h.SyncWorkspace)
 	v1.GET("/sandboxes/:id/workspace/info", h.GetWorkspaceInfo)
 
+	// Agent skill discovery
+	v1.GET("/sandboxes/:id/skills", h.ListSkills)
+	v1.GET("/sandboxes/:id/skills/:name", h.GetSkill)
+	v1.GET("/sandboxes/:id/skills/:name/files/*filepath", h.GetSkillFile)
+
 	// One-shot execution
 	v1.POST("/execute", h.ExecuteOneShot)
 	v1.POST("/execute/stream", h.ExecuteOneShotStream)

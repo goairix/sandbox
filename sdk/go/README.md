@@ -93,6 +93,29 @@ err = sb.EnableNetwork(ctx, []string{"api.openai.com"})
 err = sb.DisableNetwork(ctx)
 ```
 
+### Agent Skills
+
+```go
+// List all skills in the sandbox
+list, err := sb.ListSkills(ctx)
+for _, s := range list.Skills {
+    fmt.Println(s.Name, "-", s.Description)
+}
+
+// Get full skill content and attached files
+skill, err := sb.GetSkill(ctx, "sandbox-execute")
+fmt.Println(skill.Content)
+for _, f := range skill.Files {
+    fmt.Println(f.Path)
+}
+
+// Read an attached file
+rc, err := sb.GetSkillFile(ctx, "sandbox-execute", "scripts/execute.sh")
+defer rc.Close()
+```
+
+Skills are stored at `/workspace/.agent/skills/{name}/SKILL.md` inside the sandbox.
+
 ## Error Handling
 
 ```go
@@ -137,6 +160,9 @@ Predefined sentinels:
 | `UnmountWorkspace(ctx, id)` | POST /api/v1/sandboxes/:id/workspace/unmount |
 | `SyncWorkspace(ctx, id, req)` | POST /api/v1/sandboxes/:id/workspace/sync |
 | `GetWorkspaceInfo(ctx, id)` | GET /api/v1/sandboxes/:id/workspace/info |
+| `ListSkills(ctx, id)` | GET /api/v1/sandboxes/:id/skills |
+| `GetSkill(ctx, id, name)` | GET /api/v1/sandboxes/:id/skills/:name |
+| `GetSkillFile(ctx, id, name, path)` | GET /api/v1/sandboxes/:id/skills/:name/files/*filepath |
 
 ### Convenience methods on Client
 

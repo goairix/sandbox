@@ -113,6 +113,23 @@ func (s *Sandbox) DisableNetwork(ctx context.Context) error {
 	return err
 }
 
+// ListSkills lists all agent skills stored in the sandbox at /workspace/.agent/skills/.
+func (s *Sandbox) ListSkills(ctx context.Context) (SkillListResponse, error) {
+	return s.client.ListSkills(ctx, s.id)
+}
+
+// GetSkill returns the full content and attached file list for a named skill.
+func (s *Sandbox) GetSkill(ctx context.Context, name string) (SkillResponse, error) {
+	return s.client.GetSkill(ctx, s.id, name)
+}
+
+// GetSkillFile returns the raw content of an attached skill file.
+// filePath is relative to the skill directory (e.g. "scripts/run.sh").
+// Caller must close the returned ReadCloser.
+func (s *Sandbox) GetSkillFile(ctx context.Context, name, filePath string) (io.ReadCloser, error) {
+	return s.client.GetSkillFile(ctx, s.id, name, filePath)
+}
+
 // Run is a convenience method on Client for one-shot execution without pre-creating a sandbox.
 func (c *Client) Run(ctx context.Context, language, code string) (ExecResponse, error) {
 	return c.Execute(ctx, ExecuteRequest{Language: language, Code: code})
