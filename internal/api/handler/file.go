@@ -77,9 +77,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 	}
 
 	if err := h.manager.UploadFile(c.Request.Context(), id, fullPath, file); err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -108,9 +106,7 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 
 	reader, err := h.manager.DownloadFile(c.Request.Context(), id, path)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 	defer reader.Close()
@@ -137,9 +133,7 @@ func (h *Handler) ListFiles(c *gin.Context) {
 
 	files, err := h.manager.ListFiles(c.Request.Context(), id, dir)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 

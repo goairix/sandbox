@@ -49,6 +49,11 @@ func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, re
 	}
 
 	dir := filepath.Dir(destPath)
+	if _, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("mkdir -p %s", shellEscape(dir)),
+	}); err != nil {
+		return fmt.Errorf("create directory %s: %w", dir, err)
+	}
 	return r.cli.CopyToContainer(ctx, id, dir, &buf, container.CopyToContainerOptions{})
 }
 

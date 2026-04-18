@@ -149,7 +149,7 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	raw, err := io.ReadAll(reader)
 	reader.Close()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{Message: err.Error()})
+		internalError(c, err)
 		return
 	}
 

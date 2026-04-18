@@ -50,9 +50,7 @@ func (h *Handler) ExecSync(c *gin.Context) {
 
 	result, err := h.manager.Exec(c.Request.Context(), id, execReq)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -99,9 +97,7 @@ func (h *Handler) ExecStream(c *gin.Context) {
 
 	ch, err := h.manager.ExecStream(c.Request.Context(), id, execReq)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 

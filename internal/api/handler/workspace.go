@@ -27,7 +27,7 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 			c.JSON(http.StatusConflict, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{Message: err.Error()})
+		internalError(c, err)
 		return
 	}
 
@@ -46,7 +46,7 @@ func (h *Handler) UnmountWorkspace(c *gin.Context) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{Message: err.Error()})
+		internalError(c, err)
 		return
 	}
 
@@ -71,7 +71,7 @@ func (h *Handler) SyncWorkspace(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{Message: err.Error()})
+		internalError(c, err)
 		return
 	}
 

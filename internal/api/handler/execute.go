@@ -62,9 +62,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 
 	sb, err := h.manager.Create(ctx, cfg)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 	// Use context.WithoutCancel so Destroy completes even if client disconnects
@@ -87,9 +85,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		Env:     req.Env,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -133,9 +129,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 
 	sb, err := h.manager.Create(ctx, cfg)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 	// Use context.WithoutCancel so Destroy completes even if client disconnects
@@ -157,9 +151,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 		Env:     req.Env,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 

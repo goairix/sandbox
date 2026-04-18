@@ -77,9 +77,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 
 	sb, err := h.manager.Create(c.Request.Context(), cfg)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -137,9 +135,7 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 	}
 
 	if err := h.manager.UpdateNetwork(c.Request.Context(), id, req.Enabled, req.Whitelist); err != nil {
-		c.JSON(http.StatusInternalServerError, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
