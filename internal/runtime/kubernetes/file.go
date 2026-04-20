@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -215,8 +216,10 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 		fmt.Sscanf(parts[1], "%d", &size)
 		isDir := parts[2] == "d"
 
-		var modTime int64
-		fmt.Sscanf(parts[3], "%d", &modTime)
+		var modTimeFloat float64
+		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
+		sec := int64(modTimeFloat)
+		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		fullPath := dirPath + "/" + parts[0]
 
@@ -225,7 +228,7 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: modTime,
+			ModTime: time.Unix(sec, nsec),
 		})
 	}
 

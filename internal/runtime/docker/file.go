@@ -120,8 +120,10 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 		fmt.Sscanf(parts[1], "%d", &size)
 		isDir := parts[2] == "d"
 
-		var modTime int64
-		fmt.Sscanf(parts[3], "%d", &modTime)
+		var modTimeFloat float64
+		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
+		sec := int64(modTimeFloat)
+		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		fullPath := dirPath + "/" + parts[0]
 
@@ -130,7 +132,7 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: modTime,
+			ModTime: time.Unix(sec, nsec),
 		})
 	}
 

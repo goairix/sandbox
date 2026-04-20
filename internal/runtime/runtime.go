@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).
@@ -74,5 +75,5 @@ type FileInfo struct {
 	Path    string
 	Size    int64
 	IsDir   bool
-	ModTime int64 // unix timestamp
+	ModTime time.Time
 }

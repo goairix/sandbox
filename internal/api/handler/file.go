@@ -140,10 +140,11 @@ func (h *Handler) ListFiles(c *gin.Context) {
 	var fileInfos []types.FileInfo
 	for _, f := range files {
 		fileInfos = append(fileInfos, types.FileInfo{
-			Name:  f.Name,
-			Path:  f.Path,
-			Size:  f.Size,
-			IsDir: f.IsDir,
+			Name:    f.Name,
+			Path:    f.Path,
+			Size:    f.Size,
+			IsDir:   f.IsDir,
+			ModTime: f.ModTime,
 		})
 	}
 
