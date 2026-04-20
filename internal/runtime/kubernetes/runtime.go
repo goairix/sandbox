@@ -146,6 +146,22 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	return listFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, dirPath)
 }
 
+func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*runtime.FileListResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
+	return fmt.Errorf("not implemented")
+}
+
 func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
 	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist)
 }

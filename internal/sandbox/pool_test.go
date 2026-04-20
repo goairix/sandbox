@@ -110,6 +110,19 @@ func (m *mockRuntime) ListSandboxes(_ context.Context, _ map[string]string) ([]r
 
 func (m *mockRuntime) IsStateful() bool { return false }
 
+func (m *mockRuntime) ListFilesRecursive(context.Context, string, string, int, int, int) (*runtime.FileListResult, error) {
+	return nil, nil
+}
+func (m *mockRuntime) ReadFileLines(context.Context, string, string, int, int) (*runtime.FileLineResult, error) {
+	return nil, nil
+}
+func (m *mockRuntime) EditFile(context.Context, string, string, string, string, bool) error {
+	return nil
+}
+func (m *mockRuntime) EditFileLines(context.Context, string, string, int, int, string) error {
+	return nil
+}
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{
