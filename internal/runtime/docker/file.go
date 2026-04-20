@@ -305,5 +305,46 @@ func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldS
 }
 
 func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
-	return fmt.Errorf("not implemented")
+	if startLine < 1 {
+		startLine = 1
+	}
+
+	tmpEdit := fmt.Sprintf("/tmp/sandbox-edit-%d", time.Now().UnixNano())
+	tmpContent := fmt.Sprintf("/tmp/sandbox-content-%d", time.Now().UnixNano())
+
+	// Write new content to a temp file inside the container
+	escapedContent := strings.ReplaceAll(newContent, "'", "'\\''")
+	writeCmd := fmt.Sprintf("printf '%%s' '%s' > %s", escapedContent, shellEscape(tmpContent))
+	if _, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: writeCmd,
+		WorkDir: "/workspace",
+	}); err != nil {
+		return err
+	}
+
+	// Build the replacement command:
+	// 1. Write lines before startLine to tmpEdit
+	// 2. Append new content
+	// 3. Append lines after endLine
+	// 4. Move tmpEdit back to filePath
+	var buildCmd string
+	if startLine > 1 {
+		buildCmd = fmt.Sprintf("head -n %d %s > %s", startLine-1, shellEscape(filePath), shellEscape(tmpEdit))
+	} else {
+		buildCmd = fmt.Sprintf("> %s", shellEscape(tmpEdit))
+	}
+	buildCmd += fmt.Sprintf(" && cat %s >> %s", shellEscape(tmpContent), shellEscape(tmpEdit))
+
+	if endLine > 0 {
+		buildCmd += fmt.Sprintf(" && tail -n +%d %s >> %s", endLine+1, shellEscape(filePath), shellEscape(tmpEdit))
+	}
+	// if endLine <= 0, we replace to end of file, so no tail needed
+
+	buildCmd += fmt.Sprintf(" && mv %s %s", shellEscape(tmpEdit), shellEscape(filePath))
+
+	_, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: buildCmd,
+		WorkDir: "/workspace",
+	})
+	return err
 }
