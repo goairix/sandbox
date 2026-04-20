@@ -222,7 +222,53 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	if startLine < 1 {
+		startLine = 1
+	}
+
+	// Get total line count
+	countResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("wc -l < %s", shellEscape(filePath)),
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+	var totalLines int
+	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalLines)
+
+	// Build sed range: endLine 0 means read to end of file
+	var sedRange string
+	if endLine <= 0 || endLine > totalLines {
+		endLine = totalLines
+		sedRange = fmt.Sprintf("%d,$p", startLine)
+	} else {
+		sedRange = fmt.Sprintf("%d,%dp", startLine, endLine)
+	}
+
+	readResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("sed -n %s %s", shellEscape(sedRange), shellEscape(filePath)),
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var lines []string
+	if strings.TrimSpace(readResult.Stdout) != "" {
+		lines = strings.Split(readResult.Stdout, "\n")
+		// Remove trailing empty string from final newline
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	}
+
+	return &runtime.FileLineResult{
+		Lines:      lines,
+		StartLine:  startLine,
+		EndLine:    endLine,
+		TotalLines: totalLines,
+	}, nil
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
