@@ -58,6 +58,11 @@ func (s *Sandbox) Run(ctx context.Context, language, code string) (ExecResponse,
 	return s.client.Exec(ctx, s.id, ExecRequest{Language: language, Code: code})
 }
 
+// RunStream executes code in the sandbox and streams output as SSE events.
+func (s *Sandbox) RunStream(ctx context.Context, language, code string) (<-chan SSEEvent, error) {
+	return s.client.ExecStream(ctx, s.id, ExecRequest{Language: language, Code: code})
+}
+
 // UploadFile uploads a file to the sandbox at remotePath.
 func (s *Sandbox) UploadFile(ctx context.Context, remotePath string, r io.Reader) error {
 	_, err := s.client.UploadFile(ctx, s.id, remotePath, r)

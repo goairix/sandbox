@@ -182,9 +182,23 @@ type SkillResponse struct {
 	Files   []SkillFile `json:"files"`
 }
 
-// NOTE: SSEEvent and streaming sub-types (SSEStdoutData, SSEStderrData, etc.)
-// are intentionally omitted here. They will be added in the streaming iteration
-// alongside ExecStream / ExecuteStream on Client.
+// SSEEventType identifies the kind of a streaming execution event.
+type SSEEventType string
+
+const (
+	SSEEventStdout SSEEventType = "stdout"
+	SSEEventStderr SSEEventType = "stderr"
+	SSEEventDone   SSEEventType = "done"
+	SSEEventError  SSEEventType = "error"
+)
+
+// SSEEvent is a single event received from a streaming execution endpoint.
+type SSEEvent struct {
+	Type    SSEEventType
+	Content string  // stdout/stderr content, or error message
+	ExitCode int    // set when Type == SSEEventDone
+	Elapsed  float64 // seconds elapsed, set when Type == SSEEventDone
+}
 
 // ListFilesRecursiveRequest is the request body for POST /api/v1/sandboxes/:id/files/list-recursive.
 type ListFilesRecursiveRequest struct {

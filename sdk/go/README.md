@@ -53,8 +53,29 @@ defer sb.Close(ctx)
 ### Execute code
 
 ```go
+// Synchronous
 result, err := sb.Run(ctx, "python", `print("hello")`)
 // result.Stdout, result.Stderr, result.ExitCode, result.Duration
+
+// Streaming (SSE)
+ch, err := sb.RunStream(ctx, "python", `
+import time
+for i in range(5):
+    print(i)
+    time.sleep(0.1)
+`)
+for ev := range ch {
+    switch ev.Type {
+    case sandbox.SSEEventStdout:
+        fmt.Print(ev.Content)
+    case sandbox.SSEEventStderr:
+        fmt.Fprint(os.Stderr, ev.Content)
+    case sandbox.SSEEventDone:
+        fmt.Printf("exit %d (%.2fs)\n", ev.ExitCode, ev.Elapsed)
+    case sandbox.SSEEventError:
+        fmt.Println("error:", ev.Content)
+    }
+}
 ```
 
 Supported languages: `python`, `nodejs`, `bash`.
@@ -70,8 +91,41 @@ err = sb.UploadFile(ctx, "/workspace/main.py", f)
 rc, err := sb.DownloadFile(ctx, "/workspace/output.txt")
 defer rc.Close()
 
-// List
+// List (shallow)
 files, err := sb.ListFiles(ctx, "/workspace")
+
+// List recursively with pagination
+resp, err := sb.ListFilesRecursive(ctx, sandbox.ListFilesRecursiveRequest{
+    Path:     "/workspace",
+    MaxDepth: 3,
+    Page:     1,
+    PageSize: 50,
+})
+// resp.Files, resp.TotalCount, resp.Page, resp.PageSize
+
+// Read lines
+lines, err := sb.ReadFileLines(ctx, sandbox.ReadFileLinesRequest{
+    Path:      "/workspace/main.py",
+    StartLine: 10,
+    EndLine:   20, // 0 = read to end of file
+})
+// lines.Lines, lines.TotalLines
+
+// String replacement
+err = sb.EditFile(ctx, sandbox.EditFileRequest{
+    Path:       "/workspace/main.py",
+    OldStr:     "hello",
+    NewStr:     "world",
+    ReplaceAll: true,
+})
+
+// Replace line range
+err = sb.EditFileLines(ctx, sandbox.EditFileLinesRequest{
+    Path:       "/workspace/main.py",
+    StartLine:  5,
+    EndLine:    8,   // 0 = replace to end of file
+    NewContent: "# replaced\n",
+})
 ```
 
 ### Workspace
@@ -152,10 +206,16 @@ Predefined sentinels:
 | `DestroySandbox(ctx, id)` | DELETE /api/v1/sandboxes/:id |
 | `UpdateNetwork(ctx, id, req)` | PUT /api/v1/sandboxes/:id/network |
 | `Exec(ctx, id, req)` | POST /api/v1/sandboxes/:id/exec |
+| `ExecStream(ctx, id, req)` | POST /api/v1/sandboxes/:id/exec/stream |
 | `Execute(ctx, req)` | POST /api/v1/execute |
+| `ExecuteStream(ctx, req)` | POST /api/v1/execute/stream |
 | `UploadFile(ctx, id, path, r)` | POST /api/v1/sandboxes/:id/files/upload |
 | `DownloadFile(ctx, id, path)` | GET /api/v1/sandboxes/:id/files/download |
 | `ListFiles(ctx, id, dir)` | GET /api/v1/sandboxes/:id/files/list |
+| `ListFilesRecursive(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/list-recursive |
+| `ReadFileLines(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/read-lines |
+| `EditFile(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/edit |
+| `EditFileLines(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/edit-lines |
 | `MountWorkspace(ctx, id, req)` | POST /api/v1/sandboxes/:id/workspace/mount |
 | `UnmountWorkspace(ctx, id)` | POST /api/v1/sandboxes/:id/workspace/unmount |
 | `SyncWorkspace(ctx, id, req)` | POST /api/v1/sandboxes/:id/workspace/sync |
@@ -170,6 +230,31 @@ Predefined sentinels:
 |---|---|
 | `NewSandbox(ctx, opts)` | Create sandbox, return high-level handle |
 | `Run(ctx, language, code)` | One-shot execution via POST /api/v1/execute |
+
+### Sandbox handle methods
+
+| Method | Description |
+|---|---|
+| `Run(ctx, language, code)` | Execute code, return full result |
+| `RunStream(ctx, language, code)` | Execute code, stream SSE events |
+| `UploadFile(ctx, path, r)` | Upload file |
+| `DownloadFile(ctx, path)` | Download file |
+| `ListFiles(ctx, dir)` | List directory (shallow) |
+| `ListFilesRecursive(ctx, req)` | List directory recursively |
+| `ReadFileLines(ctx, req)` | Read line range from file |
+| `EditFile(ctx, req)` | String replacement in file |
+| `EditFileLines(ctx, req)` | Replace line range in file |
+| `MountWorkspace(ctx, rootPath, exclude...)` | Mount workspace |
+| `UnmountWorkspace(ctx)` | Unmount workspace |
+| `Sync(ctx)` | Sync container → host |
+| `SyncTo(ctx)` | Sync host → container |
+| `WorkspaceInfo(ctx)` | Workspace status |
+| `EnableNetwork(ctx, whitelist)` | Enable network |
+| `DisableNetwork(ctx)` | Disable network |
+| `ListSkills(ctx)` | List agent skills |
+| `GetSkill(ctx, name)` | Get skill content |
+| `GetSkillFile(ctx, name, path)` | Get skill file |
+| `Close(ctx)` | Destroy sandbox |
 
 ## License
 
