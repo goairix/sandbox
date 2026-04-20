@@ -140,7 +140,85 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 }
 
 func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*runtime.FileListResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	// Build find command
+	maxDepthArg := ""
+	if maxDepth > 0 {
+		maxDepthArg = fmt.Sprintf("-maxdepth %d ", maxDepth)
+	}
+
+	// Get total count
+	countResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("find %s %s\\( -type f -o -type d \\) | wc -l", shellEscape(dirPath), maxDepthArg),
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+	var totalCount int
+	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+
+	// Build paginated listing command
+	// Use -printf to get: relative path, size, type, mod time
+	listCmd := fmt.Sprintf(
+		"find %s %s\\( -type f -o -type d \\) -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
+		shellEscape(dirPath), maxDepthArg,
+	)
+	if pageSize > 0 {
+		offset := (page - 1) * pageSize
+		if offset < 0 {
+			offset = 0
+		}
+		listCmd = fmt.Sprintf("%s | tail -n +%d | head -n %d", listCmd, offset+1, pageSize)
+	}
+
+	listResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: listCmd,
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var files []runtime.FileInfo
+	for _, line := range strings.Split(strings.TrimSpace(listResult.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 || parts[0] == "" {
+			continue
+		}
+
+		var size int64
+		fmt.Sscanf(parts[1], "%d", &size)
+		isDir := parts[2] == "d"
+
+		var modTimeFloat float64
+		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
+		sec := int64(modTimeFloat)
+		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
+
+		fullPath := dirPath + "/" + parts[0]
+
+		files = append(files, runtime.FileInfo{
+			Name:    parts[0],
+			Path:    fullPath,
+			Size:    size,
+			IsDir:   isDir,
+			ModTime: time.Unix(sec, nsec),
+		})
+	}
+
+	if page < 1 {
+		page = 1
+	}
+
+	return &runtime.FileListResult{
+		Files:      files,
+		TotalCount: totalCount,
+		Page:       page,
+		PageSize:   pageSize,
+	}, nil
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
