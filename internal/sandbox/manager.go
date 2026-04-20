@@ -418,6 +418,42 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
 }
 
+// ListFilesRecursive lists files recursively in a sandbox directory.
+func (m *Manager) ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*runtime.FileListResult, error) {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return m.runtime.ListFilesRecursive(ctx, sb.RuntimeID, dirPath, maxDepth, page, pageSize)
+}
+
+// ReadFileLines reads a range of lines from a file in a sandbox.
+func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return m.runtime.ReadFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine)
+}
+
+// EditFile performs a string replacement in a file in a sandbox.
+func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return err
+	}
+	return m.runtime.EditFile(ctx, sb.RuntimeID, filePath, oldStr, newStr, replaceAll)
+}
+
+// EditFileLines replaces a range of lines in a file in a sandbox.
+func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return err
+	}
+	return m.runtime.EditFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine, newContent)
+}
+
 // UpdateNetwork dynamically updates network access for a running sandbox.
 func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
 	m.mu.Lock()
