@@ -153,3 +153,124 @@ func (h *Handler) ListFiles(c *gin.Context) {
 		Path:  dir,
 	})
 }
+
+func (h *Handler) ListFilesRecursive(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.ListFilesRecursiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := req.PageSize
+	if pageSize < 0 {
+		pageSize = 0
+	}
+
+	result, err := h.manager.ListFilesRecursive(c.Request.Context(), id, req.Path, req.MaxDepth, page, pageSize)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+
+	var fileInfos []types.FileInfo
+	for _, f := range result.Files {
+		fileInfos = append(fileInfos, types.FileInfo{
+			Name:    f.Name,
+			Path:    f.Path,
+			Size:    f.Size,
+			IsDir:   f.IsDir,
+			ModTime: f.ModTime,
+		})
+	}
+
+	c.JSON(http.StatusOK, types.ListFilesRecursiveResponse{
+		Files:      fileInfos,
+		Path:       req.Path,
+		TotalCount: result.TotalCount,
+		Page:       result.Page,
+		PageSize:   result.PageSize,
+	})
+}
+
+func (h *Handler) ReadFileLines(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.ReadFileLinesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	result, err := h.manager.ReadFileLines(c.Request.Context(), id, req.Path, req.StartLine, req.EndLine)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, types.ReadFileLinesResponse{
+		Lines:      result.Lines,
+		StartLine:  result.StartLine,
+		EndLine:    result.EndLine,
+		TotalLines: result.TotalLines,
+	})
+}
+
+func (h *Handler) EditFile(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.EditFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := h.manager.EditFile(c.Request.Context(), id, req.Path, req.OldStr, req.NewStr, req.ReplaceAll); err != nil {
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "ok"})
+}
+
+func (h *Handler) EditFileLines(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.EditFileLinesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := h.manager.EditFileLines(c.Request.Context(), id, req.Path, req.StartLine, req.EndLine, req.NewContent); err != nil {
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "ok"})
+}
