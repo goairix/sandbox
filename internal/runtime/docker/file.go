@@ -21,6 +21,15 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// shellEscapeSed escapes special characters in a string for use in a sed s/// expression.
+// The delimiter used is '/', so '/', '\', and '&' must be escaped.
+func shellEscapeSed(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "/", "\\/")
+	s = strings.ReplaceAll(s, "&", "\\&")
+	return s
+}
+
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
 	content, err := io.ReadAll(reader)
 	if err != nil {
@@ -272,7 +281,27 @@ func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
-	return fmt.Errorf("not implemented")
+	flag := ""
+	if replaceAll {
+		flag = "g"
+	}
+
+	escapedOld := shellEscapeSed(oldStr)
+	escapedNew := shellEscapeSed(newStr)
+
+	tmpFile := fmt.Sprintf("/tmp/sandbox-edit-%d", time.Now().UnixNano())
+	cmd := fmt.Sprintf(
+		"sed 's/%s/%s/%s' %s > %s && mv %s %s",
+		escapedOld, escapedNew, flag,
+		shellEscape(filePath), shellEscape(tmpFile),
+		shellEscape(tmpFile), shellEscape(filePath),
+	)
+
+	_, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: cmd,
+		WorkDir: "/workspace",
+	})
+	return err
 }
 
 func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
