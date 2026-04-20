@@ -273,3 +273,27 @@ func (c *Client) GetSkillFile(ctx context.Context, id, name, filePath string) (i
 	}
 	return resp.Body, nil
 }
+
+// ListFilesRecursive lists files recursively in a sandbox directory.
+func (c *Client) ListFilesRecursive(ctx context.Context, id string, req ListFilesRecursiveRequest) (ListFilesRecursiveResponse, error) {
+	var resp ListFilesRecursiveResponse
+	err := c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/list-recursive", req, &resp)
+	return resp, err
+}
+
+// ReadFileLines reads a range of lines from a file in a sandbox.
+func (c *Client) ReadFileLines(ctx context.Context, id string, req ReadFileLinesRequest) (ReadFileLinesResponse, error) {
+	var resp ReadFileLinesResponse
+	err := c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/read-lines", req, &resp)
+	return resp, err
+}
+
+// EditFile performs a string replacement in a file in a sandbox.
+func (c *Client) EditFile(ctx context.Context, id string, req EditFileRequest) error {
+	return c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/edit", req, nil)
+}
+
+// EditFileLines replaces a range of lines in a file in a sandbox.
+func (c *Client) EditFileLines(ctx context.Context, id string, req EditFileLinesRequest) error {
+	return c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/edit-lines", req, nil)
+}
