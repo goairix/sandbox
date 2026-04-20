@@ -185,3 +185,51 @@ type SkillResponse struct {
 // NOTE: SSEEvent and streaming sub-types (SSEStdoutData, SSEStderrData, etc.)
 // are intentionally omitted here. They will be added in the streaming iteration
 // alongside ExecStream / ExecuteStream on Client.
+
+// ListFilesRecursiveRequest is the request body for POST /api/v1/sandboxes/:id/files/list-recursive.
+type ListFilesRecursiveRequest struct {
+	Path     string `json:"path"`
+	MaxDepth int    `json:"max_depth,omitempty"`
+	Page     int    `json:"page,omitempty"`
+	PageSize int    `json:"page_size,omitempty"`
+}
+
+// ListFilesRecursiveResponse is returned by the list-recursive endpoint.
+type ListFilesRecursiveResponse struct {
+	Files      []FileInfo `json:"files"`
+	Path       string     `json:"path"`
+	TotalCount int        `json:"total_count"`
+	Page       int        `json:"page"`
+	PageSize   int        `json:"page_size"`
+}
+
+// ReadFileLinesRequest is the request body for POST /api/v1/sandboxes/:id/files/read-lines.
+type ReadFileLinesRequest struct {
+	Path      string `json:"path"`
+	StartLine int    `json:"start_line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+}
+
+// ReadFileLinesResponse is returned by the read-lines endpoint.
+type ReadFileLinesResponse struct {
+	Lines      []string `json:"lines"`
+	StartLine  int      `json:"start_line"`
+	EndLine    int      `json:"end_line"`
+	TotalLines int      `json:"total_lines"`
+}
+
+// EditFileRequest is the request body for POST /api/v1/sandboxes/:id/files/edit.
+type EditFileRequest struct {
+	Path       string `json:"path"`
+	OldStr     string `json:"old_str"`
+	NewStr     string `json:"new_str"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+// EditFileLinesRequest is the request body for POST /api/v1/sandboxes/:id/files/edit-lines.
+type EditFileLinesRequest struct {
+	Path       string `json:"path"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line,omitempty"`
+	NewContent string `json:"new_content"`
+}
