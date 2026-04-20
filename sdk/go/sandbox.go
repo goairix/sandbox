@@ -130,6 +130,26 @@ func (s *Sandbox) GetSkillFile(ctx context.Context, name, filePath string) (io.R
 	return s.client.GetSkillFile(ctx, s.id, name, filePath)
 }
 
+// ListFilesRecursive lists files recursively in a sandbox directory.
+func (s *Sandbox) ListFilesRecursive(ctx context.Context, req ListFilesRecursiveRequest) (ListFilesRecursiveResponse, error) {
+	return s.client.ListFilesRecursive(ctx, s.id, req)
+}
+
+// ReadFileLines reads a range of lines from a file in the sandbox.
+func (s *Sandbox) ReadFileLines(ctx context.Context, req ReadFileLinesRequest) (ReadFileLinesResponse, error) {
+	return s.client.ReadFileLines(ctx, s.id, req)
+}
+
+// EditFile performs a string replacement in a file in the sandbox.
+func (s *Sandbox) EditFile(ctx context.Context, req EditFileRequest) error {
+	return s.client.EditFile(ctx, s.id, req)
+}
+
+// EditFileLines replaces a range of lines in a file in the sandbox.
+func (s *Sandbox) EditFileLines(ctx context.Context, req EditFileLinesRequest) error {
+	return s.client.EditFileLines(ctx, s.id, req)
+}
+
 // Run is a convenience method on Client for one-shot execution without pre-creating a sandbox.
 func (c *Client) Run(ctx context.Context, language, code string) (ExecResponse, error) {
 	return c.Execute(ctx, ExecuteRequest{Language: language, Code: code})
