@@ -203,3 +203,91 @@ func TestClientGetWorkspaceInfo(t *testing.T) {
 	}
 }
 
+func TestClient_ListFilesRecursive(t *testing.T) {
+	want := sandbox.ListFilesRecursiveResponse{
+		Path:       "/workspace",
+		Files:      []sandbox.FileInfo{{Name: "main.py", Path: "/workspace/main.py", Size: 42}},
+		TotalCount: 1,
+		Page:       1,
+		PageSize:   50,
+	}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-lr/files/list-recursive" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.ListFilesRecursive(context.Background(), "sb-lr", sandbox.ListFilesRecursiveRequest{
+		Path: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("ListFilesRecursive error: %v", err)
+	}
+	if got.Path != "/workspace" || got.TotalCount != 1 || len(got.Files) != 1 || got.Files[0].Name != "main.py" {
+		t.Errorf("unexpected response: %+v", got)
+	}
+}
+
+func TestClient_ReadFileLines(t *testing.T) {
+	want := sandbox.ReadFileLinesResponse{
+		Lines:      []string{"package main", "", "func main() {}"},
+		StartLine:  1,
+		EndLine:    3,
+		TotalLines: 3,
+	}
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-rl/files/read-lines" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(want)
+	})
+	got, err := client.ReadFileLines(context.Background(), "sb-rl", sandbox.ReadFileLinesRequest{
+		Path:      "/workspace/main.go",
+		StartLine: 1,
+		EndLine:   3,
+	})
+	if err != nil {
+		t.Fatalf("ReadFileLines error: %v", err)
+	}
+	if got.TotalLines != 3 || len(got.Lines) != 3 || got.Lines[0] != "package main" {
+		t.Errorf("unexpected response: %+v", got)
+	}
+}
+
+func TestClient_EditFile(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-ef/files/edit" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	err := client.EditFile(context.Background(), "sb-ef", sandbox.EditFileRequest{
+		Path:   "/workspace/main.go",
+		OldStr: "Hello",
+		NewStr: "World",
+	})
+	if err != nil {
+		t.Fatalf("EditFile error: %v", err)
+	}
+}
+
+func TestClient_EditFileLines(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/sb-efl/files/edit-lines" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	err := client.EditFileLines(context.Background(), "sb-efl", sandbox.EditFileLinesRequest{
+		Path:       "/workspace/main.go",
+		StartLine:  1,
+		EndLine:    3,
+		NewContent: "package main\n\nfunc main() {}\n",
+	})
+	if err != nil {
+		t.Fatalf("EditFileLines error: %v", err)
+	}
+}
+
