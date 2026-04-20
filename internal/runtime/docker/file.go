@@ -149,15 +149,20 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 }
 
 func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*runtime.FileListResult, error) {
-	// Build find command
+	// Normalise page before computing offset
+	if page < 1 {
+		page = 1
+	}
+
+	// Build find command args
 	maxDepthArg := ""
 	if maxDepth > 0 {
 		maxDepthArg = fmt.Sprintf("-maxdepth %d ", maxDepth)
 	}
 
-	// Get total count
+	// Get total count (exclude root dir with -mindepth 1)
 	countResult, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: fmt.Sprintf("find %s %s\\( -type f -o -type d \\) | wc -l", shellEscape(dirPath), maxDepthArg),
+		Command: fmt.Sprintf("find %s -mindepth 1 %s\\( -type f -o -type d \\) | wc -l", shellEscape(dirPath), maxDepthArg),
 		WorkDir: "/workspace",
 	})
 	if err != nil {
@@ -166,17 +171,13 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 	var totalCount int
 	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
 
-	// Build paginated listing command
-	// Use -printf to get: relative path, size, type, mod time
+	// Build paginated listing command (exclude root dir with -mindepth 1)
 	listCmd := fmt.Sprintf(
-		"find %s %s\\( -type f -o -type d \\) -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
+		"find %s -mindepth 1 %s\\( -type f -o -type d \\) -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
 		shellEscape(dirPath), maxDepthArg,
 	)
 	if pageSize > 0 {
 		offset := (page - 1) * pageSize
-		if offset < 0 {
-			offset = 0
-		}
 		listCmd = fmt.Sprintf("%s | tail -n +%d | head -n %d", listCmd, offset+1, pageSize)
 	}
 
@@ -207,19 +208,16 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 		sec := int64(modTimeFloat)
 		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
+		name := filepath.Base(parts[0])
 		fullPath := dirPath + "/" + parts[0]
 
 		files = append(files, runtime.FileInfo{
-			Name:    parts[0],
+			Name:    name,
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
 			ModTime: time.Unix(sec, nsec),
 		})
-	}
-
-	if page < 1 {
-		page = 1
 	}
 
 	return &runtime.FileListResult{
@@ -281,6 +279,22 @@ func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
+	if strings.ContainsAny(oldStr, "\n\r") || strings.ContainsAny(newStr, "\n\r") {
+		return fmt.Errorf("oldStr and newStr must not contain newline characters")
+	}
+
+	// Check that oldStr exists in the file before attempting replacement
+	checkResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("grep -qF %s %s", shellEscape(oldStr), shellEscape(filePath)),
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return err
+	}
+	if checkResult.ExitCode != 0 {
+		return fmt.Errorf("string not found in file: %s", oldStr)
+	}
+
 	flag := ""
 	if replaceAll {
 		flag = "g"
@@ -297,7 +311,7 @@ func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldS
 		shellEscape(tmpFile), shellEscape(filePath),
 	)
 
-	_, err := r.Exec(ctx, id, runtime.ExecRequest{
+	_, err = r.Exec(ctx, id, runtime.ExecRequest{
 		Command: cmd,
 		WorkDir: "/workspace",
 	})
@@ -312,20 +326,15 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 	tmpEdit := fmt.Sprintf("/tmp/sandbox-edit-%d", time.Now().UnixNano())
 	tmpContent := fmt.Sprintf("/tmp/sandbox-content-%d", time.Now().UnixNano())
 
-	// Write new content to a temp file inside the container
-	escapedContent := strings.ReplaceAll(newContent, "'", "'\\''")
-	writeCmd := fmt.Sprintf("printf '%%s' '%s' > %s", escapedContent, shellEscape(tmpContent))
-	if _, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: writeCmd,
-		WorkDir: "/workspace",
-	}); err != nil {
-		return err
+	// Stream new content into a temp file via stdin to avoid ARG_MAX limits
+	if err := r.ExecPipe(ctx, id, []string{"sh", "-c", fmt.Sprintf("cat > %s", shellEscape(tmpContent))}, strings.NewReader(newContent)); err != nil {
+		return fmt.Errorf("write content: %w", err)
 	}
 
 	// Build the replacement command:
 	// 1. Write lines before startLine to tmpEdit
 	// 2. Append new content
-	// 3. Append lines after endLine
+	// 3. Append lines after endLine (if endLine > 0)
 	// 4. Move tmpEdit back to filePath
 	var buildCmd string
 	if startLine > 1 {
@@ -338,7 +347,6 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 	if endLine > 0 {
 		buildCmd += fmt.Sprintf(" && tail -n +%d %s >> %s", endLine+1, shellEscape(filePath), shellEscape(tmpEdit))
 	}
-	// if endLine <= 0, we replace to end of file, so no tail needed
 
 	buildCmd += fmt.Sprintf(" && mv %s %s", shellEscape(tmpEdit), shellEscape(filePath))
 

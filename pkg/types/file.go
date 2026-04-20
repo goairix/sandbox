@@ -71,3 +71,8 @@ type EditFileLinesRequest struct {
 	EndLine    int    `json:"end_line,omitempty"`
 	NewContent string `json:"new_content"`
 }
+
+// EditFileResponse is returned by the edit and edit-lines endpoints.
+type EditFileResponse struct {
+	Message string `json:"message"`
+}

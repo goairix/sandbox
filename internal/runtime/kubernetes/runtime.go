@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -147,19 +148,19 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 }
 
 func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*runtime.FileListResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("kubernetes runtime: %w", errors.ErrUnsupported)
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("kubernetes runtime: %w", errors.ErrUnsupported)
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
-	return fmt.Errorf("not implemented")
+	return fmt.Errorf("kubernetes runtime: %w", errors.ErrUnsupported)
 }
 
 func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
-	return fmt.Errorf("not implemented")
+	return fmt.Errorf("kubernetes runtime: %w", errors.ErrUnsupported)
 }
 
 func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {

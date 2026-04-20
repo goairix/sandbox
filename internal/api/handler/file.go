@@ -173,8 +173,10 @@ func (h *Handler) ListFilesRecursive(c *gin.Context) {
 		page = 1
 	}
 	pageSize := req.PageSize
-	if pageSize < 0 {
-		pageSize = 0
+	if pageSize <= 0 {
+		pageSize = 100
+	} else if pageSize > 1000 {
+		pageSize = 1000
 	}
 
 	result, err := h.manager.ListFilesRecursive(c.Request.Context(), id, req.Path, req.MaxDepth, page, pageSize)
@@ -250,7 +252,7 @@ func (h *Handler) EditFile(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "ok"})
+	c.JSON(http.StatusOK, types.EditFileResponse{Message: "ok"})
 }
 
 func (h *Handler) EditFileLines(c *gin.Context) {
@@ -272,5 +274,5 @@ func (h *Handler) EditFileLines(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "ok"})
+	c.JSON(http.StatusOK, types.EditFileResponse{Message: "ok"})
 }
