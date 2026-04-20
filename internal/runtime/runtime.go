@@ -38,6 +38,22 @@ type Runtime interface {
 	// ListFiles lists files in a directory inside the sandbox.
 	ListFiles(ctx context.Context, id string, dirPath string) ([]FileInfo, error)
 
+	// ListFilesRecursive lists files recursively in a directory inside the sandbox.
+	// maxDepth controls recursion depth (0 = unlimited). Supports pagination via page/pageSize.
+	ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*FileListResult, error)
+
+	// ReadFileLines reads a range of lines from a file inside the sandbox.
+	// startLine is 1-based. endLine of 0 means read to end of file.
+	ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*FileLineResult, error)
+
+	// EditFile performs a string replacement in a file inside the sandbox.
+	// If replaceAll is true, all occurrences are replaced; otherwise only the first.
+	EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error
+
+	// EditFileLines replaces a range of lines in a file inside the sandbox.
+	// startLine and endLine are 1-based. endLine of 0 means replace to end of file.
+	EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error
+
 	// UploadArchive uploads a tar archive to the sandbox, extracting it at destDir.
 	UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error
 
@@ -76,4 +92,20 @@ type FileInfo struct {
 	Size    int64
 	IsDir   bool
 	ModTime time.Time
+}
+
+// FileListResult holds the result of a recursive file listing.
+type FileListResult struct {
+	Files      []FileInfo
+	TotalCount int
+	Page       int
+	PageSize   int
+}
+
+// FileLineResult holds the result of reading file lines.
+type FileLineResult struct {
+	Lines      []string
+	StartLine  int
+	EndLine    int
+	TotalLines int
 }
