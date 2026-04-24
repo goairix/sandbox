@@ -41,6 +41,7 @@ const (
 	StreamStderr StreamEventType = "stderr"
 	StreamDone   StreamEventType = "done"
 	StreamError  StreamEventType = "error"
+	StreamPing   StreamEventType = "ping" // keepalive heartbeat
 )
 
 // SandboxSpec defines what the runtime needs to create a sandbox.

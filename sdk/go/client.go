@@ -413,6 +413,11 @@ func parseSandboxSSEEvent(eventType, data string) (SSEEvent, bool) {
 		if err := json.Unmarshal([]byte(data), &d); err == nil {
 			return SSEEvent{Type: SSEEventError, Content: d.Message}, true
 		}
+	case SSEEventPing:
+		var d struct{ Timestamp int64 `json:"timestamp"` }
+		if err := json.Unmarshal([]byte(data), &d); err == nil {
+			return SSEEvent{Type: SSEEventPing, Timestamp: d.Timestamp}, true
+		}
 	}
 	return SSEEvent{}, false
 }

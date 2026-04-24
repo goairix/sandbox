@@ -110,11 +110,24 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	start := time.Now()
 	flusher, _ := c.Writer.(http.Flusher)
 
+	// Heartbeat ticker to prevent timeout during silent periods
+	heartbeatInterval := 30 * time.Second
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			// Client disconnected
 			return
+		case <-ticker.C:
+			// Send heartbeat ping event
+			pingData := types.SSEPingData{Timestamp: time.Now().Unix()}
+			jsonData, _ := json.Marshal(pingData)
+			fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData)
+			if flusher != nil {
+				flusher.Flush()
+			}
 		case event, ok := <-ch:
 			if !ok {
 				// Channel closed

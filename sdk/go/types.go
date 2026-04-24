@@ -190,14 +190,16 @@ const (
 	SSEEventStderr SSEEventType = "stderr"
 	SSEEventDone   SSEEventType = "done"
 	SSEEventError  SSEEventType = "error"
+	SSEEventPing   SSEEventType = "ping" // keepalive heartbeat
 )
 
 // SSEEvent is a single event received from a streaming execution endpoint.
 type SSEEvent struct {
-	Type    SSEEventType
-	Content string  // stdout/stderr content, or error message
-	ExitCode int    // set when Type == SSEEventDone
-	Elapsed  float64 // seconds elapsed, set when Type == SSEEventDone
+	Type      SSEEventType
+	Content   string  // stdout/stderr content, or error message
+	ExitCode  int     // set when Type == SSEEventDone
+	Elapsed   float64 // seconds elapsed, set when Type == SSEEventDone
+	Timestamp int64   // Unix timestamp, set when Type == SSEEventPing
 }
 
 // ListFilesRecursiveRequest is the request body for POST /api/v1/sandboxes/:id/files/list-recursive.

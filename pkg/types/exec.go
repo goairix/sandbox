@@ -55,3 +55,7 @@ type SSEErrorData struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 }
+
+type SSEPingData struct {
+	Timestamp int64 `json:"timestamp"` // Unix timestamp in seconds
+}
