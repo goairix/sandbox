@@ -66,7 +66,8 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 			Command:   cmd,
 			Stdin:     req.Stdin != "",
 			Stdout:    true,
-			Stderr:    true,
+			Stderr:    !req.LineBuffered,
+			TTY:       req.LineBuffered,
 		}, scheme.ParameterCodec)
 
 	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
@@ -80,11 +81,17 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 		stdin = strings.NewReader(req.Stdin)
 	}
 
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+	streamOpts := remotecommand.StreamOptions{
 		Stdin:  stdin,
 		Stdout: &stdout,
-		Stderr: &stderr,
-	})
+	}
+	if req.LineBuffered {
+		streamOpts.Tty = true
+	} else {
+		streamOpts.Stderr = &stderr
+	}
+
+	err = executor.StreamWithContext(ctx, streamOpts)
 
 	exitCode := 0
 	if err != nil {
@@ -143,7 +150,8 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 			Container: "sandbox",
 			Command:   cmd,
 			Stdout:    true,
-			Stderr:    true,
+			Stderr:    !req.LineBuffered,
+			TTY:       req.LineBuffered,
 		}, scheme.ParameterCodec)
 
 	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
@@ -154,63 +162,99 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 
 	ch := make(chan runtime.StreamEvent, 64)
 
-	stdoutPR, stdoutPW := io.Pipe()
-	stderrPR, stderrPW := io.Pipe()
+	if req.LineBuffered {
+		// TTY mode: stdout and stderr are merged, read from a single pipe.
+		stdoutPR, stdoutPW := io.Pipe()
 
-	go func() {
-		defer cancel()
-		defer close(ch)
-		defer stdoutPR.Close()
-		defer stderrPR.Close()
-
-		// Run exec in background
-		execDone := make(chan error, 1)
 		go func() {
-			execDone <- executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-				Stdout: stdoutPW,
-				Stderr: stderrPW,
-			})
-			stdoutPW.Close()
-			stderrPW.Close()
-		}()
+			defer cancel()
+			defer close(ch)
+			defer stdoutPR.Close()
 
-		// Stream stderr
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
+			execDone := make(chan error, 1)
+			go func() {
+				execDone <- executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+					Stdout: stdoutPW,
+					Tty:    true,
+				})
+				stdoutPW.Close()
+			}()
+
 			buf := make([]byte, 4096)
 			for {
-				n, readErr := stderrPR.Read(buf)
+				n, readErr := stdoutPR.Read(buf)
 				if n > 0 {
-					ch <- runtime.StreamEvent{Type: runtime.StreamStderr, Content: string(buf[:n])}
+					ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}
 				}
 				if readErr != nil {
 					break
 				}
 			}
+
+			execErr := <-execDone
+			if execErr != nil {
+				ch <- runtime.StreamEvent{Type: runtime.StreamError, Content: execErr.Error()}
+			} else {
+				ch <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
+			}
 		}()
+	} else {
+		// Non-TTY mode: separate stdout and stderr pipes.
+		stdoutPR, stdoutPW := io.Pipe()
+		stderrPR, stderrPW := io.Pipe()
 
-		// Stream stdout
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := stdoutPR.Read(buf)
-			if n > 0 {
-				ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}
+		go func() {
+			defer cancel()
+			defer close(ch)
+			defer stdoutPR.Close()
+			defer stderrPR.Close()
+
+			execDone := make(chan error, 1)
+			go func() {
+				execDone <- executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+					Stdout: stdoutPW,
+					Stderr: stderrPW,
+				})
+				stdoutPW.Close()
+				stderrPW.Close()
+			}()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := stderrPR.Read(buf)
+					if n > 0 {
+						ch <- runtime.StreamEvent{Type: runtime.StreamStderr, Content: string(buf[:n])}
+					}
+					if readErr != nil {
+						break
+					}
+				}
+			}()
+
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := stdoutPR.Read(buf)
+				if n > 0 {
+					ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}
+				}
+				if readErr != nil {
+					break
+				}
 			}
-			if readErr != nil {
-				break
+
+			<-done
+
+			execErr := <-execDone
+			if execErr != nil {
+				ch <- runtime.StreamEvent{Type: runtime.StreamError, Content: execErr.Error()}
+			} else {
+				ch <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
 			}
-		}
-
-		<-done
-
-		execErr := <-execDone
-		if execErr != nil {
-			ch <- runtime.StreamEvent{Type: runtime.StreamError, Content: execErr.Error()}
-		} else {
-			ch <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
-		}
-	}()
+		}()
+	}
 
 	return ch, nil
 }

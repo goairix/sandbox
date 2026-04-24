@@ -43,6 +43,7 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 		AttachStdout: true,
 		AttachStderr: true,
 		AttachStdin:  req.Stdin != "",
+		Tty:          req.LineBuffered,
 		WorkingDir:   workDir,
 		Env:          env,
 	}
@@ -65,8 +66,13 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	}
 
 	// Read stdout/stderr
+	// In TTY mode, stdout and stderr are merged into a single stream (no stdcopy multiplexing).
 	var stdout, stderr bytes.Buffer
-	_, err = stdcopy.StdCopy(&stdout, &stderr, attachResp.Reader)
+	if req.LineBuffered {
+		_, err = io.Copy(&stdout, attachResp.Reader)
+	} else {
+		_, err = stdcopy.StdCopy(&stdout, &stderr, attachResp.Reader)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read output: %w", err)
 	}
@@ -152,6 +158,7 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
+		Tty:          req.LineBuffered,
 		WorkingDir:   workDir,
 		Env:          env,
 	}
@@ -162,7 +169,9 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
 
-	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{
+		Tty: req.LineBuffered,
+	})
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("exec attach: %w", err)
@@ -175,26 +184,15 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		defer close(ch)
 		defer attachResp.Close()
 
-		stdoutPR, stdoutPW := io.Pipe()
-		stderrPR, stderrPW := io.Pipe()
-		defer stdoutPR.Close()
-		defer stderrPR.Close()
-
-		go func() {
-			_, _ = stdcopy.StdCopy(stdoutPW, stderrPW, attachResp.Reader)
-			stdoutPW.Close()
-			stderrPW.Close()
-		}()
-
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
+		if req.LineBuffered {
+			// TTY mode: stdout and stderr are merged into a single raw stream.
+			// Read directly without stdcopy demuxing.
 			buf := make([]byte, 4096)
 			for {
-				n, readErr := stderrPR.Read(buf)
+				n, readErr := attachResp.Reader.Read(buf)
 				if n > 0 {
 					ch <- runtime.StreamEvent{
-						Type:    runtime.StreamStderr,
+						Type:    runtime.StreamStdout,
 						Content: string(buf[:n]),
 					}
 				}
@@ -202,23 +200,53 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 					break
 				}
 			}
-		}()
+		} else {
+			// Non-TTY mode: use stdcopy to demux stdout/stderr.
+			stdoutPR, stdoutPW := io.Pipe()
+			stderrPR, stderrPW := io.Pipe()
+			defer stdoutPR.Close()
+			defer stderrPR.Close()
 
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := stdoutPR.Read(buf)
-			if n > 0 {
-				ch <- runtime.StreamEvent{
-					Type:    runtime.StreamStdout,
-					Content: string(buf[:n]),
+			go func() {
+				_, _ = stdcopy.StdCopy(stdoutPW, stderrPW, attachResp.Reader)
+				stdoutPW.Close()
+				stderrPW.Close()
+			}()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := stderrPR.Read(buf)
+					if n > 0 {
+						ch <- runtime.StreamEvent{
+							Type:    runtime.StreamStderr,
+							Content: string(buf[:n]),
+						}
+					}
+					if readErr != nil {
+						break
+					}
+				}
+			}()
+
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := stdoutPR.Read(buf)
+				if n > 0 {
+					ch <- runtime.StreamEvent{
+						Type:    runtime.StreamStdout,
+						Content: string(buf[:n]),
+					}
+				}
+				if readErr != nil {
+					break
 				}
 			}
-			if readErr != nil {
-				break
-			}
-		}
 
-		<-done
+			<-done
+		}
 
 		inspectResp, inspectErr := r.cli.ContainerExecInspect(context.Background(), execResp.ID)
 		if inspectErr != nil {

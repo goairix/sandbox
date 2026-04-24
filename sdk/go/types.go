@@ -75,11 +75,12 @@ type UpdateNetworkResponse struct {
 
 // ExecRequest is the request body for POST /api/v1/sandboxes/:id/exec.
 type ExecRequest struct {
-	Language string            `json:"language"`
-	Code     string            `json:"code"`
-	Stdin    string            `json:"stdin,omitempty"`
-	Timeout  int               `json:"timeout,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
+	Language     string            `json:"language"`
+	Code         string            `json:"code"`
+	Stdin        string            `json:"stdin,omitempty"`
+	Timeout      int               `json:"timeout,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	LineBuffered bool              `json:"line_buffered,omitempty"`
 }
 
 // ExecResponse is returned by the exec endpoint.
@@ -101,6 +102,7 @@ type ExecuteRequest struct {
 	Resources    *ResourceLimits   `json:"resources,omitempty"`
 	Network      *NetworkConfig    `json:"network,omitempty"`
 	Dependencies []DependencySpec  `json:"dependencies,omitempty"`
+	LineBuffered bool              `json:"line_buffered,omitempty"`
 }
 
 // FileInfo describes a file or directory entry.

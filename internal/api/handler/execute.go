@@ -79,10 +79,11 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 
 	// Execute
 	result, err := h.manager.Exec(ctx, sb.ID, runtime.ExecRequest{
-		Command: command,
-		Stdin:   req.Stdin,
-		Timeout: req.Timeout,
-		Env:     req.Env,
+		Command:      command,
+		Stdin:        req.Stdin,
+		Timeout:      req.Timeout,
+		Env:          req.Env,
+		LineBuffered: req.LineBuffered,
 	})
 	if err != nil {
 		internalError(c, err)
@@ -145,10 +146,11 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	}
 
 	ch, err := h.manager.ExecStream(ctx, sb.ID, runtime.ExecRequest{
-		Command: command2,
-		Stdin:   req.Stdin,
-		Timeout: req.Timeout,
-		Env:     req.Env,
+		Command:      command2,
+		Stdin:        req.Stdin,
+		Timeout:      req.Timeout,
+		Env:          req.Env,
+		LineBuffered: req.LineBuffered,
 	})
 	if err != nil {
 		internalError(c, err)

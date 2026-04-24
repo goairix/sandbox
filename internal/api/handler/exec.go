@@ -42,10 +42,11 @@ func (h *Handler) ExecSync(c *gin.Context) {
 	}
 
 	execReq := runtime.ExecRequest{
-		Command: command,
-		Stdin:   req.Stdin,
-		Timeout: req.Timeout,
-		Env:     req.Env,
+		Command:      command,
+		Stdin:        req.Stdin,
+		Timeout:      req.Timeout,
+		Env:          req.Env,
+		LineBuffered: req.LineBuffered,
 	}
 
 	result, err := h.manager.Exec(c.Request.Context(), id, execReq)
@@ -89,10 +90,11 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	}
 
 	execReq := runtime.ExecRequest{
-		Command: command,
-		Stdin:   req.Stdin,
-		Timeout: req.Timeout,
-		Env:     req.Env,
+		Command:      command,
+		Stdin:        req.Stdin,
+		Timeout:      req.Timeout,
+		Env:          req.Env,
+		LineBuffered: req.LineBuffered,
 	}
 
 	ch, err := h.manager.ExecStream(c.Request.Context(), id, execReq)

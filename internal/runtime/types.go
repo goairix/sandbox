@@ -12,11 +12,12 @@ type SandboxInfo struct {
 
 // ExecRequest holds parameters for executing a command in a sandbox.
 type ExecRequest struct {
-	Command string            // the command to run
-	Stdin   string            // optional stdin input
-	Timeout int               // seconds
-	Env     map[string]string // additional environment variables
-	WorkDir string            // working directory, defaults to /workspace
+	Command      string            // the command to run
+	Stdin        string            // optional stdin input
+	Timeout      int               // seconds
+	Env          map[string]string // additional environment variables
+	WorkDir      string            // working directory, defaults to /workspace
+	LineBuffered bool              // force line-buffered stdout/stderr via stdbuf
 }
 
 // ExecResult holds the result of a synchronous command execution.

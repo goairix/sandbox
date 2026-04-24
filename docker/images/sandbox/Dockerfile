@@ -3,7 +3,7 @@ FROM python:3.13-slim
 # System tools
 RUN apt-get update
 RUN apt-get install -y --no-install-recommends \
-    curl wget jq git openssh-client zip unzip
+    curl wget jq git openssh-client zip unzip iproute2
 RUN apt-get install -y findutils gawk imagemagick ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,6 +32,13 @@ RUN pip install --no-cache-dir \
     reportlab \
     openpyxl \
     python-docx
+
+# Jupyter Notebook
+RUN pip install --no-cache-dir \
+    jupyter \
+    ipykernel \
+    nbformat \
+    nbconvert
 
 # TypeScript + global Node packages
 RUN npm install -g \
