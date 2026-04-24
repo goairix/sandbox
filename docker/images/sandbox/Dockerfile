@@ -1,5 +1,8 @@
 FROM python:3.13-slim
 
+# Use China mirror for Debian packages
+RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+
 # System tools
 RUN apt-get update
 RUN apt-get install -y --no-install-recommends \
@@ -10,7 +13,11 @@ RUN apt-get install -y findutils gawk imagemagick ffmpeg \
 # Node.js 20
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && npm config set registry https://registry.npmmirror.com
+
+# Use Tsinghua pip mirror
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Python packages
 RUN pip install --no-cache-dir \
