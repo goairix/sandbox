@@ -323,6 +323,10 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 		return nil, err
 	}
 
+	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+		return nil, ErrNetworkRequired
+	}
+
 	m.mu.Lock()
 	sb.State = StateRunning
 	sb.UpdatedAt = time.Now()
@@ -348,6 +352,10 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+
+	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+		return nil, ErrNetworkRequired
 	}
 
 	m.mu.Lock()

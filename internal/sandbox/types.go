@@ -1,6 +1,13 @@
 package sandbox
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrNetworkRequired is returned when a command requires network access
+// but the sandbox has networking disabled.
+var ErrNetworkRequired = errors.New("network access is required but not enabled for this sandbox")
 
 // Language represents a supported programming language/runtime.
 type Language string

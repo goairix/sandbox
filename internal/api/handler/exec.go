@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -42,15 +43,20 @@ func (h *Handler) ExecSync(c *gin.Context) {
 	}
 
 	execReq := runtime.ExecRequest{
-		Command:      command,
-		Stdin:        req.Stdin,
-		Timeout:      req.Timeout,
-		Env:          req.Env,
-		LineBuffered: req.LineBuffered,
+		Command:         command,
+		Stdin:           req.Stdin,
+		Timeout:         req.Timeout,
+		Env:             req.Env,
+		LineBuffered:    req.LineBuffered,
+		RequiresNetwork: req.RequiresNetwork,
 	}
 
 	result, err := h.manager.Exec(c.Request.Context(), id, execReq)
 	if err != nil {
+		if errors.Is(err, sandbox.ErrNetworkRequired) {
+			c.JSON(http.StatusForbidden, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
@@ -90,15 +96,20 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	}
 
 	execReq := runtime.ExecRequest{
-		Command:      command,
-		Stdin:        req.Stdin,
-		Timeout:      req.Timeout,
-		Env:          req.Env,
-		LineBuffered: req.LineBuffered,
+		Command:         command,
+		Stdin:           req.Stdin,
+		Timeout:         req.Timeout,
+		Env:             req.Env,
+		LineBuffered:    req.LineBuffered,
+		RequiresNetwork: req.RequiresNetwork,
 	}
 
 	ch, err := h.manager.ExecStream(c.Request.Context(), id, execReq)
 	if err != nil {
+		if errors.Is(err, sandbox.ErrNetworkRequired) {
+			c.JSON(http.StatusForbidden, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}

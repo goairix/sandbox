@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -79,13 +80,18 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 
 	// Execute
 	result, err := h.manager.Exec(ctx, sb.ID, runtime.ExecRequest{
-		Command:      command,
-		Stdin:        req.Stdin,
-		Timeout:      req.Timeout,
-		Env:          req.Env,
-		LineBuffered: req.LineBuffered,
+		Command:         command,
+		Stdin:           req.Stdin,
+		Timeout:         req.Timeout,
+		Env:             req.Env,
+		LineBuffered:    req.LineBuffered,
+		RequiresNetwork: req.RequiresNetwork,
 	})
 	if err != nil {
+		if errors.Is(err, sandbox.ErrNetworkRequired) {
+			c.JSON(http.StatusForbidden, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
@@ -146,13 +152,18 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	}
 
 	ch, err := h.manager.ExecStream(ctx, sb.ID, runtime.ExecRequest{
-		Command:      command2,
-		Stdin:        req.Stdin,
-		Timeout:      req.Timeout,
-		Env:          req.Env,
-		LineBuffered: req.LineBuffered,
+		Command:         command2,
+		Stdin:           req.Stdin,
+		Timeout:         req.Timeout,
+		Env:             req.Env,
+		LineBuffered:    req.LineBuffered,
+		RequiresNetwork: req.RequiresNetwork,
 	})
 	if err != nil {
+		if errors.Is(err, sandbox.ErrNetworkRequired) {
+			c.JSON(http.StatusForbidden, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}

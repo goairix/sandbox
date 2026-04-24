@@ -1,12 +1,13 @@
 package types
 
 type ExecRequest struct {
-	Language     string            `json:"language" binding:"required,oneof=python nodejs bash"`
-	Code         string            `json:"code" binding:"required"`
-	Stdin        string            `json:"stdin,omitempty" binding:"max=1048576"`
-	Timeout      int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
-	Env          map[string]string `json:"env,omitempty"`
-	LineBuffered bool              `json:"line_buffered,omitempty"`
+	Language        string            `json:"language" binding:"required,oneof=python nodejs bash"`
+	Code            string            `json:"code" binding:"required"`
+	Stdin           string            `json:"stdin,omitempty" binding:"max=1048576"`
+	Timeout         int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
+	Env             map[string]string `json:"env,omitempty"`
+	LineBuffered    bool              `json:"line_buffered,omitempty"`
+	RequiresNetwork bool             `json:"requires_network,omitempty"`
 }
 
 type ExecResponse struct {
@@ -18,15 +19,16 @@ type ExecResponse struct {
 
 // ExecuteRequest is for one-shot execution (no pre-created sandbox).
 type ExecuteRequest struct {
-	Language     string            `json:"language" binding:"required,oneof=python nodejs bash"`
-	Code         string            `json:"code" binding:"required"`
-	Stdin        string            `json:"stdin,omitempty" binding:"max=1048576"`
-	Timeout      int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
-	Env          map[string]string `json:"env,omitempty"`
-	Resources    *ResourceLimits   `json:"resources,omitempty"`
-	Network      *NetworkConfig    `json:"network,omitempty"`
-	Dependencies []DependencySpec  `json:"dependencies,omitempty"`
-	LineBuffered bool              `json:"line_buffered,omitempty"`
+	Language        string            `json:"language" binding:"required,oneof=python nodejs bash"`
+	Code            string            `json:"code" binding:"required"`
+	Stdin           string            `json:"stdin,omitempty" binding:"max=1048576"`
+	Timeout         int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
+	Env             map[string]string `json:"env,omitempty"`
+	Resources       *ResourceLimits   `json:"resources,omitempty"`
+	Network         *NetworkConfig    `json:"network,omitempty"`
+	Dependencies    []DependencySpec  `json:"dependencies,omitempty"`
+	LineBuffered    bool              `json:"line_buffered,omitempty"`
+	RequiresNetwork bool             `json:"requires_network,omitempty"`
 }
 
 // SSEEvent represents a Server-Sent Event for streamed execution.
