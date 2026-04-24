@@ -165,7 +165,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	rc := http.NewResponseController(c.Writer)
 
 	// Heartbeat ticker to prevent timeout during silent periods
-	heartbeatInterval := 30 * time.Second
+	heartbeatInterval := 10 * time.Second
 	writeDeadline := 2 * heartbeatInterval
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
