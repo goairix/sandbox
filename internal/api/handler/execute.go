@@ -162,11 +162,16 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 
 	start := time.Now()
 	flusher, _ := c.Writer.(http.Flusher)
+	rc := http.NewResponseController(c.Writer)
 
 	// Heartbeat ticker to prevent timeout during silent periods
 	heartbeatInterval := 30 * time.Second
+	writeDeadline := 2 * heartbeatInterval
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
+
+	// Extend write deadline before first wait
+	_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
 
 	for {
 		select {
@@ -174,6 +179,8 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 			// Client disconnected
 			return
 		case <-ticker.C:
+			// Extend write deadline before sending heartbeat
+			_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
 			// Send heartbeat ping event
 			pingData := types.SSEPingData{Timestamp: time.Now().Unix()}
 			jsonData, _ := json.Marshal(pingData)
@@ -219,6 +226,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 				log.Printf("unknown stream event type: %v", event.Type)
 				continue
 			}
+
+			// Extend write deadline before sending event
+			_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
 
 			jsonData, err := json.Marshal(data)
 			if err != nil {
