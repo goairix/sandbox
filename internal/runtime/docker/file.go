@@ -21,14 +21,6 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// shellEscapeSed escapes special characters in a string for use in a sed s/// expression.
-// The delimiter used is '/', so '/', '\', and '&' must be escaped.
-func shellEscapeSed(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "/", "\\/")
-	s = strings.ReplaceAll(s, "&", "\\&")
-	return s
-}
 
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
 	content, err := io.ReadAll(reader)
@@ -279,40 +271,41 @@ func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
-	if strings.ContainsAny(oldStr, "\n\r") || strings.ContainsAny(newStr, "\n\r") {
-		return fmt.Errorf("oldStr and newStr must not contain newline characters")
-	}
-
-	// Check that oldStr exists in the file before attempting replacement
-	checkResult, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: fmt.Sprintf("grep -qF %s %s", shellEscape(oldStr), shellEscape(filePath)),
+	// Read the file content from the container.
+	readResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("cat %s", shellEscape(filePath)),
 		WorkDir: "/workspace",
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("read file: %w", err)
 	}
-	if checkResult.ExitCode != 0 {
+	if readResult.ExitCode != 0 {
+		return fmt.Errorf("read file: %s", strings.TrimSpace(readResult.Stderr))
+	}
+
+	content := readResult.Stdout
+
+	// Check that oldStr exists in the file.
+	if !strings.Contains(content, oldStr) {
 		return fmt.Errorf("string not found in file: %s", oldStr)
 	}
 
-	flag := ""
+	// Perform the replacement in Go — supports multiline strings naturally.
+	var newContent string
 	if replaceAll {
-		flag = "g"
+		newContent = strings.ReplaceAll(content, oldStr, newStr)
+	} else {
+		newContent = strings.Replace(content, oldStr, newStr, 1)
 	}
 
-	escapedOld := shellEscapeSed(oldStr)
-	escapedNew := shellEscapeSed(newStr)
-
+	// Write the result back via stdin pipe to avoid shell escaping issues.
 	tmpFile := fmt.Sprintf("/tmp/sandbox-edit-%d", time.Now().UnixNano())
-	cmd := fmt.Sprintf(
-		"sed 's/%s/%s/%s' %s > %s && mv %s %s",
-		escapedOld, escapedNew, flag,
-		shellEscape(filePath), shellEscape(tmpFile),
-		shellEscape(tmpFile), shellEscape(filePath),
-	)
+	if err := r.ExecPipe(ctx, id, []string{"sh", "-c", fmt.Sprintf("cat > %s", shellEscape(tmpFile))}, strings.NewReader(newContent)); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
 
 	_, err = r.Exec(ctx, id, runtime.ExecRequest{
-		Command: cmd,
+		Command: fmt.Sprintf("mv %s %s", shellEscape(tmpFile), shellEscape(filePath)),
 		WorkDir: "/workspace",
 	})
 	return err

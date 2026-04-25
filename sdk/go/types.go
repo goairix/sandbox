@@ -43,10 +43,10 @@ type DependencySpec struct {
 // CreateSandboxRequest is the request body for POST /api/v1/sandboxes.
 // Mode is required; use ModeEphemeral or ModePersistent.
 type CreateSandboxRequest struct {
-	Mode          Mode             `json:"mode"`
-	Timeout       int              `json:"timeout,omitempty"`
-	Resources     *ResourceLimits  `json:"resources,omitempty"`
-	Network       *NetworkConfig   `json:"network,omitempty"`
+	Mode                 Mode             `json:"mode"`
+	Timeout              int              `json:"timeout,omitempty"`
+	Resources            *ResourceLimits  `json:"resources,omitempty"`
+	Network              *NetworkConfig   `json:"network,omitempty"`
 	Dependencies         []DependencySpec `json:"dependencies,omitempty"`
 	WorkspacePath        string           `json:"workspace_path,omitempty"`
 	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
@@ -54,11 +54,13 @@ type CreateSandboxRequest struct {
 
 // SandboxResponse is returned by sandbox lifecycle endpoints.
 type SandboxResponse struct {
-	ID        string    `json:"id"`
-	Mode      Mode      `json:"mode"`
-	State     string    `json:"state"`
-	RuntimeID string    `json:"runtime_id"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string     `json:"id"`
+	Mode      Mode       `json:"mode"`
+	State     string     `json:"state"`
+	RuntimeID string     `json:"runtime_id"`
+	CreatedAt time.Time  `json:"created_at"`
+	Timeout   int        `json:"timeout"`              // seconds; -1 = never expire
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil when timeout = -1
 }
 
 // UpdateNetworkRequest is the request body for PUT /api/v1/sandboxes/:id/network.
@@ -73,6 +75,17 @@ type UpdateNetworkResponse struct {
 	Whitelist []string `json:"whitelist"`
 }
 
+// UpdateTTLRequest is the request body for PUT /api/v1/sandboxes/:id/ttl.
+type UpdateTTLRequest struct {
+	Timeout int `json:"timeout"` // seconds; must be > 0
+}
+
+// UpdateTTLResponse is returned by the update TTL endpoint.
+type UpdateTTLResponse struct {
+	Timeout   int       `json:"timeout"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // ExecRequest is the request body for POST /api/v1/sandboxes/:id/exec.
 type ExecRequest struct {
 	Language        string            `json:"language"`
@@ -81,7 +94,7 @@ type ExecRequest struct {
 	Timeout         int               `json:"timeout,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	LineBuffered    bool              `json:"line_buffered,omitempty"`
-	RequiresNetwork bool             `json:"requires_network,omitempty"`
+	RequiresNetwork bool              `json:"requires_network,omitempty"`
 }
 
 // ExecResponse is returned by the exec endpoint.
@@ -104,7 +117,7 @@ type ExecuteRequest struct {
 	Network         *NetworkConfig    `json:"network,omitempty"`
 	Dependencies    []DependencySpec  `json:"dependencies,omitempty"`
 	LineBuffered    bool              `json:"line_buffered,omitempty"`
-	RequiresNetwork bool             `json:"requires_network,omitempty"`
+	RequiresNetwork bool              `json:"requires_network,omitempty"`
 }
 
 // FileInfo describes a file or directory entry.

@@ -137,6 +137,12 @@ func (c *Client) UpdateNetwork(ctx context.Context, id string, req UpdateNetwork
 	return resp, c.do(ctx, http.MethodPut, c.sandboxBase(id)+"/network", req, &resp)
 }
 
+// UpdateTTL dynamically updates the TTL for a running sandbox. PUT /api/v1/sandboxes/:id/ttl
+func (c *Client) UpdateTTL(ctx context.Context, id string, req UpdateTTLRequest) (UpdateTTLResponse, error) {
+	var resp UpdateTTLResponse
+	return resp, c.do(ctx, http.MethodPut, c.sandboxBase(id)+"/ttl", req, &resp)
+}
+
 // Exec executes code in a sandbox. POST /api/v1/sandboxes/:id/exec
 func (c *Client) Exec(ctx context.Context, id string, req ExecRequest) (ExecResponse, error) {
 	var resp ExecResponse

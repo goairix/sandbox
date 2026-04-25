@@ -118,6 +118,12 @@ func (s *Sandbox) DisableNetwork(ctx context.Context) error {
 	return err
 }
 
+// UpdateTTL dynamically updates the sandbox's TTL.
+// timeoutSeconds must be > 0; setting to never-expire (-1) after creation is not allowed.
+func (s *Sandbox) UpdateTTL(ctx context.Context, timeoutSeconds int) (UpdateTTLResponse, error) {
+	return s.client.UpdateTTL(ctx, s.id, UpdateTTLRequest{Timeout: timeoutSeconds})
+}
+
 // ListSkills lists all agent skills stored in the sandbox at /workspace/.agent/skills/.
 func (s *Sandbox) ListSkills(ctx context.Context) (SkillListResponse, error) {
 	return s.client.ListSkills(ctx, s.id)

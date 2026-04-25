@@ -81,13 +81,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, types.SandboxResponse{
-		ID:        sb.ID,
-		Mode:      string(sb.Config.Mode),
-		State:     string(sb.State),
-		RuntimeID: sb.RuntimeID,
-		CreatedAt: sb.CreatedAt,
-	})
+	c.JSON(http.StatusCreated, sandboxToResponse(sb))
 }
 
 func (h *Handler) GetSandbox(c *gin.Context) {
@@ -101,13 +95,7 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, types.SandboxResponse{
-		ID:        sb.ID,
-		Mode:      string(sb.Config.Mode),
-		State:     string(sb.State),
-		RuntimeID: sb.RuntimeID,
-		CreatedAt: sb.CreatedAt,
-	})
+	c.JSON(http.StatusOK, sandboxToResponse(&sb))
 }
 
 func (h *Handler) DestroySandbox(c *gin.Context) {
@@ -143,6 +131,50 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 		Enabled:   req.Enabled,
 		Whitelist: req.Whitelist,
 	})
+}
+
+// UpdateTTL dynamically updates the TTL for a running sandbox.
+func (h *Handler) UpdateTTL(c *gin.Context) {
+	id := c.Param("id")
+
+	var req types.UpdateTTLRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	sb, err := h.manager.UpdateTTL(c.Request.Context(), id, req.Timeout)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	expiresAt := sb.CreatedAt.Add(sb.Timeout)
+	c.JSON(http.StatusOK, types.UpdateTTLResponse{
+		Timeout:   int(sb.Timeout.Seconds()),
+		ExpiresAt: expiresAt,
+	})
+}
+
+// sandboxToResponse converts a Sandbox to a SandboxResponse.
+func sandboxToResponse(sb *sandbox.Sandbox) types.SandboxResponse {
+	resp := types.SandboxResponse{
+		ID:        sb.ID,
+		Mode:      string(sb.Config.Mode),
+		State:     string(sb.State),
+		RuntimeID: sb.RuntimeID,
+		CreatedAt: sb.CreatedAt,
+		Timeout:   int(sb.Timeout.Seconds()),
+	}
+	if sb.Timeout > 0 {
+		expiresAt := sb.CreatedAt.Add(sb.Timeout)
+		resp.ExpiresAt = &expiresAt
+	}
+	return resp
 }
 
 // buildCommand wraps raw code with the appropriate interpreter command based on language.

@@ -126,6 +126,14 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		timeout = m.config.DefaultTimeout
 	}
 
+	var timeoutDuration time.Duration
+	if timeout < 0 {
+		// -1 means never expire
+		timeoutDuration = -1
+	} else {
+		timeoutDuration = time.Duration(timeout) * time.Second
+	}
+
 	m.mu.Lock()
 	id := fmt.Sprintf("sandbox-%s", randSuffix(randSuffixLen))
 	m.mu.Unlock()
@@ -174,7 +182,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		RuntimeID: info.RuntimeID,
-		Timeout:   time.Duration(timeout) * time.Second,
+		Timeout:   timeoutDuration,
 	}
 
 	// Install dependencies if requested
@@ -484,6 +492,38 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	m.mu.Unlock()
 
 	return nil
+}
+
+// UpdateTTL dynamically updates the TTL for a running sandbox.
+// The new timeout (in seconds) must be > 0; setting to never-expire (-1) after
+// creation is not allowed.
+func (m *Manager) UpdateTTL(ctx context.Context, id string, timeoutSeconds int) (*Sandbox, error) {
+	if timeoutSeconds <= 0 {
+		return nil, fmt.Errorf("timeout must be greater than 0")
+	}
+
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	newTimeout := time.Duration(timeoutSeconds) * time.Second
+
+	m.mu.Lock()
+	sb.Timeout = newTimeout
+	sb.CreatedAt = now // reset so reaper uses new baseline
+	sb.UpdatedAt = now
+	m.mu.Unlock()
+
+	// Persist to session store if applicable
+	if sb.Config.Mode == ModePersistent && m.sessions != nil {
+		if err := m.sessions.Save(ctx, sb); err != nil {
+			_ = err
+		}
+	}
+
+	return sb, nil
 }
 
 // reapExpiredSandboxes periodically checks for sandboxes that have exceeded

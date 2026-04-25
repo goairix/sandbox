@@ -23,12 +23,26 @@ func NewSessionStore(store state.Store, ttl time.Duration) *SessionStore {
 }
 
 // Save persists a sandbox to the store.
+// The Redis key TTL is derived from the sandbox's own timeout:
+//   - Timeout <= 0 (never expire): uses TTL=0 so the key never expires
+//   - Timeout > 0: uses the remaining lifetime as TTL
 func (s *SessionStore) Save(ctx context.Context, sb *Sandbox) error {
 	data, err := json.Marshal(sb)
 	if err != nil {
 		return fmt.Errorf("marshal sandbox: %w", err)
 	}
-	return s.store.Set(ctx, sandboxKeyPrefix+sb.ID, data, s.ttl)
+
+	ttl := s.ttl // fallback to global default
+	if sb.Timeout <= 0 {
+		ttl = 0 // never expire
+	} else {
+		remaining := sb.Timeout - time.Since(sb.CreatedAt)
+		if remaining > 0 {
+			ttl = remaining
+		}
+	}
+
+	return s.store.Set(ctx, sandboxKeyPrefix+sb.ID, data, ttl)
 }
 
 // Load retrieves a sandbox from the store.

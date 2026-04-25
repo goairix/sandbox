@@ -71,7 +71,7 @@ type WorkspaceInfo struct {
 // SandboxConfig holds all configuration for creating a sandbox.
 type SandboxConfig struct {
 	Mode          Mode           `json:"mode"`
-	Timeout       int            `json:"timeout"` // seconds, max sandbox lifetime
+	Timeout       int            `json:"timeout"` // seconds; 0 = use default, -1 = never expire
 	Resources     ResourceLimits `json:"resources"`
 	Network       NetworkConfig  `json:"network"`
 	Dependencies  []Dependency   `json:"dependencies"`

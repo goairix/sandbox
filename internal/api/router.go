@@ -47,6 +47,7 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int) *gin.Engine {
 	v1.GET("/sandboxes/:id", h.GetSandbox)
 	v1.DELETE("/sandboxes/:id", h.DestroySandbox)
 	v1.PUT("/sandboxes/:id/network", h.UpdateNetwork)
+	v1.PUT("/sandboxes/:id/ttl", h.UpdateTTL)
 
 	// Execution within a sandbox
 	v1.POST("/sandboxes/:id/exec", h.ExecSync)
