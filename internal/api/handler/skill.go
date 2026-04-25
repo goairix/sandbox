@@ -31,19 +31,44 @@ func ParseFrontmatter(content string) (types.SkillMeta, string, error) {
 	frontmatter := rest[:end]
 	body := rest[end+5:]
 
-	var raw struct {
-		Name          string            `yaml:"name"`
-		Description   string            `yaml:"description"`
-		Compatibility string            `yaml:"compatibility"`
-		Metadata      map[string]string `yaml:"metadata"`
-	}
-	if err := yaml.Unmarshal([]byte(frontmatter), &raw); err != nil {
+	// Parse all frontmatter fields into a generic map so that unknown fields
+	// (e.g. context, model, agent) are captured in Metadata automatically.
+	var all map[string]interface{}
+	if err := yaml.Unmarshal([]byte(frontmatter), &all); err != nil {
 		return meta, body, fmt.Errorf("parse frontmatter: %w", err)
 	}
-	meta.Name = raw.Name
-	meta.Description = raw.Description
-	meta.Compatibility = raw.Compatibility
-	meta.Metadata = raw.Metadata
+
+	// Extract known top-level fields.
+	knownKeys := map[string]bool{"name": true, "description": true, "compatibility": true, "metadata": true}
+	if v, ok := all["name"].(string); ok {
+		meta.Name = v
+	}
+	if v, ok := all["description"].(string); ok {
+		meta.Description = v
+	}
+	if v, ok := all["compatibility"].(string); ok {
+		meta.Compatibility = v
+	}
+
+	// Collect unknown top-level fields into Metadata.
+	metadata := make(map[string]string)
+	for k, v := range all {
+		if knownKeys[k] {
+			continue
+		}
+		metadata[k] = fmt.Sprintf("%v", v)
+	}
+
+	// Merge explicit "metadata" block entries (they take precedence).
+	if m, ok := all["metadata"].(map[string]interface{}); ok {
+		for k, v := range m {
+			metadata[k] = fmt.Sprintf("%v", v)
+		}
+	}
+
+	if len(metadata) > 0 {
+		meta.Metadata = metadata
+	}
 	return meta, body, nil
 }
 
