@@ -110,11 +110,13 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 	}
 	defer attachResp.Close()
 
-	// Drain stdout/stderr in background to prevent the exec from blocking.
+	// Capture stdout/stderr in background to prevent the exec from blocking
+	// and to include stderr in error messages when the command fails.
+	var stdout, stderr bytes.Buffer
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		_, _ = io.Copy(io.Discard, attachResp.Reader)
+		_, _ = stdcopy.StdCopy(&stdout, &stderr, attachResp.Reader)
 	}()
 
 	// Stream stdin to the exec process.
@@ -128,6 +130,10 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 		return fmt.Errorf("exec inspect: %w", err)
 	}
 	if inspectResp.ExitCode != 0 {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return fmt.Errorf("exec exited with code %d: %s", inspectResp.ExitCode, errMsg)
+		}
 		return fmt.Errorf("exec exited with code %d", inspectResp.ExitCode)
 	}
 	return nil
