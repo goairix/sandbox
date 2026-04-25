@@ -166,6 +166,7 @@ func (h *Handler) GetSkill(c *gin.Context) {
 
 	c.JSON(http.StatusOK, types.SkillResponse{
 		SkillMeta: meta,
+		Path:      skillDir,
 		Content:   body,
 		Files:     skillFiles,
 	})

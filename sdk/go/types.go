@@ -182,6 +182,7 @@ type SkillListResponse struct {
 // SkillResponse is returned by GET /api/v1/sandboxes/:id/skills/:name.
 type SkillResponse struct {
 	SkillMeta
+	Path    string      `json:"path"`
 	Content string      `json:"content"`
 	Files   []SkillFile `json:"files"`
 }
