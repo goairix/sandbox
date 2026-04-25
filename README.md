@@ -47,6 +47,12 @@ curl -X POST http://localhost:8080/api/v1/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"mode":"persistent"}'
 
+# 创建永不过期的沙箱（timeout=-1，只能手动销毁）
+curl -X POST http://localhost:8080/api/v1/sandboxes \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"persistent","timeout":-1}'
+
 # 执行 Python 代码
 curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/exec \
   -H "Authorization: Bearer your-api-key" \
@@ -68,6 +74,12 @@ curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/exec \
 # 销毁沙箱
 curl -X DELETE http://localhost:8080/api/v1/sandboxes/<id> \
   -H "Authorization: Bearer your-api-key"
+
+# 动态修改沙箱 TTL（延长或缩短剩余生存时间）
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/ttl \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"timeout":7200}'
 ```
 
 **安装依赖（支持混合 pip + npm）：**
@@ -136,6 +148,7 @@ curl -X POST http://localhost:8080/api/v1/execute/stream \
 | GET | `/api/v1/sandboxes/:id/files/download` | 从沙箱下载文件 |
 | GET | `/api/v1/sandboxes/:id/files/list` | 列出沙箱中的文件 |
 | PUT | `/api/v1/sandboxes/:id/network` | 更新沙箱网络配置 |
+| PUT | `/api/v1/sandboxes/:id/ttl` | 动态修改沙箱 TTL |
 | POST | `/api/v1/sandboxes/:id/workspace/mount` | 挂载工作空间 |
 | POST | `/api/v1/sandboxes/:id/workspace/unmount` | 卸载工作空间 |
 | POST | `/api/v1/sandboxes/:id/workspace/sync` | 手动同步工作空间 |
@@ -170,7 +183,7 @@ SANDBOX_IMAGES_SANDBOX=sandbox:latest
 | `images.sandbox` | `sandbox:latest` | 统一沙箱镜像 |
 | `images.gateway` | `sandbox-gateway:latest` | 网络网关镜像 |
 | `security.exec_timeout_seconds` | `30` | 单次执行超时时间 |
-| `security.sandbox_timeout_seconds` | `3600` | 沙箱最大生命周期 |
+| `security.sandbox_timeout_seconds` | `3600` | 沙箱默认生命周期（-1 = 永不过期） |
 | `security.max_memory` | `256Mi` | 沙箱内存限制 |
 | `security.max_pids` | `100` | 沙箱最大进程数 |
 | `security.network_enabled` | `false` | 是否允许网络访问 |

@@ -40,7 +40,7 @@ client := sandbox.NewClient(baseURL, apiKey,
 ```go
 sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
     Mode:    sandbox.ModePersistent, // default: ModeEphemeral
-    Timeout: 300,
+    Timeout: 300,                    // seconds; 0 = server default, -1 = never expire
     Resources: &sandbox.ResourceLimits{Memory: "256Mi", CPU: "500m"},
     Network:   &sandbox.NetworkConfig{Enabled: true, Whitelist: []string{"api.openai.com"}},
 })
@@ -48,6 +48,11 @@ if err != nil {
     return err
 }
 defer sb.Close(ctx)
+
+// Response now includes Timeout and ExpiresAt
+info, _ := client.GetSandbox(ctx, sb.ID())
+fmt.Println(info.Timeout)   // seconds; -1 = never expire
+fmt.Println(info.ExpiresAt) // nil when timeout = -1
 ```
 
 ### Execute code
@@ -147,6 +152,15 @@ err = sb.EnableNetwork(ctx, []string{"api.openai.com"})
 err = sb.DisableNetwork(ctx)
 ```
 
+### TTL
+
+```go
+// Dynamically extend or shorten sandbox lifetime (seconds, must be > 0)
+resp, err := sb.UpdateTTL(ctx, 7200)
+fmt.Println(resp.Timeout)   // 7200
+fmt.Println(resp.ExpiresAt) // new expiration time
+```
+
 ### Agent Skills
 
 ```go
@@ -205,6 +219,7 @@ Predefined sentinels:
 | `GetSandbox(ctx, id)` | GET /api/v1/sandboxes/:id |
 | `DestroySandbox(ctx, id)` | DELETE /api/v1/sandboxes/:id |
 | `UpdateNetwork(ctx, id, req)` | PUT /api/v1/sandboxes/:id/network |
+| `UpdateTTL(ctx, id, req)` | PUT /api/v1/sandboxes/:id/ttl |
 | `Exec(ctx, id, req)` | POST /api/v1/sandboxes/:id/exec |
 | `ExecStream(ctx, id, req)` | POST /api/v1/sandboxes/:id/exec/stream |
 | `Execute(ctx, req)` | POST /api/v1/execute |
@@ -251,6 +266,7 @@ Predefined sentinels:
 | `WorkspaceInfo(ctx)` | Workspace status |
 | `EnableNetwork(ctx, whitelist)` | Enable network |
 | `DisableNetwork(ctx)` | Disable network |
+| `UpdateTTL(ctx, timeoutSeconds)` | Dynamically update sandbox TTL |
 | `ListSkills(ctx)` | List agent skills |
 | `GetSkill(ctx, name)` | Get skill content |
 | `GetSkillFile(ctx, name, path)` | Get skill file |
