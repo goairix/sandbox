@@ -91,6 +91,28 @@ spec:
                   name: {{ .Release.Name }}-api
                   key: api-key
           {{- end }}
+            - name: SANDBOX_TELEMETRY_SERVICE_NAME
+              value: "{{ .Values.config.telemetry.serviceName }}"
+            - name: SANDBOX_TELEMETRY_SERVICE_VERSION
+              value: "{{ .Values.config.telemetry.serviceVersion }}"
+            - name: SANDBOX_TELEMETRY_TRACER_OTLP_ENABLED
+              value: "{{ .Values.config.telemetry.tracer.otlpEnabled }}"
+            {{- if .Values.config.telemetry.tracer.otlpEndpoint }}
+            - name: SANDBOX_TELEMETRY_TRACER_OTLP_ENDPOINT
+              value: "{{ .Values.config.telemetry.tracer.otlpEndpoint }}"
+            {{- end }}
+            - name: SANDBOX_TELEMETRY_METRICS_OTLP_ENABLED
+              value: "{{ .Values.config.telemetry.metrics.otlpEnabled }}"
+            {{- if .Values.config.telemetry.metrics.otlpEndpoint }}
+            - name: SANDBOX_TELEMETRY_METRICS_OTLP_ENDPOINT
+              value: "{{ .Values.config.telemetry.metrics.otlpEndpoint }}"
+            {{- end }}
+            - name: SANDBOX_TELEMETRY_LOG_OTLP_ENABLED
+              value: "{{ .Values.config.telemetry.log.otlpEnabled }}"
+            {{- if .Values.config.telemetry.log.otlpEndpoint }}
+            - name: SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT
+              value: "{{ .Values.config.telemetry.log.otlpEndpoint }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:

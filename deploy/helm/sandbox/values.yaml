@@ -82,6 +82,18 @@ config:
     sandboxTimeoutSeconds: 3600
     maxMemory: 256Mi
     maxPids: 100
+  telemetry:
+    serviceName: "sandbox"
+    serviceVersion: "v1.0.0"
+    tracer:
+      otlpEnabled: false
+      otlpEndpoint: ""
+    metrics:
+      otlpEnabled: false
+      otlpEndpoint: ""
+    log:
+      otlpEnabled: false
+      otlpEndpoint: ""
 
 networkPolicy:
   enabled: true
