@@ -23,6 +23,12 @@ func BodySizeLimit(maxBytes int64) gin.HandlerFunc {
 func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName string) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
+
+	// Health check — registered before OTel middleware so it is never traced
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
 	r.Use(middleware.OTel(serviceName))
 
 	// Limit multipart memory to 32MB
@@ -30,11 +36,6 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 
 	// Limit request body size to 64MB
 	r.Use(BodySizeLimit(64 << 20))
-
-	// Health check (no auth)
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
 
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.Auth(apiKey))
