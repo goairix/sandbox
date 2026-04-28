@@ -63,6 +63,9 @@ func NewTracer(traceName string, opts ...trace.TracerOption) trace.Tracer {
 }
 
 func Tracer() trace.Tracer {
+	if tracer == nil {
+		return otel.Tracer("")
+	}
 	return tracer
 }
 
