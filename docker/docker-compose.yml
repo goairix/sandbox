@@ -3,6 +3,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    image: sandbox-api:latest
     ports:
       - "8080:8080"
     environment:
@@ -25,6 +26,12 @@ services:
       - SANDBOX_POOL_MAX_SIZE=${POOL_MAX_SIZE:-20}
       - SANDBOX_IMAGES_SANDBOX=sandbox:latest
       - SANDBOX_IMAGES_GATEWAY=sandbox-gateway:latest
+      - SANDBOX_TELEMETRY_TRACER_ENABLED=${TELEMETRY_TRACER_ENABLED}
+      - SANDBOX_TELEMETRY_TRACER_ENDPOINT=${TELEMETRY_TRACER_ENDPOINT}
+      - SANDBOX_TELEMETRY_METRICS_ENABLED=${TELEMETRY_METRICS_ENABLED}
+      - SANDBOX_TELEMETRY_METRICS_ENDPOINT=${TELEMETRY_METRICS_ENDPOINT}
+      - SANDBOX_TELEMETRY_LOG_ENABLED=${TELEMETRY_LOG_ENABLED}
+      - SANDBOX_TELEMETRY_LOG_ENDPOINT=${TELEMETRY_LOG_ENDPOINT}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
