@@ -6,10 +6,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
 func (h *Handler) MountWorkspace(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.workspace.MountWorkspace")
+	defer span.End()
+
 	id := c.Param("id")
 
 	var req types.MountWorkspaceRequest
@@ -18,7 +22,7 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.MountWorkspace(c.Request.Context(), id, req.RootPath, req.Exclude); err != nil {
+	if err := h.manager.MountWorkspace(spanCtx, id, req.RootPath, req.Exclude); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
@@ -31,7 +35,7 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 		return
 	}
 
-	info, _ := h.manager.GetWorkspaceInfo(c.Request.Context(), id)
+	info, _ := h.manager.GetWorkspaceInfo(spanCtx, id)
 	c.JSON(http.StatusOK, types.MountWorkspaceResponse{
 		RootPath:  info.RootPath,
 		MountedAt: info.MountedAt,
@@ -39,9 +43,12 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 }
 
 func (h *Handler) UnmountWorkspace(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.workspace.UnmountWorkspace")
+	defer span.End()
+
 	id := c.Param("id")
 
-	if err := h.manager.UnmountWorkspace(c.Request.Context(), id); err != nil {
+	if err := h.manager.UnmountWorkspace(spanCtx, id); err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no workspace mounted") {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
@@ -54,6 +61,9 @@ func (h *Handler) UnmountWorkspace(c *gin.Context) {
 }
 
 func (h *Handler) SyncWorkspace(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.workspace.SyncWorkspace")
+	defer span.End()
+
 	id := c.Param("id")
 
 	var req types.SyncWorkspaceRequest
@@ -62,7 +72,7 @@ func (h *Handler) SyncWorkspace(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.SyncWorkspace(c.Request.Context(), id, req.Direction, req.Exclude); err != nil {
+	if err := h.manager.SyncWorkspace(spanCtx, id, req.Direction, req.Exclude); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
@@ -82,9 +92,12 @@ func (h *Handler) SyncWorkspace(c *gin.Context) {
 }
 
 func (h *Handler) GetWorkspaceInfo(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.workspace.GetWorkspaceInfo")
+	defer span.End()
+
 	id := c.Param("id")
 
-	info, err := h.manager.GetWorkspaceInfo(c.Request.Context(), id)
+	info, err := h.manager.GetWorkspaceInfo(spanCtx, id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return

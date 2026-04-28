@@ -133,3 +133,17 @@ security:
   # Path to a custom seccomp profile JSON file.
   # Leave empty to use the container runtime default profile.
   seccomp_profile: ""
+
+# 监控配置
+telemetry:
+  service_name: "sandbox"
+  service_version: "v1.0.0"
+  tracer: # 链路追踪
+    otlp_enabled: false # 是否开启数据上报
+    otlp_endpoint: "http://127.0.0.1:4318" # 上报地址
+  metrics: # 监控
+    otlp_enabled: false # 是否开启数据上报
+    otlp_endpoint: "http://127.0.0.1:4318" # 上报地址
+  log: # 日志
+    otlp_enabled: false # 是否开启数据上报
+    otlp_endpoint: "http://127.0.0.1:4318" # 上报地址

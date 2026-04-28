@@ -4,7 +4,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
+)
+
+const (
+	VarPath  string = "var"
+	LogPath         = VarPath + "/logs"
+	TempPath        = VarPath + "/tmp"
 )
 
 // Config is the root configuration structure for the sandbox service.
@@ -16,6 +23,7 @@ type Config struct {
 	Storage   StorageConfig   `mapstructure:"storage"`
 	Workspace WorkspaceConfig `mapstructure:"workspace"`
 	Security  SecurityConfig  `mapstructure:"security"`
+	Telemetry Telemetry       `mapstructure:"telemetry"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -109,6 +117,21 @@ type SecurityConfig struct {
 	SeccompProfile        string   `mapstructure:"seccomp_profile"`
 }
 
+// Telemetry 平台监控配置
+type Telemetry struct {
+	ServiceName    string `mapstructure:"service_name"`
+	ServiceVersion string `mapstructure:"service_version"`
+	Tracer         otlp   `mapstructure:"tracer"`
+	Metrics        otlp   `mapstructure:"metrics"`
+	Log            otlp   `mapstructure:"log"`
+}
+
+// tracer 链路追踪配置
+type otlp struct {
+	OtlpEnabled  bool   `mapstructure:"otlp_enabled"`
+	OtlpEndpoint string `mapstructure:"otlp_endpoint"`
+}
+
 // Load reads configuration from the given file path (if non-empty), applies
 // defaults, and overlays any SANDBOX_* environment variables.
 //
@@ -121,6 +144,9 @@ type SecurityConfig struct {
 //	SANDBOX_SERVER_PORT=9090
 //	SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
 func Load(path string) (*Config, error) {
+	// 加载.env
+	_ = godotenv.Load()
+
 	v := viper.New()
 
 	// ------------------------------------------------------------------ defaults
@@ -261,5 +287,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.network_enabled", false)
 	v.SetDefault("security.network_whitelist", []string{})
 	v.SetDefault("security.seccomp_profile", "")
-}
 
+	// Telemetry
+	v.SetDefault("telemetry.service_name", "sandbox")
+	v.SetDefault("telemetry.service_version", "v1.0.0")
+	v.SetDefault("telemetry.tracer.otlp_enabled", "false")
+	v.SetDefault("telemetry.tracer.otlp_endpoint", "http://127.0.0.1:4318")
+	v.SetDefault("telemetry.metrics.otlp_enabled", "false")
+	v.SetDefault("telemetry.metrics.otlp_endpoint", "http://127.0.0.1:4318")
+	v.SetDefault("telemetry.log.otlp_enabled", "false")
+	v.SetDefault("telemetry.log.otlp_endpoint", "127.0.0.1:4318")
+}

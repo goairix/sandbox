@@ -20,10 +20,10 @@ func BodySizeLimit(maxBytes int64) gin.HandlerFunc {
 }
 
 // SetupRouter configures all routes.
-func SetupRouter(h *handler.Handler, apiKey string, rateLimit int) *gin.Engine {
+func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName string) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
+	r.Use(middleware.OTel(serviceName))
 
 	// Limit multipart memory to 32MB
 	r.MaxMultipartMemory = 32 << 20

@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/goairix/sandbox/internal/logger"
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
 func (h *Handler) ExecuteOneShot(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.execute.ExecuteOneShot")
+	defer span.End()
+
 	var req types.ExecuteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
@@ -33,7 +37,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := spanCtx
 
 	// Create ephemeral sandbox
 	cfg := sandbox.SandboxConfig{
@@ -105,6 +109,9 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 }
 
 func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.execute.ExecuteOneShotStream")
+	defer span.End()
+
 	var req types.ExecuteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
@@ -120,7 +127,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := spanCtx
 
 	cfg := sandbox.SandboxConfig{
 		Mode:    sandbox.ModeEphemeral,
@@ -221,7 +228,10 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 				eventType = "done"
 				exitCode, err := strconv.Atoi(event.Content)
 				if err != nil {
-					log.Printf("failed to parse exit code %q: %v", event.Content, err)
+					logger.Warn(c.Request.Context(), "failed to parse exit code",
+						logger.AddField("raw_value", event.Content),
+						logger.ErrorField(err),
+					)
 					exitCode = -1
 				}
 				data = types.SSEDoneData{
@@ -236,7 +246,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 				}
 			default:
 				// Unknown event type, skip
-				log.Printf("unknown stream event type: %v", event.Type)
+				logger.Warn(c.Request.Context(), "unknown stream event type",
+					logger.AddField("event_type", event.Type),
+				)
 				continue
 			}
 
@@ -245,7 +257,10 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 
 			jsonData, err := json.Marshal(data)
 			if err != nil {
-				log.Printf("failed to marshal SSE data: %v", err)
+				logger.Error(c.Request.Context(), "failed to marshal SSE data",
+					logger.AddField("event_type", eventType),
+					logger.ErrorField(err),
+				)
 				errData := types.SSEErrorData{Error: "marshal_error", Message: "failed to serialize event"}
 				jsonData, _ = json.Marshal(errData)
 				eventType = "error"

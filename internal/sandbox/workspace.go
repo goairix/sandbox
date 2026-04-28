@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 )
@@ -367,7 +367,10 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	manifest, err := m.containerFileManifest(ctx, runtimeID)
 	if err != nil {
 		// Fall back to full sync if manifest collection fails
-		log.Printf("container manifest failed, falling back to full sync: %v", err)
+		logger.Warn(ctx, "container manifest failed, falling back to full sync",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}
@@ -379,7 +382,10 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// Get storage file set
 	storageFiles, err := m.storageFileSet(ctx, scoped, ".")
 	if err != nil {
-		log.Printf("storage file listing failed, falling back to full sync: %v", err)
+		logger.Warn(ctx, "storage file listing failed, falling back to full sync",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}

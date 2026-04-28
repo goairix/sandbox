@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
@@ -29,6 +30,9 @@ func isValidMode(mode string) bool {
 }
 
 func (h *Handler) CreateSandbox(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.CreateSandbox")
+	defer span.End()
+
 	var req types.CreateSandboxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
@@ -75,7 +79,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	cfg.WorkspacePath = req.WorkspacePath
 	cfg.WorkspaceSyncExclude = req.WorkspaceSyncExclude
 
-	sb, err := h.manager.Create(c.Request.Context(), cfg)
+	sb, err := h.manager.Create(spanCtx, cfg)
 	if err != nil {
 		internalError(c, err)
 		return
@@ -85,9 +89,12 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 }
 
 func (h *Handler) GetSandbox(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.GetSandbox")
+	defer span.End()
+
 	id := c.Param("id")
 
-	sb, err := h.manager.Get(c.Request.Context(), id)
+	sb, err := h.manager.Get(spanCtx, id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
 			Message: err.Error(),
@@ -99,9 +106,12 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 }
 
 func (h *Handler) DestroySandbox(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.DestroySandbox")
+	defer span.End()
+
 	id := c.Param("id")
 
-	if err := h.manager.Destroy(c.Request.Context(), id); err != nil {
+	if err := h.manager.Destroy(spanCtx, id); err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
 			Message: err.Error(),
 		})
@@ -112,6 +122,9 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 }
 
 func (h *Handler) UpdateNetwork(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.UpdateNetwork")
+	defer span.End()
+
 	id := c.Param("id")
 
 	var req types.UpdateNetworkRequest
@@ -122,7 +135,7 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.UpdateNetwork(c.Request.Context(), id, req.Enabled, req.Whitelist); err != nil {
+	if err := h.manager.UpdateNetwork(spanCtx, id, req.Enabled, req.Whitelist); err != nil {
 		internalError(c, err)
 		return
 	}
@@ -135,6 +148,9 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 
 // UpdateTTL dynamically updates the TTL for a running sandbox.
 func (h *Handler) UpdateTTL(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.UpdateTTL")
+	defer span.End()
+
 	id := c.Param("id")
 
 	var req types.UpdateTTLRequest
@@ -145,7 +161,7 @@ func (h *Handler) UpdateTTL(c *gin.Context) {
 		return
 	}
 
-	sb, err := h.manager.UpdateTTL(c.Request.Context(), id, req.Timeout)
+	sb, err := h.manager.UpdateTTL(spanCtx, id, req.Timeout)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
 			Message: err.Error(),

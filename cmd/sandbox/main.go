@@ -15,21 +15,55 @@ import (
 	"github.com/goairix/sandbox/internal/api"
 	"github.com/goairix/sandbox/internal/api/handler"
 	"github.com/goairix/sandbox/internal/config"
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/runtime/docker"
 	k8sruntime "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/storage"
 	redisstate "github.com/goairix/sandbox/internal/storage/state/redis"
+	"github.com/goairix/sandbox/internal/telemetry"
+	telemetrylog "github.com/goairix/sandbox/internal/telemetry/log"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			if logger.ZapLogger() != nil {
+				logger.Error(context.Background(), "panic: process crashed",
+					logger.AddField("panic", r),
+				)
+			} else {
+				log.Printf("panic: process crashed: %v", r)
+			}
+		}
+	}()
+
 	configPath := flag.String("config", "", "path to config file")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
+	}
+
+	// Initialize telemetry
+	if err = telemetry.Init(cfg); err != nil {
+		log.Fatalf("failed to init telemetry resource: %v", err)
+	}
+	if err = trace.Init(cfg); err != nil {
+		log.Fatalf("failed to init tracer: %v", err)
+	}
+	if err = metrics.Init(cfg); err != nil {
+		log.Fatalf("failed to init metrics: %v", err)
+	}
+	if err = telemetrylog.Init(cfg); err != nil {
+		log.Fatalf("failed to init log exporter: %v", err)
+	}
+	if err = logger.Init(cfg); err != nil {
+		log.Fatalf("failed to init logger: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -92,7 +126,7 @@ func main() {
 	mgr.Start(ctx)
 
 	h := handler.NewHandler(mgr)
-	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit)
+	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit, cfg.Telemetry.ServiceName)
 	server := api.NewServer(router, cfg.Server.Host, cfg.Server.Port)
 
 	// Graceful shutdown
@@ -107,6 +141,13 @@ func main() {
 		mgr.Stop(context.Background())
 		if shutdownErr := server.Stop(context.Background()); shutdownErr != nil {
 			log.Printf("server shutdown error: %v", shutdownErr)
+		}
+		shutdownCtx := context.Background()
+		if p := trace.TracerProvider(); p != nil {
+			_ = p.Shutdown(shutdownCtx)
+		}
+		if p := telemetrylog.Provider(); p != nil {
+			_ = p.Shutdown(shutdownCtx)
 		}
 	}()
 

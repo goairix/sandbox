@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/goccy/go-yaml"
 
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
@@ -106,14 +107,17 @@ func (h *Handler) listSkillFilesRecursive(ctx context.Context, id, skillRoot str
 
 // ListSkills handles GET /api/v1/sandboxes/:id/skills
 func (h *Handler) ListSkills(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.skill.ListSkills")
+	defer span.End()
+
 	id := c.Param("id")
 
-	if _, err := h.manager.Get(c.Request.Context(), id); err != nil {
+	if _, err := h.manager.Get(spanCtx, id); err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
 
-	entries, err := h.manager.ListFiles(c.Request.Context(), id, skillsBasePath)
+	entries, err := h.manager.ListFiles(spanCtx, id, skillsBasePath)
 	if err != nil {
 		c.JSON(http.StatusOK, types.SkillListResponse{Skills: []types.SkillMeta{}})
 		return
@@ -125,7 +129,7 @@ func (h *Handler) ListSkills(c *gin.Context) {
 			continue
 		}
 		skillMDPath := skillsBasePath + "/" + entry.Name + "/SKILL.md"
-		reader, err := h.manager.DownloadFile(c.Request.Context(), id, skillMDPath)
+		reader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
 		if err != nil {
 			skills = append(skills, types.SkillMeta{Name: entry.Name})
 			continue
@@ -152,6 +156,9 @@ func (h *Handler) ListSkills(c *gin.Context) {
 
 // GetSkill handles GET /api/v1/sandboxes/:id/skills/:name
 func (h *Handler) GetSkill(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.skill.GetSkill")
+	defer span.End()
+
 	id := c.Param("id")
 	name := c.Param("name")
 
@@ -160,13 +167,13 @@ func (h *Handler) GetSkill(c *gin.Context) {
 		return
 	}
 
-	if _, err := h.manager.Get(c.Request.Context(), id); err != nil {
+	if _, err := h.manager.Get(spanCtx, id); err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
 
 	skillMDPath := skillsBasePath + "/" + name + "/SKILL.md"
-	reader, err := h.manager.DownloadFile(c.Request.Context(), id, skillMDPath)
+	reader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
 		return
@@ -185,7 +192,7 @@ func (h *Handler) GetSkill(c *gin.Context) {
 
 	skillDir := skillsBasePath + "/" + name
 	var skillFiles []types.SkillFile
-	if files, err := h.listSkillFilesRecursive(c.Request.Context(), id, skillDir); err == nil {
+	if files, err := h.listSkillFilesRecursive(spanCtx, id, skillDir); err == nil {
 		skillFiles = files
 	}
 
@@ -199,11 +206,14 @@ func (h *Handler) GetSkill(c *gin.Context) {
 
 // GetSkillFile handles GET /api/v1/sandboxes/:id/skills/:name/files/*filepath
 func (h *Handler) GetSkillFile(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.skill.GetSkillFile")
+	defer span.End()
+
 	id := c.Param("id")
 	name := c.Param("name")
 	relPath := c.Param("filepath")
 
-	if _, err := h.manager.Get(c.Request.Context(), id); err != nil {
+	if _, err := h.manager.Get(spanCtx, id); err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
@@ -225,7 +235,7 @@ func (h *Handler) GetSkillFile(c *gin.Context) {
 		return
 	}
 
-	reader, err := h.manager.DownloadFile(c.Request.Context(), id, fullPath)
+	reader, err := h.manager.DownloadFile(spanCtx, id, fullPath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "file not found"})
 		return

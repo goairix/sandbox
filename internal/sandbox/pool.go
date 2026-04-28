@@ -3,10 +3,10 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -78,7 +78,9 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 		}
 
 		// Stale container, discard and try next
-		log.Printf("pool: discarding stale container %s", info.RuntimeID)
+		logger.Info(ctx, "pool: discarding stale container",
+			logger.AddField("runtime_id", info.RuntimeID),
+		)
 		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
 	}
 
@@ -168,7 +170,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
-			log.Printf("refillIfNeeded: context cancelled, stopping refill")
+			logger.Info(ctx, "pool refill stopping: context cancelled")
 			return
 		default:
 		}
@@ -177,7 +179,10 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 		if err != nil {
 			consecutiveFailures++
 			if consecutiveFailures >= maxRefillRetries {
-				log.Printf("refillIfNeeded: giving up after %d consecutive failures", consecutiveFailures)
+				logger.Error(ctx, "pool refill giving up after consecutive failures",
+					logger.AddField("failures", consecutiveFailures),
+					logger.ErrorField(err),
+				)
 				return
 			}
 			backoff := time.Duration(1<<(consecutiveFailures-1)) * time.Second
@@ -187,7 +192,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				log.Printf("refillIfNeeded: context cancelled during backoff")
+				logger.Info(ctx, "pool refill stopping during backoff: context cancelled")
 				return
 			}
 			continue

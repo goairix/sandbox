@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,8 +12,15 @@ import (
 	"time"
 
 	"github.com/goairix/fs"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
+	telemetry "github.com/goairix/sandbox/internal/telemetry/trace"
 )
 
 // validDepRegexp validates dependency names and versions to prevent command injection.
@@ -82,24 +88,27 @@ func (m *Manager) SetSessionStore(ss *SessionStore) {
 // It first removes any orphaned pool containers left over from a previous
 // process that exited without cleanup (e.g. crash, SIGKILL).
 func (m *Manager) Start(ctx context.Context) {
+	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Start")
+	defer span.End()
+
 	if m.runtime.IsStateful() {
 		// Stateful runtimes (e.g. Kubernetes): pods survive process restarts, so
 		// we must restore persistent sandboxes synchronously first. This registers
 		// their RuntimeIDs in m.sandboxes before cleanupOrphanedPoolContainers
 		// runs, preventing live pods from being mistakenly deleted as orphans.
-		m.restorePersistentSandboxes(ctx)
-		m.cleanupOrphanedPoolContainers(ctx)
-		m.pool.WarmUp(ctx)
+		m.restorePersistentSandboxes(spanCtx)
+		m.cleanupOrphanedPoolContainers(spanCtx)
+		m.pool.WarmUp(spanCtx)
 	} else {
 		// Non-stateful runtimes (e.g. Docker): containers are gone after restart,
 		// so cleanup first, then warm up, then restore in background to avoid
 		// blocking API startup.
-		m.cleanupOrphanedPoolContainers(ctx)
-		m.pool.WarmUp(ctx)
+		m.cleanupOrphanedPoolContainers(spanCtx)
+		m.pool.WarmUp(spanCtx)
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.restorePersistentSandboxes(ctx)
+			m.restorePersistentSandboxes(spanCtx)
 		}()
 	}
 
@@ -114,13 +123,19 @@ func (m *Manager) Start(ctx context.Context) {
 
 // Stop drains the pool and cleans up.
 func (m *Manager) Stop(ctx context.Context) {
+	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
+	defer span.End()
+
 	close(m.stopCh)
 	m.wg.Wait()
-	m.pool.Drain(ctx)
+	m.pool.Drain(spanCtx)
 }
 
 // Create creates a new sandbox.
 func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
+	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Create")
+	defer span.End()
+
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = m.config.DefaultTimeout
@@ -154,26 +169,28 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 			})
 			bindMounted = true
 		}
-		info, err = m.runtime.CreateSandbox(ctx, spec)
+		info, err = m.runtime.CreateSandbox(spanCtx, spec)
 		if err != nil {
+			telemetry.Error(err, span)
 			return nil, fmt.Errorf("create sandbox: %w", err)
 		}
 	} else {
-		info, err = m.pool.Acquire(ctx)
+		info, err = m.pool.Acquire(spanCtx)
 		if err != nil {
+			telemetry.Error(err, span)
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
 		// Remove pool label and update sandbox.id so the pod is correctly
 		// identified after being taken from the pool (effective on K8s).
 		nilVal := (*string)(nil)
-		_ = m.runtime.UpdateLabels(ctx, info.RuntimeID, map[string]*string{
+		_ = m.runtime.UpdateLabels(spanCtx, info.RuntimeID, map[string]*string{
 			"sandbox.pool": nilVal,
 			"sandbox.id":   &id,
 		})
 	}
 
 	// Rename container for easier identification (best-effort)
-	_ = m.runtime.RenameSandbox(ctx, info.RuntimeID, id)
+	_ = m.runtime.RenameSandbox(spanCtx, info.RuntimeID, id)
 
 	sb := &Sandbox{
 		ID:        id,
@@ -189,13 +206,13 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	if len(cfg.Dependencies) > 0 {
 		installCmd := buildInstallCommand(cfg.Dependencies)
 		if installCmd != "" {
-			if _, err := m.runtime.Exec(ctx, info.RuntimeID, runtime.ExecRequest{
+			if _, err := m.runtime.Exec(spanCtx, info.RuntimeID, runtime.ExecRequest{
 				Command: installCmd,
 				WorkDir: "/workspace",
 				Timeout: 120, // 2 min for dependency install
 			}); err != nil {
 				// Cleanup on failure
-				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
 				return nil, fmt.Errorf("install dependencies: %w", err)
 			}
 		}
@@ -207,7 +224,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	// Persist persistent sandboxes to session store
 	if cfg.Mode == ModePersistent && m.sessions != nil {
-		if err := m.sessions.Save(ctx, sb); err != nil {
+		if err := m.sessions.Save(spanCtx, sb); err != nil {
 			// Log but don't fail — in-memory state is still valid
 			_ = err
 		}
@@ -217,16 +234,16 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	if cfg.WorkspacePath != "" {
 		if bindMounted {
 			// Bind mount: just register the scoped FS, no file copy needed.
-			if err := m.registerWorkspace(ctx, id, cfg.WorkspacePath); err != nil {
-				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+			if err := m.registerWorkspace(spanCtx, id, cfg.WorkspacePath); err != nil {
+				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
 				m.mu.Lock()
 				delete(m.sandboxes, id)
 				m.mu.Unlock()
 				return nil, fmt.Errorf("register workspace: %w", err)
 			}
 		} else {
-			if err := m.MountWorkspace(ctx, id, cfg.WorkspacePath, cfg.WorkspaceSyncExclude); err != nil {
-				_ = m.runtime.RemoveSandbox(ctx, info.RuntimeID)
+			if err := m.MountWorkspace(spanCtx, id, cfg.WorkspacePath, cfg.WorkspaceSyncExclude); err != nil {
+				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
 				m.mu.Lock()
 				delete(m.sandboxes, id)
 				m.mu.Unlock()
@@ -235,12 +252,17 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}
 	}
 
+	span.SetAttributes(attribute.String("sandbox.id", id))
+	metrics.SandboxActiveGauge.Add(spanCtx, 1)
 	return sb, nil
 }
 
 // Get retrieves a sandbox by ID. Returns a copy to prevent external data races.
 func (m *Manager) Get(ctx context.Context, id string) (Sandbox, error) {
-	sb, err := m.resolve(ctx, id)
+	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Get")
+	defer span.End()
+
+	sb, err := m.resolve(spanCtx, id)
 	if err != nil {
 		return Sandbox{}, err
 	}
@@ -263,7 +285,10 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 		if err != nil {
 			return nil, err
 		}
-		log.Printf("sandbox %s: restored from session store (container %s)", id, sbPtr.RuntimeID)
+		logger.Info(ctx, "sandbox restored from session store",
+			logger.AddField("sandbox_id", id),
+			logger.AddField("runtime_id", sbPtr.RuntimeID),
+		)
 		// Register into in-memory map so subsequent lookups find it directly
 		m.mu.Lock()
 		m.sandboxes[id] = sbPtr
@@ -287,8 +312,14 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 
 // Destroy removes a sandbox.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Destroy",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
+		telemetry.Error(err, span)
 		return err
 	}
 
@@ -315,23 +346,35 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	// Remove the container
 	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
+		telemetry.Error(err, span)
 		return fmt.Errorf("remove sandbox: %w", err)
 	}
 
 	// Notify pool so it can refill
 	m.pool.NotifyRemoved()
+	metrics.SandboxActiveGauge.Add(ctx, -1)
 
 	return nil
 }
 
 // Exec executes a command in a sandbox synchronously.
 func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Exec",
+		trace.WithAttributes(
+			attribute.String("sandbox.id", id),
+			attribute.String("exec.language", req.Command[:min(len(req.Command), 20)]),
+		),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
+		telemetry.Error(err, span)
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+		telemetry.Error(ErrNetworkRequired, span)
 		return nil, ErrNetworkRequired
 	}
 
@@ -352,17 +395,38 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
 
-	return result, err
+	if err != nil {
+		telemetry.Error(err, span)
+		return nil, err
+	}
+
+	metrics.SandboxExecTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("sandbox.id", id),
+		attribute.Int("exec.exit_code", result.ExitCode),
+	))
+	span.SetAttributes(
+		attribute.Int("exec.exit_code", result.ExitCode),
+		attribute.Float64("exec.duration_s", result.Duration.Seconds()),
+	)
+	return result, nil
 }
 
 // ExecStream executes a command in a sandbox with streaming output.
 func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.ExecStream",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
+		telemetry.Error(err, span)
+		span.End()
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+		telemetry.Error(ErrNetworkRequired, span)
+		span.End()
 		return nil, ErrNetworkRequired
 	}
 
@@ -378,12 +442,15 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.State = StateError
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
+		telemetry.Error(err, span)
+		span.End()
 		return nil, err
 	}
 
 	// Wrap channel to update state on completion
 	outCh := make(chan runtime.StreamEvent, 64)
 	go func() {
+		defer span.End()
 		defer close(outCh)
 		for event := range ch {
 			select {
@@ -399,6 +466,10 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.State = StateIdle
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
+		metrics.SandboxExecTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("sandbox.id", id),
+			attribute.String("exec.type", "stream"),
+		))
 	}()
 
 	return outCh, nil
@@ -406,6 +477,11 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 
 // UploadFile uploads a file into a sandbox.
 func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.UploadFile",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		return err
@@ -416,6 +492,11 @@ func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, re
 
 // DownloadFile downloads a file from a sandbox.
 func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.DownloadFile",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		return nil, err
@@ -454,6 +535,12 @@ func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string,
 
 // EditFile performs a string replacement in a file in a sandbox.
 func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.EditFile",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+		trace.WithAttributes(attribute.String("file_path", filePath)),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		return err
@@ -463,6 +550,12 @@ func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldS
 
 // EditFileLines replaces a range of lines in a file in a sandbox.
 func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.EditFileLines",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+		trace.WithAttributes(attribute.String("file_path", filePath)),
+	)
+	defer span.End()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		return err
@@ -472,6 +565,12 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 
 // UpdateNetwork dynamically updates network access for a running sandbox.
 func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.UpdateNetwork",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+		trace.WithAttributes(attribute.String("white_list", strings.Join(whitelist, ","))),
+	)
+	defer span.End()
+
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
@@ -600,7 +699,10 @@ func (m *Manager) autoSyncOnce() {
 
 	for _, t := range targets {
 		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
-			log.Printf("auto-sync failed for sandbox %s: %v", t.sandboxID, err)
+			logger.Error(context.Background(), "auto-sync failed",
+				logger.AddField("sandbox_id", t.sandboxID),
+				logger.ErrorField(err),
+			)
 		}
 	}
 }
@@ -615,7 +717,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 
 	ids, err := m.sessions.List(ctx)
 	if err != nil {
-		log.Printf("failed to list persistent sandboxes: %v", err)
+		logger.Error(ctx, "failed to list persistent sandboxes", logger.ErrorField(err))
 		return
 	}
 
@@ -623,7 +725,10 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 	for _, id := range ids {
 		sbPtr, err := m.sessions.Load(ctx, id)
 		if err != nil {
-			log.Printf("sandbox %s: failed to load from session store: %v", id, err)
+			logger.Error(ctx, "failed to load sandbox from session store",
+				logger.AddField("sandbox_id", id),
+				logger.ErrorField(err),
+			)
 			failed++
 			continue
 		}
@@ -632,10 +737,16 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 		existingInfo, rtErr := m.runtime.GetSandbox(ctx, sbPtr.RuntimeID)
 		if rtErr != nil || existingInfo == nil || existingInfo.State != "running" {
 			// Container gone or not healthy — recreate it
-			log.Printf("sandbox %s: container %s gone, recreating", id, sbPtr.RuntimeID)
+			logger.Warn(ctx, "sandbox container gone, recreating",
+				logger.AddField("sandbox_id", id),
+				logger.AddField("runtime_id", sbPtr.RuntimeID),
+			)
 			newInfo, recreateErr := m.recreateSandbox(ctx, sbPtr)
 			if recreateErr != nil {
-				log.Printf("sandbox %s: failed to recreate: %v", id, recreateErr)
+				logger.Error(ctx, "failed to recreate sandbox",
+					logger.AddField("sandbox_id", id),
+					logger.ErrorField(recreateErr),
+				)
 				_ = m.sessions.Remove(ctx, id)
 				failed++
 				continue
@@ -658,11 +769,18 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 				// Re-sync files to the new container (skip for bind mount)
 				if !sbPtr.Workspace.BindMounted {
 					if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID); syncErr != nil {
-						log.Printf("sandbox %s: workspace re-sync failed: %v", id, syncErr)
+						logger.Error(ctx, "workspace re-sync failed",
+							logger.AddField("sandbox_id", id),
+							logger.AddField("runtime_id", sbPtr.RuntimeID),
+							logger.ErrorField(syncErr),
+						)
 					}
 				}
 			} else {
-				log.Printf("sandbox %s: failed to restore workspace: %v", id, fsErr)
+				logger.Error(ctx, "failed to restore workspace scoped fs",
+					logger.AddField("sandbox_id", id),
+					logger.ErrorField(fsErr),
+				)
 			}
 		}
 
@@ -670,7 +788,11 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 	}
 
 	if restored > 0 || failed > 0 {
-		log.Printf("persistent sandboxes: %d restored (%d recreated), %d failed", restored, recreated, failed)
+		logger.Info(ctx, "persistent sandboxes restore complete",
+			logger.AddField("restored", restored),
+			logger.AddField("recreated", recreated),
+			logger.AddField("failed", failed),
+		)
 	}
 }
 
@@ -713,7 +835,7 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 		"sandbox.pool": "true",
 	})
 	if err != nil {
-		log.Printf("failed to list orphaned pool containers: %v", err)
+		logger.Error(ctx, "failed to list orphaned pool containers", logger.ErrorField(err))
 		return
 	}
 
@@ -730,12 +852,16 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 		if _, active := activeRuntimeIDs[c.RuntimeID]; active {
 			continue // in use by a persistent sandbox
 		}
-		log.Printf("removing orphaned pool container %s", c.RuntimeID)
+		logger.Info(ctx, "removing orphaned pool container",
+			logger.AddField("runtime_id", c.RuntimeID),
+		)
 		_ = m.runtime.RemoveSandbox(ctx, c.RuntimeID)
 		removed++
 	}
 	if removed > 0 {
-		log.Printf("cleaned up %d orphaned pool container(s)", removed)
+		logger.Info(ctx, "cleaned up orphaned pool containers",
+			logger.AddField("count", removed),
+		)
 	}
 }
 
@@ -748,11 +874,16 @@ func buildInstallCommand(deps []Dependency) string {
 	var pipPkgs, npmPkgs []string
 	for _, d := range deps {
 		if !validDepRegexp.MatchString(d.Name) {
-			log.Printf("WARNING: skipping dependency with invalid name: %q", d.Name)
+			logger.Warn(context.Background(), "skipping dependency with invalid name",
+				logger.AddField("dep_name", d.Name),
+			)
 			continue
 		}
 		if d.Version != "" && !validDepRegexp.MatchString(d.Version) {
-			log.Printf("WARNING: skipping dependency %q with invalid version: %q", d.Name, d.Version)
+			logger.Warn(context.Background(), "skipping dependency with invalid version",
+				logger.AddField("dep_name", d.Name),
+				logger.AddField("dep_version", d.Version),
+			)
 			continue
 		}
 		pkg := d.Name
@@ -768,7 +899,10 @@ func buildInstallCommand(deps []Dependency) string {
 			}
 			npmPkgs = append(npmPkgs, pkg)
 		default:
-			log.Printf("WARNING: skipping dependency %q with unknown manager: %q", d.Name, d.Manager)
+			logger.Warn(context.Background(), "skipping dependency with unknown manager",
+				logger.AddField("dep_name", d.Name),
+				logger.AddField("manager", d.Manager),
+			)
 		}
 	}
 	var cmds []string
