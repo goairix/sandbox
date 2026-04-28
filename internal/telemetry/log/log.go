@@ -24,7 +24,8 @@ func Init(cfg *config.Config) error {
 			return fmt.Errorf("log: otlp_endpoint is empty")
 		}
 		exporter, err := otlploghttp.New(context.Background(),
-			otlploghttp.WithEndpointURL(cfg.Telemetry.Log.OtlpEndpoint),
+			otlploghttp.WithEndpoint(cfg.Telemetry.Log.OtlpEndpoint),
+			otlploghttp.WithInsecure(),
 		)
 		if err != nil {
 			return fmt.Errorf("log: create otlp exporter: %w", err)
