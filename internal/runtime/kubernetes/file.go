@@ -167,6 +167,31 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 	return results, nil
 }
 
+func (r *Runtime) DownloadFiles(ctx context.Context, id string, paths []string) ([]runtime.FileContent, error) {
+	results := make([]runtime.FileContent, len(paths))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+
+	for i, path := range paths {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			reader, err := downloadFileFromPod(ctx, r.client, r.restConfig, r.namespace, id, filePath)
+			results[idx] = runtime.FileContent{
+				Path:    filePath,
+				Content: reader,
+				Error:   err,
+			}
+		}(i, path)
+	}
+	wg.Wait()
+
+	return results, nil
+}
+
 // uploadArchiveToPod uploads a tar archive into a pod, extracting at destDir.
 func uploadArchiveToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destDir string, archive io.Reader) error {
 	execReq := client.CoreV1().RESTClient().Post().
