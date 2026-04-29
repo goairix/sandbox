@@ -24,7 +24,6 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-
 func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
 	content, err := io.ReadAll(reader)
 	if err != nil {
@@ -361,8 +360,8 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 	baseDir := pattern[:lastSlash]
 	globPattern := pattern[lastSlash+1:]
 
-	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("cd %s && find . -name '%s' -type f", baseDir, globPattern)},
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", fmt.Sprintf("cd %s && find . -path './%s' -type f", baseDir, globPattern)},
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -370,7 +369,7 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		return nil, fmt.Errorf("create exec: %w", err)
 	}
 
-	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("attach exec: %w", err)
 	}

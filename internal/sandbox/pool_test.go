@@ -122,6 +122,12 @@ func (m *mockRuntime) EditFile(context.Context, string, string, string, string, 
 func (m *mockRuntime) EditFileLines(context.Context, string, string, int, int, string) error {
 	return nil
 }
+func (m *mockRuntime) GlobInfo(context.Context, string, string) ([]runtime.FileContent, error) {
+	return nil, nil
+}
+func (m *mockRuntime) DownloadFiles(context.Context, string, []string) ([]runtime.FileContent, error) {
+	return nil, nil
+}
 
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()

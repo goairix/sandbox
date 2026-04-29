@@ -118,7 +118,7 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"sh", "-c", fmt.Sprintf("cd %s && find . -name '%s' -type f", baseDir, globPattern)},
+			Command:   []string{"sh", "-c", fmt.Sprintf("cd %s && find . -path './%s' -type f", baseDir, globPattern)},
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
