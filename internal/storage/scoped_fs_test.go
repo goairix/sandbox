@@ -44,6 +44,20 @@ func TestNewScopedFS_NilFS(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestNewScopedFS_AbsoluteRootStripped(t *testing.T) {
+	dir := t.TempDir()
+	lfs, err := local.New(local.Config{RootPath: dir})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, lfs.MakeDir(ctx, "workspaces/user/project", 0755))
+
+	// Absolute path should be treated as relative by stripping the leading "/".
+	sfs, err := NewScopedFS(lfs, "/workspaces/user/project")
+	require.NoError(t, err)
+	assert.Equal(t, "workspaces/user/project", sfs.(*scopedFS).rootPath)
+}
+
 func TestScopedFS_ResolvePath_Normal(t *testing.T) {
 	sfs := setupTestFS(t).(*scopedFS)
 	resolved, err := sfs.resolvePath("file.txt")

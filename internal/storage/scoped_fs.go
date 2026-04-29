@@ -82,6 +82,9 @@ func cleanRoot(root string) string {
 	if cleaned == "/" {
 		return ""
 	}
+	// Strip leading slash to convert absolute paths to relative.
+	// Object storage (MinIO/S3) rejects object names starting with "/".
+	cleaned = strings.TrimLeft(cleaned, "/")
 	return strings.TrimRight(cleaned, "/")
 }
 

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
 	"io"
@@ -129,13 +130,19 @@ func (h *Handler) ListSkills(c *gin.Context) {
 			continue
 		}
 		skillMDPath := skillsBasePath + "/" + entry.Name + "/SKILL.md"
-		reader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
+		tarReader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
 		if err != nil {
 			skills = append(skills, types.SkillMeta{Name: entry.Name})
 			continue
 		}
-		raw, err := io.ReadAll(reader)
-		reader.Close()
+		tr := tar.NewReader(tarReader)
+		if _, err := tr.Next(); err != nil {
+			_ = tarReader.Close()
+			skills = append(skills, types.SkillMeta{Name: entry.Name})
+			continue
+		}
+		raw, err := io.ReadAll(tr)
+		_ = tarReader.Close()
 		if err != nil {
 			skills = append(skills, types.SkillMeta{Name: entry.Name})
 			continue
@@ -173,13 +180,24 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	}
 
 	skillMDPath := skillsBasePath + "/" + name + "/SKILL.md"
-	reader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
+	tarReader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
 		return
 	}
-	raw, err := io.ReadAll(reader)
-	reader.Close()
+	defer tarReader.Close()
+
+	tr := tar.NewReader(tarReader)
+	hdr, err := tr.Next()
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	if hdr.Typeflag != tar.TypeReg {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
+		return
+	}
+	raw, err := io.ReadAll(tr)
 	if err != nil {
 		internalError(c, err)
 		return
