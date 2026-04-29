@@ -505,6 +505,36 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 	return m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
 }
 
+// GlobInfo returns files matching the glob pattern with their content.
+func (m *Manager) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.GlobInfo",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.runtime.GlobInfo(ctx, sb.RuntimeID, pattern)
+}
+
+// DownloadFiles downloads multiple files in parallel.
+func (m *Manager) DownloadFiles(ctx context.Context, id string, paths []string) ([]runtime.FileContent, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.DownloadFiles",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.runtime.DownloadFiles(ctx, sb.RuntimeID, paths)
+}
+
 // ListFiles lists files in a sandbox directory.
 func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]runtime.FileInfo, error) {
 	sb, err := m.resolve(ctx, id)
