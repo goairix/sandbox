@@ -104,12 +104,18 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 }
 
 func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
-	lastSlash := strings.LastIndex(pattern, "/")
-	if lastSlash == -1 {
+	// Find the first wildcard to determine the search root (no wildcards in baseDir).
+	firstStar := strings.Index(pattern, "*")
+	if firstStar == -1 {
+		return nil, fmt.Errorf("invalid pattern: must contain wildcard")
+	}
+	lastSlashBeforeStar := strings.LastIndex(pattern[:firstStar], "/")
+	if lastSlashBeforeStar == -1 {
 		return nil, fmt.Errorf("invalid pattern: must contain directory path")
 	}
-	baseDir := pattern[:lastSlash]
-	globPattern := pattern[lastSlash+1:]
+	baseDir := pattern[:lastSlashBeforeStar]
+	// Convert glob pattern to find -path format: /workspace/.agent/skills/*/SKILL.md -> */SKILL.md relative to baseDir
+	relPattern := pattern[lastSlashBeforeStar+1:]
 
 	execReq := r.client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -118,7 +124,7 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"sh", "-c", fmt.Sprintf("cd %s && find . -path './%s' -type f", baseDir, globPattern)},
+			Command:   []string{"find", baseDir, "-path", baseDir + "/" + relPattern, "-type", "f"},
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -153,7 +159,7 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			fullPath := filepath.Join(baseDir, strings.TrimPrefix(relPath, "./"))
+			fullPath := line
 			reader, err := downloadFileFromPod(ctx, r.client, r.restConfig, r.namespace, id, fullPath)
 			results[idx] = runtime.FileContent{
 				Path:    fullPath,

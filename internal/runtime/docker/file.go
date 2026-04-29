@@ -353,15 +353,20 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
-	lastSlash := strings.LastIndex(pattern, "/")
-	if lastSlash == -1 {
+	// Find the first wildcard to determine the search root (no wildcards in baseDir).
+	firstStar := strings.Index(pattern, "*")
+	if firstStar == -1 {
+		return nil, fmt.Errorf("invalid pattern: must contain wildcard")
+	}
+	lastSlashBeforeStar := strings.LastIndex(pattern[:firstStar], "/")
+	if lastSlashBeforeStar == -1 {
 		return nil, fmt.Errorf("invalid pattern: must contain directory path")
 	}
-	baseDir := pattern[:lastSlash]
-	globPattern := pattern[lastSlash+1:]
+	baseDir := pattern[:lastSlashBeforeStar]
+	relPattern := pattern[lastSlashBeforeStar+1:]
 
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("cd %s && find . -path './%s' -type f", baseDir, globPattern)},
+		Cmd:          []string{"find", baseDir, "-path", baseDir + "/" + relPattern, "-type", "f"},
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -391,12 +396,11 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 
 	for i, line := range lines {
 		wg.Add(1)
-		go func(idx int, relPath string) {
+		go func(idx int, fullPath string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			fullPath := filepath.Join(baseDir, strings.TrimPrefix(relPath, "./"))
 			reader, err := r.downloadFile(ctx, id, fullPath)
 			results[idx] = runtime.FileContent{
 				Path:    fullPath,
