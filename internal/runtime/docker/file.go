@@ -8,9 +8,12 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -348,4 +351,112 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 		WorkDir: "/workspace",
 	})
 	return err
+}
+
+func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
+	lastSlash := strings.LastIndex(pattern, "/")
+	if lastSlash == -1 {
+		return nil, fmt.Errorf("invalid pattern: must contain directory path")
+	}
+	baseDir := pattern[:lastSlash]
+	globPattern := pattern[lastSlash+1:]
+
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
+		Cmd:          []string{"sh", "-c", fmt.Sprintf("cd %s && find . -name '%s' -type f", baseDir, globPattern)},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create exec: %w", err)
+	}
+
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return nil, fmt.Errorf("attach exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	var stdout bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, io.Discard, attachResp.Reader); err != nil {
+		return nil, fmt.Errorf("read exec output: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return []runtime.FileContent{}, nil
+	}
+
+	results := make([]runtime.FileContent, len(lines))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+
+	for i, line := range lines {
+		wg.Add(1)
+		go func(idx int, relPath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			fullPath := filepath.Join(baseDir, strings.TrimPrefix(relPath, "./"))
+			reader, err := r.downloadFile(ctx, id, fullPath)
+			results[idx] = runtime.FileContent{
+				Path:    fullPath,
+				Content: reader,
+				Error:   err,
+			}
+		}(i, line)
+	}
+	wg.Wait()
+
+	return results, nil
+}
+
+func (r *Runtime) DownloadFiles(ctx context.Context, id string, paths []string) ([]runtime.FileContent, error) {
+	results := make([]runtime.FileContent, len(paths))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+
+	for i, path := range paths {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			reader, err := r.downloadFile(ctx, id, filePath)
+			results[idx] = runtime.FileContent{
+				Path:    filePath,
+				Content: reader,
+				Error:   err,
+			}
+		}(i, path)
+	}
+	wg.Wait()
+
+	return results, nil
+}
+
+func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
+		Cmd:          []string{"tar", "cf", "-", srcPath},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create exec: %w", err)
+	}
+
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return nil, fmt.Errorf("attach exec: %w", err)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
+		attachResp.Close()
+		pw.CloseWithError(err)
+	}()
+
+	return pr, nil
 }
