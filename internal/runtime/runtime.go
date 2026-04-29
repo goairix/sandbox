@@ -35,6 +35,16 @@ type Runtime interface {
 	// DownloadFile downloads a file from the sandbox.
 	DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error)
 
+	// GlobInfo returns files matching the glob pattern with their content.
+	// Pattern syntax: "*/*.md" matches all .md files in immediate subdirectories.
+	// Returns FileContent slice where each Content is a tar stream (same format as DownloadFile).
+	GlobInfo(ctx context.Context, id string, pattern string) ([]FileContent, error)
+
+	// DownloadFiles downloads multiple files in parallel.
+	// Returns partial results even if some files fail (check FileContent.Error).
+	// Each Content is a tar stream (same format as DownloadFile).
+	DownloadFiles(ctx context.Context, id string, paths []string) ([]FileContent, error)
+
 	// ListFiles lists files in a directory inside the sandbox.
 	ListFiles(ctx context.Context, id string, dirPath string) ([]FileInfo, error)
 
@@ -108,4 +118,11 @@ type FileLineResult struct {
 	StartLine  int
 	EndLine    int
 	TotalLines int
+}
+
+// FileContent represents a file with its content stream.
+type FileContent struct {
+	Path    string
+	Content io.ReadCloser // tar stream for single file
+	Error   error         // per-file error (for batch operations)
 }
