@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goccy/go-yaml"
 
 	"github.com/goairix/sandbox/internal/telemetry/trace"
@@ -106,6 +107,38 @@ func (h *Handler) listSkillFilesRecursive(ctx context.Context, id, skillRoot str
 	return out, nil
 }
 
+// extractSkillMeta extracts skill metadata from a tar stream.
+func (h *Handler) extractSkillMeta(path string, tarReader io.ReadCloser) types.SkillMeta {
+	defer tarReader.Close()
+
+	// Extract skill name from path: /workspace/.agent/skills/<name>/SKILL.md
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return types.SkillMeta{Name: "unknown"}
+	}
+	skillName := parts[len(parts)-2]
+
+	tr := tar.NewReader(tarReader)
+	if _, err := tr.Next(); err != nil {
+		return types.SkillMeta{Name: skillName}
+	}
+
+	raw, err := io.ReadAll(tr)
+	if err != nil {
+		return types.SkillMeta{Name: skillName}
+	}
+
+	meta, _, err := ParseFrontmatter(string(raw))
+	if err != nil {
+		return types.SkillMeta{Name: skillName}
+	}
+
+	if meta.Name == "" {
+		meta.Name = skillName
+	}
+	return meta
+}
+
 // ListSkills handles GET /api/v1/sandboxes/:id/skills
 func (h *Handler) ListSkills(c *gin.Context) {
 	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.skill.ListSkills")
@@ -118,43 +151,23 @@ func (h *Handler) ListSkills(c *gin.Context) {
 		return
 	}
 
-	entries, err := h.manager.ListFiles(spanCtx, id, skillsBasePath)
+	// Use GlobInfo to fetch all SKILL.md files in one call
+	pattern := skillsBasePath + "/*/SKILL.md"
+	files, err := h.manager.GlobInfo(spanCtx, id, pattern)
 	if err != nil {
 		c.JSON(http.StatusOK, types.SkillListResponse{Skills: []types.SkillMeta{}})
 		return
 	}
 
-	var skills []types.SkillMeta
-	for _, entry := range entries {
-		if !entry.IsDir {
+	skills := make([]types.SkillMeta, 0, len(files))
+	for _, file := range files {
+		if file.Error != nil {
+			logger.Warn(spanCtx, "failed to download skill file",
+				logger.AddField("path", file.Path),
+				logger.ErrorField(file.Error))
 			continue
 		}
-		skillMDPath := skillsBasePath + "/" + entry.Name + "/SKILL.md"
-		tarReader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
-		if err != nil {
-			skills = append(skills, types.SkillMeta{Name: entry.Name})
-			continue
-		}
-		tr := tar.NewReader(tarReader)
-		if _, err := tr.Next(); err != nil {
-			_ = tarReader.Close()
-			skills = append(skills, types.SkillMeta{Name: entry.Name})
-			continue
-		}
-		raw, err := io.ReadAll(tr)
-		_ = tarReader.Close()
-		if err != nil {
-			skills = append(skills, types.SkillMeta{Name: entry.Name})
-			continue
-		}
-		meta, _, parseErr := ParseFrontmatter(string(raw))
-		if parseErr != nil {
-			skills = append(skills, types.SkillMeta{Name: entry.Name})
-			continue
-		}
-		if meta.Name == "" {
-			meta.Name = entry.Name
-		}
+		meta := h.extractSkillMeta(file.Path, file.Content)
 		skills = append(skills, meta)
 	}
 
@@ -203,15 +216,22 @@ func (h *Handler) GetSkill(c *gin.Context) {
 		return
 	}
 
-	meta, body, _ := ParseFrontmatter(string(raw))
+	meta, body, err := ParseFrontmatter(string(raw))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "invalid skill format: " + err.Error()})
+		return
+	}
 	if meta.Name == "" {
 		meta.Name = name
 	}
 
 	skillDir := skillsBasePath + "/" + name
-	var skillFiles []types.SkillFile
-	if files, err := h.listSkillFilesRecursive(spanCtx, id, skillDir); err == nil {
-		skillFiles = files
+	skillFiles, err := h.listSkillFilesRecursive(spanCtx, id, skillDir)
+	if err != nil {
+		logger.Warn(spanCtx, "failed to list skill files",
+			logger.AddField("skill", name),
+			logger.ErrorField(err))
+		skillFiles = []types.SkillFile{}
 	}
 
 	c.JSON(http.StatusOK, types.SkillResponse{
