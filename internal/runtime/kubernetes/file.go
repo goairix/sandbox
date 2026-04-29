@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,6 +101,70 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	}()
 
 	return pr, nil
+}
+
+func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
+	lastSlash := strings.LastIndex(pattern, "/")
+	if lastSlash == -1 {
+		return nil, fmt.Errorf("invalid pattern: must contain directory path")
+	}
+	baseDir := pattern[:lastSlash]
+	globPattern := pattern[lastSlash+1:]
+
+	execReq := r.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(id).
+		Namespace(r.namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   []string{"sh", "-c", fmt.Sprintf("cd %s && find . -name '%s' -type f", baseDir, globPattern)},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(r.restConfig, "POST", execReq.URL())
+	if err != nil {
+		return nil, fmt.Errorf("create executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("find command failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return []runtime.FileContent{}, nil
+	}
+
+	results := make([]runtime.FileContent, len(lines))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+
+	for i, line := range lines {
+		wg.Add(1)
+		go func(idx int, relPath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			fullPath := filepath.Join(baseDir, strings.TrimPrefix(relPath, "./"))
+			reader, err := downloadFileFromPod(ctx, r.client, r.restConfig, r.namespace, id, fullPath)
+			results[idx] = runtime.FileContent{
+				Path:    fullPath,
+				Content: reader,
+				Error:   err,
+			}
+		}(i, line)
+	}
+	wg.Wait()
+
+	return results, nil
 }
 
 // uploadArchiveToPod uploads a tar archive into a pod, extracting at destDir.
