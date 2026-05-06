@@ -41,6 +41,11 @@ type ListFilesRecursiveResponse struct {
 	PageSize   int        `json:"page_size"`
 }
 
+// ReadFileRequest is the request body for POST /api/v1/sandboxes/:id/files/read.
+type ReadFileRequest struct {
+	Path string `json:"path" binding:"required"`
+}
+
 // ReadFileLinesRequest is the request body for POST /api/v1/sandboxes/:id/files/read-lines.
 type ReadFileLinesRequest struct {
 	Path      string `json:"path" binding:"required"`
@@ -54,6 +59,12 @@ type ReadFileLinesResponse struct {
 	StartLine  int      `json:"start_line"`
 	EndLine    int      `json:"end_line"`
 	TotalLines int      `json:"total_lines"`
+}
+
+// ReadFileResponse is returned by the read file endpoint.
+type ReadFileResponse struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 // EditFileRequest is the request body for POST /api/v1/sandboxes/:id/files/edit.

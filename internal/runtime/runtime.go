@@ -35,6 +35,10 @@ type Runtime interface {
 	// DownloadFile downloads a file from the sandbox.
 	DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error)
 
+	// ReadFileContent streams the raw content of a file from the sandbox without
+	// any tar wrapping. The caller must close the returned ReadCloser.
+	ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error)
+
 	// GlobInfo returns files matching the glob pattern with their content.
 	// Pattern syntax: "*/*.md" matches all .md files in immediate subdirectories.
 	// Returns FileContent slice where each Content is a tar stream (same format as DownloadFile).

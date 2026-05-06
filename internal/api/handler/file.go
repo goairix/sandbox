@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"archive/tar"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,23 +112,62 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 		return
 	}
 
-	reader, err := h.manager.DownloadFile(spanCtx, id, path)
+	tarStream, err := h.manager.DownloadFile(spanCtx, id, path)
 	if err != nil {
 		internalError(c, err)
 		return
 	}
-	defer reader.Close()
+	defer tarStream.Close()
+
+	tr := tar.NewReader(tarStream)
+	if _, err := tr.Next(); err != nil {
+		internalError(c, err)
+		return
+	}
 
 	safeName := filepath.Base(path)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
 	c.Header("Content-Type", "application/octet-stream")
-	if _, err := io.Copy(c.Writer, reader); err != nil {
+	if _, err := io.Copy(c.Writer, tr); err != nil {
 		logger.Warn(spanCtx, "error copying file to response",
 			logger.AddField("sandbox_id", id),
 			logger.AddField("path", path),
 			logger.ErrorField(err),
 		)
 	}
+}
+
+func (h *Handler) ReadFile(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.ReadFile")
+	defer span.End()
+
+	id := c.Param("id")
+
+	var req types.ReadFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: "path is required",
+		})
+		return
+	}
+
+	path := req.Path
+	if err := validateSandboxPath(path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	reader, err := h.manager.ReadFileContent(spanCtx, id, path)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	defer reader.Close()
+
+	c.Header("X-File-Path", path)
+	c.DataFromReader(http.StatusOK, -1, "text/plain; charset=utf-8", reader, nil)
 }
 
 func (h *Handler) ListFiles(c *gin.Context) {

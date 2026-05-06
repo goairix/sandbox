@@ -505,6 +505,21 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 	return m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
 }
 
+// ReadFileContent streams the raw content of a file from the sandbox without tar wrapping.
+func (m *Manager) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.ReadFileContent",
+		trace.WithAttributes(attribute.String("sandbox.id", id)),
+	)
+	defer span.End()
+
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.runtime.ReadFileContent(ctx, sb.RuntimeID, srcPath)
+}
+
 // GlobInfo returns files matching the glob pattern with their content.
 func (m *Manager) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.GlobInfo",

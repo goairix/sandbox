@@ -65,27 +65,32 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 	if err != nil {
 		return nil, err
 	}
+	return tarReader, nil
+}
 
-	// Docker returns a tar archive; extract the single file from it.
-	tr := tar.NewReader(tarReader)
-	_, err = tr.Next()
+func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
+		Cmd:          []string{"cat", srcPath},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
 	if err != nil {
-		tarReader.Close()
-		return nil, fmt.Errorf("read tar entry: %w", err)
+		return nil, fmt.Errorf("create exec: %w", err)
 	}
 
-	// Return a reader that reads file content and closes the underlying tar stream.
-	return &tarEntryReader{Reader: tr, closer: tarReader}, nil
-}
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return nil, fmt.Errorf("attach exec: %w", err)
+	}
 
-// tarEntryReader wraps a tar.Reader entry and closes the underlying stream.
-type tarEntryReader struct {
-	io.Reader
-	closer io.Closer
-}
+	pr, pw := io.Pipe()
+	go func() {
+		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
+		attachResp.Close()
+		pw.CloseWithError(err)
+	}()
 
-func (r *tarEntryReader) Close() error {
-	return r.closer.Close()
+	return pr, nil
 }
 
 func (r *Runtime) UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error {

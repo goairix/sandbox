@@ -193,24 +193,14 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	}
 
 	skillMDPath := skillsBasePath + "/" + name + "/SKILL.md"
-	tarReader, err := h.manager.DownloadFile(spanCtx, id, skillMDPath)
+	reader, err := h.manager.ReadFileContent(spanCtx, id, skillMDPath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
 		return
 	}
-	defer tarReader.Close()
+	defer reader.Close()
 
-	tr := tar.NewReader(tarReader)
-	hdr, err := tr.Next()
-	if err != nil {
-		internalError(c, err)
-		return
-	}
-	if hdr.Typeflag != tar.TypeReg {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
-		return
-	}
-	raw, err := io.ReadAll(tr)
+	raw, err := io.ReadAll(reader)
 	if err != nil {
 		internalError(c, err)
 		return
@@ -273,7 +263,7 @@ func (h *Handler) GetSkillFile(c *gin.Context) {
 		return
 	}
 
-	reader, err := h.manager.DownloadFile(spanCtx, id, fullPath)
+	reader, err := h.manager.ReadFileContent(spanCtx, id, fullPath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "file not found"})
 		return

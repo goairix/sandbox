@@ -103,6 +103,36 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	return pr, nil
 }
 
+func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	execReq := r.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(id).
+		Namespace(r.namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   []string{"cat", srcPath},
+			Stdout:    true,
+			Stderr:    false,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(r.restConfig, "POST", execReq.URL())
+	if err != nil {
+		return nil, fmt.Errorf("create executor: %w", err)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Stdout: pw,
+			Stderr: io.Discard,
+		})
+		pw.CloseWithError(err)
+	}()
+
+	return pr, nil
+}
+
 func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {
 	// Find the first wildcard to determine the search root (no wildcards in baseDir).
 	firstStar := strings.Index(pattern, "*")

@@ -146,6 +146,12 @@ func (s *Sandbox) ListFilesRecursive(ctx context.Context, req ListFilesRecursive
 	return s.client.ListFilesRecursive(ctx, s.id, req)
 }
 
+// ReadFile reads the full content of a file from the sandbox as a stream.
+// Caller is responsible for closing the returned ReadCloser.
+func (s *Sandbox) ReadFile(ctx context.Context, remotePath string) (io.ReadCloser, error) {
+	return s.client.ReadFile(ctx, s.id, remotePath)
+}
+
 // ReadFileLines reads a range of lines from a file in the sandbox.
 func (s *Sandbox) ReadFileLines(ctx context.Context, req ReadFileLinesRequest) (ReadFileLinesResponse, error) {
 	return s.client.ReadFileLines(ctx, s.id, req)

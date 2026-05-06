@@ -57,6 +57,7 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	// File operations
 	v1.POST("/sandboxes/:id/files/upload", h.UploadFile)
 	v1.GET("/sandboxes/:id/files/download", h.DownloadFile)
+	v1.POST("/sandboxes/:id/files/read", h.ReadFile)
 	v1.GET("/sandboxes/:id/files/list", h.ListFiles)
 	v1.POST("/sandboxes/:id/files/list-recursive", h.ListFilesRecursive)
 	v1.POST("/sandboxes/:id/files/read-lines", h.ReadFileLines)

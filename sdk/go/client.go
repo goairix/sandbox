@@ -199,6 +199,32 @@ func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Rea
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
+// ReadFile reads the full content of a file from the sandbox as a stream.
+// POST /api/v1/sandboxes/:id/files/read
+// Caller is responsible for closing the returned ReadCloser.
+func (c *Client) ReadFile(ctx context.Context, id, remotePath string) (io.ReadCloser, error) {
+	u := c.baseURL + c.sandboxBase(id) + "/files/read"
+	body, err := json.Marshal(map[string]string{"path": remotePath})
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: http: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, c.decodeError(resp)
+	}
+	return resp.Body, nil
+}
+
 // DownloadFile downloads a file from the sandbox. GET /api/v1/sandboxes/:id/files/download
 // Caller is responsible for closing the returned ReadCloser.
 func (c *Client) DownloadFile(ctx context.Context, id, remotePath string) (io.ReadCloser, error) {
@@ -397,12 +423,16 @@ func parseSSE(r io.Reader, ch chan<- SSEEvent, ctx context.Context) {
 func parseSandboxSSEEvent(eventType, data string) (SSEEvent, bool) {
 	switch SSEEventType(eventType) {
 	case SSEEventStdout:
-		var d struct{ Content string `json:"content"` }
+		var d struct {
+			Content string `json:"content"`
+		}
 		if err := json.Unmarshal([]byte(data), &d); err == nil {
 			return SSEEvent{Type: SSEEventStdout, Content: d.Content}, true
 		}
 	case SSEEventStderr:
-		var d struct{ Content string `json:"content"` }
+		var d struct {
+			Content string `json:"content"`
+		}
 		if err := json.Unmarshal([]byte(data), &d); err == nil {
 			return SSEEvent{Type: SSEEventStderr, Content: d.Content}, true
 		}
@@ -415,12 +445,16 @@ func parseSandboxSSEEvent(eventType, data string) (SSEEvent, bool) {
 			return SSEEvent{Type: SSEEventDone, ExitCode: d.ExitCode, Elapsed: d.Elapsed}, true
 		}
 	case SSEEventError:
-		var d struct{ Message string `json:"message"` }
+		var d struct {
+			Message string `json:"message"`
+		}
 		if err := json.Unmarshal([]byte(data), &d); err == nil {
 			return SSEEvent{Type: SSEEventError, Content: d.Message}, true
 		}
 	case SSEEventPing:
-		var d struct{ Timestamp int64 `json:"timestamp"` }
+		var d struct {
+			Timestamp int64 `json:"timestamp"`
+		}
 		if err := json.Unmarshal([]byte(data), &d); err == nil {
 			return SSEEvent{Type: SSEEventPing, Timestamp: d.Timestamp}, true
 		}

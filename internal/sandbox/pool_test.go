@@ -129,6 +129,10 @@ func (m *mockRuntime) DownloadFiles(context.Context, string, []string) ([]runtim
 	return nil, nil
 }
 
+func (m *mockRuntime) ReadFileContent(_ context.Context, _ string, _ string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{
