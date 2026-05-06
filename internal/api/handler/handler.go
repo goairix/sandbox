@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +24,11 @@ func NewHandler(mgr *sandbox.Manager) *Handler {
 }
 
 // internalError records the error on the current span and responds with 500.
+// context.Canceled is silently ignored — the client disconnected.
 func internalError(c *gin.Context, err error) {
+	if context.Cause(c.Request.Context()) != nil {
+		return
+	}
 	span := trace.SpanFromContext(c.Request.Context())
 	telemetry.Error(err, span)
 	logger.Error(c.Request.Context(), "internal error",
