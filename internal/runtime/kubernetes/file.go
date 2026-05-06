@@ -113,7 +113,7 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 			Container: "sandbox",
 			Command:   []string{"cat", srcPath},
 			Stdout:    true,
-			Stderr:    false,
+			Stderr:    true,
 		}, scheme.ParameterCodec)
 
 	executor, err := remotecommand.NewSPDYExecutor(r.restConfig, "POST", execReq.URL())
