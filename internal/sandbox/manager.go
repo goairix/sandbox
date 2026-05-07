@@ -325,7 +325,6 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	m.mu.Lock()
 	sb.State = StateDestroying
-	delete(m.sandboxes, id)
 	m.mu.Unlock()
 
 	// Clean up session store
@@ -333,7 +332,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		_ = m.sessions.Remove(ctx, id)
 	}
 
-	// Best-effort sync workspace back before destroying
+	// Best-effort sync workspace back before destroying.
+	// We do this before removing from the sandboxes map so that concurrent
+	// autoSync goroutines see StateDestroying and skip this sandbox.
 	m.mu.RLock()
 	_, hasWS := m.workspaces[id]
 	m.mu.RUnlock()
@@ -343,6 +344,10 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		delete(m.workspaces, id)
 		m.mu.Unlock()
 	}
+
+	m.mu.Lock()
+	delete(m.sandboxes, id)
+	m.mu.Unlock()
 
 	// Remove the container
 	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
@@ -732,7 +737,7 @@ func (m *Manager) autoSyncOnce() {
 	}
 	var targets []syncTarget
 	for id := range m.workspaces {
-		if sb, ok := m.sandboxes[id]; ok {
+		if sb, ok := m.sandboxes[id]; ok && sb.State != StateDestroying {
 			var exclude []string
 			if sb.Workspace != nil {
 				exclude = sb.Workspace.SyncExclude
@@ -743,7 +748,18 @@ func (m *Manager) autoSyncOnce() {
 	m.mu.RUnlock()
 
 	for _, t := range targets {
+		m.mu.RLock()
+		sb, alive := m.sandboxes[t.sandboxID]
+		skip := !alive || sb.State == StateDestroying || sb.State == StateDestroyed
+		m.mu.RUnlock()
+		if skip {
+			continue
+		}
+
 		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				continue
+			}
 			logger.Error(context.Background(), "auto-sync failed",
 				logger.AddField("sandbox_id", t.sandboxID),
 				logger.ErrorField(err),

@@ -352,20 +352,33 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
 	}
 
+	// Skip sync if the sandbox is gone from the map — it has already been
+	// fully destroyed and the pod is likely deleted.
+	if sb == nil {
+		return nil
+	}
+
 	// Bind-mounted workspaces share the host filesystem directly — no sync needed.
-	if sb != nil && sb.Workspace != nil && sb.Workspace.BindMounted {
+	if sb.Workspace != nil && sb.Workspace.BindMounted {
 		return nil
 	}
 
 	// LastSyncedAt is set at mount time; use it as the change detection baseline.
 	var cutoff int64
-	if sb != nil && sb.Workspace != nil && !sb.Workspace.LastSyncedAt.IsZero() {
+	if sb.Workspace != nil && !sb.Workspace.LastSyncedAt.IsZero() {
 		cutoff = sb.Workspace.LastSyncedAt.Unix()
 	}
+
+	// Record the sync start time BEFORE collecting the manifest. Any file
+	// modified after this point will be picked up by the next sync cycle.
+	syncStartedAt := time.Now()
 
 	// Get container file manifest via exec
 	manifest, err := m.containerFileManifest(ctx, runtimeID)
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return err
+		}
 		// Fall back to full sync if manifest collection fails
 		logger.Warn(ctx, "container manifest failed, falling back to full sync",
 			logger.AddField("runtime_id", runtimeID),
@@ -374,7 +387,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}
-		m.updateLastSyncedAt(sb)
+		m.setLastSyncedAt(sb, syncStartedAt)
 		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
@@ -389,12 +402,12 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if err := m.fullSyncFromContainer(ctx, scoped, runtimeID, exclude); err != nil {
 			return err
 		}
-		m.updateLastSyncedAt(sb)
+		m.setLastSyncedAt(sb, syncStartedAt)
 		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
-	// Compute changed files: container files with modtime > cutoff
+	// Compute changed files: container files with modtime >= cutoff
 	changedSet := make(map[string]struct{})
 	for path, modtime := range manifest {
 		if strings.HasSuffix(path, "/") {
@@ -403,7 +416,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if isExcluded(path, exclude) {
 			continue
 		}
-		if cutoff == 0 || modtime > cutoff {
+		if cutoff == 0 || modtime >= cutoff {
 			changedSet[path] = struct{}{}
 		}
 	}
@@ -421,7 +434,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 	// Nothing to do
 	if len(changedSet) == 0 && len(deletedFiles) == 0 {
-		m.updateLastSyncedAt(sb)
+		m.setLastSyncedAt(sb, syncStartedAt)
 		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
@@ -438,19 +451,19 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		_ = scoped.Remove(ctx, path)
 	}
 
-	m.updateLastSyncedAt(sb)
+	m.setLastSyncedAt(sb, syncStartedAt)
 	m.saveSessionIfAlive(ctx, sandboxID, sb)
 	return nil
 }
 
-// updateLastSyncedAt updates the LastSyncedAt timestamp under lock.
-func (m *Manager) updateLastSyncedAt(sb *Sandbox) {
+// setLastSyncedAt updates the LastSyncedAt timestamp under lock.
+func (m *Manager) setLastSyncedAt(sb *Sandbox, t time.Time) {
 	if sb == nil || sb.Workspace == nil {
 		return
 	}
 	m.mu.Lock()
-	sb.Workspace.LastSyncedAt = time.Now()
-	sb.UpdatedAt = time.Now()
+	sb.Workspace.LastSyncedAt = t
+	sb.UpdatedAt = t
 	m.mu.Unlock()
 }
 
