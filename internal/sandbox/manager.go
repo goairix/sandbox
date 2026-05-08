@@ -806,10 +806,6 @@ func (m *Manager) autoSyncOnce() {
 	}
 	m.mu.RUnlock()
 
-	logger.Debug(ctx, "autoSyncOnce tick",
-		logger.AddField("targets", len(targets)),
-	)
-
 	for _, t := range targets {
 		m.mu.RLock()
 		sb, alive := m.sandboxes[t.sandboxID]

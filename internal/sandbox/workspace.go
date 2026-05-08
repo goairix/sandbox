@@ -460,12 +460,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// modified after this point will be picked up by the next sync cycle.
 	syncStartedAt := time.Now()
 
-	logger.Debug(ctx, "syncFromContainer: collecting manifest",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("runtime_id", runtimeID),
-		logger.AddField("cutoff", cutoff),
-	)
-
 	// Get container file manifest via exec
 	manifest, err := m.containerFileManifest(ctx, runtimeID)
 	if err != nil {
@@ -489,11 +483,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return nil
 	}
 
-	logger.Debug(ctx, "syncFromContainer: manifest collected",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("manifest_files", len(manifest)),
-	)
-
 	// Get storage file set
 	storageFiles, err := m.storageFileSet(ctx, scoped, ".")
 	if err != nil {
@@ -508,11 +497,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
-
-	logger.Debug(ctx, "syncFromContainer: storage files listed",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("storage_files", len(storageFiles)),
-	)
 
 	// Compute changed files: container files that are new or modified since cutoff
 	changedSet := make(map[string]struct{})
@@ -539,13 +523,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			deletedFiles = append(deletedFiles, path)
 		}
 	}
-
-	logger.Debug(ctx, "syncFromContainer: diff computed",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("changed", len(changedSet)),
-		logger.AddField("deleted", len(deletedFiles)),
-		logger.AddField("cutoff", cutoff),
-	)
 
 	// Nothing to do
 	if len(changedSet) == 0 && len(deletedFiles) == 0 {
@@ -781,12 +758,6 @@ func (m *Manager) containerFileManifest(ctx context.Context, runtimeID string) (
 		)
 		return nil, fmt.Errorf("exec find: %w", err)
 	}
-
-	logger.Debug(ctx, "containerFileManifest: find output",
-		logger.AddField("runtime_id", runtimeID),
-		logger.AddField("stdout_len", len(result.Stdout)),
-		logger.AddField("exit_code", result.ExitCode),
-	)
 
 	manifest := make(map[string]int64)
 	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
