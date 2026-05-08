@@ -514,7 +514,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		logger.AddField("storage_files", len(storageFiles)),
 	)
 
-	// Compute changed files: container files with modtime >= cutoff
+	// Compute changed files: container files that are new or modified since cutoff
 	changedSet := make(map[string]struct{})
 	for path, modtime := range manifest {
 		if strings.HasSuffix(path, "/") {
@@ -523,7 +523,8 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		if isExcluded(path, exclude) {
 			continue
 		}
-		if cutoff == 0 || modtime >= cutoff {
+		_, inStorage := storageFiles[path]
+		if !inStorage || cutoff == 0 || modtime >= cutoff {
 			changedSet[path] = struct{}{}
 		}
 	}
