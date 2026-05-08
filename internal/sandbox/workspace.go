@@ -45,6 +45,11 @@ func isExcluded(path string, exclude []string) bool {
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
 // exclude is an optional list of path prefixes to skip during all subsequent syncs.
 func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
+	logger.Info(ctx, "MountWorkspace: starting",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("root_path", rootPath),
+	)
+
 	m.mu.RLock()
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
@@ -61,11 +66,21 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 
 	scoped, err := storage.NewScopedFS(m.filesystem, rootPath)
 	if err != nil {
+		logger.Error(ctx, "MountWorkspace: create scoped filesystem failed",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("root_path", rootPath),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("create scoped filesystem: %w", err)
 	}
 
 	// Sync files from storage to container
 	if err := m.syncToContainer(ctx, scoped, runtimeID); err != nil {
+		logger.Error(ctx, "MountWorkspace: sync to container failed",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("sync to container: %w", err)
 	}
 
@@ -86,11 +101,20 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		_ = m.sessions.Save(ctx, sb)
 	}
 
+	logger.Info(ctx, "MountWorkspace: completed",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("runtime_id", runtimeID),
+	)
+
 	return nil
 }
 
 // UnmountWorkspace syncs files back from container to storage, then detaches.
 func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error {
+	logger.Info(ctx, "UnmountWorkspace: starting",
+		logger.AddField("sandbox_id", sandboxID),
+	)
+
 	m.mu.RLock()
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
@@ -106,6 +130,11 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	}
 
 	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, sb.Workspace.SyncExclude); err != nil {
+		logger.Error(ctx, "UnmountWorkspace: sync from container failed",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("sync from container: %w", err)
 	}
 
@@ -120,12 +149,21 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		_ = m.sessions.Save(ctx, sb)
 	}
 
+	logger.Info(ctx, "UnmountWorkspace: completed",
+		logger.AddField("sandbox_id", sandboxID),
+	)
+
 	return nil
 }
 
 // SyncWorkspace manually syncs files in the given direction.
 // exclude is an optional list of path prefixes to skip during from_container sync.
 func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string, exclude []string) error {
+	logger.Info(ctx, "SyncWorkspace: request received",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("direction", direction),
+	)
+
 	m.mu.RLock()
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
@@ -140,14 +178,29 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		return fmt.Errorf("no workspace mounted for sandbox %s", sandboxID)
 	}
 
+	var err error
 	switch direction {
 	case "to_container":
-		return m.syncToContainer(ctx, scoped, runtimeID)
+		err = m.syncToContainer(ctx, scoped, runtimeID)
 	case "from_container":
-		return m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
+		err = m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
 	default:
 		return fmt.Errorf("invalid sync direction: %s", direction)
 	}
+
+	if err != nil {
+		logger.Error(ctx, "SyncWorkspace: failed",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("direction", direction),
+			logger.ErrorField(err),
+		)
+	} else {
+		logger.Info(ctx, "SyncWorkspace: completed",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("direction", direction),
+		)
+	}
+	return err
 }
 
 // GetWorkspaceInfo returns workspace info for a sandbox.
@@ -171,11 +224,23 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 	// Phase 1: walk the directory tree to collect file metadata.
 	var entries []fileEntry
 	if err := m.collectFiles(ctx, scoped, ".", &entries); err != nil {
+		logger.Error(ctx, "syncToContainer: collectFiles failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("collect files: %w", err)
 	}
 	if len(entries) == 0 {
+		logger.Debug(ctx, "syncToContainer: no files to sync",
+			logger.AddField("runtime_id", runtimeID),
+		)
 		return nil
 	}
+
+	logger.Debug(ctx, "syncToContainer: starting tar upload",
+		logger.AddField("runtime_id", runtimeID),
+		logger.AddField("entries", len(entries)),
+	)
 
 	// Phase 2: stream tar into container via exec pipe.
 	pr, pw := io.Pipe()
@@ -196,11 +261,24 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 	execErr := <-execErrCh
 
 	if writeErr != nil {
+		logger.Error(ctx, "syncToContainer: write tar stream failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(writeErr),
+		)
 		return fmt.Errorf("write tar stream: %w", writeErr)
 	}
 	if execErr != nil {
+		logger.Error(ctx, "syncToContainer: exec tar extract failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(execErr),
+		)
 		return fmt.Errorf("exec tar extract: %w", execErr)
 	}
+
+	logger.Debug(ctx, "syncToContainer: completed",
+		logger.AddField("runtime_id", runtimeID),
+		logger.AddField("entries", len(entries)),
+	)
 	return nil
 }
 
@@ -349,17 +427,26 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	sb := m.sandboxes[sandboxID]
 	m.mu.RUnlock()
 	if !ok {
+		logger.Debug(ctx, "syncFromContainer: no workspace found",
+			logger.AddField("sandbox_id", sandboxID),
+		)
 		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
 	}
 
 	// Skip sync if the sandbox is gone from the map — it has already been
 	// fully destroyed and the pod is likely deleted.
 	if sb == nil {
+		logger.Debug(ctx, "syncFromContainer: sandbox nil, skipping",
+			logger.AddField("sandbox_id", sandboxID),
+		)
 		return nil
 	}
 
 	// Bind-mounted workspaces share the host filesystem directly — no sync needed.
 	if sb.Workspace != nil && sb.Workspace.BindMounted {
+		logger.Debug(ctx, "syncFromContainer: bind-mounted, skipping",
+			logger.AddField("sandbox_id", sandboxID),
+		)
 		return nil
 	}
 
@@ -373,10 +460,20 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// modified after this point will be picked up by the next sync cycle.
 	syncStartedAt := time.Now()
 
+	logger.Debug(ctx, "syncFromContainer: collecting manifest",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("runtime_id", runtimeID),
+		logger.AddField("cutoff", cutoff),
+	)
+
 	// Get container file manifest via exec
 	manifest, err := m.containerFileManifest(ctx, runtimeID)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
+			logger.Debug(ctx, "syncFromContainer: container not found",
+				logger.AddField("sandbox_id", sandboxID),
+				logger.AddField("runtime_id", runtimeID),
+			)
 			return err
 		}
 		// Fall back to full sync if manifest collection fails
@@ -392,6 +489,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return nil
 	}
 
+	logger.Debug(ctx, "syncFromContainer: manifest collected",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("manifest_files", len(manifest)),
+	)
+
 	// Get storage file set
 	storageFiles, err := m.storageFileSet(ctx, scoped, ".")
 	if err != nil {
@@ -406,6 +508,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
+
+	logger.Debug(ctx, "syncFromContainer: storage files listed",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("storage_files", len(storageFiles)),
+	)
 
 	// Compute changed files: container files with modtime >= cutoff
 	changedSet := make(map[string]struct{})
@@ -432,6 +539,13 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		}
 	}
 
+	logger.Debug(ctx, "syncFromContainer: diff computed",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("changed", len(changedSet)),
+		logger.AddField("deleted", len(deletedFiles)),
+		logger.AddField("cutoff", cutoff),
+	)
+
 	// Nothing to do
 	if len(changedSet) == 0 && len(deletedFiles) == 0 {
 		m.setLastSyncedAt(sb, syncStartedAt)
@@ -441,7 +555,16 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 	// Download tar and selectively extract only changed files
 	if len(changedSet) > 0 {
+		logger.Debug(ctx, "syncFromContainer: downloading changed files",
+			logger.AddField("sandbox_id", sandboxID),
+			logger.AddField("count", len(changedSet)),
+		)
 		if err := m.downloadChangedFiles(ctx, scoped, runtimeID, changedSet, exclude); err != nil {
+			logger.Error(ctx, "syncFromContainer: download changed files failed",
+				logger.AddField("sandbox_id", sandboxID),
+				logger.AddField("runtime_id", runtimeID),
+				logger.ErrorField(err),
+			)
 			return fmt.Errorf("download changed files: %w", err)
 		}
 	}
@@ -450,6 +573,12 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	for _, path := range deletedFiles {
 		_ = scoped.Remove(ctx, path)
 	}
+
+	logger.Info(ctx, "syncFromContainer: completed",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("synced", len(changedSet)),
+		logger.AddField("removed", len(deletedFiles)),
+	)
 
 	m.setLastSyncedAt(sb, syncStartedAt)
 	m.saveSessionIfAlive(ctx, sandboxID, sb)
@@ -488,6 +617,10 @@ func (m *Manager) saveSessionIfAlive(ctx context.Context, sandboxID string, sb *
 func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string, exclude []string) error {
 	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
+		logger.Error(ctx, "fullSyncFromContainer: download failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("download workspace: %w", err)
 	}
 	defer tarReader.Close()
@@ -499,6 +632,10 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 			break
 		}
 		if err != nil {
+			logger.Error(ctx, "fullSyncFromContainer: read tar entry failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.ErrorField(err),
+			)
 			return fmt.Errorf("read tar entry: %w", err)
 		}
 
@@ -518,15 +655,30 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 
 		writer, err := scoped.Create(ctx, name)
 		if err != nil {
+			logger.Error(ctx, "fullSyncFromContainer: create file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(err),
+			)
 			return fmt.Errorf("create %q: %w", name, err)
 		}
 
 		_, copyErr := io.Copy(writer, tr)
 		closeErr := writer.Close()
 		if copyErr != nil {
+			logger.Error(ctx, "fullSyncFromContainer: write file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(copyErr),
+			)
 			return fmt.Errorf("write %q: %w", name, copyErr)
 		}
 		if closeErr != nil {
+			logger.Error(ctx, "fullSyncFromContainer: flush file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(closeErr),
+			)
 			return fmt.Errorf("flush %q to storage: %w", name, closeErr)
 		}
 	}
@@ -538,6 +690,10 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.ScopedFS, runtimeID string, changedSet map[string]struct{}, exclude []string) error {
 	tarReader, err := m.runtime.DownloadDir(ctx, runtimeID, "/workspace")
 	if err != nil {
+		logger.Error(ctx, "downloadChangedFiles: download failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return fmt.Errorf("download workspace: %w", err)
 	}
 	defer tarReader.Close()
@@ -549,6 +705,10 @@ func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.Scope
 			break
 		}
 		if err != nil {
+			logger.Error(ctx, "downloadChangedFiles: read tar entry failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.ErrorField(err),
+			)
 			return fmt.Errorf("read tar entry: %w", err)
 		}
 
@@ -573,15 +733,30 @@ func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.Scope
 
 		writer, err := scoped.Create(ctx, name)
 		if err != nil {
+			logger.Error(ctx, "downloadChangedFiles: create file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(err),
+			)
 			return fmt.Errorf("create %q: %w", name, err)
 		}
 
 		_, copyErr := io.Copy(writer, tr)
 		closeErr := writer.Close()
 		if copyErr != nil {
+			logger.Error(ctx, "downloadChangedFiles: write file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(copyErr),
+			)
 			return fmt.Errorf("write %q: %w", name, copyErr)
 		}
 		if closeErr != nil {
+			logger.Error(ctx, "downloadChangedFiles: flush file failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.AddField("file", name),
+				logger.ErrorField(closeErr),
+			)
 			return fmt.Errorf("flush %q to storage: %w", name, closeErr)
 		}
 	}
@@ -599,8 +774,18 @@ func (m *Manager) containerFileManifest(ctx context.Context, runtimeID string) (
 		Timeout: 30,
 	})
 	if err != nil {
+		logger.Error(ctx, "containerFileManifest: exec find failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
 		return nil, fmt.Errorf("exec find: %w", err)
 	}
+
+	logger.Debug(ctx, "containerFileManifest: find output",
+		logger.AddField("runtime_id", runtimeID),
+		logger.AddField("stdout_len", len(result.Stdout)),
+		logger.AddField("exit_code", result.ExitCode),
+	)
 
 	manifest := make(map[string]int64)
 	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {

@@ -211,6 +211,11 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 				WorkDir: "/workspace",
 				Timeout: 120, // 2 min for dependency install
 			}); err != nil {
+				logger.Error(spanCtx, "Create: install dependencies failed",
+					logger.AddField("sandbox_id", id),
+					logger.AddField("runtime_id", info.RuntimeID),
+					logger.ErrorField(err),
+				)
 				// Cleanup on failure
 				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
 				return nil, fmt.Errorf("install dependencies: %w", err)
@@ -225,8 +230,10 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	// Persist persistent sandboxes to session store
 	if cfg.Mode == ModePersistent && m.sessions != nil {
 		if err := m.sessions.Save(spanCtx, sb); err != nil {
-			// Log but don't fail — in-memory state is still valid
-			_ = err
+			logger.Error(spanCtx, "Create: persist sandbox to session store failed",
+				logger.AddField("sandbox_id", id),
+				logger.ErrorField(err),
+			)
 		}
 	}
 
@@ -301,6 +308,12 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 				m.mu.Lock()
 				m.workspaces[id] = scoped
 				m.mu.Unlock()
+			} else {
+				logger.Error(ctx, "resolve: restore workspace scoped fs failed",
+					logger.AddField("sandbox_id", id),
+					logger.AddField("root_path", sbPtr.Workspace.RootPath),
+					logger.ErrorField(fsErr),
+				)
 			}
 		}
 
@@ -729,6 +742,52 @@ func (m *Manager) autoSyncWorkspaces() {
 }
 
 func (m *Manager) autoSyncOnce() {
+	ctx := context.Background()
+
+	// Restore persistent sandboxes not yet in local memory (handles multi-replica scenario)
+	if m.sessions != nil {
+		ids, err := m.sessions.List(ctx)
+		if err != nil {
+			logger.Error(ctx, "autoSyncOnce: list persistent sandboxes failed", logger.ErrorField(err))
+		} else {
+			for _, id := range ids {
+				m.mu.RLock()
+				_, inMemory := m.sandboxes[id]
+				m.mu.RUnlock()
+				if inMemory {
+					continue
+				}
+				// Restore from session store so this replica can sync it
+				sbPtr, err := m.sessions.Load(ctx, id)
+				if err != nil {
+					logger.Error(ctx, "autoSyncOnce: load sandbox from session store failed",
+						logger.AddField("sandbox_id", id),
+						logger.ErrorField(err),
+					)
+					continue
+				}
+				m.mu.Lock()
+				m.sandboxes[id] = sbPtr
+				m.mu.Unlock()
+
+				if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
+					scoped, fsErr := storage.NewScopedFS(m.filesystem, sbPtr.Workspace.RootPath)
+					if fsErr != nil {
+						logger.Error(ctx, "autoSyncOnce: restore workspace scoped fs failed",
+							logger.AddField("sandbox_id", id),
+							logger.AddField("root_path", sbPtr.Workspace.RootPath),
+							logger.ErrorField(fsErr),
+						)
+					} else {
+						m.mu.Lock()
+						m.workspaces[id] = scoped
+						m.mu.Unlock()
+					}
+				}
+			}
+		}
+	}
+
 	m.mu.RLock()
 	type syncTarget struct {
 		sandboxID   string
@@ -737,7 +796,7 @@ func (m *Manager) autoSyncOnce() {
 	}
 	var targets []syncTarget
 	for id := range m.workspaces {
-		if sb, ok := m.sandboxes[id]; ok && sb.State != StateDestroying {
+		if sb, ok := m.sandboxes[id]; ok && sb.State != StateDestroying && sb.State != StateDestroyed {
 			var exclude []string
 			if sb.Workspace != nil {
 				exclude = sb.Workspace.SyncExclude
@@ -747,20 +806,28 @@ func (m *Manager) autoSyncOnce() {
 	}
 	m.mu.RUnlock()
 
+	logger.Debug(ctx, "autoSyncOnce tick",
+		logger.AddField("targets", len(targets)),
+	)
+
 	for _, t := range targets {
 		m.mu.RLock()
 		sb, alive := m.sandboxes[t.sandboxID]
 		skip := !alive || sb.State == StateDestroying || sb.State == StateDestroyed
 		m.mu.RUnlock()
 		if skip {
+			logger.Debug(ctx, "autoSync skipping sandbox",
+				logger.AddField("sandbox_id", t.sandboxID),
+				logger.AddField("alive", alive),
+			)
 			continue
 		}
 
-		if err := m.syncFromContainer(context.Background(), t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
+		if err := m.syncFromContainer(ctx, t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				continue
 			}
-			logger.Error(context.Background(), "auto-sync failed",
+			logger.Error(ctx, "auto-sync failed",
 				logger.AddField("sandbox_id", t.sandboxID),
 				logger.ErrorField(err),
 			)
