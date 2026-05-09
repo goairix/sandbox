@@ -23,6 +23,7 @@ func newFileTestRouter() *gin.Engine {
 	h := handler.NewHandler(nil)
 	r := gin.New()
 	r.POST("/sandboxes/:id/files/list-recursive", h.ListFilesRecursive)
+	r.POST("/sandboxes/:id/files/glob", h.GlobFiles)
 	r.POST("/sandboxes/:id/files/read-lines", h.ReadFileLines)
 	r.POST("/sandboxes/:id/files/edit", h.EditFile)
 	r.POST("/sandboxes/:id/files/edit-lines", h.EditFileLines)
@@ -105,6 +106,37 @@ func TestEditFileLines_InvalidStartLine(t *testing.T) {
 	w := doPost(t, r, "/sandboxes/sb-1/files/edit-lines", map[string]any{
 		"path":       "/workspace/file.txt",
 		"start_line": 0,
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGlobFiles_MissingPath(t *testing.T) {
+	r := newFileTestRouter()
+	w := doPost(t, r, "/sandboxes/sb-1/files/glob", map[string]any{
+		"pattern": "*.txt",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGlobFiles_MissingPattern(t *testing.T) {
+	r := newFileTestRouter()
+	w := doPost(t, r, "/sandboxes/sb-1/files/glob", map[string]any{
+		"path": "/workspace",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGlobFiles_InvalidPath(t *testing.T) {
+	r := newFileTestRouter()
+	w := doPost(t, r, "/sandboxes/sb-1/files/glob", map[string]any{
+		"path":    "../../etc",
+		"pattern": "*.txt",
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())

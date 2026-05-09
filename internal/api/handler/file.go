@@ -261,6 +261,61 @@ func (h *Handler) ListFilesRecursive(c *gin.Context) {
 	})
 }
 
+func (h *Handler) GlobFiles(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.GlobFiles")
+	defer span.End()
+
+	id := c.Param("id")
+
+	var req types.GlobFilesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := req.PageSize
+	if pageSize <= 0 {
+		pageSize = 100
+	} else if pageSize > 1000 {
+		pageSize = 1000
+	}
+
+	result, err := h.manager.GlobFiles(spanCtx, id, req.Path, req.Pattern, page, pageSize)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+
+	var fileInfos []types.FileInfo
+	for _, f := range result.Files {
+		fileInfos = append(fileInfos, types.FileInfo{
+			Name:    f.Name,
+			Path:    f.Path,
+			Size:    f.Size,
+			IsDir:   f.IsDir,
+			ModTime: f.ModTime,
+		})
+	}
+
+	c.JSON(http.StatusOK, types.GlobFilesResponse{
+		Files:      fileInfos,
+		Path:       req.Path,
+		Pattern:    req.Pattern,
+		TotalCount: result.TotalCount,
+		Page:       result.Page,
+		PageSize:   result.PageSize,
+	})
+}
+
 func (h *Handler) ReadFileLines(c *gin.Context) {
 	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.ReadFileLines")
 	defer span.End()

@@ -314,6 +314,13 @@ func (c *Client) ListFilesRecursive(ctx context.Context, id string, req ListFile
 	return resp, err
 }
 
+// GlobFiles finds files matching a glob pattern in a sandbox directory.
+func (c *Client) GlobFiles(ctx context.Context, id string, req GlobFilesRequest) (GlobFilesResponse, error) {
+	var resp GlobFilesResponse
+	err := c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/glob", req, &resp)
+	return resp, err
+}
+
 // ReadFileLines reads a range of lines from a file in a sandbox.
 func (c *Client) ReadFileLines(ctx context.Context, id string, req ReadFileLinesRequest) (ReadFileLinesResponse, error) {
 	var resp ReadFileLinesResponse

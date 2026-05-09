@@ -41,6 +41,24 @@ type ListFilesRecursiveResponse struct {
 	PageSize   int        `json:"page_size"`
 }
 
+// GlobFilesRequest is the request body for POST /api/v1/sandboxes/:id/files/glob.
+type GlobFilesRequest struct {
+	Path     string `json:"path" binding:"required"`
+	Pattern  string `json:"pattern" binding:"required"`
+	Page     int    `json:"page,omitempty"`
+	PageSize int    `json:"page_size,omitempty"`
+}
+
+// GlobFilesResponse is returned by the glob endpoint.
+type GlobFilesResponse struct {
+	Files      []FileInfo `json:"files"`
+	Path       string     `json:"path"`
+	Pattern    string     `json:"pattern"`
+	TotalCount int        `json:"total_count"`
+	Page       int        `json:"page"`
+	PageSize   int        `json:"page_size"`
+}
+
 // ReadFileRequest is the request body for POST /api/v1/sandboxes/:id/files/read.
 type ReadFileRequest struct {
 	Path string `json:"path" binding:"required"`

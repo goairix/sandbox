@@ -587,6 +587,15 @@ func (m *Manager) ListFilesRecursive(ctx context.Context, id string, dirPath str
 	return m.runtime.ListFilesRecursive(ctx, sb.RuntimeID, dirPath, maxDepth, page, pageSize)
 }
 
+// GlobFiles finds files matching a glob pattern in a sandbox directory.
+func (m *Manager) GlobFiles(ctx context.Context, id string, baseDir string, pattern string, page int, pageSize int) (*runtime.FileListResult, error) {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return m.runtime.GlobFiles(ctx, sb.RuntimeID, baseDir, pattern, page, pageSize)
+}
+
 // ReadFileLines reads a range of lines from a file in a sandbox.
 func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
 	sb, err := m.resolve(ctx, id)

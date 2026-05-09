@@ -439,6 +439,84 @@ func listFilesRecursiveInPod(ctx context.Context, client kubernetes.Interface, r
 	}, nil
 }
 
+// globFilesInPod finds files matching a glob pattern inside a pod with pagination.
+func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, baseDir, pattern string, page int, pageSize int) (*runtime.FileListResult, error) {
+	if page < 1 {
+		page = 1
+	}
+
+	findArgs, maxDepth1 := runtime.GlobToFindArgs(pattern)
+	depthArg := ""
+	if maxDepth1 {
+		depthArg = "-maxdepth 1 "
+	}
+
+	countCmd := fmt.Sprintf("find %s -mindepth 1 %s%s -type f | wc -l", shellEscape(baseDir), depthArg, findArgs)
+	countResult, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
+		Command: countCmd,
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+	var totalCount int
+	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+
+	listCmd := fmt.Sprintf(
+		"find %s -mindepth 1 %s%s -type f -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
+		shellEscape(baseDir), depthArg, findArgs,
+	)
+	if pageSize > 0 {
+		offset := (page - 1) * pageSize
+		listCmd = fmt.Sprintf("%s | tail -n +%d | head -n %d", listCmd, offset+1, pageSize)
+	}
+
+	listResult, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
+		Command: listCmd,
+		WorkDir: "/workspace",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var files []runtime.FileInfo
+	for _, line := range strings.Split(strings.TrimSpace(listResult.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 || parts[0] == "" {
+			continue
+		}
+
+		var size int64
+		fmt.Sscanf(parts[1], "%d", &size)
+
+		var modTimeFloat float64
+		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
+		sec := int64(modTimeFloat)
+		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
+
+		name := filepath.Base(parts[0])
+		fullPath := baseDir + "/" + parts[0]
+
+		files = append(files, runtime.FileInfo{
+			Name:    name,
+			Path:    fullPath,
+			Size:    size,
+			IsDir:   false,
+			ModTime: time.Unix(sec, nsec),
+		})
+	}
+
+	return &runtime.FileListResult{
+		Files:      files,
+		TotalCount: totalCount,
+		Page:       page,
+		PageSize:   pageSize,
+	}, nil
+}
+
 // readFileLinesInPod reads a range of lines from a file inside a pod.
 func readFileLinesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
 	if startLine < 1 {

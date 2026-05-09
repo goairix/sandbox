@@ -56,6 +56,12 @@ type Runtime interface {
 	// maxDepth controls recursion depth (0 = unlimited). Supports pagination via page/pageSize.
 	ListFilesRecursive(ctx context.Context, id string, dirPath string, maxDepth int, page int, pageSize int) (*FileListResult, error)
 
+	// GlobFiles finds files matching a glob pattern inside the sandbox.
+	// Supported patterns: **/*.txt, **/*.{txt,md}, *.txt, **/*keyword*.txt
+	// The baseDir is the root directory to search from.
+	// Supports pagination via page/pageSize.
+	GlobFiles(ctx context.Context, id string, baseDir string, pattern string, page int, pageSize int) (*FileListResult, error)
+
 	// ReadFileLines reads a range of lines from a file inside the sandbox.
 	// startLine is 1-based. endLine of 0 means read to end of file.
 	ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*FileLineResult, error)

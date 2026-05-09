@@ -146,6 +146,11 @@ func (s *Sandbox) ListFilesRecursive(ctx context.Context, req ListFilesRecursive
 	return s.client.ListFilesRecursive(ctx, s.id, req)
 }
 
+// GlobFiles finds files matching a glob pattern in a sandbox directory.
+func (s *Sandbox) GlobFiles(ctx context.Context, req GlobFilesRequest) (GlobFilesResponse, error) {
+	return s.client.GlobFiles(ctx, s.id, req)
+}
+
 // ReadFile reads the full content of a file from the sandbox as a stream.
 // Caller is responsible for closing the returned ReadCloser.
 func (s *Sandbox) ReadFile(ctx context.Context, remotePath string) (io.ReadCloser, error) {

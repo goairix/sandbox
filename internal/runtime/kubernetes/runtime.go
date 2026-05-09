@@ -150,6 +150,10 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 	return listFilesRecursiveInPod(ctx, r.client, r.restConfig, r.namespace, id, dirPath, maxDepth, page, pageSize)
 }
 
+func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, pattern string, page int, pageSize int) (*runtime.FileListResult, error) {
+	return globFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, baseDir, pattern, page, pageSize)
+}
+
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
 	return readFileLinesInPod(ctx, r.client, r.restConfig, r.namespace, id, filePath, startLine, endLine)
 }

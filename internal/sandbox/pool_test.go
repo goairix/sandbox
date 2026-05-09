@@ -125,6 +125,9 @@ func (m *mockRuntime) EditFileLines(context.Context, string, string, int, int, s
 func (m *mockRuntime) GlobInfo(context.Context, string, string) ([]runtime.FileContent, error) {
 	return nil, nil
 }
+func (m *mockRuntime) GlobFiles(context.Context, string, string, string, int, int) (*runtime.FileListResult, error) {
+	return nil, nil
+}
 func (m *mockRuntime) DownloadFiles(context.Context, string, []string) ([]runtime.FileContent, error) {
 	return nil, nil
 }

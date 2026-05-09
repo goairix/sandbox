@@ -9,7 +9,7 @@
 - **RESTful API** — 一次性执行、持久化沙箱、同步/流式（SSE）输出
 - **预热容器池** — 预热容器池实现低延迟分配，启动时自动清理上次遗留的孤儿容器
 - **安全隔离** — 资源限制（CPU、内存、PID、磁盘）、只读根文件系统、Seccomp 安全配置、网络白名单、API Key 认证、速率限制
-- **文件操作** — 沙箱内文件的上传、下载和列表查看
+- **文件操作** — 沙箱内文件的上传、下载、列表查看、按行读取/编辑、Glob 模式匹配
 - **工作空间** — 基于 ScopedFS 的持久化工作空间，支持挂载/卸载/增量同步，路径限定防止目录逃逸
 - **会话持久化** — Persistent 模式沙箱元数据存储到 Redis，API 重启后自动恢复
 - **文件存储** — 可插拔后端：Local、S3、COS、OBS、OSS、MinIO
@@ -132,6 +132,46 @@ curl -X POST http://localhost:8080/api/v1/execute/stream \
   -d '{"language":"python","code":"import time\nfor i in range(5):\n    print(i)\n    time.sleep(1)"}'
 ```
 
+**文件操作：**
+
+```bash
+# 上传文件到沙箱
+curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/files/upload \
+  -H "Authorization: Bearer your-api-key" \
+  -F "file=@local-file.txt" \
+  -F "path=/workspace/remote-file.txt"
+
+# 递归列出目录（支持分页）
+curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/files/list-recursive \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/workspace","max_depth":3,"page":1,"page_size":50}'
+
+# Glob 模式匹配文件（支持 **、{a,b} 展开、Unicode 文件名）
+curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/files/glob \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/workspace","pattern":"**/*.{txt,md}"}'
+
+# 更多 glob 模式示例：
+#   **/*.txt          — 递归匹配所有 .txt 文件
+#   *.txt             — 仅匹配当前目录下的 .txt 文件
+#   **/*医疗*.txt      — 递归匹配文件名包含"医疗"的 .txt 文件
+#   **/*.{js,ts,jsx}  — 递归匹配多种扩展名
+
+# 按行读取文件
+curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/files/read-lines \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/workspace/main.py","start_line":1,"end_line":20}'
+
+# 字符串替换编辑文件
+curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/files/edit \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/workspace/main.py","old_str":"hello","new_str":"world","replace_all":true}'
+```
+
 ## API 接口
 
 | 方法 | 路径 | 说明 |
@@ -142,13 +182,19 @@ curl -X POST http://localhost:8080/api/v1/execute/stream \
 | POST | `/api/v1/sandboxes` | 创建沙箱 |
 | GET | `/api/v1/sandboxes/:id` | 获取沙箱信息 |
 | DELETE | `/api/v1/sandboxes/:id` | 销毁沙箱 |
+| PUT | `/api/v1/sandboxes/:id/network` | 更新沙箱网络配置 |
+| PUT | `/api/v1/sandboxes/:id/ttl` | 动态修改沙箱 TTL |
 | POST | `/api/v1/sandboxes/:id/exec` | 在沙箱中执行代码 |
 | POST | `/api/v1/sandboxes/:id/exec/stream` | 在沙箱中执行代码（流式输出） |
 | POST | `/api/v1/sandboxes/:id/files/upload` | 上传文件到沙箱 |
 | GET | `/api/v1/sandboxes/:id/files/download` | 从沙箱下载文件 |
-| GET | `/api/v1/sandboxes/:id/files/list` | 列出沙箱中的文件 |
-| PUT | `/api/v1/sandboxes/:id/network` | 更新沙箱网络配置 |
-| PUT | `/api/v1/sandboxes/:id/ttl` | 动态修改沙箱 TTL |
+| POST | `/api/v1/sandboxes/:id/files/read` | 读取文件内容（流式返回） |
+| GET | `/api/v1/sandboxes/:id/files/list` | 列出目录下的文件 |
+| POST | `/api/v1/sandboxes/:id/files/list-recursive` | 递归列出目录下的文件（支持分页） |
+| POST | `/api/v1/sandboxes/:id/files/glob` | 按 glob 模式匹配文件（支持分页） |
+| POST | `/api/v1/sandboxes/:id/files/read-lines` | 按行范围读取文件内容 |
+| POST | `/api/v1/sandboxes/:id/files/edit` | 字符串替换编辑文件 |
+| POST | `/api/v1/sandboxes/:id/files/edit-lines` | 按行范围替换文件内容 |
 | POST | `/api/v1/sandboxes/:id/workspace/mount` | 挂载工作空间 |
 | POST | `/api/v1/sandboxes/:id/workspace/unmount` | 卸载工作空间 |
 | POST | `/api/v1/sandboxes/:id/workspace/sync` | 手动同步工作空间 |
