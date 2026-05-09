@@ -108,6 +108,14 @@ resp, err := sb.ListFilesRecursive(ctx, sandbox.ListFilesRecursiveRequest{
 })
 // resp.Files, resp.TotalCount, resp.Page, resp.PageSize
 
+// Glob pattern matching (supports **, {a,b} brace expansion, Unicode)
+glob, err := sb.GlobFiles(ctx, sandbox.GlobFilesRequest{
+    Path:    "/workspace",
+    Pattern: "**/*.{txt,md}",
+})
+// glob.Files, glob.TotalCount
+// More patterns: **/*.txt, *.txt, **/*keyword*.txt, **/*.{js,ts,jsx}
+
 // Read lines
 lines, err := sb.ReadFileLines(ctx, sandbox.ReadFileLinesRequest{
     Path:      "/workspace/main.py",
@@ -227,7 +235,9 @@ Predefined sentinels:
 | `UploadFile(ctx, id, path, r)` | POST /api/v1/sandboxes/:id/files/upload |
 | `DownloadFile(ctx, id, path)` | GET /api/v1/sandboxes/:id/files/download |
 | `ListFiles(ctx, id, dir)` | GET /api/v1/sandboxes/:id/files/list |
+| `ReadFile(ctx, id, path)` | POST /api/v1/sandboxes/:id/files/read |
 | `ListFilesRecursive(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/list-recursive |
+| `GlobFiles(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/glob |
 | `ReadFileLines(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/read-lines |
 | `EditFile(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/edit |
 | `EditFileLines(ctx, id, req)` | POST /api/v1/sandboxes/:id/files/edit-lines |
@@ -256,6 +266,7 @@ Predefined sentinels:
 | `DownloadFile(ctx, path)` | Download file |
 | `ListFiles(ctx, dir)` | List directory (shallow) |
 | `ListFilesRecursive(ctx, req)` | List directory recursively |
+| `GlobFiles(ctx, req)` | Glob pattern matching files |
 | `ReadFileLines(ctx, req)` | Read line range from file |
 | `EditFile(ctx, req)` | String replacement in file |
 | `EditFileLines(ctx, req)` | Replace line range in file |
