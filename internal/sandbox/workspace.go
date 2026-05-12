@@ -509,7 +509,10 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			continue
 		}
 		_, inStorage := storageFiles[path]
-		if !inStorage || cutoff == 0 || modtime >= cutoff {
+		// modtime == 0 means the filesystem doesn't track mtime (e.g. some overlay
+		// mounts reset it to epoch). Treat it as always-changed so we don't silently
+		// skip files whose real modification time is unknown.
+		if !inStorage || cutoff == 0 || modtime == 0 || modtime >= cutoff {
 			changedSet[path] = struct{}{}
 		}
 	}
