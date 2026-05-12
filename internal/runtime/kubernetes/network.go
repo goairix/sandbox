@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -112,7 +112,7 @@ func deleteNetworkPolicy(ctx context.Context, client kubernetes.Interface, names
 func updateNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string, enabled bool, whitelist []string) error {
 	if !enabled {
 		err := deleteNetworkPolicy(ctx, client, namespace, sandboxID)
-		if err != nil && !strings.Contains(err.Error(), "not found") {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 		return nil
