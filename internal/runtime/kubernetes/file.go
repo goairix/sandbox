@@ -280,8 +280,10 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 	}
 
 	pr, pw := io.Pipe()
+	done := make(chan struct{})
 
 	go func() {
+		defer close(done)
 		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: pw,
 			Stderr: io.Discard,
@@ -289,7 +291,22 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 		pw.CloseWithError(err)
 	}()
 
-	return pr, nil
+	return &pipeReadCloser{pr: pr, done: done}, nil
+}
+
+// pipeReadCloser wraps a PipeReader and waits for the background streaming
+// goroutine to finish before returning from Close, preventing the goroutine
+// from writing to an already-closed pipe.
+type pipeReadCloser struct {
+	pr   *io.PipeReader
+	done <-chan struct{}
+}
+
+func (p *pipeReadCloser) Read(b []byte) (int, error) { return p.pr.Read(b) }
+func (p *pipeReadCloser) Close() error {
+	err := p.pr.Close()
+	<-p.done
+	return err
 }
 
 // execPipeInPod executes a command in a pod with an io.Reader connected to stdin.
