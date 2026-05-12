@@ -836,16 +836,14 @@ func (m *Manager) autoSyncOnce() {
 
 		if err := m.syncFromContainer(ctx, t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
 			if strings.Contains(err.Error(), "not found") {
-				// Pod is gone. If the sandbox is also absent from the session store
-				// (i.e. Destroy already cleaned it up), remove the stale in-memory
-				// entry so we stop retrying on every tick.
+				// Pod is gone — clean up both in-memory state and the session store
+				// so we stop retrying on every tick and don't restore it again.
+				m.mu.Lock()
+				delete(m.workspaces, t.sandboxID)
+				delete(m.sandboxes, t.sandboxID)
+				m.mu.Unlock()
 				if m.sessions != nil {
-					if _, loadErr := m.sessions.Load(ctx, t.sandboxID); loadErr != nil {
-						m.mu.Lock()
-						delete(m.workspaces, t.sandboxID)
-						delete(m.sandboxes, t.sandboxID)
-						m.mu.Unlock()
-					}
+					_ = m.sessions.Remove(ctx, t.sandboxID)
 				}
 				continue
 			}
