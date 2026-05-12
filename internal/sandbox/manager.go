@@ -775,10 +775,12 @@ func (m *Manager) autoSyncOnce() {
 					)
 					continue
 				}
-				// Skip sandboxes that are being or have been destroyed — the session
-				// entry may be a stale record from a concurrent Destroy that removed
-				// the session key after our List call but before we loaded it.
-				if sbPtr.State == StateDestroying || sbPtr.State == StateDestroyed {
+				// Skip sandboxes that are being destroyed — the session entry may
+				// be a stale record from a concurrent Destroy that removed the
+				// session key after our List call but before we loaded it.
+				// (StateDestroyed is never written to the session store because
+				// Destroy deletes the key before the sandbox reaches that state.)
+				if sbPtr.State == StateDestroying {
 					continue
 				}
 				m.mu.Lock()

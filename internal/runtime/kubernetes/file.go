@@ -307,12 +307,11 @@ type pipeReadCloser struct {
 
 func (p *pipeReadCloser) Read(b []byte) (int, error) { return p.pr.Read(b) }
 func (p *pipeReadCloser) Close() error {
-	// Drain any remaining data so the goroutine's io.Copy can finish writing
-	// and close pw on its own. Then wait for the goroutine to exit before
-	// closing pr. This prevents the goroutine from seeing a closed-pipe error
-	// while it is still writing, which would cause the Kubernetes SPDY client
-	// to print "Unhandled Error: io: read/write on closed pipe".
-	go io.Copy(io.Discard, p.pr) //nolint:errcheck
+	// Drain synchronously until the streaming goroutine closes pw (returns EOF).
+	// Using a separate goroutine would race: pr.Close() could fire while the
+	// drain goroutine is mid-Read, producing the same ErrClosedPipe we're
+	// trying to suppress.
+	io.Copy(io.Discard, p.pr) //nolint:errcheck
 	<-p.done
 	return p.pr.Close()
 }
