@@ -775,6 +775,12 @@ func (m *Manager) autoSyncOnce() {
 					)
 					continue
 				}
+				// Skip sandboxes that are being or have been destroyed — the session
+				// entry may be a stale record from a concurrent Destroy that removed
+				// the session key after our List call but before we loaded it.
+				if sbPtr.State == StateDestroying || sbPtr.State == StateDestroyed {
+					continue
+				}
 				m.mu.Lock()
 				m.sandboxes[id] = sbPtr
 				m.mu.Unlock()
@@ -830,6 +836,17 @@ func (m *Manager) autoSyncOnce() {
 
 		if err := m.syncFromContainer(ctx, t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
 			if strings.Contains(err.Error(), "not found") {
+				// Pod is gone. If the sandbox is also absent from the session store
+				// (i.e. Destroy already cleaned it up), remove the stale in-memory
+				// entry so we stop retrying on every tick.
+				if m.sessions != nil {
+					if _, loadErr := m.sessions.Load(ctx, t.sandboxID); loadErr != nil {
+						m.mu.Lock()
+						delete(m.workspaces, t.sandboxID)
+						delete(m.sandboxes, t.sandboxID)
+						m.mu.Unlock()
+					}
+				}
 				continue
 			}
 			logger.Error(ctx, "auto-sync failed",
