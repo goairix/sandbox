@@ -499,8 +499,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		return nil
 	}
 
-	// Compute changed files: container files that are new or modified since cutoff
+	// Compute changed files: container files that are new or modified since cutoff.
+	// Also collect files with mtime=0 so we can touch them after sync to give them
+	// a real timestamp for future incremental comparisons.
 	changedSet := make(map[string]struct{})
+	var zeroMtimeFiles []string
 	for path, modtime := range manifest {
 		if strings.HasSuffix(path, "/") {
 			continue // skip directories
@@ -512,6 +515,9 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		// modtime == 0 means the filesystem doesn't track mtime (e.g. some overlay
 		// mounts reset it to epoch). Treat it as always-changed so we don't silently
 		// skip files whose real modification time is unknown.
+		if modtime == 0 {
+			zeroMtimeFiles = append(zeroMtimeFiles, path)
+		}
 		if !inStorage || cutoff == 0 || modtime == 0 || modtime >= cutoff {
 			changedSet[path] = struct{}{}
 		}
@@ -549,6 +555,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			)
 			return fmt.Errorf("download changed files: %w", err)
 		}
+	}
+
+	// Touch files that had mtime=0 so future incremental syncs can detect real changes.
+	if len(zeroMtimeFiles) > 0 {
+		m.touchFilesInContainer(ctx, runtimeID, zeroMtimeFiles)
 	}
 
 	// Remove deleted files from storage
@@ -835,4 +846,29 @@ func (m *Manager) walkStorageFiles(ctx context.Context, scoped storage.ScopedFS,
 	}
 
 	return nil
+}
+
+// touchFilesInContainer runs `touch` on the given paths inside the container so
+// that files which previously had mtime=0 get a real timestamp. This prevents
+// them from being re-synced on every autoSync cycle when their content hasn't
+// actually changed.
+func (m *Manager) touchFilesInContainer(ctx context.Context, runtimeID string, paths []string) {
+	// Build a single touch command for all files to minimise exec round-trips.
+	args := make([]string, len(paths))
+	for i, p := range paths {
+		// Single-quote each path to handle spaces and special characters safely.
+		escaped := "'" + strings.ReplaceAll("/workspace/"+p, "'", "'\\''") + "'"
+		args[i] = escaped
+	}
+	cmd := "touch " + strings.Join(args, " ")
+	if _, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
+		Command: cmd,
+		WorkDir: "/workspace",
+		Timeout: 10,
+	}); err != nil {
+		logger.Warn(ctx, "touchFilesInContainer: touch failed",
+			logger.AddField("runtime_id", runtimeID),
+			logger.ErrorField(err),
+		)
+	}
 }
