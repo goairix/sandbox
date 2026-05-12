@@ -848,27 +848,46 @@ func (m *Manager) walkStorageFiles(ctx context.Context, scoped storage.ScopedFS,
 	return nil
 }
 
-// touchFilesInContainer runs `touch` on the given paths inside the container so
-// that files which previously had mtime=0 get a real timestamp. This prevents
-// them from being re-synced on every autoSync cycle when their content hasn't
-// actually changed.
+const touchBatchSize = 200
+
+// touchFilesInContainer stamps the given paths inside the container with a
+// fixed historical timestamp (1970-01-01 00:01:00) so that future incremental
+// syncs can skip them unless they are genuinely modified.
+//
+// We use a fixed past timestamp rather than "now" because the next sync's
+// cutoff equals syncStartedAt (recorded before this call). Using "now" would
+// produce mtime > cutoff and cause the files to be re-synced every cycle.
+// epoch+60 is non-zero (so the manifest parser won't treat it as unknown) and
+// safely below any real cutoff.
 func (m *Manager) touchFilesInContainer(ctx context.Context, runtimeID string, paths []string) {
-	// Build a single touch command for all files to minimise exec round-trips.
-	args := make([]string, len(paths))
-	for i, p := range paths {
-		// Single-quote each path to handle spaces and special characters safely.
-		escaped := "'" + strings.ReplaceAll("/workspace/"+p, "'", "'\\''") + "'"
-		args[i] = escaped
+	// Validate and escape paths in one pass, skipping any suspicious entries.
+	escaped := make([]string, 0, len(paths))
+	for _, p := range paths {
+		clean := filepath.Clean(p)
+		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+			continue
+		}
+		q := "'" + strings.ReplaceAll("/workspace/"+clean, "'", "'\\''") + "'"
+		escaped = append(escaped, q)
 	}
-	cmd := "touch " + strings.Join(args, " ")
-	if _, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
-		Command: cmd,
-		WorkDir: "/workspace",
-		Timeout: 10,
-	}); err != nil {
-		logger.Warn(ctx, "touchFilesInContainer: touch failed",
-			logger.AddField("runtime_id", runtimeID),
-			logger.ErrorField(err),
-		)
+
+	// Process in batches to stay well within ARG_MAX limits.
+	for i := 0; i < len(escaped); i += touchBatchSize {
+		end := i + touchBatchSize
+		if end > len(escaped) {
+			end = len(escaped)
+		}
+		// -t 197001010001.00 = 1970-01-01 00:01:00 UTC (epoch+60), always < any real cutoff.
+		cmd := "touch -t 197001010001.00 " + strings.Join(escaped[i:end], " ")
+		if _, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
+			Command: cmd,
+			WorkDir: "/workspace",
+			Timeout: 10,
+		}); err != nil {
+			logger.Warn(ctx, "touchFilesInContainer: touch failed",
+				logger.AddField("runtime_id", runtimeID),
+				logger.ErrorField(err),
+			)
+		}
 	}
 }
