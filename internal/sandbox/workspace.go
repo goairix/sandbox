@@ -3,6 +3,7 @@ package sandbox
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -463,7 +464,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// Get container file manifest via exec
 	manifest, err := m.containerFileManifest(ctx, runtimeID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, runtime.ErrNotFound) {
 			logger.Debug(ctx, "syncFromContainer: container not found",
 				logger.AddField("sandbox_id", sandboxID),
 				logger.AddField("runtime_id", runtimeID),

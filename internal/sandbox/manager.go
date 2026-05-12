@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -837,7 +838,7 @@ func (m *Manager) autoSyncOnce() {
 		}
 
 		if err := m.syncFromContainer(ctx, t.sandboxID, t.runtimeID, t.syncExclude); err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if errors.Is(err, runtime.ErrNotFound) {
 				// Pod is gone — clean up both in-memory state and the session store
 				// so we stop retrying on every tick and don't restore it again.
 				m.mu.Lock()

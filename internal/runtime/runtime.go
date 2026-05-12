@@ -2,9 +2,14 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
+
+// ErrNotFound is returned when the target sandbox/pod does not exist.
+// Use errors.Is to check for this error across wrapped error chains.
+var ErrNotFound = errors.New("sandbox not found")
 
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).
 type Runtime interface {

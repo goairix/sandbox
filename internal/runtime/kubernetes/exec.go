@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -95,6 +96,9 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 
 	exitCode := 0
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("exec stream: %w", runtime.ErrNotFound)
+		}
 		// Try to extract exit code from error
 		if exitErr, ok := err.(interface{ ExitStatus() int }); ok {
 			exitCode = exitErr.ExitStatus()
