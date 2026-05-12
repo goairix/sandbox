@@ -295,8 +295,11 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 }
 
 // pipeReadCloser wraps a PipeReader and waits for the background streaming
-// goroutine to finish before returning from Close, preventing the goroutine
-// from writing to an already-closed pipe.
+// goroutine to finish before closing the pipe. The Kubernetes SPDY client
+// calls runtime.HandleError on any io.Copy error, which prints "Unhandled
+// Error: io: read/write on closed pipe" if pr is closed while the goroutine
+// is still writing. Waiting for the goroutine first ensures pw is always
+// closed by the goroutine itself before we close pr.
 type pipeReadCloser struct {
 	pr   *io.PipeReader
 	done <-chan struct{}
@@ -304,9 +307,14 @@ type pipeReadCloser struct {
 
 func (p *pipeReadCloser) Read(b []byte) (int, error) { return p.pr.Read(b) }
 func (p *pipeReadCloser) Close() error {
-	err := p.pr.Close()
+	// Drain any remaining data so the goroutine's io.Copy can finish writing
+	// and close pw on its own. Then wait for the goroutine to exit before
+	// closing pr. This prevents the goroutine from seeing a closed-pipe error
+	// while it is still writing, which would cause the Kubernetes SPDY client
+	// to print "Unhandled Error: io: read/write on closed pipe".
+	go io.Copy(io.Discard, p.pr) //nolint:errcheck
 	<-p.done
-	return err
+	return p.pr.Close()
 }
 
 // execPipeInPod executes a command in a pod with an io.Reader connected to stdin.
