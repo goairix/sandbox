@@ -38,7 +38,14 @@ RUN pip install --no-cache-dir \
     pymupdf \
     reportlab \
     openpyxl \
-    python-docx
+    python-docx \
+    playwright
+
+# Playwright Chromium 及系统依赖
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN playwright install-deps chromium \
+  && playwright install chromium \
+  && chmod -R a+r /opt/playwright-browsers
 
 # Jupyter Notebook
 RUN pip install --no-cache-dir \
