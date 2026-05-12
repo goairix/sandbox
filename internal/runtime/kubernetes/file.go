@@ -91,8 +91,10 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	}
 
 	pr, pw := io.Pipe()
+	done := make(chan struct{})
 
 	go func() {
+		defer close(done)
 		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: pw,
 			Stderr: io.Discard,
@@ -100,7 +102,7 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 		pw.CloseWithError(err)
 	}()
 
-	return pr, nil
+	return &pipeReadCloser{pr: pr, done: done}, nil
 }
 
 func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
@@ -122,7 +124,9 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 	}
 
 	pr, pw := io.Pipe()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: pw,
 			Stderr: io.Discard,
@@ -130,7 +134,7 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 		pw.CloseWithError(err)
 	}()
 
-	return pr, nil
+	return &pipeReadCloser{pr: pr, done: done}, nil
 }
 
 func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]runtime.FileContent, error) {

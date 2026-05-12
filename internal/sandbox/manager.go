@@ -813,7 +813,7 @@ func (m *Manager) autoSyncOnce() {
 	}
 	var targets []syncTarget
 	for id := range m.workspaces {
-		if sb, ok := m.sandboxes[id]; ok && sb.State != StateDestroying && sb.State != StateDestroyed {
+		if sb, ok := m.sandboxes[id]; ok && sb.State != StateDestroying {
 			var exclude []string
 			if sb.Workspace != nil {
 				exclude = sb.Workspace.SyncExclude
@@ -826,7 +826,7 @@ func (m *Manager) autoSyncOnce() {
 	for _, t := range targets {
 		m.mu.RLock()
 		sb, alive := m.sandboxes[t.sandboxID]
-		skip := !alive || sb.State == StateDestroying || sb.State == StateDestroyed
+		skip := !alive || sb.State == StateDestroying
 		m.mu.RUnlock()
 		if skip {
 			logger.Debug(ctx, "autoSync skipping sandbox",
