@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 )
@@ -15,11 +16,10 @@ import (
 // applyNetworkPolicy builds and upserts the NetworkPolicy for a sandbox.
 //
 // Mode selection (evaluated in order):
-//  1. openAccess=true: allow all egress (explicit allow-all rule)
-//  2. blockPrivate=true: allow external, block RFC1918/ULA; whitelist = internal allowlist
-//  3. len(whitelist)>0: whitelist-only egress
-//  4. default: isolation — deny all egress except DNS
-func applyNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, sandboxID string, whitelist []string, blockPrivate bool, openAccess bool) error {
+//  1. blockPrivate=true: allow external, block RFC1918/ULA; whitelist = internal allowlist
+//  2. len(whitelist)>0: whitelist-only egress
+//  3. default: isolation — deny all egress except DNS
+func applyNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, sandboxID string, whitelist []string, blockPrivate bool) error {
 	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
 
 	resolvedCIDRs, err := resolveToCIDRs(whitelist)
@@ -40,10 +40,6 @@ func applyNetworkPolicy(ctx context.Context, client kubernetes.Interface, namesp
 	})
 
 	switch {
-	case openAccess:
-		// Allow all egress (no destination restriction)
-		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{})
-
 	case blockPrivate:
 		// Allow whitelisted internal addresses individually (before the block rules)
 		for _, cidr := range resolvedCIDRs {
@@ -166,26 +162,30 @@ func resolveToCIDRs(entries []string) ([]string, error) {
 	return cidrs, nil
 }
 
-// deleteNetworkPolicy removes the sandbox network policy.
+// deleteNetworkPolicy removes the sandbox network policy. Ignores not-found errors.
 func deleteNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string) error {
 	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
-	return client.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, policyName, metav1.DeleteOptions{})
+	err := client.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, policyName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete network policy: %w", err)
+	}
+	return nil
 }
 
-// updateNetworkPolicy upserts the NetworkPolicy for a sandbox.
+// updateNetworkPolicy upserts or removes the NetworkPolicy for a sandbox.
 //
 //   - enabled=false: isolation mode — deny all egress except DNS
-//   - enabled=true, blockPrivate=false, whitelist=[]: open mode — allow all egress
+//   - enabled=true, blockPrivate=false, whitelist=[]: open mode — delete policy (K8s default = allow all)
 //   - enabled=true, whitelist=[...]: whitelist-only egress
 //   - enabled=true, blockPrivate=true: allow external, block RFC1918/ULA; whitelist = internal allowlist
 func updateNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string, enabled bool, whitelist []string, blockPrivate bool) error {
 	if !enabled {
 		// Isolation: deny-all except DNS
-		return applyNetworkPolicy(ctx, client, namespace, sandboxID, nil, false, false)
+		return applyNetworkPolicy(ctx, client, namespace, sandboxID, nil, false)
 	}
 	if !blockPrivate && len(whitelist) == 0 {
-		// Open: allow all egress — represented as a policy with a single allow-all rule
-		return applyNetworkPolicy(ctx, client, namespace, sandboxID, nil, false, true)
+		// Open: delete the NetworkPolicy entirely — K8s default allows all egress
+		return deleteNetworkPolicy(ctx, client, namespace, sandboxID)
 	}
-	return applyNetworkPolicy(ctx, client, namespace, sandboxID, whitelist, blockPrivate, false)
+	return applyNetworkPolicy(ctx, client, namespace, sandboxID, whitelist, blockPrivate)
 }
