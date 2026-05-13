@@ -63,8 +63,9 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 
 	if req.Network != nil {
 		cfg.Network = sandbox.NetworkConfig{
-			Enabled:   req.Network.Enabled,
-			Whitelist: req.Network.Whitelist,
+			Enabled:      req.Network.Enabled,
+			Whitelist:    req.Network.Whitelist,
+			BlockPrivate: req.Network.BlockPrivate,
 		}
 	}
 
@@ -135,14 +136,15 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.UpdateNetwork(spanCtx, id, req.Enabled, req.Whitelist); err != nil {
+	if err := h.manager.UpdateNetwork(spanCtx, id, req.Enabled, req.Whitelist, req.BlockPrivate); err != nil {
 		internalError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, types.UpdateNetworkResponse{
-		Enabled:   req.Enabled,
-		Whitelist: req.Whitelist,
+		Enabled:      req.Enabled,
+		Whitelist:    req.Whitelist,
+		BlockPrivate: req.BlockPrivate,
 	})
 }
 

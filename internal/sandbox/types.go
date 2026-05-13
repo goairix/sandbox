@@ -55,8 +55,11 @@ type ResourceLimits struct {
 
 // NetworkConfig defines network settings for a sandbox.
 type NetworkConfig struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist"` // allowed domains
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist"` // allowed domains/IPs
+	// BlockPrivate blocks RFC1918 private ranges by default; Whitelist entries
+	// can still reach internal addresses.
+	BlockPrivate bool     `json:"block_private"`
 }
 
 // WorkspaceInfo holds metadata about a mounted workspace.

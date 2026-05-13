@@ -28,8 +28,12 @@ type ResourceLimits struct {
 
 // NetworkConfig controls network access for a sandbox.
 type NetworkConfig struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist,omitempty"`
+	// BlockPrivate blocks RFC1918 private IP ranges by default.
+	// When true, only Whitelist entries can reach internal networks;
+	// all other external traffic is allowed.
+	BlockPrivate bool     `json:"block_private,omitempty"`
 }
 
 // DependencySpec describes a single package dependency.
@@ -65,14 +69,16 @@ type SandboxResponse struct {
 
 // UpdateNetworkRequest is the request body for PUT /api/v1/sandboxes/:id/network.
 type UpdateNetworkRequest struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist,omitempty"`
+	BlockPrivate bool     `json:"block_private,omitempty"`
 }
 
 // UpdateNetworkResponse is returned by the update network endpoint.
 type UpdateNetworkResponse struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist"`
+	BlockPrivate bool     `json:"block_private"`
 }
 
 // UpdateTTLRequest is the request body for PUT /api/v1/sandboxes/:id/ttl.

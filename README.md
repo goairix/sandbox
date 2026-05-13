@@ -8,7 +8,7 @@
 - **双运行时后端** — Docker（通过 Gateway Sidecar 实现网络过滤）和 Kubernetes（通过 NetworkPolicy 实现网络隔离）
 - **RESTful API** — 一次性执行、持久化沙箱、同步/流式（SSE）输出
 - **预热容器池** — 预热容器池实现低延迟分配，启动时自动清理上次遗留的孤儿容器
-- **安全隔离** — 资源限制（CPU、内存、PID、磁盘）、只读根文件系统、Seccomp 安全配置、网络白名单、API Key 认证、速率限制
+- **安全隔离** — 资源限制（CPU、内存、PID、磁盘）、只读根文件系统、Seccomp 安全配置、三种网络隔离模式、API Key 认证、速率限制
 - **文件操作** — 沙箱内文件的上传、下载、列表查看、按行读取/编辑、Glob 模式匹配
 - **工作空间** — 基于 ScopedFS 的持久化工作空间，支持挂载/卸载/增量同步，路径限定防止目录逃逸
 - **会话持久化** — Persistent 模式沙箱元数据存储到 Redis，API 重启后自动恢复
@@ -80,6 +80,47 @@ curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/ttl \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"timeout":7200}'
+```
+
+**网络模式配置：**
+
+```bash
+# 模式一：隔离（默认）— 禁止所有出站流量（仅允许 DNS）
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":false}'
+
+# 模式二：开放 — 允许所有出站流量
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true}'
+
+# 模式三：白名单 — 仅允许访问指定目标（IP、CIDR 或域名）
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"whitelist":["api.openai.com","8.8.8.8"]}'
+
+# 模式四：屏蔽内网 — 允许所有外网访问，默认屏蔽 RFC1918 私有地址段
+# whitelist 为内网白名单（可选），列表中的内网地址仍可访问
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"block_private":true}'
+
+# 屏蔽内网 + 允许特定内网地址（如内部 API 服务）
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"block_private":true,"whitelist":["10.0.1.5","192.168.100.0/24"]}'
+
+# 创建沙箱时直接指定网络模式
+curl -X POST http://localhost:8080/api/v1/sandboxes \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"persistent","network":{"enabled":true,"block_private":true}}'
 ```
 
 **安装依赖（支持混合 pip + npm）：**

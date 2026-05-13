@@ -91,7 +91,7 @@ type Runtime interface {
 	ExecPipe(ctx context.Context, id string, cmd []string, stdin io.Reader) error
 
 	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
-	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error
+	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error
 
 	// RenameSandbox renames a sandbox container/pod for easier identification.
 	RenameSandbox(ctx context.Context, id string, newName string) error

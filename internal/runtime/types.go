@@ -55,8 +55,9 @@ type SandboxSpec struct {
 	Disk     string // e.g. "100Mi"
 	PidLimit int
 	// Network
-	NetworkEnabled   bool
-	NetworkWhitelist []string
+	NetworkEnabled      bool
+	NetworkWhitelist    []string
+	NetworkBlockPrivate bool
 	// Security
 	ReadOnlyRootFS bool
 	RunAsUser      int64

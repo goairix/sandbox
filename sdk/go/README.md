@@ -43,6 +43,7 @@ sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
     Timeout: 300,                    // seconds; 0 = server default, -1 = never expire
     Resources: &sandbox.ResourceLimits{Memory: "256Mi", CPU: "500m"},
     Network:   &sandbox.NetworkConfig{Enabled: true, Whitelist: []string{"api.openai.com"}},
+    // or: Network: &sandbox.NetworkConfig{Enabled: true, BlockPrivate: true}, // block RFC1918
 })
 if err != nil {
     return err
@@ -155,9 +156,35 @@ err = sb.UnmountWorkspace(ctx)
 
 ### Network
 
+四种网络模式：
+
 ```go
-err = sb.EnableNetwork(ctx, []string{"api.openai.com"})
+// 模式一：隔离（默认）— 禁止所有出站流量（仅允许 DNS）
 err = sb.DisableNetwork(ctx)
+
+// 模式二：开放 — 允许所有出站流量
+err = sb.EnableNetwork(ctx, nil)
+
+// 模式三：白名单 — 仅允许访问指定目标（IP、CIDR 或域名）
+err = sb.EnableNetwork(ctx, []string{"api.openai.com", "8.8.8.8"})
+
+// 模式四：屏蔽内网 — 允许所有外网，默认屏蔽 RFC1918 私有地址段
+err = sb.BlockPrivateNetwork(ctx, nil)
+
+// 屏蔽内网 + 允许特定内网地址（internalWhitelist 中的地址仍可访问）
+err = sb.BlockPrivateNetwork(ctx, []string{"10.0.1.5", "192.168.100.0/24"})
+```
+
+也可以在创建沙箱时通过 `SandboxOptions.Network` 指定初始网络模式：
+
+```go
+sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
+    Mode: sandbox.ModePersistent,
+    Network: &sandbox.NetworkConfig{
+        Enabled:      true,
+        BlockPrivate: true,
+    },
+})
 ```
 
 ### TTL
@@ -275,8 +302,9 @@ Predefined sentinels:
 | `Sync(ctx)` | Sync container → host |
 | `SyncTo(ctx)` | Sync host → container |
 | `WorkspaceInfo(ctx)` | Workspace status |
-| `EnableNetwork(ctx, whitelist)` | Enable network |
-| `DisableNetwork(ctx)` | Disable network |
+| `EnableNetwork(ctx, whitelist)` | 开放模式（whitelist=nil）或白名单模式 |
+| `BlockPrivateNetwork(ctx, internalWhitelist)` | 屏蔽内网模式，允许所有外网；internalWhitelist 中的内网地址仍可访问 |
+| `DisableNetwork(ctx)` | 隔离模式，禁止所有出站流量 |
 | `UpdateTTL(ctx, timeoutSeconds)` | Dynamically update sandbox TTL |
 | `ListSkills(ctx)` | List agent skills |
 | `GetSkill(ctx, name)` | Get skill content |

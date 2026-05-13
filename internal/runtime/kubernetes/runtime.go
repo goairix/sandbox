@@ -62,13 +62,11 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		return nil, fmt.Errorf("wait for pod: %w", err)
 	}
 
-	// Apply network policy if whitelist is configured
-	if spec.NetworkEnabled && len(spec.NetworkWhitelist) > 0 {
-		if err := ensureNetworkPolicy(ctx, r.client, r.namespace, spec.ID, spec.NetworkWhitelist); err != nil {
-			// Clean up the created pod on failure
-			_ = deletePod(ctx, r.client, r.namespace, pod.Name)
-			return nil, fmt.Errorf("apply network policy: %w", err)
-		}
+	// Always apply a NetworkPolicy. Without one, K8s allows all egress by default.
+	// updateNetworkPolicy handles all modes: isolation, whitelist, block-private, open.
+	if err := updateNetworkPolicy(ctx, r.client, r.namespace, spec.ID, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate); err != nil {
+		_ = deletePod(ctx, r.client, r.namespace, pod.Name)
+		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	return &runtime.SandboxInfo{
@@ -166,8 +164,8 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 	return editFileLinesInPod(ctx, r.client, r.restConfig, r.namespace, id, filePath, startLine, endLine, newContent)
 }
 
-func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
-	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist)
+func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error {
+	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist, blockPrivate)
 }
 
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {

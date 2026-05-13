@@ -637,7 +637,7 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 }
 
 // UpdateNetwork dynamically updates network access for a running sandbox.
-func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string) error {
+func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error {
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.UpdateNetwork",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 		trace.WithAttributes(attribute.String("white_list", strings.Join(whitelist, ","))),
@@ -653,13 +653,14 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
 
-	if err := m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist); err != nil {
+	if err := m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist, blockPrivate); err != nil {
 		return err
 	}
 
 	m.mu.Lock()
 	sb.Config.Network.Enabled = enabled
 	sb.Config.Network.Whitelist = whitelist
+	sb.Config.Network.BlockPrivate = blockPrivate
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
 
@@ -1075,8 +1076,9 @@ func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
 		Memory:           cfg.Resources.Memory,
 		CPU:              cfg.Resources.CPU,
 		Disk:             cfg.Resources.Disk,
-		NetworkEnabled:   cfg.Network.Enabled,
-		NetworkWhitelist: cfg.Network.Whitelist,
+		NetworkEnabled:      cfg.Network.Enabled,
+		NetworkWhitelist:    cfg.Network.Whitelist,
+		NetworkBlockPrivate: cfg.Network.BlockPrivate,
 		ReadOnlyRootFS:   false,
 		RunAsUser:        1000,
 		PidLimit:         100,

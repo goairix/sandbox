@@ -96,7 +96,7 @@ func (m *mockRuntime) DownloadDir(context.Context, string, string) (io.ReadClose
 	return nil, nil
 }
 
-func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string) error {
+func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string, bool) error {
 	return nil
 }
 

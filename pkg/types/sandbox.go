@@ -19,8 +19,12 @@ type ResourceLimits struct {
 }
 
 type NetworkConfig struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist,omitempty"`
+	// BlockPrivate blocks access to RFC1918 private IP ranges by default.
+	// When true, only entries in Whitelist can reach internal networks;
+	// all other external traffic is allowed.
+	BlockPrivate bool     `json:"block_private,omitempty"`
 }
 
 type DependencySpec struct {
@@ -45,13 +49,15 @@ type ErrorResponse struct {
 }
 
 type UpdateNetworkRequest struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist,omitempty"`
+	BlockPrivate bool     `json:"block_private,omitempty"`
 }
 
 type UpdateNetworkResponse struct {
-	Enabled   bool     `json:"enabled"`
-	Whitelist []string `json:"whitelist"`
+	Enabled      bool     `json:"enabled"`
+	Whitelist    []string `json:"whitelist"`
+	BlockPrivate bool     `json:"block_private"`
 }
 
 type UpdateTTLRequest struct {

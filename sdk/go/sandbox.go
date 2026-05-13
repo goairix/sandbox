@@ -106,13 +106,26 @@ func (s *Sandbox) WorkspaceInfo(ctx context.Context) (WorkspaceInfoResponse, err
 	return s.client.GetWorkspaceInfo(ctx, s.id)
 }
 
-// EnableNetwork enables network access with the given whitelist.
+// EnableNetwork enables network access with an optional destination whitelist.
+// Pass nil or an empty slice to allow all external traffic.
 func (s *Sandbox) EnableNetwork(ctx context.Context, whitelist []string) error {
 	_, err := s.client.UpdateNetwork(ctx, s.id, UpdateNetworkRequest{Enabled: true, Whitelist: whitelist})
 	return err
 }
 
-// DisableNetwork disables network access.
+// BlockPrivateNetwork enables network access but blocks RFC1918 private IP ranges by default.
+// Entries in internalWhitelist are still allowed to reach internal addresses.
+// Pass nil or an empty slice if no internal addresses need to be reachable.
+func (s *Sandbox) BlockPrivateNetwork(ctx context.Context, internalWhitelist []string) error {
+	_, err := s.client.UpdateNetwork(ctx, s.id, UpdateNetworkRequest{
+		Enabled:      true,
+		Whitelist:    internalWhitelist,
+		BlockPrivate: true,
+	})
+	return err
+}
+
+// DisableNetwork disables all network access.
 func (s *Sandbox) DisableNetwork(ctx context.Context) error {
 	_, err := s.client.UpdateNetwork(ctx, s.id, UpdateNetworkRequest{Enabled: false})
 	return err

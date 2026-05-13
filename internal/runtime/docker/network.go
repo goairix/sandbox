@@ -77,7 +77,7 @@ func ensureOneNetwork(ctx context.Context, cli *dockerclient.Client, name string
 //
 // The gateway container performs NAT + whitelist filtering via iptables.
 // Returns the pair network ID, gateway container ID, and gateway IP on the pair network.
-func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID, openNetworkID, gatewayImage string, whitelist []string) (pairNetworkID, gatewayID, gatewayIP string, err error) {
+func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID, openNetworkID, gatewayImage string, whitelist []string, blockPrivate bool) (pairNetworkID, gatewayID, gatewayIP string, err error) {
 	// Resolve whitelist entries: IPs/CIDRs pass through, domain names are resolved to IPs
 	resolved, err := resolveWhitelist(whitelist)
 	if err != nil {
@@ -159,7 +159,7 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 	}
 
 	// 5. Configure NAT + whitelist rules inside the gateway
-	iptablesCmd := buildGatewayIptablesCmd(resolved)
+	iptablesCmd := buildGatewayIptablesCmd(resolved, blockPrivate)
 	execCfg := container.ExecOptions{
 		Cmd:  []string{"sh", "-c", iptablesCmd},
 		User: "root",
@@ -189,9 +189,15 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 	return pairNetworkID, gatewayID, gatewayIP, nil
 }
 
-// buildGatewayIptablesCmd builds the shell command to configure NAT and whitelist
+// buildGatewayIptablesCmd builds the shell command to configure NAT and filtering
 // rules inside the gateway container.
-func buildGatewayIptablesCmd(whitelist []string) string {
+//
+// Three modes:
+//  1. whitelist (len(whitelist)>0, !blockPrivate): default deny, allow only whitelist destinations
+//  2. open (!blockPrivate, len(whitelist)==0): allow all forwarding
+//  3. block-private (blockPrivate): allow all external traffic, block RFC1918 private ranges;
+//     whitelist entries are accepted before the private-range DROP rules (internal allowlist)
+func buildGatewayIptablesCmd(whitelist []string, blockPrivate bool) string {
 	var parts []string
 
 	// Find the outbound interface (the one with the default route, from sandbox-open)
@@ -199,7 +205,38 @@ func buildGatewayIptablesCmd(whitelist []string) string {
 	// NAT outbound traffic through the open network interface
 	parts = append(parts, "iptables -t nat -A POSTROUTING -o $OUT_IF -j MASQUERADE")
 
-	if len(whitelist) > 0 {
+	switch {
+	case blockPrivate:
+		// Allow established/related and DNS first
+		parts = append(parts, "iptables -P FORWARD DROP")
+		parts = append(parts, "iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT")
+		parts = append(parts, "iptables -A FORWARD -p udp --dport 53 -j ACCEPT")
+		parts = append(parts, "iptables -A FORWARD -p tcp --dport 53 -j ACCEPT")
+		// Internal whitelist: split by address family
+		for _, dest := range whitelist {
+			if isIPv6(dest) {
+				parts = append(parts, fmt.Sprintf("ip6tables -A FORWARD -d %s -j ACCEPT", dest))
+			} else {
+				parts = append(parts, fmt.Sprintf("iptables -A FORWARD -d %s -j ACCEPT", dest))
+			}
+		}
+		// Block IPv4 private ranges
+		for _, cidr := range privateRanges {
+			parts = append(parts, fmt.Sprintf("iptables -A FORWARD -d %s -j DROP", cidr))
+		}
+		// Allow everything else (external IPv4 traffic)
+		parts = append(parts, "iptables -A FORWARD -j ACCEPT")
+		// IPv6: same structure via ip6tables
+		parts = append(parts, "ip6tables -P FORWARD DROP")
+		parts = append(parts, "ip6tables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT")
+		parts = append(parts, "ip6tables -A FORWARD -p udp --dport 53 -j ACCEPT")
+		parts = append(parts, "ip6tables -A FORWARD -p tcp --dport 53 -j ACCEPT")
+		for _, cidr := range privateRangesIPv6 {
+			parts = append(parts, fmt.Sprintf("ip6tables -A FORWARD -d %s -j DROP", cidr))
+		}
+		parts = append(parts, "ip6tables -A FORWARD -j ACCEPT")
+
+	case len(whitelist) > 0:
 		// Whitelist mode: default deny, allow only specified destinations
 		parts = append(parts, "iptables -P FORWARD DROP")
 		parts = append(parts, "iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT")
@@ -208,12 +245,43 @@ func buildGatewayIptablesCmd(whitelist []string) string {
 		for _, dest := range whitelist {
 			parts = append(parts, fmt.Sprintf("iptables -A FORWARD -d %s -j ACCEPT", dest))
 		}
-	} else {
+		parts = append(parts, "ip6tables -P FORWARD DROP")
+
+	default:
 		// Full access mode: allow all forwarding
 		parts = append(parts, "iptables -P FORWARD ACCEPT")
+		parts = append(parts, "ip6tables -P FORWARD ACCEPT")
 	}
 
 	return strings.Join(parts, " && ")
+}
+
+// privateRanges contains RFC1918 private IP ranges, loopback, and link-local (IPv4 only).
+// IPv6 private ranges are handled separately via ip6tables.
+var privateRanges = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+}
+
+// privateRangesIPv6 contains IPv6 private/ULA ranges for ip6tables rules.
+var privateRangesIPv6 = []string{
+	"fc00::/7",  // ULA
+	"::1/128",   // loopback
+	"fe80::/10", // link-local
+}
+
+// isIPv6 reports whether addr is an IPv6 address or CIDR.
+func isIPv6(addr string) bool {
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.To4() == nil
+	}
+	if ip, _, err := net.ParseCIDR(addr); err == nil {
+		return ip.To4() == nil
+	}
+	return false
 }
 
 // removeSandboxPair removes the gateway container and pair network for a sandbox.

@@ -71,7 +71,7 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		var gatewayID string
 		var err error
 		pairNetworkID, gatewayID, gatewayIP, err = createSandboxPair(
-			ctx, r.cli, spec.ID, r.openNetworkID, r.gatewayImage, spec.NetworkWhitelist,
+			ctx, r.cli, spec.ID, r.openNetworkID, r.gatewayImage, spec.NetworkWhitelist, spec.NetworkBlockPrivate,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create gateway pair: %w", err)
@@ -176,7 +176,7 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 	}, nil
 }
 
-func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled bool, whitelist []string) error {
+func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled bool, whitelist []string, blockPrivate bool) error {
 	// Get sandbox ID from container — use the container name which equals spec.ID
 	info, err := r.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
@@ -190,7 +190,7 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled
 	if enabled && !hasGateway {
 		// Enable network: create gateway pair and connect sandbox
 		pairNetworkID, _, gatewayIP, err := createSandboxPair(
-			ctx, r.cli, sandboxID, r.openNetworkID, r.gatewayImage, whitelist,
+			ctx, r.cli, sandboxID, r.openNetworkID, r.gatewayImage, whitelist, blockPrivate,
 		)
 		if err != nil {
 			return fmt.Errorf("create gateway pair: %w", err)
@@ -223,9 +223,10 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled
 			return err
 		}
 
-		// Flush and rebuild iptables rules
-		flushCmd := "iptables -F FORWARD && iptables -t nat -F POSTROUTING"
-		iptablesCmd := flushCmd + " && " + buildGatewayIptablesCmd(resolved)
+		// Flush chains, reset policies to ACCEPT, then rebuild rules
+		flushCmd := "iptables -F FORWARD && iptables -P FORWARD ACCEPT && iptables -t nat -F POSTROUTING" +
+			" && ip6tables -F FORWARD && ip6tables -P FORWARD ACCEPT"
+		iptablesCmd := flushCmd + " && " + buildGatewayIptablesCmd(resolved, blockPrivate)
 
 		execCfg := container.ExecOptions{
 			Cmd:  []string{"sh", "-c", iptablesCmd},
