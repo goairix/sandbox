@@ -1240,3 +1240,74 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 	}
 	return st.ReceivedChunks, st.TotalChunks, nil
 }
+
+// GetMultipartStatus returns the current state of a multipart upload.
+func (m *Manager) GetMultipartStatus(ctx context.Context, sandboxID, uploadID string) (*multipartUploadState, error) {
+	return m.loadMultipartState(ctx, sandboxID, uploadID)
+}
+
+// CompleteMultipartUpload merges all chunks into the destination path.
+// Returns the final file size in bytes.
+func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, uploadID string) (destPath string, size int64, err error) {
+	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
+	if err != nil {
+		return "", 0, err
+	}
+	if st.ReceivedChunks != st.TotalChunks {
+		return "", 0, fmt.Errorf("incomplete upload: received %d of %d chunks", st.ReceivedChunks, st.TotalChunks)
+	}
+
+	sb, err := m.resolve(ctx, sandboxID)
+	if err != nil {
+		return "", 0, err
+	}
+
+	// Build: cat /tmp/.uploads/{id}/0 /tmp/.uploads/{id}/1 ... > destPath
+	parts := make([]string, st.TotalChunks)
+	for i := 0; i < st.TotalChunks; i++ {
+		parts[i] = fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, i)
+	}
+	catCmd := "cat " + strings.Join(parts, " ") + " > " + st.DestPath
+	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: catCmd,
+		Timeout: 120,
+	}); err != nil {
+		return "", 0, fmt.Errorf("merge chunks: %w", err)
+	}
+
+	// Get file size via stat
+	statResult, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: "stat -c %s " + st.DestPath,
+		Timeout: 10,
+	})
+	if err == nil {
+		fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &size)
+	}
+
+	// Cleanup staging dir
+	_, _ = m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: "rm -rf /tmp/.uploads/" + uploadID,
+		Timeout: 10,
+	})
+	_ = m.multipartStore.Delete(ctx, multipartKey(sandboxID, uploadID))
+
+	return st.DestPath, size, nil
+}
+
+// CancelMultipartUpload removes staging files and Redis state.
+func (m *Manager) CancelMultipartUpload(ctx context.Context, sandboxID, uploadID string) error {
+	if _, err := m.loadMultipartState(ctx, sandboxID, uploadID); err != nil {
+		return err
+	}
+
+	sb, err := m.resolve(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+
+	_, _ = m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: "rm -rf /tmp/.uploads/" + uploadID,
+		Timeout: 10,
+	})
+	return m.multipartStore.Delete(ctx, multipartKey(sandboxID, uploadID))
+}
