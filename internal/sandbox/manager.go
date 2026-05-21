@@ -35,7 +35,7 @@ const randSuffixLen = 10
 const multipartKeyPrefix = "sandbox:multipart:"
 const multipartTTL = 24 * time.Hour
 
-type multipartUploadState struct {
+type MultipartUploadState struct {
 	UploadID       string    `json:"upload_id"`
 	SandboxID      string    `json:"sandbox_id"`
 	DestPath       string    `json:"dest_path"`
@@ -1170,7 +1170,7 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 		return "", fmt.Errorf("multipart store not configured")
 	}
 
-	st := multipartUploadState{
+	st := MultipartUploadState{
 		UploadID:    uploadID,
 		SandboxID:   sandboxID,
 		DestPath:    destPath,
@@ -1187,7 +1187,7 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 	return uploadID, nil
 }
 
-func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID string) (*multipartUploadState, error) {
+func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID string) (*MultipartUploadState, error) {
 	if m.multipartStore == nil {
 		return nil, fmt.Errorf("multipart store not configured")
 	}
@@ -1198,14 +1198,14 @@ func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID st
 	if data == nil {
 		return nil, fmt.Errorf("upload not found: %s", uploadID)
 	}
-	var st multipartUploadState
+	var st MultipartUploadState
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("unmarshal multipart state: %w", err)
 	}
 	return &st, nil
 }
 
-func (m *Manager) saveMultipartState(ctx context.Context, sandboxID, uploadID string, st *multipartUploadState) error {
+func (m *Manager) saveMultipartState(ctx context.Context, sandboxID, uploadID string, st *MultipartUploadState) error {
 	data, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("marshal multipart state: %w", err)
@@ -1242,7 +1242,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 }
 
 // GetMultipartStatus returns the current state of a multipart upload.
-func (m *Manager) GetMultipartStatus(ctx context.Context, sandboxID, uploadID string) (*multipartUploadState, error) {
+func (m *Manager) GetMultipartStatus(ctx context.Context, sandboxID, uploadID string) (*MultipartUploadState, error) {
 	return m.loadMultipartState(ctx, sandboxID, uploadID)
 }
 
@@ -1281,7 +1281,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 		Timeout: 10,
 	})
 	if statErr == nil {
-		fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &size)
+		_, _ = fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &size)
 	} else {
 		logger.Warn(ctx, "CompleteMultipartUpload: stat failed",
 			logger.AddField("upload_id", uploadID),
