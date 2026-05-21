@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -432,8 +433,8 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		return
 	}
 	chunkIndexStr := c.PostForm("chunk_index")
-	var chunkIndex int
-	if _, err := fmt.Sscanf(chunkIndexStr, "%d", &chunkIndex); err != nil || chunkIndex < 0 {
+	chunkIndex, err := strconv.Atoi(chunkIndexStr)
+	if err != nil || chunkIndex < 0 {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "chunk_index must be a non-negative integer"})
 		return
 	}
