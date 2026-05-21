@@ -20,6 +20,7 @@ import (
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/storage/state"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 	telemetry "github.com/goairix/sandbox/internal/telemetry/trace"
 )
@@ -28,6 +29,17 @@ import (
 var validDepRegexp = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 const randSuffixLen = 10
+const multipartKeyPrefix = "sandbox:multipart:"
+const multipartTTL = 24 * time.Hour
+
+type multipartUploadState struct {
+	UploadID       string    `json:"upload_id"`
+	SandboxID      string    `json:"sandbox_id"`
+	DestPath       string    `json:"dest_path"`
+	TotalChunks    int       `json:"total_chunks"`
+	ReceivedChunks int       `json:"received_chunks"`
+	CreatedAt      time.Time `json:"created_at"`
+}
 
 // randSuffix generates a random lowercase alphanumeric string of length n.
 func randSuffix(n int) string {
@@ -40,6 +52,10 @@ func randSuffix(n int) string {
 		b[i] = alphabet[b[i]%byte(len(alphabet))]
 	}
 	return string(b)
+}
+
+func multipartKey(sandboxID, uploadID string) string {
+	return multipartKeyPrefix + sandboxID + ":" + uploadID
 }
 
 // ManagerConfig configures the SandboxManager.
@@ -56,6 +72,7 @@ type Manager struct {
 	fsMeta     *storage.FileSystemMeta
 	config     ManagerConfig
 	sessions   *SessionStore // optional, for persistent sandboxes
+	multipartStore state.Store // optional, for multipart upload state
 
 	pool       *Pool
 	sandboxes  map[string]*Sandbox
@@ -83,6 +100,11 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 // SetSessionStore sets an optional SessionStore for persistent sandbox state.
 func (m *Manager) SetSessionStore(ss *SessionStore) {
 	m.sessions = ss
+}
+
+// SetMultipartStore sets the state.Store used for multipart upload state.
+func (m *Manager) SetMultipartStore(s state.Store) {
+	m.multipartStore = s
 }
 
 // Start initializes the manager and warms up the pool.
