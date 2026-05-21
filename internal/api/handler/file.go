@@ -396,3 +396,147 @@ func (h *Handler) EditFileLines(c *gin.Context) {
 
 	c.JSON(http.StatusOK, types.EditFileResponse{Message: "ok"})
 }
+
+func (h *Handler) InitMultipartUpload(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.InitMultipartUpload")
+	defer span.End()
+
+	id := c.Param("id")
+
+	var req types.MultipartInitRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+	if err := validateSandboxPath(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	uploadID, err := h.manager.InitMultipartUpload(spanCtx, id, req.Path, req.TotalChunks)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, types.MultipartInitResponse{UploadID: uploadID})
+}
+
+func (h *Handler) UploadChunk(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.UploadChunk")
+	defer span.End()
+
+	id := c.Param("id")
+	uploadID := c.PostForm("upload_id")
+	if uploadID == "" {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "upload_id is required"})
+		return
+	}
+	chunkIndexStr := c.PostForm("chunk_index")
+	var chunkIndex int
+	if _, err := fmt.Sscanf(chunkIndexStr, "%d", &chunkIndex); err != nil || chunkIndex < 0 {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "chunk_index must be a non-negative integer"})
+		return
+	}
+
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file is required"})
+		return
+	}
+	defer file.Close()
+
+	received, total, err := h.manager.UploadChunk(spanCtx, id, uploadID, chunkIndex, file)
+	if err != nil {
+		if strings.Contains(err.Error(), "upload not found") {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "expected chunk_index") {
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, types.MultipartChunkResponse{Received: received, Total: total})
+}
+
+func (h *Handler) GetMultipartStatus(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.GetMultipartStatus")
+	defer span.End()
+
+	id := c.Param("id")
+	uploadID := c.Query("upload_id")
+	if uploadID == "" {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "upload_id is required"})
+		return
+	}
+
+	st, err := h.manager.GetMultipartStatus(spanCtx, id, uploadID)
+	if err != nil {
+		if strings.Contains(err.Error(), "upload not found") {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, types.MultipartStatusResponse{
+		UploadID:       st.UploadID,
+		Path:           st.DestPath,
+		TotalChunks:    st.TotalChunks,
+		ReceivedChunks: st.ReceivedChunks,
+		CreatedAt:      st.CreatedAt,
+	})
+}
+
+func (h *Handler) CompleteMultipartUpload(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.CompleteMultipartUpload")
+	defer span.End()
+
+	id := c.Param("id")
+
+	var req types.MultipartCompleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	path, size, err := h.manager.CompleteMultipartUpload(spanCtx, id, req.UploadID)
+	if err != nil {
+		if strings.Contains(err.Error(), "upload not found") {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "incomplete upload") {
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, types.MultipartCompleteResponse{Path: path, Size: size})
+}
+
+func (h *Handler) CancelMultipartUpload(c *gin.Context) {
+	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.file.CancelMultipartUpload")
+	defer span.End()
+
+	id := c.Param("id")
+
+	var req types.MultipartCancelRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
+		return
+	}
+
+	if err := h.manager.CancelMultipartUpload(spanCtx, id, req.UploadID); err != nil {
+		if strings.Contains(err.Error(), "upload not found") {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
+		internalError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
