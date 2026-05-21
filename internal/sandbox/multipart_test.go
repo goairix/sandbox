@@ -146,3 +146,21 @@ func TestGetMultipartStatus_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "upload not found")
 }
+
+func TestUploadChunk_Sequential(t *testing.T) {
+	mgr, _ := newTestManagerWithStore(t)
+
+	uploadID, err := mgr.InitMultipartUpload(context.Background(), "test-sb", "/workspace/big.bin", 3)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		received, total, err := mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, strings.NewReader("chunk-data"))
+		require.NoError(t, err)
+		assert.Equal(t, i+1, received)
+		assert.Equal(t, 3, total)
+	}
+
+	st, err := mgr.GetMultipartStatus(context.Background(), "test-sb", uploadID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, st.ReceivedChunks)
+}
