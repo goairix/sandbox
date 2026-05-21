@@ -105,3 +105,45 @@ type EditFileLinesRequest struct {
 type EditFileResponse struct {
 	Message string `json:"message"`
 }
+
+// MultipartInitRequest is the request body for POST .../files/upload/init.
+type MultipartInitRequest struct {
+	Path        string `json:"path" binding:"required"`
+	TotalChunks int    `json:"total_chunks" binding:"required,min=1"`
+}
+
+// MultipartInitResponse is returned by the init endpoint.
+type MultipartInitResponse struct {
+	UploadID string `json:"upload_id"`
+}
+
+// MultipartChunkResponse is returned after each chunk upload.
+type MultipartChunkResponse struct {
+	Received int `json:"received"`
+	Total    int `json:"total"`
+}
+
+// MultipartStatusResponse is returned by the status endpoint.
+type MultipartStatusResponse struct {
+	UploadID       string    `json:"upload_id"`
+	DestPath       string    `json:"dest_path"`
+	TotalChunks    int       `json:"total_chunks"`
+	ReceivedChunks int       `json:"received_chunks"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// MultipartCompleteRequest is the request body for POST .../files/upload/complete.
+type MultipartCompleteRequest struct {
+	UploadID string `json:"upload_id" binding:"required"`
+}
+
+// MultipartCompleteResponse is returned after a successful merge.
+type MultipartCompleteResponse struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+// MultipartCancelRequest carries the upload_id for DELETE .../files/upload/cancel.
+type MultipartCancelRequest struct {
+	UploadID string `form:"upload_id" binding:"required"`
+}
