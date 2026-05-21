@@ -164,3 +164,50 @@ func TestUploadChunk_Sequential(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, st.ReceivedChunks)
 }
+
+func TestCompleteMultipartUpload_Success(t *testing.T) {
+	mgr, store := newTestManagerWithStore(t)
+
+	uploadID, err := mgr.InitMultipartUpload(context.Background(), "test-sb", "/workspace/big.bin", 2)
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, strings.NewReader("chunk"))
+		require.NoError(t, err)
+	}
+
+	destPath, _, err := mgr.CompleteMultipartUpload(context.Background(), "test-sb", uploadID)
+	require.NoError(t, err)
+	assert.Equal(t, "/workspace/big.bin", destPath)
+
+	// State should be removed from store after completion.
+	key := multipartKey("test-sb", uploadID)
+	data, err := store.Get(context.Background(), key)
+	require.NoError(t, err)
+	assert.Nil(t, data)
+}
+
+func TestCrossSandboxAccess(t *testing.T) {
+	mgr, _ := newTestManagerWithStore(t)
+
+	// Register a second sandbox.
+	sb2 := &Sandbox{
+		ID:        "other-sb",
+		RuntimeID: "container-other-sb",
+		State:     StateReady,
+		Config:    SandboxConfig{Mode: ModeEphemeral},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	mgr.mu.Lock()
+	mgr.sandboxes[sb2.ID] = sb2
+	mgr.mu.Unlock()
+
+	uploadID, err := mgr.InitMultipartUpload(context.Background(), "test-sb", "/workspace/big.bin", 1)
+	require.NoError(t, err)
+
+	// Accessing the upload via a different sandbox ID must fail.
+	_, err = mgr.GetMultipartStatus(context.Background(), "other-sb", uploadID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upload not found")
+}

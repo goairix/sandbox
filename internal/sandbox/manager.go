@@ -1151,13 +1151,13 @@ func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath str
 // InitMultipartUpload initialises a multipart upload session.
 // It creates the staging directory in the container and persists state to Redis.
 func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath string, totalChunks int) (string, error) {
+	if m.multipartStore == nil {
+		return "", fmt.Errorf("multipart store not configured")
+	}
+
 	sb, err := m.resolve(ctx, sandboxID)
 	if err != nil {
 		return "", err
-	}
-
-	if m.multipartStore == nil {
-		return "", fmt.Errorf("multipart store not configured")
 	}
 
 	uploadID := uuid.New().String()
@@ -1212,11 +1212,16 @@ func (m *Manager) saveMultipartState(ctx context.Context, sandboxID, uploadID st
 	if err != nil {
 		return fmt.Errorf("marshal multipart state: %w", err)
 	}
-	return m.multipartStore.Set(ctx, multipartKey(sandboxID, uploadID), data, multipartTTL)
+	ttl := multipartTTL - time.Since(st.CreatedAt)
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+	return m.multipartStore.Set(ctx, multipartKey(sandboxID, uploadID), data, ttl)
 }
 
 // UploadChunk writes a single chunk to the container staging directory.
 // Chunks must be uploaded in order: chunk_index must equal ReceivedChunks.
+// Concurrent uploads for the same uploadID are not supported; callers must serialize chunk requests.
 func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, chunkIndex int, reader io.Reader) (received int, total int, err error) {
 	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
 	if err != nil {
@@ -1267,7 +1272,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	// Build: cat /tmp/.uploads/{id}/0 /tmp/.uploads/{id}/1 ... > destPath
 	parts := make([]string, st.TotalChunks)
 	for i := 0; i < st.TotalChunks; i++ {
-		parts[i] = fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, i)
+		parts[i] = fmt.Sprintf("'/tmp/.uploads/%s/%d'", uploadID, i)
 	}
 	escapedDest := "'" + strings.ReplaceAll(st.DestPath, "'", "'\\''") + "'"
 	catCmd := "cat " + strings.Join(parts, " ") + " > " + escapedDest
