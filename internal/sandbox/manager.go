@@ -12,6 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
+
+	"github.com/google/uuid"
 	"github.com/goairix/fs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -1143,4 +1146,39 @@ func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath str
 		_ = m.sessions.Save(ctx, sb)
 	}
 	return nil
+}
+
+// InitMultipartUpload initialises a multipart upload session.
+// It creates the staging directory in the container and persists state to Redis.
+func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath string, totalChunks int) (string, error) {
+	sb, err := m.resolve(ctx, sandboxID)
+	if err != nil {
+		return "", err
+	}
+
+	uploadID := uuid.New().String()
+	stagingDir := "/tmp/.uploads/" + uploadID
+
+	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: "mkdir -p " + stagingDir,
+		Timeout: 10,
+	}); err != nil {
+		return "", fmt.Errorf("create staging dir: %w", err)
+	}
+
+	st := multipartUploadState{
+		UploadID:    uploadID,
+		SandboxID:   sandboxID,
+		DestPath:    destPath,
+		TotalChunks: totalChunks,
+		CreatedAt:   time.Now(),
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return "", fmt.Errorf("marshal multipart state: %w", err)
+	}
+	if err := m.multipartStore.Set(ctx, multipartKey(sandboxID, uploadID), data, multipartTTL); err != nil {
+		return "", fmt.Errorf("save multipart state: %w", err)
+	}
+	return uploadID, nil
 }
