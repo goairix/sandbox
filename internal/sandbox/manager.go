@@ -1186,3 +1186,54 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 	}
 	return uploadID, nil
 }
+
+func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID string) (*multipartUploadState, error) {
+	data, err := m.multipartStore.Get(ctx, multipartKey(sandboxID, uploadID))
+	if err != nil {
+		return nil, fmt.Errorf("get multipart state: %w", err)
+	}
+	if data == nil {
+		return nil, fmt.Errorf("upload not found: %s", uploadID)
+	}
+	var st multipartUploadState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("unmarshal multipart state: %w", err)
+	}
+	return &st, nil
+}
+
+func (m *Manager) saveMultipartState(ctx context.Context, sandboxID, uploadID string, st *multipartUploadState) error {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal multipart state: %w", err)
+	}
+	return m.multipartStore.Set(ctx, multipartKey(sandboxID, uploadID), data, multipartTTL)
+}
+
+// UploadChunk writes a single chunk to the container staging directory.
+// Chunks must be uploaded in order: chunk_index must equal ReceivedChunks.
+func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, chunkIndex int, reader io.Reader) (received int, total int, err error) {
+	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if chunkIndex != st.ReceivedChunks {
+		return 0, 0, fmt.Errorf("expected chunk_index %d, got %d", st.ReceivedChunks, chunkIndex)
+	}
+
+	sb, err := m.resolve(ctx, sandboxID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	chunkPath := fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, chunkIndex)
+	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, chunkPath, reader); err != nil {
+		return 0, 0, fmt.Errorf("upload chunk: %w", err)
+	}
+
+	st.ReceivedChunks++
+	if err := m.saveMultipartState(ctx, sandboxID, uploadID, st); err != nil {
+		return 0, 0, err
+	}
+	return st.ReceivedChunks, st.TotalChunks, nil
+}
