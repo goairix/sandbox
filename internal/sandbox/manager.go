@@ -1156,18 +1156,17 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 		return "", err
 	}
 
+	if m.multipartStore == nil {
+		return "", fmt.Errorf("multipart store not configured")
+	}
+
 	uploadID := uuid.New().String()
-	stagingDir := "/tmp/.uploads/" + uploadID
 
 	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
-		Command: "mkdir -p " + stagingDir,
+		Command: fmt.Sprintf("mkdir -p '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
-	}
-
-	if m.multipartStore == nil {
-		return "", fmt.Errorf("multipart store not configured")
 	}
 
 	st := MultipartUploadState{
@@ -1201,6 +1200,9 @@ func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID st
 	var st MultipartUploadState
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("unmarshal multipart state: %w", err)
+	}
+	if st.SandboxID != sandboxID {
+		return nil, fmt.Errorf("upload not found: %s", uploadID)
 	}
 	return &st, nil
 }
@@ -1267,7 +1269,8 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	for i := 0; i < st.TotalChunks; i++ {
 		parts[i] = fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, i)
 	}
-	catCmd := "cat " + strings.Join(parts, " ") + " > " + `"` + st.DestPath + `"`
+	escapedDest := "'" + strings.ReplaceAll(st.DestPath, "'", "'\\''") + "'"
+	catCmd := "cat " + strings.Join(parts, " ") + " > " + escapedDest
 	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: catCmd,
 		Timeout: 120,
@@ -1275,9 +1278,9 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 		return "", 0, fmt.Errorf("merge chunks: %w", err)
 	}
 
-	// Get file size via stat
+	// Get file size via wc -c
 	statResult, statErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
-		Command: "stat -c %s " + st.DestPath,
+		Command: "wc -c < " + escapedDest,
 		Timeout: 10,
 	})
 	if statErr == nil {
@@ -1291,7 +1294,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 
 	// Cleanup staging dir
 	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
-		Command: "rm -rf /tmp/.uploads/" + uploadID,
+		Command: fmt.Sprintf("rm -rf '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); rmErr != nil {
 		logger.Warn(ctx, "CompleteMultipartUpload: cleanup staging dir failed",
@@ -1321,7 +1324,7 @@ func (m *Manager) CancelMultipartUpload(ctx context.Context, sandboxID, uploadID
 	}
 
 	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
-		Command: "rm -rf /tmp/.uploads/" + uploadID,
+		Command: fmt.Sprintf("rm -rf '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); rmErr != nil {
 		logger.Warn(ctx, "CancelMultipartUpload: cleanup staging dir failed",
