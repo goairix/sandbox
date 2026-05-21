@@ -106,7 +106,7 @@ type EditFileResponse struct {
 	Message string `json:"message"`
 }
 
-// MultipartInitRequest is the request body for POST .../files/upload/init.
+// MultipartInitRequest is the request body for POST /api/v1/sandboxes/:id/files/upload/init.
 type MultipartInitRequest struct {
 	Path        string `json:"path" binding:"required"`
 	TotalChunks int    `json:"total_chunks" binding:"required,min=1"`
@@ -126,13 +126,13 @@ type MultipartChunkResponse struct {
 // MultipartStatusResponse is returned by the status endpoint.
 type MultipartStatusResponse struct {
 	UploadID       string    `json:"upload_id"`
-	DestPath       string    `json:"dest_path"`
+	Path           string    `json:"path"`
 	TotalChunks    int       `json:"total_chunks"`
 	ReceivedChunks int       `json:"received_chunks"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-// MultipartCompleteRequest is the request body for POST .../files/upload/complete.
+// MultipartCompleteRequest is the request body for POST /api/v1/sandboxes/:id/files/upload/complete.
 type MultipartCompleteRequest struct {
 	UploadID string `json:"upload_id" binding:"required"`
 }
@@ -143,7 +143,7 @@ type MultipartCompleteResponse struct {
 	Size int64  `json:"size"`
 }
 
-// MultipartCancelRequest carries the upload_id for DELETE .../files/upload/cancel.
+// MultipartCancelRequest is the request body for DELETE /api/v1/sandboxes/:id/files/upload/cancel.
 type MultipartCancelRequest struct {
 	UploadID string `form:"upload_id" binding:"required"`
 }
