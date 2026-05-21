@@ -1188,6 +1188,9 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 }
 
 func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID string) (*multipartUploadState, error) {
+	if m.multipartStore == nil {
+		return nil, fmt.Errorf("multipart store not configured")
+	}
 	data, err := m.multipartStore.Get(ctx, multipartKey(sandboxID, uploadID))
 	if err != nil {
 		return nil, fmt.Errorf("get multipart state: %w", err)
@@ -1233,7 +1236,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 
 	st.ReceivedChunks++
 	if err := m.saveMultipartState(ctx, sandboxID, uploadID, st); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("save multipart state: %w", err)
 	}
 	return st.ReceivedChunks, st.TotalChunks, nil
 }
