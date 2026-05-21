@@ -1166,6 +1166,10 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}
 
+	if m.multipartStore == nil {
+		return "", fmt.Errorf("multipart store not configured")
+	}
+
 	st := multipartUploadState{
 		UploadID:    uploadID,
 		SandboxID:   sandboxID,
