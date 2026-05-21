@@ -120,6 +120,7 @@ func main() {
 		}
 		ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
 		mgr.SetSessionStore(sandbox.NewSessionStore(store, ttl))
+		mgr.SetMultipartStore(store)
 		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
 	}
 

@@ -65,6 +65,13 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	v1.POST("/sandboxes/:id/files/edit", h.EditFile)
 	v1.POST("/sandboxes/:id/files/edit-lines", h.EditFileLines)
 
+	// Multipart upload
+	v1.POST("/sandboxes/:id/files/upload/init", h.InitMultipartUpload)
+	v1.POST("/sandboxes/:id/files/upload/chunk", h.UploadChunk)
+	v1.GET("/sandboxes/:id/files/upload/status", h.GetMultipartStatus)
+	v1.POST("/sandboxes/:id/files/upload/complete", h.CompleteMultipartUpload)
+	v1.DELETE("/sandboxes/:id/files/upload/cancel", h.CancelMultipartUpload)
+
 	// Workspace operations
 	v1.POST("/sandboxes/:id/workspace/mount", h.MountWorkspace)
 	v1.POST("/sandboxes/:id/workspace/unmount", h.UnmountWorkspace)
