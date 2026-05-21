@@ -1267,7 +1267,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	for i := 0; i < st.TotalChunks; i++ {
 		parts[i] = fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, i)
 	}
-	catCmd := "cat " + strings.Join(parts, " ") + " > " + st.DestPath
+	catCmd := "cat " + strings.Join(parts, " ") + " > " + `"` + st.DestPath + `"`
 	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: catCmd,
 		Timeout: 120,
@@ -1276,20 +1276,35 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	}
 
 	// Get file size via stat
-	statResult, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	statResult, statErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: "stat -c %s " + st.DestPath,
 		Timeout: 10,
 	})
-	if err == nil {
+	if statErr == nil {
 		fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &size)
+	} else {
+		logger.Warn(ctx, "CompleteMultipartUpload: stat failed",
+			logger.AddField("upload_id", uploadID),
+			logger.ErrorField(statErr),
+		)
 	}
 
 	// Cleanup staging dir
-	_, _ = m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: "rm -rf /tmp/.uploads/" + uploadID,
 		Timeout: 10,
-	})
-	_ = m.multipartStore.Delete(ctx, multipartKey(sandboxID, uploadID))
+	}); rmErr != nil {
+		logger.Warn(ctx, "CompleteMultipartUpload: cleanup staging dir failed",
+			logger.AddField("upload_id", uploadID),
+			logger.ErrorField(rmErr),
+		)
+	}
+	if delErr := m.multipartStore.Delete(ctx, multipartKey(sandboxID, uploadID)); delErr != nil {
+		logger.Warn(ctx, "CompleteMultipartUpload: delete multipart state failed",
+			logger.AddField("upload_id", uploadID),
+			logger.ErrorField(delErr),
+		)
+	}
 
 	return st.DestPath, size, nil
 }
@@ -1305,9 +1320,14 @@ func (m *Manager) CancelMultipartUpload(ctx context.Context, sandboxID, uploadID
 		return err
 	}
 
-	_, _ = m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: "rm -rf /tmp/.uploads/" + uploadID,
 		Timeout: 10,
-	})
+	}); rmErr != nil {
+		logger.Warn(ctx, "CancelMultipartUpload: cleanup staging dir failed",
+			logger.AddField("upload_id", uploadID),
+			logger.ErrorField(rmErr),
+		)
+	}
 	return m.multipartStore.Delete(ctx, multipartKey(sandboxID, uploadID))
 }
