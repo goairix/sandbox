@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir \
 # Python 文档处理库
 RUN pip install --no-cache-dir \
     pymupdf \
+    pdfplumber \
     reportlab \
     openpyxl \
     python-docx \
