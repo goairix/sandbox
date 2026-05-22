@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,10 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"encoding/json"
-
-	"github.com/google/uuid"
 	"github.com/goairix/fs"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -1275,12 +1274,28 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 		parts[i] = fmt.Sprintf("'/tmp/.uploads/%s/%d'", uploadID, i)
 	}
 	escapedDest := "'" + strings.ReplaceAll(st.DestPath, "'", "'\\''") + "'"
+	escapedParent := "'" + strings.ReplaceAll(filepath.Dir(st.DestPath), "'", "'\\''") + "'"
+
+	if mkRes, mkErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+		Command: "mkdir -p " + escapedParent,
+		Timeout: 10,
+	}); mkErr != nil || mkRes.ExitCode != 0 {
+		if mkErr != nil {
+			return "", 0, fmt.Errorf("create dest dir: %w", mkErr)
+		}
+		return "", 0, fmt.Errorf("create dest dir: exit %d: %s", mkRes.ExitCode, mkRes.Stderr)
+	}
+
 	catCmd := "cat " + strings.Join(parts, " ") + " > " + escapedDest
-	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	catRes, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
 		Command: catCmd,
 		Timeout: 120,
-	}); err != nil {
+	})
+	if err != nil {
 		return "", 0, fmt.Errorf("merge chunks: %w", err)
+	}
+	if catRes.ExitCode != 0 {
+		return "", 0, fmt.Errorf("merge chunks: exit %d: %s", catRes.ExitCode, catRes.Stderr)
 	}
 
 	// Get file size via wc -c
@@ -1291,8 +1306,13 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	if statErr == nil {
 		_, _ = fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &size)
 	} else {
+		var stderr string
+		if statResult != nil {
+			stderr = statResult.Stderr
+		}
 		logger.Warn(ctx, "CompleteMultipartUpload: stat failed",
 			logger.AddField("upload_id", uploadID),
+			logger.AddField("stderr", stderr),
 			logger.ErrorField(statErr),
 		)
 	}

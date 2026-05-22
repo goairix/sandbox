@@ -109,7 +109,7 @@ type EditFileResponse struct {
 // MultipartInitRequest is the request body for POST /api/v1/sandboxes/:id/files/upload/init.
 type MultipartInitRequest struct {
 	Path        string `json:"path" binding:"required"`
-	TotalChunks int    `json:"total_chunks" binding:"required,min=1"`
+	TotalChunks int    `json:"total_chunks" binding:"required,min=1,max=10000"`
 }
 
 // MultipartInitResponse is returned by the init endpoint.

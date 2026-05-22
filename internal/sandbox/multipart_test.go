@@ -211,3 +211,16 @@ func TestCrossSandboxAccess(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "upload not found")
 }
+
+func TestInitMultipartUpload_NoStore(t *testing.T) {
+	rt := newMockRuntime()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		PoolConfig:     PoolConfig{MinSize: 0, MaxSize: 0, Image: "sandbox:latest"},
+		DefaultTimeout: 30,
+	})
+	// No SetMultipartStore call — store is nil.
+
+	_, err := mgr.InitMultipartUpload(context.Background(), "test-sb", "/workspace/big.bin", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multipart store not configured")
+}
