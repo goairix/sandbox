@@ -338,6 +338,85 @@ func (c *Client) EditFileLines(ctx context.Context, id string, req EditFileLines
 	return c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/edit-lines", req, nil)
 }
 
+// InitMultipartUpload initialises a multipart upload session.
+// POST /api/v1/sandboxes/:id/files/upload/init
+func (c *Client) InitMultipartUpload(ctx context.Context, id string, req MultipartInitRequest) (MultipartInitResponse, error) {
+	var resp MultipartInitResponse
+	return resp, c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/upload/init", req, &resp)
+}
+
+// UploadChunk uploads a single chunk for an in-progress multipart upload.
+// POST /api/v1/sandboxes/:id/files/upload/chunk
+// chunkIndex is zero-based and must be uploaded in order.
+func (c *Client) UploadChunk(ctx context.Context, id, uploadID string, chunkIndex int, r io.Reader) (MultipartChunkResponse, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		if err := mw.WriteField("upload_id", uploadID); err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: write field upload_id: %w", err))
+			return
+		}
+		if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIndex)); err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: write field chunk_index: %w", err))
+			return
+		}
+		fw, err := mw.CreateFormFile("chunk", fmt.Sprintf("chunk-%d", chunkIndex))
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: create form file: %w", err))
+			return
+		}
+		if _, err := io.Copy(fw, r); err != nil {
+			pw.CloseWithError(fmt.Errorf("sandbox: copy chunk: %w", err))
+			return
+		}
+		pw.CloseWithError(mw.Close())
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+c.sandboxBase(id)+"/files/upload/chunk", pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		return MultipartChunkResponse{}, fmt.Errorf("sandbox: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return MultipartChunkResponse{}, fmt.Errorf("sandbox: http: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return MultipartChunkResponse{}, c.decodeError(resp)
+	}
+	var out MultipartChunkResponse
+	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
+// GetMultipartStatus returns the current status of a multipart upload.
+// GET /api/v1/sandboxes/:id/files/upload/status
+func (c *Client) GetMultipartStatus(ctx context.Context, id, uploadID string) (MultipartStatusResponse, error) {
+	var resp MultipartStatusResponse
+	path := c.sandboxBase(id) + "/files/upload/status?upload_id=" + url.QueryEscape(uploadID)
+	return resp, c.do(ctx, http.MethodGet, path, nil, &resp)
+}
+
+// CompleteMultipartUpload finalises a multipart upload and merges all chunks.
+// POST /api/v1/sandboxes/:id/files/upload/complete
+func (c *Client) CompleteMultipartUpload(ctx context.Context, id, uploadID string) (MultipartCompleteResponse, error) {
+	var resp MultipartCompleteResponse
+	body := map[string]string{"upload_id": uploadID}
+	return resp, c.do(ctx, http.MethodPost, c.sandboxBase(id)+"/files/upload/complete", body, &resp)
+}
+
+// CancelMultipartUpload cancels an in-progress multipart upload and removes staging files.
+// DELETE /api/v1/sandboxes/:id/files/upload/cancel
+func (c *Client) CancelMultipartUpload(ctx context.Context, id, uploadID string) error {
+	path := c.sandboxBase(id) + "/files/upload/cancel?upload_id=" + url.QueryEscape(uploadID)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 // ExecStream executes code in a sandbox and streams output as SSE events.
 // The returned channel is closed when the stream ends or ctx is cancelled.
 func (c *Client) ExecStream(ctx context.Context, id string, req ExecRequest) (<-chan SSEEvent, error) {

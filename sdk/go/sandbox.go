@@ -185,6 +185,46 @@ func (s *Sandbox) EditFileLines(ctx context.Context, req EditFileLinesRequest) e
 	return s.client.EditFileLines(ctx, s.id, req)
 }
 
+// InitMultipartUpload starts a multipart upload session for a large file.
+// totalChunks is the total number of chunks that will be uploaded (1–10000).
+// Returns the upload ID to use in subsequent UploadChunk / CompleteMultipartUpload calls.
+func (s *Sandbox) InitMultipartUpload(ctx context.Context, remotePath string, totalChunks int) (string, error) {
+	resp, err := s.client.InitMultipartUpload(ctx, s.id, MultipartInitRequest{
+		Path:        remotePath,
+		TotalChunks: totalChunks,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.UploadID, nil
+}
+
+// UploadChunk uploads a single chunk for an in-progress multipart upload.
+// chunkIndex is zero-based and must be uploaded in sequential order.
+// Returns the number of chunks received so far and the total expected.
+func (s *Sandbox) UploadChunk(ctx context.Context, uploadID string, chunkIndex int, r io.Reader) (received, total int, err error) {
+	resp, err := s.client.UploadChunk(ctx, s.id, uploadID, chunkIndex, r)
+	if err != nil {
+		return 0, 0, err
+	}
+	return resp.Received, resp.Total, nil
+}
+
+// GetMultipartStatus returns the current status of a multipart upload.
+func (s *Sandbox) GetMultipartStatus(ctx context.Context, uploadID string) (MultipartStatusResponse, error) {
+	return s.client.GetMultipartStatus(ctx, s.id, uploadID)
+}
+
+// CompleteMultipartUpload finalises a multipart upload, merges all chunks, and returns the destination path and file size.
+func (s *Sandbox) CompleteMultipartUpload(ctx context.Context, uploadID string) (MultipartCompleteResponse, error) {
+	return s.client.CompleteMultipartUpload(ctx, s.id, uploadID)
+}
+
+// CancelMultipartUpload cancels an in-progress multipart upload and removes all staging files.
+func (s *Sandbox) CancelMultipartUpload(ctx context.Context, uploadID string) error {
+	return s.client.CancelMultipartUpload(ctx, s.id, uploadID)
+}
+
 // Run is a convenience method on Client for one-shot execution without pre-creating a sandbox.
 func (c *Client) Run(ctx context.Context, language, code string) (ExecResponse, error) {
 	return c.Execute(ctx, ExecuteRequest{Language: language, Code: code})

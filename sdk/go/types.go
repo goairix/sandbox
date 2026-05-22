@@ -291,3 +291,35 @@ type EditFileLinesRequest struct {
 	EndLine    int    `json:"end_line,omitempty"`
 	NewContent string `json:"new_content"`
 }
+
+// MultipartInitRequest is the request body for POST /api/v1/sandboxes/:id/files/upload/init.
+type MultipartInitRequest struct {
+	Path        string `json:"path"`
+	TotalChunks int    `json:"total_chunks"`
+}
+
+// MultipartInitResponse is returned by the multipart init endpoint.
+type MultipartInitResponse struct {
+	UploadID string `json:"upload_id"`
+}
+
+// MultipartChunkResponse is returned after each chunk upload.
+type MultipartChunkResponse struct {
+	Received int `json:"received"`
+	Total    int `json:"total"`
+}
+
+// MultipartStatusResponse is returned by the multipart status endpoint.
+type MultipartStatusResponse struct {
+	UploadID       string    `json:"upload_id"`
+	Path           string    `json:"path"`
+	TotalChunks    int       `json:"total_chunks"`
+	ReceivedChunks int       `json:"received_chunks"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// MultipartCompleteResponse is returned after a successful multipart complete.
+type MultipartCompleteResponse struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
