@@ -26,7 +26,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Sandbox 服务监控面板 — 多集群通过 service_name 区分",
+  "description": "Sandbox 服务监控面板",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -68,7 +68,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(sandbox_active{service_name=~\"$service\"})",
+          "expr": "sum(sandbox_active{job=~\"$service\"})",
           "legendFormat": "活跃 sandbox",
           "refId": "A"
         }
@@ -106,7 +106,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_create_total{service_name=~\"$service\",status=\"success\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_create_total{job=~\"$service\",status=\"success\"}[$__rate_interval]))",
           "legendFormat": "创建速率",
           "refId": "A"
         }
@@ -144,7 +144,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_create_total{service_name=~\"$service\",status=\"error\"}[$__rate_interval])) / sum(rate(sandbox_create_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_create_total{job=~\"$service\",status=\"error\"}[$__rate_interval])) / sum(rate(sandbox_create_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "创建失败率",
           "refId": "A"
         }
@@ -184,7 +184,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_pool_hit_total{service_name=~\"$service\",hit=\"true\"}[$__rate_interval])) / sum(rate(sandbox_pool_hit_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_pool_hit_total{job=~\"$service\",hit=\"true\"}[$__rate_interval])) / sum(rate(sandbox_pool_hit_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "Pool 命中率",
           "refId": "A"
         }
@@ -222,7 +222,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_exec_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_exec_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "Exec 速率",
           "refId": "A"
         }
@@ -260,7 +260,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_exec_total{service_name=~\"$service\",status=\"error\"}[$__rate_interval])) / sum(rate(sandbox_exec_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_exec_total{job=~\"$service\",status=\"error\"}[$__rate_interval])) / sum(rate(sandbox_exec_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "Exec 错误率",
           "refId": "A"
         }
@@ -294,8 +294,8 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(service_name) (sandbox_active{service_name=~\"$service\"})",
-          "legendFormat": "{{service_name}}",
+          "expr": "sum by(job) (sandbox_active{job=~\"$service\"})",
+          "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
@@ -321,13 +321,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(source, status) (rate(sandbox_create_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(source, status) (rate(sandbox_create_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "create {{source}} {{status}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(reason) (rate(sandbox_destroy_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(reason) (rate(sandbox_destroy_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "destroy {{reason}}",
           "refId": "B"
         }
@@ -354,19 +354,19 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.99, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{job=~\"$service\"}[$__rate_interval])))",
           "legendFormat": "p99 {{source}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.95, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{job=~\"$service\"}[$__rate_interval])))",
           "legendFormat": "p95 {{source}}",
           "refId": "B"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.50, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, source) (rate(sandbox_create_duration_seconds_bucket{job=~\"$service\"}[$__rate_interval])))",
           "legendFormat": "p50 {{source}}",
           "refId": "C"
         }
@@ -393,13 +393,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.95, sum by(le) (rate(sandbox_dependency_install_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(sandbox_dependency_install_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.50, sum by(le) (rate(sandbox_dependency_install_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(sandbox_dependency_install_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "B"
         }
@@ -433,8 +433,8 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(service_name) (sandbox_pool_size{service_name=~\"$service\"})",
-          "legendFormat": "{{service_name}}",
+          "expr": "sum by(job) (sandbox_pool_size{job=~\"$service\"})",
+          "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
@@ -460,13 +460,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(hit) (rate(sandbox_pool_hit_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(hit) (rate(sandbox_pool_hit_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "hit={{hit}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(sandbox_pool_refill_failures_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(sandbox_pool_refill_failures_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "refill 失败",
           "refId": "B"
         }
@@ -500,7 +500,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(kind, status) (rate(sandbox_exec_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(kind, status) (rate(sandbox_exec_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{kind}} {{status}}",
           "refId": "A"
         }
@@ -527,19 +527,19 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.99, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p99 {{kind}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.95, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p95 {{kind}}",
           "refId": "B"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.50, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, kind) (rate(sandbox_exec_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p50 {{kind}}",
           "refId": "C"
         }
@@ -573,7 +573,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(operation, status) (rate(sandbox_file_operation_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(operation, status) (rate(sandbox_file_operation_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{operation}} {{status}}",
           "refId": "A"
         }
@@ -600,7 +600,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(operation) (increase(sandbox_file_operation_total{service_name=~\"$service\"}[$__range]))",
+          "expr": "sum by(operation) (increase(sandbox_file_operation_total{job=~\"$service\"}[$__range]))",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -634,7 +634,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(direction, status) (rate(sandbox_workspace_sync_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(direction, status) (rate(sandbox_workspace_sync_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{direction}} {{status}}",
           "refId": "A"
         }
@@ -661,13 +661,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.95, sum by(le, direction) (rate(sandbox_workspace_sync_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, direction) (rate(sandbox_workspace_sync_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p95 {{direction}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.50, sum by(le, direction) (rate(sandbox_workspace_sync_duration_seconds_bucket{service_name=~\"$service\",status=\"success\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, direction) (rate(sandbox_workspace_sync_duration_seconds_bucket{job=~\"$service\",status=\"success\"}[$__rate_interval])))",
           "legendFormat": "p50 {{direction}}",
           "refId": "B"
         }
@@ -701,7 +701,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(status) (increase(sandbox_session_restore_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(status) (increase(sandbox_session_restore_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
@@ -728,7 +728,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(type) (rate(sandbox_error_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(type) (rate(sandbox_error_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{type}}",
           "refId": "A"
         }
@@ -762,7 +762,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by(http_route) (rate(http_server_requests_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by(http_route) (rate(http_server_requests_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{http_route}}",
           "refId": "A"
         }
@@ -800,7 +800,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(http_server_requests_total{service_name=~\"$service\",http_status_code=~\"5..\"}[$__rate_interval])) / sum(rate(http_server_requests_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(http_server_requests_total{job=~\"$service\",http_status_code=~\"5..\"}[$__rate_interval])) / sum(rate(http_server_requests_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "5xx 错误率",
           "refId": "A"
         }
@@ -838,7 +838,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(rate(http_server_requests_total{service_name=~\"$service\",http_status_code=~\"4..\"}[$__rate_interval])) / sum(rate(http_server_requests_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum(rate(http_server_requests_total{job=~\"$service\",http_status_code=~\"4..\"}[$__rate_interval])) / sum(rate(http_server_requests_total{job=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "4xx 错误率",
           "refId": "A"
         }
@@ -865,13 +865,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.99, sum by(le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, http_route) (rate(http_server_request_duration_seconds_bucket{job=~\"$service\"}[$__rate_interval])))",
           "legendFormat": "p99 {{http_route}}",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "histogram_quantile(0.95, sum by(le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, http_route) (rate(http_server_request_duration_seconds_bucket{job=~\"$service\"}[$__rate_interval])))",
           "legendFormat": "p95 {{http_route}}",
           "refId": "B"
         }
@@ -910,7 +910,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(sandbox_active, service_name)",
+        "definition": "label_values(sandbox_active, job)",
         "hide": 0,
         "includeAll": true,
         "label": "Sandbox 集群",
@@ -918,7 +918,7 @@
         "name": "service",
         "options": [],
         "query": {
-          "query": "label_values(sandbox_active, service_name)",
+          "query": "label_values(sandbox_active, job)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
