@@ -14,6 +14,7 @@ import (
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 // maxConcurrentReads limits the number of parallel file reads from storage
@@ -180,6 +181,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	}
 
 	var err error
+	syncStart := time.Now()
 	switch direction {
 	case "to_container":
 		err = m.syncToContainer(ctx, scoped, runtimeID)
@@ -188,6 +190,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	default:
 		return fmt.Errorf("invalid sync direction: %s", direction)
 	}
+	syncDuration := time.Since(syncStart).Seconds()
 
 	if err != nil {
 		logger.Error(ctx, "SyncWorkspace: failed",
@@ -195,11 +198,13 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 			logger.AddField("direction", direction),
 			logger.ErrorField(err),
 		)
+		metrics.RecordWorkspaceSync(ctx, direction, "error", syncDuration)
 	} else {
 		logger.Info(ctx, "SyncWorkspace: completed",
 			logger.AddField("sandbox_id", sandboxID),
 			logger.AddField("direction", direction),
 		)
+		metrics.RecordWorkspaceSync(ctx, direction, "success", syncDuration)
 	}
 	return err
 }

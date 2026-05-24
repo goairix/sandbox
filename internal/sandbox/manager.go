@@ -16,7 +16,6 @@ import (
 	"github.com/goairix/fs"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/goairix/sandbox/internal/logger"
@@ -161,6 +160,8 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Create")
 	defer span.End()
 
+	createStart := time.Now()
+
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = m.config.DefaultTimeout
@@ -181,10 +182,12 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	var info *runtime.SandboxInfo
 	var err error
 	var bindMounted bool
+	var source string
 
 	useBindMount := cfg.WorkspacePath != "" && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal
 
 	if cfg.Network.Enabled || useBindMount {
+		source = "direct"
 		spec := m.buildSpec(id, cfg)
 		if useBindMount {
 			hostPath := m.resolveLocalWorkspacePath(cfg.WorkspacePath)
@@ -197,12 +200,17 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		info, err = m.runtime.CreateSandbox(spanCtx, spec)
 		if err != nil {
 			telemetry.Error(err, span)
+			metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+			metrics.RecordError(spanCtx, "create_failed")
 			return nil, fmt.Errorf("create sandbox: %w", err)
 		}
 	} else {
+		source = "pool"
 		info, err = m.pool.Acquire(spanCtx)
 		if err != nil {
 			telemetry.Error(err, span)
+			metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+			metrics.RecordError(spanCtx, "create_failed")
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
 		// Remove pool label and update sandbox.id so the pod is correctly
@@ -231,6 +239,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	if len(cfg.Dependencies) > 0 {
 		installCmd := buildInstallCommand(cfg.Dependencies)
 		if installCmd != "" {
+			depStart := time.Now()
 			if _, err := m.runtime.Exec(spanCtx, info.RuntimeID, runtime.ExecRequest{
 				Command: installCmd,
 				WorkDir: "/workspace",
@@ -241,10 +250,14 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 					logger.AddField("runtime_id", info.RuntimeID),
 					logger.ErrorField(err),
 				)
+				metrics.RecordDependencyInstall(spanCtx, "error", time.Since(depStart).Seconds())
 				// Cleanup on failure
 				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
+				metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+				metrics.RecordError(spanCtx, "install_dependencies_failed")
 				return nil, fmt.Errorf("install dependencies: %w", err)
 			}
+			metrics.RecordDependencyInstall(spanCtx, "success", time.Since(depStart).Seconds())
 		}
 	}
 
@@ -271,6 +284,8 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 				m.mu.Lock()
 				delete(m.sandboxes, id)
 				m.mu.Unlock()
+				metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+				metrics.RecordError(spanCtx, "register_workspace_failed")
 				return nil, fmt.Errorf("register workspace: %w", err)
 			}
 		} else {
@@ -279,6 +294,8 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 				m.mu.Lock()
 				delete(m.sandboxes, id)
 				m.mu.Unlock()
+				metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+				metrics.RecordError(spanCtx, "mount_workspace_failed")
 				return nil, fmt.Errorf("mount workspace: %w", err)
 			}
 		}
@@ -286,6 +303,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	span.SetAttributes(attribute.String("sandbox.id", id))
 	metrics.SandboxActiveGauge.Add(spanCtx, 1)
+	metrics.RecordSandboxCreate(spanCtx, source, "success", time.Since(createStart).Seconds())
 	return sb, nil
 }
 
@@ -350,8 +368,13 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 
 // Destroy removes a sandbox.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
+	return m.destroyWithReason(ctx, id, "manual")
+}
+
+func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) error {
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Destroy",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
+		trace.WithAttributes(attribute.String("reason", reason)),
 	)
 	defer span.End()
 
@@ -390,12 +413,14 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	// Remove the container
 	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
 		telemetry.Error(err, span)
+		metrics.RecordError(ctx, "destroy_failed")
 		return fmt.Errorf("remove sandbox: %w", err)
 	}
 
 	// Notify pool so it can refill
 	m.pool.NotifyRemoved()
 	metrics.SandboxActiveGauge.Add(ctx, -1)
+	metrics.RecordSandboxDestroy(ctx, reason)
 
 	return nil
 }
@@ -410,14 +435,18 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	)
 	defer span.End()
 
+	execStart := time.Now()
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		telemetry.Error(err, span)
+		metrics.RecordError(ctx, "sandbox_not_found")
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
 		telemetry.Error(ErrNetworkRequired, span)
+		metrics.RecordError(ctx, "network_required")
 		return nil, ErrNetworkRequired
 	}
 
@@ -440,13 +469,16 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 	if err != nil {
 		telemetry.Error(err, span)
+		metrics.RecordExec(ctx, "sync", "error", time.Since(execStart).Seconds())
+		metrics.RecordError(ctx, "exec_failed")
 		return nil, err
 	}
 
-	metrics.SandboxExecTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("sandbox.id", id),
-		attribute.Int("exec.exit_code", result.ExitCode),
-	))
+	status := "success"
+	if result.ExitCode != 0 {
+		status = "non_zero_exit"
+	}
+	metrics.RecordExec(ctx, "sync", status, result.Duration.Seconds())
 	span.SetAttributes(
 		attribute.Int("exec.exit_code", result.ExitCode),
 		attribute.Float64("exec.duration_s", result.Duration.Seconds()),
@@ -463,12 +495,14 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		telemetry.Error(err, span)
+		metrics.RecordError(ctx, "sandbox_not_found")
 		span.End()
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
 		telemetry.Error(ErrNetworkRequired, span)
+		metrics.RecordError(ctx, "network_required")
 		span.End()
 		return nil, ErrNetworkRequired
 	}
@@ -479,6 +513,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
 
+	streamStart := time.Now()
 	ch, err := m.runtime.ExecStream(ctx, runtimeID, req)
 	if err != nil {
 		m.mu.Lock()
@@ -486,6 +521,8 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		telemetry.Error(err, span)
+		metrics.RecordExec(ctx, "stream", "error", time.Since(streamStart).Seconds())
+		metrics.RecordError(ctx, "exec_failed")
 		span.End()
 		return nil, err
 	}
@@ -509,10 +546,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.State = StateIdle
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
-		metrics.SandboxExecTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("sandbox.id", id),
-			attribute.String("exec.type", "stream"),
-		))
+		metrics.RecordExec(ctx, "stream", "success", time.Since(streamStart).Seconds())
 	}()
 
 	return outCh, nil
@@ -530,7 +564,12 @@ func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, re
 		return err
 	}
 
-	return m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, reader)
+	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, reader); err != nil {
+		metrics.RecordFileOp(ctx, "upload", "error")
+		return err
+	}
+	metrics.RecordFileOp(ctx, "upload", "success")
+	return nil
 }
 
 // DownloadFile downloads a file from a sandbox.
@@ -545,7 +584,13 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 		return nil, err
 	}
 
-	return m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
+	rc, err := m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
+	if err != nil {
+		metrics.RecordFileOp(ctx, "download", "error")
+		return nil, err
+	}
+	metrics.RecordFileOp(ctx, "download", "success")
+	return rc, nil
 }
 
 // ReadFileContent streams the raw content of a file from the sandbox without tar wrapping.
@@ -560,7 +605,13 @@ func (m *Manager) ReadFileContent(ctx context.Context, id string, srcPath string
 		return nil, err
 	}
 
-	return m.runtime.ReadFileContent(ctx, sb.RuntimeID, srcPath)
+	rc, err := m.runtime.ReadFileContent(ctx, sb.RuntimeID, srcPath)
+	if err != nil {
+		metrics.RecordFileOp(ctx, "read", "error")
+		return nil, err
+	}
+	metrics.RecordFileOp(ctx, "read", "success")
+	return rc, nil
 }
 
 // GlobInfo returns files matching the glob pattern with their content.
@@ -637,7 +688,13 @@ func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string,
 	if err != nil {
 		return nil, err
 	}
-	return m.runtime.ReadFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine)
+	result, err := m.runtime.ReadFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine)
+	if err != nil {
+		metrics.RecordFileOp(ctx, "read_lines", "error")
+		return nil, err
+	}
+	metrics.RecordFileOp(ctx, "read_lines", "success")
+	return result, nil
 }
 
 // EditFile performs a string replacement in a file in a sandbox.
@@ -652,7 +709,12 @@ func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldS
 	if err != nil {
 		return err
 	}
-	return m.runtime.EditFile(ctx, sb.RuntimeID, filePath, oldStr, newStr, replaceAll)
+	if err := m.runtime.EditFile(ctx, sb.RuntimeID, filePath, oldStr, newStr, replaceAll); err != nil {
+		metrics.RecordFileOp(ctx, "edit", "error")
+		return err
+	}
+	metrics.RecordFileOp(ctx, "edit", "success")
+	return nil
 }
 
 // EditFileLines replaces a range of lines in a file in a sandbox.
@@ -667,7 +729,12 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 	if err != nil {
 		return err
 	}
-	return m.runtime.EditFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine, newContent)
+	if err := m.runtime.EditFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine, newContent); err != nil {
+		metrics.RecordFileOp(ctx, "edit_lines", "error")
+		return err
+	}
+	metrics.RecordFileOp(ctx, "edit_lines", "success")
+	return nil
 }
 
 // UpdateNetwork dynamically updates network access for a running sandbox.
@@ -763,7 +830,7 @@ func (m *Manager) reapOnce() {
 	m.mu.RUnlock()
 
 	for _, id := range expired {
-		_ = m.Destroy(context.Background(), id)
+		_ = m.destroyWithReason(context.Background(), id, "ttl_expired")
 	}
 }
 
@@ -822,6 +889,8 @@ func (m *Manager) autoSyncOnce() {
 				m.mu.Lock()
 				m.sandboxes[id] = sbPtr
 				m.mu.Unlock()
+				metrics.RecordSessionRestore(ctx, "success")
+				metrics.SandboxActiveGauge.Add(ctx, 1)
 
 				if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
 					scoped, fsErr := storage.NewScopedFS(m.filesystem, sbPtr.Workspace.RootPath)
@@ -916,6 +985,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 				logger.ErrorField(err),
 			)
 			failed++
+			metrics.RecordSessionRestore(ctx, "error")
 			continue
 		}
 
@@ -935,6 +1005,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 				)
 				_ = m.sessions.Remove(ctx, id)
 				failed++
+				metrics.RecordSessionRestore(ctx, "error")
 				continue
 			}
 			sbPtr.RuntimeID = newInfo.RuntimeID
@@ -971,6 +1042,8 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 		}
 
 		restored++
+		metrics.RecordSessionRestore(ctx, "success")
+		metrics.SandboxActiveGauge.Add(ctx, 1)
 	}
 
 	if restored > 0 || failed > 0 {

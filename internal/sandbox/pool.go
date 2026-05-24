@@ -8,6 +8,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 // PoolConfig configures the container pool.
@@ -59,6 +60,8 @@ func (p *Pool) WarmUp(ctx context.Context) {
 
 // Acquire takes a warm container from the pool. If none available, creates one on-demand.
 // Stale containers (e.g. removed by Docker restart) are automatically discarded.
+// Records pool hit metrics: hit=true means a warm container was successfully reused;
+// hit=false means an on-demand container was created.
 func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 	for {
 		p.mu.Lock()
@@ -73,6 +76,8 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 		// Verify container is still alive and running
 		got, err := p.runtime.GetSandbox(ctx, info.RuntimeID)
 		if err == nil && got != nil && got.State == "running" {
+			metrics.SandboxPoolSize.Add(ctx, -1)
+			metrics.RecordPoolAcquire(ctx, true)
 			go p.refillIfNeeded(context.Background())
 			return info, nil
 		}
@@ -82,9 +87,11 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 			logger.AddField("runtime_id", info.RuntimeID),
 		)
 		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
+		metrics.SandboxPoolSize.Add(ctx, -1)
 	}
 
 	// No healthy warm containers, create on-demand
+	metrics.RecordPoolAcquire(ctx, false)
 	return p.createWarm(ctx)
 }
 
@@ -178,6 +185,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 		info, err := p.createWarm(ctx)
 		if err != nil {
 			consecutiveFailures++
+			metrics.RecordPoolRefillFailure(ctx)
 			if consecutiveFailures >= maxRefillRetries {
 				logger.Error(ctx, "pool refill giving up after consecutive failures",
 					logger.AddField("failures", consecutiveFailures),
@@ -201,11 +209,13 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 		p.mu.Lock()
 		if len(p.available) < p.config.MaxSize {
 			p.available = append(p.available, info)
+			p.mu.Unlock()
+			metrics.SandboxPoolSize.Add(context.Background(), 1)
 		} else {
 			// Pool is full, discard
 			runtimeID := info.RuntimeID
+			p.mu.Unlock()
 			go func() { _ = p.runtime.RemoveSandbox(context.Background(), runtimeID) }()
 		}
-		p.mu.Unlock()
 	}
 }

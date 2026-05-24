@@ -95,7 +95,7 @@ func TestUploadChunk_OutOfOrder(t *testing.T) {
 	// chunk_index=1 before chunk_index=0 should fail.
 	_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, 1, strings.NewReader("data"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "expected chunk_index 0")
+	assert.ErrorIs(t, err, ErrUnexpectedChunkIndex)
 }
 
 func TestCompleteMultipartUpload_Incomplete(t *testing.T) {
