@@ -26,16 +26,59 @@ func NewHandler(mgr *sandbox.Manager) *Handler {
 }
 
 // internalError records the error on the current span and responds with the
-// appropriate HTTP status code. context.Canceled is silently ignored.
-// runtime.ErrFileNotFound maps to 404; everything else maps to 500.
+// appropriate HTTP status code and error code. context.Canceled is silently
+// ignored. Known sentinel errors are mapped to specific HTTP status + code;
+// everything else is a 500.
 func internalError(c *gin.Context, err error) {
 	if context.Cause(c.Request.Context()) != nil {
 		return
 	}
-	if errors.Is(err, runtime.ErrFileNotFound) {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+
+	switch {
+	case errors.Is(err, runtime.ErrFileNotFound):
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Code:    "FILE_NOT_FOUND",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrSandboxNotFound):
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Code:    "SANDBOX_NOT_FOUND",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrNoWorkspaceMounted):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "NO_WORKSPACE_MOUNTED",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrWorkspaceAlreadyMounted):
+		c.JSON(http.StatusConflict, types.ErrorResponse{
+			Code:    "WORKSPACE_ALREADY_MOUNTED",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrUploadNotFound):
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Code:    "UPLOAD_NOT_FOUND",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrUnexpectedChunkIndex):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "UNEXPECTED_CHUNK_INDEX",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrIncompleteUpload):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "INCOMPLETE_UPLOAD",
+			Message: err.Error(),
+		})
 		return
 	}
+
 	span := trace.SpanFromContext(c.Request.Context())
 	telemetry.Error(err, span)
 	logger.Error(c.Request.Context(), "internal error",

@@ -97,9 +97,7 @@ func (h *Handler) GetSandbox(c *gin.Context) {
 
 	sb, err := h.manager.Get(spanCtx, id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -113,9 +111,7 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 	id := c.Param("id")
 
 	if err := h.manager.Destroy(spanCtx, id); err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 
@@ -165,9 +161,7 @@ func (h *Handler) UpdateTTL(c *gin.Context) {
 
 	sb, err := h.manager.UpdateTTL(spanCtx, id, req.Timeout)
 	if err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 

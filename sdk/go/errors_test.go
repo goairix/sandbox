@@ -21,6 +21,24 @@ func TestSandboxErrorIsNegative(t *testing.T) {
 	}
 }
 
+func TestErrFileNotFoundDistinctFromErrNotFound(t *testing.T) {
+	fileErr := &sandbox.SandboxError{StatusCode: 404, Code: "FILE_NOT_FOUND", Message: "file not found"}
+	if !errors.Is(fileErr, sandbox.ErrFileNotFound) {
+		t.Error("FILE_NOT_FOUND should match ErrFileNotFound")
+	}
+	if errors.Is(fileErr, sandbox.ErrNotFound) {
+		t.Error("FILE_NOT_FOUND should not match ErrNotFound (sandbox)")
+	}
+
+	sbErr := &sandbox.SandboxError{StatusCode: 404, Code: "SANDBOX_NOT_FOUND", Message: "sandbox not found"}
+	if !errors.Is(sbErr, sandbox.ErrNotFound) {
+		t.Error("SANDBOX_NOT_FOUND should match ErrNotFound")
+	}
+	if errors.Is(sbErr, sandbox.ErrFileNotFound) {
+		t.Error("SANDBOX_NOT_FOUND should not match ErrFileNotFound")
+	}
+}
+
 func TestSandboxErrorIsEmptyCodeSentinel(t *testing.T) {
 	// ErrUnauthorized has no Code — any 401 should match regardless of Code.
 	err := &sandbox.SandboxError{StatusCode: 401, Code: "SOME_OTHER_CODE", Message: "bad key"}

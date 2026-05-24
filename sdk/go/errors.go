@@ -33,8 +33,10 @@ func (e *SandboxError) Is(target error) bool {
 }
 
 // Predefined sentinel errors for common HTTP status codes.
+// Use errors.Is to match against these.
 var (
 	ErrNotFound       = &SandboxError{StatusCode: 404, Code: "SANDBOX_NOT_FOUND"}
+	ErrFileNotFound   = &SandboxError{StatusCode: 404, Code: "FILE_NOT_FOUND"}
 	ErrUnauthorized   = &SandboxError{StatusCode: 401}
 	ErrRateLimited    = &SandboxError{StatusCode: 429}
 	ErrTimeout        = &SandboxError{StatusCode: 408}
