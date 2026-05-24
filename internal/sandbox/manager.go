@@ -345,7 +345,7 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 		return sbPtr, nil
 	}
 
-	return nil, fmt.Errorf("sandbox not found: %s", id)
+	return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 }
 
 // Destroy removes a sandbox.
@@ -621,6 +621,16 @@ func (m *Manager) GlobFiles(ctx context.Context, id string, baseDir string, patt
 	return m.runtime.GlobFiles(ctx, sb.RuntimeID, baseDir, pattern, page, pageSize)
 }
 
+// FileExists reports whether a regular file exists at the given path inside the sandbox.
+// Returns runtime.ErrFileNotFound if the file does not exist.
+func (m *Manager) FileExists(ctx context.Context, id string, filePath string) error {
+	sb, err := m.resolve(ctx, id)
+	if err != nil {
+		return err
+	}
+	return m.runtime.FileExists(ctx, sb.RuntimeID, filePath)
+}
+
 // ReadFileLines reads a range of lines from a file in a sandbox.
 func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
 	sb, err := m.resolve(ctx, id)
@@ -672,7 +682,7 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	sb, ok := m.sandboxes[id]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("sandbox not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
@@ -1194,14 +1204,14 @@ func (m *Manager) loadMultipartState(ctx context.Context, sandboxID, uploadID st
 		return nil, fmt.Errorf("get multipart state: %w", err)
 	}
 	if data == nil {
-		return nil, fmt.Errorf("upload not found: %s", uploadID)
+		return nil, fmt.Errorf("%w: %s", ErrUploadNotFound, uploadID)
 	}
 	var st MultipartUploadState
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("unmarshal multipart state: %w", err)
 	}
 	if st.SandboxID != sandboxID {
-		return nil, fmt.Errorf("upload not found: %s", uploadID)
+		return nil, fmt.Errorf("%w: %s", ErrUploadNotFound, uploadID)
 	}
 	return &st, nil
 }
@@ -1227,7 +1237,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 		return 0, 0, err
 	}
 	if chunkIndex != st.ReceivedChunks {
-		return 0, 0, fmt.Errorf("expected chunk_index %d, got %d", st.ReceivedChunks, chunkIndex)
+		return 0, 0, fmt.Errorf("%w: expected %d, got %d", ErrUnexpectedChunkIndex, st.ReceivedChunks, chunkIndex)
 	}
 
 	sb, err := m.resolve(ctx, sandboxID)
@@ -1260,7 +1270,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 		return "", 0, err
 	}
 	if st.ReceivedChunks != st.TotalChunks {
-		return "", 0, fmt.Errorf("incomplete upload: received %d of %d chunks", st.ReceivedChunks, st.TotalChunks)
+		return "", 0, fmt.Errorf("%w: received %d of %d chunks", ErrIncompleteUpload, st.ReceivedChunks, st.TotalChunks)
 	}
 
 	sb, err := m.resolve(ctx, sandboxID)

@@ -12,9 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/logger"
-	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
@@ -71,7 +71,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		return
 	}
 	// Use context.WithoutCancel so Destroy completes even if client disconnects
-	defer h.manager.Destroy(context.WithoutCancel(ctx), sb.ID)
+	defer func() { _ = h.manager.Destroy(context.WithoutCancel(ctx), sb.ID) }()
 
 	// Build command from language and code
 	command, err := buildCommand(sandbox.Language(req.Language), req.Code)

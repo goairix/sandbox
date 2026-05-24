@@ -69,6 +69,10 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 }
 
 func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	if err := r.FileExists(ctx, id, srcPath); err != nil {
+		return nil, err
+	}
+
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
 		Cmd:          []string{"cat", srcPath},
 		AttachStdout: true,
@@ -91,6 +95,19 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 	}()
 
 	return pr, nil
+}
+
+func (r *Runtime) FileExists(ctx context.Context, id string, filePath string) error {
+	result, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("test -f %s", shellEscape(filePath)),
+	})
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return runtime.ErrFileNotFound
+	}
+	return nil
 }
 
 func (r *Runtime) UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error {
@@ -305,6 +322,10 @@ func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, patt
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
+	if err := r.FileExists(ctx, id, filePath); err != nil {
+		return nil, err
+	}
+
 	if startLine < 1 {
 		startLine = 1
 	}
@@ -355,6 +376,10 @@ func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldStr string, newStr string, replaceAll bool) error {
+	if err := r.FileExists(ctx, id, filePath); err != nil {
+		return err
+	}
+
 	// Read the file content from the container.
 	readResult, err := r.Exec(ctx, id, runtime.ExecRequest{
 		Command: fmt.Sprintf("cat %s", shellEscape(filePath)),
@@ -396,6 +421,10 @@ func (r *Runtime) EditFile(ctx context.Context, id string, filePath string, oldS
 }
 
 func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int, newContent string) error {
+	if err := r.FileExists(ctx, id, filePath); err != nil {
+		return err
+	}
+
 	if startLine < 1 {
 		startLine = 1
 	}

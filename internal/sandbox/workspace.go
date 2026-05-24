@@ -55,14 +55,14 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
 		m.mu.RUnlock()
-		return fmt.Errorf("sandbox not found: %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	runtimeID := sb.RuntimeID
 	_, exists := m.workspaces[sandboxID]
 	m.mu.RUnlock()
 
 	if exists {
-		return fmt.Errorf("workspace already mounted for sandbox %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrWorkspaceAlreadyMounted, sandboxID)
 	}
 
 	scoped, err := storage.NewScopedFS(m.filesystem, rootPath)
@@ -120,14 +120,14 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
 		m.mu.RUnlock()
-		return fmt.Errorf("sandbox not found: %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	runtimeID := sb.RuntimeID
 	_, hasWS := m.workspaces[sandboxID]
 	m.mu.RUnlock()
 
 	if !hasWS {
-		return fmt.Errorf("no workspace mounted for sandbox %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
 
 	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, sb.Workspace.SyncExclude); err != nil {
@@ -169,14 +169,14 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	sb, ok := m.sandboxes[sandboxID]
 	if !ok {
 		m.mu.RUnlock()
-		return fmt.Errorf("sandbox not found: %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	runtimeID := sb.RuntimeID
 	scoped, hasWS := m.workspaces[sandboxID]
 	m.mu.RUnlock()
 
 	if !hasWS {
-		return fmt.Errorf("no workspace mounted for sandbox %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
 
 	var err error
@@ -211,7 +211,7 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	m.mu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 
 	return sb.Workspace, nil
@@ -431,7 +431,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 		logger.Debug(ctx, "syncFromContainer: no workspace found",
 			logger.AddField("sandbox_id", sandboxID),
 		)
-		return fmt.Errorf("no workspace for sandbox %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
 
 	// Skip sync if the sandbox is gone from the map — it has already been

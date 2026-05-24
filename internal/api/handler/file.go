@@ -2,6 +2,7 @@ package handler
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/logger"
+	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
@@ -44,7 +47,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		})
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	sb, err := h.manager.Get(spanCtx, id)
 	if err != nil {
@@ -118,7 +121,7 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 		internalError(c, err)
 		return
 	}
-	defer tarStream.Close()
+	defer func() { _ = tarStream.Close() }()
 
 	tr := tar.NewReader(tarStream)
 	if _, err := tr.Next(); err != nil {
@@ -162,10 +165,14 @@ func (h *Handler) ReadFile(c *gin.Context) {
 
 	reader, err := h.manager.ReadFileContent(spanCtx, id, path)
 	if err != nil {
+		if errors.Is(err, runtime.ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	c.Header("X-File-Path", path)
 	c.DataFromReader(http.StatusOK, -1, "text/plain; charset=utf-8", reader, nil)
@@ -336,6 +343,10 @@ func (h *Handler) ReadFileLines(c *gin.Context) {
 
 	result, err := h.manager.ReadFileLines(spanCtx, id, req.Path, req.StartLine, req.EndLine)
 	if err != nil {
+		if errors.Is(err, runtime.ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
@@ -366,6 +377,10 @@ func (h *Handler) EditFile(c *gin.Context) {
 	}
 
 	if err := h.manager.EditFile(spanCtx, id, req.Path, req.OldStr, req.NewStr, req.ReplaceAll); err != nil {
+		if errors.Is(err, runtime.ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
@@ -391,6 +406,10 @@ func (h *Handler) EditFileLines(c *gin.Context) {
 	}
 
 	if err := h.manager.EditFileLines(spanCtx, id, req.Path, req.StartLine, req.EndLine, req.NewContent); err != nil {
+		if errors.Is(err, runtime.ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
+			return
+		}
 		internalError(c, err)
 		return
 	}
@@ -444,15 +463,15 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file is required"})
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	received, total, err := h.manager.UploadChunk(spanCtx, id, uploadID, chunkIndex, file)
 	if err != nil {
-		if strings.Contains(err.Error(), "upload not found") {
+		if errors.Is(err, sandbox.ErrUploadNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		if strings.Contains(err.Error(), "expected chunk_index") {
+		if errors.Is(err, sandbox.ErrUnexpectedChunkIndex) {
 			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 			return
 		}
@@ -475,7 +494,7 @@ func (h *Handler) GetMultipartStatus(c *gin.Context) {
 
 	st, err := h.manager.GetMultipartStatus(spanCtx, id, uploadID)
 	if err != nil {
-		if strings.Contains(err.Error(), "upload not found") {
+		if errors.Is(err, sandbox.ErrUploadNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
@@ -505,11 +524,11 @@ func (h *Handler) CompleteMultipartUpload(c *gin.Context) {
 
 	path, size, err := h.manager.CompleteMultipartUpload(spanCtx, id, req.UploadID)
 	if err != nil {
-		if strings.Contains(err.Error(), "upload not found") {
+		if errors.Is(err, sandbox.ErrUploadNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		if strings.Contains(err.Error(), "incomplete upload") {
+		if errors.Is(err, sandbox.ErrIncompleteUpload) {
 			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 			return
 		}
@@ -532,7 +551,7 @@ func (h *Handler) CancelMultipartUpload(c *gin.Context) {
 	}
 
 	if err := h.manager.CancelMultipartUpload(spanCtx, id, req.UploadID); err != nil {
-		if strings.Contains(err.Error(), "upload not found") {
+		if errors.Is(err, sandbox.ErrUploadNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}

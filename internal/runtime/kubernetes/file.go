@@ -105,7 +105,43 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 	return &pipeReadCloser{pr: pr, done: done}, nil
 }
 
+func (r *Runtime) FileExists(ctx context.Context, id string, filePath string) error {
+	return fileExistsInPod(ctx, r.client, r.restConfig, r.namespace, id, filePath)
+}
+
+func fileExistsInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath string) error {
+	execReq := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "sandbox",
+			Command:   []string{"test", "-f", filePath},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
+	if err != nil {
+		return fmt.Errorf("create executor: %w", err)
+	}
+
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		return runtime.ErrFileNotFound
+	}
+	return nil
+}
+
 func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	if err := r.FileExists(ctx, id, srcPath); err != nil {
+		return nil, err
+	}
+
 	execReq := r.client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(id).
@@ -547,6 +583,10 @@ func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 
 // readFileLinesInPod reads a range of lines from a file inside a pod.
 func readFileLinesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
+	if err := fileExistsInPod(ctx, client, restConfig, namespace, podName, filePath); err != nil {
+		return nil, err
+	}
+
 	if startLine < 1 {
 		startLine = 1
 	}
@@ -595,6 +635,10 @@ func readFileLinesInPod(ctx context.Context, client kubernetes.Interface, restCo
 
 // editFileInPod performs a string replacement in a file inside a pod.
 func editFileInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath, oldStr, newStr string, replaceAll bool) error {
+	if err := fileExistsInPod(ctx, client, restConfig, namespace, podName, filePath); err != nil {
+		return err
+	}
+
 	readResult, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
 		Command: fmt.Sprintf("cat %s", shellEscape(filePath)),
 		WorkDir: "/workspace",
@@ -635,6 +679,10 @@ func editFileInPod(ctx context.Context, client kubernetes.Interface, restConfig 
 
 // editFileLinesInPod replaces a range of lines in a file inside a pod.
 func editFileLinesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath string, startLine, endLine int, newContent string) error {
+	if err := fileExistsInPod(ctx, client, restConfig, namespace, podName, filePath); err != nil {
+		return err
+	}
+
 	if startLine < 1 {
 		startLine = 1
 	}

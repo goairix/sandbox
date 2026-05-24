@@ -132,6 +132,10 @@ func (m *mockRuntime) DownloadFiles(context.Context, string, []string) ([]runtim
 	return nil, nil
 }
 
+func (m *mockRuntime) FileExists(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
 func (m *mockRuntime) ReadFileContent(_ context.Context, _ string, _ string) (io.ReadCloser, error) {
 	return nil, nil
 }

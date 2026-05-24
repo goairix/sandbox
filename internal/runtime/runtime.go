@@ -11,6 +11,9 @@ import (
 // Use errors.Is to check for this error across wrapped error chains.
 var ErrNotFound = errors.New("sandbox not found")
 
+// ErrFileNotFound is returned when the target file does not exist inside the sandbox.
+var ErrFileNotFound = errors.New("file not found")
+
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).
 type Runtime interface {
 	// CreateSandbox creates a new sandbox container/pod from the given spec.
@@ -39,6 +42,10 @@ type Runtime interface {
 
 	// DownloadFile downloads a file from the sandbox.
 	DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error)
+
+	// FileExists reports whether a regular file exists at the given path inside the sandbox.
+	// Returns ErrFileNotFound if the file does not exist.
+	FileExists(ctx context.Context, id string, filePath string) error
 
 	// ReadFileContent streams the raw content of a file from the sandbox without
 	// any tar wrapping. The caller must close the returned ReadCloser.

@@ -2,12 +2,14 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/goairix/sandbox/internal/logger"
+	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/sandbox"
 	telemetry "github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
@@ -23,10 +25,15 @@ func NewHandler(mgr *sandbox.Manager) *Handler {
 	return &Handler{manager: mgr}
 }
 
-// internalError records the error on the current span and responds with 500.
-// context.Canceled is silently ignored — the client disconnected.
+// internalError records the error on the current span and responds with the
+// appropriate HTTP status code. context.Canceled is silently ignored.
+// runtime.ErrFileNotFound maps to 404; everything else maps to 500.
 func internalError(c *gin.Context, err error) {
 	if context.Cause(c.Request.Context()) != nil {
+		return
+	}
+	if errors.Is(err, runtime.ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
 	span := trace.SpanFromContext(c.Request.Context())

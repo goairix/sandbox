@@ -11,9 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/goairix/sandbox/internal/logger"
-	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
@@ -151,7 +151,7 @@ func (h *Handler) ExecStream(c *gin.Context) {
 			// Send heartbeat ping event
 			pingData := types.SSEPingData{Timestamp: time.Now().Unix()}
 			jsonData, _ := json.Marshal(pingData)
-			fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData)
+			_, _ = fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -215,7 +215,7 @@ func (h *Handler) ExecStream(c *gin.Context) {
 				jsonData, _ = json.Marshal(errData)
 				eventType = "error"
 			}
-			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
+			_, _ = fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
 			if flusher != nil {
 				flusher.Flush()
 			}

@@ -109,7 +109,7 @@ func (h *Handler) listSkillFilesRecursive(ctx context.Context, id, skillRoot str
 
 // extractSkillMeta extracts skill metadata from a tar stream.
 func (h *Handler) extractSkillMeta(path string, tarReader io.ReadCloser) types.SkillMeta {
-	defer tarReader.Close()
+	defer func() { _ = tarReader.Close() }()
 
 	// Extract skill name from path: /workspace/.agent/skills/<name>/SKILL.md
 	parts := strings.Split(path, "/")
@@ -198,7 +198,7 @@ func (h *Handler) GetSkill(c *gin.Context) {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	raw, err := io.ReadAll(reader)
 	if err != nil {
@@ -268,7 +268,7 @@ func (h *Handler) GetSkillFile(c *gin.Context) {
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "file not found"})
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	safeName := filepath.Base(fullPath)
 	c.Header("Content-Type", "text/plain; charset=utf-8")

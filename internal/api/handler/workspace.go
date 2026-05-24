@@ -1,11 +1,12 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
@@ -23,11 +24,11 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 	}
 
 	if err := h.manager.MountWorkspace(spanCtx, id, req.RootPath, req.Exclude); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, sandbox.ErrSandboxNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		if strings.Contains(err.Error(), "already mounted") {
+		if errors.Is(err, sandbox.ErrWorkspaceAlreadyMounted) {
 			c.JSON(http.StatusConflict, types.ErrorResponse{Message: err.Error()})
 			return
 		}
@@ -49,7 +50,7 @@ func (h *Handler) UnmountWorkspace(c *gin.Context) {
 	id := c.Param("id")
 
 	if err := h.manager.UnmountWorkspace(spanCtx, id); err != nil {
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no workspace mounted") {
+		if errors.Is(err, sandbox.ErrSandboxNotFound) || errors.Is(err, sandbox.ErrNoWorkspaceMounted) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
@@ -73,11 +74,11 @@ func (h *Handler) SyncWorkspace(c *gin.Context) {
 	}
 
 	if err := h.manager.SyncWorkspace(spanCtx, id, req.Direction, req.Exclude); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, sandbox.ErrSandboxNotFound) {
 			c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 			return
 		}
-		if strings.Contains(err.Error(), "no workspace mounted") {
+		if errors.Is(err, sandbox.ErrNoWorkspaceMounted) {
 			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 			return
 		}
