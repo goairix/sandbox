@@ -142,6 +142,8 @@ err = sb.EditFileLines(ctx, sandbox.EditFileLinesRequest{
 })
 ```
 
+> `ReadFile` / `ReadFileLines` / `EditFile` / `EditFileLines` 在文件不存在时返回 `*SandboxError`，`errors.Is(err, sandbox.ErrFileNotFound)` 为 true。详见 [Error Handling](#error-handling)。
+
 ### Workspace
 
 ```go
@@ -221,28 +223,52 @@ Skills are stored at `/workspace/.agent/skills/{name}/SKILL.md` inside the sandb
 
 ## Error Handling
 
+服务端在错误响应里携带 `code` 字段（机器可读）和 `message` 字段（可读说明）。SDK 把它们解析成 `*SandboxError`，可以用 `errors.Is` 与预定义 sentinel 比对：
+
 ```go
 result, err := client.GetSandbox(ctx, id)
 if errors.Is(err, sandbox.ErrNotFound) {
-    // sandbox does not exist
+    // 沙箱不存在
 }
 
-// Get full error details
+// 文件操作可能返回两种 404：沙箱不存在 vs 文件不存在
+_, err = sb.ReadFile(ctx, "/workspace/missing.txt")
+switch {
+case errors.Is(err, sandbox.ErrFileNotFound):
+    // 文件在沙箱内不存在
+case errors.Is(err, sandbox.ErrNotFound):
+    // 沙箱本身已不存在
+}
+
+// 取完整错误细节
 var sbErr *sandbox.SandboxError
 if errors.As(err, &sbErr) {
     fmt.Println(sbErr.StatusCode, sbErr.Code, sbErr.Message)
 }
 ```
 
-Predefined sentinels:
+`*SandboxError` 的 `Is` 在 sentinel 的 `Code` 非空时要求 `StatusCode` 与 `Code` 都匹配；为空时只比 `StatusCode`。所以 `ErrFileNotFound` 和 `ErrNotFound` 互不混淆。
 
-| Variable | Status |
-|---|---|
-| `ErrNotFound` | 404 `SANDBOX_NOT_FOUND` |
-| `ErrUnauthorized` | 401 |
-| `ErrRateLimited` | 429 |
-| `ErrTimeout` | 408 |
-| `ErrInvalidRequest` | 400 |
+预定义 sentinel：
+
+| Variable | Status | Code | 触发场景 |
+|---|---|---|---|
+| `ErrNotFound` | 404 | `SANDBOX_NOT_FOUND` | 沙箱 ID 不存在 |
+| `ErrFileNotFound` | 404 | `FILE_NOT_FOUND` | 沙箱内目标文件不存在（Read / ReadFileLines / EditFile / EditFileLines） |
+| `ErrUnauthorized` | 401 | — | API key 校验失败 |
+| `ErrRateLimited` | 429 | — | 限流 |
+| `ErrTimeout` | 408 | — | 请求超时 |
+| `ErrInvalidRequest` | 400 | — | 请求参数错误 |
+
+服务端目前还会返回这些机器可读 code（暂未提供专用 sentinel，可通过 `*SandboxError.Code` 判断）：
+
+| Code | Status | 含义 |
+|---|---|---|
+| `NO_WORKSPACE_MOUNTED` | 400 | 沙箱未挂载 workspace |
+| `WORKSPACE_ALREADY_MOUNTED` | 409 | workspace 已挂载，不能重复挂载 |
+| `UPLOAD_NOT_FOUND` | 404 | 分片上传 ID 不存在或已过期 |
+| `UNEXPECTED_CHUNK_INDEX` | 400 | 分片顺序错误 |
+| `INCOMPLETE_UPLOAD` | 400 | 分片未全部上传完就调用 Complete |
 
 ## API Reference
 
