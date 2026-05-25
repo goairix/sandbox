@@ -439,9 +439,9 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		return
 	}
 
-	file, _, err := c.Request.FormFile("file")
+	file, _, err := c.Request.FormFile("chunk")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file is required"})
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file chunk is required"})
 		return
 	}
 	defer func() { _ = file.Close() }()
