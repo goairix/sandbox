@@ -127,8 +127,14 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 	}
 
 	safeName := filepath.Base(path)
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
-	c.Header("Content-Type", "application/octet-stream")
+	ext := strings.ToLower(filepath.Ext(safeName))
+	if ext == ".html" || ext == ".htm" {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Header("Content-Disposition", "inline")
+	} else {
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
+		c.Header("Content-Type", "application/octet-stream")
+	}
 	if _, err := io.Copy(c.Writer, tr); err != nil {
 		logger.Warn(spanCtx, "error copying file to response",
 			logger.AddField("sandbox_id", id),
