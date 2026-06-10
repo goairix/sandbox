@@ -11,11 +11,23 @@ import (
 	"strings"
 	"time"
 
+	"mime"
+
+	"github.com/goairix/fs"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
+
+// contentTypeOpt returns a fs.Option that sets Content-Type based on file extension.
+func contentTypeOpt(name string) fs.Option {
+	ct := mime.TypeByExtension(filepath.Ext(name))
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	return fs.WithContentType(ct)
+}
 
 // maxConcurrentReads limits the number of parallel file reads from storage
 // during syncToContainer. This bounds memory usage and avoids overwhelming
@@ -651,7 +663,7 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 			continue
 		}
 
-		writer, err := scoped.Create(ctx, name)
+		writer, err := scoped.Create(ctx, name, contentTypeOpt(name))
 		if err != nil {
 			logger.Error(ctx, "fullSyncFromContainer: create file failed",
 				logger.AddField("runtime_id", runtimeID),
@@ -729,7 +741,7 @@ func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.Scope
 			continue
 		}
 
-		writer, err := scoped.Create(ctx, name)
+		writer, err := scoped.Create(ctx, name, contentTypeOpt(name))
 		if err != nil {
 			logger.Error(ctx, "downloadChangedFiles: create file failed",
 				logger.AddField("runtime_id", runtimeID),
