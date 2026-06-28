@@ -100,9 +100,13 @@ func main() {
 
 	mgr := sandbox.NewManager(rt, fsys, fsMeta, sandbox.ManagerConfig{
 		PoolConfig: sandbox.PoolConfig{
-			MinSize: cfg.Pool.MinSize,
-			MaxSize: cfg.Pool.MaxSize,
-			Image:   sandboxImage,
+			MinSize:       cfg.Pool.MinSize,
+			MaxSize:       cfg.Pool.MaxSize,
+			Image:         sandboxImage,
+			Memory:        cfg.Security.MaxMemory,
+			MemoryRequest: cfg.Security.MaxMemoryRequest,
+			CPU:           cfg.Security.MaxCPU,
+			CPURequest:    cfg.Security.MaxCPURequest,
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,

@@ -248,8 +248,11 @@ func buildGatewayIptablesCmd(whitelist []string, blockPrivate bool) string {
 		parts = append(parts, "ip6tables -P FORWARD DROP")
 
 	default:
-		// Full access mode: allow all forwarding
+		// Full access mode: allow all forwarding, but always block the cloud metadata
+		// endpoint regardless of mode — it must never be reachable from sandbox code.
+		parts = append(parts, "iptables -A FORWARD -d 169.254.0.0/16 -j DROP")
 		parts = append(parts, "iptables -P FORWARD ACCEPT")
+		parts = append(parts, "ip6tables -A FORWARD -d fe80::/10 -j DROP")
 		parts = append(parts, "ip6tables -P FORWARD ACCEPT")
 	}
 

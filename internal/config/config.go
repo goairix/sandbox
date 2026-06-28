@@ -110,8 +110,11 @@ type SecurityConfig struct {
 	ExecTimeoutSeconds    int      `mapstructure:"exec_timeout_seconds"`
 	SandboxTimeoutSeconds int      `mapstructure:"sandbox_timeout_seconds"`
 	MaxMemory             string   `mapstructure:"max_memory"`
+	MaxMemoryRequest      string   `mapstructure:"max_memory_request"`
 	MaxDisk               string   `mapstructure:"max_disk"`
 	MaxPids               int      `mapstructure:"max_pids"`
+	MaxCPU                string   `mapstructure:"max_cpu"`
+	MaxCPURequest         string   `mapstructure:"max_cpu_request"`
 	NetworkEnabled        bool     `mapstructure:"network_enabled"`
 	NetworkWhitelist      []string `mapstructure:"network_whitelist"`
 	SeccompProfile        string   `mapstructure:"seccomp_profile"`

@@ -80,8 +80,14 @@ config:
     rateLimit: 100
     execTimeoutSeconds: 30
     sandboxTimeoutSeconds: 3600
-    maxMemory: 256Mi
+    maxMemory: "512Mi"
+    maxMemoryRequest: "128Mi"
+    maxDisk: "100Mi"
     maxPids: 100
+    maxCpu: "500m"
+    maxCpuRequest: "100m"
+    networkEnabled: false
+    networkBlockPrivate: false
   telemetry:
     serviceName: "sandbox"
     serviceVersion: "v1.0.0"

@@ -82,8 +82,20 @@ spec:
               value: "{{ .Values.config.security.sandboxTimeoutSeconds }}"
             - name: SANDBOX_SECURITY_MAX_MEMORY
               value: "{{ .Values.config.security.maxMemory }}"
+            - name: SANDBOX_SECURITY_MAX_MEMORY_REQUEST
+              value: "{{ .Values.config.security.maxMemoryRequest }}"
+            - name: SANDBOX_SECURITY_MAX_DISK
+              value: "{{ .Values.config.security.maxDisk }}"
             - name: SANDBOX_SECURITY_MAX_PIDS
               value: "{{ .Values.config.security.maxPids }}"
+            - name: SANDBOX_SECURITY_MAX_CPU
+              value: "{{ .Values.config.security.maxCpu }}"
+            - name: SANDBOX_SECURITY_MAX_CPU_REQUEST
+              value: "{{ .Values.config.security.maxCpuRequest }}"
+            - name: SANDBOX_SECURITY_NETWORK_ENABLED
+              value: "{{ .Values.config.security.networkEnabled }}"
+            - name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE
+              value: "{{ .Values.config.security.networkBlockPrivate }}"
           {{- if .Values.config.security.apiKey }}
             - name: SANDBOX_SECURITY_API_KEY
               valueFrom:

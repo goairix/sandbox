@@ -25,6 +25,7 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 	}
 
 	resources := corev1.ResourceRequirements{}
+	falseVal := false
 	if spec.Memory != "" || spec.CPU != "" {
 		resources.Limits = corev1.ResourceList{}
 		resources.Requests = corev1.ResourceList{}
@@ -34,7 +35,13 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 				return nil, fmt.Errorf("parse memory quantity %q: %w", spec.Memory, err)
 			}
 			resources.Limits[corev1.ResourceMemory] = mem
-			resources.Requests[corev1.ResourceMemory] = mem
+			req := mem
+			if spec.MemoryRequest != "" {
+				if req, err = resource.ParseQuantity(spec.MemoryRequest); err != nil {
+					return nil, fmt.Errorf("parse memory request %q: %w", spec.MemoryRequest, err)
+				}
+			}
+			resources.Requests[corev1.ResourceMemory] = req
 		}
 		if spec.CPU != "" {
 			cpu, err := resource.ParseQuantity(spec.CPU)
@@ -42,12 +49,19 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 				return nil, fmt.Errorf("parse cpu quantity %q: %w", spec.CPU, err)
 			}
 			resources.Limits[corev1.ResourceCPU] = cpu
-			resources.Requests[corev1.ResourceCPU] = cpu
+			req := cpu
+			if spec.CPURequest != "" {
+				if req, err = resource.ParseQuantity(spec.CPURequest); err != nil {
+					return nil, fmt.Errorf("parse cpu request %q: %w", spec.CPURequest, err)
+				}
+			}
+			resources.Requests[corev1.ResourceCPU] = req
 		}
 	}
 
 	securityContext := &corev1.SecurityContext{
-		ReadOnlyRootFilesystem: &spec.ReadOnlyRootFS,
+		ReadOnlyRootFilesystem:   &spec.ReadOnlyRootFS,
+		AllowPrivilegeEscalation: &falseVal,
 	}
 	if spec.RunAsUser > 0 {
 		securityContext.RunAsUser = &spec.RunAsUser
@@ -79,6 +93,22 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			// Disable SA token mount and K8s service env injection to avoid
+			// leaking cluster topology and credentials into the sandbox.
+			AutomountServiceAccountToken: &falseVal,
+			EnableServiceLinks:           &falseVal,
+			// Pod-level seccomp: restrict syscalls to the runtime default allowlist.
+			SecurityContext: &corev1.PodSecurityContext{
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
+			// Use public DNS instead of CoreDNS to prevent cluster service name
+			// resolution and avoid leaking cluster topology via search domains.
+			DNSPolicy: corev1.DNSNone,
+			DNSConfig: &corev1.PodDNSConfig{
+				Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+			},
 			Containers: []corev1.Container{
 				{
 					Name:            "sandbox",

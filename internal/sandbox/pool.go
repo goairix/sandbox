@@ -13,9 +13,13 @@ import (
 
 // PoolConfig configures the container pool.
 type PoolConfig struct {
-	MinSize int
-	MaxSize int
-	Image   string
+	MinSize       int
+	MaxSize       int
+	Image         string
+	Memory        string // applied to every warm container; empty = no limit
+	MemoryRequest string
+	CPU           string
+	CPURequest    string
 }
 
 // Pool manages a pool of warm containers.
@@ -141,6 +145,10 @@ func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
 		ReadOnlyRootFS: false, // warm containers need writable FS for dependency install
 		RunAsUser:      1000,
 		PidLimit:       100,
+		Memory:         p.config.Memory,
+		MemoryRequest:  p.config.MemoryRequest,
+		CPU:            p.config.CPU,
+		CPURequest:     p.config.CPURequest,
 	}
 
 	return p.runtime.CreateSandbox(ctx, spec)

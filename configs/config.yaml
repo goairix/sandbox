@@ -122,7 +122,13 @@ security:
   # Disk quota per sandbox (e.g. "100Mi", "1Gi").
   max_disk: "100Mi"
   # Maximum number of processes / threads per sandbox.
-  max_pids: 100
+  # CPU limit per sandbox (e.g. "1", "0.5"). Prevents CPU-intensive abuse such as
+  # cryptocurrency mining. Empty string disables the limit.
+  max_cpu: "500m"
+  max_cpu_request: "100m"
+  # Memory limit per sandbox (e.g. "256Mi", "1Gi").
+  max_memory: "512Mi"
+  max_memory_request: "128Mi"
   # Whether outbound network access is allowed inside the sandbox.
   network_enabled: false
   # CIDR ranges the sandbox is allowed to reach when network_enabled = true.

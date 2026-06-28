@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -14,14 +15,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
 // Runtime implements runtime.Runtime using Kubernetes.
 type Runtime struct {
 	client     kubernetes.Interface
+	dynClient  dynamic.Interface
 	restConfig *rest.Config
 	namespace  string
+	hasCilium  bool // whether CiliumNetworkPolicy CRD is available on this cluster
 }
 
 // New creates a new Kubernetes runtime.
@@ -43,10 +47,23 @@ func New(kubeconfig string, namespace string) (*Runtime, error) {
 		return nil, fmt.Errorf("create k8s client: %w", err)
 	}
 
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create dynamic k8s client: %w", err)
+	}
+
+	hasCilium := detectCilium(client)
+	if hasCilium {
+		logger.Info(context.Background(), "Cilium CNI detected: CiliumNetworkPolicy will be used for private range enforcement")
+	} else {
+		logger.Info(context.Background(), "Cilium CNI not detected: relying on standard NetworkPolicy only")
+	}
 	return &Runtime{
 		client:     client,
+		dynClient:  dynClient,
 		restConfig: restConfig,
 		namespace:  namespace,
+		hasCilium:  hasCilium,
 	}, nil
 }
 
@@ -67,6 +84,20 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if err := updateNetworkPolicy(ctx, r.client, r.namespace, spec.ID, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate); err != nil {
 		_ = deletePod(ctx, r.client, r.namespace, pod.Name)
 		return nil, fmt.Errorf("apply network policy: %w", err)
+	}
+
+	// When network is enabled without an explicit whitelist, apply a CiliumNetworkPolicy
+	// egressDeny to block private ranges. Standard K8s NetworkPolicy IPBlock/Except is
+	// unreliable in Cilium (CIDR identity may not be assigned before the "world" catch-all
+	// matches), so an eBPF-level deny is the only reliable fix.
+	// Whitelist mode is excluded: the whitelist may intentionally allow private CIDRs.
+	// On non-Cilium clusters this is skipped; the standard NetworkPolicy suffices.
+	if r.hasCilium && spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0 {
+		if err := applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, spec.ID); err != nil {
+			_ = deleteNetworkPolicy(ctx, r.client, r.namespace, spec.ID)
+			_ = deletePod(ctx, r.client, r.namespace, pod.Name)
+			return nil, fmt.Errorf("apply cilium private deny: %w", err)
+		}
 	}
 
 	return &runtime.SandboxInfo{
@@ -94,6 +125,9 @@ func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
 
 func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
 	// Clean up network policy
+	if r.hasCilium {
+		_ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
+	}
 	_ = deleteNetworkPolicy(ctx, r.client, r.namespace, id)
 	return deletePod(ctx, r.client, r.namespace, id)
 }
@@ -165,7 +199,16 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error {
-	return updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist, blockPrivate)
+	if err := updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist, blockPrivate); err != nil {
+		return err
+	}
+	if !r.hasCilium {
+		return nil
+	}
+	if enabled && len(whitelist) == 0 {
+		return applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
+	}
+	return deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
 }
 
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {

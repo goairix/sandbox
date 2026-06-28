@@ -50,8 +50,10 @@ const (
 type SandboxSpec struct {
 	ID       string
 	Image    string
-	Memory   string // e.g. "256Mi"
-	CPU      string // e.g. "0.5"
+	Memory        string // limit e.g. "512Mi"
+	MemoryRequest string // request e.g. "128Mi"; defaults to Memory when empty
+	CPU           string // limit e.g. "500m"
+	CPURequest    string // request e.g. "100m"; defaults to CPU when empty
 	Disk     string // e.g. "100Mi"
 	PidLimit int
 	// Network
