@@ -117,11 +117,10 @@ security:
   exec_timeout_seconds: 30
   # Maximum sandbox lifetime in seconds (0 = no limit). Default: 3600 (1 hour).
   sandbox_timeout_seconds: 3600
-  # Memory limit per sandbox (e.g. "256Mi", "1Gi").
-  max_memory: "256Mi"
   # Disk quota per sandbox (e.g. "100Mi", "1Gi").
   max_disk: "100Mi"
   # Maximum number of processes / threads per sandbox.
+  max_pids: 100
   # CPU limit per sandbox (e.g. "1", "0.5"). Prevents CPU-intensive abuse such as
   # cryptocurrency mining. Empty string disables the limit.
   max_cpu: "500m"
