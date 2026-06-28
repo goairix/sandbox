@@ -59,13 +59,6 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		}
 	}
 
-	if spec.PidLimit > 0 {
-		if resources.Limits == nil {
-			resources.Limits = corev1.ResourceList{}
-		}
-		resources.Limits[corev1.ResourceName("pids")] = *resource.NewQuantity(int64(spec.PidLimit), resource.DecimalSI)
-	}
-
 	securityContext := &corev1.SecurityContext{
 		ReadOnlyRootFilesystem:   &spec.ReadOnlyRootFS,
 		AllowPrivilegeEscalation: &falseVal,
