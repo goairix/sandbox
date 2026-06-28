@@ -123,6 +123,20 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 					WorkingDir:      "/workspace",
 					Resources:       resources,
 					SecurityContext: securityContext,
+					// Override kubelet-injected KUBERNETES_* env vars to empty strings.
+					// enableServiceLinks=false suppresses other service vars but not these.
+					// The API server is unreachable anyway (no SA token + network policy),
+					// but clearing them avoids information leakage in security audits.
+					Env: []corev1.EnvVar{
+						{Name: "KUBERNETES_SERVICE_HOST", Value: ""},
+						{Name: "KUBERNETES_SERVICE_PORT", Value: ""},
+						{Name: "KUBERNETES_SERVICE_PORT_HTTPS", Value: ""},
+						{Name: "KUBERNETES_PORT", Value: ""},
+						{Name: "KUBERNETES_PORT_443_TCP", Value: ""},
+						{Name: "KUBERNETES_PORT_443_TCP_PROTO", Value: ""},
+						{Name: "KUBERNETES_PORT_443_TCP_PORT", Value: ""},
+						{Name: "KUBERNETES_PORT_443_TCP_ADDR", Value: ""},
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "workspace",
