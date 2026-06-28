@@ -59,6 +59,13 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		}
 	}
 
+	if spec.PidLimit > 0 {
+		if resources.Limits == nil {
+			resources.Limits = corev1.ResourceList{}
+		}
+		resources.Limits[corev1.ResourceName("pids")] = *resource.NewQuantity(int64(spec.PidLimit), resource.DecimalSI)
+	}
+
 	securityContext := &corev1.SecurityContext{
 		ReadOnlyRootFilesystem:   &spec.ReadOnlyRootFS,
 		AllowPrivilegeEscalation: &falseVal,
@@ -68,10 +75,16 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 	}
 
 	// Determine workspace volume source: HostPath if a /workspace mount is
-	// specified, otherwise EmptyDir.
-	workspaceVolume := corev1.VolumeSource{
-		EmptyDir: &corev1.EmptyDirVolumeSource{},
+	// specified, otherwise EmptyDir with optional disk quota.
+	workspaceEmptyDir := &corev1.EmptyDirVolumeSource{}
+	if spec.Disk != "" {
+		diskQty, err := resource.ParseQuantity(spec.Disk)
+		if err != nil {
+			return nil, fmt.Errorf("parse disk quantity %q: %w", spec.Disk, err)
+		}
+		workspaceEmptyDir.SizeLimit = &diskQty
 	}
+	workspaceVolume := corev1.VolumeSource{EmptyDir: workspaceEmptyDir}
 	for _, m := range spec.Mounts {
 		if m.ContainerPath == "/workspace" {
 			hostPathType := corev1.HostPathDirectory

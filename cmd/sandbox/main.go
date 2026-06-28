@@ -107,6 +107,7 @@ func main() {
 			MemoryRequest: cfg.Security.MaxMemoryRequest,
 			CPU:           cfg.Security.MaxCPU,
 			CPURequest:    cfg.Security.MaxCPURequest,
+			Disk:          cfg.Security.MaxDisk,
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,

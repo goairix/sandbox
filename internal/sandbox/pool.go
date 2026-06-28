@@ -16,10 +16,11 @@ type PoolConfig struct {
 	MinSize       int
 	MaxSize       int
 	Image         string
-	Memory        string // applied to every warm container; empty = no limit
+	Memory        string
 	MemoryRequest string
 	CPU           string
 	CPURequest    string
+	Disk          string
 }
 
 // Pool manages a pool of warm containers.
@@ -149,6 +150,7 @@ func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
 		MemoryRequest:  p.config.MemoryRequest,
 		CPU:            p.config.CPU,
 		CPURequest:     p.config.CPURequest,
+		Disk:           p.config.Disk,
 	}
 
 	return p.runtime.CreateSandbox(ctx, spec)
