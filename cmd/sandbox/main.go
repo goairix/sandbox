@@ -110,6 +110,7 @@ func main() {
 			Disk:          cfg.Security.MaxDisk,
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
+		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,
 	})
 

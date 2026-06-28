@@ -63,6 +63,7 @@ func multipartKey(sandboxID, uploadID string) string {
 type ManagerConfig struct {
 	PoolConfig              PoolConfig
 	DefaultTimeout          int // seconds
+	ExecTimeoutSeconds      int // per-execution timeout; 0 = no limit
 	AutoSyncIntervalSeconds int // 0 = disabled
 }
 
@@ -437,6 +438,12 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 	execStart := time.Now()
 
+	if m.config.ExecTimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(m.config.ExecTimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		telemetry.Error(err, span)
@@ -491,6 +498,12 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.ExecStream",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 	)
+
+	if m.config.ExecTimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(m.config.ExecTimeoutSeconds)*time.Second)
+		defer cancel()
+	}
 
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
