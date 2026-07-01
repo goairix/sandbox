@@ -42,6 +42,29 @@ type readResult struct {
     err    error
 }
 
+releaseResult := func(res readResult) {
+    if res.reader != nil {
+        _ = res.reader.Close()
+    }
+    if res.done != nil {
+        close(res.done)
+    }
+}
+
+// cleanup 函数：仅在错误路径调用，负责排空并释放尚未被主循环处理的 entry。
+// 注意：本函数处理的是主循环还没 range 到的 entry（下标 ≥ start）。
+// 当前 entry 的 reader/done 必须由调用点先 releaseResult，避免 WriteHeader/io.Copy
+// 失败时泄漏 reader 或卡住等待 done 的 goroutine。
+cleanup := func(start int) {
+    for j := start; j < len(entries); j++ {
+        if resultChs[j] == nil { // 目录 entry 没有 goroutine
+            continue
+        }
+        res := <-resultChs[j] // 可能阻塞，等排队中的 goroutine 发送
+        releaseResult(res)    // 释放 reader 和 sem 槽位，链式解锁下一个
+    }
+}
+
 go func(entry fileEntry, ch chan<- readResult) {
     sem <- struct{}{}
     reader, err := scoped.Open(ctx, entry.relPath)
@@ -56,18 +79,23 @@ go func(entry fileEntry, ch chan<- readResult) {
     <-sem   // 消费完才释放；连接在 Close() 时已归还
 }(e, ch)
 
-// 主循环
-tw.WriteHeader(&tar.Header{Size: res.size, ...}) // 用预知 size
-io.Copy(tw, res.reader)                          // 流式，不缓冲
-res.reader.Close()
-close(res.done)
-
-// 错误路径 cleanup：收到已打开的 reader 后也必须关闭并 close(done)，否则
-// 对应 goroutine 会一直卡在 <-done，sem 槽位无法释放。
-if res.reader != nil {
-    _ = res.reader.Close()
-    close(res.done)
+// 主循环：正常路径，每个 entry 只处理一次
+res := <-resultChs[i]
+if res.err != nil {
+    cleanup(i + 1) // 从下一个未处理的 entry 开始清理
+    return res.err
 }
+if err := tw.WriteHeader(&tar.Header{Size: res.size, ...}); err != nil {
+    releaseResult(res)
+    cleanup(i + 1)
+    return err
+}
+if _, err := io.Copy(tw, res.reader); err != nil { // 流式，不缓冲
+    releaseResult(res)
+    cleanup(i + 1)
+    return err
+}
+releaseResult(res)
 ```
 
 **注意事项：**
@@ -80,7 +108,7 @@ if res.reader != nil {
 
 2. **ctx 取消时 `io.Copy` 的行为**：取决于底层 reader 是否感知 context cancellation。S3 SDK（aws-sdk-go-v2 / aliyun-oss-go-sdk 等）的 object reader 均感知 ctx，取消时 `io.Copy` 会立即返回错误，进入正常错误路径。**实现时必须确保 `scoped.Open` 返回的 reader 透传 ctx 给底层 HTTP 请求**，否则取消信号无法传递，`io.Copy` 会阻塞到文件传完。
 
-3. **cleanup 的链式解锁行为**：cleanup 顺序处理各 channel：`<-resultChs[j]` 可能阻塞，等待还在排队 `sem <- struct{}{}` 的 goroutine 发送结果。但每次 `close(res.done)` 都会释放一个 sem 槽位，从而解锁下一个等待的 goroutine，形成链式传导。cleanup 只在**错误路径**执行，正常路径不受影响。
+3. **cleanup 的链式解锁行为**：cleanup 顺序处理各 channel：`<-resultChs[j]` 可能阻塞，等待还在排队 `sem <- struct{}{}` 的 goroutine 发送结果。但每次 `releaseResult(res)` 都会释放一个 sem 槽位，从而解锁下一个等待的 goroutine，形成链式传导。cleanup 只处理“尚未被主循环接收”的后续 entry；当前 entry 在 `WriteHeader` / `io.Copy` 失败时必须先 `releaseResult(res)` 再 cleanup。
 
 ### 内存收益
 
@@ -326,7 +354,8 @@ type WorkspaceSyncSpec struct {
     Bucket      string
     UseSSL      bool
     SecretRef   string   // K8s Secret name，含 access_key / secret_key
-    EgressHosts []string // init 阶段临时 NetworkPolicy 允许访问的对象存储域名/IP
+    EgressFQDNs []string // Cilium toFQDNs 使用的对象存储域名
+    EgressCIDRs []string // 标准 NetworkPolicy ipBlock 使用的稳定 CIDR
     SyncExclude []string
 }
 ```
@@ -378,7 +407,8 @@ type ManagerConfig struct {
     WorkspaceSyncEnabled             bool     // 仅 runtime.type == "kubernetes" 且 secret/image 配齐时为 true
     WorkspaceSyncSecretRef           string
     WorkspaceSyncImage               string
-    WorkspaceSyncEgressHostsOverride []string
+    WorkspaceSyncEgressFQDNs         []string
+    WorkspaceSyncEgressCIDRs         []string
     SingleFileDownloadThreshold      int
 }
 ```
@@ -387,7 +417,8 @@ type ManagerConfig struct {
 
 - `workspace.sync_secret_ref` 与 `workspace.sync_image` 必须同时配置，否则启动时报配置错误
 - Docker 运行时忽略/拒绝 init container 配置，不能让 Docker runtime 静默忽略 `WorkspaceSync`
-- `WorkspaceSyncEgressHostsOverride` 为空时，从对象存储 endpoint 推导 bootstrap egress host
+- Cilium 环境优先使用 `WorkspaceSyncEgressFQDNs`；为空时可从对象存储 endpoint 推导域名
+- 标准 NetworkPolicy 环境必须配置 `WorkspaceSyncEgressCIDRs`，不能把单次 DNS 解析结果当成稳定策略
 
 ### pod.go — 注入 sync init container
 
@@ -424,9 +455,9 @@ if ws := spec.WorkspaceSync; ws != nil {
 
 ### kubernetes/runtime.go — init 阶段网络策略
 
-K8s `NetworkPolicy` 是 Pod 级别，不是 container 级别；不能只给 init container 开网、同时让 main container 完全无网。因此 init container 模式必须显式接受这个安全取舍：启动阶段临时允许 Pod 访问对象存储 endpoint，Pod Ready 后立即把同名 NetworkPolicy 更新为 sandbox 的正常网络策略。
+K8s `NetworkPolicy` 是 Pod 级别，不是 container 级别；不能只给 init container 开网、同时让 main container 完全无网。因此 init container 模式必须显式接受这个安全取舍：启动阶段临时允许 Pod 访问对象存储 endpoint，Pod Ready 后立即切换为 sandbox 的正常网络策略，并删除任何额外的 bootstrap allow policy。
 
-当前 `CreateSandbox` 是“创建 Pod → 等 Ready → 应用 NetworkPolicy”。启用 init container 时需要改为。注意：`spec.ID` 是 pod/runtime 名称，restore 重建时可能等于旧 `RuntimeID`；NetworkPolicy selector 必须使用 pod 上最终的 `sandbox.id` label，也就是逻辑 sandbox ID。否则 restore 重建时 policy 选不中 pod。
+当前 `CreateSandbox` 是“创建 Pod → 等 Ready → 应用 NetworkPolicy”。启用 init container 时需要改为“应用 bootstrap policy → 创建 Pod → 等 Ready → 应用正常 policy → 清理临时 bootstrap policy”。注意：`spec.ID` 是 pod/runtime 名称，restore 重建时可能等于旧 `RuntimeID`；NetworkPolicy selector 必须使用 pod 上最终的 `sandbox.id` label，也就是逻辑 sandbox ID。否则 restore 重建时 policy 选不中 pod。
 
 ```go
 func policySandboxID(spec runtime.SandboxSpec) string {
@@ -436,45 +467,67 @@ func policySandboxID(spec runtime.SandboxSpec) string {
     return spec.ID
 }
 
+type workspaceSyncBootstrapCleanup struct {
+    // OnFailure 删除 bootstrap 阶段创建的临时策略。
+    // 标准 NetworkPolicy 模式删除 sandbox-<id>；Cilium FQDN 模式删除独立 Cilium allow policy。
+    OnFailure func(context.Context)
+    // AfterReady 只删除 Ready 后仍会额外放行的策略。
+    // 标准 NetworkPolicy 模式由 updateNetworkPolicy 覆盖同名 policy，因此这里是 no-op；
+    // Cilium FQDN 模式必须删除独立 Cilium allow policy，避免 bootstrap allow 遗留。
+    AfterReady func(context.Context)
+}
+
 func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
     policyID := policySandboxID(spec)
+    var bootstrapCleanup workspaceSyncBootstrapCleanup
 
     if ws := spec.WorkspaceSync; ws != nil {
-        // 使用与正常策略相同的 policy name: sandbox-<id>。
-        // 不创建第二个临时 policy，避免多个 NetworkPolicy 的 egress allow 规则叠加。
-        //
         // Cilium egressDeny 是独立策略，allow policy 不能覆盖 deny。
         // restore 重建同一 logical sandbox 时，旧 deny 可能仍存在；init 阶段必须先删除，
         // Ready 后再按正常网络配置重建。
         if r.hasCilium {
             _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID)
         }
-        if err := applyWorkspaceSyncBootstrapPolicy(ctx, r.client, r.namespace, policyID, ws.EgressHosts); err != nil {
+        cleanup, err := applyWorkspaceSyncBootstrapPolicy(ctx, r.client, r.dynClient, r.namespace, policyID, r.hasCilium, ws)
+        if err != nil {
             return nil, fmt.Errorf("apply workspace sync bootstrap policy: %w", err)
+        }
+        bootstrapCleanup = cleanup
+    }
+
+    cleanupCreateFailure := func() {
+        if bootstrapCleanup.OnFailure != nil {
+            bootstrapCleanup.OnFailure(ctx)
         }
     }
 
     pod, err := createPod(ctx, r.client, r.namespace, spec)
     if err != nil {
-        _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+        cleanupCreateFailure()
         return nil, err
     }
 
     if err := waitForPodReady(ctx, r.client, r.namespace, pod.Name, 60*time.Second); err != nil {
         _ = deletePod(ctx, r.client, r.namespace, pod.Name)
-        _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+        cleanupCreateFailure()
         return nil, fmt.Errorf("wait for pod: %w", err)
     }
 
-    // Ready 后把 bootstrap policy 更新为正常 sandbox 网络策略。
+    // Ready 后把标准 bootstrap policy 更新为正常 sandbox 网络策略；
+    // 若 bootstrap 额外创建了 Cilium FQDN allow policy，update 后必须删除。
     if err := updateNetworkPolicy(ctx, r.client, r.namespace, policyID, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate); err != nil {
         _ = deletePod(ctx, r.client, r.namespace, pod.Name)
+        cleanupCreateFailure()
         return nil, fmt.Errorf("apply network policy: %w", err)
+    }
+    if bootstrapCleanup.AfterReady != nil {
+        bootstrapCleanup.AfterReady(ctx)
     }
     if r.hasCilium {
         if spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0 {
             if err := applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID); err != nil {
                 _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+                cleanupCreateFailure()
                 _ = deletePod(ctx, r.client, r.namespace, pod.Name)
                 return nil, fmt.Errorf("apply cilium private deny: %w", err)
             }
@@ -489,11 +542,17 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 `applyWorkspaceSyncBootstrapPolicy` 的规则：
 
 - 允许 DNS
-- 仅允许 `ws.EgressHosts` 解析出的 CIDR（通常是对象存储 endpoint）的 80/443 egress
-- 使用现有 `sandbox-<logical sandbox id>` policy name，Ready 后由 `updateNetworkPolicy` 覆盖
+- 仅允许对象存储 endpoint 的 80/443 egress
+- 标准 NetworkPolicy 模式使用现有 `sandbox-<logical sandbox id>` policy name，Ready 后由 `updateNetworkPolicy` 覆盖
+- Cilium FQDN 模式创建独立的 `sandbox-workspace-sync-<logical sandbox id>` `CiliumNetworkPolicy`，Ready 后必须删除，避免 bootstrap allow 与正常策略叠加
 - Pod selector 必须匹配 `createPod` 最终写入的 `sandbox.id` label；restore 重建时不能用 runtime/pod name 当 selector
 - Cilium 环境下 bootstrap 前删除同 logical sandbox 的旧 `sandbox-private-deny-*`，Ready 后再按正常网络配置恢复
-- endpoint 解析失败时创建 sandbox 失败，不创建 Pod
+- Cilium 模式缺少可用 FQDN、标准 NetworkPolicy 模式缺少稳定 CIDR、或 policy 创建失败时，sandbox 创建失败且不创建 Pod
+
+**P4 —— endpoint 的 IP 漂移问题（必须在实现前决策）**：标准 K8s `NetworkPolicy` 的 egress 只能写 `ipBlock`（CIDR），不支持 FQDN。而阿里云 OSS、腾讯 COS 等公网 endpoint 通常是 **CDN / 多 IP 轮换**，DNS A 记录会变。如果在创建 sandbox 时把 endpoint 解析成一组固定 CIDR 写进 policy，下一次 endpoint IP 漂移后，bootstrap policy 就会漏掉新 IP，init container 拉取间歇性失败——且因为是间歇性的，极难排查。两种可行策略，按环境二选一：
+
+- **Cilium 环境**：用 `CiliumNetworkPolicy` 的 `toFQDNs`，直接按 `sync_egress_fqdns` 放行，天然跟随 IP 变化。这是首选，也和本方案已有的 Cilium 分支一致。该 bootstrap Cilium policy 必须在 Pod Ready 且正常 policy 更新完成后删除。
+- **标准 NetworkPolicy 环境**：`ipBlock` 必须放宽到 endpoint 所属对象存储服务的**已知网段**（各云厂商公布了 OSS/COS/OBS 的公网 IP 段），而不是解析单次 A 记录。文档需明确要求运维填 `sync_egress_cidrs`。若既非 Cilium、endpoint 又是不可枚举的动态 IP，则该 endpoint 不适合用 init container 模式。
 
 `RemoveSandbox` 也必须使用同一套 logical sandbox id 清理策略。当前调用方传入的是 runtime/pod id；在 restore 重建场景下它可能不等于 logical sandbox id。K8s runtime 删除前应尽量读取 pod label：
 
@@ -507,8 +566,10 @@ func (r *Runtime) cleanupSandboxPolicies(ctx context.Context, runtimeID string) 
     }
     if r.hasCilium {
         _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID)
+        _ = deleteWorkspaceSyncBootstrapCiliumPolicy(ctx, r.dynClient, r.namespace, policyID)
         if policyID != runtimeID {
             _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, runtimeID) // 兼容旧策略名
+            _ = deleteWorkspaceSyncBootstrapCiliumPolicy(ctx, r.dynClient, r.namespace, runtimeID)
         }
     }
     _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
@@ -520,7 +581,15 @@ func (r *Runtime) cleanupSandboxPolicies(ctx context.Context, runtimeID string) 
 
 `UpdateNetwork` 只接收 runtime id，也需要同样先从 pod label 解析 logical sandbox id，再更新对应 policy。
 
-这个方案仍有一个很短窗口：Pod 进入 Running 到正常 policy 更新完成之间，main container 也处于 bootstrap policy 下。当前实现本来在 Ready 前完全没有 sandbox NetworkPolicy；该调整是收敛风险。如果后续需要严格零窗口，需要让 main container 入口等待 API 写入解除文件/annotation，这不纳入本阶段。
+**安全边界（P2，必须显式接受）**：Pod 进入 Running 到正常 policy 更新完成之间存在一个窗口，在此窗口内 **main container 的网络命名空间也处于 bootstrap policy 下，可直连对象存储 endpoint 的 80/443**。但按当前 sandbox 启动模型，main container 默认命令是 `sleep infinity`，且 `CreateSandbox` 在正常 policy 更新完成前不会把 sandbox 返回给用户；因此正常用户代码并不会在这个窗口内经由 API 执行。风险应表述为“主容器网络短暂可达对象存储 endpoint”，而不是“用户代码必然可达 endpoint”：
+
+- 用户代码**没有** access key（key 只存在于 init container 的 Secret，不注入 main container），无法直接读写 bucket；
+- 如果未来镜像 entrypoint 会自动运行用户代码、引入 sidecar、或存在能在 Pod Ready 前 exec 进容器的外部权限，endpoint 可达性会扩大攻击面——探测 bucket 是否存在、尝试匿名/公共读、对 endpoint 做指纹识别等；
+- 当前实现下该窗口是平台残余风险，不是常规用户代码路径；实现和运维文档需把这个前提写清楚，避免后续改启动命令时误判风险。
+
+这个窗口**无法用纯 K8s 机制消除**：init container 退出后、main container 启动前，K8s 没有 hook 点可以插入 policy 切换。相比"Ready 前完全没有 NetworkPolicy"的现状，本方案是风险收敛（窗口从"整个创建期"缩短到"Running→policy 更新"），但不是零风险。
+
+严格零窗口方案见"不在范围内"：让 main container entrypoint 阻塞等待 API 写入的解除文件/annotation，API 在正常 policy 更新完成后才放行。本阶段不纳入。
 
 ### manager.go — buildSpec 与创建路径联动
 
@@ -561,7 +630,8 @@ if m.shouldUseWorkspaceInitContainer(cfg.WorkspacePath) {
         Bucket:      m.fsMeta.Bucket,
         UseSSL:      m.fsMeta.UseSSL,
         SecretRef:   m.config.WorkspaceSyncSecretRef,
-        EgressHosts: m.workspaceSyncEgressHosts(),
+        EgressFQDNs: m.workspaceSyncEgressFQDNs(),
+        EgressCIDRs: m.workspaceSyncEgressCIDRs(),
         SyncExclude: cfg.WorkspaceSyncExclude,
     }
 }
@@ -654,7 +724,16 @@ func (m *Manager) registerWorkspaceWithMode(
 
 ### restorePersistentSandboxes — 按 SyncMode 恢复
 
-第三层必须同步修改 restore 流程，否则 pod 重建后仍会走 API `syncToContainer`，收益表里的“API 进程文件流量 = 0”不成立。`restorePersistentSandboxes` 在 `recreateSandbox` 成功时需要记录 `recreatedThisRun := true`，供 workspace restore 分支判断是否需要降级同步。
+第三层必须同步修改 restore 流程，否则 pod 重建后仍会走 API `syncToContainer`，收益表里的“API 进程文件流量 = 0”不成立。
+
+**`recreatedThisRun` 语义定义**：这是一个 **per-sandbox** 布尔量，作用域仅限当前 sandbox 的 restore 处理，含义是「本次进程启动是否重建了这个 pod」——`restorePersistentSandboxes` 发现 pod 已不存在、调用 `recreateSandbox` 并成功后置为 `true`；若原 pod 仍在 running（无需重建）则为 `false`。它不是整个 restore loop 的全局标志，每个 sandbox 独立计算。
+
+它只影响 `WorkspaceSyncModeInitContainer` 分支的降级判断：
+
+- `recreatedThisRun == true`（pod 是本次新建）：init container 已在新 pod 里跑过一次；只有当**当前配置已不再支持 init container**时，新 pod 的 `/workspace` 才是空的，必须降级 API sync 补数据。
+- `recreatedThisRun == false`（pod 原本仍 running）：`/workspace` 数据仍在老 pod 的 emptyDir 里，**无论配置是否变化都不能重新 sync**（会覆盖运行中的数据）。所以这一步直接跳过。
+
+因此下方 `if recreatedThisRun && !shouldUseWorkspaceInitContainer(...)` 的两个条件缺一不可。
 
 ```go
 if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
@@ -697,9 +776,10 @@ if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
 ```go
 type WorkspaceConfig struct {
     // ...现有字段...
-    SyncSecretRef                  string   `mapstructure:"sync_secret_ref"`  // 与 sync_image 同时填写才启用
-    SyncImage                      string   `mapstructure:"sync_image"`       // sync init container 镜像
-    SyncEgressHosts                []string `mapstructure:"sync_egress_hosts"` // 可选；默认从 storage endpoint 推导
+    SyncSecretRef                  string   `mapstructure:"sync_secret_ref"`   // 与 sync_image 同时填写才启用
+    SyncImage                      string   `mapstructure:"sync_image"`        // sync init container 镜像
+    SyncEgressFQDNs                []string `mapstructure:"sync_egress_fqdns"` // Cilium toFQDNs；可从 endpoint 推导
+    SyncEgressCIDRs                []string `mapstructure:"sync_egress_cidrs"` // 标准 NetworkPolicy ipBlock；非 Cilium 必填
     SingleFileDownloadThreshold int `mapstructure:"single_file_download_threshold"`
 }
 ```
@@ -709,8 +789,12 @@ workspace:
   single_file_download_threshold: 5
   sync_secret_ref: "sandbox-storage-secret"
   sync_image: "registry.example.com/workspace-sync:1.0"
-  sync_egress_hosts:
+  # Cilium 环境推荐按域名放行。
+  sync_egress_fqdns:
     - "oss-cn-hangzhou.aliyuncs.com"
+  # 标准 NetworkPolicy 环境必须配置对象存储服务的稳定 CIDR，不能填单次 DNS 解析结果。
+  sync_egress_cidrs:
+    - "203.0.113.0/24"
 ```
 
 ### 收益
@@ -728,15 +812,15 @@ workspace:
 | 文件 | 变更 | 所属层 |
 |------|------|--------|
 | `internal/sandbox/workspace.go` | `writeTarStream` 改为流式；新增 `downloadFilesDirect`、`downloadFilesViaTar`；常量 `singleFileDownloadThreshold`、`maxConcurrentStorageWrites` | 优化一、二 |
-| `internal/runtime/types.go` | `SandboxSpec` 新增 `WorkspaceSync *WorkspaceSyncSpec`；`WorkspaceSyncSpec` 包含 image、对象存储定位、SecretRef、bootstrap egress hosts | 优化三 |
+| `internal/runtime/types.go` | `SandboxSpec` 新增 `WorkspaceSync *WorkspaceSyncSpec`；`WorkspaceSyncSpec` 包含 image、对象存储定位、SecretRef、bootstrap egress FQDN/CIDR | 优化三 |
 | `internal/storage/filesystem.go` | `FileSystemMeta` 补充 Endpoint、Region、Bucket、SubPath、UseSSL | 优化三 |
 | `internal/sandbox/types.go` | `WorkspaceInfo` 新增 `SyncMode`，并定义 `api` / `init_container` / `bind_mount` 常量 | 优化三 |
-| `internal/config/config.go` | `WorkspaceConfig` 新增 `SyncSecretRef`、`SyncImage`、`SyncEgressHosts`、`SingleFileDownloadThreshold` | 优化二、三 |
+| `internal/config/config.go` | `WorkspaceConfig` 新增 `SyncSecretRef`、`SyncImage`、`SyncEgressFQDNs`、`SyncEgressCIDRs`、`SingleFileDownloadThreshold` | 优化二、三 |
 | `internal/sandbox/manager.go` | direct 创建判断、`buildSpec` 填充 `WorkspaceSync`、自动挂载注册 `SyncMode`、public `MountWorkspace` 固定 API sync、注册 helper 接收已创建的 `ScopedFS`、restore 按 `SyncMode` 恢复 | 优化三 |
-| `internal/runtime/kubernetes/runtime.go` | init container 模式下按 logical sandbox id 应用 bootstrap NetworkPolicy，Pod Ready 后更新为正常策略；Cilium 环境下 init 前移除旧 deny，Ready 后恢复正常 deny；`RemoveSandbox`/`UpdateNetwork` 从 pod label 解析 logical sandbox id 清理或更新策略 | 优化三 |
+| `internal/runtime/kubernetes/runtime.go` | init container 模式下按 logical sandbox id 应用 bootstrap NetworkPolicy/CiliumNetworkPolicy，Pod Ready 后更新为正常策略并删除临时 Cilium allow；Cilium 环境下 init 前移除旧 deny，Ready 后恢复正常 deny；`RemoveSandbox`/`UpdateNetwork` 从 pod label 解析 logical sandbox id 清理或更新策略 | 优化三 |
 | `internal/runtime/kubernetes/pod.go` | 按 `WorkspaceSync` 注入 sync init container | 优化三 |
 | `internal/runtime/kubernetes/exec.go` | **无改动** | — |
-| `configs/config.yaml` | 新增 `workspace.single_file_download_threshold`、`workspace.sync_secret_ref`、`workspace.sync_image`、`workspace.sync_egress_hosts` | 优化二、三 |
+| `configs/config.yaml` | 新增 `workspace.single_file_download_threshold`、`workspace.sync_secret_ref`、`workspace.sync_image`、`workspace.sync_egress_fqdns`、`workspace.sync_egress_cidrs` | 优化二、三 |
 | sync 镜像 Dockerfile | 新增（内置 rclone 或自研二进制，精简） | 优化三 |
 
 ## 错误处理
@@ -748,10 +832,11 @@ workspace:
 | 大变更路径下 `io.Discard` 失败 | 返回错误，中止整个 syncFromContainer |
 | `sync_secret_ref` 与 `sync_image` 只配置其一 | 启动配置校验失败，避免半启用状态 |
 | Docker runtime 配置了 init container sync | 启动配置校验失败或禁用该模式，不能让 Docker 静默忽略 `WorkspaceSync` |
-| bootstrap egress host 解析失败 / NetworkPolicy 创建失败 | sandbox 创建失败，不创建 Pod 或清理已创建资源 |
+| Cilium 模式缺少 bootstrap FQDN / 标准 NetworkPolicy 模式缺少 bootstrap CIDR / policy 创建失败 | sandbox 创建失败，不创建 Pod 或清理已创建资源 |
 | restore 重建时 runtime id 与 logical sandbox id 不一致 | NetworkPolicy / CiliumNetworkPolicy 使用 logical sandbox id，selector 匹配 pod 的最终 `sandbox.id` label |
 | runtime id 与 logical sandbox id 不一致导致策略清理遗漏 | `RemoveSandbox` 从 pod label 解析 logical id，并兼容删除 runtime id 命名的旧策略 |
 | Cilium 旧 private deny 阻断 init container 访问私网对象存储 | bootstrap 前删除同 logical sandbox 的旧 deny，Ready 后按正常网络配置重建或保持删除 |
+| Cilium FQDN bootstrap allow policy 遗留 | Ready 后显式删除 `sandbox-workspace-sync-<logical id>`；失败路径和 `RemoveSandbox` 也幂等清理 |
 | init container 拉取失败（凭证错/网络断）| pod init container 失败 → `waitForPodReady` 超时 → sandbox 创建返回 500 |
 | init container 拉取超时 | 同上 |
 | init 模式 session 在重启后配置失效且 pod 需要重建 | 降级为 API `syncToContainer`，成功后将 `SyncMode` 更新为 `api` |
