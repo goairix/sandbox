@@ -18,6 +18,7 @@
 - 改动范围限于 `internal/sandbox/workspace.go` 及相关文件，不改公共接口
 - 保持现有 sync 语义（mtime 增量、排除列表、bind-mount 短路）不变
 - 第三层（init container）需要扩展 `runtime.SandboxSpec`，是较大架构变更
+- init container 模式仅适用于 K8s + 远端对象存储；Docker 运行时和手动挂载已有 sandbox 仍走 API sync 路径
 
 ## 优化一：writeTarStream 流式化（消灭 OOM）
 
@@ -60,6 +61,13 @@ tw.WriteHeader(&tar.Header{Size: res.size, ...}) // 用预知 size
 io.Copy(tw, res.reader)                          // 流式，不缓冲
 res.reader.Close()
 close(res.done)
+
+// 错误路径 cleanup：收到已打开的 reader 后也必须关闭并 close(done)，否则
+// 对应 goroutine 会一直卡在 <-done，sem 槽位无法释放。
+if res.reader != nil {
+    _ = res.reader.Close()
+    close(res.done)
+}
 ```
 
 **注意事项：**
@@ -137,9 +145,9 @@ func (m *Manager) downloadChangedFiles(
 
 逐文件调用 `runtime.ReadFileContent`（已有接口），并发 4 路写回 storage。
 
-**关键约束**：必须保证任何错误路径都关闭已打开的 reader。`ReadFileContent` 在 K8s 下是 exec/cat 流，未 Close 的流会在后台 drain 完整个文件，泄漏连接和资源。
+**关键约束**：必须保证任何错误路径都关闭已打开的 reader。`ReadFileContent` 在 K8s 下是 exec/cat 流，且当前 `pipeReadCloser.Close()` 会同步 drain 到 EOF；如果 `Create` 失败后直接 `Close`，大文件会被读完才返回。实现时必须在错误路径先取消该文件的 context，再关闭 reader。
 
-实现上用 `errgroup.WithContext`（`golang.org/x/sync/errgroup`）管控全流程——第一个错误自动 cancel ctx，后续 Open 和 io.Copy 均感知取消：
+实现上用 `errgroup.WithContext`（`golang.org/x/sync/errgroup`）管控整个 open → create → copy → close 流程。不要拆成“先打开所有 reader，再写回”的两阶段 channel 设计；一段式处理更简单，且任意错误都会触发 `egCtx` 取消。每个文件再派生一个 `fileCtx`，用于在当前文件出错时立即中断 `ReadFileContent` 的底层 exec/cat 流。
 
 ```go
 func (m *Manager) downloadFilesDirect(
@@ -148,65 +156,53 @@ func (m *Manager) downloadFilesDirect(
     runtimeID string,
     changedSet map[string]struct{},
 ) error {
-    // 所有 goroutine 共享可取消 ctx；第一个错误触发取消
     eg, egCtx := errgroup.WithContext(ctx)
+    eg.SetLimit(maxConcurrentStorageWrites)
 
-    type job struct {
-        path   string
-        reader io.ReadCloser
-    }
-    jobs := make(chan job, len(changedSet))
-
-    // 阶段一：并发打开 reader（数量 ≤ threshold，无需额外信号量）
     for path := range changedSet {
         path := path
         eg.Go(func() error {
-            rc, err := m.runtime.ReadFileContent(egCtx, runtimeID, "/workspace/"+path)
+            fileCtx, cancelFile := context.WithCancel(egCtx)
+            defer cancelFile()
+
+            rc, err := m.runtime.ReadFileContent(fileCtx, runtimeID, "/workspace/"+path)
             if err != nil {
                 return fmt.Errorf("read %q: %w", path, err)
             }
-            select {
-            case jobs <- job{path: path, reader: rc}:
-            case <-egCtx.Done():
-                rc.Close() // ctx 已取消，立刻关闭，不泄漏
-                return egCtx.Err()
+            closeReader := func() {
+                cancelFile()
+                _ = rc.Close()
             }
-            return nil
-        })
-    }
+            defer closeReader()
 
-    // 等阶段一全部完成（含错误），再关闭 jobs channel
-    go func() {
-        eg.Wait() //nolint:errcheck // 错误通过 eg.Wait() 返回值收集
-        close(jobs)
-    }()
-
-    // 阶段二：并发写回 storage
-    sem := make(chan struct{}, maxConcurrentStorageWrites)
-    for j := range jobs {
-        j := j
-        eg.Go(func() error {
-            sem <- struct{}{}
-            defer func() { <-sem }()
-            defer j.reader.Close()
-
-            w, err := scoped.Create(egCtx, j.path, contentTypeOpt(j.path))
+            w, err := scoped.Create(egCtx, path, contentTypeOpt(path))
             if err != nil {
-                return fmt.Errorf("create %q: %w", j.path, err)
+                cancelFile() // 避免 rc.Close() drain 完整个文件
+                return fmt.Errorf("create %q: %w", path, err)
             }
-            if _, err := io.Copy(w, j.reader); err != nil {
-                w.Close()
-                return fmt.Errorf("write %q: %w", j.path, err)
+            closed := false
+            defer func() {
+                if !closed {
+                    _ = w.Close()
+                }
+            }()
+
+            if _, err := io.Copy(w, rc); err != nil {
+                cancelFile()
+                return fmt.Errorf("write %q: %w", path, err)
             }
-            return w.Close()
+            if err := w.Close(); err != nil {
+                closed = true
+                return fmt.Errorf("flush %q: %w", path, err)
+            }
+            closed = true
+            return nil
         })
     }
 
     return eg.Wait()
 }
 ```
-
-> **注意**：上面的 `go func() { eg.Wait(); close(jobs) }()` 启动了一个后台 goroutine 来关闭 channel，而主流程通过 `range jobs` 消费然后再调 `eg.Wait()`。这里有一个重入问题——`eg.Wait()` 被调用了两次。实现时应改用两个独立的 errgroup，或用 `sync.WaitGroup` 控制阶段一、`errgroup` 控制阶段二。伪代码仅示意流程，实现时需仔细拆分两个阶段的并发控制。
 
 ### 大变更路径：downloadFilesViaTar
 
@@ -287,7 +283,7 @@ func (m *Manager) downloadFilesViaTar(
 |------|--------|--------|
 | 1 个文件变更 | 下载全量 workspace tar（如 500 MB）| 只下载该文件 |
 | 5 个文件变更 | 同上 | 5 次 ReadFileContent，并发写回 |
-| 100 个文件变更 | 下载全量 tar，串行写回 | 下载全量 tar，并发 4 路写回 |
+| 100 个文件变更 | 下载全量 tar，串行写回 | 下载全量 tar，顺序流式写回（保持内存稳定） |
 
 ---
 
@@ -322,23 +318,76 @@ type SandboxSpec struct {
 
 // WorkspaceSyncSpec 描述 init container 如何从对象存储拉取 workspace。
 type WorkspaceSyncSpec struct {
-    RootPath    string   // 对象存储路径前缀
+    Image       string   // sync init container 镜像
+    RootPath    string   // 对象存储路径前缀，必须包含 storage.filesystem.sub_path
     Provider    string   // "s3" | "oss" | "cos" | "obs" | "minio"
     Endpoint    string
+    Region      string
     Bucket      string
+    UseSSL      bool
     SecretRef   string   // K8s Secret name，含 access_key / secret_key
+    EgressHosts []string // init 阶段临时 NetworkPolicy 允许访问的对象存储域名/IP
     SyncExclude []string
 }
 ```
 
-**`internal/sandbox/types.go` — WorkspaceInfo 新增字段：**
+**`internal/sandbox/types.go` — WorkspaceInfo 新增 sync mode：**
 
 ```go
+const (
+    WorkspaceSyncModeAPI           = "api"
+    WorkspaceSyncModeInitContainer = "init_container"
+    WorkspaceSyncModeBindMount     = "bind_mount"
+)
+
 type WorkspaceInfo struct {
     // ...现有字段...
-    SyncMode string `json:"sync_mode,omitempty"` // "api" | "init_container"
+    SyncMode string `json:"sync_mode,omitempty"`
 }
 ```
+
+`SyncMode` 记录“这个 sandbox 的 workspace 实际如何完成初始同步”，不能用全局配置推断。原因：`MountWorkspace` 也可用于已有 sandbox 的手动挂载；这类挂载没有 init container 跑过，即使全局配置了 `sync_secret_ref`，也必须继续执行 `syncToContainer`。
+
+**`internal/storage/filesystem.go` — FileSystemMeta 补充远端定位字段：**
+
+```go
+type FileSystemMeta struct {
+    Provider  StorageProvider
+    LocalPath string // non-empty only when Provider == ProviderLocal
+    Endpoint  string
+    Region    string
+    Bucket    string
+    SubPath   string
+    UseSSL    bool
+}
+```
+
+`RootPath` 不能只用 `cfg.WorkspacePath`。对象存储 driver 当前会在内部叠加 `storage.filesystem.sub_path`，init container 直连对象存储时也必须使用同一个前缀：
+
+```go
+func objectStorageRootPath(meta *storage.FileSystemMeta, workspacePath string) string {
+    return path.Join(meta.SubPath, workspacePath)
+}
+```
+
+**`internal/sandbox/manager.go` — ManagerConfig 新增内部配置：**
+
+```go
+type ManagerConfig struct {
+    // ...现有字段...
+    WorkspaceSyncEnabled             bool     // 仅 runtime.type == "kubernetes" 且 secret/image 配齐时为 true
+    WorkspaceSyncSecretRef           string
+    WorkspaceSyncImage               string
+    WorkspaceSyncEgressHostsOverride []string
+    SingleFileDownloadThreshold      int
+}
+```
+
+上层配置装配时负责校验：
+
+- `workspace.sync_secret_ref` 与 `workspace.sync_image` 必须同时配置，否则启动时报配置错误
+- Docker 运行时忽略/拒绝 init container 配置，不能让 Docker runtime 静默忽略 `WorkspaceSync`
+- `WorkspaceSyncEgressHostsOverride` 为空时，从对象存储 endpoint 推导 bootstrap egress host
 
 ### pod.go — 注入 sync init container
 
@@ -346,11 +395,12 @@ type WorkspaceInfo struct {
 if ws := spec.WorkspaceSync; ws != nil {
     pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
         Name:  "workspace-sync",
-        Image: syncContainerImage, // 精简镜像，内置 rclone 或自研 sync 二进制
+        Image: ws.Image, // 精简镜像，内置 rclone 或自研 sync 二进制
         Command: []string{
             "/bin/workspace-sync",
             "--provider=" + ws.Provider,
             "--endpoint=" + ws.Endpoint,
+            "--region=" + ws.Region,
             "--bucket=" + ws.Bucket,
             "--src=" + ws.RootPath,
             "--dst=/workspace",
@@ -372,18 +422,115 @@ if ws := spec.WorkspaceSync; ws != nil {
 }
 ```
 
+### kubernetes/runtime.go — init 阶段网络策略
+
+K8s `NetworkPolicy` 是 Pod 级别，不是 container 级别；不能只给 init container 开网、同时让 main container 完全无网。因此 init container 模式必须显式接受这个安全取舍：启动阶段临时允许 Pod 访问对象存储 endpoint，Pod Ready 后立即把同名 NetworkPolicy 更新为 sandbox 的正常网络策略。
+
+当前 `CreateSandbox` 是“创建 Pod → 等 Ready → 应用 NetworkPolicy”。启用 init container 时需要改为。注意：`spec.ID` 是 pod/runtime 名称，restore 重建时可能等于旧 `RuntimeID`；NetworkPolicy selector 必须使用 pod 上最终的 `sandbox.id` label，也就是逻辑 sandbox ID。否则 restore 重建时 policy 选不中 pod。
+
+```go
+func policySandboxID(spec runtime.SandboxSpec) string {
+    if spec.Labels != nil && spec.Labels["sandbox.id"] != "" {
+        return spec.Labels["sandbox.id"]
+    }
+    return spec.ID
+}
+
+func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+    policyID := policySandboxID(spec)
+
+    if ws := spec.WorkspaceSync; ws != nil {
+        // 使用与正常策略相同的 policy name: sandbox-<id>。
+        // 不创建第二个临时 policy，避免多个 NetworkPolicy 的 egress allow 规则叠加。
+        //
+        // Cilium egressDeny 是独立策略，allow policy 不能覆盖 deny。
+        // restore 重建同一 logical sandbox 时，旧 deny 可能仍存在；init 阶段必须先删除，
+        // Ready 后再按正常网络配置重建。
+        if r.hasCilium {
+            _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID)
+        }
+        if err := applyWorkspaceSyncBootstrapPolicy(ctx, r.client, r.namespace, policyID, ws.EgressHosts); err != nil {
+            return nil, fmt.Errorf("apply workspace sync bootstrap policy: %w", err)
+        }
+    }
+
+    pod, err := createPod(ctx, r.client, r.namespace, spec)
+    if err != nil {
+        _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+        return nil, err
+    }
+
+    if err := waitForPodReady(ctx, r.client, r.namespace, pod.Name, 60*time.Second); err != nil {
+        _ = deletePod(ctx, r.client, r.namespace, pod.Name)
+        _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+        return nil, fmt.Errorf("wait for pod: %w", err)
+    }
+
+    // Ready 后把 bootstrap policy 更新为正常 sandbox 网络策略。
+    if err := updateNetworkPolicy(ctx, r.client, r.namespace, policyID, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate); err != nil {
+        _ = deletePod(ctx, r.client, r.namespace, pod.Name)
+        return nil, fmt.Errorf("apply network policy: %w", err)
+    }
+    if r.hasCilium {
+        if spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0 {
+            if err := applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID); err != nil {
+                _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+                _ = deletePod(ctx, r.client, r.namespace, pod.Name)
+                return nil, fmt.Errorf("apply cilium private deny: %w", err)
+            }
+        } else {
+            _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID)
+        }
+    }
+    ...
+}
+```
+
+`applyWorkspaceSyncBootstrapPolicy` 的规则：
+
+- 允许 DNS
+- 仅允许 `ws.EgressHosts` 解析出的 CIDR（通常是对象存储 endpoint）的 80/443 egress
+- 使用现有 `sandbox-<logical sandbox id>` policy name，Ready 后由 `updateNetworkPolicy` 覆盖
+- Pod selector 必须匹配 `createPod` 最终写入的 `sandbox.id` label；restore 重建时不能用 runtime/pod name 当 selector
+- Cilium 环境下 bootstrap 前删除同 logical sandbox 的旧 `sandbox-private-deny-*`，Ready 后再按正常网络配置恢复
+- endpoint 解析失败时创建 sandbox 失败，不创建 Pod
+
+`RemoveSandbox` 也必须使用同一套 logical sandbox id 清理策略。当前调用方传入的是 runtime/pod id；在 restore 重建场景下它可能不等于 logical sandbox id。K8s runtime 删除前应尽量读取 pod label：
+
+```go
+func (r *Runtime) cleanupSandboxPolicies(ctx context.Context, runtimeID string) {
+    policyID := runtimeID
+    if pod, err := getPod(ctx, r.client, r.namespace, runtimeID); err == nil {
+        if v := pod.Labels["sandbox.id"]; v != "" {
+            policyID = v
+        }
+    }
+    if r.hasCilium {
+        _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, policyID)
+        if policyID != runtimeID {
+            _ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, runtimeID) // 兼容旧策略名
+        }
+    }
+    _ = deleteNetworkPolicy(ctx, r.client, r.namespace, policyID)
+    if policyID != runtimeID {
+        _ = deleteNetworkPolicy(ctx, r.client, r.namespace, runtimeID) // 兼容旧策略名
+    }
+}
+```
+
+`UpdateNetwork` 只接收 runtime id，也需要同样先从 pod label 解析 logical sandbox id，再更新对应 policy。
+
+这个方案仍有一个很短窗口：Pod 进入 Running 到正常 policy 更新完成之间，main container 也处于 bootstrap policy 下。当前实现本来在 Ready 前完全没有 sandbox NetworkPolicy；该调整是收敛风险。如果后续需要严格零窗口，需要让 main container 入口等待 API 写入解除文件/annotation，这不纳入本阶段。
+
 ### manager.go — buildSpec 与创建路径联动
 
 **P1-c 修正**：init container 必须在 Pod 创建时注入，pool 里的 pod 是预先建好的，事后无法补注入。因此，**启用 init container 时，workspace sandbox 必须强制绕过 pool，走 direct 创建路径**。这与现有 network-enabled 和 bind-mount 的处理方式一致。
 
-`Create` 里的 `useDirectCreate` 判断扩展：
+`Create` 里的 direct 创建判断扩展：
 
 ```go
-useBindMount   := cfg.WorkspacePath != "" && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal
-useSyncInitCtr := cfg.WorkspacePath != "" &&
-    m.fsMeta != nil &&
-    m.fsMeta.Provider != storage.ProviderLocal &&
-    m.config.Workspace.SyncSecretRef != "" // 有 SecretRef = 启用 init container
+useBindMount := cfg.WorkspacePath != "" && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal
+useSyncInitCtr := m.shouldUseWorkspaceInitContainer(cfg.WorkspacePath)
 
 if cfg.Network.Enabled || useBindMount || useSyncInitCtr {
     source = "direct"
@@ -392,53 +539,178 @@ if cfg.Network.Enabled || useBindMount || useSyncInitCtr {
 }
 ```
 
+```go
+func (m *Manager) shouldUseWorkspaceInitContainer(workspacePath string) bool {
+    return workspacePath != "" &&
+        m.config.WorkspaceSyncEnabled &&
+        m.fsMeta != nil &&
+        m.fsMeta.Provider != storage.ProviderLocal
+}
+```
+
 `buildSpec` 按 provider 填充 `WorkspaceSync`：
 
 ```go
-if cfg.WorkspacePath != "" &&
-    m.fsMeta != nil &&
-    m.fsMeta.Provider != storage.ProviderLocal &&
-    m.config.Workspace.SyncSecretRef != "" {
+if m.shouldUseWorkspaceInitContainer(cfg.WorkspacePath) {
     spec.WorkspaceSync = &runtime.WorkspaceSyncSpec{
-        RootPath:    cfg.WorkspacePath,
+        Image:       m.config.WorkspaceSyncImage,
+        RootPath:    objectStorageRootPath(m.fsMeta, cfg.WorkspacePath),
         Provider:    string(m.fsMeta.Provider),
         Endpoint:    m.fsMeta.Endpoint,
+        Region:      m.fsMeta.Region,
         Bucket:      m.fsMeta.Bucket,
-        SecretRef:   m.config.Workspace.SyncSecretRef,
+        UseSSL:      m.fsMeta.UseSSL,
+        SecretRef:   m.config.WorkspaceSyncSecretRef,
+        EgressHosts: m.workspaceSyncEgressHosts(),
         SyncExclude: cfg.WorkspaceSyncExclude,
     }
 }
 ```
 
-`MountWorkspace` 检测到 init container 已完成同步时跳过 `syncToContainer`（init container 的完成由 `waitForPodReady` 保证——K8s 原生 init container 在退出 0 之前主容器不会启动）：
+自动挂载 workspace 时按创建模式分流：
 
 ```go
-initSynced := m.fsMeta != nil &&
-    m.fsMeta.Provider != storage.ProviderLocal &&
-    m.config.Workspace.SyncSecretRef != ""
-if !initSynced {
-    if err := m.syncToContainer(ctx, scoped, runtimeID); err != nil {
-        return fmt.Errorf("sync to container: %w", err)
+if cfg.WorkspacePath != "" {
+    switch {
+    case bindMounted:
+        scoped, fsErr := storage.NewScopedFS(m.filesystem, cfg.WorkspacePath)
+        if fsErr != nil {
+            err = fmt.Errorf("create scoped filesystem: %w", fsErr)
+        } else {
+            err = m.registerWorkspaceWithMode(ctx, id, scoped, cfg.WorkspacePath, cfg.WorkspaceSyncExclude, true, WorkspaceSyncModeBindMount)
+        }
+    case useSyncInitCtr:
+        // init container 已在 waitForPodReady 前完成 storage -> /workspace。
+        // 这里只注册 ScopedFS 和 WorkspaceInfo，不再调用 syncToContainer。
+        scoped, fsErr := storage.NewScopedFS(m.filesystem, cfg.WorkspacePath)
+        if fsErr != nil {
+            err = fmt.Errorf("create scoped filesystem: %w", fsErr)
+        } else {
+            err = m.registerWorkspaceWithMode(ctx, id, scoped, cfg.WorkspacePath, cfg.WorkspaceSyncExclude, false, WorkspaceSyncModeInitContainer)
+        }
+    default:
+        err = m.MountWorkspace(ctx, id, cfg.WorkspacePath, cfg.WorkspaceSyncExclude)
+    }
+    if err != nil {
+        // 保持现有失败清理逻辑：remove sandbox + 删除内存 map
+        return nil, fmt.Errorf("mount workspace: %w", err)
     }
 }
 ```
 
+`MountWorkspace` 是 public API handler 使用的路径，必须始终执行 API sync。不要在这里用全局配置推断 init 是否完成：
+
+```go
+func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
+    runtimeID := m.sandboxes[sandboxID].RuntimeID
+    scoped, err := storage.NewScopedFS(m.filesystem, rootPath)
+    if err != nil {
+        return fmt.Errorf("create scoped filesystem: %w", err)
+    }
+    if err := m.syncToContainer(ctx, scoped, runtimeID); err != nil {
+        return fmt.Errorf("sync to container: %w", err)
+    }
+    return m.registerWorkspaceWithMode(ctx, sandboxID, scoped, rootPath, exclude, false, WorkspaceSyncModeAPI)
+}
+```
+
+`registerWorkspaceWithMode` 只负责登记已经创建好的 `ScopedFS`，避免 `MountWorkspace` 在完成 `syncToContainer` 后再次 `NewScopedFS`，造成“容器已同步但注册失败”的半成功状态：
+
+```go
+func (m *Manager) registerWorkspaceWithMode(
+    ctx context.Context,
+    sandboxID string,
+    scoped storage.ScopedFS,
+    rootPath string,
+    exclude []string,
+    bindMounted bool,
+    syncMode string,
+) error {
+    if scoped == nil {
+        return fmt.Errorf("scoped filesystem is nil")
+    }
+    now := time.Now()
+    m.mu.Lock()
+    sb := m.sandboxes[sandboxID]
+    m.workspaces[sandboxID] = scoped
+    sb.Workspace = &WorkspaceInfo{
+        RootPath:     rootPath,
+        MountedAt:    now,
+        LastSyncedAt: now,
+        BindMounted:  bindMounted,
+        SyncExclude:  exclude,
+        SyncMode:     syncMode,
+    }
+    sb.UpdatedAt = now
+    m.mu.Unlock()
+    if m.sessions != nil {
+        _ = m.sessions.Save(ctx, sb)
+    }
+    return nil
+}
+```
+
 > **Open Question 回答**：是否接受"有 workspace sync 的 sandbox 不走 pool"？**是，必须接受**。init container 在 pod spec 里声明，pool pod 无法事后改造。这是设计约束，不是可选项。需在配置文档里明确说明：启用 `sync_secret_ref` 后，所有带 `workspace_path` 的 sandbox 都走 direct 路径，pool 仅服务无 workspace 的 sandbox。
+
+### restorePersistentSandboxes — 按 SyncMode 恢复
+
+第三层必须同步修改 restore 流程，否则 pod 重建后仍会走 API `syncToContainer`，收益表里的“API 进程文件流量 = 0”不成立。`restorePersistentSandboxes` 在 `recreateSandbox` 成功时需要记录 `recreatedThisRun := true`，供 workspace restore 分支判断是否需要降级同步。
+
+```go
+if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
+    scoped, fsErr := storage.NewScopedFS(m.filesystem, sbPtr.Workspace.RootPath)
+    if fsErr == nil {
+        m.workspaces[id] = scoped
+
+        switch sbPtr.Workspace.SyncMode {
+        case WorkspaceSyncModeBindMount:
+            // 直接共享宿主机目录，无需同步。
+        case WorkspaceSyncModeInitContainer:
+            // 如果 pod 刚被 recreateSandbox 重建，init container 已经完成拉取；
+            // 如果 pod 原本仍 running，/workspace 仍在该 pod 的 emptyDir 中。
+            // 两种情况都不能再调用 syncToContainer。
+            //
+            // 例外：如果这是本次启动刚重建的 pod，但当前配置已不再支持 init container
+            //（例如 sync_secret_ref 被移除），则必须降级到 API sync，并把 SyncMode 更新为 api。
+            if recreatedThisRun && !m.shouldUseWorkspaceInitContainer(sbPtr.Config.WorkspacePath) {
+                logger.Warn(ctx, "workspace init-container config unavailable, falling back to API sync", ...)
+                if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID); syncErr != nil {
+                    logger.Error(ctx, "workspace re-sync failed", ...)
+                } else {
+                    sbPtr.Workspace.SyncMode = WorkspaceSyncModeAPI
+                }
+            }
+        default:
+            // 兼容旧 session 和手动挂载：继续用 API sync 恢复。
+            if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID); syncErr != nil {
+                logger.Error(ctx, "workspace re-sync failed", ...)
+            }
+        }
+    }
+}
+```
+
+`recreateSandbox` 使用 `m.buildSpec(sb.RuntimeID, sb.Config)` 时，只有 `sb.Config.WorkspacePath` 非空且当前配置仍启用 init container 的 sandbox 才会注入 init container。手动挂载的 workspace 通常只存在于 `sb.Workspace.RootPath`，不在 `sb.Config.WorkspacePath`，因此仍走 API restore，符合预期。
 
 ### 新增配置项
 
 ```go
 type WorkspaceConfig struct {
     // ...现有字段...
-    SyncSecretRef string `mapstructure:"sync_secret_ref"` // 填写则启用 init container 模式
-    SyncImage     string `mapstructure:"sync_image"`      // sync init container 镜像
+    SyncSecretRef                  string   `mapstructure:"sync_secret_ref"`  // 与 sync_image 同时填写才启用
+    SyncImage                      string   `mapstructure:"sync_image"`       // sync init container 镜像
+    SyncEgressHosts                []string `mapstructure:"sync_egress_hosts"` // 可选；默认从 storage endpoint 推导
+    SingleFileDownloadThreshold int `mapstructure:"single_file_download_threshold"`
 }
 ```
 
 ```yaml
 workspace:
+  single_file_download_threshold: 5
   sync_secret_ref: "sandbox-storage-secret"
   sync_image: "registry.example.com/workspace-sync:1.0"
+  sync_egress_hosts:
+    - "oss-cn-hangzhou.aliyuncs.com"
 ```
 
 ### 收益
@@ -446,7 +718,7 @@ workspace:
 | 场景 | 优化前 | 优化后 |
 |------|--------|--------|
 | K8s，workspace 1000 个文件 | API 进程全量 tar 传输 | API 进程文件流量 = 0 |
-| pod crash 后恢复 | `restorePersistentSandboxes` 全量 syncToContainer | pod 重建时 init container 自动重拉 |
+| pod crash 后恢复 | `restorePersistentSandboxes` 全量 syncToContainer | 当前 init 配置仍有效时，pod 重建由 init container 自动重拉 |
 | API OOM 风险 | 存在（受文件总大小影响）| 消除（数据不过 API 进程）|
 
 ---
@@ -456,13 +728,15 @@ workspace:
 | 文件 | 变更 | 所属层 |
 |------|------|--------|
 | `internal/sandbox/workspace.go` | `writeTarStream` 改为流式；新增 `downloadFilesDirect`、`downloadFilesViaTar`；常量 `singleFileDownloadThreshold`、`maxConcurrentStorageWrites` | 优化一、二 |
-| `internal/runtime/types.go` | `SandboxSpec` 新增 `WorkspaceSync *WorkspaceSyncSpec`；新增 `WorkspaceSyncSpec` 类型 | 优化三 |
-| `internal/sandbox/types.go` | `WorkspaceInfo` 新增 `SyncMode` | 优化三 |
-| `internal/config/config.go` | `WorkspaceConfig` 新增 `SyncSecretRef`、`SyncImage` | 优化三 |
-| `internal/sandbox/manager.go` | `buildSpec` 填充 `WorkspaceSync`；`MountWorkspace` 检测 init container 已同步时跳过 `syncToContainer` | 优化三 |
+| `internal/runtime/types.go` | `SandboxSpec` 新增 `WorkspaceSync *WorkspaceSyncSpec`；`WorkspaceSyncSpec` 包含 image、对象存储定位、SecretRef、bootstrap egress hosts | 优化三 |
+| `internal/storage/filesystem.go` | `FileSystemMeta` 补充 Endpoint、Region、Bucket、SubPath、UseSSL | 优化三 |
+| `internal/sandbox/types.go` | `WorkspaceInfo` 新增 `SyncMode`，并定义 `api` / `init_container` / `bind_mount` 常量 | 优化三 |
+| `internal/config/config.go` | `WorkspaceConfig` 新增 `SyncSecretRef`、`SyncImage`、`SyncEgressHosts`、`SingleFileDownloadThreshold` | 优化二、三 |
+| `internal/sandbox/manager.go` | direct 创建判断、`buildSpec` 填充 `WorkspaceSync`、自动挂载注册 `SyncMode`、public `MountWorkspace` 固定 API sync、注册 helper 接收已创建的 `ScopedFS`、restore 按 `SyncMode` 恢复 | 优化三 |
+| `internal/runtime/kubernetes/runtime.go` | init container 模式下按 logical sandbox id 应用 bootstrap NetworkPolicy，Pod Ready 后更新为正常策略；Cilium 环境下 init 前移除旧 deny，Ready 后恢复正常 deny；`RemoveSandbox`/`UpdateNetwork` 从 pod label 解析 logical sandbox id 清理或更新策略 | 优化三 |
 | `internal/runtime/kubernetes/pod.go` | 按 `WorkspaceSync` 注入 sync init container | 优化三 |
 | `internal/runtime/kubernetes/exec.go` | **无改动** | — |
-| `configs/config.yaml` | 新增 `workspace.sync_secret_ref`、`workspace.sync_image` | 优化三 |
+| `configs/config.yaml` | 新增 `workspace.single_file_download_threshold`、`workspace.sync_secret_ref`、`workspace.sync_image`、`workspace.sync_egress_hosts` | 优化二、三 |
 | sync 镜像 Dockerfile | 新增（内置 rclone 或自研二进制，精简） | 优化三 |
 
 ## 错误处理
@@ -472,8 +746,15 @@ workspace:
 | `entry.size` 与实际内容不符（极罕见的 S3 不一致）| `tar.Writer` 返回错误，`writeTarStream` 向上透传，sandbox 创建失败 |
 | `ReadFileContent` 超时（小变更路径）| 单文件 error 返回，整个 `downloadFilesDirect` 中止 |
 | 大变更路径下 `io.Discard` 失败 | 返回错误，中止整个 syncFromContainer |
+| `sync_secret_ref` 与 `sync_image` 只配置其一 | 启动配置校验失败，避免半启用状态 |
+| Docker runtime 配置了 init container sync | 启动配置校验失败或禁用该模式，不能让 Docker 静默忽略 `WorkspaceSync` |
+| bootstrap egress host 解析失败 / NetworkPolicy 创建失败 | sandbox 创建失败，不创建 Pod 或清理已创建资源 |
+| restore 重建时 runtime id 与 logical sandbox id 不一致 | NetworkPolicy / CiliumNetworkPolicy 使用 logical sandbox id，selector 匹配 pod 的最终 `sandbox.id` label |
+| runtime id 与 logical sandbox id 不一致导致策略清理遗漏 | `RemoveSandbox` 从 pod label 解析 logical id，并兼容删除 runtime id 命名的旧策略 |
+| Cilium 旧 private deny 阻断 init container 访问私网对象存储 | bootstrap 前删除同 logical sandbox 的旧 deny，Ready 后按正常网络配置重建或保持删除 |
 | init container 拉取失败（凭证错/网络断）| pod init container 失败 → `waitForPodReady` 超时 → sandbox 创建返回 500 |
 | init container 拉取超时 | 同上 |
+| init 模式 session 在重启后配置失效且 pod 需要重建 | 降级为 API `syncToContainer`，成功后将 `SyncMode` 更新为 `api` |
 
 ## 不在范围内
 
@@ -481,6 +762,7 @@ workspace:
 - `autoSync` 定时任务的频率/并发控制
 - sync init container 镜像的构建与发布流程
 - Docker 运行时（init container 是 K8s 原生概念）
+- 严格消除 Pod Running 到正常 NetworkPolicy 更新之间的短暂 bootstrap egress 窗口
 
 ## 实施顺序建议
 
