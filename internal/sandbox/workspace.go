@@ -29,13 +29,7 @@ func contentTypeOpt(name string) fs.Option {
 	return fs.WithContentType(ct)
 }
 
-// maxConcurrentReads limits the number of parallel file reads from storage
-// during syncToContainer. This bounds memory usage and avoids overwhelming
-// cloud storage backends with too many concurrent HTTP requests.
-const maxConcurrentReads = 8
-
-// fileEntry holds metadata and content for a single file or directory,
-// collected during the parallel-read phase of syncToContainer.
+// fileEntry holds metadata for a single file or directory.
 type fileEntry struct {
 	relPath string
 	isDir   bool
@@ -234,10 +228,10 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 	return sb.Workspace, nil
 }
 
-// syncToContainer collects file metadata from ScopedFS, concurrently reads
-// file contents, and streams a tar archive into the container via exec pipe.
-// The container-side "tar xf -" process consumes data in real-time, keeping
-// memory usage proportional to the concurrency window rather than total size.
+// syncToContainer collects file metadata from ScopedFS and streams a tar archive
+// into the container via exec pipe. File contents are copied directly from
+// storage, so content memory does not grow with the total workspace byte size;
+// the entries slice still grows with the number of files and directories.
 func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
 	// Phase 1: walk the directory tree to collect file metadata.
 	var entries []fileEntry
@@ -261,22 +255,7 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 	)
 
 	// Phase 2: stream tar into container via exec pipe.
-	pr, pw := io.Pipe()
-
-	execErrCh := make(chan error, 1)
-	go func() {
-		execErrCh <- m.runtime.ExecPipe(ctx, runtimeID,
-			[]string{"tar", "xf", "-", "-C", "/workspace"}, pr)
-	}()
-
-	writeErr := m.writeTarStream(ctx, scoped, entries, pw)
-	if writeErr != nil {
-		pw.CloseWithError(writeErr)
-	} else {
-		pw.Close()
-	}
-
-	execErr := <-execErrCh
+	writeErr, execErr := m.streamTarToContainer(ctx, scoped, entries, runtimeID)
 
 	if writeErr != nil {
 		logger.Error(ctx, "syncToContainer: write tar stream failed",
@@ -300,60 +279,52 @@ func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, 
 	return nil
 }
 
-// writeTarStream writes all entries as a tar archive to w, reading files
-// concurrently (up to maxConcurrentReads) to reduce I/O latency.
+// streamTarToContainer connects the tar producer to the runtime consumer.
+// It returns both sides' errors so the caller can log the failing phase.
+func (m *Manager) streamTarToContainer(
+	ctx context.Context,
+	scoped storage.ScopedFS,
+	entries []fileEntry,
+	runtimeID string,
+) (writeErr, execErr error) {
+	pr, pw := io.Pipe()
+
+	execErrCh := make(chan error, 1)
+	go func() {
+		execErr := m.runtime.ExecPipe(ctx, runtimeID,
+			[]string{"tar", "xf", "-", "-C", "/workspace"}, pr)
+		// ExecPipe may return before consuming the stream (for example, when
+		// starting tar fails). Closing the reader wakes a producer blocked in
+		// io.PipeWriter.Write instead of leaking the sync goroutine forever.
+		_ = pr.CloseWithError(execErr)
+		execErrCh <- execErr
+	}()
+
+	writeErr = m.writeTarStream(ctx, scoped, entries, pw)
+	if writeErr != nil {
+		_ = pw.CloseWithError(writeErr)
+	} else {
+		_ = pw.Close()
+	}
+
+	execErr = <-execErrCh
+	return writeErr, execErr
+}
+
+// writeTarStream writes entries directly from storage into the tar stream.
+// Files must not be prefetched into []byte: a workspace may contain millions
+// of files or tens of GB, so file-content memory must stay bounded even though
+// the metadata entries slice is proportional to the number of paths.
 func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, entries []fileEntry, w io.Writer) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
 	tw := tar.NewWriter(w)
-
-	type readResult struct {
-		content []byte
-		err     error
-	}
-
-	sem := make(chan struct{}, maxConcurrentReads)
-	resultChs := make([]chan readResult, len(entries))
-
-	for i, e := range entries {
-		if e.isDir {
-			continue
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		ch := make(chan readResult, 1)
-		resultChs[i] = ch
-		go func(entry fileEntry, ch chan<- readResult) {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			if ctx.Err() != nil {
-				ch <- readResult{err: ctx.Err()}
-				return
-			}
-			reader, err := scoped.Open(ctx, entry.relPath)
-			if err != nil {
-				ch <- readResult{err: fmt.Errorf("open %q: %w", entry.relPath, err)}
-				return
-			}
-			data, err := io.ReadAll(reader)
-			reader.Close()
-			if err != nil {
-				ch <- readResult{err: fmt.Errorf("read %q: %w", entry.relPath, err)}
-				return
-			}
-			ch <- readResult{content: data}
-		}(e, ch)
-	}
-
-	cleanup := func(start int) {
-		for j := start; j < len(entries); j++ {
-			if resultChs[j] != nil {
-				<-resultChs[j]
-			}
-		}
-	}
-
-	for i, e := range entries {
 		if e.isDir {
 			if err := tw.WriteHeader(&tar.Header{
 				Name:     e.relPath + "/",
@@ -364,34 +335,37 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 				Gid:      1000,
 				Format:   tar.FormatPAX,
 			}); err != nil {
-				cleanup(i)
 				return fmt.Errorf("write dir header %q: %w", e.relPath, err)
 			}
 			continue
 		}
 
-		res := <-resultChs[i]
-		if res.err != nil {
-			cleanup(i + 1)
-			return res.err
-		}
-
 		if err := tw.WriteHeader(&tar.Header{
 			Name:    e.relPath,
-			Size:    int64(len(res.content)),
+			Size:    e.size,
 			Mode:    0644,
 			ModTime: e.modTime,
 			Uid:     1000,
 			Gid:     1000,
 			Format:  tar.FormatPAX,
 		}); err != nil {
-			cleanup(i + 1)
 			return fmt.Errorf("write file header %q: %w", e.relPath, err)
 		}
 
-		if _, err := tw.Write(res.content); err != nil {
-			cleanup(i + 1)
-			return fmt.Errorf("write file content %q: %w", e.relPath, err)
+		reader, err := scoped.Open(ctx, e.relPath)
+		if err != nil {
+			return fmt.Errorf("open %q: %w", e.relPath, err)
+		}
+		written, copyErr := io.Copy(tw, reader)
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return fmt.Errorf("stream %q: %w", e.relPath, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %q: %w", e.relPath, closeErr)
+		}
+		if written != e.size {
+			return fmt.Errorf("stream %q: size changed during sync: metadata=%d streamed=%d", e.relPath, e.size, written)
 		}
 	}
 

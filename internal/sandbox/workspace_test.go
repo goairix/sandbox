@@ -4,16 +4,21 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/goairix/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/goairix/sandbox/internal/runtime"
 )
 
 func TestIsExcluded(t *testing.T) {
@@ -222,6 +227,66 @@ func TestWriteTarStream_ContextCancelled(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestWriteTarStream_DoesNotPrefetchEntireWorkspace(t *testing.T) {
+	const fileCount = 16
+	files := make(map[string][]byte, fileCount)
+	entries := make([]fileEntry, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		name := fmt.Sprintf("file-%02d.bin", i)
+		files[name] = bytes.Repeat([]byte{byte(i)}, 1024)
+		entries = append(entries, fileEntry{relPath: name, size: 1024})
+	}
+	fs := &countingScopedFS{mockScopedFS: &mockScopedFS{files: files}}
+	w := newBlockingWriter()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Manager{}).writeTarStream(context.Background(), fs, entries, w)
+	}()
+
+	select {
+	case <-w.started:
+	case <-time.After(time.Second):
+		t.Fatal("tar writer 未开始写入")
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for fs.opened.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	openedWhileBlocked := fs.opened.Load()
+	close(w.release)
+	require.NoError(t, <-done)
+
+	if openedWhileBlocked > 1 {
+		t.Fatalf("输出阻塞时不应预读后续文件，实际已打开 %d 个文件", openedWhileBlocked)
+	}
+}
+
+func TestStreamTarToContainer_ExecPipeFailureDoesNotBlockProducer(t *testing.T) {
+	consumerErr := errors.New("tar process exited")
+	mgr := &Manager{runtime: &failingExecPipeRuntime{err: consumerErr}}
+	fs := &mockScopedFS{
+		files: map[string][]byte{"large.bin": bytes.Repeat([]byte("x"), 1024)},
+	}
+	entries := []fileEntry{{relPath: "large.bin", size: 1024}}
+	type result struct {
+		writeErr error
+		execErr  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		writeErr, execErr := mgr.streamTarToContainer(context.Background(), fs, entries, "runtime-1")
+		done <- result{writeErr: writeErr, execErr: execErr}
+	}()
+
+	select {
+	case got := <-done:
+		require.ErrorIs(t, got.execErr, consumerErr)
+		require.ErrorIs(t, got.writeErr, consumerErr)
+	case <-time.After(time.Second):
+		t.Fatal("ExecPipe 提前失败后 tar 生产端仍阻塞")
+	}
+}
+
 // --- mock infrastructure for workspace streaming tests ---
 
 type mockFileInfo struct {
@@ -247,6 +312,41 @@ type mockScopedFS struct {
 	files   map[string][]byte        // relPath -> content
 	dirs    map[string][]fs.FileInfo // dir -> children
 	openErr map[string]error         // relPath -> error to return from Open
+}
+
+type countingScopedFS struct {
+	*mockScopedFS
+	opened atomic.Int64
+}
+
+func (m *countingScopedFS) Open(ctx context.Context, path string, opts ...fs.Option) (io.ReadCloser, error) {
+	m.opened.Add(1)
+	return m.mockScopedFS.Open(ctx, path, opts...)
+}
+
+type blockingWriter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type failingExecPipeRuntime struct {
+	runtime.Runtime
+	err error
+}
+
+func (r *failingExecPipeRuntime) ExecPipe(context.Context, string, []string, io.Reader) error {
+	return r.err
+}
+
+func newBlockingWriter() *blockingWriter {
+	return &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(p), nil
 }
 
 func (m *mockScopedFS) List(_ context.Context, p string, _ ...fs.Option) ([]fs.FileInfo, error) {
