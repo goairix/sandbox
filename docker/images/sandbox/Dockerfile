@@ -55,6 +55,30 @@ RUN pip install --no-cache-dir \
     nbformat \
     nbconvert
 
+# Python Common Expansion Pack
+RUN pip install --no-cache-dir \
+    xmltodict==1.0.4 \
+    pyyaml==6.0.2 \
+    httpx==0.28.1 \
+    toml==0.10.2 \
+    rich==13.9.4 \
+    tqdm==4.67.1 \
+    seaborn==0.13.2 \
+    python-dateutil==2.9.0 \
+    opencv-python-headless==4.10.0.84 \
+    cryptography==44.0.0 \
+    bcrypt==4.2.1 \
+    aiohttp==3.11.10 \
+    jieba==0.42.1 \
+    pypinyin==0.53.0 \
+    chardet==5.2.0 \
+    pyarrow==18.1.0 \
+    pytz==2024.2 \
+    tabulate==0.9.0 \
+    faker==33.1.0 \
+    click==8.1.8 \
+    orjson==3.10.12
+
 # TypeScript + global Node packages
 RUN npm install -g \
     typescript@5.6.3 \
@@ -62,7 +86,7 @@ RUN npm install -g \
     tsx@4.19.2
 
 WORKDIR /opt/sandbox-libs
-RUN echo '{"name":"sandbox-libs","private":true,"dependencies":{"axios":"^1.7.0","lodash":"^4.17.21","cheerio":"^1.0.0","csv-parse":"^5.6.0","exceljs":"^4.4.0","zod":"^3.23.0"}}' > package.json && \
+RUN echo '{"name":"sandbox-libs","private":true,"dependencies":{"axios":"^1.7.0","lodash":"^4.17.21","cheerio":"^1.0.0","csv-parse":"^5.6.0","exceljs":"^4.4.0","zod":"^3.23.0","dayjs":"^1.11.0","uuid":"^10.0.0","dotenv":"^16.0.0","marked":"^14.0.0","jsdom":"^25.0.0"}}' > package.json && \
     npm install --production
 ENV NODE_PATH=/opt/sandbox-libs/node_modules
 
