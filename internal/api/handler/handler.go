@@ -35,6 +35,18 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, sandbox.ErrInvalidExecTimeout):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "INVALID_EXEC_TIMEOUT",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrExecTimeout):
+		c.JSON(http.StatusRequestTimeout, types.ErrorResponse{
+			Code:    "EXEC_TIMEOUT",
+			Message: err.Error(),
+		})
+		return
 	case errors.Is(err, runtime.ErrFileNotFound):
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
 			Code:    "FILE_NOT_FOUND",
@@ -87,4 +99,12 @@ func internalError(c *gin.Context, err error) {
 		logger.ErrorField(err),
 	)
 	c.JSON(http.StatusInternalServerError, types.ErrorResponse{Message: err.Error()})
+}
+
+func streamErrorData(message string) types.SSEErrorData {
+	code := "exec_error"
+	if message == sandbox.ErrExecTimeout.Error() {
+		code = "EXEC_TIMEOUT"
+	}
+	return types.SSEErrorData{Error: code, Message: message}
 }

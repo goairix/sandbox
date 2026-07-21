@@ -188,10 +188,7 @@ func (h *Handler) ExecStream(c *gin.Context) {
 				}
 			case runtime.StreamError:
 				eventType = "error"
-				data = types.SSEErrorData{
-					Error:   "exec_error",
-					Message: event.Content,
-				}
+				data = streamErrorData(event.Content)
 			default:
 				// Unknown event type, skip
 				logger.Warn(c.Request.Context(), "unknown stream event type",
