@@ -108,6 +108,7 @@ type SecurityConfig struct {
 	APIKey                string   `mapstructure:"api_key"`
 	RateLimit             int      `mapstructure:"rate_limit"` // requests per second, 0 = disabled
 	ExecTimeoutSeconds    int      `mapstructure:"exec_timeout_seconds"`
+	MaxExecTimeoutSeconds int      `mapstructure:"max_exec_timeout_seconds"`
 	SandboxTimeoutSeconds int      `mapstructure:"sandbox_timeout_seconds"`
 	MaxMemory             string   `mapstructure:"max_memory"`
 	MaxMemoryRequest      string   `mapstructure:"max_memory_request"`
@@ -230,6 +231,12 @@ func (c *Config) Validate() error {
 	if c.Security.ExecTimeoutSeconds <= 0 {
 		return fmt.Errorf("config: security.exec_timeout_seconds must be > 0, got %d", c.Security.ExecTimeoutSeconds)
 	}
+	if c.Security.MaxExecTimeoutSeconds <= 0 {
+		return fmt.Errorf("config: security.max_exec_timeout_seconds must be > 0, got %d", c.Security.MaxExecTimeoutSeconds)
+	}
+	if c.Security.MaxExecTimeoutSeconds < c.Security.ExecTimeoutSeconds {
+		return fmt.Errorf("config: security.max_exec_timeout_seconds (%d) must be >= security.exec_timeout_seconds (%d)", c.Security.MaxExecTimeoutSeconds, c.Security.ExecTimeoutSeconds)
+	}
 
 	// Workspace auto-sync
 	if c.Workspace.AutoSyncIntervalSeconds < 0 {
@@ -283,6 +290,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.api_key", "")
 	v.SetDefault("security.rate_limit", 0)
 	v.SetDefault("security.exec_timeout_seconds", 30)
+	v.SetDefault("security.max_exec_timeout_seconds", 600)
 	v.SetDefault("security.sandbox_timeout_seconds", 3600)
 	v.SetDefault("security.max_memory", "256Mi")
 	v.SetDefault("security.max_disk", "100Mi")

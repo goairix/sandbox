@@ -52,6 +52,7 @@ func TestLoadDefaults(t *testing.T) {
 
 	// Security defaults
 	assert.Equal(t, 30, cfg.Security.ExecTimeoutSeconds)
+	assert.Equal(t, 600, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "256Mi", cfg.Security.MaxMemory)
 	assert.Equal(t, "100Mi", cfg.Security.MaxDisk)
 	assert.Equal(t, 100, cfg.Security.MaxPids)
@@ -100,6 +101,7 @@ storage:
 security:
   api_key: "test-yaml-api-key"
   exec_timeout_seconds: 60
+  max_exec_timeout_seconds: 900
   max_memory: "512Mi"
   max_disk: "200Mi"
   max_pids: 200
@@ -151,6 +153,7 @@ security:
 
 	// Security
 	assert.Equal(t, 60, cfg.Security.ExecTimeoutSeconds)
+	assert.Equal(t, 900, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "512Mi", cfg.Security.MaxMemory)
 	assert.Equal(t, "200Mi", cfg.Security.MaxDisk)
 	assert.Equal(t, 200, cfg.Security.MaxPids)
@@ -162,32 +165,33 @@ security:
 func TestEnvOverrides(t *testing.T) {
 	// Set env vars before loading; clean up after
 	envVars := map[string]string{
-		"SANDBOX_SERVER_PORT":                        "7070",
-		"SANDBOX_SERVER_HOST":                        "localhost",
-		"SANDBOX_RUNTIME_TYPE":                       "kubernetes",
-		"SANDBOX_RUNTIME_DOCKER_HOST":                "tcp://docker.example.com:2376",
-		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG":      "/root/.kube/config",
-		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":       "production",
-		"SANDBOX_POOL_MIN_SIZE":                      "10",
-		"SANDBOX_POOL_MAX_SIZE":                      "100",
-		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":       "30",
-		"SANDBOX_STORAGE_STATE_REDIS_ADDR":           "cache.example.com:6379",
-		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":       "redispass",
-		"SANDBOX_STORAGE_STATE_REDIS_DB":             "2",
-		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":        "cos",
-		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":          "env-bucket",
-		"SANDBOX_STORAGE_FILESYSTEM_REGION":          "ap-guangzhou",
-		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":        "https://cos.ap-guangzhou.myqcloud.com",
-		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":      "env-access-key",
-		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":      "env-secret-key",
-		"SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH":      "/env/sandbox-storage",
-		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS":      "120",
-		"SANDBOX_SECURITY_API_KEY":                   "env-api-key",
-		"SANDBOX_SECURITY_MAX_MEMORY":                "1Gi",
-		"SANDBOX_SECURITY_MAX_DISK":                  "500Mi",
-		"SANDBOX_SECURITY_MAX_PIDS":                  "500",
-		"SANDBOX_SECURITY_NETWORK_ENABLED":           "true",
-		"SANDBOX_SECURITY_SECCOMP_PROFILE":           "/etc/seccomp/custom.json",
+		"SANDBOX_SERVER_PORT":                       "7070",
+		"SANDBOX_SERVER_HOST":                       "localhost",
+		"SANDBOX_RUNTIME_TYPE":                      "kubernetes",
+		"SANDBOX_RUNTIME_DOCKER_HOST":               "tcp://docker.example.com:2376",
+		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG":     "/root/.kube/config",
+		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":      "production",
+		"SANDBOX_POOL_MIN_SIZE":                     "10",
+		"SANDBOX_POOL_MAX_SIZE":                     "100",
+		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":      "30",
+		"SANDBOX_STORAGE_STATE_REDIS_ADDR":          "cache.example.com:6379",
+		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":      "redispass",
+		"SANDBOX_STORAGE_STATE_REDIS_DB":            "2",
+		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":       "cos",
+		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":         "env-bucket",
+		"SANDBOX_STORAGE_FILESYSTEM_REGION":         "ap-guangzhou",
+		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":       "https://cos.ap-guangzhou.myqcloud.com",
+		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":     "env-access-key",
+		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":     "env-secret-key",
+		"SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH":     "/env/sandbox-storage",
+		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS":     "120",
+		"SANDBOX_SECURITY_MAX_EXEC_TIMEOUT_SECONDS": "900",
+		"SANDBOX_SECURITY_API_KEY":                  "env-api-key",
+		"SANDBOX_SECURITY_MAX_MEMORY":               "1Gi",
+		"SANDBOX_SECURITY_MAX_DISK":                 "500Mi",
+		"SANDBOX_SECURITY_MAX_PIDS":                 "500",
+		"SANDBOX_SECURITY_NETWORK_ENABLED":          "true",
+		"SANDBOX_SECURITY_SECCOMP_PROFILE":          "/etc/seccomp/custom.json",
 	}
 
 	for k, v := range envVars {
@@ -223,6 +227,7 @@ func TestEnvOverrides(t *testing.T) {
 	assert.Equal(t, "/env/sandbox-storage", cfg.Storage.FileSystem.LocalPath)
 
 	assert.Equal(t, 120, cfg.Security.ExecTimeoutSeconds)
+	assert.Equal(t, 900, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "1Gi", cfg.Security.MaxMemory)
 	assert.Equal(t, "500Mi", cfg.Security.MaxDisk)
 	assert.Equal(t, 500, cfg.Security.MaxPids)
@@ -265,6 +270,25 @@ func TestValidateKubernetesNamespaceRequired(t *testing.T) {
 	_, err := config.Load("")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "namespace")
+}
+
+func TestValidateMaxExecTimeoutLessThanDefault(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS", "60")
+	t.Setenv("SANDBOX_SECURITY_MAX_EXEC_TIMEOUT_SECONDS", "30")
+
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "max_exec_timeout_seconds")
+}
+
+func TestValidateMaxExecTimeoutMustBePositive(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	t.Setenv("SANDBOX_SECURITY_MAX_EXEC_TIMEOUT_SECONDS", "0")
+
+	_, err := config.Load("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "max_exec_timeout_seconds")
 }
 
 func TestLoad_FileSystemConfig_Defaults(t *testing.T) {

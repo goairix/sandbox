@@ -115,6 +115,8 @@ security:
   rate_limit: 0
   # Maximum wall-clock time (seconds) allowed for a single execution.
   exec_timeout_seconds: 30
+  # Maximum permitted value for an execution timeout in seconds.
+  max_exec_timeout_seconds: 600
   # Maximum sandbox lifetime in seconds (0 = no limit). Default: 3600 (1 hour).
   sandbox_timeout_seconds: 3600
   # Disk quota per sandbox (e.g. "100Mi", "1Gi").
