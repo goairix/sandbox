@@ -120,12 +120,25 @@ func execTimeoutSource(requested int) string {
 	return "request"
 }
 
-func execFailureStatus(ctx context.Context, timeoutSource string) string {
-	cause := context.Cause(ctx)
-	if errors.Is(cause, ErrExecTimeout) {
+func newExecContext(parent context.Context, effectiveTimeout int) (context.Context, context.CancelFunc) {
+	if effectiveTimeout > 0 {
+		return context.WithTimeoutCause(parent, time.Duration(effectiveTimeout)*time.Second, ErrExecTimeout)
+	}
+	return context.WithCancel(parent)
+}
+
+func isExecTimeout(parentCtx, execCtx context.Context, err error) bool {
+	if errors.Is(context.Cause(execCtx), ErrExecTimeout) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil
+}
+
+func execFailureStatus(parentCtx, execCtx context.Context, err error, timeoutSource string) string {
+	if isExecTimeout(parentCtx, execCtx, err) {
 		return "timeout_" + timeoutSource
 	}
-	if cause != nil {
+	if parentCtx.Err() != nil || context.Cause(execCtx) != nil {
 		return "caller_cancelled"
 	}
 	return "error"
@@ -460,6 +473,7 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 
 // Exec executes a command in a sandbox synchronously.
 func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
+	parentCtx := ctx
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Exec",
 		trace.WithAttributes(
 			attribute.String("sandbox.id", id),
@@ -482,7 +496,7 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	}
 	span.SetAttributes(attribute.Int("exec.timeout.effective_seconds", effectiveTimeout))
 	req.Timeout = effectiveTimeout
-	execCtx, cancel := context.WithTimeoutCause(ctx, time.Duration(effectiveTimeout)*time.Second, ErrExecTimeout)
+	execCtx, cancel := newExecContext(ctx, effectiveTimeout)
 	defer cancel()
 
 	sb, err := m.resolve(execCtx, id)
@@ -517,10 +531,10 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 	if err != nil {
 		telemetry.Error(err, span)
-		status := execFailureStatus(execCtx, timeoutSource)
+		status := execFailureStatus(parentCtx, execCtx, err, timeoutSource)
 		metrics.RecordExec(execCtx, "sync", status, time.Since(execStart).Seconds())
 		metrics.RecordError(execCtx, "exec_failed")
-		if errors.Is(context.Cause(execCtx), ErrExecTimeout) {
+		if isExecTimeout(parentCtx, execCtx, err) {
 			return nil, fmt.Errorf("execute sandbox: %w", ErrExecTimeout)
 		}
 		return nil, err
@@ -540,6 +554,7 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 // ExecStream executes a command in a sandbox with streaming output.
 func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+	parentCtx := ctx
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.ExecStream",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 	)
@@ -557,7 +572,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	}
 	span.SetAttributes(attribute.Int("exec.timeout.effective_seconds", effectiveTimeout))
 	req.Timeout = effectiveTimeout
-	execCtx, cancel := context.WithTimeoutCause(ctx, time.Duration(effectiveTimeout)*time.Second, ErrExecTimeout)
+	execCtx, cancel := newExecContext(ctx, effectiveTimeout)
 
 	sb, err := m.resolve(execCtx, id)
 	if err != nil {
@@ -590,10 +605,10 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		telemetry.Error(err, span)
-		status := execFailureStatus(execCtx, timeoutSource)
+		status := execFailureStatus(parentCtx, execCtx, err, timeoutSource)
 		metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
 		metrics.RecordError(execCtx, "exec_failed")
-		timedOut := errors.Is(context.Cause(execCtx), ErrExecTimeout)
+		timedOut := isExecTimeout(parentCtx, execCtx, err)
 		cancel()
 		span.End()
 		if timedOut {
@@ -619,7 +634,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 				telemetry.Error(ErrExecTimeout, span)
 				outCh <- runtime.StreamEvent{Type: runtime.StreamError, Content: ErrExecTimeout.Error()}
 			}
-			metrics.RecordExec(execCtx, "stream", execFailureStatus(execCtx, timeoutSource), time.Since(streamStart).Seconds())
+			metrics.RecordExec(execCtx, "stream", execFailureStatus(parentCtx, execCtx, cause, timeoutSource), time.Since(streamStart).Seconds())
 		}
 
 		streamFailed := false

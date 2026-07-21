@@ -8,8 +8,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 func newExecTestManager(rt *mockRuntime, cfg ManagerConfig) *Manager {
@@ -23,6 +27,49 @@ func newExecTestManager(rt *mockRuntime, cfg ManagerConfig) *Manager {
 		},
 	}
 	return mgr
+}
+
+func captureExecMetricStatus(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := provider.Meter(t.Name())
+	counter, err := meter.Int64Counter("sandbox.exec.total")
+	require.NoError(t, err)
+	duration, err := meter.Float64Histogram("sandbox.exec.duration")
+	require.NoError(t, err)
+
+	oldCounter := metrics.SandboxExecTotal
+	oldDuration := metrics.SandboxExecDuration
+	metrics.SandboxExecTotal = counter
+	metrics.SandboxExecDuration = duration
+	t.Cleanup(func() {
+		metrics.SandboxExecTotal = oldCounter
+		metrics.SandboxExecDuration = oldDuration
+		require.NoError(t, provider.Shutdown(context.Background()))
+	})
+	return reader
+}
+
+func readExecMetricStatus(t *testing.T, reader *sdkmetric.ManualReader) string {
+	t.Helper()
+	var resourceMetrics metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &resourceMetrics))
+	for _, scopeMetrics := range resourceMetrics.ScopeMetrics {
+		for _, metric := range scopeMetrics.Metrics {
+			if metric.Name != "sandbox.exec.total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			require.Len(t, sum.DataPoints, 1)
+			status, ok := sum.DataPoints[0].Attributes.Value(attribute.Key("status"))
+			require.True(t, ok)
+			return status.AsString()
+		}
+	}
+	t.Fatal("sandbox.exec.total metric not found")
+	return ""
 }
 
 func TestManagerResolveExecTimeout(t *testing.T) {
@@ -134,6 +181,78 @@ func TestManagerExecTimeout(t *testing.T) {
 	sb, getErr := mgr.Get(context.Background(), "sandbox-test")
 	require.NoError(t, getErr)
 	assert.Equal(t, StateError, sb.State)
+}
+
+func TestManagerExecRuntimeDeadlineExceededIsTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		requested  int
+		wantStatus string
+	}{
+		{name: "default", requested: 0, wantStatus: "timeout_default"},
+		{name: "request", requested: 300, wantStatus: "timeout_request"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metricReader := captureExecMetricStatus(t)
+			rt := newMockRuntime()
+			rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+				return nil, context.DeadlineExceeded
+			}
+			mgr := newExecTestManager(rt, ManagerConfig{
+				ExecTimeoutSeconds:    30,
+				MaxExecTimeoutSeconds: 600,
+			})
+
+			_, err := mgr.Exec(context.Background(), "sandbox-test", runtime.ExecRequest{
+				Command: "sleep",
+				Timeout: tt.requested,
+			})
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrExecTimeout)
+			assert.Equal(t, tt.wantStatus, readExecMetricStatus(t, metricReader))
+		})
+	}
+}
+
+func TestManagerExecParentDeadlineIsNotExecutionTimeout(t *testing.T) {
+	metricReader := captureExecMetricStatus(t)
+	rt := newMockRuntime()
+	rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{
+		ExecTimeoutSeconds:    30,
+		MaxExecTimeoutSeconds: 600,
+	})
+	parent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := mgr.Exec(parent, "sandbox-test", runtime.ExecRequest{Command: "sleep"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, ErrExecTimeout)
+	assert.Equal(t, "caller_cancelled", readExecMetricStatus(t, metricReader))
+}
+
+func TestManagerExecUnlimitedTimeoutDoesNotCancelRuntime(t *testing.T) {
+	rt := newMockRuntime()
+	rt.execFunc = func(ctx context.Context, _ string, _ runtime.ExecRequest) (*runtime.ExecResult, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return &runtime.ExecResult{}, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{})
+
+	_, err := mgr.Exec(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+
+	require.NoError(t, err)
+	_, gotReq := rt.lastExec()
+	assert.Zero(t, gotReq.Timeout)
 }
 
 func TestManagerExecCallerCancellationIsNotTimeout(t *testing.T) {
@@ -262,6 +381,50 @@ func TestManagerExecStreamInitializationFailureCancelsContext(t *testing.T) {
 	case <-runtimeCtx.Done():
 	default:
 		t.Fatal("stream context was not canceled after initialization failed")
+	}
+}
+
+func TestManagerExecStreamRuntimeDeadlineExceededIsTimeout(t *testing.T) {
+	metricReader := captureExecMetricStatus(t)
+	rt := newMockRuntime()
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return nil, context.DeadlineExceeded
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{
+		ExecTimeoutSeconds:    30,
+		MaxExecTimeoutSeconds: 600,
+	})
+
+	_, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{
+		Command: "sleep",
+		Timeout: 300,
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrExecTimeout)
+	assert.Equal(t, "timeout_request", readExecMetricStatus(t, metricReader))
+}
+
+func TestManagerExecStreamUnlimitedTimeoutDoesNotCancelRuntime(t *testing.T) {
+	rt := newMockRuntime()
+	runtimeEvents := make(chan runtime.StreamEvent)
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return runtimeEvents, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{})
+
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+	runtimeCtx, gotReq := rt.lastStream()
+	assert.Zero(t, gotReq.Timeout)
+	select {
+	case <-runtimeCtx.Done():
+		t.Fatal("unlimited stream context was canceled when ExecStream returned")
+	default:
+	}
+
+	close(runtimeEvents)
+	for range out {
 	}
 }
 
