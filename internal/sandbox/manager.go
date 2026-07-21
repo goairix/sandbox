@@ -127,21 +127,40 @@ func newExecContext(parent context.Context, effectiveTimeout int) (context.Conte
 	return context.WithCancel(parent)
 }
 
-func isExecTimeout(parentCtx, execCtx context.Context, err error) bool {
+func isExecTimeout(parentCtx, execCtx context.Context, err error, effectiveTimeout int) bool {
 	if errors.Is(context.Cause(execCtx), ErrExecTimeout) {
 		return true
 	}
-	return errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil
+	return effectiveTimeout > 0 && errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil
 }
 
-func execFailureStatus(parentCtx, execCtx context.Context, err error, timeoutSource string) string {
-	if isExecTimeout(parentCtx, execCtx, err) {
+func execFailureStatus(parentCtx, execCtx context.Context, err error, effectiveTimeout int, timeoutSource string) string {
+	if isExecTimeout(parentCtx, execCtx, err, effectiveTimeout) {
 		return "timeout_" + timeoutSource
 	}
 	if parentCtx.Err() != nil || context.Cause(execCtx) != nil {
 		return "caller_cancelled"
 	}
 	return "error"
+}
+
+func sendStreamTerminal(outCh chan runtime.StreamEvent, event runtime.StreamEvent) {
+	select {
+	case outCh <- event:
+		return
+	default:
+	}
+
+	// The buffer is full. Drop the oldest ordinary event to reserve room for
+	// the terminal event without waiting for a slow or disconnected consumer.
+	select {
+	case <-outCh:
+	default:
+	}
+	select {
+	case outCh <- event:
+	default:
+	}
 }
 
 // SetSessionStore sets an optional SessionStore for persistent sandbox state.
@@ -531,10 +550,10 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 	if err != nil {
 		telemetry.Error(err, span)
-		status := execFailureStatus(parentCtx, execCtx, err, timeoutSource)
+		status := execFailureStatus(parentCtx, execCtx, err, effectiveTimeout, timeoutSource)
 		metrics.RecordExec(execCtx, "sync", status, time.Since(execStart).Seconds())
 		metrics.RecordError(execCtx, "exec_failed")
-		if isExecTimeout(parentCtx, execCtx, err) {
+		if isExecTimeout(parentCtx, execCtx, err, effectiveTimeout) {
 			return nil, fmt.Errorf("execute sandbox: %w", ErrExecTimeout)
 		}
 		return nil, err
@@ -605,10 +624,10 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		telemetry.Error(err, span)
-		status := execFailureStatus(parentCtx, execCtx, err, timeoutSource)
+		status := execFailureStatus(parentCtx, execCtx, err, effectiveTimeout, timeoutSource)
 		metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
 		metrics.RecordError(execCtx, "exec_failed")
-		timedOut := isExecTimeout(parentCtx, execCtx, err)
+		timedOut := isExecTimeout(parentCtx, execCtx, err, effectiveTimeout)
 		cancel()
 		span.End()
 		if timedOut {
@@ -624,56 +643,82 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		defer cancel()
 		defer close(outCh)
 
-		finishCancelled := func() {
-			cause := context.Cause(execCtx)
+		finalized := false
+		finalize := func(state State, status string, terminal *runtime.StreamEvent) {
+			if finalized {
+				return
+			}
+			finalized = true
 			m.mu.Lock()
-			sb.State = StateError
+			sb.State = state
 			sb.UpdatedAt = time.Now()
 			m.mu.Unlock()
-			if errors.Is(cause, ErrExecTimeout) {
-				telemetry.Error(ErrExecTimeout, span)
-				outCh <- runtime.StreamEvent{Type: runtime.StreamError, Content: ErrExecTimeout.Error()}
+			if terminal != nil {
+				sendStreamTerminal(outCh, *terminal)
 			}
-			metrics.RecordExec(execCtx, "stream", execFailureStatus(parentCtx, execCtx, cause, timeoutSource), time.Since(streamStart).Seconds())
+			metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
 		}
 
-		streamFailed := false
+		finishCancelled := func() {
+			cause := context.Cause(execCtx)
+			var terminal *runtime.StreamEvent
+			if errors.Is(cause, ErrExecTimeout) {
+				telemetry.Error(ErrExecTimeout, span)
+				event := runtime.StreamEvent{Type: runtime.StreamError, Content: ErrExecTimeout.Error()}
+				terminal = &event
+			}
+			status := execFailureStatus(parentCtx, execCtx, cause, effectiveTimeout, timeoutSource)
+			finalize(StateError, status, terminal)
+		}
+
+		finishEvent := func(event runtime.StreamEvent) bool {
+			switch event.Type {
+			case runtime.StreamDone:
+				finalize(StateIdle, "success", &event)
+				return true
+			case runtime.StreamError:
+				finalize(StateError, "error", &event)
+				return true
+			default:
+				return false
+			}
+		}
+
+		finishReadyTerminal := func() bool {
+			select {
+			case event, ok := <-ch:
+				return ok && finishEvent(event)
+			default:
+				return false
+			}
+		}
+
 		for {
 			select {
 			case <-execCtx.Done():
+				if finishReadyTerminal() {
+					return
+				}
 				finishCancelled()
 				return
 			case event, ok := <-ch:
 				if !ok {
 					if context.Cause(execCtx) != nil {
 						finishCancelled()
-						return
-					}
-					m.mu.Lock()
-					if streamFailed {
-						sb.State = StateError
 					} else {
-						sb.State = StateIdle
+						finalize(StateIdle, "success", nil)
 					}
-					sb.UpdatedAt = time.Now()
-					m.mu.Unlock()
-					status := "success"
-					if streamFailed {
-						status = "error"
-					}
-					metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
 					return
 				}
-				if context.Cause(execCtx) != nil {
-					finishCancelled()
+				if finishEvent(event) {
 					return
-				}
-				if event.Type == runtime.StreamError {
-					streamFailed = true
 				}
 				select {
 				case outCh <- event:
 				case <-execCtx.Done():
+					if finishReadyTerminal() {
+						return
+					}
 					finishCancelled()
 					return
 				}

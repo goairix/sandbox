@@ -8,9 +8,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
@@ -70,6 +73,19 @@ func readExecMetricStatus(t *testing.T, reader *sdkmetric.ManualReader) string {
 	}
 	t.Fatal("sandbox.exec.total metric not found")
 	return ""
+}
+
+func captureEndedSpans(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	oldProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oldProvider)
+		require.NoError(t, provider.Shutdown(context.Background()))
+	})
+	return recorder
 }
 
 func TestManagerResolveExecTimeout(t *testing.T) {
@@ -255,6 +271,22 @@ func TestManagerExecUnlimitedTimeoutDoesNotCancelRuntime(t *testing.T) {
 	assert.Zero(t, gotReq.Timeout)
 }
 
+func TestManagerExecUnlimitedRuntimeDeadlineExceededIsNotTimeout(t *testing.T) {
+	metricReader := captureExecMetricStatus(t)
+	rt := newMockRuntime()
+	rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{})
+
+	_, err := mgr.Exec(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "sleep"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, ErrExecTimeout)
+	assert.Equal(t, "error", readExecMetricStatus(t, metricReader))
+}
+
 func TestManagerExecCallerCancellationIsNotTimeout(t *testing.T) {
 	rt := newMockRuntime()
 	rt.execFunc = func(ctx context.Context, _ string, _ runtime.ExecRequest) (*runtime.ExecResult, error) {
@@ -426,6 +458,108 @@ func TestManagerExecStreamUnlimitedTimeoutDoesNotCancelRuntime(t *testing.T) {
 	close(runtimeEvents)
 	for range out {
 	}
+}
+
+func TestManagerExecStreamUnlimitedRuntimeDeadlineExceededIsNotTimeout(t *testing.T) {
+	metricReader := captureExecMetricStatus(t)
+	rt := newMockRuntime()
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return nil, context.DeadlineExceeded
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{})
+
+	_, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "sleep"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, ErrExecTimeout)
+	assert.Equal(t, "error", readExecMetricStatus(t, metricReader))
+}
+
+func TestManagerExecStreamFullOutputBufferStillFinalizesTimeout(t *testing.T) {
+	recorder := captureEndedSpans(t)
+	rt := newMockRuntime()
+	runtimeEvents := make(chan runtime.StreamEvent, 65)
+	for i := 0; i < cap(runtimeEvents); i++ {
+		runtimeEvents <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: "output"}
+	}
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return runtimeEvents, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 1})
+
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "sleep"})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		close(runtimeEvents)
+		for range out {
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		for _, span := range recorder.Ended() {
+			if span.Name() == "sandbox.Manager.ExecStream" {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond, "stream did not finalize while output buffer was full")
+
+	var got []runtime.StreamEvent
+	for event := range out {
+		got = append(got, event)
+	}
+	require.NotEmpty(t, got)
+	assert.Equal(t, runtime.StreamEvent{Type: runtime.StreamError, Content: ErrExecTimeout.Error()}, got[len(got)-1])
+}
+
+func TestManagerExecStreamDoneWinsDeadlineRace(t *testing.T) {
+	rt := newMockRuntime()
+	rt.execStreamFunc = func(ctx context.Context, _ string, _ runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		<-ctx.Done()
+		events := make(chan runtime.StreamEvent, 1)
+		events <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
+		close(events)
+		return events, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 1})
+
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+	var got []runtime.StreamEvent
+	for event := range out {
+		got = append(got, event)
+	}
+
+	assert.Equal(t, []runtime.StreamEvent{{Type: runtime.StreamDone, Content: "0"}}, got)
+	sb, getErr := mgr.Get(context.Background(), "sandbox-test")
+	require.NoError(t, getErr)
+	assert.Equal(t, StateIdle, sb.State)
+}
+
+func TestManagerExecStreamRuntimeErrorIsImmediateUniqueTerminal(t *testing.T) {
+	rt := newMockRuntime()
+	runtimeEvents := make(chan runtime.StreamEvent, 1)
+	runtimeEvents <- runtime.StreamEvent{Type: runtime.StreamError, Content: "runtime failed"}
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return runtimeEvents, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 1})
+
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "false"})
+	require.NoError(t, err)
+	event, ok := <-out
+	require.True(t, ok)
+	assert.Equal(t, runtime.StreamEvent{Type: runtime.StreamError, Content: "runtime failed"}, event)
+	select {
+	case _, ok = <-out:
+		assert.False(t, ok)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("stream did not close immediately after runtime error terminal")
+	}
+	sb, getErr := mgr.Get(context.Background(), "sandbox-test")
+	require.NoError(t, getErr)
+	assert.Equal(t, StateError, sb.State)
 }
 
 func TestManager_CreateEphemeralSandbox(t *testing.T) {
