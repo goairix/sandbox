@@ -64,17 +64,18 @@ type ManagerConfig struct {
 	PoolConfig              PoolConfig
 	DefaultTimeout          int // seconds
 	ExecTimeoutSeconds      int // per-execution timeout; 0 = no limit
+	MaxExecTimeoutSeconds   int // maximum request timeout; 0 = no additional maximum
 	AutoSyncIntervalSeconds int // 0 = disabled
 }
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
 type Manager struct {
-	runtime    runtime.Runtime
-	filesystem fs.FileSystem
-	fsMeta     *storage.FileSystemMeta
-	config     ManagerConfig
-	sessions   *SessionStore // optional, for persistent sandboxes
-	multipartStore state.Store // optional, for multipart upload state
+	runtime        runtime.Runtime
+	filesystem     fs.FileSystem
+	fsMeta         *storage.FileSystemMeta
+	config         ManagerConfig
+	sessions       *SessionStore // optional, for persistent sandboxes
+	multipartStore state.Store   // optional, for multipart upload state
 
 	pool       *Pool
 	sandboxes  map[string]*Sandbox
@@ -97,6 +98,37 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		workspaces: make(map[string]storage.ScopedFS),
 		stopCh:     make(chan struct{}),
 	}
+}
+
+func (m *Manager) resolveExecTimeout(requested int) (int, error) {
+	if requested < 0 {
+		return 0, fmt.Errorf("%w: timeout must not be negative: %d", ErrInvalidExecTimeout, requested)
+	}
+	if m.config.MaxExecTimeoutSeconds > 0 && requested > m.config.MaxExecTimeoutSeconds {
+		return 0, fmt.Errorf("%w: requested %d seconds exceeds maximum %d seconds", ErrInvalidExecTimeout, requested, m.config.MaxExecTimeoutSeconds)
+	}
+	if requested == 0 {
+		return m.config.ExecTimeoutSeconds, nil
+	}
+	return requested, nil
+}
+
+func execTimeoutSource(requested int) string {
+	if requested == 0 {
+		return "default"
+	}
+	return "request"
+}
+
+func execFailureStatus(ctx context.Context, timeoutSource string) string {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ErrExecTimeout) {
+		return "timeout_" + timeoutSource
+	}
+	if cause != nil {
+		return "caller_cancelled"
+	}
+	return "error"
 }
 
 // SetSessionStore sets an optional SessionStore for persistent sandbox state.
@@ -437,23 +469,32 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	defer span.End()
 
 	execStart := time.Now()
-
-	if m.config.ExecTimeoutSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(m.config.ExecTimeoutSeconds)*time.Second)
-		defer cancel()
-	}
-
-	sb, err := m.resolve(ctx, id)
+	requestedTimeout := req.Timeout
+	timeoutSource := execTimeoutSource(requestedTimeout)
+	effectiveTimeout, err := m.resolveExecTimeout(requestedTimeout)
+	span.SetAttributes(
+		attribute.Int("exec.timeout.requested_seconds", requestedTimeout),
+		attribute.String("exec.timeout.source", timeoutSource),
+	)
 	if err != nil {
 		telemetry.Error(err, span)
-		metrics.RecordError(ctx, "sandbox_not_found")
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("exec.timeout.effective_seconds", effectiveTimeout))
+	req.Timeout = effectiveTimeout
+	execCtx, cancel := context.WithTimeoutCause(ctx, time.Duration(effectiveTimeout)*time.Second, ErrExecTimeout)
+	defer cancel()
+
+	sb, err := m.resolve(execCtx, id)
+	if err != nil {
+		telemetry.Error(err, span)
+		metrics.RecordError(execCtx, "sandbox_not_found")
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
 		telemetry.Error(ErrNetworkRequired, span)
-		metrics.RecordError(ctx, "network_required")
+		metrics.RecordError(execCtx, "network_required")
 		return nil, ErrNetworkRequired
 	}
 
@@ -463,7 +504,7 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	runtimeID := sb.RuntimeID
 	m.mu.Unlock()
 
-	result, err := m.runtime.Exec(ctx, runtimeID, req)
+	result, err := m.runtime.Exec(execCtx, runtimeID, req)
 
 	m.mu.Lock()
 	if err != nil {
@@ -476,8 +517,12 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 
 	if err != nil {
 		telemetry.Error(err, span)
-		metrics.RecordExec(ctx, "sync", "error", time.Since(execStart).Seconds())
-		metrics.RecordError(ctx, "exec_failed")
+		status := execFailureStatus(execCtx, timeoutSource)
+		metrics.RecordExec(execCtx, "sync", status, time.Since(execStart).Seconds())
+		metrics.RecordError(execCtx, "exec_failed")
+		if errors.Is(context.Cause(execCtx), ErrExecTimeout) {
+			return nil, fmt.Errorf("execute sandbox: %w", ErrExecTimeout)
+		}
 		return nil, err
 	}
 
@@ -485,7 +530,7 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	if result.ExitCode != 0 {
 		status = "non_zero_exit"
 	}
-	metrics.RecordExec(ctx, "sync", status, result.Duration.Seconds())
+	metrics.RecordExec(execCtx, "sync", status, result.Duration.Seconds())
 	span.SetAttributes(
 		attribute.Int("exec.exit_code", result.ExitCode),
 		attribute.Float64("exec.duration_s", result.Duration.Seconds()),
@@ -498,24 +543,35 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.ExecStream",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 	)
-
-	if m.config.ExecTimeoutSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(m.config.ExecTimeoutSeconds)*time.Second)
-		defer cancel()
-	}
-
-	sb, err := m.resolve(ctx, id)
+	requestedTimeout := req.Timeout
+	timeoutSource := execTimeoutSource(requestedTimeout)
+	effectiveTimeout, err := m.resolveExecTimeout(requestedTimeout)
+	span.SetAttributes(
+		attribute.Int("exec.timeout.requested_seconds", requestedTimeout),
+		attribute.String("exec.timeout.source", timeoutSource),
+	)
 	if err != nil {
 		telemetry.Error(err, span)
-		metrics.RecordError(ctx, "sandbox_not_found")
+		span.End()
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("exec.timeout.effective_seconds", effectiveTimeout))
+	req.Timeout = effectiveTimeout
+	execCtx, cancel := context.WithTimeoutCause(ctx, time.Duration(effectiveTimeout)*time.Second, ErrExecTimeout)
+
+	sb, err := m.resolve(execCtx, id)
+	if err != nil {
+		telemetry.Error(err, span)
+		metrics.RecordError(execCtx, "sandbox_not_found")
+		cancel()
 		span.End()
 		return nil, err
 	}
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
 		telemetry.Error(ErrNetworkRequired, span)
-		metrics.RecordError(ctx, "network_required")
+		metrics.RecordError(execCtx, "network_required")
+		cancel()
 		span.End()
 		return nil, ErrNetworkRequired
 	}
@@ -527,16 +583,22 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	m.mu.Unlock()
 
 	streamStart := time.Now()
-	ch, err := m.runtime.ExecStream(ctx, runtimeID, req)
+	ch, err := m.runtime.ExecStream(execCtx, runtimeID, req)
 	if err != nil {
 		m.mu.Lock()
 		sb.State = StateError
 		sb.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		telemetry.Error(err, span)
-		metrics.RecordExec(ctx, "stream", "error", time.Since(streamStart).Seconds())
-		metrics.RecordError(ctx, "exec_failed")
+		status := execFailureStatus(execCtx, timeoutSource)
+		metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
+		metrics.RecordError(execCtx, "exec_failed")
+		timedOut := errors.Is(context.Cause(execCtx), ErrExecTimeout)
+		cancel()
 		span.End()
+		if timedOut {
+			return nil, fmt.Errorf("execute sandbox stream: %w", ErrExecTimeout)
+		}
 		return nil, err
 	}
 
@@ -544,22 +606,64 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	outCh := make(chan runtime.StreamEvent, 64)
 	go func() {
 		defer span.End()
+		defer cancel()
 		defer close(outCh)
-		for event := range ch {
+
+		finishCancelled := func() {
+			cause := context.Cause(execCtx)
+			m.mu.Lock()
+			sb.State = StateError
+			sb.UpdatedAt = time.Now()
+			m.mu.Unlock()
+			if errors.Is(cause, ErrExecTimeout) {
+				telemetry.Error(ErrExecTimeout, span)
+				outCh <- runtime.StreamEvent{Type: runtime.StreamError, Content: ErrExecTimeout.Error()}
+			}
+			metrics.RecordExec(execCtx, "stream", execFailureStatus(execCtx, timeoutSource), time.Since(streamStart).Seconds())
+		}
+
+		streamFailed := false
+		for {
 			select {
-			case outCh <- event:
-			case <-ctx.Done():
-				// Drain remaining events to avoid blocking the upstream goroutine
-				for range ch {
-				}
+			case <-execCtx.Done():
+				finishCancelled()
 				return
+			case event, ok := <-ch:
+				if !ok {
+					if context.Cause(execCtx) != nil {
+						finishCancelled()
+						return
+					}
+					m.mu.Lock()
+					if streamFailed {
+						sb.State = StateError
+					} else {
+						sb.State = StateIdle
+					}
+					sb.UpdatedAt = time.Now()
+					m.mu.Unlock()
+					status := "success"
+					if streamFailed {
+						status = "error"
+					}
+					metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
+					return
+				}
+				if context.Cause(execCtx) != nil {
+					finishCancelled()
+					return
+				}
+				if event.Type == runtime.StreamError {
+					streamFailed = true
+				}
+				select {
+				case outCh <- event:
+				case <-execCtx.Done():
+					finishCancelled()
+					return
+				}
 			}
 		}
-		m.mu.Lock()
-		sb.State = StateIdle
-		sb.UpdatedAt = time.Now()
-		m.mu.Unlock()
-		metrics.RecordExec(ctx, "stream", "success", time.Since(streamStart).Seconds())
 	}()
 
 	return outCh, nil
@@ -1191,17 +1295,17 @@ func buildInstallCommand(deps []Dependency) string {
 // Used for network-enabled sandboxes that bypass the pool.
 func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
 	return runtime.SandboxSpec{
-		ID:               id,
-		Image:            m.config.PoolConfig.Image,
-		Memory:           cfg.Resources.Memory,
-		CPU:              cfg.Resources.CPU,
-		Disk:             cfg.Resources.Disk,
+		ID:                  id,
+		Image:               m.config.PoolConfig.Image,
+		Memory:              cfg.Resources.Memory,
+		CPU:                 cfg.Resources.CPU,
+		Disk:                cfg.Resources.Disk,
 		NetworkEnabled:      cfg.Network.Enabled,
 		NetworkWhitelist:    cfg.Network.Whitelist,
 		NetworkBlockPrivate: cfg.Network.BlockPrivate,
-		ReadOnlyRootFS:   false,
-		RunAsUser:        1000,
-		PidLimit:         100,
+		ReadOnlyRootFS:      false,
+		RunAsUser:           1000,
+		PidLimit:            100,
 		Labels: map[string]string{
 			"sandbox.id": id,
 		},

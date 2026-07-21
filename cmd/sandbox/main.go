@@ -111,6 +111,7 @@ func main() {
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
 		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,
+		MaxExecTimeoutSeconds:   cfg.Security.MaxExecTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,
 	})
 

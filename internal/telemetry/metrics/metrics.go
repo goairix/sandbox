@@ -288,7 +288,8 @@ func RecordDependencyInstall(ctx context.Context, status string, duration float6
 }
 
 // RecordExec records an execution attempt.
-// status: "success" (exit_code == 0), "non_zero_exit" (process exited with non-zero), or "error" (transport/runtime error).
+// status: "success" (exit_code == 0), "non_zero_exit" (process exited with non-zero),
+// "error" (transport/runtime error), "timeout_default", "timeout_request", or "caller_cancelled".
 // kind: "sync" or "stream".
 func RecordExec(ctx context.Context, kind, status string, duration float64) {
 	attrs := []attribute.KeyValue{

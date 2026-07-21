@@ -5,9 +5,15 @@ import (
 	"time"
 )
 
-// ErrNetworkRequired is returned when a command requires network access
-// but the sandbox has networking disabled.
-var ErrNetworkRequired = errors.New("network access is required but not enabled for this sandbox")
+var (
+	// ErrNetworkRequired is returned when a command requires network access
+	// but the sandbox has networking disabled.
+	ErrNetworkRequired = errors.New("network access is required but not enabled for this sandbox")
+	// ErrInvalidExecTimeout is returned when a requested execution timeout is invalid.
+	ErrInvalidExecTimeout = errors.New("invalid execution timeout")
+	// ErrExecTimeout is returned when a sandbox execution exceeds its effective timeout.
+	ErrExecTimeout = errors.New("sandbox execution timed out")
+)
 
 // Language represents a supported programming language/runtime.
 type Language string
@@ -55,11 +61,11 @@ type ResourceLimits struct {
 
 // NetworkConfig defines network settings for a sandbox.
 type NetworkConfig struct {
-	Enabled      bool     `json:"enabled"`
-	Whitelist    []string `json:"whitelist"` // allowed domains/IPs
+	Enabled   bool     `json:"enabled"`
+	Whitelist []string `json:"whitelist"` // allowed domains/IPs
 	// BlockPrivate blocks RFC1918 private ranges by default; Whitelist entries
 	// can still reach internal addresses.
-	BlockPrivate bool     `json:"block_private"`
+	BlockPrivate bool `json:"block_private"`
 }
 
 // WorkspaceInfo holds metadata about a mounted workspace.
@@ -73,11 +79,11 @@ type WorkspaceInfo struct {
 
 // SandboxConfig holds all configuration for creating a sandbox.
 type SandboxConfig struct {
-	Mode          Mode           `json:"mode"`
-	Timeout       int            `json:"timeout"` // seconds; 0 = use default, -1 = never expire
-	Resources     ResourceLimits `json:"resources"`
-	Network       NetworkConfig  `json:"network"`
-	Dependencies  []Dependency   `json:"dependencies"`
+	Mode                 Mode           `json:"mode"`
+	Timeout              int            `json:"timeout"` // seconds; 0 = use default, -1 = never expire
+	Resources            ResourceLimits `json:"resources"`
+	Network              NetworkConfig  `json:"network"`
+	Dependencies         []Dependency   `json:"dependencies"`
 	WorkspacePath        string         `json:"workspace_path,omitempty"`
 	WorkspaceSyncExclude []string       `json:"workspace_sync_exclude,omitempty"`
 }

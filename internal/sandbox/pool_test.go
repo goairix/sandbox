@@ -15,10 +15,16 @@ import (
 
 // mockRuntime is a simple mock for testing pool logic.
 type mockRuntime struct {
-	mu        sync.Mutex
-	created   int
-	removed   int
-	sandboxes map[string]*runtime.SandboxInfo
+	mu             sync.Mutex
+	created        int
+	removed        int
+	sandboxes      map[string]*runtime.SandboxInfo
+	execContext    context.Context
+	execRequest    runtime.ExecRequest
+	execFunc       func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error)
+	streamContext  context.Context
+	streamRequest  runtime.ExecRequest
+	execStreamFunc func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
 }
 
 func newMockRuntime() *mockRuntime {
@@ -60,12 +66,42 @@ func (m *mockRuntime) GetSandbox(_ context.Context, id string) (*runtime.Sandbox
 	return info, nil
 }
 
-func (m *mockRuntime) Exec(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+func (m *mockRuntime) Exec(ctx context.Context, id string, req runtime.ExecRequest) (*runtime.ExecResult, error) {
+	m.mu.Lock()
+	m.execContext = ctx
+	m.execRequest = req
+	execFunc := m.execFunc
+	m.mu.Unlock()
+	if execFunc != nil {
+		return execFunc(ctx, id, req)
+	}
 	return &runtime.ExecResult{}, nil
 }
 
-func (m *mockRuntime) ExecStream(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
-	return nil, nil
+func (m *mockRuntime) ExecStream(ctx context.Context, id string, req runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+	m.mu.Lock()
+	m.streamContext = ctx
+	m.streamRequest = req
+	execStreamFunc := m.execStreamFunc
+	m.mu.Unlock()
+	if execStreamFunc != nil {
+		return execStreamFunc(ctx, id, req)
+	}
+	ch := make(chan runtime.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockRuntime) lastExec() (context.Context, runtime.ExecRequest) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.execContext, m.execRequest
+}
+
+func (m *mockRuntime) lastStream() (context.Context, runtime.ExecRequest) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamContext, m.streamRequest
 }
 
 func (m *mockRuntime) ExecPipe(context.Context, string, []string, io.Reader) error {
