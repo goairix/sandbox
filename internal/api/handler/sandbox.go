@@ -29,6 +29,18 @@ func isValidMode(mode string) bool {
 	return false
 }
 
+func resourceLimitsFromRequest(req *types.ResourceLimits) sandbox.ResourceLimits {
+	if req == nil {
+		return sandbox.ResourceLimits{}
+	}
+	return sandbox.ResourceLimits{
+		Memory:  req.Memory,
+		CPU:     req.CPU,
+		Disk:    req.Disk,
+		TmpDisk: req.TmpDisk,
+	}
+}
+
 func (h *Handler) CreateSandbox(c *gin.Context) {
 	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.CreateSandbox")
 	defer span.End()
@@ -54,11 +66,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	}
 
 	if req.Resources != nil {
-		cfg.Resources = sandbox.ResourceLimits{
-			Memory: req.Resources.Memory,
-			CPU:    req.Resources.CPU,
-			Disk:   req.Resources.Disk,
-		}
+		cfg.Resources = resourceLimitsFromRequest(req.Resources)
 	}
 
 	if req.Network != nil {

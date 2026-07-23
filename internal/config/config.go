@@ -113,6 +113,7 @@ type SecurityConfig struct {
 	MaxMemory             string   `mapstructure:"max_memory"`
 	MaxMemoryRequest      string   `mapstructure:"max_memory_request"`
 	MaxDisk               string   `mapstructure:"max_disk"`
+	MaxTmpDisk            string   `mapstructure:"max_tmp_disk"`
 	MaxPids               int      `mapstructure:"max_pids"`
 	MaxCPU                string   `mapstructure:"max_cpu"`
 	MaxCPURequest         string   `mapstructure:"max_cpu_request"`
@@ -294,6 +295,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.sandbox_timeout_seconds", 3600)
 	v.SetDefault("security.max_memory", "256Mi")
 	v.SetDefault("security.max_disk", "100Mi")
+	v.SetDefault("security.max_tmp_disk", "50Mi")
 	v.SetDefault("security.max_pids", 100)
 	v.SetDefault("security.network_enabled", false)
 	v.SetDefault("security.network_whitelist", []string{})

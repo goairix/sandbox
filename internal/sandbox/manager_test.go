@@ -32,6 +32,49 @@ func newExecTestManager(rt *mockRuntime, cfg ManagerConfig) *Manager {
 	return mgr
 }
 
+func TestManagerCreatePropagatesTmpDiskToDirectRuntime(t *testing.T) {
+	rt := newMockRuntime()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		PoolConfig: PoolConfig{
+			Image:         "sandbox:latest",
+			Memory:        "256Mi",
+			MemoryRequest: "128Mi",
+			CPU:           "500m",
+			CPURequest:    "100m",
+			Disk:          "1Gi",
+		},
+	})
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode: ModeEphemeral,
+		Resources: ResourceLimits{
+			TmpDisk: "200Mi",
+		},
+	})
+
+	require.NoError(t, err)
+	spec := rt.lastCreatedSpec()
+	assert.Equal(t, "200Mi", spec.TmpDisk)
+	assert.Equal(t, "256Mi", spec.Memory)
+	assert.Equal(t, "128Mi", spec.MemoryRequest)
+	assert.Equal(t, "500m", spec.CPU)
+	assert.Equal(t, "100m", spec.CPURequest)
+	assert.Equal(t, "1Gi", spec.Disk)
+}
+
+func TestManagerBuildSpecUsesConfiguredTmpDiskDefault(t *testing.T) {
+	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{
+		PoolConfig: PoolConfig{
+			Image:   "sandbox:latest",
+			TmpDisk: "150Mi",
+		},
+	})
+
+	spec := mgr.buildSpec("sandbox-test", SandboxConfig{})
+
+	assert.Equal(t, "150Mi", spec.TmpDisk)
+}
+
 func captureExecMetricStatus(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()

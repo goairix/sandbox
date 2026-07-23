@@ -52,6 +52,15 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 		}
 	}
 
+	tmpDisk := spec.TmpDisk
+	if tmpDisk == "" {
+		tmpDisk = runtime.DefaultTmpDisk
+	}
+	tmpDiskBytes, err := parseMemory(tmpDisk)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse tmp disk: %w", err)
+	}
+
 	hostConfig := &container.HostConfig{
 		Resources: container.Resources{
 			Memory:    memoryBytes,
@@ -61,7 +70,7 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 		SecurityOpt:    []string{},
 		// Tmpfs for writable directories on read-only root
 		Tmpfs: map[string]string{
-			"/tmp": "size=50m",
+			"/tmp": fmt.Sprintf("size=%d", tmpDiskBytes),
 		},
 	}
 

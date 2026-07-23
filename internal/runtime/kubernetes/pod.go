@@ -91,6 +91,15 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		}
 	}
 
+	tmpDisk := spec.TmpDisk
+	if tmpDisk == "" {
+		tmpDisk = runtime.DefaultTmpDisk
+	}
+	tmpDiskQty, err := resource.ParseQuantity(tmpDisk)
+	if err != nil {
+		return nil, fmt.Errorf("parse tmp disk quantity %q: %w", tmpDisk, err)
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      spec.ID,
@@ -158,7 +167,7 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 					Name: "tmp",
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{
-							SizeLimit: resource.NewQuantity(50*1024*1024, resource.BinarySI),
+							SizeLimit: &tmpDiskQty,
 						},
 					},
 				},

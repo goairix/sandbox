@@ -83,6 +83,7 @@ config:
     maxMemory: "512Mi"
     maxMemoryRequest: "128Mi"
     maxDisk: "100Mi"
+    maxTmpDisk: "50Mi"
     maxPids: 100
     maxCpu: "500m"
     maxCpuRequest: "100m"

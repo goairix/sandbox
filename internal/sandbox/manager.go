@@ -251,9 +251,22 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	useBindMount := cfg.WorkspacePath != "" && m.fsMeta != nil && m.fsMeta.Provider == storage.ProviderLocal
 
-	if cfg.Network.Enabled || useBindMount {
+	if cfg.Network.Enabled || useBindMount || cfg.Resources.TmpDisk != "" {
 		source = "direct"
 		spec := m.buildSpec(id, cfg)
+		if cfg.Resources.TmpDisk != "" {
+			if spec.Memory == "" {
+				spec.Memory = m.config.PoolConfig.Memory
+				spec.MemoryRequest = m.config.PoolConfig.MemoryRequest
+			}
+			if spec.CPU == "" {
+				spec.CPU = m.config.PoolConfig.CPU
+				spec.CPURequest = m.config.PoolConfig.CPURequest
+			}
+			if spec.Disk == "" {
+				spec.Disk = m.config.PoolConfig.Disk
+			}
+		}
 		if useBindMount {
 			hostPath := m.resolveLocalWorkspacePath(cfg.WorkspacePath)
 			spec.Mounts = append(spec.Mounts, runtime.Mount{
@@ -1354,12 +1367,17 @@ func buildInstallCommand(deps []Dependency) string {
 // buildSpec constructs a runtime.SandboxSpec from sandbox config.
 // Used for network-enabled sandboxes that bypass the pool.
 func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
+	tmpDisk := cfg.Resources.TmpDisk
+	if tmpDisk == "" {
+		tmpDisk = m.config.PoolConfig.TmpDisk
+	}
 	return runtime.SandboxSpec{
 		ID:                  id,
 		Image:               m.config.PoolConfig.Image,
 		Memory:              cfg.Resources.Memory,
 		CPU:                 cfg.Resources.CPU,
 		Disk:                cfg.Resources.Disk,
+		TmpDisk:             tmpDisk,
 		NetworkEnabled:      cfg.Network.Enabled,
 		NetworkWhitelist:    cfg.Network.Whitelist,
 		NetworkBlockPrivate: cfg.Network.BlockPrivate,

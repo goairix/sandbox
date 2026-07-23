@@ -1,10 +1,21 @@
 package sandbox_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	sandbox "github.com/goairix/sandbox/sdk/go"
 )
+
+func TestResourceLimitsMarshalTmpDisk(t *testing.T) {
+	data, err := json.Marshal(sandbox.ResourceLimits{TmpDisk: "200Mi"})
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	if got, want := string(data), `{"tmp_disk":"200Mi"}`; got != want {
+		t.Fatalf("JSON = %s, want %s", got, want)
+	}
+}
 
 func TestModeConstants(t *testing.T) {
 	if sandbox.ModeEphemeral != "ephemeral" {

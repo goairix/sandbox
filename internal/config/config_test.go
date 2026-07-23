@@ -55,6 +55,7 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, 600, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "256Mi", cfg.Security.MaxMemory)
 	assert.Equal(t, "100Mi", cfg.Security.MaxDisk)
+	assert.Equal(t, "50Mi", cfg.Security.MaxTmpDisk)
 	assert.Equal(t, 100, cfg.Security.MaxPids)
 	assert.Equal(t, false, cfg.Security.NetworkEnabled)
 	assert.Empty(t, cfg.Security.NetworkWhitelist)
@@ -104,6 +105,7 @@ security:
   max_exec_timeout_seconds: 900
   max_memory: "512Mi"
   max_disk: "200Mi"
+  max_tmp_disk: "300Mi"
   max_pids: 200
   network_enabled: true
   network_whitelist:
@@ -156,6 +158,7 @@ security:
 	assert.Equal(t, 900, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "512Mi", cfg.Security.MaxMemory)
 	assert.Equal(t, "200Mi", cfg.Security.MaxDisk)
+	assert.Equal(t, "300Mi", cfg.Security.MaxTmpDisk)
 	assert.Equal(t, 200, cfg.Security.MaxPids)
 	assert.Equal(t, true, cfg.Security.NetworkEnabled)
 	assert.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"}, cfg.Security.NetworkWhitelist)
@@ -189,6 +192,7 @@ func TestEnvOverrides(t *testing.T) {
 		"SANDBOX_SECURITY_API_KEY":                  "env-api-key",
 		"SANDBOX_SECURITY_MAX_MEMORY":               "1Gi",
 		"SANDBOX_SECURITY_MAX_DISK":                 "500Mi",
+		"SANDBOX_SECURITY_MAX_TMP_DISK":             "600Mi",
 		"SANDBOX_SECURITY_MAX_PIDS":                 "500",
 		"SANDBOX_SECURITY_NETWORK_ENABLED":          "true",
 		"SANDBOX_SECURITY_SECCOMP_PROFILE":          "/etc/seccomp/custom.json",
@@ -230,6 +234,7 @@ func TestEnvOverrides(t *testing.T) {
 	assert.Equal(t, 900, cfg.Security.MaxExecTimeoutSeconds)
 	assert.Equal(t, "1Gi", cfg.Security.MaxMemory)
 	assert.Equal(t, "500Mi", cfg.Security.MaxDisk)
+	assert.Equal(t, "600Mi", cfg.Security.MaxTmpDisk)
 	assert.Equal(t, 500, cfg.Security.MaxPids)
 	assert.Equal(t, true, cfg.Security.NetworkEnabled)
 	assert.Equal(t, "/etc/seccomp/custom.json", cfg.Security.SeccompProfile)

@@ -21,19 +21,20 @@ const (
 
 // ResourceLimits specifies resource constraints for a sandbox.
 type ResourceLimits struct {
-	Memory string `json:"memory,omitempty"`
-	CPU    string `json:"cpu,omitempty"`
-	Disk   string `json:"disk,omitempty"`
+	Memory  string `json:"memory,omitempty"`
+	CPU     string `json:"cpu,omitempty"`
+	Disk    string `json:"disk,omitempty"`
+	TmpDisk string `json:"tmp_disk,omitempty"`
 }
 
 // NetworkConfig controls network access for a sandbox.
 type NetworkConfig struct {
-	Enabled      bool     `json:"enabled"`
-	Whitelist    []string `json:"whitelist,omitempty"`
+	Enabled   bool     `json:"enabled"`
+	Whitelist []string `json:"whitelist,omitempty"`
 	// BlockPrivate blocks RFC1918 private IP ranges by default.
 	// When true, only Whitelist entries can reach internal networks;
 	// all other external traffic is allowed.
-	BlockPrivate bool     `json:"block_private,omitempty"`
+	BlockPrivate bool `json:"block_private,omitempty"`
 }
 
 // DependencySpec describes a single package dependency.

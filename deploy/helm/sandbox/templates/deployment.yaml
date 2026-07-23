@@ -86,6 +86,8 @@ spec:
               value: "{{ .Values.config.security.maxMemoryRequest }}"
             - name: SANDBOX_SECURITY_MAX_DISK
               value: "{{ .Values.config.security.maxDisk }}"
+            - name: SANDBOX_SECURITY_MAX_TMP_DISK
+              value: "{{ .Values.config.security.maxTmpDisk }}"
             - name: SANDBOX_SECURITY_MAX_PIDS
               value: "{{ .Values.config.security.maxPids }}"
             - name: SANDBOX_SECURITY_MAX_CPU

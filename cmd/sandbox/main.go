@@ -108,6 +108,7 @@ func main() {
 			CPU:           cfg.Security.MaxCPU,
 			CPURequest:    cfg.Security.MaxCPURequest,
 			Disk:          cfg.Security.MaxDisk,
+			TmpDisk:       cfg.Security.MaxTmpDisk,
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
 		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,

@@ -10,7 +10,24 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/pkg/types"
 )
+
+func TestResourceLimitsFromRequestIncludesTmpDisk(t *testing.T) {
+	got := resourceLimitsFromRequest(&types.ResourceLimits{
+		Memory:  "256Mi",
+		CPU:     "500m",
+		Disk:    "1Gi",
+		TmpDisk: "200Mi",
+	})
+
+	assert.Equal(t, sandbox.ResourceLimits{
+		Memory:  "256Mi",
+		CPU:     "500m",
+		Disk:    "1Gi",
+		TmpDisk: "200Mi",
+	}, got)
+}
 
 func TestInternalErrorExecTimeout(t *testing.T) {
 	gin.SetMode(gin.TestMode)

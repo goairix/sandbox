@@ -21,6 +21,7 @@ type PoolConfig struct {
 	CPU           string
 	CPURequest    string
 	Disk          string
+	TmpDisk       string
 }
 
 // Pool manages a pool of warm containers.
@@ -151,6 +152,7 @@ func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
 		CPU:            p.config.CPU,
 		CPURequest:     p.config.CPURequest,
 		Disk:           p.config.Disk,
+		TmpDisk:        p.config.TmpDisk,
 	}
 
 	return p.runtime.CreateSandbox(ctx, spec)

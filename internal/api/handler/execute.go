@@ -45,11 +45,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		Timeout: req.Timeout,
 	}
 	if req.Resources != nil {
-		cfg.Resources = sandbox.ResourceLimits{
-			Memory: req.Resources.Memory,
-			CPU:    req.Resources.CPU,
-			Disk:   req.Resources.Disk,
-		}
+		cfg.Resources = resourceLimitsFromRequest(req.Resources)
 	}
 	if req.Network != nil {
 		cfg.Network = sandbox.NetworkConfig{
@@ -134,11 +130,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 		Timeout: req.Timeout,
 	}
 	if req.Resources != nil {
-		cfg.Resources = sandbox.ResourceLimits{
-			Memory: req.Resources.Memory,
-			CPU:    req.Resources.CPU,
-			Disk:   req.Resources.Disk,
-		}
+		cfg.Resources = resourceLimitsFromRequest(req.Resources)
 	}
 
 	sb, err := h.manager.Create(ctx, cfg)

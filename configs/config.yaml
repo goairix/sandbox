@@ -121,6 +121,8 @@ security:
   sandbox_timeout_seconds: 3600
   # Disk quota per sandbox (e.g. "100Mi", "1Gi").
   max_disk: "100Mi"
+  # /tmp quota per sandbox (e.g. "50Mi", "1Gi").
+  max_tmp_disk: "50Mi"
   # Maximum number of processes / threads per sandbox.
   max_pids: 100
   # CPU limit per sandbox (e.g. "1", "0.5"). Prevents CPU-intensive abuse such as

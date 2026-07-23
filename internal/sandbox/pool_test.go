@@ -25,6 +25,7 @@ type mockRuntime struct {
 	streamContext  context.Context
 	streamRequest  runtime.ExecRequest
 	execStreamFunc func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
+	createdSpec    runtime.SandboxSpec
 }
 
 func newMockRuntime() *mockRuntime {
@@ -35,6 +36,7 @@ func (m *mockRuntime) CreateSandbox(_ context.Context, spec runtime.SandboxSpec)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.created++
+	m.createdSpec = spec
 	info := &runtime.SandboxInfo{
 		ID:        spec.ID,
 		RuntimeID: "container-" + spec.ID,
@@ -43,6 +45,12 @@ func (m *mockRuntime) CreateSandbox(_ context.Context, spec runtime.SandboxSpec)
 	}
 	m.sandboxes[info.RuntimeID] = info
 	return info, nil
+}
+
+func (m *mockRuntime) lastCreatedSpec() runtime.SandboxSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createdSpec
 }
 
 func (m *mockRuntime) StartSandbox(_ context.Context, _ string) error { return nil }
@@ -197,6 +205,19 @@ func TestPool_Acquire(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, info.ID)
 	assert.Equal(t, 1, pool.Size())
+}
+
+func TestPoolCreateWarmPropagatesTmpDisk(t *testing.T) {
+	rt := newMockRuntime()
+	pool := NewPool(rt, PoolConfig{
+		Image:   "sandbox:latest",
+		TmpDisk: "150Mi",
+	})
+
+	_, err := pool.createWarm(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, "150Mi", rt.lastCreatedSpec().TmpDisk)
 }
 
 func TestPool_Release(t *testing.T) {

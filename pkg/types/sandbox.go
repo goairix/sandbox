@@ -3,28 +3,29 @@ package types
 import "time"
 
 type CreateSandboxRequest struct {
-	Mode          string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
-	Timeout       int              `json:"timeout,omitempty" binding:"min=-1"` // seconds; 0 = use default, -1 = never expire
-	Resources     *ResourceLimits  `json:"resources,omitempty"`
-	Network       *NetworkConfig   `json:"network,omitempty"`
-	Dependencies  []DependencySpec `json:"dependencies,omitempty"`
+	Mode                 string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
+	Timeout              int              `json:"timeout,omitempty" binding:"min=-1"` // seconds; 0 = use default, -1 = never expire
+	Resources            *ResourceLimits  `json:"resources,omitempty"`
+	Network              *NetworkConfig   `json:"network,omitempty"`
+	Dependencies         []DependencySpec `json:"dependencies,omitempty"`
 	WorkspacePath        string           `json:"workspace_path,omitempty"`
 	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
 }
 
 type ResourceLimits struct {
-	Memory string `json:"memory,omitempty"`
-	CPU    string `json:"cpu,omitempty"`
-	Disk   string `json:"disk,omitempty"`
+	Memory  string `json:"memory,omitempty"`
+	CPU     string `json:"cpu,omitempty"`
+	Disk    string `json:"disk,omitempty"`
+	TmpDisk string `json:"tmp_disk,omitempty"`
 }
 
 type NetworkConfig struct {
-	Enabled      bool     `json:"enabled"`
-	Whitelist    []string `json:"whitelist,omitempty"`
+	Enabled   bool     `json:"enabled"`
+	Whitelist []string `json:"whitelist,omitempty"`
 	// BlockPrivate blocks access to RFC1918 private IP ranges by default.
 	// When true, only entries in Whitelist can reach internal networks;
 	// all other external traffic is allowed.
-	BlockPrivate bool     `json:"block_private,omitempty"`
+	BlockPrivate bool `json:"block_private,omitempty"`
 }
 
 type DependencySpec struct {

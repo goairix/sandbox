@@ -18,7 +18,7 @@ type ExecRequest struct {
 	Env             map[string]string // additional environment variables
 	WorkDir         string            // working directory, defaults to /workspace
 	LineBuffered    bool              // allocate TTY for real-time output
-	RequiresNetwork bool             // if true, caller asserts this command needs network
+	RequiresNetwork bool              // if true, caller asserts this command needs network
 }
 
 // ExecResult holds the result of a synchronous command execution.
@@ -48,14 +48,15 @@ const (
 
 // SandboxSpec defines what the runtime needs to create a sandbox.
 type SandboxSpec struct {
-	ID       string
-	Image    string
+	ID            string
+	Image         string
 	Memory        string // limit e.g. "512Mi"
 	MemoryRequest string // request e.g. "128Mi"; defaults to Memory when empty
 	CPU           string // limit e.g. "500m"
 	CPURequest    string // request e.g. "100m"; defaults to CPU when empty
-	Disk     string // e.g. "100Mi"
-	PidLimit int
+	Disk          string // /workspace, e.g. "100Mi"
+	TmpDisk       string // /tmp, e.g. "50Mi"; defaults to DefaultTmpDisk
+	PidLimit      int
 	// Network
 	NetworkEnabled      bool
 	NetworkWhitelist    []string
@@ -69,6 +70,8 @@ type SandboxSpec struct {
 	// Mounts specifies host paths to bind-mount into the container.
 	Mounts []Mount
 }
+
+const DefaultTmpDisk = "50Mi"
 
 // Mount describes a host-to-container bind mount.
 type Mount struct {

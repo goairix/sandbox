@@ -54,9 +54,10 @@ type Dependency struct {
 
 // ResourceLimits defines resource constraints for a sandbox.
 type ResourceLimits struct {
-	Memory string `json:"memory"` // e.g. "256Mi"
-	CPU    string `json:"cpu"`    // e.g. "0.5"
-	Disk   string `json:"disk"`   // e.g. "100Mi"
+	Memory  string `json:"memory"`   // e.g. "256Mi"
+	CPU     string `json:"cpu"`      // e.g. "0.5"
+	Disk    string `json:"disk"`     // /workspace, e.g. "100Mi"
+	TmpDisk string `json:"tmp_disk"` // /tmp, e.g. "50Mi"
 }
 
 // NetworkConfig defines network settings for a sandbox.
