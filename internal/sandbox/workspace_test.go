@@ -48,6 +48,33 @@ func TestIsExcluded(t *testing.T) {
 	assert.False(t, isExcluded(".agent", []string{}))
 }
 
+func TestStorageWriteOptions(t *testing.T) {
+	tests := []struct {
+		name            string
+		path            string
+		wantContentType string
+		wantDisposition string
+	}{
+		{name: "html", path: "index.html", wantContentType: "text/html; charset=utf-8", wantDisposition: "inline"},
+		{name: "htm", path: "page.htm", wantContentType: "text/html; charset=utf-8", wantDisposition: "inline"},
+		{name: "mixed case html", path: "report.HtMl", wantContentType: "text/html; charset=utf-8", wantDisposition: "inline"},
+		{name: "plain text", path: "notes.txt", wantContentType: "text/plain; charset=utf-8"},
+		{name: "unknown extension", path: "payload.unknownext", wantContentType: "application/octet-stream"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := &fs.Options{}
+			for _, opt := range storageWriteOptions(tt.path) {
+				opt(got)
+			}
+
+			assert.Equal(t, tt.wantContentType, got.ContentType)
+			assert.Equal(t, tt.wantDisposition, got.ContentDisposition)
+		})
+	}
+}
+
 func TestSyncFromContainer_ExcludeFiltering(t *testing.T) {
 	// Test that excluded paths are filtered from manifest
 	manifest := map[string]int64{
