@@ -4,8 +4,11 @@
 
 **复审修订：** 2026-09-02
 
-**状态：** 已完成可实施性复审修订，待最终确认
+**状态：** 设计已确认，待实现
+
 **目标分支：** `feat/workspace-fuse-mount`
+
+**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册给出 Kubernetes sidecar 与 Docker 特殊容器的目标部署契约、MinIO/华为 OBS 配置模板、Secret 管理、验证、灰度及回滚步骤；在实现合入前，模板中的新增配置项不可直接用于当前版本。
 
 ## 1. 决策摘要
 
@@ -166,7 +169,7 @@ volumeMounts:
     mountPropagation: HostToContainer
 ```
 
-`Bidirectional` 仅用于可信 privileged sidecar；sandbox 主容器保持非特权。Pod 不使用 hostPath，也不在宿主机创建可复用的 workspace 路径。该模式不是“宿主机 mount namespace 完全不可见”：FUSE 子挂载会先传播回 kubelet 管理的 Pod volume 路径，再传播给 sandbox 容器。如果安全要求禁止任何回传宿主机 mount namespace，则 sidecar 方案不可用，需要重新选择 CSI 或单容器模型。
+`Bidirectional` 仅用于可信 privileged sidecar；sandbox 主容器保持非特权。`workspace` volume 不使用 hostPath，也不在宿主机创建可复用的业务 workspace 路径。为了向 sidecar 暴露 FUSE 字符设备，部署可以单独使用指向 `/dev/fuse` 的 `hostPath.type=CharDevice`，或使用集群提供的设备插件；该设备映射不承载 workspace 数据。该模式不是“宿主机 mount namespace 完全不可见”：FUSE 子挂载会先传播回 kubelet 管理的 Pod volume 路径，再传播给 sandbox 容器。如果安全要求禁止任何回传宿主机 mount namespace，则 sidecar 方案不可用，需要重新选择 CSI 或单容器模型。
 
 ### 5.3 启动顺序
 
@@ -379,6 +382,17 @@ type WorkspaceFUSEProviderConfig struct {
     SystemEgressCIDRs []string `mapstructure:"system_egress_cidrs"`
 }
 
+type FileSystemCredentialFileConfig struct {
+    AccessKeyFile    string `mapstructure:"access_key_file"`
+    SecretKeyFile    string `mapstructure:"secret_key_file"`
+    SessionTokenFile string `mapstructure:"session_token_file"`
+}
+
+type FileSystemConfig struct {
+    // 省略现有 provider、bucket、endpoint 等字段。
+    CredentialFiles FileSystemCredentialFileConfig `mapstructure:"credential_files"`
+}
+
 type WorkspaceConfig struct {
     AutoSyncIntervalSeconds   int                                    `mapstructure:"auto_sync_interval_seconds"`
     Mode                      string                                 `mapstructure:"mode"` // "sync" | "fuse"
@@ -406,11 +420,18 @@ type WorkspaceConfig struct {
 - `quota_mode=soft` 必须显式配置，避免把现有 `max_disk` 误认为 FUSE workspace 硬限制。
 - `cache_medium=disk` 会在节点临时盘保存有界的明文缓存块；禁止节点落盘时必须显式使用 `memory`，并把 cache 纳入 Pod/container 内存限制。
 - Secret、AK、SK 不得通过日志输出。
+- sandbox-api 继续为显式文件 API 访问对象存储，但生产凭证必须通过 `FileSystemCredentialFileConfig` 指向只读 Secret 文件；文件凭证与现有明文 `access_key`/`secret_key` 互斥。Kubernetes 控制面 Secret 和 runtime namespace 的 sidecar Secret 由同一外部 Secret 源同步，不能由 API 读取 runtime Secret 内容后再转发。
 - `mount_timeout_seconds`、`flush_timeout_seconds`、`lease_ttl_seconds` 和 cache size 必须为正值并设置安全默认值。
 
 示例：
 
 ```yaml
+storage:
+  filesystem:
+    credential_files:
+      access_key_file: "/run/secrets/storage_access_key"
+      secret_key_file: "/run/secrets/storage_secret_key"
+
 workspace:
   mode: "fuse"
   secret_name: "sandbox-storage-secret"
