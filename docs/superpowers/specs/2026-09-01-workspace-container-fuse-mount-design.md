@@ -20,6 +20,9 @@ Workspace 从“sandbox-api 中转 tar 并定期同步”改为“在 sandbox �
 - Docker：每个 sandbox 使用一个自带 FUSE 的特殊容器；可信 root supervisor 管理 FUSE，所有用户代码和文件命令强制以 UID/GID 1000 执行。
 - MinIO 和普通华为 OBS 对象桶一期统一选择 s3fs 客户端族，但使用分别验证和固定的 provider profile；不预设两者必须使用完全相同的二进制或参数。华为 OBS 并行文件系统后续使用 obsfs，不在一期范围内。
 - 每个 sandbox 只挂载其自己的对象前缀，不暴露 bucket 中的其他 workspace。
+- 一期使用 provider 级静态长期 AK/SK 和 root-only s3fs `passwd_file`；不支持 STS/session token。挂载路径限制用户可见的 prefix，但共享凭证本身不构成单 workspace 的 IAM 隔离边界。
+- FUSE cache 默认使用节点磁盘和软容量阈值；超限时 sandbox 进入 error/eviction 并重建，不承诺文件写立即返回 ENOSPC。
+- Kubernetes 保持 `DNSPolicy=None` 和当前公共 nameserver；MinIO 必须使用公共 DNS 可解析的稳定 endpoint 或显式 IP，不能直接配置 `cluster.local` Service。
 - 同一个 workspace 只允许一个读写 sandbox，通过 Redis 独占租约防止多 FUSE 客户端并发写。
 - FUSE 模式不再执行 `syncToContainer`、`syncFromContainer` 或 auto-sync；挂载失败必须 fail closed，不自动退回 emptyDir 或同步模式。
 
@@ -75,6 +78,7 @@ Docker container 或 Kubernetes emptyDir /workspace
 - 一期不支持运行中为既有 Pod/容器动态增加 FUSE workspace。
 - 一期不移除 legacy sync 代码；待灰度稳定后另行清理。
 - 一期不实现 prefix 级硬容量配额，因为 s3fs、goofys 和普通对象桶均不提供该能力。
+- 一期不支持 STS、session token、临时凭证过期管理或运行中凭证热更新；静态 AK/SK 轮换通过停止新建、排空并重建该 provider 的 FUSE sandbox 完成。
 
 ## 4. 客户端选型
 
@@ -147,7 +151,7 @@ volumes:
       sizeLimit: 2Gi
 ```
 
-`workspace` 只作为 FUSE mount 的传播锚点，不保存文件数据。`fuse-cache` 为 s3fs 临时写入和缓存提供有界空间，默认上限由配置决定。
+`workspace` 只作为 FUSE mount 的传播锚点，不保存文件数据。`fuse-cache` 为 s3fs 临时写入和缓存提供节点磁盘空间；`sizeLimit` 与 Pod `ephemeral-storage` request/limit 用于调度、监控和超限驱逐，不视为文件系统硬 quota。
 
 Sidecar 在挂载前把底层 `workspace` anchor 设置为 `root:root`、mode `0555`，且不配置 `fsGroup` 赋予 sandbox 写权限。只有覆盖其上的 FUSE mount 对 UID/GID 1000 可写；如果 mount 消失，sandbox 对暴露出的 emptyDir 只能读、不能创建或修改文件，从内核权限层面 fail closed。
 
@@ -201,7 +205,9 @@ Sidecar 同时配置 `readinessProbe`。startup probe 用于启动顺序，readi
 - Secret 只挂载到 sidecar，不使用会被主容器读取的共享环境变量。
 - s3fs 密码文件位于 sidecar 私有 tmpfs，权限 `0600`。
 - 不暴露监听端口。
-- 一期使用的凭证有效期必须覆盖 sandbox 最大存活时间和卸载宽限期。若使用会过期的临时凭证，`timeout=-1` 的 FUSE sandbox 必须拒绝创建；凭证轮换通过受控重建 sandbox 完成，不假设运行中的 s3fs 自动重载 Secret。
+- 必须配置 CPU、内存和 `ephemeral-storage` request/limit；limit 必须覆盖 `cache_size`、容器日志和少量安全余量。
+- 配置固定 argv 的 `preStop`，在 termination grace period 内完成尽力 flush 和 unmount；主容器不设置长时间 preStop。
+- 一期只读取 provider 级静态长期 AK/SK，并生成 s3fs `passwd_file`；Secret 中出现 session token 时配置校验必须失败。静态凭证轮换不做热加载，按 provider 排空并重建 FUSE sandbox。
 
 `sandbox`：
 
@@ -211,6 +217,7 @@ Sidecar 同时配置 `readinessProbe`。startup probe 用于启动顺序，readi
 - 不增加 `SYS_ADMIN`。
 - Pod 的 `shareProcessNamespace` 保持 `false`。
 - 继续禁用 ServiceAccount token 和 service links。
+- Pod 使用 RuntimeDefault seccomp；sandbox 与 `workspace-ready` init container 显式 drop ALL capabilities，`workspace-ready` 同时设置 `allowPrivilegeEscalation=false`。
 
 ### 5.5 Sidecar 健康、故障与销毁
 
@@ -310,16 +317,17 @@ Docker `CopyToContainer` 写入的 tar header 必须保持 UID/GID 1000。安全
 
 system egress 的实现按集群能力固定：
 
-- Cilium 集群优先使用 FQDN/service aware policy，并单独允许 CoreDNS。
-- 标准 NetworkPolicy 不支持稳定的 FQDN 策略，不允许把启动时的一次 DNS 解析结果当成长期规则。必须使用运维配置的稳定 CIDR、专用 egress proxy，或具有稳定地址的对象存储 endpoint。
-- 当前 Pod 使用 `DNSPolicy=None` 和公共 nameserver。若 MinIO 是 `cluster.local` Service，必须显式改为允许 CoreDNS 的受控 DNS 配置，或者通过专用稳定 endpoint 访问；不能假设公共 DNS 能解析集群 Service。
+- Pod 保持 `DNSPolicy=None` 和当前公共 nameserver，不接入 CoreDNS，也不配置集群 search domain。
+- MinIO 必须使用公共 nameserver 可解析的稳定专用 endpoint，或由运维直接配置稳定 IP；`cluster.local` Service 不属于一期支持的 endpoint 形式。
+- DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR、专用 egress proxy 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。
+- endpoint 解析和连通性必须在挂载前检查。仅加入网络白名单不能让公共 nameserver 解析 `cluster.local`。
 
-Sandbox 主容器也能连接这些地址，但没有存储凭证。必须使用最小网络范围和最小权限凭证降低风险：
+Sandbox 主容器也能连接这些地址，但没有存储凭证。必须使用最小网络范围并防止凭证泄露：
 
 - 禁止放开整个 VPC、集群或对象存储网段。
 - MinIO 优先使用独立 endpoint 或专用负载均衡地址，避免向 Pod 开放整个集群服务网段。
 - 禁止匿名 bucket 访问。
-- 存储策略只授权当前 workspace prefix。
+- provider 级静态凭证只授予所需 bucket/sub path 权限，不授予管理权限；一期明确不提供单 workspace prefix 的凭证级隔离。
 - 凭证不得出现在 Pod 共享环境变量、主容器文件系统或 API 响应中。
 
 ### 7.2 Docker 约束
@@ -383,9 +391,8 @@ type WorkspaceFUSEProviderConfig struct {
 }
 
 type FileSystemCredentialFileConfig struct {
-    AccessKeyFile    string `mapstructure:"access_key_file"`
-    SecretKeyFile    string `mapstructure:"secret_key_file"`
-    SessionTokenFile string `mapstructure:"session_token_file"`
+    AccessKeyFile string `mapstructure:"access_key_file"`
+    SecretKeyFile string `mapstructure:"secret_key_file"`
 }
 
 type FileSystemConfig struct {
@@ -393,12 +400,21 @@ type FileSystemConfig struct {
     CredentialFiles FileSystemCredentialFileConfig `mapstructure:"credential_files"`
 }
 
+type WorkspaceFUSEResourceConfig struct {
+    CPURequest              string `mapstructure:"cpu_request"`
+    CPULimit                string `mapstructure:"cpu_limit"`
+    MemoryRequest           string `mapstructure:"memory_request"`
+    MemoryLimit             string `mapstructure:"memory_limit"`
+    EphemeralStorageRequest string `mapstructure:"ephemeral_storage_request"`
+    EphemeralStorageLimit   string `mapstructure:"ephemeral_storage_limit"`
+}
+
 type WorkspaceConfig struct {
     AutoSyncIntervalSeconds   int                                    `mapstructure:"auto_sync_interval_seconds"`
     Mode                      string                                 `mapstructure:"mode"` // "sync" | "fuse"
     SecretName                string                                 `mapstructure:"secret_name"`
     CacheSize                 string                                 `mapstructure:"cache_size"`
-    CacheMedium               string                                 `mapstructure:"cache_medium"` // "disk" | "memory"
+    CacheMedium               string                                 `mapstructure:"cache_medium"` // 一期固定 "disk"
     MountTimeoutSeconds       int                                    `mapstructure:"mount_timeout_seconds"`
     FlushTimeoutSeconds       int                                    `mapstructure:"flush_timeout_seconds"`
     UnmountTimeoutSeconds     int                                    `mapstructure:"unmount_timeout_seconds"`
@@ -406,6 +422,7 @@ type WorkspaceConfig struct {
     LeaseTTLSeconds           int                                    `mapstructure:"lease_ttl_seconds"`
     LeaseRenewIntervalSeconds int                                    `mapstructure:"lease_renew_interval_seconds"`
     QuotaMode                 string                                 `mapstructure:"quota_mode"` // FUSE 一期固定 "soft"
+    MounterResources          WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
     Providers                 map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
 }
 ```
@@ -418,9 +435,10 @@ type WorkspaceConfig struct {
 - Docker 必须为当前 provider 配置固定 digest 的特殊 sandbox image 和 Secret 来源。
 - `lease_renew_interval_seconds` 必须不大于 `lease_ttl_seconds / 3`。
 - `quota_mode=soft` 必须显式配置，避免把现有 `max_disk` 误认为 FUSE workspace 硬限制。
-- `cache_medium=disk` 会在节点临时盘保存有界的明文缓存块；禁止节点落盘时必须显式使用 `memory`，并把 cache 纳入 Pod/container 内存限制。
+- 一期 `cache_medium` 固定为 `disk`。Kubernetes 同时配置 `emptyDir.sizeLimit` 和 Pod/container `ephemeral-storage` request/limit；Docker 使用独立 cache volume/目录、软阈值监控和销毁清理。`cache_size` 是软阈值，不承诺硬 quota 或 ENOSPC。
 - Secret、AK、SK 不得通过日志输出。
 - sandbox-api 继续为显式文件 API 访问对象存储，但生产凭证必须通过 `FileSystemCredentialFileConfig` 指向只读 Secret 文件；文件凭证与现有明文 `access_key`/`secret_key` 互斥。Kubernetes 控制面 Secret 和 runtime namespace 的 sidecar Secret 由同一外部 Secret 源同步，不能由 API 读取 runtime Secret 内容后再转发。
+- 一期只接受长期 AK/SK；任何 session token 或凭证过期字段都必须拒绝，不能隐式退回环境变量认证。
 - `mount_timeout_seconds`、`flush_timeout_seconds`、`lease_ttl_seconds` 和 cache size 必须为正值并设置安全默认值。
 
 示例：
@@ -444,6 +462,13 @@ workspace:
   lease_ttl_seconds: 120
   lease_renew_interval_seconds: 30
   quota_mode: "soft"
+  mounter_resources:
+    cpu_request: "50m"
+    cpu_limit: "1"
+    memory_request: "64Mi"
+    memory_limit: "512Mi"
+    ephemeral_storage_request: "512Mi"
+    ephemeral_storage_limit: "3Gi"
   providers:
     minio:
       driver: "s3fs"
@@ -615,12 +640,12 @@ FUSE workspace 不再使用 Kubernetes workspace emptyDir，因此当前 `max_di
 
 s3fs 写入可能使用本地临时文件：
 
-- Kubernetes 使用独立、带 sizeLimit 的 `fuse-cache` emptyDir；它不是完整 workspace，但可能包含文件分片或缓存内容。
-- Docker 使用受限 scratch/cache mount，禁止无限使用 container writable layer。
-- `cache_medium=disk` 使用节点临时盘，要求节点磁盘加密并在 Pod/容器销毁后清理；`cache_medium=memory` 使用 tmpfs，但会增加内存压力并限制可安全处理的文件大小。
+- Kubernetes 使用独立、带 `sizeLimit` 的 `fuse-cache` emptyDir，并为 mounter 和 Pod 配置 `ephemeral-storage` request/limit；它不是完整 workspace，但可能包含文件分片或缓存内容。
+- Docker 使用独立 cache volume/目录和软阈值监控，禁止使用无界 container writable layer；宿主机不能提供真实 quota 时，达到阈值后终止并重建 sandbox。
+- 一期 `cache_medium=disk` 使用节点临时盘，要求节点磁盘加密并在 Pod/容器销毁后清理。`emptyDir.sizeLimit` 和 Docker 软阈值都不是文件系统硬 quota，Kubernetes 可能以 eviction 而不是同步写入错误处理超限。
 - 即使不启用 s3fs 持久 `use_cache`，s3fs 写入仍需要临时空间；“不使用宿主机 workspace”不等于“节点上绝不出现临时文件”。
-- cache 满时写操作应返回 ENOSPC，不应触发无界内存缓存。
-- cache 使用率、清理失败和 ENOSPC 进入指标和告警。
+- cache 达到软阈值或 Pod 收到 ephemeral-storage eviction 信号时，runtime 立即阻止新 Exec、取消活动 Exec、flush 后终止并重建 sandbox；不得继续使用无界缓存。
+- cache 使用率、阈值触发、eviction、清理失败和实际出现的 ENOSPC 进入指标和告警。
 
 ### 13.3 B 类负载建议
 
@@ -640,12 +665,12 @@ s3fs 写入可能使用本地临时文件：
 | 运行中 FUSE 进程死亡 | 拒绝新 Exec，取消活动 Exec；默认重建 Pod/容器，仅在零活动 Exec 时允许原地重挂载 |
 | 重建失败 | mount state=`error`，返回 503，等待销毁或人工诊断 |
 | 对象存储网络中断 | readiness 失败并返回 503，不触发 liveness 重启，不切换到本地目录 |
-| cache 满 | 写返回 ENOSPC，记录 workspace/cache 指标 |
+| cache 达到软阈值或 ephemeral-storage 超限 | 阻止新 Exec，取消活动 Exec，尽力 flush 后终止并重建；不承诺写调用先收到 ENOSPC |
 | Redis 租约冲突 | 返回 HTTP 409，包含占用 sandbox ID |
 | Redis 续租失败 | 立即阻止新 Exec；持续失败则取消 Exec、flush 并停止 sandbox，保留 owner 记录 |
 | API 重启 | 从 owner/session 和 runtime label 恢复状态并检查 mounter 健康；不重复挂载已有健康实例 |
 | Pod/容器丢失 | 清理 session 和租约；按持久 sandbox 规则重新创建 |
-| 凭证即将过期或轮换 | 阻止新 Exec，flush 后受控重建；不期望 s3fs 热加载 Secret |
+| 静态 AK/SK 计划轮换 | 停止该 provider 的新建流量，排空并重建全部 FUSE sandbox 后切换 Secret；不热加载凭证 |
 | 优雅卸载超时 | lazy unmount 后强制删除，记录告警 |
 
 任何故障路径都不能把空 emptyDir、容器目录或 writable layer 当作 workspace 继续运行。
@@ -689,7 +714,7 @@ Pod 和 Docker health 状态必须区分 container running 与 FUSE ready，不�
 | `internal/sandbox/manager.go` | FUSE direct create、绕过 pool、租约、restore、健康门控 |
 | `internal/sandbox/workspace.go` | FUSE 模式跳过 sync；动态 mount/unmount 冲突语义 |
 | `internal/runtime/kubernetes/pod.go` | 原生 sidecar、memory emptyDir、propagation、startup/readiness/liveness probe、Secret、完整 Ready 等待 |
-| `internal/runtime/kubernetes/network.go` | system egress 与用户网络规则合并、CoreDNS/FQDN 或稳定出口策略 |
+| `internal/runtime/kubernetes/network.go` | system egress 与用户网络规则合并、公共 DNS 和稳定 endpoint/CIDR 策略 |
 | `internal/runtime/kubernetes/exec.go` | 保持 exec 固定到 `sandbox`；错误映射 |
 | `internal/runtime/docker/container.go` | 特殊镜像、FUSE device/capability/security/health、root supervisor 与用户 exec 分离 |
 | `internal/runtime/docker/exec.go` | `execUser` 强制 UID/GID 1000；私有固定 argv `execControl` |
@@ -735,6 +760,7 @@ Pod 和 Docker health 状态必须区分 container running 与 FUSE ready，不�
 
 - 路径穿越、绝对路径、特殊字符和 shell 参数注入。
 - sandbox 主容器无法读取 Kubernetes Secret、sidecar `/proc` 或 `/dev/fuse`。
+- Pod 明确设置 `automountServiceAccountToken=false`、`enableServiceLinks=false`、`shareProcessNamespace=false`；sandbox 和普通 init container 使用 RuntimeDefault seccomp 并 drop ALL capabilities。
 - Docker 用户命令 UID/GID 始终为 1000，覆盖所有直接和间接 exec 路径。
 - Docker 用户无法读取 root-only Secret、控制 supervisor 或执行 mount/umount。
 - 公共请求无法触发 `execControl`、指定 mounter 容器或传入 root 控制 argv。
@@ -749,11 +775,11 @@ Pod 和 Docker health 状态必须区分 container running 与 FUSE ready，不�
 - 强制移除 FUSE mount 后尝试通过 Exec 和文件 API 写入，验证底层 emptyDir/容器目录返回权限错误且没有本地文件残留。
 - 对象存储断网、DNS 失败、证书错误、AK/SK 失效。
 - mount 过程中 Pod/容器被删除。
-- 写入中 cache 满。
+- 写入中 cache 达到软阈值和 Kubernetes ephemeral-storage eviction。
 - Pod 驱逐、节点重启、Docker daemon 重启、sandbox-api 重启。
 - 优雅卸载失败和 stale FUSE mount 恢复。
 - Redis 短暂不可用、租约续期失败、API 崩溃超过一个 TTL、owner 记录恢复和安全接管。
-- 长生命周期 sandbox 的凭证过期与受控重建。
+- provider 静态 AK/SK 计划轮换时的停止新建、排空与受控重建。
 
 ### 17.5 验收标准
 

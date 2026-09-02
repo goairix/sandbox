@@ -11,6 +11,9 @@
 - Kubernetes：每个 sandbox Pod 注入一个 FUSE 原生 sidecar，业务 `/workspace` 使用 Pod 私有 `emptyDir`，不挂载宿主机业务目录。sidecar 负责挂载，sandbox 主容器仅消费传播后的 mount。
 - Docker：每个 sandbox 使用自带 s3fs 和 root supervisor 的特殊镜像，API 通过 Docker Device 映射 `/dev/fuse`。不在宿主机挂载 `/workspace`，也不运行宿主机常驻 s3fs 进程。
 - MinIO 和华为 OBS 使用独立 provider profile、镜像和 digest。不得让租户或 API 调用方传入任意 s3fs 参数。
+- 一期使用 provider 级静态长期 AK/SK 和 root-only s3fs `passwd_file`，不支持 STS/session token。挂载路径只向用户暴露当前 prefix，但静态凭证本身不提供单 workspace IAM 隔离。
+- FUSE cache 默认使用节点磁盘和软容量阈值；达到阈值或被 kubelet eviction 时终止并重建 sandbox，不承诺写入立即返回 ENOSPC。
+- Kubernetes 保持 `DNSPolicy=None` 和公共 nameserver。MinIO 必须使用公共 DNS 可解析的稳定 endpoint 或显式 IP，不支持直接使用 `cluster.local` Service。
 - 对象存储 endpoint 属于系统必需网络。即使用户网络关闭，也必须通过受控 system egress 或 gateway 可达。
 - 凭证不写入 Helm values、Compose environment、容器命令行、镜像或日志。
 - `mode=fuse` 必须与 `quota_mode=soft` 同时显式开启；对象存储不能提供与当前本地目录相同的严格磁盘配额语义。
@@ -22,7 +25,7 @@
 | sandbox-api | Helm Deployment | Compose service | 创建/销毁 sandbox、签发运行时规格、维护租约与状态 |
 | FUSE 进程 | 每个 sandbox Pod 的 sidecar | 每个特殊 sandbox 容器内的 root supervisor 子进程 | 将单一 workspace prefix 挂载到 `/workspace` |
 | 用户进程 | sandbox 主容器，UID/GID 1000 | 同一容器内由 supervisor/exec 强制 UID/GID 1000 | 访问 `/workspace`，不能控制 FUSE |
-| Secret | Pod Secret volume，仅 sidecar 可见 | 宿主机 root-only 暂存文件，仅挂载到特殊容器 | 提供 AK/SK、临时 token、自定义 CA |
+| Secret | Pod Secret volume，仅 sidecar 可见 | 宿主机 root-only 暂存文件，仅挂载到特殊容器 | 提供 provider 级静态长期 AK/SK 和自定义 CA |
 | Redis | Helm 内置或外部 Redis | Compose Redis 或外部 Redis | TTL lease、持久 owner、generation、runtime identity |
 | system egress | 每 sandbox NetworkPolicy/Cilium 策略 | 受控 gateway 网络 | 只允许 DNS 和目标对象存储 endpoint |
 
@@ -74,7 +77,8 @@ grep -w fuse /proc/filesystems
 - endpoint 必须是运维配置，不能来自 CreateSandbox 请求。
 - 生产必须启用 TLS 和主机名校验。
 - 私有 CA 通过 Secret 文件注入 mounter，不修改宿主机全局 CA。
-- endpoint 使用 DNS 名时，system egress 必须允许 DNS 解析及解析结果变化。
+- endpoint 使用 DNS 名时，必须能由配置的公共 nameserver 解析，system egress 必须允许 DNS 和 endpoint 连接。
+- Kubernetes 不接入 CoreDNS；`*.svc.cluster.local` 不能作为 MinIO endpoint。需要使用专用稳定 FQDN、egress proxy 或显式 IP。
 - MinIO 明确使用 path-style；OBS 的签名版本、region 和 path-style 由 provider spike 的固定结果决定。
 - bucket 必须已存在。挂载器不得以高权限凭证自动创建 bucket。
 
@@ -106,7 +110,7 @@ rm workspace-storage.env
 
 当控制面与 runtime namespace 分离时，使用同一外部 Secret 源在 `CONTROL_NAMESPACE` 生成 `sandbox-storage-minio`，供 sandbox-api 的存储 driver 使用；上面的 `sandbox-workspace-minio` 只供 sidecar 使用。若两个组件在同一 namespace，可以让两处配置引用同一个 Secret 名称，但 volume 仍只投射给各自受信任的容器。
 
-使用短期凭证时增加 `sessionToken`；使用私有 CA 时增加 `ca.crt`：
+使用私有 CA 时增加 `ca.crt`：
 
 ```bash
 kubectl -n "$SANDBOX_NAMESPACE" create secret generic sandbox-workspace-minio \
@@ -118,7 +122,7 @@ kubectl -n "$SANDBOX_NAMESPACE" create secret generic sandbox-workspace-minio \
 
 第二种写法适合受控终端，但 literal 可能进入本机进程参数审计；生产优先使用 External Secrets、Sealed Secrets 或等价设施。
 
-Pod 直接 `secretKeyRef`/Secret volume 引用已存在的 Secret 时，sandbox-api ServiceAccount 不需要 `get/list/watch secrets`。只有未来确实由 API 创建短期 Secret 时，才增加最小范围的 Secret RBAC。现有 Chart 把 `config.storage.filesystem.accessKey/secretKey` 直接渲染为普通环境变量；FUSE 实现合入时必须改成 `secretKeyRef` 或文件型 credential provider，并删除 values 中的明文凭证入口。
+Pod 直接 `secretKeyRef`/Secret volume 引用已存在的 provider Secret 时，sandbox-api ServiceAccount 不需要 `get/list/watch secrets`。一期不创建 per-sandbox Secret，也不接受 `sessionToken`；Secret 中出现该字段时配置校验失败。现有 Chart 把 `config.storage.filesystem.accessKey/secretKey` 直接渲染为普通环境变量；FUSE 实现合入时必须改成 `secretKeyRef` 或文件型 credential provider，并删除 values 中的明文凭证入口。
 
 ### 5.2 Docker
 
@@ -143,6 +147,8 @@ sudo install -d -m 0700 -o root -g root /var/lib/sandbox/fuse-secrets
 - `capabilities.drop: ["ALL"]`；
 - 不挂载 Secret 和 `/dev/fuse`。
 
+Pod 级强制设置 `automountServiceAccountToken: false`、`enableServiceLinks: false`、`shareProcessNamespace: false` 和 RuntimeDefault seccomp。`workspace-ready` init container 同样设置非 root、`allowPrivilegeEscalation: false`、只读 rootfs 和 drop ALL capabilities。
+
 不要为了 sidecar 把 sandbox 主容器改成 privileged，也不要对整个业务 namespace 放宽安全基线。
 
 ### 6.2 `/dev/fuse` 与 workspace volume
@@ -165,6 +171,8 @@ volumes:
 
 这里的 hostPath 仅暴露字符设备，不承载数据。业务 `/workspace` 仍是 Pod 私有 `emptyDir`，不会映射到用户指定的宿主机目录。因为 `mountPropagation: Bidirectional`，mount 会在 kubelet 管理的 Pod volume 路径下短暂进入宿主机 mount namespace；Pod 删除和异常回收必须清理该 mount。
 
+`fuse-cache.sizeLimit` 不是文件系统硬 quota。必须同时为 mounter 配置 `ephemeral-storage` request/limit，并监控 cache；达到软阈值或 kubelet 发出 eviction 时阻止新 Exec、取消活动 Exec 并终止重建，不保证用户写调用先收到 ENOSPC。
+
 ### 6.3 目标 Helm values
 
 以下配置块是实现完成后 Chart 应支持的目标 schema。它补充现有 `config.workspace`，不应把 AK/SK 写入 values：
@@ -176,7 +184,7 @@ config:
       provider: minio
       bucket: sandbox-storage
       region: us-east-1
-      endpoint: https://minio.storage.svc.cluster.local:9000
+      endpoint: https://minio-fuse.example.com:9000
       subPath: workspaces
       useSSL: true
   workspace:
@@ -192,6 +200,13 @@ config:
     recreateMaxAttempts: 1
     leaseTTLSeconds: 90
     leaseRenewIntervalSeconds: 30
+    mounterResources:
+      cpuRequest: 50m
+      cpuLimit: "1"
+      memoryRequest: 64Mi
+      memoryLimit: 512Mi
+      ephemeralStorageRequest: 512Mi
+      ephemeralStorageLimit: 3Gi
     providers:
       minio:
         driver: s3fs
@@ -199,7 +214,7 @@ config:
         mounterImage: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
         dockerImage: registry.example.com/sandbox-fuse-minio@sha256:<64-hex-digest>
         systemEgressFQDNs:
-          - minio.storage.svc.cluster.local
+          - minio-fuse.example.com
         systemEgressCIDRs: []
       obs:
         driver: s3fs
@@ -247,7 +262,17 @@ metadata:
     sandbox.workspace.mode: fuse
     sandbox.workspace.provider: minio
 spec:
-  terminationGracePeriodSeconds: 30
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  shareProcessNamespace: false
+  dnsPolicy: None
+  dnsConfig:
+    nameservers: ["8.8.8.8", "1.1.1.1"]
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  terminationGracePeriodSeconds: 90
   initContainers:
     - name: workspace-mounter
       image: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
@@ -255,6 +280,25 @@ spec:
       securityContext:
         privileged: true
         runAsUser: 0
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi
+          ephemeral-storage: 3Gi
+      lifecycle:
+        preStop:
+          exec:
+            command:
+              - /usr/local/bin/mounter-control
+              - shutdown
+              - --mount=/workspace
+              - --flush-timeout=30s
+              - --unmount-timeout=20s
       volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -266,6 +310,8 @@ spec:
         - name: workspace-credentials
           mountPath: /run/secrets/workspace
           readOnly: true
+        - name: mounter-run
+          mountPath: /run/s3fs
       startupProbe:
         exec:
           command: ["/usr/local/bin/mounter-health", "startup", "/workspace"]
@@ -283,11 +329,15 @@ spec:
         failureThreshold: 3
     - name: workspace-ready
       image: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
+      command: ["/usr/local/bin/mounter-health", "write-probe", "/workspace"]
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
         allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
       volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -322,6 +372,10 @@ spec:
       secret:
         secretName: sandbox-workspace-minio
         defaultMode: 0400
+    - name: mounter-run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
 ```
 
 实际 runtime 还必须根据 workspace 生成唯一 prefix、租约标签和 runtime identity。对象 key 根路径严格为：
@@ -349,10 +403,11 @@ Secret 通过已知名称挂载时不授予读取权限。若 control namespace 
 
 现有 Chart 的静态 NetworkPolicy 只提供默认拒绝和 DNS 基线。FUSE endpoint 的 system egress 必须由 runtime 为每个 sandbox 动态生成：
 
-- 始终允许集群 DNS；
+- Pod 保持 `DNSPolicy=None`，DNS egress 只允许运维配置的公共 nameserver；不允许 CoreDNS，也不配置集群 search domain；
 - 无论 `network_enabled` 是否为 false，都允许 sidecar 访问该 workspace 固定 provider endpoint；
 - sandbox 主容器不因此获得任意公网访问；
-- Cilium 环境优先使用 FQDN policy；仅使用标准 NetworkPolicy 时，使用稳定私网 CIDR、固定 egress proxy 或 gateway，不把短期 DNS 解析结果永久写死；
+- endpoint 必须是公共 nameserver 可解析的稳定专用 FQDN，或显式稳定 IP；不支持 `cluster.local` Service。仅加入网络白名单不能解决集群域名解析；
+- Cilium 环境可使用 FQDN policy；仅使用标准 NetworkPolicy 时，使用运维维护的稳定 CIDR、固定 egress proxy 或显式 endpoint IP，不把短期 DNS 解析结果永久写死；
 - 禁止访问云元数据地址和不必要的 RFC1918 网段。
 
 NetworkPolicy 不能按容器区分流量；若必须严格保证主容器无法直连对象存储，应使用 sidecar 独立网络身份、CNI 扩展或 egress proxy，而不是仅依赖同 Pod 的标准 NetworkPolicy。
@@ -368,12 +423,15 @@ kubectl -n "$SANDBOX_NAMESPACE" get pod "$SANDBOX_POD" \
 kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -c sandbox -- \
   findmnt -T /workspace
 kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -c sandbox -- \
+  getent ahosts minio-fuse.example.com
+kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -c sandbox -- \
   sh -c 'id && p=/workspace/.deploy-probe-$(date +%s); printf ok > "$p"; test "$(cat "$p")" = ok; rm "$p"'
 ```
 
 验收时还要验证：
 
 - sandbox 容器内不存在 `/dev/fuse` 和 Secret mount；
+- Pod 的 nameserver 为配置的公共 DNS，`cluster.local` 不可解析，目标 endpoint 可以解析且只有 system egress 允许连接；
 - Pod 未 Ready 前 API 不返回创建成功；
 - 删除 s3fs 进程后 sandbox 被标记 error 并按策略重建，不写到底层 emptyDir；
 - 删除 Pod 后节点没有遗留对应 kubelet volume 的 FUSE mount；
@@ -449,6 +507,13 @@ workspace:
   recreate_max_attempts: 1
   lease_ttl_seconds: 90
   lease_renew_interval_seconds: 30
+  mounter_resources:
+    cpu_request: 50m
+    cpu_limit: "1"
+    memory_request: 64Mi
+    memory_limit: 512Mi
+    ephemeral_storage_request: 512Mi
+    ephemeral_storage_limit: 3Gi
   providers:
     minio:
       driver: s3fs
@@ -502,11 +567,13 @@ readOnlyRootfs: true
 并挂载：
 
 - 每 sandbox root-only Secret 目录到 `/run/secrets/workspace:ro`；
-- 有界 cache volume 到 `/var/cache/s3fs`；
+- 独立 cache volume/目录到 `/var/cache/s3fs`，由 supervisor 上报使用量并按 `cache_size` 软阈值触发终止重建；
 - 必要的 tmpfs 到 `/run` 和 `/tmp`；
 - 不挂载宿主机业务 `/workspace`。
 
 `CAP_SYS_ADMIN` 属于容器内 root supervisor，不得传递给 UID 1000 用户进程。runtime 必须覆盖所有 Exec、文件 API 和间接命令路径，强制 `User=1000:1000`。容器镜像内 `/workspace` 底层目录必须不可由 UID 1000 写入，以便 mount 消失时 fail closed。
+
+普通 Docker named volume 不提供可移植的硬 quota。达到 cache 软阈值时，runtime 必须阻止新 Exec、取消活动 Exec、尽力 flush 后删除并重建容器；不承诺用户写操作先收到 ENOSPC。cache 不得落在无界 container writable layer，销毁后必须清理。
 
 部分 Docker/LSM 组合需要额外 AppArmor FUSE mount 规则。若当前节点只有 `apparmor=unconfined` 才能运行，应停止上线并补充最小 profile，不能把 unconfined 作为生产默认值。
 
@@ -555,6 +622,7 @@ MinIO profile 至少固定：
 - `allow_other`、`uid=1000`、`gid=1000`、`umask=0022`、`mp_umask=0022`；
 - 前台运行、有界 cache 和 multipart 参数；
 - TLS 主机名与 CA 校验。
+- provider 级静态长期 AK/SK，写入 root-only s3fs `passwd_file`；出现 session token 时拒绝启动。
 
 ### 8.2 华为 OBS 固定基线
 
@@ -567,6 +635,7 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - path-style 或 virtual-host-style；
 - `big_writes`、multipart、零字节对象、rename 和大量小文件；
 - 私有 CA、TLS SNI 和主机名校验。
+- provider 级静态长期 AK/SK 与目标 s3fs 构建的 `passwd_file` 认证。
 
 未完成 spike 前，不得把 `storage.filesystem.provider` 切换为 `obs`，也不得发布可选中的 OBS profile/image。验证结论要落为版本化 profile，而不是在生产临时追加参数。
 
@@ -581,6 +650,8 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 5. 先灰度 Kubernetes × MinIO，再 Docker × MinIO，然后 Kubernetes × OBS，最后 Docker × OBS。
 6. 每一步至少观察一个完整 sandbox TTL，验证租约接管、API/Redis/节点故障和 cleanup。
 7. 达到实测阈值后逐步扩大新建 sandbox 流量。
+
+静态 AK/SK 轮换不走热更新：先停止该 provider 的 FUSE 新建流量，排空或销毁全部存量 FUSE sandbox，再更新控制面和 runtime namespace Secret，完成验证后恢复新建流量。
 
 ### 9.2 回滚
 
@@ -607,7 +678,11 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - [ ] `/workspace` 使用 Pod 私有 `emptyDir`，没有业务 hostPath。
 - [ ] 只有 mounter sidecar 可见 Secret 和 `/dev/fuse`。
 - [ ] 只有 mounter sidecar privileged，sandbox 主容器保持非特权 UID/GID 1000。
+- [ ] Pod 禁用 ServiceAccount token、service links 和共享进程 namespace；sandbox 与普通 init container 使用 RuntimeDefault seccomp 并 drop ALL capabilities。
+- [ ] mounter 配置 CPU、内存和 ephemeral-storage request/limit；cache 超限按 eviction/error 重建，不宣称硬 quota 或 ENOSPC。
+- [ ] Pod 使用公共 nameserver，目标 endpoint 可解析且 `cluster.local` 不可解析。
 - [ ] startup/readiness/liveness 和 `workspace-ready` init 检查均通过。
+- [ ] mounter `preStop` 可以在 termination grace period 内完成 flush/unmount，主容器没有长时间 preStop。
 - [ ] Pod 删除、节点重启、sidecar 异常后无遗留 mount。
 - [ ] NetworkPolicy/Cilium 策略只开放 DNS 和 provider system egress。
 
@@ -616,7 +691,7 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - [ ] 宿主机只提供 `/dev/fuse` 和 root-only Secret 暂存目录，不挂载业务 `/workspace`。
 - [ ] root supervisor 与 UID/GID 1000 用户执行边界经过安全测试。
 - [ ] 特殊容器使用最小 capabilities、seccomp/LSM 和只读根文件系统。
-- [ ] cache 有硬性容量边界，Secret 和 cache 均随容器清理。
+- [ ] cache 使用独立 volume/目录并配置软阈值；阈值触发时终止重建，Secret 和 cache 均随容器清理。
 - [ ] API/daemon 重启和强制删除后没有孤儿容器、Secret 或租约。
 
 ## 11. 日常观测与故障定位
@@ -626,7 +701,7 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - mount 启动耗时、成功率和失败原因；
 - readiness/liveness 失败次数；
 - FUSE 进程重启、非正常退出和强制卸载次数；
-- cache 使用量、cache 满和 flush 延迟；
+- cache 使用量、软阈值触发、ephemeral-storage eviction、实际 ENOSPC 和 flush 延迟；
 - endpoint DNS/TLS/鉴权错误；
 - lease 续期失败、owner 冲突和 stale runtime 清理；
 - sandbox 创建延迟、首读延迟、顺序吞吐和小文件耗时。
