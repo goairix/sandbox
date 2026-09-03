@@ -19,6 +19,7 @@ Workspace 从“sandbox-api 中转 tar 并定期同步”改为“在 sandbox �
 - Kubernetes：每个 sandbox Pod 注入一个可信 FUSE 原生 sidecar；sidecar 与非特权 sandbox 容器通过 memory-backed `emptyDir` 和 mount propagation 共享 `/workspace`。
 - Docker：每个 sandbox 使用一个自带 FUSE 的特殊容器；可信 root supervisor 管理 FUSE，所有用户代码和文件命令强制以 UID/GID 1000 执行。
 - 两个 runtime 都预热“未绑定 workspace”的 locked 空壳实例。provider、endpoint、bucket、profile、镜像、Secret 与 system egress 在预热时固定；只有 `workspace_path/prefix` 在 Pool Acquire 时确定并触发 s3fs 挂载。空壳一旦消费挂载授权，无论成功失败都必须销毁，不得卸载后回池复用。
+- FUSE Pool 与当前通用 Pool 一样由 `sandbox-api` 内的 `sandbox.Manager` 维护目标数量和生命周期，不部署独立 Pool Controller、Operator 或 CronJob。Redis 只为多 API 副本保存库存状态并提供原子保留/refill 互斥，不会自行创建或删除 Pod/容器。
 - MinIO 和普通华为 OBS 对象桶一期统一选择 s3fs 客户端族，但使用分别验证和固定的 provider profile；不预设两者必须使用完全相同的二进制或参数。华为 OBS 并行文件系统后续使用 obsfs，不在一期范围内。
 - 每个 sandbox 只挂载其自己的对象前缀，不暴露 bucket 中的其他 workspace。
 - 一期使用 provider 级静态长期 AK/SK 和 root-only s3fs `passwd_file`；不支持 STS/session token。挂载路径限制用户可见的 prefix，但共享凭证本身不构成单 workspace 的 IAM 隔离边界。
@@ -644,24 +645,26 @@ const (
 
 `WorkspaceInfo` 保存 mount type、mount state、driver、最后健康时间、最后 flush 时间、owner 和租约 generation。旧 session 中 `BindMounted=true` 迁移为 local bind 兼容状态；不存在新字段的远端 workspace 继续解释为 sync，不自动升级为 FUSE。
 
-Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保存 `preparing → prepared → reserved → binding → consumed` 状态、PoolKey、runtime ID/UID、reservation token 和时间戳。只有 health 验证完成后的 `prepared` 可被领取；Kubernetes 初始 label 必须为 `preparing`，通过校验后再以 resourceVersion 保护 patch 为 `prepared`。Docker label 创建后不可更新，只保存 PoolKey/instance identity，Redis record 是跨副本状态源。`reserved` 在授权前通过 pristine 复检后可退回 `prepared`，`binding` 表示 owner 的 `mount_attempt` 已消费，必须最终销毁。
+Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保存 `preparing → prepared → reserved → binding → consumed` 状态、PoolKey、runtime ID/UID、创建它的 API instance ownership token、reservation token 和时间戳。只有 health 验证完成后的 `prepared` 可被领取；Kubernetes 初始 label 必须为 `preparing`，通过校验后再以 resourceVersion 保护 patch 为 `prepared`。Docker label 创建后不可更新，只保存 PoolKey/instance identity，Redis record 是跨副本状态源。`reserved` 在授权前通过 pristine 复检后可退回 `prepared`，`binding` 表示 owner 的 `mount_attempt` 已消费，必须最终销毁。
 
 ### 10.3 FUSE Pool
 
-现有 Pool 已采用 single-use Release（使用后删除容器），FUSE 扩展沿用这一安全边界，但不能直接复用它的进程内 `available` 队列。FUSE Pool 必须按 PoolKey 使用 Redis inventory，支持 sandbox-api 多副本：
+现有 Pool 已采用 single-use Release（使用后删除容器），FUSE 扩展沿用它由 `sandbox-api` 负责 WarmUp、Acquire 后补池、异常移除补池和 Stop/Drain 的控制模式。FUSE 空壳的 prepared health、一次性挂载授权和恢复规则与普通空壳不同，因此使用独立 `FUSEPool` 队列，不能直接混入当前 `available` slice。多副本场景下由各 `sandbox-api` 副本运行相同控制循环，并按 PoolKey 使用 Redis inventory/互斥共同维护全局目标水位；Redis 是状态与协调介质，不是主动控制器：
 
-- `WarmUp` 先用分布式 refill lock/原子计数控制全局 `min_size/max_size`，创建不含 prefix 的 `WorkspaceFUSESpec` 空壳，直到 supervisor 和 sandbox 基础进程均已启动；不能调用等待 workspace Ready 的旧 `CreateSandbox` 路径。
+- `Manager.Start` 在 persistent sandbox 恢复与 FUSE inventory 对账后调用 `FUSEPool.WarmUp`。获得分布式 refill lock 的 `sandbox-api` 根据 Redis 记录计算缺口，创建不含 prefix 的 `WorkspaceFUSESpec` 空壳，直到 `prepared` 达到 `min_size`；不能调用等待 workspace Ready 的旧 `CreateSandbox` 路径。
 - 健康验证通过后，以 runtime UID 唯一键把 `preparing` record CAS 为 `prepared`；Pod label 只用于观测和 runtime 反查，不能代替 Redis 状态。
 - prepared 空壳不创建用户 sandbox/session，不出现在公共 list/get 响应中，其 runtime ID/UID 也不能返回给调用方；所有公共 Exec/file API 必须先验证已提交的用户 session 和 gate，不能仅凭可猜测或泄露的 runtime ID 直达空壳。
-- `AcquirePrepared(poolKey, reservationToken)` 通过 Lua/事务原子选择同 key 的一个 `prepared` record 并改为 `reserved`，避免多个 API 副本领取同一实例；随后执行 runtime pristine probe，并从 owner/session 反查 runtime UID 未绑定 workspace、API gate 关闭。领取后异步补池；没有可用实例时同步 prepare 一个空壳。
+- `AcquirePrepared(poolKey, reservationToken)` 通过 Lua/事务原子选择同 key 的一个 `prepared` record 并改为 `reserved`，避免多个 API 副本领取同一实例；随后执行 runtime pristine probe，并从 owner/session 反查 runtime UID 未绑定 workspace、API gate 关闭。领取后当前 `sandbox-api` 立即异步调用 `refillIfNeeded`；没有可用实例时由当前请求同步 cold prepare 一个空壳。
 - manager 先以 CAS 把 workspace owner 的 runtime UID/lease generation 和 `mount_attempt: 0→1` 绑定，再以相同 reservation token 把 pool record 从 `reserved` CAS 为 `binding`；两步都成功后才能向 supervisor 发授权。任一步失败或两步之间崩溃都按不确定实例销毁，reconciler 只要发现 reserved record 已被 owner 引用就禁止回池，因此不要求两个不同 key 具备跨槽事务。
 - `ReturnPrepared` 仅允许持有相同 reservation token、尚未进入 binding、没有 mount generation 和 owner/session 引用的实例；返回前重新执行完整 pristine probe，再原子改回 `prepared`。
-- `ReleaseConsumed` 删除 Pod/容器、system egress policy、cache 和临时 Secret，确认 runtime 退出后再释放 owner/lease，并触发补池；绝不把实例放回 available。
+- `ReleaseConsumed` 由持有 sandbox session 的 `sandbox-api` 删除 Pod/容器、system egress policy、cache 和临时 Secret，确认 runtime 退出后再释放 owner/lease，并调用 `NotifyRemoved/refillIfNeeded`；绝不把实例放回 available。
+- 每个 `sandbox-api` 还按 `refill_interval_seconds` 运行有抖动的 reconciliation；只有取得对应 PoolKey refill lock 的副本执行本轮增删。`min_size` 是期望的 `prepared` 可用数，`max_size` 限制 `preparing + prepared`，`reserved/binding/consumed` 已离开可用 Pool、不计入容量。补池创建先登记 `preparing`，避免并发副本超配。
 - `Drain(poolKey)` 用于 profile、镜像、credential generation、CA、endpoint、bucket、网络或安全配置变化，只删除该 key 的 prepared 空壳；已绑定实例按正常排空策略结束。
+- `Manager.Stop` 只删除本副本持有 ownership token 的 `preparing/prepared` 空壳；滚动发布时其他副本继续维护全局水位。最后一个副本退出或明确禁用 FUSE 时，运维 drain 流程负责删除剩余未绑定空壳。
 - Pool 大小指标增加 `runtime/provider/pool_key/state` 标签，但日志和指标只记录 PoolKey/ workspace hash，不记录 prefix、AK/SK 或 Secret 内容。
 - API 副本崩溃后，`prepared` record 只有通过新副本的 pristine probe 才能继续使用；超时的 `preparing/reserved`、任意 `binding` 和状态不明实例一律删除，不因 reservation TTL 到期自动回池。`consumed` 由持久 sandbox session 接管。reconciler 必须核对 Redis record 和 session，不能把其他副本仍持有的空壳当孤儿删除。
 
-FUSE Pool 复用现有 `Pool` 的 single-use、refill 和 drain 策略，但使用独立的 `workspace.fuse_pool` 配置与 Redis registry，不能占用或改变现有通用 `pool` 的 sync/无 workspace 空壳队列。当前部署只有一个活动 filesystem provider，因此一期只维护一个活动 FUSE PoolKey；未来同时服务多个 provider 时可自然增加多个 key，不需要把进程内队列作为协调源。
+FUSE Pool 复用现有 `Pool` 的 `WarmUp → Acquire → refill → single-use Release/Drain` 生命周期，但使用独立的 `workspace.fuse_pool` 配置与 Redis registry，不能占用或改变现有通用 `pool` 的 sync/无 workspace 空壳队列。独立配置是因为两类空壳的镜像、权限和 ready 判定不同，不表示由其他组件维护。当前部署只有一个活动 filesystem provider，因此一期只维护一个活动 FUSE PoolKey；未来同时服务多个 provider 时可自然增加多个 key，不需要把进程内队列作为跨副本协调源。
 
 ## 11. API 语义
 
@@ -829,8 +832,8 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 | `internal/config/config.go` | Workspace FUSE 配置、默认值与校验 |
 | `internal/runtime/types.go`、`internal/runtime/runtime.go` | `WorkspaceFUSESpec`、prepare/authorize/ready 创建状态机、system egress、health/quiesce/flush 控制接口、带 size 的流式上传签名 |
 | `internal/sandbox/types.go` | Workspace mount type/state/driver/health/lease 字段 |
-| `internal/sandbox/pool.go` | 按 PoolKey 管理 FUSE prepared 空壳、pristine probe、保留/安全归还、single-use 销毁与补池 |
-| `internal/sandbox/manager.go` | FUSE Pool Acquire、prefix 绑定、租约/owner CAS、restore、健康与 Exec gate |
+| `internal/sandbox/pool.go` | 在现有 Pool 生命周期内增加独立 FUSEPool：按 PoolKey WarmUp、pristine probe、保留/安全归还、single-use 销毁、周期对账与补池 |
+| `internal/sandbox/manager.go`、`cmd/sandbox/main.go` | 由 sandbox-api 构造并启动/停止 FUSE Pool，编排 Acquire、prefix 绑定、租约/owner CAS、restore、健康与 Exec gate |
 | `internal/sandbox/workspace.go` | FUSE 模式跳过 sync；动态 mount/unmount 冲突语义 |
 | `internal/runtime/kubernetes/pod.go` | 可预热的原生 sidecar、memory emptyDir、propagation、supervisor generation gate、prepared/readiness probe、Secret、Acquire 后 sandbox 内探测 |
 | `internal/runtime/kubernetes/network.go` | system egress 与用户网络规则合并、公共 DNS 和稳定 endpoint/CIDR 策略 |
@@ -868,6 +871,7 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 
 - Kubernetes 与 Docker 都验证：Pool WarmUp 后 sandbox 基础容器已经运行，但没有 s3fs 进程、workspace mount、owner/lease，且用户 Exec/file API 被 gate 拒绝。
 - Pool hit 时传入动态 `workspace_path`，不新建 Pod/容器即可完成租约、prefix 绑定、挂载和 sandbox 内读写探测；Pool miss 能 cold prepare 并完成相同流程。
+- `sandbox.Manager.Start` 会把每个 PoolKey 补到 `min_size`；并发 Acquire、异常移除和周期 reconciliation 都由 sandbox-api 补池，且多副本并发时 `preparing + prepared` 不超过 `max_size`。
 - 授权前租约冲突时，pristine 空壳可以安全归还同一 PoolKey；授权后成功、失败和请求取消三种情况都销毁实例并触发补池。
 - 更改 provider profile、镜像 digest、credential generation、CA、endpoint/bucket 或安全/网络配置会生成不同 PoolKey，旧 key 空壳被排空且不会被新请求 Acquire。
 - 空 `sub_path`、canonical `sub_path` 和 Unicode workspace path 的 prefix 结果在 file API、FUSE source、目录标记与 lease key 中逐字节一致；非 canonical 旧 `sub_path` 在 FUSE 模式启动失败且对象 key 不被改写。

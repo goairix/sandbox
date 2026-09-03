@@ -11,6 +11,7 @@
 - Kubernetes：每个 sandbox Pod 注入一个 FUSE 原生 sidecar，业务 `/workspace` 使用 Pod 私有 `emptyDir`，不挂载宿主机业务目录。sidecar 负责挂载，sandbox 主容器仅消费传播后的 mount。
 - Docker：每个 sandbox 使用自带 s3fs 和 root supervisor 的特殊镜像，API 通过 Docker Device 映射 `/dev/fuse`。不在宿主机挂载 `/workspace`，也不运行宿主机常驻 s3fs 进程。
 - Pool 预先启动没有 workspace mount 的 locked 空壳；provider、endpoint、bucket、profile、镜像、Secret 和 system egress 固定，收到带 `workspace_path` 的创建请求后才启动 s3fs 挂载对应 prefix。授权后的实例使用完必须销毁，不能卸载后回池。
+- Pool 数量由 `sandbox-api` 自身维护：启动时 WarmUp，Acquire/移除后异步补池，周期对账，停止或禁用时 Drain；不部署独立 Pool Controller、Operator、CronJob 或 DaemonSet。Redis 只保存跨副本库存状态与协调锁。
 - MinIO 和华为 OBS 使用独立 provider profile、镜像和 digest。不得让租户或 API 调用方传入任意 s3fs 参数。
 - 一期使用 provider 级静态长期 AK/SK 和 root-only s3fs `passwd_file`，不支持 STS/session token。挂载路径只向用户暴露当前 prefix，但静态凭证本身不提供单 workspace IAM 隔离。
 - FUSE cache 默认使用节点磁盘和软容量阈值；达到阈值或被 kubelet eviction 时终止并重建 sandbox，不承诺写入立即返回 ENOSPC。
@@ -23,7 +24,7 @@
 
 | 组件 | Kubernetes | Docker | 职责 |
 |---|---|---|---|
-| sandbox-api | Helm Deployment | Compose service | 创建/销毁 sandbox、签发运行时规格、维护租约与状态 |
+| sandbox-api | Helm Deployment | Compose service | 创建/销毁 sandbox、签发运行时规格、维护租约与状态，并直接维护 FUSE Pool 数量、补池和排空 |
 | FUSE 进程 | 每个预热 Pod 的 sidecar，Acquire 后启动 s3fs | 每个预热特殊容器内的 root supervisor，Acquire 后启动 s3fs 子进程 | 空壳阶段保持 locked；使用时将单一 workspace prefix 挂载到 `/workspace` |
 | 用户进程 | sandbox 主容器，UID/GID 1000 | 同一容器内由 supervisor/exec 强制 UID/GID 1000 | 访问 `/workspace`，不能控制 FUSE |
 | Secret | Pod Secret volume，仅 sidecar 可见 | 宿主机 root-only 暂存文件，仅挂载到特殊容器 | 提供 provider 级静态长期 AK/SK 和自定义 CA |
@@ -90,7 +91,7 @@ FUSE 模式依赖 Redis 独占租约。生产必须使用持久化且具备故�
 
 - sandbox-api 所有副本连接同一 Redis；
 - Redis 数据持久化和备份已启用；
-- FUSE Pool record、reservation token 与 refill lock 使用同一 Redis；不能以各副本的进程内队列作为 prepared inventory 状态源；
+- FUSE Pool record、reservation token 与 refill lock 使用同一 Redis；它们只供 `sandbox-api` 多副本保存状态和协调，不能以各副本的进程内队列作为 prepared inventory 状态源，也不代表 Redis 负责补池；
 - 时钟同步正常；
 - 监控覆盖连接错误、租约续期失败、owner 冲突、reservation 超时和 refill lock 异常；
 - API 重启后可以按 runtime identity 恢复 owner 状态。
@@ -266,7 +267,7 @@ storageCredentials:
 
 `<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名的 profile；没有验证结果或 profile 不匹配时启动失败。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置。
 
-`workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。FUSE Pool 的 inventory、reservation 和 refill 协调保存在 Redis，使多个 sandbox-api 副本原子领取同一全局容量内的空壳；进程内 slice 只能做非权威缓存。reservation 超时不能自动回池，必须经 reconciler pristine probe 或直接销毁。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
+`workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。和当前 Pool 一样，FUSE Pool 由 `sandbox-api` 的 Manager 启动并维护：启动时 WarmUp，Acquire/异常移除后调用 `refillIfNeeded`，并按 `refillIntervalSeconds` 周期对账。Redis 只让多个 sandbox-api 副本原子领取空壳、争抢本轮 refill 权并计算全局水位；进程内 slice 只能做非权威缓存。`minSize` 针对可领取的 prepared 数量，`maxSize` 限制 preparing + prepared；reservation 超时不能自动回池，必须经 reconciler pristine probe 或直接销毁。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
 
 PoolKey 必须覆盖 runtime、sandbox 镜像/资源/安全配置、provider、storage identity、bucket、endpoint、profile、mounter 镜像 digest、Secret 名、`credentialGeneration`、CA、cache 和 system egress；明确排除 Acquire 时才知道的 `workspace_path/prefix`、workspace identity、lease generation、reservation token 和请求级用户网络规则。任一固定字段变化都创建新 key 并排空旧 key 空壳；请求固定字段与现有 key 不匹配时只能 cold prepare。Secret 或 CA 每次轮换都必须递增 `credentialGeneration`，因为 sandbox-api 不读取 runtime namespace Secret 的 resourceVersion。
 
@@ -811,7 +812,9 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - [ ] PoolKey 覆盖所有固定存储、镜像、Secret/credential generation、网络和安全配置；不同 key 的空壳不会混用。
 - [ ] PoolKey 不包含动态 `workspace_path/prefix` 或请求级用户网络规则；固定字段不匹配时 cold prepare，不借用其他 key 空壳。
 - [ ] 生产 `fusePool.minSize>=1` 且完成突发容量压测；若设置为 0，已明确接受所有请求走 cold prepare。
+- [ ] `sandbox-api` 启动时 WarmUp 到 `minSize`，Acquire/异常移除后自动补池，周期对账可修复数量漂移；没有部署其他 Pool 控制组件。
 - [ ] 多副本通过 Redis 原子 reserve prepared record；同一 runtime UID 不会被领取两次，其他副本的空壳不会被误删。
+- [ ] 多副本同时补池时，全局 `preparing + prepared` 不超过 `maxSize`；单副本停止只 Drain 带自身 ownership token 的未绑定空壳。
 - [ ] prepared 空壳已启动基础容器，但没有 s3fs、workspace mount、owner/lease 或开放的 Exec/file gate。
 - [ ] prepared 空壳不创建用户 session，不出现在公共 list/get 响应中，公共 API 无法凭 runtime ID 绕过 gate。
 - [ ] 授权前失败只有 pristine probe 通过才可归还空壳；授权后成功、失败或取消都销毁实例并补池。
