@@ -339,6 +339,7 @@ func (c *Config) validateFUSE() error {
 	if filesystem.Provider != "minio" && filesystem.Provider != "obs" {
 		return fmt.Errorf("config: workspace.mode=fuse supports only minio or obs, got %q", filesystem.Provider)
 	}
+	providerPath := "workspace.providers." + filesystem.Provider
 	provider, ok := workspace.Providers[filesystem.Provider]
 	if !ok {
 		return fmt.Errorf("config: workspace.providers.%s must be configured", filesystem.Provider)
@@ -369,6 +370,9 @@ func (c *Config) validateFUSE() error {
 	}
 	if hasTemporaryCredentialFields(filesystem) {
 		return fmt.Errorf("config: session token or credential expiry fields are unsupported when workspace.mode is \"fuse\"")
+	}
+	if (filesystem.CAFile == "") != (provider.CASecretKey == "") {
+		return fmt.Errorf("config: ca_file and ca_secret_key must both be empty or both be configured (storage.filesystem.ca_file, %s.ca_secret_key)", providerPath)
 	}
 
 	pool := workspace.FUSEPool
@@ -413,11 +417,47 @@ func (c *Config) validateFUSE() error {
 	if err != nil || cacheSize.Sign() <= 0 {
 		return fmt.Errorf("config: workspace.cache_size must be a positive Kubernetes quantity, got %q", workspace.CacheSize)
 	}
+	resources := workspace.MounterResources
+	cpuRequest, err := positiveQuantity("workspace.mounter_resources.cpu_request", resources.CPURequest)
+	if err != nil {
+		return err
+	}
+	cpuLimit, err := positiveQuantity("workspace.mounter_resources.cpu_limit", resources.CPULimit)
+	if err != nil {
+		return err
+	}
+	memoryRequest, err := positiveQuantity("workspace.mounter_resources.memory_request", resources.MemoryRequest)
+	if err != nil {
+		return err
+	}
+	memoryLimit, err := positiveQuantity("workspace.mounter_resources.memory_limit", resources.MemoryLimit)
+	if err != nil {
+		return err
+	}
+	ephemeralRequest, err := positiveQuantity("workspace.mounter_resources.ephemeral_storage_request", resources.EphemeralStorageRequest)
+	if err != nil {
+		return err
+	}
+	ephemeralLimit, err := positiveQuantity("workspace.mounter_resources.ephemeral_storage_limit", resources.EphemeralStorageLimit)
+	if err != nil {
+		return err
+	}
+	if cpuRequest.Cmp(cpuLimit) > 0 {
+		return fmt.Errorf("config: workspace.mounter_resources.cpu_request must be <= workspace.mounter_resources.cpu_limit")
+	}
+	if memoryRequest.Cmp(memoryLimit) > 0 {
+		return fmt.Errorf("config: workspace.mounter_resources.memory_request must be <= workspace.mounter_resources.memory_limit")
+	}
+	if ephemeralRequest.Cmp(ephemeralLimit) > 0 {
+		return fmt.Errorf("config: workspace.mounter_resources.ephemeral_storage_request must be <= workspace.mounter_resources.ephemeral_storage_limit")
+	}
+	if ephemeralLimit.Cmp(cacheSize) < 0 {
+		return fmt.Errorf("config: workspace.mounter_resources.ephemeral_storage_limit must be >= workspace.cache_size")
+	}
 	if workspace.QuotaMode != "soft" {
 		return fmt.Errorf("config: workspace.quota_mode must be \"soft\", got %q", workspace.QuotaMode)
 	}
 
-	providerPath := "workspace.providers." + filesystem.Provider
 	if provider.Driver != "s3fs" {
 		return fmt.Errorf("config: %s.driver must be \"s3fs\", got %q", providerPath, provider.Driver)
 	}
@@ -522,6 +562,14 @@ func hasTemporaryCredentialFields(filesystem FileSystemConfig) bool {
 	files := filesystem.CredentialFiles
 	return filesystem.SessionToken != "" || filesystem.CredentialExpiry != "" ||
 		files.SessionTokenFile != "" || files.CredentialExpiryFile != ""
+}
+
+func positiveQuantity(path, value string) (resource.Quantity, error) {
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil || quantity.Sign() <= 0 {
+		return resource.Quantity{}, fmt.Errorf("config: %s must be a positive Kubernetes quantity, got %q", path, value)
+	}
+	return quantity, nil
 }
 
 func isDigestPinnedImage(image string) bool {

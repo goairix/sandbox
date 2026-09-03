@@ -346,6 +346,7 @@ func newValidFUSEConfig() *config.Config {
 	valid.Storage.FileSystem.Bucket = "sandbox"
 	valid.Storage.FileSystem.Endpoint = "minio.example.com:9000"
 	valid.Storage.FileSystem.SubPath = "workspaces/团队"
+	valid.Storage.FileSystem.CAFile = "/run/secrets/ca.crt"
 	valid.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{
 		AccessKeyFile: "/run/secrets/storage_access_key",
 		SecretKeyFile: "/run/secrets/storage_secret_key",
@@ -362,6 +363,10 @@ func newValidFUSEConfig() *config.Config {
 		LeaseTTLSeconds:           120,
 		LeaseRenewIntervalSeconds: 30,
 		QuotaMode:                 "soft",
+		MounterResources: config.WorkspaceFUSEResourceConfig{
+			CPURequest: "50m", CPULimit: "1", MemoryRequest: "64Mi", MemoryLimit: "512Mi",
+			EphemeralStorageRequest: "512Mi", EphemeralStorageLimit: "3Gi",
+		},
 		FUSEPool: config.WorkspaceFUSEPoolConfig{
 			MinSize: 3, MaxSize: 20, RefillIntervalSeconds: 10, PrepareTimeoutSeconds: 120,
 		},
@@ -555,6 +560,56 @@ func TestLoadRejectsTemporaryFUSECredentialsFromYAML(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidFUSEResourcesFromYAML(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+		want string
+	}{
+		{name: "invalid cpu request", old: `    cpu_request: 75m`, new: `    cpu_request: invalid`, want: "mounter_resources.cpu_request"},
+		{name: "cpu request exceeds limit", old: `    cpu_request: 75m`, new: `    cpu_request: "3"`, want: "cpu_request must be <="},
+		{name: "memory request exceeds limit", old: `    memory_request: 96Mi`, new: `    memory_request: 1Gi`, want: "memory_request must be <="},
+		{name: "ephemeral request exceeds limit", old: `    ephemeral_storage_request: 1Gi`, new: `    ephemeral_storage_request: 6Gi`, want: "ephemeral_storage_request must be <="},
+		{name: "cache exceeds ephemeral limit", old: `    ephemeral_storage_limit: 5Gi`, new: `    ephemeral_storage_limit: 3Gi`, want: "ephemeral_storage_limit must be >= workspace.cache_size"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := strings.Replace(validFUSEYAML, tt.old, tt.new, 1)
+			require.NotEqual(t, validFUSEYAML, content)
+			cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
+			require.NoError(t, os.WriteFile(cfgFile, []byte(content), 0o600))
+
+			_, err := config.Load(cfgFile)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestLoadRejectsMismatchedFUSECAFromYAML(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "only control plane CA", old: `      ca_secret_key: ca.crt`, new: `      ca_secret_key: ""`},
+		{name: "only provider CA", old: `    ca_file: /run/secrets/ca.crt`, new: `    ca_file: ""`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := strings.Replace(validFUSEYAML, tt.old, tt.new, 1)
+			require.NotEqual(t, validFUSEYAML, content)
+			cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
+			require.NoError(t, os.WriteFile(cfgFile, []byte(content), 0o600))
+
+			_, err := config.Load(cfgFile)
+			require.ErrorContains(t, err, "ca_file and ca_secret_key")
+		})
+	}
+}
+
 func TestRepositoryConfigDefaultsToSync(t *testing.T) {
 	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
 
@@ -622,6 +677,10 @@ func TestFUSEConfigValidation(t *testing.T) {
 			p.SystemEgressCIDRs = nil
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
+		}, want: ""},
+		{name: "valid with no custom CA", edit: func(c *config.Config) {
+			c.Storage.FileSystem.CAFile = ""
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
 		}, want: ""},
 		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "fuse supports only minio or obs"},
 		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "workspace.providers.minio"},
@@ -736,6 +795,12 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "proxy configured", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.ProxyURL = "http://proxy.example.com" })
 		}, want: "proxy_url"},
+		{name: "only control plane CA", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
+		}, want: "ca_file and ca_secret_key"},
+		{name: "only provider CA", edit: func(c *config.Config) {
+			c.Storage.FileSystem.CAFile = ""
+		}, want: "ca_file and ca_secret_key"},
 		{name: "endpoint host alias is not an IP", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointHostIPs = []string{"minio.example.com"} })
 		}, want: "endpoint_host_ips"},
@@ -782,6 +847,40 @@ func TestFUSEConfigValidation(t *testing.T) {
 	}
 }
 
+func TestFUSEMounterResourceValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*config.WorkspaceFUSEResourceConfig)
+		want string
+	}{
+		{name: "invalid cpu request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPURequest = "invalid" }, want: "mounter_resources.cpu_request"},
+		{name: "zero cpu request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPURequest = "0" }, want: "mounter_resources.cpu_request"},
+		{name: "negative cpu request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPURequest = "-1" }, want: "mounter_resources.cpu_request"},
+		{name: "invalid cpu limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPULimit = "invalid" }, want: "mounter_resources.cpu_limit"},
+		{name: "zero cpu limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPULimit = "0" }, want: "mounter_resources.cpu_limit"},
+		{name: "invalid memory request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.MemoryRequest = "invalid" }, want: "mounter_resources.memory_request"},
+		{name: "zero memory request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.MemoryRequest = "0" }, want: "mounter_resources.memory_request"},
+		{name: "invalid memory limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.MemoryLimit = "invalid" }, want: "mounter_resources.memory_limit"},
+		{name: "zero memory limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.MemoryLimit = "0" }, want: "mounter_resources.memory_limit"},
+		{name: "invalid ephemeral request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageRequest = "invalid" }, want: "mounter_resources.ephemeral_storage_request"},
+		{name: "zero ephemeral request", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageRequest = "0" }, want: "mounter_resources.ephemeral_storage_request"},
+		{name: "invalid ephemeral limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageLimit = "invalid" }, want: "mounter_resources.ephemeral_storage_limit"},
+		{name: "zero ephemeral limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageLimit = "0" }, want: "mounter_resources.ephemeral_storage_limit"},
+		{name: "cpu request exceeds limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.CPURequest = "2" }, want: "cpu_request must be <="},
+		{name: "memory request exceeds limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.MemoryRequest = "1Gi" }, want: "memory_request must be <="},
+		{name: "ephemeral request exceeds limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageRequest = "4Gi" }, want: "ephemeral_storage_request must be <="},
+		{name: "cache exceeds ephemeral limit", edit: func(r *config.WorkspaceFUSEResourceConfig) { r.EphemeralStorageLimit = "1Gi" }, want: "ephemeral_storage_limit must be >= workspace.cache_size"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newValidFUSEConfig()
+			tt.edit(&cfg.Workspace.MounterResources)
+			require.ErrorContains(t, cfg.Validate(), tt.want)
+		})
+	}
+}
+
 func editSelectedProvider(c *config.Config, edit func(*config.WorkspaceFUSEProviderConfig)) {
 	provider := c.Workspace.Providers[c.Storage.FileSystem.Provider]
 	edit(&provider)
@@ -819,6 +918,7 @@ func TestLoadFUSEProviderFromEnvironmentOnly(t *testing.T) {
 		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":                                "minio",
 		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":                                  "sandbox",
 		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":                                "minio.example.com:9000",
+		"SANDBOX_STORAGE_FILESYSTEM_CA_FILE":                                 "/run/secrets/ca.crt",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "/run/secrets/access-key",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "/run/secrets/secret-key",
 		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DRIVER":                           "s3fs",
