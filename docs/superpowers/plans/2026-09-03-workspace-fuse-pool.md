@@ -201,7 +201,7 @@ type WorkspaceConfig struct {
 }
 ```
 
-Keep `workspace.mode=sync` as the default. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`; reject session-token fields, mutable image tags, unsupported providers, non-canonical `sub_path`, missing Redis, and pool/timeouts outside the design bounds.
+Keep `workspace.mode=sync` as the default and reject unknown workspace modes. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`. The exact FUSE bounds are: `0 <= min_size <= max_size`, `max_size > 0`, positive refill/prepare/mount/flush/unmount/lease timeouts, `0 < lease_renew_interval <= lease_ttl/3`, `recreate_max_attempts == 1`, `cache_medium == disk`, positive parsed `cache_size`, and `quota_mode == soft`. Require Redis address, Secret name, bucket, endpoint, selected provider/profile, storage identity, credential generation, digest-pinned images, non-unconfined LSM profile and non-empty approved system egress. Reject session-token/expiry fields (model them explicitly so Viper cannot silently ignore them), mutable image tags, providers other than MinIO/OBS, non-canonical `sub_path`, wildcard FQDNs and proxy URLs.
 
 - [ ] **Step 4: Run configuration tests**
 
