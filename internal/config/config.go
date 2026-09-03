@@ -2,10 +2,15 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/distribution/reference"
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -84,23 +89,89 @@ type RedisConfig struct {
 // FileSystemConfig holds filesystem storage settings.
 // Provider can be one of: local, s3, cos, oss, obs, minio.
 type FileSystemConfig struct {
-	Provider  string `mapstructure:"provider"`
-	Bucket    string `mapstructure:"bucket"`
-	Region    string `mapstructure:"region"`
-	Endpoint  string `mapstructure:"endpoint"`
-	AccessKey string `mapstructure:"access_key"`
-	SecretKey string `mapstructure:"secret_key"`
-	LocalPath string `mapstructure:"local_path"`
-	SubPath   string `mapstructure:"sub_path"`
-	UseSSL    bool   `mapstructure:"use_ssl"`
+	Provider         string                         `mapstructure:"provider"`
+	Bucket           string                         `mapstructure:"bucket"`
+	Region           string                         `mapstructure:"region"`
+	Endpoint         string                         `mapstructure:"endpoint"`
+	AccessKey        string                         `mapstructure:"access_key"`
+	SecretKey        string                         `mapstructure:"secret_key"`
+	SessionToken     string                         `mapstructure:"session_token"`
+	CredentialExpiry string                         `mapstructure:"credential_expiry"`
+	CredentialFiles  FileSystemCredentialFileConfig `mapstructure:"credential_files"`
+	CAFile           string                         `mapstructure:"ca_file"`
+	LocalPath        string                         `mapstructure:"local_path"`
+	SubPath          string                         `mapstructure:"sub_path"`
+	UseSSL           bool                           `mapstructure:"use_ssl"`
 }
 
-// WorkspaceConfig holds workspace sync strategy settings.
+// FileSystemCredentialFileConfig holds paths to credentials mounted from a
+// trusted external secret source.
+type FileSystemCredentialFileConfig struct {
+	AccessKeyFile        string `mapstructure:"access_key_file"`
+	SecretKeyFile        string `mapstructure:"secret_key_file"`
+	SessionTokenFile     string `mapstructure:"session_token_file"`
+	CredentialExpiryFile string `mapstructure:"credential_expiry_file"`
+}
+
+// WorkspaceFUSEProviderConfig holds an approved provider-specific FUSE
+// profile. The profile is selected by storage.filesystem.provider.
+type WorkspaceFUSEProviderConfig struct {
+	Driver               string   `mapstructure:"driver"`
+	Profile              string   `mapstructure:"profile"`
+	StorageIdentity      string   `mapstructure:"storage_identity"`
+	MounterImage         string   `mapstructure:"mounter_image"`
+	DockerImage          string   `mapstructure:"docker_image"`
+	CASecretKey          string   `mapstructure:"ca_secret_key"`
+	CredentialGeneration string   `mapstructure:"credential_generation"`
+	EndpointHostIPs      []string `mapstructure:"endpoint_host_ips"`
+	LSMProfile           string   `mapstructure:"lsm_profile"`
+	SystemEgressMode     string   `mapstructure:"system_egress_mode"`
+	DNSCIDRs             []string `mapstructure:"dns_cidrs"`
+	SystemEgressFQDNs    []string `mapstructure:"system_egress_fqdns"`
+	SystemEgressCIDRs    []string `mapstructure:"system_egress_cidrs"`
+	EndpointPorts        []int32  `mapstructure:"endpoint_ports"`
+	ProxyURL             string   `mapstructure:"proxy_url"`
+}
+
+// WorkspaceFUSEResourceConfig holds mounter sidecar/container resource
+// requests and limits.
+type WorkspaceFUSEResourceConfig struct {
+	CPURequest              string `mapstructure:"cpu_request"`
+	CPULimit                string `mapstructure:"cpu_limit"`
+	MemoryRequest           string `mapstructure:"memory_request"`
+	MemoryLimit             string `mapstructure:"memory_limit"`
+	EphemeralStorageRequest string `mapstructure:"ephemeral_storage_request"`
+	EphemeralStorageLimit   string `mapstructure:"ephemeral_storage_limit"`
+}
+
+// WorkspaceFUSEPoolConfig holds settings for the dedicated FUSE runtime pool.
+type WorkspaceFUSEPoolConfig struct {
+	MinSize               int `mapstructure:"min_size"`
+	MaxSize               int `mapstructure:"max_size"`
+	RefillIntervalSeconds int `mapstructure:"refill_interval_seconds"`
+	PrepareTimeoutSeconds int `mapstructure:"prepare_timeout_seconds"`
+}
+
+// WorkspaceConfig holds workspace sync or FUSE strategy settings.
 type WorkspaceConfig struct {
 	// AutoSyncIntervalSeconds is the interval between automatic sync-from-container
 	// cycles. Set to 0 to disable auto-sync. Recommended: 30 for long-running
 	// agent sessions.
-	AutoSyncIntervalSeconds int `mapstructure:"auto_sync_interval_seconds"`
+	AutoSyncIntervalSeconds   int                                    `mapstructure:"auto_sync_interval_seconds"`
+	Mode                      string                                 `mapstructure:"mode"`
+	SecretName                string                                 `mapstructure:"secret_name"`
+	CacheSize                 string                                 `mapstructure:"cache_size"`
+	CacheMedium               string                                 `mapstructure:"cache_medium"`
+	MountTimeoutSeconds       int                                    `mapstructure:"mount_timeout_seconds"`
+	FlushTimeoutSeconds       int                                    `mapstructure:"flush_timeout_seconds"`
+	UnmountTimeoutSeconds     int                                    `mapstructure:"unmount_timeout_seconds"`
+	RecreateMaxAttempts       int                                    `mapstructure:"recreate_max_attempts"`
+	LeaseTTLSeconds           int                                    `mapstructure:"lease_ttl_seconds"`
+	LeaseRenewIntervalSeconds int                                    `mapstructure:"lease_renew_interval_seconds"`
+	QuotaMode                 string                                 `mapstructure:"quota_mode"`
+	MounterResources          WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
+	FUSEPool                  WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
+	Providers                 map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -117,6 +188,7 @@ type SecurityConfig struct {
 	MaxPids               int      `mapstructure:"max_pids"`
 	MaxCPU                string   `mapstructure:"max_cpu"`
 	MaxCPURequest         string   `mapstructure:"max_cpu_request"`
+	MaxUploadBytes        int64    `mapstructure:"max_upload_bytes"`
 	NetworkEnabled        bool     `mapstructure:"network_enabled"`
 	NetworkWhitelist      []string `mapstructure:"network_whitelist"`
 	SeccompProfile        string   `mapstructure:"seccomp_profile"`
@@ -169,6 +241,9 @@ func Load(path string) (*Config, error) {
 	v.SetEnvPrefix("SANDBOX")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	if err := bindFUSEProviderEnv(v); err != nil {
+		return nil, err
+	}
 
 	// Explicitly bind every known key so that env vars are honoured even when
 	// no config file is present. Using v.AllKeys() (populated by SetDefault
@@ -238,13 +313,292 @@ func (c *Config) Validate() error {
 	if c.Security.MaxExecTimeoutSeconds < c.Security.ExecTimeoutSeconds {
 		return fmt.Errorf("config: security.max_exec_timeout_seconds (%d) must be >= security.exec_timeout_seconds (%d)", c.Security.MaxExecTimeoutSeconds, c.Security.ExecTimeoutSeconds)
 	}
+	if c.Security.MaxUploadBytes <= 0 {
+		return fmt.Errorf("config: security.max_upload_bytes must be > 0, got %d", c.Security.MaxUploadBytes)
+	}
 
 	// Workspace auto-sync
 	if c.Workspace.AutoSyncIntervalSeconds < 0 {
 		return fmt.Errorf("config: workspace.auto_sync_interval_seconds must be >= 0, got %d", c.Workspace.AutoSyncIntervalSeconds)
 	}
 
+	switch c.Workspace.Mode {
+	case "sync":
+		return nil
+	case "fuse":
+		return c.validateFUSE()
+	default:
+		return fmt.Errorf("config: workspace.mode must be \"sync\" or \"fuse\", got %q", c.Workspace.Mode)
+	}
+}
+
+func (c *Config) validateFUSE() error {
+	filesystem := c.Storage.FileSystem
+	workspace := c.Workspace
+
+	if filesystem.Provider != "minio" && filesystem.Provider != "obs" {
+		return fmt.Errorf("config: workspace.mode=fuse supports only minio or obs, got %q", filesystem.Provider)
+	}
+	provider, ok := workspace.Providers[filesystem.Provider]
+	if !ok {
+		return fmt.Errorf("config: workspace.providers.%s must be configured", filesystem.Provider)
+	}
+	if c.Storage.State.Redis.Addr == "" {
+		return fmt.Errorf("config: storage.state.redis.addr must not be empty when workspace.mode is \"fuse\"")
+	}
+	if workspace.SecretName == "" {
+		return fmt.Errorf("config: workspace.secret_name must not be empty when workspace.mode is \"fuse\"")
+	}
+	if filesystem.Bucket == "" {
+		return fmt.Errorf("config: storage.filesystem.bucket must not be empty when workspace.mode is \"fuse\"")
+	}
+	if filesystem.Endpoint == "" {
+		return fmt.Errorf("config: storage.filesystem.endpoint must not be empty when workspace.mode is \"fuse\"")
+	}
+	if filesystem.CredentialFiles.AccessKeyFile == "" {
+		return fmt.Errorf("config: storage.filesystem.credential_files.access_key_file must not be empty when workspace.mode is \"fuse\"")
+	}
+	if filesystem.CredentialFiles.SecretKeyFile == "" {
+		return fmt.Errorf("config: storage.filesystem.credential_files.secret_key_file must not be empty when workspace.mode is \"fuse\"")
+	}
+	if filesystem.AccessKey != "" {
+		return fmt.Errorf("config: inline access_key is forbidden when workspace.mode is \"fuse\"")
+	}
+	if filesystem.SecretKey != "" {
+		return fmt.Errorf("config: inline secret_key is forbidden when workspace.mode is \"fuse\"")
+	}
+	if hasTemporaryCredentialFields(filesystem) {
+		return fmt.Errorf("config: session token or credential expiry fields are unsupported when workspace.mode is \"fuse\"")
+	}
+
+	pool := workspace.FUSEPool
+	if pool.MinSize < 0 {
+		return fmt.Errorf("config: workspace.fuse_pool.min_size must be >= 0, got %d", pool.MinSize)
+	}
+	if pool.MaxSize <= 0 {
+		return fmt.Errorf("config: workspace.fuse_pool.max_size must be > 0, got %d", pool.MaxSize)
+	}
+	if pool.MinSize > pool.MaxSize {
+		return fmt.Errorf("config: workspace.fuse_pool.max_size (%d) must be >= workspace.fuse_pool.min_size (%d)", pool.MaxSize, pool.MinSize)
+	}
+	if pool.RefillIntervalSeconds <= 0 {
+		return fmt.Errorf("config: workspace.fuse_pool.refill_interval_seconds must be > 0, got %d", pool.RefillIntervalSeconds)
+	}
+	if pool.PrepareTimeoutSeconds <= 0 {
+		return fmt.Errorf("config: workspace.fuse_pool.prepare_timeout_seconds must be > 0, got %d", pool.PrepareTimeoutSeconds)
+	}
+
+	if workspace.MountTimeoutSeconds <= 0 {
+		return fmt.Errorf("config: workspace.mount_timeout_seconds must be > 0, got %d", workspace.MountTimeoutSeconds)
+	}
+	if workspace.FlushTimeoutSeconds <= 0 {
+		return fmt.Errorf("config: workspace.flush_timeout_seconds must be > 0, got %d", workspace.FlushTimeoutSeconds)
+	}
+	if workspace.UnmountTimeoutSeconds <= 0 {
+		return fmt.Errorf("config: workspace.unmount_timeout_seconds must be > 0, got %d", workspace.UnmountTimeoutSeconds)
+	}
+	if workspace.LeaseTTLSeconds <= 0 {
+		return fmt.Errorf("config: workspace.lease_ttl_seconds must be > 0, got %d", workspace.LeaseTTLSeconds)
+	}
+	if workspace.LeaseRenewIntervalSeconds <= 0 || workspace.LeaseRenewIntervalSeconds > workspace.LeaseTTLSeconds/3 {
+		return fmt.Errorf("config: workspace.lease_renew_interval_seconds must be > 0 and <= workspace.lease_ttl_seconds/3, got %d", workspace.LeaseRenewIntervalSeconds)
+	}
+	if workspace.RecreateMaxAttempts != 1 {
+		return fmt.Errorf("config: workspace.recreate_max_attempts must equal 1, got %d", workspace.RecreateMaxAttempts)
+	}
+	if workspace.CacheMedium != "disk" {
+		return fmt.Errorf("config: workspace.cache_medium must be \"disk\", got %q", workspace.CacheMedium)
+	}
+	cacheSize, err := resource.ParseQuantity(workspace.CacheSize)
+	if err != nil || cacheSize.Sign() <= 0 {
+		return fmt.Errorf("config: workspace.cache_size must be a positive Kubernetes quantity, got %q", workspace.CacheSize)
+	}
+	if workspace.QuotaMode != "soft" {
+		return fmt.Errorf("config: workspace.quota_mode must be \"soft\", got %q", workspace.QuotaMode)
+	}
+
+	providerPath := "workspace.providers." + filesystem.Provider
+	if provider.Driver != "s3fs" {
+		return fmt.Errorf("config: %s.driver must be \"s3fs\", got %q", providerPath, provider.Driver)
+	}
+	if provider.Profile == "" {
+		return fmt.Errorf("config: %s.profile must not be empty", providerPath)
+	}
+	if provider.StorageIdentity == "" {
+		return fmt.Errorf("config: %s.storage_identity must not be empty", providerPath)
+	}
+	if provider.CredentialGeneration == "" {
+		return fmt.Errorf("config: %s.credential_generation must not be empty", providerPath)
+	}
+	if !isDigestPinnedImage(provider.MounterImage) {
+		return fmt.Errorf("config: %s.mounter_image must contain a valid @sha256 digest", providerPath)
+	}
+	if !isDigestPinnedImage(provider.DockerImage) {
+		return fmt.Errorf("config: %s.docker_image must contain a valid @sha256 digest", providerPath)
+	}
+	lsmProfile := strings.ToLower(strings.TrimSpace(provider.LSMProfile))
+	if lsmProfile == "" || lsmProfile == "unconfined" || lsmProfile == "label=disable" {
+		return fmt.Errorf("config: %s.lsm_profile must be a confined profile", providerPath)
+	}
+	if provider.SystemEgressMode != "cidr" && provider.SystemEgressMode != "cilium-fqdn" {
+		return fmt.Errorf("config: %s.system_egress_mode must be \"cidr\" or \"cilium-fqdn\", got %q", providerPath, provider.SystemEgressMode)
+	}
+	if len(provider.DNSCIDRs) == 0 {
+		return fmt.Errorf("config: %s.dns_cidrs must not be empty", providerPath)
+	}
+	for _, cidr := range provider.DNSCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
+		}
+		ones, bits := network.Mask.Size()
+		if ones != bits {
+			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
+		}
+	}
+	if len(provider.EndpointPorts) == 0 {
+		return fmt.Errorf("config: %s.endpoint_ports must not be empty", providerPath)
+	}
+	for _, port := range provider.EndpointPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("config: %s.endpoint_ports must be in range 1-65535, got %d", providerPath, port)
+		}
+	}
+	if provider.ProxyURL != "" {
+		return fmt.Errorf("config: %s.proxy_url must be empty", providerPath)
+	}
+
+	approvedNetworks := make([]*net.IPNet, 0, len(provider.SystemEgressCIDRs))
+	for _, cidr := range provider.SystemEgressCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("config: %s.system_egress_cidrs contains invalid CIDR %q", providerPath, cidr)
+		}
+		approvedNetworks = append(approvedNetworks, network)
+	}
+	if provider.SystemEgressMode == "cidr" && len(approvedNetworks) == 0 {
+		return fmt.Errorf("config: %s.system_egress_cidrs must not be empty in cidr mode", providerPath)
+	}
+	for _, rawIP := range provider.EndpointHostIPs {
+		ip := net.ParseIP(rawIP)
+		if ip == nil {
+			return fmt.Errorf("config: %s.endpoint_host_ips must contain literal IP addresses, got %q", providerPath, rawIP)
+		}
+		approved := false
+		for _, network := range approvedNetworks {
+			if network.Contains(ip) {
+				approved = true
+				break
+			}
+		}
+		if !approved {
+			return fmt.Errorf("config: %s.endpoint_host_ips entry %q must be contained in approved system_egress_cidrs", providerPath, rawIP)
+		}
+	}
+
+	switch provider.SystemEgressMode {
+	case "cilium-fqdn":
+		if len(provider.SystemEgressFQDNs) == 0 {
+			return fmt.Errorf("config: %s.system_egress_fqdns must not be empty in cilium-fqdn mode", providerPath)
+		}
+	}
+	for _, fqdn := range provider.SystemEgressFQDNs {
+		if strings.TrimSpace(fqdn) == "" {
+			return fmt.Errorf("config: %s.system_egress_fqdns must not contain empty names", providerPath)
+		}
+		if strings.Contains(fqdn, "*") {
+			return fmt.Errorf("config: %s.system_egress_fqdns must not contain wildcard names, got %q", providerPath, fqdn)
+		}
+	}
+
+	if !isCanonicalRelativePrefix(filesystem.SubPath) {
+		return fmt.Errorf("config: storage.filesystem.sub_path must be a canonical relative prefix, got %q", filesystem.SubPath)
+	}
+
 	return nil
+}
+
+func hasTemporaryCredentialFields(filesystem FileSystemConfig) bool {
+	files := filesystem.CredentialFiles
+	return filesystem.SessionToken != "" || filesystem.CredentialExpiry != "" ||
+		files.SessionTokenFile != "" || files.CredentialExpiryFile != ""
+}
+
+func isDigestPinnedImage(image string) bool {
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	digested, ok := named.(reference.Digested)
+	if !ok {
+		return false
+	}
+	digest := digested.Digest()
+	encoded := digest.Encoded()
+	if digest.Algorithm() != "sha256" || len(encoded) != 64 || encoded != strings.ToLower(encoded) {
+		return false
+	}
+	for _, r := range encoded {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	return true
+}
+
+var fuseProviderEnvKeys = []string{
+	"driver",
+	"profile",
+	"storage_identity",
+	"mounter_image",
+	"docker_image",
+	"ca_secret_key",
+	"credential_generation",
+	"endpoint_host_ips",
+	"lsm_profile",
+	"system_egress_mode",
+	"dns_cidrs",
+	"system_egress_fqdns",
+	"system_egress_cidrs",
+	"endpoint_ports",
+	"proxy_url",
+}
+
+func bindFUSEProviderEnv(v *viper.Viper) error {
+	for _, provider := range []string{"minio", "obs"} {
+		for _, key := range fuseProviderEnvKeys {
+			configKey := "workspace.providers." + provider + "." + key
+			if err := v.BindEnv(configKey); err != nil {
+				return fmt.Errorf("config: bind env for %q: %w", configKey, err)
+			}
+		}
+	}
+	return nil
+}
+
+func isCanonicalRelativePrefix(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	if !utf8.ValidString(prefix) || strings.HasPrefix(prefix, "/") || strings.HasSuffix(prefix, "/") {
+		return false
+	}
+	segments := strings.Split(prefix, "/")
+	if segments[0] == ".sandbox-system" {
+		return false
+	}
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+		for _, r := range segment {
+			if unicode.IsControl(r) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // setDefaults registers all default values on the viper instance.
@@ -280,12 +634,40 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.filesystem.endpoint", "")
 	v.SetDefault("storage.filesystem.access_key", "")
 	v.SetDefault("storage.filesystem.secret_key", "")
+	v.SetDefault("storage.filesystem.session_token", "")
+	v.SetDefault("storage.filesystem.credential_expiry", "")
+	v.SetDefault("storage.filesystem.credential_files.access_key_file", "")
+	v.SetDefault("storage.filesystem.credential_files.secret_key_file", "")
+	v.SetDefault("storage.filesystem.credential_files.session_token_file", "")
+	v.SetDefault("storage.filesystem.credential_files.credential_expiry_file", "")
+	v.SetDefault("storage.filesystem.ca_file", "")
 	v.SetDefault("storage.filesystem.local_path", "/tmp/sandbox-storage")
 	v.SetDefault("storage.filesystem.sub_path", "")
 	v.SetDefault("storage.filesystem.use_ssl", false)
 
 	// Workspace
 	v.SetDefault("workspace.auto_sync_interval_seconds", 0)
+	v.SetDefault("workspace.mode", "sync")
+	v.SetDefault("workspace.secret_name", "")
+	v.SetDefault("workspace.cache_size", "2Gi")
+	v.SetDefault("workspace.cache_medium", "disk")
+	v.SetDefault("workspace.mount_timeout_seconds", 30)
+	v.SetDefault("workspace.flush_timeout_seconds", 30)
+	v.SetDefault("workspace.unmount_timeout_seconds", 15)
+	v.SetDefault("workspace.recreate_max_attempts", 1)
+	v.SetDefault("workspace.lease_ttl_seconds", 120)
+	v.SetDefault("workspace.lease_renew_interval_seconds", 30)
+	v.SetDefault("workspace.quota_mode", "soft")
+	v.SetDefault("workspace.mounter_resources.cpu_request", "50m")
+	v.SetDefault("workspace.mounter_resources.cpu_limit", "1")
+	v.SetDefault("workspace.mounter_resources.memory_request", "64Mi")
+	v.SetDefault("workspace.mounter_resources.memory_limit", "512Mi")
+	v.SetDefault("workspace.mounter_resources.ephemeral_storage_request", "512Mi")
+	v.SetDefault("workspace.mounter_resources.ephemeral_storage_limit", "3Gi")
+	v.SetDefault("workspace.fuse_pool.min_size", 3)
+	v.SetDefault("workspace.fuse_pool.max_size", 20)
+	v.SetDefault("workspace.fuse_pool.refill_interval_seconds", 10)
+	v.SetDefault("workspace.fuse_pool.prepare_timeout_seconds", 120)
 
 	// Security
 	v.SetDefault("security.api_key", "")
@@ -297,6 +679,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.max_disk", "100Mi")
 	v.SetDefault("security.max_tmp_disk", "50Mi")
 	v.SetDefault("security.max_pids", 100)
+	v.SetDefault("security.max_upload_bytes", int64(2<<30))
 	v.SetDefault("security.network_enabled", false)
 	v.SetDefault("security.network_whitelist", []string{})
 	v.SetDefault("security.seccomp_profile", "")

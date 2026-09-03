@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/goairix/sandbox/internal/config"
@@ -322,4 +324,532 @@ func TestLoad_FileSystemConfig_EnvOverride(t *testing.T) {
 	assert.Equal(t, "my-bucket", cfg.Storage.FileSystem.Bucket)
 	assert.Equal(t, "us-east-1", cfg.Storage.FileSystem.Region)
 	assert.Equal(t, "workspaces", cfg.Storage.FileSystem.SubPath)
+}
+
+func minimalValidConfig() *config.Config {
+	return &config.Config{
+		Server:  config.ServerConfig{Port: 8080},
+		Runtime: config.RuntimeConfig{Type: "docker"},
+		Pool:    config.PoolConfig{MinSize: 0, MaxSize: 1},
+		Security: config.SecurityConfig{
+			APIKey: "test", ExecTimeoutSeconds: 30, MaxExecTimeoutSeconds: 60,
+			MaxUploadBytes: 2 << 30,
+		},
+		Workspace: config.WorkspaceConfig{Mode: "sync"},
+	}
+}
+
+func newValidFUSEConfig() *config.Config {
+	valid := minimalValidConfig()
+	valid.Storage.State.Redis.Addr = "redis:6379"
+	valid.Storage.FileSystem.Provider = "minio"
+	valid.Storage.FileSystem.Bucket = "sandbox"
+	valid.Storage.FileSystem.Endpoint = "minio.example.com:9000"
+	valid.Storage.FileSystem.SubPath = "workspaces/团队"
+	valid.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{
+		AccessKeyFile: "/run/secrets/storage_access_key",
+		SecretKeyFile: "/run/secrets/storage_secret_key",
+	}
+	valid.Workspace = config.WorkspaceConfig{
+		Mode:                      "fuse",
+		SecretName:                "sandbox-workspace-minio",
+		CacheSize:                 "2Gi",
+		CacheMedium:               "disk",
+		MountTimeoutSeconds:       30,
+		FlushTimeoutSeconds:       30,
+		UnmountTimeoutSeconds:     15,
+		RecreateMaxAttempts:       1,
+		LeaseTTLSeconds:           120,
+		LeaseRenewIntervalSeconds: 30,
+		QuotaMode:                 "soft",
+		FUSEPool: config.WorkspaceFUSEPoolConfig{
+			MinSize: 3, MaxSize: 20, RefillIntervalSeconds: 10, PrepareTimeoutSeconds: 120,
+		},
+		Providers: map[string]config.WorkspaceFUSEProviderConfig{
+			"minio": validFUSEProvider("minio.example.com", "cidr"),
+		},
+	}
+	return valid
+}
+
+func validFUSEProvider(endpointFQDN, egressMode string) config.WorkspaceFUSEProviderConfig {
+	return config.WorkspaceFUSEProviderConfig{
+		Driver:               "s3fs",
+		Profile:              "s3fs-compatible-v1",
+		StorageIdentity:      "primary-object-store",
+		MounterImage:         "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
+		DockerImage:          "registry.example.com/sandbox-fuse@sha256:" + strings.Repeat("b", 64),
+		CASecretKey:          "ca.crt",
+		CredentialGeneration: "2026-09-03-01",
+		EndpointHostIPs:      []string{"192.0.2.10"},
+		LSMProfile:           "sandbox-fuse",
+		SystemEgressMode:     egressMode,
+		DNSCIDRs:             []string{"8.8.8.8/32", "2001:4860:4860::8888/128"},
+		SystemEgressFQDNs:    []string{endpointFQDN},
+		SystemEgressCIDRs:    []string{"192.0.2.10/32"},
+		EndpointPorts:        []int32{443, 9000},
+	}
+}
+
+func TestLoadFUSEDefaults(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+
+	assert.Equal(t, "sync", cfg.Workspace.Mode)
+	assert.Equal(t, "", cfg.Workspace.SecretName)
+	assert.Equal(t, "2Gi", cfg.Workspace.CacheSize)
+	assert.Equal(t, "disk", cfg.Workspace.CacheMedium)
+	assert.Equal(t, 30, cfg.Workspace.MountTimeoutSeconds)
+	assert.Equal(t, 30, cfg.Workspace.FlushTimeoutSeconds)
+	assert.Equal(t, 15, cfg.Workspace.UnmountTimeoutSeconds)
+	assert.Equal(t, 1, cfg.Workspace.RecreateMaxAttempts)
+	assert.Equal(t, 120, cfg.Workspace.LeaseTTLSeconds)
+	assert.Equal(t, 30, cfg.Workspace.LeaseRenewIntervalSeconds)
+	assert.Equal(t, "soft", cfg.Workspace.QuotaMode)
+	assert.Equal(t, config.WorkspaceFUSEPoolConfig{
+		MinSize: 3, MaxSize: 20, RefillIntervalSeconds: 10, PrepareTimeoutSeconds: 120,
+	}, cfg.Workspace.FUSEPool)
+	assert.Equal(t, config.WorkspaceFUSEResourceConfig{
+		CPURequest: "50m", CPULimit: "1", MemoryRequest: "64Mi", MemoryLimit: "512Mi",
+		EphemeralStorageRequest: "512Mi", EphemeralStorageLimit: "3Gi",
+	}, cfg.Workspace.MounterResources)
+	assert.Empty(t, cfg.Workspace.Providers)
+	assert.Equal(t, int64(2<<30), cfg.Security.MaxUploadBytes)
+	assert.Equal(t, config.FileSystemCredentialFileConfig{}, cfg.Storage.FileSystem.CredentialFiles)
+	assert.Empty(t, cfg.Storage.FileSystem.CAFile)
+	assert.Empty(t, cfg.Storage.FileSystem.SessionToken)
+	assert.Empty(t, cfg.Storage.FileSystem.CredentialExpiry)
+}
+
+const validFUSEYAML = `
+server:
+  port: 8080
+runtime:
+  type: docker
+pool:
+  min_size: 0
+  max_size: 1
+storage:
+  state:
+    redis:
+      addr: redis.example.com:6379
+  filesystem:
+    provider: obs
+    bucket: sandbox
+    endpoint: https://obs.example.com
+    sub_path: teams/project
+    credential_files:
+      access_key_file: /run/secrets/access-key
+      secret_key_file: /run/secrets/secret-key
+      session_token_file: ""
+      credential_expiry_file: ""
+    ca_file: /run/secrets/ca.crt
+    session_token: ""
+    credential_expiry: ""
+workspace:
+  mode: fuse
+  secret_name: sandbox-obs
+  cache_size: 4Gi
+  cache_medium: disk
+  mount_timeout_seconds: 31
+  flush_timeout_seconds: 32
+  unmount_timeout_seconds: 16
+  recreate_max_attempts: 1
+  lease_ttl_seconds: 150
+  lease_renew_interval_seconds: 40
+  quota_mode: soft
+  mounter_resources:
+    cpu_request: 75m
+    cpu_limit: "2"
+    memory_request: 96Mi
+    memory_limit: 768Mi
+    ephemeral_storage_request: 1Gi
+    ephemeral_storage_limit: 5Gi
+  fuse_pool:
+    min_size: 2
+    max_size: 9
+    refill_interval_seconds: 11
+    prepare_timeout_seconds: 121
+  providers:
+    obs:
+      driver: s3fs
+      profile: obs-s3-compatible-v1
+      storage_identity: obs-primary
+      mounter_image: registry.example.com/mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      docker_image: registry.example.com/sandbox@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      ca_secret_key: ca.crt
+      credential_generation: gen-2
+      endpoint_host_ips: [192.0.2.20]
+      lsm_profile: sandbox-fuse
+      system_egress_mode: cilium-fqdn
+      dns_cidrs: [10.96.0.10/32]
+      system_egress_fqdns: [obs.example.com]
+      system_egress_cidrs: [192.0.2.0/24]
+      endpoint_ports: [443]
+      proxy_url: ""
+security:
+  api_key: yaml-key
+  exec_timeout_seconds: 30
+  max_exec_timeout_seconds: 60
+  max_upload_bytes: 3221225472
+`
+
+func TestLoadFUSEConfigFromYAML(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(validFUSEYAML), 0o600))
+
+	cfg, err := config.Load(cfgFile)
+	require.NoError(t, err)
+
+	assert.Equal(t, "fuse", cfg.Workspace.Mode)
+	assert.Equal(t, "sandbox-obs", cfg.Workspace.SecretName)
+	assert.Equal(t, "4Gi", cfg.Workspace.CacheSize)
+	assert.Equal(t, 31, cfg.Workspace.MountTimeoutSeconds)
+	assert.Equal(t, 32, cfg.Workspace.FlushTimeoutSeconds)
+	assert.Equal(t, 16, cfg.Workspace.UnmountTimeoutSeconds)
+	assert.Equal(t, 1, cfg.Workspace.RecreateMaxAttempts)
+	assert.Equal(t, 150, cfg.Workspace.LeaseTTLSeconds)
+	assert.Equal(t, 40, cfg.Workspace.LeaseRenewIntervalSeconds)
+	assert.Equal(t, config.WorkspaceFUSEPoolConfig{MinSize: 2, MaxSize: 9, RefillIntervalSeconds: 11, PrepareTimeoutSeconds: 121}, cfg.Workspace.FUSEPool)
+	assert.Equal(t, "75m", cfg.Workspace.MounterResources.CPURequest)
+	assert.Equal(t, "5Gi", cfg.Workspace.MounterResources.EphemeralStorageLimit)
+	provider := cfg.Workspace.Providers["obs"]
+	assert.Equal(t, "s3fs", provider.Driver)
+	assert.Equal(t, "obs-s3-compatible-v1", provider.Profile)
+	assert.Equal(t, "obs-primary", provider.StorageIdentity)
+	assert.Equal(t, "ca.crt", provider.CASecretKey)
+	assert.Equal(t, []string{"192.0.2.20"}, provider.EndpointHostIPs)
+	assert.Equal(t, []string{"10.96.0.10/32"}, provider.DNSCIDRs)
+	assert.Equal(t, []string{"obs.example.com"}, provider.SystemEgressFQDNs)
+	assert.Equal(t, []int32{443}, provider.EndpointPorts)
+	assert.Equal(t, "/run/secrets/access-key", cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile)
+	assert.Equal(t, "/run/secrets/secret-key", cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile)
+	assert.Equal(t, "/run/secrets/ca.crt", cfg.Storage.FileSystem.CAFile)
+	assert.Equal(t, int64(3221225472), cfg.Security.MaxUploadBytes)
+}
+
+func TestLoadRejectsTemporaryFUSECredentialsFromYAML(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "session token", old: `    session_token: ""`, new: `    session_token: forbidden`},
+		{name: "credential expiry", old: `    credential_expiry: ""`, new: `    credential_expiry: tomorrow`},
+		{name: "session token file", old: `      session_token_file: ""`, new: `      session_token_file: /run/secrets/token`},
+		{name: "credential expiry file", old: `      credential_expiry_file: ""`, new: `      credential_expiry_file: /run/secrets/expiry`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := strings.Replace(validFUSEYAML, tt.old, tt.new, 1)
+			require.NotEqual(t, validFUSEYAML, content)
+			cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
+			require.NoError(t, os.WriteFile(cfgFile, []byte(content), 0o600))
+
+			_, err := config.Load(cfgFile)
+			require.ErrorContains(t, err, "session token or credential expiry")
+		})
+	}
+}
+
+func TestRepositoryConfigDefaultsToSync(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+
+	cfg, err := config.Load(filepath.Join("..", "..", "configs", "config.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "sync", cfg.Workspace.Mode)
+}
+
+func TestSyncModePreservesLegacyCompatibility(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Storage.FileSystem.Provider = "local"
+	cfg.Storage.FileSystem.AccessKey = "legacy-inline-access-key"
+	cfg.Storage.FileSystem.SecretKey = "legacy-inline-secret-key"
+	cfg.Storage.FileSystem.SessionToken = "legacy-session-token"
+	cfg.Storage.FileSystem.CredentialExpiry = "soon"
+	cfg.Storage.FileSystem.SubPath = "/legacy//noncanonical/"
+	cfg.Workspace.FUSEPool = config.WorkspaceFUSEPoolConfig{}
+	cfg.Workspace.Providers = nil
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestWorkspaceModeValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{name: "empty", mode: "", want: "workspace.mode"},
+		{name: "unknown", mode: "sidecar", want: "workspace.mode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := minimalValidConfig()
+			cfg.Workspace.Mode = tt.mode
+			require.ErrorContains(t, cfg.Validate(), tt.want)
+		})
+	}
+}
+
+func TestMaxUploadBytesMustBePositive(t *testing.T) {
+	for _, value := range []int64{0, -1} {
+		t.Run(fmt.Sprintf("value_%d", value), func(t *testing.T) {
+			cfg := minimalValidConfig()
+			cfg.Security.MaxUploadBytes = value
+			require.ErrorContains(t, cfg.Validate(), "security.max_upload_bytes")
+		})
+	}
+}
+
+func TestFUSEConfigValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{name: "valid minio", edit: func(*config.Config) {}, want: ""},
+		{name: "valid obs cilium fqdn", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Endpoint = "https://obs.example.com"
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
+				"obs": validFUSEProvider("obs.example.com", "cilium-fqdn"),
+			}
+			p := c.Workspace.Providers["obs"]
+			p.SystemEgressCIDRs = nil
+			p.EndpointHostIPs = nil
+			c.Workspace.Providers["obs"] = p
+		}, want: ""},
+		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "fuse supports only minio or obs"},
+		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "workspace.providers.minio"},
+		{name: "missing redis", edit: func(c *config.Config) { c.Storage.State.Redis.Addr = "" }, want: "storage.state.redis.addr"},
+		{name: "missing secret name", edit: func(c *config.Config) { c.Workspace.SecretName = "" }, want: "workspace.secret_name"},
+		{name: "missing bucket", edit: func(c *config.Config) { c.Storage.FileSystem.Bucket = "" }, want: "storage.filesystem.bucket"},
+		{name: "missing endpoint", edit: func(c *config.Config) { c.Storage.FileSystem.Endpoint = "" }, want: "storage.filesystem.endpoint"},
+		{name: "missing access key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.AccessKeyFile = "" }, want: "access_key_file"},
+		{name: "missing secret key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SecretKeyFile = "" }, want: "secret_key_file"},
+		{name: "inline access key", edit: func(c *config.Config) { c.Storage.FileSystem.AccessKey = "inline" }, want: "inline access_key"},
+		{name: "inline secret key", edit: func(c *config.Config) { c.Storage.FileSystem.SecretKey = "inline" }, want: "inline secret_key"},
+		{name: "session token", edit: func(c *config.Config) { c.Storage.FileSystem.SessionToken = "token" }, want: "session token or credential expiry"},
+		{name: "credential expiry", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialExpiry = "tomorrow" }, want: "session token or credential expiry"},
+		{name: "session token file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SessionTokenFile = "/secret/token" }, want: "session token or credential expiry"},
+		{name: "credential expiry file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.CredentialExpiryFile = "/secret/expiry" }, want: "session token or credential expiry"},
+		{name: "negative pool min", edit: func(c *config.Config) { c.Workspace.FUSEPool.MinSize = -1 }, want: "fuse_pool.min_size"},
+		{name: "zero pool max", edit: func(c *config.Config) { c.Workspace.FUSEPool.MinSize = 0; c.Workspace.FUSEPool.MaxSize = 0 }, want: "fuse_pool.max_size"},
+		{name: "pool min exceeds max", edit: func(c *config.Config) { c.Workspace.FUSEPool.MinSize = 21 }, want: "fuse_pool.max_size"},
+		{name: "zero refill interval", edit: func(c *config.Config) { c.Workspace.FUSEPool.RefillIntervalSeconds = 0 }, want: "refill_interval_seconds"},
+		{name: "zero prepare timeout", edit: func(c *config.Config) { c.Workspace.FUSEPool.PrepareTimeoutSeconds = 0 }, want: "prepare_timeout_seconds"},
+		{name: "zero mount timeout", edit: func(c *config.Config) { c.Workspace.MountTimeoutSeconds = 0 }, want: "mount_timeout_seconds"},
+		{name: "zero flush timeout", edit: func(c *config.Config) { c.Workspace.FlushTimeoutSeconds = 0 }, want: "flush_timeout_seconds"},
+		{name: "zero unmount timeout", edit: func(c *config.Config) { c.Workspace.UnmountTimeoutSeconds = 0 }, want: "unmount_timeout_seconds"},
+		{name: "zero lease ttl", edit: func(c *config.Config) { c.Workspace.LeaseTTLSeconds = 0 }, want: "lease_ttl_seconds"},
+		{name: "zero lease renew", edit: func(c *config.Config) { c.Workspace.LeaseRenewIntervalSeconds = 0 }, want: "lease_renew_interval_seconds"},
+		{name: "lease renew too slow", edit: func(c *config.Config) { c.Workspace.LeaseTTLSeconds = 60; c.Workspace.LeaseRenewIntervalSeconds = 21 }, want: "lease_renew_interval_seconds"},
+		{name: "recreate disabled", edit: func(c *config.Config) { c.Workspace.RecreateMaxAttempts = 0 }, want: "recreate_max_attempts"},
+		{name: "multiple recreate attempts", edit: func(c *config.Config) { c.Workspace.RecreateMaxAttempts = 2 }, want: "recreate_max_attempts"},
+		{name: "memory cache", edit: func(c *config.Config) { c.Workspace.CacheMedium = "memory" }, want: "cache_medium"},
+		{name: "invalid cache quantity", edit: func(c *config.Config) { c.Workspace.CacheSize = "large" }, want: "cache_size"},
+		{name: "zero cache quantity", edit: func(c *config.Config) { c.Workspace.CacheSize = "0" }, want: "cache_size"},
+		{name: "negative cache quantity", edit: func(c *config.Config) { c.Workspace.CacheSize = "-1Gi" }, want: "cache_size"},
+		{name: "hard quota", edit: func(c *config.Config) { c.Workspace.QuotaMode = "hard" }, want: "quota_mode"},
+		{name: "wrong driver", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Driver = "goofys" })
+		}, want: "driver"},
+		{name: "missing profile", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "" })
+		}, want: "profile"},
+		{name: "missing identity", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.StorageIdentity = "" })
+		}, want: "storage_identity"},
+		{name: "missing credential generation", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CredentialGeneration = "" })
+		}, want: "credential_generation"},
+		{name: "missing mounter image", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.MounterImage = "" })
+		}, want: "mounter_image"},
+		{name: "mutable mounter image", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.MounterImage = "mounter:latest" })
+		}, want: "sha256 digest"},
+		{name: "short mounter digest", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.MounterImage = "mounter@sha256:abc" })
+		}, want: "sha256 digest"},
+		{name: "nonhex mounter digest", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.MounterImage = "mounter@sha256:" + strings.Repeat("z", 64)
+			})
+		}, want: "sha256 digest"},
+		{name: "uppercase mounter digest", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.MounterImage = "registry.example.com/mounter@sha256:" + strings.Repeat("A", 64)
+			})
+		}, want: "sha256 digest"},
+		{name: "invalid mounter image reference", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.MounterImage = "invalid image@sha256:" + strings.Repeat("a", 64)
+			})
+		}, want: "sha256 digest"},
+		{name: "missing docker image", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DockerImage = "" })
+		}, want: "docker_image"},
+		{name: "mutable docker image", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DockerImage = "sandbox:latest" })
+		}, want: "sha256 digest"},
+		{name: "missing lsm profile", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
+		}, want: "lsm_profile"},
+		{name: "unconfined lsm", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "unconfined" })
+		}, want: "lsm_profile"},
+		{name: "disabled lsm", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "label=disable" })
+		}, want: "lsm_profile"},
+		{name: "missing egress mode", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressMode = "" })
+		}, want: "system_egress_mode"},
+		{name: "unknown egress mode", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressMode = "allow-all" })
+		}, want: "system_egress_mode"},
+		{name: "missing dns cidrs", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = nil })
+		}, want: "dns_cidrs"},
+		{name: "bare dns ip", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"8.8.8.8"} })
+		}, want: "host-only"},
+		{name: "dns subnet", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"8.8.8.0/24"} })
+		}, want: "host-only"},
+		{name: "ipv6 dns subnet", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"2001:db8::/64"} })
+		}, want: "host-only"},
+		{name: "missing endpoint ports", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = nil })
+		}, want: "endpoint_ports"},
+		{name: "zero endpoint port", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = []int32{0} })
+		}, want: "endpoint_ports"},
+		{name: "high endpoint port", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = []int32{65536} })
+		}, want: "endpoint_ports"},
+		{name: "proxy configured", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.ProxyURL = "http://proxy.example.com" })
+		}, want: "proxy_url"},
+		{name: "endpoint host alias is not an IP", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointHostIPs = []string{"minio.example.com"} })
+		}, want: "endpoint_host_ips"},
+		{name: "endpoint host alias is not approved", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointHostIPs = []string{"198.51.100.20"} })
+		}, want: "approved system_egress_cidrs"},
+		{name: "missing cidr egress", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressCIDRs = nil })
+		}, want: "system_egress_cidrs"},
+		{name: "invalid cidr egress", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressCIDRs = []string{"not-a-cidr"} })
+		}, want: "system_egress_cidrs"},
+		{name: "missing fqdn egress", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.SystemEgressMode = "cilium-fqdn"
+				p.SystemEgressFQDNs = nil
+			})
+		}, want: "system_egress_fqdns"},
+		{name: "empty fqdn egress", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.SystemEgressMode = "cilium-fqdn"
+				p.SystemEgressFQDNs = []string{""}
+			})
+		}, want: "system_egress_fqdns"},
+		{name: "wildcard fqdn egress", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
+				p.SystemEgressMode = "cilium-fqdn"
+				p.SystemEgressFQDNs = []string{"*.example.com"}
+			})
+		}, want: "wildcard"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newValidFUSEConfig()
+			tt.edit(cfg)
+			err := cfg.Validate()
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func editSelectedProvider(c *config.Config, edit func(*config.WorkspaceFUSEProviderConfig)) {
+	provider := c.Workspace.Providers[c.Storage.FileSystem.Provider]
+	edit(&provider)
+	c.Workspace.Providers[c.Storage.FileSystem.Provider] = provider
+}
+
+func TestFUSESubPathValidation(t *testing.T) {
+	valid := []string{"", "workspace", "workspaces/team", "workspaces/团队"}
+	for _, subPath := range valid {
+		t.Run("valid_"+subPath, func(t *testing.T) {
+			cfg := newValidFUSEConfig()
+			cfg.Storage.FileSystem.SubPath = subPath
+			require.NoError(t, cfg.Validate())
+		})
+	}
+
+	invalid := []string{
+		"/root", "root/", "a//b", ".", "..", "a/./b", "a/../b",
+		".sandbox-system", ".sandbox-system/owner", "a\x00b", "a\nb", string([]byte{0xff}),
+	}
+	for i, subPath := range invalid {
+		t.Run(fmt.Sprintf("invalid_%d", i), func(t *testing.T) {
+			cfg := newValidFUSEConfig()
+			cfg.Storage.FileSystem.SubPath = subPath
+			require.ErrorContains(t, cfg.Validate(), "canonical relative prefix")
+		})
+	}
+}
+
+func TestLoadFUSEProviderFromEnvironmentOnly(t *testing.T) {
+	env := map[string]string{
+		"SANDBOX_SECURITY_API_KEY":                                           "test-key",
+		"SANDBOX_WORKSPACE_MODE":                                             "fuse",
+		"SANDBOX_WORKSPACE_SECRET_NAME":                                      "sandbox-minio",
+		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":                                "minio",
+		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":                                  "sandbox",
+		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":                                "minio.example.com:9000",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "/run/secrets/access-key",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "/run/secrets/secret-key",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DRIVER":                           "s3fs",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROFILE":                          "minio-profile",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_STORAGE_IDENTITY":                 "minio-primary",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_MOUNTER_IMAGE":                    "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DOCKER_IMAGE":                     "registry.example.com/sandbox@sha256:" + strings.Repeat("b", 64),
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_CREDENTIAL_GENERATION":            "gen-1",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_HOST_IPS":                "192.0.2.10",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_LSM_PROFILE":                      "sandbox-fuse",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_MODE":               "cidr",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DNS_CIDRS":                        "8.8.8.8/32,1.1.1.1/32",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_CIDRS":              "192.0.2.0/24",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_PORTS":                   "9000",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROXY_URL":                        "",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_CA_SECRET_KEY":                    "ca.crt",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_FQDNS":              "minio.example.com",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SESSION_TOKEN_FILE":     "",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_CREDENTIAL_EXPIRY_FILE": "",
+	}
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+
+	provider, ok := cfg.Workspace.Providers["minio"]
+	require.True(t, ok)
+	assert.Equal(t, "s3fs", provider.Driver)
+	assert.Equal(t, []string{"8.8.8.8/32", "1.1.1.1/32"}, provider.DNSCIDRs)
+	assert.Equal(t, []string{"192.0.2.10"}, provider.EndpointHostIPs)
+	assert.Equal(t, []int32{9000}, provider.EndpointPorts)
 }

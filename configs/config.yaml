@@ -88,6 +88,19 @@ storage:
     access_key: ""
     # Secret access key.
     secret_key: ""
+    # Temporary/session credentials are explicit so FUSE mode can reject them.
+    # FUSE v1 supports long-lived AK/SK credentials only.
+    session_token: ""
+    credential_expiry: ""
+    # Read-only Secret file paths used by the FUSE control plane. These must
+    # remain empty in sync mode unless the storage client is configured to use them.
+    credential_files:
+      access_key_file: ""
+      secret_key_file: ""
+      session_token_file: ""
+      credential_expiry_file: ""
+    # Optional private CA bundle used by the control-plane object client.
+    ca_file: ""
     # Local directory for the "local" provider.
     local_path: "/tmp/sandbox-storage"
     # Sub-path prefix within the bucket / root directory (optional).
@@ -99,11 +112,68 @@ storage:
 # Workspace — workspace sync strategy
 # -----------------------------------------------------------------------------
 workspace:
+  # Workspace implementation. Keep "sync" for the existing copy-in/copy-out
+  # behavior. "fuse" requires every fail-closed setting in the template below.
+  mode: "sync"
   # Automatic sync interval in seconds. When > 0, a background goroutine
   # periodically syncs changed files from containers back to storage,
   # reducing data loss if a container crashes between manual syncs.
   # Set to 0 to disable. Recommended: 30 for long-running agent sessions.
   auto_sync_interval_seconds: 0
+
+  # FUSE defaults. They are inert while mode = "sync"; switching to "fuse"
+  # additionally requires storage credentials and a selected provider profile.
+  secret_name: ""
+  cache_size: "2Gi"
+  cache_medium: "disk"
+  mount_timeout_seconds: 30
+  flush_timeout_seconds: 30
+  unmount_timeout_seconds: 15
+  recreate_max_attempts: 1
+  lease_ttl_seconds: 120
+  lease_renew_interval_seconds: 30
+  quota_mode: "soft"
+
+  mounter_resources:
+    cpu_request: "50m"
+    cpu_limit: "1"
+    memory_request: "64Mi"
+    memory_limit: "512Mi"
+    ephemeral_storage_request: "512Mi"
+    ephemeral_storage_limit: "3Gi"
+
+  fuse_pool:
+    min_size: 3
+    max_size: 20
+    refill_interval_seconds: 10
+    prepare_timeout_seconds: 120
+
+  # Provider profiles are deliberately not active by default. Copy only the
+  # selected storage.filesystem.provider entry, replace all operational
+  # placeholders, and keep both images pinned to immutable sha256 digests.
+  providers: {}
+  # providers:
+  #   minio:
+  #     driver: "s3fs"
+  #     profile: "approved-minio-profile"
+  #     storage_identity: "stable-physical-storage-id"
+  #     mounter_image: "registry.example.com/mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  #     docker_image: "registry.example.com/sandbox-fuse@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  #     ca_secret_key: "ca.crt"
+  #     credential_generation: "rotation-generation"
+  #     endpoint_host_ips:
+  #       - "192.0.2.10"
+  #     lsm_profile: "sandbox-fuse"
+  #     system_egress_mode: "cidr" # "cidr" or "cilium-fqdn"
+  #     dns_cidrs:
+  #       - "10.96.0.10/32"
+  #     system_egress_fqdns:
+  #       - "minio.example.com"
+  #     system_egress_cidrs:
+  #       - "192.0.2.10/32"
+  #     endpoint_ports:
+  #       - 9000
+  #     proxy_url: "" # Proxies are forbidden in FUSE mode.
 
 # -----------------------------------------------------------------------------
 # Security — sandbox isolation and resource limits
@@ -132,6 +202,8 @@ security:
   # Memory limit per sandbox (e.g. "256Mi", "1Gi").
   max_memory: "512Mi"
   max_memory_request: "128Mi"
+  # Maximum body size for the direct file-upload route (2 GiB by default).
+  max_upload_bytes: 2147483648
   # Whether outbound network access is allowed inside the sandbox.
   network_enabled: false
   # CIDR ranges the sandbox is allowed to reach when network_enabled = true.
