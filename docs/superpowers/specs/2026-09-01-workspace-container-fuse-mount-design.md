@@ -550,6 +550,7 @@ workspace:
       endpoint_ports: [9000]
       proxy_url: ""
       system_egress_fqdns: ["${SANDBOX_MINIO_ENDPOINT_HOST}"]
+      system_egress_cidrs: ["${SANDBOX_MINIO_ENDPOINT_CIDR}"]
     obs:
       driver: "s3fs"
       profile: "huawei-obs-private-2023-verified-v1"
@@ -564,6 +565,7 @@ workspace:
       endpoint_ports: [443]
       proxy_url: ""
       system_egress_fqdns: ["${SANDBOX_OBS_ENDPOINT_HOST}"]
+      system_egress_cidrs: ["${SANDBOX_OBS_ENDPOINT_CIDR}"]
 ```
 
 ## 10. Runtime 与状态模型

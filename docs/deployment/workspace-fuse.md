@@ -249,7 +249,9 @@ config:
         proxyURL: ""
         systemEgressFQDNs:
           - minio-fuse.example.com
-        systemEgressCIDRs: []
+        # CIDR mode uses only this approved destination in standard NetworkPolicy;
+        # the FQDN above remains the TLS/DNS name and is not an NP selector.
+        systemEgressCIDRs: ["192.0.2.10/32"]
       obs:
         driver: s3fs
         profile: huawei-obs-public-cn-north-4-verified-v1
@@ -266,7 +268,7 @@ config:
         proxyURL: ""
         systemEgressFQDNs:
           - obs.cn-north-4.myhuaweicloud.com
-        systemEgressCIDRs: []
+        systemEgressCIDRs: ["192.0.2.20/32"]
 
 storageCredentials:
   existingSecret: sandbox-storage-minio
