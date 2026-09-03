@@ -135,6 +135,10 @@ func TestFUSEConfigValidation(t *testing.T) {
         valid.Storage.FileSystem.Provider = "minio"
         valid.Storage.FileSystem.Bucket = "sandbox"
         valid.Storage.FileSystem.Endpoint = "minio.example.com:9000"
+        valid.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{
+            AccessKeyFile: "/run/secrets/storage_access_key",
+            SecretKeyFile: "/run/secrets/storage_secret_key",
+        }
         valid.Workspace.SecretName = "sandbox-workspace-minio"
         valid.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
             "minio": {
@@ -206,7 +210,7 @@ type WorkspaceConfig struct {
 }
 ```
 
-Keep `workspace.mode=sync` as the default and reject unknown workspace modes. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`. The exact FUSE bounds are: `0 <= min_size <= max_size`, `max_size > 0`, positive refill/prepare/mount/flush/unmount/lease timeouts, `0 < lease_renew_interval <= lease_ttl/3`, `recreate_max_attempts == 1`, `cache_medium == disk`, positive parsed `cache_size`, and `quota_mode == soft`. Require Redis address, Secret name, bucket, endpoint, selected provider/profile, storage identity, credential generation, digest-pinned images, non-unconfined LSM profile, `SystemEgressMode`, host-only DNS CIDRs (`/32` or `/128`), exact positive endpoint ports and non-empty approved endpoint CIDR/FQDN values compatible with the selected mode. The same DNS CIDRs, stripped to IPs, populate Pod `dnsConfig.nameservers` and system egress policy—there is no second DNS source. Reject session-token/expiry fields (model them explicitly so Viper cannot silently ignore them), mutable image tags, providers other than MinIO/OBS, non-canonical `sub_path`, wildcard FQDNs and any non-empty proxy URL.
+Keep `workspace.mode=sync` as the default and reject unknown workspace modes. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`. The exact FUSE bounds are: `0 <= min_size <= max_size`, `max_size > 0`, positive refill/prepare/mount/flush/unmount/lease timeouts, `0 < lease_renew_interval <= lease_ttl/3`, `recreate_max_attempts == 1`, `cache_medium == disk`, positive parsed `cache_size`, and `quota_mode == soft`. Require Redis address, Secret name, bucket, endpoint, non-empty control-plane AK/SK credential file paths with no simultaneous inline credentials, selected provider/profile, storage identity, credential generation, digest-pinned images, non-unconfined LSM profile, `SystemEgressMode`, host-only DNS CIDRs (`/32` or `/128`), exact positive endpoint ports and non-empty approved endpoint CIDR/FQDN values compatible with the selected mode. The same DNS CIDRs, stripped to IPs, populate Pod `dnsConfig.nameservers` and system egress policy—there is no second DNS source. Reject session-token/expiry fields (model them explicitly so Viper cannot silently ignore them), mutable image tags, providers other than MinIO/OBS, non-canonical `sub_path`, wildcard FQDNs and any non-empty proxy URL.
 
 - [ ] **Step 4: Run configuration tests**
 
