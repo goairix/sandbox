@@ -143,7 +143,12 @@ func TestFUSEConfigValidation(t *testing.T) {
                 MounterImage: "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
                 DockerImage: "registry.example.com/sandbox-fuse@sha256:" + strings.Repeat("b", 64),
                 LSMProfile: "sandbox-fuse",
+                SystemEgressMode: "cidr",
+                DNSCIDRs: []string{"8.8.8.8/32", "1.1.1.1/32"},
+                SystemEgressCIDRs: []string{"192.0.2.10/32"},
                 SystemEgressFQDNs: []string{"minio.example.com"},
+                EndpointPorts: []int32{9000},
+                ProxyURL: "",
             },
         }
         return valid
@@ -179,7 +184,7 @@ Expected: FAIL because the FUSE configuration types and validation do not exist.
 
 - [ ] **Step 3: Add the exact configuration types and conditional validation**
 
-Add the types from design section 9 to `internal/config/config.go`, including `FileSystemCredentialFileConfig`, `WorkspaceFUSEProviderConfig` (with required non-`unconfined` `LSMProfile`), `WorkspaceFUSEResourceConfig` and `WorkspaceFUSEPoolConfig`. Extend `WorkspaceConfig` with:
+Add the types from design section 9 to `internal/config/config.go`, including `FileSystemCredentialFileConfig`, `WorkspaceFUSEProviderConfig` (with required non-`unconfined` `LSMProfile`, `SystemEgressMode`, `DNSCIDRs`, endpoint CIDR/FQDN/ports and explicit `ProxyURL`), `WorkspaceFUSEResourceConfig` and `WorkspaceFUSEPoolConfig`. Extend `WorkspaceConfig` with:
 
 ```go
 type WorkspaceConfig struct {
@@ -201,7 +206,7 @@ type WorkspaceConfig struct {
 }
 ```
 
-Keep `workspace.mode=sync` as the default and reject unknown workspace modes. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`. The exact FUSE bounds are: `0 <= min_size <= max_size`, `max_size > 0`, positive refill/prepare/mount/flush/unmount/lease timeouts, `0 < lease_renew_interval <= lease_ttl/3`, `recreate_max_attempts == 1`, `cache_medium == disk`, positive parsed `cache_size`, and `quota_mode == soft`. Require Redis address, Secret name, bucket, endpoint, selected provider/profile, storage identity, credential generation, digest-pinned images, non-unconfined LSM profile and non-empty approved system egress. Reject session-token/expiry fields (model them explicitly so Viper cannot silently ignore them), mutable image tags, providers other than MinIO/OBS, non-canonical `sub_path`, wildcard FQDNs and proxy URLs.
+Keep `workspace.mode=sync` as the default and reject unknown workspace modes. Add positive `security.max_upload_bytes` with a 2 GiB default while preserving the default 64 MiB limit for non-upload request bodies. Run FUSE-only checks only when `Mode == "fuse"`. The exact FUSE bounds are: `0 <= min_size <= max_size`, `max_size > 0`, positive refill/prepare/mount/flush/unmount/lease timeouts, `0 < lease_renew_interval <= lease_ttl/3`, `recreate_max_attempts == 1`, `cache_medium == disk`, positive parsed `cache_size`, and `quota_mode == soft`. Require Redis address, Secret name, bucket, endpoint, selected provider/profile, storage identity, credential generation, digest-pinned images, non-unconfined LSM profile, `SystemEgressMode`, host-only DNS CIDRs (`/32` or `/128`), exact positive endpoint ports and non-empty approved endpoint CIDR/FQDN values compatible with the selected mode. The same DNS CIDRs, stripped to IPs, populate Pod `dnsConfig.nameservers` and system egress policy—there is no second DNS source. Reject session-token/expiry fields (model them explicitly so Viper cannot silently ignore them), mutable image tags, providers other than MinIO/OBS, non-canonical `sub_path`, wildcard FQDNs and any non-empty proxy URL.
 
 - [ ] **Step 4: Run configuration tests**
 
@@ -526,7 +531,8 @@ func (m *mockRuntime) AuthorizeWorkspaceMount(context.Context, string, runtime.W
 func (m *mockRuntime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) { return &runtime.SandboxInfo{State: "running"}, nil }
 func (m *mockRuntime) PreparedSandboxHealth(context.Context, string, string) error { return nil }
 func (m *mockRuntime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) { return &runtime.WorkspaceHealth{Ready: true}, nil }
-func (m *mockRuntime) QuiesceWorkspace(context.Context, string) error { return nil }
+func (m *mockRuntime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) { return runtime.WorkspaceQuiesceToken{}, nil }
+func (m *mockRuntime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error { return nil }
 func (m *mockRuntime) FlushWorkspace(context.Context, string) error { return nil }
 ```
 
@@ -583,15 +589,21 @@ type WorkspaceHealth struct {
     LastSuccessful time.Time
     Error          string
 }
+
+type WorkspaceQuiesceToken struct {
+    RuntimeUID string
+    Generation int64
+    Opaque     string
+}
 ```
 
-Extend `Runtime` with the seven FUSE methods above and change upload to:
+Extend `Runtime` with the FUSE methods above, including `QuiesceWorkspace(ctx, id) (WorkspaceQuiesceToken, error)` and `ResumeWorkspace(ctx, id, token) error`, and change upload to:
 
 ```go
 UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error
 ```
 
-Update all runtime implementations and mocks with explicit `ErrWorkspaceFUSEUnsupported` stubs first; later tasks replace Kubernetes and Docker stubs.
+Update all runtime implementations and mocks with explicit `ErrWorkspaceFUSEUnsupported` stubs first; later tasks replace Kubernetes and Docker stubs. Quiesce tokens are bound to exact RuntimeUID/generation, single-use for resume, and never persisted; stale, replayed or cross-runtime tokens fail closed.
 
 `RemoveSandbox` for FUSE is not successful until its runtime-specific `RuntimeFencer` produces matching termination evidence. Kubernetes may use successful supervisor unmount followed by graceful Pod UID deletion; if the node/control path is unavailable it requires an injected infrastructure fencer and otherwise returns a blocked error. Force-deleting only the API object is never evidence. Docker requires a reachable daemon and `ContainerInspect` NotFound for the exact immutable container ID.
 
@@ -993,7 +1005,7 @@ func buildPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, error) {
 }
 ```
 
-Build the exact Pod contract from deployment section 6.4. The sidecar receives the Pod UID from the Downward API and fixed, non-secret bootstrap JSON (provider, bucket, endpoint, profile, credential/cache/CA paths, PoolKey and timeouts) in its private environment; on startup the supervisor validates both, verifies the UID against authorization later, and atomically materializes a mode-0600 bootstrap file below `/run/s3fs`. Set the bottom workspace anchor to mode 0555 before reporting prepared. Do not include prefix, workspace identity or lease generation in the Pod spec, environment, labels or command line.
+Build the exact Pod contract from deployment section 6.4. The sidecar receives the Pod UID from the Downward API and fixed, non-secret bootstrap JSON (provider, bucket, endpoint, profile, AK/SK source paths, generated password/cache/CA paths, PoolKey and timeouts) in its private environment; on startup the supervisor validates both, verifies the UID against authorization later, and atomically materializes a mode-0600 bootstrap file below `/run/s3fs`. Derive `dnsConfig.nameservers` from the same host-only provider `DNSCIDRs` used by `SystemEgressSpec`; reject a CIDR that cannot be reduced to one resolver IP. Set the bottom workspace anchor to mode 0555 before reporting prepared. Do not include prefix, workspace identity or lease generation in the Pod spec, environment, labels or command line.
 
 - [ ] **Step 4: Run Kubernetes Pod tests**
 
@@ -1041,7 +1053,7 @@ func TestPrepareSandboxCreatesPolicyBeforePod(t *testing.T) {
 }
 ```
 
-Add tests that standard NetworkPolicy rejects FQDN mode, Cilium policy renders exact non-wildcard FQDNs, public Exec always targets `sandbox`, private authorize targets only `workspace-mounter`, state labels are patched with resourceVersion, UID 1000 probe uses fixed argv, and removal keeps policies/owner when termination evidence is unavailable. A normal removal test must observe successful mounter shutdown, graceful deletion of the exact Pod UID, then NotFound before deleting policies. A node-loss test must fail closed without a configured fencer and succeed only when a fake infrastructure fencer returns evidence for the same node/Pod UID. Force-delete alone must fail.
+Add tests that standard NetworkPolicy rejects FQDN mode, Cilium policy renders exact non-wildcard FQDNs, public Exec always targets `sandbox`, private authorize targets only `workspace-mounter`, state labels are patched with resourceVersion, UID 1000 probe uses fixed argv, quiesce/resume tokens reject generation mismatch/replay, and removal keeps policies/owner when termination evidence is unavailable. A normal removal test must observe successful mounter shutdown, graceful deletion of the exact Pod UID, then NotFound before deleting policies. A node-loss test must fail closed without a configured fencer and succeed only when a fake infrastructure fencer returns evidence for the same node/Pod UID. Force-delete alone must fail.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -1115,7 +1127,7 @@ func TestSupervisorStaysLockedWhenGenerationMarkerExists(t *testing.T) {
 }
 ```
 
-Add proc mountinfo fixtures for `fuse.s3fs`, wrong filesystem type, missing mount, and open writable file descriptors.
+Add bootstrap tests for missing/multiline AK/SK, atomic mode-0600 `passwd-s3fs`, source/output path separation, RuntimeUID mismatch and replay. Add proc mountinfo fixtures for `fuse.s3fs`, wrong filesystem type and missing mount. Add `workspace-probe` tests for open writable file descriptors plus quiesce/resume token generation, cross-runtime rejection and replay.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -1125,7 +1137,7 @@ Expected: FAIL because the package is absent.
 
 - [ ] **Step 3: Implement the supervisor and CLI**
 
-Define a versioned `BootstrapConfig` with provider, bucket, endpoint, region, profile, credential file, CA file, cache directory, mount path, PoolKey, mount/flush/unmount timeouts and RuntimeUID. It contains no workspace prefix, identity or lease generation. Validate every field against the compiled profile, reject unknown JSON fields, require absolute trusted paths, and atomically persist it mode 0600 below mode-0700 `/run/s3fs` before reporting prepared. Kubernetes obtains this config from its fixed bootstrap environment plus Downward API Pod UID. Docker starts locked without a RuntimeUID and accepts exactly one `bootstrap` JSON command after `ContainerCreate` returns the immutable container ID; it must reject authorization until bootstrap succeeds and reject bootstrap replay or an ID mismatch.
+Define a versioned `BootstrapConfig` with provider, bucket, endpoint, region, profile, `AccessKeyFile`, `SecretKeyFile`, `PasswdFile`, CA file, cache directory, mount path, PoolKey, mount/flush/unmount timeouts and RuntimeUID. `PasswdFile` is fixed below `/run/s3fs` (normally `/run/s3fs/passwd-s3fs`); the AK/SK sources are fixed paths in the read-only Secret mount. It contains no workspace prefix, identity or lease generation. Validate every field against the compiled profile, reject unknown JSON fields, require absolute trusted paths, read AK/SK without logging them, atomically generate `AK:SK` plus one newline at `PasswdFile` mode 0600, and atomically persist the sanitized bootstrap mode 0600 below mode-0700 `/run/s3fs` before reporting prepared. Reject missing/empty/multiline credentials and wipe temporary byte slices. Kubernetes obtains this config from its fixed bootstrap environment plus Downward API Pod UID. Docker starts locked without a RuntimeUID and accepts exactly one `bootstrap` JSON command after `ContainerCreate` returns the immutable container ID; it must reject authorization until bootstrap succeeds and reject bootstrap replay or an ID mismatch.
 
 Use a root-only Unix socket below `/run/s3fs`; accept bootstrap/authorization JSON only through stdin. Validate `RuntimeUID`, `PoolKey`, canonical prefix, positive generation and `MountAttempt == 1`. Atomically create `mount-generation` with `O_CREATE|O_EXCL`, then start exactly one foreground s3fs child from an argv slice:
 
@@ -1134,7 +1146,7 @@ argv := []string{
     bucket + ":/" + strings.TrimSuffix(auth.Prefix, "/"), mountPath,
     "-f", "-o", "allow_other", "-o", "uid=1000", "-o", "gid=1000",
     "-o", "umask=0022", "-o", "mp_umask=0022",
-    "-o", "passwd_file=" + credentialFile,
+    "-o", "passwd_file=" + passwdFile,
     "-o", "tmpdir=" + filepath.Join(cacheDir, "tmp"),
 }
 argv = append(argv, profile.FixedOptions(endpoint, region)...)
@@ -1282,7 +1294,7 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 }
 ```
 
-Add tests for root-only secret bind, bounded cache volume, prepared health, one-shot bootstrap after container ID allocation, fixed root control argv, UID 1000 public exec/file paths, gateway system egress before container start, Acquire-time user rule append, exact AppArmor/SELinux profile, restart adoption, and cleanup after failure. Assert `New` performs no orphan cleanup and `ReconcileOrphanedResources` preserves every runtime UID supplied by Manager.
+Add tests for root-only secret bind, bounded cache volume, prepared health, one-shot bootstrap after container ID allocation, fixed root control argv, UID 1000 public exec/file paths, quiesce/resume token generation and replay rejection, gateway system egress before container start, Acquire-time user rule append, exact AppArmor/SELinux profile, restart adoption, and cleanup after failure. Assert `New` performs no orphan cleanup and `ReconcileOrphanedResources` preserves every runtime UID supplied by Manager.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -1343,6 +1355,7 @@ func TestFUSESyncDirections(t *testing.T) {
     require.NoError(t, mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil))
     assert.Equal(t, 1, rt.quiesceCalls)
     assert.Equal(t, 1, rt.flushCalls)
+    assert.Equal(t, 1, rt.resumeCalls)
 }
 
 func TestUploadFilePropagatesMultipartSize(t *testing.T) {
@@ -1369,7 +1382,7 @@ Expected: FAIL because FUSE is still routed through sync and upload has no size.
 
 - [ ] **Step 3: Implement mount-type branching and bounded upload**
 
-For `WorkspaceMountFUSE`, public mount/unmount return `ErrFUSEWorkspaceImmutable`; `to_container` returns a typed no-op without copy. `from_container` obtains the operation gate's exclusive token, waits for all API streams, executes the fixed sandbox-side `workspace-probe quiesce`, calls `FlushWorkspace`, resumes stopped processes, rechecks the same runtime generation and only then reopens admission. It reports `flushed=true` only after every step succeeds. If enumeration/open-writer checks fail it returns `flushed=false` and never calls the mounter flush path. Auto-sync skips FUSE. Add backward-compatible response fields:
+For `WorkspaceMountFUSE`, public mount/unmount return `ErrFUSEWorkspaceImmutable`; `to_container` returns a typed no-op without copy. `from_container` obtains the operation gate's exclusive token, waits for all API streams, calls `QuiesceWorkspace` to execute the fixed sandbox-side probe and receive a RuntimeUID/generation-bound `WorkspaceQuiesceToken`, calls `FlushWorkspace`, then calls `ResumeWorkspace` with that token, rechecks the same runtime generation and only then reopens admission. It reports `flushed=true` only after every step succeeds. If enumeration/open-writer checks fail it returns `flushed=false` and never calls the mounter flush path. Stale/replayed tokens fail and close the gate. Auto-sync skips FUSE. Add backward-compatible response fields:
 
 ```go
 type WorkspaceInfoResponse struct {
@@ -1552,6 +1565,8 @@ Expected: FAIL because FUSE values, RBAC, test values and preflight script are n
 - [ ] **Step 3: Wire the control loop and deployment contract**
 
 In `cmd/sandbox/main.go`, retain the Redis `Store`, assert only that it implements `state.AtomicStore`, construct the sole `redisstate.NewFUSEPoolRepository(store)` wrapper, generate a random API instance ownership token at process start, and pass all FUSE dependencies through `ManagerConfig`. In sync mode construct the existing `goairix/fs` filesystem. In FUSE mode load file credentials once, construct the native `WorkspaceObjectClient` with the configured CA, zero the owned credential buffers immediately, and do not construct or fall back to the `goairix/fs` MinIO/OBS driver. `mgr.Start` remains the only place that starts WarmUp/reconciliation; main must check its returned error and must not start the HTTP listener when Redis, restore, reconciliation or WarmUp fails. No new executable or Kubernetes controller owns Pool quantity.
+
+Build `WorkspaceFUSESpec.SystemEgress` only from the selected provider's validated `SystemEgressMode`, `DNSCIDRs`, endpoint CIDRs/FQDNs, endpoint ports and empty `ProxyURL`; copy the exact same DNS values into the Pod/Docker resolver configuration. No runtime DNS lookup, global default or user request may add destinations during this mapping.
 
 Add Helm values matching deployment section 6.3, project credential files into sandbox-api, grant runtime namespace Pod create/get/list/watch/delete/**patch**, Pod exec and NetworkPolicy permissions, and keep runtime default-deny separate from the control namespace policy. Configure the named AppArmor/SELinux profile for both runtimes and reject `unconfined`. Compose mounts `/dev/fuse` only into dynamically created special containers, exposes root-only Secret staging, and never mounts host `/workspace`.
 

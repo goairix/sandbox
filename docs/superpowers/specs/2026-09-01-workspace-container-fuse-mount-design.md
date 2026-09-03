@@ -186,7 +186,7 @@ volumeMounts:
 预热阶段：
 
 1. Pool 按固定配置指纹创建 system egress policy，再创建 FUSE Pod；此时 spec 不含 workspace prefix 或 lease generation。
-2. Kubelet 启动 `workspace-mounter`。Sidecar 从 mounter-only 环境读取固定、非敏感的 versioned bootstrap JSON，从 Downward API 单独读取 Pod UID；校验后把合并结果原子写入 `/run/s3fs/bootstrap.json`（mode `0600`）。随后从自身专用 Secret volume 读取 provider 级凭证并生成 mode `0600` 的临时密码文件，但 supervisor 只进入 prepared/locked，不调用 s3fs。bootstrap 只包含 provider、bucket、endpoint、profile、credential/CA/cache 路径、PoolKey 和超时，不包含 prefix、workspace identity 或 lease generation。
+2. Kubelet 启动 `workspace-mounter`。Sidecar 从 mounter-only 环境读取固定、非敏感的 versioned bootstrap JSON，从 Downward API 单独读取 Pod UID；校验后把合并结果原子写入 `/run/s3fs/bootstrap.json`（mode `0600`）。bootstrap 明确区分只读 Secret 中的 `access_key_file`/`secret_key_file` 与私有 tmpfs 中的 `passwd_file=/run/s3fs/passwd-s3fs`；supervisor 校验单行非空 AK/SK、原子生成 mode `0600` 的 `AK:SK` 密码文件并清零临时 buffer，随后只进入 prepared/locked，不调用 s3fs。bootstrap 还包含 provider、bucket、endpoint、profile、CA/cache 路径、PoolKey 和超时，不包含 prefix、workspace identity 或 lease generation。
 3. `startupProbe` 只检查 supervisor、`/dev/fuse`、cache/Secret 与底层 `/workspace` mode，prepared 后返回成功；Kubelet 随即启动 sandbox 主容器。
 4. mounter `readinessProbe` 因尚未挂载而保持失败，Pod 保持 NotReady。Pool 通过独立 `PreparedSandbox` probe 确认 supervisor locked、sandbox 主进程存活、无 FUSE mount、无 mount generation 且 Exec/file gate 关闭，之后才把空壳加入 available 队列。
 
@@ -268,7 +268,7 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 ### 6.2 预热与 Acquire
 
 1. Pool 使用固定 provider 配置指纹创建特殊容器，以 root supervisor 作为 PID 1 启动；Swarm 使用 Docker Secret，普通 Docker Engine 使用 sandbox-api 创建的 root-only 临时凭证目录。该 bind mount 只承载 provider 级凭证/CA，不承载 `/workspace`。
-2. supervisor 先保持 locked；sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，通过 root-only 控制通道提交一次 versioned bootstrap JSON。supervisor 校验 RuntimeUID 与固定配置、拒绝重放后，创建 mode `0600` 的 s3fs 密码文件并进入 prepared/locked；用户环境基础进程已经启动，但 API 不允许任何用户 Exec/file 操作，且此时不存在 s3fs 进程或 workspace mount。
+2. supervisor 先保持 locked；sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，通过 root-only 控制通道提交一次相同 schema 的 versioned bootstrap JSON。supervisor 校验 RuntimeUID 与固定配置、拒绝重放后，从只读 Secret 的 AK/SK 源生成私有 `/run/s3fs/passwd-s3fs`（mode `0600`）并进入 prepared/locked；用户环境基础进程已经启动，但 API 不允许任何用户 Exec/file 操作，且此时不存在 s3fs 进程或 workspace mount。
 3. Pool 用私有 `execControl` 检查容器进程、底层 `/workspace` mode、Secret/cache 和“无 mount、无 generation”状态，将合格空壳加入对应配置指纹队列。Docker engine health 只能表示 supervisor 存活，不能代表 workspace ready。
 4. Acquire 时 manager 原子保留空壳、获取 prefix 租约并准备目录标记，再绑定 sandbox identity并 CAS 消费一次 `mount_attempt`。
 5. runtime 通过固定 `execControl` 传递 prefix、runtime ID 和 lease generation；supervisor 校验后启动唯一前台 s3fs，runtime 同时在 gateway 中应用用户网络策略。
@@ -337,7 +337,7 @@ system egress 的实现按集群能力固定：
 - provider endpoint 必须先进入平台维护的精确白名单；仅在配置文件中填写 endpoint 不产生放行规则。内网 endpoint 还必须经过显式安全审批，拒绝用户请求动态增加或覆盖。
 - Pod 保持 `DNSPolicy=None` 和当前公共 nameserver，不接入 CoreDNS，也不配置集群 search domain。
 - MinIO/OBS 必须使用公共 nameserver 可解析的稳定专用 endpoint；私有云 FQDN 无法公共解析时，可由运维使用 Pod `hostAliases`/等价 CNI 机制把该 FQDN 静态映射到平台批准的稳定 IP，且证书必须匹配原 FQDN。只有证书包含 IP SAN 时才允许直接配置 IP endpoint；`cluster.local` Service 不属于一期支持形式。
-- DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR、专用 egress proxy 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。
+- DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。一期 `ProxyURL` 必须为空，egress proxy 仅作为后续安全增强方向。
 - endpoint 解析和连通性必须在挂载前检查。仅加入网络白名单不能让公共 nameserver 解析 `cluster.local`。
 - runtime 为每个空壳生成不可变的 instance selector，先创建对应 system egress policy，再创建 Pod；Acquire 时保留这条 policy，并在开放 Exec 前另外应用用户请求对应的网络策略。多个 NetworkPolicy 的 allow 语义是并集，用户策略不能删除 system egress，也不能额外获得未批准的内网目的地。
 
@@ -425,8 +425,12 @@ type WorkspaceFUSEProviderConfig struct {
     CredentialGeneration string   `mapstructure:"credential_generation"`
     LSMProfile           string   `mapstructure:"lsm_profile"`
     EndpointHostIPs      []string `mapstructure:"endpoint_host_ips"`
+    SystemEgressMode     string   `mapstructure:"system_egress_mode"`
+    DNSCIDRs             []string `mapstructure:"dns_cidrs"`
     SystemEgressFQDNs    []string `mapstructure:"system_egress_fqdns"`
     SystemEgressCIDRs    []string `mapstructure:"system_egress_cidrs"`
+    EndpointPorts        []int32  `mapstructure:"endpoint_ports"`
+    ProxyURL             string   `mapstructure:"proxy_url"`
 }
 
 type FileSystemCredentialFileConfig struct {
@@ -541,6 +545,10 @@ workspace:
       mounter_image: "${SANDBOX_MINIO_MOUNTER_IMAGE}"
       docker_image: "${SANDBOX_MINIO_FUSE_RUNTIME_IMAGE}"
       lsm_profile: "sandbox-fuse"
+      system_egress_mode: "cidr"
+      dns_cidrs: ["8.8.8.8/32", "1.1.1.1/32"]
+      endpoint_ports: [9000]
+      proxy_url: ""
       system_egress_fqdns: ["${SANDBOX_MINIO_ENDPOINT_HOST}"]
     obs:
       driver: "s3fs"
@@ -551,6 +559,10 @@ workspace:
       mounter_image: "${SANDBOX_OBS_MOUNTER_IMAGE}"
       docker_image: "${SANDBOX_OBS_FUSE_RUNTIME_IMAGE}"
       lsm_profile: "sandbox-fuse"
+      system_egress_mode: "cidr"
+      dns_cidrs: ["8.8.8.8/32", "1.1.1.1/32"]
+      endpoint_ports: [443]
+      proxy_url: ""
       system_egress_fqdns: ["${SANDBOX_OBS_ENDPOINT_HOST}"]
 ```
 
@@ -628,11 +640,12 @@ runtime 接口同时增加以下可信控制能力：
 ```go
 WorkspaceHealth(ctx context.Context, id string) (*WorkspaceHealth, error)
 PreparedSandboxHealth(ctx context.Context, id string, poolKey string) error
-QuiesceWorkspace(ctx context.Context, id string) error
+QuiesceWorkspace(ctx context.Context, id string) (WorkspaceQuiesceToken, error)
+ResumeWorkspace(ctx context.Context, id string, token WorkspaceQuiesceToken) error
 FlushWorkspace(ctx context.Context, id string) error
 ```
 
-`QuiesceWorkspace` 关闭 Exec/file gate，等待 API 跟踪的 Exec 结束，并验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。验证失败时返回错误，调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
+`QuiesceWorkspace` 在 Manager 已关闭 admission、等待 API 引用归零后验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。成功返回绑定 exact RuntimeUID/generation 的一次性 `WorkspaceQuiesceToken`；非销毁 flush 后必须用 `ResumeWorkspace` 消费同一 token 恢复进程，跨 runtime、跨 generation 或重放都失败。验证失败时调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
 
 上传接口需要把调用方声明并由流式读取校验的文件大小传入 runtime，使 tar header 可以先写出并通过 pipe 直接流向 Docker/Kubernetes，而不是 `io.ReadAll`：
 

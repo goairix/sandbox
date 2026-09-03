@@ -80,8 +80,8 @@ grep -w fuse /proc/filesystems
 - `storage.filesystem.endpoint` 保持现有 driver 的 provider-native 格式：MinIO 必须是 `host[:port]` 且由 `use_ssl` 决定协议，OBS 按华为 SDK 要求使用完整 endpoint。runtime 必须从这些字段派生并校验 s3fs 的完整 `url=https://...` 参数，不能把同一字符串未经转换同时传给控制面 driver 和 s3fs。
 - 生产必须启用 TLS 和主机名校验。
 - 私有 CA 通过同一外部 Secret 源分别投射给 sandbox-api 和 mounter；控制面存储客户端与 s3fs 都必须显式使用该 CA，不修改宿主机全局 CA。CA 轮换需要排空并重建相关 FUSE sandbox。
-- endpoint 使用 DNS 名时，优先由配置的公共 nameserver 解析。私有云 FQDN 无法公共解析时，使用运维维护的 Pod `hostAliases`/Docker `extra_hosts` 或固定 egress proxy，把证书匹配的 FQDN 映射到平台批准的稳定 IP；映射不得来自用户请求，IP 变更必须走受控发布。只有证书包含 IP SAN 时才允许直接使用 IP endpoint。
-- Kubernetes 不接入 CoreDNS；`*.svc.cluster.local` 不能作为 MinIO endpoint。需要使用专用稳定 FQDN、egress proxy 或显式 IP。
+- endpoint 使用 DNS 名时，优先由配置的公共 nameserver 解析。私有云 FQDN 无法公共解析时，使用运维维护的 Pod `hostAliases`/Docker `extra_hosts`，把证书匹配的 FQDN 映射到平台批准的稳定 IP；映射不得来自用户请求，IP 变更必须走受控发布。只有证书包含 IP SAN 时才允许直接使用 IP endpoint。一期不支持 egress proxy。
+- Kubernetes 不接入 CoreDNS；`*.svc.cluster.local` 不能作为 MinIO endpoint。需要使用专用稳定 FQDN 或显式 IP。
 - MinIO 明确使用 path-style；OBS 的签名版本、region 和 path-style 由 provider spike 的固定结果决定。
 - bucket 必须已存在。挂载器不得以高权限凭证自动创建 bucket。
 
@@ -128,7 +128,7 @@ kubectl -n "$SANDBOX_NAMESPACE" create secret generic sandbox-workspace-minio \
 
 Pod 直接 `secretKeyRef`/Secret volume 引用已存在的 provider Secret 时，sandbox-api ServiceAccount 不需要 `get/list/watch secrets`。一期不创建 per-sandbox Secret，也不接受 `sessionToken`；Secret 中出现该字段时配置校验失败。现有 Chart 把 `config.storage.filesystem.accessKey/secretKey` 直接渲染为普通环境变量；FUSE 实现合入时必须改成 `secretKeyRef` 或文件型 credential provider，并删除 values 中的明文凭证入口。
 
-sandbox-api 的配置同时把控制面 Secret 中的 `ca.crt` 映射为 `storage.filesystem.ca_file`。当前 `goairix/fs` MinIO/OBS driver 没有完整的自定义 CA 配置入口，实现必须先为其 HTTP transport 增加 CA 注入；不能只让 s3fs 信任私有 CA，而让显式上传/下载 API 继续失败。
+sandbox-api 的配置同时把控制面 Secret 中的 `ca.crt` 映射为 `storage.filesystem.ca_file`。FUSE 控制路径使用本仓库基于 MinIO/华为 OBS 原生 SDK 的 `WorkspaceObjectClient` 注入该 CA；不支持自定义 transport 的 `goairix/fs` v0.3.11 只用于 sync 模式。FUSE 公共上传/下载通过容器内已挂载的 `/workspace`，不能旁路到旧 driver。
 
 ### 5.2 Docker
 
@@ -243,6 +243,10 @@ config:
         mounterImage: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
         dockerImage: registry.example.com/sandbox-fuse-minio@sha256:<64-hex-digest>
         lsmProfile: sandbox-fuse
+        systemEgressMode: cidr
+        dnsCIDRs: ["8.8.8.8/32", "1.1.1.1/32"]
+        endpointPorts: [9000]
+        proxyURL: ""
         systemEgressFQDNs:
           - minio-fuse.example.com
         systemEgressCIDRs: []
@@ -256,6 +260,10 @@ config:
         mounterImage: registry.example.com/sandbox-s3fs-obs@sha256:<64-hex-digest>
         dockerImage: registry.example.com/sandbox-fuse-obs@sha256:<64-hex-digest>
         lsmProfile: sandbox-fuse
+        systemEgressMode: cidr
+        dnsCIDRs: ["8.8.8.8/32", "1.1.1.1/32"]
+        endpointPorts: [443]
+        proxyURL: ""
         systemEgressFQDNs:
           - obs.cn-north-4.myhuaweicloud.com
         systemEgressCIDRs: []
@@ -380,16 +388,13 @@ spec:
             fieldRef:
               fieldPath: metadata.uid
         - name: SANDBOX_MOUNTER_BOOTSTRAP
-          value: '{"version":1,"provider":"minio","bucket":"sandbox","endpoint":"https://minio.example.com:9000","profile":"minio-sigv4-path-style-v1","credential_file":"/run/secrets/workspace/passwd-s3fs","ca_file":"/run/secrets/workspace/ca.crt","cache_dir":"/var/cache/s3fs","mount_path":"/workspace","pool_key":"<pool-key-sha256>"}'
+          value: '{"version":1,"provider":"minio","bucket":"sandbox","endpoint":"https://minio.example.com:9000","profile":"minio-sigv4-path-style-v1","access_key_file":"/run/secrets/workspace/accessKey","secret_key_file":"/run/secrets/workspace/secretKey","passwd_file":"/run/s3fs/passwd-s3fs","ca_file":"/run/secrets/workspace/ca.crt","cache_dir":"/var/cache/s3fs","mount_path":"/workspace","pool_key":"<pool-key-sha256>"}'
       lifecycle:
         preStop:
           exec:
             command:
               - /usr/local/bin/workspace-mounter
               - shutdown
-              - --mount=/workspace
-              - --flush-timeout=30s
-              - --unmount-timeout=20s
       volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -449,7 +454,7 @@ spec:
         sizeLimit: 16Mi
 ```
 
-`SANDBOX_MOUNTER_BOOTSTRAP` 只包含 PoolKey 已覆盖的固定、非敏感配置，不包含 prefix、workspace identity 或 lease generation。sidecar 把 Downward API 提供的 Pod UID 与该 JSON 分别校验，并在 `/run/s3fs` 原子落成 mode `0600` 的 bootstrap 文件后才进入 prepared。Docker 特殊容器没有 Downward API：它先以 locked supervisor 启动，sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，再通过一次性 `workspace-mounter bootstrap` 控制命令写入同一 schema；bootstrap 重放或 ID 不一致必须失败。
+`SANDBOX_MOUNTER_BOOTSTRAP` 只包含 PoolKey 已覆盖的固定、非敏感配置，不包含 prefix、workspace identity 或 lease generation。`access_key_file`/`secret_key_file` 位于只读 Secret volume，`passwd_file` 必须位于 mounter 私有 `/run/s3fs`；sidecar 校验 AK/SK 为单行非空值后原子生成 mode `0600` 的 `AK:SK` 文件，不能假设 Secret 已提供 `passwd-s3fs`。sidecar 把 Downward API 提供的 Pod UID 与该 JSON 分别校验，并在 `/run/s3fs` 原子落成 mode `0600` 的 bootstrap 文件后才进入 prepared。Docker 特殊容器没有 Downward API：它先以 locked supervisor 启动，sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，再通过一次性 `workspace-mounter bootstrap` 控制命令写入同一 schema；bootstrap 重放或 ID 不一致必须失败。
 
 空壳创建时只携带固定 provider 配置和 PoolKey，初始 label state 必须是 `preparing`，不能在 health 验证前标成 `prepared`。Pool availability 不能等待 Pod Ready：私有 `PreparedSandboxHealth` 验证 sidecar locked、sandbox 主容器 running、无 s3fs 和无 mount/generation；Pool/manager 另外从 Redis owner/session 反查确认该 runtime UID 未绑定 workspace，且公共 Exec/file gate 关闭。prepared 空壳不创建用户 session，不出现在公共 sandbox list/get 响应中，runtime ID/UID 也不能返回给调用方；公共 Exec/file API 必须校验已提交的用户 session 和 gate，不能仅凭 runtime ID 访问。全部通过后 Kubernetes 才以 resourceVersion 冲突保护把 state patch 为 `prepared` 并入队；Acquire 后 runtime 才根据请求生成唯一 prefix、租约标签和 workspace identity。对象 key 根路径严格为：
 
@@ -498,8 +503,8 @@ Secret 通过已知名称挂载时不授予读取权限。若 control namespace 
 - Pod 保持 `DNSPolicy=None`，DNS egress 只允许运维配置的公共 nameserver；不允许 CoreDNS，也不配置集群 search domain；
 - 无论 `network_enabled` 是否为 false，都允许 sidecar 访问该 workspace 固定 provider endpoint；
 - sandbox 主容器不因此获得任意公网访问；
-- endpoint 必须是公共 nameserver 可解析的稳定专用 FQDN，或由运维通过 `hostAliases`/egress proxy 解析的证书匹配 FQDN；只有证书包含 IP SAN 时才允许直接使用稳定 IP。不支持 `cluster.local` Service，仅加入网络白名单不能解决集群域名解析；
-- Cilium 环境可使用 FQDN policy；仅使用标准 NetworkPolicy 时，使用运维维护的稳定 CIDR、固定 egress proxy 或显式 endpoint IP，不把短期 DNS 解析结果永久写死；
+- endpoint 必须是公共 nameserver 可解析的稳定专用 FQDN，或由运维通过 `hostAliases` 映射的证书匹配 FQDN；只有证书包含 IP SAN 时才允许直接使用稳定 IP。不支持 `cluster.local` Service，仅加入网络白名单不能解决集群域名解析；
+- Cilium 环境可使用 FQDN policy；仅使用标准 NetworkPolicy 时，使用运维维护的稳定 CIDR或显式 endpoint IP，不把短期 DNS 解析结果永久写死；
 - 禁止访问云元数据地址和不必要的 RFC1918 网段。
 
 NetworkPolicy 不能按容器区分流量；若必须严格保证主容器无法直连对象存储，应使用 sidecar 独立网络身份、CNI 扩展或 egress proxy，而不是仅依赖同 Pod 的标准 NetworkPolicy。
@@ -642,6 +647,10 @@ workspace:
       mounter_image: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
       docker_image: registry.example.com/sandbox-fuse-minio@sha256:<64-hex-digest>
       lsm_profile: sandbox-fuse
+      system_egress_mode: cidr
+      dns_cidrs: ["8.8.8.8/32", "1.1.1.1/32"]
+      endpoint_ports: [9000]
+      proxy_url: ""
       system_egress_fqdns: [minio.example.internal]
       system_egress_cidrs: [192.0.2.10/32]
     obs:
@@ -653,6 +662,10 @@ workspace:
       mounter_image: registry.example.com/sandbox-s3fs-obs@sha256:<64-hex-digest>
       docker_image: registry.example.com/sandbox-fuse-obs@sha256:<64-hex-digest>
       lsm_profile: sandbox-fuse
+      system_egress_mode: cidr
+      dns_cidrs: ["8.8.8.8/32", "1.1.1.1/32"]
+      endpoint_ports: [443]
+      proxy_url: ""
       system_egress_fqdns: [obs.private.example.com]
       system_egress_cidrs: [192.0.2.20/32]
 ```
@@ -672,7 +685,7 @@ Docker FUSE 镜像不是简单把 s3fs 安装进现有 sandbox 镜像。它必�
 3. Acquire 后 supervisor 只接受一次包含相同 PoolKey、runtime ID、prefix 和 lease generation 的固定授权，随后启动前台 FUSE 进程；mount health 与 UID 1000 sandbox 内读写探测都通过后才允许 API 执行用户命令。
 4. 所有用户命令和文件命令强制 UID/GID 1000，不能调用 root supervisor 的控制接口。
 5. FUSE 进程异常退出时容器进入 unhealthy/error 并停止整个 sandbox；不能把取消 attach/exec 流当作用户进程退出，也不能把用户流量切到底层目录。
-6. flush/销毁时 sandbox-api 先关闭引用计数 operation gate 并等待所有 API stream 结束，再在 sandbox 容器内运行固定 `workspace-probe quiesce`：停止同 UID 的其余进程并验证没有指向 `/workspace` 的可写 fd。只有得到 quiesce token 才执行经过 profile 验证的 flush；无法证明静止时返回 `flushed=false`。删除后还必须由可达 Docker daemon 对精确 container ID 返回 NotFound，host 失联时保留 owner/resources 并阻止接管，不能把 force remove 请求本身当成退出证明。
+6. flush/销毁时 sandbox-api 先关闭引用计数 operation gate 并等待所有 API stream 结束，再在 sandbox 容器内运行固定 `workspace-probe quiesce`：停止同 UID 的其余进程并验证没有指向 `/workspace` 的可写 fd。只有得到绑定 exact RuntimeUID/generation 的一次性 quiesce token 才执行经过 profile 验证的 flush；非销毁 flush 后必须用 `workspace-probe resume` 消费同一 token，重放/跨 generation 失败并保持 gate 关闭。无法证明静止时返回 `flushed=false`。删除后还必须由可达 Docker daemon 对精确 container ID 返回 NotFound，host 失联时保留 owner/resources 并阻止接管，不能把 force remove 请求本身当成退出证明。
 
 镜像入口点必须使用 exec 形式，s3fs 参数必须由参数数组构造。禁止在命令行包含明文 AK/SK，也不接受 API 调用方传入任意 `-o` 参数。
 
@@ -713,7 +726,7 @@ readOnlyRootfs: true
 FUSE Pool 空壳从 WarmUp 起就加入只允许以下目的地的系统网络：
 
 - DNS resolver；
-- 当前 provider endpoint/egress proxy；
+- 当前 provider endpoint；
 - 必需的证书状态或内部 PKI 服务。
 
 用户网络关闭时仍保留该系统网络；上述地址必须预先进入平台审批的精确 system egress 白名单，配置 provider endpoint 不得自动批准任意内网地址。Acquire 后、开放 Exec 前再把用户网络规则追加到 gateway。用户进程的网络请求必须经过 gateway 策略，不能因为与 supervisor 同容器而获得不受限出口。对象存储 endpoint 和用户白名单分别建模；当前边界允许用户进程连接已批准的 endpoint，但其不能获得凭证。若要求按进程阻止该连接，必须增加认证 egress proxy，单容器 Docker network 本身无法实现。
