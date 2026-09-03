@@ -186,7 +186,7 @@ volumeMounts:
 预热阶段：
 
 1. Pool 按固定配置指纹创建 system egress policy，再创建 FUSE Pod；此时 spec 不含 workspace prefix 或 lease generation。
-2. Kubelet 启动 `workspace-mounter`。Sidecar 从自身专用 Secret volume 读取 provider 级凭证，生成 mode `0600` 的临时密码文件，但 supervisor 只进入 prepared/locked，不调用 s3fs。
+2. Kubelet 启动 `workspace-mounter`。Sidecar 从 mounter-only 环境读取固定、非敏感的 versioned bootstrap JSON，从 Downward API 单独读取 Pod UID；校验后把合并结果原子写入 `/run/s3fs/bootstrap.json`（mode `0600`）。随后从自身专用 Secret volume 读取 provider 级凭证并生成 mode `0600` 的临时密码文件，但 supervisor 只进入 prepared/locked，不调用 s3fs。bootstrap 只包含 provider、bucket、endpoint、profile、credential/CA/cache 路径、PoolKey 和超时，不包含 prefix、workspace identity 或 lease generation。
 3. `startupProbe` 只检查 supervisor、`/dev/fuse`、cache/Secret 与底层 `/workspace` mode，prepared 后返回成功；Kubelet 随即启动 sandbox 主容器。
 4. mounter `readinessProbe` 因尚未挂载而保持失败，Pod 保持 NotReady。Pool 通过独立 `PreparedSandbox` probe 确认 supervisor locked、sandbox 主进程存活、无 FUSE mount、无 mount generation 且 Exec/file gate 关闭，之后才把空壳加入 available 队列。
 
@@ -240,6 +240,7 @@ Sidecar 不配置 `livenessProbe`。startup probe 只表示“空壳可绑定”
 - `/run/s3fs` 使用随 Pod 存活的独立 `emptyDir`。supervisor 获得一次性授权后以原子 create-if-absent 写入包含 Pod UID、workspace identity 和 lease generation 的 `mount-generation`；若容器重启且 marker 仍在，则写入 `restart-detected`、不得再次调用 s3fs，并保持存活但 readiness 失败。节点重启可能丢失 memory-backed `emptyDir`，因此 marker 只是本地第二道防线，不能授予挂载权；owner 中持久的 `mount_attempt=1` 禁止 runtime 对同一 Pod UID/lease generation 再次授权。marker 丢失时 supervisor 仍保持 locked，runtime 必须按第 8.3 节确认旧 Pod API 对象消失且进程已退出或节点已 fencing，再以新 Pod UID 和新 lease generation 重建。startup probe 只确认“授权后的初始化判定已完成”，runtime 观察到 `restartCount`、`restart-detected`、授权超时或 generation 异常后停止整个 Pod。
 - s3fs 进程死亡会使已有 fd、cwd 和 mmap 指向失效的 FUSE 实例。仅取消 Kubernetes exec/Docker attach 流不保证远端进程及其脱离的子进程已经退出，因此安全恢复路径必须把 sandbox 置为 unavailable 并停止整个 Pod/容器。一期不做原地 remount；只有 runtime 确认旧实例完全退出并获取新的 lease generation 后，才能以新 Pod/容器重新挂载。
 - mount state 以 runtime 的实时 probe/status 为准，Redis session 中的状态只用于恢复提示，不能单独作为 Exec 放行依据。
+- 对外发布后，sandbox-api 为每个 FUSE sandbox 运行 lifecycle watcher，持续核对 lease、exact runtime UID、generation、restartCount/restart marker 和 FUSE health；任一异常只执行一次 gate close 与 single-use teardown。初始 `WaitSandboxReady` 不能替代该持续监督。
 - 正常销毁由 sandbox-api 先拒绝新 Exec 并调用 `QuiesceWorkspace`。quiesce 成功时再通过可信 runtime 控制路径执行经过 profile 验证的 flush，然后删除 Pod；quiesce 失败时直接进入整个 Pod 停止流程，由主容器退出后的 sidecar 做有界、尽力 flush，不能返回强持久化承诺。主容器应快速退出；sidecar 在主容器退出后完成 unmount。
 - sidecar 的 SIGTERM/preStop 是 unmount 的正常收尾，也是 API 异常时的 flush 兜底，但不能作为唯一 flush 机制，因为主容器可能消耗大部分 Pod termination grace period。Pod 必须配置足够的 termination grace period，主容器不得设置长时间 preStop。
 - 尚未消费挂载授权的 prepared 空壳在缩容、过期或配置轮换时直接删除；一旦 `mount_attempt=1`，无论 workspace 是否进入 ready，销毁都必须走 single-use 清理并确认 runtime 退出后再释放租约。
@@ -267,7 +268,7 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 ### 6.2 预热与 Acquire
 
 1. Pool 使用固定 provider 配置指纹创建特殊容器，以 root supervisor 作为 PID 1 启动；Swarm 使用 Docker Secret，普通 Docker Engine 使用 sandbox-api 创建的 root-only 临时凭证目录。该 bind mount 只承载 provider 级凭证/CA，不承载 `/workspace`。
-2. supervisor 创建 mode `0600` 的 s3fs 密码文件并进入 prepared/locked；用户环境基础进程已经启动，但 API 不允许任何用户 Exec/file 操作，且此时不存在 s3fs 进程或 workspace mount。
+2. supervisor 先保持 locked；sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，通过 root-only 控制通道提交一次 versioned bootstrap JSON。supervisor 校验 RuntimeUID 与固定配置、拒绝重放后，创建 mode `0600` 的 s3fs 密码文件并进入 prepared/locked；用户环境基础进程已经启动，但 API 不允许任何用户 Exec/file 操作，且此时不存在 s3fs 进程或 workspace mount。
 3. Pool 用私有 `execControl` 检查容器进程、底层 `/workspace` mode、Secret/cache 和“无 mount、无 generation”状态，将合格空壳加入对应配置指纹队列。Docker engine health 只能表示 supervisor 存活，不能代表 workspace ready。
 4. Acquire 时 manager 原子保留空壳、获取 prefix 租约并准备目录标记，再绑定 sandbox identity并 CAS 消费一次 `mount_attempt`。
 5. runtime 通过固定 `execControl` 传递 prefix、runtime ID 和 lease generation；supervisor 校验后启动唯一前台 s3fs，runtime 同时在 gateway 中应用用户网络策略。
@@ -391,17 +392,17 @@ Docker 特殊容器同样需要访问对象存储 endpoint。FUSE Pool 在 WarmU
 s3fs 不协调多个客户端对同一对象的并发修改，因此创建 FUSE workspace 前必须获取独占租约：
 
 ```text
-sandbox:workspace-lease:<provider>:<storage-identity-hash>:<bucket>:<normalized-prefix>
+sandbox:workspace:lease:<provider>:<storage-identity-hash>:<bucket>:<normalized-prefix>
 ```
 
 租约 value 包含 sandbox ID、runtime、runtime ID、创建时间和 fencing generation。除 TTL lease 外，另保存不自动过期的 workspace owner 记录，并把 workspace hash 与 generation 写入 Pod/container label，供 Redis 状态异常时从 runtime 反查。规则：
 
 - 同一 workspace 同时只允许一个 `rw` sandbox。
-- sandbox-api 以不大于 TTL 三分之一的间隔续租。
-- 续租失败立即把 workspace 置为 unavailable 并拒绝新 Exec；持续失败时停止整个 sandbox，确认 runtime 已退出后才允许释放租约或接管。停止前的 flush 只能尽力执行，不能延迟 fail closed。
+- sandbox-api 在 Acquire 获得 lease 后立即启动续租，不等 marker、mount 或对外发布；以不大于 TTL 三分之一的间隔续租。
+- 续租失败立即关闭引用计数 operation gate，把 workspace 置为 unavailable 并拒绝新 Exec；lifecycle watcher 随即停止整个 sandbox，确认 runtime 已退出后才允许释放租约或接管。停止前的 flush 只能尽力执行，不能延迟 fail closed。挂载事务尚未发布时，续租失败取消同一 Acquire context 并进入 single-use cleanup。
 - 正常销毁时 compare-and-delete 释放，不能删除其他 generation 的租约。
 - TTL lease 消失不能自动删除 owner 记录。
-- 接管前必须同时检查 owner 记录、持久 session，以及带相同 workspace label 的 Pod/container；只有确认旧 runtime 已停止或删除，才允许清理旧 owner 并创建新 generation。
+- generation 由独立、永不随 owner 删除的 `sandbox:workspace:generation:` Redis 计数器原子递增；接管前必须同时检查 owner 记录、持久 session，以及带相同 workspace label 的 Pod/container；只有确认旧 runtime 已停止或删除，才允许清理旧 owner并分配新 generation。
 - Kubernetes 的“旧 runtime 已删除”必须同时满足旧 Pod UID 对应的 API 对象已为 NotFound，以及 kubelet/CRI 已确认进程退出或节点已经完成基础设施级 fencing；节点 NotReady、容器暂时 stopped、空的 mount probe 或仅 force-delete Pod API 对象都不够。Docker 必须确认旧 container ID 已不存在且 daemon/宿主机可确认进程退出，宿主机失联时同样需要 fencing。无法确认时 workspace 保持 blocked，不得接管。新实例总是获得新 lease generation，owner 的 `mount_attempt` 从 0 开始且只允许 CAS 成功一次。
 - API 多副本共享同一 Redis 状态，不能只使用进程内锁。
 
@@ -422,6 +423,7 @@ type WorkspaceFUSEProviderConfig struct {
     DockerImage          string   `mapstructure:"docker_image"`
     CASecretKey          string   `mapstructure:"ca_secret_key"`
     CredentialGeneration string   `mapstructure:"credential_generation"`
+    LSMProfile           string   `mapstructure:"lsm_profile"`
     EndpointHostIPs      []string `mapstructure:"endpoint_host_ips"`
     SystemEgressFQDNs    []string `mapstructure:"system_egress_fqdns"`
     SystemEgressCIDRs    []string `mapstructure:"system_egress_cidrs"`
@@ -473,6 +475,8 @@ type WorkspaceConfig struct {
 }
 ```
 
+`security.max_upload_bytes` 默认 2 GiB 且必须为正数；它只放宽精确的 direct file-upload 路由，其他 request body 继续限制为 64 MiB。生产 FUSE provider 的 `lsm_profile` 必填并拒绝 `unconfined`/`label=disable`。
+
 配置约束：
 
 - `mode=fuse` 时 runtime 必须为 Kubernetes 或 Linux Docker Engine。
@@ -487,7 +491,7 @@ type WorkspaceConfig struct {
 - `quota_mode=soft` 必须显式配置，避免把现有 `max_disk` 误认为 FUSE workspace 硬限制。
 - 一期 `cache_medium` 固定为 `disk`。Kubernetes 同时配置 `emptyDir.sizeLimit` 和 Pod/container `ephemeral-storage` request/limit；Docker 使用独立 cache volume/目录、软阈值监控和销毁清理。`cache_size` 是软阈值，不承诺硬 quota 或 ENOSPC。
 - Secret、AK、SK 不得通过日志输出。
-- sandbox-api 继续为显式文件 API 访问对象存储，但生产凭证必须通过 `FileSystemCredentialFileConfig` 指向只读 Secret 文件；文件凭证与现有明文 `access_key`/`secret_key` 互斥。私有 CA 通过 `ca_file` 注入控制面存储客户端，并通过 provider Secret 的 `ca_secret_key` 注入 mounter；两者由同一外部 Secret 源同步，不能由 API 读取 runtime Secret 内容后再转发。当前 `goairix/fs` driver 若不能接收自定义 CA，必须先扩展其 HTTP transport，不能关闭 TLS 校验绕过。
+- 生产凭证必须通过 `FileSystemCredentialFileConfig` 指向只读 Secret 文件；文件凭证与现有明文 `access_key`/`secret_key` 互斥。私有 CA 通过 `ca_file` 注入控制面存储客户端，并通过 provider Secret 的 `ca_secret_key` 注入 mounter；两者由同一外部 Secret 源同步，不能由 API 读取 runtime Secret 内容后再转发。FUSE 模式的 prefix marker、head/list 探测使用本仓库中基于 MinIO/华为 OBS 原生 SDK 的独立 `WorkspaceObjectClient`，由它显式注入自定义 CA；当前不支持自定义 transport 的 `goairix/fs` v0.3.11 只保留给 legacy sync 模式，不能在 FUSE 启动路径中悄悄回退使用，更不能关闭 TLS 校验绕过。FUSE 模式的公共文件 API 一律通过已挂载的 runtime `/workspace` 操作，不通过该对象客户端旁路写业务文件。
 - 一期只接受长期 AK/SK；任何 session token 或凭证过期字段都必须拒绝，不能隐式退回环境变量认证。
 - `mount_timeout_seconds`、`flush_timeout_seconds`、`lease_ttl_seconds` 和 cache size 必须为正值并设置安全默认值。
 - `fuse_pool.min_size/max_size` 独立于现有通用 `pool`；必须满足 `0 <= min_size <= max_size`，`prepare_timeout_seconds` 覆盖 Pod/容器基础启动但不包含 Acquire 后的 mount timeout。
@@ -536,6 +540,7 @@ workspace:
       credential_generation: "2026-09-03-01"
       mounter_image: "${SANDBOX_MINIO_MOUNTER_IMAGE}"
       docker_image: "${SANDBOX_MINIO_FUSE_RUNTIME_IMAGE}"
+      lsm_profile: "sandbox-fuse"
       system_egress_fqdns: ["${SANDBOX_MINIO_ENDPOINT_HOST}"]
     obs:
       driver: "s3fs"
@@ -545,6 +550,7 @@ workspace:
       credential_generation: "2026-09-03-01"
       mounter_image: "${SANDBOX_OBS_MOUNTER_IMAGE}"
       docker_image: "${SANDBOX_OBS_FUSE_RUNTIME_IMAGE}"
+      lsm_profile: "sandbox-fuse"
       system_egress_fqdns: ["${SANDBOX_OBS_ENDPOINT_HOST}"]
 ```
 
@@ -571,8 +577,24 @@ type WorkspaceFUSESpec struct {
     CacheSize       string
     MountTimeout    time.Duration
     FlushTimeout    time.Duration
+    LSMProfile      string
     SystemEgress    SystemEgressSpec
     PoolKey         string
+}
+
+type SystemEgressMode string
+const (
+    SystemEgressCIDR       SystemEgressMode = "cidr"
+    SystemEgressCiliumFQDN SystemEgressMode = "cilium-fqdn"
+)
+type SystemEgressSpec struct {
+    Mode          SystemEgressMode
+    DNSCIDRs      []string
+    DNSPorts      []int32
+    EndpointCIDRs []string
+    EndpointFQDNs []string
+    EndpointPorts []int32
+    ProxyURL      string // 一期必须为空，代理模式不在支持范围
 }
 
 type WorkspaceMountAuthorization struct {
@@ -585,7 +607,7 @@ type WorkspaceMountAuthorization struct {
 }
 ```
 
-`WorkspaceFUSESpec` 只包含预热时已经确定的固定配置，不包含 workspace prefix 或 lease generation。`PoolKey` 是以下字段规范化序列化后的哈希：runtime、sandbox 镜像/资源/安全配置、provider、`storage_identity`、bucket、endpoint、region、profile、mounter 镜像 digest、Secret 名与运维维护的 credential generation、CA、cache 和 system egress。它明确不包含 `workspace_path/prefix`、workspace identity、lease generation、reservation token 或请求级用户网络规则；这些字段只能在 Acquire 时绑定或追加。不同 PoolKey 的空壳绝不能混用；请求的固定字段不匹配现有 PoolKey 时只能按新 key cold prepare，不能借用其他 key 的空壳。Spec 只携带 Secret 引用，不携带明文 AK/SK；Docker 如无法通过名称引用 Secret，则使用 root-only secret path，由 runtime 管理生命周期，不能写入持久 session。
+`WorkspaceFUSESpec` 只包含预热时已经确定的固定配置，不包含 workspace prefix 或 lease generation。`PoolKey` 是以下字段规范化序列化后的哈希：runtime、sandbox 镜像/资源/安全配置、provider、`storage_identity`、bucket、endpoint、region、profile、mounter 镜像 digest、Secret 名与运维维护的 credential generation、CA、cache、LSM profile 和 system egress。它明确不包含 `workspace_path/prefix`、workspace identity、lease generation、reservation token 或请求级用户网络规则；这些字段只能在 Acquire 时绑定或追加。不同 PoolKey 的空壳绝不能混用；请求的固定字段不匹配现有 PoolKey 时只能按新 key cold prepare，不能借用其他 key 的空壳。Spec 只携带 Secret 引用，不携带明文 AK/SK；Docker 如无法通过名称引用 Secret，则使用 root-only secret path，由 runtime 管理生命周期，不能写入持久 session。标准 NetworkPolicy 只接受 CIDR mode；Cilium FQDN mode 只接受精确、无通配符的 endpoint FQDN。两种模式都固定 DNS TCP/UDP 53 与对象端口，并拒绝任何未审批私网目的地或非空 `ProxyURL`。
 
 FUSE 创建必须拆为 prepare/authorize/ready 三阶段，不能沿用“创建后直接等 Ready”的单调用流程：
 
@@ -594,6 +616,8 @@ PrepareSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error)
 AuthorizeWorkspaceMount(ctx context.Context, id string, auth WorkspaceMountAuthorization) error
 WaitSandboxReady(ctx context.Context, id string) (*SandboxInfo, error)
 ```
+
+FUSE runtime 还必须使用 `RuntimeFencer` 产生与 exact RuntimeUID 匹配的退出证据。Kubernetes 正常路径要求 supervisor 已确认 unmount，再对 exact Pod UID graceful delete 并观察到 NotFound；节点/控制通道异常时必须由基础设施 fencer 证明节点已隔离，否则保持 owner blocked。Docker 要求 daemon 可达且对 exact container ID 的 inspect 返回 NotFound。force-delete/remove 请求本身不是退出证据。runtime 构造函数不得提前清理资源；Manager 完成 session/owner/Pool 对账后，才把受保护 RuntimeUID 集合交给可选 `OrphanReconciler`。
 
 `PrepareSandbox` 先创建固定 system egress policy，再创建 supervisor locked、无 prefix 的 Pod/容器，等待 sandbox 基础进程启动并返回不可复用的 runtime UID；它不得启动 s3fs 或开放用户 Exec。Pool 使用新增的 `PreparedSandboxHealth` 验证 supervisor locked、sandbox 进程存活、无 mount/generation 后才入队。
 
@@ -610,13 +634,13 @@ FlushWorkspace(ctx context.Context, id string) error
 
 `QuiesceWorkspace` 关闭 Exec/file gate，等待 API 跟踪的 Exec 结束，并验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。验证失败时返回错误，调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
 
-现有上传接口还需要把 multipart 已知的文件大小传入 runtime，使 tar header 可以先写出并通过 pipe 直接流向 Docker/Kubernetes，而不是 `io.ReadAll`：
+上传接口需要把调用方声明并由流式读取校验的文件大小传入 runtime，使 tar header 可以先写出并通过 pipe 直接流向 Docker/Kubernetes，而不是 `io.ReadAll`：
 
 ```go
 UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error
 ```
 
-实现必须校验实际读取字节数与声明大小一致，并设置上传大小上限；该调整不改变公共 HTTP multipart 请求格式。
+非上传请求继续使用 64 MiB body 上限，只有 exact direct-upload 路由使用 `security.max_upload_bytes`（默认 2 GiB）。大于 64 MiB 的上传要求 `X-Sandbox-File-Size`，handler 使用 `Request.MultipartReader` 直接读取 file part，禁止 `FormFile`/`ParseMultipartForm` 产生整文件临时缓存；实现必须校验实际读取字节数与声明大小一致，并拒绝负数、超限、短读和多余字节。小文件继续兼容现有 multipart 格式。
 
 ### 10.2 Workspace 状态
 
@@ -645,16 +669,16 @@ const (
 
 `WorkspaceInfo` 保存 mount type、mount state、driver、最后健康时间、最后 flush 时间、owner 和租约 generation。旧 session 中 `BindMounted=true` 迁移为 local bind 兼容状态；不存在新字段的远端 workspace 继续解释为 sync，不自动升级为 FUSE。
 
-Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保存 `preparing → prepared → reserved → binding → consumed` 状态、PoolKey、runtime ID/UID、创建它的 API instance ownership token、reservation token 和时间戳。只有 health 验证完成后的 `prepared` 可被领取；Kubernetes 初始 label 必须为 `preparing`，通过校验后再以 resourceVersion 保护 patch 为 `prepared`。Docker label 创建后不可更新，只保存 PoolKey/instance identity，Redis record 是跨副本状态源。`reserved` 在授权前通过 pristine 复检后可退回 `prepared`，`binding` 表示 owner 的 `mount_attempt` 已消费，必须最终销毁。
+Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保存 `preparing → prepared → reserved → binding → consumed` 状态、PoolKey、runtime ID/UID、创建它的 API instance ownership token、reservation token、时间戳和单调 revision。所有 transition/delete 必须同时匹配预期 state、token 与 revision，成功后递增 revision，过期 reconciler 不能无条件删除新副本刚更新的 record。只有 health 验证完成后的 `prepared` 可被领取；Kubernetes 初始 label 必须为 `preparing`，通过校验后再以 resourceVersion 保护 patch 为 `prepared`。Docker label 创建后不可更新，只保存 PoolKey/instance identity，Redis record 是跨副本状态源。`reserved` 在授权前通过 pristine 复检后可退回 `prepared`，`binding` 表示 owner 的 `mount_attempt` 已消费，必须最终销毁。
 
 ### 10.3 FUSE Pool
 
 现有 Pool 已采用 single-use Release（使用后删除容器），FUSE 扩展沿用它由 `sandbox-api` 负责 WarmUp、Acquire 后补池、异常移除补池和 Stop/Drain 的控制模式。FUSE 空壳的 prepared health、一次性挂载授权和恢复规则与普通空壳不同，因此使用独立 `FUSEPool` 队列，不能直接混入当前 `available` slice。多副本场景下由各 `sandbox-api` 副本运行相同控制循环，并按 PoolKey 使用 Redis inventory/互斥共同维护全局目标水位；Redis 是状态与协调介质，不是主动控制器：
 
-- `Manager.Start` 在 persistent sandbox 恢复与 FUSE inventory 对账后调用 `FUSEPool.WarmUp`。获得分布式 refill lock 的 `sandbox-api` 根据 Redis 记录计算缺口，创建不含 prefix 的 `WorkspaceFUSESpec` 空壳，直到 `prepared` 达到 `min_size`；不能调用等待 workspace Ready 的旧 `CreateSandbox` 路径。
+- `Manager.Start(ctx) error` 在 persistent sandbox 恢复与 FUSE inventory 对账后调用 `FUSEPool.WarmUp`。FUSE 模式下 Redis、恢复、对账或 WarmUp 任一失败都必须返回错误并阻止 HTTP 服务监听。获得分布式 refill lock 的 `sandbox-api` 根据 Redis 记录计算缺口，创建不含 prefix 的 `WorkspaceFUSESpec` 空壳，直到 `prepared` 达到 `min_size`；不能调用等待 workspace Ready 的旧 `CreateSandbox` 路径。
 - 健康验证通过后，以 runtime UID 唯一键把 `preparing` record CAS 为 `prepared`；Pod label 只用于观测和 runtime 反查，不能代替 Redis 状态。
 - prepared 空壳不创建用户 sandbox/session，不出现在公共 list/get 响应中，其 runtime ID/UID 也不能返回给调用方；所有公共 Exec/file API 必须先验证已提交的用户 session 和 gate，不能仅凭可猜测或泄露的 runtime ID 直达空壳。
-- `AcquirePrepared(poolKey, reservationToken)` 通过 Lua/事务原子选择同 key 的一个 `prepared` record 并改为 `reserved`，避免多个 API 副本领取同一实例；随后执行 runtime pristine probe，并从 owner/session 反查 runtime UID 未绑定 workspace、API gate 关闭。领取后当前 `sandbox-api` 立即异步调用 `refillIfNeeded`；没有可用实例时由当前请求同步 cold prepare 一个空壳。
+- `AcquirePrepared(poolKey, reservationToken)` 通过 Lua/事务原子选择同 key 的一个 `prepared` record 并改为 `reserved`，避免多个 API 副本领取同一实例；随后执行 runtime pristine probe，并从 owner/session 反查 runtime UID 未绑定 workspace、API gate 关闭。领取后当前 `sandbox-api` 立即异步调用 `refillIfNeeded`；没有可用实例时由当前请求以自己的 reservation token 创建 `preparing` record，健康通过后直接 revision-CAS 为 `reserved`，绝不能短暂发布为可被另一副本领取的 `prepared`。
 - manager 先以 CAS 把 workspace owner 的 runtime UID/lease generation 和 `mount_attempt: 0→1` 绑定，再以相同 reservation token 把 pool record 从 `reserved` CAS 为 `binding`；两步都成功后才能向 supervisor 发授权。任一步失败或两步之间崩溃都按不确定实例销毁，reconciler 只要发现 reserved record 已被 owner 引用就禁止回池，因此不要求两个不同 key 具备跨槽事务。
 - `ReturnPrepared` 仅允许持有相同 reservation token、尚未进入 binding、没有 mount generation 和 owner/session 引用的实例；返回前重新执行完整 pristine probe，再原子改回 `prepared`。
 - `ReleaseConsumed` 由持有 sandbox session 的 `sandbox-api` 删除 Pod/容器、system egress policy、cache 和临时 Secret，确认 runtime 退出后再释放 owner/lease，并调用 `NotifyRemoved/refillIfNeeded`；绝不把实例放回 available。
@@ -665,6 +689,8 @@ Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保�
 - API 副本崩溃后，`prepared` record 只有通过新副本的 pristine probe 才能继续使用；超时的 `preparing/reserved`、任意 `binding` 和状态不明实例一律删除，不因 reservation TTL 到期自动回池。`consumed` 由持久 sandbox session 接管。reconciler 必须核对 Redis record 和 session，不能把其他副本仍持有的空壳当孤儿删除。
 
 FUSE Pool 复用现有 `Pool` 的 `WarmUp → Acquire → refill → single-use Release/Drain` 生命周期，但使用独立的 `workspace.fuse_pool` 配置与 Redis registry，不能占用或改变现有通用 `pool` 的 sync/无 workspace 空壳队列。独立配置是因为两类空壳的镜像、权限和 ready 判定不同，不表示由其他组件维护。当前部署只有一个活动 filesystem provider，因此一期只维护一个活动 FUSE PoolKey；未来同时服务多个 provider 时可自然增加多个 key，不需要把进程内队列作为跨副本协调源。
+
+Redis key 必须分域：session 使用 `sandbox:session:v2:`，Pool、workspace lease、owner 与 generation 使用各自独立前缀。恢复只扫描 v2 session 前缀；旧 `sandbox:<id>` 只有在 exact key 读取且 JSON 验证为合法 Sandbox 后才能迁移，不能用 `sandbox:*` 把 Pool/lease/owner 当 session。Docker 容器会跨 sandbox-api 进程重启存活，runtime 构造时禁止清理 managed 资源；Manager 先恢复 session/owner/Pool、构造受保护 RuntimeUID 集合，再调用 runtime orphan reconciliation。
 
 ## 11. API 语义
 
@@ -684,8 +710,8 @@ FUSE Pool 复用现有 `Pool` 的 `WarmUp → Acquire → refill → single-use 
 
 FUSE workspace 不再复制整棵目录，但保留 `SyncWorkspace` 的持久化语义：
 
-- `from_container` 进入 `flushing` 状态，先调用 runtime `QuiesceWorkspace`，再调用 `FlushWorkspace`；只有目标 s3fs 版本与 provider profile 的故障注入测试证明该 flush/close 路径已把全部已关闭文件上传到远端时，才返回 `files_synced=0`、`flushed=true` 和 `last_flushed_at`。
-- flush 与用户 Exec/file API 使用同一个互斥门：已有 Exec 未结束时等待到请求超时或返回冲突，flush 期间不允许启动新操作。Exec wrapper 必须跟踪并清理后代进程；发现后台/脱离进程或打开写句柄时 quiesce 失败，`SyncWorkspace` 返回 409/503，不能宣称持久化完成。
+- 每个已发布 sandbox 使用可关闭、引用计数的 operation gate；所有 Exec/stream/file/workspace 操作从开始到流结束都持有引用。`from_container` 进入 `flushing` 状态并取得 exclusive token：先关闭新 admission，等待已有引用归零，再调用 runtime `QuiesceWorkspace` 和 `FlushWorkspace`；只有目标 s3fs 版本与 provider profile 的故障注入测试证明该 flush/close 路径已把全部已关闭文件上传到远端时，才返回 `files_synced=0`、`flushed=true` 和 `last_flushed_at`。
+- Kubernetes 保持 `shareProcessNamespace=false`，因此不能让 sidecar 检查主容器 `/proc`。`QuiesceWorkspace` 必须在 sandbox 容器内运行固定的非特权 `workspace-probe`：停止同 UID 的其余进程、枚举 `/proc/*/fd` 并确认没有指向 `/workspace` 的可写 fd，返回可恢复 token。无法枚举/停止、发现后台/脱离进程或写句柄、或 generation 在 flush 后变化时，`SyncWorkspace` 返回 409/503 与 `flushed=false`，不能调用 mounter flush 或宣称持久化完成；健康复检成功后才恢复进程并重开 gate。
 - flush 超时、quiesce 失败、s3fs 返回错误或 provider spike 无法证明持久化边界时，API 返回错误或明确的 `flushed=false`/unsupported，不能把健康检查、Linux `syncfs` 返回成功或 Exec 流结束单独当成数据已持久化。
 - `to_container` 不执行复制并返回明确 no-op；其前提是持有租约期间禁止其他客户端或管理工具修改同一 prefix。s3fs 不提供可靠的跨客户端缓存失效，因此外部修改不属于一期支持语义。
 - 响应包含 `mount_type=fuse`，区分“未复制但已 flush”和 legacy sync 的文件复制计数。
@@ -833,7 +859,7 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 | `internal/runtime/types.go`、`internal/runtime/runtime.go` | `WorkspaceFUSESpec`、prepare/authorize/ready 创建状态机、system egress、health/quiesce/flush 控制接口、带 size 的流式上传签名 |
 | `internal/sandbox/types.go` | Workspace mount type/state/driver/health/lease 字段 |
 | `internal/sandbox/pool.go` | 在现有 Pool 生命周期内增加独立 FUSEPool：按 PoolKey WarmUp、pristine probe、保留/安全归还、single-use 销毁、周期对账与补池 |
-| `internal/sandbox/manager.go`、`cmd/sandbox/main.go` | 由 sandbox-api 构造并启动/停止 FUSE Pool，编排 Acquire、prefix 绑定、租约/owner CAS、restore、健康与 Exec gate |
+| `internal/sandbox/manager.go`、`operation_gate.go`、`cmd/sandbox/main.go` | 由 sandbox-api 构造并 fail-closed 启动/停止 FUSE Pool，编排 Acquire、prefix 绑定、租约/owner CAS、restore、引用计数 gate 与 lifecycle watcher |
 | `internal/sandbox/workspace.go` | FUSE 模式跳过 sync；动态 mount/unmount 冲突语义 |
 | `internal/runtime/kubernetes/pod.go` | 可预热的原生 sidecar、memory emptyDir、propagation、supervisor generation gate、prepared/readiness probe、Secret、Acquire 后 sandbox 内探测 |
 | `internal/runtime/kubernetes/network.go` | system egress 与用户网络规则合并、公共 DNS 和稳定 endpoint/CIDR 策略 |
@@ -843,9 +869,10 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 | `internal/runtime/docker/network.go` | network disabled 时仍创建仅含 system egress 的 gateway |
 | `internal/runtime/docker/file.go` | 直接 Exec 强制用户；CopyToContainer ownership；上传改为流式 tar |
 | `internal/runtime/kubernetes/file.go` | 上传改为 pipe 流式 tar，禁止 `io.ReadAll` 整文件缓存 |
-| `internal/api/handler/file.go`、`internal/sandbox/manager.go` | 从 multipart header 透传 size，执行大小和 workspace health 校验 |
+| `internal/api/router.go`、`internal/api/handler/file.go`、`internal/sandbox/manager.go` | upload-only body 上限、`MultipartReader` 流式 size 校验、workspace health gate |
+| `cmd/workspace-mounter`、`cmd/workspace-probe` | root supervisor 的 versioned bootstrap/authorize/health/flush，以及 sandbox 内 UID-1000 读写和 quiesce 探针 |
 | `pkg/types/workspace.go`、`internal/api/handler/workspace.go` | 为 flush/no-op 增加向后兼容的 mount type、flushed、last flushed 等响应字段 |
-| `internal/storage/filesystem.go` 及 MinIO/OBS driver | 共享 prefix builder、`sub_path` 规范化、兼容目录标记创建/过滤 |
+| `internal/storage/filesystem.go`、`workspace_marker.go` | 共享 prefix builder、`sub_path` 规范化；FUSE 专用原生 MinIO/OBS 对象客户端负责自定义 CA、兼容目录标记创建/验证/过滤，legacy `goairix/fs` driver 不进入 FUSE 控制路径 |
 | `internal/storage/state/redis` | workspace TTL lease、持久 owner/generation，以及 FUSE Pool inventory、reservation/refill lock；lease key 复用共享 prefix builder |
 | `deploy/helm/sandbox` | mounter image、Secret、network policy、sidecar 资源配置 |
 | `docker` | 特殊 sandbox-fuse image、entrypoint、healthcheck、Secret 示例 |
