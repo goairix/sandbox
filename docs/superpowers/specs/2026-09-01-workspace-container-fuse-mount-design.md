@@ -97,7 +97,8 @@ Docker container 或 Kubernetes emptyDir /workspace
 - goofys 明确以性能优先、POSIX 兼容次之为设计目标，只支持顺序写，不保存逐文件 mode/owner/group，不支持 symlink/hardlink，并将 MinIO 标记为有限兼容。其最新正式版 v0.24.0 发布于 2020 年。
 - s3fs 支持更大的 POSIX 子集，包括随机写、append、symlink、mode 和 uid/gid；它支持自定义 S3 endpoint 与 path-style 请求，且仍持续发布。
 - s3fs 的随机写、append 和 rename 仍受对象存储限制：随机写或 append 会重写整个对象，rename 是 copy + delete，不是原子操作。
-- 华为云 CCE 当前明确使用 s3fs 挂载普通 OBS 对象桶，使用 obsfs 挂载并行文件系统。
+- 华为云公有云 CCE 文档明确使用 s3fs 挂载普通 OBS 对象桶、使用 obsfs 挂载并行文件系统。本项目实际使用的双华云私有云 CCE 文档也明确采用相同分工，并显示普通对象桶自动使用 `sigv2`、s3fs 1.92 自动添加 `compat_dir`。公有云与私有云证据共同支持一期的 `obs = 普通对象桶 + s3fs` 选择。
+- 上述 CCE 文档描述的是 Everest 集成挂载；私有云文档还说明每个对象存储卷会产生一个常驻进程。它们可以证明客户端分工和资源模型，但不能证明任意 s3fs 镜像、参数组合或自建 sidecar 已获得厂商认证。
 - s3fs 保持文件对象的原生数据格式，现有对象 API 和 `goairix/fs` 可继续访问挂载产生的文件。
 
 goofys 仅保留为 MinIO A 类负载的性能对照项。如果四象限基准显示 s3fs 无法达到性能目标，再单独评审 goofys 或 geesefs，不在一期同时维护两套客户端。
@@ -108,6 +109,7 @@ goofys 仅保留为 MinIO A 类负载的性能对照项。如果四象限基准�
 
 - MinIO profile：上游 s3fs、显式 `url`、`use_path_request_style`、SigV4 和完整 TLS 校验。
 - 华为 OBS profile：必须实测上游 s3fs 与目标 OBS 区域；重点验证 `sigv2`、region、`compat_dir`/`support_compat_dir`、`big_writes` 和 multipart 参数。不得直接照搬 Everest 默认的 `no_check_certificate` 或 `ssl_verify_hostname=0`。
+- 目标私有云在 2023 年部署，而在线帮助中心内容仍在更新；文档页面不能替代环境版本证据。spike 前必须记录实际 OBS 服务版本/补丁、CCE Everest 插件版本，以及现网集成路径使用的 s3fs/obsfs 版本（能获取时）。本项目自建 sidecar 和 Docker 镜像仍以目标 endpoint 的实测结果为准。
 - 如果上游 s3fs 无法在开启证书校验时通过 OBS 四象限测试，则 OBS 使用单独固定 digest 的华为兼容构建；不能为了统一镜像而关闭 TLS 校验。
 - spike 未通过时，`provider=obs` 的 `mode=fuse` 配置校验必须失败，不能静默使用未经验证的参数。
 
@@ -823,8 +825,11 @@ Pod 和 Docker health 状态必须区分 container running 与 FUSE ready，不�
 - s3fs 参数、缓存与临时空间：https://github.com/s3fs-fuse/s3fs-fuse/blob/master/doc/man/s3fs.1.in
 - s3fs releases：https://github.com/s3fs-fuse/s3fs-fuse/releases
 - MinIO S3 compatibility：https://github.com/minio/minio/blob/master/README.md
-- 华为云 CCE OBS 对象桶挂载：https://support.huaweicloud.com/usermanual-cce/cce_10_0630.html
-- 华为云 CCE OBS 挂载参数：https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html
+- 华为云公有云 CCE OBS 对象桶挂载：https://support.huaweicloud.com/usermanual-cce/cce_10_0630.html
+- 华为云公有云 CCE OBS 挂载参数：https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html
+- 双华云私有云 CCE OBS 概述（对象桶/并行文件系统、常驻进程）：https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0628.html
+- 双华云私有云 CCE OBS 挂载参数（s3fs/obsfs、sigv2、compat_dir）：https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0631.html
+- 双华云私有云 OBS API 签名验证：https://docs.shuanghuayun.com/zh-cn/api/obs/obs_04_0009.html
 - Kubernetes Sidecar Containers：https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/
 - Kubernetes Mount Propagation：https://kubernetes.io/docs/concepts/storage/volumes/#mount-propagation
 - Docker Exec 用户参数：https://docs.docker.com/reference/cli/docker/container/exec/

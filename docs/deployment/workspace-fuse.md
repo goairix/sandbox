@@ -626,6 +626,10 @@ MinIO profile 至少固定：
 
 ### 8.2 华为 OBS 固定基线
 
+[华为云公有云 CCE OBS 挂载参数文档](https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html)与本项目使用的[双华云私有云 CCE OBS 挂载参数文档](https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0631.html)均明确规定：普通对象桶使用 s3fs，并行文件系统使用 obsfs。私有云文档还显示普通对象桶自动使用 `sigv2`，s3fs 1.92 会自动添加 `compat_dir`。一期只接入普通对象桶，因此 OBS profile 的客户端固定为 s3fs，不使用 obsfs。
+
+该文档描述的是 Everest 集成路径，不等于任意自建 sidecar/Docker 镜像已兼容。并且目标私有云部署于 2023 年，在线文档的当前内容不能证明现网组件版本。上线前须向平台侧或厂商确认并留档实际 OBS 服务版本/补丁、CCE Everest 插件版本及集成路径客户端版本；无法取得服务端版本时，至少保存 endpoint、桶类型、Everest 版本和全套兼容性测试证据。
+
 OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 provider spike 后冻结。至少验证：
 
 - 上游 s3fs 与厂商兼容构建分别测试；
@@ -636,6 +640,7 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - `big_writes`、multipart、零字节对象、rename 和大量小文件；
 - 私有 CA、TLS SNI 和主机名校验。
 - provider 级静态长期 AK/SK 与目标 s3fs 构建的 `passwd_file` 认证。
+- 待挂载资源确认为普通对象桶；如果识别为并行文件系统，配置校验失败并转入后续 obsfs 方案评审。
 
 未完成 spike 前，不得把 `storage.filesystem.provider` 切换为 `obs`，也不得发布可选中的 OBS profile/image。验证结论要落为版本化 profile，而不是在生产临时追加参数。
 
