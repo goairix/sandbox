@@ -9,7 +9,7 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
-const sandboxKeyPrefix = "sandbox:"
+const sandboxSessionKeyPrefix = "sandbox:session:v2:"
 
 // SessionStore manages persistent sandbox state using a state.Store backend.
 type SessionStore struct {
@@ -42,12 +42,12 @@ func (s *SessionStore) Save(ctx context.Context, sb *Sandbox) error {
 		}
 	}
 
-	return s.store.Set(ctx, sandboxKeyPrefix+sb.ID, data, ttl)
+	return s.store.Set(ctx, sandboxSessionKeyPrefix+sb.ID, data, ttl)
 }
 
 // Load retrieves a sandbox from the store.
 func (s *SessionStore) Load(ctx context.Context, id string) (*Sandbox, error) {
-	data, err := s.store.Get(ctx, sandboxKeyPrefix+id)
+	data, err := s.store.Get(ctx, sandboxSessionKeyPrefix+id)
 	if err != nil {
 		return nil, fmt.Errorf("get sandbox: %w", err)
 	}
@@ -63,23 +63,23 @@ func (s *SessionStore) Load(ctx context.Context, id string) (*Sandbox, error) {
 
 // Remove deletes a sandbox from the store.
 func (s *SessionStore) Remove(ctx context.Context, id string) error {
-	return s.store.Delete(ctx, sandboxKeyPrefix+id)
+	return s.store.Delete(ctx, sandboxSessionKeyPrefix+id)
 }
 
 // List returns all sandbox IDs in the store.
 func (s *SessionStore) List(ctx context.Context) ([]string, error) {
-	keys, err := s.store.Keys(ctx, sandboxKeyPrefix+"*")
+	keys, err := s.store.Keys(ctx, sandboxSessionKeyPrefix+"*")
 	if err != nil {
 		return nil, err
 	}
 	ids := make([]string, len(keys))
 	for i, key := range keys {
-		ids[i] = key[len(sandboxKeyPrefix):]
+		ids[i] = key[len(sandboxSessionKeyPrefix):]
 	}
 	return ids, nil
 }
 
 // Exists checks if a sandbox exists in the store.
 func (s *SessionStore) Exists(ctx context.Context, id string) (bool, error) {
-	return s.store.Exists(ctx, sandboxKeyPrefix+id)
+	return s.store.Exists(ctx, sandboxSessionKeyPrefix+id)
 }
