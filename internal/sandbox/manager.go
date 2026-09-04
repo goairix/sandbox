@@ -42,6 +42,28 @@ type MultipartUploadState struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+type fuseBindingClaim struct {
+	record    state.FUSEPoolRecord
+	returning bool
+}
+
+type fuseSandboxLifecycle struct {
+	sandboxID       string
+	gate            *operationGate
+	lease           *WorkspaceLease
+	renewal         *WorkspaceLeaseRenewal
+	record          state.FUSEPoolRecord
+	cancel          context.CancelFunc
+	teardownMu      sync.Mutex
+	teardownRunning bool
+	teardownDone    bool
+	gateClosed      bool
+	poolRemoved     bool
+	evidence        runtime.TerminationEvidence
+	leaseReleased   bool
+	sessionRemoved  bool
+}
+
 // randSuffix generates a random lowercase alphanumeric string of length n.
 func randSuffix(n int) string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -64,6 +86,10 @@ type ManagerConfig struct {
 	PoolConfig              PoolConfig
 	WorkspaceMode           string
 	FUSEPool                *FUSEPool
+	WorkspaceCoordinator    *WorkspaceCoordinator
+	WorkspaceObjectClient   storage.WorkspaceObjectClient
+	WorkspaceMarkerProfile  storage.RootMarkerProfile
+	FUSEHealthInterval      time.Duration
 	DefaultTimeout          int // seconds
 	ExecTimeoutSeconds      int // per-execution timeout; 0 = no limit
 	MaxExecTimeoutSeconds   int // maximum request timeout; 0 = no additional maximum
@@ -79,11 +105,14 @@ type Manager struct {
 	sessions       *SessionStore // optional, for persistent sandboxes
 	multipartStore state.Store   // optional, for multipart upload state
 
-	pool       *Pool
-	fusePool   *FUSEPool
-	sandboxes  map[string]*Sandbox
-	workspaces map[string]storage.ScopedFS // sandbox ID -> ScopedFS
-	mu         sync.RWMutex
+	pool           *Pool
+	fusePool       *FUSEPool
+	sandboxes      map[string]*Sandbox
+	workspaces     map[string]storage.ScopedFS // sandbox ID -> ScopedFS
+	operationGates map[string]*operationGate
+	fuseLifecycles map[string]*fuseSandboxLifecycle
+	fuseInFlight   map[string]*fuseBindingClaim
+	mu             sync.RWMutex
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -92,17 +121,24 @@ type Manager struct {
 
 // NewManager creates a new SandboxManager.
 func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSystemMeta, cfg ManagerConfig) *Manager {
-	return &Manager{
-		runtime:    rt,
-		filesystem: fsys,
-		fsMeta:     fsMeta,
-		config:     cfg,
-		pool:       NewPool(rt, cfg.PoolConfig),
-		fusePool:   cfg.FUSEPool,
-		sandboxes:  make(map[string]*Sandbox),
-		workspaces: make(map[string]storage.ScopedFS),
-		stopCh:     make(chan struct{}),
+	m := &Manager{
+		runtime:        rt,
+		filesystem:     fsys,
+		fsMeta:         fsMeta,
+		config:         cfg,
+		pool:           NewPool(rt, cfg.PoolConfig),
+		fusePool:       cfg.FUSEPool,
+		sandboxes:      make(map[string]*Sandbox),
+		workspaces:     make(map[string]storage.ScopedFS),
+		operationGates: make(map[string]*operationGate),
+		fuseLifecycles: make(map[string]*fuseSandboxLifecycle),
+		fuseInFlight:   make(map[string]*fuseBindingClaim),
+		stopCh:         make(chan struct{}),
 	}
+	if m.fusePool != nil {
+		m.fusePool.config.PristineGuard = m.guardFUSEPoolRecord
+	}
+	return m
 }
 
 func (m *Manager) resolveExecTimeout(requested int) (int, error) {
@@ -249,6 +285,9 @@ func (m *Manager) Stop(ctx context.Context) {
 func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Create")
 	defer span.End()
+	if m.config.WorkspaceMode == "fuse" && cfg.WorkspacePath != "" {
+		return m.createFUSESandbox(spanCtx, cfg)
+	}
 
 	createStart := time.Now()
 
@@ -410,16 +449,443 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	return sb, nil
 }
 
+func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *Sandbox, returnErr error) {
+	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.config.WorkspaceObjectClient == nil || m.fsMeta == nil || m.sessions == nil || m.fusePool.spec.WorkspaceFUSE == nil {
+		return nil, ErrInvalidFUSEPoolConfig
+	}
+	prefix, err := storage.BuildWorkspacePrefix(m.fsMeta.SubPath, cfg.WorkspacePath)
+	if err != nil {
+		return nil, err
+	}
+	id := fmt.Sprintf("sandbox-%s", randSuffix(randSuffixLen))
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = m.config.DefaultTimeout
+	}
+	timeoutDuration := time.Duration(timeout) * time.Second
+	if timeout < 0 {
+		timeoutDuration = -1
+	}
+
+	txnCtx, cancelTxn := context.WithCancel(ctx)
+	defer cancelTxn()
+	record, err := m.fusePool.Acquire(txnCtx, m.fusePool.poolKey)
+	if err != nil {
+		return nil, fmt.Errorf("acquire FUSE sandbox: %w", err)
+	}
+	claim := &fuseBindingClaim{record: *record}
+	m.mu.Lock()
+	m.fuseInFlight[record.PreparationID] = claim
+	m.mu.Unlock()
+
+	var lease *WorkspaceLease
+	var renewal *WorkspaceLeaseRenewal
+	bindingStarted := false
+	poolRemoved := false
+	var ambiguousAfter *state.FUSEPoolRecord
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		cleanupErr := m.cleanupFailedFUSECreate(*record, ambiguousAfter, lease, renewal, claim, bindingStarted, poolRemoved)
+		m.mu.Lock()
+		delete(m.fuseInFlight, record.PreparationID)
+		m.mu.Unlock()
+		returnErr = errors.Join(returnErr, cleanupErr)
+	}()
+
+	lease, err = m.config.WorkspaceCoordinator.Acquire(txnCtx, WorkspaceLeaseRequest{
+		Provider:        m.fusePool.spec.WorkspaceFUSE.Provider,
+		StorageIdentity: m.fusePool.spec.WorkspaceFUSE.StorageIdentity,
+		Bucket:          m.fusePool.spec.WorkspaceFUSE.Bucket,
+		Prefix:          prefix,
+		SandboxID:       id,
+		Runtime:         m.fusePool.spec.WorkspaceFUSE.RuntimeType,
+		RuntimeID:       record.RuntimeID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("acquire workspace lease: %w", err)
+	}
+	var lifecycle *fuseSandboxLifecycle
+	renewal, err = m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, func(lost error) {
+		cancelTxn()
+		if lifecycle != nil {
+			m.scheduleFUSETeardown(lifecycle, lost)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("start workspace lease renewal: %w", err)
+	}
+	if err = storage.PrepareWorkspacePrefix(txnCtx, m.config.WorkspaceObjectClient, prefix, m.config.WorkspaceMarkerProfile); err != nil {
+		return nil, err
+	}
+	if err = m.config.WorkspaceCoordinator.BindRuntime(txnCtx, lease, record.RuntimeUID); err != nil {
+		return nil, fmt.Errorf("bind workspace runtime: %w", err)
+	}
+	bindingStarted = true
+	auth, err := m.config.WorkspaceCoordinator.ConsumeMountAttempt(txnCtx, lease, record.PoolKey)
+	if err != nil {
+		return nil, fmt.Errorf("consume workspace mount attempt: %w", err)
+	}
+	record, err = m.fusePool.repo.Transition(txnCtx, record.PreparationID, state.FUSEPoolReserved, state.FUSEPoolBinding, record.ReservationToken, record.Revision)
+	if err != nil {
+		possibleAfter := expectedPublication(claim.record, state.FUSEPoolBinding, claim.record.ReservationToken)
+		ambiguousAfter = &possibleAfter
+		poolRemoved = m.fusePool.compensatePublication(claim.record, possibleAfter) == nil
+		return nil, fmt.Errorf("publish FUSE binding: %w", err)
+	}
+	claim.record = *record
+	if err = m.runtime.AuthorizeWorkspaceMount(txnCtx, record.RuntimeID, auth); err != nil {
+		return nil, fmt.Errorf("authorize workspace mount: %w", err)
+	}
+	if err = m.runtime.UpdateNetwork(txnCtx, record.RuntimeID, cfg.Network.Enabled, cfg.Network.Whitelist, cfg.Network.BlockPrivate); err != nil {
+		return nil, fmt.Errorf("update sandbox network: %w", err)
+	}
+	readyInfo, err := m.runtime.WaitSandboxReady(txnCtx, record.RuntimeID)
+	if err != nil {
+		return nil, fmt.Errorf("wait FUSE sandbox ready: %w", err)
+	}
+	if readyInfo == nil || readyInfo.RuntimeID != record.RuntimeID || readyInfo.RuntimeUID != record.RuntimeUID {
+		return nil, fmt.Errorf("wait FUSE sandbox ready: runtime identity changed")
+	}
+	if len(cfg.Dependencies) > 0 {
+		if command := buildInstallCommand(cfg.Dependencies); command != "" {
+			if _, err = m.runtime.Exec(txnCtx, record.RuntimeID, runtime.ExecRequest{Command: command, WorkDir: "/workspace", Timeout: 120}); err != nil {
+				return nil, fmt.Errorf("install dependencies: %w", err)
+			}
+		}
+	}
+	record, err = m.fusePool.repo.Transition(txnCtx, record.PreparationID, state.FUSEPoolBinding, state.FUSEPoolConsumed, record.ReservationToken, record.Revision)
+	if err != nil {
+		possibleAfter := expectedPublication(claim.record, state.FUSEPoolConsumed, claim.record.ReservationToken)
+		ambiguousAfter = &possibleAfter
+		poolRemoved = m.fusePool.compensatePublication(claim.record, possibleAfter) == nil
+		return nil, fmt.Errorf("consume FUSE sandbox: %w", err)
+	}
+	claim.record = *record
+	now := time.Now()
+	sb := &Sandbox{
+		ID: id, Config: cfg, State: StateReady, CreatedAt: now, UpdatedAt: now,
+		RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID, Timeout: timeoutDuration,
+		Workspace: &WorkspaceInfo{
+			RootPath: cfg.WorkspacePath, MountedAt: now, LastHealthyAt: now,
+			MountType: WorkspaceMountFUSE, MountState: WorkspaceMountReady, Driver: m.fusePool.spec.WorkspaceFUSE.Driver,
+			Owner: lease.Owner, LeaseGeneration: lease.Owner.Generation,
+			FUSEPreparationID: record.PreparationID, FUSEPoolKey: record.PoolKey,
+			FUSEReservationToken: record.ReservationToken, FUSERecordRevision: record.Revision,
+		},
+	}
+	gate := newOperationGate(true)
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	lifecycle = &fuseSandboxLifecycle{sandboxID: id, gate: gate, lease: lease, renewal: renewal, record: *record, cancel: cancelLifecycle}
+	_ = lifecycleCtx
+	if err = m.publishSandboxAndSession(txnCtx, sb, gate, lifecycle); err != nil {
+		cancelLifecycle()
+		lifecycle = nil
+		return nil, err
+	}
+	published = true
+	m.startFUSEWatcher(lifecycleCtx, lifecycle)
+	return sb, nil
+}
+
+func (m *Manager) publishSandboxAndSession(ctx context.Context, sb *Sandbox, gate *operationGate, lifecycle *fuseSandboxLifecycle) error {
+	if err := m.sessions.Save(ctx, sb); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
+		defer cancel()
+		return errors.Join(fmt.Errorf("save FUSE sandbox session: %w", err), m.sessions.RemoveExact(cleanupCtx, sb))
+	}
+	m.mu.Lock()
+	m.sandboxes[sb.ID] = sb
+	m.operationGates[sb.ID] = gate
+	m.fuseLifecycles[sb.ID] = lifecycle
+	delete(m.fuseInFlight, lifecycle.record.PreparationID)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguousAfter *state.FUSEPoolRecord, lease *WorkspaceLease, renewal *WorkspaceLeaseRenewal, claim *fuseBindingClaim, bindingStarted, poolRemoved bool) error {
+	if renewal != nil {
+		renewal.Stop()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+	defer cancel()
+	if !bindingStarted {
+		if lease != nil {
+			if err := m.config.WorkspaceCoordinator.Release(ctx, lease, runtime.TerminationEvidence{}); err != nil {
+				return errors.Join(err, m.fusePool.claimAndDestroyWithCleanupContext(record))
+			}
+		}
+		m.mu.Lock()
+		claim.returning = true
+		m.mu.Unlock()
+		return m.fusePool.ReturnPrepared(ctx, record)
+	}
+	if !poolRemoved {
+		var err error
+		if ambiguousAfter != nil {
+			err = m.fusePool.compensatePublication(record, *ambiguousAfter)
+		} else {
+			err = m.fusePool.ReleaseConsumed(ctx, record)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	fencer, ok := m.runtime.(runtime.RuntimeFencer)
+	if !ok {
+		return ErrRuntimeExitUnconfirmed
+	}
+	evidence, err := fencer.ConfirmTerminated(ctx, record.RuntimeID, record.RuntimeUID)
+	if err != nil {
+		return err
+	}
+	if lease != nil {
+		return m.config.WorkspaceCoordinator.Release(ctx, lease, evidence)
+	}
+	return nil
+}
+
+func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
+	m.mu.RLock()
+	claim := m.fuseInFlight[record.PreparationID]
+	if claim != nil {
+		returning := claim.returning
+		m.mu.RUnlock()
+		if returning {
+			return FUSEPoolPristine, nil
+		}
+		return FUSEPoolProtected, nil
+	}
+	for id, lifecycle := range m.fuseLifecycles {
+		if lifecycle.record.RuntimeUID == record.RuntimeUID || lifecycle.record.PreparationID == record.PreparationID {
+			_ = id
+			m.mu.RUnlock()
+			return FUSEPoolProtected, nil
+		}
+	}
+	m.mu.RUnlock()
+	if m.sessions != nil {
+		ids, err := m.sessions.List(ctx)
+		if err != nil {
+			return FUSEPoolDispositionUnknown, err
+		}
+		for _, id := range ids {
+			sb, err := m.sessions.Load(ctx, id)
+			if err != nil {
+				return FUSEPoolDispositionUnknown, err
+			}
+			if sb.RuntimeUID == record.RuntimeUID || (sb.Workspace != nil && sb.Workspace.FUSEPreparationID == record.PreparationID) {
+				return FUSEPoolProtected, nil
+			}
+		}
+	}
+	if m.config.WorkspaceCoordinator != nil {
+		protected, err := m.config.WorkspaceCoordinator.HasRuntimeOwner(ctx, record.RuntimeID, record.RuntimeUID)
+		if err != nil {
+			return FUSEPoolDispositionUnknown, err
+		}
+		if protected {
+			return FUSEPoolProtected, nil
+		}
+	}
+	if record.State == state.FUSEPoolBinding || record.State == state.FUSEPoolConsumed {
+		return FUSEPoolAbandoned, nil
+	}
+	return FUSEPoolPristine, nil
+}
+
+func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLifecycle) {
+	interval := m.config.FUSEHealthInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.stopCh:
+				lifecycle.renewal.Stop()
+				return
+			case <-ticker.C:
+				if err := m.checkFUSELifecycle(ctx, lifecycle); err != nil {
+					m.scheduleFUSETeardown(lifecycle, err)
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (m *Manager) checkFUSELifecycle(ctx context.Context, lifecycle *fuseSandboxLifecycle) error {
+	info, err := m.runtime.GetSandbox(ctx, lifecycle.record.RuntimeID)
+	if err != nil {
+		return err
+	}
+	if info == nil || info.RuntimeUID != lifecycle.record.RuntimeUID || info.State != "running" {
+		return ErrSandboxNotReady
+	}
+	health, err := m.runtime.WorkspaceHealth(ctx, lifecycle.record.RuntimeID)
+	if err != nil {
+		return err
+	}
+	if health == nil || !health.Ready || health.MountType != "fuse" || health.RuntimeUID != lifecycle.record.RuntimeUID || health.Generation != lifecycle.lease.Owner.Generation || health.RestartCount != 0 || health.RestartDetected {
+		return ErrSandboxNotReady
+	}
+	m.mu.Lock()
+	if sb := m.sandboxes[lifecycle.sandboxID]; sb != nil && sb.Workspace != nil {
+		sb.Workspace.LastHealthyAt = time.Now()
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause error) {
+	if lifecycle == nil {
+		return
+	}
+	lifecycle.teardownMu.Lock()
+	if lifecycle.teardownRunning || lifecycle.teardownDone {
+		lifecycle.teardownMu.Unlock()
+		return
+	}
+	lifecycle.teardownRunning = true
+	lifecycle.teardownMu.Unlock()
+	defer func() {
+		lifecycle.teardownMu.Lock()
+		lifecycle.teardownRunning = false
+		lifecycle.teardownMu.Unlock()
+	}()
+
+	lifecycle.cancel()
+	_ = cause
+	if !lifecycle.gateClosed {
+		if err := lifecycle.gate.CloseAndWait(context.Background()); err != nil {
+			return
+		}
+		lifecycle.gateClosed = true
+	}
+	lifecycle.renewal.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+	defer cancel()
+	if !lifecycle.poolRemoved {
+		if err := m.fusePool.ReleaseConsumed(ctx, lifecycle.record); err != nil {
+			return
+		}
+		lifecycle.poolRemoved = true
+	}
+	if lifecycle.evidence.RuntimeUID == "" {
+		fencer, ok := m.runtime.(runtime.RuntimeFencer)
+		if !ok {
+			return
+		}
+		evidence, err := fencer.ConfirmTerminated(ctx, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID)
+		if err != nil {
+			return
+		}
+		lifecycle.evidence = evidence
+	}
+	if !lifecycle.leaseReleased {
+		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, lifecycle.evidence); err != nil {
+			return
+		}
+		lifecycle.leaseReleased = true
+	}
+	if !lifecycle.sessionRemoved && m.sessions != nil {
+		if err := m.sessions.RemoveMatchingFUSESession(ctx, lifecycle.sandboxID, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID, lifecycle.record.PreparationID, lifecycle.lease.Owner.Generation); err != nil {
+			return
+		}
+		lifecycle.sessionRemoved = true
+	}
+	m.mu.Lock()
+	delete(m.sandboxes, lifecycle.sandboxID)
+	delete(m.operationGates, lifecycle.sandboxID)
+	delete(m.fuseLifecycles, lifecycle.sandboxID)
+	m.mu.Unlock()
+	lifecycle.teardownMu.Lock()
+	lifecycle.teardownDone = true
+	lifecycle.teardownMu.Unlock()
+}
+
+func (m *Manager) scheduleFUSETeardown(lifecycle *fuseSandboxLifecycle, cause error) {
+	go func() {
+		for {
+			m.teardownFUSESandbox(lifecycle, cause)
+			lifecycle.teardownMu.Lock()
+			done := lifecycle.teardownDone
+			lifecycle.teardownMu.Unlock()
+			if done {
+				return
+			}
+			select {
+			case <-m.stopCh:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}()
+}
+
 // Get retrieves a sandbox by ID. Returns a copy to prevent external data races.
 func (m *Manager) Get(ctx context.Context, id string) (Sandbox, error) {
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Get")
 	defer span.End()
 
-	sb, err := m.resolve(spanCtx, id)
+	sb, release, err := m.acquireSandboxOperation(spanCtx, id)
 	if err != nil {
 		return Sandbox{}, err
 	}
+	defer release()
 	return *sb, nil
+}
+
+func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sandbox, func(), error) {
+	m.mu.RLock()
+	sb, ok := m.sandboxes[id]
+	gate := m.operationGates[id]
+	if ok {
+		if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+			if gate == nil {
+				m.mu.RUnlock()
+				return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
+			}
+			release, err := gate.Acquire()
+			if err != nil {
+				m.mu.RUnlock()
+				return nil, nil, fmt.Errorf("%w: %s", err, id)
+			}
+			m.mu.RUnlock()
+			return sb, release, nil
+		}
+		m.mu.RUnlock()
+		return sb, func() {}, nil
+	}
+	m.mu.RUnlock()
+
+	if m.sessions != nil {
+		loaded, err := m.sessions.Load(ctx, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if loaded.Workspace != nil && loaded.Workspace.MountType == WorkspaceMountFUSE {
+			return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
+		}
+		m.mu.Lock()
+		if current := m.sandboxes[id]; current != nil {
+			loaded = current
+		} else {
+			m.sandboxes[id] = loaded
+		}
+		m.mu.Unlock()
+		return loaded, func() {}, nil
+	}
+	return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 }
 
 // resolve looks up a sandbox by ID: first in memory, then in the session store.
@@ -437,6 +903,9 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 		sbPtr, err := m.sessions.Load(ctx, id)
 		if err != nil {
 			return nil, err
+		}
+		if sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountFUSE {
+			return nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 		}
 		logger.Info(ctx, "sandbox restored from session store",
 			logger.AddField("sandbox_id", id),
@@ -480,6 +949,21 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 		trace.WithAttributes(attribute.String("reason", reason)),
 	)
 	defer span.End()
+	m.mu.RLock()
+	fuseLifecycle := m.fuseLifecycles[id]
+	m.mu.RUnlock()
+	if fuseLifecycle != nil {
+		m.teardownFUSESandbox(fuseLifecycle, fmt.Errorf("sandbox destroy: %s", reason))
+		fuseLifecycle.teardownMu.Lock()
+		done := fuseLifecycle.teardownDone
+		fuseLifecycle.teardownMu.Unlock()
+		if !done {
+			m.scheduleFUSETeardown(fuseLifecycle, fmt.Errorf("sandbox destroy retry: %s", reason))
+			return fmt.Errorf("destroy FUSE sandbox cleanup is pending")
+		}
+		metrics.RecordSandboxDestroy(ctx, reason)
+		return nil
+	}
 
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
@@ -556,12 +1040,13 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	execCtx, cancel := newExecContext(ctx, effectiveTimeout)
 	defer cancel()
 
-	sb, err := m.resolve(execCtx, id)
+	sb, release, err := m.acquireSandboxOperation(execCtx, id)
 	if err != nil {
 		telemetry.Error(err, span)
 		metrics.RecordError(execCtx, "sandbox_not_found")
 		return nil, err
 	}
+	defer release()
 
 	if req.RequiresNetwork && !sb.Config.Network.Enabled {
 		telemetry.Error(ErrNetworkRequired, span)
@@ -631,7 +1116,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	req.Timeout = effectiveTimeout
 	execCtx, cancel := newExecContext(ctx, effectiveTimeout)
 
-	sb, err := m.resolve(execCtx, id)
+	sb, release, err := m.acquireSandboxOperation(execCtx, id)
 	if err != nil {
 		telemetry.Error(err, span)
 		metrics.RecordError(execCtx, "sandbox_not_found")
@@ -645,6 +1130,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		metrics.RecordError(execCtx, "network_required")
 		cancel()
 		span.End()
+		release()
 		return nil, ErrNetworkRequired
 	}
 
@@ -668,6 +1154,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		timedOut := isExecTimeout(parentCtx, execCtx, err, effectiveTimeout)
 		cancel()
 		span.End()
+		release()
 		if timedOut {
 			return nil, fmt.Errorf("execute sandbox stream: %w", ErrExecTimeout)
 		}
@@ -679,6 +1166,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	go func() {
 		defer span.End()
 		defer cancel()
+		defer release()
 		defer close(outCh)
 
 		finalized := false
@@ -774,10 +1262,11 @@ func (m *Manager) UploadFile(ctx context.Context, id, destPath string, size int6
 	)
 	defer span.End()
 
-	sb, err := m.resolve(ctx, id)
+	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
 		return err
 	}
+	defer release()
 
 	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, size, reader); err != nil {
 		metrics.RecordFileOp(ctx, "upload", "error")
@@ -794,18 +1283,19 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 	)
 	defer span.End()
 
-	sb, err := m.resolve(ctx, id)
+	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
 	rc, err := m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
 	if err != nil {
+		release()
 		metrics.RecordFileOp(ctx, "download", "error")
 		return nil, err
 	}
 	metrics.RecordFileOp(ctx, "download", "success")
-	return rc, nil
+	return &gatedReadCloser{reader: rc, release: release}, nil
 }
 
 // ReadFileContent streams the raw content of a file from the sandbox without tar wrapping.
@@ -815,18 +1305,19 @@ func (m *Manager) ReadFileContent(ctx context.Context, id string, srcPath string
 	)
 	defer span.End()
 
-	sb, err := m.resolve(ctx, id)
+	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
 	rc, err := m.runtime.ReadFileContent(ctx, sb.RuntimeID, srcPath)
 	if err != nil {
+		release()
 		metrics.RecordFileOp(ctx, "read", "error")
 		return nil, err
 	}
 	metrics.RecordFileOp(ctx, "read", "success")
-	return rc, nil
+	return &gatedReadCloser{reader: rc, release: release}, nil
 }
 
 // GlobInfo returns files matching the glob pattern with their content.
@@ -851,12 +1342,22 @@ func (m *Manager) DownloadFiles(ctx context.Context, id string, paths []string) 
 	)
 	defer span.End()
 
-	sb, err := m.resolve(ctx, id)
+	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.runtime.DownloadFiles(ctx, sb.RuntimeID, paths)
+	files, err := m.runtime.DownloadFiles(ctx, sb.RuntimeID, paths)
+	if err != nil {
+		for i := range files {
+			if files[i].Content != nil {
+				_ = files[i].Content.Close()
+			}
+		}
+		release()
+		return files, err
+	}
+	return holdGateForFileContents(files, release), nil
 }
 
 // ListFiles lists files in a sandbox directory.
@@ -1202,6 +1703,11 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) error {
 			failed++
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("load persistent sandbox %q: %w", id, err))
 			metrics.RecordSessionRestore(ctx, "error")
+			continue
+		}
+		if sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountFUSE {
+			failed++
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore FUSE sandbox %q: %w", id, ErrSandboxNotReady))
 			continue
 		}
 

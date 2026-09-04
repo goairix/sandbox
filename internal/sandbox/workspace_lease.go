@@ -148,6 +148,36 @@ type WorkspaceCoordinator struct {
 	configErr     error
 }
 
+// HasRuntimeOwner reports whether any valid persistent owner references the
+// exact runtime identity. Malformed owner state is an error so callers can
+// fail closed instead of declaring a runtime abandoned.
+func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, runtimeUID string) (bool, error) {
+	if c == nil || c.configErr != nil {
+		return false, ErrInvalidWorkspaceLease
+	}
+	keys, err := c.store.Keys(ctx, workspaceOwnerKeyPrefix+"*")
+	if err != nil {
+		return false, fmt.Errorf("list workspace owners: %w", err)
+	}
+	for _, key := range keys {
+		raw, err := c.store.Get(ctx, key)
+		if err != nil {
+			return false, fmt.Errorf("load workspace owner: %w", err)
+		}
+		if raw == nil {
+			continue
+		}
+		var owner WorkspaceOwner
+		if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
+			return false, ErrWorkspaceOwnerLost
+		}
+		if owner.RuntimeID == runtimeID && owner.RuntimeUID == runtimeUID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // NewWorkspaceCoordinator constructs a workspace lease coordinator. Invalid
 // durations are reported fail-closed by operations so existing call sites do
 // not need a separate constructor error path.
@@ -452,14 +482,34 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 	}
 	deleted, err := c.store.CompareAndDelete(ctx, lease.Key, append([]byte(nil), lease.Value...))
 	if err != nil {
-		return fmt.Errorf("release workspace lease: %w", err)
+		current, verifyErr := c.store.Get(ctx, lease.Key)
+		if verifyErr != nil {
+			return errors.Join(fmt.Errorf("release workspace lease: %w", err), fmt.Errorf("verify workspace lease release: %w", verifyErr))
+		}
+		if current != nil {
+			if !bytes.Equal(current, lease.Value) {
+				return ErrWorkspaceLeaseLost
+			}
+			return fmt.Errorf("release workspace lease: %w", err)
+		}
+		deleted = true
 	}
 	if !deleted {
 		return ErrWorkspaceLeaseLost
 	}
 	deleted, err = c.store.CompareAndDelete(ctx, lease.ownerKey, raw)
 	if err != nil {
-		return fmt.Errorf("release workspace owner: %w", err)
+		current, verifyErr := c.store.Get(ctx, lease.ownerKey)
+		if verifyErr != nil {
+			return errors.Join(fmt.Errorf("release workspace owner: %w", err), fmt.Errorf("verify workspace owner release: %w", verifyErr))
+		}
+		if current != nil {
+			if !bytes.Equal(current, raw) {
+				return ErrWorkspaceOwnerLost
+			}
+			return fmt.Errorf("release workspace owner: %w", err)
+		}
+		deleted = true
 	}
 	if !deleted {
 		return ErrWorkspaceOwnerLost

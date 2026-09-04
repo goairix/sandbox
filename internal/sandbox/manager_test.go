@@ -3,7 +3,10 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +20,529 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/storage/state"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
+
+type fuseManagerRuntime struct {
+	*mockRuntime
+	mu               sync.Mutex
+	events           []string
+	authorizations   []runtime.WorkspaceMountAuthorization
+	waitReadyEntered chan struct{}
+	allowReady       chan struct{}
+	waitReadyOnce    sync.Once
+	waitReadyErr     error
+	networkErr       error
+	health           runtime.WorkspaceHealth
+}
+
+func newFUSEManagerRuntime() *fuseManagerRuntime {
+	return &fuseManagerRuntime{
+		mockRuntime: newFUSEMockRuntime(),
+		health: runtime.WorkspaceHealth{
+			Ready: true, MountType: "fuse", RuntimeUID: "prepared-uid-1", Generation: 1,
+		},
+	}
+}
+
+func newBlockingFUSEManagerRuntime() *fuseManagerRuntime {
+	rt := newFUSEManagerRuntime()
+	rt.waitReadyEntered = make(chan struct{})
+	rt.allowReady = make(chan struct{})
+	return rt
+}
+
+func (r *fuseManagerRuntime) recordEvent(event string) {
+	r.mu.Lock()
+	r.events = append(r.events, event)
+	r.mu.Unlock()
+}
+
+func (r *fuseManagerRuntime) AuthorizeWorkspaceMount(_ context.Context, _ string, auth runtime.WorkspaceMountAuthorization) error {
+	r.mu.Lock()
+	r.events = append(r.events, "authorize")
+	r.authorizations = append(r.authorizations, auth)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *fuseManagerRuntime) UpdateNetwork(_ context.Context, _ string, _ bool, _ []string, _ bool) error {
+	r.recordEvent("network")
+	return r.networkErr
+}
+
+func (r *fuseManagerRuntime) WaitSandboxReady(ctx context.Context, id string) (*runtime.SandboxInfo, error) {
+	r.recordEvent("ready")
+	if r.waitReadyEntered != nil {
+		r.waitReadyOnce.Do(func() { close(r.waitReadyEntered) })
+		select {
+		case <-r.allowReady:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if r.waitReadyErr != nil {
+		return nil, r.waitReadyErr
+	}
+	info, err := r.GetSandbox(ctx, id)
+	if err != nil || info == nil {
+		return nil, fmt.Errorf("prepared sandbox missing")
+	}
+	copy := *info
+	copy.State = "running"
+	return &copy, nil
+}
+
+func (r *fuseManagerRuntime) WorkspaceHealth(_ context.Context, id string) (*runtime.WorkspaceHealth, error) {
+	r.mu.Lock()
+	health := r.health
+	r.mu.Unlock()
+	info, _ := r.GetSandbox(context.Background(), id)
+	if info != nil && health.RuntimeUID == "" {
+		health.RuntimeUID = info.RuntimeUID
+	}
+	return &health, nil
+}
+
+func (r *fuseManagerRuntime) ConfirmTerminated(_ context.Context, _, runtimeUID string) (runtime.TerminationEvidence, error) {
+	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}, nil
+}
+
+type fuseMarkerClient struct {
+	mu     sync.Mutex
+	events *[]string
+	exists bool
+	err    error
+}
+
+type ambiguousSessionStore struct {
+	*atomicMemoryStore
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (s *ambiguousSessionStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if err := s.atomicMemoryStore.Set(ctx, key, value, ttl); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	fail := s.failNext
+	s.failNext = false
+	s.mu.Unlock()
+	if fail && strings.HasPrefix(key, sandboxSessionKeyPrefix) {
+		return errors.New("connection lost after session commit")
+	}
+	return nil
+}
+
+func (c *fuseMarkerClient) PutEmptyObject(_ context.Context, _ string, _ storage.RootMarkerOptions) error {
+	if c.events != nil {
+		c.mu.Lock()
+		*c.events = append(*c.events, "marker-put")
+		c.mu.Unlock()
+	}
+	return c.err
+}
+
+func (c *fuseMarkerClient) HeadObject(context.Context, string) (bool, error) {
+	if c.err != nil {
+		return false, c.err
+	}
+	return c.exists, nil
+}
+
+func newFUSETestManager(t *testing.T, rt *fuseManagerRuntime) (*Manager, string, *memoryFUSEPoolRepository, *atomicMemoryStore) {
+	t.Helper()
+	repo := newMemoryFUSEPoolRepository()
+	store := newAtomicMemoryStore()
+	spec := fixedFUSESpec("pool-key")
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), spec)
+	profile, err := storage.RootMarkerProfileByID(storage.RootMarkerProfileMinIO)
+	require.NoError(t, err)
+	mgr := NewManager(rt, nil, &storage.FileSystemMeta{
+		Provider: storage.ProviderMinIO, Bucket: "sandbox", SubPath: "workspaces", StorageIdentity: "storage-primary",
+	}, ManagerConfig{
+		WorkspaceMode: "fuse", FUSEPool: pool,
+		WorkspaceCoordinator:  NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
+		FUSEHealthInterval: time.Hour,
+	})
+	mgr.SetSessionStore(NewSessionStore(store, time.Hour))
+	require.NoError(t, mgr.fusePool.WarmUp(context.Background()))
+	records, err := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, state.FUSEPoolPrepared, records[0].State)
+	return mgr, records[0].RuntimeID, repo, store
+}
+
+func TestManagerCreateFUSEUsesPreparedRuntimeAndPublishesAfterProbe(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, _, _ := newFUSETestManager(t, rt)
+
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	assert.Equal(t, preparedID, sb.RuntimeID)
+	require.NotNil(t, sb.Workspace)
+	assert.Equal(t, WorkspaceMountFUSE, sb.Workspace.MountType)
+	assert.Equal(t, WorkspaceMountReady, sb.Workspace.MountState)
+	rt.mu.Lock()
+	assert.Equal(t, []string{"authorize", "network", "ready"}, rt.events)
+	assert.Len(t, rt.authorizations, 1)
+	rt.mu.Unlock()
+	_, err = mgr.Exec(context.Background(), sb.ID, runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+}
+
+func TestManagerCreateFUSEIsInvisibleUntilReady(t *testing.T) {
+	rt := newBlockingFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+		done <- err
+	}()
+	<-rt.waitReadyEntered
+	mgr.mu.RLock()
+	assert.Empty(t, mgr.sandboxes)
+	assert.Empty(t, mgr.operationGates)
+	mgr.mu.RUnlock()
+	close(rt.allowReady)
+	require.NoError(t, <-done)
+}
+
+type managerStreamRuntime struct {
+	*mockRuntime
+	stream chan runtime.StreamEvent
+	reader io.ReadCloser
+	batch  []runtime.FileContent
+}
+
+func (r *managerStreamRuntime) ExecStream(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+	return r.stream, nil
+}
+
+func (r *managerStreamRuntime) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
+	return r.reader, nil
+}
+
+func (r *managerStreamRuntime) DownloadFiles(context.Context, string, []string) ([]runtime.FileContent, error) {
+	return r.batch, nil
+}
+
+type signalReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newSignalReadCloser() *signalReadCloser       { return &signalReadCloser{closed: make(chan struct{})} }
+func (*signalReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (r *signalReadCloser) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
+}
+
+func newGatedManager(rt runtime.Runtime) (*Manager, *operationGate) {
+	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	gate := newOperationGate(true)
+	mgr.sandboxes["sandbox-test"] = &Sandbox{ID: "sandbox-test", RuntimeID: "runtime-test", RuntimeUID: "uid-test", State: StateReady, Workspace: &WorkspaceInfo{MountType: WorkspaceMountFUSE}}
+	mgr.operationGates["sandbox-test"] = gate
+	return mgr, gate
+}
+
+func TestManagerExecStreamHoldsGateUntilStreamEnds(t *testing.T) {
+	rt := &managerStreamRuntime{mockRuntime: newMockRuntime(), stream: make(chan runtime.StreamEvent)}
+	mgr, gate := newGatedManager(rt)
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+
+	drained := make(chan error, 1)
+	go func() { drained <- gate.CloseAndWait(context.Background()) }()
+	require.Eventually(t, func() bool {
+		_, execErr := mgr.Exec(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+		return errors.Is(execErr, ErrSandboxNotReady)
+	}, time.Second, time.Millisecond)
+	select {
+	case <-drained:
+		t.Fatal("gate drained before stream completion")
+	default:
+	}
+	close(rt.stream)
+	for range out {
+	}
+	require.NoError(t, <-drained)
+}
+
+func TestManagerDownloadReaderHoldsGateUntilTerminalRead(t *testing.T) {
+	reader := newSignalReadCloser()
+	rt := &managerStreamRuntime{mockRuntime: newMockRuntime(), reader: reader}
+	mgr, gate := newGatedManager(rt)
+	rc, err := mgr.DownloadFile(context.Background(), "sandbox-test", "/workspace/a")
+	require.NoError(t, err)
+
+	drained := make(chan error, 1)
+	go func() { drained <- gate.CloseAndWait(context.Background()) }()
+	require.Eventually(t, func() bool {
+		probeRelease, err := gate.Acquire()
+		if err == nil {
+			probeRelease()
+		}
+		return errors.Is(err, ErrSandboxNotReady)
+	}, time.Second, time.Millisecond)
+	select {
+	case <-drained:
+		t.Fatal("gate drained before reader completion")
+	default:
+	}
+	buf := make([]byte, 1)
+	_, err = rc.Read(buf)
+	require.ErrorIs(t, err, io.EOF)
+	require.NoError(t, <-drained)
+	require.NoError(t, rc.Close())
+	select {
+	case <-reader.closed:
+	case <-time.After(time.Second):
+		t.Fatal("underlying reader was not closed")
+	}
+}
+
+func TestManagerDownloadFilesHoldsOneGateReferenceUntilEveryReaderEnds(t *testing.T) {
+	one, two := newSignalReadCloser(), newSignalReadCloser()
+	rt := &managerStreamRuntime{mockRuntime: newMockRuntime(), batch: []runtime.FileContent{{Path: "a", Content: one}, {Path: "b", Content: two}}}
+	mgr, gate := newGatedManager(rt)
+	files, err := mgr.DownloadFiles(context.Background(), "sandbox-test", []string{"a", "b"})
+	require.NoError(t, err)
+
+	drained := make(chan error, 1)
+	go func() { drained <- gate.CloseAndWait(context.Background()) }()
+	require.Eventually(t, func() bool {
+		probeRelease, err := gate.Acquire()
+		if err == nil {
+			probeRelease()
+		}
+		return errors.Is(err, ErrSandboxNotReady)
+	}, time.Second, time.Millisecond)
+	require.NoError(t, files[0].Content.Close())
+	select {
+	case <-drained:
+		t.Fatal("first reader released the batch reference")
+	default:
+	}
+	require.NoError(t, files[1].Content.Close())
+	require.NoError(t, <-drained)
+}
+
+func TestManagerDirectFUSESessionLoadDoesNotOpenGate(t *testing.T) {
+	store := newAtomicMemoryStore()
+	sessions := NewSessionStore(store, time.Hour)
+	sb := &Sandbox{ID: "persistent", RuntimeID: "runtime", RuntimeUID: "uid"}
+	sb.Config.Mode = ModePersistent
+	sb.Workspace = &WorkspaceInfo{MountType: WorkspaceMountFUSE, MountState: WorkspaceMountReady}
+	require.NoError(t, sessions.Save(context.Background(), sb))
+	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse"})
+	mgr.SetSessionStore(sessions)
+
+	_, err := mgr.Get(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrSandboxNotReady)
+	mgr.mu.RLock()
+	_, loaded := mgr.sandboxes[sb.ID]
+	_, gated := mgr.operationGates[sb.ID]
+	mgr.mu.RUnlock()
+	assert.False(t, loaded)
+	assert.False(t, gated)
+}
+
+func TestManagerCreateFUSELeaseConflictReturnsPristineShell(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, repo, _ := newFUSETestManager(t, rt)
+	prefix, err := storage.BuildWorkspacePrefix("workspaces", "team/a")
+	require.NoError(t, err)
+	other, err := mgr.config.WorkspaceCoordinator.Acquire(context.Background(), WorkspaceLeaseRequest{
+		Provider: "minio", StorageIdentity: "storage-primary", Bucket: "sandbox", Prefix: prefix, SandboxID: "other",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = mgr.config.WorkspaceCoordinator.Release(context.Background(), other, runtime.TerminationEvidence{})
+	})
+
+	_, err = mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorIs(t, err, ErrWorkspaceLeased)
+	require.Eventually(t, func() bool {
+		records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+		if listErr != nil {
+			return false
+		}
+		for _, record := range records {
+			if record.RuntimeID == preparedID && record.State == state.FUSEPoolPrepared {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+	assert.False(t, rt.wasRemoved(preparedID))
+}
+
+func TestManagerCreateFUSEUserNetworkFailureDestroysBoundShell(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	rt.networkErr = errors.New("network policy rejected")
+	mgr, preparedID, repo, _ := newFUSETestManager(t, rt)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorContains(t, err, "network policy rejected")
+	assert.True(t, rt.wasRemoved(preparedID))
+	records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, listErr)
+	for _, record := range records {
+		assert.NotEqual(t, preparedID, record.RuntimeID)
+	}
+	mgr.mu.RLock()
+	assert.Empty(t, mgr.sandboxes)
+	assert.Empty(t, mgr.operationGates)
+	mgr.mu.RUnlock()
+}
+
+func TestManagerCreateFUSESessionSaveFailureDestroysWithoutOpeningGate(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, _, store := newFUSETestManager(t, rt)
+	store.failNext("Set", errors.New("redis write failed"))
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorContains(t, err, "redis write failed")
+	assert.True(t, rt.wasRemoved(preparedID))
+	mgr.mu.RLock()
+	assert.Empty(t, mgr.sandboxes)
+	assert.Empty(t, mgr.operationGates)
+	mgr.mu.RUnlock()
+}
+
+func TestManagerCreateFUSECompensatesAmbiguousSessionPublicationExactly(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, _, store := newFUSETestManager(t, rt)
+	ambiguous := &ambiguousSessionStore{atomicMemoryStore: store, failNext: true}
+	mgr.sessions = NewSessionStore(ambiguous, time.Hour)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorContains(t, err, "connection lost after session commit")
+	assert.True(t, rt.wasRemoved(preparedID))
+	keys, listErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
+	require.NoError(t, listErr)
+	assert.Empty(t, keys)
+}
+
+func TestManagerFUSETeardownRetriesTransientExactRemoval(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	require.NotNil(t, lifecycle)
+	rt.failRemove(sb.RuntimeID, errors.New("runtime temporarily unavailable"))
+
+	mgr.teardownFUSESandbox(lifecycle, errors.New("unhealthy"))
+	assert.False(t, rt.wasRemoved(sb.RuntimeID))
+	rt.failRemove(sb.RuntimeID, nil)
+	mgr.teardownFUSESandbox(lifecycle, errors.New("retry"))
+
+	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+	mgr.mu.RLock()
+	_, exists := mgr.sandboxes[sb.ID]
+	mgr.mu.RUnlock()
+	assert.False(t, exists)
+}
+
+func TestManagerFUSETeardownUsesPublishedSessionRevisionAfterExecMutation(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, store := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	_, err = mgr.Exec(context.Background(), sb.ID, runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+	_, err = mgr.UpdateTTL(context.Background(), sb.ID, 300)
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+
+	mgr.teardownFUSESandbox(lifecycle, errors.New("unhealthy"))
+	keys, listErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
+	require.NoError(t, listErr)
+	assert.Empty(t, keys)
+}
+
+func TestManagerFUSETeardownCompensatesLeaseDeleteReplyLoss(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, store := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	store.failCompareAndDeleteAfterWriting(lifecycle.lease.Key, errors.New("connection lost after delete"))
+
+	mgr.teardownFUSESandbox(lifecycle, errors.New("unhealthy"))
+
+	keys, listErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
+	require.NoError(t, listErr)
+	assert.Empty(t, keys)
+	assert.True(t, lifecycle.leaseReleased)
+}
+
+func TestManagerFUSEWatcherClosesGateBeforeBlockedStreamTeardown(t *testing.T) {
+	rt := &fuseManagerRuntime{mockRuntime: newFUSEMockRuntime(), health: runtime.WorkspaceHealth{Ready: true, MountType: "fuse", RuntimeUID: "prepared-uid-1", Generation: 1}}
+	stream := make(chan runtime.StreamEvent)
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return stream, nil
+	}
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	mgr.config.FUSEHealthInterval = time.Millisecond
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	out, err := mgr.ExecStream(context.Background(), sb.ID, runtime.ExecRequest{Command: "sleep"})
+	require.NoError(t, err)
+	rt.mu.Lock()
+	rt.health.Ready = false
+	rt.mu.Unlock()
+
+	require.Eventually(t, func() bool {
+		_, execErr := mgr.Exec(context.Background(), sb.ID, runtime.ExecRequest{Command: "true"})
+		return errors.Is(execErr, ErrSandboxNotReady)
+	}, time.Second, time.Millisecond)
+	assert.False(t, rt.wasRemoved(sb.RuntimeID), "teardown must wait for the live stream reference")
+	close(stream)
+	for range out {
+	}
+	require.Eventually(t, func() bool { return rt.wasRemoved(sb.RuntimeID) }, time.Second, time.Millisecond)
+}
+
+func TestManagerFUSEReconcileRetainsLiveBindingTransaction(t *testing.T) {
+	rt := newBlockingFUSEManagerRuntime()
+	mgr, _, repo, _ := newFUSETestManager(t, rt)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+		done <- err
+	}()
+	<-rt.waitReadyEntered
+	records, err := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	var binding state.FUSEPoolRecord
+	for _, record := range records {
+		if record.State == state.FUSEPoolBinding {
+			binding = record
+		}
+	}
+	require.NotEmpty(t, binding.PreparationID)
+	require.NoError(t, mgr.fusePool.Reconcile(context.Background()))
+	assert.False(t, rt.wasRemoved(binding.RuntimeID))
+	cancel()
+	require.Error(t, <-done)
+	assert.True(t, rt.wasRemoved(binding.RuntimeID))
+}
 
 func TestManagerUploadFilePropagatesExactSize(t *testing.T) {
 	rt := newMockRuntime()

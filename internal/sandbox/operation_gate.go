@@ -2,7 +2,10 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"sync"
+
+	"github.com/goairix/sandbox/internal/runtime"
 )
 
 // operationGate controls admission to one published sandbox. References cover
@@ -95,6 +98,12 @@ func (g *operationGate) BeginExclusive(ctx context.Context) (*operationGateExclu
 
 	select {
 	case <-drained:
+		g.mu.Lock()
+		valid := g.exclusive && !g.permanent && g.generation == generation
+		g.mu.Unlock()
+		if !valid {
+			return nil, ErrSandboxNotReady
+		}
 		return &operationGateExclusive{gate: g, generation: generation}, nil
 	case <-ctx.Done():
 		g.mu.Lock()
@@ -155,4 +164,58 @@ func (g *operationGate) isOpen() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.open && !g.permanent && !g.exclusive
+}
+
+type gatedReadCloser struct {
+	reader  io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (r *gatedReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil {
+		r.releaseOnce()
+	}
+	return n, err
+}
+
+func (r *gatedReadCloser) Close() error {
+	err := r.reader.Close()
+	r.releaseOnce()
+	return err
+}
+
+func (r *gatedReadCloser) releaseOnce() {
+	r.once.Do(r.release)
+}
+
+func holdGateForFileContents(files []runtime.FileContent, release func()) []runtime.FileContent {
+	count := 0
+	for i := range files {
+		if files[i].Content != nil {
+			count++
+		}
+	}
+	if count == 0 {
+		release()
+		return files
+	}
+	var mu sync.Mutex
+	remaining := count
+	releaseOne := func() {
+		mu.Lock()
+		remaining--
+		last := remaining == 0
+		mu.Unlock()
+		if last {
+			release()
+		}
+	}
+	for i := range files {
+		if files[i].Content != nil {
+			files[i].Content = &gatedReadCloser{reader: files[i].Content, release: releaseOne}
+		}
+	}
+	return files
 }

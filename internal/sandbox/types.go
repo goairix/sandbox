@@ -69,13 +69,39 @@ type NetworkConfig struct {
 	BlockPrivate bool `json:"block_private"`
 }
 
+type WorkspaceMountType string
+
+const (
+	WorkspaceMountSync  WorkspaceMountType = "sync"
+	WorkspaceMountLocal WorkspaceMountType = "local"
+	WorkspaceMountFUSE  WorkspaceMountType = "fuse"
+)
+
+type WorkspaceMountState string
+
+const (
+	WorkspaceMountMounting WorkspaceMountState = "mounting"
+	WorkspaceMountReady    WorkspaceMountState = "ready"
+	WorkspaceMountError    WorkspaceMountState = "error"
+)
+
 // WorkspaceInfo holds metadata about a mounted workspace.
 type WorkspaceInfo struct {
-	RootPath     string    `json:"root_path"`
-	MountedAt    time.Time `json:"mounted_at"`
-	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
-	BindMounted  bool      `json:"bind_mounted,omitempty"`
-	SyncExclude  []string  `json:"sync_exclude,omitempty"`
+	RootPath             string              `json:"root_path"`
+	MountedAt            time.Time           `json:"mounted_at"`
+	LastSyncedAt         time.Time           `json:"last_synced_at,omitempty"`
+	LastHealthyAt        time.Time           `json:"last_healthy_at,omitempty"`
+	BindMounted          bool                `json:"bind_mounted,omitempty"`
+	SyncExclude          []string            `json:"sync_exclude,omitempty"`
+	MountType            WorkspaceMountType  `json:"mount_type,omitempty"`
+	MountState           WorkspaceMountState `json:"mount_state,omitempty"`
+	Driver               string              `json:"driver,omitempty"`
+	Owner                WorkspaceOwner      `json:"owner,omitempty"`
+	LeaseGeneration      int64               `json:"lease_generation,omitempty"`
+	FUSEPreparationID    string              `json:"fuse_preparation_id,omitempty"`
+	FUSEPoolKey          string              `json:"fuse_pool_key,omitempty"`
+	FUSEReservationToken string              `json:"fuse_reservation_token,omitempty"`
+	FUSERecordRevision   uint64              `json:"fuse_record_revision,omitempty"`
 }
 
 // SandboxConfig holds all configuration for creating a sandbox.
@@ -97,7 +123,8 @@ type Sandbox struct {
 	CreatedAt time.Time     `json:"created_at"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	// RuntimeID is the container/pod ID in the underlying runtime
-	RuntimeID string         `json:"runtime_id"`
-	Timeout   time.Duration  `json:"timeout"` // max sandbox lifetime
-	Workspace *WorkspaceInfo `json:"workspace,omitempty"`
+	RuntimeID  string         `json:"runtime_id"`
+	RuntimeUID string         `json:"runtime_uid,omitempty"`
+	Timeout    time.Duration  `json:"timeout"` // max sandbox lifetime
+	Workspace  *WorkspaceInfo `json:"workspace,omitempty"`
 }

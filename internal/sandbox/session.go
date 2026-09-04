@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 )
 
 const sandboxSessionKeyPrefix = "sandbox:session:v2:"
+
+var ErrSessionPublicationConflict = errors.New("sandbox session publication changed")
 
 // SessionStore manages persistent sandbox state using a state.Store backend.
 type SessionStore struct {
@@ -64,6 +68,85 @@ func (s *SessionStore) Load(ctx context.Context, id string) (*Sandbox, error) {
 // Remove deletes a sandbox from the store.
 func (s *SessionStore) Remove(ctx context.Context, id string) error {
 	return s.store.Delete(ctx, sandboxSessionKeyPrefix+id)
+}
+
+// RemoveExact compensates a FUSE session publication without deleting a
+// newer value written by another actor after an ambiguous Redis reply.
+func (s *SessionStore) RemoveExact(ctx context.Context, sb *Sandbox) error {
+	if s == nil || sb == nil {
+		return ErrSessionPublicationConflict
+	}
+	atomicStore, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return ErrSessionPublicationConflict
+	}
+	expected, err := json.Marshal(sb)
+	if err != nil {
+		return fmt.Errorf("marshal exact sandbox session: %w", err)
+	}
+	return s.removeExactValue(ctx, atomicStore, sb.ID, expected)
+}
+
+func (s *SessionStore) RemoveExactValue(ctx context.Context, id string, expected []byte) error {
+	atomicStore, ok := s.store.(state.AtomicStore)
+	if !ok || id == "" || len(expected) == 0 {
+		return ErrSessionPublicationConflict
+	}
+	return s.removeExactValue(ctx, atomicStore, id, append([]byte(nil), expected...))
+}
+
+func (s *SessionStore) removeExactValue(ctx context.Context, atomicStore state.AtomicStore, id string, expected []byte) error {
+	deleted, err := atomicStore.CompareAndDelete(ctx, sandboxSessionKeyPrefix+id, expected)
+	if err != nil {
+		return fmt.Errorf("remove exact sandbox session: %w", err)
+	}
+	if deleted {
+		return nil
+	}
+	current, err := s.store.Get(ctx, sandboxSessionKeyPrefix+id)
+	if err != nil {
+		return fmt.Errorf("verify exact sandbox session removal: %w", err)
+	}
+	if current == nil {
+		return nil
+	}
+	if bytes.Equal(current, expected) {
+		return ErrSessionPublicationConflict
+	}
+	return ErrSessionPublicationConflict
+}
+
+// RemoveMatchingFUSESession compare-deletes the latest valid revision of one
+// lifecycle. A reused sandbox ID or changed immutable runtime/workspace
+// identity is retained fail-closed.
+func (s *SessionStore) RemoveMatchingFUSESession(ctx context.Context, id, runtimeID, runtimeUID, preparationID string, generation int64) error {
+	atomicStore, ok := s.store.(state.AtomicStore)
+	if !ok || id == "" || runtimeID == "" || runtimeUID == "" || preparationID == "" || generation <= 0 {
+		return ErrSessionPublicationConflict
+	}
+	var lastErr error
+	for range 4 {
+		raw, err := s.store.Get(ctx, sandboxSessionKeyPrefix+id)
+		if err != nil {
+			return fmt.Errorf("load FUSE session for removal: %w", err)
+		}
+		if raw == nil {
+			return nil
+		}
+		var current Sandbox
+		if err := json.Unmarshal(raw, &current); err != nil || current.ID != id || current.RuntimeID != runtimeID || current.RuntimeUID != runtimeUID || current.Workspace == nil || current.Workspace.MountType != WorkspaceMountFUSE || current.Workspace.FUSEPreparationID != preparationID || current.Workspace.LeaseGeneration != generation {
+			return ErrSessionPublicationConflict
+		}
+		deleted, err := atomicStore.CompareAndDelete(ctx, sandboxSessionKeyPrefix+id, raw)
+		if err != nil {
+			lastErr = fmt.Errorf("remove matching FUSE session: %w", err)
+			continue
+		}
+		if deleted {
+			return nil
+		}
+	}
+	return errors.Join(ErrSessionPublicationConflict, lastErr)
 }
 
 // List returns all sandbox IDs in the store.

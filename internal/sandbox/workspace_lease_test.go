@@ -25,20 +25,21 @@ type atomicMemoryEntry struct {
 }
 
 type atomicMemoryStore struct {
-	mu                    sync.Mutex
-	entries               map[string]atomicMemoryEntry
-	increments            map[string]int64
-	failMethods           map[string]error
-	failSetNXAfterWrite   map[string]error
-	failCASAfterWrite     map[string]error
-	failVerifyAfterCAS    map[string]error
-	casBlocks             map[string]*atomicCASBlock
-	casAfterWriteBlocks   map[string]*atomicCASBlock
-	compareDeleteBlocks   map[string]*atomicCASBlock
-	calls                 int
-	compareAndSwapCalls   int
-	failCompareAndSwapAt  int
-	failCompareAndSwapErr error
+	mu                          sync.Mutex
+	entries                     map[string]atomicMemoryEntry
+	increments                  map[string]int64
+	failMethods                 map[string]error
+	failSetNXAfterWrite         map[string]error
+	failCASAfterWrite           map[string]error
+	failVerifyAfterCAS          map[string]error
+	casBlocks                   map[string]*atomicCASBlock
+	casAfterWriteBlocks         map[string]*atomicCASBlock
+	compareDeleteBlocks         map[string]*atomicCASBlock
+	failCompareDeleteAfterWrite map[string]error
+	calls                       int
+	compareAndSwapCalls         int
+	failCompareAndSwapAt        int
+	failCompareAndSwapErr       error
 }
 
 type atomicCASBlock struct {
@@ -48,15 +49,16 @@ type atomicCASBlock struct {
 
 func newAtomicMemoryStore() *atomicMemoryStore {
 	return &atomicMemoryStore{
-		entries:             make(map[string]atomicMemoryEntry),
-		increments:          make(map[string]int64),
-		failMethods:         make(map[string]error),
-		failSetNXAfterWrite: make(map[string]error),
-		failCASAfterWrite:   make(map[string]error),
-		failVerifyAfterCAS:  make(map[string]error),
-		casBlocks:           make(map[string]*atomicCASBlock),
-		casAfterWriteBlocks: make(map[string]*atomicCASBlock),
-		compareDeleteBlocks: make(map[string]*atomicCASBlock),
+		entries:                     make(map[string]atomicMemoryEntry),
+		increments:                  make(map[string]int64),
+		failMethods:                 make(map[string]error),
+		failSetNXAfterWrite:         make(map[string]error),
+		failCASAfterWrite:           make(map[string]error),
+		failVerifyAfterCAS:          make(map[string]error),
+		casBlocks:                   make(map[string]*atomicCASBlock),
+		casAfterWriteBlocks:         make(map[string]*atomicCASBlock),
+		compareDeleteBlocks:         make(map[string]*atomicCASBlock),
+		failCompareDeleteAfterWrite: make(map[string]error),
 	}
 }
 
@@ -208,6 +210,10 @@ func (s *atomicMemoryStore) CompareAndDelete(_ context.Context, key string, expe
 		return false, nil
 	}
 	delete(s.entries, key)
+	if err := s.failCompareDeleteAfterWrite[key]; err != nil {
+		delete(s.failCompareDeleteAfterWrite, key)
+		return false, err
+	}
 	return true, nil
 }
 
@@ -258,6 +264,12 @@ func (s *atomicMemoryStore) failSetNXAfterWriting(key string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failSetNXAfterWrite[key] = err
+}
+
+func (s *atomicMemoryStore) failCompareAndDeleteAfterWriting(key string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCompareDeleteAfterWrite[key] = err
 }
 
 func (s *atomicMemoryStore) failCompareAndSwapCall(call int, err error) {

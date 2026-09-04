@@ -150,11 +150,14 @@ type WorkspaceMountAuthorization struct {
 
 // WorkspaceHealth reports trusted mounter health for the mounted workspace.
 type WorkspaceHealth struct {
-	Ready          bool
-	MountType      string
-	Generation     int64
-	LastSuccessful time.Time
-	Error          string
+	Ready           bool
+	MountType       string
+	RuntimeUID      string
+	Generation      int64
+	RestartCount    int32
+	RestartDetected bool
+	LastSuccessful  time.Time
+	Error           string
 }
 
 // WorkspaceQuiesceToken binds a single resume operation to an exact runtime

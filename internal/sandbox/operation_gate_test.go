@@ -18,7 +18,10 @@ func TestOperationGateCloseRejectsNewOperationsAndDrainsReferences(t *testing.T)
 	go func() { drained <- gate.CloseAndWait(context.Background()) }()
 
 	require.Eventually(t, func() bool {
-		_, acquireErr := gate.Acquire()
+		probeRelease, acquireErr := gate.Acquire()
+		if acquireErr == nil {
+			probeRelease()
+		}
 		return errors.Is(acquireErr, ErrSandboxNotReady)
 	}, time.Second, time.Millisecond)
 	select {
@@ -67,4 +70,31 @@ func TestOperationGateCancelledExclusiveReopensAdmission(t *testing.T) {
 	nextRelease, err := gate.Acquire()
 	require.NoError(t, err)
 	nextRelease()
+}
+
+func TestOperationGateExclusiveCannotSucceedAfterPermanentCloseWinsDrain(t *testing.T) {
+	gate := newOperationGate(true)
+	release, err := gate.Acquire()
+	require.NoError(t, err)
+
+	exclusiveResult := make(chan error, 1)
+	go func() {
+		_, beginErr := gate.BeginExclusive(context.Background())
+		exclusiveResult <- beginErr
+	}()
+	require.Eventually(t, func() bool {
+		gate.mu.Lock()
+		defer gate.mu.Unlock()
+		return gate.exclusive
+	}, time.Second, time.Millisecond)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- gate.CloseAndWait(context.Background()) }()
+	require.Eventually(t, func() bool {
+		gate.mu.Lock()
+		defer gate.mu.Unlock()
+		return gate.permanent
+	}, time.Second, time.Millisecond)
+	release()
+	require.NoError(t, <-closeResult)
+	require.ErrorIs(t, <-exclusiveResult, ErrSandboxNotReady)
 }
