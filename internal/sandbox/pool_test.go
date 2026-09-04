@@ -38,10 +38,11 @@ func (m *mockRuntime) CreateSandbox(_ context.Context, spec runtime.SandboxSpec)
 	m.created++
 	m.createdSpec = spec
 	info := &runtime.SandboxInfo{
-		ID:        spec.ID,
-		RuntimeID: "container-" + spec.ID,
-		State:     "running",
-		CreatedAt: time.Now(),
+		ID:         spec.ID,
+		RuntimeID:  "container-" + spec.ID,
+		RuntimeUID: "container-" + spec.ID,
+		State:      "running",
+		CreatedAt:  time.Now(),
 	}
 	m.sandboxes[info.RuntimeID] = info
 	return info, nil
@@ -120,7 +121,39 @@ func (m *mockRuntime) UpdateLabels(context.Context, string, map[string]*string) 
 	return nil
 }
 
-func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, _ io.Reader) error {
+func (m *mockRuntime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+	return m.CreateSandbox(ctx, spec)
+}
+
+func (m *mockRuntime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
+	return nil
+}
+
+func (m *mockRuntime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) {
+	return &runtime.SandboxInfo{State: "running"}, nil
+}
+
+func (m *mockRuntime) PreparedSandboxHealth(context.Context, string, string) error {
+	return nil
+}
+
+func (m *mockRuntime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {
+	return &runtime.WorkspaceHealth{Ready: true}, nil
+}
+
+func (m *mockRuntime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) {
+	return runtime.WorkspaceQuiesceToken{}, nil
+}
+
+func (m *mockRuntime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error {
+	return nil
+}
+
+func (m *mockRuntime) FlushWorkspace(context.Context, string) error {
+	return nil
+}
+
+func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, _ int64, _ io.Reader) error {
 	return nil
 }
 
@@ -183,6 +216,8 @@ func (m *mockRuntime) FileExists(_ context.Context, _ string, _ string) error {
 func (m *mockRuntime) ReadFileContent(_ context.Context, _ string, _ string) (io.ReadCloser, error) {
 	return nil, nil
 }
+
+var _ runtime.Runtime = (*mockRuntime)(nil)
 
 func TestPool_Acquire(t *testing.T) {
 	rt := newMockRuntime()

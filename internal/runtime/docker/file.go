@@ -24,7 +24,7 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
+func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, reader io.Reader) error {
 	content, err := io.ReadAll(reader)
 	if err != nil {
 		return fmt.Errorf("read file content: %w", err)

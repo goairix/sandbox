@@ -14,10 +14,54 @@ var ErrNotFound = errors.New("sandbox not found")
 // ErrFileNotFound is returned when the target file does not exist inside the sandbox.
 var ErrFileNotFound = errors.New("file not found")
 
+// ErrWorkspaceFUSEUnsupported is returned by runtimes that do not yet
+// implement the trusted FUSE control contract.
+var ErrWorkspaceFUSEUnsupported = errors.New("workspace FUSE is unsupported")
+
+// RuntimeFencer confirms that an exact immutable runtime instance has
+// terminated or has been isolated from its workspace infrastructure.
+type RuntimeFencer interface {
+	ConfirmTerminated(ctx context.Context, runtimeID, runtimeUID string) (TerminationEvidence, error)
+}
+
+// OrphanReconciler removes managed runtime resources only after the manager has
+// restored state and supplied the complete set of protected runtime UIDs.
+type OrphanReconciler interface {
+	ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error
+}
+
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).
 type Runtime interface {
 	// CreateSandbox creates a new sandbox container/pod from the given spec.
 	CreateSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error)
+
+	// PrepareSandbox creates a prefix-free FUSE sandbox without exposing user
+	// execution or starting the mounter.
+	PrepareSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error)
+
+	// AuthorizeWorkspaceMount delivers the one-shot workspace authorization over
+	// the runtime's trusted control channel.
+	AuthorizeWorkspaceMount(ctx context.Context, id string, auth WorkspaceMountAuthorization) error
+
+	// WaitSandboxReady waits for both trusted FUSE health and sandbox-side probes.
+	WaitSandboxReady(ctx context.Context, id string) (*SandboxInfo, error)
+
+	// PreparedSandboxHealth verifies a prepared instance is pristine and belongs
+	// to the expected pool key.
+	PreparedSandboxHealth(ctx context.Context, id, poolKey string) error
+
+	// WorkspaceHealth returns trusted health for the mounted workspace.
+	WorkspaceHealth(ctx context.Context, id string) (*WorkspaceHealth, error)
+
+	// QuiesceWorkspace closes workspace activity and returns a single-use token.
+	QuiesceWorkspace(ctx context.Context, id string) (WorkspaceQuiesceToken, error)
+
+	// ResumeWorkspace consumes the exact token returned by QuiesceWorkspace.
+	ResumeWorkspace(ctx context.Context, id string, token WorkspaceQuiesceToken) error
+
+	// FlushWorkspace durably flushes the mounted workspace through the trusted
+	// mounter control channel.
+	FlushWorkspace(ctx context.Context, id string) error
 
 	// StartSandbox starts a previously created sandbox (for pool warm-up scenarios).
 	StartSandbox(ctx context.Context, id string) error
@@ -38,7 +82,7 @@ type Runtime interface {
 	ExecStream(ctx context.Context, id string, req ExecRequest) (<-chan StreamEvent, error)
 
 	// UploadFile uploads a file into the sandbox.
-	UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error
+	UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error
 
 	// DownloadFile downloads a file from the sandbox.
 	DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error)

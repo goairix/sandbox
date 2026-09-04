@@ -82,7 +82,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	if err := h.manager.UploadFile(spanCtx, id, fullPath, file); err != nil {
+	if err := h.manager.UploadFile(spanCtx, id, fullPath, header.Size, file); err != nil {
 		internalError(c, err)
 		return
 	}
@@ -445,14 +445,14 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		return
 	}
 
-	file, _, err := c.Request.FormFile("chunk")
+	file, header, err := c.Request.FormFile("chunk")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file chunk is required"})
 		return
 	}
 	defer func() { _ = file.Close() }()
 
-	received, total, err := h.manager.UploadChunk(spanCtx, id, uploadID, chunkIndex, file)
+	received, total, err := h.manager.UploadChunk(spanCtx, id, uploadID, chunkIndex, header.Size, file)
 	if err != nil {
 		internalError(c, err)
 		return

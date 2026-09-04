@@ -110,11 +110,44 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	}
 
 	return &runtime.SandboxInfo{
-		ID:        spec.ID,
-		RuntimeID: containerID,
-		State:     "running",
-		CreatedAt: time.Now(),
+		ID:         spec.ID,
+		RuntimeID:  containerID,
+		RuntimeUID: containerID,
+		State:      "running",
+		CreatedAt:  time.Now(),
 	}, nil
+}
+
+func (r *Runtime) PrepareSandbox(context.Context, runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) PreparedSandboxHealth(context.Context, string, string) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) {
+	return runtime.WorkspaceQuiesceToken{}, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) FlushWorkspace(context.Context, string) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
 func (r *Runtime) StartSandbox(ctx context.Context, id string) error {
@@ -169,10 +202,11 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 	created, _ := time.Parse(time.RFC3339Nano, info.Created)
 
 	return &runtime.SandboxInfo{
-		ID:        id,
-		RuntimeID: info.ID,
-		State:     state,
-		CreatedAt: created,
+		ID:         id,
+		RuntimeID:  info.ID,
+		RuntimeUID: info.ID,
+		State:      state,
+		CreatedAt:  created,
 	}, nil
 }
 
@@ -286,10 +320,11 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 			state = c.State
 		}
 		result = append(result, runtime.SandboxInfo{
-			ID:        c.Labels["sandbox.id"],
-			RuntimeID: c.ID,
-			State:     state,
-			CreatedAt: time.Unix(c.Created, 0),
+			ID:         c.Labels["sandbox.id"],
+			RuntimeID:  c.ID,
+			RuntimeUID: c.ID,
+			State:      state,
+			CreatedAt:  time.Unix(c.Created, 0),
 		})
 	}
 	return result, nil

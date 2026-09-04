@@ -101,11 +101,44 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	}
 
 	return &runtime.SandboxInfo{
-		ID:        spec.ID,
-		RuntimeID: pod.Name,
-		State:     "running",
-		CreatedAt: pod.CreationTimestamp.Time,
+		ID:         spec.ID,
+		RuntimeID:  pod.Name,
+		RuntimeUID: string(pod.UID),
+		State:      "running",
+		CreatedAt:  pod.CreationTimestamp.Time,
 	}, nil
+}
+
+func (r *Runtime) PrepareSandbox(context.Context, runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) PreparedSandboxHealth(context.Context, string, string) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {
+	return nil, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) {
+	return runtime.WorkspaceQuiesceToken{}, runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
+}
+
+func (r *Runtime) FlushWorkspace(context.Context, string) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
 func (r *Runtime) StartSandbox(_ context.Context, _ string) error {
@@ -139,10 +172,11 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 	}
 
 	return &runtime.SandboxInfo{
-		ID:        id,
-		RuntimeID: pod.Name,
-		State:     podStateString(pod.Status.Phase),
-		CreatedAt: pod.CreationTimestamp.Time,
+		ID:         id,
+		RuntimeID:  pod.Name,
+		RuntimeUID: string(pod.UID),
+		State:      podStateString(pod.Status.Phase),
+		CreatedAt:  pod.CreationTimestamp.Time,
 	}, nil
 }
 
@@ -158,7 +192,7 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 	return execPipeInPod(ctx, r.client, r.restConfig, r.namespace, id, cmd, stdin)
 }
 
-func (r *Runtime) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
+func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, reader io.Reader) error {
 	return uploadFileToPod(ctx, r.client, r.restConfig, r.namespace, id, destPath, reader)
 }
 
@@ -264,10 +298,11 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 	result := make([]runtime.SandboxInfo, 0, len(pods.Items))
 	for _, pod := range pods.Items {
 		result = append(result, runtime.SandboxInfo{
-			ID:        pod.Labels["sandbox.id"],
-			RuntimeID: pod.Name,
-			State:     podStateString(pod.Status.Phase),
-			CreatedAt: pod.CreationTimestamp.Time,
+			ID:         pod.Labels["sandbox.id"],
+			RuntimeID:  pod.Name,
+			RuntimeUID: string(pod.UID),
+			State:      podStateString(pod.Status.Phase),
+			CreatedAt:  pod.CreationTimestamp.Time,
 		})
 	}
 	return result, nil

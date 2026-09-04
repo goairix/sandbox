@@ -743,7 +743,7 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 }
 
 // UploadFile uploads a file into a sandbox.
-func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, reader io.Reader) error {
+func (m *Manager) UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error {
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.UploadFile",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 	)
@@ -754,7 +754,7 @@ func (m *Manager) UploadFile(ctx context.Context, id string, destPath string, re
 		return err
 	}
 
-	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, reader); err != nil {
+	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, size, reader); err != nil {
 		metrics.RecordFileOp(ctx, "upload", "error")
 		return err
 	}
@@ -1499,7 +1499,7 @@ func (m *Manager) saveMultipartState(ctx context.Context, sandboxID, uploadID st
 // UploadChunk writes a single chunk to the container staging directory.
 // Chunks must be uploaded in order: chunk_index must equal ReceivedChunks.
 // Concurrent uploads for the same uploadID are not supported; callers must serialize chunk requests.
-func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, chunkIndex int, reader io.Reader) (received int, total int, err error) {
+func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, chunkIndex int, size int64, reader io.Reader) (received int, total int, err error) {
 	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
 	if err != nil {
 		return 0, 0, err
@@ -1514,7 +1514,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 	}
 
 	chunkPath := fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, chunkIndex)
-	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, chunkPath, reader); err != nil {
+	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, chunkPath, size, reader); err != nil {
 		return 0, 0, fmt.Errorf("upload chunk: %w", err)
 	}
 

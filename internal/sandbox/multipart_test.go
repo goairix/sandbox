@@ -93,7 +93,7 @@ func TestUploadChunk_OutOfOrder(t *testing.T) {
 	require.NoError(t, err)
 
 	// chunk_index=1 before chunk_index=0 should fail.
-	_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, 1, strings.NewReader("data"))
+	_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, 1, int64(len("data")), strings.NewReader("data"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrUnexpectedChunkIndex)
 }
@@ -154,7 +154,7 @@ func TestUploadChunk_Sequential(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 3; i++ {
-		received, total, err := mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, strings.NewReader("chunk-data"))
+		received, total, err := mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, int64(len("chunk-data")), strings.NewReader("chunk-data"))
 		require.NoError(t, err)
 		assert.Equal(t, i+1, received)
 		assert.Equal(t, 3, total)
@@ -172,7 +172,7 @@ func TestCompleteMultipartUpload_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 2; i++ {
-		_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, strings.NewReader("chunk"))
+		_, _, err = mgr.UploadChunk(context.Background(), "test-sb", uploadID, i, int64(len("chunk")), strings.NewReader("chunk"))
 		require.NoError(t, err)
 	}
 

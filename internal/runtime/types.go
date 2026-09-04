@@ -4,10 +4,11 @@ import "time"
 
 // SandboxInfo holds runtime-level sandbox information.
 type SandboxInfo struct {
-	ID        string
-	RuntimeID string // container ID or pod name
-	State     string
-	CreatedAt time.Time
+	ID         string
+	RuntimeID  string // container ID or pod name
+	RuntimeUID string // immutable container ID or pod UID
+	State      string
+	CreatedAt  time.Time
 }
 
 // ExecRequest holds parameters for executing a command in a sandbox.
@@ -69,6 +70,91 @@ type SandboxSpec struct {
 	Labels map[string]string
 	// Mounts specifies host paths to bind-mount into the container.
 	Mounts []Mount
+	// WorkspaceFUSE contains the fixed, prefix-free configuration used to prepare
+	// a FUSE-backed sandbox. Per-workspace authorization is supplied separately.
+	WorkspaceFUSE *WorkspaceFUSESpec
+}
+
+// WorkspaceFUSESpec contains only configuration fixed at sandbox preparation
+// time. It deliberately excludes workspace prefixes and lease generations.
+type WorkspaceFUSESpec struct {
+	Provider        string
+	Driver          string
+	Profile         string
+	StorageIdentity string
+	MounterImage    string
+	SecretName      string
+	CASecretKey     string
+	EndpointHostIPs []string
+	Bucket          string
+	Endpoint        string
+	Region          string
+	UseSSL          bool
+	CacheSize       string
+	MountTimeout    time.Duration
+	FlushTimeout    time.Duration
+	LSMProfile      string
+	SystemEgress    SystemEgressSpec
+	PoolKey         string
+}
+
+// SystemEgressMode selects the runtime-specific system egress policy shape.
+type SystemEgressMode string
+
+const (
+	SystemEgressCIDR       SystemEgressMode = "cidr"
+	SystemEgressCiliumFQDN SystemEgressMode = "cilium-fqdn"
+)
+
+// SystemEgressSpec describes the fixed DNS and object-store destinations that
+// the trusted mounter may reach. ProxyURL is reserved and must remain empty in
+// phase one.
+type SystemEgressSpec struct {
+	Mode          SystemEgressMode
+	DNSCIDRs      []string
+	DNSPorts      []int32
+	EndpointCIDRs []string
+	EndpointFQDNs []string
+	EndpointPorts []int32
+	ProxyURL      string
+}
+
+// WorkspaceMountAuthorization is the one-shot, lease-bound authorization that
+// binds a prepared sandbox to exactly one workspace prefix.
+type WorkspaceMountAuthorization struct {
+	RuntimeUID      string
+	PoolKey         string
+	WorkspaceHash   string
+	Prefix          string
+	LeaseGeneration int64
+	MountAttempt    uint8
+}
+
+// WorkspaceHealth reports trusted mounter health for the mounted workspace.
+type WorkspaceHealth struct {
+	Ready          bool
+	MountType      string
+	Generation     int64
+	LastSuccessful time.Time
+	Error          string
+}
+
+// WorkspaceQuiesceToken binds a single resume operation to an exact runtime
+// generation. Runtime implementations must reject stale, replayed, and
+// cross-runtime tokens.
+type WorkspaceQuiesceToken struct {
+	RuntimeUID string
+	Generation int64
+	Opaque     string
+}
+
+// TerminationEvidence records trusted evidence that an exact runtime instance
+// can no longer access its workspace.
+type TerminationEvidence struct {
+	RuntimeUID           string
+	GracefulUnmount      bool
+	ProcessExited        bool
+	InfrastructureFenced bool
 }
 
 const DefaultTmpDisk = "50Mi"

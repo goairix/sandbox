@@ -11,6 +11,24 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
+func TestWorkspaceFUSEContractIsUnsupported(t *testing.T) {
+	rt := &Runtime{}
+	ctx := context.Background()
+
+	_, err := rt.PrepareSandbox(ctx, runtime.SandboxSpec{})
+	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.AuthorizeWorkspaceMount(ctx, "id", runtime.WorkspaceMountAuthorization{}), runtime.ErrWorkspaceFUSEUnsupported)
+	_, err = rt.WaitSandboxReady(ctx, "id")
+	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.PreparedSandboxHealth(ctx, "id", "pool"), runtime.ErrWorkspaceFUSEUnsupported)
+	_, err = rt.WorkspaceHealth(ctx, "id")
+	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
+	_, err = rt.QuiesceWorkspace(ctx, "id")
+	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.ResumeWorkspace(ctx, "id", runtime.WorkspaceQuiesceToken{}), runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.FlushWorkspace(ctx, "id"), runtime.ErrWorkspaceFUSEUnsupported)
+}
+
 func TestCreatePodUsesConfiguredTmpDiskLimit(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
