@@ -26,6 +26,7 @@ type mockRuntime struct {
 	streamRequest  runtime.ExecRequest
 	execStreamFunc func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
 	createdSpec    runtime.SandboxSpec
+	uploadSize     int64
 }
 
 func newMockRuntime() *mockRuntime {
@@ -153,8 +154,17 @@ func (m *mockRuntime) FlushWorkspace(context.Context, string) error {
 	return nil
 }
 
-func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, _ int64, _ io.Reader) error {
+func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, size int64, _ io.Reader) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.uploadSize = size
 	return nil
+}
+
+func (m *mockRuntime) lastUploadSize() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.uploadSize
 }
 
 func (m *mockRuntime) DownloadFile(_ context.Context, _ string, _ string) (io.ReadCloser, error) {

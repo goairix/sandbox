@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,14 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
+
+func TestManagerUploadFilePropagatesExactSize(t *testing.T) {
+	rt := newMockRuntime()
+	mgr := newExecTestManager(rt, ManagerConfig{})
+
+	require.NoError(t, mgr.UploadFile(context.Background(), "sandbox-test", "/workspace/a.txt", 5, strings.NewReader("hello")))
+	assert.Equal(t, int64(5), rt.lastUploadSize())
+}
 
 func newExecTestManager(rt *mockRuntime, cfg ManagerConfig) *Manager {
 	mgr := NewManager(rt, nil, nil, cfg)

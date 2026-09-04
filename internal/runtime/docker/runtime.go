@@ -40,9 +40,6 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 		return nil, err
 	}
 
-	// Best-effort cleanup of orphaned resources from previous runs
-	_ = cleanupOrphanedResources(ctx, cli)
-
 	if gatewayImage == "" {
 		gatewayImage = defaultGatewayImage
 	}

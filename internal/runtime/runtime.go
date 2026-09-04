@@ -81,7 +81,8 @@ type Runtime interface {
 	// ExecStream executes a command and streams output via a channel.
 	ExecStream(ctx context.Context, id string, req ExecRequest) (<-chan StreamEvent, error)
 
-	// UploadFile uploads a file into the sandbox.
+	// UploadFile uploads a file into the sandbox. Size is the exact, non-negative
+	// byte count of reader; unknown sizes are not supported.
 	UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error
 
 	// DownloadFile downloads a file from the sandbox.
