@@ -7,13 +7,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/goairix/sandbox/internal/runtime"
@@ -229,64 +234,31 @@ type preparedMounterBootstrap struct {
 	UnmountTimeoutSeconds int64  `json:"unmount_timeout_seconds"`
 }
 
+type validatedPreparedFUSEPod struct {
+	cacheSize               resource.Quantity
+	tmpDiskSize             resource.Quantity
+	mounterRunSize          resource.Quantity
+	sandboxResources        corev1.ResourceRequirements
+	mounterResources        corev1.ResourceRequirements
+	nameservers             []string
+	poolKeyLabel            string
+	endpoint                string
+	hostAliases             []corev1.HostAlias
+	secretItems             []corev1.KeyToPath
+	terminationGraceSeconds int64
+}
+
 func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, error) {
 	fuse := spec.WorkspaceFUSE
-	if fuse.CacheMedium != "disk" {
-		return nil, fmt.Errorf("workspace FUSE cache medium must be disk, got %q", fuse.CacheMedium)
-	}
-	cacheSize, err := parsePositiveQuantity("workspace FUSE cache size", fuse.CacheSize)
+	validated, err := validatePreparedFUSEPod(spec)
 	if err != nil {
 		return nil, err
-	}
-	mounterRunSize, err := resource.ParseQuantity(mounterRunVolumeSize)
-	if err != nil {
-		return nil, fmt.Errorf("parse mounter run volume size: %w", err)
-	}
-	tmpDisk := spec.TmpDisk
-	if tmpDisk == "" {
-		tmpDisk = runtime.DefaultTmpDisk
-	}
-	tmpDiskSize, err := resource.ParseQuantity(tmpDisk)
-	if err != nil {
-		return nil, fmt.Errorf("parse tmp disk quantity %q: %w", tmpDisk, err)
-	}
-
-	sandboxResources, err := preparedSandboxResources(spec)
-	if err != nil {
-		return nil, err
-	}
-	mounterResources, err := preparedMounterResources(fuse.MounterResources)
-	if err != nil {
-		return nil, err
-	}
-	nameservers, err := hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
-	if err != nil {
-		return nil, err
-	}
-	poolKeyLabel, err := preparedPoolKeyLabel(fuse.PoolKey)
-	if err != nil {
-		return nil, err
-	}
-	terminationGraceSeconds, err := fuseTerminationGraceSeconds(fuse.FlushTimeout, fuse.UnmountTimeout)
-	if err != nil {
-		return nil, err
-	}
-	if fuse.MountTimeout <= 0 {
-		return nil, fmt.Errorf("workspace FUSE mount timeout must be positive")
-	}
-	endpoint := fuse.Endpoint
-	if fuse.Provider == "minio" && !strings.Contains(endpoint, "://") {
-		scheme := "http://"
-		if fuse.UseSSL {
-			scheme = "https://"
-		}
-		endpoint = scheme + endpoint
 	}
 	bootstrap, err := json.Marshal(preparedMounterBootstrap{
 		Version:               1,
 		Provider:              fuse.Provider,
 		Bucket:                fuse.Bucket,
-		Endpoint:              endpoint,
+		Endpoint:              validated.endpoint,
 		Region:                fuse.Region,
 		Profile:               fuse.Profile,
 		AccessKeyFile:         path.Join(mounterSecretPath, "accessKey"),
@@ -319,25 +291,21 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		RunAsUser:              &rootUID,
 		ReadOnlyRootFilesystem: &trueVal,
 	}
-	if fuse.LSMProfile != "" {
-		profile := fuse.LSMProfile
-		mounterSecurity.AppArmorProfile = &corev1.AppArmorProfile{
-			Type:             corev1.AppArmorProfileTypeLocalhost,
-			LocalhostProfile: &profile,
-		}
-	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      spec.ID,
 			Namespace: namespace,
+			Annotations: map[string]string{
+				"container.apparmor.security.beta.kubernetes.io/workspace-mounter": "localhost/" + fuse.LSMProfile,
+			},
 			Labels: map[string]string{
 				"app":                        "sandbox",
 				"sandbox.id":                 spec.ID,
 				"sandbox.managed":            "true",
 				"sandbox.pool":               "true",
 				"sandbox.pool.state":         "preparing",
-				"sandbox.pool.key":           poolKeyLabel,
+				"sandbox.pool.key":           validated.poolKeyLabel,
 				"sandbox.pool.instance":      spec.ID,
 				"sandbox.workspace.mode":     "fuse",
 				"sandbox.workspace.provider": fuse.Provider,
@@ -349,8 +317,9 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			EnableServiceLinks:            &falseVal,
 			ShareProcessNamespace:         &falseVal,
 			DNSPolicy:                     corev1.DNSNone,
-			DNSConfig:                     &corev1.PodDNSConfig{Nameservers: nameservers},
-			TerminationGracePeriodSeconds: &terminationGraceSeconds,
+			DNSConfig:                     &corev1.PodDNSConfig{Nameservers: validated.nameservers},
+			HostAliases:                   validated.hostAliases,
+			TerminationGracePeriodSeconds: &validated.terminationGraceSeconds,
 			SecurityContext: &corev1.PodSecurityContext{
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
@@ -363,7 +332,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 					Command:         []string{mounterBinary, "supervise"},
 					RestartPolicy:   &restartAlways,
 					SecurityContext: mounterSecurity,
-					Resources:       mounterResources,
+					Resources:       validated.mounterResources,
 					Env: []corev1.EnvVar{
 						{
 							Name: "SANDBOX_RUNTIME_UID",
@@ -402,7 +371,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 					Image:      spec.Image,
 					Command:    []string{"sleep", "infinity"},
 					WorkingDir: workspaceMountPath,
-					Resources:  sandboxResources,
+					Resources:  validated.sandboxResources,
 					SecurityContext: &corev1.SecurityContext{
 						RunAsNonRoot:             &trueVal,
 						RunAsUser:                &sandboxUID,
@@ -422,54 +391,365 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			},
 			Volumes: []corev1.Volume{
 				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
-				{Name: "fuse-cache", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &cacheSize}}},
+				{Name: "fuse-cache", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &validated.cacheSize}}},
 				{Name: "dev-fuse", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/fuse", Type: &deviceType}}},
-				{Name: "workspace-credentials", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: fuse.SecretName, DefaultMode: &secretMode}}},
-				{Name: "mounter-run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &mounterRunSize}}},
-				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpDiskSize}}},
+				{Name: "workspace-credentials", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: fuse.SecretName, DefaultMode: &secretMode, Items: validated.secretItems}}},
+				{Name: "mounter-run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &validated.mounterRunSize}}},
+				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &validated.tmpDiskSize}}},
 			},
 		},
 	}
 	return pod, nil
 }
 
+func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod, error) {
+	var validated validatedPreparedFUSEPod
+	fuse := spec.WorkspaceFUSE
+	if fuse == nil {
+		return validated, fmt.Errorf("workspace FUSE spec is required")
+	}
+	if errs := kvalidation.IsDNS1123Subdomain(spec.ID); len(errs) != 0 {
+		return validated, fmt.Errorf("workspace FUSE sandbox ID is invalid")
+	}
+	if errs := kvalidation.IsValidLabelValue(spec.ID); len(errs) != 0 {
+		return validated, fmt.Errorf("workspace FUSE sandbox ID is not label-safe")
+	}
+	if fuse.RuntimeType != "kubernetes" {
+		return validated, fmt.Errorf("workspace FUSE runtime type must be kubernetes")
+	}
+	if fuse.Provider != "minio" && fuse.Provider != "obs" {
+		return validated, fmt.Errorf("workspace FUSE provider must be minio or obs")
+	}
+	if fuse.Driver != "s3fs" {
+		return validated, fmt.Errorf("workspace FUSE driver must be s3fs")
+	}
+	if !nonEmptyCanonicalValue(fuse.Profile) || !nonEmptyCanonicalValue(fuse.Bucket) ||
+		!nonEmptyCanonicalValue(fuse.StorageIdentity) || !nonEmptyCanonicalValue(fuse.CredentialGeneration) {
+		return validated, fmt.Errorf("workspace FUSE fixed identity fields must not be empty")
+	}
+	if !isDigestPinnedImage(fuse.MounterImage) {
+		return validated, fmt.Errorf("workspace FUSE mounter image must be pinned by sha256 digest")
+	}
+	if errs := kvalidation.IsDNS1123Subdomain(fuse.SecretName); len(errs) != 0 {
+		return validated, fmt.Errorf("workspace FUSE Secret name is invalid")
+	}
+	if err := validateLSMProfile(fuse.LSMProfile); err != nil {
+		return validated, err
+	}
+	poolKeyLabel, err := preparedPoolKeyLabel(fuse.PoolKey)
+	if err != nil {
+		return validated, err
+	}
+	validated.poolKeyLabel = poolKeyLabel
+
+	if fuse.CASecretKey != "" {
+		if errs := kvalidation.IsConfigMapKey(fuse.CASecretKey); len(errs) != 0 || fuse.CASecretKey == "accessKey" || fuse.CASecretKey == "secretKey" {
+			return validated, fmt.Errorf("workspace FUSE CA Secret key is invalid or conflicts with credential keys")
+		}
+	}
+	validated.secretItems = []corev1.KeyToPath{{Key: "accessKey", Path: "accessKey"}, {Key: "secretKey", Path: "secretKey"}}
+	if fuse.CASecretKey != "" {
+		validated.secretItems = append(validated.secretItems, corev1.KeyToPath{Key: fuse.CASecretKey, Path: fuse.CASecretKey})
+	}
+
+	endpoint, endpointHostname, endpointIP, endpointPort, err := validateFUSEEndpoint(fuse)
+	if err != nil {
+		return validated, err
+	}
+	validated.endpoint = endpoint
+
+	approvedNetworks, err := validateSystemEgress(fuse.SystemEgress, endpointHostname, endpointPort)
+	if err != nil {
+		return validated, err
+	}
+	if endpointIP {
+		addr, _ := netip.ParseAddr(endpointHostname)
+		approved := false
+		for _, network := range approvedNetworks {
+			approved = approved || network.Contains(addr)
+		}
+		if !approved {
+			return validated, fmt.Errorf("workspace FUSE endpoint is outside approved system egress CIDRs")
+		}
+	}
+	validated.nameservers, err = hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
+	if err != nil {
+		return validated, err
+	}
+	validated.hostAliases, err = endpointHostAliases(endpointHostname, endpointIP, fuse.EndpointHostIPs, approvedNetworks)
+	if err != nil {
+		return validated, err
+	}
+
+	if fuse.CacheMedium != "disk" {
+		return validated, fmt.Errorf("workspace FUSE cache medium must be disk")
+	}
+	validated.cacheSize, err = parsePositiveQuantity("workspace FUSE cache size", fuse.CacheSize)
+	if err != nil {
+		return validated, err
+	}
+	validated.mounterRunSize, err = resource.ParseQuantity(mounterRunVolumeSize)
+	if err != nil {
+		return validated, fmt.Errorf("parse mounter run volume size: %w", err)
+	}
+	tmpDisk := spec.TmpDisk
+	if tmpDisk == "" {
+		tmpDisk = runtime.DefaultTmpDisk
+	}
+	validated.tmpDiskSize, err = parsePositiveQuantity("workspace FUSE tmp disk", tmpDisk)
+	if err != nil {
+		return validated, err
+	}
+	if spec.Disk != "" {
+		if _, err := parsePositiveQuantity("workspace FUSE sandbox disk", spec.Disk); err != nil {
+			return validated, err
+		}
+	}
+	validated.sandboxResources, err = preparedSandboxResources(spec)
+	if err != nil {
+		return validated, err
+	}
+	validated.mounterResources, err = preparedMounterResources(fuse.MounterResources)
+	if err != nil {
+		return validated, err
+	}
+	if validated.mounterResources.Requests.Cpu().Cmp(*validated.mounterResources.Limits.Cpu()) > 0 ||
+		validated.mounterResources.Requests.Memory().Cmp(*validated.mounterResources.Limits.Memory()) > 0 ||
+		validated.mounterResources.Requests.StorageEphemeral().Cmp(*validated.mounterResources.Limits.StorageEphemeral()) > 0 {
+		return validated, fmt.Errorf("workspace FUSE mounter resource request must not exceed its limit")
+	}
+	if validated.cacheSize.Cmp(*validated.mounterResources.Limits.StorageEphemeral()) > 0 {
+		return validated, fmt.Errorf("workspace FUSE cache size must not exceed mounter ephemeral storage limit")
+	}
+	validated.terminationGraceSeconds, err = fuseTerminationGraceSeconds(fuse.FlushTimeout, fuse.UnmountTimeout)
+	if err != nil {
+		return validated, err
+	}
+	if fuse.MountTimeout <= 0 {
+		return validated, fmt.Errorf("workspace FUSE mount timeout must be positive")
+	}
+	return validated, nil
+}
+
+func nonEmptyCanonicalValue(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
+}
+
+func isDigestPinnedImage(image string) bool {
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	digested, ok := named.(reference.Digested)
+	if !ok || digested.Digest().Algorithm() != "sha256" {
+		return false
+	}
+	encoded := digested.Digest().Encoded()
+	if len(encoded) != 64 || encoded != strings.ToLower(encoded) {
+		return false
+	}
+	_, err = hex.DecodeString(encoded)
+	return err == nil
+}
+
+func validateLSMProfile(profile string) error {
+	lower := strings.ToLower(profile)
+	if !nonEmptyCanonicalValue(profile) || lower == "unconfined" || lower == "label=disable" || strings.HasPrefix(profile, "/") || strings.Contains(profile, "..") || len(profile) > 128 {
+		return fmt.Errorf("workspace FUSE LSM profile must be a confined profile name")
+	}
+	for _, char := range profile {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && !strings.ContainsRune("._/-", char) {
+			return fmt.Errorf("workspace FUSE LSM profile is invalid")
+		}
+	}
+	return nil
+}
+
+func validateFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, bool, int32, error) {
+	const invalidEndpoint = "invalid workspace FUSE endpoint"
+	raw := fuse.Endpoint
+	var parsed *url.URL
+	var err error
+	if fuse.Provider == "minio" {
+		if strings.Contains(raw, "://") {
+			return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+		}
+		scheme := "http"
+		if fuse.UseSSL {
+			scheme = "https"
+		}
+		parsed, err = url.Parse(scheme + "://" + raw)
+	} else {
+		parsed, err = url.Parse(raw)
+		if err == nil && parsed.Scheme != "http" && parsed.Scheme != "https" {
+			err = fmt.Errorf("unsupported scheme")
+		}
+		if err == nil && fuse.UseSSL != (parsed.Scheme == "https") {
+			err = fmt.Errorf("scheme mismatch")
+		}
+	}
+	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+	}
+	endpointIP := false
+	if addr, parseErr := netip.ParseAddr(hostname); parseErr == nil {
+		if addr.Is4In6() || addr.Zone() != "" || addr.String() != hostname {
+			return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+		}
+		endpointIP = true
+	} else if hostname != strings.ToLower(hostname) || len(kvalidation.IsDNS1123Subdomain(hostname)) != 0 {
+		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+	}
+	port := int32(80)
+	if parsed.Scheme == "https" {
+		port = 443
+	}
+	if rawPort := parsed.Port(); rawPort != "" {
+		parsedPort, parseErr := strconv.Atoi(rawPort)
+		if parseErr != nil || parsedPort < 1 || parsedPort > 65535 {
+			return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+		}
+		port = int32(parsedPort)
+	}
+	return parsed.String(), hostname, endpointIP, port, nil
+}
+
+func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string, endpointPort int32) ([]netip.Prefix, error) {
+	if spec.ProxyURL != "" {
+		return nil, fmt.Errorf("workspace FUSE system egress proxy must be empty")
+	}
+	if err := validatePorts("DNS", spec.DNSPorts); err != nil {
+		return nil, err
+	}
+	if !containsPort(spec.DNSPorts, 53) {
+		return nil, fmt.Errorf("workspace FUSE system egress must approve DNS port 53")
+	}
+	if err := validatePorts("endpoint", spec.EndpointPorts); err != nil {
+		return nil, err
+	}
+	if !containsPort(spec.EndpointPorts, endpointPort) {
+		return nil, fmt.Errorf("workspace FUSE endpoint port is not approved by system egress")
+	}
+	networks := make([]netip.Prefix, 0, len(spec.EndpointCIDRs))
+	for _, raw := range spec.EndpointCIDRs {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != raw || prefix != prefix.Masked() {
+			return nil, fmt.Errorf("workspace FUSE system egress contains an invalid endpoint CIDR")
+		}
+		networks = append(networks, prefix)
+	}
+	switch spec.Mode {
+	case runtime.SystemEgressCIDR:
+		if len(networks) == 0 {
+			return nil, fmt.Errorf("workspace FUSE CIDR system egress requires endpoint CIDRs")
+		}
+	case runtime.SystemEgressCiliumFQDN:
+		if len(spec.EndpointFQDNs) == 0 {
+			return nil, fmt.Errorf("workspace FUSE Cilium system egress requires endpoint FQDNs")
+		}
+		found := false
+		for _, fqdn := range spec.EndpointFQDNs {
+			if fqdn != strings.ToLower(fqdn) || len(kvalidation.IsDNS1123Subdomain(fqdn)) != 0 {
+				return nil, fmt.Errorf("workspace FUSE system egress contains an invalid endpoint FQDN")
+			}
+			found = found || fqdn == endpointHostname
+		}
+		if !found {
+			return nil, fmt.Errorf("workspace FUSE endpoint FQDN is not approved by system egress")
+		}
+	default:
+		return nil, fmt.Errorf("workspace FUSE system egress mode is invalid")
+	}
+	return networks, nil
+}
+
+func validatePorts(kind string, ports []int32) error {
+	if len(ports) == 0 {
+		return fmt.Errorf("workspace FUSE system egress %s ports must not be empty", kind)
+	}
+	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("workspace FUSE system egress %s port is invalid", kind)
+		}
+	}
+	return nil
+}
+
+func containsPort(ports []int32, wanted int32) bool {
+	for _, port := range ports {
+		if port == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func endpointHostAliases(hostname string, endpointIP bool, rawIPs []string, approvedNetworks []netip.Prefix) ([]corev1.HostAlias, error) {
+	if len(rawIPs) == 0 {
+		return nil, nil
+	}
+	if endpointIP {
+		return nil, fmt.Errorf("workspace FUSE endpoint aliases require an FQDN endpoint")
+	}
+	ips := append([]string(nil), rawIPs...)
+	sort.Strings(ips)
+	aliases := make([]corev1.HostAlias, 0, len(ips))
+	var previous string
+	for _, rawIP := range ips {
+		addr, err := netip.ParseAddr(rawIP)
+		if err != nil || addr.Is4In6() || addr.Zone() != "" || addr.String() != rawIP {
+			return nil, fmt.Errorf("workspace FUSE endpoint host alias must be a canonical literal IP")
+		}
+		if rawIP == previous {
+			continue
+		}
+		approved := false
+		for _, network := range approvedNetworks {
+			approved = approved || network.Contains(addr)
+		}
+		if !approved {
+			return nil, fmt.Errorf("workspace FUSE endpoint host alias is outside approved system egress CIDRs")
+		}
+		aliases = append(aliases, corev1.HostAlias{IP: rawIP, Hostnames: []string{hostname}})
+		previous = rawIP
+	}
+	return aliases, nil
+}
+
 func preparedSandboxResources(spec runtime.SandboxSpec) (corev1.ResourceRequirements, error) {
-	resources := corev1.ResourceRequirements{}
-	if spec.Memory != "" || spec.CPU != "" {
-		resources.Requests = corev1.ResourceList{}
-		resources.Limits = corev1.ResourceList{}
+	memoryLimit, err := parsePositiveQuantity("workspace FUSE sandbox memory limit", spec.Memory)
+	if err != nil {
+		return corev1.ResourceRequirements{}, err
 	}
-	if spec.Memory != "" {
-		limit, err := resource.ParseQuantity(spec.Memory)
+	memoryRequest := memoryLimit
+	if spec.MemoryRequest != "" {
+		memoryRequest, err = parsePositiveQuantity("workspace FUSE sandbox memory request", spec.MemoryRequest)
 		if err != nil {
-			return resources, fmt.Errorf("parse memory quantity %q: %w", spec.Memory, err)
+			return corev1.ResourceRequirements{}, err
 		}
-		request := limit
-		if spec.MemoryRequest != "" {
-			request, err = resource.ParseQuantity(spec.MemoryRequest)
-			if err != nil {
-				return resources, fmt.Errorf("parse memory request %q: %w", spec.MemoryRequest, err)
-			}
-		}
-		resources.Limits[corev1.ResourceMemory] = limit
-		resources.Requests[corev1.ResourceMemory] = request
 	}
-	if spec.CPU != "" {
-		limit, err := resource.ParseQuantity(spec.CPU)
+	cpuLimit, err := parsePositiveQuantity("workspace FUSE sandbox CPU limit", spec.CPU)
+	if err != nil {
+		return corev1.ResourceRequirements{}, err
+	}
+	cpuRequest := cpuLimit
+	if spec.CPURequest != "" {
+		cpuRequest, err = parsePositiveQuantity("workspace FUSE sandbox CPU request", spec.CPURequest)
 		if err != nil {
-			return resources, fmt.Errorf("parse cpu quantity %q: %w", spec.CPU, err)
+			return corev1.ResourceRequirements{}, err
 		}
-		request := limit
-		if spec.CPURequest != "" {
-			request, err = resource.ParseQuantity(spec.CPURequest)
-			if err != nil {
-				return resources, fmt.Errorf("parse cpu request %q: %w", spec.CPURequest, err)
-			}
-		}
-		resources.Limits[corev1.ResourceCPU] = limit
-		resources.Requests[corev1.ResourceCPU] = request
 	}
-	return resources, nil
+	if memoryRequest.Cmp(memoryLimit) > 0 || cpuRequest.Cmp(cpuLimit) > 0 {
+		return corev1.ResourceRequirements{}, fmt.Errorf("workspace FUSE sandbox resource request must not exceed its limit")
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: memoryRequest, corev1.ResourceCPU: cpuRequest},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: memoryLimit, corev1.ResourceCPU: cpuLimit},
+	}, nil
 }
 
 func preparedMounterResources(spec runtime.WorkspaceFUSEResources) (corev1.ResourceRequirements, error) {
@@ -516,16 +796,23 @@ func parsePositiveQuantity(name, value string) (resource.Quantity, error) {
 }
 
 func hostOnlyNameservers(cidrs []string) ([]string, error) {
-	if len(cidrs) == 0 {
-		return nil, fmt.Errorf("workspace FUSE DNS CIDRs must not be empty")
-	}
-	nameservers := make([]string, 0, len(cidrs))
-	for _, cidr := range cidrs {
+	canonical := append([]string(nil), cidrs...)
+	sort.Strings(canonical)
+	nameservers := make([]string, 0, len(canonical))
+	var previous string
+	for _, cidr := range canonical {
+		if cidr == previous {
+			continue
+		}
 		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil || prefix.Bits() != prefix.Addr().BitLen() {
+		if err != nil || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != cidr || prefix.Bits() != prefix.Addr().BitLen() {
 			return nil, fmt.Errorf("workspace FUSE DNS CIDR %q must be a host-only /32 or /128 CIDR", cidr)
 		}
-		nameservers = append(nameservers, prefix.Addr().Unmap().String())
+		nameservers = append(nameservers, prefix.Addr().String())
+		previous = cidr
+	}
+	if len(nameservers) < 1 || len(nameservers) > 3 {
+		return nil, fmt.Errorf("workspace FUSE must configure between one and three unique DNS resolvers")
 	}
 	return nameservers, nil
 }
@@ -534,13 +821,13 @@ func secretFilePath(key string) string {
 	if key == "" {
 		return ""
 	}
-	return path.Join(mounterSecretPath, path.Base(key))
+	return path.Join(mounterSecretPath, key)
 }
 
 func preparedPoolKeyLabel(poolKey string) (string, error) {
 	digest, err := hex.DecodeString(poolKey)
-	if err != nil || len(digest) != 32 {
-		return "", fmt.Errorf("workspace FUSE PoolKey must be a 64-character SHA-256 hex digest")
+	if err != nil || len(digest) != 32 || poolKey != strings.ToLower(poolKey) {
+		return "", fmt.Errorf("workspace FUSE PoolKey must be a canonical lowercase 64-character SHA-256 hex digest")
 	}
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest)), nil
 }

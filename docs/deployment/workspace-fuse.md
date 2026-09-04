@@ -347,6 +347,9 @@ preflight 工具必须使用与 sandbox-api 相同的 Kubernetes 身份和 Redis
 apiVersion: v1
 kind: Pod
 metadata:
+  annotations:
+    # Kubernetes 1.29 使用兼容 annotation；值由已校验的 provider LSM profile 生成。
+    container.apparmor.security.beta.kubernetes.io/workspace-mounter: localhost/sandbox-fuse
   labels:
     sandbox.managed: "true"
     sandbox.pool: "true"
@@ -458,6 +461,8 @@ spec:
 ```
 
 `SANDBOX_MOUNTER_BOOTSTRAP` 只包含 PoolKey 已覆盖的固定、非敏感配置，不包含 prefix、workspace identity 或 lease generation。bootstrap 携带完整的 64 位十六进制 PoolKey；`sandbox.pool.key` label 则把这 32 字节摘要编码为 lowercase base32（无 padding）的 52 字符值，以满足 Kubernetes label 长度约束。该 label 仅供 NetworkPolicy 和资源选择器使用，不得当作授权值。bootstrap 同时包含 mount、flush、unmount 三个超时；Pod 的 `terminationGracePeriodSeconds` 取 `max(90, ceil(flush_timeout + unmount_timeout) + 15)`。`access_key_file`/`secret_key_file` 位于只读 Secret volume，`passwd_file` 必须位于 mounter 私有 `/run/s3fs`；sidecar 校验 AK/SK 为单行非空值后原子生成 mode `0600` 的 `AK:SK` 文件，不能假设 Secret 已提供 `passwd-s3fs`。sidecar 把 Downward API 提供的 Pod UID 与该 JSON 分别校验，并在 `/run/s3fs` 原子落成 mode `0600` 的 bootstrap 文件后才进入 prepared。Docker 特殊容器没有 Downward API：它先以 locked supervisor 启动，sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，再通过一次性 `workspace-mounter bootstrap` 控制命令写入同一 schema；bootstrap 重放或 ID 不一致必须失败。
+
+目标最低版本包含 Kubernetes 1.29，因此 runtime 不使用 1.30 才稳定可用的结构化 `securityContext.appArmorProfile` 字段；mounter 的已校验、非 `unconfined` profile 通过兼容的 container AppArmor annotation 注入。升级最低版本前不得同时渲染两种形式，避免不同 API Server/准入插件产生不一致结果。
 
 空壳创建时只携带固定 provider 配置和 PoolKey，初始 label state 必须是 `preparing`，不能在 health 验证前标成 `prepared`。Pool availability 不能等待 Pod Ready：私有 `PreparedSandboxHealth` 验证 sidecar locked、sandbox 主容器 running、无 s3fs 和无 mount/generation；Pool/manager 另外从 Redis owner/session 反查确认该 runtime UID 未绑定 workspace，且公共 Exec/file gate 关闭。prepared 空壳不创建用户 session，不出现在公共 sandbox list/get 响应中，runtime ID/UID 也不能返回给调用方；公共 Exec/file API 必须校验已提交的用户 session 和 gate，不能仅凭 runtime ID 访问。全部通过后 Kubernetes 才以 resourceVersion 冲突保护把 state patch 为 `prepared` 并入队；Acquire 后 runtime 才根据请求生成唯一 prefix、租约标签和 workspace identity。对象 key 根路径严格为：
 

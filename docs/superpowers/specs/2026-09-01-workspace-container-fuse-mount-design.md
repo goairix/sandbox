@@ -215,6 +215,7 @@ Sidecar 不配置 `livenessProbe`。startup probe 只表示“空壳可绑定”
 
 - 使用固定 digest 的可信镜像。
 - `privileged: true`，挂载 `/dev/fuse`。
+- 最低支持 Kubernetes 1.29，专用 confined AppArmor profile 使用 `container.apparmor.security.beta.kubernetes.io/workspace-mounter=localhost/<profile>` annotation 注入；在最低版本提升前不渲染 1.30 的结构化 `securityContext.appArmorProfile` 字段。
 - Secret 只挂载到 sidecar，不使用会被主容器读取的共享环境变量。
 - s3fs 密码文件位于 sidecar 私有 tmpfs，权限 `0600`。
 - 不暴露监听端口。

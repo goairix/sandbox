@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -75,6 +76,43 @@ func TestCreatePodDefaultsTmpDiskLimitTo50Mi(t *testing.T) {
 	t.Fatal("tmp volume not found")
 }
 
+func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := runtime.SandboxSpec{ID: "legacy-a", Image: "sandbox:legacy", Labels: map[string]string{"custom": "value"}}
+
+	pod, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+	require.NoError(t, err)
+	falseVal := false
+	tmpSize := resource.MustParse(runtime.DefaultTmpDisk)
+	expected := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy-a", Namespace: "sandbox-runtime", Labels: map[string]string{
+			"app": "sandbox", "sandbox.id": "legacy-a", "sandbox.managed": "true", "custom": "value",
+		}},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &falseVal, EnableServiceLinks: &falseVal,
+			SecurityContext: &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
+			DNSPolicy:       corev1.DNSNone, DNSConfig: &corev1.PodDNSConfig{Nameservers: []string{"8.8.8.8", "1.1.1.1"}},
+			Containers: []corev1.Container{{
+				Name: "sandbox", Image: "sandbox:legacy", Command: []string{"sleep", "infinity"}, WorkingDir: "/workspace",
+				Resources:       corev1.ResourceRequirements{},
+				SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: &falseVal, AllowPrivilegeEscalation: &falseVal},
+				Env: []corev1.EnvVar{
+					{Name: "KUBERNETES_SERVICE_HOST", Value: ""}, {Name: "KUBERNETES_SERVICE_PORT", Value: ""},
+					{Name: "KUBERNETES_SERVICE_PORT_HTTPS", Value: ""}, {Name: "KUBERNETES_PORT", Value: ""},
+					{Name: "KUBERNETES_PORT_443_TCP", Value: ""}, {Name: "KUBERNETES_PORT_443_TCP_PROTO", Value: ""},
+					{Name: "KUBERNETES_PORT_443_TCP_PORT", Value: ""}, {Name: "KUBERNETES_PORT_443_TCP_ADDR", Value: ""},
+				},
+				VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}, {Name: "tmp", MountPath: "/tmp"}},
+			}},
+			Volumes: []corev1.Volume{
+				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize}}},
+			},
+		},
+	}
+	assert.Equal(t, expected, pod)
+}
+
 func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	spec := preparedFUSESpecForTest()
@@ -96,10 +134,8 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, int64(0), *mounter.SecurityContext.RunAsUser)
 	require.NotNil(t, mounter.SecurityContext.ReadOnlyRootFilesystem)
 	assert.True(t, *mounter.SecurityContext.ReadOnlyRootFilesystem)
-	require.NotNil(t, mounter.SecurityContext.AppArmorProfile)
-	assert.Equal(t, corev1.AppArmorProfileTypeLocalhost, mounter.SecurityContext.AppArmorProfile.Type)
-	require.NotNil(t, mounter.SecurityContext.AppArmorProfile.LocalhostProfile)
-	assert.Equal(t, spec.WorkspaceFUSE.LSMProfile, *mounter.SecurityContext.AppArmorProfile.LocalhostProfile)
+	assert.Nil(t, mounter.SecurityContext.AppArmorProfile)
+	assert.Equal(t, "localhost/sandbox-fuse", pod.Annotations["container.apparmor.security.beta.kubernetes.io/workspace-mounter"])
 
 	assert.Equal(t, corev1.MountPropagationBidirectional, *podVolumeMount(t, mounter.VolumeMounts, "workspace").MountPropagation)
 	assert.Equal(t, corev1.MountPropagationHostToContainer, *podVolumeMount(t, pod.Spec.Containers[0].VolumeMounts, "workspace").MountPropagation)
@@ -130,6 +166,11 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, spec.WorkspaceFUSE.SecretName, credentials.Secret.SecretName)
 	require.NotNil(t, credentials.Secret.DefaultMode)
 	assert.Equal(t, int32(0o400), *credentials.Secret.DefaultMode)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: "accessKey", Path: "accessKey"},
+		{Key: "secretKey", Path: "secretKey"},
+		{Key: "ca.crt", Path: "ca.crt"},
+	}, credentials.Secret.Items)
 	assert.True(t, podVolumeMount(t, mounter.VolumeMounts, "workspace-credentials").ReadOnly)
 
 	require.NotNil(t, mounter.StartupProbe)
@@ -209,13 +250,17 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.False(t, hasPodEnv(sandbox.Env, "SANDBOX_RUNTIME_UID"))
 	assert.False(t, hasPodEnv(sandbox.Env, "SANDBOX_MOUNTER_BOOTSTRAP"))
 
-	assert.Equal(t, []string{"8.8.8.8", "2001:4860:4860::8888"}, pod.Spec.DNSConfig.Nameservers)
+	assert.Equal(t, []string{"2001:4860:4860::8888", "8.8.8.8"}, pod.Spec.DNSConfig.Nameservers)
 	assert.Equal(t, "50m", mounter.Resources.Requests.Cpu().String())
 	assert.Equal(t, "64Mi", mounter.Resources.Requests.Memory().String())
 	assert.Equal(t, "512Mi", mounter.Resources.Requests.StorageEphemeral().String())
 	assert.Equal(t, "1", mounter.Resources.Limits.Cpu().String())
 	assert.Equal(t, "512Mi", mounter.Resources.Limits.Memory().String())
 	assert.Equal(t, "3Gi", mounter.Resources.Limits.StorageEphemeral().String())
+	assert.Equal(t, []corev1.HostAlias{
+		{IP: "192.0.2.10", Hostnames: []string{"minio.example.com"}},
+		{IP: "192.0.2.11", Hostnames: []string{"minio.example.com"}},
+	}, pod.Spec.HostAliases)
 }
 
 func TestCreatePodPreparedFUSERejectsNonHostDNSCIDR(t *testing.T) {
@@ -240,6 +285,151 @@ func TestCreatePodPreparedFUSERejectsNonDigestPoolKey(t *testing.T) {
 	pods, listErr := client.CoreV1().Pods("sandbox-runtime").List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, listErr)
 	assert.Empty(t, pods.Items)
+}
+
+func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*runtime.SandboxSpec)
+	}{
+		{"runtime type", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.RuntimeType = "docker" }},
+		{"provider", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Provider = "s3" }},
+		{"driver", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Driver = "goofys" }},
+		{"profile", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Profile = "" }},
+		{"bucket", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Bucket = "" }},
+		{"storage identity", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.StorageIdentity = "" }},
+		{"credential generation", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CredentialGeneration = "" }},
+		{"unpinned mounter image", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterImage = "mounter:latest" }},
+		{"secret name", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SecretName = "INVALID_SECRET" }},
+		{"ca secret key", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "invalid/key" }},
+		{"ca collides with access key", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "accessKey" }},
+		{"empty lsm", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.LSMProfile = "" }},
+		{"unconfined lsm", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.LSMProfile = "unconfined" }},
+		{"uppercase pool key", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.PoolKey = strings.ToUpper(s.WorkspaceFUSE.PoolKey) }},
+		{"sandbox id", func(s *runtime.SandboxSpec) { s.ID = "invalid/id" }},
+		{"system egress mode", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.Mode = "unknown" }},
+		{"cidr mode without endpoint cidr", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointCIDRs = nil }},
+		{"dns ports", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = nil }},
+		{"dns port 53 not approved", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{54} }},
+		{"endpoint ports", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointPorts = nil }},
+		{"proxy", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.ProxyURL = "http://proxy.invalid" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			spec := preparedFUSESpecForTest()
+			tt.mutate(&spec)
+			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+			require.Error(t, err)
+			assertNoPods(t, client, "sandbox-runtime")
+		})
+	}
+}
+
+func TestCreatePodPreparedFUSEValidatesEndpointWithoutEchoingIt(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		endpoint string
+		aliases  []string
+	}{
+		{"minio scheme", "minio", "https://secret.invalid:9000", nil},
+		{"minio path", "minio", "secret.invalid:9000/bucket", nil},
+		{"obs missing scheme", "obs", "secret.invalid", nil},
+		{"obs userinfo", "obs", "https://user:pass@secret.invalid", nil},
+		{"obs query", "obs", "https://secret.invalid?token=secret", nil},
+		{"obs fragment", "obs", "https://secret.invalid/#secret", nil},
+		{"obs business path", "obs", "https://secret.invalid/bucket", nil},
+		{"ip endpoint with aliases", "minio", "192.0.2.44:9000", []string{"192.0.2.10"}},
+		{"ip endpoint outside approved cidr", "minio", "198.51.100.44:9000", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			spec := preparedFUSESpecForTest()
+			spec.WorkspaceFUSE.Provider = tt.provider
+			spec.WorkspaceFUSE.Endpoint = tt.endpoint
+			spec.WorkspaceFUSE.EndpointHostIPs = tt.aliases
+			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), tt.endpoint)
+			assertNoPods(t, client, "sandbox-runtime")
+		})
+	}
+}
+
+func TestCreatePodPreparedFUSEOBSRetainsTLSEndpointHostname(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.Provider = "obs"
+	spec.WorkspaceFUSE.Endpoint = "https://obs.private.example.com:443"
+	spec.WorkspaceFUSE.EndpointHostIPs = []string{"192.0.2.20"}
+	spec.WorkspaceFUSE.SystemEgress.Mode = runtime.SystemEgressCiliumFQDN
+	spec.WorkspaceFUSE.SystemEgress.EndpointFQDNs = []string{"obs.private.example.com"}
+	spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443}
+
+	pod, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+	require.NoError(t, err)
+	mounter := pod.Spec.InitContainers[0]
+	var bootstrap map[string]any
+	require.NoError(t, json.Unmarshal([]byte(podEnv(t, mounter.Env, "SANDBOX_MOUNTER_BOOTSTRAP").Value), &bootstrap))
+	assert.Equal(t, spec.WorkspaceFUSE.Endpoint, bootstrap["endpoint"])
+	assert.Equal(t, []corev1.HostAlias{{IP: "192.0.2.20", Hostnames: []string{"obs.private.example.com"}}}, pod.Spec.HostAliases)
+}
+
+func TestCreatePodPreparedFUSEValidatesAndCanonicalizesEndpointHostIPs(t *testing.T) {
+	for _, hostIP := range []string{"not-an-ip", "192.0.2.010", "2001:0db8::1", "::ffff:192.0.2.10"} {
+		t.Run(hostIP, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			spec := preparedFUSESpecForTest()
+			spec.WorkspaceFUSE.EndpointHostIPs = []string{hostIP}
+			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+			require.Error(t, err)
+			assertNoPods(t, client, "sandbox-runtime")
+		})
+	}
+}
+
+func TestCreatePodPreparedFUSEValidatesDNSResolvers(t *testing.T) {
+	tests := [][]string{
+		{"1.1.1.1/32", "8.8.8.8/32", "9.9.9.9/32", "2001:4860:4860::8888/128"},
+		{"::ffff:192.0.2.10/128"},
+	}
+	for _, dnsCIDRs := range tests {
+		client := fake.NewSimpleClientset()
+		spec := preparedFUSESpecForTest()
+		spec.WorkspaceFUSE.SystemEgress.DNSCIDRs = dnsCIDRs
+		_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+		require.Error(t, err)
+		assertNoPods(t, client, "sandbox-runtime")
+	}
+}
+
+func TestCreatePodPreparedFUSEValidatesResourceRelationships(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*runtime.SandboxSpec)
+	}{
+		{"sandbox cpu required", func(s *runtime.SandboxSpec) { s.CPU = "" }},
+		{"sandbox cpu request", func(s *runtime.SandboxSpec) { s.CPURequest = "2" }},
+		{"sandbox memory required", func(s *runtime.SandboxSpec) { s.Memory = "" }},
+		{"sandbox memory request", func(s *runtime.SandboxSpec) { s.MemoryRequest = "1Gi" }},
+		{"tmp positive", func(s *runtime.SandboxSpec) { s.TmpDisk = "0" }},
+		{"mounter cpu request", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.CPURequest = "2" }},
+		{"mounter memory request", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.MemoryRequest = "1Gi" }},
+		{"mounter ephemeral request", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.EphemeralStorageRequest = "4Gi" }},
+		{"cache exceeds ephemeral limit", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CacheSize = "4Gi" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			spec := preparedFUSESpecForTest()
+			tt.mutate(&spec)
+			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+			require.Error(t, err)
+			assertNoPods(t, client, "sandbox-runtime")
+		})
+	}
 }
 
 func TestCreatePodPreparedFUSETerminationGraceCoversFlushAndUnmount(t *testing.T) {
@@ -287,7 +477,7 @@ func preparedFUSESpecForTest() runtime.SandboxSpec {
 			RuntimeType: "kubernetes", Provider: "minio", Driver: "s3fs", Profile: "minio-sigv4-path-style-v1",
 			StorageIdentity: "storage-a", CredentialGeneration: "credentials-v1",
 			MounterImage: "mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			SecretName:   "workspace-secret", CASecretKey: "ca.crt", Bucket: "sandbox",
+			SecretName:   "workspace-secret", CASecretKey: "ca.crt", EndpointHostIPs: []string{"192.0.2.11", "192.0.2.10", "192.0.2.10"}, Bucket: "sandbox",
 			Endpoint: "minio.example.com:9000", Region: "us-east-1", UseSSL: true,
 			CacheSize: "2Gi", CacheMedium: "disk", MountTimeout: 30 * time.Second, FlushTimeout: 45 * time.Second, UnmountTimeout: 20 * time.Second,
 			LSMProfile: "sandbox-fuse", PoolKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -295,7 +485,10 @@ func preparedFUSESpecForTest() runtime.SandboxSpec {
 				CPURequest: "50m", CPULimit: "1", MemoryRequest: "64Mi", MemoryLimit: "512Mi",
 				EphemeralStorageRequest: "512Mi", EphemeralStorageLimit: "3Gi",
 			},
-			SystemEgress: runtime.SystemEgressSpec{DNSCIDRs: []string{"8.8.8.8/32", "2001:4860:4860::8888/128"}},
+			SystemEgress: runtime.SystemEgressSpec{
+				Mode: runtime.SystemEgressCIDR, DNSCIDRs: []string{"2001:4860:4860::8888/128", "8.8.8.8/32", "8.8.8.8/32"}, DNSPorts: []int32{53},
+				EndpointCIDRs: []string{"192.0.2.0/24"}, EndpointPorts: []int32{9000},
+			},
 		},
 	}
 }
@@ -349,6 +542,13 @@ func hasPodEnv(env []corev1.EnvVar, name string) bool {
 		}
 	}
 	return false
+}
+
+func assertNoPods(t *testing.T, client *fake.Clientset, namespace string) {
+	t.Helper()
+	pods, err := client.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pods.Items)
 }
 
 func TestPreparedFUSESpecFixtureUsesNoAuthorizationFields(t *testing.T) {
