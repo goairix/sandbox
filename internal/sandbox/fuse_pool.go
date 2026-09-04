@@ -78,6 +78,7 @@ type FUSEPool struct {
 	opWG         sync.WaitGroup
 	startDone    chan struct{}
 	startErr     error
+	startWaiters int
 	stopStarted  bool
 	stopDone     chan struct{}
 	stopErr      error
@@ -107,49 +108,68 @@ func (p *FUSEPool) Start(ctx context.Context) error {
 	if err := p.validate(); err != nil {
 		return err
 	}
-	p.lifecycleMu.Lock()
-	if p.stopped || p.stopping {
+	for {
+		p.lifecycleMu.Lock()
+		if p.stopped || p.stopping {
+			p.lifecycleMu.Unlock()
+			return ErrFUSEPoolStopped
+		}
+		if p.running {
+			p.lifecycleMu.Unlock()
+			return nil
+		}
+		if p.starting {
+			done := p.startDone
+			p.startWaiters++
+			p.lifecycleMu.Unlock()
+			select {
+			case <-done:
+				p.lifecycleMu.Lock()
+				p.startWaiters--
+				err := p.startErr
+				stopped := p.stopped || p.stopping
+				p.lifecycleMu.Unlock()
+				if stopped {
+					return ErrFUSEPoolStopped
+				}
+				// A caller-scoped cancellation only ends that caller's election.
+				// A still-live waiter must compete to run its own initial pass.
+				if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && ctx.Err() == nil {
+					continue
+				}
+				return err
+			case <-ctx.Done():
+				p.lifecycleMu.Lock()
+				p.startWaiters--
+				p.lifecycleMu.Unlock()
+				return ctx.Err()
+			}
+		}
+		p.starting = true
+		p.startDone = make(chan struct{})
+		done := p.startDone
+		p.opWG.Add(1)
 		p.lifecycleMu.Unlock()
-		return ErrFUSEPoolStopped
-	}
-	if p.running {
+
+		err := p.waitInitialReconcile(ctx)
+		p.opWG.Done()
+		p.lifecycleMu.Lock()
+		p.starting = false
+		if err == nil && !p.stopped && !p.stopping {
+			p.running = true
+			p.controllerWG.Add(1)
+			go p.reconcileLoop(p.loopCtx)
+		} else if err == nil {
+			err = ErrFUSEPoolStopped
+		}
+		p.startErr = err
+		close(done)
 		p.lifecycleMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("initial FUSE pool reconciliation: %w", err)
+		}
 		return nil
 	}
-	if p.starting {
-		done := p.startDone
-		p.lifecycleMu.Unlock()
-		select {
-		case <-done:
-			return p.startErr
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	p.starting = true
-	p.startDone = make(chan struct{})
-	done := p.startDone
-	p.opWG.Add(1)
-	p.lifecycleMu.Unlock()
-
-	err := p.waitInitialReconcile(ctx)
-	p.opWG.Done()
-	p.lifecycleMu.Lock()
-	p.starting = false
-	if err == nil && !p.stopped && !p.stopping {
-		p.running = true
-		p.controllerWG.Add(1)
-		go p.reconcileLoop(p.loopCtx)
-	} else if err == nil {
-		err = ErrFUSEPoolStopped
-	}
-	p.startErr = err
-	close(done)
-	p.lifecycleMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("initial FUSE pool reconciliation: %w", err)
-	}
-	return nil
 }
 
 func (p *FUSEPool) waitInitialReconcile(ctx context.Context) error {
@@ -305,25 +325,34 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 	if err := p.validateReservedRecord(record, record.ReservationToken); err != nil {
 		return err
 	}
-	disposition, guardErr := p.guard(ctx, record)
+	opCtx, done, err := p.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	defer p.scheduleRefill()
+	disposition, guardErr := p.guard(opCtx, record)
 	if disposition == FUSEPoolProtected {
-		p.scheduleRefill()
 		return errors.Join(ErrFUSEPoolProtected, guardErr)
 	}
 	if disposition == FUSEPoolDispositionUnknown {
-		p.scheduleRefill()
 		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
 	}
 	if disposition == FUSEPoolAbandoned {
-		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr, p.claimAndDestroy(ctx, record))
+		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr, p.claimAndDestroy(opCtx, record))
 	}
-	if healthErr := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, record.PoolKey); healthErr != nil {
-		cleanupErr := p.claimAndDestroy(ctx, record)
-		p.scheduleRefill()
+	if healthErr := p.runtime.PreparedSandboxHealth(opCtx, record.RuntimeID, record.PoolKey); healthErr != nil {
+		cleanupErr := p.claimAndDestroy(opCtx, record)
 		return errors.Join(healthErr, cleanupErr)
 	}
-	_, err := p.repo.Transition(ctx, record.PreparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, record.ReservationToken, record.Revision)
+	if err := opCtx.Err(); err != nil {
+		return err
+	}
+	_, err = p.repo.ReturnPreparedWithAdmission(opCtx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
 	if err != nil {
+		if errors.Is(err, state.ErrFUSEPoolConflict) {
+			return errors.Join(ErrFUSEPoolAtCapacity, p.claimAndDestroy(opCtx, record))
+		}
 		return fmt.Errorf("return FUSE sandbox to prepared: %w", err)
 	}
 	return nil
@@ -394,8 +423,11 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		switch record.State {
 		case state.FUSEPoolPreparing:
 			if record.PrepareUntil.IsZero() || !record.PrepareUntil.After(now) {
-				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
-					return true, fmt.Errorf("clean expired preparing FUSE sandbox: %w", err)
+				disposition, _ := p.guard(ctx, record)
+				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
+					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
+						return true, fmt.Errorf("clean expired preparing FUSE sandbox: %w", err)
+					}
 				}
 				continue
 			}
@@ -517,9 +549,13 @@ func (p *FUSEPool) inspectPrepared(ctx context.Context) error {
 		}
 	}
 	for _, record := range verified {
-		_, err := p.repo.Transition(ctx, record.PreparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, record.ReservationToken, record.Revision)
+		_, err := p.repo.ReturnPreparedWithAdmission(ctx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
 		if err != nil {
-			result = errors.Join(result, err)
+			if errors.Is(err, state.ErrFUSEPoolConflict) {
+				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			} else {
+				result = errors.Join(result, err)
+			}
 			continue
 		}
 	}
@@ -649,15 +685,6 @@ func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken
 			return nil, ErrFUSEPoolAtCapacity
 		}
 		return nil, fmt.Errorf("register preparing FUSE sandbox: %w", err)
-	}
-	listed, err := p.repo.ListByPoolKey(prepareCtx, p.poolKey)
-	if err == nil {
-		for _, current := range listed {
-			if current.PreparationID == record.PreparationID {
-				record = current
-				break
-			}
-		}
 	}
 	info, err := p.runtime.PrepareSandbox(prepareCtx, spec)
 	if err != nil {
@@ -821,7 +848,7 @@ func (p *FUSEPool) guard(ctx context.Context, record state.FUSEPoolRecord) (FUSE
 }
 
 func (p *FUSEPool) validateReservedRecord(record state.FUSEPoolRecord, token string) error {
-	if record.PoolKey != p.poolKey || record.RuntimeID == "" || record.RuntimeUID == "" || record.State != state.FUSEPoolReserved || token == "" || record.ReservationToken != token || record.Revision == 0 {
+	if record.PreparationID == "" || record.PoolKey != p.poolKey || record.RuntimeID == "" || record.RuntimeUID == "" || record.State != state.FUSEPoolReserved || token == "" || record.ReservationToken != token || record.Revision == 0 {
 		return state.ErrFUSEPoolInvalidRecord
 	}
 	return nil

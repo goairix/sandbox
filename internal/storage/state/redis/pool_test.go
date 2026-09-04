@@ -254,6 +254,36 @@ func TestFUSEPoolCleanupClaimIsExclusiveRetryableAndRecoverable(t *testing.T) {
 	assert.True(t, deleted)
 }
 
+func TestFUSEPoolLateCleanupEvidenceRemainsListableAndTakeoverDeletes(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, id, runtimeUID := poolTestID("pool"), poolTestID("preparation"), poolTestID("runtime-uid")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{id, runtimeUID})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, id), "controller", 1, time.Second))
+	first, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolPreparing, "maintainer-a", "", 1, "", "", "cleaner-a", 80*time.Millisecond)
+	require.NoError(t, err)
+	late, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", first.Revision, "runtime-late", runtimeUID, "cleaner-a", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, "runtime-late", late.RuntimeID)
+	assert.Equal(t, runtimeUID, late.RuntimeUID)
+	assert.Equal(t, first.CleanupUntil, late.CleanupUntil, "late evidence must not silently renew cleanup ownership")
+	assert.Equal(t, first.Revision+1, late.Revision)
+	_, err = repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", late.Revision, "runtime-other", "uid-other", "cleaner-a", time.Second)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict, "same-token retry must not overwrite established runtime evidence")
+	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
+	require.NoError(t, err)
+	require.Len(t, listed, 1, "failed runtime removal must leave a readable cleanup tombstone")
+	assert.Equal(t, runtimeUID, listed[0].RuntimeUID)
+	waitForRedisDeadline(t, s, late.CleanupUntil)
+	taken, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", late.Revision, "runtime-late", runtimeUID, "cleaner-b", time.Second)
+	require.NoError(t, err)
+	deleted, err := repo.DeleteCleanup(context.Background(), id, "cleaner-b", taken.Revision)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+}
+
 func TestFUSEPoolPublishReservedStartsTTLAtRedisTransitionAndChecksLock(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
@@ -322,6 +352,18 @@ func prepareWarmRecord(t *testing.T, repo *FUSEPoolRepository, record state.FUSE
 	got, err := repo.Transition(context.Background(), record.RuntimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, record.Revision)
 	require.NoError(t, err)
 	return *got
+}
+
+func cleanupRecordForTest(ctx context.Context, repo *FUSEPoolRepository, record state.FUSEPoolRecord, token string) (bool, error) {
+	preparationID := record.PreparationID
+	if preparationID == "" {
+		preparationID = record.RuntimeUID
+	}
+	claimed, err := repo.ClaimCleanup(ctx, preparationID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision, record.RuntimeID, record.RuntimeUID, token, time.Minute)
+	if err != nil {
+		return false, err
+	}
+	return repo.DeleteCleanup(ctx, preparationID, token, claimed.Revision)
 }
 
 func waitForRedisDeadline(t *testing.T, s *Store, deadline time.Time) {
@@ -667,7 +709,7 @@ func TestFUSEPoolStateIndexesFollowEveryMutation(t *testing.T) {
 	require.NoError(t, err)
 	assertState(state.FUSEPoolConsumed, true)
 	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
-	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, consumed.State, consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision)
+	deleted, err := cleanupRecordForTest(context.Background(), repo, *consumed, "cleanup-state-index")
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assertState("", false)
@@ -717,7 +759,7 @@ func TestFUSEPoolStateIndexesCoverColdAndReturnTransitions(t *testing.T) {
 	assert.Equal(t, int64(1), reservedCount)
 }
 
-func TestFUSEPoolConditionalDeleteRejectsStaleRecord(t *testing.T) {
+func TestFUSEPoolCleanupClaimRejectsStaleRecord(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
 	repo := NewFUSEPoolRepository(s)
@@ -725,14 +767,16 @@ func TestFUSEPoolConditionalDeleteRejectsStaleRecord(t *testing.T) {
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	prepared := prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
 
-	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, prepared.State, prepared.MaintainerToken, prepared.ReservationToken, prepared.Revision-1)
+	stale := prepared
+	stale.Revision--
+	deleted, err := cleanupRecordForTest(context.Background(), repo, stale, "cleanup-stale")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
 
-	deleted, err = repo.ConditionalDelete(context.Background(), runtimeUID, prepared.State, prepared.MaintainerToken, prepared.ReservationToken, prepared.Revision)
+	deleted, err = cleanupRecordForTest(context.Background(), repo, prepared, "cleanup-current")
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	listed, err = repo.ListByPoolKey(context.Background(), poolKey)
@@ -740,7 +784,7 @@ func TestFUSEPoolConditionalDeleteRejectsStaleRecord(t *testing.T) {
 	assert.Empty(t, listed)
 }
 
-func TestFUSEPoolConditionalDeleteChecksEveryExpectedField(t *testing.T) {
+func TestFUSEPoolCleanupClaimChecksEveryExpectedField(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
 	repo := NewFUSEPoolRepository(s)
@@ -750,13 +794,19 @@ func TestFUSEPoolConditionalDeleteChecksEveryExpectedField(t *testing.T) {
 	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
 	require.NoError(t, err)
 
-	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, state.FUSEPoolPrepared, reserved.MaintainerToken, reserved.ReservationToken, reserved.Revision)
+	wrongState := *reserved
+	wrongState.State = state.FUSEPoolPrepared
+	deleted, err := cleanupRecordForTest(context.Background(), repo, wrongState, "cleanup-wrong-state")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
-	deleted, err = repo.ConditionalDelete(context.Background(), runtimeUID, reserved.State, "wrong-maintainer", reserved.ReservationToken, reserved.Revision)
+	wrongMaintainer := *reserved
+	wrongMaintainer.MaintainerToken = "wrong-maintainer"
+	deleted, err = cleanupRecordForTest(context.Background(), repo, wrongMaintainer, "cleanup-wrong-maintainer")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
-	deleted, err = repo.ConditionalDelete(context.Background(), runtimeUID, reserved.State, reserved.MaintainerToken, "wrong-reservation", reserved.Revision)
+	wrongReservation := *reserved
+	wrongReservation.ReservationToken = "wrong-reservation"
+	deleted, err = cleanupRecordForTest(context.Background(), repo, wrongReservation, "cleanup-wrong-reservation")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
 
@@ -766,7 +816,7 @@ func TestFUSEPoolConditionalDeleteChecksEveryExpectedField(t *testing.T) {
 	assert.Equal(t, reserved.Revision, listed[0].Revision)
 }
 
-func TestFUSEPoolConditionalDeleteRejectsCorruptPoolMetadata(t *testing.T) {
+func TestFUSEPoolCleanupClaimRejectsCorruptPoolMetadata(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
 	repo := NewFUSEPoolRepository(s)
@@ -783,7 +833,7 @@ func TestFUSEPoolConditionalDeleteRejectsCorruptPoolMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.client.Set(context.Background(), recordKey, raw, 0).Err())
 
-	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, prepared.State, prepared.MaintainerToken, prepared.ReservationToken, prepared.Revision)
+	deleted, err := cleanupRecordForTest(context.Background(), repo, prepared, "cleanup-corrupt")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 	exists, err := s.Exists(context.Background(), recordKey)
@@ -800,7 +850,7 @@ func TestFUSEPoolMissingRecordReturnsDomainError(t *testing.T) {
 
 	_, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, "", 1)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolNotFound)
-	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, state.FUSEPoolPreparing, "", "", 1)
+	deleted, err := cleanupRecordForTest(context.Background(), repo, state.FUSEPoolRecord{PreparationID: runtimeUID, State: state.FUSEPoolPreparing, Revision: 1}, "cleanup-missing")
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolNotFound)
 }
@@ -952,7 +1002,7 @@ func TestFUSEPoolListRetriesMembershipReplacementWithoutLosingProtectedMembers(t
 	hook := &sscanActionHook{once: true}
 	hook.action = func() error {
 		victim := created[victimUID]
-		deleted, deleteErr := mutationRepo.ConditionalDelete(context.Background(), victimUID, victim.State, victim.MaintainerToken, "", victim.Revision)
+		deleted, deleteErr := cleanupRecordForTest(context.Background(), mutationRepo, victim, "cleanup-replace")
 		if deleteErr != nil {
 			return deleteErr
 		}
@@ -996,7 +1046,7 @@ func TestFUSEPoolStateMutationIgnoresMaxMembershipGeneration(t *testing.T) {
 	assert.Equal(t, "9007199254740991", s.client.HGet(context.Background(), "fusepool:membership-generations", poolDigest).Val())
 }
 
-func TestFUSEPoolMembershipGenerationOverflowRejectsCreateAndDeleteBeforeWrites(t *testing.T) {
+func TestFUSEPoolMembershipGenerationOverflowPreservesCleanupTombstoneAndRejectsCreate(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
 	repo := NewFUSEPoolRepository(s)
@@ -1007,14 +1057,16 @@ func TestFUSEPoolMembershipGenerationOverflowRejectsCreateAndDeleteBeforeWrites(
 	require.NoError(t, repo.createPreparingForTest(context.Background(), deleteRecord))
 	deleteDigest := poolTestDigest(deletePool)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", deleteDigest, "9007199254740991").Err())
-	rawBefore, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
+	claimed, err := repo.ClaimCleanup(context.Background(), deleteUID, deleteRecord.State, deleteRecord.MaintainerToken, "", deleteRecord.Revision, deleteRecord.RuntimeID, deleteRecord.RuntimeUID, "cleanup-overflow", time.Minute)
 	require.NoError(t, err)
-	deleted, err := repo.ConditionalDelete(context.Background(), deleteUID, deleteRecord.State, deleteRecord.MaintainerToken, "", deleteRecord.Revision)
+	rawBeforeDelete, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
+	require.NoError(t, err)
+	deleted, err := repo.DeleteCleanup(context.Background(), deleteUID, claimed.CleanupToken, claimed.Revision)
 	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 	rawAfter, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
 	require.NoError(t, err)
-	assert.Equal(t, rawBefore, rawAfter)
+	assert.Equal(t, rawBeforeDelete, rawAfter, "failed physical deletion must preserve the retryable cleanup tombstone")
 
 	createDigest := poolTestDigest(createPool)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", createDigest, "9007199254740991").Err())
@@ -1213,6 +1265,32 @@ func TestFUSEPoolReturnPreparedRequiresLiveOwnedReservation(t *testing.T) {
 			assert.Equal(t, expired.Revision, record.Revision)
 		}
 	}
+}
+
+func TestFUSEPoolReturnPreparedAdmissionIsAtomicAtCapacity(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, firstUID, secondUID := poolTestID("pool"), poolTestID("first"), poolTestID("second")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{firstUID, secondUID})
+	prepareWarmRecord(t, repo, preparingRecord(poolKey, firstUID))
+	prepareWarmRecord(t, repo, preparingRecord(poolKey, secondUID))
+	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "return-capacity", time.Minute)
+	require.NoError(t, err)
+	require.NotNil(t, reserved)
+
+	returned, err := repo.ReturnPreparedWithAdmission(context.Background(), reserved.PreparationID, reserved.ReservationToken, reserved.Revision, 1)
+	assert.Nil(t, returned)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	states := map[state.FUSEPoolState]int{}
+	for _, record := range listed {
+		states[record.State]++
+	}
+	assert.Equal(t, 1, states[state.FUSEPoolPrepared])
+	assert.Equal(t, 1, states[state.FUSEPoolReserved], "capacity rejection must not partially publish the reservation")
 }
 
 func TestFUSEPoolDuplicateCreateLeavesNoHalfState(t *testing.T) {
@@ -1415,8 +1493,7 @@ func TestFUSEPoolRejectsStateInvariantCorruptionOnEveryPath(t *testing.T) {
 			got, err := repo.ReservePrepared(context.Background(), poolKey, "other", time.Minute)
 			assert.Nil(t, got)
 			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
-			deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision)
-			assert.False(t, deleted)
+			_, err = repo.ClaimCleanup(context.Background(), prepared.PreparationID, prepared.State, prepared.MaintainerToken, prepared.ReservationToken, prepared.Revision, prepared.RuntimeID, prepared.RuntimeUID, "cleanup-corrupt-record", time.Minute)
 			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 		})
 	}
@@ -1444,7 +1521,10 @@ func TestFUSEPoolLuaRejectsInvalidOrZeroUpdatedAtBeforeMutation(t *testing.T) {
 			got, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
 			assert.Nil(t, got)
 			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
-			deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, state.FUSEPoolPrepared, "maintainer-a", "", 2)
+			deleted, err := cleanupRecordForTest(context.Background(), repo, state.FUSEPoolRecord{
+				PreparationID: runtimeUID, RuntimeID: "runtime-" + runtimeUID, RuntimeUID: runtimeUID,
+				State: state.FUSEPoolPrepared, MaintainerToken: "maintainer-a", Revision: 2,
+			}, "cleanup-invalid-time")
 			assert.False(t, deleted)
 			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 		})
