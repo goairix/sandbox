@@ -19,6 +19,14 @@ var (
 	// workspace but none exists.
 	ErrNoWorkspaceMounted = errors.New("no workspace mounted")
 
+	// ErrFUSEWorkspaceOperationUnsupported prevents legacy copy-sync workspace
+	// APIs from mutating the lifecycle of a runtime-bound FUSE workspace.
+	ErrFUSEWorkspaceOperationUnsupported = errors.New("legacy workspace operation is unsupported for FUSE sandbox")
+
+	// ErrWorkspaceAcquireCleanupUnconfirmed means lease acquisition failed and
+	// exact compensation could not prove that every provisional write vanished.
+	ErrWorkspaceAcquireCleanupUnconfirmed = errors.New("workspace acquisition cleanup is unconfirmed")
+
 	// ErrUploadNotFound is returned when a multipart upload ID does not exist.
 	ErrUploadNotFound = errors.New("upload not found")
 

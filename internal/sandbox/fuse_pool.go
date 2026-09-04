@@ -766,7 +766,7 @@ func (p *FUSEPool) scheduleRefill() {
 	p.lifecycleMu.Unlock()
 	go func() {
 		defer p.controllerWG.Done()
-		if _, err := p.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if _, err := p.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrFUSEPoolStopped) {
 			logger.Error(ctx, "FUSE pool refill failed", logger.AddField("pool_key", p.poolKey), logger.ErrorField(err))
 		}
 	}()

@@ -885,7 +885,10 @@ func (c *WorkspaceCoordinator) compensateAcquire(ctx context.Context, keys works
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("compensate workspace lease: %w", err))
 		}
 	}
-	return errors.Join(primary, cleanupErr)
+	if cleanupErr != nil {
+		return errors.Join(primary, ErrWorkspaceAcquireCleanupUnconfirmed, cleanupErr)
+	}
+	return primary
 }
 
 func workspaceStateKeys(req WorkspaceLeaseRequest) (workspaceKeys, error) {

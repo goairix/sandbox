@@ -59,11 +59,6 @@ func isExcluded(path string, exclude []string) bool {
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
 // exclude is an optional list of path prefixes to skip during all subsequent syncs.
 func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
-	logger.Info(ctx, "MountWorkspace: starting",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("root_path", rootPath),
-	)
-
 	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return err
@@ -72,9 +67,17 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	_, exists := m.workspaces[sandboxID]
+	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
 	m.mu.RUnlock()
 
-	if exists || (sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE) {
+	if isFUSE {
+		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
+	}
+	logger.Info(ctx, "MountWorkspace: starting",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("root_path", rootPath),
+	)
+	if exists {
 		return fmt.Errorf("%w: %s", ErrWorkspaceAlreadyMounted, sandboxID)
 	}
 
@@ -125,10 +128,6 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 
 // UnmountWorkspace syncs files back from container to storage, then detaches.
 func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error {
-	logger.Info(ctx, "UnmountWorkspace: starting",
-		logger.AddField("sandbox_id", sandboxID),
-	)
-
 	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return err
@@ -137,8 +136,15 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	_, hasWS := m.workspaces[sandboxID]
+	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
 	m.mu.RUnlock()
 
+	if isFUSE {
+		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
+	}
+	logger.Info(ctx, "UnmountWorkspace: starting",
+		logger.AddField("sandbox_id", sandboxID),
+	)
 	if !hasWS {
 		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
@@ -173,11 +179,6 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 // SyncWorkspace manually syncs files in the given direction.
 // exclude is an optional list of path prefixes to skip during from_container sync.
 func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string, exclude []string) error {
-	logger.Info(ctx, "SyncWorkspace: request received",
-		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("direction", direction),
-	)
-
 	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return err
@@ -186,8 +187,16 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	scoped, hasWS := m.workspaces[sandboxID]
+	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
 	m.mu.RUnlock()
 
+	if isFUSE {
+		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
+	}
+	logger.Info(ctx, "SyncWorkspace: request received",
+		logger.AddField("sandbox_id", sandboxID),
+		logger.AddField("direction", direction),
+	)
 	if !hasWS {
 		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
@@ -228,7 +237,15 @@ func (m *Manager) GetWorkspaceInfo(ctx context.Context, sandboxID string) (*Work
 		return nil, err
 	}
 	defer release()
-	return sb.Workspace, nil
+	m.mu.RLock()
+	if sb.Workspace == nil {
+		m.mu.RUnlock()
+		return nil, nil
+	}
+	workspace := *sb.Workspace
+	workspace.SyncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
+	m.mu.RUnlock()
+	return &workspace, nil
 }
 
 // syncToContainer collects file metadata from ScopedFS and streams a tar archive
