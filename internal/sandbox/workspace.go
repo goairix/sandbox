@@ -108,7 +108,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		RootPath:     rootPath,
 		MountedAt:    now,
 		LastSyncedAt: now,
-		SyncExclude:  exclude,
+		SyncExclude:  append([]string(nil), exclude...),
 	}
 	sb.UpdatedAt = now
 	m.mu.Unlock()

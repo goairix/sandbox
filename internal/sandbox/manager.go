@@ -43,12 +43,13 @@ type MultipartUploadState struct {
 }
 
 type fuseBindingClaim struct {
-	record        state.FUSEPoolRecord
-	returning     bool
-	lost          bool
-	published     bool
-	lifecycle     *fuseSandboxLifecycle
-	cleanupRecord *state.FUSEPoolRecord
+	record          state.FUSEPoolRecord
+	returning       bool
+	lost            bool
+	published       bool
+	lifecycle       *fuseSandboxLifecycle
+	cleanupRecord   *state.FUSEPoolRecord
+	sessionIdentity *Sandbox
 }
 
 type fuseSandboxLifecycle struct {
@@ -319,6 +320,7 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	m.createWG.Add(1)
 	m.lifecycleMu.Unlock()
 	defer m.createWG.Done()
+	cfg = cloneSandboxConfig(cfg)
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Create")
 	defer span.End()
 	if m.config.WorkspaceMode == "fuse" && cfg.WorkspacePath != "" {
@@ -482,7 +484,10 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	span.SetAttributes(attribute.String("sandbox.id", id))
 	metrics.SandboxActiveGauge.Add(spanCtx, 1)
 	metrics.RecordSandboxCreate(spanCtx, source, "success", time.Since(createStart).Seconds())
-	return sb, nil
+	m.mu.RLock()
+	result := cloneSandbox(sb)
+	m.mu.RUnlock()
+	return &result, nil
 }
 
 func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *Sandbox, returnErr error) {
@@ -639,14 +644,21 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	lifecycle = &fuseSandboxLifecycle{sandboxID: id, gate: gate, lease: lease, renewal: renewal, record: *record, cancel: cancelLifecycle}
 	_ = lifecycleCtx
+	m.mu.Lock()
+	sessionIdentity := cloneSandbox(sb)
+	claim.sessionIdentity = &sessionIdentity
+	m.mu.Unlock()
 	if err = m.publishSandboxAndSession(txnCtx, sb, gate, lifecycle, claim); err != nil {
 		cancelLifecycle()
 		lifecycle = nil
 		return nil, err
 	}
 	published = true
+	m.mu.RLock()
+	result := cloneSandbox(sb)
+	m.mu.RUnlock()
 	m.startFUSEWatcher(lifecycleCtx, lifecycle)
-	return sb, nil
+	return &result, nil
 }
 
 func fuseResourcesCompatible(requested ResourceLimits, prepared runtime.SandboxSpec) bool {
@@ -703,7 +715,11 @@ func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguous
 		m.mu.Lock()
 		claim.returning = true
 		m.mu.Unlock()
-		return m.fusePool.ReturnPrepared(ctx, record)
+		if err := m.fusePool.ReturnPrepared(ctx, record); errors.Is(err, ErrFUSEPoolReturnFenced) {
+			return nil
+		} else {
+			return err
+		}
 	}
 	var claimed *state.FUSEPoolRecord
 	var err error
@@ -747,6 +763,18 @@ func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguous
 	}
 	if renewal != nil {
 		renewal.Stop()
+	}
+	m.mu.RLock()
+	sessionIdentity := claim.sessionIdentity
+	m.mu.RUnlock()
+	if sessionIdentity != nil && m.sessions != nil {
+		workspace := sessionIdentity.Workspace
+		if workspace == nil {
+			return ErrSessionPublicationConflict
+		}
+		if err := m.sessions.RemoveMatchingFUSESession(ctx, sessionIdentity.ID, sessionIdentity.RuntimeID, sessionIdentity.RuntimeUID, workspace.FUSEPreparationID, workspace.LeaseGeneration); err != nil {
+			return err
+		}
 	}
 	return m.fusePool.CompleteClaimedCleanup(ctx, *claimed)
 }
@@ -996,14 +1024,20 @@ func cloneSandbox(sb *Sandbox) Sandbox {
 		return Sandbox{}
 	}
 	clone := *sb
-	clone.Config.Network.Whitelist = append([]string(nil), sb.Config.Network.Whitelist...)
-	clone.Config.Dependencies = append([]Dependency(nil), sb.Config.Dependencies...)
-	clone.Config.WorkspaceSyncExclude = append([]string(nil), sb.Config.WorkspaceSyncExclude...)
+	clone.Config = cloneSandboxConfig(sb.Config)
 	if sb.Workspace != nil {
 		workspace := *sb.Workspace
 		workspace.SyncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
 		clone.Workspace = &workspace
 	}
+	return clone
+}
+
+func cloneSandboxConfig(config SandboxConfig) SandboxConfig {
+	clone := config
+	clone.Network.Whitelist = append([]string(nil), config.Network.Whitelist...)
+	clone.Dependencies = append([]Dependency(nil), config.Dependencies...)
+	clone.WorkspaceSyncExclude = append([]string(nil), config.WorkspaceSyncExclude...)
 	return clone
 }
 
@@ -1662,7 +1696,7 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 
 	m.mu.Lock()
 	sb.Config.Network.Enabled = enabled
-	sb.Config.Network.Whitelist = whitelist
+	sb.Config.Network.Whitelist = append([]string(nil), whitelist...)
 	sb.Config.Network.BlockPrivate = blockPrivate
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
@@ -1691,16 +1725,17 @@ func (m *Manager) UpdateTTL(ctx context.Context, id string, timeoutSeconds int) 
 	sb.Timeout = newTimeout
 	sb.CreatedAt = now // reset so reaper uses new baseline
 	sb.UpdatedAt = now
+	result := cloneSandbox(sb)
 	m.mu.Unlock()
 
 	// Persist to session store if applicable
-	if sb.Config.Mode == ModePersistent && m.sessions != nil {
-		if err := m.sessions.Save(ctx, sb); err != nil {
+	if result.Config.Mode == ModePersistent && m.sessions != nil {
+		if err := m.sessions.Save(ctx, &result); err != nil {
 			_ = err
 		}
 	}
 
-	return sb, nil
+	return &result, nil
 }
 
 // reapExpiredSandboxes periodically checks for sandboxes that have exceeded

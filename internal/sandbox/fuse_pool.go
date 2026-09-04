@@ -29,6 +29,7 @@ var (
 	ErrFUSEPoolStopped        = errors.New("FUSE pool is stopped")
 	ErrFUSEPoolKeyMismatch    = errors.New("FUSE pool key mismatch")
 	ErrFUSEPoolReturnUnproven = errors.New("FUSE pool pristine return cannot be proven")
+	ErrFUSEPoolReturnFenced   = errors.New("FUSE pool return belongs to a later lifecycle")
 	ErrFUSEPoolProtected      = errors.New("FUSE pool record is protected by manager state")
 	ErrFUSEPoolRefillBusy     = errors.New("FUSE pool refill is already in progress")
 	ErrFUSEPoolAtCapacity     = errors.New("FUSE pool is at active preparation capacity")
@@ -327,10 +328,21 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 	}
 	opCtx, done, err := p.beginOperation(ctx)
 	if err != nil {
-		return err
+		terminal, terminalErr := p.verifyReturnPreparedTerminal(record)
+		if terminal {
+			return terminalErr
+		}
+		return errors.Join(err, terminalErr)
 	}
 	defer done()
 	defer p.scheduleRefill()
+	terminal, terminalErr := p.verifyReturnPreparedTerminal(record)
+	if terminal {
+		return terminalErr
+	}
+	if terminalErr != nil {
+		return terminalErr
+	}
 	disposition, guardErr := p.guard(opCtx, record)
 	if disposition == FUSEPoolProtected {
 		return errors.Join(ErrFUSEPoolProtected, guardErr)
@@ -360,6 +372,34 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 		return errors.Join(stopErr, p.compensatePublication(record, *returned))
 	}
 	return nil
+}
+
+func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
+	defer cancel()
+	records, err := p.repo.ListByPoolKey(ctx, original.PoolKey)
+	if err != nil {
+		return false, fmt.Errorf("verify returned FUSE sandbox: %w", err)
+	}
+	for _, current := range records {
+		if current.PreparationID != original.PreparationID {
+			continue
+		}
+		if current.RuntimeID != original.RuntimeID || current.RuntimeUID != original.RuntimeUID || current.PoolKey != original.PoolKey || current.MaintainerToken != original.MaintainerToken {
+			return true, ErrFUSEPoolReturnFenced
+		}
+		if current.State == state.FUSEPoolPrepared && current.Revision == original.Revision+1 && current.ReservationToken == "" {
+			return true, nil
+		}
+		if current.State == state.FUSEPoolCleanup {
+			return false, nil
+		}
+		if current.State != state.FUSEPoolReserved || current.Revision > original.Revision || current.ReservationToken != original.ReservationToken {
+			return true, ErrFUSEPoolReturnFenced
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // ReleaseConsumed removes the exact runtime before deleting its inventory

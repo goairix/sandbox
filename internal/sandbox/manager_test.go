@@ -131,6 +131,54 @@ type blockingSessionSetStore struct {
 	once    sync.Once
 }
 
+type failedSessionPublicationStore struct {
+	*atomicMemoryStore
+	mu           sync.Mutex
+	saveFailed   bool
+	deleteFailed bool
+	afterDelete  bool
+}
+
+func (s *failedSessionPublicationStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if !strings.HasPrefix(key, sandboxSessionKeyPrefix) {
+		return s.atomicMemoryStore.Set(ctx, key, value, ttl)
+	}
+	if err := s.atomicMemoryStore.Set(ctx, key, value, ttl); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.saveFailed {
+		s.saveFailed = true
+		return errors.New("session save reply lost")
+	}
+	return nil
+}
+
+func (s *failedSessionPublicationStore) CompareAndDelete(ctx context.Context, key string, expected []byte) (bool, error) {
+	if !strings.HasPrefix(key, sandboxSessionKeyPrefix) {
+		return s.atomicMemoryStore.CompareAndDelete(ctx, key, expected)
+	}
+	s.mu.Lock()
+	fail := !s.deleteFailed
+	if fail {
+		s.deleteFailed = true
+	}
+	afterDelete := s.afterDelete
+	s.mu.Unlock()
+	if fail && !afterDelete {
+		return false, errors.New("session delete unavailable")
+	}
+	deleted, err := s.atomicMemoryStore.CompareAndDelete(ctx, key, expected)
+	if err != nil {
+		return false, err
+	}
+	if fail {
+		return false, errors.New("session delete reply lost")
+	}
+	return deleted, nil
+}
+
 func (s *blockingSessionSetStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	if strings.HasPrefix(key, sandboxSessionKeyPrefix) {
 		s.once.Do(func() {
@@ -665,7 +713,11 @@ func TestManagerCreateFUSESessionSaveFailureDestroysWithoutOpeningGate(t *testin
 	mgr.mu.RLock()
 	assert.Empty(t, mgr.sandboxes)
 	assert.Empty(t, mgr.operationGates)
+	assert.Empty(t, mgr.fuseInFlight)
 	mgr.mu.RUnlock()
+	sessionKeys, listErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
+	require.NoError(t, listErr)
+	assert.Empty(t, sessionKeys)
 }
 
 func TestManagerCreateFUSEPreBindCleanupRetriesWithoutLosingPoolAnchor(t *testing.T) {
@@ -695,6 +747,75 @@ func TestManagerCreateFUSEPreBindCleanupRetriesWithoutLosingPoolAnchor(t *testin
 	assert.False(t, rt.wasRemoved(preparedID))
 }
 
+func TestManagerCreateFUSEPreBindReturnTerminalCompensationStopsCleanupWorker(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*memoryFUSEPoolRepository)
+	}{
+		{
+			name: "reply_loss_after_return",
+			configure: func(repo *memoryFUSEPoolRepository) {
+				repo.failNextAfterCommit("ReturnPreparedWithAdmission", errors.New("return reply lost"))
+			},
+		},
+		{
+			name: "capacity_compensation",
+			configure: func(repo *memoryFUSEPoolRepository) {
+				repo.failNext("ReturnPreparedWithAdmission", state.ErrFUSEPoolConflict)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := newFUSEManagerRuntime()
+			mgr, _, repo, _ := newFUSETestManager(t, rt)
+			mgr.config.WorkspaceObjectClient = &fuseMarkerClient{err: errors.New("marker unavailable")}
+			tt.configure(repo)
+
+			_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+			require.Error(t, err)
+			require.Eventually(t, func() bool {
+				mgr.mu.RLock()
+				defer mgr.mu.RUnlock()
+				return len(mgr.fuseInFlight) == 0
+			}, 500*time.Millisecond, time.Millisecond)
+		})
+	}
+}
+
+func TestManagerCreateFUSEPreBindReturnStopCompensationIsTerminal(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, repo, _ := newFUSETestManager(t, rt)
+	mgr.config.WorkspaceObjectClient = &fuseMarkerClient{err: errors.New("marker unavailable")}
+	blocking := &blockingAfterReturnRepository{
+		memoryFUSEPoolRepository: repo,
+		entered:                  make(chan struct{}),
+		release:                  make(chan struct{}),
+	}
+	mgr.fusePool.repo = blocking
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+		createDone <- err
+	}()
+	<-blocking.entered
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- mgr.fusePool.Stop(context.Background()) }()
+	require.Eventually(t, func() bool {
+		mgr.fusePool.lifecycleMu.Lock()
+		defer mgr.fusePool.lifecycleMu.Unlock()
+		return mgr.fusePool.stopping || mgr.fusePool.stopped
+	}, time.Second, time.Millisecond)
+	close(blocking.release)
+	require.Error(t, <-createDone)
+	require.NoError(t, <-stopDone)
+	require.Eventually(t, func() bool {
+		mgr.mu.RLock()
+		defer mgr.mu.RUnlock()
+		return len(mgr.fuseInFlight) == 0
+	}, 500*time.Millisecond, time.Millisecond)
+}
+
 func TestManagerCreateFUSECompensatesAmbiguousSessionPublicationExactly(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	mgr, preparedID, _, store := newFUSETestManager(t, rt)
@@ -707,6 +828,30 @@ func TestManagerCreateFUSECompensatesAmbiguousSessionPublicationExactly(t *testi
 	keys, listErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
 	require.NoError(t, listErr)
 	assert.Empty(t, keys)
+}
+
+func TestManagerCreateFUSEBindingCleanupRetriesFailedSessionCompensation(t *testing.T) {
+	for _, afterDelete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete_after_commit_%t", afterDelete), func(t *testing.T) {
+			rt := newFUSEManagerRuntime()
+			mgr, preparedID, _, store := newFUSETestManager(t, rt)
+			failedStore := &failedSessionPublicationStore{atomicMemoryStore: store, afterDelete: afterDelete}
+			mgr.sessions = NewSessionStore(failedStore, time.Hour)
+
+			_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+			require.ErrorContains(t, err, "session save reply lost")
+			assert.True(t, rt.wasRemoved(preparedID))
+			require.Eventually(t, func() bool {
+				keys, keyErr := store.Keys(context.Background(), sandboxSessionKeyPrefix+"*")
+				if keyErr != nil || len(keys) != 0 {
+					return false
+				}
+				mgr.mu.RLock()
+				defer mgr.mu.RUnlock()
+				return len(mgr.fuseInFlight) == 0
+			}, time.Second, time.Millisecond)
+		})
+	}
 }
 
 func TestManagerCreateFUSELeaseLossDuringSessionSaveNeverPublishes(t *testing.T) {
@@ -928,6 +1073,48 @@ func TestManagerGetReturnsDeepCopyOfFUSESandbox(t *testing.T) {
 	assert.Equal(t, "allowed.example", internal.Config.Network.Whitelist[0])
 	assert.Equal(t, "requests", internal.Config.Dependencies[0].Name)
 	assert.Equal(t, "team/a", internal.Workspace.RootPath)
+	mgr.mu.RUnlock()
+}
+
+func TestManagerCreateFUSEReturnsDeepCopy(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	created, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode:          ModePersistent,
+		WorkspacePath: "team/a",
+		Network:       NetworkConfig{Whitelist: []string{"allowed.example"}},
+	})
+	require.NoError(t, err)
+	id := created.ID
+	created.Config.Network.Whitelist[0] = "mutated.example"
+	created.Workspace.RootPath = "mutated"
+
+	mgr.mu.RLock()
+	internal := mgr.sandboxes[id]
+	assert.Equal(t, "allowed.example", internal.Config.Network.Whitelist[0])
+	assert.Equal(t, "team/a", internal.Workspace.RootPath)
+	mgr.mu.RUnlock()
+}
+
+func TestManagerUpdateTTLReturnsDeepCopy(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	created, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode:          ModePersistent,
+		WorkspacePath: "team/a",
+		Network:       NetworkConfig{Whitelist: []string{"allowed.example"}},
+	})
+	require.NoError(t, err)
+	updated, err := mgr.UpdateTTL(context.Background(), created.ID, 300)
+	require.NoError(t, err)
+	updated.Config.Network.Whitelist[0] = "mutated.example"
+	updated.Workspace.RootPath = "mutated"
+
+	mgr.mu.RLock()
+	internal := mgr.sandboxes[created.ID]
+	assert.Equal(t, "allowed.example", internal.Config.Network.Whitelist[0])
+	assert.Equal(t, "team/a", internal.Workspace.RootPath)
+	assert.Equal(t, 300*time.Second, internal.Timeout)
 	mgr.mu.RUnlock()
 }
 
