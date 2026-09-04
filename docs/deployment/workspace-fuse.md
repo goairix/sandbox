@@ -464,6 +464,8 @@ spec:
 
 目标最低版本包含 Kubernetes 1.29，因此 runtime 不使用 1.30 才稳定可用的结构化 `securityContext.appArmorProfile` 字段；mounter 的已校验、非 `unconfined` profile 通过兼容的 container AppArmor annotation 注入。升级最低版本前不得同时渲染两种形式，避免不同 API Server/准入插件产生不一致结果。
 
+Pod 渲染前会把批准列表排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 集合可以包含额外的运维批准项，但必须覆盖当前 endpoint。`cilium-fqdn` 的每个元素都必须是 canonical FQDN，不接受 IP literal 或通配符；重复、乱序输入按集合归一化，不能扩大 system egress。
+
 空壳创建时只携带固定 provider 配置和 PoolKey，初始 label state 必须是 `preparing`，不能在 health 验证前标成 `prepared`。Pool availability 不能等待 Pod Ready：私有 `PreparedSandboxHealth` 验证 sidecar locked、sandbox 主容器 running、无 s3fs 和无 mount/generation；Pool/manager 另外从 Redis owner/session 反查确认该 runtime UID 未绑定 workspace，且公共 Exec/file gate 关闭。prepared 空壳不创建用户 session，不出现在公共 sandbox list/get 响应中，runtime ID/UID 也不能返回给调用方；公共 Exec/file API 必须校验已提交的用户 session 和 gate，不能仅凭 runtime ID 访问。全部通过后 Kubernetes 才以 resourceVersion 冲突保护把 state patch 为 `prepared` 并入队；Acquire 后 runtime 才根据请求生成唯一 prefix、租约标签和 workspace identity。对象 key 根路径严格为：
 
 ```text

@@ -340,6 +340,7 @@ system egress 的实现按集群能力固定：
 - Pod 保持 `DNSPolicy=None` 和当前公共 nameserver，不接入 CoreDNS，也不配置集群 search domain。
 - MinIO/OBS 必须使用公共 nameserver 可解析的稳定专用 endpoint；私有云 FQDN 无法公共解析时，可由运维使用 Pod `hostAliases`/等价 CNI 机制把该 FQDN 静态映射到平台批准的稳定 IP，且证书必须匹配原 FQDN。只有证书包含 IP SAN 时才允许直接配置 IP endpoint；`cluster.local` Service 不属于一期支持形式。
 - DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。一期 `ProxyURL` 必须为空，egress proxy 仅作为后续安全增强方向。
+- runtime 对批准列表先排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 是可包含额外批准项的 canonical set，但必须覆盖当前 endpoint 的有效端口及目标地址/FQDN。Cilium FQDN 集合中的每个元素必须是 canonical FQDN，不接受 IP 或通配符；输入重复和乱序只做集合归一化，不能扩大 system egress。
 - endpoint 解析和连通性必须在挂载前检查。仅加入网络白名单不能让公共 nameserver 解析 `cluster.local`。
 - runtime 为每个空壳生成不可变的 instance selector，先创建对应 system egress policy，再创建 Pod；Acquire 时保留这条 policy，并在开放 Exec 前另外应用用户请求对应的网络策略。多个 NetworkPolicy 的 allow 语义是并集，用户策略不能删除 system egress，也不能额外获得未批准的内网目的地。
 

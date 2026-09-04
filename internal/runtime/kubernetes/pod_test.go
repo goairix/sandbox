@@ -299,6 +299,7 @@ func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
 		{"bucket", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Bucket = "" }},
 		{"storage identity", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.StorageIdentity = "" }},
 		{"credential generation", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CredentialGeneration = "" }},
+		{"unpinned sandbox image", func(s *runtime.SandboxSpec) { s.Image = "sandbox:latest" }},
 		{"unpinned mounter image", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterImage = "mounter:latest" }},
 		{"secret name", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SecretName = "INVALID_SECRET" }},
 		{"ca secret key", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "invalid/key" }},
@@ -311,6 +312,7 @@ func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
 		{"cidr mode without endpoint cidr", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointCIDRs = nil }},
 		{"dns ports", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = nil }},
 		{"dns port 53 not approved", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{54} }},
+		{"dns port set expanded", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{22, 53} }},
 		{"endpoint ports", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointPorts = nil }},
 		{"proxy", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.ProxyURL = "http://proxy.invalid" }},
 	}
@@ -335,11 +337,13 @@ func TestCreatePodPreparedFUSEValidatesEndpointWithoutEchoingIt(t *testing.T) {
 	}{
 		{"minio scheme", "minio", "https://secret.invalid:9000", nil},
 		{"minio path", "minio", "secret.invalid:9000/bucket", nil},
+		{"minio empty port", "minio", "secret.invalid:", nil},
 		{"obs missing scheme", "obs", "secret.invalid", nil},
 		{"obs userinfo", "obs", "https://user:pass@secret.invalid", nil},
 		{"obs query", "obs", "https://secret.invalid?token=secret", nil},
 		{"obs fragment", "obs", "https://secret.invalid/#secret", nil},
 		{"obs business path", "obs", "https://secret.invalid/bucket", nil},
+		{"obs empty port", "obs", "https://secret.invalid:", nil},
 		{"ip endpoint with aliases", "minio", "192.0.2.44:9000", []string{"192.0.2.10"}},
 		{"ip endpoint outside approved cidr", "minio", "198.51.100.44:9000", nil},
 	}
@@ -356,6 +360,59 @@ func TestCreatePodPreparedFUSEValidatesEndpointWithoutEchoingIt(t *testing.T) {
 			assertNoPods(t, client, "sandbox-runtime")
 		})
 	}
+}
+
+func TestCreatePodPreparedFUSEAcceptsCanonicalApprovedSets(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{53, 53}
+	spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443, 9000, 9000}
+	spec.WorkspaceFUSE.SystemEgress.EndpointCIDRs = []string{"198.51.100.0/24", "192.0.2.0/24", "192.0.2.0/24"}
+
+	_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+	require.NoError(t, err)
+}
+
+func TestCreatePodPreparedFUSERejectsAmbiguousCiliumFQDNSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		fqdns    []string
+	}{
+		{"IP endpoint", "https://192.0.2.10:443", []string{"192.0.2.10"}},
+		{"IP literal entry", "https://obs.example.com:443", []string{"192.0.2.10"}},
+		{"wildcard entry", "https://obs.example.com:443", []string{"*.example.com"}},
+		{"noncanonical entry", "https://obs.example.com:443", []string{"OBS.example.com"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			spec := preparedFUSESpecForTest()
+			spec.WorkspaceFUSE.Provider = "obs"
+			spec.WorkspaceFUSE.Endpoint = tt.endpoint
+			spec.WorkspaceFUSE.EndpointHostIPs = nil
+			spec.WorkspaceFUSE.SystemEgress.Mode = runtime.SystemEgressCiliumFQDN
+			spec.WorkspaceFUSE.SystemEgress.EndpointFQDNs = tt.fqdns
+			spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443}
+			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+			require.Error(t, err)
+			assertNoPods(t, client, "sandbox-runtime")
+		})
+	}
+}
+
+func TestCreatePodPreparedFUSEAcceptsCanonicalCiliumFQDNSet(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.Provider = "obs"
+	spec.WorkspaceFUSE.Endpoint = "https://obs.example.com:443"
+	spec.WorkspaceFUSE.EndpointHostIPs = nil
+	spec.WorkspaceFUSE.SystemEgress.Mode = runtime.SystemEgressCiliumFQDN
+	spec.WorkspaceFUSE.SystemEgress.EndpointFQDNs = []string{"other.example.com", "obs.example.com", "obs.example.com"}
+	spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{9000, 443, 443}
+
+	_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+	require.NoError(t, err)
 }
 
 func TestCreatePodPreparedFUSEOBSRetainsTLSEndpointHostname(t *testing.T) {

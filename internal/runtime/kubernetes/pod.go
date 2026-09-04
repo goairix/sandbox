@@ -427,6 +427,9 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 		!nonEmptyCanonicalValue(fuse.StorageIdentity) || !nonEmptyCanonicalValue(fuse.CredentialGeneration) {
 		return validated, fmt.Errorf("workspace FUSE fixed identity fields must not be empty")
 	}
+	if !isDigestPinnedImage(spec.Image) {
+		return validated, fmt.Errorf("workspace FUSE sandbox image must be pinned by sha256 digest")
+	}
 	if !isDigestPinnedImage(fuse.MounterImage) {
 		return validated, fmt.Errorf("workspace FUSE mounter image must be pinned by sha256 digest")
 	}
@@ -458,7 +461,7 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 	}
 	validated.endpoint = endpoint
 
-	approvedNetworks, err := validateSystemEgress(fuse.SystemEgress, endpointHostname, endpointPort)
+	approvedNetworks, err := validateSystemEgress(fuse.SystemEgress, endpointHostname, endpointIP, endpointPort)
 	if err != nil {
 		return validated, err
 	}
@@ -618,24 +621,27 @@ func validateFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, bool
 	return parsed.String(), hostname, endpointIP, port, nil
 }
 
-func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string, endpointPort int32) ([]netip.Prefix, error) {
+func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string, endpointIP bool, endpointPort int32) ([]netip.Prefix, error) {
 	if spec.ProxyURL != "" {
 		return nil, fmt.Errorf("workspace FUSE system egress proxy must be empty")
 	}
-	if err := validatePorts("DNS", spec.DNSPorts); err != nil {
+	dnsPorts, err := canonicalPorts("DNS", spec.DNSPorts)
+	if err != nil {
 		return nil, err
 	}
-	if !containsPort(spec.DNSPorts, 53) {
-		return nil, fmt.Errorf("workspace FUSE system egress must approve DNS port 53")
+	if len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+		return nil, fmt.Errorf("workspace FUSE system egress DNS port set must be exactly 53")
 	}
-	if err := validatePorts("endpoint", spec.EndpointPorts); err != nil {
+	endpointPorts, err := canonicalPorts("endpoint", spec.EndpointPorts)
+	if err != nil {
 		return nil, err
 	}
-	if !containsPort(spec.EndpointPorts, endpointPort) {
-		return nil, fmt.Errorf("workspace FUSE endpoint port is not approved by system egress")
+	if !containsCanonicalPort(endpointPorts, endpointPort) {
+		return nil, fmt.Errorf("workspace FUSE system egress endpoint port set must include the endpoint")
 	}
-	networks := make([]netip.Prefix, 0, len(spec.EndpointCIDRs))
-	for _, raw := range spec.EndpointCIDRs {
+	endpointCIDRs := canonicalStringSet(spec.EndpointCIDRs)
+	networks := make([]netip.Prefix, 0, len(endpointCIDRs))
+	for _, raw := range endpointCIDRs {
 		prefix, err := netip.ParsePrefix(raw)
 		if err != nil || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != raw || prefix != prefix.Masked() {
 			return nil, fmt.Errorf("workspace FUSE system egress contains an invalid endpoint CIDR")
@@ -648,12 +654,16 @@ func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string
 			return nil, fmt.Errorf("workspace FUSE CIDR system egress requires endpoint CIDRs")
 		}
 	case runtime.SystemEgressCiliumFQDN:
-		if len(spec.EndpointFQDNs) == 0 {
+		if endpointIP {
+			return nil, fmt.Errorf("workspace FUSE Cilium system egress requires an FQDN endpoint")
+		}
+		endpointFQDNs := canonicalStringSet(spec.EndpointFQDNs)
+		if len(endpointFQDNs) == 0 {
 			return nil, fmt.Errorf("workspace FUSE Cilium system egress requires endpoint FQDNs")
 		}
 		found := false
-		for _, fqdn := range spec.EndpointFQDNs {
-			if fqdn != strings.ToLower(fqdn) || len(kvalidation.IsDNS1123Subdomain(fqdn)) != 0 {
+		for _, fqdn := range endpointFQDNs {
+			if _, parseErr := netip.ParseAddr(fqdn); parseErr == nil || fqdn != strings.ToLower(fqdn) || len(kvalidation.IsDNS1123Subdomain(fqdn)) != 0 {
 				return nil, fmt.Errorf("workspace FUSE system egress contains an invalid endpoint FQDN")
 			}
 			found = found || fqdn == endpointHostname
@@ -667,25 +677,39 @@ func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string
 	return networks, nil
 }
 
-func validatePorts(kind string, ports []int32) error {
+func canonicalPorts(kind string, ports []int32) ([]int32, error) {
 	if len(ports) == 0 {
-		return fmt.Errorf("workspace FUSE system egress %s ports must not be empty", kind)
+		return nil, fmt.Errorf("workspace FUSE system egress %s ports must not be empty", kind)
 	}
-	for _, port := range ports {
+	canonical := append([]int32(nil), ports...)
+	sort.Slice(canonical, func(i, j int) bool { return canonical[i] < canonical[j] })
+	result := canonical[:0]
+	for _, port := range canonical {
 		if port < 1 || port > 65535 {
-			return fmt.Errorf("workspace FUSE system egress %s port is invalid", kind)
+			return nil, fmt.Errorf("workspace FUSE system egress %s port is invalid", kind)
+		}
+		if len(result) == 0 || result[len(result)-1] != port {
+			result = append(result, port)
 		}
 	}
-	return nil
+	return result, nil
 }
 
-func containsPort(ports []int32, wanted int32) bool {
-	for _, port := range ports {
-		if port == wanted {
-			return true
+func containsCanonicalPort(ports []int32, wanted int32) bool {
+	index := sort.Search(len(ports), func(i int) bool { return ports[i] >= wanted })
+	return index < len(ports) && ports[index] == wanted
+}
+
+func canonicalStringSet(values []string) []string {
+	canonical := append([]string(nil), values...)
+	sort.Strings(canonical)
+	result := canonical[:0]
+	for _, value := range canonical {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
 		}
 	}
-	return false
+	return result
 }
 
 func endpointHostAliases(hostname string, endpointIP bool, rawIPs []string, approvedNetworks []netip.Prefix) ([]corev1.HostAlias, error) {
