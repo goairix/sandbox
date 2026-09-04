@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -235,4 +236,26 @@ func replaceFile(t *testing.T, path string, value []byte) {
 	replacement := path + ".replacement"
 	require.NoError(t, os.WriteFile(replacement, value, 0o600))
 	require.NoError(t, os.Rename(replacement, path))
+}
+
+func TestReadCredentialValueZerosPartialBufferOnError(t *testing.T) {
+	readErr := errors.New("injected read failure")
+	reader := &partialCredentialErrorReader{value: []byte("partial-secret"), err: readErr}
+
+	value, err := readCredentialValue(reader, "access key")
+	require.ErrorIs(t, err, readErr)
+	assert.Nil(t, value)
+	assert.Equal(t, make([]byte, len(reader.observed)), reader.observed)
+}
+
+type partialCredentialErrorReader struct {
+	value    []byte
+	err      error
+	observed []byte
+}
+
+func (r *partialCredentialErrorReader) Read(buffer []byte) (int, error) {
+	count := copy(buffer, r.value)
+	r.observed = buffer[:count]
+	return count, r.err
 }

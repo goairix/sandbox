@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -227,6 +228,9 @@ func validateOBSEndpoint(endpoint string) (string, error) {
 	}
 	if !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
 		return "", fmt.Errorf("storage: invalid OBS endpoint: absolute URL with host is required")
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && ip.To4() == nil {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: IPv6 literals are unsupported by the OBS SDK")
 	}
 	if parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(endpoint, "#") {
 		return "", fmt.Errorf("storage: invalid OBS endpoint: userinfo, query, and fragment are forbidden")

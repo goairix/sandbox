@@ -283,8 +283,13 @@ func validateCredentialFilePermissions(info os.FileInfo, name string) error {
 }
 
 func readOpenCredentialFile(file *os.File, name string) ([]byte, error) {
-	value, err := io.ReadAll(file)
+	return readCredentialValue(file, name)
+}
+
+func readCredentialValue(reader io.Reader, name string) ([]byte, error) {
+	value, err := io.ReadAll(reader)
 	if err != nil {
+		zeroBytes(value)
 		return nil, fmt.Errorf("storage: read %s credential file: %w", name, err)
 	}
 	if len(value) > 0 && value[len(value)-1] == '\n' {
