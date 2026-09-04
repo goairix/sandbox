@@ -471,9 +471,11 @@ const (
     FUSEPoolReserved  FUSEPoolState = "reserved"
     FUSEPoolBinding   FUSEPoolState = "binding"
     FUSEPoolConsumed  FUSEPoolState = "consumed"
+    FUSEPoolCleanup   FUSEPoolState = "cleanup"
 )
 
 type FUSEPoolRecord struct {
+    PreparationID   string        `json:"preparation_id"`
     RuntimeID       string        `json:"runtime_id"`
     RuntimeUID      string        `json:"runtime_uid"`
     PoolKey         string        `json:"pool_key"`
@@ -481,25 +483,34 @@ type FUSEPoolRecord struct {
     MaintainerToken string        `json:"maintainer_token"`
     ReservationToken string      `json:"reservation_token,omitempty"`
     ReservedUntil   time.Time     `json:"reserved_until,omitempty"`
+    PrepareUntil    time.Time     `json:"prepare_until,omitempty"`
+    CleanupToken    string        `json:"cleanup_token,omitempty"`
+    CleanupUntil    time.Time     `json:"cleanup_until,omitempty"`
     UpdatedAt       time.Time     `json:"updated_at"`
     Revision        uint64        `json:"revision"`
 }
 
 type FUSEPoolRepository interface {
-    CreatePreparing(ctx context.Context, record FUSEPoolRecord) error
+	CreatePreparingWithAdmission(ctx context.Context, record FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error
+	BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*FUSEPoolRecord, error)
     ReservePrepared(ctx context.Context, poolKey, token string, ttl time.Duration) (*FUSEPoolRecord, error)
-    Transition(ctx context.Context, runtimeUID string, from, to FUSEPoolState, token string, expectedRevision uint64) (*FUSEPoolRecord, error)
+	Transition(ctx context.Context, preparationID string, from, to FUSEPoolState, token string, expectedRevision uint64) (*FUSEPoolRecord, error)
+	TransitionWithRefillLock(ctx context.Context, preparationID string, from, to FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*FUSEPoolRecord, error)
+	ClaimCleanup(ctx context.Context, preparationID string, from FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*FUSEPoolRecord, error)
     ListByPoolKey(ctx context.Context, poolKey string) ([]FUSEPoolRecord, error)
     CountPreparingAndPrepared(ctx context.Context, poolKey string) (int, error)
-    ConditionalDelete(ctx context.Context, runtimeUID string, expectedState FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error)
+	ConditionalDelete(ctx context.Context, preparationID string, expectedState FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error)
+	DeleteCleanup(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64) (bool, error)
+	ServerTime(ctx context.Context) (time.Time, error)
     TryRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
+	RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
     UnlockRefill(ctx context.Context, poolKey, token string) error
 }
 ```
 
-`NewFUSEPoolRepository(store *Store)` is the only concrete repository constructor; `Store` itself is not asserted to implement this domain interface and its Redis client remains private. Implement `ReservePrepared`, revision-aware `Transition`, `ConditionalDelete`, `ListByPoolKey`, `CountPreparingAndPrepared`, `TryRefillLock` and token-checked `UnlockRefill` with Lua so state/token/revision check and mutation are one Redis operation. Every successful mutation increments `Revision`; stale reconcilers must receive a mismatch and leave the newer record untouched. Never auto-transition an expired reservation to prepared.
+`NewFUSEPoolRepository(store *Store)` is the only concrete repository constructor; `Store` itself is not asserted to implement this domain interface and its Redis client remains private. `PreparationID` is an opaque, bounded, valid-UTF-8 UUID generated before runtime allocation and Redis keys contain only its digest. Implement admission, bind, reserve, revision-aware transitions, cleanup claim/delete, inventory and refill-lock operations with Lua so state/token/revision checks and mutations are atomic. Admission validates the held refill token and `preparing + prepared < max_size` in the same Lua; bind makes RuntimeUID immutable and globally unique; publish validates the same lock token. `PrepareUntil`, `ReservedUntil` and `CleanupUntil` come from Redis `TIME`, not API wall clocks. Refill locks are token-renewed and every fenced write still rejects a lost token. Cleanup claims are idempotent for the same token, reject another token before expiry, and permit stale takeover after expiry. Runtime deletion occurs only after a successful exact cleanup claim; a failed removal keeps the cleanup tombstone retryable. Every successful non-idempotent mutation increments `Revision`; stale reconcilers leave the newer record and runtime untouched. Never auto-transition an expired reservation to prepared.
 
-For a Pool miss, the requesting API creates a `preparing` record that already carries its unique reservation token, prepares the runtime, and transitions that exact revision directly to `reserved`; it must never publish an intermediate `prepared` record. WarmUp/refill records have no reservation token and transition `preparing → prepared`. Add a two-client test proving a cold-prepared runtime cannot be stolen between health completion and return to the original requester.
+For a Pool miss, the requesting API first registers an unbound `preparing` intent, using `PreparationID` as runtime `spec.ID`, then prepares and atomically binds RuntimeID/RuntimeUID. After health it starts the reservation TTL from Redis `TIME` while transitioning that exact revision directly to `reserved`; it must never publish an intermediate `prepared` record. WarmUp/refill records follow the same intent/bind protocol and transition `preparing → prepared`. Bound deletion uses the FUSE-only exact `(RuntimeID, RuntimeUID)` contract; unbound recovery removes only the non-reusable `PreparationID/spec.ID`. Add tests for blocked allocation visibility, UID uniqueness, capacity admission, lock fencing, Redis clock skew, stale cleanup takeover and a two-client cold prepare.
 
 - [ ] **Step 4: Run state tests**
 
@@ -784,7 +795,7 @@ func TestFUSEPoolKeyExcludesOnlyAcquireFields(t *testing.T) {
 }
 ```
 
-Add `record(runtimeUID) (state.FUSEPoolRecord, bool)` to the fake repository and `wasRemoved(runtimeID string) bool` to `mockRuntime`; both take their existing mutex. Add cases for pristine return, stale health discard, Pool miss cold prepare, two concurrent refillers, expired preparing/reserved deletion, binding deletion, and Stop draining only `MaintainerToken == "api-a"`.
+Add `record(preparationID) (state.FUSEPoolRecord, bool)` to the fake repository and exact runtime removal evidence to `mockRuntime`; both take their existing mutex. Add cases for pristine return, stale health discard, Pool miss cold prepare, two concurrent refillers, expired preparing/reserved cleanup, protected/unknown binding retention, stale cleanup recovery, and Stop draining only `MaintainerToken == "api-a"`. The fake repository must perform each method as one mutex-held state check/mutation and model lock TTL/renewal plus Redis server time.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -837,7 +848,7 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 
 `ComputeFUSEPoolKey` canonical-JSON serializes a projection of runtime type, sandbox image/resources/security, provider, storage identity, bucket, endpoint, region, profile, mounter digest, Secret name, credential generation, CA, cache and system egress, then returns a SHA-256 hex digest. The projection excludes the output `PoolKey` field itself and has no workspace path, prefix, workspace identity, lease generation, reservation token or request-level user network fields.
 
-`Reconcile` is run only after token-checked refill lock acquisition. It counts `preparing + prepared`, conditionally deletes invalid/over-max records using the exact state/tokens/revision it inspected, and creates until `prepared >= MinSize` without allowing in-flight prepares above `MaxSize`. `ReturnPrepared` runs `PreparedSandboxHealth`, confirms no owner/session, and revision-CASes `reserved → prepared`. `ReleaseConsumed` accepts the complete record so it cannot confuse RuntimeID with RuntimeUID; it removes `record.RuntimeID`, conditionally deletes `record.RuntimeUID`, and triggers refill. Do not change the existing non-FUSE Pool behavior.
+`Reconcile` runs only after token-checked refill lock acquisition and keeps that lock renewed; renewal loss cancels the round and fenced Lua prevents later writes. It obtains Redis server time, recovers expired preparation/cleanup claims, and atomically inspection-reserves every pre-existing prepared record. A required Manager guard returns `Pristine`, `Protected`, or `Abandoned`: only `Pristine` plus runtime health may return to prepared; `Protected` or an uncertain/error result stays unavailable and makes initial startup fail closed; only `Abandoned` authorizes cleanup. It counts only `preparing + prepared`, then creates until `prepared >= MinSize` without exceeding `MaxSize`. `Acquire` applies the same guard after reservation and triggers refill even when an unproven record remains isolated. `ReturnPrepared` requires `Pristine` plus health before revision-CAS. Every destructive path first claims `cleanup`, then uses exact FUSE runtime removal, then conditionally deletes the tombstone; stale CAS never removes a runtime. `ReleaseConsumed` follows the same protocol and keeps failed deletions retryable. `Start` callers share the first real reconciliation result, wait while the initial lock is busy, and Stop cancels/tracks initial reconciliation and in-flight Acquire/WarmUp/Reconcile operations. Do not change the existing non-FUSE Pool behavior.
 
 Change `Manager.Start(ctx)` to return `error`. Sync mode preserves the existing best-effort general Pool behavior, but FUSE mode must synchronously connect/reconcile state and complete `fusePool.Start`; any Redis, reconciliation or WarmUp error is returned to `cmd/sandbox` and the HTTP server must not start listening. Add tests for each fail-closed startup error.
 

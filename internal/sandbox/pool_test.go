@@ -84,6 +84,17 @@ func (m *mockRuntime) RemoveSandbox(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *mockRuntime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeUID string) error {
+	m.mu.Lock()
+	info, ok := m.sandboxes[runtimeID]
+	if ok && info.RuntimeUID != runtimeUID {
+		m.mu.Unlock()
+		return runtime.ErrNotFound
+	}
+	m.mu.Unlock()
+	return m.RemoveSandbox(ctx, runtimeID)
+}
+
 func (m *mockRuntime) GetSandbox(_ context.Context, id string) (*runtime.SandboxInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

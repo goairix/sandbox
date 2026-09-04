@@ -91,9 +91,9 @@ FUSE 模式依赖 Redis 独占租约。生产必须使用持久化且具备故�
 
 - sandbox-api 所有副本连接同一 Redis；
 - Redis 数据持久化和备份已启用；
-- FUSE Pool record、reservation token 与 refill lock 使用同一 Redis；它们只供 `sandbox-api` 多副本保存状态和协调，不能以各副本的进程内队列作为 prepared inventory 状态源，也不代表 Redis 负责补池；
-- 时钟同步正常；
-- 监控覆盖连接错误、租约续期失败、owner 冲突、reservation 超时和 refill lock 异常；
+- FUSE Pool record、preparation/reservation/cleanup token 与 refill lock 使用同一 Redis；它们只供 `sandbox-api` 多副本保存状态和协调，不能以各副本的进程内队列作为 prepared inventory 状态源，也不代表 Redis 负责补池；
+- Pool 的 prepare/reservation/cleanup 到期时间统一由 Redis `TIME` 计算；API 主机时钟偏移不得参与过期判定；
+- 监控覆盖连接错误、租约续期失败、owner 冲突、preparation/reservation/cleanup 超时和 refill lock 续租/fencing 异常；
 - API 重启后可以按 runtime identity 恢复 owner 状态。
 
 ## 5. Secret 管理
@@ -279,7 +279,7 @@ storageCredentials:
 
 `<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名的 profile；没有验证结果或 profile 不匹配时启动失败。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置。
 
-`workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。和当前 Pool 一样，FUSE Pool 由 `sandbox-api` 的 Manager 启动并维护：启动时 WarmUp，Acquire/异常移除后调用 `refillIfNeeded`，并按 `refillIntervalSeconds` 周期对账。Redis 只让多个 sandbox-api 副本原子领取空壳、争抢本轮 refill 权并计算全局水位；进程内 slice 只能做非权威缓存。`minSize` 针对可领取的 prepared 数量，`maxSize` 限制 preparing + prepared；reservation 超时不能自动回池，必须经 reconciler pristine probe 或直接销毁。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
+`workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。和当前 Pool 一样，FUSE Pool 由 `sandbox-api` 的 Manager 启动并维护：启动时 WarmUp，Acquire/异常移除后调用 `refillIfNeeded`，并按 `refillIntervalSeconds` 周期对账。Redis 让多个 sandbox-api 副本原子领取空壳、续租本轮 refill 权并计算全局水位；进程内 slice 只能做非权威缓存。创建 runtime 前必须先以不可复用的 `PreparationID/spec.ID` 原子占用容量槽，`maxSize` 只限制 preparing + prepared；RuntimeUID 返回后原子绑定且不可变。reservation 超时不能自动回池，必须经 Manager owner/session/gate guard 得到明确 disposition。Protected 或检查失败的记录保持不可领取且不得删除，只有明确 Abandoned（或无引用的 Pristine 过期空壳）才能先 claim cleanup、再精确删除 `(RuntimeID, RuntimeUID)`。删除失败保留 cleanup tombstone 重试。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
 
 PoolKey 必须覆盖 runtime、sandbox 镜像/资源/安全配置、provider、storage identity、bucket、endpoint、profile、mounter 镜像 digest、Secret 名、`credentialGeneration`、CA、cache 和 system egress；明确排除 Acquire 时才知道的 `workspace_path/prefix`、workspace identity、lease generation、reservation token 和请求级用户网络规则。任一固定字段变化都创建新 key 并排空旧 key 空壳；请求固定字段与现有 key 不匹配时只能 cold prepare。Secret 或 CA 每次轮换都必须递增 `credentialGeneration`，因为 sandbox-api 不读取 runtime namespace Secret 的 resourceVersion。
 
@@ -470,7 +470,7 @@ spec:
 
 全新空 prefix 挂载前，控制面必须在获得独占租约后调用 `PrepareWorkspacePrefix`，对上述精确 prefix 写入 provider profile 已验证的零字节目录标记并用直接对象 API 验证。现有 `goairix/fs` v0.3.11 的 MinIO/OBS `MakeDir` 是 no-op，不能作为成功依据。根标记在 sandbox 销毁后保留，只随显式 workspace 删除流程清理；对应 profile 没有通过“全新空 prefix”测试时禁止启用 FUSE。
 
-Redis FUSE Pool record 带单调 `revision`；transition 和 delete 都必须同时匹配预期 state、maintainer/reservation token 与 revision。cold prepare 从创建 `preparing` 起就携带当前请求的 reservation token，健康通过后直接 CAS 到 `reserved`，绝不能短暂发布成可被其他副本领取的 `prepared`。SessionStore 使用独立 `sandbox:session:v2:` 前缀；lease、owner、generation 和 pool key 均使用各自命名空间，恢复扫描不能把它们当作 session JSON。
+Redis FUSE Pool record 带不可复用 `PreparationID`、单调 `revision`、Redis 服务时间生成的 `PrepareUntil/ReservedUntil/CleanupUntil`；transition、cleanup claim 和 delete 都必须同时匹配预期 state、token 与 revision。cold prepare 先登记无 reservation 的 `preparing` 容量意图，runtime health 通过后才在受 refill lock fencing 的 Lua 中从当前 Redis 时间开始 reservation TTL 并直接 CAS 到 `reserved`，绝不能短暂发布成可被其他副本领取的 `prepared`。任何 runtime 删除前必须先取得 `cleanup` claim；旧 prepared 快照与 Acquire 并发时只能 CAS 失败，不能先删除新 reserved runtime。SessionStore 使用独立 `sandbox:session:v2:` 前缀；lease、owner、generation 和 pool key 均使用各自命名空间，恢复扫描不能把它们当作 session JSON。
 
 mounter 必须预创建 `/var/cache/s3fs/tmp`（以及启用文件 cache 时的 `/var/cache/s3fs/cache`），固定 argv 至少包含 `tmpdir=/var/cache/s3fs/tmp`；不得使用默认 `/tmp`。启用 `use_cache` 时必须指向 `/var/cache/s3fs/cache`，确保 `emptyDir.sizeLimit` 和 ephemeral-storage 监控覆盖 s3fs 的全部本地数据。
 
@@ -855,8 +855,10 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - [ ] PoolKey 不包含动态 `workspace_path/prefix` 或请求级用户网络规则；固定字段不匹配时 cold prepare，不借用其他 key 空壳。
 - [ ] 生产 `fusePool.minSize>=1` 且完成突发容量压测；若设置为 0，已明确接受所有请求走 cold prepare。
 - [ ] `sandbox-api` 启动时 WarmUp 到 `minSize`，Acquire/异常移除后自动补池，周期对账可修复数量漂移；没有部署其他 Pool 控制组件。
-- [ ] 多副本通过 Redis 原子 reserve prepared record；同一 runtime UID 不会被领取两次，其他副本的空壳不会被误删。
-- [ ] Pool transition/delete 匹配 state、token 和 revision；cold prepare 直接进入请求独占的 reserved，不暴露 prepared 抢占窗口。
+- [ ] 多副本通过 Redis 原子 reserve prepared record；同一 runtime UID 不会被领取两次，prepared inspection 遇 Protected/未知状态会隔离且不会误删。
+- [ ] runtime 创建前已登记 PreparationID 容量槽；RuntimeUID 绑定全局唯一且不可变，Pool transition/publish 校验 refill lock token、state 和 revision。
+- [ ] cold prepare 的 reservation TTL 从 Redis publish 时开始，直接进入请求独占的 reserved，不暴露 prepared 抢占窗口。
+- [ ] cleanup claim 先于任何 runtime 删除；删除使用精确 RuntimeID+RuntimeUID，失败 tombstone 可重试且过期后可安全接管。
 - [ ] sandbox-api 在 lease 获取后立即续租，并持续监督 lease/runtime UID/generation/FUSE health；失败时 gate 在销毁前先关闭。
 - [ ] FUSE 模式 Redis/reconcile/WarmUp 失败会阻止 HTTP 服务监听。
 - [ ] 1 GiB direct upload 端到端流式通过，非上传路由仍在 64 MiB 返回 413，API 内存不随文件大小线性增长。

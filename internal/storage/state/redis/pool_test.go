@@ -37,7 +37,7 @@ func cleanupFUSEPool(t *testing.T, s *Store, poolKeys, runtimeUIDs []string) {
 			for _, poolKey := range poolKeys {
 				digest := poolTestDigest(poolKey)
 				keys := []string{"fusepool:index:" + digest, "fusepool:lock:" + digest}
-				for _, poolState := range []state.FUSEPoolState{state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed} {
+				for _, poolState := range fusePoolStates {
 					keys = append(keys, "fusepool:state:"+string(poolState)+":"+digest)
 					pipe.HDel(ctx, "fusepool:state-counts:"+string(poolState), digest)
 				}
@@ -52,6 +52,7 @@ func cleanupFUSEPool(t *testing.T, s *Store, poolKeys, runtimeUIDs []string) {
 				pipe.HDel(ctx, "fusepool:reservation-deadlines", digest)
 				pipe.HDel(ctx, "fusepool:record-uids", digest)
 				pipe.HDel(ctx, "fusepool:record-pool-values", digest)
+				pipe.HDel(ctx, fusePoolRuntimeUIDOwners, digest)
 			}
 			return nil
 		})
@@ -169,9 +170,155 @@ func preparingRecord(poolKey, runtimeUID string) state.FUSEPoolRecord {
 	}
 }
 
+func preparingIntent(poolKey, preparationID string) state.FUSEPoolRecord {
+	return state.FUSEPoolRecord{
+		PreparationID: preparationID,
+		PoolKey:       poolKey, State: state.FUSEPoolPreparing,
+		MaintainerToken: "maintainer-a", Revision: 1,
+	}
+}
+
+func TestFUSEPoolAdmissionRegistersIntentBeforeRuntimeAndUsesRedisDeadline(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, preparationID := poolTestID("pool"), poolTestID("preparation")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{preparationID})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+
+	before, err := repo.ServerTime(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, preparationID), "controller", 1, 2*time.Second))
+	after, err := repo.ServerTime(context.Background())
+	require.NoError(t, err)
+	records, err := repo.ListByPoolKey(context.Background(), poolKey)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].RuntimeID)
+	assert.Empty(t, records[0].RuntimeUID)
+	assert.GreaterOrEqual(t, records[0].PrepareUntil.UnixMilli(), before.Add(2*time.Second).UnixMilli())
+	assert.LessOrEqual(t, records[0].PrepareUntil.UnixMilli(), after.Add(2*time.Second).UnixMilli())
+
+	err = repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, poolTestID("second")), "controller", 1, time.Second)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+}
+
+func TestFUSEPoolBindPreparingRuntimeFencesLockAndRuntimeUID(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey := poolTestID("pool")
+	first, second := poolTestID("preparation"), poolTestID("preparation")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{first, second, "uid-a", "uid-b"})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	for _, id := range []string{first, second} {
+		require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, id), "controller", 2, time.Second))
+	}
+	bound, err := repo.BindPreparingRuntime(context.Background(), first, "runtime-a", "uid-a", "controller", 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), bound.Revision)
+	_, err = repo.BindPreparingRuntime(context.Background(), second, "runtime-b", "uid-a", "controller", 1)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	_, err = repo.BindPreparingRuntime(context.Background(), first, "runtime-changed", "uid-changed", "controller", 2)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	_, err = repo.BindPreparingRuntime(context.Background(), second, "runtime-b", "uid-b", "stale-controller", 1)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+}
+
+func TestFUSEPoolCleanupClaimIsExclusiveRetryableAndRecoverable(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, id := poolTestID("pool"), poolTestID("preparation")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{id, "uid-cleanup"})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, id), "controller", 1, time.Second))
+	claimed, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolPreparing, "maintainer-a", "", 1, "runtime-cleanup", "uid-cleanup", "cleaner-a", 80*time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, state.FUSEPoolCleanup, claimed.State)
+	assert.NotEmpty(t, claimed.CleanupUntil)
+	assert.Equal(t, "runtime-cleanup", claimed.RuntimeID)
+	assert.Equal(t, "uid-cleanup", claimed.RuntimeUID)
+
+	same, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", claimed.Revision, "runtime-cleanup", "uid-cleanup", "cleaner-a", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, claimed.Revision, same.Revision, "same owner retry must be idempotent")
+	_, err = repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", claimed.Revision, "runtime-cleanup", "uid-cleanup", "cleaner-b", time.Second)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	waitForRedisDeadline(t, s, claimed.CleanupUntil)
+	taken, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", claimed.Revision, "runtime-cleanup", "uid-cleanup", "cleaner-b", time.Second)
+	require.NoError(t, err)
+	assert.Greater(t, taken.Revision, claimed.Revision)
+	deleted, err := repo.DeleteCleanup(context.Background(), id, "cleaner-b", taken.Revision)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+}
+
+func TestFUSEPoolPublishReservedStartsTTLAtRedisTransitionAndChecksLock(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, id := poolTestID("pool"), poolTestID("preparation")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{id, "uid-a"})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, id), "controller", 1, time.Second))
+	bound, err := repo.BindPreparingRuntime(context.Background(), id, "runtime-a", "uid-a", "controller", 1)
+	require.NoError(t, err)
+	require.NoError(t, repo.UnlockRefill(context.Background(), poolKey, "controller"))
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller-new", time.Second))
+	_, err = repo.TransitionWithRefillLock(context.Background(), id, state.FUSEPoolPreparing, state.FUSEPoolReserved, "reservation", "controller", bound.Revision, 2*time.Second)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	before, err := repo.ServerTime(context.Background())
+	require.NoError(t, err)
+	reserved, err := repo.TransitionWithRefillLock(context.Background(), id, state.FUSEPoolPreparing, state.FUSEPoolReserved, "reservation", "controller-new", bound.Revision, 2*time.Second)
+	require.NoError(t, err)
+	after, err := repo.ServerTime(context.Background())
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, reserved.ReservedUntil.UnixMilli(), before.Add(2*time.Second).UnixMilli())
+	assert.LessOrEqual(t, reserved.ReservedUntil.UnixMilli(), after.Add(2*time.Second).UnixMilli())
+}
+
+func TestFUSEPoolRenewRefillLockVerifiesOwnership(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey := poolTestID("pool")
+	cleanupFUSEPool(t, s, []string{poolKey}, nil)
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller-a", 100*time.Millisecond))
+	ok, err := repo.RenewRefillLock(context.Background(), poolKey, "controller-b", time.Second)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	ok, err = repo.RenewRefillLock(context.Background(), poolKey, "controller-a", time.Second)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestFUSEPoolPreparationIDValidationDoesNotCreateRawRedisKey(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey := poolTestID("pool")
+	cleanupFUSEPool(t, s, []string{poolKey}, nil)
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	for _, invalid := range []string{"", string([]byte{0xff}), strings.Repeat("x", 1025)} {
+		err := repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, invalid), "controller", 1, time.Second)
+		assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
+	}
+	keys, err := s.client.Keys(context.Background(), "fusepool:record:*x*").Result()
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func mustRefillLock(t *testing.T, repo *FUSEPoolRepository, poolKey, token string, ttl time.Duration) bool {
+	t.Helper()
+	locked, err := repo.TryRefillLock(context.Background(), poolKey, token, ttl)
+	require.NoError(t, err)
+	return locked
+}
+
 func prepareWarmRecord(t *testing.T, repo *FUSEPoolRepository, record state.FUSEPoolRecord) state.FUSEPoolRecord {
 	t.Helper()
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 	got, err := repo.Transition(context.Background(), record.RuntimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, record.Revision)
 	require.NoError(t, err)
 	return *got
@@ -344,7 +491,7 @@ func TestFUSEPoolCreateColdUsesRedisServerTimeAfterQueueing(t *testing.T) {
 	before, err := s.client.Time(context.Background()).Result()
 	require.NoError(t, err)
 	s.client.AddHook(&delayScriptHook{delay: delay})
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 	after, err := s.client.Time(context.Background()).Result()
 	require.NoError(t, err)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
@@ -370,7 +517,7 @@ func TestFUSEPoolCreateColdTreatsPositiveTTLAsAuthoritativeAfterLongQueue(t *tes
 	record.ReservationToken = "cold-token"
 	record.ReservedUntil = time.Now().Add(60 * time.Millisecond)
 	s.client.AddHook(&delayScriptHook{delay: 180 * time.Millisecond})
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 	serverAfter, err := s.client.Time(context.Background()).Result()
 	require.NoError(t, err)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
@@ -387,7 +534,7 @@ func TestFUSEPoolTransitionUpdatedAtUsesRedisServerTime(t *testing.T) {
 	poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	record := preparingRecord(poolKey, runtimeUID)
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 	delay := 350 * time.Millisecond
 	before, err := s.client.Time(context.Background()).Result()
 	require.NoError(t, err)
@@ -409,7 +556,7 @@ func TestFUSEPoolColdPreparingTransitionsDirectlyAndCannotBeStolen(t *testing.T)
 	record := preparingRecord(poolKey, runtimeUID)
 	record.ReservationToken = token
 	record.ReservedUntil = time.Now().Add(time.Minute).UTC()
-	require.NoError(t, repoA.CreatePreparing(context.Background(), record))
+	require.NoError(t, repoA.createPreparingForTest(context.Background(), record))
 
 	stolen, err := repoB.ReservePrepared(context.Background(), poolKey, uuid.NewString(), time.Minute)
 	require.NoError(t, err)
@@ -433,7 +580,7 @@ func TestFUSEPoolTransitionRejectsRevisionTokenAndIllegalEdges(t *testing.T) {
 	poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	record := preparingRecord(poolKey, runtimeUID)
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 
 	_, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, 99)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
@@ -501,7 +648,7 @@ func TestFUSEPoolStateIndexesFollowEveryMutation(t *testing.T) {
 	}
 
 	record := preparingRecord(poolKey, runtimeUID)
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 	assertState(state.FUSEPoolPreparing, true)
 	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	prepared, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, 1)
@@ -549,7 +696,7 @@ func TestFUSEPoolStateIndexesCoverColdAndReturnTransitions(t *testing.T) {
 	cold := preparingRecord(poolKey, coldUID)
 	cold.ReservationToken = "cold-reservation"
 	cold.ReservedUntil = time.Now().Add(time.Minute)
-	require.NoError(t, repo.CreatePreparing(context.Background(), cold))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), cold))
 	assertOnlyState(coldUID, state.FUSEPoolPreparing)
 	_, err := repo.Transition(context.Background(), coldUID, state.FUSEPoolPreparing, state.FUSEPoolReserved, cold.ReservationToken, 1)
 	require.NoError(t, err)
@@ -690,7 +837,7 @@ func TestFUSEPoolCountAndListAreCrossClientAndStable(t *testing.T) {
 	poolKey := poolTestID("pool")
 	runtimeUIDs := []string{poolTestID("uid-c"), poolTestID("uid-a"), poolTestID("uid-b")}
 	cleanupFUSEPool(t, a, []string{poolKey}, runtimeUIDs)
-	require.NoError(t, repoA.CreatePreparing(context.Background(), preparingRecord(poolKey, runtimeUIDs[0])))
+	require.NoError(t, repoA.createPreparingForTest(context.Background(), preparingRecord(poolKey, runtimeUIDs[0])))
 	prepareWarmRecord(t, repoA, preparingRecord(poolKey, runtimeUIDs[1]))
 	prepareWarmRecord(t, repoA, preparingRecord(poolKey, runtimeUIDs[2]))
 	reserved, err := repoA.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
@@ -719,7 +866,7 @@ func TestFUSEPoolListUsesIncrementalSSCAN(t *testing.T) {
 	for range records {
 		runtimeUID := poolTestID("uid")
 		runtimeUIDs = append(runtimeUIDs, runtimeUID)
-		require.NoError(t, repo.CreatePreparing(context.Background(), preparingRecord(poolKey, runtimeUID)))
+		require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolKey, runtimeUID)))
 	}
 	cleanupFUSEPool(t, s, []string{poolKey}, runtimeUIDs)
 	hook := &commandCountHook{}
@@ -742,7 +889,7 @@ func TestFUSEPoolListSucceedsDuringDeterministicStateChurn(t *testing.T) {
 	for range preparingRecords {
 		runtimeUID := poolTestID("preparing")
 		runtimeUIDs = append(runtimeUIDs, runtimeUID)
-		require.NoError(t, listRepo.CreatePreparing(context.Background(), preparingRecord(poolKey, runtimeUID)))
+		require.NoError(t, listRepo.createPreparingForTest(context.Background(), preparingRecord(poolKey, runtimeUID)))
 	}
 	targetUID := poolTestID("churn")
 	runtimeUIDs = append(runtimeUIDs, targetUID)
@@ -795,7 +942,7 @@ func TestFUSEPoolListRetriesMembershipReplacementWithoutLosingProtectedMembers(t
 		record := preparingRecord(poolKey, runtimeUID)
 		runtimeUIDs = append(runtimeUIDs, runtimeUID)
 		created[runtimeUID] = record
-		require.NoError(t, listRepo.CreatePreparing(context.Background(), record))
+		require.NoError(t, listRepo.createPreparingForTest(context.Background(), record))
 	}
 	victimUID := runtimeUIDs[0]
 	replacementUID := poolTestID("replacement")
@@ -812,7 +959,7 @@ func TestFUSEPoolListRetriesMembershipReplacementWithoutLosingProtectedMembers(t
 		if !deleted {
 			return fmt.Errorf("victim was not deleted")
 		}
-		return mutationRepo.CreatePreparing(context.Background(), preparingRecord(poolKey, replacementUID))
+		return mutationRepo.createPreparingForTest(context.Background(), preparingRecord(poolKey, replacementUID))
 	}
 	listStore.client.AddHook(hook)
 	listed, err := listRepo.ListByPoolKey(context.Background(), poolKey)
@@ -857,7 +1004,7 @@ func TestFUSEPoolMembershipGenerationOverflowRejectsCreateAndDeleteBeforeWrites(
 	deleteUID, createUID := poolTestID("delete-uid"), poolTestID("create-uid")
 	cleanupFUSEPool(t, s, []string{deletePool, createPool}, []string{deleteUID, createUID})
 	deleteRecord := preparingRecord(deletePool, deleteUID)
-	require.NoError(t, repo.CreatePreparing(context.Background(), deleteRecord))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), deleteRecord))
 	deleteDigest := poolTestDigest(deletePool)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", deleteDigest, "9007199254740991").Err())
 	rawBefore, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
@@ -871,7 +1018,7 @@ func TestFUSEPoolMembershipGenerationOverflowRejectsCreateAndDeleteBeforeWrites(
 
 	createDigest := poolTestDigest(createPool)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", createDigest, "9007199254740991").Err())
-	err = repo.CreatePreparing(context.Background(), preparingRecord(createPool, createUID))
+	err = repo.createPreparingForTest(context.Background(), preparingRecord(createPool, createUID))
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 	assert.Equal(t, int64(0), s.client.Exists(context.Background(), "fusepool:record:"+poolTestDigest(createUID)).Val())
 	assert.Equal(t, int64(0), s.client.SCard(context.Background(), "fusepool:index:"+createDigest).Val())
@@ -1027,7 +1174,7 @@ func TestFUSEPoolRejectsExpiredColdPreparationWithoutHalfState(t *testing.T) {
 	record := preparingRecord(poolKey, runtimeUID)
 	record.ReservationToken = "reservation"
 	record.ReservedUntil = time.Now().Add(-time.Second).UTC()
-	err := repo.CreatePreparing(context.Background(), record)
+	err := repo.createPreparingForTest(context.Background(), record)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
 	require.NoError(t, err)
@@ -1074,9 +1221,9 @@ func TestFUSEPoolDuplicateCreateLeavesNoHalfState(t *testing.T) {
 	repo := NewFUSEPoolRepository(s)
 	poolA, poolB, runtimeUID := poolTestID("pool-a"), poolTestID("pool-b"), poolTestID("uid")
 	cleanupFUSEPool(t, s, []string{poolA, poolB}, []string{runtimeUID})
-	require.NoError(t, repo.CreatePreparing(context.Background(), preparingRecord(poolA, runtimeUID)))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolA, runtimeUID)))
 	duplicate := preparingRecord(poolB, runtimeUID)
-	err := repo.CreatePreparing(context.Background(), duplicate)
+	err := repo.createPreparingForTest(context.Background(), duplicate)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
 
 	a, err := repo.ListByPoolKey(context.Background(), poolA)
@@ -1095,17 +1242,17 @@ func TestFUSEPoolRejectsInvalidCreateAndReportsCorruption(t *testing.T) {
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	record := preparingRecord(poolKey, runtimeUID)
 	record.Revision = 0
-	assert.ErrorIs(t, repo.CreatePreparing(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
+	assert.ErrorIs(t, repo.createPreparingForTest(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
 	record.Revision = 1
 	record.State = state.FUSEPoolPrepared
-	assert.ErrorIs(t, repo.CreatePreparing(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
+	assert.ErrorIs(t, repo.createPreparingForTest(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
 	record.State = state.FUSEPoolPreparing
 	record.MaintainerToken = ""
-	assert.ErrorIs(t, repo.CreatePreparing(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
+	assert.ErrorIs(t, repo.createPreparingForTest(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
 	record.MaintainerToken = "maintainer-a"
 	record.ReservationToken = "cold-token"
 	record.ReservedUntil = time.Unix(0, 0).UTC()
-	assert.ErrorIs(t, repo.CreatePreparing(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
+	assert.ErrorIs(t, repo.createPreparingForTest(context.Background(), record), state.ErrFUSEPoolInvalidRecord)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
 	require.NoError(t, err)
 	assert.Empty(t, listed)
@@ -1144,7 +1291,7 @@ func TestFUSEPoolCreateRejectsInvalidUTF8BeforeRedisWrites(t *testing.T) {
 			record := preparingRecord(poolTestID("pool"), poolTestID("uid"))
 			tt.mutate(&record)
 			cleanupFUSEPool(t, s, []string{record.PoolKey}, []string{record.RuntimeUID})
-			err := repo.CreatePreparing(context.Background(), record)
+			err := repo.createPreparingForTest(context.Background(), record)
 			assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
 			uidDigest, poolDigest := poolTestDigest(record.RuntimeUID), poolTestDigest(record.PoolKey)
 			assert.Equal(t, int64(0), s.client.Exists(context.Background(), "fusepool:record:"+uidDigest).Val())
@@ -1413,7 +1560,7 @@ func TestFUSEPoolNamespaceDoesNotMatchSandboxSessionGlob(t *testing.T) {
 	repo := NewFUSEPoolRepository(s)
 	poolKey, runtimeUID := "pool:*?["+uuid.NewString(), "uid:/../*"+uuid.NewString()
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
-	require.NoError(t, repo.CreatePreparing(context.Background(), preparingRecord(poolKey, runtimeUID)))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolKey, runtimeUID)))
 
 	keys, err := s.Keys(context.Background(), "sandbox:*")
 	require.NoError(t, err)
@@ -1440,7 +1587,7 @@ func TestFUSEPoolErrorsDoNotLeakRecordValuesAndContextCancellationPropagates(t *
 	record := preparingRecord(poolKey, runtimeUID)
 	record.ReservationToken = "secret-reservation-token"
 	record.ReservedUntil = time.Now().Add(time.Minute).UTC()
-	require.NoError(t, repo.CreatePreparing(context.Background(), record))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), record))
 
 	_, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolReserved, "wrong", record.Revision)
 	require.Error(t, err)

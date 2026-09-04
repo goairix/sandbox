@@ -28,6 +28,7 @@ const (
 	fusePoolMembershipGenerations = "fusepool:membership-generations"
 	fusePoolStatePrefix           = "fusepool:state:"
 	fusePoolStateCounts           = "fusepool:state-counts:"
+	fusePoolRuntimeUIDOwners      = "fusepool:runtime-uid-owners"
 )
 
 var fusePoolStates = [...]state.FUSEPoolState{
@@ -36,6 +37,7 @@ var fusePoolStates = [...]state.FUSEPoolState{
 	state.FUSEPoolReserved,
 	state.FUSEPoolBinding,
 	state.FUSEPoolConsumed,
+	state.FUSEPoolCleanup,
 }
 
 const (
@@ -52,10 +54,10 @@ const (
 const fusePoolLuaHelpers = `
 local function isValidState(value)
     return value == 'preparing' or value == 'prepared' or value == 'reserved'
-        or value == 'binding' or value == 'consumed'
+        or value == 'binding' or value == 'consumed' or value == 'cleanup'
 end
 
-local poolStates = {'preparing', 'prepared', 'reserved', 'binding', 'consumed'}
+local poolStates = {'preparing', 'prepared', 'reserved', 'binding', 'consumed', 'cleanup'}
 
 local function parseRFC3339Millis(value)
     if type(value) ~= 'string' then return nil end
@@ -140,12 +142,14 @@ end
 
 local function validateRecord(record, deadlineValue)
     if type(record) ~= 'table'
-        or type(record.runtime_id) ~= 'string' or record.runtime_id == ''
-        or type(record.runtime_uid) ~= 'string' or record.runtime_uid == ''
+        or type(record.preparation_id) ~= 'string' or record.preparation_id == ''
+        or type(record.runtime_id) ~= 'string'
+        or type(record.runtime_uid) ~= 'string'
         or type(record.pool_key) ~= 'string' or record.pool_key == ''
         or not isValidState(record.state)
         or type(record.maintainer_token) ~= 'string' or record.maintainer_token == ''
         or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
+        or (record.cleanup_token ~= nil and type(record.cleanup_token) ~= 'string')
         or type(record.revision) ~= 'number' or record.revision < 1
         or record.revision ~= math.floor(record.revision)
         or record.revision > 99999999999999 then
@@ -156,16 +160,29 @@ local function validateRecord(record, deadlineValue)
     local deadline = tonumber(deadlineValue)
     if not deadline or deadline ~= math.floor(deadline) then return false end
     local reservation = record.reservation_token or ''
+    local cleanup = record.cleanup_token or ''
     local reservedMillis = parseRFC3339Millis(record.reserved_until)
+    local cleanupMillis = parseRFC3339Millis(record.cleanup_until)
+	local prepareMillis = parseRFC3339Millis(record.prepare_until)
     local zeroReserved = record.reserved_until == '0001-01-01T00:00:00Z'
+    local zeroCleanup = record.cleanup_until == '0001-01-01T00:00:00Z'
+	local zeroPrepare = record.prepare_until == '0001-01-01T00:00:00Z'
+	if zeroPrepare or not prepareMillis or prepareMillis <= 0 then return false end
+    if record.state == 'cleanup' then
+		if cleanup == '' or zeroCleanup or cleanupMillis == nil or cleanupMillis <= 0 then return false end
+		if reservation == '' then return zeroReserved and deadline == 0 end
+		return not zeroReserved and reservedMillis ~= nil and reservedMillis == deadline and deadline > 0
+    end
+    if cleanup ~= '' or not zeroCleanup then return false end
     if record.state == 'prepared' then
-        return reservation == '' and zeroReserved and deadline == 0
+        return record.runtime_id ~= '' and record.runtime_uid ~= '' and reservation == '' and zeroReserved and deadline == 0
     end
     if record.state == 'preparing' then
+        if (record.runtime_id == '') ~= (record.runtime_uid == '') then return false end
         if reservation == '' then return zeroReserved and deadline == 0 end
         return not zeroReserved and reservedMillis ~= nil and reservedMillis == deadline and deadline > 0
     end
-    return reservation ~= '' and not zeroReserved and reservedMillis ~= nil
+    return record.runtime_id ~= '' and record.runtime_uid ~= '' and reservation ~= '' and not zeroReserved and reservedMillis ~= nil
         and reservedMillis == deadline and deadline > 0
 end
 
@@ -232,12 +249,16 @@ end
 var createPreparingScript = redisclient.NewScript(fusePoolLuaHelpers + `
 local decoded, record = pcall(cjson.decode, ARGV[3])
 if not decoded or type(record) ~= 'table'
-    or type(record.runtime_id) ~= 'string' or record.runtime_id == ''
-    or type(record.runtime_uid) ~= 'string' or record.runtime_uid ~= ARGV[5]
+    or type(record.preparation_id) ~= 'string' or record.preparation_id ~= ARGV[5]
+    or type(record.runtime_id) ~= 'string'
+    or type(record.runtime_uid) ~= 'string'
+    or (record.runtime_id == '') ~= (record.runtime_uid == '')
     or type(record.pool_key) ~= 'string' or record.pool_key ~= ARGV[6]
     or record.state ~= 'preparing'
     or type(record.maintainer_token) ~= 'string' or record.maintainer_token == ''
     or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
+	or (record.cleanup_token ~= nil and record.cleanup_token ~= '')
+	or record.cleanup_until ~= '0001-01-01T00:00:00Z'
     or type(record.revision) ~= 'number' or record.revision ~= 1
     or not parseRFC3339Millis(record.updated_at)
     or parseRFC3339Millis(record.updated_at) == -62135596800000 then
@@ -245,6 +266,9 @@ if not decoded or type(record) ~= 'table'
 end
 local redisTime = redis.call('TIME')
 local nowMillis = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+local prepareTTLMillis = tonumber(ARGV[10])
+if not prepareTTLMillis or prepareTTLMillis <= 0 or prepareTTLMillis ~= math.floor(prepareTTLMillis) then return -5 end
+record.prepare_until = formatRFC3339Millis(nowMillis + prepareTTLMillis)
 local ttlMillis = tonumber(ARGV[4])
 local reservation = record.reservation_token or ''
 local zeroReserved = record.reserved_until == '0001-01-01T00:00:00Z'
@@ -268,6 +292,10 @@ local encoded = cjson.encode(record)
 if redis.call('EXISTS', KEYS[1]) == 1 then
     return -3
 end
+if record.runtime_uid ~= '' then
+    local owner = redis.call('HGET', KEYS[12], ARGV[9])
+    if owner and owner ~= ARGV[1] then return -3 end
+end
 if redis.call('HEXISTS', KEYS[3], ARGV[1]) == 1
     or redis.call('HEXISTS', KEYS[4], ARGV[1]) == 1
     or redis.call('HEXISTS', KEYS[5], ARGV[1]) == 1
@@ -279,19 +307,61 @@ if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1
     or not validatePoolInventory(ARGV[2], 'fusepool:index:', KEYS[7], 'fusepool:state:', 'fusepool:state-counts:') then
     return -4
 end
+if ARGV[7] ~= '' then
+    local maxSize = tonumber(ARGV[8])
+    if not maxSize or maxSize < 1 or maxSize ~= math.floor(maxSize)
+        or redis.call('GET', KEYS[11]) ~= ARGV[7] then return -6 end
+    local preparing = tonumber(redis.call('HGET', KEYS[9], ARGV[2]) or '0')
+    local prepared = tonumber(redis.call('HGET', 'fusepool:state-counts:prepared', ARGV[2]) or '0')
+    if not preparing or not prepared or preparing + prepared >= maxSize then return -3 end
+end
 local generationOK = validateMutableMembershipGeneration(KEYS[10], ARGV[2], redis.call('SCARD', KEYS[2]))
 if not generationOK then return -4 end
 redis.call('SET', KEYS[1], encoded)
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 redis.call('HSET', KEYS[4], ARGV[1], deadlineMillis)
-redis.call('HSET', KEYS[5], ARGV[1], ARGV[5])
+redis.call('HSET', KEYS[5], ARGV[1], record.runtime_uid)
 redis.call('HSET', KEYS[6], ARGV[1], ARGV[6])
+if record.runtime_uid ~= '' then redis.call('HSET', KEYS[12], ARGV[9], ARGV[1]) end
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('SADD', KEYS[8], ARGV[1])
 setCount(KEYS[7], ARGV[2], 1)
 setCount(KEYS[9], ARGV[2], 1)
 redis.call('HINCRBY', KEYS[10], ARGV[2], 1)
 return 1
+`)
+
+var bindPreparingRuntimeScript = redisclient.NewScript(fusePoolLuaHelpers + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {-1} end
+local decoded, record = pcall(cjson.decode, raw)
+local deadline = redis.call('HGET', KEYS[2], ARGV[1])
+if not decoded or not validateMutableRecord(record, deadline)
+    or record.preparation_id ~= ARGV[2]
+    or record.state ~= 'preparing'
+    or record.revision ~= tonumber(ARGV[6]) then return {-2} end
+if record.runtime_id ~= '' or record.runtime_uid ~= '' then return {-3} end
+if ARGV[3] == '' or ARGV[4] == '' then return {-5} end
+local poolDigest = redis.call('HGET', KEYS[3], ARGV[1])
+local mappedUID = redis.call('HGET', KEYS[4], ARGV[1])
+local mappedPoolValue = redis.call('HGET', KEYS[5], ARGV[1])
+if not poolDigest or not validatePoolInventory(poolDigest, 'fusepool:index:', KEYS[6], 'fusepool:state:', 'fusepool:state-counts:')
+	or mappedUID ~= '' or mappedPoolValue ~= record.pool_key
+	or not recordIsInExactlyState(ARGV[1], poolDigest, 'preparing', 'fusepool:state:') then return {-4} end
+if redis.call('GET', 'fusepool:lock:' .. poolDigest) ~= ARGV[5] then return {-6} end
+local owner = redis.call('HGET', KEYS[7], ARGV[7])
+if owner and owner ~= ARGV[1] then return {-3} end
+local redisTime = redis.call('TIME')
+local nowMillis = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+record.runtime_id = ARGV[3]
+record.runtime_uid = ARGV[4]
+record.updated_at = formatRFC3339Millis(nowMillis)
+record.revision = record.revision + 1
+local updated = cjson.encode(record)
+redis.call('SET', KEYS[1], updated)
+redis.call('HSET', KEYS[4], ARGV[1], ARGV[4])
+redis.call('HSET', KEYS[7], ARGV[7], ARGV[1])
+return {1, updated}
 `)
 
 var reservePreparedScript = redisclient.NewScript(fusePoolLuaHelpers + `
@@ -364,7 +434,7 @@ if not raw then
 end
 local decoded, record = pcall(cjson.decode, raw)
 local deadline = redis.call('HGET', KEYS[2], ARGV[8])
-if not decoded or not validateMutableRecord(record, deadline) or record.runtime_uid ~= ARGV[1] then
+if not decoded or not validateMutableRecord(record, deadline) or record.preparation_id ~= ARGV[1] then
     return {-4}
 end
 local mappedPoolDigest = redis.call('HGET', KEYS[3], ARGV[8])
@@ -379,15 +449,16 @@ if not mappedPoolDigest or string.len(mappedPoolDigest) ~= 64
     or not recordIsInExactlyState(ARGV[8], mappedPoolDigest, record.state, ARGV[10]) then
     return {-4}
 end
+if ARGV[12] ~= '' and redis.call('GET', 'fusepool:lock:' .. mappedPoolDigest) ~= ARGV[12] then return {-6} end
 if record.revision ~= tonumber(ARGV[5]) then
     return {-2}
 end
 if record.state ~= ARGV[2] then
     return {-3}
 end
-
 local from = ARGV[2]
 local to = ARGV[3]
+if from == 'preparing' and (record.runtime_id == '' or record.runtime_uid == '') then return {-5} end
 local token = ARGV[4]
 local reservation = record.reservation_token or ''
 local clearDeadline = false
@@ -401,9 +472,18 @@ if from == 'preparing' and to == 'prepared' then
     if reservation ~= '' then return {-5} end
     if token ~= (record.maintainer_token or '') then return {-6} end
 elseif from == 'preparing' and to == 'reserved' then
-    if reservation == '' then return {-5} end
-    if token ~= reservation then return {-6} end
-    if not reservationIsLive() then return {-5} end
+	if ARGV[12] ~= '' then
+		local reserveTTL = tonumber(ARGV[13])
+		if reservation ~= '' or not reserveTTL or reserveTTL <= 0 or reserveTTL ~= math.floor(reserveTTL) then return {-5} end
+		local deadlineMillis = nowMillis + reserveTTL
+		record.reservation_token = token
+		record.reserved_until = formatRFC3339Millis(deadlineMillis)
+		redis.call('HSET', KEYS[2], ARGV[8], deadlineMillis)
+	else
+		if reservation == '' then return {-5} end
+		if token ~= reservation then return {-6} end
+		if not reservationIsLive() then return {-5} end
+	end
 elseif from == 'reserved' and to == 'binding' then
     if reservation == '' then return {-4} end
     if token ~= reservation then return {-6} end
@@ -432,6 +512,58 @@ redis.call('SREM', ARGV[10] .. from .. ':' .. mappedPoolDigest, ARGV[8])
 redis.call('SADD', ARGV[10] .. to .. ':' .. mappedPoolDigest, ARGV[8])
 setCount(ARGV[11] .. from, mappedPoolDigest, -1)
 setCount(ARGV[11] .. to, mappedPoolDigest, 1)
+return {1, updated}
+`)
+
+var claimCleanupScript = redisclient.NewScript(fusePoolLuaHelpers + `
+local ttl = tonumber(ARGV[8])
+if not ttl or ttl <= 0 or ttl ~= math.floor(ttl) then return {-5} end
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {-1} end
+local decoded, record = pcall(cjson.decode, raw)
+local deadline = redis.call('HGET', KEYS[2], ARGV[1])
+if not decoded or not validateMutableRecord(record, deadline) or record.preparation_id ~= ARGV[2] then return {-4} end
+local redisTime = redis.call('TIME')
+local nowMillis = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+if record.state == 'cleanup' then
+    if (record.cleanup_token or '') == ARGV[7] then return {1, raw} end
+    local cleanupUntil = parseRFC3339Millis(record.cleanup_until)
+    if not cleanupUntil or cleanupUntil > nowMillis then return {-6} end
+else
+    if record.state ~= ARGV[3] then return {-3} end
+    if record.revision ~= tonumber(ARGV[6]) then return {-2} end
+    if (record.maintainer_token or '') ~= ARGV[4]
+        or (record.reservation_token or '') ~= ARGV[5] then return {-6} end
+end
+local poolDigest = redis.call('HGET', KEYS[3], ARGV[1])
+if not poolDigest or not validatePoolInventory(poolDigest, 'fusepool:index:', KEYS[4], 'fusepool:state:', 'fusepool:state-counts:')
+    or not recordIsInExactlyState(ARGV[1], poolDigest, record.state, 'fusepool:state:') then return {-4} end
+local oldState = record.state
+if record.runtime_id == '' then
+	if (ARGV[9] == '') ~= (ARGV[10] == '') then return {-5} end
+	if ARGV[9] ~= '' then
+		local owner = redis.call('HGET', KEYS[5], ARGV[11])
+		if owner and owner ~= ARGV[1] then return {-3} end
+		record.runtime_id = ARGV[9]
+		record.runtime_uid = ARGV[10]
+		redis.call('HSET', KEYS[5], ARGV[11], ARGV[1])
+	end
+elseif record.runtime_id ~= ARGV[9] or record.runtime_uid ~= ARGV[10] then
+	return {-3}
+end
+record.state = 'cleanup'
+record.cleanup_token = ARGV[7]
+record.cleanup_until = formatRFC3339Millis(nowMillis + ttl)
+record.updated_at = formatRFC3339Millis(nowMillis)
+record.revision = record.revision + 1
+local updated = cjson.encode(record)
+redis.call('SET', KEYS[1], updated)
+if oldState ~= 'cleanup' then
+    redis.call('SREM', 'fusepool:state:' .. oldState .. ':' .. poolDigest, ARGV[1])
+    redis.call('SADD', 'fusepool:state:cleanup:' .. poolDigest, ARGV[1])
+    setCount('fusepool:state-counts:' .. oldState, poolDigest, -1)
+    setCount('fusepool:state-counts:cleanup', poolDigest, 1)
+end
 return {1, updated}
 `)
 
@@ -522,11 +654,12 @@ if not raw then
 end
 local decoded, record = pcall(cjson.decode, raw)
 local deadline = redis.call('HGET', KEYS[3], ARGV[6])
-if not decoded or not validateRecord(record, deadline) or record.runtime_uid ~= ARGV[1] then
+if not decoded or not validateRecord(record, deadline) or record.preparation_id ~= ARGV[1] then
     return -4
 end
 if record.revision ~= tonumber(ARGV[5]) then return -2 end
 if record.state ~= ARGV[2] then return -3 end
+if record.runtime_uid ~= record.preparation_id then return -5 end
 if (record.maintainer_token or '') ~= ARGV[3] then return -6 end
 if (record.reservation_token or '') ~= ARGV[4] then return -6 end
 local poolDigest = redis.call('HGET', KEYS[2], ARGV[6])
@@ -551,8 +684,38 @@ redis.call('HDEL', KEYS[2], ARGV[6])
 redis.call('HDEL', KEYS[3], ARGV[6])
 redis.call('HDEL', KEYS[4], ARGV[6])
 redis.call('HDEL', KEYS[5], ARGV[6])
+if record.runtime_uid ~= '' then redis.call('HDEL', KEYS[8], ARGV[10]) end
 setCount(KEYS[6], poolDigest, -1)
 setCount(ARGV[9] .. record.state, poolDigest, -1)
+redis.call('HINCRBY', KEYS[7], poolDigest, 1)
+return 1
+`)
+
+var deleteCleanupScript = redisclient.NewScript(fusePoolLuaHelpers + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return -1 end
+local decoded, record = pcall(cjson.decode, raw)
+local deadline = redis.call('HGET', KEYS[3], ARGV[1])
+if not decoded or not validateRecord(record, deadline) or record.preparation_id ~= ARGV[2] then return -4 end
+if record.state ~= 'cleanup' then return -3 end
+if record.revision ~= tonumber(ARGV[4]) then return -2 end
+if (record.cleanup_token or '') ~= ARGV[3] then return -6 end
+local poolDigest = redis.call('HGET', KEYS[2], ARGV[1])
+if not poolDigest or not validatePoolInventory(poolDigest, 'fusepool:index:', KEYS[6], 'fusepool:state:', 'fusepool:state-counts:')
+    or not recordIsInExactlyState(ARGV[1], poolDigest, 'cleanup', 'fusepool:state:') then return -4 end
+if record.runtime_uid ~= '' and redis.call('HGET', KEYS[8], ARGV[5]) ~= ARGV[1] then return -4 end
+local generationOK = validateMutableMembershipGeneration(KEYS[7], poolDigest, redis.call('SCARD', 'fusepool:index:' .. poolDigest))
+if not generationOK then return -4 end
+redis.call('DEL', KEYS[1])
+redis.call('SREM', 'fusepool:index:' .. poolDigest, ARGV[1])
+redis.call('SREM', 'fusepool:state:cleanup:' .. poolDigest, ARGV[1])
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('HDEL', KEYS[3], ARGV[1])
+redis.call('HDEL', KEYS[4], ARGV[1])
+redis.call('HDEL', KEYS[5], ARGV[1])
+if record.runtime_uid ~= '' then redis.call('HDEL', KEYS[8], ARGV[5]) end
+setCount(KEYS[6], poolDigest, -1)
+setCount('fusepool:state-counts:cleanup', poolDigest, -1)
 redis.call('HINCRBY', KEYS[7], poolDigest, 1)
 return 1
 `)
@@ -561,6 +724,12 @@ var tryRefillLockScript = redisclient.NewScript(`
 local result = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
 if result then return 1 end
 return 0
+`)
+
+var renewRefillLockScript = redisclient.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1
 `)
 
 var unlockRefillScript = redisclient.NewScript(`
@@ -582,9 +751,26 @@ func NewFUSEPoolRepository(store *Store) *FUSEPoolRepository {
 	return &FUSEPoolRepository{store: store}
 }
 
-func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.FUSEPoolRecord) error {
+// createPreparingForTest preserves legacy Task 4 fixture construction without
+// exposing a production admission bypass. FUSEPool only receives the domain
+// interface, which requires a held refill token and atomic capacity admission.
+func (r *FUSEPoolRepository) createPreparingForTest(ctx context.Context, record state.FUSEPoolRecord) error {
+	return r.createPreparing(ctx, record, "", 0, time.Minute)
+}
+
+func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, record state.FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error {
+	if refillToken == "" || maxSize <= 0 || prepareTTL <= 0 {
+		return state.ErrFUSEPoolInvalidRecord
+	}
+	return r.createPreparing(ctx, record, refillToken, maxSize, prepareTTL)
+}
+
+func (r *FUSEPoolRepository) createPreparing(ctx context.Context, record state.FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error {
 	if r == nil || r.store == nil {
 		return errors.New("fuse pool repository: nil store")
+	}
+	if record.PreparationID == "" {
+		record.PreparationID = record.RuntimeUID
 	}
 	if err := validatePreparingRecord(record); err != nil {
 		return err
@@ -594,6 +780,9 @@ func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.F
 		// ReservedUntil is an API-supplied duration carrier only. Redis TIME is
 		// authoritative: Lua replaces the absolute value with server-now + TTL.
 		ttl := time.Until(record.ReservedUntil)
+		if refillToken != "" && !record.UpdatedAt.IsZero() {
+			ttl = record.ReservedUntil.Sub(record.UpdatedAt)
+		}
 		if ttl <= 0 {
 			return state.ErrFUSEPoolInvalidRecord
 		}
@@ -610,11 +799,15 @@ func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.F
 	if err != nil {
 		return fmt.Errorf("encode fuse pool record: %w", state.ErrFUSEPoolInvalidRecord)
 	}
-	uidDigest := fusePoolDigest(record.RuntimeUID)
+	preparationDigest := fusePoolDigest(record.PreparationID)
 	poolDigest := fusePoolDigest(record.PoolKey)
+	prepareTTLMillis, err := redisTTLMilliseconds(prepareTTL)
+	if err != nil {
+		return state.ErrFUSEPoolInvalidRecord
+	}
 	result, err := createPreparingScript.Run(ctx, r.store.client,
 		[]string{
-			fusePoolRecordPrefix + uidDigest,
+			fusePoolRecordPrefix + preparationDigest,
 			fusePoolIndexPrefix + poolDigest,
 			fusePoolRecordPools,
 			fusePoolDeadlines,
@@ -624,13 +817,40 @@ func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.F
 			fusePoolStateIndexKey(poolDigest, state.FUSEPoolPreparing),
 			fusePoolStateCountsKey(state.FUSEPoolPreparing),
 			fusePoolMembershipGenerations,
+			fusePoolLockPrefix + poolDigest,
+			fusePoolRuntimeUIDOwners,
 		},
-		uidDigest, poolDigest, raw, ttlMillis, record.RuntimeUID, record.PoolKey,
+		preparationDigest, poolDigest, raw, ttlMillis, record.PreparationID, record.PoolKey, refillToken, maxSize, fusePoolDigest(record.RuntimeUID), prepareTTLMillis,
 	).Int64()
 	if err != nil {
 		return err
 	}
 	return poolMutationError("create preparing record", result)
+}
+
+func (r *FUSEPoolRepository) BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fuse pool repository: nil store")
+	}
+	if !validOpaqueID(preparationID) || runtimeID == "" || runtimeUID == "" || refillToken == "" || expectedRevision == 0 || !utf8.ValidString(runtimeID) || !utf8.ValidString(runtimeUID) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	member := fusePoolDigest(preparationID)
+	result, err := bindPreparingRuntimeScript.Run(ctx, r.store.client, []string{
+		fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs,
+		fusePoolPoolValues, fusePoolCounts, fusePoolRuntimeUIDOwners,
+	}, member, preparationID, runtimeID, runtimeUID, refillToken, expectedRevision, fusePoolDigest(runtimeUID)).Slice()
+	if err != nil {
+		return nil, err
+	}
+	code, payload, err := poolScriptResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if code != poolResultOK {
+		return nil, poolMutationError("bind preparing runtime", code)
+	}
+	return decodePoolRecord(payload)
 }
 
 func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token string, ttl time.Duration) (*state.FUSEPoolRecord, error) {
@@ -665,17 +885,17 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 	return decodePoolRecord(payload)
 }
 
-func (r *FUSEPoolRepository) Transition(ctx context.Context, runtimeUID string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
+func (r *FUSEPoolRepository) Transition(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("fuse pool repository: nil store")
 	}
-	if runtimeUID == "" || expectedRevision == 0 || !allowedFUSEPoolTransition(from, to) {
+	if !validOpaqueID(preparationID) || expectedRevision == 0 || !allowedFUSEPoolTransition(from, to) {
 		return nil, state.ErrFUSEPoolInvalidTransition
 	}
-	uidDigest := fusePoolDigest(runtimeUID)
+	uidDigest := fusePoolDigest(preparationID)
 	result, err := transitionScript.Run(ctx, r.store.client,
 		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
-		runtimeUID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
+		preparationID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, "", 0,
 	).Slice()
 	if err != nil {
 		return nil, err
@@ -686,6 +906,71 @@ func (r *FUSEPoolRepository) Transition(ctx context.Context, runtimeUID string, 
 	}
 	if code != poolResultOK {
 		return nil, poolMutationError("transition record", code)
+	}
+	return decodePoolRecord(payload)
+}
+
+func (r *FUSEPoolRepository) TransitionWithRefillLock(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*state.FUSEPoolRecord, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fuse pool repository: nil store")
+	}
+	if !validOpaqueID(preparationID) || refillToken == "" || expectedRevision == 0 || !allowedFUSEPoolTransition(from, to) {
+		return nil, state.ErrFUSEPoolInvalidTransition
+	}
+	if (to == state.FUSEPoolReserved) != (reservationTTL > 0) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	reserveMillis := int64(0)
+	if reservationTTL != 0 {
+		var err error
+		reserveMillis, err = redisTTLMilliseconds(reservationTTL)
+		if err != nil {
+			return nil, state.ErrFUSEPoolInvalidRecord
+		}
+	}
+	member := fusePoolDigest(preparationID)
+	result, err := transitionScript.Run(ctx, r.store.client,
+		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
+		preparationID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", member, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, refillToken, reserveMillis,
+	).Slice()
+	if err != nil {
+		return nil, err
+	}
+	code, payload, err := poolScriptResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if code != poolResultOK {
+		return nil, poolMutationError("publish preparing record", code)
+	}
+	return decodePoolRecord(payload)
+}
+
+func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID string, from state.FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*state.FUSEPoolRecord, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fuse pool repository: nil store")
+	}
+	if !validOpaqueID(preparationID) || !validFUSEPoolState(from) || cleanupToken == "" || expectedRevision == 0 || ttl <= 0 || !utf8.ValidString(cleanupToken) || (runtimeID == "") != (runtimeUID == "") || !utf8.ValidString(runtimeID) || !utf8.ValidString(runtimeUID) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	ttlMillis, err := redisTTLMilliseconds(ttl)
+	if err != nil {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	member := fusePoolDigest(preparationID)
+	result, err := claimCleanupScript.Run(ctx, r.store.client,
+		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolCounts, fusePoolRuntimeUIDOwners},
+		member, preparationID, string(from), maintainerToken, reservationToken, expectedRevision, cleanupToken, ttlMillis, runtimeID, runtimeUID, fusePoolDigest(runtimeUID),
+	).Slice()
+	if err != nil {
+		return nil, err
+	}
+	code, payload, err := poolScriptResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if code != poolResultOK {
+		return nil, poolMutationError("claim cleanup", code)
 	}
 	return decodePoolRecord(payload)
 }
@@ -767,7 +1052,7 @@ func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) 
 		records := make([]state.FUSEPoolRecord, 0, len(rawByMember))
 		for member, raw := range rawByMember {
 			record, decodeErr := decodePoolRecord(raw)
-			if decodeErr != nil || record.PoolKey != poolKey || fusePoolDigest(record.RuntimeUID) != member {
+			if decodeErr != nil || record.PoolKey != poolKey || fusePoolDigest(record.PreparationID) != member {
 				return nil, state.ErrFUSEPoolCorrupt
 			}
 			records = append(records, *record)
@@ -812,17 +1097,17 @@ func (r *FUSEPoolRepository) CountPreparingAndPrepared(ctx context.Context, pool
 	return int(count), nil
 }
 
-func (r *FUSEPoolRepository) ConditionalDelete(ctx context.Context, runtimeUID string, expectedState state.FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error) {
+func (r *FUSEPoolRepository) ConditionalDelete(ctx context.Context, preparationID string, expectedState state.FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error) {
 	if r == nil || r.store == nil {
 		return false, errors.New("fuse pool repository: nil store")
 	}
-	if runtimeUID == "" || !validFUSEPoolState(expectedState) || expectedRevision == 0 {
+	if preparationID == "" || !validFUSEPoolState(expectedState) || expectedState == state.FUSEPoolCleanup || expectedRevision == 0 {
 		return false, state.ErrFUSEPoolInvalidRecord
 	}
-	uidDigest := fusePoolDigest(runtimeUID)
+	uidDigest := fusePoolDigest(preparationID)
 	result, err := conditionalDeleteScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts, fusePoolMembershipGenerations},
-		runtimeUID, string(expectedState), maintainerToken, reservationToken, strconv.FormatUint(expectedRevision, 10), uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts, fusePoolMembershipGenerations, fusePoolRuntimeUIDOwners},
+		preparationID, string(expectedState), maintainerToken, reservationToken, strconv.FormatUint(expectedRevision, 10), uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, fusePoolDigest(preparationID),
 	).Int64()
 	if err != nil {
 		return false, err
@@ -831,6 +1116,44 @@ func (r *FUSEPoolRepository) ConditionalDelete(ctx context.Context, runtimeUID s
 		return false, poolMutationError("conditionally delete record", result)
 	}
 	return true, nil
+}
+
+func (r *FUSEPoolRepository) DeleteCleanup(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64) (bool, error) {
+	if r == nil || r.store == nil {
+		return false, errors.New("fuse pool repository: nil store")
+	}
+	if !validOpaqueID(preparationID) || cleanupToken == "" || expectedRevision == 0 {
+		return false, state.ErrFUSEPoolInvalidRecord
+	}
+	member := fusePoolDigest(preparationID)
+	// Runtime UID is evidence for exact runtime deletion and its uniqueness
+	// index is only released with the cleanup tombstone.
+	raw, err := r.store.client.Get(ctx, fusePoolRecordPrefix+member).Bytes()
+	if err != nil {
+		return false, err
+	}
+	var record state.FUSEPoolRecord
+	if json.Unmarshal(raw, &record) != nil {
+		return false, state.ErrFUSEPoolCorrupt
+	}
+	result, err := deleteCleanupScript.Run(ctx, r.store.client, []string{
+		fusePoolRecordPrefix + member, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs,
+		fusePoolPoolValues, fusePoolCounts, fusePoolMembershipGenerations, fusePoolRuntimeUIDOwners,
+	}, member, preparationID, cleanupToken, expectedRevision, fusePoolDigest(record.RuntimeUID)).Int64()
+	if err != nil {
+		return false, err
+	}
+	if result != poolResultOK {
+		return false, poolMutationError("delete cleanup record", result)
+	}
+	return true, nil
+}
+
+func (r *FUSEPoolRepository) ServerTime(ctx context.Context) (time.Time, error) {
+	if r == nil || r.store == nil {
+		return time.Time{}, errors.New("fuse pool repository: nil store")
+	}
+	return r.store.client.Time(ctx).Result()
 }
 
 func (r *FUSEPoolRepository) TryRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error) {
@@ -847,6 +1170,25 @@ func (r *FUSEPoolRepository) TryRefillLock(ctx context.Context, poolKey, token s
 	result, err := tryRefillLockScript.Run(ctx, r.store.client,
 		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token, ttlMillis,
 	).Int64()
+	if err != nil {
+		return false, err
+	}
+	return result == poolResultOK, nil
+}
+
+func (r *FUSEPoolRepository) RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error) {
+	if r == nil || r.store == nil {
+		return false, errors.New("fuse pool repository: nil store")
+	}
+	if poolKey == "" || token == "" || ttl <= 0 {
+		return false, state.ErrFUSEPoolInvalidRecord
+	}
+	ttlMillis, err := redisTTLMilliseconds(ttl)
+	if err != nil {
+		return false, err
+	}
+	result, err := renewRefillLockScript.Run(ctx, r.store.client,
+		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token, ttlMillis).Int64()
 	if err != nil {
 		return false, err
 	}
@@ -884,7 +1226,10 @@ func fusePoolStateCountsKey(poolState state.FUSEPoolState) string {
 
 func fusePoolInventoryKeys(poolDigest string) []string {
 	keys := []string{fusePoolIndexPrefix + poolDigest, fusePoolCounts}
-	for _, poolState := range fusePoolStates {
+	// Preserve the positional key contract used by the hot-path Lua scripts.
+	// Cleanup indexes are addressed by the validated state prefix and are not
+	// positional inputs to reserve/count.
+	for _, poolState := range fusePoolStates[:len(fusePoolStates)-1] {
 		keys = append(keys, fusePoolStateIndexKey(poolDigest, poolState), fusePoolStateCountsKey(poolState))
 	}
 	return append(keys, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolMembershipGenerations)
@@ -917,21 +1262,28 @@ func (r *FUSEPoolRepository) poolMembershipSnapshot(ctx context.Context, poolDig
 }
 
 func validatePreparingRecord(record state.FUSEPoolRecord) error {
-	if record.RuntimeID == "" || record.RuntimeUID == "" || record.PoolKey == "" || record.MaintainerToken == "" || record.State != state.FUSEPoolPreparing || record.Revision != 1 {
+	if record.PreparationID == "" || record.PoolKey == "" || record.MaintainerToken == "" || record.State != state.FUSEPoolPreparing || record.Revision != 1 || (record.RuntimeID == "") != (record.RuntimeUID == "") {
 		return state.ErrFUSEPoolInvalidRecord
 	}
-	if !utf8.ValidString(record.RuntimeID) || !utf8.ValidString(record.RuntimeUID) || !utf8.ValidString(record.PoolKey) || !utf8.ValidString(record.MaintainerToken) || !utf8.ValidString(record.ReservationToken) {
+	if len(record.PreparationID) > 1024 || !utf8.ValidString(record.PreparationID) || !utf8.ValidString(record.RuntimeID) || !utf8.ValidString(record.RuntimeUID) || !utf8.ValidString(record.PoolKey) || !utf8.ValidString(record.MaintainerToken) || !utf8.ValidString(record.ReservationToken) {
 		return state.ErrFUSEPoolInvalidRecord
 	}
 	if (record.ReservationToken == "") != record.ReservedUntil.IsZero() {
 		return state.ErrFUSEPoolInvalidRecord
 	}
+	if record.CleanupToken != "" || !record.CleanupUntil.IsZero() || !record.PrepareUntil.IsZero() {
+		return state.ErrFUSEPoolInvalidRecord
+	}
 	return nil
+}
+
+func validOpaqueID(value string) bool {
+	return value != "" && len(value) <= 1024 && utf8.ValidString(value)
 }
 
 func validFUSEPoolState(value state.FUSEPoolState) bool {
 	switch value {
-	case state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed:
+	case state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup:
 		return true
 	default:
 		return false
@@ -1014,7 +1366,7 @@ func decodePoolRecord(value any) (*state.FUSEPoolRecord, error) {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, state.ErrFUSEPoolCorrupt
 	}
-	if record.RuntimeID == "" || record.RuntimeUID == "" || record.PoolKey == "" || record.MaintainerToken == "" || !validFUSEPoolState(record.State) || record.Revision == 0 || record.Revision > 99999999999999 || record.UpdatedAt.IsZero() {
+	if !validOpaqueID(record.PreparationID) || (record.RuntimeID == "") != (record.RuntimeUID == "") || record.PoolKey == "" || record.MaintainerToken == "" || !validFUSEPoolState(record.State) || record.Revision == 0 || record.Revision > 99999999999999 || record.UpdatedAt.IsZero() || record.PrepareUntil.IsZero() {
 		return nil, state.ErrFUSEPoolCorrupt
 	}
 	switch record.State {
@@ -1023,11 +1375,15 @@ func decodePoolRecord(value any) (*state.FUSEPoolRecord, error) {
 			return nil, state.ErrFUSEPoolCorrupt
 		}
 	case state.FUSEPoolPrepared:
-		if record.ReservationToken != "" || !record.ReservedUntil.IsZero() {
+		if record.RuntimeID == "" || record.ReservationToken != "" || !record.ReservedUntil.IsZero() {
 			return nil, state.ErrFUSEPoolCorrupt
 		}
 	case state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed:
-		if record.ReservationToken == "" || record.ReservedUntil.IsZero() {
+		if record.RuntimeID == "" || record.ReservationToken == "" || record.ReservedUntil.IsZero() {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+	case state.FUSEPoolCleanup:
+		if record.CleanupToken == "" || record.CleanupUntil.IsZero() {
 			return nil, state.ErrFUSEPoolCorrupt
 		}
 	default:

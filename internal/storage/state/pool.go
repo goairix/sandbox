@@ -14,6 +14,7 @@ const (
 	FUSEPoolReserved  FUSEPoolState = "reserved"
 	FUSEPoolBinding   FUSEPoolState = "binding"
 	FUSEPoolConsumed  FUSEPoolState = "consumed"
+	FUSEPoolCleanup   FUSEPoolState = "cleanup"
 )
 
 var (
@@ -27,6 +28,7 @@ var (
 )
 
 type FUSEPoolRecord struct {
+	PreparationID    string        `json:"preparation_id"`
 	RuntimeID        string        `json:"runtime_id"`
 	RuntimeUID       string        `json:"runtime_uid"`
 	PoolKey          string        `json:"pool_key"`
@@ -34,17 +36,26 @@ type FUSEPoolRecord struct {
 	MaintainerToken  string        `json:"maintainer_token"`
 	ReservationToken string        `json:"reservation_token,omitempty"`
 	ReservedUntil    time.Time     `json:"reserved_until,omitempty"`
+	PrepareUntil     time.Time     `json:"prepare_until,omitempty"`
+	CleanupToken     string        `json:"cleanup_token,omitempty"`
+	CleanupUntil     time.Time     `json:"cleanup_until,omitempty"`
 	UpdatedAt        time.Time     `json:"updated_at"`
 	Revision         uint64        `json:"revision"`
 }
 
 type FUSEPoolRepository interface {
-	CreatePreparing(ctx context.Context, record FUSEPoolRecord) error
+	CreatePreparingWithAdmission(ctx context.Context, record FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error
+	BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*FUSEPoolRecord, error)
 	ReservePrepared(ctx context.Context, poolKey, token string, ttl time.Duration) (*FUSEPoolRecord, error)
-	Transition(ctx context.Context, runtimeUID string, from, to FUSEPoolState, token string, expectedRevision uint64) (*FUSEPoolRecord, error)
+	Transition(ctx context.Context, preparationID string, from, to FUSEPoolState, token string, expectedRevision uint64) (*FUSEPoolRecord, error)
+	TransitionWithRefillLock(ctx context.Context, preparationID string, from, to FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*FUSEPoolRecord, error)
+	ClaimCleanup(ctx context.Context, preparationID string, from FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*FUSEPoolRecord, error)
 	ListByPoolKey(ctx context.Context, poolKey string) ([]FUSEPoolRecord, error)
 	CountPreparingAndPrepared(ctx context.Context, poolKey string) (int, error)
-	ConditionalDelete(ctx context.Context, runtimeUID string, expectedState FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error)
+	ConditionalDelete(ctx context.Context, preparationID string, expectedState FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64) (bool, error)
+	DeleteCleanup(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64) (bool, error)
+	ServerTime(ctx context.Context) (time.Time, error)
 	TryRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
+	RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
 	UnlockRefill(ctx context.Context, poolKey, token string) error
 }

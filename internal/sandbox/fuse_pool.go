@@ -29,23 +29,33 @@ var (
 	ErrFUSEPoolStopped        = errors.New("FUSE pool is stopped")
 	ErrFUSEPoolKeyMismatch    = errors.New("FUSE pool key mismatch")
 	ErrFUSEPoolReturnUnproven = errors.New("FUSE pool pristine return cannot be proven")
+	ErrFUSEPoolProtected      = errors.New("FUSE pool record is protected by manager state")
 	ErrFUSEPoolRefillBusy     = errors.New("FUSE pool refill is already in progress")
 	ErrFUSEPoolAtCapacity     = errors.New("FUSE pool is at active preparation capacity")
 )
 
-// CanReturnPreparedFunc checks manager-owned owner/session/gate state. It must
-// return nil only when the reserved shell has no published or pending owner.
-type CanReturnPreparedFunc func(context.Context, state.FUSEPoolRecord) error
+type FUSEPoolDisposition uint8
+
+const (
+	FUSEPoolDispositionUnknown FUSEPoolDisposition = iota
+	FUSEPoolPristine
+	FUSEPoolProtected
+	FUSEPoolAbandoned
+)
+
+// PristineGuardFunc classifies manager-owned owner/session/gate state. An
+// error or Unknown is fail-closed and never authorizes physical deletion.
+type PristineGuardFunc func(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error)
 
 // FUSEPoolConfig configures the sandbox-api-owned FUSE shell pool.
 type FUSEPoolConfig struct {
-	MinSize           int
-	MaxSize           int
-	RefillInterval    time.Duration
-	PrepareTimeout    time.Duration
-	ReservationTTL    time.Duration
-	MaintainerToken   string
-	CanReturnPrepared CanReturnPreparedFunc
+	MinSize         int
+	MaxSize         int
+	RefillInterval  time.Duration
+	PrepareTimeout  time.Duration
+	ReservationTTL  time.Duration
+	MaintainerToken string
+	PristineGuard   PristineGuardFunc
 }
 
 // FUSEPool maintains prefix-free runtime shells. Redis is the shared inventory
@@ -57,17 +67,20 @@ type FUSEPool struct {
 	spec    runtime.SandboxSpec
 	poolKey string
 
-	lifecycleMu sync.Mutex
-	starting    bool
-	running     bool
-	stopping    bool
-	stopped     bool
-	loopCtx     context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	stopOnce    sync.Once
-	stopDone    chan struct{}
-	stopErr     error
+	lifecycleMu  sync.Mutex
+	starting     bool
+	running      bool
+	stopping     bool
+	stopped      bool
+	loopCtx      context.Context
+	cancel       context.CancelFunc
+	controllerWG sync.WaitGroup
+	opWG         sync.WaitGroup
+	startDone    chan struct{}
+	startErr     error
+	stopStarted  bool
+	stopDone     chan struct{}
+	stopErr      error
 }
 
 func NewFUSEPool(rt runtime.Runtime, repo state.FUSEPoolRepository, cfg FUSEPoolConfig, spec runtime.SandboxSpec) *FUSEPool {
@@ -99,32 +112,77 @@ func (p *FUSEPool) Start(ctx context.Context) error {
 		p.lifecycleMu.Unlock()
 		return ErrFUSEPoolStopped
 	}
-	if p.running || p.starting {
+	if p.running {
 		p.lifecycleMu.Unlock()
 		return nil
 	}
-	p.starting = true
-	p.wg.Add(1)
-	p.lifecycleMu.Unlock()
-	defer p.wg.Done()
-
-	if err := p.Reconcile(ctx); err != nil {
-		p.lifecycleMu.Lock()
-		p.starting = false
+	if p.starting {
+		done := p.startDone
 		p.lifecycleMu.Unlock()
+		select {
+		case <-done:
+			return p.startErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	p.starting = true
+	p.startDone = make(chan struct{})
+	done := p.startDone
+	p.opWG.Add(1)
+	p.lifecycleMu.Unlock()
+
+	err := p.waitInitialReconcile(ctx)
+	p.opWG.Done()
+	p.lifecycleMu.Lock()
+	p.starting = false
+	if err == nil && !p.stopped && !p.stopping {
+		p.running = true
+		p.controllerWG.Add(1)
+		go p.reconcileLoop(p.loopCtx)
+	} else if err == nil {
+		err = ErrFUSEPoolStopped
+	}
+	p.startErr = err
+	close(done)
+	p.lifecycleMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("initial FUSE pool reconciliation: %w", err)
 	}
-
-	p.lifecycleMu.Lock()
-	defer p.lifecycleMu.Unlock()
-	p.starting = false
-	if p.stopped || p.stopping {
-		return ErrFUSEPoolStopped
-	}
-	p.running = true
-	p.wg.Add(1)
-	go p.reconcileLoop(p.loopCtx)
 	return nil
+}
+
+func (p *FUSEPool) waitInitialReconcile(ctx context.Context) error {
+	linked, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.loopCtx, cancel)
+	defer func() { stop(); cancel() }()
+	for {
+		ran, err := p.reconcileOnce(linked)
+		if err != nil {
+			if p.loopCtx.Err() != nil && ctx.Err() == nil {
+				return ErrFUSEPoolStopped
+			}
+			return err
+		}
+		if ran {
+			return err
+		}
+		timer := time.NewTimer(min(p.config.RefillInterval, 100*time.Millisecond))
+		select {
+		case <-timer.C:
+		case <-linked.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return ErrFUSEPoolStopped
+		}
+	}
 }
 
 // Running reports whether the periodic controller is active.
@@ -139,7 +197,22 @@ func (p *FUSEPool) WarmUp(ctx context.Context) error {
 	if err := p.validate(); err != nil {
 		return err
 	}
-	return p.Reconcile(ctx)
+	opCtx, done, err := p.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	for {
+		ran, reconcileErr := p.reconcileOnce(opCtx)
+		if reconcileErr != nil || ran {
+			return reconcileErr
+		}
+		select {
+		case <-time.After(min(p.config.RefillInterval, 100*time.Millisecond)):
+		case <-opCtx.Done():
+			return opCtx.Err()
+		}
+	}
 }
 
 // Acquire reserves a pristine prepared shell, or cold-prepares one carrying
@@ -151,17 +224,22 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 	if poolKey == "" || poolKey != p.poolKey {
 		return nil, ErrFUSEPoolKeyMismatch
 	}
+	opCtx, done, err := p.beginOperation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := opCtx.Err(); err != nil {
 			return nil, err
 		}
 		token := uuid.NewString()
-		record, err := p.repo.ReservePrepared(ctx, poolKey, token, p.config.ReservationTTL)
+		record, err := p.repo.ReservePrepared(opCtx, poolKey, token, p.config.ReservationTTL)
 		if err != nil {
 			return nil, fmt.Errorf("reserve prepared FUSE sandbox: %w", err)
 		}
 		if record == nil {
-			record, err = p.prepareCold(ctx, token)
+			record, err = p.prepareCold(opCtx, token)
 			if err != nil {
 				return nil, err
 			}
@@ -171,14 +249,33 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 		if err := p.validateReservedRecord(*record, token); err != nil {
 			return nil, err
 		}
-		if err := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, poolKey); err == nil {
+		disposition, guardErr := p.guard(opCtx, *record)
+		switch disposition {
+		case FUSEPoolProtected:
+			p.scheduleRefill()
+			return nil, errors.Join(ErrFUSEPoolProtected, guardErr)
+		case FUSEPoolDispositionUnknown:
+			p.scheduleRefill()
+			return nil, errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
+		case FUSEPoolAbandoned:
+			if cleanupErr := p.claimAndDestroy(opCtx, *record); cleanupErr != nil {
+				return nil, cleanupErr
+			}
+			continue
+		case FUSEPoolPristine:
+			if healthErr := p.runtime.PreparedSandboxHealth(opCtx, record.RuntimeID, poolKey); healthErr != nil {
+				cleanupErr := p.claimAndDestroy(opCtx, *record)
+				if cleanupErr != nil {
+					return nil, errors.Join(fmt.Errorf("prepared FUSE sandbox health: %w", healthErr), cleanupErr)
+				}
+				continue
+			}
+			if opCtx.Err() != nil {
+				_ = p.claimAndDestroyWithCleanupContext(*record)
+				return nil, ErrFUSEPoolStopped
+			}
 			p.scheduleRefill()
 			return record, nil
-		} else {
-			cleanupErr := p.destroyExact(ctx, *record)
-			if cleanupErr != nil {
-				return nil, errors.Join(fmt.Errorf("prepared FUSE sandbox health: %w", err), cleanupErr)
-			}
 		}
 	}
 }
@@ -197,14 +294,9 @@ func (p *FUSEPool) prepareCold(ctx context.Context, reservationToken string) (re
 			returnErr = errors.Join(returnErr, fmt.Errorf("unlock cold FUSE preparation: %w", err))
 		}
 	}()
-	active, err := p.repo.CountPreparingAndPrepared(ctx, p.poolKey)
-	if err != nil {
-		return nil, fmt.Errorf("count cold FUSE preparation capacity: %w", err)
-	}
-	if active >= p.config.MaxSize {
-		return nil, ErrFUSEPoolAtCapacity
-	}
-	return p.prepareOne(ctx, reservationToken)
+	lease := p.startRefillLease(ctx, lockToken)
+	defer lease.stop()
+	return p.prepareOne(lease.ctx, reservationToken, lockToken)
 }
 
 // ReturnPrepared returns a reservation only after both runtime health and the
@@ -213,19 +305,24 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 	if err := p.validateReservedRecord(record, record.ReservationToken); err != nil {
 		return err
 	}
-	healthErr := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, record.PoolKey)
-	guardErr := error(nil)
-	if p.config.CanReturnPrepared == nil {
-		guardErr = ErrFUSEPoolReturnUnproven
-	} else if err := p.config.CanReturnPrepared(ctx, record); err != nil {
-		guardErr = errors.Join(ErrFUSEPoolReturnUnproven, err)
-	}
-	if healthErr != nil || guardErr != nil {
-		cleanupErr := p.destroyExact(ctx, record)
+	disposition, guardErr := p.guard(ctx, record)
+	if disposition == FUSEPoolProtected {
 		p.scheduleRefill()
-		return errors.Join(guardErr, healthErr, cleanupErr)
+		return errors.Join(ErrFUSEPoolProtected, guardErr)
 	}
-	_, err := p.repo.Transition(ctx, record.RuntimeUID, state.FUSEPoolReserved, state.FUSEPoolPrepared, record.ReservationToken, record.Revision)
+	if disposition == FUSEPoolDispositionUnknown {
+		p.scheduleRefill()
+		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
+	}
+	if disposition == FUSEPoolAbandoned {
+		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr, p.claimAndDestroy(ctx, record))
+	}
+	if healthErr := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, record.PoolKey); healthErr != nil {
+		cleanupErr := p.claimAndDestroy(ctx, record)
+		p.scheduleRefill()
+		return errors.Join(healthErr, cleanupErr)
+	}
+	_, err := p.repo.Transition(ctx, record.PreparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, record.ReservationToken, record.Revision)
 	if err != nil {
 		return fmt.Errorf("return FUSE sandbox to prepared: %w", err)
 	}
@@ -238,15 +335,8 @@ func (p *FUSEPool) ReleaseConsumed(ctx context.Context, record state.FUSEPoolRec
 	if record.PoolKey != p.poolKey || (record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed) {
 		return state.ErrFUSEPoolInvalidRecord
 	}
-	if err := p.removeRuntime(ctx, record.RuntimeID); err != nil {
-		return fmt.Errorf("remove consumed FUSE sandbox: %w", err)
-	}
-	deleted, err := p.repo.ConditionalDelete(ctx, record.RuntimeUID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision)
-	if err != nil {
-		return fmt.Errorf("delete consumed FUSE pool record: %w", err)
-	}
-	if !deleted {
-		return state.ErrFUSEPoolConflict
+	if err := p.claimAndDestroy(ctx, record); err != nil {
+		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
 	}
 	p.scheduleRefill()
 	return nil
@@ -259,68 +349,93 @@ func (p *FUSEPool) Reconcile(ctx context.Context) (returnErr error) {
 	if err := p.validate(); err != nil {
 		return err
 	}
+	opCtx, done, err := p.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	_, err = p.reconcileOnce(opCtx)
+	return err
+}
+
+func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error) {
 	lockToken := p.config.MaintainerToken + ":" + uuid.NewString()
 	locked, err := p.repo.TryRefillLock(ctx, p.poolKey, lockToken, p.refillLockTTL())
 	if err != nil {
-		return fmt.Errorf("acquire FUSE refill lock: %w", err)
+		return false, fmt.Errorf("acquire FUSE refill lock: %w", err)
 	}
 	if !locked {
-		return nil
+		return false, nil
 	}
 	defer func() {
-		if err := p.unlockRefill(ctx, lockToken); err != nil {
+		if err := p.unlockRefill(ctx, lockToken); err != nil && !errors.Is(err, state.ErrFUSEPoolTokenMismatch) {
 			returnErr = errors.Join(returnErr, fmt.Errorf("unlock FUSE refill lock: %w", err))
 		}
 	}()
+	lease := p.startRefillLease(ctx, lockToken)
+	defer lease.stop()
+	ctx = lease.ctx
+	now, err := p.repo.ServerTime(ctx)
+	if err != nil {
+		return true, fmt.Errorf("read Redis server time: %w", err)
+	}
+	inspectionErr := p.inspectPrepared(ctx)
+	now, err = p.repo.ServerTime(ctx)
+	if err != nil {
+		return true, errors.Join(inspectionErr, fmt.Errorf("refresh Redis server time: %w", err))
+	}
 
 	records, err := p.repo.ListByPoolKey(ctx, p.poolKey)
 	if err != nil {
-		return fmt.Errorf("list FUSE pool inventory: %w", err)
+		return true, fmt.Errorf("list FUSE pool inventory: %w", err)
 	}
-	now := time.Now()
 	active := make([]state.FUSEPoolRecord, 0)
 	for _, record := range records {
 		switch record.State {
 		case state.FUSEPoolPreparing:
-			expired := record.UpdatedAt.IsZero() || !record.UpdatedAt.Add(p.config.PrepareTimeout).After(now)
-			if record.ReservationToken != "" && (record.ReservedUntil.IsZero() || !record.ReservedUntil.After(now)) {
-				expired = true
-			}
-			if expired {
-				if err := p.destroyExact(ctx, record); err != nil {
-					return errors.Join(fmt.Errorf("clean expired preparing FUSE sandbox: %w", err))
+			if record.PrepareUntil.IsZero() || !record.PrepareUntil.After(now) {
+				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
+					return true, fmt.Errorf("clean expired preparing FUSE sandbox: %w", err)
 				}
 				continue
 			}
 			active = append(active, record)
 		case state.FUSEPoolPrepared:
-			if err := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, p.poolKey); err != nil {
-				if cleanupErr := p.destroyExact(ctx, record); cleanupErr != nil {
-					return errors.Join(fmt.Errorf("probe prepared FUSE sandbox: %w", err), cleanupErr)
-				}
-				continue
-			}
+			// Every prepared record was atomically inspection-reserved and only
+			// returned here after the manager and runtime proved it pristine.
 			active = append(active, record)
 		case state.FUSEPoolReserved:
 			if record.ReservedUntil.IsZero() || !record.ReservedUntil.After(now) {
-				if err := p.destroyExact(ctx, record); err != nil {
-					return fmt.Errorf("clean expired reserved FUSE sandbox: %w", err)
+				disposition, _ := p.guard(ctx, record)
+				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
+					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
+						return true, fmt.Errorf("clean expired reserved FUSE sandbox: %w", err)
+					}
 				}
 			}
 		case state.FUSEPoolBinding:
-			if err := p.destroyExact(ctx, record); err != nil {
-				return fmt.Errorf("clean binding FUSE sandbox: %w", err)
+			disposition, _ := p.guard(ctx, record)
+			if disposition == FUSEPoolAbandoned {
+				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
+					return true, fmt.Errorf("clean abandoned binding FUSE sandbox: %w", err)
+				}
 			}
 		case state.FUSEPoolConsumed:
 			// Persistent session teardown owns consumed instances.
+		case state.FUSEPoolCleanup:
+			if record.CleanupUntil.IsZero() || !record.CleanupUntil.After(now) {
+				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
+					return true, fmt.Errorf("recover cleanup FUSE sandbox: %w", err)
+				}
+			}
 		default:
-			return state.ErrFUSEPoolCorrupt
+			return true, state.ErrFUSEPoolCorrupt
 		}
 	}
 
 	activeCount, err := p.repo.CountPreparingAndPrepared(ctx, p.poolKey)
 	if err != nil {
-		return fmt.Errorf("count active FUSE pool inventory: %w", err)
+		return true, fmt.Errorf("count active FUSE pool inventory: %w", err)
 	}
 
 	// MaxSize applies only to preparing+prepared. Prefer deleting prepared
@@ -336,8 +451,8 @@ func (p *FUSEPool) Reconcile(ctx context.Context) (returnErr error) {
 		kept := active[:0]
 		for _, record := range active {
 			if toRemove > 0 && record.State == state.FUSEPoolPrepared {
-				if err := p.destroyExact(ctx, record); err != nil {
-					return fmt.Errorf("trim FUSE pool: %w", err)
+				if err := p.claimAndDestroy(ctx, record); err != nil {
+					return true, fmt.Errorf("trim FUSE pool: %w", err)
 				}
 				toRemove--
 				continue
@@ -348,13 +463,13 @@ func (p *FUSEPool) Reconcile(ctx context.Context) (returnErr error) {
 	}
 	activeCount, err = p.repo.CountPreparingAndPrepared(ctx, p.poolKey)
 	if err != nil {
-		return fmt.Errorf("recount active FUSE pool inventory: %w", err)
+		return true, fmt.Errorf("recount active FUSE pool inventory: %w", err)
 	}
 
 	prepared := 0
 	current, err := p.repo.ListByPoolKey(ctx, p.poolKey)
 	if err != nil {
-		return fmt.Errorf("refresh FUSE pool inventory: %w", err)
+		return true, fmt.Errorf("refresh FUSE pool inventory: %w", err)
 	}
 	for _, record := range current {
 		if record.State == state.FUSEPoolPrepared {
@@ -362,14 +477,53 @@ func (p *FUSEPool) Reconcile(ctx context.Context) (returnErr error) {
 		}
 	}
 	for prepared < p.config.MinSize && activeCount < p.config.MaxSize {
-		_, err := p.prepareOne(ctx, "")
+		_, err := p.prepareOne(ctx, "", lockToken)
 		if err != nil {
-			return fmt.Errorf("prepare FUSE pool sandbox: %w", err)
+			return true, fmt.Errorf("prepare FUSE pool sandbox: %w", err)
 		}
 		activeCount++
 		prepared++
 	}
-	return nil
+	return true, inspectionErr
+}
+
+func (p *FUSEPool) inspectPrepared(ctx context.Context) error {
+	var result error
+	verified := make([]state.FUSEPoolRecord, 0)
+	for {
+		token := p.config.MaintainerToken + ":inspect:" + uuid.NewString()
+		record, err := p.repo.ReservePrepared(ctx, p.poolKey, token, p.config.ReservationTTL)
+		if err != nil {
+			result = errors.Join(result, err)
+			break
+		}
+		if record == nil {
+			break
+		}
+		disposition, guardErr := p.guard(ctx, *record)
+		switch disposition {
+		case FUSEPoolPristine:
+			if healthErr := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, p.poolKey); healthErr != nil {
+				result = errors.Join(result, healthErr, p.claimAndDestroy(ctx, *record))
+			} else {
+				verified = append(verified, *record)
+			}
+		case FUSEPoolAbandoned:
+			result = errors.Join(result, p.claimAndDestroy(ctx, *record))
+		case FUSEPoolProtected:
+			result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+		default:
+			result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+		}
+	}
+	for _, record := range verified {
+		_, err := p.repo.Transition(ctx, record.PreparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, record.ReservationToken, record.Revision)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+	}
+	return result
 }
 
 // Drain deletes only unreserved prepared shells from one exact PoolKey.
@@ -384,7 +538,7 @@ func (p *FUSEPool) Drain(ctx context.Context, poolKey string) error {
 	var result error
 	for _, record := range records {
 		if record.State == state.FUSEPoolPrepared {
-			result = errors.Join(result, p.destroyExact(ctx, record))
+			result = errors.Join(result, p.claimAndDestroy(ctx, record))
 		}
 	}
 	return result
@@ -393,28 +547,33 @@ func (p *FUSEPool) Drain(ctx context.Context, poolKey string) error {
 // Stop terminates all controller goroutines and removes only preparing or
 // prepared shells owned by this API instance. It is idempotent.
 func (p *FUSEPool) Stop(ctx context.Context) error {
-	p.stopOnce.Do(func() {
-		p.lifecycleMu.Lock()
+	p.lifecycleMu.Lock()
+	if !p.stopStarted {
+		p.stopStarted = true
 		p.stopping = true
-		if p.cancel != nil {
-			p.cancel()
-		}
-		p.lifecycleMu.Unlock()
-		p.wg.Wait()
-		p.stopErr = p.drainOwned(ctx)
-		p.lifecycleMu.Lock()
-		p.running = false
-		p.stopping = false
-		p.stopped = true
-		p.lifecycleMu.Unlock()
-		close(p.stopDone)
-	})
+		p.cancel()
+		go p.finishStop(context.WithoutCancel(ctx))
+	}
+	done := p.stopDone
+	p.lifecycleMu.Unlock()
 	select {
-	case <-p.stopDone:
+	case <-done:
 		return p.stopErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (p *FUSEPool) finishStop(ctx context.Context) {
+	p.controllerWG.Wait()
+	p.opWG.Wait()
+	cleanupCtx, cancel := context.WithTimeout(ctx, fusePoolCleanupTimeout)
+	p.stopErr = p.drainOwned(cleanupCtx)
+	cancel()
+	p.lifecycleMu.Lock()
+	p.running, p.stopping, p.stopped = false, false, true
+	close(p.stopDone)
+	p.lifecycleMu.Unlock()
 }
 
 func (p *FUSEPool) drainOwned(ctx context.Context) error {
@@ -428,14 +587,14 @@ func (p *FUSEPool) drainOwned(ctx context.Context) error {
 	var result error
 	for _, record := range records {
 		if record.MaintainerToken == p.config.MaintainerToken && (record.State == state.FUSEPoolPreparing || record.State == state.FUSEPoolPrepared) {
-			result = errors.Join(result, p.destroyExact(ctx, record))
+			result = errors.Join(result, p.claimAndDestroy(ctx, record))
 		}
 	}
 	return result
 }
 
 func (p *FUSEPool) reconcileLoop(ctx context.Context) {
-	defer p.wg.Done()
+	defer p.controllerWG.Done()
 	for {
 		delay := p.config.RefillInterval
 		if delay > 5*time.Nanosecond {
@@ -444,7 +603,7 @@ func (p *FUSEPool) reconcileLoop(ctx context.Context) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
-			if err := p.Reconcile(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if _, err := p.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error(ctx, "FUSE pool reconciliation failed", logger.AddField("pool_key", p.poolKey), logger.ErrorField(err))
 			}
 		case <-ctx.Done():
@@ -466,71 +625,111 @@ func (p *FUSEPool) scheduleRefill() {
 		return
 	}
 	ctx := p.loopCtx
-	p.wg.Add(1)
+	p.controllerWG.Add(1)
 	p.lifecycleMu.Unlock()
 	go func() {
-		defer p.wg.Done()
-		if err := p.Reconcile(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		defer p.controllerWG.Done()
+		if _, err := p.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error(ctx, "FUSE pool refill failed", logger.AddField("pool_key", p.poolKey), logger.ErrorField(err))
 		}
 	}()
 }
 
-func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken string) (*state.FUSEPoolRecord, error) {
+func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken string) (*state.FUSEPoolRecord, error) {
 	prepareCtx, cancel := context.WithTimeout(ctx, p.config.PrepareTimeout)
 	defer cancel()
 	spec := cloneFUSESandboxSpec(p.spec)
-	spec.ID = "sandbox-fuse-pool-" + randSuffix(randSuffixLen)
+	spec.ID = "sandbox-fuse-pool-" + uuid.NewString()
+	record := state.FUSEPoolRecord{
+		PreparationID: spec.ID, PoolKey: p.poolKey, State: state.FUSEPoolPreparing,
+		MaintainerToken: p.config.MaintainerToken, Revision: 1,
+	}
+	if err := p.repo.CreatePreparingWithAdmission(prepareCtx, record, refillToken, p.config.MaxSize, p.config.PrepareTimeout); err != nil {
+		if errors.Is(err, state.ErrFUSEPoolConflict) {
+			return nil, ErrFUSEPoolAtCapacity
+		}
+		return nil, fmt.Errorf("register preparing FUSE sandbox: %w", err)
+	}
+	listed, err := p.repo.ListByPoolKey(prepareCtx, p.poolKey)
+	if err == nil {
+		for _, current := range listed {
+			if current.PreparationID == record.PreparationID {
+				record = current
+				break
+			}
+		}
+	}
 	info, err := p.runtime.PrepareSandbox(prepareCtx, spec)
 	if err != nil {
-		return nil, fmt.Errorf("prepare FUSE sandbox runtime: %w", err)
+		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
+		return nil, errors.Join(fmt.Errorf("prepare FUSE sandbox runtime: %w", err), cleanupErr)
 	}
 	if info == nil || info.RuntimeID == "" || info.RuntimeUID == "" {
-		if info != nil && info.RuntimeID != "" {
-			_ = p.removeRuntimeWithCleanupContext(info.RuntimeID)
-		}
-		return nil, errors.Join(state.ErrFUSEPoolInvalidRecord, errors.New("runtime returned incomplete identity"))
+		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
+		return nil, errors.Join(state.ErrFUSEPoolInvalidRecord, errors.New("runtime returned incomplete identity"), cleanupErr)
 	}
-	record := state.FUSEPoolRecord{
-		RuntimeID: info.RuntimeID, RuntimeUID: info.RuntimeUID, PoolKey: p.poolKey,
-		State: state.FUSEPoolPreparing, MaintainerToken: p.config.MaintainerToken,
-		ReservationToken: reservationToken, Revision: 1,
+	bound, err := p.repo.BindPreparingRuntime(prepareCtx, record.PreparationID, info.RuntimeID, info.RuntimeUID, refillToken, record.Revision)
+	if err != nil {
+		cleanupErr := p.claimAndDestroyWithRuntimeEvidence(record, info.RuntimeID, info.RuntimeUID)
+		return nil, errors.Join(fmt.Errorf("bind preparing FUSE sandbox runtime: %w", err), cleanupErr)
 	}
-	if reservationToken != "" {
-		record.ReservedUntil = time.Now().Add(p.config.ReservationTTL)
-	}
-	if err := p.repo.CreatePreparing(prepareCtx, record); err != nil {
-		cleanupErr := p.removeRuntimeWithCleanupContext(info.RuntimeID)
-		return nil, errors.Join(fmt.Errorf("register preparing FUSE sandbox: %w", err), cleanupErr)
-	}
-	if err := p.runtime.PreparedSandboxHealth(prepareCtx, info.RuntimeID, p.poolKey); err != nil {
-		cleanupErr := p.destroyExactWithCleanupContext(record)
+	record = *bound
+	if err := p.runtime.PreparedSandboxHealth(prepareCtx, record.RuntimeID, p.poolKey); err != nil {
+		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
 		return nil, errors.Join(fmt.Errorf("verify preparing FUSE sandbox: %w", err), cleanupErr)
 	}
 	to := state.FUSEPoolPrepared
 	token := p.config.MaintainerToken
+	reserveTTL := time.Duration(0)
 	if reservationToken != "" {
 		to = state.FUSEPoolReserved
 		token = reservationToken
+		reserveTTL = p.config.ReservationTTL
 	}
-	transitioned, err := p.repo.Transition(prepareCtx, record.RuntimeUID, state.FUSEPoolPreparing, to, token, record.Revision)
+	transitioned, err := p.repo.TransitionWithRefillLock(prepareCtx, record.PreparationID, state.FUSEPoolPreparing, to, token, refillToken, record.Revision, reserveTTL)
 	if err != nil {
-		cleanupErr := p.destroyExactWithCleanupContext(record)
+		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
 		return nil, errors.Join(fmt.Errorf("publish prepared FUSE sandbox: %w", err), cleanupErr)
 	}
 	return transitioned, nil
 }
 
-func (p *FUSEPool) destroyExact(ctx context.Context, record state.FUSEPoolRecord) error {
-	if err := p.removeRuntime(ctx, record.RuntimeID); err != nil {
-		return fmt.Errorf("remove runtime %q: %w", record.RuntimeID, err)
-	}
-	deleted, err := p.repo.ConditionalDelete(ctx, record.RuntimeUID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision)
+func (p *FUSEPool) claimAndDestroyWithCleanupContext(record state.FUSEPoolRecord) error {
+	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
+	defer cancel()
+	return p.claimAndDestroy(ctx, record)
+}
+
+func (p *FUSEPool) claimAndDestroyWithRuntimeEvidence(record state.FUSEPoolRecord, runtimeID, runtimeUID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
+	defer cancel()
+	claimed, err := p.claimCleanupWithEvidence(ctx, record, runtimeID, runtimeUID)
 	if err != nil {
-		if isStalePoolMutation(err) {
-			return nil
-		}
-		return fmt.Errorf("delete exact FUSE pool record: %w", err)
+		return err
+	}
+	if err := p.exactRemover().RemovePreparedSandbox(ctx, runtimeID, runtimeUID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return err
+	}
+	_, err = p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	return err
+}
+
+func (p *FUSEPool) claimAndDestroy(ctx context.Context, record state.FUSEPoolRecord) error {
+	claimed, err := p.claimCleanup(ctx, record)
+	if err != nil {
+		return err
+	}
+	if claimed.RuntimeID == "" {
+		err = p.runtime.RemoveSandbox(ctx, claimed.PreparationID)
+	} else {
+		err = p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID)
+	}
+	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return fmt.Errorf("remove claimed FUSE runtime: %w", err)
+	}
+	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	if err != nil {
+		return fmt.Errorf("delete cleanup record: %w", err)
 	}
 	if !deleted {
 		return state.ErrFUSEPoolConflict
@@ -538,33 +737,87 @@ func (p *FUSEPool) destroyExact(ctx context.Context, record state.FUSEPoolRecord
 	return nil
 }
 
-func (p *FUSEPool) removeRuntime(ctx context.Context, runtimeID string) error {
-	if runtimeID == "" {
-		return state.ErrFUSEPoolInvalidRecord
-	}
-	err := p.runtime.RemoveSandbox(ctx, runtimeID)
-	if errors.Is(err, runtime.ErrNotFound) {
-		return nil
-	}
-	return err
+func (p *FUSEPool) claimCleanup(ctx context.Context, record state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
+	return p.claimCleanupWithEvidence(ctx, record, record.RuntimeID, record.RuntimeUID)
 }
 
-func (p *FUSEPool) removeRuntimeWithCleanupContext(runtimeID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
-	defer cancel()
-	return p.removeRuntime(ctx, runtimeID)
+func (p *FUSEPool) claimCleanupWithEvidence(ctx context.Context, record state.FUSEPoolRecord, runtimeID, runtimeUID string) (*state.FUSEPoolRecord, error) {
+	digest := sha256.Sum256([]byte(record.PreparationID))
+	token := p.config.MaintainerToken + ":cleanup:" + hex.EncodeToString(digest[:])
+	return p.repo.ClaimCleanup(ctx, record.PreparationID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision, runtimeID, runtimeUID, token, p.config.PrepareTimeout)
 }
 
-func (p *FUSEPool) destroyExactWithCleanupContext(record state.FUSEPoolRecord) error {
-	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
-	defer cancel()
-	return p.destroyExact(ctx, record)
+func (p *FUSEPool) exactRemover() runtime.PreparedSandboxRemover {
+	return p.runtime.(runtime.PreparedSandboxRemover)
 }
 
 func (p *FUSEPool) unlockRefill(parent context.Context, token string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), fusePoolCleanupTimeout)
 	defer cancel()
 	return p.repo.UnlockRefill(ctx, p.poolKey, token)
+}
+
+type refillLease struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func (p *FUSEPool) startRefillLease(parent context.Context, token string) *refillLease {
+	ctx, cancel := context.WithCancel(parent)
+	lease := &refillLease{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	interval := p.refillLockTTL() / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	go func() {
+		defer close(lease.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ok, err := p.repo.RenewRefillLock(ctx, p.poolKey, token, p.refillLockTTL())
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return lease
+}
+
+func (l *refillLease) stop() { l.cancel(); <-l.done }
+
+func (p *FUSEPool) beginOperation(parent context.Context) (context.Context, func(), error) {
+	p.lifecycleMu.Lock()
+	if p.stopping || p.stopped {
+		p.lifecycleMu.Unlock()
+		return nil, nil, ErrFUSEPoolStopped
+	}
+	p.opWG.Add(1)
+	control := p.loopCtx
+	p.lifecycleMu.Unlock()
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(control, cancel)
+	return ctx, func() { stop(); cancel(); p.opWG.Done() }, nil
+}
+
+func (p *FUSEPool) guard(ctx context.Context, record state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
+	if p.config.PristineGuard == nil {
+		return FUSEPoolDispositionUnknown, ErrFUSEPoolReturnUnproven
+	}
+	disposition, err := p.config.PristineGuard(ctx, record)
+	if err != nil {
+		return FUSEPoolDispositionUnknown, err
+	}
+	if disposition < FUSEPoolPristine || disposition > FUSEPoolAbandoned {
+		return FUSEPoolDispositionUnknown, errors.Join(ErrFUSEPoolReturnUnproven, err)
+	}
+	return disposition, err
 }
 
 func (p *FUSEPool) validateReservedRecord(record state.FUSEPoolRecord, token string) error {
@@ -575,7 +828,10 @@ func (p *FUSEPool) validateReservedRecord(record state.FUSEPoolRecord, token str
 }
 
 func (p *FUSEPool) validate() error {
-	if p == nil || p.runtime == nil || p.repo == nil || p.spec.WorkspaceFUSE == nil || p.poolKey == "" || p.config.MinSize < 0 || p.config.MaxSize <= 0 || p.config.MinSize > p.config.MaxSize || p.config.RefillInterval <= 0 || p.config.PrepareTimeout <= 0 || p.config.ReservationTTL <= 0 || p.config.MaintainerToken == "" {
+	if p == nil || p.runtime == nil || p.repo == nil || p.config.PristineGuard == nil || p.spec.WorkspaceFUSE == nil || p.poolKey == "" || p.config.MinSize < 0 || p.config.MaxSize <= 0 || p.config.MinSize > p.config.MaxSize || p.config.RefillInterval <= 0 || p.config.PrepareTimeout <= 0 || p.config.ReservationTTL <= 0 || p.config.MaintainerToken == "" {
+		return ErrInvalidFUSEPoolConfig
+	}
+	if _, ok := p.runtime.(runtime.PreparedSandboxRemover); !ok {
 		return ErrInvalidFUSEPoolConfig
 	}
 	return nil

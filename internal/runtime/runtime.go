@@ -24,6 +24,12 @@ type RuntimeFencer interface {
 	ConfirmTerminated(ctx context.Context, runtimeID, runtimeUID string) (TerminationEvidence, error)
 }
 
+// PreparedSandboxRemover removes only the exact immutable runtime instance.
+// FUSE pool cleanup must use it after RuntimeUID has been bound.
+type PreparedSandboxRemover interface {
+	RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeUID string) error
+}
+
 // OrphanReconciler removes managed runtime resources only after the manager has
 // restored state and supplied the complete set of protected runtime UIDs.
 type OrphanReconciler interface {
