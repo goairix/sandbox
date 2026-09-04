@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 
@@ -179,28 +181,109 @@ func LoadFileSystemCredentials(cfg config.FileSystemConfig) (FileSystemCredentia
 		return FileSystemCredentials{}, fmt.Errorf("storage: access key and secret key credential files are both required")
 	}
 
-	accessKey, err := readCredentialFile(files.AccessKeyFile, "access key")
-	if err != nil {
-		return FileSystemCredentials{}, err
-	}
-	secretKey, err := readCredentialFile(files.SecretKeyFile, "secret key")
-	if err != nil {
-		zeroBytes(accessKey)
-		return FileSystemCredentials{}, err
-	}
-	return FileSystemCredentials{AccessKey: accessKey, SecretKey: secretKey}, nil
+	return loadCredentialFiles(files, credentialLoadHooks{})
 }
 
-func readCredentialFile(path, name string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("storage: inspect %s credential file: %w", name, err)
+const credentialLoadMaxAttempts = 3
+
+type credentialLoadHooks struct {
+	afterOpen     func(attempt int)
+	afterValidate func(attempt int)
+}
+
+func loadCredentialFiles(files config.FileSystemCredentialFileConfig, hooks credentialLoadHooks) (FileSystemCredentials, error) {
+	for attempt := 0; attempt < credentialLoadMaxAttempts; attempt++ {
+		credentials, retry, err := loadCredentialFilesAttempt(files, hooks, attempt)
+		if err != nil {
+			return FileSystemCredentials{}, err
+		}
+		if !retry {
+			return credentials, nil
+		}
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o044 != 0 {
-		return nil, fmt.Errorf("storage: %s credential file permissions allow group or world read access", name)
+	return FileSystemCredentials{}, fmt.Errorf("storage: credential files changed while loading")
+}
+
+func loadCredentialFilesAttempt(files config.FileSystemCredentialFileConfig, hooks credentialLoadHooks, attempt int) (FileSystemCredentials, bool, error) {
+	accessFile, err := os.Open(files.AccessKeyFile)
+	if err != nil {
+		return FileSystemCredentials{}, false, fmt.Errorf("storage: open access key credential file: %w", err)
+	}
+	defer accessFile.Close()
+
+	secretFile, err := os.Open(files.SecretKeyFile)
+	if err != nil {
+		return FileSystemCredentials{}, false, fmt.Errorf("storage: open secret key credential file: %w", err)
+	}
+	defer secretFile.Close()
+
+	if hooks.afterOpen != nil {
+		hooks.afterOpen(attempt)
 	}
 
-	value, err := os.ReadFile(path)
+	accessInfo, err := accessFile.Stat()
+	if err != nil {
+		return FileSystemCredentials{}, false, fmt.Errorf("storage: inspect open access key credential file: %w", err)
+	}
+	secretInfo, err := secretFile.Stat()
+	if err != nil {
+		return FileSystemCredentials{}, false, fmt.Errorf("storage: inspect open secret key credential file: %w", err)
+	}
+	if err := validateCredentialFilePermissions(accessInfo, "access key"); err != nil {
+		return FileSystemCredentials{}, false, err
+	}
+	if err := validateCredentialFilePermissions(secretInfo, "secret key"); err != nil {
+		return FileSystemCredentials{}, false, err
+	}
+
+	accessCurrent, accessRetry, err := currentCredentialFileInfo(files.AccessKeyFile, "access key")
+	if err != nil {
+		return FileSystemCredentials{}, false, err
+	}
+	secretCurrent, secretRetry, err := currentCredentialFileInfo(files.SecretKeyFile, "secret key")
+	if err != nil {
+		return FileSystemCredentials{}, false, err
+	}
+	if accessRetry || secretRetry || !os.SameFile(accessInfo, accessCurrent) || !os.SameFile(secretInfo, secretCurrent) {
+		return FileSystemCredentials{}, true, nil
+	}
+
+	if hooks.afterValidate != nil {
+		hooks.afterValidate(attempt)
+	}
+
+	accessKey, err := readOpenCredentialFile(accessFile, "access key")
+	if err != nil {
+		return FileSystemCredentials{}, false, err
+	}
+	secretKey, err := readOpenCredentialFile(secretFile, "secret key")
+	if err != nil {
+		zeroBytes(accessKey)
+		return FileSystemCredentials{}, false, err
+	}
+	return FileSystemCredentials{AccessKey: accessKey, SecretKey: secretKey}, false, nil
+}
+
+func currentCredentialFileInfo(path, name string) (os.FileInfo, bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("storage: inspect current %s credential file: %w", name, err)
+	}
+	return info, false, nil
+}
+
+func validateCredentialFilePermissions(info os.FileInfo, name string) error {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o044 != 0 {
+		return fmt.Errorf("storage: %s credential file permissions allow group or world read access", name)
+	}
+	return nil
+}
+
+func readOpenCredentialFile(file *os.File, name string) ([]byte, error) {
+	value, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("storage: read %s credential file: %w", name, err)
 	}

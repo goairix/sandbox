@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,17 +16,22 @@ import (
 	"sync"
 	"testing"
 
+	obs "github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
+	miniogo "github.com/minio/minio-go/v7"
+	miniocredentials "github.com/minio/minio-go/v7/pkg/credentials"
+
 	"github.com/goairix/sandbox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeWorkspaceObjects struct {
-	data    map[string][]byte
-	options map[string]RootMarkerOptions
-	head    bool
-	putErr  error
-	headErr error
+	data     map[string][]byte
+	options  map[string]RootMarkerOptions
+	head     bool
+	headKeys []string
+	putErr   error
+	headErr  error
 }
 
 func newFakeWorkspaceObjects() *fakeWorkspaceObjects {
@@ -43,8 +51,16 @@ func (f *fakeWorkspaceObjects) PutEmptyObject(_ context.Context, key string, opt
 	return nil
 }
 
-func (f *fakeWorkspaceObjects) HeadObject(_ context.Context, _ string) (bool, error) {
-	return f.head, f.headErr
+func (f *fakeWorkspaceObjects) HeadObject(_ context.Context, key string) (bool, error) {
+	f.headKeys = append(f.headKeys, key)
+	if f.headErr != nil {
+		return false, f.headErr
+	}
+	if !f.head {
+		return false, nil
+	}
+	_, exists := f.data[key]
+	return exists, nil
 }
 
 func TestRootMarkerProfilesHaveIndependentImmutableOptions(t *testing.T) {
@@ -91,6 +107,7 @@ func TestPrepareWorkspacePrefixWritesAndVerifiesExactRootMarker(t *testing.T) {
 		ContentType: "application/x-directory",
 		Metadata:    map[string]string{},
 	}, objects.options["workspaces/team-a/"])
+	assert.Equal(t, []string{"workspaces/team-a/"}, objects.headKeys)
 	assert.False(t, IsUserVisibleWorkspaceObject("workspaces/team-a/", "workspaces/team-a/"))
 	assert.True(t, IsUserVisibleWorkspaceObject("workspaces/team-a/", "workspaces/team-a/file.txt"))
 	assert.True(t, IsUserVisibleWorkspaceObject("workspaces/team-a/", "workspaces/team-a/subdir/"))
@@ -152,15 +169,61 @@ func TestNewWorkspaceObjectClientRejectsInvalidCustomCA(t *testing.T) {
 	require.ErrorContains(t, err, "no certificates")
 }
 
+func TestNewWorkspaceObjectClientRejectsInvalidOBSEndpointsWithoutPanicking(t *testing.T) {
+	credentials := FileSystemCredentials{AccessKey: []byte("access"), SecretKey: []byte("secret")}
+	invalid := []string{
+		"obs.example.test",
+		"ftp://obs.example.test",
+		"https://",
+		"https://user:password@obs.example.test",
+		"https://obs.example.test/bucket",
+		"https://obs.example.test?query=value",
+		"https://obs.example.test?",
+		"https://obs.example.test#fragment",
+		"https://obs.example.test#",
+		"https://obs.example.test:not-a-port",
+		"https://obs.example.test:0",
+		"https://obs.example.test:65536",
+		"https://%",
+	}
+
+	for _, endpoint := range invalid {
+		t.Run(endpoint, func(t *testing.T) {
+			var err error
+			require.NotPanics(t, func() {
+				_, err = NewWorkspaceObjectClient(config.FileSystemConfig{
+					Provider: "obs", Bucket: "bucket", Endpoint: endpoint,
+				}, credentials)
+			})
+			require.ErrorContains(t, err, "OBS endpoint")
+		})
+	}
+}
+
+func TestNewWorkspaceObjectClientNormalizesSingleOBSTrailingSlash(t *testing.T) {
+	client, err := NewWorkspaceObjectClient(config.FileSystemConfig{
+		Provider: "obs", Bucket: "bucket", Endpoint: "https://obs.example.test/",
+	}, FileSystemCredentials{AccessKey: []byte("access"), SecretKey: []byte("secret")})
+	require.NoError(t, err)
+	assert.Equal(t, "https://obs.example.test", client.(*obsWorkspaceObjectClient).endpoint)
+}
+
 func TestMinIONativeAdapterPutHeadAndNotFound(t *testing.T) {
 	var mu sync.Mutex
 	objects := map[string]http.Header{}
+	bodies := map[string][]byte{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.Method {
 		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			objects[r.URL.Path] = r.Header.Clone()
+			bodies[r.URL.Path] = body
 			w.Header().Set("ETag", `"marker"`)
 			w.WriteHeader(http.StatusOK)
 		case http.MethodHead:
@@ -191,20 +254,57 @@ func TestMinIONativeAdapterPutHeadAndNotFound(t *testing.T) {
 
 	mu.Lock()
 	headers := objects["/bucket/workspaces/team-a/"]
+	body := bodies["/bucket/workspaces/team-a/"]
 	mu.Unlock()
+	assert.Empty(t, body)
 	assert.Equal(t, "application/x-directory", headers.Get("Content-Type"))
 	assert.Equal(t, "root", headers.Get("X-Amz-Meta-Marker"))
+}
+
+func TestMinIONativeAdapterDoesNotMapNoSuchBucketToMissingObject(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 Not Found",
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`<Error><Code>NoSuchBucket</Code><Message>missing bucket</Message></Error>`,
+			)),
+			Request: request,
+		}, nil
+	})
+	native, err := miniogo.New("minio.example.test", &miniogo.Options{
+		Creds:        miniocredentials.NewStaticV4("access", "secret", ""),
+		Transport:    transport,
+		Region:       "us-east-1",
+		BucketLookup: miniogo.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	require.NoError(t, err)
+	client := &minioWorkspaceObjectClient{client: native, bucket: "missing-bucket"}
+
+	exists, err := client.HeadObject(context.Background(), "workspace/")
+	require.Error(t, err)
+	assert.False(t, exists)
+	assert.Equal(t, "NoSuchBucket", miniogo.ToErrorResponse(err).Code)
 }
 
 func TestOBSNativeAdapterPutHeadAndNotFound(t *testing.T) {
 	var mu sync.Mutex
 	objects := map[string]http.Header{}
+	bodies := map[string][]byte{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.Method {
 		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			objects[r.URL.Path] = r.Header.Clone()
+			bodies[r.URL.Path] = body
 			w.Header().Set("ETag", `"marker"`)
 			w.WriteHeader(http.StatusOK)
 		case http.MethodHead:
@@ -244,8 +344,34 @@ func TestOBSNativeAdapterPutHeadAndNotFound(t *testing.T) {
 	}
 	mu.Unlock()
 	require.NotNil(t, headers)
+	mu.Lock()
+	var body []byte
+	for path, candidate := range bodies {
+		if strings.HasSuffix(path, "/workspaces/team-a/") {
+			body = candidate
+			break
+		}
+	}
+	mu.Unlock()
+	assert.Empty(t, body)
 	assert.Equal(t, "application/x-directory", headers.Get("Content-Type"))
 	assert.Equal(t, "root", firstNonEmpty(headers.Get("X-Obs-Meta-Marker"), headers.Get("X-Amz-Meta-Marker")))
+}
+
+func TestOBSNativeAdapterDoesNotMapNoSuchBucketToMissingObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Obs-Error-Code", "NoSuchBucket")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	client := newWorkspaceClientForServer(t, "obs", server.URL, "")
+
+	exists, err := client.HeadObject(context.Background(), "workspace/")
+	require.Error(t, err)
+	assert.False(t, exists)
+	var obsError obs.ObsError
+	require.ErrorAs(t, err, &obsError)
+	assert.Equal(t, "NoSuchBucket", obsError.Code)
 }
 
 func TestWorkspaceObjectClientCustomCAControlsTLSOperations(t *testing.T) {
@@ -253,6 +379,11 @@ func TestWorkspaceObjectClientCustomCAControlsTLSOperations(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil || len(body) != 0 {
+				http.Error(w, "marker body must be empty", http.StatusBadRequest)
+				return
+			}
 			objects[r.URL.Path] = true
 			w.Header().Set("ETag", `"marker"`)
 			w.WriteHeader(http.StatusOK)
@@ -296,8 +427,30 @@ func TestWorkspaceObjectClientCustomCAControlsTLSOperations(t *testing.T) {
 			}
 			require.NotNil(t, transport.TLSClientConfig)
 			assert.False(t, transport.TLSClientConfig.InsecureSkipVerify)
+
+			parsed, err := url.Parse(server.URL)
+			require.NoError(t, err)
+			_, port, err := net.SplitHostPort(parsed.Host)
+			require.NoError(t, err)
+			mismatchURL := "https://localhost:" + port
+			mismatch := newWorkspaceClientForServer(t, provider, mismatchURL, caFile)
+			err = mismatch.PutEmptyObject(context.Background(), "workspaces/"+provider+"-hostname-mismatch/", RootMarkerOptions{ContentType: "application/x-directory"})
+			require.Error(t, err)
+			assertHostnameVerificationError(t, err)
 		})
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func assertHostnameVerificationError(t *testing.T, err error) {
+	t.Helper()
+	var hostnameError x509.HostnameError
+	require.True(t, errors.As(err, &hostnameError), "expected x509.HostnameError in %T error chain: %v", err, err)
 }
 
 func newWorkspaceClientForServer(t *testing.T, provider, rawURL, caFile string) WorkspaceObjectClient {

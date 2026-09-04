@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	obs "github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
@@ -194,14 +196,18 @@ func NewWorkspaceObjectClient(cfg config.FileSystemConfig, credentials FileSyste
 		return &minioWorkspaceObjectClient{client: client, bucket: cfg.Bucket, transport: transport}, nil
 
 	case ProviderOBS:
+		endpoint, err := validateOBSEndpoint(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
 		// OBS accepts its provider-native complete endpoint, including scheme.
-		if _, err := obs.New(accessKey, secretKey, cfg.Endpoint, obs.WithHttpTransport(transport), obs.WithMaxRetryCount(0)); err != nil {
+		if _, err := obs.New(accessKey, secretKey, endpoint, obs.WithHttpTransport(transport), obs.WithMaxRetryCount(0)); err != nil {
 			return nil, fmt.Errorf("storage: create native OBS client: %w", err)
 		}
 		return &obsWorkspaceObjectClient{
 			accessKey: accessKey,
 			secretKey: secretKey,
-			endpoint:  cfg.Endpoint,
+			endpoint:  endpoint,
 			bucket:    cfg.Bucket,
 			transport: transport,
 		}, nil
@@ -209,6 +215,41 @@ func NewWorkspaceObjectClient(cfg config.FileSystemConfig, credentials FileSyste
 	default:
 		return nil, fmt.Errorf("storage: unsupported workspace object provider %q", cfg.Provider)
 	}
+}
+
+func validateOBSEndpoint(endpoint string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: scheme must be http or https")
+	}
+	if !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: absolute URL with host is required")
+	}
+	if parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(endpoint, "#") {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: userinfo, query, and fragment are forbidden")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: path is forbidden")
+	}
+	if parsed.RawPath != "" || parsed.EscapedPath() != parsed.Path {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: escaped path is forbidden")
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return "", fmt.Errorf("storage: invalid OBS endpoint: port is empty")
+	}
+	if port := parsed.Port(); port != "" {
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return "", fmt.Errorf("storage: invalid OBS endpoint: port must be between 1 and 65535")
+		}
+	}
+	if parsed.Path == "/" {
+		return strings.TrimSuffix(endpoint, "/"), nil
+	}
+	return endpoint, nil
 }
 
 func newWorkspaceHTTPTransport(caFile string) (*http.Transport, error) {
@@ -252,9 +293,12 @@ type minioWorkspaceObjectClient struct {
 }
 
 func (c *minioWorkspaceObjectClient) PutEmptyObject(ctx context.Context, key string, options RootMarkerOptions) error {
-	_, err := c.client.PutObject(ctx, c.bucket, key, bytes.NewReader(nil), 0, miniogo.PutObjectOptions{
-		ContentType:  options.ContentType,
-		UserMetadata: cloneStringMap(options.Metadata),
+	const emptySHA256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	core := miniogo.Core{Client: c.client}
+	_, err := core.PutObject(ctx, c.bucket, key, bytes.NewReader(nil), 0, "", emptySHA256Hex, miniogo.PutObjectOptions{
+		ContentType:          options.ContentType,
+		UserMetadata:         cloneStringMap(options.Metadata),
+		DisableContentSha256: true, // use the fixed empty hash above, not aws-chunked framing
 	})
 	return err
 }
@@ -265,7 +309,7 @@ func (c *minioWorkspaceObjectClient) HeadObject(ctx context.Context, key string)
 		return true, nil
 	}
 	response := miniogo.ToErrorResponse(err)
-	if response.StatusCode == http.StatusNotFound || response.Code == "NoSuchKey" || response.Code == "NotFound" {
+	if isObjectNotFound(response.StatusCode, response.Code) {
 		return false, nil
 	}
 	return false, err
@@ -320,10 +364,17 @@ func (c *obsWorkspaceObjectClient) HeadObject(ctx context.Context, key string) (
 		return true, nil
 	}
 	var obsError obs.ObsError
-	if errors.As(err, &obsError) && (obsError.StatusCode == http.StatusNotFound || obsError.Code == "NoSuchKey" || obsError.Code == "NotFound") {
+	if errors.As(err, &obsError) && isObjectNotFound(obsError.StatusCode, obsError.Code) {
 		return false, nil
 	}
 	return false, err
+}
+
+func isObjectNotFound(statusCode int, serviceCode string) bool {
+	if serviceCode == "NoSuchKey" || serviceCode == "NotFound" {
+		return true
+	}
+	return statusCode == http.StatusNotFound && serviceCode == ""
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

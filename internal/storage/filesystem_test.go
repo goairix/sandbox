@@ -167,3 +167,72 @@ func TestLoadFileSystemCredentialsRejectsGroupOrWorldReadableFiles(t *testing.T)
 	assert.NotContains(t, err.Error(), "do-not-leak-access")
 	assert.NotContains(t, err.Error(), "do-not-leak-secret")
 }
+
+func TestLoadCredentialFilesRetriesProjectedSecretRotationAfterOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink replacement semantics differ")
+	}
+	root := t.TempDir()
+	writeCredentialGeneration(t, root, "..2026_09_03", "old-access", "old-secret")
+	writeCredentialGeneration(t, root, "..2026_09_04", "new-access", "new-secret")
+	require.NoError(t, os.Symlink("..2026_09_03", filepath.Join(root, "..data")))
+	require.NoError(t, os.Symlink("..data/access", filepath.Join(root, "access")))
+	require.NoError(t, os.Symlink("..data/secret", filepath.Join(root, "secret")))
+
+	credentials, err := loadCredentialFiles(config.FileSystemCredentialFileConfig{
+		AccessKeyFile: filepath.Join(root, "access"),
+		SecretKeyFile: filepath.Join(root, "secret"),
+	}, credentialLoadHooks{
+		afterOpen: func(attempt int) {
+			if attempt != 0 {
+				return
+			}
+			next := filepath.Join(root, "..data-next")
+			require.NoError(t, os.Symlink("..2026_09_04", next))
+			require.NoError(t, os.Rename(next, filepath.Join(root, "..data")))
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("new-access"), credentials.AccessKey)
+	assert.Equal(t, []byte("new-secret"), credentials.SecretKey)
+}
+
+func TestLoadCredentialFilesReadsAlreadyValidatedFileDescriptors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows replacement semantics differ")
+	}
+	root := t.TempDir()
+	accessPath := filepath.Join(root, "access")
+	secretPath := filepath.Join(root, "secret")
+	require.NoError(t, os.WriteFile(accessPath, []byte("opened-access"), 0o600))
+	require.NoError(t, os.WriteFile(secretPath, []byte("opened-secret"), 0o600))
+
+	credentials, err := loadCredentialFiles(config.FileSystemCredentialFileConfig{
+		AccessKeyFile: accessPath,
+		SecretKeyFile: secretPath,
+	}, credentialLoadHooks{
+		afterValidate: func(attempt int) {
+			require.Equal(t, 0, attempt)
+			replaceFile(t, accessPath, []byte("replacement-access"))
+			replaceFile(t, secretPath, []byte("replacement-secret"))
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("opened-access"), credentials.AccessKey)
+	assert.Equal(t, []byte("opened-secret"), credentials.SecretKey)
+}
+
+func writeCredentialGeneration(t *testing.T, root, generation, access, secret string) {
+	t.Helper()
+	dir := filepath.Join(root, generation)
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "access"), []byte(access), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret"), []byte(secret), 0o600))
+}
+
+func replaceFile(t *testing.T, path string, value []byte) {
+	t.Helper()
+	replacement := path + ".replacement"
+	require.NoError(t, os.WriteFile(replacement, value, 0o600))
+	require.NoError(t, os.Rename(replacement, path))
+}
