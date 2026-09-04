@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/goairix/sandbox/internal/config"
@@ -20,6 +23,30 @@ func TestNewFileSystem_Local(t *testing.T) {
 	assert.NotNil(t, fsys)
 	assert.Equal(t, ProviderLocal, meta.Provider)
 	assert.Equal(t, dir, meta.LocalPath)
+	assert.Empty(t, meta.Bucket)
+}
+
+func TestNewFileSystemMetaIncludesRemoteConfiguration(t *testing.T) {
+	cfg := config.FileSystemConfig{
+		Provider: "obs",
+		Bucket:   "sandbox",
+		Region:   "local-1",
+		Endpoint: "https://obs.example.test",
+		SubPath:  "workspaces",
+		UseSSL:   true,
+	}
+
+	_, meta, err := NewFileSystemWithStorageIdentity(cfg, "obs-primary")
+	require.NoError(t, err)
+	assert.Equal(t, &FileSystemMeta{
+		Provider:        ProviderOBS,
+		Bucket:          "sandbox",
+		Region:          "local-1",
+		Endpoint:        "https://obs.example.test",
+		SubPath:         "workspaces",
+		UseSSL:          true,
+		StorageIdentity: "obs-primary",
+	}, meta)
 }
 
 func TestNewFileSystem_LocalEmptyPath(t *testing.T) {
@@ -40,4 +67,103 @@ func TestNewFileSystem_UnknownProvider(t *testing.T) {
 	_, _, err := NewFileSystem(cfg)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported filesystem provider")
+}
+
+func TestLoadFileSystemCredentialsInlineReturnsOwnedBuffers(t *testing.T) {
+	cfg := config.FileSystemConfig{AccessKey: "access", SecretKey: "secret"}
+
+	credentials, err := LoadFileSystemCredentials(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("access"), credentials.AccessKey)
+	assert.Equal(t, []byte("secret"), credentials.SecretKey)
+
+	accessAlias := credentials.AccessKey
+	secretAlias := credentials.SecretKey
+	credentials.Zero()
+	assert.Equal(t, make([]byte, len(accessAlias)), accessAlias)
+	assert.Equal(t, make([]byte, len(secretAlias)), secretAlias)
+	assert.Nil(t, credentials.AccessKey)
+	assert.Nil(t, credentials.SecretKey)
+	assert.Equal(t, "access", cfg.AccessKey)
+	assert.Equal(t, "secret", cfg.SecretKey)
+}
+
+func TestLoadFileSystemCredentialsFromFilesTrimsOnlyOneNewline(t *testing.T) {
+	dir := t.TempDir()
+	accessPath := filepath.Join(dir, "access")
+	secretPath := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(accessPath, []byte(" access \n\n"), 0o600))
+	require.NoError(t, os.WriteFile(secretPath, []byte("secret\r\n"), 0o400))
+
+	credentials, err := LoadFileSystemCredentials(config.FileSystemConfig{
+		CredentialFiles: config.FileSystemCredentialFileConfig{
+			AccessKeyFile: accessPath,
+			SecretKeyFile: secretPath,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte(" access \n"), credentials.AccessKey)
+	assert.Equal(t, []byte("secret\r"), credentials.SecretKey)
+}
+
+func TestLoadFileSystemCredentialsRejectsMixedSources(t *testing.T) {
+	_, err := LoadFileSystemCredentials(config.FileSystemConfig{
+		AccessKey: "do-not-leak-access",
+		CredentialFiles: config.FileSystemCredentialFileConfig{
+			AccessKeyFile: "/run/secrets/access",
+		},
+	})
+	require.ErrorContains(t, err, "mutually exclusive")
+	assert.NotContains(t, err.Error(), "do-not-leak-access")
+}
+
+func TestLoadFileSystemCredentialsRejectsMissingOrEmptyValues(t *testing.T) {
+	dir := t.TempDir()
+	emptyPath := filepath.Join(dir, "empty")
+	newlinePath := filepath.Join(dir, "newline")
+	require.NoError(t, os.WriteFile(emptyPath, nil, 0o600))
+	require.NoError(t, os.WriteFile(newlinePath, []byte("\n"), 0o600))
+
+	tests := []struct {
+		name string
+		cfg  config.FileSystemConfig
+	}{
+		{name: "no source", cfg: config.FileSystemConfig{}},
+		{name: "inline access only", cfg: config.FileSystemConfig{AccessKey: "access"}},
+		{name: "inline secret only", cfg: config.FileSystemConfig{SecretKey: "secret"}},
+		{name: "file access only", cfg: config.FileSystemConfig{CredentialFiles: config.FileSystemCredentialFileConfig{AccessKeyFile: emptyPath}}},
+		{name: "file secret only", cfg: config.FileSystemConfig{CredentialFiles: config.FileSystemCredentialFileConfig{SecretKeyFile: emptyPath}}},
+		{name: "empty access file", cfg: config.FileSystemConfig{CredentialFiles: config.FileSystemCredentialFileConfig{AccessKeyFile: emptyPath, SecretKeyFile: filepath.Join(dir, "missing")}}},
+		{name: "newline only access file", cfg: config.FileSystemConfig{CredentialFiles: config.FileSystemCredentialFileConfig{AccessKeyFile: newlinePath, SecretKeyFile: newlinePath}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadFileSystemCredentials(tt.cfg)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoadFileSystemCredentialsRejectsGroupOrWorldReadableFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix credential file permissions")
+	}
+	dir := t.TempDir()
+	accessPath := filepath.Join(dir, "access")
+	secretPath := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(accessPath, []byte("do-not-leak-access"), 0o640))
+	require.NoError(t, os.WriteFile(secretPath, []byte("do-not-leak-secret"), 0o600))
+	require.NoError(t, os.Chmod(accessPath, 0o640))
+	require.NoError(t, os.Chmod(secretPath, 0o600))
+
+	_, err := LoadFileSystemCredentials(config.FileSystemConfig{
+		CredentialFiles: config.FileSystemCredentialFileConfig{
+			AccessKeyFile: accessPath,
+			SecretKeyFile: secretPath,
+		},
+	})
+	require.ErrorContains(t, err, "permissions")
+	assert.NotContains(t, err.Error(), "do-not-leak-access")
+	assert.NotContains(t, err.Error(), "do-not-leak-secret")
 }
