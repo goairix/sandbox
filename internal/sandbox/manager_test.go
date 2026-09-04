@@ -37,6 +37,29 @@ type fuseManagerRuntime struct {
 	waitReadyErr     error
 	networkErr       error
 	health           runtime.WorkspaceHealth
+	downloadReader   io.ReadCloser
+}
+
+func (r *fuseManagerRuntime) DownloadFile(ctx context.Context, id, path string) (io.ReadCloser, error) {
+	r.mu.Lock()
+	reader := r.downloadReader
+	r.mu.Unlock()
+	if reader != nil {
+		return reader, nil
+	}
+	return r.mockRuntime.DownloadFile(ctx, id, path)
+}
+
+type blockingCreateRuntime struct {
+	*mockRuntime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingCreateRuntime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+	close(r.entered)
+	<-r.release
+	return r.mockRuntime.CreateSandbox(context.Background(), spec)
 }
 
 func newFUSEManagerRuntime() *fuseManagerRuntime {
@@ -371,6 +394,63 @@ func TestManagerStopCancelsAndWaitsForInFlightFUSECreate(t *testing.T) {
 	require.ErrorIs(t, err, ErrSandboxNotReady)
 }
 
+func TestManagerStopHonorsDeadlineWhileLegacyCreateIsBlocked(t *testing.T) {
+	rt := &blockingCreateRuntime{mockRuntime: newMockRuntime(), entered: make(chan struct{}), release: make(chan struct{})}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.Create(context.Background(), SandboxConfig{Network: NetworkConfig{Enabled: true}})
+		createDone <- err
+	}()
+	<-rt.entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	stopDone := make(chan struct{})
+	go func() {
+		mgr.Stop(ctx)
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(100 * time.Millisecond):
+		close(rt.release)
+		<-stopDone
+		t.Fatal("Stop ignored its deadline while runtime CreateSandbox was blocked")
+	}
+	close(rt.release)
+	require.Error(t, <-createDone)
+	mgr.Stop(context.Background())
+}
+
+func TestManagerStopHonorsDeadlineWithoutRemovingFUSERuntimeUnderReader(t *testing.T) {
+	reader := newSignalReadCloser()
+	rt := newFUSEManagerRuntime()
+	rt.downloadReader = reader
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	rc, err := mgr.DownloadFile(context.Background(), sb.ID, "/workspace/a")
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	stopDone := make(chan struct{})
+	go func() {
+		mgr.Stop(ctx)
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(100 * time.Millisecond):
+		_ = rc.Close()
+		<-stopDone
+		t.Fatal("Stop ignored its deadline while a FUSE reader held the operation gate")
+	}
+	assert.False(t, rt.wasRemoved(sb.RuntimeID), "deadline return must not remove a runtime with a live gate reference")
+	require.NoError(t, rc.Close())
+	mgr.Stop(context.Background())
+	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+}
+
 type managerStreamRuntime struct {
 	*mockRuntime
 	stream chan runtime.StreamEvent
@@ -431,6 +511,42 @@ func TestManagerExecStreamHoldsGateUntilStreamEnds(t *testing.T) {
 	for range out {
 	}
 	require.NoError(t, <-drained)
+}
+
+func TestManagerExecSnapshotsNetworkStateDuringConcurrentUpdates(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_%t", stream), func(t *testing.T) {
+			mgr, _ := newGatedManager(newMockRuntime())
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				for i := 0; i < 500; i++ {
+					_ = mgr.UpdateNetwork(context.Background(), "sandbox-test", i%2 == 0, nil, true)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				for i := 0; i < 500; i++ {
+					req := runtime.ExecRequest{Command: "true", RequiresNetwork: true}
+					if stream {
+						out, err := mgr.ExecStream(context.Background(), "sandbox-test", req)
+						if err == nil {
+							for range out {
+							}
+						}
+					} else {
+						_, _ = mgr.Exec(context.Background(), "sandbox-test", req)
+					}
+				}
+			}()
+			close(start)
+			wg.Wait()
+		})
+	}
 }
 
 func TestManagerDownloadReaderHoldsGateUntilTerminalRead(t *testing.T) {

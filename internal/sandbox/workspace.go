@@ -111,11 +111,12 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		SyncExclude:  append([]string(nil), exclude...),
 	}
 	sb.UpdatedAt = now
+	sessionSnapshot := cloneSandbox(sb)
 	m.mu.Unlock()
 
 	// Persist workspace info to session store
 	if m.sessions != nil {
-		_ = m.sessions.Save(ctx, sb)
+		_ = m.sessions.Save(ctx, &sessionSnapshot)
 	}
 
 	logger.Info(ctx, "MountWorkspace: completed",
@@ -137,6 +138,10 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	runtimeID := sb.RuntimeID
 	_, hasWS := m.workspaces[sandboxID]
 	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
+	var syncExclude []string
+	if sb.Workspace != nil {
+		syncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
+	}
 	m.mu.RUnlock()
 
 	if isFUSE {
@@ -149,7 +154,7 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
 
-	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, sb.Workspace.SyncExclude); err != nil {
+	if err := m.syncFromContainer(ctx, sandboxID, runtimeID, syncExclude); err != nil {
 		logger.Error(ctx, "UnmountWorkspace: sync from container failed",
 			logger.AddField("sandbox_id", sandboxID),
 			logger.AddField("runtime_id", runtimeID),
@@ -162,11 +167,12 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	delete(m.workspaces, sandboxID)
 	sb.Workspace = nil
 	sb.UpdatedAt = time.Now()
+	sessionSnapshot := cloneSandbox(sb)
 	m.mu.Unlock()
 
 	// Persist workspace removal to session store
 	if m.sessions != nil {
-		_ = m.sessions.Save(ctx, sb)
+		_ = m.sessions.Save(ctx, &sessionSnapshot)
 	}
 
 	logger.Info(ctx, "UnmountWorkspace: completed",
@@ -437,6 +443,11 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
 	sb := m.sandboxes[sandboxID]
+	bindMounted := sb != nil && sb.Workspace != nil && sb.Workspace.BindMounted
+	var lastSyncedAt time.Time
+	if sb != nil && sb.Workspace != nil {
+		lastSyncedAt = sb.Workspace.LastSyncedAt
+	}
 	m.mu.RUnlock()
 	if !ok {
 		logger.Debug(ctx, "syncFromContainer: no workspace found",
@@ -455,7 +466,7 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	}
 
 	// Bind-mounted workspaces share the host filesystem directly — no sync needed.
-	if sb.Workspace != nil && sb.Workspace.BindMounted {
+	if bindMounted {
 		logger.Debug(ctx, "syncFromContainer: bind-mounted, skipping",
 			logger.AddField("sandbox_id", sandboxID),
 		)
@@ -464,8 +475,8 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 	// LastSyncedAt is set at mount time; use it as the change detection baseline.
 	var cutoff int64
-	if sb.Workspace != nil && !sb.Workspace.LastSyncedAt.IsZero() {
-		cutoff = sb.Workspace.LastSyncedAt.Unix()
+	if !lastSyncedAt.IsZero() {
+		cutoff = lastSyncedAt.Unix()
 	}
 
 	// Record the sync start time BEFORE collecting the manifest. Any file
@@ -591,13 +602,13 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 // setLastSyncedAt updates the LastSyncedAt timestamp under lock.
 func (m *Manager) setLastSyncedAt(sb *Sandbox, t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if sb == nil || sb.Workspace == nil {
 		return
 	}
-	m.mu.Lock()
 	sb.Workspace.LastSyncedAt = t
 	sb.UpdatedAt = t
-	m.mu.Unlock()
 }
 
 // saveSessionIfAlive persists sb to the session store only if the sandbox is
@@ -611,9 +622,13 @@ func (m *Manager) saveSessionIfAlive(ctx context.Context, sandboxID string, sb *
 	}
 	m.mu.RLock()
 	_, alive := m.sandboxes[sandboxID]
+	var snapshot Sandbox
+	if alive {
+		snapshot = cloneSandbox(sb)
+	}
 	m.mu.RUnlock()
 	if alive {
-		_ = m.sessions.Save(ctx, sb)
+		_ = m.sessions.Save(ctx, &snapshot)
 	}
 }
 

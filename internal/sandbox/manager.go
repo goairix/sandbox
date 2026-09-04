@@ -123,6 +123,7 @@ type Manager struct {
 
 	stopCh        chan struct{}
 	stopOnce      sync.Once
+	shutdownDone  chan struct{}
 	wg            sync.WaitGroup
 	createWG      sync.WaitGroup
 	lifecycleMu   sync.Mutex
@@ -147,6 +148,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		fuseLifecycles: make(map[string]*fuseSandboxLifecycle),
 		fuseInFlight:   make(map[string]*fuseBindingClaim),
 		stopCh:         make(chan struct{}),
+		shutdownDone:   make(chan struct{}),
 		controlCtx:     controlCtx,
 		cancelControl:  cancelControl,
 	}
@@ -283,7 +285,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // Stop drains the pool and cleans up.
 func (m *Manager) Stop(ctx context.Context) {
-	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
+	_, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
 	defer span.End()
 
 	m.stopOnce.Do(func() {
@@ -292,22 +294,31 @@ func (m *Manager) Stop(ctx context.Context) {
 		m.cancelControl()
 		close(m.stopCh)
 		m.lifecycleMu.Unlock()
-		m.createWG.Wait()
-		m.mu.RLock()
-		lifecycles := make([]*fuseSandboxLifecycle, 0, len(m.fuseLifecycles))
-		for _, lifecycle := range m.fuseLifecycles {
-			lifecycles = append(lifecycles, lifecycle)
-		}
-		m.mu.RUnlock()
-		for _, lifecycle := range lifecycles {
-			m.runFUSETeardown(spanCtx, lifecycle, ErrSandboxNotReady)
-		}
-		m.wg.Wait()
-		if m.fusePool != nil {
-			_ = m.fusePool.Stop(spanCtx)
-		}
-		m.pool.Drain(spanCtx)
+		go m.finishShutdown()
 	})
+	select {
+	case <-m.shutdownDone:
+	case <-ctx.Done():
+	}
+}
+
+func (m *Manager) finishShutdown() {
+	defer close(m.shutdownDone)
+	m.createWG.Wait()
+	m.mu.RLock()
+	lifecycles := make([]*fuseSandboxLifecycle, 0, len(m.fuseLifecycles))
+	for _, lifecycle := range m.fuseLifecycles {
+		lifecycles = append(lifecycles, lifecycle)
+	}
+	m.mu.RUnlock()
+	for _, lifecycle := range lifecycles {
+		m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
+	}
+	m.wg.Wait()
+	if m.fusePool != nil {
+		_ = m.fusePool.Stop(context.Background())
+	}
+	m.pool.Drain(context.Background())
 }
 
 // Create creates a new sandbox.
@@ -321,7 +332,11 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	m.lifecycleMu.Unlock()
 	defer m.createWG.Done()
 	cfg = cloneSandboxConfig(cfg)
-	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Create")
+	createCtx, cancelCreate := context.WithCancel(ctx)
+	stopCreate := context.AfterFunc(m.controlCtx, cancelCreate)
+	defer stopCreate()
+	defer cancelCreate()
+	spanCtx, span := telemetry.Tracer().Start(createCtx, "sandbox.Manager.Create")
 	defer span.End()
 	if m.config.WorkspaceMode == "fuse" && cfg.WorkspacePath != "" {
 		return m.createFUSESandbox(spanCtx, cfg)
@@ -401,6 +416,15 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 			"sandbox.id":   &id,
 		})
 	}
+	if err := spanCtx.Err(); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+		defer cancel()
+		_ = m.runtime.RemoveSandbox(cleanupCtx, info.RuntimeID)
+		if source == "pool" {
+			m.pool.NotifyRemoved()
+		}
+		return nil, errors.Join(ErrSandboxNotReady, err)
+	}
 
 	// Rename container for easier identification (best-effort)
 	_ = m.runtime.RenameSandbox(spanCtx, info.RuntimeID, id)
@@ -447,7 +471,10 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 
 	// Persist persistent sandboxes to session store
 	if cfg.Mode == ModePersistent && m.sessions != nil {
-		if err := m.sessions.Save(spanCtx, sb); err != nil {
+		m.mu.RLock()
+		sessionSnapshot := cloneSandbox(sb)
+		m.mu.RUnlock()
+		if err := m.sessions.Save(spanCtx, &sessionSnapshot); err != nil {
 			logger.Error(spanCtx, "Create: persist sandbox to session store failed",
 				logger.AddField("sandbox_id", id),
 				logger.ErrorField(err),
@@ -1041,6 +1068,15 @@ func cloneSandboxConfig(config SandboxConfig) SandboxConfig {
 	return clone
 }
 
+func (m *Manager) sandboxRuntimeID(sb *Sandbox) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if sb == nil {
+		return ""
+	}
+	return sb.RuntimeID
+}
+
 func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sandbox, func(), error) {
 	m.mu.RLock()
 	sb, ok := m.sandboxes[id]
@@ -1244,17 +1280,21 @@ func (m *Manager) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	}
 	defer release()
 
-	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+	m.mu.Lock()
+	networkEnabled := sb.Config.Network.Enabled
+	runtimeID := sb.RuntimeID
+	networkDenied := req.RequiresNetwork && !networkEnabled
+	if !networkDenied {
+		sb.State = StateRunning
+		sb.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
+
+	if networkDenied {
 		telemetry.Error(ErrNetworkRequired, span)
 		metrics.RecordError(execCtx, "network_required")
 		return nil, ErrNetworkRequired
 	}
-
-	m.mu.Lock()
-	sb.State = StateRunning
-	sb.UpdatedAt = time.Now()
-	runtimeID := sb.RuntimeID
-	m.mu.Unlock()
 
 	result, err := m.runtime.Exec(execCtx, runtimeID, req)
 
@@ -1321,7 +1361,17 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		return nil, err
 	}
 
-	if req.RequiresNetwork && !sb.Config.Network.Enabled {
+	m.mu.Lock()
+	networkEnabled := sb.Config.Network.Enabled
+	runtimeID := sb.RuntimeID
+	networkDenied := req.RequiresNetwork && !networkEnabled
+	if !networkDenied {
+		sb.State = StateRunning
+		sb.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
+
+	if networkDenied {
 		telemetry.Error(ErrNetworkRequired, span)
 		metrics.RecordError(execCtx, "network_required")
 		cancel()
@@ -1329,12 +1379,6 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		release()
 		return nil, ErrNetworkRequired
 	}
-
-	m.mu.Lock()
-	sb.State = StateRunning
-	sb.UpdatedAt = time.Now()
-	runtimeID := sb.RuntimeID
-	m.mu.Unlock()
 
 	streamStart := time.Now()
 	ch, err := m.runtime.ExecStream(execCtx, runtimeID, req)
@@ -1464,7 +1508,8 @@ func (m *Manager) UploadFile(ctx context.Context, id, destPath string, size int6
 	}
 	defer release()
 
-	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, destPath, size, reader); err != nil {
+	runtimeID := m.sandboxRuntimeID(sb)
+	if err := m.runtime.UploadFile(ctx, runtimeID, destPath, size, reader); err != nil {
 		metrics.RecordFileOp(ctx, "upload", "error")
 		return err
 	}
@@ -1484,7 +1529,8 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 		return nil, err
 	}
 
-	rc, err := m.runtime.DownloadFile(ctx, sb.RuntimeID, srcPath)
+	runtimeID := m.sandboxRuntimeID(sb)
+	rc, err := m.runtime.DownloadFile(ctx, runtimeID, srcPath)
 	if err != nil {
 		release()
 		metrics.RecordFileOp(ctx, "download", "error")
@@ -1510,7 +1556,8 @@ func (m *Manager) ReadFileContent(ctx context.Context, id string, srcPath string
 		return nil, err
 	}
 
-	rc, err := m.runtime.ReadFileContent(ctx, sb.RuntimeID, srcPath)
+	runtimeID := m.sandboxRuntimeID(sb)
+	rc, err := m.runtime.ReadFileContent(ctx, runtimeID, srcPath)
 	if err != nil {
 		release()
 		metrics.RecordFileOp(ctx, "read", "error")
@@ -1535,7 +1582,8 @@ func (m *Manager) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 	if err != nil {
 		return nil, err
 	}
-	files, err := m.runtime.GlobInfo(ctx, sb.RuntimeID, pattern)
+	runtimeID := m.sandboxRuntimeID(sb)
+	files, err := m.runtime.GlobInfo(ctx, runtimeID, pattern)
 	if err != nil {
 		for i := range files {
 			if files[i].Content != nil {
@@ -1560,7 +1608,8 @@ func (m *Manager) DownloadFiles(ctx context.Context, id string, paths []string) 
 		return nil, err
 	}
 
-	files, err := m.runtime.DownloadFiles(ctx, sb.RuntimeID, paths)
+	runtimeID := m.sandboxRuntimeID(sb)
+	files, err := m.runtime.DownloadFiles(ctx, runtimeID, paths)
 	if err != nil {
 		for i := range files {
 			if files[i].Content != nil {
@@ -1581,7 +1630,7 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 	}
 	defer release()
 
-	return m.runtime.ListFiles(ctx, sb.RuntimeID, dirPath)
+	return m.runtime.ListFiles(ctx, m.sandboxRuntimeID(sb), dirPath)
 }
 
 // ListFilesRecursive lists files recursively in a sandbox directory.
@@ -1591,7 +1640,7 @@ func (m *Manager) ListFilesRecursive(ctx context.Context, id string, dirPath str
 		return nil, err
 	}
 	defer release()
-	return m.runtime.ListFilesRecursive(ctx, sb.RuntimeID, dirPath, maxDepth, page, pageSize)
+	return m.runtime.ListFilesRecursive(ctx, m.sandboxRuntimeID(sb), dirPath, maxDepth, page, pageSize)
 }
 
 // GlobFiles finds files matching a glob pattern in a sandbox directory.
@@ -1601,7 +1650,7 @@ func (m *Manager) GlobFiles(ctx context.Context, id string, baseDir string, patt
 		return nil, err
 	}
 	defer release()
-	return m.runtime.GlobFiles(ctx, sb.RuntimeID, baseDir, pattern, page, pageSize)
+	return m.runtime.GlobFiles(ctx, m.sandboxRuntimeID(sb), baseDir, pattern, page, pageSize)
 }
 
 // FileExists reports whether a regular file exists at the given path inside the sandbox.
@@ -1612,7 +1661,7 @@ func (m *Manager) FileExists(ctx context.Context, id string, filePath string) er
 		return err
 	}
 	defer release()
-	return m.runtime.FileExists(ctx, sb.RuntimeID, filePath)
+	return m.runtime.FileExists(ctx, m.sandboxRuntimeID(sb), filePath)
 }
 
 // ReadFileLines reads a range of lines from a file in a sandbox.
@@ -1622,7 +1671,7 @@ func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string,
 		return nil, err
 	}
 	defer release()
-	result, err := m.runtime.ReadFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine)
+	result, err := m.runtime.ReadFileLines(ctx, m.sandboxRuntimeID(sb), filePath, startLine, endLine)
 	if err != nil {
 		metrics.RecordFileOp(ctx, "read_lines", "error")
 		return nil, err
@@ -1644,7 +1693,7 @@ func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldS
 		return err
 	}
 	defer release()
-	if err := m.runtime.EditFile(ctx, sb.RuntimeID, filePath, oldStr, newStr, replaceAll); err != nil {
+	if err := m.runtime.EditFile(ctx, m.sandboxRuntimeID(sb), filePath, oldStr, newStr, replaceAll); err != nil {
 		metrics.RecordFileOp(ctx, "edit", "error")
 		return err
 	}
@@ -1665,7 +1714,7 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 		return err
 	}
 	defer release()
-	if err := m.runtime.EditFileLines(ctx, sb.RuntimeID, filePath, startLine, endLine, newContent); err != nil {
+	if err := m.runtime.EditFileLines(ctx, m.sandboxRuntimeID(sb), filePath, startLine, endLine, newContent); err != nil {
 		metrics.RecordFileOp(ctx, "edit_lines", "error")
 		return err
 	}
@@ -1675,6 +1724,7 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 
 // UpdateNetwork dynamically updates network access for a running sandbox.
 func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error {
+	whitelist = append([]string(nil), whitelist...)
 	ctx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.UpdateNetwork",
 		trace.WithAttributes(attribute.String("sandbox.id", id)),
 		trace.WithAttributes(attribute.String("white_list", strings.Join(whitelist, ","))),
@@ -1686,9 +1736,9 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 		return err
 	}
 	defer release()
-	m.mu.Lock()
+	m.mu.RLock()
 	runtimeID := sb.RuntimeID
-	m.mu.Unlock()
+	m.mu.RUnlock()
 
 	if err := m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist, blockPrivate); err != nil {
 		return err
@@ -2185,10 +2235,11 @@ func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath str
 		BindMounted:  true,
 	}
 	sb.UpdatedAt = now
+	sessionSnapshot := cloneSandbox(sb)
 	m.mu.Unlock()
 
 	if m.sessions != nil {
-		_ = m.sessions.Save(ctx, sb)
+		_ = m.sessions.Save(ctx, &sessionSnapshot)
 	}
 	return nil
 }
@@ -2205,10 +2256,11 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 		return "", err
 	}
 	defer release()
+	runtimeID := m.sandboxRuntimeID(sb)
 
 	uploadID := uuid.New().String()
 
-	if _, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if _, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: fmt.Sprintf("mkdir -p '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); err != nil {
@@ -2274,6 +2326,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 		return 0, 0, err
 	}
 	defer release()
+	runtimeID := m.sandboxRuntimeID(sb)
 	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
 	if err != nil {
 		return 0, 0, err
@@ -2283,7 +2336,7 @@ func (m *Manager) UploadChunk(ctx context.Context, sandboxID, uploadID string, c
 	}
 
 	chunkPath := fmt.Sprintf("/tmp/.uploads/%s/%d", uploadID, chunkIndex)
-	if err := m.runtime.UploadFile(ctx, sb.RuntimeID, chunkPath, size, reader); err != nil {
+	if err := m.runtime.UploadFile(ctx, runtimeID, chunkPath, size, reader); err != nil {
 		return 0, 0, fmt.Errorf("upload chunk: %w", err)
 	}
 
@@ -2312,6 +2365,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 		return "", 0, err
 	}
 	defer release()
+	runtimeID := m.sandboxRuntimeID(sb)
 	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
 	if err != nil {
 		return "", 0, err
@@ -2328,7 +2382,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	escapedDest := "'" + strings.ReplaceAll(st.DestPath, "'", "'\\''") + "'"
 	escapedParent := "'" + strings.ReplaceAll(filepath.Dir(st.DestPath), "'", "'\\''") + "'"
 
-	if mkRes, mkErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if mkRes, mkErr := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: "mkdir -p " + escapedParent,
 		Timeout: 10,
 	}); mkErr != nil || mkRes.ExitCode != 0 {
@@ -2339,7 +2393,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	}
 
 	catCmd := "cat " + strings.Join(parts, " ") + " > " + escapedDest
-	catRes, err := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	catRes, err := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: catCmd,
 		Timeout: 120,
 	})
@@ -2351,7 +2405,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	}
 
 	// Get file size via wc -c
-	statResult, statErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	statResult, statErr := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: "wc -c < " + escapedDest,
 		Timeout: 10,
 	})
@@ -2370,7 +2424,7 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	}
 
 	// Cleanup staging dir
-	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if _, rmErr := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: fmt.Sprintf("rm -rf '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); rmErr != nil {
@@ -2396,11 +2450,12 @@ func (m *Manager) CancelMultipartUpload(ctx context.Context, sandboxID, uploadID
 		return err
 	}
 	defer release()
+	runtimeID := m.sandboxRuntimeID(sb)
 	if _, err := m.loadMultipartState(ctx, sandboxID, uploadID); err != nil {
 		return err
 	}
 
-	if _, rmErr := m.runtime.Exec(ctx, sb.RuntimeID, runtime.ExecRequest{
+	if _, rmErr := m.runtime.Exec(ctx, runtimeID, runtime.ExecRequest{
 		Command: fmt.Sprintf("rm -rf '/tmp/.uploads/%s'", uploadID),
 		Timeout: 10,
 	}); rmErr != nil {
