@@ -514,6 +514,7 @@ func TestWorkspaceCoordinatorStrictOwnerJSON(t *testing.T) {
 		{name: "unknown field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"unknown":1`) }},
 		{name: "case variant field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"RuntimeUID":"uid-a"`) }},
 		{name: "duplicate field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"mount_attempt":0`) }},
+		{name: "null runtime UID", mutate: func(raw []byte) []byte { return replaceJSONObjectField(raw, "runtime_uid", json.RawMessage("null")) }},
 		{name: "missing mount attempt", mutate: func(raw []byte) []byte { return removeJSONObjectField(raw, "mount_attempt") }},
 		{name: "missing runtime UID", mutate: func(raw []byte) []byte { return removeJSONObjectField(raw, "runtime_uid") }},
 		{name: "second value", mutate: func(raw []byte) []byte { return append(append([]byte(nil), raw...), []byte(` {}`)...) }},
@@ -600,6 +601,66 @@ func removeJSONObjectField(raw []byte, field string) []byte {
 		panic(err)
 	}
 	return result
+}
+
+func replaceJSONObjectField(raw []byte, field string, value json.RawMessage) []byte {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		panic(err)
+	}
+	object[field] = append(json.RawMessage(nil), value...)
+	result, err := json.Marshal(object)
+	if err != nil {
+		panic(err)
+	}
+	return result
+}
+
+func TestWorkspaceCoordinatorStrictLeaseJSONRejectsNullOptionalRuntimeFields(t *testing.T) {
+	fields := []string{"runtime", "runtime_id", "runtime_uid"}
+	operations := []struct {
+		name string
+		run  func(*WorkspaceCoordinator, *WorkspaceLease) error
+	}{
+		{name: "renew", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.Renew(context.Background(), lease)
+		}},
+		{name: "bind", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.BindRuntime(context.Background(), lease, "uid-a")
+		}},
+		{name: "release", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.Release(context.Background(), lease, runtime.TerminationEvidence{})
+		}},
+	}
+	for _, field := range fields {
+		for _, operation := range operations {
+			t.Run(field+"/"+operation.name, func(t *testing.T) {
+				store := newAtomicMemoryStore()
+				c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+				req := validLeaseRequest()
+				req.Runtime = ""
+				req.RuntimeID = ""
+				req.RuntimeUID = ""
+				lease, err := c.Acquire(context.Background(), req)
+				require.NoError(t, err)
+				leaseBefore, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				ownerBefore, getErr := store.Get(context.Background(), lease.ownerKey)
+				require.NoError(t, getErr)
+				forged := cloneWorkspaceLeaseWithValue(lease, replaceJSONObjectField(lease.Value, field, json.RawMessage("null")))
+
+				err = operation.run(c, forged)
+				require.ErrorIs(t, err, ErrInvalidWorkspaceLease)
+				assert.NotContains(t, err.Error(), "null")
+				leaseAfter, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				ownerAfter, getErr := store.Get(context.Background(), lease.ownerKey)
+				require.NoError(t, getErr)
+				assert.Equal(t, leaseBefore, leaseAfter)
+				assert.Equal(t, ownerBefore, ownerAfter)
+			})
+		}
+	}
 }
 
 func cloneWorkspaceLeaseWithValue(lease *WorkspaceLease, value []byte) *WorkspaceLease {
@@ -863,6 +924,28 @@ func TestWorkspaceCoordinatorConcurrentMountAttemptHasOneWinner(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int32(1), successes.Load())
+}
+
+func TestWorkspaceCoordinatorNullMountAttemptCannotReplayConsumedAuthorization(t *testing.T) {
+	store := newAtomicMemoryStore()
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	req := validLeaseRequest()
+	req.RuntimeUID = "uid-a"
+	lease, err := c.Acquire(context.Background(), req)
+	require.NoError(t, err)
+	_, err = c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.NoError(t, err)
+
+	consumedOwner, getErr := store.Get(context.Background(), lease.ownerKey)
+	require.NoError(t, getErr)
+	corruptOwner := replaceJSONObjectField(consumedOwner, "mount_attempt", json.RawMessage("null"))
+	require.NoError(t, store.Set(context.Background(), lease.ownerKey, corruptOwner, 0))
+	_, err = c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.ErrorIs(t, err, ErrWorkspaceOwnerLost)
+	assert.NotContains(t, err.Error(), "null")
+	ownerAfter, getErr := store.Get(context.Background(), lease.ownerKey)
+	require.NoError(t, getErr)
+	assert.Equal(t, corruptOwner, ownerAfter)
 }
 
 func TestWorkspaceCoordinatorReleaseWaitsForInFlightMountAttempt(t *testing.T) {

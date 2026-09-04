@@ -722,6 +722,9 @@ func strictDecodeFlatJSONObject(raw []byte, dst any) error {
 		if err := structure.Decode(&value); err != nil {
 			return ErrInvalidWorkspaceLease
 		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return ErrInvalidWorkspaceLease
+		}
 	}
 	end, err := structure.Token()
 	if err != nil || end != json.Delim('}') {
