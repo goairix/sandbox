@@ -543,7 +543,7 @@ func fixedFUSESpec(poolKey string) runtime.SandboxSpec {
 			MounterImage: "mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			SecretName:   "storage-secret", CASecretKey: "ca.crt", EndpointHostIPs: []string{"192.0.2.11", "192.0.2.10"},
 			Bucket: "sandbox", Endpoint: "minio.example.com:9000", Region: "us-east-1", UseSSL: true,
-			CacheSize: "2Gi", CacheMedium: "disk", MountTimeout: 30 * time.Second, FlushTimeout: 30 * time.Second,
+			CacheSize: "2Gi", CacheMedium: "disk", MountTimeout: 30 * time.Second, FlushTimeout: 30 * time.Second, UnmountTimeout: 15 * time.Second,
 			LSMProfile: "sandbox-fuse", PoolKey: poolKey,
 			MounterResources: runtime.WorkspaceFUSEResources{
 				CPURequest: "100m", CPULimit: "500m", MemoryRequest: "128Mi", MemoryLimit: "512Mi",
@@ -627,6 +627,7 @@ func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {
 		{"cache medium", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CacheMedium = "memory" }},
 		{"mount timeout", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MountTimeout = time.Minute }},
 		{"flush timeout", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.FlushTimeout = time.Minute }},
+		{"unmount timeout", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.UnmountTimeout = time.Minute }},
 		{"LSM", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.LSMProfile = "sandbox-fuse-v2" }},
 		{"mounter CPU request", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.CPURequest = "200m" }},
 		{"mounter CPU", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.CPULimit = "1" }},

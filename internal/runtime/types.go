@@ -98,6 +98,7 @@ type WorkspaceFUSESpec struct {
 	CacheMedium          string
 	MountTimeout         time.Duration
 	FlushTimeout         time.Duration
+	UnmountTimeout       time.Duration
 	LSMProfile           string
 	MounterResources     WorkspaceFUSEResources
 	SystemEgress         SystemEgressSpec

@@ -186,7 +186,7 @@ volumeMounts:
 预热阶段：
 
 1. Pool 按固定配置指纹创建 system egress policy，再创建 FUSE Pod；此时 spec 不含 workspace prefix 或 lease generation。
-2. Kubelet 启动 `workspace-mounter`。Sidecar 从 mounter-only 环境读取固定、非敏感的 versioned bootstrap JSON，从 Downward API 单独读取 Pod UID；校验后把合并结果原子写入 `/run/s3fs/bootstrap.json`（mode `0600`）。bootstrap 明确区分只读 Secret 中的 `access_key_file`/`secret_key_file` 与私有 tmpfs 中的 `passwd_file=/run/s3fs/passwd-s3fs`；supervisor 校验单行非空 AK/SK、原子生成 mode `0600` 的 `AK:SK` 密码文件并清零临时 buffer，随后只进入 prepared/locked，不调用 s3fs。bootstrap 还包含 provider、bucket、endpoint、profile、CA/cache 路径、PoolKey 和超时，不包含 prefix、workspace identity 或 lease generation。
+2. Kubelet 启动 `workspace-mounter`。Sidecar 从 mounter-only 环境读取固定、非敏感的 versioned bootstrap JSON，从 Downward API 单独读取 Pod UID；校验后把合并结果原子写入 `/run/s3fs/bootstrap.json`（mode `0600`）。bootstrap 明确区分只读 Secret 中的 `access_key_file`/`secret_key_file` 与私有 tmpfs 中的 `passwd_file=/run/s3fs/passwd-s3fs`；supervisor 校验单行非空 AK/SK、原子生成 mode `0600` 的 `AK:SK` 密码文件并清零临时 buffer，随后只进入 prepared/locked，不调用 s3fs。bootstrap 还包含 provider、bucket、endpoint、profile、CA/cache 路径、完整 PoolKey，以及 mount/flush/unmount 超时，不包含 prefix、workspace identity 或 lease generation。Pod 的 `sandbox.pool.key` label 不直接保存 64 位十六进制 PoolKey，而是对其对应的 32 字节 SHA-256 值使用 lowercase base32（无 padding）派生 52 字符、label-safe 的选择器值；该 label 仅用于选择资源，不能代替 bootstrap/Redis 中的完整 PoolKey 做授权校验。
 3. `startupProbe` 只检查 supervisor、`/dev/fuse`、cache/Secret 与底层 `/workspace` mode，prepared 后返回成功；Kubelet 随即启动 sandbox 主容器。
 4. mounter `readinessProbe` 因尚未挂载而保持失败，Pod 保持 NotReady。Pool 通过独立 `PreparedSandbox` probe 确认 supervisor locked、sandbox 主进程存活、无 FUSE mount、无 mount generation 且 Exec/file gate 关闭，之后才把空壳加入 available 队列。
 
@@ -220,6 +220,7 @@ Sidecar 不配置 `livenessProbe`。startup probe 只表示“空壳可绑定”
 - 不暴露监听端口。
 - 必须配置 CPU、内存和 `ephemeral-storage` request/limit；limit 必须覆盖 `cache_size`、容器日志和少量安全余量。
 - 配置固定 argv 的 `preStop`：prepared 空壳没有 mount 时立即成功；已授权实例在 termination grace period 内完成尽力 flush 和 unmount。主容器不设置长时间 preStop。
+- `terminationGracePeriodSeconds` 至少为 90 秒，并且不得小于向上取整的 `flush_timeout + unmount_timeout` 再加 15 秒收尾余量。
 - 一期只读取 provider 级静态长期 AK/SK，并生成 s3fs `passwd_file`；Secret 中出现 session token 时配置校验必须失败。静态凭证轮换不做热加载，按 provider 排空并重建 FUSE sandbox。
 
 `sandbox`：

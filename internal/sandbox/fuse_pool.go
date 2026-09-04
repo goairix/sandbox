@@ -1109,6 +1109,7 @@ type fusePoolKeyProjection struct {
 	CacheMedium          string                         `json:"cache_medium"`
 	MountTimeout         time.Duration                  `json:"mount_timeout"`
 	FlushTimeout         time.Duration                  `json:"flush_timeout"`
+	UnmountTimeout       time.Duration                  `json:"unmount_timeout"`
 	LSMProfile           string                         `json:"lsm_profile"`
 	MounterResources     fusePoolResourcesProjection    `json:"mounter_resources"`
 	SystemEgress         fusePoolSystemEgressProjection `json:"system_egress"`
@@ -1149,7 +1150,7 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 		CredentialGeneration: fuse.CredentialGeneration, MounterImage: fuse.MounterImage,
 		SecretName: fuse.SecretName, CASecretKey: fuse.CASecretKey, EndpointHostIPs: canonicalStrings(fuse.EndpointHostIPs),
 		Bucket: fuse.Bucket, Endpoint: fuse.Endpoint, Region: fuse.Region, UseSSL: fuse.UseSSL,
-		CacheSize: fuse.CacheSize, CacheMedium: fuse.CacheMedium, MountTimeout: fuse.MountTimeout, FlushTimeout: fuse.FlushTimeout,
+		CacheSize: fuse.CacheSize, CacheMedium: fuse.CacheMedium, MountTimeout: fuse.MountTimeout, FlushTimeout: fuse.FlushTimeout, UnmountTimeout: fuse.UnmountTimeout,
 		LSMProfile: fuse.LSMProfile,
 		MounterResources: fusePoolResourcesProjection{
 			CPURequest: fuse.MounterResources.CPURequest, CPULimit: fuse.MounterResources.CPULimit,
