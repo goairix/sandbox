@@ -637,7 +637,7 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 	if r == nil || r.store == nil {
 		return nil, errors.New("fuse pool repository: nil store")
 	}
-	if poolKey == "" || token == "" || ttl <= 0 {
+	if poolKey == "" || token == "" || !utf8.ValidString(poolKey) || !utf8.ValidString(token) || ttl <= 0 {
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	poolDigest := fusePoolDigest(poolKey)

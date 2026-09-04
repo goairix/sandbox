@@ -185,6 +185,50 @@ func waitForRedisDeadline(t *testing.T, s *Store, deadline time.Time) {
 	}, time.Second, 5*time.Millisecond)
 }
 
+type fusePoolReservationSnapshot struct {
+	raw                  string
+	deadline             string
+	totalMember          bool
+	totalCount           string
+	membershipGeneration string
+	stateMembers         map[state.FUSEPoolState]bool
+	stateCounts          map[state.FUSEPoolState]string
+}
+
+func reservationSnapshot(t *testing.T, s *Store, poolKey, runtimeUID string) fusePoolReservationSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	poolDigest, uidDigest := poolTestDigest(poolKey), poolTestDigest(runtimeUID)
+	hashValue := func(key, field string) string {
+		value, err := s.client.HGet(ctx, key, field).Result()
+		if errors.Is(err, redisclient.Nil) {
+			return ""
+		}
+		require.NoError(t, err)
+		return value
+	}
+	raw, err := s.client.Get(ctx, "fusepool:record:"+uidDigest).Result()
+	require.NoError(t, err)
+	totalMember, err := s.client.SIsMember(ctx, "fusepool:index:"+poolDigest, uidDigest).Result()
+	require.NoError(t, err)
+	snapshot := fusePoolReservationSnapshot{
+		raw:                  raw,
+		deadline:             hashValue("fusepool:reservation-deadlines", uidDigest),
+		totalMember:          totalMember,
+		totalCount:           hashValue("fusepool:pool-counts", poolDigest),
+		membershipGeneration: hashValue("fusepool:membership-generations", poolDigest),
+		stateMembers:         make(map[state.FUSEPoolState]bool, len(fusePoolStates)),
+		stateCounts:          make(map[state.FUSEPoolState]string, len(fusePoolStates)),
+	}
+	for _, poolState := range fusePoolStates {
+		member, memberErr := s.client.SIsMember(ctx, "fusepool:state:"+string(poolState)+":"+poolDigest, uidDigest).Result()
+		require.NoError(t, memberErr)
+		snapshot.stateMembers[poolState] = member
+		snapshot.stateCounts[poolState] = hashValue("fusepool:state-counts:"+string(poolState), poolDigest)
+	}
+	return snapshot
+}
+
 func TestFUSEPoolReservePreparedIsAtomicAcrossClients(t *testing.T) {
 	skipIfNoRedis(t)
 	a, b := testStore(t), testStore(t)
@@ -219,6 +263,39 @@ func TestFUSEPoolReservePreparedIsAtomicAcrossClients(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Equal(t, int32(1), wins.Load())
+}
+
+func TestFUSEPoolReserveRejectsInvalidUTF8WithoutMutation(t *testing.T) {
+	skipIfNoRedis(t)
+	invalid := string([]byte{0xff, 0xfe})
+	tests := []struct {
+		name    string
+		poolKey func(string) string
+		token   string
+	}{
+		{name: "pool key", poolKey: func(string) string { return invalid }, token: "reservation"},
+		{name: "reservation token", poolKey: func(poolKey string) string { return poolKey }, token: invalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := testStore(t)
+			repo := NewFUSEPoolRepository(s)
+			poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
+			cleanupFUSEPool(t, s, []string{poolKey, invalid}, []string{runtimeUID})
+			prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
+			before := reservationSnapshot(t, s, poolKey, runtimeUID)
+
+			got, err := repo.ReservePrepared(context.Background(), tt.poolKey(poolKey), tt.token, time.Minute)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
+			after := reservationSnapshot(t, s, poolKey, runtimeUID)
+			assert.Equal(t, before, after)
+			invalidPoolDigest := poolTestDigest(invalid)
+			assert.Equal(t, int64(0), s.client.SCard(context.Background(), "fusepool:index:"+invalidPoolDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:pool-counts", invalidPoolDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:membership-generations", invalidPoolDigest).Val())
+		})
+	}
 }
 
 func TestFUSEPoolReserveDeadlineUsesRedisServerTime(t *testing.T) {
