@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,9 +29,18 @@ type atomicMemoryStore struct {
 	increments            map[string]int64
 	failMethods           map[string]error
 	failSetNXAfterWrite   map[string]error
+	failCASAfterWrite     map[string]error
+	failVerifyAfterCAS    map[string]error
+	casBlocks             map[string]*atomicCASBlock
+	calls                 int
 	compareAndSwapCalls   int
 	failCompareAndSwapAt  int
 	failCompareAndSwapErr error
+}
+
+type atomicCASBlock struct {
+	entered chan struct{}
+	release chan struct{}
 }
 
 func newAtomicMemoryStore() *atomicMemoryStore {
@@ -39,12 +49,16 @@ func newAtomicMemoryStore() *atomicMemoryStore {
 		increments:          make(map[string]int64),
 		failMethods:         make(map[string]error),
 		failSetNXAfterWrite: make(map[string]error),
+		failCASAfterWrite:   make(map[string]error),
+		failVerifyAfterCAS:  make(map[string]error),
+		casBlocks:           make(map[string]*atomicCASBlock),
 	}
 }
 
 func (s *atomicMemoryStore) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Set"); err != nil {
 		return err
 	}
@@ -55,6 +69,7 @@ func (s *atomicMemoryStore) Set(_ context.Context, key string, value []byte, ttl
 func (s *atomicMemoryStore) Get(_ context.Context, key string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Get"); err != nil {
 		return nil, err
 	}
@@ -68,6 +83,7 @@ func (s *atomicMemoryStore) Get(_ context.Context, key string) ([]byte, error) {
 func (s *atomicMemoryStore) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Delete"); err != nil {
 		return err
 	}
@@ -78,6 +94,7 @@ func (s *atomicMemoryStore) Delete(_ context.Context, key string) error {
 func (s *atomicMemoryStore) Exists(_ context.Context, key string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Exists"); err != nil {
 		return false, err
 	}
@@ -88,6 +105,7 @@ func (s *atomicMemoryStore) Exists(_ context.Context, key string) (bool, error) 
 func (s *atomicMemoryStore) SetNX(_ context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("SetNX"); err != nil {
 		return false, err
 	}
@@ -105,6 +123,7 @@ func (s *atomicMemoryStore) SetNX(_ context.Context, key string, value []byte, t
 func (s *atomicMemoryStore) Keys(_ context.Context, pattern string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Keys"); err != nil {
 		return nil, err
 	}
@@ -126,7 +145,15 @@ func (s *atomicMemoryStore) Keys(_ context.Context, pattern string) ([]string, e
 
 func (s *atomicMemoryStore) CompareAndSwap(_ context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error) {
 	s.mu.Lock()
+	if block := s.casBlocks[key]; block != nil {
+		delete(s.casBlocks, key)
+		s.mu.Unlock()
+		close(block.entered)
+		<-block.release
+		s.mu.Lock()
+	}
 	defer s.mu.Unlock()
+	s.calls++
 	s.compareAndSwapCalls++
 	if s.compareAndSwapCalls == s.failCompareAndSwapAt {
 		return false, s.failCompareAndSwapErr
@@ -139,12 +166,21 @@ func (s *atomicMemoryStore) CompareAndSwap(_ context.Context, key string, oldVal
 		return false, nil
 	}
 	s.setLocked(key, newValue, ttl)
+	if err := s.failCASAfterWrite[key]; err != nil {
+		delete(s.failCASAfterWrite, key)
+		if verifyErr := s.failVerifyAfterCAS[key]; verifyErr != nil {
+			delete(s.failVerifyAfterCAS, key)
+			s.failMethods["Get"] = verifyErr
+		}
+		return false, err
+	}
 	return true, nil
 }
 
 func (s *atomicMemoryStore) CompareAndDelete(_ context.Context, key string, expected []byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("CompareAndDelete"); err != nil {
 		return false, err
 	}
@@ -159,6 +195,7 @@ func (s *atomicMemoryStore) CompareAndDelete(_ context.Context, key string, expe
 func (s *atomicMemoryStore) Increment(_ context.Context, key string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if err := s.takeFailure("Increment"); err != nil {
 		return 0, err
 	}
@@ -209,6 +246,29 @@ func (s *atomicMemoryStore) failCompareAndSwapCall(call int, err error) {
 	defer s.mu.Unlock()
 	s.failCompareAndSwapAt = call
 	s.failCompareAndSwapErr = err
+}
+
+func (s *atomicMemoryStore) failCompareAndSwapAfterWriting(key string, writeErr, verifyErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCASAfterWrite[key] = writeErr
+	if verifyErr != nil {
+		s.failVerifyAfterCAS[key] = verifyErr
+	}
+}
+
+func (s *atomicMemoryStore) blockNextCompareAndSwap(key string) *atomicCASBlock {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	block := &atomicCASBlock{entered: make(chan struct{}), release: make(chan struct{})}
+	s.casBlocks[key] = block
+	return block
+}
+
+func (s *atomicMemoryStore) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func (s *atomicMemoryStore) setGeneration(key string, generation int64) {
@@ -337,16 +397,163 @@ func TestWorkspaceCoordinatorRenewAndReleaseRejectInvalidLeaseRecords(t *testing
 	}
 }
 
+func TestWorkspaceCoordinatorStrictLeaseJSON(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "unknown field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"unknown":1`) }},
+		{name: "case variant field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"Phase":"active"`) }},
+		{name: "duplicate field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"phase":"active"`) }},
+		{name: "second value", mutate: func(raw []byte) []byte { return append(append([]byte(nil), raw...), []byte(` {}`)...) }},
+	}
+	operations := []struct {
+		name string
+		run  func(*WorkspaceCoordinator, *WorkspaceLease) error
+	}{
+		{name: "renew", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.Renew(context.Background(), lease)
+		}},
+		{name: "bind", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.BindRuntime(context.Background(), lease, "uid-a")
+		}},
+		{name: "consume", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			_, err := c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+			return err
+		}},
+		{name: "release", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.Release(context.Background(), lease, runtime.TerminationEvidence{})
+		}},
+	}
+	for _, mutation := range mutations {
+		for _, operation := range operations {
+			t.Run(mutation.name+"/"+operation.name, func(t *testing.T) {
+				store := newAtomicMemoryStore()
+				c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+				lease, err := c.Acquire(context.Background(), validLeaseRequest())
+				require.NoError(t, err)
+				storedBefore, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				ownerBefore, getErr := store.Get(context.Background(), lease.ownerKey)
+				require.NoError(t, getErr)
+				forged := cloneWorkspaceLeaseWithValue(lease, mutation.mutate(lease.Value))
+
+				err = operation.run(c, forged)
+				require.ErrorIs(t, err, ErrInvalidWorkspaceLease)
+				storedAfter, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				assert.Equal(t, storedBefore, storedAfter)
+				ownerAfter, getErr := store.Get(context.Background(), lease.ownerKey)
+				require.NoError(t, getErr)
+				assert.Equal(t, ownerBefore, ownerAfter)
+			})
+		}
+	}
+
+	t.Run("trailing whitespace accepted", func(t *testing.T) {
+		store := newAtomicMemoryStore()
+		c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+		lease, err := c.Acquire(context.Background(), validLeaseRequest())
+		require.NoError(t, err)
+		withWhitespace := append(append([]byte(nil), lease.Value...), []byte(" \n\t")...)
+		store.replaceLeaseValue(lease.Key, withWhitespace)
+		forged := cloneWorkspaceLeaseWithValue(lease, withWhitespace)
+		require.NoError(t, c.Renew(context.Background(), forged))
+	})
+}
+
+func TestWorkspaceCoordinatorStrictOwnerJSON(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "unknown field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"unknown":1`) }},
+		{name: "case variant field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"RuntimeUID":"uid-a"`) }},
+		{name: "duplicate field", mutate: func(raw []byte) []byte { return appendBeforeJSONObjectEnd(raw, `,"mount_attempt":0`) }},
+		{name: "second value", mutate: func(raw []byte) []byte { return append(append([]byte(nil), raw...), []byte(` {}`)...) }},
+	}
+	operations := []struct {
+		name  string
+		bound bool
+		run   func(*WorkspaceCoordinator, *WorkspaceLease) error
+	}{
+		{name: "bind", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.BindRuntime(context.Background(), lease, "uid-a")
+		}},
+		{name: "consume", bound: true, run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			_, err := c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+			return err
+		}},
+		{name: "release", run: func(c *WorkspaceCoordinator, lease *WorkspaceLease) error {
+			return c.Release(context.Background(), lease, runtime.TerminationEvidence{})
+		}},
+	}
+	for _, mutation := range mutations {
+		for _, operation := range operations {
+			t.Run(mutation.name+"/"+operation.name, func(t *testing.T) {
+				store := newAtomicMemoryStore()
+				c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+				req := validLeaseRequest()
+				if operation.bound {
+					req.RuntimeUID = "uid-a"
+				}
+				lease, err := c.Acquire(context.Background(), req)
+				require.NoError(t, err)
+				keys, keyErr := workspaceStateKeys(req)
+				require.NoError(t, keyErr)
+				ownerBefore, getErr := store.Get(context.Background(), keys.owner)
+				require.NoError(t, getErr)
+				leaseBefore, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				corrupt := mutation.mutate(ownerBefore)
+				require.NoError(t, store.Set(context.Background(), keys.owner, corrupt, 0))
+
+				err = operation.run(c, lease)
+				require.ErrorIs(t, err, ErrWorkspaceOwnerLost)
+				ownerAfter, getErr := store.Get(context.Background(), keys.owner)
+				require.NoError(t, getErr)
+				assert.Equal(t, corrupt, ownerAfter)
+				leaseAfter, getErr := store.Get(context.Background(), lease.Key)
+				require.NoError(t, getErr)
+				assert.Equal(t, leaseBefore, leaseAfter)
+			})
+		}
+	}
+
+	t.Run("trailing whitespace accepted", func(t *testing.T) {
+		store := newAtomicMemoryStore()
+		c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+		req := validLeaseRequest()
+		req.RuntimeUID = "uid-a"
+		lease, err := c.Acquire(context.Background(), req)
+		require.NoError(t, err)
+		keys, keyErr := workspaceStateKeys(req)
+		require.NoError(t, keyErr)
+		owner, getErr := store.Get(context.Background(), keys.owner)
+		require.NoError(t, getErr)
+		require.NoError(t, store.Set(context.Background(), keys.owner, append(owner, []byte(" \n\t")...), 0))
+		_, err = c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+		require.NoError(t, err)
+	})
+}
+
+func appendBeforeJSONObjectEnd(raw []byte, suffix string) []byte {
+	result := append([]byte(nil), raw[:len(raw)-1]...)
+	result = append(result, suffix...)
+	return append(result, '}')
+}
+
 func cloneWorkspaceLeaseWithValue(lease *WorkspaceLease, value []byte) *WorkspaceLease {
 	return &WorkspaceLease{
-		Key:           lease.Key,
-		Value:         append([]byte(nil), value...),
-		Prefix:        lease.Prefix,
-		WorkspaceHash: lease.WorkspaceHash,
-		Owner:         lease.Owner,
-		ExpiresAt:     lease.ExpiresAt,
-		ownerKey:      lease.ownerKey,
-		generationKey: lease.generationKey,
+		Key:             lease.Key,
+		Value:           append([]byte(nil), value...),
+		Prefix:          lease.Prefix,
+		WorkspaceHash:   lease.WorkspaceHash,
+		Owner:           lease.Owner,
+		ExpiresAt:       lease.ExpiresAt,
+		ownerKey:        lease.ownerKey,
+		generationKey:   lease.generationKey,
+		boundRuntimeUID: lease.boundRuntimeUID,
 	}
 }
 
@@ -420,20 +627,63 @@ func TestWorkspaceCoordinatorBindsOnlyEmptyRuntime(t *testing.T) {
 	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
 	lease, err := c.Acquire(context.Background(), validLeaseRequest())
 	require.NoError(t, err)
+	leaseValueBeforeBind := append([]byte(nil), lease.Value...)
 
 	require.NoError(t, c.BindRuntime(context.Background(), lease, "uid-a"))
 	var record workspaceLeaseRecord
 	require.NoError(t, json.Unmarshal(lease.Value, &record))
-	assert.Equal(t, "uid-a", record.RuntimeUID)
+	assert.Empty(t, record.RuntimeUID, "lease keeps its immutable acquire-time identity snapshot")
 	storedLease, getErr := store.Get(context.Background(), lease.Key)
 	require.NoError(t, getErr)
-	assert.Equal(t, lease.Value, storedLease)
+	assert.Equal(t, leaseValueBeforeBind, storedLease)
 	err = c.BindRuntime(context.Background(), lease, "uid-b")
 	require.ErrorIs(t, err, ErrWorkspaceRuntimeBound)
 
 	auth, err := c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
 	require.NoError(t, err)
 	assert.Equal(t, "uid-a", auth.RuntimeUID)
+}
+
+func TestWorkspaceCoordinatorBindConfirmsWriteAfterError(t *testing.T) {
+	store := newAtomicMemoryStore()
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	lease, err := c.Acquire(context.Background(), validLeaseRequest())
+	require.NoError(t, err)
+	keys, keyErr := workspaceStateKeys(validLeaseRequest())
+	require.NoError(t, keyErr)
+	leaseBefore := append([]byte(nil), lease.Value...)
+	store.failCompareAndSwapAfterWriting(keys.owner, errors.New("reply lost"), nil)
+
+	require.NoError(t, c.BindRuntime(context.Background(), lease, "uid-a"))
+	assert.Equal(t, leaseBefore, lease.Value)
+	auth, err := c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.NoError(t, err)
+	assert.Equal(t, "uid-a", auth.RuntimeUID)
+}
+
+func TestWorkspaceCoordinatorBindVerificationFailureKeepsFailClosedOwner(t *testing.T) {
+	store := newAtomicMemoryStore()
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	lease, err := c.Acquire(context.Background(), validLeaseRequest())
+	require.NoError(t, err)
+	keys, keyErr := workspaceStateKeys(validLeaseRequest())
+	require.NoError(t, keyErr)
+	leaseBefore := append([]byte(nil), lease.Value...)
+	store.failCompareAndSwapAfterWriting(keys.owner, errors.New("reply lost"), errors.New("verification unavailable"))
+
+	err = c.BindRuntime(context.Background(), lease, "uid-a")
+	require.Error(t, err)
+	assert.Equal(t, leaseBefore, lease.Value)
+	ownerBefore, getErr := store.Get(context.Background(), keys.owner)
+	require.NoError(t, getErr)
+	_, err = c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.ErrorIs(t, err, ErrWorkspaceOwnerLost)
+	err = c.Release(context.Background(), lease, runtime.TerminationEvidence{RuntimeUID: "uid-a", ProcessExited: true})
+	require.ErrorIs(t, err, ErrWorkspaceOwnerLost)
+	ownerAfter, getErr := store.Get(context.Background(), keys.owner)
+	require.NoError(t, getErr)
+	assert.Equal(t, ownerBefore, ownerAfter)
+	assert.True(t, store.hasKey(keys.lease))
 }
 
 func TestWorkspaceCoordinatorAcquireWithRuntimeUIDRequiresThatExactRuntime(t *testing.T) {
@@ -498,6 +748,37 @@ func TestWorkspaceCoordinatorConcurrentMountAttemptHasOneWinner(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int32(1), successes.Load())
+}
+
+func TestWorkspaceCoordinatorReleaseWaitsForInFlightMountAttempt(t *testing.T) {
+	store := newAtomicMemoryStore()
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	req := validLeaseRequest()
+	req.RuntimeUID = "uid-a"
+	lease, err := c.Acquire(context.Background(), req)
+	require.NoError(t, err)
+	keys, keyErr := workspaceStateKeys(req)
+	require.NoError(t, keyErr)
+	block := store.blockNextCompareAndSwap(keys.owner)
+
+	authResult := make(chan error, 1)
+	go func() {
+		_, consumeErr := c.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+		authResult <- consumeErr
+	}()
+	<-block.entered
+	releaseResult := make(chan error, 1)
+	go func() {
+		releaseResult <- c.Release(context.Background(), lease, runtime.TerminationEvidence{RuntimeUID: "uid-a", ProcessExited: true})
+	}()
+	select {
+	case releaseErr := <-releaseResult:
+		t.Fatalf("release completed during mount authorization: %v", releaseErr)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(block.release)
+	require.NoError(t, <-authResult)
+	require.NoError(t, <-releaseResult)
 }
 
 func TestWorkspaceCoordinatorRenewNeverOverwritesAnotherLease(t *testing.T) {
@@ -630,6 +911,20 @@ func TestWorkspaceCoordinatorCompensatesAmbiguousProvisionalLeaseCreate(t *testi
 	assert.False(t, store.hasKey(keys.owner))
 }
 
+func TestWorkspaceCoordinatorCompensatesAmbiguousActiveLeasePublication(t *testing.T) {
+	store := newAtomicMemoryStore()
+	keys, err := workspaceStateKeys(validLeaseRequest())
+	require.NoError(t, err)
+	store.failCompareAndSwapAfterWriting(keys.lease, errors.New("connection lost after write"), nil)
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+
+	_, err = c.Acquire(context.Background(), validLeaseRequest())
+	require.ErrorIs(t, err, ErrWorkspaceLeaseLost)
+	assert.False(t, store.hasKey(keys.lease), "exact active lease written by the failed publication must be compensated")
+	assert.False(t, store.hasKey(keys.owner))
+	assert.Equal(t, int64(1), store.increments[keys.generation], "fencing generations are never rolled back")
+}
+
 func TestWorkspaceCoordinatorGenerationOverflowLeavesNoLeaseOrOwner(t *testing.T) {
 	store := newAtomicMemoryStore()
 	keys, err := workspaceStateKeys(validLeaseRequest())
@@ -637,7 +932,7 @@ func TestWorkspaceCoordinatorGenerationOverflowLeavesNoLeaseOrOwner(t *testing.T
 	store.setGeneration(keys.generation, math.MaxInt64)
 	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
 	_, err = c.Acquire(context.Background(), validLeaseRequest())
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWorkspaceGenerationExhausted)
 	assert.False(t, store.hasKey(keys.lease))
 	assert.False(t, store.hasKey(keys.owner))
 }
@@ -677,6 +972,45 @@ func TestWorkspaceCoordinatorRejectsInvalidConfigurationAndInputsWithoutLeakingT
 			assert.NotContains(t, err.Error(), "secret-value")
 		})
 	}
+}
+
+func TestWorkspaceCoordinatorRejectsOversizedInputsBeforeStoreAccess(t *testing.T) {
+	tooLong := strings.Repeat("x", workspaceLeaseMaxFieldBytes+1)
+	tests := []struct {
+		name   string
+		mutate func(*WorkspaceLeaseRequest)
+	}{
+		{name: "provider", mutate: func(req *WorkspaceLeaseRequest) { req.Provider = tooLong }},
+		{name: "storage identity", mutate: func(req *WorkspaceLeaseRequest) { req.StorageIdentity = tooLong }},
+		{name: "bucket", mutate: func(req *WorkspaceLeaseRequest) { req.Bucket = tooLong }},
+		{name: "prefix", mutate: func(req *WorkspaceLeaseRequest) { req.Prefix = tooLong + "/" }},
+		{name: "sandbox ID", mutate: func(req *WorkspaceLeaseRequest) { req.SandboxID = tooLong }},
+		{name: "runtime", mutate: func(req *WorkspaceLeaseRequest) { req.Runtime = tooLong }},
+		{name: "runtime ID", mutate: func(req *WorkspaceLeaseRequest) { req.RuntimeID = tooLong }},
+		{name: "runtime UID", mutate: func(req *WorkspaceLeaseRequest) { req.RuntimeUID = tooLong }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newAtomicMemoryStore()
+			c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+			req := validLeaseRequest()
+			tt.mutate(&req)
+			_, err := c.Acquire(context.Background(), req)
+			require.ErrorIs(t, err, ErrInvalidWorkspaceLease)
+			assert.NotContains(t, err.Error(), tooLong)
+			assert.Zero(t, store.callCount())
+		})
+	}
+}
+
+func TestWorkspaceCoordinatorAcceptsMaximumPrefixBytes(t *testing.T) {
+	store := newAtomicMemoryStore()
+	c := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	req := validLeaseRequest()
+	req.Prefix = strings.Repeat("a", workspaceLeaseMaxFieldBytes-1) + "/"
+	lease, err := c.Acquire(context.Background(), req)
+	require.NoError(t, err)
+	require.NoError(t, c.Release(context.Background(), lease, runtime.TerminationEvidence{}))
 }
 
 func TestWorkspaceStateKeysAreSafeAndUnambiguous(t *testing.T) {

@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,8 @@ const (
 	workspaceLeaseRecordVersion    = 1
 	workspaceLeasePhaseProvisional = "provisional"
 	workspaceLeasePhaseActive      = "active"
+	workspaceLeaseMaxFieldBytes    = 1024
+	workspaceLeaseMaxRecordBytes   = 16 * 1024
 )
 
 var (
@@ -98,11 +102,14 @@ type WorkspaceLease struct {
 	Prefix        string
 	WorkspaceHash string
 	Owner         WorkspaceOwner
-	ExpiresAt     time.Time
+	// ExpiresAt is an observation captured after successful Acquire. Renewals
+	// deliberately do not update it; Redis TTL is the authoritative lifetime.
+	ExpiresAt time.Time
 
-	ownerKey      string
-	generationKey string
-	runtimeMu     sync.RWMutex
+	ownerKey        string
+	generationKey   string
+	runtimeMu       sync.RWMutex
+	boundRuntimeUID string
 }
 
 type workspaceLeaseRecord struct {
@@ -204,7 +211,11 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 
 	generation, err := c.store.Increment(ctx, keys.generation)
 	if err != nil {
-		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, fmt.Errorf("increment workspace generation: %w", err))
+		primary := fmt.Errorf("increment workspace generation: %w", err)
+		if strings.Contains(strings.ToLower(err.Error()), "overflow") {
+			primary = errors.Join(ErrWorkspaceGenerationExhausted, primary)
+		}
+		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, primary)
 	}
 	if generation <= 0 {
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, ErrWorkspaceGenerationExhausted)
@@ -251,14 +262,15 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 	}
 
 	lease := &WorkspaceLease{
-		Key:           keys.lease,
-		Value:         append([]byte(nil), activeRaw...),
-		Prefix:        req.Prefix,
-		WorkspaceHash: keys.workspaceHash,
-		Owner:         owner,
-		ExpiresAt:     now.Add(c.leaseTTL),
-		ownerKey:      keys.owner,
-		generationKey: keys.generation,
+		Key:             keys.lease,
+		Value:           append([]byte(nil), activeRaw...),
+		Prefix:          req.Prefix,
+		WorkspaceHash:   keys.workspaceHash,
+		Owner:           owner,
+		ExpiresAt:       now.Add(c.leaseTTL),
+		ownerKey:        keys.owner,
+		generationKey:   keys.generation,
+		boundRuntimeUID: req.RuntimeUID,
 	}
 	if err := c.Renew(ctx, lease); err != nil {
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{activeRaw, provisionalRaw}, ownerRaw, err)
@@ -282,7 +294,7 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 	if err != nil {
 		return err
 	}
-	if record.RuntimeUID != "" {
+	if record.RuntimeUID != "" || lease.boundRuntimeUID != "" {
 		return ErrWorkspaceRuntimeBound
 	}
 	if err := c.renewLocked(ctx, lease); err != nil {
@@ -296,25 +308,6 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 		return ErrWorkspaceRuntimeBound
 	}
 
-	nextRecord := record
-	nextRecord.RuntimeUID = runtimeUID
-	nextLeaseRaw, err := json.Marshal(nextRecord)
-	if err != nil {
-		return fmt.Errorf("marshal bound workspace lease: %w", err)
-	}
-	leaseUpdated, err := c.store.CompareAndSwap(ctx, lease.Key, lease.Value, nextLeaseRaw, c.leaseTTL)
-	if err != nil {
-		leaseUpdated, err = c.resolveAmbiguousSwap(ctx, lease.Key, lease.Value, nextLeaseRaw, err)
-	}
-	if err != nil {
-		return errors.Join(ErrWorkspaceLeaseLost, err)
-	}
-	if !leaseUpdated {
-		return ErrWorkspaceLeaseLost
-	}
-	previousLeaseRaw := append([]byte(nil), lease.Value...)
-	lease.Value = append([]byte(nil), nextLeaseRaw...)
-
 	owner.RuntimeUID = runtimeUID
 	owner.UpdatedAt = time.Now().UTC()
 	nextOwnerRaw, err := json.Marshal(owner)
@@ -323,50 +316,25 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 	}
 	swapped, err := c.store.CompareAndSwap(ctx, lease.ownerKey, ownerRaw, nextOwnerRaw, 0)
 	if err != nil {
-		swapped, err = c.resolveAmbiguousSwap(ctx, lease.ownerKey, ownerRaw, nextOwnerRaw, err)
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
+		current, verifyErr := c.store.Get(checkCtx, lease.ownerKey)
+		cancel()
+		if verifyErr != nil {
+			return errors.Join(fmt.Errorf("bind workspace runtime: %w", err), fmt.Errorf("verify workspace runtime binding: %w", verifyErr))
+		}
+		if bytes.Equal(current, nextOwnerRaw) {
+			lease.boundRuntimeUID = runtimeUID
+			return nil
+		}
+		if bytes.Equal(current, ownerRaw) {
+			return fmt.Errorf("bind workspace runtime: %w", err)
+		}
+		return ErrWorkspaceOwnerLost
 	}
-	if err == nil && swapped {
-		return nil
+	if !swapped {
+		return ErrWorkspaceRuntimeBound
 	}
-	rollbackErr := c.rollbackLeaseBinding(ctx, lease, previousLeaseRaw)
-	if err != nil {
-		return errors.Join(fmt.Errorf("bind workspace runtime: %w", err), rollbackErr)
-	}
-	if rollbackErr != nil {
-		return errors.Join(ErrWorkspaceRuntimeBound, rollbackErr)
-	}
-	return ErrWorkspaceRuntimeBound
-}
-
-func (c *WorkspaceCoordinator) resolveAmbiguousSwap(ctx context.Context, key string, oldValue, newValue []byte, original error) (bool, error) {
-	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
-	defer cancel()
-	current, err := c.store.Get(checkCtx, key)
-	if err != nil {
-		return false, errors.Join(original, fmt.Errorf("verify ambiguous compare-and-swap: %w", err))
-	}
-	if bytes.Equal(current, newValue) {
-		return true, nil
-	}
-	if bytes.Equal(current, oldValue) {
-		return false, original
-	}
-	return false, ErrWorkspaceLeaseLost
-}
-
-func (c *WorkspaceCoordinator) rollbackLeaseBinding(ctx context.Context, lease *WorkspaceLease, previous []byte) error {
-	current := append([]byte(nil), lease.Value...)
-	rolledBack, err := c.store.CompareAndSwap(ctx, lease.Key, current, previous, c.leaseTTL)
-	if err != nil {
-		rolledBack, err = c.resolveAmbiguousSwap(ctx, lease.Key, current, previous, err)
-	}
-	if err != nil {
-		return fmt.Errorf("rollback workspace lease binding: %w", err)
-	}
-	if !rolledBack {
-		return ErrWorkspaceLeaseLost
-	}
-	lease.Value = append([]byte(nil), previous...)
+	lease.boundRuntimeUID = runtimeUID
 	return nil
 }
 
@@ -380,8 +348,8 @@ func (c *WorkspaceCoordinator) ConsumeMountAttempt(ctx context.Context, lease *W
 	if lease == nil {
 		return zero, ErrInvalidWorkspaceLease
 	}
-	lease.runtimeMu.RLock()
-	defer lease.runtimeMu.RUnlock()
+	lease.runtimeMu.Lock()
+	defer lease.runtimeMu.Unlock()
 	if _, err := c.validateLeaseLocked(lease); err != nil {
 		return zero, err
 	}
@@ -467,8 +435,8 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 	if lease == nil {
 		return ErrInvalidWorkspaceLease
 	}
-	lease.runtimeMu.RLock()
-	defer lease.runtimeMu.RUnlock()
+	lease.runtimeMu.Lock()
+	defer lease.runtimeMu.Unlock()
 	if _, err := c.validateLeaseLocked(lease); err != nil {
 		return err
 	}
@@ -559,10 +527,12 @@ func (c *WorkspaceCoordinator) validateRequest(req WorkspaceLeaseRequest) error 
 	if c == nil || c.configErr != nil {
 		return ErrInvalidWorkspaceLease
 	}
-	if _, err := workspaceStateKeys(req); err != nil {
-		return err
+	for _, value := range []string{req.Provider, req.StorageIdentity, req.Bucket, req.SandboxID} {
+		if err := validateOpaqueText(value, false); err != nil {
+			return ErrInvalidWorkspaceLease
+		}
 	}
-	if err := validateOpaqueText(req.SandboxID, false); err != nil {
+	if err := validateCanonicalWorkspacePrefix(req.Prefix); err != nil {
 		return ErrInvalidWorkspaceLease
 	}
 	if err := validateOpaqueText(req.Runtime, true); err != nil {
@@ -590,12 +560,16 @@ func (c *WorkspaceCoordinator) validateLeaseLocked(lease *WorkspaceLease) (works
 	if err != nil {
 		return workspaceLeaseRecord{}, err
 	}
+	if err := validateOpaqueText(lease.boundRuntimeUID, true); err != nil {
+		return workspaceLeaseRecord{}, ErrInvalidWorkspaceLease
+	}
 	if lease.Key != keys.lease || lease.ownerKey != keys.owner || lease.generationKey != keys.generation ||
 		lease.Prefix != owner.Prefix || lease.WorkspaceHash != keys.workspaceHash || owner.WorkspaceHash != keys.workspaceHash ||
 		record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
 		record.Bucket != owner.Bucket || record.Prefix != owner.Prefix || record.WorkspaceHash != owner.WorkspaceHash ||
 		record.SandboxID != owner.SandboxID || record.Runtime != owner.Runtime || record.RuntimeID != owner.RuntimeID ||
-		record.Generation != owner.Generation || (owner.RuntimeUID != "" && record.RuntimeUID != owner.RuntimeUID) {
+		record.RuntimeUID != owner.RuntimeUID || record.Generation != owner.Generation ||
+		(owner.RuntimeUID != "" && lease.boundRuntimeUID != owner.RuntimeUID) {
 		return workspaceLeaseRecord{}, ErrInvalidWorkspaceLease
 	}
 	return record, nil
@@ -610,7 +584,7 @@ func (c *WorkspaceCoordinator) loadMatchingOwner(ctx context.Context, lease *Wor
 		return WorkspaceOwner{}, nil, ErrWorkspaceOwnerLost
 	}
 	var owner WorkspaceOwner
-	if err := json.Unmarshal(raw, &owner); err != nil {
+	if err := strictDecodeFlatJSONObject(raw, &owner); err != nil {
 		return WorkspaceOwner{}, nil, ErrWorkspaceOwnerLost
 	}
 	if err := validateStoredOwner(owner); err != nil ||
@@ -630,11 +604,7 @@ func (c *WorkspaceCoordinator) loadMatchingOwner(ctx context.Context, lease *Wor
 }
 
 func leaseRuntimeUID(lease *WorkspaceLease) string {
-	record, err := parseActiveWorkspaceLeaseRecord(lease.Value)
-	if err != nil {
-		return ""
-	}
-	return record.RuntimeUID
+	return lease.boundRuntimeUID
 }
 
 func validateStoredOwner(owner WorkspaceOwner) error {
@@ -664,7 +634,7 @@ func validateStoredOwner(owner WorkspaceOwner) error {
 
 func parseActiveWorkspaceLeaseRecord(raw []byte) (workspaceLeaseRecord, error) {
 	var record workspaceLeaseRecord
-	if len(raw) == 0 || json.Unmarshal(raw, &record) != nil {
+	if strictDecodeFlatJSONObject(raw, &record) != nil {
 		return workspaceLeaseRecord{}, ErrInvalidWorkspaceLease
 	}
 	if record.Version != workspaceLeaseRecordVersion || record.Phase != workspaceLeasePhaseActive ||
@@ -702,6 +672,68 @@ func parseActiveWorkspaceLeaseRecord(raw []byte) (workspaceLeaseRecord, error) {
 		}
 	}
 	return record, nil
+}
+
+func strictDecodeFlatJSONObject(raw []byte, dst any) error {
+	if len(raw) == 0 || len(raw) > workspaceLeaseMaxRecordBytes {
+		return ErrInvalidWorkspaceLease
+	}
+	typeOfDestination := reflect.TypeOf(dst)
+	if typeOfDestination == nil || typeOfDestination.Kind() != reflect.Pointer || typeOfDestination.Elem().Kind() != reflect.Struct {
+		return ErrInvalidWorkspaceLease
+	}
+	allowedKeys := make(map[string]struct{}, typeOfDestination.Elem().NumField())
+	for i := 0; i < typeOfDestination.Elem().NumField(); i++ {
+		field := typeOfDestination.Elem().Field(i)
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "" {
+			name = field.Name
+		}
+		if name != "-" {
+			allowedKeys[name] = struct{}{}
+		}
+	}
+	keys := make(map[string]struct{})
+	structure := json.NewDecoder(bytes.NewReader(raw))
+	start, err := structure.Token()
+	if err != nil || start != json.Delim('{') {
+		return ErrInvalidWorkspaceLease
+	}
+	for structure.More() {
+		keyToken, err := structure.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return ErrInvalidWorkspaceLease
+		}
+		if _, exists := keys[key]; exists {
+			return ErrInvalidWorkspaceLease
+		}
+		if _, allowed := allowedKeys[key]; !allowed {
+			return ErrInvalidWorkspaceLease
+		}
+		keys[key] = struct{}{}
+		var value json.RawMessage
+		if err := structure.Decode(&value); err != nil {
+			return ErrInvalidWorkspaceLease
+		}
+	}
+	end, err := structure.Token()
+	if err != nil || end != json.Delim('}') {
+		return ErrInvalidWorkspaceLease
+	}
+	if _, err := structure.Token(); !errors.Is(err, io.EOF) {
+		return ErrInvalidWorkspaceLease
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return ErrInvalidWorkspaceLease
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return ErrInvalidWorkspaceLease
+	}
+	return nil
 }
 
 func safeToReleaseOwner(owner WorkspaceOwner, evidence runtime.TerminationEvidence) bool {
@@ -809,7 +841,7 @@ func validateStorageIdentityHash(value string) error {
 }
 
 func validateCanonicalWorkspacePrefix(prefix string) error {
-	if !strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, "//") {
+	if len(prefix) > workspaceLeaseMaxFieldBytes || !strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, "//") {
 		return ErrInvalidWorkspaceLease
 	}
 	path := strings.TrimSuffix(prefix, "/")
@@ -828,6 +860,9 @@ func validateOpaqueText(value string, allowEmpty bool) error {
 		return ErrInvalidWorkspaceLease
 	}
 	if !utf8.ValidString(value) {
+		return ErrInvalidWorkspaceLease
+	}
+	if len(value) > workspaceLeaseMaxFieldBytes {
 		return ErrInvalidWorkspaceLease
 	}
 	for _, r := range value {
