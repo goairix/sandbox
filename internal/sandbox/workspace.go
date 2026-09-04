@@ -64,17 +64,17 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		logger.AddField("root_path", rootPath),
 	)
 
-	m.mu.RLock()
-	sb, ok := m.sandboxes[sandboxID]
-	if !ok {
-		m.mu.RUnlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
+	defer release()
+	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	_, exists := m.workspaces[sandboxID]
 	m.mu.RUnlock()
 
-	if exists {
+	if exists || (sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE) {
 		return fmt.Errorf("%w: %s", ErrWorkspaceAlreadyMounted, sandboxID)
 	}
 
@@ -129,12 +129,12 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		logger.AddField("sandbox_id", sandboxID),
 	)
 
-	m.mu.RLock()
-	sb, ok := m.sandboxes[sandboxID]
-	if !ok {
-		m.mu.RUnlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
+	defer release()
+	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	_, hasWS := m.workspaces[sandboxID]
 	m.mu.RUnlock()
@@ -178,12 +178,12 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		logger.AddField("direction", direction),
 	)
 
-	m.mu.RLock()
-	sb, ok := m.sandboxes[sandboxID]
-	if !ok {
-		m.mu.RUnlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
+	defer release()
+	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	scoped, hasWS := m.workspaces[sandboxID]
 	m.mu.RUnlock()
@@ -192,23 +192,23 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
 
-	var err error
+	var syncErr error
 	syncStart := time.Now()
 	switch direction {
 	case "to_container":
-		err = m.syncToContainer(ctx, scoped, runtimeID)
+		syncErr = m.syncToContainer(ctx, scoped, runtimeID)
 	case "from_container":
-		err = m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
+		syncErr = m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
 	default:
 		return fmt.Errorf("invalid sync direction: %s", direction)
 	}
 	syncDuration := time.Since(syncStart).Seconds()
 
-	if err != nil {
+	if syncErr != nil {
 		logger.Error(ctx, "SyncWorkspace: failed",
 			logger.AddField("sandbox_id", sandboxID),
 			logger.AddField("direction", direction),
-			logger.ErrorField(err),
+			logger.ErrorField(syncErr),
 		)
 		metrics.RecordWorkspaceSync(ctx, direction, "error", syncDuration)
 	} else {
@@ -218,19 +218,16 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		)
 		metrics.RecordWorkspaceSync(ctx, direction, "success", syncDuration)
 	}
-	return err
+	return syncErr
 }
 
 // GetWorkspaceInfo returns workspace info for a sandbox.
-func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*WorkspaceInfo, error) {
-	m.mu.RLock()
-	sb, ok := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+func (m *Manager) GetWorkspaceInfo(ctx context.Context, sandboxID string) (*WorkspaceInfo, error) {
+	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
-
+	defer release()
 	return sb.Workspace, nil
 }
 

@@ -109,10 +109,34 @@ type WorkspaceLease struct {
 	// deliberately do not update it; Redis TTL is the authoritative lifetime.
 	ExpiresAt time.Time
 
-	ownerKey        string
-	generationKey   string
-	runtimeMu       sync.RWMutex
-	boundRuntimeUID string
+	ownerKey           string
+	generationKey      string
+	runtimeMu          sync.RWMutex
+	boundRuntimeUID    string
+	authoritativeOwner WorkspaceOwner
+}
+
+// RuntimeBindingMatches reports whether BindRuntime crossed its persistent
+// owner CAS boundary, including when a later lease-renewal reply failed.
+func (l *WorkspaceLease) RuntimeBindingMatches(runtimeUID string) bool {
+	if l == nil || runtimeUID == "" {
+		return false
+	}
+	l.runtimeMu.RLock()
+	defer l.runtimeMu.RUnlock()
+	return l.boundRuntimeUID == runtimeUID
+}
+
+func (l *WorkspaceLease) OwnerSnapshot() WorkspaceOwner {
+	if l == nil {
+		return WorkspaceOwner{}
+	}
+	l.runtimeMu.RLock()
+	defer l.runtimeMu.RUnlock()
+	if l.authoritativeOwner.Generation != 0 {
+		return l.authoritativeOwner
+	}
+	return l.Owner
 }
 
 type workspaceLeaseRecord struct {
@@ -295,15 +319,16 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 	}
 
 	lease := &WorkspaceLease{
-		Key:             keys.lease,
-		Value:           append([]byte(nil), activeRaw...),
-		Prefix:          req.Prefix,
-		WorkspaceHash:   keys.workspaceHash,
-		Owner:           owner,
-		ExpiresAt:       now.Add(c.leaseTTL),
-		ownerKey:        keys.owner,
-		generationKey:   keys.generation,
-		boundRuntimeUID: req.RuntimeUID,
+		Key:                keys.lease,
+		Value:              append([]byte(nil), activeRaw...),
+		Prefix:             req.Prefix,
+		WorkspaceHash:      keys.workspaceHash,
+		Owner:              owner,
+		ExpiresAt:          now.Add(c.leaseTTL),
+		ownerKey:           keys.owner,
+		generationKey:      keys.generation,
+		boundRuntimeUID:    req.RuntimeUID,
+		authoritativeOwner: owner,
 	}
 	if err := c.Renew(ctx, lease); err != nil {
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{activeRaw, provisionalRaw}, ownerRaw, err)
@@ -357,6 +382,7 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 		}
 		if bytes.Equal(current, nextOwnerRaw) {
 			lease.boundRuntimeUID = runtimeUID
+			lease.authoritativeOwner = owner
 			return c.renewLocked(ctx, lease)
 		}
 		if bytes.Equal(current, ownerRaw) {
@@ -368,6 +394,7 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 		return ErrWorkspaceRuntimeBound
 	}
 	lease.boundRuntimeUID = runtimeUID
+	lease.authoritativeOwner = owner
 	return c.renewLocked(ctx, lease)
 }
 
@@ -425,6 +452,7 @@ func (c *WorkspaceCoordinator) ConsumeMountAttempt(ctx context.Context, lease *W
 	if err := c.renewLocked(ctx, lease); err != nil {
 		return zero, err
 	}
+	lease.authoritativeOwner = owner
 	return runtime.WorkspaceMountAuthorization{
 		RuntimeUID:      owner.RuntimeUID,
 		PoolKey:         poolKey,
@@ -460,10 +488,10 @@ func (c *WorkspaceCoordinator) renewLocked(ctx context.Context, lease *Workspace
 	return nil
 }
 
-// Release removes the exact lease first, then compare-deletes the exact owner
-// bytes that were validated. A bound runtime requires evidence for that exact
-// UID proving process exit or infrastructure fencing. The generation counter
-// is intentionally retained forever.
+// Release removes the exact owner before its lease. Keeping the lease alive
+// through the owner phase preserves renewal authority when an owner delete
+// fails and makes the two phases safely retryable. The generation counter is
+// intentionally retained forever.
 func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLease, evidence runtime.TerminationEvidence) error {
 	if lease == nil {
 		return ErrInvalidWorkspaceLease
@@ -473,46 +501,75 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 	if _, err := c.validateLeaseLocked(lease); err != nil {
 		return err
 	}
-	owner, raw, err := c.loadMatchingOwner(ctx, lease)
+	currentLease, err := c.store.Get(ctx, lease.Key)
 	if err != nil {
-		return err
+		return fmt.Errorf("get workspace lease for release: %w", err)
 	}
-	if !safeToReleaseOwner(owner, evidence) {
-		return ErrRuntimeExitUnconfirmed
-	}
-	deleted, err := c.store.CompareAndDelete(ctx, lease.Key, append([]byte(nil), lease.Value...))
-	if err != nil {
-		current, verifyErr := c.store.Get(ctx, lease.Key)
-		if verifyErr != nil {
-			return errors.Join(fmt.Errorf("release workspace lease: %w", err), fmt.Errorf("verify workspace lease release: %w", verifyErr))
-		}
-		if current != nil {
-			if !bytes.Equal(current, lease.Value) {
-				return ErrWorkspaceLeaseLost
-			}
-			return fmt.Errorf("release workspace lease: %w", err)
-		}
-		deleted = true
-	}
-	if !deleted {
+	if currentLease != nil && !bytes.Equal(currentLease, lease.Value) {
 		return ErrWorkspaceLeaseLost
 	}
-	deleted, err = c.store.CompareAndDelete(ctx, lease.ownerKey, raw)
+
+	ownerRaw, err := c.store.Get(ctx, lease.ownerKey)
 	if err != nil {
-		current, verifyErr := c.store.Get(ctx, lease.ownerKey)
-		if verifyErr != nil {
-			return errors.Join(fmt.Errorf("release workspace owner: %w", err), fmt.Errorf("verify workspace owner release: %w", verifyErr))
+		return fmt.Errorf("get workspace owner for release: %w", err)
+	}
+	if ownerRaw != nil {
+		owner, exactRaw, matchErr := c.loadMatchingOwner(ctx, lease)
+		if matchErr != nil {
+			return matchErr
 		}
-		if current != nil {
-			if !bytes.Equal(current, raw) {
+		if !bytes.Equal(ownerRaw, exactRaw) {
+			return ErrWorkspaceOwnerLost
+		}
+		if !safeToReleaseOwner(owner, evidence) {
+			return ErrRuntimeExitUnconfirmed
+		}
+		deleted, deleteErr := c.store.CompareAndDelete(ctx, lease.ownerKey, exactRaw)
+		if deleteErr != nil || !deleted {
+			current, verifyErr := c.store.Get(ctx, lease.ownerKey)
+			if verifyErr != nil {
+				return errors.Join(fmt.Errorf("release workspace owner: %w", deleteErr), fmt.Errorf("verify workspace owner release: %w", verifyErr))
+			}
+			if current != nil {
+				if !bytes.Equal(current, exactRaw) {
+					return ErrWorkspaceOwnerLost
+				}
+				if deleteErr != nil {
+					return fmt.Errorf("release workspace owner: %w", deleteErr)
+				}
 				return ErrWorkspaceOwnerLost
 			}
-			return fmt.Errorf("release workspace owner: %w", err)
 		}
-		deleted = true
 	}
-	if !deleted {
-		return ErrWorkspaceOwnerLost
+
+	// The owner is now absent. Removing the exact lease is the final phase;
+	// absence is success on retries, while a changed value is always fenced.
+	currentLease, err = c.store.Get(ctx, lease.Key)
+	if err != nil {
+		return fmt.Errorf("get workspace lease after owner release: %w", err)
+	}
+	if currentLease == nil {
+		return nil
+	}
+	if !bytes.Equal(currentLease, lease.Value) {
+		return ErrWorkspaceLeaseLost
+	}
+	deleted, deleteErr := c.store.CompareAndDelete(ctx, lease.Key, append([]byte(nil), lease.Value...))
+	if deleteErr != nil || !deleted {
+		current, verifyErr := c.store.Get(ctx, lease.Key)
+		if verifyErr != nil {
+			return errors.Join(fmt.Errorf("release workspace lease: %w", deleteErr), fmt.Errorf("verify workspace lease release: %w", verifyErr))
+		}
+		if current == nil {
+			return nil
+		}
+		if !bytes.Equal(current, lease.Value) {
+			return ErrWorkspaceLeaseLost
+		}
+		if deleteErr != nil {
+			return fmt.Errorf("release workspace lease: %w", deleteErr)
+		}
+		return ErrWorkspaceLeaseLost
 	}
 	return nil
 }

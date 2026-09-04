@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -121,6 +122,46 @@ type ambiguousSessionStore struct {
 	*atomicMemoryStore
 	mu       sync.Mutex
 	failNext bool
+}
+
+type consumeFailStore struct{ *atomicMemoryStore }
+
+func (s *consumeFailStore) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error) {
+	if strings.HasPrefix(key, workspaceOwnerKeyPrefix) {
+		var owner WorkspaceOwner
+		if json.Unmarshal(newValue, &owner) == nil && owner.MountAttempt == 1 {
+			return false, errors.New("mount attempt CAS failed")
+		}
+	}
+	return s.atomicMemoryStore.CompareAndSwap(ctx, key, oldValue, newValue, ttl)
+}
+
+type bindRenewFailStore struct {
+	*atomicMemoryStore
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (s *bindRenewFailStore) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error) {
+	s.mu.Lock()
+	fail := s.failNext && strings.HasPrefix(key, workspaceLeaseKeyPrefix)
+	if fail {
+		s.failNext = false
+	}
+	s.mu.Unlock()
+	if fail {
+		return false, errors.New("renew failed after owner bind")
+	}
+	swapped, err := s.atomicMemoryStore.CompareAndSwap(ctx, key, oldValue, newValue, ttl)
+	if err == nil && swapped && strings.HasPrefix(key, workspaceOwnerKeyPrefix) {
+		var owner WorkspaceOwner
+		if json.Unmarshal(newValue, &owner) == nil && owner.RuntimeUID != "" && owner.MountAttempt == 0 {
+			s.mu.Lock()
+			s.failNext = true
+			s.mu.Unlock()
+		}
+	}
+	return swapped, err
 }
 
 func (s *ambiguousSessionStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
@@ -384,6 +425,23 @@ func TestManagerCreateFUSELeaseConflictReturnsPristineShell(t *testing.T) {
 	assert.False(t, rt.wasRemoved(preparedID))
 }
 
+func TestManagerCreateFUSERejectsResourcesOutsidePreparedPoolSpec(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, repo, _ := newFUSETestManager(t, rt)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode:          ModePersistent,
+		WorkspacePath: "team/a",
+		Resources:     ResourceLimits{Memory: "2Gi"},
+	})
+	require.ErrorIs(t, err, ErrInvalidFUSEPoolConfig)
+	assert.False(t, rt.wasRemoved(preparedID))
+	records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, listErr)
+	require.Len(t, records, 1)
+	assert.Equal(t, state.FUSEPoolPrepared, records[0].State)
+}
+
 func TestManagerCreateFUSEUserNetworkFailureDestroysBoundShell(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	rt.networkErr = errors.New("network policy rejected")
@@ -401,6 +459,34 @@ func TestManagerCreateFUSEUserNetworkFailureDestroysBoundShell(t *testing.T) {
 	assert.Empty(t, mgr.sandboxes)
 	assert.Empty(t, mgr.operationGates)
 	mgr.mu.RUnlock()
+}
+
+func TestManagerCreateFUSEMountAttemptFailureDestroysReservedBoundShell(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, repo, store := newFUSETestManager(t, rt)
+	mgr.config.WorkspaceCoordinator = NewWorkspaceCoordinator(&consumeFailStore{atomicMemoryStore: store}, time.Minute, 10*time.Second)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorContains(t, err, "mount attempt CAS failed")
+	assert.True(t, rt.wasRemoved(preparedID))
+	records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, listErr)
+	for _, record := range records {
+		assert.NotEqual(t, preparedID, record.RuntimeID)
+	}
+	ownerKeys, keyErr := store.Keys(context.Background(), workspaceOwnerKeyPrefix+"*")
+	require.NoError(t, keyErr)
+	assert.Empty(t, ownerKeys)
+}
+
+func TestManagerCreateFUSEBindCommittedThenRenewFailedStillDestroysShell(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, _, store := newFUSETestManager(t, rt)
+	mgr.config.WorkspaceCoordinator = NewWorkspaceCoordinator(&bindRenewFailStore{atomicMemoryStore: store}, time.Minute, 10*time.Second)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.ErrorContains(t, err, "renew failed after owner bind")
+	assert.True(t, rt.wasRemoved(preparedID))
 }
 
 func TestManagerCreateFUSESessionSaveFailureDestroysWithoutOpeningGate(t *testing.T) {

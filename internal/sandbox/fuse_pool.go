@@ -368,11 +368,88 @@ func (p *FUSEPool) ReleaseConsumed(ctx context.Context, record state.FUSEPoolRec
 	if record.PoolKey != p.poolKey || (record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed) {
 		return state.ErrFUSEPoolInvalidRecord
 	}
-	if err := p.claimAndDestroy(ctx, record); err != nil {
+	claimed, err := p.ClaimSingleUseCleanup(ctx, record)
+	if err != nil {
+		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
+	}
+	if err := p.RemoveClaimedRuntime(ctx, *claimed); err != nil {
+		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
+	}
+	if err := p.CompleteClaimedCleanup(ctx, *claimed); err != nil {
 		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
 	}
 	p.scheduleRefill()
 	return nil
+}
+
+// ClaimSingleUseCleanup fences one reserved-or-used shell into cleanup without
+// deleting either the runtime or tombstone. Manager uses this two-phase form
+// to retain a recovery anchor until runtime evidence and owner/session cleanup
+// have completed.
+func (p *FUSEPool) ClaimSingleUseCleanup(ctx context.Context, record state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
+	if record.PoolKey != p.poolKey || (record.State != state.FUSEPoolReserved && record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed && record.State != state.FUSEPoolCleanup) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	return p.claimCleanup(ctx, record)
+}
+
+func (p *FUSEPool) RemoveClaimedRuntime(ctx context.Context, claimed state.FUSEPoolRecord) error {
+	if claimed.PoolKey != p.poolKey || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" || claimed.RuntimeID == "" || claimed.RuntimeUID == "" {
+		return state.ErrFUSEPoolInvalidRecord
+	}
+	if err := p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return fmt.Errorf("remove claimed FUSE runtime: %w", err)
+	}
+	return nil
+}
+
+func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord) error {
+	if claimed.PoolKey != p.poolKey || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" {
+		return state.ErrFUSEPoolInvalidRecord
+	}
+	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	if err != nil || !deleted {
+		records, verifyErr := p.repo.ListByPoolKey(ctx, claimed.PoolKey)
+		if verifyErr != nil {
+			primary := state.ErrFUSEPoolConflict
+			if err != nil {
+				primary = fmt.Errorf("delete cleanup record: %w", err)
+			}
+			return errors.Join(primary, fmt.Errorf("verify cleanup record deletion: %w", verifyErr))
+		}
+		for _, current := range records {
+			if current.PreparationID != claimed.PreparationID {
+				continue
+			}
+			if current.State != state.FUSEPoolCleanup || current.CleanupToken != claimed.CleanupToken || current.Revision != claimed.Revision {
+				return state.ErrFUSEPoolConflict
+			}
+			if err != nil {
+				return fmt.Errorf("delete cleanup record: %w", err)
+			}
+			return state.ErrFUSEPoolConflict
+		}
+		// An uncertain reply after the exact delete is success. Absence is also
+		// success for a retry of the same claimed cleanup capability.
+		p.scheduleRefill()
+		return nil
+	}
+	p.scheduleRefill()
+	return nil
+}
+
+func (p *FUSEPool) claimAmbiguousCleanup(before, possibleAfter state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
+	defer cancel()
+	claimed, afterErr := p.claimCleanup(ctx, possibleAfter)
+	if afterErr == nil || !isStalePoolMutation(afterErr) {
+		return claimed, afterErr
+	}
+	claimed, beforeErr := p.claimCleanup(ctx, before)
+	if beforeErr == nil {
+		return claimed, nil
+	}
+	return nil, errors.Join(afterErr, beforeErr)
 }
 
 // Reconcile repairs the configured PoolKey while holding its distributed
