@@ -23,6 +23,7 @@ const (
 	fusePoolDeadlines    = "fusepool:reservation-deadlines"
 	fusePoolRecordUIDs   = "fusepool:record-uids"
 	fusePoolPoolValues   = "fusepool:record-pool-values"
+	fusePoolCounts       = "fusepool:pool-counts"
 )
 
 const (
@@ -36,7 +37,134 @@ const (
 	poolResultToken    int64 = -6
 )
 
-var createPreparingScript = redisclient.NewScript(`
+const fusePoolLuaHelpers = `
+local function isValidState(value)
+    return value == 'preparing' or value == 'prepared' or value == 'reserved'
+        or value == 'binding' or value == 'consumed'
+end
+
+local function parseRFC3339Millis(value)
+    if type(value) ~= 'string' then return nil end
+    local length = string.len(value)
+    if length < 20 or length > 30
+        or string.sub(value, 5, 5) ~= '-'
+        or string.sub(value, 8, 8) ~= '-'
+        or string.sub(value, 11, 11) ~= 'T'
+        or string.sub(value, 14, 14) ~= ':'
+        or string.sub(value, 17, 17) ~= ':'
+        or string.sub(value, length, length) ~= 'Z' then
+        return nil
+    end
+    if not string.match(string.sub(value, 1, 19),
+        '^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d$') then
+        return nil
+    end
+    local fraction = ''
+    if length > 20 then
+        if string.sub(value, 20, 20) ~= '.' then return nil end
+        fraction = string.sub(value, 21, length - 1)
+        if fraction == '' or string.len(fraction) > 9 or not string.match(fraction, '^%d+$') then
+            return nil
+        end
+    elseif string.sub(value, 20, 20) ~= 'Z' then
+        return nil
+    end
+    local year = tonumber(string.sub(value, 1, 4))
+    local month = tonumber(string.sub(value, 6, 7))
+    local day = tonumber(string.sub(value, 9, 10))
+    local hour = tonumber(string.sub(value, 12, 13))
+    local minute = tonumber(string.sub(value, 15, 16))
+    local second = tonumber(string.sub(value, 18, 19))
+    if not year or year < 1 or not month or month < 1 or month > 12
+        or not day or day < 1 or not hour or hour < 0 or hour > 23
+        or not minute or minute < 0 or minute > 59
+        or not second or second < 0 or second > 59 then
+        return nil
+    end
+    local monthDays = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+    if month == 2 and (year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0)) then
+        monthDays[2] = 29
+    end
+    if day > monthDays[month] then return nil end
+    local adjustedYear = year
+    if month <= 2 then adjustedYear = adjustedYear - 1 end
+    local era = math.floor(adjustedYear / 400)
+    local yearOfEra = adjustedYear - era * 400
+    local adjustedMonth
+    if month > 2 then adjustedMonth = month - 3 else adjustedMonth = month + 9 end
+    local dayOfYear = math.floor((153 * adjustedMonth + 2) / 5) + day - 1
+    local dayOfEra = yearOfEra * 365 + math.floor(yearOfEra / 4) - math.floor(yearOfEra / 100) + dayOfYear
+    local days = era * 146097 + dayOfEra - 719468
+    local millisText = string.sub(fraction .. '000', 1, 3)
+    local millis = tonumber(millisText) or 0
+    return days * 86400000 + hour * 3600000 + minute * 60000 + second * 1000 + millis
+end
+
+local function formatRFC3339Millis(epochMillis)
+    local epochSeconds = math.floor(epochMillis / 1000)
+    local millis = epochMillis - epochSeconds * 1000
+    local days = math.floor(epochSeconds / 86400)
+    local secondsOfDay = epochSeconds - days * 86400
+    local z = days + 719468
+    local era = math.floor(z / 146097)
+    local dayOfEra = z - era * 146097
+    local yearOfEra = math.floor((dayOfEra - math.floor(dayOfEra / 1460)
+        + math.floor(dayOfEra / 36524) - math.floor(dayOfEra / 146096)) / 365)
+    local year = yearOfEra + era * 400
+    local dayOfYear = dayOfEra - (365 * yearOfEra + math.floor(yearOfEra / 4) - math.floor(yearOfEra / 100))
+    local monthPart = math.floor((5 * dayOfYear + 2) / 153)
+    local day = dayOfYear - math.floor((153 * monthPart + 2) / 5) + 1
+    local month
+    if monthPart < 10 then month = monthPart + 3 else month = monthPart - 9 end
+    if month <= 2 then year = year + 1 end
+    local hour = math.floor(secondsOfDay / 3600)
+    local minute = math.floor((secondsOfDay % 3600) / 60)
+    local second = secondsOfDay % 60
+    return string.format('%04d-%02d-%02dT%02d:%02d:%02d.%03dZ',
+        year, month, day, hour, minute, second, millis)
+end
+
+local function validateRecord(record, deadlineValue)
+    if type(record) ~= 'table'
+        or type(record.runtime_id) ~= 'string' or record.runtime_id == ''
+        or type(record.runtime_uid) ~= 'string' or record.runtime_uid == ''
+        or type(record.pool_key) ~= 'string' or record.pool_key == ''
+        or not isValidState(record.state)
+        or type(record.maintainer_token) ~= 'string'
+        or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
+        or type(record.revision) ~= 'number' or record.revision < 1
+        or record.revision ~= math.floor(record.revision) then
+        return false
+    end
+    local updatedMillis = parseRFC3339Millis(record.updated_at)
+    if not updatedMillis or updatedMillis == -62135596800000 then return false end
+    local deadline = tonumber(deadlineValue)
+    if not deadline or deadline ~= math.floor(deadline) then return false end
+    local reservation = record.reservation_token or ''
+    local reservedMillis = parseRFC3339Millis(record.reserved_until)
+    local zeroReserved = record.reserved_until == '0001-01-01T00:00:00Z'
+    if record.state == 'prepared' then
+        return reservation == '' and zeroReserved and deadline == 0
+    end
+    if record.state == 'preparing' then
+        if reservation == '' then return zeroReserved and deadline == 0 end
+        return not zeroReserved and reservedMillis ~= nil and reservedMillis == deadline and deadline > 0
+    end
+    return reservation ~= '' and not zeroReserved and reservedMillis ~= nil
+        and reservedMillis == deadline and deadline > 0
+end
+
+local function validatePoolCardinality(indexKey, countsKey, poolDigest)
+    local cardinality = redis.call('SCARD', indexKey)
+    local expectedRaw = redis.call('HGET', countsKey, poolDigest)
+    if cardinality == 0 then return not expectedRaw end
+    if not expectedRaw or not string.match(expectedRaw, '^%d+$') then return false end
+    local expected = tonumber(expectedRaw)
+    return expected and expected == math.floor(expected) and expected == cardinality
+end
+`
+
+var createPreparingScript = redisclient.NewScript(fusePoolLuaHelpers + `
 if redis.call('EXISTS', KEYS[1]) == 1 then
     return -3
 end
@@ -46,16 +174,24 @@ if redis.call('HEXISTS', KEYS[3], ARGV[1]) == 1
     or redis.call('HEXISTS', KEYS[6], ARGV[1]) == 1 then
     return -4
 end
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1
+    or not validatePoolCardinality(KEYS[2], KEYS[7], ARGV[2]) then
+    return -4
+end
 redis.call('SET', KEYS[1], ARGV[3])
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 redis.call('HSET', KEYS[4], ARGV[1], ARGV[4])
 redis.call('HSET', KEYS[5], ARGV[1], ARGV[5])
 redis.call('HSET', KEYS[6], ARGV[1], ARGV[6])
 redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('HINCRBY', KEYS[7], ARGV[2], 1)
 return 1
 `)
 
-var reservePreparedScript = redisclient.NewScript(`
+var reservePreparedScript = redisclient.NewScript(fusePoolLuaHelpers + `
+if not validatePoolCardinality(KEYS[1], KEYS[6], ARGV[1]) then
+    return {-4}
+end
 local members = redis.call('SMEMBERS', KEYS[1])
 table.sort(members)
 local candidateMember = nil
@@ -68,32 +204,20 @@ for _, member in ipairs(members) do
     end
     local mappedUID = redis.call('HGET', KEYS[4], member)
     local mappedPoolValue = redis.call('HGET', KEYS[5], member)
+    local deadline = redis.call('HGET', KEYS[3], member)
     local recordKey = ARGV[5] .. member
     local raw = redis.call('GET', recordKey)
     if not raw then
         return {-4}
     end
     local decoded, record = pcall(cjson.decode, raw)
-    if not decoded or type(record) ~= 'table'
-        or type(record.runtime_uid) ~= 'string'
-        or record.runtime_uid == ''
+    if not decoded or not validateRecord(record, deadline)
         or not mappedUID
         or record.runtime_uid ~= mappedUID
-        or type(record.runtime_id) ~= 'string'
-        or record.runtime_id == ''
-        or type(record.pool_key) ~= 'string'
         or record.pool_key ~= ARGV[2]
         or not mappedPoolValue
         or record.pool_key ~= mappedPoolValue
-        or type(record.state) ~= 'string'
-        or (record.state ~= 'preparing' and record.state ~= 'prepared'
-            and record.state ~= 'reserved' and record.state ~= 'binding'
-            and record.state ~= 'consumed')
-        or type(record.maintainer_token) ~= 'string'
-        or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
-        or type(record.revision) ~= 'number'
-        or record.revision < 1
-        or record.revision ~= math.floor(record.revision) then
+        then
         return {-4}
     end
     if record.state == 'prepared' and not candidate then
@@ -106,38 +230,30 @@ for _, member in ipairs(members) do
     end
 end
 if candidate then
+    local redisTime = redis.call('TIME')
+    local nowMillis = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+    local deadlineMillis = nowMillis + tonumber(ARGV[4])
     candidate.state = 'reserved'
     candidate.reservation_token = ARGV[3]
-    candidate.reserved_until = ARGV[4]
-    candidate.updated_at = ARGV[6]
+    candidate.reserved_until = formatRFC3339Millis(deadlineMillis)
+    candidate.updated_at = formatRFC3339Millis(nowMillis)
     candidate.revision = candidate.revision + 1
     local updated = cjson.encode(candidate)
     redis.call('SET', candidateKey, updated)
-    redis.call('HSET', KEYS[3], candidateMember, ARGV[7])
+    redis.call('HSET', KEYS[3], candidateMember, deadlineMillis)
     return {1, updated}
 end
 return {0}
 `)
 
-var transitionScript = redisclient.NewScript(`
+var transitionScript = redisclient.NewScript(fusePoolLuaHelpers + `
 local raw = redis.call('GET', KEYS[1])
 if not raw then
     return {-1}
 end
 local decoded, record = pcall(cjson.decode, raw)
-if not decoded or type(record) ~= 'table'
-    or type(record.runtime_uid) ~= 'string'
-    or record.runtime_uid ~= ARGV[1]
-    or type(record.runtime_id) ~= 'string'
-    or record.runtime_id == ''
-    or type(record.pool_key) ~= 'string'
-    or record.pool_key == ''
-    or type(record.state) ~= 'string'
-    or type(record.maintainer_token) ~= 'string'
-    or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
-    or type(record.revision) ~= 'number'
-    or record.revision < 1
-    or record.revision ~= math.floor(record.revision) then
+local deadline = redis.call('HGET', KEYS[2], ARGV[8])
+if not decoded or not validateRecord(record, deadline) or record.runtime_uid ~= ARGV[1] then
     return {-4}
 end
 local mappedPoolDigest = redis.call('HGET', KEYS[3], ARGV[8])
@@ -147,7 +263,8 @@ if not mappedPoolDigest or string.len(mappedPoolDigest) ~= 64
     or not string.match(mappedPoolDigest, '^[0-9a-f]+$')
     or mappedUID ~= record.runtime_uid
     or mappedPoolValue ~= record.pool_key
-    or redis.call('SISMEMBER', ARGV[9] .. mappedPoolDigest, ARGV[8]) ~= 1 then
+    or redis.call('SISMEMBER', ARGV[9] .. mappedPoolDigest, ARGV[8]) ~= 1
+    or not validatePoolCardinality(ARGV[9] .. mappedPoolDigest, KEYS[6], mappedPoolDigest) then
     return {-4}
 end
 if record.revision ~= tonumber(ARGV[5]) then
@@ -161,6 +278,7 @@ local from = ARGV[2]
 local to = ARGV[3]
 local token = ARGV[4]
 local reservation = record.reservation_token or ''
+local clearDeadline = false
 local function reservationIsLive()
     local deadline = tonumber(redis.call('HGET', KEYS[2], ARGV[8]))
     local redisTime = redis.call('TIME')
@@ -187,7 +305,7 @@ elseif from == 'reserved' and to == 'prepared' then
     if not reservationIsLive() then return {-5} end
     record.reservation_token = nil
     record.reserved_until = ARGV[7]
-    redis.call('HSET', KEYS[2], ARGV[8], '0')
+    clearDeadline = true
 else
     return {-5}
 end
@@ -196,11 +314,15 @@ record.state = to
 record.updated_at = ARGV[6]
 record.revision = record.revision + 1
 local updated = cjson.encode(record)
+if clearDeadline then redis.call('HSET', KEYS[2], ARGV[8], '0') end
 redis.call('SET', KEYS[1], updated)
 return {1, updated}
 `)
 
-var listByPoolKeyScript = redisclient.NewScript(`
+var listByPoolKeyScript = redisclient.NewScript(fusePoolLuaHelpers + `
+if not validatePoolCardinality(KEYS[1], KEYS[6], ARGV[1]) then
+    return {-4}
+end
 local members = redis.call('SMEMBERS', KEYS[1])
 table.sort(members)
 local result = {1}
@@ -211,22 +333,17 @@ for _, member in ipairs(members) do
     end
     local mappedUID = redis.call('HGET', KEYS[3], member)
     local mappedPoolValue = redis.call('HGET', KEYS[4], member)
+    local deadline = redis.call('HGET', KEYS[5], member)
     local raw = redis.call('GET', ARGV[3] .. member)
     if not raw then
         return {-4}
     end
     local decoded, record = pcall(cjson.decode, raw)
-    if not decoded or type(record) ~= 'table'
-        or type(record.runtime_uid) ~= 'string'
+    if not decoded or not validateRecord(record, deadline)
         or record.runtime_uid ~= mappedUID
-        or type(record.runtime_id) ~= 'string'
-        or type(record.pool_key) ~= 'string'
         or record.pool_key ~= ARGV[2]
         or record.pool_key ~= mappedPoolValue
-        or type(record.state) ~= 'string'
-        or type(record.revision) ~= 'number'
-        or record.revision < 1
-        or record.revision ~= math.floor(record.revision) then
+        then
         return {-4}
     end
     table.insert(result, member)
@@ -235,7 +352,10 @@ end
 return result
 `)
 
-var countPreparingAndPreparedScript = redisclient.NewScript(`
+var countPreparingAndPreparedScript = redisclient.NewScript(fusePoolLuaHelpers + `
+if not validatePoolCardinality(KEYS[1], KEYS[6], ARGV[1]) then
+    return {-4}
+end
 local members = redis.call('SMEMBERS', KEYS[1])
 local result = {1}
 for _, member in ipairs(members) do
@@ -245,21 +365,17 @@ for _, member in ipairs(members) do
     end
     local mappedUID = redis.call('HGET', KEYS[3], member)
     local mappedPoolValue = redis.call('HGET', KEYS[4], member)
+    local deadline = redis.call('HGET', KEYS[5], member)
     local raw = redis.call('GET', ARGV[3] .. member)
     if not raw then
         return {-4}
     end
     local decoded, record = pcall(cjson.decode, raw)
-    if not decoded or type(record) ~= 'table'
-        or type(record.runtime_uid) ~= 'string'
+    if not decoded or not validateRecord(record, deadline)
         or record.runtime_uid ~= mappedUID
-        or type(record.pool_key) ~= 'string'
         or record.pool_key ~= ARGV[2]
         or record.pool_key ~= mappedPoolValue
-        or type(record.state) ~= 'string'
-        or type(record.revision) ~= 'number'
-        or record.revision < 1
-        or record.revision ~= math.floor(record.revision) then
+        then
         return {-4}
     end
     table.insert(result, member)
@@ -268,19 +384,14 @@ end
 return result
 `)
 
-var conditionalDeleteScript = redisclient.NewScript(`
+var conditionalDeleteScript = redisclient.NewScript(fusePoolLuaHelpers + `
 local raw = redis.call('GET', KEYS[1])
 if not raw then
     return -1
 end
 local decoded, record = pcall(cjson.decode, raw)
-if not decoded or type(record) ~= 'table'
-    or type(record.runtime_uid) ~= 'string'
-    or record.runtime_uid ~= ARGV[1]
-    or type(record.state) ~= 'string'
-    or type(record.revision) ~= 'number'
-    or record.revision < 1
-    or record.revision ~= math.floor(record.revision) then
+local deadline = redis.call('HGET', KEYS[3], ARGV[6])
+if not decoded or not validateRecord(record, deadline) or record.runtime_uid ~= ARGV[1] then
     return -4
 end
 if record.revision ~= tonumber(ARGV[5]) then return -2 end
@@ -295,7 +406,8 @@ local mappedUID = redis.call('HGET', KEYS[4], ARGV[6])
 local mappedPoolValue = redis.call('HGET', KEYS[5], ARGV[6])
 if mappedUID ~= record.runtime_uid
     or mappedPoolValue ~= record.pool_key
-    or redis.call('SISMEMBER', ARGV[7] .. poolDigest, ARGV[6]) ~= 1 then
+    or redis.call('SISMEMBER', ARGV[7] .. poolDigest, ARGV[6]) ~= 1
+    or not validatePoolCardinality(ARGV[7] .. poolDigest, KEYS[6], poolDigest) then
     return -4
 end
 redis.call('DEL', KEYS[1])
@@ -304,6 +416,8 @@ redis.call('HDEL', KEYS[2], ARGV[6])
 redis.call('HDEL', KEYS[3], ARGV[6])
 redis.call('HDEL', KEYS[4], ARGV[6])
 redis.call('HDEL', KEYS[5], ARGV[6])
+local remaining = redis.call('HINCRBY', KEYS[6], poolDigest, -1)
+if remaining == 0 then redis.call('HDEL', KEYS[6], poolDigest) end
 return 1
 `)
 
@@ -349,7 +463,7 @@ func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.F
 	uidDigest := fusePoolDigest(record.RuntimeUID)
 	poolDigest := fusePoolDigest(record.PoolKey)
 	result, err := createPreparingScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues},
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		uidDigest, poolDigest, raw, deadlineMillis, record.RuntimeUID, record.PoolKey,
 	).Int64()
 	if err != nil {
@@ -366,16 +480,13 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	poolDigest := fusePoolDigest(poolKey)
-	now := time.Now().UTC()
 	ttlMillis, err := redisTTLMilliseconds(ttl)
 	if err != nil {
 		return nil, err
 	}
-	deadlineMillis := now.UnixMilli() + ttlMillis
-	reservedUntil := time.UnixMilli(deadlineMillis).UTC()
 	result, err := reservePreparedScript.Run(ctx, r.store.client,
-		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues},
-		poolDigest, poolKey, token, reservedUntil.Format(time.RFC3339Nano), fusePoolRecordPrefix, now.Format(time.RFC3339Nano), deadlineMillis,
+		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
+		poolDigest, poolKey, token, ttlMillis, fusePoolRecordPrefix,
 	).Slice()
 	if err != nil {
 		return nil, err
@@ -403,7 +514,7 @@ func (r *FUSEPoolRepository) Transition(ctx context.Context, runtimeUID string, 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	uidDigest := fusePoolDigest(runtimeUID)
 	result, err := transitionScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues},
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		runtimeUID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), now, time.Time{}.Format(time.RFC3339Nano), uidDigest, fusePoolIndexPrefix,
 	).Slice()
 	if err != nil {
@@ -428,7 +539,7 @@ func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) 
 	}
 	poolDigest := fusePoolDigest(poolKey)
 	result, err := listByPoolKeyScript.Run(ctx, r.store.client,
-		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues},
+		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolDeadlines, fusePoolCounts},
 		poolDigest, poolKey, fusePoolRecordPrefix,
 	).Slice()
 	if err != nil {
@@ -477,7 +588,7 @@ func (r *FUSEPoolRepository) CountPreparingAndPrepared(ctx context.Context, pool
 	}
 	poolDigest := fusePoolDigest(poolKey)
 	result, err := countPreparingAndPreparedScript.Run(ctx, r.store.client,
-		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues},
+		[]string{fusePoolIndexPrefix + poolDigest, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolDeadlines, fusePoolCounts},
 		poolDigest, poolKey, fusePoolRecordPrefix,
 	).Slice()
 	if err != nil {
@@ -519,7 +630,7 @@ func (r *FUSEPoolRepository) ConditionalDelete(ctx context.Context, runtimeUID s
 	}
 	uidDigest := fusePoolDigest(runtimeUID)
 	result, err := conditionalDeleteScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues},
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		runtimeUID, string(expectedState), maintainerToken, reservationToken, strconv.FormatUint(expectedRevision, 10), uidDigest, fusePoolIndexPrefix,
 	).Int64()
 	if err != nil {
@@ -668,6 +779,22 @@ func decodePoolRecord(value any) (*state.FUSEPoolRecord, error) {
 		return nil, state.ErrFUSEPoolCorrupt
 	}
 	if record.RuntimeID == "" || record.RuntimeUID == "" || record.PoolKey == "" || !validFUSEPoolState(record.State) || record.Revision == 0 || record.UpdatedAt.IsZero() {
+		return nil, state.ErrFUSEPoolCorrupt
+	}
+	switch record.State {
+	case state.FUSEPoolPreparing:
+		if (record.ReservationToken == "") != record.ReservedUntil.IsZero() {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+	case state.FUSEPoolPrepared:
+		if record.ReservationToken != "" || !record.ReservedUntil.IsZero() {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+	case state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed:
+		if record.ReservationToken == "" || record.ReservedUntil.IsZero() {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+	default:
 		return nil, state.ErrFUSEPoolCorrupt
 	}
 	return &record, nil

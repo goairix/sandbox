@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/storage/state"
 	"github.com/google/uuid"
+	redisclient "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,6 +36,7 @@ func cleanupFUSEPool(t *testing.T, s *Store, poolKeys, runtimeUIDs []string) {
 		for _, poolKey := range poolKeys {
 			digest := poolTestDigest(poolKey)
 			require.NoError(t, s.client.Del(ctx, "fusepool:index:"+digest, "fusepool:lock:"+digest).Err())
+			require.NoError(t, s.client.HDel(ctx, "fusepool:pool-counts", digest).Err())
 		}
 		for _, runtimeUID := range runtimeUIDs {
 			digest := poolTestDigest(runtimeUID)
@@ -43,6 +47,31 @@ func cleanupFUSEPool(t *testing.T, s *Store, poolKeys, runtimeUIDs []string) {
 			require.NoError(t, s.client.HDel(ctx, "fusepool:record-pool-values", digest).Err())
 		}
 	})
+}
+
+type delayScriptHook struct {
+	delay time.Duration
+	once  sync.Once
+}
+
+func (h *delayScriptHook) DialHook(next redisclient.DialHook) redisclient.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(ctx, network, addr)
+	}
+}
+
+func (h *delayScriptHook) ProcessHook(next redisclient.ProcessHook) redisclient.ProcessHook {
+	return func(ctx context.Context, cmd redisclient.Cmder) error {
+		name := strings.ToLower(cmd.Name())
+		if name == "eval" || name == "evalsha" {
+			h.once.Do(func() { time.Sleep(h.delay) })
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *delayScriptHook) ProcessPipelineHook(next redisclient.ProcessPipelineHook) redisclient.ProcessPipelineHook {
+	return next
 }
 
 func preparingRecord(poolKey, runtimeUID string) state.FUSEPoolRecord {
@@ -62,6 +91,14 @@ func prepareWarmRecord(t *testing.T, repo *FUSEPoolRepository, record state.FUSE
 	got, err := repo.Transition(context.Background(), record.RuntimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, record.Revision)
 	require.NoError(t, err)
 	return *got
+}
+
+func waitForRedisDeadline(t *testing.T, s *Store, deadline time.Time) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		now, err := s.client.Time(context.Background()).Result()
+		return err == nil && !now.Before(deadline)
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestFUSEPoolReservePreparedIsAtomicAcrossClients(t *testing.T) {
@@ -98,6 +135,38 @@ func TestFUSEPoolReservePreparedIsAtomicAcrossClients(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Equal(t, int32(1), wins.Load())
+}
+
+func TestFUSEPoolReserveDeadlineUsesRedisServerTime(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
+	prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
+
+	const ttl = 2 * time.Second
+	delay := 350 * time.Millisecond
+	before, err := s.client.Time(context.Background()).Result()
+	require.NoError(t, err)
+	s.client.AddHook(&delayScriptHook{delay: delay})
+	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", ttl)
+	require.NoError(t, err)
+	after, err := s.client.Time(context.Background()).Result()
+	require.NoError(t, err)
+
+	deadlineMillis := reserved.ReservedUntil.UnixMilli()
+	assert.GreaterOrEqual(t, deadlineMillis, before.UnixMilli()+ttl.Milliseconds())
+	assert.LessOrEqual(t, deadlineMillis, after.UnixMilli()+ttl.Milliseconds())
+	assert.GreaterOrEqual(t, deadlineMillis-before.UnixMilli(), (ttl + delay - 100*time.Millisecond).Milliseconds())
+	storedDeadline, err := s.client.HGet(context.Background(), "fusepool:reservation-deadlines", poolTestDigest(runtimeUID)).Int64()
+	require.NoError(t, err)
+	assert.Equal(t, deadlineMillis, storedDeadline)
+	raw, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(runtimeUID)).Bytes()
+	require.NoError(t, err)
+	var stored state.FUSEPoolRecord
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	assert.Equal(t, reserved.ReservedUntil, stored.ReservedUntil)
 }
 
 func TestFUSEPoolColdPreparingTransitionsDirectlyAndCannotBeStolen(t *testing.T) {
@@ -308,6 +377,24 @@ func TestFUSEPoolCountAndListAreCrossClientAndStable(t *testing.T) {
 	assert.Equal(t, wantUIDs, gotUIDs)
 }
 
+func TestFUSEPoolDetectsRecordMissingFromPoolIndex(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
+	prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
+	require.NoError(t, s.client.SRem(context.Background(), "fusepool:index:"+poolTestDigest(poolKey), poolTestDigest(runtimeUID)).Err())
+
+	_, err := repo.ListByPoolKey(context.Background(), poolKey)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	_, err = repo.CountPreparingAndPrepared(context.Background(), poolKey)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	got, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+}
+
 func TestFUSEPoolExpiredReservationRemainsReserved(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
@@ -318,7 +405,7 @@ func TestFUSEPoolExpiredReservationRemainsReserved(t *testing.T) {
 	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", 40*time.Millisecond)
 	require.NoError(t, err)
 	require.NotNil(t, reserved)
-	time.Sleep(60 * time.Millisecond)
+	waitForRedisDeadline(t, s, reserved.ReservedUntil)
 
 	got, err := repo.ReservePrepared(context.Background(), poolKey, "other", time.Minute)
 	require.NoError(t, err)
@@ -340,9 +427,8 @@ func TestFUSEPoolExpiredColdPreparationCannotBecomeReserved(t *testing.T) {
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	record := preparingRecord(poolKey, runtimeUID)
 	record.ReservationToken = "reservation"
-	record.ReservedUntil = time.Now().Add(30 * time.Millisecond).UTC()
+	record.ReservedUntil = time.Now().Add(-time.Second).UTC()
 	require.NoError(t, repo.CreatePreparing(context.Background(), record))
-	time.Sleep(50 * time.Millisecond)
 
 	_, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolReserved, record.ReservationToken, record.Revision)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidTransition)
@@ -374,7 +460,7 @@ func TestFUSEPoolReturnPreparedRequiresLiveOwnedReservation(t *testing.T) {
 	prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUIDs[1]))
 	expired, err := repo.ReservePrepared(context.Background(), poolKey, "expired-token", 30*time.Millisecond)
 	require.NoError(t, err)
-	time.Sleep(50 * time.Millisecond)
+	waitForRedisDeadline(t, s, expired.ReservedUntil)
 	_, err = repo.Transition(context.Background(), expired.RuntimeUID, state.FUSEPoolReserved, state.FUSEPoolPrepared, "expired-token", expired.Revision)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidTransition)
 	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
@@ -433,6 +519,85 @@ func TestFUSEPoolRejectsInvalidCreateAndReportsCorruption(t *testing.T) {
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 }
 
+func TestFUSEPoolRejectsStateInvariantCorruptionOnEveryPath(t *testing.T) {
+	skipIfNoRedis(t)
+	tests := []struct {
+		name   string
+		mutate func(*state.FUSEPoolRecord, *int64)
+	}{
+		{"empty runtime id", func(record *state.FUSEPoolRecord, _ *int64) { record.RuntimeID = "" }},
+		{"zero updated at", func(record *state.FUSEPoolRecord, _ *int64) { record.UpdatedAt = time.Time{} }},
+		{"prepared carries reservation", func(record *state.FUSEPoolRecord, deadline *int64) {
+			record.ReservationToken = "impossible-token"
+			record.ReservedUntil = time.Now().Add(time.Minute).UTC()
+			*deadline = record.ReservedUntil.UnixMilli()
+		}},
+		{"deadline disagrees with json", func(record *state.FUSEPoolRecord, deadline *int64) {
+			record.State = state.FUSEPoolReserved
+			record.ReservationToken = "reservation"
+			record.ReservedUntil = time.Now().Add(time.Minute).UTC()
+			*deadline = record.ReservedUntil.UnixMilli() + 1
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := testStore(t)
+			repo := NewFUSEPoolRepository(s)
+			poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
+			cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
+			prepared := prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
+			record := prepared
+			deadline := int64(0)
+			tt.mutate(&record, &deadline)
+			raw, err := json.Marshal(record)
+			require.NoError(t, err)
+			uidDigest := poolTestDigest(runtimeUID)
+			require.NoError(t, s.client.Set(context.Background(), "fusepool:record:"+uidDigest, raw, 0).Err())
+			require.NoError(t, s.client.HSet(context.Background(), "fusepool:reservation-deadlines", uidDigest, deadline).Err())
+
+			_, err = repo.ListByPoolKey(context.Background(), poolKey)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+			_, err = repo.CountPreparingAndPrepared(context.Background(), poolKey)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+			got, err := repo.ReservePrepared(context.Background(), poolKey, "other", time.Minute)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+			deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision)
+			assert.False(t, deleted)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+		})
+	}
+}
+
+func TestFUSEPoolLuaRejectsInvalidOrZeroUpdatedAtBeforeMutation(t *testing.T) {
+	skipIfNoRedis(t)
+	for _, updatedAt := range []string{"2e02-01-01T00:00:00Z", "0001-01-01T00:00:00.000Z"} {
+		t.Run(updatedAt, func(t *testing.T) {
+			s := testStore(t)
+			repo := NewFUSEPoolRepository(s)
+			poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
+			cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
+			prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
+			recordKey := "fusepool:record:" + poolTestDigest(runtimeUID)
+			raw, err := s.client.Get(context.Background(), recordKey).Bytes()
+			require.NoError(t, err)
+			var fields map[string]any
+			require.NoError(t, json.Unmarshal(raw, &fields))
+			fields["updated_at"] = updatedAt
+			raw, err = json.Marshal(fields)
+			require.NoError(t, err)
+			require.NoError(t, s.client.Set(context.Background(), recordKey, raw, 0).Err())
+
+			got, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+			deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, state.FUSEPoolPrepared, "maintainer-a", "", 2)
+			assert.False(t, deleted)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+		})
+	}
+}
+
 func TestFUSEPoolRejectsIndexPointingAtDifferentRuntimeUID(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
@@ -449,6 +614,10 @@ func TestFUSEPoolRejectsIndexPointingAtDifferentRuntimeUID(t *testing.T) {
 	poolDigest := poolTestDigest(poolKey)
 	require.NoError(t, s.client.Set(context.Background(), "fusepool:record:"+uidDigest, raw, 0).Err())
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-pools", uidDigest, poolDigest).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-uids", uidDigest, embeddedUID).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-pool-values", uidDigest, poolKey).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:reservation-deadlines", uidDigest, 0).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-counts", poolDigest, 1).Err())
 	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:index:"+poolDigest, uidDigest).Err())
 
 	_, err = repo.ListByPoolKey(context.Background(), poolKey)
@@ -504,6 +673,8 @@ func TestFUSEPoolReserveRejectsRecordStoredUnderDifferentUIDDigest(t *testing.T)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-pools", uidDigest, poolDigest).Err())
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-uids", uidDigest, indexedUID).Err())
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:record-pool-values", uidDigest, poolKey).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:reservation-deadlines", uidDigest, 0).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-counts", poolDigest, 1).Err())
 	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:index:"+poolDigest, uidDigest).Err())
 
 	got, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
