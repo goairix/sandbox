@@ -21,3 +21,12 @@ type Store interface {
 	// Keys returns all keys matching a pattern (e.g. "sandbox:*").
 	Keys(ctx context.Context, pattern string) ([]string, error)
 }
+
+// AtomicStore extends Store with compare-and-swap primitives used by
+// distributed state coordinators.
+type AtomicStore interface {
+	Store
+	CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error)
+	CompareAndDelete(ctx context.Context, key string, expected []byte) (bool, error)
+	Increment(ctx context.Context, key string) (int64, error)
+}
