@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -11,6 +12,8 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 )
 
 const (
@@ -487,13 +490,15 @@ func (c *Config) validateFUSE() error {
 		return fmt.Errorf("config: %s.dns_cidrs must not be empty", providerPath)
 	}
 	for _, cidr := range provider.DNSCIDRs {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.String() != cidr || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" {
 			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
 		}
-		ones, bits := network.Mask.Size()
-		if ones != bits {
+		if prefix.Bits() != prefix.Addr().BitLen() {
 			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
+		}
+		if !sandboxruntime.IsPublicDNSAddress(prefix.Addr()) {
+			return fmt.Errorf("config: %s.dns_cidrs must contain public resolver addresses, got %q", providerPath, cidr)
 		}
 	}
 	if len(provider.EndpointPorts) == 0 {

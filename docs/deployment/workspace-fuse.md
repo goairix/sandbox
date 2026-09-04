@@ -486,7 +486,7 @@ workspace-mounter 不配置 liveness probe。可信 supervisor 作为 PID 1 在 
 
 授权后 mounter readiness 成功还不够；runtime 必须在 sandbox 主容器中以 UID/GID 1000 执行固定、不可由用户传入 argv 的读写探测，确认传播后的 `/workspace` 可创建、读取和删除随机探测文件。随后更新 pool state 为 consumed、持久化 sandbox session 并打开 Exec/file gate。只有授权 CAS 前失败且完整 pristine probe 通过的 reserved 空壳可以回到同一 PoolKey；授权后的实例永不回池。
 
-`mounter-run` 是 memory-backed emptyDir，其中的 `mount-generation` 只是本地第二道防线：获得授权后以 create-if-absent 原子写入；容器重启若 marker 仍在，写入 `restart-detected`、不再调用 s3fs，并让 readiness 持续失败。节点重启可能丢失该卷，因此 runtime 永不对同一 Pod UID/lease generation 做第二次授权；marker 丢失时 supervisor 仍保持 locked。正常销毁必须先收到 supervisor 的成功 flush/unmount 证明，再对精确 Pod UID 执行非 force 的 graceful delete 并观察到 NotFound。若节点或控制通道不可用，只能由配置的基础设施 fencer 返回匹配 Pod UID/节点的证明；没有证明时保留 owner/lease 与策略并标记 blocked。仅 force-delete API 对象、节点 NotReady 或状态无法确认时禁止接管。
+`mounter-run` 是 memory-backed emptyDir，其中的 `mount-generation` 只是本地第二道防线：获得授权后以 create-if-absent 原子写入；容器重启若 marker 仍在，写入 `restart-detected`、不再调用 s3fs，并让 readiness 持续失败。节点重启可能丢失该卷，因此 runtime 永不对同一 Pod UID/lease generation 做第二次授权；marker 丢失时 supervisor 仍保持 locked。正常销毁必须先收到 supervisor 的成功 flush/unmount 证明，再对精确 Pod UID 执行非 force 的 graceful delete 并观察到 NotFound。若节点或控制通道不可用，只能由配置的基础设施 fencer 返回匹配 Pod UID/节点的证明；没有证明时保留 owner/lease 与策略并标记 blocked。仅 force-delete API 对象、节点 NotReady 或状态无法确认时禁止接管。runtime 的 termination evidence 缓存只用于同一 sandbox-api 进程内完成“两阶段删除策略后再确认”；进程重启后不能把缺失缓存当成已退出，必须重新通过精确 graceful termination 取证或配置的 infrastructure fencer 恢复，否则继续 fail closed 并保留 owner/lease 与策略。
 
 ### 6.5 RBAC
 
@@ -510,7 +510,10 @@ Secret 通过已知名称挂载时不授予读取权限。若 control namespace 
 - runtime namespace 的 default-deny 必须作为独立部署前置项存在，不能依赖 control namespace 中的 Chart policy；
 - provider endpoint 必须先进入平台维护的精确白名单，配置文件或创建请求不能自动批准新的内网目的地；
 - Pool WarmUp 先创建并确认 instance 专属 system allow policy，再创建带相同唯一 selector 的 Pod；selector 只使用不可变 `sandbox.pool.instance`，不能依赖可变 state label。Acquire 后、开放 Exec 前再创建用户网络 policy，销毁顺序相反；
+- system policy 在 Pod 创建后必须绑定不可变 Pod UID，用户 policy 也必须携带相同 UID；更新与删除同时核对 instance、role 和 UID。同名 Pod 被替换时，旧 runtime 的退出证明和策略清理不得作用于新 Pod 或新策略；
 - Pod 保持 `DNSPolicy=None`，DNS egress 只允许运维配置的公共 nameserver；不允许 CoreDNS，也不配置集群 search domain；
+- 用户网络启用时，独立 user policy 额外只向该 Pod `DNSConfig` 中经校验的公共 nameserver 精确主机地址（IPv4 `/32`、IPv6 `/128`）开放 TCP/UDP 53；禁用时不加入用户 DNS 规则。用户域名白名单仍由控制面当次解析为已审批 CIDR，不使用 user `toFQDNs` 动态放行；DNS 重解析得到新地址后必须重新调用网络更新并重新审批策略；
+- Cilium 集群的 `block_private` 不能只依赖标准 NetworkPolicy 的 `0/0 + Except`；runtime 还为 exact instance/Pod UID 创建独立 user-deny CiliumNetworkPolicy。deny 必须先于 user allow 生效，收紧/禁用时先确认 allow，再删除不再需要的 deny。私网 deny 的 exception 仅来自平台 system policy 中持久的已审批 endpoint CIDR（Cilium FQDN 模式只作为 deny exception，不新增 CIDR allow）和用户显式批准的私网白名单；元数据、link-local、loopback、multicast 与 unspecified 范围永久禁止，不能作为 exception；
 - 无论 `network_enabled` 是否为 false，都允许 sidecar 访问该 workspace 固定 provider endpoint；
 - sandbox 主容器不因此获得任意公网访问；
 - endpoint 必须是公共 nameserver 可解析的稳定专用 FQDN，或由运维通过 `hostAliases` 映射的证书匹配 FQDN；只有证书包含 IP SAN 时才允许直接使用稳定 IP。不支持 `cluster.local` Service，仅加入网络白名单不能解决集群域名解析；

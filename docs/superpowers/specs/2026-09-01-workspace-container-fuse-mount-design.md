@@ -340,9 +340,11 @@ system egress 的实现按集群能力固定：
 - Pod 保持 `DNSPolicy=None` 和当前公共 nameserver，不接入 CoreDNS，也不配置集群 search domain。
 - MinIO/OBS 必须使用公共 nameserver 可解析的稳定专用 endpoint；私有云 FQDN 无法公共解析时，可由运维使用 Pod `hostAliases`/等价 CNI 机制把该 FQDN 静态映射到平台批准的稳定 IP，且证书必须匹配原 FQDN。只有证书包含 IP SAN 时才允许直接配置 IP endpoint；`cluster.local` Service 不属于一期支持形式。
 - DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。一期 `ProxyURL` 必须为空，egress proxy 仅作为后续安全增强方向。
+- 用户网络启用时，独立 user NetworkPolicy 只向 exact Pod `DNSConfig` 中经校验的公共 nameserver 主机地址（IPv4 `/32`、IPv6 `/128`）额外开放 TCP/UDP 53；禁用时不加入用户 DNS rule。用户域名白名单由控制面在每次更新时解析并审批对应 CIDR，不生成 user `toFQDNs`，避免 DNS 重绑定绕过私网审批；解析结果变化时必须重新执行网络更新。
+- Cilium 下的 FUSE `block_private` 还必须使用绑定 exact instance 与 Pod UID 的独立 user-deny CiliumNetworkPolicy，不能依赖可能被 `world` identity 绕过的标准 NetworkPolicy `Except`。先应用 deny、再应用 allow；移除时先收紧 allow、再删除 deny。RFC1918/ULA deny 只对 system policy 中持久保存的已审批 endpoint CIDR及用户显式私网白名单做 exception；FQDN mode 的批准 CIDR仅用于 deny exception，不转换为额外 system CIDR allow。元数据、link-local、loopback、multicast 与 unspecified 永久拒绝。
 - runtime 对批准列表先排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 是可包含额外批准项的 canonical set，但必须覆盖当前 endpoint 的有效端口及目标地址/FQDN。Cilium FQDN 集合中的每个元素必须是 canonical FQDN，不接受 IP 或通配符；输入重复和乱序只做集合归一化，不能扩大 system egress。
 - endpoint 解析和连通性必须在挂载前检查。仅加入网络白名单不能让公共 nameserver 解析 `cluster.local`。
-- runtime 为每个空壳生成不可变的 instance selector，先创建对应 system egress policy，再创建 Pod；Acquire 时保留这条 policy，并在开放 Exec 前另外应用用户请求对应的网络策略。多个 NetworkPolicy 的 allow 语义是并集，用户策略不能删除 system egress，也不能额外获得未批准的内网目的地。
+- runtime 为每个空壳生成不可变的 instance selector，先创建对应 system egress policy，再创建 Pod；取得 Pod UID 后把 system policy 绑定到该不可变 UID，用户 policy 同样绑定 UID，后续更新和删除必须同时匹配 instance、role 与 UID。Acquire 时保留这条 policy，并在开放 Exec 前另外应用用户请求对应的网络策略。多个 NetworkPolicy 的 allow 语义是并集，用户策略不能删除 system egress，也不能额外获得未批准的内网目的地。同名 Pod replacement 不是旧 UID 的退出证明，也不能授权旧清理流程删除新 UID 的策略。
 
 Sandbox 主容器也能连接这些地址，但没有存储凭证。必须使用最小网络范围并防止凭证泄露：
 
@@ -630,8 +632,8 @@ FUSE 创建必须拆为 prepare/authorize/ready 三阶段，不能沿用“创�
 
 ```go
 PrepareSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error)
-AuthorizeWorkspaceMount(ctx context.Context, id string, auth WorkspaceMountAuthorization) error
-WaitSandboxReady(ctx context.Context, id string) (*SandboxInfo, error)
+AuthorizeWorkspaceMount(ctx context.Context, ref RuntimeRef, auth WorkspaceMountAuthorization) error
+WaitSandboxReady(ctx context.Context, ref RuntimeRef, expectedGeneration int64) (*SandboxInfo, error)
 ```
 
 FUSE runtime 还必须使用 `RuntimeFencer` 产生与 exact RuntimeUID 匹配的退出证据。Kubernetes 正常路径要求 supervisor 已确认 unmount，再对 exact Pod UID graceful delete 并观察到 NotFound；节点/控制通道异常时必须由基础设施 fencer 证明节点已隔离，否则保持 owner blocked。Docker 要求 daemon 可达且对 exact container ID 的 inspect 返回 NotFound。force-delete/remove 请求本身不是退出证据。runtime 构造函数不得提前清理资源；Manager 完成 session/owner/Pool 对账后，才把受保护 RuntimeUID 集合交给可选 `OrphanReconciler`。
@@ -643,14 +645,17 @@ Acquire 时 manager 确认 PoolKey 相等、实例仍 pristine 且 Kubernetes si
 runtime 接口同时增加以下可信控制能力：
 
 ```go
-WorkspaceHealth(ctx context.Context, id string) (*WorkspaceHealth, error)
-PreparedSandboxHealth(ctx context.Context, id string, poolKey string) error
-QuiesceWorkspace(ctx context.Context, id string) (WorkspaceQuiesceToken, error)
-ResumeWorkspace(ctx context.Context, id string, token WorkspaceQuiesceToken) error
-FlushWorkspace(ctx context.Context, id string) error
+WorkspaceHealth(ctx context.Context, ref RuntimeRef) (*WorkspaceHealth, error)
+PreparedSandboxHealth(ctx context.Context, ref RuntimeRef, poolKey string) error
+QuiesceWorkspace(ctx context.Context, ref RuntimeRef, expectedGeneration int64) (WorkspaceQuiesceToken, error)
+ResumeWorkspace(ctx context.Context, ref RuntimeRef, token WorkspaceQuiesceToken) error
+FlushWorkspace(ctx context.Context, ref RuntimeRef, expectedGeneration int64) error
+UpdateFUSENetwork(ctx context.Context, ref RuntimeRef, enabled bool, whitelist []string, blockPrivate bool) error
 ```
 
-`QuiesceWorkspace` 在 Manager 已关闭 admission、等待 API 引用归零后验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。成功返回绑定 exact RuntimeUID/generation 的一次性 `WorkspaceQuiesceToken`；非销毁 flush 后必须用 `ResumeWorkspace` 消费同一 token 恢复进程，跨 runtime、跨 generation 或重放都失败。验证失败时调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
+`RuntimeRef` 同时携带 runtime 名称和 provider 返回的不可变 RuntimeUID；所有 FUSE 私有控制与 FUSE 网络更新都必须验证这两个字段，不能回退为 name-only 操作。`expectedGeneration` 必须来自持久 owner/session，不能从 runtime 进程内缓存或 mounter health 反向学习。`WorkspaceHealth` 只返回观测值，由 Manager 与持久 generation 比对。
+
+`QuiesceWorkspace` 在 Manager 已关闭 admission、等待 API 引用归零后验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。成功返回绑定 exact RuntimeUID/generation 的一次性 `WorkspaceQuiesceToken`；`FlushWorkspace` 只接受与当前 quiesce token 相同的显式 generation，非销毁 flush 后必须用 `ResumeWorkspace` 消费同一 token 恢复进程，跨 runtime、跨 generation 或重放都失败。控制命令的回复不确定时本次 token/cycle 进入 fail-closed 状态，不能重放。验证失败时调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
 
 上传接口需要把调用方声明并由流式读取校验的文件大小传入 runtime，使 tar header 可以先写出并通过 pipe 直接流向 Docker/Kubernetes，而不是 `io.ReadAll`：
 

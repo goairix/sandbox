@@ -17,22 +17,12 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
-func TestWorkspaceFUSEContractIsUnsupported(t *testing.T) {
+func TestPrepareSandboxWithoutFUSESpecIsUnsupported(t *testing.T) {
 	rt := &Runtime{}
 	ctx := context.Background()
 
 	_, err := rt.PrepareSandbox(ctx, runtime.SandboxSpec{})
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.AuthorizeWorkspaceMount(ctx, "id", runtime.WorkspaceMountAuthorization{}), runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.WaitSandboxReady(ctx, "id")
-	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.PreparedSandboxHealth(ctx, "id", "pool"), runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.WorkspaceHealth(ctx, "id")
-	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.QuiesceWorkspace(ctx, "id")
-	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.ResumeWorkspace(ctx, "id", runtime.WorkspaceQuiesceToken{}), runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.FlushWorkspace(ctx, "id"), runtime.ErrWorkspaceFUSEUnsupported)
 }
 
 func TestCreatePodUsesConfiguredTmpDiskLimit(t *testing.T) {
@@ -249,6 +239,10 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.NotContains(t, bootstrap, "lease_generation")
 	assert.False(t, hasPodEnv(sandbox.Env, "SANDBOX_RUNTIME_UID"))
 	assert.False(t, hasPodEnv(sandbox.Env, "SANDBOX_MOUNTER_BOOTSTRAP"))
+	sandboxPodUID := podEnv(t, sandbox.Env, "SANDBOX_POD_UID")
+	require.NotNil(t, sandboxPodUID.ValueFrom)
+	require.NotNil(t, sandboxPodUID.ValueFrom.FieldRef)
+	assert.Equal(t, "metadata.uid", sandboxPodUID.ValueFrom.FieldRef.FieldPath)
 
 	assert.Equal(t, []string{"2001:4860:4860::8888", "8.8.8.8"}, pod.Spec.DNSConfig.Nameservers)
 	assert.Equal(t, "50m", mounter.Resources.Requests.Cpu().String())

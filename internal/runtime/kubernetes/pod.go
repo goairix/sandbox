@@ -285,6 +285,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 	deviceType := corev1.HostPathCharDev
 	secretMode := int32(0o400)
 	restartAlways := corev1.ContainerRestartPolicyAlways
+	defaultNoExecuteSeconds := int64(300)
 
 	mounterSecurity := &corev1.SecurityContext{
 		Privileged:             &trueVal,
@@ -313,6 +314,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
+			ServiceAccountName:            "default",
 			AutomountServiceAccountToken:  &falseVal,
 			EnableServiceLinks:            &falseVal,
 			ShareProcessNamespace:         &falseVal,
@@ -322,6 +324,10 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			TerminationGracePeriodSeconds: &validated.terminationGraceSeconds,
 			SecurityContext: &corev1.PodSecurityContext{
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
 			},
 			InitContainers: []corev1.Container{
 				{
@@ -382,7 +388,13 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 							Drop: []corev1.Capability{"ALL"},
 						},
 					},
-					Env: sandboxKubernetesEnv(),
+					Env: append(sandboxKubernetesEnv(), corev1.EnvVar{
+						Name: "SANDBOX_POD_UID",
+						ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+							APIVersion: "v1",
+							FieldPath:  "metadata.uid",
+						}},
+					}),
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: workspaceMountPath, MountPropagation: &sandboxPropagation},
 						{Name: "tmp", MountPath: "/tmp"},
@@ -413,6 +425,11 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 	}
 	if errs := kvalidation.IsValidLabelValue(spec.ID); len(errs) != 0 {
 		return validated, fmt.Errorf("workspace FUSE sandbox ID is not label-safe")
+	}
+	for _, prefix := range []string{fuseSystemPolicyPrefix, fuseUserPolicyPrefix, fuseUserDenyPolicyPrefix} {
+		if len(kvalidation.IsDNS1123Subdomain(prefix+spec.ID)) != 0 {
+			return validated, fmt.Errorf("workspace FUSE sandbox ID cannot form resource names")
+		}
 	}
 	if fuse.RuntimeType != "kubernetes" {
 		return validated, fmt.Errorf("workspace FUSE runtime type must be kubernetes")

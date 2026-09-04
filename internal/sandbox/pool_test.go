@@ -193,18 +193,18 @@ func (m *mockRuntime) blockPrepare() (<-chan struct{}, chan<- struct{}) {
 	return m.prepareEntered, m.prepareRelease
 }
 
-func (m *mockRuntime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
+func (m *mockRuntime) AuthorizeWorkspaceMount(context.Context, runtime.RuntimeRef, runtime.WorkspaceMountAuthorization) error {
 	return nil
 }
 
-func (m *mockRuntime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) {
-	return &runtime.SandboxInfo{State: "running"}, nil
+func (m *mockRuntime) WaitSandboxReady(_ context.Context, ref runtime.RuntimeRef, _ int64) (*runtime.SandboxInfo, error) {
+	return &runtime.SandboxInfo{RuntimeID: ref.ID, RuntimeUID: ref.UID, State: "running"}, nil
 }
 
-func (m *mockRuntime) PreparedSandboxHealth(_ context.Context, id, _ string) error {
+func (m *mockRuntime) PreparedSandboxHealth(_ context.Context, ref runtime.RuntimeRef, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.healthFailures[id]
+	return m.healthFailures[ref.ID]
 }
 
 func (m *mockRuntime) failPreparedHealth(id string, err error) {
@@ -231,19 +231,19 @@ func (m *mockRuntime) prepareCount() int {
 	return m.prepareSeq
 }
 
-func (m *mockRuntime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {
+func (m *mockRuntime) WorkspaceHealth(context.Context, runtime.RuntimeRef) (*runtime.WorkspaceHealth, error) {
 	return &runtime.WorkspaceHealth{Ready: true}, nil
 }
 
-func (m *mockRuntime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) {
+func (m *mockRuntime) QuiesceWorkspace(context.Context, runtime.RuntimeRef, int64) (runtime.WorkspaceQuiesceToken, error) {
 	return runtime.WorkspaceQuiesceToken{}, nil
 }
 
-func (m *mockRuntime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error {
+func (m *mockRuntime) ResumeWorkspace(context.Context, runtime.RuntimeRef, runtime.WorkspaceQuiesceToken) error {
 	return nil
 }
 
-func (m *mockRuntime) FlushWorkspace(context.Context, string) error {
+func (m *mockRuntime) FlushWorkspace(context.Context, runtime.RuntimeRef, int64) error {
 	return nil
 }
 
@@ -277,6 +277,10 @@ func (m *mockRuntime) DownloadDir(context.Context, string, string) (io.ReadClose
 }
 
 func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string, bool) error {
+	return nil
+}
+
+func (m *mockRuntime) UpdateFUSENetwork(context.Context, runtime.RuntimeRef, bool, []string, bool) error {
 	return nil
 }
 

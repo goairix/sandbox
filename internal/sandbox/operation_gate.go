@@ -62,19 +62,33 @@ func (g *operationGate) CloseAndWait(ctx context.Context) error {
 	if g == nil {
 		return ErrSandboxNotReady
 	}
-	g.mu.Lock()
-	g.open = false
-	g.permanent = true
-	g.exclusive = false
-	g.generation++
-	drained := g.drained
-	g.mu.Unlock()
+	drained := g.closeAdmission()
 	select {
 	case <-drained:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// closeAdmission permanently rejects new work immediately without waiting for
+// already-admitted operations. Teardown uses the returned channel to drain.
+func (g *operationGate) closeAdmission() <-chan struct{} {
+	if g == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	g.mu.Lock()
+	if !g.permanent {
+		g.open = false
+		g.permanent = true
+		g.exclusive = false
+		g.generation++
+	}
+	drained := g.drained
+	g.mu.Unlock()
+	return drained
 }
 
 // BeginExclusive closes admission and drains earlier operations. The caller

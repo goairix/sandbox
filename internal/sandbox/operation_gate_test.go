@@ -36,6 +36,22 @@ func TestOperationGateCloseRejectsNewOperationsAndDrainsReferences(t *testing.T)
 	require.ErrorIs(t, err, ErrSandboxNotReady)
 }
 
+func TestOperationGateCloseAdmissionRejectsImmediatelyWithoutWaitingForLiveReference(t *testing.T) {
+	gate := newOperationGate(true)
+	release, err := gate.Acquire()
+	require.NoError(t, err)
+	drained := gate.closeAdmission()
+	select {
+	case <-drained:
+		t.Fatal("admission close must not pretend a live reference drained")
+	default:
+	}
+	_, err = gate.Acquire()
+	require.ErrorIs(t, err, ErrSandboxNotReady)
+	release()
+	<-drained
+}
+
 func TestOperationGateExclusiveCanReopenOnlyItsGeneration(t *testing.T) {
 	gate := newOperationGate(true)
 	token, err := gate.BeginExclusive(context.Background())

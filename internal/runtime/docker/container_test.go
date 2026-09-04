@@ -13,19 +13,20 @@ import (
 func TestWorkspaceFUSEContractIsUnsupported(t *testing.T) {
 	rt := &Runtime{}
 	ctx := context.Background()
+	ref := runtime.RuntimeRef{ID: "id", UID: "uid"}
 
 	_, err := rt.PrepareSandbox(ctx, runtime.SandboxSpec{})
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.AuthorizeWorkspaceMount(ctx, "id", runtime.WorkspaceMountAuthorization{}), runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.WaitSandboxReady(ctx, "id")
+	require.ErrorIs(t, rt.AuthorizeWorkspaceMount(ctx, ref, runtime.WorkspaceMountAuthorization{}), runtime.ErrWorkspaceFUSEUnsupported)
+	_, err = rt.WaitSandboxReady(ctx, ref, 1)
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.PreparedSandboxHealth(ctx, "id", "pool"), runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.WorkspaceHealth(ctx, "id")
+	require.ErrorIs(t, rt.PreparedSandboxHealth(ctx, ref, "pool"), runtime.ErrWorkspaceFUSEUnsupported)
+	_, err = rt.WorkspaceHealth(ctx, ref)
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	_, err = rt.QuiesceWorkspace(ctx, "id")
+	_, err = rt.QuiesceWorkspace(ctx, ref, 1)
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.ResumeWorkspace(ctx, "id", runtime.WorkspaceQuiesceToken{}), runtime.ErrWorkspaceFUSEUnsupported)
-	require.ErrorIs(t, rt.FlushWorkspace(ctx, "id"), runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.ResumeWorkspace(ctx, ref, runtime.WorkspaceQuiesceToken{}), runtime.ErrWorkspaceFUSEUnsupported)
+	require.ErrorIs(t, rt.FlushWorkspace(ctx, ref, 1), runtime.ErrWorkspaceFUSEUnsupported)
 }
 
 func TestCreateContainerConfigUsesConfiguredTmpDiskLimit(t *testing.T) {

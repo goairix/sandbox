@@ -119,31 +119,31 @@ func (r *Runtime) PrepareSandbox(context.Context, runtime.SandboxSpec) (*runtime
 	return nil, runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
+func (r *Runtime) AuthorizeWorkspaceMount(context.Context, runtime.RuntimeRef, runtime.WorkspaceMountAuthorization) error {
 	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) WaitSandboxReady(context.Context, string) (*runtime.SandboxInfo, error) {
+func (r *Runtime) WaitSandboxReady(context.Context, runtime.RuntimeRef, int64) (*runtime.SandboxInfo, error) {
 	return nil, runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) PreparedSandboxHealth(context.Context, string, string) error {
+func (r *Runtime) PreparedSandboxHealth(context.Context, runtime.RuntimeRef, string) error {
 	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {
+func (r *Runtime) WorkspaceHealth(context.Context, runtime.RuntimeRef) (*runtime.WorkspaceHealth, error) {
 	return nil, runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) QuiesceWorkspace(context.Context, string) (runtime.WorkspaceQuiesceToken, error) {
+func (r *Runtime) QuiesceWorkspace(context.Context, runtime.RuntimeRef, int64) (runtime.WorkspaceQuiesceToken, error) {
 	return runtime.WorkspaceQuiesceToken{}, runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) ResumeWorkspace(context.Context, string, runtime.WorkspaceQuiesceToken) error {
+func (r *Runtime) ResumeWorkspace(context.Context, runtime.RuntimeRef, runtime.WorkspaceQuiesceToken) error {
 	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
-func (r *Runtime) FlushWorkspace(context.Context, string) error {
+func (r *Runtime) FlushWorkspace(context.Context, runtime.RuntimeRef, int64) error {
 	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
@@ -282,6 +282,10 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, containerID string, enabled
 
 	// !enabled && !hasGateway — already disabled, nothing to do
 	return nil
+}
+
+func (r *Runtime) UpdateFUSENetwork(context.Context, runtime.RuntimeRef, bool, []string, bool) error {
+	return runtime.ErrWorkspaceFUSEUnsupported
 }
 
 func (r *Runtime) RenameSandbox(ctx context.Context, id string, newName string) error {

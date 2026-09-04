@@ -489,7 +489,7 @@ workspace:
       endpoint_host_ips: [192.0.2.20]
       lsm_profile: sandbox-fuse
       system_egress_mode: cilium-fqdn
-      dns_cidrs: [10.96.0.10/32]
+      dns_cidrs: [1.1.1.1/32]
       system_egress_fqdns: [obs.example.com]
       system_egress_cidrs: [192.0.2.0/24]
       endpoint_ports: [443]
@@ -526,7 +526,7 @@ func TestLoadFUSEConfigFromYAML(t *testing.T) {
 	assert.Equal(t, "obs-primary", provider.StorageIdentity)
 	assert.Equal(t, "ca.crt", provider.CASecretKey)
 	assert.Equal(t, []string{"192.0.2.20"}, provider.EndpointHostIPs)
-	assert.Equal(t, []string{"10.96.0.10/32"}, provider.DNSCIDRs)
+	assert.Equal(t, []string{"1.1.1.1/32"}, provider.DNSCIDRs)
 	assert.Equal(t, []string{"obs.example.com"}, provider.SystemEgressFQDNs)
 	assert.Equal(t, []int32{443}, provider.EndpointPorts)
 	assert.Equal(t, "/run/secrets/access-key", cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile)
@@ -783,6 +783,15 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "ipv6 dns subnet", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"2001:db8::/64"} })
 		}, want: "host-only"},
+		{name: "shared address DNS", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"100.64.0.53/32"} })
+		}, want: "public resolver"},
+		{name: "benchmark DNS", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"198.18.0.53/32"} })
+		}, want: "public resolver"},
+		{name: "documentation DNS", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"2001:db8::53/128"} })
+		}, want: "public resolver"},
 		{name: "missing endpoint ports", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = nil })
 		}, want: "endpoint_ports"},

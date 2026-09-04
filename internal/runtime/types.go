@@ -174,6 +174,7 @@ type WorkspaceQuiesceToken struct {
 // can no longer access its workspace.
 type TerminationEvidence struct {
 	RuntimeUID           string
+	NodeName             string
 	GracefulUnmount      bool
 	ProcessExited        bool
 	InfrastructureFenced bool

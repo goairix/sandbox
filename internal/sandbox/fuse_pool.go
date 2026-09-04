@@ -284,7 +284,7 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 			}
 			continue
 		case FUSEPoolPristine:
-			if healthErr := p.runtime.PreparedSandboxHealth(opCtx, record.RuntimeID, poolKey); healthErr != nil {
+			if healthErr := p.runtime.PreparedSandboxHealth(opCtx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}, poolKey); healthErr != nil {
 				cleanupErr := p.claimAndDestroy(opCtx, *record)
 				if cleanupErr != nil {
 					return nil, errors.Join(fmt.Errorf("prepared FUSE sandbox health: %w", healthErr), cleanupErr)
@@ -353,7 +353,7 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 	if disposition == FUSEPoolAbandoned {
 		return errors.Join(ErrFUSEPoolReturnUnproven, guardErr, p.claimAndDestroy(opCtx, record))
 	}
-	if healthErr := p.runtime.PreparedSandboxHealth(opCtx, record.RuntimeID, record.PoolKey); healthErr != nil {
+	if healthErr := p.runtime.PreparedSandboxHealth(opCtx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}, record.PoolKey); healthErr != nil {
 		cleanupErr := p.claimAndDestroy(opCtx, record)
 		return errors.Join(healthErr, cleanupErr)
 	}
@@ -656,7 +656,7 @@ func (p *FUSEPool) inspectPrepared(ctx context.Context) error {
 		disposition, guardErr := p.guard(ctx, *record)
 		switch disposition {
 		case FUSEPoolPristine:
-			if healthErr := p.runtime.PreparedSandboxHealth(ctx, record.RuntimeID, p.poolKey); healthErr != nil {
+			if healthErr := p.runtime.PreparedSandboxHealth(ctx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}, p.poolKey); healthErr != nil {
 				result = errors.Join(result, healthErr, p.claimAndDestroy(ctx, *record))
 			} else {
 				verified = append(verified, *record)
@@ -842,7 +842,7 @@ func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken
 		return nil, errors.Join(fmt.Errorf("bind preparing FUSE sandbox runtime: %w", err), cleanupErr)
 	}
 	record = *bound
-	if err := p.runtime.PreparedSandboxHealth(prepareCtx, record.RuntimeID, p.poolKey); err != nil {
+	if err := p.runtime.PreparedSandboxHealth(prepareCtx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}, p.poolKey); err != nil {
 		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
 		return nil, errors.Join(fmt.Errorf("verify preparing FUSE sandbox: %w", err), cleanupErr)
 	}

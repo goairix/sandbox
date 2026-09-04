@@ -18,6 +18,40 @@ var ErrFileNotFound = errors.New("file not found")
 // implement the trusted FUSE control contract.
 var ErrWorkspaceFUSEUnsupported = errors.New("workspace FUSE is unsupported")
 
+// ErrTerminationUnconfirmed means an exact runtime may still be able to reach
+// its workspace. Callers must retain the owner and lease.
+var ErrTerminationUnconfirmed = errors.New("runtime termination is unconfirmed")
+
+// ErrInvalidRuntimeRef means a FUSE control operation did not identify both
+// the runtime name and its immutable provider UID.
+var ErrInvalidRuntimeRef = errors.New("invalid exact runtime reference")
+
+// ErrFUSENetworkStateUncertain means a request-scoped policy mutation could
+// not be proven fail-closed. The owning Manager must close the public gate and
+// tear down the single-use runtime.
+var ErrFUSENetworkStateUncertain = errors.New("FUSE network policy state is uncertain")
+
+// RuntimeRef identifies one immutable runtime instance. ID alone is never
+// sufficient for a FUSE control operation because names may be reused.
+type RuntimeRef struct {
+	ID  string
+	UID string
+}
+
+func NewRuntimeRef(id, uid string) (RuntimeRef, error) {
+	if id == "" || uid == "" {
+		return RuntimeRef{}, ErrInvalidRuntimeRef
+	}
+	return RuntimeRef{ID: id, UID: uid}, nil
+}
+
+func (r RuntimeRef) Validate() error {
+	if r.ID == "" || r.UID == "" {
+		return ErrInvalidRuntimeRef
+	}
+	return nil
+}
+
 // RuntimeFencer confirms that an exact immutable runtime instance has
 // terminated or has been isolated from its workspace infrastructure.
 type RuntimeFencer interface {
@@ -47,27 +81,27 @@ type Runtime interface {
 
 	// AuthorizeWorkspaceMount delivers the one-shot workspace authorization over
 	// the runtime's trusted control channel.
-	AuthorizeWorkspaceMount(ctx context.Context, id string, auth WorkspaceMountAuthorization) error
+	AuthorizeWorkspaceMount(ctx context.Context, ref RuntimeRef, auth WorkspaceMountAuthorization) error
 
 	// WaitSandboxReady waits for both trusted FUSE health and sandbox-side probes.
-	WaitSandboxReady(ctx context.Context, id string) (*SandboxInfo, error)
+	WaitSandboxReady(ctx context.Context, ref RuntimeRef, expectedGeneration int64) (*SandboxInfo, error)
 
 	// PreparedSandboxHealth verifies a prepared instance is pristine and belongs
 	// to the expected pool key.
-	PreparedSandboxHealth(ctx context.Context, id, poolKey string) error
+	PreparedSandboxHealth(ctx context.Context, ref RuntimeRef, poolKey string) error
 
 	// WorkspaceHealth returns trusted health for the mounted workspace.
-	WorkspaceHealth(ctx context.Context, id string) (*WorkspaceHealth, error)
+	WorkspaceHealth(ctx context.Context, ref RuntimeRef) (*WorkspaceHealth, error)
 
 	// QuiesceWorkspace closes workspace activity and returns a single-use token.
-	QuiesceWorkspace(ctx context.Context, id string) (WorkspaceQuiesceToken, error)
+	QuiesceWorkspace(ctx context.Context, ref RuntimeRef, expectedGeneration int64) (WorkspaceQuiesceToken, error)
 
 	// ResumeWorkspace consumes the exact token returned by QuiesceWorkspace.
-	ResumeWorkspace(ctx context.Context, id string, token WorkspaceQuiesceToken) error
+	ResumeWorkspace(ctx context.Context, ref RuntimeRef, token WorkspaceQuiesceToken) error
 
 	// FlushWorkspace durably flushes the mounted workspace through the trusted
 	// mounter control channel.
-	FlushWorkspace(ctx context.Context, id string) error
+	FlushWorkspace(ctx context.Context, ref RuntimeRef, expectedGeneration int64) error
 
 	// StartSandbox starts a previously created sandbox (for pool warm-up scenarios).
 	StartSandbox(ctx context.Context, id string) error
@@ -150,6 +184,10 @@ type Runtime interface {
 
 	// UpdateNetwork dynamically enables, disables, or updates network access for a running sandbox.
 	UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error
+
+	// UpdateFUSENetwork applies only the request-scoped user policy for an exact
+	// FUSE runtime; it never mutates that runtime's system egress policy.
+	UpdateFUSENetwork(ctx context.Context, ref RuntimeRef, enabled bool, whitelist []string, blockPrivate bool) error
 
 	// RenameSandbox renames a sandbox container/pod for easier identification.
 	RenameSandbox(ctx context.Context, id string, newName string) error

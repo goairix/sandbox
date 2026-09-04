@@ -28,16 +28,21 @@ import (
 
 type fuseManagerRuntime struct {
 	*mockRuntime
-	mu               sync.Mutex
-	events           []string
-	authorizations   []runtime.WorkspaceMountAuthorization
-	waitReadyEntered chan struct{}
-	allowReady       chan struct{}
-	waitReadyOnce    sync.Once
-	waitReadyErr     error
-	networkErr       error
-	health           runtime.WorkspaceHealth
-	downloadReader   io.ReadCloser
+	mu                 sync.Mutex
+	events             []string
+	authorizations     []runtime.WorkspaceMountAuthorization
+	authorizeRefs      []runtime.RuntimeRef
+	networkRefs        []runtime.RuntimeRef
+	readyRefs          []runtime.RuntimeRef
+	readyGenerations   []int64
+	legacyNetworkCalls int
+	waitReadyEntered   chan struct{}
+	allowReady         chan struct{}
+	waitReadyOnce      sync.Once
+	waitReadyErr       error
+	networkErr         error
+	health             runtime.WorkspaceHealth
+	downloadReader     io.ReadCloser
 }
 
 func (r *fuseManagerRuntime) DownloadFile(ctx context.Context, id, path string) (io.ReadCloser, error) {
@@ -84,21 +89,36 @@ func (r *fuseManagerRuntime) recordEvent(event string) {
 	r.mu.Unlock()
 }
 
-func (r *fuseManagerRuntime) AuthorizeWorkspaceMount(_ context.Context, _ string, auth runtime.WorkspaceMountAuthorization) error {
+func (r *fuseManagerRuntime) AuthorizeWorkspaceMount(_ context.Context, ref runtime.RuntimeRef, auth runtime.WorkspaceMountAuthorization) error {
 	r.mu.Lock()
 	r.events = append(r.events, "authorize")
 	r.authorizations = append(r.authorizations, auth)
+	r.authorizeRefs = append(r.authorizeRefs, ref)
 	r.mu.Unlock()
 	return nil
 }
 
-func (r *fuseManagerRuntime) UpdateNetwork(_ context.Context, _ string, _ bool, _ []string, _ bool) error {
-	r.recordEvent("network")
+func (r *fuseManagerRuntime) UpdateFUSENetwork(_ context.Context, ref runtime.RuntimeRef, _ bool, _ []string, _ bool) error {
+	r.mu.Lock()
+	r.events = append(r.events, "network")
+	r.networkRefs = append(r.networkRefs, ref)
+	r.mu.Unlock()
 	return r.networkErr
 }
 
-func (r *fuseManagerRuntime) WaitSandboxReady(ctx context.Context, id string) (*runtime.SandboxInfo, error) {
-	r.recordEvent("ready")
+func (r *fuseManagerRuntime) UpdateNetwork(context.Context, string, bool, []string, bool) error {
+	r.mu.Lock()
+	r.legacyNetworkCalls++
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *fuseManagerRuntime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (*runtime.SandboxInfo, error) {
+	r.mu.Lock()
+	r.events = append(r.events, "ready")
+	r.readyRefs = append(r.readyRefs, ref)
+	r.readyGenerations = append(r.readyGenerations, expectedGeneration)
+	r.mu.Unlock()
 	if r.waitReadyEntered != nil {
 		r.waitReadyOnce.Do(func() { close(r.waitReadyEntered) })
 		select {
@@ -110,7 +130,7 @@ func (r *fuseManagerRuntime) WaitSandboxReady(ctx context.Context, id string) (*
 	if r.waitReadyErr != nil {
 		return nil, r.waitReadyErr
 	}
-	info, err := r.GetSandbox(ctx, id)
+	info, err := r.GetSandbox(ctx, ref.ID)
 	if err != nil || info == nil {
 		return nil, fmt.Errorf("prepared sandbox missing")
 	}
@@ -119,11 +139,11 @@ func (r *fuseManagerRuntime) WaitSandboxReady(ctx context.Context, id string) (*
 	return &copy, nil
 }
 
-func (r *fuseManagerRuntime) WorkspaceHealth(_ context.Context, id string) (*runtime.WorkspaceHealth, error) {
+func (r *fuseManagerRuntime) WorkspaceHealth(_ context.Context, ref runtime.RuntimeRef) (*runtime.WorkspaceHealth, error) {
 	r.mu.Lock()
 	health := r.health
 	r.mu.Unlock()
-	info, _ := r.GetSandbox(context.Background(), id)
+	info, _ := r.GetSandbox(context.Background(), ref.ID)
 	if info != nil && health.RuntimeUID == "" {
 		health.RuntimeUID = info.RuntimeUID
 	}
@@ -340,9 +360,46 @@ func TestManagerCreateFUSEUsesPreparedRuntimeAndPublishesAfterProbe(t *testing.T
 	rt.mu.Lock()
 	assert.Equal(t, []string{"authorize", "network", "ready"}, rt.events)
 	assert.Len(t, rt.authorizations, 1)
+	expectedRef := runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID}
+	assert.Equal(t, []runtime.RuntimeRef{expectedRef}, rt.authorizeRefs)
+	assert.Equal(t, []runtime.RuntimeRef{expectedRef}, rt.networkRefs)
+	assert.Equal(t, []runtime.RuntimeRef{expectedRef}, rt.readyRefs)
+	assert.Equal(t, []int64{rt.authorizations[0].LeaseGeneration}, rt.readyGenerations)
 	rt.mu.Unlock()
 	_, err = mgr.Exec(context.Background(), sb.ID, runtime.ExecRequest{Command: "true"})
 	require.NoError(t, err)
+}
+
+func TestManagerUpdateNetworkKeepsPublishedFUSERuntimeExact(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.UpdateNetwork(context.Background(), sb.ID, true, []string{"192.0.2.10/32"}, false))
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	require.Len(t, rt.networkRefs, 2)
+	assert.Equal(t, runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID}, rt.networkRefs[1])
+	assert.Zero(t, rt.legacyNetworkCalls)
+}
+
+func TestManagerUncertainFUSENetworkUpdateClosesAdmissionBeforeReturning(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	gate := mgr.operationGates[sb.ID]
+	mgr.mu.RUnlock()
+	require.NotNil(t, gate)
+
+	rt.mu.Lock()
+	rt.networkErr = runtime.ErrFUSENetworkStateUncertain
+	rt.mu.Unlock()
+	err = mgr.UpdateNetwork(context.Background(), sb.ID, true, []string{"192.0.2.10/32"}, false)
+	require.ErrorIs(t, err, runtime.ErrFUSENetworkStateUncertain)
+	assert.False(t, gate.isOpen())
 }
 
 func TestManagerCreateFUSEIsInvisibleUntilReady(t *testing.T) {

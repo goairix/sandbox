@@ -624,13 +624,17 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	m.mu.Lock()
 	claim.record = *record
 	m.mu.Unlock()
-	if err = m.runtime.AuthorizeWorkspaceMount(txnCtx, record.RuntimeID, auth); err != nil {
+	runtimeRef, refErr := runtime.NewRuntimeRef(record.RuntimeID, record.RuntimeUID)
+	if refErr != nil {
+		return nil, fmt.Errorf("construct exact FUSE runtime reference: %w", refErr)
+	}
+	if err = m.runtime.AuthorizeWorkspaceMount(txnCtx, runtimeRef, auth); err != nil {
 		return nil, fmt.Errorf("authorize workspace mount: %w", err)
 	}
-	if err = m.runtime.UpdateNetwork(txnCtx, record.RuntimeID, cfg.Network.Enabled, cfg.Network.Whitelist, cfg.Network.BlockPrivate); err != nil {
+	if err = m.runtime.UpdateFUSENetwork(txnCtx, runtimeRef, cfg.Network.Enabled, cfg.Network.Whitelist, cfg.Network.BlockPrivate); err != nil {
 		return nil, fmt.Errorf("update sandbox network: %w", err)
 	}
-	readyInfo, err := m.runtime.WaitSandboxReady(txnCtx, record.RuntimeID)
+	readyInfo, err := m.runtime.WaitSandboxReady(txnCtx, runtimeRef, auth.LeaseGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("wait FUSE sandbox ready: %w", err)
 	}
@@ -906,7 +910,7 @@ func (m *Manager) checkFUSELifecycle(ctx context.Context, lifecycle *fuseSandbox
 	if info == nil || info.RuntimeUID != lifecycle.record.RuntimeUID || info.State != "running" {
 		return ErrSandboxNotReady
 	}
-	health, err := m.runtime.WorkspaceHealth(ctx, lifecycle.record.RuntimeID)
+	health, err := m.runtime.WorkspaceHealth(ctx, runtime.RuntimeRef{ID: lifecycle.record.RuntimeID, UID: lifecycle.record.RuntimeUID})
 	if err != nil {
 		return err
 	}
@@ -1738,9 +1742,25 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	defer release()
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
+	runtimeUID := sb.RuntimeUID
+	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
+	lifecycle := m.fuseLifecycles[id]
 	m.mu.RUnlock()
 
-	if err := m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist, blockPrivate); err != nil {
+	if isFUSE {
+		ref, refErr := runtime.NewRuntimeRef(runtimeID, runtimeUID)
+		if refErr != nil {
+			return refErr
+		}
+		err = m.runtime.UpdateFUSENetwork(ctx, ref, enabled, whitelist, blockPrivate)
+	} else {
+		err = m.runtime.UpdateNetwork(ctx, runtimeID, enabled, whitelist, blockPrivate)
+	}
+	if err != nil {
+		if isFUSE && lifecycle != nil && errors.Is(err, runtime.ErrFUSENetworkStateUncertain) {
+			lifecycle.gate.closeAdmission()
+			m.scheduleFUSETeardown(lifecycle, err)
+		}
 		return err
 	}
 
