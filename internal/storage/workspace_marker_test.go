@@ -186,6 +186,8 @@ func TestNewWorkspaceObjectClientRejectsInvalidOBSEndpointsWithoutPanicking(t *t
 		"https://obs.example.test:65536",
 		"https://[::1]",
 		"https://[::1]:9000",
+		"https://[::ffff:192.0.2.1]:9000",
+		"https://[fe80::1%25eth0]:9000",
 		"https://%",
 	}
 
