@@ -22,6 +22,7 @@ type memoryFUSEPoolRepository struct {
 	now          time.Time
 	stateHistory map[string][]state.FUSEPoolState
 	failMethod   map[string]error
+	failAfter    map[string]error
 }
 
 type memoryRefillLock struct {
@@ -36,6 +37,7 @@ func newMemoryFUSEPoolRepository() *memoryFUSEPoolRepository {
 		now:          time.Now().UTC(),
 		stateHistory: make(map[string][]state.FUSEPoolState),
 		failMethod:   make(map[string]error),
+		failAfter:    make(map[string]error),
 	}
 }
 
@@ -196,6 +198,9 @@ func (r *memoryFUSEPoolRepository) transitionLocked(preparationID string, from, 
 func (r *memoryFUSEPoolRepository) TransitionWithRefillLock(_ context.Context, preparationID string, from, to state.FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*state.FUSEPoolRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.takeFailureLocked("TransitionWithRefillLock"); err != nil {
+		return nil, err
+	}
 	record, ok := r.records[preparationID]
 	if !ok {
 		return nil, state.ErrFUSEPoolNotFound
@@ -207,7 +212,14 @@ func (r *memoryFUSEPoolRepository) TransitionWithRefillLock(_ context.Context, p
 	if (to == state.FUSEPoolReserved) != (reservationTTL > 0) {
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
-	return r.transitionLocked(preparationID, from, to, token, expectedRevision, reservationTTL)
+	transitioned, err := r.transitionLocked(preparationID, from, to, token, expectedRevision, reservationTTL)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.takeFailureLocked("TransitionWithRefillLockAfterCommit"); err != nil {
+		return nil, err
+	}
+	return transitioned, nil
 }
 
 func (r *memoryFUSEPoolRepository) ReturnPreparedWithAdmission(_ context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*state.FUSEPoolRecord, error) {
@@ -226,7 +238,14 @@ func (r *memoryFUSEPoolRepository) ReturnPreparedWithAdmission(_ context.Context
 	if r.countPreparingAndPreparedLocked(record.PoolKey) >= maxSize {
 		return nil, state.ErrFUSEPoolConflict
 	}
-	return r.transitionLocked(preparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, reservationToken, expectedRevision, 0)
+	transitioned, err := r.transitionLocked(preparationID, state.FUSEPoolReserved, state.FUSEPoolPrepared, reservationToken, expectedRevision, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.takeFailureLocked("ReturnPreparedWithAdmissionAfterCommit"); err != nil {
+		return nil, err
+	}
+	return transitioned, nil
 }
 
 func (r *memoryFUSEPoolRepository) ClaimCleanup(_ context.Context, preparationID string, from state.FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*state.FUSEPoolRecord, error) {
@@ -444,13 +463,74 @@ func (r *memoryFUSEPoolRepository) failNext(method string, err error) {
 	r.failMethod[method] = err
 }
 
+func (r *memoryFUSEPoolRepository) failNextAfterCommit(method string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failAfter[method+"AfterCommit"] = err
+}
+
 func (r *memoryFUSEPoolRepository) takeFailureLocked(method string) error {
 	err := r.failMethod[method]
 	delete(r.failMethod, method)
+	if err == nil {
+		err = r.failAfter[method]
+		delete(r.failAfter, method)
+	}
 	return err
 }
 
 var _ state.FUSEPoolRepository = (*memoryFUSEPoolRepository)(nil)
+
+type advancingAfterReturnRepository struct {
+	*memoryFUSEPoolRepository
+	err      error
+	advanced *state.FUSEPoolRecord
+}
+
+func (r *advancingAfterReturnRepository) ReturnPreparedWithAdmission(ctx context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*state.FUSEPoolRecord, error) {
+	returned, err := r.memoryFUSEPoolRepository.ReturnPreparedWithAdmission(ctx, preparationID, reservationToken, expectedRevision, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	advanced, reserveErr := r.memoryFUSEPoolRepository.ReservePrepared(ctx, returned.PoolKey, "next-owner", time.Minute)
+	if reserveErr != nil {
+		return nil, reserveErr
+	}
+	r.advanced = advanced
+	return nil, r.err
+}
+
+type blockingAfterReturnRepository struct {
+	*memoryFUSEPoolRepository
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingAfterReturnRepository) ReturnPreparedWithAdmission(ctx context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*state.FUSEPoolRecord, error) {
+	returned, err := r.memoryFUSEPoolRepository.ReturnPreparedWithAdmission(ctx, preparationID, reservationToken, expectedRevision, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	close(r.entered)
+	<-r.release
+	return returned, nil
+}
+
+type blockingAfterTransitionRepository struct {
+	*memoryFUSEPoolRepository
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingAfterTransitionRepository) TransitionWithRefillLock(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*state.FUSEPoolRecord, error) {
+	transitioned, err := r.memoryFUSEPoolRepository.TransitionWithRefillLock(ctx, preparationID, from, to, token, refillToken, expectedRevision, reservationTTL)
+	if err != nil {
+		return nil, err
+	}
+	close(r.entered)
+	<-r.release
+	return transitioned, nil
+}
 
 func fixedFUSESpec(poolKey string) runtime.SandboxSpec {
 	return runtime.SandboxSpec{
@@ -927,6 +1007,196 @@ func TestFUSEPoolReturnAtCapacityDestroysReservation(t *testing.T) {
 	assert.LessOrEqual(t, repo.countPreparingAndPrepared("pool-key"), 1)
 }
 
+func TestFUSEPoolCompensatesFinalPublicationOutcomes(t *testing.T) {
+	networkErr := errors.New("redis reply lost after commit")
+	newReserved := func(repo *memoryFUSEPoolRepository) state.FUSEPoolRecord {
+		return state.FUSEPoolRecord{
+			PreparationID: "preparation-a", RuntimeID: "runtime-a", RuntimeUID: "uid-a", PoolKey: "pool-key",
+			State: state.FUSEPoolReserved, MaintainerToken: "api-a", ReservationToken: "reservation-a",
+			ReservedUntil: repo.now.Add(time.Minute), PrepareUntil: repo.now.Add(time.Minute), UpdatedAt: repo.now, Revision: 3,
+		}
+	}
+
+	t.Run("return", func(t *testing.T) {
+		rt := newFUSEMockRuntime()
+		repo := newMemoryFUSEPoolRepository()
+		record := newReserved(repo)
+		repo.seed(record)
+		rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+		repo.failNextAfterCommit("ReturnPreparedWithAdmission", networkErr)
+		cfg := fusePoolConfig()
+		cfg.MinSize = 0
+		pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+		err := pool.ReturnPrepared(context.Background(), record)
+		require.ErrorIs(t, err, networkErr)
+		_, exists := repo.record(record.PreparationID)
+		assert.False(t, exists)
+		assert.True(t, rt.wasRemoved(record.RuntimeID))
+	})
+
+	t.Run("inspection", func(t *testing.T) {
+		rt := newFUSEMockRuntime()
+		repo := newMemoryFUSEPoolRepository()
+		record := newReserved(repo)
+		record.State, record.ReservationToken, record.ReservedUntil, record.Revision = state.FUSEPoolPrepared, "", time.Time{}, 2
+		repo.seed(record)
+		rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+		repo.failNextAfterCommit("ReturnPreparedWithAdmission", networkErr)
+		cfg := fusePoolConfig()
+		cfg.MinSize = 0
+		pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+		err := pool.Reconcile(context.Background())
+		require.ErrorIs(t, err, networkErr)
+		_, exists := repo.record(record.PreparationID)
+		assert.False(t, exists)
+		assert.True(t, rt.wasRemoved(record.RuntimeID))
+	})
+
+	t.Run("warm publish", func(t *testing.T) {
+		rt := newFUSEMockRuntime()
+		repo := newMemoryFUSEPoolRepository()
+		repo.failNextAfterCommit("TransitionWithRefillLock", networkErr)
+		cfg := fusePoolConfig()
+		cfg.MinSize, cfg.MaxSize = 1, 1
+		pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+		err := pool.WarmUp(context.Background())
+		require.ErrorIs(t, err, networkErr)
+		records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+		require.NoError(t, listErr)
+		assert.Empty(t, records)
+		assert.True(t, rt.wasRemoved("prepared-runtime-1"))
+	})
+
+	t.Run("cold publish", func(t *testing.T) {
+		rt := newFUSEMockRuntime()
+		repo := newMemoryFUSEPoolRepository()
+		repo.failNextAfterCommit("TransitionWithRefillLock", networkErr)
+		cfg := fusePoolConfig()
+		cfg.MinSize, cfg.MaxSize = 0, 1
+		pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+		record, err := pool.Acquire(context.Background(), "pool-key")
+		assert.Nil(t, record)
+		require.ErrorIs(t, err, networkErr)
+		records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+		require.NoError(t, listErr)
+		assert.Empty(t, records)
+		assert.True(t, rt.wasRemoved("prepared-runtime-1"))
+	})
+
+	t.Run("warm publish not committed", func(t *testing.T) {
+		rt := newFUSEMockRuntime()
+		repo := newMemoryFUSEPoolRepository()
+		repo.failNext("TransitionWithRefillLock", networkErr)
+		cfg := fusePoolConfig()
+		cfg.MinSize, cfg.MaxSize = 1, 1
+		pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+		err := pool.WarmUp(context.Background())
+		require.ErrorIs(t, err, networkErr)
+		records, listErr := repo.ListByPoolKey(context.Background(), "pool-key")
+		require.NoError(t, listErr)
+		assert.Empty(t, records, "exact before-state compensation must clean an uncommitted publication")
+		assert.True(t, rt.wasRemoved("prepared-runtime-1"))
+	})
+}
+
+func TestFUSEPoolPublicationCompensationNeverDeletesAdvancedAcquire(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	base := newMemoryFUSEPoolRepository()
+	record := state.FUSEPoolRecord{
+		PreparationID: "preparation-a", RuntimeID: "runtime-a", RuntimeUID: "uid-a", PoolKey: "pool-key",
+		State: state.FUSEPoolReserved, MaintainerToken: "api-a", ReservationToken: "reservation-a",
+		ReservedUntil: base.now.Add(time.Minute), PrepareUntil: base.now.Add(time.Minute), UpdatedAt: base.now, Revision: 3,
+	}
+	base.seed(record)
+	rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	replyErr := errors.New("reply lost after next owner acquired")
+	repo := &advancingAfterReturnRepository{memoryFUSEPoolRepository: base, err: replyErr}
+	cfg := fusePoolConfig()
+	cfg.MinSize = 0
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+	err := pool.ReturnPrepared(context.Background(), record)
+	require.ErrorIs(t, err, replyErr)
+	require.NotNil(t, repo.advanced)
+	current, exists := base.record(record.PreparationID)
+	require.True(t, exists)
+	assert.Equal(t, state.FUSEPoolReserved, current.State)
+	assert.Equal(t, "next-owner", current.ReservationToken)
+	assert.False(t, rt.wasRemoved(record.RuntimeID), "failed exact compensation must not delete the next owner's runtime")
+}
+
+func TestFUSEPoolStopAfterReturnCommitCompensatesPublishedRecord(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	base := newMemoryFUSEPoolRepository()
+	record := state.FUSEPoolRecord{
+		PreparationID: "preparation-a", RuntimeID: "runtime-a", RuntimeUID: "uid-a", PoolKey: "pool-key",
+		State: state.FUSEPoolReserved, MaintainerToken: "api-a", ReservationToken: "reservation-a",
+		ReservedUntil: base.now.Add(time.Minute), PrepareUntil: base.now.Add(time.Minute), UpdatedAt: base.now, Revision: 3,
+	}
+	base.seed(record)
+	rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	repo := &blockingAfterReturnRepository{memoryFUSEPoolRepository: base, entered: make(chan struct{}), release: make(chan struct{})}
+	cfg := fusePoolConfig()
+	cfg.MinSize = 0
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+	returned := make(chan error, 1)
+	go func() { returned <- pool.ReturnPrepared(context.Background(), record) }()
+	<-repo.entered
+	stopped := make(chan error, 1)
+	go func() { stopped <- pool.Stop(context.Background()) }()
+	require.Eventually(t, func() bool {
+		pool.lifecycleMu.Lock()
+		defer pool.lifecycleMu.Unlock()
+		return pool.stopping
+	}, time.Second, time.Millisecond)
+	close(repo.release)
+	require.ErrorIs(t, <-returned, ErrFUSEPoolStopped)
+	require.NoError(t, <-stopped)
+	_, exists := base.record(record.PreparationID)
+	assert.False(t, exists)
+	assert.True(t, rt.wasRemoved(record.RuntimeID))
+}
+
+func TestFUSEPoolColdAcquireDoesNotReturnReservationCommittedAfterStop(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	base := newMemoryFUSEPoolRepository()
+	repo := &blockingAfterTransitionRepository{memoryFUSEPoolRepository: base, entered: make(chan struct{}), release: make(chan struct{})}
+	cfg := fusePoolConfig()
+	cfg.MinSize, cfg.MaxSize = 0, 1
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+	type result struct {
+		record *state.FUSEPoolRecord
+		err    error
+	}
+	acquired := make(chan result, 1)
+	go func() {
+		record, err := pool.Acquire(context.Background(), "pool-key")
+		acquired <- result{record: record, err: err}
+	}()
+	<-repo.entered
+	stopped := make(chan error, 1)
+	go func() { stopped <- pool.Stop(context.Background()) }()
+	require.Eventually(t, func() bool {
+		pool.lifecycleMu.Lock()
+		defer pool.lifecycleMu.Unlock()
+		return pool.stopping
+	}, time.Second, time.Millisecond)
+	close(repo.release)
+	got := <-acquired
+	assert.Nil(t, got.record)
+	require.ErrorIs(t, got.err, ErrFUSEPoolStopped)
+	require.NoError(t, <-stopped)
+	records, err := base.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	assert.Empty(t, records)
+	assert.True(t, rt.wasRemoved("prepared-runtime-1"))
+}
+
 func TestFUSEPoolExpiredPreparingRequiresDeletableDisposition(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -1188,6 +1458,42 @@ func TestFUSEPoolDrainAndStopAreScoped(t *testing.T) {
 	assert.False(t, ownPrepared)
 	assert.True(t, otherPrepared)
 	assert.True(t, ownReserved)
+}
+
+func TestFUSEPoolStopRetainsProtectedAndUnknownOwnedRecords(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	now := repo.now
+	records := []state.FUSEPoolRecord{
+		{PreparationID: "protected", RuntimeID: "protected", RuntimeUID: "uid-protected", PoolKey: "pool-key", State: state.FUSEPoolPrepared, MaintainerToken: "api-a", UpdatedAt: now, Revision: 2},
+		{PreparationID: "unknown", RuntimeID: "unknown", RuntimeUID: "uid-unknown", PoolKey: "pool-key", State: state.FUSEPoolPreparing, MaintainerToken: "api-a", PrepareUntil: now.Add(time.Minute), UpdatedAt: now, Revision: 1},
+		{PreparationID: "other", RuntimeID: "other", RuntimeUID: "uid-other", PoolKey: "pool-key", State: state.FUSEPoolPrepared, MaintainerToken: "api-b", UpdatedAt: now, Revision: 2},
+	}
+	repo.seed(records...)
+	for _, record := range records {
+		rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	}
+	cfg := fusePoolConfig()
+	cfg.PristineGuard = func(_ context.Context, record state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
+		switch record.PreparationID {
+		case "protected":
+			return FUSEPoolProtected, nil
+		case "unknown":
+			return FUSEPoolDispositionUnknown, errors.New("owner lookup unavailable")
+		default:
+			return FUSEPoolPristine, nil
+		}
+	}
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+	err := pool.Stop(context.Background())
+	require.ErrorIs(t, err, ErrFUSEPoolProtected)
+	require.ErrorIs(t, err, ErrFUSEPoolReturnUnproven)
+	for _, record := range records {
+		_, exists := repo.record(record.PreparationID)
+		assert.True(t, exists, record.PreparationID)
+		assert.False(t, rt.wasRemoved(record.RuntimeID), record.PreparationID)
+	}
 }
 
 func TestFUSEPoolStopCancelsInFlightRefill(t *testing.T) {

@@ -470,7 +470,7 @@ spec:
 
 全新空 prefix 挂载前，控制面必须在获得独占租约后调用 `PrepareWorkspacePrefix`，对上述精确 prefix 写入 provider profile 已验证的零字节目录标记并用直接对象 API 验证。现有 `goairix/fs` v0.3.11 的 MinIO/OBS `MakeDir` 是 no-op，不能作为成功依据。根标记在 sandbox 销毁后保留，只随显式 workspace 删除流程清理；对应 profile 没有通过“全新空 prefix”测试时禁止启用 FUSE。
 
-Redis FUSE Pool record 带不可复用 `PreparationID`、单调 `revision`、Redis 服务时间生成的 `PrepareUntil/ReservedUntil/CleanupUntil`；transition、cleanup claim 和 delete 都必须同时匹配预期 state、token 与 revision。cold prepare 先登记无 reservation 的 `preparing` 容量意图，runtime health 通过后才在受 refill lock fencing 的 Lua 中从当前 Redis 时间开始 reservation TTL 并直接 CAS 到 `reserved`，绝不能短暂发布成可被其他副本领取的 `prepared`。任何 runtime 删除前必须先取得 `cleanup` claim；旧 prepared 快照与 Acquire 并发时只能 CAS 失败，不能先删除新 reserved runtime。runtime identity 在 intent-only cleanup claim 之后才返回时，相同 cleanup token 在一个 Lua 中补全 record、record UID 映射和全局 RuntimeUID owner 索引；失败的 runtime 删除留下可读取、可接管的 cleanup tombstone。生产接口不提供从 live state 直接物理删 record 的捷径。SessionStore 使用独立 `sandbox:session:v2:` 前缀；lease、owner、generation 和 pool key 均使用各自命名空间，恢复扫描不能把它们当作 session JSON。
+Redis FUSE Pool record 带不可复用 `PreparationID`、单调 `revision`、Redis 服务时间生成的 `PrepareUntil/ReservedUntil/CleanupUntil`；transition、cleanup claim 和 delete 都必须同时匹配预期 state、token 与 revision。cold prepare 先登记无 reservation 的 `preparing` 容量意图，runtime health 通过后才在受 refill lock fencing 的 Lua 中从当前 Redis 时间开始 reservation TTL 并直接 CAS 到 `reserved`，绝不能短暂发布成可被其他副本领取的 `prepared`。final publication 回复发生网络错误，或成功后立即观察到 Stop/cancellation 时，控制器先 claim 本次唯一可能的 exact after 版本，再 claim exact before 版本做补偿；若另一个 Acquire 已推进 revision/token，补偿 CAS 失败且绝不能删它的 runtime。cold reservation 完成该 post-check 前不能返回调用方。任何 runtime 删除前必须先取得 `cleanup` claim；旧 prepared 快照与 Acquire 并发时只能 CAS 失败，不能先删除新 reserved runtime。runtime identity 在 intent-only cleanup claim 之后才返回时，相同 cleanup token 在一个 Lua 中补全 record、record UID 映射和全局 RuntimeUID owner 索引；失败的 runtime 删除留下可读取、可接管的 cleanup tombstone。生产接口不提供从 live state 直接物理删 record 的捷径。SessionStore 使用独立 `sandbox:session:v2:` 前缀；lease、owner、generation 和 pool key 均使用各自命名空间，恢复扫描不能把它们当作 session JSON。
 
 mounter 必须预创建 `/var/cache/s3fs/tmp`（以及启用文件 cache 时的 `/var/cache/s3fs/cache`），固定 argv 至少包含 `tmpdir=/var/cache/s3fs/tmp`；不得使用默认 `/tmp`。启用 `use_cache` 时必须指向 `/var/cache/s3fs/cache`，确保 `emptyDir.sizeLimit` 和 ephemeral-storage 监控覆盖 s3fs 的全部本地数据。
 
@@ -863,7 +863,7 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - [ ] FUSE 模式 Redis/reconcile/WarmUp 失败会阻止 HTTP 服务监听。
 - [ ] 1 GiB direct upload 端到端流式通过，非上传路由仍在 64 MiB 返回 413，API 内存不随文件大小线性增长。
 - [ ] AppArmor/SELinux 使用明确的非 unconfined profile；用户进程 mount 负向测试失败、可信 supervisor 正向测试成功。
-- [ ] 多副本同时补池时，全局 `preparing + prepared` 不超过 `maxSize`；单副本停止只 Drain 带自身 ownership token 的未绑定空壳。
+- [ ] 多副本同时补池时，全局 `preparing + prepared` 不超过 `maxSize`；单副本停止只考虑带自身 ownership token 的 preparing/prepared 空壳，且 guard 为 Protected/Unknown/错误时保留并报告未完全 Drain，绝不删除其他 maintainer 或已进入 reserved/binding/consumed 的实例。
 - [ ] prepared 空壳已启动基础容器，但没有 s3fs、workspace mount、owner/lease 或开放的 Exec/file gate。
 - [ ] prepared 空壳不创建用户 session，不出现在公共 list/get 响应中，公共 API 无法凭 runtime ID 绕过 gate。
 - [ ] 授权前失败只有 pristine probe 通过才可归还空壳；授权后成功、失败或取消都销毁实例并补池。

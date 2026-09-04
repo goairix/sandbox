@@ -348,12 +348,16 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 	if err := opCtx.Err(); err != nil {
 		return err
 	}
-	_, err = p.repo.ReturnPreparedWithAdmission(opCtx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
+	returned, err := p.repo.ReturnPreparedWithAdmission(opCtx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
 	if err != nil {
+		compensationErr := p.compensatePublication(record, expectedPublication(record, state.FUSEPoolPrepared, ""))
 		if errors.Is(err, state.ErrFUSEPoolConflict) {
-			return errors.Join(ErrFUSEPoolAtCapacity, p.claimAndDestroy(opCtx, record))
+			return errors.Join(ErrFUSEPoolAtCapacity, compensationErr)
 		}
-		return fmt.Errorf("return FUSE sandbox to prepared: %w", err)
+		return errors.Join(fmt.Errorf("return FUSE sandbox to prepared: %w", err), compensationErr)
+	}
+	if stopErr := p.publicationStopError(opCtx); stopErr != nil {
+		return errors.Join(stopErr, p.compensatePublication(record, *returned))
 	}
 	return nil
 }
@@ -549,14 +553,18 @@ func (p *FUSEPool) inspectPrepared(ctx context.Context) error {
 		}
 	}
 	for _, record := range verified {
-		_, err := p.repo.ReturnPreparedWithAdmission(ctx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
+		returned, err := p.repo.ReturnPreparedWithAdmission(ctx, record.PreparationID, record.ReservationToken, record.Revision, p.config.MaxSize)
 		if err != nil {
+			compensationErr := p.compensatePublication(record, expectedPublication(record, state.FUSEPoolPrepared, ""))
 			if errors.Is(err, state.ErrFUSEPoolConflict) {
-				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+				result = errors.Join(result, compensationErr)
 			} else {
-				result = errors.Join(result, err)
+				result = errors.Join(result, err, compensationErr)
 			}
 			continue
+		}
+		if stopErr := p.publicationStopError(ctx); stopErr != nil {
+			result = errors.Join(result, stopErr, p.compensatePublication(record, *returned))
 		}
 	}
 	return result
@@ -574,7 +582,15 @@ func (p *FUSEPool) Drain(ctx context.Context, poolKey string) error {
 	var result error
 	for _, record := range records {
 		if record.State == state.FUSEPoolPrepared {
-			result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			disposition, guardErr := p.guard(ctx, record)
+			switch disposition {
+			case FUSEPoolPristine, FUSEPoolAbandoned:
+				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			case FUSEPoolProtected:
+				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+			default:
+				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+			}
 		}
 	}
 	return result
@@ -623,7 +639,15 @@ func (p *FUSEPool) drainOwned(ctx context.Context) error {
 	var result error
 	for _, record := range records {
 		if record.MaintainerToken == p.config.MaintainerToken && (record.State == state.FUSEPoolPreparing || record.State == state.FUSEPoolPrepared) {
-			result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			disposition, guardErr := p.guard(ctx, record)
+			switch disposition {
+			case FUSEPoolPristine, FUSEPoolAbandoned:
+				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			case FUSEPoolProtected:
+				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+			default:
+				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+			}
 		}
 	}
 	return result
@@ -715,10 +739,59 @@ func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken
 	}
 	transitioned, err := p.repo.TransitionWithRefillLock(prepareCtx, record.PreparationID, state.FUSEPoolPreparing, to, token, refillToken, record.Revision, reserveTTL)
 	if err != nil {
-		cleanupErr := p.claimAndDestroyWithCleanupContext(record)
+		cleanupErr := p.compensatePublication(record, expectedPublication(record, to, token))
 		return nil, errors.Join(fmt.Errorf("publish prepared FUSE sandbox: %w", err), cleanupErr)
 	}
+	if stopErr := p.publicationStopError(prepareCtx); stopErr != nil {
+		return nil, errors.Join(stopErr, p.compensatePublication(record, *transitioned))
+	}
 	return transitioned, nil
+}
+
+// expectedPublication describes the only revision/state/token result that the
+// attempted transition can have committed. Server-authored timestamps are not
+// used as deletion authority; ClaimCleanup validates the stored record and its
+// deadline indexes while CAS-fencing this exact revision and token tuple.
+func expectedPublication(before state.FUSEPoolRecord, to state.FUSEPoolState, token string) state.FUSEPoolRecord {
+	after := before
+	after.State = to
+	after.Revision++
+	switch {
+	case before.State == state.FUSEPoolPreparing && to == state.FUSEPoolReserved:
+		after.ReservationToken = token
+	case before.State == state.FUSEPoolReserved && to == state.FUSEPoolPrepared:
+		after.ReservationToken = ""
+		after.ReservedUntil = time.Time{}
+	}
+	return after
+}
+
+// compensatePublication handles both outcomes of an uncertain Redis reply. It
+// first claims the exact possible committed revision, then the exact pre-state.
+// A later Acquire/transition changes revision or token and fences both claims,
+// so this path can never delete a runtime now owned by another operation.
+func (p *FUSEPool) compensatePublication(before, possibleAfter state.FUSEPoolRecord) error {
+	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
+	defer cancel()
+	afterErr := p.claimAndDestroy(ctx, possibleAfter)
+	if afterErr == nil || !isStalePoolMutation(afterErr) {
+		return afterErr
+	}
+	beforeErr := p.claimAndDestroy(ctx, before)
+	if beforeErr == nil {
+		return nil
+	}
+	return errors.Join(afterErr, beforeErr)
+}
+
+func (p *FUSEPool) publicationStopError(ctx context.Context) error {
+	p.lifecycleMu.Lock()
+	stopping := p.stopping || p.stopped
+	p.lifecycleMu.Unlock()
+	if stopping {
+		return ErrFUSEPoolStopped
+	}
+	return ctx.Err()
 }
 
 func (p *FUSEPool) claimAndDestroyWithCleanupContext(record state.FUSEPoolRecord) error {
