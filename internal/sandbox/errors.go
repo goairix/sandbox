@@ -8,6 +8,9 @@ var (
 	// ErrSandboxNotFound is returned when a sandbox ID does not exist.
 	ErrSandboxNotFound = errors.New("sandbox not found")
 
+	// ErrSandboxNotReady is returned when the sandbox operation gate is closed.
+	ErrSandboxNotReady = errors.New("sandbox not ready")
+
 	// ErrWorkspaceAlreadyMounted is returned when a workspace is already
 	// mounted for a sandbox.
 	ErrWorkspaceAlreadyMounted = errors.New("workspace already mounted")
