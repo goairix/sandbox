@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -27,10 +28,23 @@ type mockRuntime struct {
 	execStreamFunc func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
 	createdSpec    runtime.SandboxSpec
 	uploadSize     int64
+	prepareSeq     int
+	prepareErr     error
+	prepareEntered chan struct{}
+	prepareRelease chan struct{}
+	prepareSignal  sync.Once
+	healthFailures map[string]error
+	removeFailures map[string]error
+	removedIDs     map[string]int
 }
 
 func newMockRuntime() *mockRuntime {
-	return &mockRuntime{sandboxes: make(map[string]*runtime.SandboxInfo)}
+	return &mockRuntime{
+		sandboxes:      make(map[string]*runtime.SandboxInfo),
+		healthFailures: make(map[string]error),
+		removeFailures: make(map[string]error),
+		removedIDs:     make(map[string]int),
+	}
 }
 
 func (m *mockRuntime) CreateSandbox(_ context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
@@ -61,7 +75,11 @@ func (m *mockRuntime) StopSandbox(_ context.Context, _ string) error  { return n
 func (m *mockRuntime) RemoveSandbox(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.removeFailures[id]; err != nil {
+		return err
+	}
 	m.removed++
+	m.removedIDs[id]++
 	delete(m.sandboxes, id)
 	return nil
 }
@@ -123,7 +141,45 @@ func (m *mockRuntime) UpdateLabels(context.Context, string, map[string]*string) 
 }
 
 func (m *mockRuntime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
-	return m.CreateSandbox(ctx, spec)
+	m.mu.Lock()
+	if m.prepareErr != nil {
+		err := m.prepareErr
+		m.mu.Unlock()
+		return nil, err
+	}
+	entered, release := m.prepareEntered, m.prepareRelease
+	m.mu.Unlock()
+	if entered != nil {
+		m.prepareSignal.Do(func() { close(entered) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	m.mu.Lock()
+	m.prepareSeq++
+	seq := m.prepareSeq
+	m.created++
+	m.createdSpec = spec
+	info := &runtime.SandboxInfo{
+		ID:         spec.ID,
+		RuntimeID:  fmt.Sprintf("prepared-runtime-%d", seq),
+		RuntimeUID: fmt.Sprintf("prepared-uid-%d", seq),
+		State:      "running",
+		CreatedAt:  time.Now(),
+	}
+	m.sandboxes[info.RuntimeID] = info
+	m.mu.Unlock()
+	return info, nil
+}
+
+func (m *mockRuntime) blockPrepare() (<-chan struct{}, chan<- struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.prepareEntered = make(chan struct{})
+	m.prepareRelease = make(chan struct{})
+	return m.prepareEntered, m.prepareRelease
 }
 
 func (m *mockRuntime) AuthorizeWorkspaceMount(context.Context, string, runtime.WorkspaceMountAuthorization) error {
@@ -134,8 +190,34 @@ func (m *mockRuntime) WaitSandboxReady(context.Context, string) (*runtime.Sandbo
 	return &runtime.SandboxInfo{State: "running"}, nil
 }
 
-func (m *mockRuntime) PreparedSandboxHealth(context.Context, string, string) error {
-	return nil
+func (m *mockRuntime) PreparedSandboxHealth(_ context.Context, id, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.healthFailures[id]
+}
+
+func (m *mockRuntime) failPreparedHealth(id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.healthFailures[id] = err
+}
+
+func (m *mockRuntime) failRemove(id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeFailures[id] = err
+}
+
+func (m *mockRuntime) wasRemoved(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.removedIDs[id] > 0
+}
+
+func (m *mockRuntime) prepareCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.prepareSeq
 }
 
 func (m *mockRuntime) WorkspaceHealth(context.Context, string) (*runtime.WorkspaceHealth, error) {

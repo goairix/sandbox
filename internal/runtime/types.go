@@ -78,24 +78,42 @@ type SandboxSpec struct {
 // WorkspaceFUSESpec contains only configuration fixed at sandbox preparation
 // time. It deliberately excludes workspace prefixes and lease generations.
 type WorkspaceFUSESpec struct {
+	RuntimeType     string
 	Provider        string
 	Driver          string
 	Profile         string
 	StorageIdentity string
-	MounterImage    string
-	SecretName      string
-	CASecretKey     string
-	EndpointHostIPs []string
-	Bucket          string
-	Endpoint        string
-	Region          string
-	UseSSL          bool
-	CacheSize       string
-	MountTimeout    time.Duration
-	FlushTimeout    time.Duration
-	LSMProfile      string
-	SystemEgress    SystemEgressSpec
-	PoolKey         string
+	// CredentialGeneration is a non-secret operator-maintained version. It is
+	// part of the pool identity so credential rotations cannot reuse old shells.
+	CredentialGeneration string
+	MounterImage         string
+	SecretName           string
+	CASecretKey          string
+	EndpointHostIPs      []string
+	Bucket               string
+	Endpoint             string
+	Region               string
+	UseSSL               bool
+	CacheSize            string
+	CacheMedium          string
+	MountTimeout         time.Duration
+	FlushTimeout         time.Duration
+	LSMProfile           string
+	MounterResources     WorkspaceFUSEResources
+	SystemEgress         SystemEgressSpec
+	PoolKey              string
+}
+
+// WorkspaceFUSEResources contains the fixed resource requests and limits used
+// by the trusted mounter. Runtime renderers consume these values directly from
+// the prepared spec rather than consulting mutable global configuration.
+type WorkspaceFUSEResources struct {
+	CPURequest              string
+	CPULimit                string
+	MemoryRequest           string
+	MemoryLimit             string
+	EphemeralStorageRequest string
+	EphemeralStorageLimit   string
 }
 
 // SystemEgressMode selects the runtime-specific system egress policy shape.

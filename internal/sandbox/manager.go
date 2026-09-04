@@ -62,6 +62,8 @@ func multipartKey(sandboxID, uploadID string) string {
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
 	PoolConfig              PoolConfig
+	WorkspaceMode           string
+	FUSEPool                *FUSEPool
 	DefaultTimeout          int // seconds
 	ExecTimeoutSeconds      int // per-execution timeout; 0 = no limit
 	MaxExecTimeoutSeconds   int // maximum request timeout; 0 = no additional maximum
@@ -78,12 +80,14 @@ type Manager struct {
 	multipartStore state.Store   // optional, for multipart upload state
 
 	pool       *Pool
+	fusePool   *FUSEPool
 	sandboxes  map[string]*Sandbox
 	workspaces map[string]storage.ScopedFS // sandbox ID -> ScopedFS
 	mu         sync.RWMutex
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewManager creates a new SandboxManager.
@@ -94,6 +98,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		fsMeta:     fsMeta,
 		config:     cfg,
 		pool:       NewPool(rt, cfg.PoolConfig),
+		fusePool:   cfg.FUSEPool,
 		sandboxes:  make(map[string]*Sandbox),
 		workspaces: make(map[string]storage.ScopedFS),
 		stopCh:     make(chan struct{}),
@@ -176,16 +181,28 @@ func (m *Manager) SetMultipartStore(s state.Store) {
 // Start initializes the manager and warms up the pool.
 // It first removes any orphaned pool containers left over from a previous
 // process that exited without cleanup (e.g. crash, SIGKILL).
-func (m *Manager) Start(ctx context.Context) {
+func (m *Manager) Start(ctx context.Context) error {
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Start")
 	defer span.End()
 
-	if m.runtime.IsStateful() {
+	if m.config.WorkspaceMode == "fuse" {
+		if m.fusePool == nil {
+			return errors.Join(ErrInvalidFUSEPoolConfig, errors.New("FUSE mode requires a FUSE pool"))
+		}
+		if err := m.restorePersistentSandboxes(spanCtx); err != nil {
+			return fmt.Errorf("restore persistent sandboxes for FUSE mode: %w", err)
+		}
+		if err := m.fusePool.Start(spanCtx); err != nil {
+			return fmt.Errorf("start FUSE pool: %w", err)
+		}
+	} else if m.runtime.IsStateful() {
 		// Stateful runtimes (e.g. Kubernetes): pods survive process restarts, so
 		// we must restore persistent sandboxes synchronously first. This registers
 		// their RuntimeIDs in m.sandboxes before cleanupOrphanedPoolContainers
 		// runs, preventing live pods from being mistakenly deleted as orphans.
-		m.restorePersistentSandboxes(spanCtx)
+		if err := m.restorePersistentSandboxes(spanCtx); err != nil {
+			logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
+		}
 		m.cleanupOrphanedPoolContainers(spanCtx)
 		m.pool.WarmUp(spanCtx)
 	} else {
@@ -197,7 +214,9 @@ func (m *Manager) Start(ctx context.Context) {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.restorePersistentSandboxes(spanCtx)
+			if err := m.restorePersistentSandboxes(spanCtx); err != nil {
+				logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
+			}
 		}()
 	}
 
@@ -208,6 +227,7 @@ func (m *Manager) Start(ctx context.Context) {
 		m.wg.Add(1)
 		go m.autoSyncWorkspaces()
 	}
+	return nil
 }
 
 // Stop drains the pool and cleans up.
@@ -215,9 +235,14 @@ func (m *Manager) Stop(ctx context.Context) {
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
 	defer span.End()
 
-	close(m.stopCh)
-	m.wg.Wait()
-	m.pool.Drain(spanCtx)
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+		if m.fusePool != nil {
+			_ = m.fusePool.Stop(spanCtx)
+		}
+		m.wg.Wait()
+		m.pool.Drain(spanCtx)
+	})
 }
 
 // Create creates a new sandbox.
@@ -1155,18 +1180,18 @@ func (m *Manager) autoSyncOnce() {
 // restorePersistentSandboxes reloads all persistent sandboxes from the session
 // store at startup. If a container is gone, it recreates the container and
 // re-syncs the workspace.
-func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
+func (m *Manager) restorePersistentSandboxes(ctx context.Context) error {
 	if m.sessions == nil {
-		return
+		return nil
 	}
 
 	ids, err := m.sessions.List(ctx)
 	if err != nil {
-		logger.Error(ctx, "failed to list persistent sandboxes", logger.ErrorField(err))
-		return
+		return fmt.Errorf("list persistent sandboxes: %w", err)
 	}
 
 	var restored, recreated, failed int
+	var restoreErr error
 	for _, id := range ids {
 		sbPtr, err := m.sessions.Load(ctx, id)
 		if err != nil {
@@ -1175,6 +1200,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 				logger.ErrorField(err),
 			)
 			failed++
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("load persistent sandbox %q: %w", id, err))
 			metrics.RecordSessionRestore(ctx, "error")
 			continue
 		}
@@ -1193,15 +1219,20 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 					logger.AddField("sandbox_id", id),
 					logger.ErrorField(recreateErr),
 				)
-				_ = m.sessions.Remove(ctx, id)
+				if removeErr := m.sessions.Remove(ctx, id); removeErr != nil {
+					restoreErr = errors.Join(restoreErr, fmt.Errorf("remove unrecoverable persistent sandbox %q: %w", id, removeErr))
+				}
 				failed++
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("recreate persistent sandbox %q: %w", id, recreateErr))
 				metrics.RecordSessionRestore(ctx, "error")
 				continue
 			}
 			sbPtr.RuntimeID = newInfo.RuntimeID
 			sbPtr.State = StateReady
 			sbPtr.UpdatedAt = time.Now()
-			_ = m.sessions.Save(ctx, sbPtr)
+			if saveErr := m.sessions.Save(ctx, sbPtr); saveErr != nil {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("save recreated persistent sandbox %q: %w", id, saveErr))
+			}
 			recreated++
 		}
 
@@ -1221,6 +1252,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 							logger.AddField("runtime_id", sbPtr.RuntimeID),
 							logger.ErrorField(syncErr),
 						)
+						restoreErr = errors.Join(restoreErr, fmt.Errorf("restore workspace for sandbox %q: %w", id, syncErr))
 					}
 				}
 			} else {
@@ -1228,6 +1260,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 					logger.AddField("sandbox_id", id),
 					logger.ErrorField(fsErr),
 				)
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("restore scoped workspace for sandbox %q: %w", id, fsErr))
 			}
 		}
 
@@ -1243,6 +1276,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 			logger.AddField("failed", failed),
 		)
 	}
+	return restoreErr
 }
 
 // recreateSandbox creates a new container for a persistent sandbox whose

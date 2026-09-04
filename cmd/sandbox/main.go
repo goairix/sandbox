@@ -132,7 +132,9 @@ func main() {
 		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
 	}
 
-	mgr.Start(ctx)
+	if err = mgr.Start(ctx); err != nil {
+		log.Fatalf("failed to start sandbox manager: %v", err)
+	}
 
 	h := handler.NewHandler(mgr)
 	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit, cfg.Telemetry.ServiceName)
