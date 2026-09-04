@@ -354,6 +354,11 @@ func TestCreatePodPreparedFUSEValidatesEndpointWithoutEchoingIt(t *testing.T) {
 			spec.WorkspaceFUSE.Provider = tt.provider
 			spec.WorkspaceFUSE.Endpoint = tt.endpoint
 			spec.WorkspaceFUSE.EndpointHostIPs = tt.aliases
+			if strings.HasSuffix(tt.endpoint, ":") {
+				// Make the policy match the scheme default so the endpoint parser,
+				// rather than an unrelated port-policy mismatch, must reject it.
+				spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443}
+			}
 			_, err := createPod(context.Background(), client, "sandbox-runtime", spec)
 			require.Error(t, err)
 			assert.NotContains(t, err.Error(), tt.endpoint)

@@ -591,7 +591,7 @@ func validateFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, bool
 			err = fmt.Errorf("scheme mismatch")
 		}
 	}
-	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	if err != nil || parsed == nil || parsed.Host == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
 	}
 	hostname := parsed.Hostname()
