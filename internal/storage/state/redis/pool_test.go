@@ -43,7 +43,7 @@ func cleanupFUSEPool(t *testing.T, s *Store, poolKeys, runtimeUIDs []string) {
 				}
 				pipe.Del(ctx, keys...)
 				pipe.HDel(ctx, "fusepool:pool-counts", digest)
-				pipe.HDel(ctx, "fusepool:pool-versions", digest)
+				pipe.HDel(ctx, "fusepool:membership-generations", digest)
 			}
 			for _, runtimeUID := range runtimeUIDs {
 				digest := poolTestDigest(runtimeUID)
@@ -113,6 +113,49 @@ func (h *delayScriptHook) ProcessHook(next redisclient.ProcessHook) redisclient.
 
 func (h *delayScriptHook) ProcessPipelineHook(next redisclient.ProcessPipelineHook) redisclient.ProcessPipelineHook {
 	return next
+}
+
+type sscanActionHook struct {
+	mu     sync.Mutex
+	action func() error
+	once   bool
+	done   bool
+	err    error
+	calls  atomic.Int32
+}
+
+func (h *sscanActionHook) DialHook(next redisclient.DialHook) redisclient.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) { return next(ctx, network, addr) }
+}
+
+func (h *sscanActionHook) ProcessHook(next redisclient.ProcessHook) redisclient.ProcessHook {
+	return func(ctx context.Context, cmd redisclient.Cmder) error {
+		if err := next(ctx, cmd); err != nil {
+			return err
+		}
+		if !strings.EqualFold(cmd.Name(), "sscan") {
+			return nil
+		}
+		h.calls.Add(1)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.err != nil || (h.once && h.done) {
+			return nil
+		}
+		h.done = true
+		h.err = h.action()
+		return nil
+	}
+}
+
+func (h *sscanActionHook) ProcessPipelineHook(next redisclient.ProcessPipelineHook) redisclient.ProcessPipelineHook {
+	return next
+}
+
+func (h *sscanActionHook) actionError() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
 }
 
 func preparingRecord(poolKey, runtimeUID string) state.FUSEPoolRecord {
@@ -383,22 +426,28 @@ func TestFUSEPoolStateIndexesFollowEveryMutation(t *testing.T) {
 	record := preparingRecord(poolKey, runtimeUID)
 	require.NoError(t, repo.CreatePreparing(context.Background(), record))
 	assertState(state.FUSEPoolPreparing, true)
+	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	prepared, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolPreparing, state.FUSEPoolPrepared, record.MaintainerToken, 1)
 	require.NoError(t, err)
 	assertState(state.FUSEPoolPrepared, true)
+	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
 	require.NoError(t, err)
 	assertState(state.FUSEPoolReserved, true)
+	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	binding, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolReserved, state.FUSEPoolBinding, "reservation", reserved.Revision)
 	require.NoError(t, err)
 	assertState(state.FUSEPoolBinding, true)
+	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	consumed, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolBinding, state.FUSEPoolConsumed, "reservation", binding.Revision)
 	require.NoError(t, err)
 	assertState(state.FUSEPoolConsumed, true)
+	assert.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	deleted, err := repo.ConditionalDelete(context.Background(), runtimeUID, consumed.State, consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision)
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assertState("", false)
+	assert.Equal(t, "2", s.client.HGet(context.Background(), "fusepool:membership-generations", digest).Val())
 	assert.Equal(t, prepared.Revision+3, consumed.Revision)
 }
 
@@ -606,34 +655,105 @@ func TestFUSEPoolListUsesIncrementalSSCAN(t *testing.T) {
 	assert.Less(t, hook.max.Load(), int32(records))
 }
 
-func TestFUSEPoolVersionOverflowCannotLeavePartialMutation(t *testing.T) {
+func TestFUSEPoolListSucceedsDuringDeterministicStateChurn(t *testing.T) {
 	skipIfNoRedis(t)
-	s := testStore(t)
-	repo := NewFUSEPoolRepository(s)
-	poolKey, runtimeUID := poolTestID("pool"), poolTestID("uid")
-	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
-	prepared := prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
-	poolDigest, uidDigest := poolTestDigest(poolKey), poolTestDigest(runtimeUID)
-	recordKey := "fusepool:record:" + uidDigest
-	rawBefore, err := s.client.Get(context.Background(), recordKey).Bytes()
+	listStore, mutationStore := testStore(t), testStore(t)
+	listRepo, mutationRepo := NewFUSEPoolRepository(listStore), NewFUSEPoolRepository(mutationStore)
+	poolKey := poolTestID("pool")
+	const preparingRecords = 140
+	runtimeUIDs := make([]string, 0, preparingRecords+1)
+	for range preparingRecords {
+		runtimeUID := poolTestID("preparing")
+		runtimeUIDs = append(runtimeUIDs, runtimeUID)
+		require.NoError(t, listRepo.CreatePreparing(context.Background(), preparingRecord(poolKey, runtimeUID)))
+	}
+	targetUID := poolTestID("churn")
+	runtimeUIDs = append(runtimeUIDs, targetUID)
+	prepareWarmRecord(t, mutationRepo, preparingRecord(poolKey, targetUID))
+	reserved, err := mutationRepo.ReservePrepared(context.Background(), poolKey, "churn-token", time.Minute)
 	require.NoError(t, err)
-	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-versions", poolDigest, "9223372036854775807").Err())
+	require.NotNil(t, reserved)
+	cleanupFUSEPool(t, listStore, []string{poolKey}, runtimeUIDs)
 
-	_, err = repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
-	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
-	rawAfter, err := s.client.Get(context.Background(), recordKey).Bytes()
+	hook := &sscanActionHook{}
+	hook.action = func() error {
+		returned, transitionErr := mutationRepo.Transition(context.Background(), targetUID, state.FUSEPoolReserved, state.FUSEPoolPrepared, "churn-token", reserved.Revision)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		reserved, transitionErr = mutationRepo.ReservePrepared(context.Background(), poolKey, "churn-token", time.Minute)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if reserved == nil || reserved.Revision != returned.Revision+1 {
+			return fmt.Errorf("state churn did not re-reserve target")
+		}
+		return nil
+	}
+	listStore.client.AddHook(hook)
+	listed, err := listRepo.ListByPoolKey(context.Background(), poolKey)
 	require.NoError(t, err)
-	assert.Equal(t, rawBefore, rawAfter)
-	assert.Equal(t, state.FUSEPoolPrepared, prepared.State)
-	member, err := s.client.SIsMember(context.Background(), "fusepool:state:prepared:"+poolDigest, uidDigest).Result()
-	require.NoError(t, err)
-	assert.True(t, member)
-	member, err = s.client.SIsMember(context.Background(), "fusepool:state:reserved:"+poolDigest, uidDigest).Result()
-	require.NoError(t, err)
-	assert.False(t, member)
+	require.NoError(t, hook.actionError())
+	assert.Len(t, listed, len(runtimeUIDs))
+	assert.Greater(t, hook.calls.Load(), int32(1))
+	got := make(map[string]struct{}, len(listed))
+	for _, record := range listed {
+		got[record.RuntimeUID] = struct{}{}
+	}
+	for _, runtimeUID := range runtimeUIDs {
+		assert.Contains(t, got, runtimeUID)
+	}
 }
 
-func TestFUSEPoolLastSafeVersionIncrementRemainsReadable(t *testing.T) {
+func TestFUSEPoolListRetriesMembershipReplacementWithoutLosingProtectedMembers(t *testing.T) {
+	skipIfNoRedis(t)
+	listStore, mutationStore := testStore(t), testStore(t)
+	listRepo, mutationRepo := NewFUSEPoolRepository(listStore), NewFUSEPoolRepository(mutationStore)
+	poolKey := poolTestID("pool")
+	const records = 140
+	runtimeUIDs := make([]string, 0, records+1)
+	created := make(map[string]state.FUSEPoolRecord, records)
+	for range records {
+		runtimeUID := poolTestID("protected")
+		record := preparingRecord(poolKey, runtimeUID)
+		runtimeUIDs = append(runtimeUIDs, runtimeUID)
+		created[runtimeUID] = record
+		require.NoError(t, listRepo.CreatePreparing(context.Background(), record))
+	}
+	victimUID := runtimeUIDs[0]
+	replacementUID := poolTestID("replacement")
+	runtimeUIDs = append(runtimeUIDs, replacementUID)
+	cleanupFUSEPool(t, listStore, []string{poolKey}, runtimeUIDs)
+
+	hook := &sscanActionHook{once: true}
+	hook.action = func() error {
+		victim := created[victimUID]
+		deleted, deleteErr := mutationRepo.ConditionalDelete(context.Background(), victimUID, victim.State, victim.MaintainerToken, "", victim.Revision)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		if !deleted {
+			return fmt.Errorf("victim was not deleted")
+		}
+		return mutationRepo.CreatePreparing(context.Background(), preparingRecord(poolKey, replacementUID))
+	}
+	listStore.client.AddHook(hook)
+	listed, err := listRepo.ListByPoolKey(context.Background(), poolKey)
+	require.NoError(t, err)
+	require.NoError(t, hook.actionError())
+	require.Len(t, listed, records)
+	got := make(map[string]struct{}, len(listed))
+	for _, record := range listed {
+		got[record.RuntimeUID] = struct{}{}
+	}
+	assert.NotContains(t, got, victimUID)
+	assert.Contains(t, got, replacementUID)
+	for _, runtimeUID := range runtimeUIDs[1:records] {
+		assert.Contains(t, got, runtimeUID)
+	}
+}
+
+func TestFUSEPoolStateMutationIgnoresMaxMembershipGeneration(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
 	repo := NewFUSEPoolRepository(s)
@@ -641,26 +761,43 @@ func TestFUSEPoolLastSafeVersionIncrementRemainsReadable(t *testing.T) {
 	cleanupFUSEPool(t, s, []string{poolKey}, []string{runtimeUID})
 	prepareWarmRecord(t, repo, preparingRecord(poolKey, runtimeUID))
 	poolDigest := poolTestDigest(poolKey)
-	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-versions", poolDigest, "9007199254740990").Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", poolDigest, "9007199254740991").Err())
 
 	reserved, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
 	require.NoError(t, err)
 	require.NotNil(t, reserved)
-	assert.Equal(t, "9007199254740991", s.client.HGet(context.Background(), "fusepool:pool-versions", poolDigest).Val())
-	listed, err := repo.ListByPoolKey(context.Background(), poolKey)
+	binding, err := repo.Transition(context.Background(), runtimeUID, state.FUSEPoolReserved, state.FUSEPoolBinding, "reservation", reserved.Revision)
 	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	count, err := repo.CountPreparingAndPrepared(context.Background(), poolKey)
-	require.NoError(t, err)
-	assert.Zero(t, count)
+	assert.Equal(t, state.FUSEPoolBinding, binding.State)
+	assert.Equal(t, "9007199254740991", s.client.HGet(context.Background(), "fusepool:membership-generations", poolDigest).Val())
+}
 
-	rawBefore, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(runtimeUID)).Bytes()
+func TestFUSEPoolMembershipGenerationOverflowRejectsCreateAndDeleteBeforeWrites(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	deletePool, createPool := poolTestID("delete-pool"), poolTestID("create-pool")
+	deleteUID, createUID := poolTestID("delete-uid"), poolTestID("create-uid")
+	cleanupFUSEPool(t, s, []string{deletePool, createPool}, []string{deleteUID, createUID})
+	deleteRecord := preparingRecord(deletePool, deleteUID)
+	require.NoError(t, repo.CreatePreparing(context.Background(), deleteRecord))
+	deleteDigest := poolTestDigest(deletePool)
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", deleteDigest, "9007199254740991").Err())
+	rawBefore, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
 	require.NoError(t, err)
-	_, err = repo.Transition(context.Background(), runtimeUID, state.FUSEPoolReserved, state.FUSEPoolBinding, "reservation", reserved.Revision)
+	deleted, err := repo.ConditionalDelete(context.Background(), deleteUID, deleteRecord.State, deleteRecord.MaintainerToken, "", deleteRecord.Revision)
+	assert.False(t, deleted)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
-	rawAfter, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(runtimeUID)).Bytes()
+	rawAfter, err := s.client.Get(context.Background(), "fusepool:record:"+poolTestDigest(deleteUID)).Bytes()
 	require.NoError(t, err)
 	assert.Equal(t, rawBefore, rawAfter)
+
+	createDigest := poolTestDigest(createPool)
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", createDigest, "9007199254740991").Err())
+	err = repo.CreatePreparing(context.Background(), preparingRecord(createPool, createUID))
+	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	assert.Equal(t, int64(0), s.client.Exists(context.Background(), "fusepool:record:"+poolTestDigest(createUID)).Val())
+	assert.Equal(t, int64(0), s.client.SCard(context.Background(), "fusepool:index:"+createDigest).Val())
 }
 
 func TestFUSEPoolRecordRevisionMustBeSafelyIncrementable(t *testing.T) {
@@ -907,6 +1044,46 @@ func TestFUSEPoolRejectsInvalidCreateAndReportsCorruption(t *testing.T) {
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 }
 
+func TestFUSEPoolCreateRejectsInvalidUTF8BeforeRedisWrites(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	invalid := string([]byte{0xff, 0xfe})
+	tests := []struct {
+		name   string
+		mutate func(*state.FUSEPoolRecord)
+	}{
+		{"runtime id", func(record *state.FUSEPoolRecord) { record.RuntimeID = invalid }},
+		{"runtime uid", func(record *state.FUSEPoolRecord) { record.RuntimeUID = invalid }},
+		{"pool key", func(record *state.FUSEPoolRecord) { record.PoolKey = invalid }},
+		{"maintainer token", func(record *state.FUSEPoolRecord) { record.MaintainerToken = invalid }},
+		{"reservation token", func(record *state.FUSEPoolRecord) {
+			record.ReservationToken = invalid
+			record.ReservedUntil = time.Now().Add(time.Minute)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := preparingRecord(poolTestID("pool"), poolTestID("uid"))
+			tt.mutate(&record)
+			cleanupFUSEPool(t, s, []string{record.PoolKey}, []string{record.RuntimeUID})
+			err := repo.CreatePreparing(context.Background(), record)
+			assert.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
+			uidDigest, poolDigest := poolTestDigest(record.RuntimeUID), poolTestDigest(record.PoolKey)
+			assert.Equal(t, int64(0), s.client.Exists(context.Background(), "fusepool:record:"+uidDigest).Val())
+			assert.Equal(t, int64(0), s.client.SCard(context.Background(), "fusepool:index:"+poolDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:record-pools", uidDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:reservation-deadlines", uidDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:record-uids", uidDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:record-pool-values", uidDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:pool-counts", poolDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:membership-generations", poolDigest).Val())
+			assert.Equal(t, int64(0), s.client.SCard(context.Background(), "fusepool:state:preparing:"+poolDigest).Val())
+			assert.False(t, s.client.HExists(context.Background(), "fusepool:state-counts:preparing", poolDigest).Val())
+		})
+	}
+}
+
 func TestFUSEPoolCreateLuaRejectsPoisonBeforeAnyWrite(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
@@ -929,7 +1106,7 @@ func TestFUSEPoolCreateLuaRejectsPoisonBeforeAnyWrite(t *testing.T) {
 		"fusepool:pool-counts",
 		"fusepool:state:preparing:" + poolDigest,
 		"fusepool:state-counts:preparing",
-		"fusepool:pool-versions",
+		"fusepool:membership-generations",
 	}, uidDigest, poolDigest, raw, 0, runtimeUID, poolKey).Int64()
 	require.NoError(t, err)
 	assert.Equal(t, poolResultCorrupt, result)
@@ -1071,11 +1248,16 @@ func TestFUSEPoolRejectsIndexPointingAtDifferentRuntimeUID(t *testing.T) {
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:reservation-deadlines", uidDigest, 0).Err())
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-counts", poolDigest, 1).Err())
 	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:index:"+poolDigest, uidDigest).Err())
+	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:state:prepared:"+poolDigest, uidDigest).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:state-counts:prepared", poolDigest, 1).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", poolDigest, 1).Err())
 
 	_, err = repo.ListByPoolKey(context.Background(), poolKey)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
-	_, err = repo.CountPreparingAndPrepared(context.Background(), poolKey)
-	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	stored, err := s.client.Get(context.Background(), "fusepool:record:"+uidDigest).Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, raw, stored)
+	assert.True(t, s.client.SIsMember(context.Background(), "fusepool:state:prepared:"+poolDigest, uidDigest).Val())
 }
 
 func TestFUSEPoolReserveValidatesWholeIndexBeforeMutation(t *testing.T) {
@@ -1134,10 +1316,18 @@ func TestFUSEPoolReserveRejectsRecordStoredUnderDifferentUIDDigest(t *testing.T)
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:reservation-deadlines", uidDigest, 0).Err())
 	require.NoError(t, s.client.HSet(context.Background(), "fusepool:pool-counts", poolDigest, 1).Err())
 	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:index:"+poolDigest, uidDigest).Err())
+	require.NoError(t, s.client.SAdd(context.Background(), "fusepool:state:prepared:"+poolDigest, uidDigest).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:state-counts:prepared", poolDigest, 1).Err())
+	require.NoError(t, s.client.HSet(context.Background(), "fusepool:membership-generations", poolDigest, 1).Err())
 
 	got, err := repo.ReservePrepared(context.Background(), poolKey, "reservation", time.Minute)
 	assert.Nil(t, got)
 	assert.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	stored, err := s.client.Get(context.Background(), "fusepool:record:"+uidDigest).Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, raw, stored)
+	assert.True(t, s.client.SIsMember(context.Background(), "fusepool:state:prepared:"+poolDigest, uidDigest).Val())
+	assert.False(t, s.client.SIsMember(context.Background(), "fusepool:state:reserved:"+poolDigest, uidDigest).Val())
 }
 
 func TestFUSEPoolNamespaceDoesNotMatchSandboxSessionGlob(t *testing.T) {

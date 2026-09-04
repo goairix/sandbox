@@ -10,23 +10,24 @@ import (
 	"sort"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goairix/sandbox/internal/storage/state"
 	redisclient "github.com/redis/go-redis/v9"
 )
 
 const (
-	fusePoolRecordPrefix = "fusepool:record:"
-	fusePoolIndexPrefix  = "fusepool:index:"
-	fusePoolLockPrefix   = "fusepool:lock:"
-	fusePoolRecordPools  = "fusepool:record-pools"
-	fusePoolDeadlines    = "fusepool:reservation-deadlines"
-	fusePoolRecordUIDs   = "fusepool:record-uids"
-	fusePoolPoolValues   = "fusepool:record-pool-values"
-	fusePoolCounts       = "fusepool:pool-counts"
-	fusePoolVersions     = "fusepool:pool-versions"
-	fusePoolStatePrefix  = "fusepool:state:"
-	fusePoolStateCounts  = "fusepool:state-counts:"
+	fusePoolRecordPrefix          = "fusepool:record:"
+	fusePoolIndexPrefix           = "fusepool:index:"
+	fusePoolLockPrefix            = "fusepool:lock:"
+	fusePoolRecordPools           = "fusepool:record-pools"
+	fusePoolDeadlines             = "fusepool:reservation-deadlines"
+	fusePoolRecordUIDs            = "fusepool:record-uids"
+	fusePoolPoolValues            = "fusepool:record-pool-values"
+	fusePoolCounts                = "fusepool:pool-counts"
+	fusePoolMembershipGenerations = "fusepool:membership-generations"
+	fusePoolStatePrefix           = "fusepool:state:"
+	fusePoolStateCounts           = "fusepool:state-counts:"
 )
 
 var fusePoolStates = [...]state.FUSEPoolState{
@@ -198,20 +199,20 @@ local function validatePoolInventory(poolDigest, indexPrefix, countsKey, statePr
     return stateTotal == total
 end
 
-local function validatePoolVersion(versionsKey, poolDigest, total)
-    local raw = redis.call('HGET', versionsKey, poolDigest)
+local function validateMembershipGeneration(generationsKey, poolDigest, total)
+    local raw = redis.call('HGET', generationsKey, poolDigest)
     if not raw then return total == 0, 0 end
     if not raw or not string.match(raw, '^[1-9]%d*$') then return false, 0 end
-    local version = tonumber(raw)
-    -- Keep version comparisons exact in Redis Lua doubles.
-    return version and version == math.floor(version) and version <= 9007199254740991, version
+    local generation = tonumber(raw)
+    -- Keep membership generation comparisons exact in Redis Lua doubles.
+    return generation and generation == math.floor(generation) and generation <= 9007199254740991, generation
 end
 
-local function validateMutablePoolVersion(versionsKey, poolDigest, total)
-    local valid, version = validatePoolVersion(versionsKey, poolDigest, total)
-    -- Leave room for the mutation's final HINCRBY. Every mutation calls this
-    -- before any write, while reads accept the last exact integer.
-    return valid and version <= 9007199254740990
+local function validateMutableMembershipGeneration(generationsKey, poolDigest, total)
+    local valid, generation = validateMembershipGeneration(generationsKey, poolDigest, total)
+    -- Leave room for Create/Delete's final HINCRBY. State-only mutations do
+    -- not read or change the membership generation.
+    return valid and generation <= 9007199254740990
 end
 
 local function recordIsInExactlyState(member, poolDigest, expectedState, statePrefix)
@@ -278,8 +279,8 @@ if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1
     or not validatePoolInventory(ARGV[2], 'fusepool:index:', KEYS[7], 'fusepool:state:', 'fusepool:state-counts:') then
     return -4
 end
-local versionOK = validateMutablePoolVersion(KEYS[10], ARGV[2], redis.call('SCARD', KEYS[2]))
-if not versionOK then return -4 end
+local generationOK = validateMutableMembershipGeneration(KEYS[10], ARGV[2], redis.call('SCARD', KEYS[2]))
+if not generationOK then return -4 end
 redis.call('SET', KEYS[1], encoded)
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 redis.call('HSET', KEYS[4], ARGV[1], deadlineMillis)
@@ -299,8 +300,6 @@ if not reserveTTL or reserveTTL <= 0 or reserveTTL ~= math.floor(reserveTTL) the
 if not validatePoolInventory(ARGV[1], ARGV[6], KEYS[2], ARGV[7], ARGV[8]) then
     return {-4}
 end
-local versionOK = validateMutablePoolVersion(KEYS[17], ARGV[1], redis.call('SCARD', KEYS[1]))
-if not versionOK then return {-4} end
 local members = redis.call('SMEMBERS', KEYS[5])
 table.sort(members)
 local candidateMember = nil
@@ -353,7 +352,6 @@ if candidate then
     redis.call('SADD', KEYS[7], candidateMember)
     setCount(KEYS[6], ARGV[1], -1)
     setCount(KEYS[8], ARGV[1], 1)
-    redis.call('HINCRBY', KEYS[17], ARGV[1], 1)
     return {1, updated}
 end
 return {0}
@@ -381,8 +379,6 @@ if not mappedPoolDigest or string.len(mappedPoolDigest) ~= 64
     or not recordIsInExactlyState(ARGV[8], mappedPoolDigest, record.state, ARGV[10]) then
     return {-4}
 end
-local versionOK = validateMutablePoolVersion(KEYS[7], mappedPoolDigest, redis.call('SCARD', ARGV[9] .. mappedPoolDigest))
-if not versionOK then return {-4} end
 if record.revision ~= tonumber(ARGV[5]) then
     return {-2}
 end
@@ -436,18 +432,17 @@ redis.call('SREM', ARGV[10] .. from .. ':' .. mappedPoolDigest, ARGV[8])
 redis.call('SADD', ARGV[10] .. to .. ':' .. mappedPoolDigest, ARGV[8])
 setCount(ARGV[11] .. from, mappedPoolDigest, -1)
 setCount(ARGV[11] .. to, mappedPoolDigest, 1)
-redis.call('HINCRBY', KEYS[7], mappedPoolDigest, 1)
 return {1, updated}
 `)
 
-var listSnapshotScript = redisclient.NewScript(fusePoolLuaHelpers + `
+var listMembershipSnapshotScript = redisclient.NewScript(fusePoolLuaHelpers + `
 if not validatePoolInventory(ARGV[1], ARGV[2], KEYS[2], ARGV[3], ARGV[4]) then
     return {-4}
 end
 local total = redis.call('SCARD', KEYS[1])
-local ok, version = validatePoolVersion(KEYS[3], ARGV[1], total)
+local ok, generation = validateMembershipGeneration(KEYS[3], ARGV[1], total)
 if not ok then return {-4} end
-return {1, version, total}
+return {1, generation, total}
 `)
 
 var listBatchScript = redisclient.NewScript(fusePoolLuaHelpers + `
@@ -485,8 +480,8 @@ var countPreparingAndPreparedScript = redisclient.NewScript(fusePoolLuaHelpers +
 if not validatePoolInventory(ARGV[1], ARGV[4], KEYS[2], ARGV[5], ARGV[6]) then
     return {-4}
 end
-local versionOK = validatePoolVersion(KEYS[17], ARGV[1], redis.call('SCARD', KEYS[1]))
-if not versionOK then return {-4} end
+local generationOK = validateMembershipGeneration(KEYS[17], ARGV[1], redis.call('SCARD', KEYS[1]))
+if not generationOK then return {-4} end
 local count = 0
 for _, expectedState in ipairs({'preparing', 'prepared'}) do
     local stateKey
@@ -547,8 +542,8 @@ if mappedUID ~= record.runtime_uid
     or not recordIsInExactlyState(ARGV[6], poolDigest, record.state, ARGV[8]) then
     return -4
 end
-local versionOK = validateMutablePoolVersion(KEYS[7], poolDigest, redis.call('SCARD', ARGV[7] .. poolDigest))
-if not versionOK then return -4 end
+local generationOK = validateMutableMembershipGeneration(KEYS[7], poolDigest, redis.call('SCARD', ARGV[7] .. poolDigest))
+if not generationOK then return -4 end
 redis.call('DEL', KEYS[1])
 redis.call('SREM', ARGV[7] .. poolDigest, ARGV[6])
 redis.call('SREM', ARGV[8] .. record.state .. ':' .. poolDigest, ARGV[6])
@@ -628,7 +623,7 @@ func (r *FUSEPoolRepository) CreatePreparing(ctx context.Context, record state.F
 			fusePoolCounts,
 			fusePoolStateIndexKey(poolDigest, state.FUSEPoolPreparing),
 			fusePoolStateCountsKey(state.FUSEPoolPreparing),
-			fusePoolVersions,
+			fusePoolMembershipGenerations,
 		},
 		uidDigest, poolDigest, raw, ttlMillis, record.RuntimeUID, record.PoolKey,
 	).Int64()
@@ -679,7 +674,7 @@ func (r *FUSEPoolRepository) Transition(ctx context.Context, runtimeUID string, 
 	}
 	uidDigest := fusePoolDigest(runtimeUID)
 	result, err := transitionScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts, fusePoolVersions},
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		runtimeUID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
 	).Slice()
 	if err != nil {
@@ -705,7 +700,7 @@ func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) 
 	poolDigest := fusePoolDigest(poolKey)
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		beforeVersion, beforeTotal, err := r.poolListSnapshot(ctx, poolDigest)
+		beforeGeneration, beforeTotal, err := r.poolMembershipSnapshot(ctx, poolDigest)
 		if err != nil {
 			return nil, err
 		}
@@ -733,8 +728,8 @@ func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) 
 					return nil, parseErr
 				}
 				if code != poolResultOK {
-					afterVersion, _, snapshotErr := r.poolListSnapshot(ctx, poolDigest)
-					if snapshotErr == nil && afterVersion != beforeVersion {
+					afterGeneration, _, snapshotErr := r.poolMembershipSnapshot(ctx, poolDigest)
+					if snapshotErr == nil && afterGeneration != beforeGeneration {
 						retry = true
 						break
 					}
@@ -759,11 +754,11 @@ func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) 
 		if retry {
 			continue
 		}
-		afterVersion, afterTotal, err := r.poolListSnapshot(ctx, poolDigest)
+		afterGeneration, afterTotal, err := r.poolMembershipSnapshot(ctx, poolDigest)
 		if err != nil {
 			return nil, err
 		}
-		if beforeVersion != afterVersion || beforeTotal != afterTotal {
+		if beforeGeneration != afterGeneration || beforeTotal != afterTotal {
 			continue
 		}
 		if len(rawByMember) != beforeTotal {
@@ -826,7 +821,7 @@ func (r *FUSEPoolRepository) ConditionalDelete(ctx context.Context, runtimeUID s
 	}
 	uidDigest := fusePoolDigest(runtimeUID)
 	result, err := conditionalDeleteScript.Run(ctx, r.store.client,
-		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts, fusePoolVersions},
+		[]string{fusePoolRecordPrefix + uidDigest, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts, fusePoolMembershipGenerations},
 		runtimeUID, string(expectedState), maintainerToken, reservationToken, strconv.FormatUint(expectedRevision, 10), uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
 	).Int64()
 	if err != nil {
@@ -892,12 +887,12 @@ func fusePoolInventoryKeys(poolDigest string) []string {
 	for _, poolState := range fusePoolStates {
 		keys = append(keys, fusePoolStateIndexKey(poolDigest, poolState), fusePoolStateCountsKey(poolState))
 	}
-	return append(keys, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolVersions)
+	return append(keys, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolMembershipGenerations)
 }
 
-func (r *FUSEPoolRepository) poolListSnapshot(ctx context.Context, poolDigest string) (int64, int, error) {
-	result, err := listSnapshotScript.Run(ctx, r.store.client,
-		[]string{fusePoolIndexPrefix + poolDigest, fusePoolCounts, fusePoolVersions},
+func (r *FUSEPoolRepository) poolMembershipSnapshot(ctx context.Context, poolDigest string) (int64, int, error) {
+	result, err := listMembershipSnapshotScript.Run(ctx, r.store.client,
+		[]string{fusePoolIndexPrefix + poolDigest, fusePoolCounts, fusePoolMembershipGenerations},
 		poolDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
 	).Slice()
 	if err != nil {
@@ -913,16 +908,19 @@ func (r *FUSEPoolRepository) poolListSnapshot(ctx context.Context, poolDigest st
 	if len(payloads) != 2 {
 		return 0, 0, state.ErrFUSEPoolCorrupt
 	}
-	version, versionOK := payloads[0].(int64)
+	generation, generationOK := payloads[0].(int64)
 	total, totalOK := payloads[1].(int64)
-	if !versionOK || !totalOK || version < 0 || total < 0 {
+	if !generationOK || !totalOK || generation < 0 || total < 0 {
 		return 0, 0, state.ErrFUSEPoolCorrupt
 	}
-	return version, int(total), nil
+	return generation, int(total), nil
 }
 
 func validatePreparingRecord(record state.FUSEPoolRecord) error {
 	if record.RuntimeID == "" || record.RuntimeUID == "" || record.PoolKey == "" || record.MaintainerToken == "" || record.State != state.FUSEPoolPreparing || record.Revision != 1 {
+		return state.ErrFUSEPoolInvalidRecord
+	}
+	if !utf8.ValidString(record.RuntimeID) || !utf8.ValidString(record.RuntimeUID) || !utf8.ValidString(record.PoolKey) || !utf8.ValidString(record.MaintainerToken) || !utf8.ValidString(record.ReservationToken) {
 		return state.ErrFUSEPoolInvalidRecord
 	}
 	if (record.ReservationToken == "") != record.ReservedUntil.IsZero() {
