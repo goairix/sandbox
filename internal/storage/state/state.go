@@ -2,8 +2,13 @@ package state
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrIncrementOverflow indicates that an atomic counter is already at the
+// largest value supported by the backing store and was left unchanged.
+var ErrIncrementOverflow = errors.New("atomic increment overflow")
 
 // Store is the abstraction over state storage backends (sandbox sessions, pool state).
 type Store interface {
@@ -28,5 +33,7 @@ type AtomicStore interface {
 	Store
 	CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error)
 	CompareAndDelete(ctx context.Context, key string, expected []byte) (bool, error)
+	// Increment atomically increments a persistent integer and returns
+	// ErrIncrementOverflow without mutation at the backend's upper bound.
 	Increment(ctx context.Context, key string) (int64, error)
 }

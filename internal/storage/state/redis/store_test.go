@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/goairix/sandbox/internal/storage/state"
 )
 
 func skipIfNoRedis(t *testing.T) {
@@ -132,6 +134,25 @@ func TestAtomicIncrementAcrossClients(t *testing.T) {
 	got, err := a.Get(context.Background(), key)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("200"), got)
+}
+
+func TestAtomicIncrementMapsOverflow(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	ctx := context.Background()
+	key := atomicTestKey(t, s, "increment-overflow")
+	require.NoError(t, s.Set(ctx, key, []byte("9223372036854775806"), 0))
+
+	value, err := s.Increment(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, int64(9223372036854775807), value)
+
+	value, err = s.Increment(ctx, key)
+	assert.Zero(t, value)
+	require.ErrorIs(t, err, state.ErrIncrementOverflow)
+	stored, getErr := s.Get(ctx, key)
+	require.NoError(t, getErr)
+	assert.Equal(t, []byte("9223372036854775807"), stored)
 }
 
 func TestAtomicOperationsPropagateCanceledContext(t *testing.T) {

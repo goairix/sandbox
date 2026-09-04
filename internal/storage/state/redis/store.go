@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/goairix/sandbox/internal/storage/state"
 )
 
 var compareAndSwapScript = redis.NewScript(`
@@ -118,7 +120,11 @@ func (s *Store) CompareAndDelete(ctx context.Context, key string, expected []byt
 }
 
 func (s *Store) Increment(ctx context.Context, key string) (int64, error) {
-	return s.client.Incr(ctx, key).Result()
+	value, err := s.client.Incr(ctx, key).Result()
+	if redis.HasErrorPrefix(err, "increment or decrement would overflow") {
+		return 0, state.ErrIncrementOverflow
+	}
+	return value, err
 }
 
 func redisTTLMilliseconds(ttl time.Duration) (int64, error) {

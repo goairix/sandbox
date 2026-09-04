@@ -35,7 +35,10 @@ const (
 	workspaceLeasePhaseProvisional = "provisional"
 	workspaceLeasePhaseActive      = "active"
 	workspaceLeaseMaxFieldBytes    = 1024
-	workspaceLeaseMaxRecordBytes   = 16 * 1024
+	// JSON escapes each input byte to at most six bytes (for example, '<' is
+	// encoded as "\\u003c"). 128 KiB safely covers every maximum-sized field
+	// plus fixed metadata while still bounding decoder allocations.
+	workspaceLeaseMaxRecordBytes = 128 * 1024
 )
 
 var (
@@ -212,7 +215,7 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 	generation, err := c.store.Increment(ctx, keys.generation)
 	if err != nil {
 		primary := fmt.Errorf("increment workspace generation: %w", err)
-		if strings.Contains(strings.ToLower(err.Error()), "overflow") {
+		if errors.Is(err, state.ErrIncrementOverflow) {
 			primary = errors.Join(ErrWorkspaceGenerationExhausted, primary)
 		}
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, primary)
@@ -324,7 +327,7 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 		}
 		if bytes.Equal(current, nextOwnerRaw) {
 			lease.boundRuntimeUID = runtimeUID
-			return nil
+			return c.renewLocked(ctx, lease)
 		}
 		if bytes.Equal(current, ownerRaw) {
 			return fmt.Errorf("bind workspace runtime: %w", err)
@@ -335,7 +338,7 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 		return ErrWorkspaceRuntimeBound
 	}
 	lease.boundRuntimeUID = runtimeUID
-	return nil
+	return c.renewLocked(ctx, lease)
 }
 
 // ConsumeMountAttempt atomically consumes the owner's only mount attempt and
@@ -685,6 +688,9 @@ func strictDecodeFlatJSONObject(raw []byte, dst any) error {
 	allowedKeys := make(map[string]struct{}, typeOfDestination.Elem().NumField())
 	for i := 0; i < typeOfDestination.Elem().NumField(); i++ {
 		field := typeOfDestination.Elem().Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
 		name := strings.Split(field.Tag.Get("json"), ",")[0]
 		if name == "" {
 			name = field.Name
@@ -719,6 +725,9 @@ func strictDecodeFlatJSONObject(raw []byte, dst any) error {
 	}
 	end, err := structure.Token()
 	if err != nil || end != json.Delim('}') {
+		return ErrInvalidWorkspaceLease
+	}
+	if len(keys) != len(allowedKeys) {
 		return ErrInvalidWorkspaceLease
 	}
 	if _, err := structure.Token(); !errors.Is(err, io.EOF) {
