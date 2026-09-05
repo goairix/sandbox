@@ -916,6 +916,38 @@ scripts/workspace-fuse-preflight.sh docker \
 
 preflight 会验证 digest、镜像自检、RBAC、Secret、`/dev/fuse`、非 unconfined LSM、无宿主机 `/workspace` bind 和现有 FUSE workload。完整测试还需提供 sandbox-api URL/API key、真实对象存储凭据和 fault driver。MinIO 本地替身也必须启用证书与主机名校验，因为 release profile 拒绝 HTTP 和跳过 TLS 校验。对象存储若位于内网，只对其精确 FQDN/CIDR、端口以及必要 DNS 开 system egress 白名单，不开放通用内网访问。
 
+本地 MinIO 冒烟验证应使用 Docker/kind 实际可达的宿主机非回环地址，不要把 `127.0.0.1` 写入容器配置。macOS Docker Desktop 可先从默认路由解析当前地址，再从宿主机、普通 Docker 容器和 kind Pod 分别探测 MinIO health endpoint；地址会随网络变化，不能提交到 values/profile：
+
+```bash
+HOST_IF=$(route -n get default | sed -n 's/^[[:space:]]*interface: //p')
+HOST_IP=$(ipconfig getifaddr "$HOST_IF")
+test -n "$HOST_IP" && test "$HOST_IP" != 127.0.0.1
+
+curl -fsS "http://$HOST_IP:9000/minio/health/live"
+docker run --rm alpine:3.22 wget -q -O /dev/null \
+  "http://$HOST_IP:9000/minio/health/live"
+```
+
+创建全新 workspace prefix 时，根 marker 必须是尾部 `/` 的零字节对象，并携带 `Content-Type: application/x-directory`；仅创建没有该类型的空对象会被 s3fs 1.95 视为缺失目录并拒绝子目录挂载。Kubernetes 的共享 `emptyDir` 在 mountinfo 中会同时保留底层 `tmpfs` 与上层 `fuse.s3fs`，因此验证 effective FUSE 时不要断言 `findmnt -T` 只有一行；集成测试使用：
+
+```bash
+findmnt -rn -o FSTYPE -T /workspace | grep -qx fuse.s3fs
+```
+
+kind 中只有 trusted mounter sidecar 以 `privileged: true` 打开 `/dev/fuse`；单纯给非 privileged 容器增加 `SYS_ADMIN` 并挂入字符设备，在常见 containerd 设备 cgroup 下仍会得到 `Operation not permitted`。sandbox 容器继续以 UID/GID 1000、drop `ALL` capabilities 和 `HostToContainer` propagation 运行。mounter 使用 `Bidirectional` 后，实测上层 `fuse.s3fs` 会传播到 sandbox；删除 Pod 前必须先由 mounter 完成 flush/unmount，否则节点 kubelet 会因仍存在的传播挂载而阻塞 volume 清理。
+
+若旧版 kind CLI 无法向较新的 containerd v2 节点执行 `kind load docker-image`（例如报 `failed to detect containerd snapshotter`），发布/长期测试仍应优先把镜像推到本地 registry 并让 Pod 按 digest 拉取。仅限一次性开发冒烟时，可把同一 Docker 镜像导入每个 kind 节点的 `k8s.io` namespace，并核对导入后的 image ID：
+
+```bash
+for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+  docker save "$LOCAL_TEST_IMAGE" | \
+    docker exec -i "$node" ctr -n k8s.io images import -
+  docker exec "$node" crictl images --no-trunc | grep "$LOCAL_TEST_IMAGE"
+done
+```
+
+上述 HTTP MinIO、临时包镜像或手工导入只提供本地功能证据，不能生成 release profile：正式矩阵仍要求 TLS 主机名/CA 校验、digest-pinned 专用镜像、完整 sandbox-api Pool 生命周期、fault driver、清理确认以及 durable-flush 证据。
+
 ## 8. Provider profile
 
 ### 8.1 MinIO mount 参数基线（尚未通过 durable-flush gate）

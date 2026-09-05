@@ -122,7 +122,7 @@ func TestWorkspaceFUSE(t *testing.T) {
 	// Filesystem semantics: new empty prefix, directories, overwrite, append,
 	// truncate, rename, delete, local git checkout and a bounded small-file set.
 	if err := c.exec(ctx, sandbox.ID, `set -e
-test "$(stat -f -c %T /workspace 2>/dev/null || stat -f %T /workspace)" = fuse.s3fs
+	findmnt -rn -o FSTYPE -T /workspace | grep -qx fuse.s3fs
 mkdir -p /workspace/tree/a
 printf first >/workspace/tree/a/file
 printf second >/workspace/tree/a/file
