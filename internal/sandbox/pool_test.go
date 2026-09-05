@@ -26,6 +26,7 @@ type mockRuntime struct {
 	streamContext     context.Context
 	streamRequest     runtime.ExecRequest
 	execStreamFunc    func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
+	execPipeCalls     int
 	createdSpec       runtime.SandboxSpec
 	uploadSize        int64
 	uploadCalls       int
@@ -155,8 +156,12 @@ func (m *mockRuntime) lastStream() (context.Context, runtime.ExecRequest) {
 	return m.streamContext, m.streamRequest
 }
 
-func (m *mockRuntime) ExecPipe(context.Context, string, []string, io.Reader) error {
-	return nil
+func (m *mockRuntime) ExecPipe(_ context.Context, _ string, _ []string, input io.Reader) error {
+	_, err := io.Copy(io.Discard, input)
+	m.mu.Lock()
+	m.execPipeCalls++
+	m.mu.Unlock()
+	return err
 }
 
 func (m *mockRuntime) UpdateLabels(context.Context, string, map[string]*string) error {

@@ -11,14 +11,6 @@ require_command() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1
 require_digest() {
   [[ "$2" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "$1 must be an immutable lowercase sha256 image digest"
 }
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-
 profile_value() {
   python3 - "$1" "$2" <<'PY'
 import sys, yaml
@@ -62,9 +54,15 @@ runtime_preflight() {
       minio-sigv4-path-style-v1:minio|huawei-obs-public-v1:obs|huawei-obs-private-2023-v1:obs) ;;
       *) fail "profile report provider does not match its immutable profile ID" ;;
     esac
+    [[ "$(profile_value "$profile_file" schema_version)" == "1" ]] || fail "profile report schema version is unsupported"
     [[ "$(profile_value "$profile_file" enabled)" == "True" || "$(profile_value "$profile_file" enabled)" == "true" ]] || fail "profile report is not enabled"
     [[ "$(profile_value "$profile_file" status)" == "release-verified" ]] || fail "profile report is not release-verified"
     [[ "$(profile_value "$profile_file" evidence_sha256)" =~ ^[0-9a-f]{64}$ ]] || fail "profile report has no immutable evidence digest"
+    [[ -n "$(profile_value "$profile_file" service_version)" && -n "$(profile_value "$profile_file" s3fs_version)" ]] || fail "profile report has no observed service or s3fs version"
+    [[ "$(profile_value "$profile_file" tls_verify)" == "True" || "$(profile_value "$profile_file" tls_verify)" == "true" ]] || fail "profile report did not verify TLS"
+    if [[ "$report_provider" == "obs" ]]; then
+      [[ -n "$(profile_value "$profile_file" everest_version)" ]] || fail "OBS profile report has no observed Everest version"
+    fi
   fi
   [[ "$profile_id" =~ ^[a-z0-9][a-z0-9._-]+$ ]] || fail "profile ID is required and must be canonical"
   require_digest FUSE_IMAGE "$fuse_image"
@@ -163,10 +161,12 @@ record_profile() {
   done
   local joined_options
   joined_options="$(IFS=,; printf '%s' "${options[*]}")"
-  python3 - "$evidence" "$profile_id" "$image_digest" "$sandbox_digest" "$service_version" "$everest_version" "$s3fs_version" "$marker" "$tls_verify" "$joined_options" <<'PY' || fail "matrix evidence does not bind the exact images, parameters, both runtimes and all fault cases"
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as stream:
-    evidence = json.load(stream)
+  local evidence_sha
+  evidence_sha="$(python3 - "$evidence" "$profile_id" "$image_digest" "$sandbox_digest" "$service_version" "$everest_version" "$s3fs_version" "$marker" "$tls_verify" "$joined_options" <<'PY'
+import hashlib, json, sys
+with open(sys.argv[1], "rb") as stream:
+    raw = stream.read()
+evidence = json.loads(raw)
 if evidence.get("profile_id") != sys.argv[2] or evidence.get("passed") is not True:
     raise SystemExit(1)
 expected_fields = {
@@ -196,11 +196,11 @@ for item in items:
     seen.add(item["runtime"])
 if seen != expected:
     raise SystemExit(1)
+print(hashlib.sha256(raw).hexdigest())
 PY
+)" || fail "matrix evidence does not bind the exact images, parameters, both runtimes and all fault cases"
   local provider="minio"
   [[ "$profile_id" == huawei-obs-* ]] && provider="obs"
-  local evidence_sha
-  evidence_sha="$(sha256_file "$evidence")"
   mkdir -p -- "$(dirname -- "$output")"
   local staged="$tmp_dir/profile.yaml"
   {
@@ -217,8 +217,12 @@ PY
     printf 'evidence_sha256: "%s"\n' "$evidence_sha"
     printf 'directory_marker: %s\n' "$marker"
     printf 'tls_verify: true\n'
-    printf 'options:\n'
-    for option in "${options[@]}"; do printf '  - %s\n' "$option"; done
+    if ((${#options[@]} == 0)); then
+      printf 'options: []\n'
+    else
+      printf 'options:\n'
+      for option in "${options[@]}"; do printf '  - %s\n' "$option"; done
+    fi
   } >"$staged"
   chmod 0644 "$staged"
   mv -- "$staged" "$output"

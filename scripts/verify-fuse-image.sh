@@ -94,6 +94,10 @@ docker run --rm --entrypoint /bin/sh "$package_image" -ceu '
   grep -Fq "\"id\": \"$profile_id\"" profile.json
   grep -Eq "\"mount_parameters\": \"(verified|candidate|unverified)\"" profile.json
   grep -Eq "\"durable_flush\": \"(verified|blocked-pending-flush-spike)\"" profile.json
+  if find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -print -quit | grep -q .; then
+    echo "setuid/setgid files are forbidden" >&2
+    exit 1
+  fi
 ' image-contract "$profile_id"
 
 if test "$runtime" = kubernetes; then

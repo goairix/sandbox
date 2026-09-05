@@ -53,6 +53,7 @@ RUN printf '%s  %s\n' "$S3FS_PACKAGE_SHA256" /tmp/s3fs-package | sha256sum -c - 
  && sha256sum profile.json > profile.sha256 \
  && chown root:root base-image.digest s3fs-package.sha256 profile.sha256 \
  && chmod 0444 base-image.digest s3fs-package.sha256 profile.sha256 \
+ && find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + \
  && rm -f /tmp/s3fs-package /tmp/workspace-fuse-profile.json
 
 RUN /usr/local/bin/workspace-mounter health prepared --self-check-image

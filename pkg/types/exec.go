@@ -7,7 +7,7 @@ type ExecRequest struct {
 	Timeout         int               `json:"timeout,omitempty" binding:"min=0,max=3600"`
 	Env             map[string]string `json:"env,omitempty"`
 	LineBuffered    bool              `json:"line_buffered,omitempty"`
-	RequiresNetwork bool             `json:"requires_network,omitempty"`
+	RequiresNetwork bool              `json:"requires_network,omitempty"`
 }
 
 type ExecResponse struct {
@@ -28,7 +28,7 @@ type ExecuteRequest struct {
 	Network         *NetworkConfig    `json:"network,omitempty"`
 	Dependencies    []DependencySpec  `json:"dependencies,omitempty"`
 	LineBuffered    bool              `json:"line_buffered,omitempty"`
-	RequiresNetwork bool             `json:"requires_network,omitempty"`
+	RequiresNetwork bool              `json:"requires_network,omitempty"`
 }
 
 // SSEEvent represents a Server-Sent Event for streamed execution.

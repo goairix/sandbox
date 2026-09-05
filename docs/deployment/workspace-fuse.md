@@ -816,9 +816,9 @@ readOnlyRootfs: true
 - 独立 tmpfs 到 `/run/s3fs`（root:root、mode `0700`、当前固定 16 MiB）和受 `tmp_disk` 限制的 `/tmp`；不得给整个 `/run` 叠加 tmpfs，否则会遮蔽特殊镜像中预置的可信 `/run` 契约。s3fs 不得把临时/缓存数据写入不受 cache 阈值约束的 `/tmp`；
 - 不挂载宿主机业务 `/workspace`。
 
-`CAP_SYS_ADMIN` 和 `CAP_NET_ADMIN` 只属于容器内 root supervisor：前者用于 FUSE mount，后者只用于 runtime 通过固定绝对路径 `/usr/sbin/ip route replace default via <gateway-ip>` 设置 sidecar gateway 默认路由。禁止使用 Docker exec `Privileged=true`，也不得将这两个 capability 传递给 UID 1000 用户进程。runtime 必须覆盖所有 Exec、文件 API 和间接命令路径，强制 `User=1000:1000`。容器镜像内 `/workspace` 底层目录必须不可由 UID 1000 写入，以便 mount 消失时 fail closed。
+`CAP_SYS_ADMIN` 和 `CAP_NET_ADMIN` 只属于容器内 root supervisor：前者用于 FUSE mount，后者只用于 runtime 通过固定绝对路径 `/usr/sbin/ip route replace default via <gateway-ip>` 设置 sidecar gateway 默认路由。禁止使用 Docker exec `Privileged=true`，也不得将这两个 capability 传递给 UID 1000 用户进程。runtime 必须覆盖所有 Exec、文件 API 和间接命令路径，强制 `User=1000:1000`。两个 FUSE 镜像在构建时移除全部普通文件上的 setuid/setgid 位，runtime image verifier 再做反向扫描；该约束与 `no-new-privileges=true` 同时成立。容器镜像内 `/workspace` 底层目录必须不可由 UID 1000 写入，以便 mount 消失时 fail closed。
 
-Docker 特殊镜像的 root PID 1 还必须提供版本化的本地 child-reaper 握手：校验 Unix peer PID/UID，并只对已登记的 UID 1000 broker PID/starttime 执行精确 `wait4(pid)`。仅观察 `SIGCHLD` disposition 不足以放行 quiesce；握手缺失或身份不匹配时必须 fail closed。
+Docker 特殊镜像的 root PID 1 还必须提供版本化的本地 child-reaper 握手：校验 Unix peer PID/UID，并只对已登记的 UID 1000 broker PID/starttime 执行精确 `wait4(pid)`。对于 supervisor 自己启动且超时终止的可信命令，PID 1 在杀死整个 process group 并回收直接子进程后，还要用精确 `wait4(-pgid)` 回收被收养的同组后代，避免 zombie 积累；该路径不得使用 `wait4(-1)`。仅观察 `SIGCHLD` disposition 不足以放行 quiesce；握手缺失或身份不匹配时必须 fail closed。
 
 普通 Docker named volume 不提供可移植的硬 quota。prepared 空壳的 cache 必须为空且无 mount generation。达到 cache 软阈值时，runtime 必须阻止新 Exec 并停止整个容器，执行有界、尽力 flush 后删除并补充新空壳；不承诺用户写操作先收到 ENOSPC。cache 不得落在无界 container writable layer，销毁后必须清理。
 
@@ -1029,6 +1029,7 @@ OBS 两份报告还强制要求各自实测的 `--everest-version`。recorder �
 - [ ] 镜像全部使用 digest，没有 `latest`。
 - [ ] 每个发布 profile 的 mounter 都用精确 `-ldflags '-X=main.imageProfileID=<exact-profile-id>'` 单独构建，且 Kubernetes/Docker 镜像中的二进制与 manifest ID 一致。
 - [ ] `BASE_IMAGE` 使用 digest，s3fs artifact 使用 HTTPS 并完成 SHA-256 校验；真实镜像的 scan、SBOM 和签名 attestation 已归档。
+- [ ] 两个 FUSE 镜像均无 setuid/setgid 文件，且 HostConfig 保持 `no-new-privileges=true`。
 - [ ] Kubernetes 与 Docker 镜像先通过 `package-check`，再通过 `release-check`；当前三个 checked-in profile 在状态提升前均不得通过后者。
 - [ ] 华为公有云和 2023 私有云拥有不同的 profile、镜像 digest 与实测报告，没有互相复用验证结论。
 - [ ] 凭证未进入 Git、values、environment、命令行、inspect 或日志。

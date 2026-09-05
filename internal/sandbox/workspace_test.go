@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,11 +16,13 @@ import (
 	"time"
 
 	"github.com/goairix/fs"
+	"github.com/goairix/fs/driver/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
@@ -71,6 +74,36 @@ func TestFUSEWorkspacePublicMountAndUnmountConflict(t *testing.T) {
 	require.ErrorIs(t, err, ErrFUSEWorkspaceImmutable)
 	err = mgr.UnmountWorkspace(context.Background(), sb.ID)
 	require.ErrorIs(t, err, ErrFUSEWorkspaceImmutable)
+}
+
+func TestSyncModeAfterFUSERollbackUsesLegacyPoolAndFullCopy(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "team", "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "team", "a", "remote.txt"), []byte("remote"), 0o644))
+	filesystem, err := local.New(local.Config{RootPath: root})
+	require.NoError(t, err)
+	rt := newMockRuntime()
+	mgr := NewManager(rt, filesystem, &storage.FileSystemMeta{Provider: storage.ProviderMinIO}, ManagerConfig{
+		WorkspaceMode: "sync",
+		// A leftover FUSE pool reference must not influence the rollback path;
+		// only workspace.mode selects FUSE acquisition.
+		FUSEPool:   &FUSEPool{},
+		PoolConfig: PoolConfig{Image: "sandbox:sync"},
+	})
+
+	sb, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode:          ModePersistent,
+		WorkspacePath: "team/a",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sb.Workspace)
+	assert.NotEqual(t, WorkspaceMountFUSE, sb.Workspace.MountType)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, 1, rt.created, "sync rollback must use the legacy container pool")
+	assert.Zero(t, rt.prepareSeq, "sync rollback must not prepare a privileged FUSE shell")
+	assert.Equal(t, 1, rt.execPipeCalls, "the first sync mount must perform a full storage-to-container copy")
 }
 
 func TestFUSESyncDirections(t *testing.T) {

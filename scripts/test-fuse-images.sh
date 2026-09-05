@@ -106,8 +106,11 @@ for file in "$mounter" "$fuse"; do
   grep -Fq '/workspace' "$file" || fail "$file has no workspace anchor"
   grep -Fq '/run/s3fs' "$file" || fail "$file has no supervisor run directory"
   grep -Fq '/var/cache/s3fs/tmp' "$file" || fail "$file has no bounded-cache path"
+  grep -Fq 'find / -xdev -type f' "$file" || fail "$file does not remove setuid/setgid files"
   ! grep -Eiq '(access.?key|secret.?key|passwd-s3fs).*=|AKIA[0-9A-Z]+' "$file" || fail "$file may embed credentials"
 done
+
+grep -Fq 'setuid/setgid files are forbidden' "$verify" || fail "runtime image verification does not reject setuid/setgid files"
 
 grep -Fq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$mounter" || fail "mounter binary missing"
 ! grep -Fq 'workspace-probe' "$mounter" || fail "Kubernetes mounter image must not contain workspace-probe"

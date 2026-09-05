@@ -58,6 +58,7 @@ func (CommandRunner) Run(ctx context.Context, argv []string) error {
 	case <-ctx.Done():
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
+		reapOrphanedProcessGroup(command.Process.Pid)
 		return ctx.Err()
 	}
 }
