@@ -6,3 +6,4 @@ import "os"
 
 func ownedByRoot(os.FileInfo) bool        { return false }
 func ownedByCurrentUser(os.FileInfo) bool { return false }
+func ownedByUID(os.FileInfo, int) bool    { return false }

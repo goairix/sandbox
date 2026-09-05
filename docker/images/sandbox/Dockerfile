@@ -1,4 +1,16 @@
-FROM python:3.13-slim
+ARG WORKSPACE_PROBE_BUILDER=golang:1.25-alpine
+ARG SANDBOX_BASE_IMAGE=python:3.13-slim
+FROM ${WORKSPACE_PROBE_BUILDER} AS workspace-probe-builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/workspace-probe ./cmd/workspace-probe
+COPY internal/fuseprotocol ./internal/fuseprotocol
+COPY internal/workspaceprobe ./internal/workspaceprobe
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/workspace-probe ./cmd/workspace-probe
+
+FROM ${SANDBOX_BASE_IMAGE}
 
 # Use China mirror for Debian packages
 RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
@@ -96,6 +108,12 @@ RUN chown -R sandbox:sandbox /opt/sandbox-libs
 
 # Create workspace
 RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+
+# Non-privileged fixed-path workspace health/quiesce probe. The ordinary image
+# intentionally does not contain s3fs or the root workspace supervisor.
+COPY --from=workspace-probe-builder /out/workspace-probe /usr/local/bin/workspace-probe
+RUN chown root:root /usr/local/bin/workspace-probe \
+    && chmod 0755 /usr/local/bin/workspace-probe
 
 WORKDIR /workspace
 USER sandbox

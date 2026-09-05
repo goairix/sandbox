@@ -345,6 +345,7 @@ func newValidFUSEConfig() *config.Config {
 	valid.Storage.FileSystem.Provider = "minio"
 	valid.Storage.FileSystem.Bucket = "sandbox"
 	valid.Storage.FileSystem.Endpoint = "minio.example.com:9000"
+	valid.Storage.FileSystem.UseSSL = true
 	valid.Storage.FileSystem.SubPath = "workspaces/团队"
 	valid.Storage.FileSystem.CAFile = "/run/secrets/ca.crt"
 	valid.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{
@@ -380,7 +381,7 @@ func newValidFUSEConfig() *config.Config {
 func validFUSEProvider(endpointFQDN, egressMode string) config.WorkspaceFUSEProviderConfig {
 	return config.WorkspaceFUSEProviderConfig{
 		Driver:               "s3fs",
-		Profile:              "s3fs-compatible-v1",
+		Profile:              "minio-sigv4-path-style-v1",
 		StorageIdentity:      "primary-object-store",
 		MounterImage:         "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
 		DockerImage:          "registry.example.com/sandbox-fuse@sha256:" + strings.Repeat("b", 64),
@@ -444,6 +445,7 @@ storage:
     provider: obs
     bucket: sandbox
     endpoint: https://obs.example.com
+    use_ssl: true
     sub_path: teams/project
     credential_files:
       access_key_file: /run/secrets/access-key
@@ -480,7 +482,7 @@ workspace:
   providers:
     obs:
       driver: s3fs
-      profile: obs-s3-compatible-v1
+      profile: huawei-obs-public-v1
       storage_identity: obs-primary
       mounter_image: registry.example.com/mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       docker_image: registry.example.com/sandbox@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -505,10 +507,19 @@ func TestLoadFUSEConfigFromYAML(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
 	require.NoError(t, os.WriteFile(cfgFile, []byte(validFUSEYAML), 0o600))
 
+	_, err := config.Load(cfgFile)
+	require.ErrorContains(t, err, "pending provider spike")
+}
+
+func TestLoadDecodesBlockedFUSEProviderWithoutSelectingIt(t *testing.T) {
+	content := strings.Replace(validFUSEYAML, "mode: fuse", "mode: sync", 1)
+	require.NotEqual(t, validFUSEYAML, content)
+	cfgFile := filepath.Join(t.TempDir(), "fuse-provider.yaml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(content), 0o600))
+
 	cfg, err := config.Load(cfgFile)
 	require.NoError(t, err)
-
-	assert.Equal(t, "fuse", cfg.Workspace.Mode)
+	assert.Equal(t, "sync", cfg.Workspace.Mode)
 	assert.Equal(t, "sandbox-obs", cfg.Workspace.SecretName)
 	assert.Equal(t, "4Gi", cfg.Workspace.CacheSize)
 	assert.Equal(t, 31, cfg.Workspace.MountTimeoutSeconds)
@@ -522,7 +533,7 @@ func TestLoadFUSEConfigFromYAML(t *testing.T) {
 	assert.Equal(t, "5Gi", cfg.Workspace.MounterResources.EphemeralStorageLimit)
 	provider := cfg.Workspace.Providers["obs"]
 	assert.Equal(t, "s3fs", provider.Driver)
-	assert.Equal(t, "obs-s3-compatible-v1", provider.Profile)
+	assert.Equal(t, "huawei-obs-public-v1", provider.Profile)
 	assert.Equal(t, "obs-primary", provider.StorageIdentity)
 	assert.Equal(t, "ca.crt", provider.CASecretKey)
 	assert.Equal(t, []string{"192.0.2.20"}, provider.EndpointHostIPs)
@@ -666,7 +677,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 		edit func(*config.Config)
 		want string
 	}{
-		{name: "valid minio", edit: func(*config.Config) {}, want: ""},
+		{name: "minio blocked pending durable flush spike", edit: func(*config.Config) {}, want: "pending durable-flush provider spike"},
 		{name: "valid obs cilium fqdn", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Endpoint = "https://obs.example.com"
@@ -674,15 +685,40 @@ func TestFUSEConfigValidation(t *testing.T) {
 				"obs": validFUSEProvider("obs.example.com", "cilium-fqdn"),
 			}
 			p := c.Workspace.Providers["obs"]
+			p.Profile = "huawei-obs-public-v1"
 			p.SystemEgressCIDRs = nil
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
-		}, want: ""},
+		}, want: "pending provider spike"},
+		{name: "unknown minio profile", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "unknown-v1" })
+		}, want: "unknown or does not match provider"},
+		{name: "provider profile mismatch", edit: func(c *config.Config) {
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "huawei-obs-public-v1" })
+		}, want: "unknown or does not match provider"},
 		{name: "valid with no custom CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
-		}, want: ""},
+		}, want: "pending durable-flush provider spike"},
 		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "fuse supports only minio or obs"},
+		{name: "minio TLS disabled", edit: func(c *config.Config) { c.Storage.FileSystem.UseSSL = false }, want: "TLS"},
+		{name: "obs TLS disabled", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Endpoint = "http://obs.example.com"
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{"obs": validFUSEProvider("obs.example.com", "cilium-fqdn")}
+			p := c.Workspace.Providers["obs"]
+			p.Profile, p.SystemEgressCIDRs, p.EndpointHostIPs = "huawei-obs-public-v1", nil, nil
+			c.Workspace.Providers["obs"] = p
+		}, want: "TLS"},
+		{name: "obs HTTPS endpoint with use ssl disabled", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Endpoint = "https://obs.example.com"
+			c.Storage.FileSystem.UseSSL = false
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{"obs": validFUSEProvider("obs.example.com", "cilium-fqdn")}
+			p := c.Workspace.Providers["obs"]
+			p.Profile, p.SystemEgressCIDRs, p.EndpointHostIPs = "huawei-obs-public-v1", nil, nil
+			c.Workspace.Providers["obs"] = p
+		}, want: "use_ssl"},
 		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "workspace.providers.minio"},
 		{name: "missing redis", edit: func(c *config.Config) { c.Storage.State.Redis.Addr = "" }, want: "storage.state.redis.addr"},
 		{name: "missing secret name", edit: func(c *config.Config) { c.Workspace.SecretName = "" }, want: "workspace.secret_name"},
@@ -902,7 +938,7 @@ func TestFUSESubPathValidation(t *testing.T) {
 		t.Run("valid_"+subPath, func(t *testing.T) {
 			cfg := newValidFUSEConfig()
 			cfg.Storage.FileSystem.SubPath = subPath
-			require.NoError(t, cfg.Validate())
+			require.ErrorContains(t, cfg.Validate(), "pending durable-flush provider spike")
 		})
 	}
 
@@ -922,7 +958,7 @@ func TestFUSESubPathValidation(t *testing.T) {
 func TestLoadFUSEProviderFromEnvironmentOnly(t *testing.T) {
 	env := map[string]string{
 		"SANDBOX_SECURITY_API_KEY":                                           "test-key",
-		"SANDBOX_WORKSPACE_MODE":                                             "fuse",
+		"SANDBOX_WORKSPACE_MODE":                                             "sync",
 		"SANDBOX_WORKSPACE_SECRET_NAME":                                      "sandbox-minio",
 		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":                                "minio",
 		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":                                  "sandbox",
@@ -931,7 +967,7 @@ func TestLoadFUSEProviderFromEnvironmentOnly(t *testing.T) {
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "/run/secrets/access-key",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "/run/secrets/secret-key",
 		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DRIVER":                           "s3fs",
-		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROFILE":                          "minio-profile",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROFILE":                          "minio-sigv4-path-style-v1",
 		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_STORAGE_IDENTITY":                 "minio-primary",
 		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_MOUNTER_IMAGE":                    "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
 		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DOCKER_IMAGE":                     "registry.example.com/sandbox@sha256:" + strings.Repeat("b", 64),

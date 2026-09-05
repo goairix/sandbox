@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+verify="$repo_root/scripts/verify-fuse-image.sh"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+expect_failure() {
+  if "$@" >"$tmp/stdout" 2>"$tmp/stderr"; then
+    fail "command unexpectedly succeeded: $*"
+  fi
+}
+
+expect_success() {
+  if ! "$@" >"$tmp/stdout" 2>"$tmp/stderr"; then
+    sed -n '1,120p' "$tmp/stderr" >&2
+    fail "command failed: $*"
+  fi
+}
+
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${MOCK_DOCKER_LOG:?}"
+
+case "$*" in
+  *'health prepared --release-check-image'*)
+    test "${MOCK_PROFILE_STATUS:-blocked-pending-flush-spike}" = release-verified
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+MOCK
+chmod +x "$tmp/bin/docker"
+
+digest="registry.example.com/sandbox@sha256:$(printf 'a%.0s' {1..64})"
+fuse_digest="registry.example.com/mounter@sha256:$(printf 'b%.0s' {1..64})"
+export PATH="$tmp/bin:$PATH"
+export MOCK_DOCKER_LOG="$tmp/docker.log"
+
+# RED/GREEN behavior tests for the executable verifier.
+expect_failure env FUSE_IMAGE=repo/mounter:latest SANDBOX_IMAGE="$digest" \
+  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+test ! -s "$tmp/docker.log" || fail "invalid digest reached docker"
+
+: >"$tmp/docker.log"
+expect_failure env FUSE_IMAGE="repo/mounter@sha256:abc" SANDBOX_IMAGE="$digest" \
+  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+test ! -s "$tmp/docker.log" || fail "short digest reached docker"
+
+: >"$tmp/docker.log"
+MOCK_PROFILE_STATUS=blocked-pending-flush-spike expect_success env \
+  FUSE_IMAGE="$fuse_digest" SANDBOX_IMAGE="$digest" \
+  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+grep -Fq -- '--entrypoint /usr/local/bin/workspace-mounter' "$tmp/docker.log" || fail "mounter self-check missing"
+grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp/docker.log" || fail "UID 1000 probe self-check missing"
+grep -Fq -- 'ordinary sandbox contract' "$tmp/docker.log" || fail "ordinary sandbox negative contract missing"
+grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "mounter package contract missing"
+
+expect_failure env MOCK_PROFILE_STATUS=blocked-pending-flush-spike \
+  FUSE_IMAGE="$fuse_digest" SANDBOX_IMAGE="$digest" \
+  "$verify" kubernetes release-check minio-sigv4-path-style-v1
+grep -Fq -- 'health prepared --release-check-image' "$tmp/docker.log" || fail "Go release gate missing"
+
+: >"$tmp/docker.log"
+MOCK_PROFILE_STATUS=blocked-pending-provider-spike expect_success env SANDBOX_IMAGE="$digest" \
+  "$verify" docker package-check huawei-obs-private-2023-v1
+grep -Fq -- '--entrypoint /usr/local/bin/workspace-mounter' "$tmp/docker.log" || fail "docker mounter self-check missing"
+grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp/docker.log" || fail "docker UID 1000 probe self-check missing"
+grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "docker package contract missing"
+
+expect_failure env MOCK_PROFILE_STATUS=blocked-pending-provider-spike SANDBOX_IMAGE="$digest" \
+  "$verify" docker release-check huawei-obs-public-v1
+
+expect_failure env SANDBOX_IMAGE="$digest" \
+  "$verify" invalid-runtime package-check minio-sigv4-path-style-v1
+expect_failure env SANDBOX_IMAGE="$digest" \
+  "$verify" docker invalid-check minio-sigv4-path-style-v1
+expect_failure env SANDBOX_IMAGE="$digest" \
+  "$verify" docker package-check 'bad/profile'
+
+# Static image contracts. These intentionally avoid builds so they also run in
+# CI workers without a Docker daemon.
+mounter="$repo_root/docker/images/workspace-mounter/Dockerfile"
+fuse="$repo_root/docker/images/sandbox-fuse/Dockerfile"
+ordinary="$repo_root/docker/images/sandbox/Dockerfile"
+ordinary_ignore="$repo_root/docker/images/sandbox/Dockerfile.dockerignore"
+compose="$repo_root/docker/docker-compose.yml"
+
+for file in "$mounter" "$fuse"; do
+  test -f "$file" || fail "missing $file"
+  grep -Eq '^ARG BASE_IMAGE$' "$file" || fail "$file does not require BASE_IMAGE"
+  grep -Fq '@sha256:' "$file" || fail "$file does not enforce a digest base"
+  grep -Eq '^ARG S3FS_PACKAGE_URL$' "$file" || fail "$file does not require S3FS_PACKAGE_URL"
+  grep -Eq '^ARG S3FS_PACKAGE_SHA256$' "$file" || fail "$file does not require S3FS_PACKAGE_SHA256"
+  grep -Fq 'sha256sum -c' "$file" || fail "$file does not verify the s3fs artifact"
+  grep -Fq 'https://*@*|*\?*|*\#*' "$file" || fail "$file allows credentialed or mutable artifact URLs"
+  grep -Fq '/workspace' "$file" || fail "$file has no workspace anchor"
+  grep -Fq '/run/s3fs' "$file" || fail "$file has no supervisor run directory"
+  grep -Fq '/var/cache/s3fs/tmp' "$file" || fail "$file has no bounded-cache path"
+  ! grep -Eiq '(access.?key|secret.?key|passwd-s3fs).*=|AKIA[0-9A-Z]+' "$file" || fail "$file may embed credentials"
+done
+
+grep -Fq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$mounter" || fail "mounter binary missing"
+! grep -Fq 'workspace-probe' "$mounter" || fail "Kubernetes mounter image must not contain workspace-probe"
+grep -Fq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$fuse" || fail "special image mounter missing"
+grep -Fq 'COPY workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image probe missing"
+grep -Fq 'ENTRYPOINT ["/usr/local/bin/workspace-mounter", "supervise"]' "$fuse" || fail "special image supervisor entrypoint missing"
+grep -Fq 'command -v python3' "$fuse" || fail "special image does not enforce Python tooling in its base"
+grep -Fq 'command -v node' "$fuse" || fail "special image does not enforce Node.js tooling in its base"
+grep -Fq 'test "$(id -u sandbox)" = 1000' "$fuse" || fail "special image does not enforce the sandbox UID"
+
+! grep -Eq '(workspace-mounter|/usr/bin/s3fs|S3FS_PACKAGE)' "$ordinary" || fail "ordinary image contains privileged FUSE payload"
+grep -Fq 'FROM ${WORKSPACE_PROBE_BUILDER} AS workspace-probe-builder' "$ordinary" || fail "ordinary image does not build the probe from source"
+grep -Fq 'COPY --from=workspace-probe-builder /out/workspace-probe /usr/local/bin/workspace-probe' "$ordinary" || fail "ordinary image probe stage is not wired"
+grep -Fq '../:/repo:ro' "$compose" || fail "Compose does not expose the repository build context"
+grep -Fq 'docker build -f /repo/docker/images/sandbox/Dockerfile -t sandbox:latest /repo' "$compose" || fail "Compose still uses the probe-less sandbox context"
+test -f "$ordinary_ignore" || fail "ordinary root-context build has no Dockerfile-specific ignore policy"
+grep -Fxq '**' "$ordinary_ignore" || fail "ordinary build context is not deny-by-default"
+grep -Fxq '!cmd/workspace-probe/**' "$ordinary_ignore" || fail "ordinary build context omits workspace-probe source"
+grep -Fxq '!internal/workspaceprobe/**' "$ordinary_ignore" || fail "ordinary build context omits workspaceprobe package"
+
+profile_dir="$repo_root/docker/images/workspace-mounter/profiles"
+for tuple in \
+  'minio-sigv4-path-style-v1 blocked-pending-flush-spike' \
+  'huawei-obs-public-v1 blocked-pending-flush-spike' \
+  'huawei-obs-private-2023-v1 blocked-pending-flush-spike'; do
+  set -- $tuple
+  file="$profile_dir/$1.json"
+  test -f "$file" || fail "missing profile $file"
+  grep -Fq '"id": "'"$1"'"' "$file" || fail "$file has wrong profile ID"
+  grep -Fq '"durable_flush": "'"$2"'"' "$file" || fail "$file has wrong durable flush status"
+  grep -Fq '"s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"' "$file" \
+    || fail "$file lacks the unique build-time s3fs hash placeholder"
+done
+
+grep -Fq '"mount_parameters": "verified"' "$profile_dir/minio-sigv4-path-style-v1.json" \
+  || fail "MinIO mount packaging contract is not marked verified"
+
+for file in "$profile_dir"/huawei-obs-*.json; do
+  ! grep -Eiq '(no_check_certificate|ssl_verify_hostname|compat_dir|support_compat_dir|use_path_request_style|"options"|"extra_args"|"tls_required": false)' "$file" \
+    || fail "$file contains unverified OBS options"
+done
+
+printf 'fuse image contract tests: PASS\n'

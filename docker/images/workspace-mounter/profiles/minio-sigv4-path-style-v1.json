@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "profile": {
+    "id": "minio-sigv4-path-style-v1",
+    "provider": "minio",
+    "mount_parameters": "verified",
+    "durable_flush": "blocked-pending-flush-spike",
+    "tls_required": true,
+    "endpoint_option": "url",
+    "region_option": "region",
+    "addressing_style": "path",
+    "signature_version": "sigv4"
+  },
+  "s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

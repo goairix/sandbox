@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "profile": {
+    "id": "huawei-obs-public-v1",
+    "provider": "obs",
+    "mount_parameters": "candidate",
+    "durable_flush": "blocked-pending-flush-spike",
+    "tls_required": true,
+    "endpoint_option": "url",
+    "region_option": "endpoint",
+    "addressing_style": "unverified",
+    "signature_version": "sigv2"
+  },
+  "s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

@@ -1094,74 +1094,115 @@ git commit -m "feat: add one-shot s3fs supervisor"
 - Create: `docker/images/workspace-mounter/Dockerfile`
 - Create: `docker/images/sandbox-fuse/Dockerfile`
 - Modify: `docker/images/sandbox/Dockerfile`
+- Modify: `docker/docker-compose.yml`
 - Create: `docker/images/workspace-mounter/profiles/minio-sigv4-path-style-v1.json`
 - Create: `docker/images/workspace-mounter/profiles/huawei-obs-public-v1.json`
 - Create: `docker/images/workspace-mounter/profiles/huawei-obs-private-2023-v1.json`
 - Create: `scripts/verify-fuse-image.sh`
+- Create: `scripts/test-fuse-images.sh`
+- Create: `internal/mounter/profile.go`
+- Create: `internal/mounter/manifest.go`
+- Create: `internal/mounter/profile_test.go`
+- Create: `internal/mounter/manifest_test.go`
+- Modify: `internal/mounter/systemcheck.go`
+- Modify: `internal/config/config.go`
+- Modify: `internal/config/config_test.go`
+- Modify: `cmd/workspace-mounter/main.go`
+- Modify: `cmd/workspace-mounter/main_test.go`
 
-- [ ] **Step 1: Add an image contract test script**
+- [x] **Step 1: Add image contract and static test scripts**
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-: "${FUSE_IMAGE:?set FUSE_IMAGE to a digest-pinned image}"
-: "${SANDBOX_IMAGE:?set SANDBOX_IMAGE to the digest-pinned sandbox image}"
-case "$FUSE_IMAGE" in *@sha256:*) ;; *) echo "image must use a digest" >&2; exit 1;; esac
-case "$SANDBOX_IMAGE" in *@sha256:*) ;; *) echo "sandbox image must use a digest" >&2; exit 1;; esac
-docker run --rm --entrypoint /usr/local/bin/workspace-mounter "$FUSE_IMAGE" health prepared --self-check-image
-docker run --rm --entrypoint /usr/local/bin/workspace-probe "$SANDBOX_IMAGE" self-check
-docker run --rm --entrypoint /bin/sh "$FUSE_IMAGE" -ceu '
-  test -x /usr/bin/s3fs
-  test -f /etc/fuse.conf
-  test "$(stat -c %a /workspace)" = 555
-  test "$(stat -c %u:%g /workspace)" = 0:0
-'
+bash -n scripts/verify-fuse-image.sh scripts/test-fuse-images.sh
+bash scripts/test-fuse-images.sh
 ```
 
-- [ ] **Step 2: Run it against the existing sandbox image and confirm failure**
+The static suite exercises the Dockerfile and verifier contracts without requiring release images. The runtime verifier accepts an explicit runtime, gate and exact profile ID:
 
-Run: `FUSE_IMAGE="$(docker image inspect sandbox:latest --format '{{index .RepoDigests 0}}')" scripts/verify-fuse-image.sh`
+```bash
+FUSE_IMAGE="$MOUNTER_DIGEST" SANDBOX_IMAGE="$ORDINARY_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh kubernetes package-check minio-sigv4-path-style-v1
 
-Expected: FAIL because the existing image has no mounter binary or s3fs contract.
-
-- [ ] **Step 3: Add provider-specific image builds**
-
-Both new Dockerfiles must use CI-supplied immutable base references and s3fs packages/artifacts whose SHA-256 is verified during build. The Kubernetes mounter image contains only s3fs, CA roots, profile JSON and `workspace-mounter`; the Docker special image extends the normal sandbox runtime with the same trusted binary/profile and `workspace-probe` but retains language tooling. The ordinary Kubernetes sandbox image also receives only the non-privileged `workspace-probe`; it never receives s3fs, credentials or `SYS_ADMIN`. None of the images contains credentials. Use:
-
-```dockerfile
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-ARG S3FS_PACKAGE_URL
-ARG S3FS_PACKAGE_SHA256
-ADD ${S3FS_PACKAGE_URL} /tmp/s3fs-package
-RUN echo "${S3FS_PACKAGE_SHA256}  /tmp/s3fs-package" | sha256sum -c - \
- && install -m 0755 /tmp/s3fs-package /usr/bin/s3fs \
- && rm -f /tmp/s3fs-package \
- && install -d -m 0555 -o root -g root /workspace \
- && install -d -m 0700 -o root -g root /run/s3fs /var/cache/s3fs/tmp
-COPY workspace-mounter /usr/local/bin/workspace-mounter
-ENTRYPOINT ["/usr/local/bin/workspace-mounter", "supervise"]
+SANDBOX_IMAGE="$SPECIAL_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh docker package-check minio-sigv4-path-style-v1
 ```
 
-CI supplies real package URLs, hashes and base digests from the provider spike; builds without them fail. Keep public and 2023 private OBS in separate jobs/digests even if options match.
+- [x] **Step 2: Add provider-specific package builds and compiled profile binding**
 
-- [ ] **Step 4: Build, scan and verify every profile image**
+Both new Dockerfiles require a CI-supplied `BASE_IMAGE` pinned with `@sha256:...` and an HTTPS s3fs artifact whose lowercase SHA-256 is verified before installation. The Kubernetes `workspace-mounter` image contains s3fs, CA roots, the strict profile manifest and the trusted supervisor. The Docker `sandbox-fuse` image extends the normal language runtime with the same components plus `workspace-probe`. The ordinary sandbox image receives only the root-owned, non-setuid `workspace-probe`; it never receives s3fs, the root supervisor or credentials. None of the images contains credentials.
+
+Each profile job must compile its own mounter binary before the Docker build; setting the Docker `PROFILE_ID` argument does not modify the Go binary:
+
+```bash
+PROFILE_ID=minio-sigv4-path-style-v1
+: "${BUILD_ARTIFACT_DIR:?set BUILD_ARTIFACT_DIR}"
+GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-X=main.imageProfileID=${PROFILE_ID}" \
+  -o "$BUILD_ARTIFACT_DIR/workspace-mounter" ./cmd/workspace-mounter
+GOOS=linux GOARCH=amd64 go build \
+  -o "$BUILD_ARTIFACT_DIR/workspace-probe" ./cmd/workspace-probe
+```
+
+The CI build-context assembly must copy that same profile-bound mounter artifact into both the Kubernetes mounter and Docker special-image contexts, and copy `workspace-probe` into the Docker special and ordinary sandbox contexts.
+
+The ordinary sandbox uses a `workspace-probe-builder` multi-stage build rather than a generated binary committed to Git. Its repository-root build context copies only `go.mod`, `go.sum`, `cmd/workspace-probe`, `internal/fuseprotocol` and `internal/workspaceprobe`, then compiles a static probe with `CGO_ENABLED=0`. `docker/docker-compose.yml` therefore mounts `../` read-only at `/repo` and runs:
+
+```bash
+docker build -f /repo/docker/images/sandbox/Dockerfile -t sandbox:latest /repo
+```
+
+The old `/images/sandbox` context does not contain the required Go inputs and must not be used. `WORKSPACE_PROBE_BUILDER=golang:1.25-alpine` and `SANDBOX_BASE_IMAGE=python:3.13-slim` are development defaults; production CI must override both with digest-pinned references, including a digest-pinned `WORKSPACE_PROBE_BUILDER`.
+
+The manifest is strict audit evidence: its ID/status/parameter metadata and s3fs hash must exactly match the compiled catalog and installed binary. It cannot add or override s3fs argv. Only the compiled typed catalog produces argv. A missing/mismatched `imageProfileID`, unknown/duplicate manifest field, profile mismatch or hash mismatch fails the image self-check. Package self-check also executes fixed `s3fs --version`; a wrong architecture, missing loader or unresolved dynamic dependency therefore fails before publication rather than passing on file presence alone.
+
+Package construction and production release eligibility are deliberately separate. The current checked-in status is:
+
+| Profile ID | Mount parameters | Durable flush | Current result |
+|---|---|---|---|
+| `minio-sigv4-path-style-v1` | `verified` | `blocked-pending-flush-spike` | package may be audited; release/configuration fail closed |
+| `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | package may be audited; release/configuration fail closed |
+| `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | package may be audited; release/configuration fail closed |
+
+This means no profile is currently production-selectable. Public OBS and the 2023 private OBS deployment remain separate profiles, image digests and verification reports. The public-cloud candidate records the documented `url`/`endpoint`/SigV2 shape only; it is not a verified production profile. Neither OBS profile may use `no_check_certificate` or `ssl_verify_hostname=0`.
+
+- [ ] **Step 3: Supply real immutable inputs and build package images in CI**
+
+Current repository tests use contract fixtures only. Real `BASE_IMAGE` digests, s3fs artifact HTTPS URLs/hashes and profile-specific binaries are CI inputs and are not available in this task. CI must build both the Kubernetes sidecar and Docker special image separately for every profile, including separate public/private OBS jobs and digests.
+
+The local static contract suite and `docker compose -f docker/docker-compose.yml config` validate the checked-in build graph. A real local ordinary-image build was attempted but did not complete because the Docker Hub authentication connection was reset; do not treat that attempt as image-build evidence. CI/Task 18 must still perform the real builds from immutable inputs.
+
+- [ ] **Step 4: Complete spikes, promote eligible profiles, then scan and attest in Task 18**
 
 Run for each CI-produced digest:
 
 ```bash
-FUSE_IMAGE="$IMAGE_DIGEST" scripts/verify-fuse-image.sh
+FUSE_IMAGE="$MOUNTER_DIGEST" SANDBOX_IMAGE="$ORDINARY_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh kubernetes package-check "$PROFILE"
+SANDBOX_IMAGE="$SPECIAL_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh docker package-check "$PROFILE"
+
+# These must remain non-zero until both manifest statuses are verified.
+FUSE_IMAGE="$MOUNTER_DIGEST" SANDBOX_IMAGE="$ORDINARY_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh kubernetes release-check "$PROFILE"
+SANDBOX_IMAGE="$SPECIAL_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh docker release-check "$PROFILE"
+
 trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE_DIGEST"
 syft "$IMAGE_DIGEST" -o cyclonedx-json > "$ARTIFACT_DIR/${PROFILE}-${RUNTIME}.sbom.cdx.json"
 cosign attest --predicate "$ARTIFACT_DIR/${PROFILE}-${RUNTIME}.sbom.cdx.json" --type cyclonedx "$IMAGE_DIGEST"
 ```
 
-Expected: PASS for MinIO, Huawei public OBS and Huawei private 2023 OBS Kubernetes and Docker images; image scanning reports no critical fixable findings under the repository release policy, and every released digest has an archived CycloneDX SBOM plus signed attestation.
+`release-check` must invoke the fixed in-image command `workspace-mounter health prepared --release-check-image`; that command reruns package integrity checks and calls the Go `CheckProductionProfile` gate. Shell code must not infer release eligibility by grepping manifest text.
+
+Expected now: `package-check` can validate a correctly constructed package, while `release-check` fails for all three profiles. Expected after Task 18 evidence and explicit catalog/manifest promotion: only enabled runtime/profile combinations pass `release-check`; image scanning reports no critical fixable findings under repository policy, and every released digest has an archived CycloneDX SBOM plus signed attestation. Never promote a status merely to make the check pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docker/images/workspace-mounter docker/images/sandbox-fuse docker/images/sandbox/Dockerfile scripts/verify-fuse-image.sh
+git add docker/images/workspace-mounter docker/images/sandbox-fuse docker/images/sandbox/Dockerfile \
+  docker/docker-compose.yml \
+  scripts/verify-fuse-image.sh scripts/test-fuse-images.sh internal/mounter internal/config \
+  cmd/workspace-mounter
 git commit -m "build: add pinned workspace fuse images"
 ```
 

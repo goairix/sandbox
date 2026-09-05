@@ -43,12 +43,14 @@ services:
     image: docker:cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ../docker/images:/images:ro
+      # The ordinary sandbox now compiles workspace-probe from repository
+      # source in a controlled build stage, so its build context is repo root.
+      - ../:/repo:ro
     entrypoint: ["sh", "-c"]
     command:
       - |
-        docker build -t sandbox:latest /images/sandbox &&
-        docker build -t sandbox-gateway:latest /images/gateway &&
+        docker build -f /repo/docker/images/sandbox/Dockerfile -t sandbox:latest /repo &&
+        docker build -t sandbox-gateway:latest /repo/docker/images/gateway &&
         echo "All sandbox images built successfully"
 
   redis:

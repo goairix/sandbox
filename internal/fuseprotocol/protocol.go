@@ -234,7 +234,7 @@ func AllowedMounterCLI(argv []string) bool {
 	if len(argv) == 2 && argv[0] == MounterBinary && (argv[1] == "supervise" || argv[1] == "bootstrap") {
 		return true
 	}
-	return len(argv) == 4 && argv[0] == MounterBinary && argv[1] == "health" && argv[2] == "prepared" && argv[3] == "--self-check-image"
+	return len(argv) == 4 && argv[0] == MounterBinary && argv[1] == "health" && argv[2] == "prepared" && (argv[3] == "--self-check-image" || argv[3] == "--release-check-image")
 }
 
 // AllowedDockerMounterCommand is the private Docker exec surface. The

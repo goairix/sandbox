@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "profile": {
+    "id": "huawei-obs-private-2023-v1",
+    "provider": "obs",
+    "mount_parameters": "unverified",
+    "durable_flush": "blocked-pending-flush-spike",
+    "tls_required": true,
+    "endpoint_option": "unverified",
+    "region_option": "unverified",
+    "addressing_style": "unverified",
+    "signature_version": "unverified"
+  },
+  "s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

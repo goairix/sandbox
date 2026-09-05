@@ -71,12 +71,14 @@ func TestPublicCLIGrammarsAreStrictAndDistinct(t *testing.T) {
 		{MounterBinary, "health", "prepared"},
 		{MounterBinary, "health", "ready"},
 		{MounterBinary, "health", "prepared", "--self-check-image"},
+		{MounterBinary, "health", "prepared", "--release-check-image"},
 		{MounterBinary, "flush"},
 		{MounterBinary, "shutdown"},
 	} {
 		assert.True(t, AllowedMounterCLI(argv), argv)
 	}
 	assert.False(t, AllowedMounterCLI([]string{MounterBinary, "broker"}))
+	assert.False(t, AllowedMounterCLI([]string{MounterBinary, "health", "ready", "--release-check-image"}))
 	assert.False(t, AllowedMounterCommand([]string{MounterBinary, "bootstrap"}), "Kubernetes private exec must not bootstrap")
 	assert.True(t, AllowedDockerMounterCommand([]string{MounterBinary, "bootstrap"}))
 	assert.False(t, AllowedDockerMounterCommand([]string{MounterBinary, "supervise"}))

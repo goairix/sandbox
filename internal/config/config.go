@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/goairix/sandbox/internal/mounter"
 	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -359,6 +361,16 @@ func (c *Config) validateFUSE() error {
 	if filesystem.Endpoint == "" {
 		return fmt.Errorf("config: storage.filesystem.endpoint must not be empty when workspace.mode is \"fuse\"")
 	}
+	if !filesystem.UseSSL {
+		return fmt.Errorf("config: storage.filesystem.use_ssl must be true for TLS-required FUSE profiles")
+	}
+	switch filesystem.Provider {
+	case "obs":
+		endpoint, err := url.Parse(filesystem.Endpoint)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+			return fmt.Errorf("config: storage.filesystem.endpoint must be a canonical TLS HTTPS URL for OBS FUSE")
+		}
+	}
 	if filesystem.CredentialFiles.AccessKeyFile == "" {
 		return fmt.Errorf("config: storage.filesystem.credential_files.access_key_file must not be empty when workspace.mode is \"fuse\"")
 	}
@@ -558,6 +570,9 @@ func (c *Config) validateFUSE() error {
 
 	if !isCanonicalRelativePrefix(filesystem.SubPath) {
 		return fmt.Errorf("config: storage.filesystem.sub_path must be a canonical relative prefix, got %q", filesystem.SubPath)
+	}
+	if err := mounter.CheckProductionProfile(filesystem.Provider, provider.Profile); err != nil {
+		return fmt.Errorf("config: %s.profile %q is not production-ready: %w", providerPath, provider.Profile, err)
 	}
 
 	return nil

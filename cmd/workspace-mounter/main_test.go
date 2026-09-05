@@ -22,6 +22,40 @@ func TestRunRejectsUndocumentedGrammarBeforeIO(t *testing.T) {
 	require.Error(t, run(nil, strings.NewReader("secret"), &bytes.Buffer{}))
 }
 
+func TestImageProfileBindingIsBuildTimeRestrictedAndTestInjectable(t *testing.T) {
+	original := imageProfileID
+	t.Cleanup(func() { imageProfileID = original })
+
+	imageProfileID = "huawei-obs-public-v1"
+	_, err := mounter.BoundProfiles(imageProfileID)
+	require.Error(t, err)
+
+	imageProfileID = "minio-sigv4-path-style-v1"
+	registry, err := mounter.BoundProfiles(imageProfileID)
+	require.NoError(t, err)
+	_, ok := registry.Lookup(imageProfileID)
+	assert.True(t, ok)
+}
+
+func TestReleaseImageCLIUsesGoReleaseGate(t *testing.T) {
+	originalPackage, originalRelease := checkPackagedImage, checkReleaseImage
+	t.Cleanup(func() { checkPackagedImage, checkReleaseImage = originalPackage, originalRelease })
+	packageCalls, releaseCalls := 0, 0
+	checkPackagedImage = func(string, string, string) error { packageCalls++; return nil }
+	checkReleaseImage = func(run, cache, profile string) error {
+		releaseCalls++
+		assert.Equal(t, runDir, run)
+		assert.Equal(t, cacheRoot, cache)
+		assert.Equal(t, imageProfileID, profile)
+		return assert.AnError
+	}
+
+	err := run([]string{"workspace-mounter", "health", "prepared", "--release-check-image"}, strings.NewReader("must-not-be-read"), &bytes.Buffer{})
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Zero(t, packageCalls)
+	assert.Equal(t, 1, releaseCalls)
+}
+
 type cliTestRunner struct{}
 
 func (cliTestRunner) Start(context.Context, []string, []string) (mounter.Process, error) {

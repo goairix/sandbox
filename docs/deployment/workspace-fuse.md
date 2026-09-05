@@ -4,7 +4,7 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 目标部署契约。当前代码尚未实现本文新增的 FUSE 配置和运行时编排；实现合入后方可按本文启用。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 目标部署契约，分阶段实现中。Task 12 已提供镜像构建、自检和 profile 门禁；runtime 编排与生产验证尚未完成，而且当前三个 profile 均未通过 release gate，因此还不能启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
 
 ## 1. 部署结论
 
@@ -42,11 +42,13 @@ Compose 同样只部署控制面和依赖。特殊 sandbox 容器由 Docker runt
 | 变量 | 内容 |
 |---|---|
 | `SANDBOX_API_IMAGE` | sandbox-api 镜像，使用 digest |
-| `SANDBOX_BASE_IMAGE` | 普通 sync 模式 sandbox 镜像，使用 digest |
+| `SANDBOX_BASE_IMAGE` | 普通 sync/Kubernetes sandbox 镜像，仅包含 `workspace-probe`，使用 digest |
 | `MINIO_MOUNTER_IMAGE` | Kubernetes MinIO s3fs sidecar 镜像，使用 digest |
-| `OBS_MOUNTER_IMAGE` | Kubernetes OBS 兼容 s3fs sidecar 镜像，使用 digest |
+| `OBS_PUBLIC_MOUNTER_IMAGE` | Kubernetes 华为公有云 OBS s3fs sidecar 镜像，独立 digest |
+| `OBS_PRIVATE_2023_MOUNTER_IMAGE` | Kubernetes 2023 私有云 OBS s3fs sidecar 镜像，独立 digest |
 | `MINIO_SANDBOX_FUSE_IMAGE` | Docker MinIO 特殊 sandbox 镜像，使用 digest |
-| `OBS_SANDBOX_FUSE_IMAGE` | Docker OBS 特殊 sandbox 镜像，使用 digest |
+| `OBS_PUBLIC_SANDBOX_FUSE_IMAGE` | Docker 华为公有云 OBS 特殊 sandbox 镜像，独立 digest |
+| `OBS_PRIVATE_2023_SANDBOX_FUSE_IMAGE` | Docker 2023 私有云 OBS 特殊 sandbox 镜像，独立 digest |
 | `GATEWAY_IMAGE` | Docker system egress gateway 镜像，使用 digest |
 
 生产环境不得使用 `latest` 或可变 tag。镜像中应记录：
@@ -58,7 +60,84 @@ Compose 同样只部署控制面和依赖。特殊 sandbox 容器由 Docker runt
 - 支持的架构；
 - CA bundle 版本。
 
-MinIO 与 OBS 可共用源码仓库和构建流水线，但必须能独立升级和回滚。OBS provider spike 如果证明上游 s3fs 不满足签名或目录语义要求，`OBS_MOUNTER_IMAGE` 和 `OBS_SANDBOX_FUSE_IMAGE` 应切换为固定的厂商兼容构建，不能悄悄复用 MinIO 镜像。
+MinIO 与 OBS 可共用源码仓库和构建流水线，但必须能独立升级和回滚。华为公有云与 2023 私有云也必须使用独立 profile、构建 job、镜像 digest 和验证报告。对应 OBS provider spike 如果证明上游 s3fs 不满足签名或目录语义要求，只能让该 profile 切换为固定的厂商兼容构建，不能悄悄复用 MinIO 或另一套 OBS 镜像。
+
+### 3.1 Task 12 镜像边界
+
+- Kubernetes：`docker/images/workspace-mounter/Dockerfile` 构建专用 sidecar，包含 s3fs、CA roots、严格 profile manifest 与 `workspace-mounter`，不包含语言运行时。
+- Docker：`docker/images/sandbox-fuse/Dockerfile` 以普通 sandbox runtime 为基础构建特殊镜像，保留 Python/Node 等工具，同时加入 s3fs、`workspace-mounter` 与 `workspace-probe`。
+- 普通 sandbox：`docker/images/sandbox/Dockerfile` 只安装 root-owned mode `0755` 的 `workspace-probe`，不得出现 s3fs、`workspace-mounter` 或 profile manifest。
+
+### 3.2 不可变构建输入与 profile 绑定
+
+每个 profile 的 CI job 必须先构建专属 mounter 二进制。`PROFILE_ID` Docker build argument 只用于交叉校验，不能改变已经编译的二进制：
+
+```bash
+PROFILE_ID=minio-sigv4-path-style-v1
+: "${BUILD_ARTIFACT_DIR:?set BUILD_ARTIFACT_DIR}"
+GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-X=main.imageProfileID=${PROFILE_ID}" \
+  -o "$BUILD_ARTIFACT_DIR/workspace-mounter" ./cmd/workspace-mounter
+
+GOOS=linux GOARCH=amd64 go build \
+  -o "$BUILD_ARTIFACT_DIR/workspace-probe" ./cmd/workspace-probe
+```
+
+构建上下文组装步骤把同一个 profile-bound mounter artifact 分别放入 Kubernetes mounter 与 Docker 特殊镜像上下文，把 `workspace-probe` 放入 Docker 特殊镜像和普通 sandbox 上下文；不得重新执行一个没有 `-ldflags` 绑定的普通 mounter build 覆盖它。
+
+普通 sandbox 不提交生成 binary。`docker/images/sandbox/Dockerfile` 的 `workspace-probe-builder` 阶段从 repository-root context 复制 `go.mod`/`go.sum`、`cmd/workspace-probe`、`internal/fuseprotocol` 和 `internal/workspaceprobe`，并以 `CGO_ENABLED=0` 编译静态 probe。`docker/docker-compose.yml` 将仓库根目录只读挂载到 `/repo`，使用：
+
+```bash
+docker build -f /repo/docker/images/sandbox/Dockerfile -t sandbox:latest /repo
+```
+
+因此旧的 `/images/sandbox` context 已废弃。开发默认 `WORKSPACE_PROBE_BUILDER=golang:1.25-alpine`、`SANDBOX_BASE_IMAGE=python:3.13-slim`；生产 CI 必须分别传入 digest-pinned builder 和 sandbox base，尤其不能沿用可变的默认 builder tag。
+
+CI 必须向两个 FUSE Dockerfile 传入：
+
+- 带 `@sha256:<64 lowercase hex>` 的不可变 `BASE_IMAGE`；
+- 不含 URL credential/query/fragment 的 HTTPS `S3FS_PACKAGE_URL`；
+- 与下载内容一致且非全零的 `S3FS_PACKAGE_SHA256`；
+- 精确 `PROFILE_ID` 和对应的只读 manifest。
+
+manifest 是严格审计证据，不是运行时配置扩展点。它记录 profile/status/参数元数据和 s3fs SHA-256，并与编译进 Go 二进制的 typed catalog 逐项匹配；只有 compiled catalog 可以构造 s3fs argv。未知字段、重复字段、ID/状态不匹配、s3fs hash 不匹配或未通过 ldflags 绑定都会使镜像构建自检失败。package self-check 还会真实执行固定 `s3fs --version`，以提前发现 artifact 架构错误、loader 缺失或动态依赖缺失。任何租户、API 参数或 manifest 都不能注入额外 `-o` 参数。
+
+当前仓库没有真实 `BASE_IMAGE` digest、s3fs artifact URL/hash 或已发布镜像 digest；这些输入及实际 image build、漏洞扫描、CycloneDX SBOM、签名 attestation 均由 CI/Task 18 生成，不能以本地 contract test 或 Compose config 校验代替。
+
+### 3.3 package-check 与 release-check
+
+`package-check` 只证明镜像内容、权限、manifest/binary/artifact 绑定及 s3fs 可执行性正确；`release-check` 必须调用镜像内固定命令 `workspace-mounter health prepared --release-check-image`，由 Go `CheckProductionProfile` 进一步要求 profile 的 mount parameters 与 durable flush 都为 `verified`。不得在外层脚本中仅 grep manifest 来决定发布资格。当前状态为：
+
+| Profile ID | Mount parameters | Durable flush | 当前部署资格 |
+|---|---|---|---|
+| `minio-sigv4-path-style-v1` | `verified` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+| `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+| `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+
+因此三者当前都必须在 `release-check` 和 `workspace.mode=fuse` 配置校验处 fail closed。MinIO 的 mount 参数已冻结不代表 durable flush 已获证明；公有 OBS 只是从官方资料得到的候选参数；2023 私有云不能继承公有云结论。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
+
+静态 contract test：
+
+```bash
+bash -n scripts/verify-fuse-image.sh scripts/test-fuse-images.sh
+bash scripts/test-fuse-images.sh
+```
+
+CI 取得真实 digest 后，分别运行两个 runtime 与两种 gate：
+
+```bash
+FUSE_IMAGE="$MOUNTER_DIGEST" SANDBOX_IMAGE="$ORDINARY_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh kubernetes package-check "$PROFILE_ID"
+FUSE_IMAGE="$MOUNTER_DIGEST" SANDBOX_IMAGE="$ORDINARY_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh kubernetes release-check "$PROFILE_ID"
+
+SANDBOX_IMAGE="$SPECIAL_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh docker package-check "$PROFILE_ID"
+SANDBOX_IMAGE="$SPECIAL_SANDBOX_DIGEST" \
+  scripts/verify-fuse-image.sh docker release-check "$PROFILE_ID"
+```
+
+现阶段正确结果是结构正确的候选镜像可通过 `package-check`，但三个 profile 的 `release-check` 都返回非零。只有 Task 18 对某个 runtime/profile 完成真实环境证据、显式提升 compiled catalog 和 manifest 状态并重新构建后，该组合才允许通过 release gate。
 
 ## 4. 通用前置检查
 
@@ -195,7 +274,7 @@ volumes:
 
 ### 6.3 目标 Helm values
 
-以下配置块是实现完成后 Chart 应支持的目标 schema。它补充现有 `config.workspace`，不应把 AK/SK 写入 values：
+以下配置块是实现完成后 Chart 应支持的目标 schema。它补充现有 `config.workspace`，不应把 AK/SK 写入 values。当前即使填入真实镜像 digest，MinIO 和 OBS 也都会因 durable-flush/profile release gate 未通过而拒绝启动；示例只用于开发和渲染检查：
 
 ```yaml
 config:
@@ -254,7 +333,9 @@ config:
         systemEgressCIDRs: ["192.0.2.10/32"]
       obs:
         driver: s3fs
-        profile: huawei-obs-public-cn-north-4-verified-v1
+        # 当前仅为 candidate，以下配置会被 fail-closed 校验拒绝；
+        # Task 18 完成公有云实测并显式提升状态后方可启用。
+        profile: huawei-obs-public-v1
         storageIdentity: huawei-obs-public-cn-north-4
         caSecretKey: ca.crt
         credentialGeneration: "2026-09-03-01"
@@ -277,7 +358,7 @@ storageCredentials:
   caKey: ca.crt
 ```
 
-`<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名的 profile；没有验证结果或 profile 不匹配时启动失败。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置。
+`<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名且已通过 release gate 的 profile；没有验证结果、durable flush 未验证或 profile 不匹配时启动失败。上面的公有云 OBS 段只是展示配置形状，当前不能启用。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置；公有云与 2023 私有云也分别使用独立 values、digest 和报告。
 
 `workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。和当前 Pool 一样，FUSE Pool 由 `sandbox-api` 的 Manager 启动并维护：启动时 WarmUp，Acquire/异常移除后调用 `refillIfNeeded`，并按 `refillIntervalSeconds` 周期对账。Redis 让多个 sandbox-api 副本原子领取空壳、续租本轮 refill 权并计算全局水位；进程内 slice 只能做非权威缓存。创建 runtime 前必须先以不可复用的 `PreparationID/spec.ID` 原子占用容量槽，`maxSize` 只限制 preparing + prepared；RuntimeUID 返回后原子绑定且不可变。reservation 超时不能自动回池，必须经 Manager owner/session/gate guard 得到明确 disposition。Protected、Unknown 或 guard 检查错误的记录保持不可领取且不得删除；只有明确 Abandoned（或无引用的 Pristine 过期空壳）才能先 claim cleanup、再精确删除 `(RuntimeID, RuntimeUID)`。guard 已明确证明 Pristine 后若 prepared runtime health 明确失败，也必须 cleanup 而不能重新发布。`reserved → prepared` 在同一 Redis 事务中重新检查 `preparing + prepared < maxSize`；若异步 refill 已占满容量，则销毁旧 reservation。删除失败保留 cleanup tombstone 重试。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
 
@@ -583,6 +664,8 @@ docker run --rm --device /dev/fuse:/dev/fuse alpine:3.22 \
 
 ### 7.2 Compose 控制面配置
 
+以下同样是目标配置形状；当前所有 FUSE profile 都会被启动配置校验 fail closed，不能作为可上线 Compose 配置直接使用。
+
 Compose 需要把 Secret 暂存目录以同一绝对路径挂载给 API，以便 API 创建动态容器时使用宿主机可解析的 source path：
 
 ```yaml
@@ -670,7 +753,9 @@ workspace:
       system_egress_cidrs: [192.0.2.10/32]
     obs:
       driver: s3fs
-      profile: huawei-obs-private-2023-verified-v1
+      # 当前仍为 unverified，以下配置会被 fail-closed 校验拒绝；
+      # Task 18 完成目标私有云实测并显式提升状态后方可启用。
+      profile: huawei-obs-private-2023-v1
       storage_identity: huawei-obs-private-primary
       credential_generation: "2026-09-03-01"
       endpoint_host_ips: [192.0.2.20]
@@ -789,9 +874,9 @@ docker exec -u 1000:1000 "$SANDBOX_CONTAINER" \
 
 ## 8. Provider profile
 
-### 8.1 MinIO 固定基线
+### 8.1 MinIO mount 参数基线（尚未通过 durable-flush gate）
 
-MinIO profile 至少固定：
+`minio-sigv4-path-style-v1` 的 mount parameters 已标记为 `verified`，至少固定：
 
 - 显式 HTTPS endpoint；
 - `use_path_request_style`；
@@ -802,11 +887,15 @@ MinIO profile 至少固定：
 - TLS 主机名与 CA 校验。
 - provider 级静态长期 AK/SK，写入 root-only s3fs `passwd_file`；出现 session token 时拒绝启动。
 
-### 8.2 华为 OBS 固定基线
+但其 durable flush 当前仍为 `blocked-pending-flush-spike`，所以这不是可上线结论。配置校验和 `release-check` 必须继续拒绝该 profile，直至 Task 18 证明 exact profile 的写入静止、flush、卸载和终止语义并显式提升状态。
+
+### 8.2 华为 OBS 公有云候选与 2023 私有云未验证基线
 
 [华为云公有云 CCE OBS 挂载参数文档](https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html)与本项目使用的[双华云私有云 CCE OBS 挂载参数文档](https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0631.html)均明确规定：普通对象桶使用 s3fs，并行文件系统使用 obsfs。私有云文档还显示普通对象桶自动使用 `sigv2`，s3fs 1.92 会自动添加 `compat_dir`。一期只接入普通对象桶，因此 OBS profile 的客户端固定为 s3fs，不使用 obsfs。
 
 该文档描述的是 Everest 集成路径，不等于任意自建 sidecar/Docker 镜像已兼容。并且目标私有云部署于 2023 年，在线文档的当前内容不能证明现网组件版本。上线前须向平台侧或厂商确认并留档实际 OBS 服务版本/补丁、CCE Everest 插件版本及集成路径客户端版本；无法取得服务端版本时，至少保存 endpoint、桶类型、Everest 版本和全套兼容性测试证据。
+
+当前 `huawei-obs-public-v1` 只把官方公有云资料中的 `url`、`endpoint` 与 SigV2 形状记录为 `candidate`，addressing style 尚未验证；`huawei-obs-private-2023-v1` 的 mount parameters 为 `unverified`。两者 durable flush 都是 `blocked-pending-flush-spike`，不能通过配置或 release gate。
 
 OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 provider spike 后冻结。至少验证：
 
@@ -819,6 +908,8 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 - 私有 CA、TLS SNI 和主机名校验。
 - provider 级静态长期 AK/SK 与目标 s3fs 构建的 `passwd_file` 认证。
 - 待挂载资源确认为普通对象桶；如果识别为并行文件系统，配置校验失败并转入后续 obsfs 方案评审。
+
+所有测试必须保留完整 TLS 与主机名校验；Everest 示例中的 `no_check_certificate` 和 `ssl_verify_hostname=0` 不得进入 compiled profile、manifest、Helm/Compose 配置或临时发布参数。
 
 华为公有云与 2023 私有云必须产出不同的 profile ID、镜像 digest 和验证报告，例如 `huawei-obs-public-<region>-v1` 与 `huawei-obs-private-2023-<site>-v1`。即使实测参数暂时相同，也不能把其中一方的兼容性结论直接复用到另一方。
 
@@ -853,6 +944,10 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 ### 10.1 通用
 
 - [ ] 镜像全部使用 digest，没有 `latest`。
+- [ ] 每个发布 profile 的 mounter 都用精确 `-ldflags '-X=main.imageProfileID=<exact-profile-id>'` 单独构建，且 Kubernetes/Docker 镜像中的二进制与 manifest ID 一致。
+- [ ] `BASE_IMAGE` 使用 digest，s3fs artifact 使用 HTTPS 并完成 SHA-256 校验；真实镜像的 scan、SBOM 和签名 attestation 已归档。
+- [ ] Kubernetes 与 Docker 镜像先通过 `package-check`，再通过 `release-check`；当前三个 checked-in profile 在状态提升前均不得通过后者。
+- [ ] 华为公有云和 2023 私有云拥有不同的 profile、镜像 digest 与实测报告，没有互相复用验证结论。
 - [ ] 凭证未进入 Git、values、environment、命令行、inspect 或日志。
 - [ ] `mode=fuse` 与 `quota_mode=soft` 同时显式开启。
 - [ ] 对象根路径等于 `sub_path/workspace_path`，没有重复 prefix。

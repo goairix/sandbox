@@ -52,35 +52,6 @@ type Runner interface {
 	Run(ctx context.Context, argv []string) error
 }
 
-type Profile struct {
-	ID       string
-	Provider string
-	Options  func(fuseprotocol.BootstrapConfig) ([]string, error)
-	Flush    func(fuseprotocol.BootstrapConfig) []string
-}
-
-type ProfileRegistry interface {
-	Lookup(id string) (Profile, bool)
-}
-
-type StaticProfiles map[string]Profile
-
-func (p StaticProfiles) Lookup(id string) (Profile, bool) { profile, ok := p[id]; return profile, ok }
-
-func CompiledProfiles() ProfileRegistry {
-	return StaticProfiles{
-		"minio-sigv4-path-style-v1": {
-			ID: "minio-sigv4-path-style-v1", Provider: "minio",
-			Options: func(config fuseprotocol.BootstrapConfig) ([]string, error) {
-				if !fuseprotocol.ValidIdentity(config.Region) {
-					return nil, fmt.Errorf("minio profile requires a canonical SigV4 region")
-				}
-				return []string{"-o", "url=" + config.Endpoint, "-o", "region=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
-			},
-		},
-	}
-}
-
 type Config struct {
 	RunDir            string
 	CredentialRoot    string

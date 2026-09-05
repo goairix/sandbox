@@ -4,7 +4,7 @@
 
 **复审修订：** 2026-09-03
 
-**状态：** 设计已确认，待实现
+**状态：** 设计已确认，分阶段实现中；Task 12 已落地镜像构建契约，但当前没有可上线的 FUSE profile
 
 **目标分支：** `feat/workspace-fuse-mount`
 
@@ -120,6 +120,36 @@ goofys 仅保留为 MinIO A 类负载的性能对照项。如果 MinIO 的 Kuber
 ### 4.4 版本策略
 
 不直接追随 `latest` 标签。发布前针对 MinIO 和 OBS 验证 `bucket:/prefix` 挂载，选择通过测试的 s3fs 版本并固定镜像 digest。升级 s3fs 必须重新执行兼容性和故障测试。
+
+### 4.5 镜像与 profile 的当前落地状态
+
+Task 12 已把运行时镜像拆为三个明确边界：Kubernetes 使用只承载 s3fs 与可信 supervisor 的 `workspace-mounter` sidecar 镜像；Docker 使用保留语言工具链、同时包含 s3fs、supervisor 与 `workspace-probe` 的特殊 `sandbox-fuse` 镜像；普通 sandbox 镜像只增加非特权 `workspace-probe`，不得包含 s3fs 或 `workspace-mounter`。
+
+镜像构建采用“编译期 profile + 严格审计 manifest”双重绑定。CI 必须为每个 profile 单独编译 mounter，不能指望 Docker build argument 改写已经生成的 Go 二进制：
+
+```bash
+PROFILE_ID=minio-sigv4-path-style-v1
+: "${BUILD_ARTIFACT_DIR:?set BUILD_ARTIFACT_DIR}"
+GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-X=main.imageProfileID=${PROFILE_ID}" \
+  -o "$BUILD_ARTIFACT_DIR/workspace-mounter" ./cmd/workspace-mounter
+```
+
+同一 profile-bound artifact 必须进入该 profile 的 Kubernetes mounter 和 Docker 特殊镜像；普通 sandbox 与 Docker 特殊镜像所需的 `workspace-probe` 可由同一无特权构建产物提供。不得用未设置上述 ldflags 的普通 mounter build 覆盖专属 artifact。
+
+普通 sandbox 不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 复制 `go.mod`/`go.sum`、`cmd/workspace-probe`、`internal/fuseprotocol` 和 `internal/workspaceprobe`，再以 `CGO_ENABLED=0` 编译静态 probe。Compose/dev 将仓库根目录只读挂载为 `/repo`，使用 `docker build -f /repo/docker/images/sandbox/Dockerfile ... /repo`；不再使用缺少这些输入的 `/images/sandbox` context。开发默认 builder 是 `golang:1.25-alpine`，生产 CI 必须通过 `WORKSPACE_PROBE_BUILDER=<digest-pinned-ref>` 覆盖，并同样固定 `SANDBOX_BASE_IMAGE`。
+
+只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON manifest 只记录 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析和逐项比对可以发现包被拼错，但 manifest 不能注入或覆盖任意 `-o` 参数。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
+
+镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制绑定、manifest、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并调用 Go `CheckProductionProfile`，进一步要求 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep manifest 代替。当前状态如下，因此 `workspace.mode=fuse` 配置校验与全部 `release-check` 都应 fail closed：
+
+| Profile ID | Mount parameters | Durable flush | 结论 |
+|---|---|---|---|
+| `minio-sigv4-path-style-v1` | `verified` | `blocked-pending-flush-spike` | 挂载参数已冻结，仍不能发布 |
+| `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 仅为公有云文档候选参数，仍不能发布 |
+| `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 2023 私有云必须实测，仍不能发布 |
+
+公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。真实基础镜像 digest、s3fs artifact URL/hash、镜像 build/scan、SBOM 和 attestation 由 CI 与 Task 18 产出；在这些证据完成并显式提升状态前，文档示例不代表已可启用。本地静态 contract 与 Compose config 校验不能作为镜像构建或生产发布证据。
 
 ## 5. Kubernetes 架构
 
@@ -558,7 +588,9 @@ workspace:
       system_egress_cidrs: ["${SANDBOX_MINIO_ENDPOINT_CIDR}"]
     obs:
       driver: "s3fs"
-      profile: "huawei-obs-private-2023-verified-v1"
+      # 当前 compiled profile 仍为 unverified；此值会使 mode=fuse 校验失败，
+      # 仅用于展示最终配置形状，必须等 Task 18 实测并显式提升状态后启用。
+      profile: "huawei-obs-private-2023-v1"
       storage_identity: "huawei-obs-private-primary"
       ca_secret_key: "ca.crt"
       credential_generation: "2026-09-03-01"
@@ -908,7 +940,7 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 
 ### 17.1 测试矩阵
 
-必须覆盖：
+最终发布必须覆盖以下矩阵；当前三个 profile 均未通过 durable-flush release gate，不能把矩阵写成已验收：
 
 | Runtime | Provider |
 |---|---|
