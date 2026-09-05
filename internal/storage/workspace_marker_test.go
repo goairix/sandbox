@@ -63,6 +63,12 @@ func (f *fakeWorkspaceObjects) HeadObject(_ context.Context, key string) (bool, 
 	return exists, nil
 }
 
+func (f *fakeWorkspaceObjects) DeleteObject(_ context.Context, key string) error {
+	delete(f.data, key)
+	delete(f.options, key)
+	return nil
+}
+
 func TestRootMarkerProfilesHaveIndependentImmutableOptions(t *testing.T) {
 	profileIDs := []string{
 		RootMarkerProfileMinIO,
@@ -239,6 +245,10 @@ func TestMinIONativeAdapterPutHeadAndNotFound(t *testing.T) {
 			w.Header().Set("ETag", `"marker"`)
 			w.Header().Set("Last-Modified", "Thu, 04 Sep 2026 10:00:00 GMT")
 			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			delete(objects, r.URL.Path)
+			delete(bodies, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected method %s", r.Method)
 		}
@@ -263,6 +273,10 @@ func TestMinIONativeAdapterPutHeadAndNotFound(t *testing.T) {
 	assert.Empty(t, body)
 	assert.Equal(t, "application/x-directory", headers.Get("Content-Type"))
 	assert.Equal(t, "root", headers.Get("X-Amz-Meta-Marker"))
+	require.NoError(t, client.DeleteObject(context.Background(), "workspaces/team-a/"))
+	exists, err = client.HeadObject(context.Background(), "workspaces/team-a/")
+	require.NoError(t, err)
+	assert.False(t, exists)
 }
 
 func TestMinIONativeAdapterDoesNotMapNoSuchBucketToMissingObject(t *testing.T) {
@@ -321,6 +335,10 @@ func TestOBSNativeAdapterPutHeadAndNotFound(t *testing.T) {
 			w.Header().Set("ETag", `"marker"`)
 			w.Header().Set("Last-Modified", "Thu, 04 Sep 2026 10:00:00 GMT")
 			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			delete(objects, r.URL.Path)
+			delete(bodies, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected method %s", r.Method)
 		}
@@ -360,6 +378,10 @@ func TestOBSNativeAdapterPutHeadAndNotFound(t *testing.T) {
 	assert.Empty(t, body)
 	assert.Equal(t, "application/x-directory", headers.Get("Content-Type"))
 	assert.Equal(t, "root", firstNonEmpty(headers.Get("X-Obs-Meta-Marker"), headers.Get("X-Amz-Meta-Marker")))
+	require.NoError(t, client.DeleteObject(context.Background(), "workspaces/team-a/"))
+	exists, err = client.HeadObject(context.Background(), "workspaces/team-a/")
+	require.NoError(t, err)
+	assert.False(t, exists)
 }
 
 func TestOBSNativeAdapterDoesNotMapNoSuchBucketToMissingObject(t *testing.T) {

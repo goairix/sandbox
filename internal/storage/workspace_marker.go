@@ -106,6 +106,7 @@ func (p RootMarkerProfile) MarkerOptions() RootMarkerOptions {
 type WorkspaceObjectClient interface {
 	PutEmptyObject(ctx context.Context, key string, options RootMarkerOptions) error
 	HeadObject(ctx context.Context, key string) (bool, error)
+	DeleteObject(ctx context.Context, key string) error
 }
 
 // PrepareWorkspacePrefix writes and verifies the exact root marker for a
@@ -318,6 +319,10 @@ func (c *minioWorkspaceObjectClient) HeadObject(ctx context.Context, key string)
 	return false, err
 }
 
+func (c *minioWorkspaceObjectClient) DeleteObject(ctx context.Context, key string) error {
+	return c.client.RemoveObject(ctx, c.bucket, key, miniogo.RemoveObjectOptions{})
+}
+
 type obsWorkspaceObjectClient struct {
 	accessKey string
 	secretKey string
@@ -371,6 +376,15 @@ func (c *obsWorkspaceObjectClient) HeadObject(ctx context.Context, key string) (
 		return false, nil
 	}
 	return false, err
+}
+
+func (c *obsWorkspaceObjectClient) DeleteObject(ctx context.Context, key string) error {
+	client, err := c.client(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteObject(&obs.DeleteObjectInput{Bucket: c.bucket, Key: key})
+	return err
 }
 
 func isObjectNotFound(statusCode int, serviceCode string) bool {

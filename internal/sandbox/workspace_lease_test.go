@@ -1376,6 +1376,47 @@ func TestSessionStoreV2ListIgnoresWorkspaceStateNamespaces(t *testing.T) {
 	assert.Equal(t, "session-a", loaded.ID)
 }
 
+func TestSessionStoreLoadMigratesExactLegacySession(t *testing.T) {
+	store := newAtomicMemoryStore()
+	sessions := NewSessionStore(store, time.Minute)
+	sb := &Sandbox{
+		ID: "legacy-a", Config: SandboxConfig{Mode: ModePersistent}, State: StateReady,
+		CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now(),
+		RuntimeID: "runtime-a", Timeout: time.Hour,
+	}
+	raw, err := json.Marshal(sb)
+	require.NoError(t, err)
+	require.NoError(t, store.Set(context.Background(), "sandbox:"+sb.ID, raw, 0))
+
+	loaded, err := sessions.Load(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sb.ID, loaded.ID)
+	assert.True(t, store.hasKey(sandboxSessionKeyPrefix+sb.ID))
+	assert.False(t, store.hasKey("sandbox:"+sb.ID))
+}
+
+func TestWorkspaceCoordinatorRestoresExactConsumedLeaseWithoutNewGeneration(t *testing.T) {
+	store := newAtomicMemoryStore()
+	coordinator := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	lease, err := coordinator.Acquire(context.Background(), validLeaseRequest())
+	require.NoError(t, err)
+	require.NoError(t, coordinator.BindRuntime(context.Background(), lease, "uid-a"))
+	_, err = coordinator.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.NoError(t, err)
+	owner := lease.OwnerSnapshot()
+	require.Equal(t, uint8(1), owner.MountAttempt)
+
+	restored, err := coordinator.Restore(context.Background(), owner)
+	require.NoError(t, err)
+	assert.Equal(t, owner, restored.OwnerSnapshot())
+	assert.Equal(t, lease.Key, restored.Key)
+	require.NoError(t, coordinator.Renew(context.Background(), restored))
+	store.mu.Lock()
+	generation := store.increments[lease.generationKey]
+	store.mu.Unlock()
+	assert.Equal(t, int64(1), generation)
+}
+
 func mustWorkspaceHash(t *testing.T, req WorkspaceLeaseRequest) string {
 	t.Helper()
 	keys, err := workspaceStateKeys(req)

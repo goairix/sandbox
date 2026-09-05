@@ -20,6 +20,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
@@ -43,6 +44,19 @@ type fuseManagerRuntime struct {
 	networkErr         error
 	health             runtime.WorkspaceHealth
 	downloadReader     io.ReadCloser
+	orphanCalls        int
+	protectedOrphans   map[string]struct{}
+}
+
+func (r *fuseManagerRuntime) ReconcileOrphanedResources(_ context.Context, protected map[string]struct{}) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.orphanCalls++
+	r.protectedOrphans = make(map[string]struct{}, len(protected))
+	for uid := range protected {
+		r.protectedOrphans[uid] = struct{}{}
+	}
+	return nil
 }
 
 func (r *fuseManagerRuntime) DownloadFile(ctx context.Context, id, path string) (io.ReadCloser, error) {
@@ -151,14 +165,18 @@ func (r *fuseManagerRuntime) WorkspaceHealth(_ context.Context, ref runtime.Runt
 }
 
 func (r *fuseManagerRuntime) ConfirmTerminated(_ context.Context, _, runtimeUID string) (runtime.TerminationEvidence, error) {
+	r.recordEvent("confirm")
 	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}, nil
 }
 
 type fuseMarkerClient struct {
-	mu     sync.Mutex
-	events *[]string
-	exists bool
-	err    error
+	mu          sync.Mutex
+	events      *[]string
+	exists      bool
+	err         error
+	deletedKeys []string
+	deleteErr   error
+	onDelete    func(string)
 }
 
 type ambiguousSessionStore struct {
@@ -320,6 +338,22 @@ func (c *fuseMarkerClient) HeadObject(context.Context, string) (bool, error) {
 		return false, c.err
 	}
 	return c.exists, nil
+}
+
+func (c *fuseMarkerClient) DeleteObject(_ context.Context, key string) error {
+	c.mu.Lock()
+	if c.deleteErr != nil {
+		c.mu.Unlock()
+		return c.deleteErr
+	}
+	c.deletedKeys = append(c.deletedKeys, key)
+	c.exists = false
+	onDelete := c.onDelete
+	c.mu.Unlock()
+	if onDelete != nil {
+		onDelete(key)
+	}
+	return nil
 }
 
 func newFUSETestManager(t *testing.T, rt *fuseManagerRuntime) (*Manager, string, *memoryFUSEPoolRepository, *atomicMemoryStore) {
@@ -1090,6 +1124,129 @@ func TestManagerFUSETeardownRetriesTransientExactRemoval(t *testing.T) {
 	_, exists := mgr.sandboxes[sb.ID]
 	mgr.mu.RUnlock()
 	assert.False(t, exists)
+}
+
+func TestRestoreNeverReauthorizesExistingRuntimeUID(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	first, _, repo, store := newFUSETestManager(t, rt)
+	sb, err := first.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	first.mu.RLock()
+	oldLifecycle := first.fuseLifecycles[sb.ID]
+	first.mu.RUnlock()
+	require.NotNil(t, oldLifecycle)
+	oldLifecycle.cancel()
+	oldLifecycle.renewal.Stop()
+	rt.mu.Lock()
+	authorizeCalls := len(rt.authorizations)
+	rt.mu.Unlock()
+
+	spec := fixedFUSESpec("pool-key")
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), spec)
+	profile, err := storage.RootMarkerProfileByID(storage.RootMarkerProfileMinIO)
+	require.NoError(t, err)
+	restored := NewManager(rt, nil, first.fsMeta, ManagerConfig{
+		WorkspaceMode: "fuse", FUSEPool: pool,
+		WorkspaceCoordinator:  NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
+		FUSEHealthInterval: time.Hour,
+	})
+	restored.SetSessionStore(NewSessionStore(store, time.Hour))
+	require.NoError(t, restored.restorePersistentSandboxes(context.Background()))
+	t.Cleanup(func() {
+		restored.mu.RLock()
+		lifecycle := restored.fuseLifecycles[sb.ID]
+		restored.mu.RUnlock()
+		if lifecycle != nil {
+			lifecycle.cancel()
+			lifecycle.renewal.Stop()
+		}
+	})
+
+	rt.mu.Lock()
+	assert.Len(t, rt.authorizations, authorizeCalls)
+	rt.mu.Unlock()
+	got, err := restored.Get(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sb.RuntimeUID, got.RuntimeUID)
+	restored.mu.RLock()
+	assert.NotNil(t, restored.operationGates[sb.ID])
+	assert.NotNil(t, restored.fuseLifecycles[sb.ID])
+	restored.mu.RUnlock()
+}
+
+func TestDestroyFUSEDeletesExactProbeOnlyAfterRuntimeExitBeforeLeaseRelease(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, repo, store := newFUSETestManager(t, rt)
+	marker := mgr.config.WorkspaceObjectClient.(*fuseMarkerClient)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	require.NotNil(t, lifecycle)
+	probeName, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	expectedKey := sb.Workspace.Owner.Prefix + probeName
+	deleteObserved := false
+	marker.onDelete = func(key string) {
+		deleteObserved = true
+		assert.Equal(t, expectedKey, key)
+		assert.True(t, rt.wasRemoved(sb.RuntimeID), "runtime must be gone before remote probe cleanup")
+		assert.True(t, store.hasKey(lifecycle.lease.Key), "lease must remain until remote cleanup is verified")
+		assert.True(t, store.hasKey(lifecycle.lease.ownerKey), "owner must remain until remote cleanup is verified")
+	}
+
+	require.NoError(t, mgr.Destroy(context.Background(), sb.ID))
+	assert.True(t, deleteObserved)
+	marker.mu.Lock()
+	assert.Equal(t, []string{expectedKey}, marker.deletedKeys)
+	marker.mu.Unlock()
+	rt.mu.Lock()
+	assert.Equal(t, 1, rt.quiesceCalls)
+	assert.Equal(t, 1, rt.flushCalls)
+	rt.mu.Unlock()
+	assert.False(t, store.hasKey(lifecycle.lease.Key))
+	assert.False(t, store.hasKey(lifecycle.lease.ownerKey))
+	records, err := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	for _, record := range records {
+		assert.NotEqual(t, sb.Workspace.FUSEPreparationID, record.PreparationID)
+	}
+}
+
+func TestFUSEOrphanReconcileProtectsSessionOwnerAndPoolRuntimeUIDs(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, repo, store := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	defer func() {
+		mgr.mu.RLock()
+		lifecycle := mgr.fuseLifecycles[sb.ID]
+		mgr.mu.RUnlock()
+		if lifecycle != nil {
+			lifecycle.cancel()
+			lifecycle.renewal.Stop()
+		}
+	}()
+
+	prepared, err := repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	require.NotEmpty(t, prepared)
+	require.NoError(t, mgr.config.WorkspaceCoordinator.store.Set(context.Background(), workspaceOwnerKeyPrefix+"malformed", []byte("{}"), 0))
+	require.ErrorIs(t, mgr.reconcileFUSEOrphans(context.Background()), ErrWorkspaceOwnerLost)
+	require.NoError(t, store.Delete(context.Background(), workspaceOwnerKeyPrefix+"malformed"))
+
+	require.NoError(t, mgr.reconcileFUSEOrphans(context.Background()))
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, 1, rt.orphanCalls)
+	assert.Contains(t, rt.protectedOrphans, sb.RuntimeUID)
+	for _, record := range prepared {
+		if record.RuntimeUID != "" {
+			assert.Contains(t, rt.protectedOrphans, record.RuntimeUID)
+		}
+	}
 }
 
 func TestManagerStopWaitsForScheduledFUSETeardownRetry(t *testing.T) {

@@ -32,7 +32,10 @@ func ZapLogger() *zap.Logger {
 	return _logger._logger
 }
 
-var _logger *logger
+// Keep logging safe before the application-level logger is initialized. This
+// matters during startup recovery (and in focused package tests), where an
+// error path may log before main has installed the configured logger.
+var _logger = &logger{_logger: zap.NewNop()}
 
 func Init(cfg *config.Config) error {
 	newZapLogger(cfg)

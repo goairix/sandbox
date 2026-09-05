@@ -195,11 +195,50 @@ func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, r
 		if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
 			return false, ErrWorkspaceOwnerLost
 		}
+		keys, err := workspaceStateKeysFromOwner(owner)
+		if err != nil || keys.owner != key {
+			return false, ErrWorkspaceOwnerLost
+		}
 		if owner.RuntimeID == runtimeID && owner.RuntimeUID == runtimeUID {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// ProtectedRuntimeUIDs returns every immutable runtime referenced by valid
+// persistent owner state. One malformed record aborts the scan so an orphan
+// reconciler can never delete resources based on an incomplete protection set.
+func (c *WorkspaceCoordinator) ProtectedRuntimeUIDs(ctx context.Context) (map[string]struct{}, error) {
+	if c == nil || c.configErr != nil {
+		return nil, ErrInvalidWorkspaceLease
+	}
+	keys, err := c.store.Keys(ctx, workspaceOwnerKeyPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("list workspace owners: %w", err)
+	}
+	protected := make(map[string]struct{})
+	for _, key := range keys {
+		raw, err := c.store.Get(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("load workspace owner: %w", err)
+		}
+		if raw == nil {
+			continue
+		}
+		var owner WorkspaceOwner
+		if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
+			return nil, ErrWorkspaceOwnerLost
+		}
+		keys, err := workspaceStateKeysFromOwner(owner)
+		if err != nil || keys.owner != key {
+			return nil, ErrWorkspaceOwnerLost
+		}
+		if owner.RuntimeUID != "" {
+			protected[owner.RuntimeUID] = struct{}{}
+		}
+	}
+	return protected, nil
 }
 
 // NewWorkspaceCoordinator constructs a workspace lease coordinator. Invalid
@@ -334,6 +373,63 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{activeRaw, provisionalRaw}, ownerRaw, err)
 	}
 	lease.ExpiresAt = time.Now().UTC().Add(c.leaseTTL)
+	return lease, nil
+}
+
+// Restore reconstructs the in-memory capability for an already-consumed
+// workspace owner without allocating a new generation or mount attempt. Both
+// the persistent owner and active lease must still match exactly.
+func (c *WorkspaceCoordinator) Restore(ctx context.Context, expected WorkspaceOwner) (*WorkspaceLease, error) {
+	if c == nil || c.configErr != nil || validateStoredOwner(expected) != nil || expected.RuntimeUID == "" || expected.MountAttempt != 1 {
+		return nil, ErrInvalidWorkspaceLease
+	}
+	keys, err := workspaceStateKeysFromOwner(expected)
+	if err != nil {
+		return nil, ErrInvalidWorkspaceLease
+	}
+	ownerRaw, err := c.store.Get(ctx, keys.owner)
+	if err != nil {
+		return nil, fmt.Errorf("restore workspace owner: %w", err)
+	}
+	if ownerRaw == nil {
+		return nil, ErrWorkspaceOwnerLost
+	}
+	var owner WorkspaceOwner
+	if strictDecodeFlatJSONObject(ownerRaw, &owner) != nil || owner != expected {
+		return nil, ErrWorkspaceOwnerLost
+	}
+	leaseRaw, err := c.store.Get(ctx, keys.lease)
+	if err != nil {
+		return nil, fmt.Errorf("restore workspace lease: %w", err)
+	}
+	if leaseRaw == nil {
+		return nil, ErrWorkspaceLeaseLost
+	}
+	record, err := parseActiveWorkspaceLeaseRecord(leaseRaw)
+	if err != nil || record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
+		record.Bucket != owner.Bucket || record.Prefix != owner.Prefix || record.WorkspaceHash != owner.WorkspaceHash ||
+		record.SandboxID != owner.SandboxID || record.Runtime != owner.Runtime || record.RuntimeID != owner.RuntimeID ||
+		record.Generation != owner.Generation || (record.RuntimeUID != "" && record.RuntimeUID != owner.RuntimeUID) {
+		return nil, ErrWorkspaceLeaseLost
+	}
+	baseOwner := owner
+	baseOwner.RuntimeUID = record.RuntimeUID
+	baseOwner.MountAttempt = 0
+	lease := &WorkspaceLease{
+		Key:                keys.lease,
+		Value:              append([]byte(nil), leaseRaw...),
+		Prefix:             owner.Prefix,
+		WorkspaceHash:      owner.WorkspaceHash,
+		Owner:              baseOwner,
+		ExpiresAt:          time.Now().UTC().Add(c.leaseTTL),
+		ownerKey:           keys.owner,
+		generationKey:      keys.generation,
+		boundRuntimeUID:    owner.RuntimeUID,
+		authoritativeOwner: owner,
+	}
+	if err := c.Renew(ctx, lease); err != nil {
+		return nil, err
+	}
 	return lease, nil
 }
 

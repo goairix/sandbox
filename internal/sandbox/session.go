@@ -11,7 +11,10 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
-const sandboxSessionKeyPrefix = "sandbox:session:v2:"
+const (
+	sandboxSessionKeyPrefix       = "sandbox:session:v2:"
+	legacySandboxSessionKeyPrefix = "sandbox:"
+)
 
 var ErrSessionPublicationConflict = errors.New("sandbox session publication changed")
 
@@ -56,11 +59,42 @@ func (s *SessionStore) Load(ctx context.Context, id string) (*Sandbox, error) {
 		return nil, fmt.Errorf("get sandbox: %w", err)
 	}
 	if data == nil {
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+		return s.loadAndMigrateLegacy(ctx, id)
 	}
 	var sb Sandbox
 	if err := json.Unmarshal(data, &sb); err != nil {
 		return nil, fmt.Errorf("unmarshal sandbox: %w", err)
+	}
+	return &sb, nil
+}
+
+func (s *SessionStore) loadAndMigrateLegacy(ctx context.Context, id string) (*Sandbox, error) {
+	if id == "" {
+		return nil, fmt.Errorf("sandbox not found: %s", id)
+	}
+	atomicStore, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return nil, fmt.Errorf("sandbox not found: %s", id)
+	}
+	legacyKey := legacySandboxSessionKeyPrefix + id
+	raw, err := s.store.Get(ctx, legacyKey)
+	if err != nil {
+		return nil, fmt.Errorf("get legacy sandbox: %w", err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("sandbox not found: %s", id)
+	}
+	var sb Sandbox
+	if err := json.Unmarshal(raw, &sb); err != nil || sb.ID != id || sb.RuntimeID == "" || sb.CreatedAt.IsZero() {
+		return nil, fmt.Errorf("invalid legacy sandbox session: %s", id)
+	}
+	if err := s.Save(ctx, &sb); err != nil {
+		return nil, fmt.Errorf("migrate legacy sandbox session: %w", err)
+	}
+	deleted, err := atomicStore.CompareAndDelete(ctx, legacyKey, raw)
+	if err != nil || !deleted {
+		cleanupErr := s.RemoveExact(ctx, &sb)
+		return nil, errors.Join(ErrSessionPublicationConflict, err, cleanupErr)
 	}
 	return &sb, nil
 }
