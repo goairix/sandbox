@@ -69,6 +69,13 @@ func (s *Sandbox) UploadFile(ctx context.Context, remotePath string, r io.Reader
 	return err
 }
 
+// UploadFileSized uploads a stream with an exact size declaration. Use this
+// for large files so the server can enforce its configured streaming limit.
+func (s *Sandbox) UploadFileSized(ctx context.Context, remotePath string, size int64, r io.Reader) error {
+	_, err := s.client.UploadFileSized(ctx, s.id, remotePath, size, r)
+	return err
+}
+
 // DownloadFile downloads a file from the sandbox. Caller must close the returned ReadCloser.
 func (s *Sandbox) DownloadFile(ctx context.Context, remotePath string) (io.ReadCloser, error) {
 	return s.client.DownloadFile(ctx, s.id, remotePath)

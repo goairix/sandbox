@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +46,38 @@ func TestClientCreateSandbox(t *testing.T) {
 	}
 	if got.ID != want.ID {
 		t.Errorf("ID = %q, want %q", got.ID, want.ID)
+	}
+}
+
+func TestClientUploadFileSizedSendsExactDeclaredSize(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Sandbox-File-Size"); got != "5" {
+			t.Errorf("X-Sandbox-File-Size = %q, want 5", got)
+		}
+		if got := r.URL.Query().Get("path"); got != "/workspace/a" {
+			t.Errorf("path query = %q, want /workspace/a", got)
+		}
+		if err := r.ParseMultipartForm(1024); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := r.MultipartForm.Value["path"]; exists {
+			t.Error("sized upload must not send path as a multipart field")
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		body, _ := io.ReadAll(file)
+		if string(body) != "hello" {
+			t.Errorf("body = %q", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sandbox.FileUploadResponse{Path: "/workspace/a", Size: 5})
+	})
+	_, err := client.UploadFileSized(context.Background(), "sb", "/workspace/a", 5, strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

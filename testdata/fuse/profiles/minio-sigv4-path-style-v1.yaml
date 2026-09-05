@@ -1,0 +1,16 @@
+schema_version: 1
+profile_id: minio-sigv4-path-style-v1
+provider: minio
+enabled: false
+status: blocked-pending-flush-spike
+mounter_image_digest: ""
+sandbox_image_digest: ""
+service_version: ""
+s3fs_version: ""
+evidence_sha256: ""
+directory_marker: trailing-slash-zero-byte
+tls_verify: true
+options:
+  - use_path_request_style
+  - sigv4
+blocked_reason: real digest and durable-flush evidence have not been recorded

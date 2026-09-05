@@ -878,6 +878,44 @@ docker exec -u 1000:1000 "$SANDBOX_CONTAINER" \
 
 非上传请求继续使用 64 MiB body 上限。只有精确的 direct file-upload 路由使用 `security.max_upload_bytes`（默认 2 GiB）；大于 64 MiB 的请求必须携带 `X-Sandbox-File-Size`，handler 用 `MultipartReader` 直接把 file part 流向 runtime，并校验声明长度、短读、超量与配置上限。Kubernetes/Docker runtime 在已知 size 后先写 tar header 再 `io.CopyN`，禁止 `ParseMultipartForm`、`FormFile` 或 `io.ReadAll` 把 1 GiB 请求落入内存/临时文件。其他 JSON、exec 和 multipart chunk 路由不得继承这个放宽值。
 
+Go SDK 对应使用 `UploadFileSized(ctx, sandboxID, remotePath, size, reader)`；它把精确路径放在 query、大小放在 `X-Sandbox-File-Size`，multipart 中只流式发送单个 file part。普通小文件继续使用 `UploadFile`，保持兼容。
+
+### 7.8 本地 Docker、kind 与本地镜像仓库验证
+
+本地双 runtime 可以共用同一套 release profile 报告，但必须分别执行完整测试。Docker 使用自带 supervisor/s3fs 的特殊 sandbox 容器；kind 使用普通 sandbox 容器加 mounter sidecar。两者都不得把宿主机业务目录挂到 `/workspace`：Docker 的 `/workspace` 位于特殊容器内，Kubernetes 的 `/workspace` 位于 Pod 私有 `emptyDir`；kind 节点内出现的 kubelet Pod mount 不是业务 hostPath。
+
+先确认实际 Docker context、kind 集群名、节点 FUSE 设备和镜像仓库：
+
+```bash
+docker context show
+docker info
+kind get clusters
+kubectl config current-context
+kind get nodes --name "$KIND_CLUSTER_NAME"
+for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+  docker exec "$node" test -c /dev/fuse
+done
+```
+
+本地仓库只解决镜像分发，不是对象存储 endpoint。mounter、普通 sandbox 和 Docker 特殊 sandbox 镜像必须先推送到该仓库，再以仓库返回的真实 `@sha256:` digest 写入 profile；禁止用本地 image ID 或 tag 代替 registry digest。kind 必须能够从节点 containerd 拉取该 digest，或者在仅供开发的验证中用 `kind load docker-image` 导入同一内容并确认 Pod 实际 image ID。MinIO/OBS endpoint、DNS、CA 和 egress 白名单仍独立配置。
+
+本机执行结构与设备检查的典型环境如下；Secret 名、namespace、digest 和 staging 路径必须换成实际值：
+
+```bash
+export KIND_CLUSTER_NAME=desktop
+export WORKSPACE_RUNTIME_NAMESPACE=sandbox-runtime
+export WORKSPACE_RUNTIME_SECRET=workspace-minio
+export FUSE_LSM_PROFILE=sandbox-fuse
+export WORKSPACE_SECRET_STAGING_ROOT=/var/lib/sandbox/workspace-secrets
+
+scripts/workspace-fuse-preflight.sh kubernetes \
+  --profile testdata/fuse/profiles/minio-sigv4-path-style-v1.yaml
+scripts/workspace-fuse-preflight.sh docker \
+  --profile testdata/fuse/profiles/minio-sigv4-path-style-v1.yaml
+```
+
+preflight 会验证 digest、镜像自检、RBAC、Secret、`/dev/fuse`、非 unconfined LSM、无宿主机 `/workspace` bind 和现有 FUSE workload。完整测试还需提供 sandbox-api URL/API key、真实对象存储凭据和 fault driver。MinIO 本地替身也必须启用证书与主机名校验，因为 release profile 拒绝 HTTP 和跳过 TLS 校验。对象存储若位于内网，只对其精确 FQDN/CIDR、端口以及必要 DNS 开 system egress 白名单，不开放通用内网访问。
+
 ## 8. Provider profile
 
 ### 8.1 MinIO mount 参数基线（尚未通过 durable-flush gate）
@@ -920,6 +958,45 @@ OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 p
 华为公有云与 2023 私有云必须产出不同的 profile ID、镜像 digest 和验证报告，例如 `huawei-obs-public-<region>-v1` 与 `huawei-obs-private-2023-<site>-v1`。即使实测参数暂时相同，也不能把其中一方的兼容性结论直接复用到另一方。
 
 未完成 spike 前，不得把 `storage.filesystem.provider` 切换为 `obs`，也不得发布可选中的 OBS profile/image。验证结论要落为版本化 profile，而不是在生产临时追加参数。
+
+### 8.3 六组合矩阵与证据冻结
+
+`scripts/workspace-fuse-matrix.sh` 固定执行三个 profile × 两个 runtime。每个启用的 profile 都必须同时通过功能测试和 fault matrix；fault driver 缺失、任一 cleanup 未确认、证据摘要不完整、digest 不一致都会失败。当前仓库中的三个报告均为 `enabled: false`，因此默认执行矩阵会以非零退出并阻止发布。仅查看候选阻塞清单时可显式运行：
+
+```bash
+ALLOW_BLOCKED_FUSE_PROFILES=1 scripts/workspace-fuse-matrix.sh
+```
+
+该变量只用于开发环境盘点，发布流水线不得设置。发布流水线必须让默认命令通过，并观察到 `enabled=3 blocked=0 combinations=6`。
+
+集成测试需要：
+
+```bash
+export WORKSPACE_FUSE_API_URL=https://sandbox-api.example.com
+export WORKSPACE_FUSE_API_KEY_FILE=/run/secrets/sandbox-api-key
+export WORKSPACE_FUSE_CHAOS_DRIVER=/opt/workspace-fuse/fault-driver
+```
+
+执行器应从受限文件读取 API key 后仅注入测试进程的 `WORKSPACE_FUSE_API_KEY`，不得把值写入命令行、profile、证据或日志。fault driver 接收 `<runtime> <profile> <scenario>`，成功时只输出 `{"passed":true,"cleanup_confirmed":true}`；endpoint、Secret、AK/SK 和原始 workspace prefix 不得输出。
+
+测试通过后生成不含凭据的 evidence JSON。它必须绑定 profile ID、mounter/sandbox digest、服务/Everest/s3fs 版本、目录标记、TLS、固定 options，以及 Kubernetes/Docker 各自的 `functional`、`faults` 和 `cleanup_confirmed` 布尔值。随后才允许执行 recorder，例如 MinIO：
+
+```bash
+scripts/workspace-fuse-preflight.sh record-profile \
+  --profile-id minio-sigv4-path-style-v1 \
+  --image-digest "$MINIO_MOUNTER_IMAGE_DIGEST" \
+  --sandbox-image-digest "$MINIO_SANDBOX_IMAGE_DIGEST" \
+  --service-version "$MINIO_SERVICE_VERSION" \
+  --s3fs-version "$S3FS_VERSION" \
+  --directory-marker trailing-slash-zero-byte \
+  --tls-verify true \
+  --option use_path_request_style \
+  --option sigv4 \
+  --evidence /secure-evidence/minio.json \
+  --output testdata/fuse/profiles/minio-sigv4-path-style-v1.yaml
+```
+
+OBS 两份报告还强制要求各自实测的 `--everest-version`。recorder 校验证据与待写参数完全一致，保存 evidence 文件的 SHA-256，并原子写出 `enabled: true/status: release-verified`；profile 中的任何 digest 都不能用环境变量覆盖。原始 evidence、镜像签名、SBOM 和扫描结果保存在制品库，不提交凭据或内部 endpoint。
 
 ## 9. 灰度、回滚与变更顺序
 

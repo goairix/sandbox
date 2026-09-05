@@ -62,6 +62,7 @@ func TestInternalErrorFUSEWorkspaceConflicts(t *testing.T) {
 	}{
 		{name: "immutable", err: sandbox.ErrFUSEWorkspaceImmutable, code: "FUSE_WORKSPACE_IMMUTABLE"},
 		{name: "owned", err: sandbox.ErrWorkspaceOwned, code: "WORKSPACE_OWNED"},
+		{name: "leased", err: sandbox.ErrWorkspaceLeased, code: "WORKSPACE_LEASED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

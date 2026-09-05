@@ -1603,12 +1603,14 @@ For each profile, write the exact tested fields with the preflight recorder; the
 scripts/workspace-fuse-preflight.sh record-profile \
   --profile-id minio-sigv4-path-style-v1 \
   --image-digest "$MINIO_IMAGE_DIGEST" \
+  --sandbox-image-digest "$MINIO_SANDBOX_IMAGE_DIGEST" \
   --service-version "$MINIO_SERVICE_VERSION" \
   --s3fs-version "$S3FS_VERSION" \
   --directory-marker trailing-slash-zero-byte \
   --tls-verify true \
   --option use_path_request_style \
   --option sigv4 \
+  --evidence "$MINIO_MATRIX_EVIDENCE" \
   --output testdata/fuse/profiles/minio-sigv4-path-style-v1.yaml
 ```
 

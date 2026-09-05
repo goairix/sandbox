@@ -106,6 +106,12 @@ func internalError(c *gin.Context, err error) {
 			Message: err.Error(),
 		})
 		return
+	case errors.Is(err, sandbox.ErrWorkspaceLeased):
+		c.JSON(http.StatusConflict, types.ErrorResponse{
+			Code:    "WORKSPACE_LEASED",
+			Message: err.Error(),
+		})
+		return
 	case errors.Is(err, sandbox.ErrReservedFUSEWorkspacePath):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Code:    "RESERVED_WORKSPACE_PATH",

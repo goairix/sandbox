@@ -2181,3 +2181,14 @@ func TestManager_Destroy(t *testing.T) {
 	_, err = mgr.Get(ctx, sb.ID)
 	assert.Error(t, err)
 }
+
+func TestBuildInstallCommandKeepsPackageCachesOutOfWorkspace(t *testing.T) {
+	command := buildInstallCommand([]Dependency{
+		{Name: "requests", Manager: "pip"},
+		{Name: "typescript", Manager: "npm"},
+	})
+
+	assert.Contains(t, command, "PIP_CACHE_DIR=/tmp/pip-cache pip install")
+	assert.Contains(t, command, "npm_config_cache=/tmp/npm-cache npm install")
+	assert.NotContains(t, command, "/workspace")
+}

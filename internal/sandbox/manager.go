@@ -2618,10 +2618,10 @@ func buildInstallCommand(deps []Dependency) string {
 	}
 	var cmds []string
 	if len(pipPkgs) > 0 {
-		cmds = append(cmds, "pip install --no-cache-dir "+strings.Join(pipPkgs, " "))
+		cmds = append(cmds, "PIP_CACHE_DIR=/tmp/pip-cache pip install --no-cache-dir "+strings.Join(pipPkgs, " "))
 	}
 	if len(npmPkgs) > 0 {
-		cmds = append(cmds, "npm install --no-save "+strings.Join(npmPkgs, " "))
+		cmds = append(cmds, "npm_config_cache=/tmp/npm-cache npm install --no-save "+strings.Join(npmPkgs, " "))
 	}
 	return strings.Join(cmds, " && ")
 }

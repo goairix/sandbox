@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -158,6 +159,19 @@ func (c *Client) Execute(ctx context.Context, req ExecuteRequest) (ExecResponse,
 // UploadFile uploads a file to the sandbox. POST /api/v1/sandboxes/:id/files/upload
 // The file content is streamed via io.Pipe to avoid buffering the entire file in memory.
 func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Reader) (FileUploadResponse, error) {
+	return c.uploadFile(ctx, id, remotePath, -1, r)
+}
+
+// UploadFileSized streams an upload while declaring its exact payload size.
+// It is required for payloads larger than the server's legacy 64 MiB fallback.
+func (c *Client) UploadFileSized(ctx context.Context, id, remotePath string, size int64, r io.Reader) (FileUploadResponse, error) {
+	if size < 0 {
+		return FileUploadResponse{}, fmt.Errorf("sandbox: upload size must be non-negative")
+	}
+	return c.uploadFile(ctx, id, remotePath, size, r)
+}
+
+func (c *Client) uploadFile(ctx context.Context, id, remotePath string, size int64, r io.Reader) (FileUploadResponse, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
@@ -171,21 +185,30 @@ func (c *Client) UploadFile(ctx context.Context, id, remotePath string, r io.Rea
 			pw.CloseWithError(fmt.Errorf("sandbox: copy file: %w", err))
 			return
 		}
-		if err := mw.WriteField("path", remotePath); err != nil {
-			pw.CloseWithError(fmt.Errorf("sandbox: write field: %w", err))
-			return
+		if size < 0 {
+			if err := mw.WriteField("path", remotePath); err != nil {
+				pw.CloseWithError(fmt.Errorf("sandbox: write field: %w", err))
+				return
+			}
 		}
 		pw.CloseWithError(mw.Close())
 	}()
 
+	uploadURL := c.baseURL + c.sandboxBase(id) + "/files/upload"
+	if size >= 0 {
+		uploadURL += "?path=" + url.QueryEscape(remotePath)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+c.sandboxBase(id)+"/files/upload", pr)
+		uploadURL, pr)
 	if err != nil {
 		pr.CloseWithError(err)
 		return FileUploadResponse{}, fmt.Errorf("sandbox: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if size >= 0 {
+		req.Header.Set("X-Sandbox-File-Size", strconv.FormatInt(size, 10))
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
