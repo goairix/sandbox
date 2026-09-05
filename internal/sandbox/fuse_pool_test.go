@@ -616,6 +616,9 @@ func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {
 		{"mounter image", func(s *runtime.SandboxSpec) {
 			s.WorkspaceFUSE.MounterImage = "mounter@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		}},
+		{"docker image", func(s *runtime.SandboxSpec) {
+			s.WorkspaceFUSE.DockerImage = "sandbox-fuse@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		}},
 		{"secret", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SecretName = "storage-secret-v2" }},
 		{"CA", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "private-ca.crt" }},
 		{"endpoint host IP", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.EndpointHostIPs = []string{"192.0.2.12"} }},

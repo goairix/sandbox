@@ -14,12 +14,13 @@ import (
 )
 
 type fakeProcesses struct {
-	snapshots [][]processIdentity
-	scans     int
-	stopped   []int
-	resumed   []int
-	fds       map[int][]descriptor
-	states    map[int]processIdentity
+	snapshots      [][]processIdentity
+	scans          int
+	stopped        []int
+	resumed        []int
+	fds            map[int][]descriptor
+	states         map[int]processIdentity
+	identityErrors map[int]error
 }
 
 func (f *fakeProcesses) listSameUID(_ int, _ int) ([]processIdentity, error) {
@@ -48,6 +49,9 @@ func (f *fakeProcesses) signal(pid int, signal syscall.Signal) error {
 }
 
 func (f *fakeProcesses) identity(pid int) (processIdentity, error) {
+	if err := f.identityErrors[pid]; err != nil {
+		return processIdentity{}, err
+	}
 	identity, ok := f.states[pid]
 	if !ok {
 		return processIdentity{}, os.ErrNotExist

@@ -250,6 +250,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		PasswdFile:            path.Join(mounterRunPath, "passwd-s3fs"),
 		CAFile:                secretFilePath(fuse.CASecretKey),
 		CacheDir:              mounterCachePath,
+		CacheLimitBytes:       validated.cacheSize.Value(),
 		MountPath:             workspaceMountPath,
 		PoolKey:               fuse.PoolKey,
 		MountTimeoutSeconds:   ceilDurationSeconds(fuse.MountTimeout),

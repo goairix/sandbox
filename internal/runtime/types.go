@@ -87,22 +87,25 @@ type WorkspaceFUSESpec struct {
 	// part of the pool identity so credential rotations cannot reuse old shells.
 	CredentialGeneration string
 	MounterImage         string
-	SecretName           string
-	CASecretKey          string
-	EndpointHostIPs      []string
-	Bucket               string
-	Endpoint             string
-	Region               string
-	UseSSL               bool
-	CacheSize            string
-	CacheMedium          string
-	MountTimeout         time.Duration
-	FlushTimeout         time.Duration
-	UnmountTimeout       time.Duration
-	LSMProfile           string
-	MounterResources     WorkspaceFUSEResources
-	SystemEgress         SystemEgressSpec
-	PoolKey              string
+	// DockerImage is the digest-pinned special sandbox image that contains the
+	// trusted PID 1 supervisor, s3fs and the unprivileged workspace probe.
+	DockerImage      string
+	SecretName       string
+	CASecretKey      string
+	EndpointHostIPs  []string
+	Bucket           string
+	Endpoint         string
+	Region           string
+	UseSSL           bool
+	CacheSize        string
+	CacheMedium      string
+	MountTimeout     time.Duration
+	FlushTimeout     time.Duration
+	UnmountTimeout   time.Duration
+	LSMProfile       string
+	MounterResources WorkspaceFUSEResources
+	SystemEgress     SystemEgressSpec
+	PoolKey          string
 }
 
 // WorkspaceFUSEResources contains the fixed resource requests and limits used

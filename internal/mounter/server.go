@@ -162,7 +162,7 @@ func (s *Server) dispatch(ctx context.Context, command string, input []byte) ([]
 			return marshalBounded(terminal)
 		}
 		if command == "health-prepared" {
-			status, err = s.Supervisor.PreparedStatus()
+			status, err = s.Supervisor.PreparedStatus(ctx)
 		} else {
 			status, err = s.Supervisor.ReadyStatus(ctx)
 		}

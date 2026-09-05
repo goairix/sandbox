@@ -113,12 +113,12 @@ func validateHealthOutput(command string, output []byte) error {
 }
 
 func validateHealthStatus(command string, status fuseprotocol.MounterStatus) error {
-	if status.Version != fuseprotocol.Version || status.RestartDetected {
+	if status.Version != fuseprotocol.Version || status.RestartDetected || status.CacheExceeded || status.CacheBytes < 0 || status.CacheLimitBytes <= 0 || status.CacheBytes >= status.CacheLimitBytes {
 		return fmt.Errorf("supervisor health state is not ready")
 	}
 	switch command {
 	case "health-prepared":
-		if status.State != "prepared" || status.MountType != "" || status.Generation != 0 {
+		if status.State != "prepared" || status.MountType != "" || status.Generation != 0 || status.CacheBytes != 0 {
 			return fmt.Errorf("supervisor is not prepared")
 		}
 	case "health-ready":
@@ -175,8 +175,15 @@ func supervise() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	server := mounter.Server{Supervisor: supervisor, SocketPath: filepath.Clean(controlSocket), ExpectedRuntimeUID: expectedUID, IOTimeout: 10 * time.Second}
-	if err := server.Serve(ctx); err != nil {
-		return err
+	serveCtx, cancelServe := context.WithCancel(ctx)
+	errors := make(chan error, 2)
+	go func() { errors <- server.Serve(serveCtx) }()
+	go func() { errors <- (&mounter.DockerReaperServer{}).Serve(serveCtx) }()
+	serveErr := <-errors
+	cancelServe()
+	<-errors
+	if serveErr != nil {
+		return serveErr
 	}
 	teardownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

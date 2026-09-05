@@ -265,11 +265,11 @@ func preparedScript() *commandScript {
 	return &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
 		switch fmt.Sprint(command.argv) {
 		case fmt.Sprint([]string{mounterBinary, "health", "prepared"}):
-			return []byte(`{"version":1,"state":"prepared","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"","generation":0,"restart_detected":false}`), nil
+			return []byte(`{"version":1,"state":"prepared","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"","generation":0,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`), nil
 		case fmt.Sprint([]string{mounterBinary, "authorize"}):
 			return []byte(`{"version":1,"accepted":true,"runtime_uid":"pod-uid-a","generation":7}`), nil
 		case fmt.Sprint([]string{mounterBinary, "health", "ready"}):
-			return []byte(`{"version":1,"state":"ready","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"fuse","generation":7,"restart_detected":false}`), nil
+			return []byte(`{"version":1,"state":"ready","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`), nil
 		case fmt.Sprint([]string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", "pod-uid-a", "--generation", "7"}):
 			return []byte(`{"version":1,"runtime_uid":"pod-uid-a","generation":7,"ok":true,"token":""}`), nil
 		case fmt.Sprint([]string{workspaceProbeBinary, "quiesce", "--runtime-uid", "pod-uid-a", "--generation", "7"}):
@@ -1500,7 +1500,7 @@ func TestRecoveredWorkspaceHealthRejectsMounterPoolKeyDrift(t *testing.T) {
 	base := preparedScript()
 	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
 		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "ready"}) {
-			return []byte(`{"version":1,"state":"ready","runtime_uid":"pod-uid-a","pool_key":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","mount_type":"fuse","generation":7,"restart_detected":false}`), nil
+			return []byte(`{"version":1,"state":"ready","runtime_uid":"pod-uid-a","pool_key":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`), nil
 		}
 		return base.handler(command)
 	}}

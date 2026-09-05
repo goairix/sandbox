@@ -231,6 +231,7 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, "/run/s3fs/passwd-s3fs", bootstrap["passwd_file"])
 	assert.Equal(t, "/run/secrets/workspace/ca.crt", bootstrap["ca_file"])
 	assert.Equal(t, "/var/cache/s3fs", bootstrap["cache_dir"])
+	assert.Equal(t, float64(2<<30), bootstrap["cache_limit_bytes"])
 	assert.Equal(t, "/workspace", bootstrap["mount_path"])
 	assert.Equal(t, spec.WorkspaceFUSE.PoolKey, bootstrap["pool_key"])
 	assert.Equal(t, float64(30), bootstrap["mount_timeout_seconds"])

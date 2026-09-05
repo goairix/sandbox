@@ -1098,6 +1098,7 @@ type fusePoolKeyProjection struct {
 	StorageIdentity      string                         `json:"storage_identity"`
 	CredentialGeneration string                         `json:"credential_generation"`
 	MounterImage         string                         `json:"mounter_image"`
+	DockerImage          string                         `json:"docker_image"`
 	SecretName           string                         `json:"secret_name"`
 	CASecretKey          string                         `json:"ca_secret_key"`
 	EndpointHostIPs      []string                       `json:"endpoint_host_ips"`
@@ -1147,7 +1148,7 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 		CPU: spec.CPU, CPURequest: spec.CPURequest, Disk: spec.Disk, TmpDisk: spec.TmpDisk,
 		PidLimit: spec.PidLimit, ReadOnlyRootFS: spec.ReadOnlyRootFS, RunAsUser: spec.RunAsUser, SeccompProfile: spec.SeccompProfile,
 		Provider: fuse.Provider, Driver: fuse.Driver, Profile: fuse.Profile, StorageIdentity: fuse.StorageIdentity,
-		CredentialGeneration: fuse.CredentialGeneration, MounterImage: fuse.MounterImage,
+		CredentialGeneration: fuse.CredentialGeneration, MounterImage: fuse.MounterImage, DockerImage: fuse.DockerImage,
 		SecretName: fuse.SecretName, CASecretKey: fuse.CASecretKey, EndpointHostIPs: canonicalStrings(fuse.EndpointHostIPs),
 		Bucket: fuse.Bucket, Endpoint: fuse.Endpoint, Region: fuse.Region, UseSSL: fuse.UseSSL,
 		CacheSize: fuse.CacheSize, CacheMedium: fuse.CacheMedium, MountTimeout: fuse.MountTimeout, FlushTimeout: fuse.FlushTimeout, UnmountTimeout: fuse.UnmountTimeout,

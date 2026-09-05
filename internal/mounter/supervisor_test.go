@@ -87,7 +87,8 @@ func validBootstrap(root string) fuseprotocol.BootstrapConfig {
 		Version: fuseprotocol.Version, RuntimeUID: "uid-a", Provider: "minio", Bucket: "bucket-a", Endpoint: "https://minio.example.com", Region: "us-east-1",
 		Profile: "minio-sigv4-path-style-v1", AccessKeyFile: filepath.Join(root, "secrets", "accessKey"), SecretKeyFile: filepath.Join(root, "secrets", "secretKey"),
 		PasswdFile: filepath.Join(root, "run", "passwd-s3fs"), CacheDir: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"),
-		PoolKey: strings.Repeat("a", 64), MountTimeoutSeconds: 2, FlushTimeoutSeconds: 2, UnmountTimeoutSeconds: 2,
+		PoolKey: strings.Repeat("a", 64), CacheLimitBytes: 1024,
+		MountTimeoutSeconds: 2, FlushTimeoutSeconds: 2, UnmountTimeoutSeconds: 2,
 	}
 }
 
@@ -229,7 +230,7 @@ func TestBootstrapCanonicalizesRuntimeUIDAndAllowsCacheRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: bootstrap.CacheDir, MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, &fakeRunner{})
 	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
-	status, err := s.PreparedStatus()
+	status, err := s.PreparedStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "uid-a", status.RuntimeUID)
 	raw, err := os.ReadFile(filepath.Join(root, "run", "bootstrap.json"))
@@ -407,18 +408,52 @@ func TestPreparedStatusRevalidatesFuseAnchorAndCredentialState(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
 	s.config.CheckFuse = func() error { return errors.New("fuse vanished") }
-	_, err := s.PreparedStatus()
+	_, err := s.PreparedStatus(context.Background())
 	require.Error(t, err)
 
 	s.config.CheckFuse = func() error { return nil }
 	s.config.CheckAnchor = func(string) error { return errors.New("anchor changed") }
-	_, err = s.PreparedStatus()
+	_, err = s.PreparedStatus(context.Background())
 	require.Error(t, err)
 
 	s.config.CheckAnchor = func(string) error { return nil }
 	require.NoError(t, os.Chmod(bootstrap.PasswdFile, 0o644))
-	_, err = s.PreparedStatus()
+	_, err = s.PreparedStatus(context.Background())
 	require.Error(t, err)
+}
+
+func TestPreparedStatusRejectsNonEmptyCache(t *testing.T) {
+	runner := &fakeRunner{}
+	s, bootstrap := newTestSupervisor(t, runner)
+	require.NoError(t, os.WriteFile(filepath.Join(bootstrap.CacheDir, "stale-cache"), []byte("stale"), 0o600))
+
+	status, err := s.PreparedStatus(context.Background())
+	require.ErrorContains(t, err, "cache")
+	assert.Equal(t, int64(5), status.CacheBytes)
+	assert.Equal(t, bootstrap.CacheLimitBytes, status.CacheLimitBytes)
+}
+
+func TestReadyStatusPoisonsRuntimeAtSoftCacheLimit(t *testing.T) {
+	runner := &fakeRunner{}
+	s, bootstrap := newTestSupervisor(t, runner)
+	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
+	s.config.MountInfo = func() (Mount, error) {
+		return Mount{ID: 42, MountPoint: bootstrap.MountPath, FilesystemType: "fuse.s3fs"}, nil
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(bootstrap.CacheDir, "cache-entry"), make([]byte, bootstrap.CacheLimitBytes), 0o600))
+
+	status, err := s.ReadyStatus(context.Background())
+	require.ErrorContains(t, err, "cache soft limit")
+	assert.True(t, status.CacheExceeded)
+	assert.Equal(t, StateUnhealthy, s.State())
+}
+
+func TestCacheUsageHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := cacheUsageBytes(ctx, t.TempDir())
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 type contextRecordingRunner struct {

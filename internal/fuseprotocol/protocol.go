@@ -24,6 +24,7 @@ const (
 	ProbePID1EnvironmentName  = "WORKSPACE_PROBE_INTERNAL_PID1_V1"
 	ProbePID1EnvironmentValue = "serve"
 	ProbeObjectBasenamePrefix = ".workspace-probe-v1-"
+	DockerReaperSocket        = "\x00workspace-mounter-reaper-v1"
 )
 
 // DeriveProbeObjectName returns the single reserved object basename used by a
@@ -65,6 +66,7 @@ type BootstrapConfig struct {
 	PasswdFile            string `json:"passwd_file"`
 	CAFile                string `json:"ca_file,omitempty"`
 	CacheDir              string `json:"cache_dir"`
+	CacheLimitBytes       int64  `json:"cache_limit_bytes"`
 	MountPath             string `json:"mount_path"`
 	PoolKey               string `json:"pool_key"`
 	MountTimeoutSeconds   int64  `json:"mount_timeout_seconds"`
@@ -80,6 +82,9 @@ type MounterStatus struct {
 	MountType       string `json:"mount_type"`
 	Generation      int64  `json:"generation"`
 	RestartDetected bool   `json:"restart_detected"`
+	CacheBytes      int64  `json:"cache_bytes"`
+	CacheLimitBytes int64  `json:"cache_limit_bytes"`
+	CacheExceeded   bool   `json:"cache_exceeded"`
 }
 
 type ControlAck struct {
@@ -125,6 +130,24 @@ type ProbeStatus struct {
 	Generation int64  `json:"generation"`
 	OK         bool   `json:"ok"`
 	Token      string `json:"token"`
+}
+
+// DockerReaperRequest is the fixed local handshake through which the UID-1000
+// probe asks the trusted root PID 1 supervisor to reap one exact detached
+// broker child. PID/start-time binding prevents PID reuse from widening it
+// into wait4(-1).
+type DockerReaperRequest struct {
+	Version   int    `json:"version"`
+	Command   string `json:"command"`
+	PID       int    `json:"pid"`
+	UID       int    `json:"uid"`
+	StartTime uint64 `json:"start_time"`
+}
+
+type DockerReaperResponse struct {
+	Version   int    `json:"version"`
+	Accepted  bool   `json:"accepted"`
+	ErrorCode string `json:"error_code"`
 }
 
 // SocketRequest and SocketResponse are the root-only, length-framed local

@@ -4,7 +4,7 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 目标部署契约，分阶段实现中。Task 12 已提供镜像构建、自检和 profile 门禁；runtime 编排与生产验证尚未完成，而且当前三个 profile 均未通过 release gate，因此还不能启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 目标部署契约，分阶段实现中。Task 13 已实现 Kubernetes sidecar 与 Docker 特殊容器的 prepared/延迟授权生命周期及运行时缓存健康门禁；控制面生产配置注入、启动恢复编排、真实环境 preflight/兼容性矩阵与 durable-flush 证据仍未完成。当前三个 profile 均未通过 release gate，因此还不能启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
 
 ## 1. 部署结论
 
@@ -475,7 +475,7 @@ spec:
             fieldRef:
               fieldPath: metadata.uid
         - name: SANDBOX_MOUNTER_BOOTSTRAP
-          value: '{"version":1,"provider":"minio","bucket":"sandbox","endpoint":"https://minio.example.com:9000","profile":"minio-sigv4-path-style-v1","access_key_file":"/run/secrets/workspace/accessKey","secret_key_file":"/run/secrets/workspace/secretKey","passwd_file":"/run/s3fs/passwd-s3fs","ca_file":"/run/secrets/workspace/ca.crt","cache_dir":"/var/cache/s3fs","mount_path":"/workspace","pool_key":"<pool-key-sha256>"}'
+          value: '{"version":1,"provider":"minio","bucket":"sandbox","endpoint":"https://minio.example.com:9000","profile":"minio-sigv4-path-style-v1","access_key_file":"/run/secrets/workspace/accessKey","secret_key_file":"/run/secrets/workspace/secretKey","passwd_file":"/run/s3fs/passwd-s3fs","ca_file":"/run/secrets/workspace/ca.crt","cache_dir":"/var/cache/s3fs","cache_limit_bytes":2147483648,"mount_path":"/workspace","pool_key":"<pool-key-sha256>","mount_timeout_seconds":60,"flush_timeout_seconds":120,"unmount_timeout_seconds":30}'
       lifecycle:
         preStop:
           exec:
@@ -541,7 +541,9 @@ spec:
         sizeLimit: 16Mi
 ```
 
-`SANDBOX_MOUNTER_BOOTSTRAP` 只包含 PoolKey 已覆盖的固定、非敏感配置，不包含 prefix、workspace identity 或 lease generation。bootstrap 携带完整的 64 位十六进制 PoolKey；`sandbox.pool.key` label 则把这 32 字节摘要编码为 lowercase base32（无 padding）的 52 字符值，以满足 Kubernetes label 长度约束。该 label 仅供 NetworkPolicy 和资源选择器使用，不得当作授权值。bootstrap 同时包含 mount、flush、unmount 三个超时；Pod 的 `terminationGracePeriodSeconds` 取 `max(90, ceil(flush_timeout + unmount_timeout) + 15)`。`access_key_file`/`secret_key_file` 位于只读 Secret volume，`passwd_file` 必须位于 mounter 私有 `/run/s3fs`；sidecar 校验 AK/SK 为单行非空值后原子生成 mode `0600` 的 `AK:SK` 文件，不能假设 Secret 已提供 `passwd-s3fs`。sidecar 把 Downward API 提供的 Pod UID 与该 JSON 分别校验，并在 `/run/s3fs` 原子落成 mode `0600` 的 bootstrap 文件后才进入 prepared。Docker 特殊容器没有 Downward API：它先以 locked supervisor 启动，sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，再通过一次性 `workspace-mounter bootstrap` 控制命令写入同一 schema；bootstrap 重放或 ID 不一致必须失败。
+`SANDBOX_MOUNTER_BOOTSTRAP` 只包含 PoolKey 已覆盖的固定、非敏感配置，不包含 prefix、workspace identity 或 lease generation。bootstrap 携带完整的 64 位十六进制 PoolKey；`sandbox.pool.key` label 则把这 32 字节摘要编码为 lowercase base32（无 padding）的 52 字符值，以满足 Kubernetes label 长度约束。该 label 仅供 NetworkPolicy 和资源选择器使用，不得当作授权值。bootstrap 同时包含 `cache_limit_bytes` 以及 mount、flush、unmount 三个超时；Pod 的 `terminationGracePeriodSeconds` 取 `max(90, ceil(flush_timeout + unmount_timeout) + 15)`。`access_key_file`/`secret_key_file` 位于只读 Secret volume，`passwd_file` 必须位于 mounter 私有 `/run/s3fs`；sidecar 校验 AK/SK 为单行非空值后原子生成 mode `0600` 的 `AK:SK` 文件，不能假设 Secret 已提供 `passwd-s3fs`。sidecar 把 Downward API 提供的 Pod UID 与该 JSON 分别校验，并在 `/run/s3fs` 原子落成 mode `0600` 的 bootstrap 文件后才进入 prepared。Docker 特殊容器没有 Downward API：它先以 locked supervisor 启动，sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，再通过一次性 `workspace-mounter bootstrap` 控制命令写入同一 schema；bootstrap 重放或 ID 不一致必须失败。
+
+prepared health 必须报告 `cache_bytes=0`、`cache_limit_bytes` 与 PoolKey 固定配置一致且 `cache_exceeded=false`；这会阻止带残留缓存的空壳入池。ready health 每次统计 cache volume 中普通文件的逻辑字节数，达到或超过软阈值时把 supervisor 置为 unhealthy 并向 s3fs 发送终止信号。`sandbox-api` 的健康监督随后关闭 admission、销毁该一次性实例并补池。该机制是健康门禁，不是文件系统硬 quota，也不保证导致超限的写调用收到 ENOSPC。
 
 目标最低版本包含 Kubernetes 1.29，因此 runtime 不使用 1.30 才稳定可用的结构化 `securityContext.appArmorProfile` 字段；mounter 的已校验、非 `unconfined` profile 通过兼容的 container AppArmor annotation 注入。升级最低版本前不得同时渲染两种形式，避免不同 API Server/准入插件产生不一致结果。
 
@@ -802,6 +804,7 @@ capDrop:
   - ALL
 capAdd:
   - SYS_ADMIN
+  - NET_ADMIN
 securityOpt:
   - no-new-privileges=true
   - apparmor=sandbox-fuse
@@ -812,10 +815,12 @@ readOnlyRootfs: true
 
 - 每 sandbox root-only Secret 目录到 `/run/secrets/workspace:ro`；
 - 独立 cache volume/目录到 `/var/cache/s3fs`，固定 profile 至少设置 `tmpdir=/var/cache/s3fs/tmp`；启用文件 cache 时同时设置 `use_cache=/var/cache/s3fs/cache`，由 supervisor 上报总使用量并按 `cache_size` 软阈值触发终止重建；
-- 必要的 tmpfs 到 `/run` 和 `/tmp`，但 s3fs 不得把临时/缓存数据写入不受 cache 阈值约束的 `/tmp`；
+- 独立 tmpfs 到 `/run/s3fs`（root:root、mode `0700`、当前固定 16 MiB）和受 `tmp_disk` 限制的 `/tmp`；不得给整个 `/run` 叠加 tmpfs，否则会遮蔽特殊镜像中预置的可信 `/run` 契约。s3fs 不得把临时/缓存数据写入不受 cache 阈值约束的 `/tmp`；
 - 不挂载宿主机业务 `/workspace`。
 
-`CAP_SYS_ADMIN` 属于容器内 root supervisor，不得传递给 UID 1000 用户进程。runtime 必须覆盖所有 Exec、文件 API 和间接命令路径，强制 `User=1000:1000`。容器镜像内 `/workspace` 底层目录必须不可由 UID 1000 写入，以便 mount 消失时 fail closed。
+`CAP_SYS_ADMIN` 和 `CAP_NET_ADMIN` 只属于容器内 root supervisor：前者用于 FUSE mount，后者只用于 runtime 通过固定绝对路径 `/usr/sbin/ip route replace default via <gateway-ip>` 设置 sidecar gateway 默认路由。禁止使用 Docker exec `Privileged=true`，也不得将这两个 capability 传递给 UID 1000 用户进程。runtime 必须覆盖所有 Exec、文件 API 和间接命令路径，强制 `User=1000:1000`。容器镜像内 `/workspace` 底层目录必须不可由 UID 1000 写入，以便 mount 消失时 fail closed。
+
+Docker 特殊镜像的 root PID 1 还必须提供版本化的本地 child-reaper 握手：校验 Unix peer PID/UID，并只对已登记的 UID 1000 broker PID/starttime 执行精确 `wait4(pid)`。仅观察 `SIGCHLD` disposition 不足以放行 quiesce；握手缺失或身份不匹配时必须 fail closed。
 
 普通 Docker named volume 不提供可移植的硬 quota。prepared 空壳的 cache 必须为空且无 mount generation。达到 cache 软阈值时，runtime 必须阻止新 Exec 并停止整个容器，执行有界、尽力 flush 后删除并补充新空壳；不承诺用户写操作先收到 ENOSPC。cache 不得落在无界 container writable layer，销毁后必须清理。
 
@@ -832,6 +837,8 @@ FUSE Pool 空壳从 WarmUp 起就加入只允许以下目的地的系统网络�
 用户网络关闭时仍保留该系统网络；上述地址必须预先进入平台审批的精确 system egress 白名单，配置 provider endpoint 不得自动批准任意内网地址。Acquire 后、开放 Exec 前再把用户网络规则追加到 gateway。用户进程的网络请求必须经过 gateway 策略，不能因为与 supervisor 同容器而获得不受限出口。对象存储 endpoint 和用户白名单分别建模；当前边界允许用户进程连接已批准的 endpoint，但其不能获得凭证。若要求按进程阻止该连接，必须增加认证 egress proxy，单容器 Docker network 本身无法实现。
 
 私有云 endpoint FQDN 无法由公共 DNS 解析时，Docker runtime 可从只读运维配置生成精确 `extra_hosts` 映射，仍以原 FQDN 发起 TLS 请求；不得由 CreateSandbox 参数控制映射，也不得因为解析困难改用跳过证书校验。
+
+Docker 一期网络只支持 IPv4 CIDR，并在创建 sandbox-facing internal bridge 时显式关闭 IPv6。gateway 使用固定 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：先安装主链跳转和不可变 system/permanent 规则，再启动 runtime；Acquire 只通过单次 `iptables-restore --noflush` 原子替换 `SBOX_USER`，不得 flush `FORWARD` 或重写前两条链。DNS 只接受 1–3 个公共 IPv4 `/32` resolver，并仅开放 TCP/UDP 53；对象 endpoint 仅开放 TCP 且端口集合必须覆盖规范化 endpoint 的实际端口。`0.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`224.0.0.0/4` 永久先于 system/user 规则拒绝，用户白名单或 open 模式不能覆盖。所有 CIDR、端口和静态 host 映射在生成规则前排序去重；Docker 收到任何 IPv6 endpoint、DNS、静态映射或用户白名单输入时必须 fail closed。
 
 ### 7.6 Docker 验证
 
@@ -864,6 +871,7 @@ docker exec -u 1000:1000 "$SANDBOX_CONTAINER" \
 - `docker inspect` 的 Env、Cmd、Entrypoint 和 Labels 不包含 AK/SK；
 - Pool hit 的 container ID 在 Acquire 前后保持不变；授权后该 ID 不再进入 available 队列，销毁后由新 container ID 补池；
 - 普通用户不能执行 mount/umount、读取 Secret、向 supervisor 发控制命令或取得 root；
+- `1000:1000` 强制只作用于 FUSE 特殊容器；普通 sync/legacy Docker 容器继续继承其镜像用户。请求取消会关闭对应 Docker attach 以释放 API 调用，但 attach 关闭本身不作为用户进程或容器已经退出的证明；
 - 宿主机没有 sandbox 对应的 `/workspace` mount；
 - FUSE 进程退出后 health 失败，用户写入不会落到镜像目录；
 - API/daemon 重启后 reconciler 能依据 runtime identity 清理旧容器、Secret 和租约。

@@ -329,7 +329,11 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 	if err != nil {
 		return nil, err
 	}
-	if health.State != "ready" || health.RuntimeUID != ref.UID || health.PoolKey != poolKey || health.MountType != "fuse" || health.Generation != generation || health.RestartDetected {
+	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
+	if err != nil {
+		return nil, err
+	}
+	if health.State != "ready" || health.RuntimeUID != ref.UID || health.PoolKey != poolKey || health.MountType != "fuse" || health.Generation != generation || health.RestartDetected || health.CacheExceeded || health.CacheBytes < 0 || health.CacheBytes >= health.CacheLimitBytes || health.CacheLimitBytes != bootstrap.CacheLimitBytes {
 		return nil, fmt.Errorf("workspace ready status does not match authorization")
 	}
 	argv := probeArgv("write-read-delete", ref, generation, false)
@@ -365,11 +369,15 @@ func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.Runtime
 	if err := validatePreparedContainerState(pod); err != nil {
 		return err
 	}
+	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
+	if err != nil {
+		return err
+	}
 	status, err := r.readMounterStatus(ctx, ref, "prepared")
 	if err != nil {
 		return err
 	}
-	if status.State != "prepared" || status.RuntimeUID != ref.UID || status.PoolKey != poolKey || status.MountType != "" || status.Generation != 0 || status.RestartDetected {
+	if status.State != "prepared" || status.RuntimeUID != ref.UID || status.PoolKey != poolKey || status.MountType != "" || status.Generation != 0 || status.RestartDetected || status.CacheExceeded || status.CacheBytes != 0 || status.CacheLimitBytes != bootstrap.CacheLimitBytes {
 		return fmt.Errorf("prepared workspace status is not pristine")
 	}
 	r.stateMu.Lock()
@@ -402,7 +410,7 @@ func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (
 		return nil, err
 	}
 	return &runtime.WorkspaceHealth{
-		Ready:     status.State == "ready" && status.MountType == "fuse" && status.PoolKey == bootstrap.PoolKey && !status.RestartDetected && restartCount == 0,
+		Ready:     status.State == "ready" && status.MountType == "fuse" && status.PoolKey == bootstrap.PoolKey && !status.RestartDetected && !status.CacheExceeded && status.CacheBytes >= 0 && status.CacheBytes < status.CacheLimitBytes && status.CacheLimitBytes == bootstrap.CacheLimitBytes && restartCount == 0,
 		MountType: status.MountType, RuntimeUID: status.RuntimeUID, Generation: status.Generation,
 		RestartCount: restartCount, RestartDetected: status.RestartDetected, LastSuccessful: time.Now(),
 	}, nil

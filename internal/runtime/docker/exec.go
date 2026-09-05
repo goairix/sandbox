@@ -38,8 +38,13 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	execConfig := container.ExecOptions{
 		Cmd:          cmd,
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 		AttachStdin:  req.Stdin != "",
@@ -58,6 +63,8 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 		return nil, fmt.Errorf("exec attach: %w", err)
 	}
 	defer attachResp.Close()
+	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
+	defer stopWatch()
 
 	// Send stdin if provided
 	if req.Stdin != "" {
@@ -76,6 +83,9 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("read output: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Get exit code
 	inspectResp, err := r.cli.ContainerExecInspect(ctx, execResp.ID)
@@ -92,8 +102,13 @@ func (r *Runtime) Exec(ctx context.Context, id string, req runtime.ExecRequest) 
 }
 
 func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin io.Reader) error {
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		return err
+	}
 	execConfig := container.ExecOptions{
 		Cmd:          cmd,
+		User:         user,
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -109,6 +124,8 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 		return fmt.Errorf("exec attach: %w", err)
 	}
 	defer attachResp.Close()
+	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
+	defer stopWatch()
 
 	// Capture stdout/stderr in background to prevent the exec from blocking
 	// and to include stderr in error messages when the command fails.
@@ -124,6 +141,9 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 	_ = attachResp.CloseWrite()
 
 	<-doneCh
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	inspectResp, err := r.cli.ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
@@ -160,8 +180,14 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	execConfig := container.ExecOptions{
 		Cmd:          cmd,
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 		Tty:          req.LineBuffered,
@@ -189,6 +215,8 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		defer cancel()
 		defer close(ch)
 		defer attachResp.Close()
+		stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
+		defer stopWatch()
 
 		if req.LineBuffered {
 			// TTY mode: stdout and stderr are merged into a single raw stream.
@@ -197,9 +225,11 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			for {
 				n, readErr := attachResp.Reader.Read(buf)
 				if n > 0 {
-					ch <- runtime.StreamEvent{
+					if !sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 						Type:    runtime.StreamStdout,
 						Content: string(buf[:n]),
+					}) {
+						return
 					}
 				}
 				if readErr != nil {
@@ -226,9 +256,11 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 				for {
 					n, readErr := stderrPR.Read(buf)
 					if n > 0 {
-						ch <- runtime.StreamEvent{
+						if !sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 							Type:    runtime.StreamStderr,
 							Content: string(buf[:n]),
+						}) {
+							return
 						}
 					}
 					if readErr != nil {
@@ -241,9 +273,11 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			for {
 				n, readErr := stdoutPR.Read(buf)
 				if n > 0 {
-					ch <- runtime.StreamEvent{
+					if !sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 						Type:    runtime.StreamStdout,
 						Content: string(buf[:n]),
+					}) {
+						return
 					}
 				}
 				if readErr != nil {
@@ -254,20 +288,32 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			<-done
 		}
 
-		inspectResp, inspectErr := r.cli.ContainerExecInspect(context.Background(), execResp.ID)
+		if ctx.Err() != nil {
+			return
+		}
+		inspectResp, inspectErr := r.cli.ContainerExecInspect(ctx, execResp.ID)
 		if inspectErr != nil {
-			ch <- runtime.StreamEvent{
+			_ = sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 				Type:    runtime.StreamError,
 				Content: inspectErr.Error(),
-			}
+			})
 			return
 		}
 
-		ch <- runtime.StreamEvent{
+		_ = sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 			Type:    runtime.StreamDone,
 			Content: fmt.Sprintf("%d", inspectResp.ExitCode),
-		}
+		})
 	}()
 
 	return ch, nil
+}
+
+func sendDockerStreamEvent(ctx context.Context, ch chan<- runtime.StreamEvent, event runtime.StreamEvent) bool {
+	select {
+	case ch <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

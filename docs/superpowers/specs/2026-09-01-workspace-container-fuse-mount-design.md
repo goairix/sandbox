@@ -4,11 +4,11 @@
 
 **复审修订：** 2026-09-03
 
-**状态：** 设计已确认，分阶段实现中；Task 12 已落地镜像构建契约，但当前没有可上线的 FUSE profile
+**状态：** 设计已确认，分阶段实现中；Task 13 已落地 Kubernetes/Docker prepared 与延迟挂载生命周期，但生产 wiring、真实环境验证和可上线 FUSE profile 仍未完成
 
 **目标分支：** `feat/workspace-fuse-mount`
 
-**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册给出 Kubernetes sidecar 与 Docker 特殊容器的目标部署契约、MinIO/华为 OBS 配置模板、Secret 管理、验证、灰度及回滚步骤；在实现合入前，模板中的新增配置项不可直接用于当前版本。
+**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册给出 Kubernetes sidecar 与 Docker 特殊容器的目标部署契约、MinIO/华为 OBS 配置模板、Secret 管理、验证、灰度及回滚步骤；在控制面 production wiring、release gate 与真实环境验收完成前，模板中的新增配置项不可直接用于生产。
 
 ## 1. 决策摘要
 
@@ -313,6 +313,7 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 
 - `/dev/fuse` device mapping；
 - `CAP_SYS_ADMIN`；
+- `CAP_NET_ADMIN`，仅供私有 root control 通过固定 `/usr/sbin/ip route replace default via <gateway-ip>` 设置 gateway 默认路由；
 - mount/umount 所需 seccomp syscall；
 - 专用 AppArmor profile；
 - `no-new-privileges`；
@@ -324,6 +325,11 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 镜像中的底层 `/workspace` 目录固定为 `root:root`、mode `0555`。supervisor 以 root 将 FUSE 覆盖挂载到该目录；如果 FUSE 消失，UID 1000 用户不能把数据写入 container writable layer。
 
 该模型的安全边界弱于 Kubernetes sidecar，因为容器本身持有 `SYS_ADMIN`。所有用户可触发路径都必须强制 UID/GID 1000，且不得提供可切换到 root 的命令或文件能力。
+禁止用 Docker exec `Privileged=true` 替代精确 capability；用户 exec 不得继承 `SYS_ADMIN`/`NET_ADMIN`。
+
+FUSE 管理目录使用独立的 `/run/s3fs` tmpfs（root:root、mode `0700`）；禁止为整个 `/run` 配置 tmpfs，以免遮蔽镜像中预置的可信运行时目录和文件。
+
+Docker 特殊镜像的 root PID 1 必须提供版本化的本地 child-reaper 握手。`workspace-probe` 校验 Unix peer PID 1/UID 0 后，以 UID 1000 broker 的 PID 和 `/proc` starttime 登记；PID 1 只能对该精确 PID 执行 `wait4(pid)`，禁止 `wait4(-1)` 抢占 s3fs 等子进程。对 root PID 1，握手不可用时必须 fail closed，不得只根据 `SIGCHLD` 的 ignored/caught 状态推断其可靠。
 
 ### 6.4 Docker Exec 用户约束
 
@@ -389,6 +395,8 @@ Sandbox 主容器也能连接这些地址，但没有存储凭证。必须使用
 ### 7.2 Docker 约束
 
 Docker 特殊容器同样需要访问对象存储 endpoint。FUSE Pool 在 WarmUp 时创建 gateway pair，并只把已经过平台审批的对象存储 endpoint 精确白名单作为不可被用户配置删除的 system egress；Acquire 后、开放 Exec 前再追加用户网络规则。用户进程可连接该已批准 endpoint，但不能获得凭证。若要求按进程隔离 endpoint，单容器模型同样需要认证 egress proxy，不能仅靠 Docker network。
+
+Docker 一期只实现 IPv4 CIDR egress，sandbox-facing internal bridge 显式禁用 IPv6；任何 IPv6 endpoint、DNS、静态 host IP 或用户白名单输入都 fail closed。gateway 固定使用按顺序执行的 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：runtime 启动前原子安装 main jump 与不可变 permanent/system 规则，Acquire 只能通过 `iptables-restore --noflush` 原子替换 USER 链，不能 flush `FORWARD` 或重写 permanent/system。DNS 仅允许批准 resolver 的 TCP/UDP 53，对象 endpoint 仅允许 TCP 且批准端口必须覆盖规范化 endpoint 的实际端口；unspecified、loopback、link-local/metadata 与 multicast 网段在 user whitelist/open 之前永久拒绝。CIDR、端口和静态 host 映射全部排序去重。
 
 ## 8. Workspace 隔离与租约
 
@@ -837,6 +845,7 @@ s3fs 写入可能使用本地临时文件：
 
 - Kubernetes 使用独立、带 `sizeLimit` 的 `fuse-cache` emptyDir，并为 mounter 和 Pod 配置 `ephemeral-storage` request/limit；固定 profile 必须至少设置 `tmpdir=/var/cache/s3fs/tmp`，启用 `use_cache` 时还必须设置 `use_cache=/var/cache/s3fs/cache`，确保所有 s3fs 临时/缓存数据进入该卷。
 - Docker 使用独立 cache volume/目录和软阈值监控，并采用相同的 `tmpdir`/`use_cache` 路由，禁止使用无界 container writable layer 或不受阈值约束的 `/tmp` tmpfs；宿主机不能提供真实 quota 时，达到阈值后终止并重建 sandbox。
+- bootstrap 固定携带 `cache_limit_bytes`；prepared health 只接受空 cache，ready health 报告 `cache_bytes`、`cache_limit_bytes` 与 `cache_exceeded`。达到或超过阈值时 supervisor 转为 unhealthy 并终止 s3fs，Manager 的健康监督关闭 admission 后销毁并补池；状态字段必须与 PoolKey 固定配置一致，不能把自报的较大阈值作为可信值。
 - 一期 `cache_medium=disk` 使用节点临时盘，要求节点磁盘加密并在 Pod/容器销毁后清理。`emptyDir.sizeLimit` 和 Docker 软阈值都不是文件系统硬 quota，Kubernetes 可能以 eviction 而不是同步写入错误处理超限。
 - 即使不启用 s3fs 持久 `use_cache`，s3fs 写入仍需要临时空间；“不使用宿主机 workspace”不等于“节点上绝不出现临时文件”。
 - cache 达到软阈值或 Pod 收到 ephemeral-storage eviction 信号时，runtime 立即阻止新 Exec 并停止整个 sandbox，执行有界、尽力 flush 后重建；不得继续使用无界缓存，也不能把取消 Exec 流当作用户进程已经退出。

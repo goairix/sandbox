@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,7 +13,268 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	dnetwork "github.com/docker/docker/api/types/network"
 	dockerclient "github.com/docker/docker/client"
+
+	"github.com/goairix/sandbox/internal/runtime"
 )
+
+// createFUSESandboxPair creates the fail-closed Docker network used by a
+// prepared FUSE runtime. Unlike the legacy pair, its sandbox-facing bridge is
+// Internal, so there is no Docker NAT route before gateway policy is loaded.
+func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage string, system runtime.SystemEgressSpec) (pairNetworkID, gatewayID, gatewayIP string, err error) {
+	if system.Mode != runtime.SystemEgressCIDR {
+		return "", "", "", fmt.Errorf("Docker workspace FUSE supports only CIDR system egress")
+	}
+	if !digestPinnedImagePattern.MatchString(gatewayImage) {
+		return "", "", "", fmt.Errorf("Docker gateway image must be pinned by sha256 digest")
+	}
+	command, err := buildFUSEGatewayIptablesCmd(system, false, nil, false)
+	if err != nil {
+		return "", "", "", err
+	}
+	pairNetName := pairNetworkPrefix + sandboxID
+	ipv6Disabled := false
+	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
+		Driver: "bridge", Internal: true, Attachable: true, EnableIPv6: &ipv6Disabled,
+		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "fuse-pair"},
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("create FUSE pair network: %w", err)
+	}
+	pairNetworkID = netResp.ID
+	cleanup := func() {
+		if gatewayID != "" {
+			_ = cli.ContainerRemove(ctx, gatewayID, container.RemoveOptions{Force: true})
+		}
+		_ = cli.NetworkRemove(ctx, pairNetworkID)
+	}
+	gwName := gatewayNamePrefix + sandboxID
+	gwResp, err := cli.ContainerCreate(ctx, &container.Config{
+		Image: gatewayImage, Cmd: []string{"sleep", "infinity"},
+		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "gateway", "sandbox.gateway.contract": "fuse-v1"},
+	}, &container.HostConfig{
+		CapDrop: []string{"ALL"}, CapAdd: []string{"NET_ADMIN", "NET_RAW"},
+		SecurityOpt: []string{"no-new-privileges=true"}, ReadonlyRootfs: true,
+		Tmpfs:     map[string]string{"/run": "size=4194304,mode=0755", "/tmp": "size=4194304"},
+		Sysctls:   map[string]string{"net.ipv4.ip_forward": "1"},
+		Resources: container.Resources{Memory: 32 * 1024 * 1024, PidsLimit: int64Ptr(20)},
+	}, &dnetwork.NetworkingConfig{EndpointsConfig: map[string]*dnetwork.EndpointSettings{pairNetName: {}}}, nil, gwName)
+	if err != nil {
+		cleanup()
+		return "", "", "", fmt.Errorf("create FUSE gateway: %w", err)
+	}
+	gatewayID = gwResp.ID
+	if err := cli.ContainerStart(ctx, gatewayID, container.StartOptions{}); err != nil {
+		cleanup()
+		return "", "", "", fmt.Errorf("start FUSE gateway: %w", err)
+	}
+	if err := cli.NetworkConnect(ctx, openNetworkID, gatewayID, nil); err != nil {
+		cleanup()
+		return "", "", "", fmt.Errorf("connect FUSE gateway to open network: %w", err)
+	}
+	if err := runGatewayPolicy(ctx, cli, gatewayID, command); err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	gatewayIP, err = getContainerIP(ctx, cli, gatewayID, pairNetName)
+	if err != nil {
+		cleanup()
+		return "", "", "", fmt.Errorf("get FUSE gateway IP: %w", err)
+	}
+	return pairNetworkID, gatewayID, gatewayIP, nil
+}
+
+func runGatewayPolicy(ctx context.Context, cli dockerAPI, gatewayID, command string) error {
+	execResponse, err := cli.ContainerExecCreate(ctx, gatewayID, container.ExecOptions{Cmd: []string{"sh", "-c", command}, User: "root"})
+	if err != nil {
+		return fmt.Errorf("create FUSE gateway policy exec: %w", err)
+	}
+	if err := cli.ContainerExecStart(ctx, execResponse.ID, container.ExecStartOptions{}); err != nil {
+		return fmt.Errorf("start FUSE gateway policy exec: %w", err)
+	}
+	if err := waitExecDone(ctx, cli, execResponse.ID); err != nil {
+		return fmt.Errorf("FUSE gateway policy failed: %w", err)
+	}
+	return nil
+}
+
+const (
+	fusePermanentChain = "SBOX_PERMANENT"
+	fuseSystemChain    = "SBOX_SYSTEM"
+	fuseUserChain      = "SBOX_USER"
+)
+
+var permanentlyDeniedDockerIPv4 = []string{
+	"0.0.0.0/8",      // unspecified/current network
+	"127.0.0.0/8",    // loopback
+	"169.254.0.0/16", // link-local and cloud metadata
+	"224.0.0.0/4",    // multicast
+}
+
+func buildFUSEGatewayIptablesCmd(system runtime.SystemEgressSpec, userEnabled bool, userCIDRs []string, blockPrivate bool) (string, error) {
+	if system.Mode != runtime.SystemEgressCIDR || len(system.DNSCIDRs) == 0 || len(system.EndpointCIDRs) == 0 || len(system.EndpointPorts) == 0 || len(system.EndpointFQDNs) != 0 || system.ProxyURL != "" {
+		return "", fmt.Errorf("invalid Docker FUSE system egress contract")
+	}
+	dnsPorts, err := canonicalDockerPorts(system.DNSPorts)
+	if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+		return "", fmt.Errorf("Docker FUSE DNS ports must be exactly 53")
+	}
+	dnsCIDRs, err := canonicalDockerDNSCIDRs(system.DNSCIDRs)
+	if err != nil {
+		return "", err
+	}
+	endpointCIDRs, err := canonicalDockerIPv4CIDRs(system.EndpointCIDRs, true)
+	if err != nil {
+		return "", err
+	}
+	endpointPorts, err := canonicalDockerPorts(system.EndpointPorts)
+	if err != nil {
+		return "", err
+	}
+	userRules, err := dockerFUSEUserRules(userEnabled, userCIDRs, blockPrivate)
+	if err != nil {
+		return "", err
+	}
+	filter := []string{
+		"*filter",
+		"-F FORWARD", "-P FORWARD DROP",
+		"-F " + fusePermanentChain, "-F " + fuseSystemChain, "-F " + fuseUserChain,
+		"-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-A FORWARD -j " + fusePermanentChain,
+		"-A FORWARD -j " + fuseSystemChain,
+		"-A FORWARD -j " + fuseUserChain,
+	}
+	for _, cidr := range permanentlyDeniedDockerIPv4 {
+		filter = append(filter, fmt.Sprintf("-A %s -d %s -j DROP", fusePermanentChain, cidr))
+	}
+	for _, cidr := range dnsCIDRs {
+		for _, protocol := range []string{"udp", "tcp"} {
+			filter = append(filter, fmt.Sprintf("-A %s -d %s -p %s --dport 53 -j ACCEPT", fuseSystemChain, cidr, protocol))
+		}
+	}
+	for _, cidr := range endpointCIDRs {
+		for _, port := range endpointPorts {
+			filter = append(filter, fmt.Sprintf("-A %s -d %s -p tcp --dport %d -j ACCEPT", fuseSystemChain, cidr, port))
+		}
+	}
+	filter = append(filter, userRules...)
+	filter = append(filter, "COMMIT")
+	parts := []string{
+		`OUT_IF=$(ip -4 route show default | awk 'NR == 1 {print $5}')`,
+		`test -n "$OUT_IF"`,
+		`(iptables -t nat -C POSTROUTING -o "$OUT_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$OUT_IF" -j MASQUERADE)`,
+		"(iptables -N " + fusePermanentChain + " 2>/dev/null || true)",
+		"(iptables -N " + fuseSystemChain + " 2>/dev/null || true)",
+		"(iptables -N " + fuseUserChain + " 2>/dev/null || true)",
+		dockerIptablesRestoreCommand(filter),
+	}
+	return strings.Join(parts, " && "), nil
+}
+
+// buildFUSEGatewayUserIptablesCmd atomically replaces only the request-scoped
+// USER chain. The immutable SYSTEM and PERMANENT chains are never flushed or
+// regenerated by an Acquire-time network update.
+func buildFUSEGatewayUserIptablesCmd(enabled bool, cidrs []string, blockPrivate bool) (string, error) {
+	rules, err := dockerFUSEUserRules(enabled, cidrs, blockPrivate)
+	if err != nil {
+		return "", err
+	}
+	lines := []string{"*filter", "-F " + fuseUserChain}
+	lines = append(lines, rules...)
+	lines = append(lines, "COMMIT")
+	return dockerIptablesRestoreCommand(lines), nil
+}
+
+func dockerFUSEUserRules(enabled bool, values []string, blockPrivate bool) ([]string, error) {
+	cidrs, err := canonicalDockerIPv4CIDRs(values, false)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return nil, nil
+	}
+	rules := make([]string, 0, len(cidrs)+len(privateRanges)+1)
+	for _, cidr := range cidrs {
+		rules = append(rules, fmt.Sprintf("-A %s -d %s -j ACCEPT", fuseUserChain, cidr))
+	}
+	if blockPrivate {
+		for _, cidr := range privateRanges {
+			rules = append(rules, fmt.Sprintf("-A %s -d %s -j DROP", fuseUserChain, cidr))
+		}
+		rules = append(rules, "-A "+fuseUserChain+" -j ACCEPT")
+	} else if len(cidrs) == 0 {
+		rules = append(rules, "-A "+fuseUserChain+" -j ACCEPT")
+	}
+	return rules, nil
+}
+
+func canonicalDockerIPv4CIDRs(values []string, rejectPermanent bool) ([]string, error) {
+	unique := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || !prefix.Addr().Is4() || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != value || prefix != prefix.Masked() {
+			return nil, fmt.Errorf("invalid canonical Docker FUSE IPv4 CIDR")
+		}
+		if rejectPermanent {
+			for _, deniedRaw := range permanentlyDeniedDockerIPv4 {
+				denied, _ := netip.ParsePrefix(deniedRaw)
+				if prefix.Overlaps(denied) {
+					return nil, fmt.Errorf("Docker FUSE system egress overlaps a permanently denied CIDR")
+				}
+			}
+		}
+		unique[value] = struct{}{}
+	}
+	result := make([]string, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func canonicalDockerDNSCIDRs(values []string) ([]string, error) {
+	result, err := canonicalDockerIPv4CIDRs(values, false)
+	if err != nil || len(result) < 1 || len(result) > 3 {
+		return nil, fmt.Errorf("Docker FUSE must configure between one and three public IPv4 DNS resolvers")
+	}
+	for _, raw := range result {
+		prefix, _ := netip.ParsePrefix(raw)
+		if prefix.Bits() != prefix.Addr().BitLen() || !runtime.IsPublicDNSAddress(prefix.Addr()) {
+			return nil, fmt.Errorf("Docker FUSE DNS resolver must be a public IPv4 host prefix")
+		}
+	}
+	return result, nil
+}
+
+func canonicalDockerPorts(values []int32) ([]int32, error) {
+	unique := make(map[int32]struct{}, len(values))
+	for _, value := range values {
+		if value < 1 || value > 65535 {
+			return nil, fmt.Errorf("invalid Docker FUSE egress port")
+		}
+		unique[value] = struct{}{}
+	}
+	result := make([]int32, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result, nil
+}
+
+func containsDockerPort(values []int32, target int32) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func dockerIptablesRestoreCommand(lines []string) string {
+	payload := strings.Join(lines, "\n") + "\n"
+	return "printf '%s' '" + strings.ReplaceAll(payload, "'", `'\''`) + "' | iptables-restore --noflush"
+}
 
 const (
 	isolatedNetworkName = "sandbox-isolated"
@@ -25,7 +288,7 @@ const (
 // ensureNetworks creates the two static sandbox networks if they don't exist:
 //   - sandbox-isolated (internal=true): no external access
 //   - sandbox-open (internal=false): full external access
-func ensureNetworks(ctx context.Context, cli *dockerclient.Client) (isolatedID, openID string, err error) {
+func ensureNetworks(ctx context.Context, cli dockerAPI) (isolatedID, openID string, err error) {
 	isolatedID, err = ensureOneNetwork(ctx, cli, isolatedNetworkName, true)
 	if err != nil {
 		return "", "", err
@@ -37,7 +300,7 @@ func ensureNetworks(ctx context.Context, cli *dockerclient.Client) (isolatedID, 
 	return isolatedID, openID, nil
 }
 
-func ensureOneNetwork(ctx context.Context, cli *dockerclient.Client, name string, internal bool) (string, error) {
+func ensureOneNetwork(ctx context.Context, cli dockerAPI, name string, internal bool) (string, error) {
 	networks, err := cli.NetworkList(ctx, dnetwork.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list networks: %w", err)
@@ -77,7 +340,7 @@ func ensureOneNetwork(ctx context.Context, cli *dockerclient.Client, name string
 //
 // The gateway container performs NAT + whitelist filtering via iptables.
 // Returns the pair network ID, gateway container ID, and gateway IP on the pair network.
-func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID, openNetworkID, gatewayImage string, whitelist []string, blockPrivate bool) (pairNetworkID, gatewayID, gatewayIP string, err error) {
+func createSandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage string, whitelist []string, blockPrivate bool) (pairNetworkID, gatewayID, gatewayIP string, err error) {
 	// Resolve whitelist entries: IPs/CIDRs pass through, domain names are resolved to IPs
 	resolved, err := resolveWhitelist(whitelist)
 	if err != nil {
@@ -95,7 +358,7 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 		Attachable: true,
 		Labels: map[string]string{
 			"sandbox.managed": "true",
-			"sandbox.id":     sandboxID,
+			"sandbox.id":      sandboxID,
 		},
 	})
 	if err != nil {
@@ -122,8 +385,8 @@ func createSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID,
 		Cmd:   []string{"sleep", "infinity"},
 		Labels: map[string]string{
 			"sandbox.managed": "true",
-			"sandbox.id":     sandboxID,
-			"sandbox.role":   "gateway",
+			"sandbox.id":      sandboxID,
+			"sandbox.role":    "gateway",
 		},
 	}, &container.HostConfig{
 		CapDrop: []string{"ALL"},
@@ -288,7 +551,7 @@ func isIPv6(addr string) bool {
 }
 
 // removeSandboxPair removes the gateway container and pair network for a sandbox.
-func removeSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID string) error {
+func removeSandboxPair(ctx context.Context, cli dockerAPI, sandboxID string) error {
 	// Find and remove gateway container by label
 	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
 		All: true,
@@ -314,7 +577,7 @@ func removeSandboxPair(ctx context.Context, cli *dockerclient.Client, sandboxID 
 
 // setupSandboxRoute configures the default route inside the sandbox container
 // to point to the gateway IP. Executed as root via Docker exec.
-func setupSandboxRoute(ctx context.Context, cli *dockerclient.Client, containerID, gatewayIP string) error {
+func setupSandboxRoute(ctx context.Context, cli dockerAPI, containerID, gatewayIP string) error {
 	execCfg := container.ExecOptions{
 		Cmd:  []string{"ip", "route", "replace", "default", "via", gatewayIP},
 		User: "root",
@@ -330,7 +593,7 @@ func setupSandboxRoute(ctx context.Context, cli *dockerclient.Client, containerI
 }
 
 // getContainerIP returns the container's IP address on the given network.
-func getContainerIP(ctx context.Context, cli *dockerclient.Client, containerID, networkName string) (string, error) {
+func getContainerIP(ctx context.Context, cli dockerAPI, containerID, networkName string) (string, error) {
 	info, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", fmt.Errorf("inspect container: %w", err)
@@ -351,7 +614,7 @@ func getContainerIP(ctx context.Context, cli *dockerclient.Client, containerID, 
 // waitExecDone polls until a Docker exec completes and returns an error if
 // the exit code is non-zero. Enforces a 30-second hard timeout to prevent
 // indefinite blocking if the caller's context has no deadline.
-func waitExecDone(ctx context.Context, cli *dockerclient.Client, execID string) error {
+func waitExecDone(ctx context.Context, cli dockerAPI, execID string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -377,7 +640,7 @@ func waitExecDone(ctx context.Context, cli *dockerclient.Client, execID string) 
 }
 
 // hasExistingGateway checks if a gateway sidecar exists for the given sandbox.
-func hasExistingGateway(ctx context.Context, cli *dockerclient.Client, sandboxID string) bool {
+func hasExistingGateway(ctx context.Context, cli dockerAPI, sandboxID string) bool {
 	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(
 			filters.Arg("label", "sandbox.id="+sandboxID),
@@ -388,7 +651,7 @@ func hasExistingGateway(ctx context.Context, cli *dockerclient.Client, sandboxID
 }
 
 // findGatewayID returns the container ID of the gateway for the given sandbox.
-func findGatewayID(ctx context.Context, cli *dockerclient.Client, sandboxID string) (string, error) {
+func findGatewayID(ctx context.Context, cli dockerAPI, sandboxID string) (string, error) {
 	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(
 			filters.Arg("label", "sandbox.id="+sandboxID),
@@ -431,9 +694,46 @@ func resolveWhitelist(entries []string) ([]string, error) {
 	return resolved, nil
 }
 
+// resolveFUSEWhitelist resolves only IPv4 destinations. Explicit IPv6 input
+// and IPv6-only names fail closed; a failed/empty resolution must never be
+// mistaken for the deliberate "network enabled without a whitelist" mode.
+func resolveFUSEWhitelist(entries []string) ([]string, error) {
+	var resolved []string
+	for _, entry := range entries {
+		if address, err := netip.ParseAddr(entry); err == nil {
+			if !address.Is4() || address.Is4In6() || address.String() != entry {
+				return nil, fmt.Errorf("Docker FUSE user network supports IPv4 only")
+			}
+			resolved = append(resolved, entry+"/32")
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			if !prefix.Addr().Is4() || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != entry || prefix != prefix.Masked() {
+				return nil, fmt.Errorf("Docker FUSE user network supports canonical IPv4 CIDRs only")
+			}
+			resolved = append(resolved, entry)
+			continue
+		}
+		ips, err := net.LookupIP(entry)
+		if err != nil {
+			return nil, fmt.Errorf("resolve FUSE whitelist domain %q: %w", entry, err)
+		}
+		before := len(resolved)
+		for _, ip := range ips {
+			if ipv4 := ip.To4(); ipv4 != nil {
+				resolved = append(resolved, ipv4.String()+"/32")
+			}
+		}
+		if len(resolved) == before {
+			return nil, fmt.Errorf("Docker FUSE whitelist domain %q has no IPv4 address", entry)
+		}
+	}
+	return canonicalDockerStrings(resolved), nil
+}
+
 // cleanupOrphanedResources cleans up leftover gateway containers, pair networks,
 // and old networks from previous runs (crash recovery).
-func cleanupOrphanedResources(ctx context.Context, cli *dockerclient.Client) error {
+func cleanupOrphanedResources(ctx context.Context, cli dockerAPI) error {
 	// Clean up orphaned gateway containers
 	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
 		All: true,

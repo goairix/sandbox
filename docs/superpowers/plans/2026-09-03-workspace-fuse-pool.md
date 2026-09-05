@@ -1211,13 +1211,24 @@ git commit -m "build: add pinned workspace fuse images"
 **Files:**
 - Modify: `internal/runtime/docker/container.go`
 - Modify: `internal/runtime/docker/container_test.go`
+- Create: `internal/runtime/docker/api.go`
 - Create: `internal/runtime/docker/control.go`
 - Create: `internal/runtime/docker/control_test.go`
+- Create: `internal/runtime/docker/secrets.go`
 - Modify: `internal/runtime/docker/network.go`
+- Create: `internal/runtime/docker/network_test.go`
+- Modify: `internal/runtime/docker/exec.go`
+- Modify: `internal/runtime/docker/file.go`
 - Modify: `internal/runtime/docker/runtime.go`
 - Create: `internal/runtime/docker/runtime_test.go`
+- Modify: `internal/fuseprotocol/protocol.go`
+- Modify: `internal/mounter/supervisor.go`
+- Create: `internal/mounter/reaper.go`
+- Create: `internal/mounter/reaper_linux.go`
+- Create: `internal/mounter/reaper_other.go`
+- Modify: `internal/workspaceprobe/broker.go`
 
-- [ ] **Step 1: Write failing HostConfig and lifecycle tests**
+- [x] **Step 1: Write failing HostConfig and lifecycle tests**
 
 Refactor `Runtime.cli` behind a package-private `dockerAPI` interface containing only Docker methods used by this package. Implement `fakeDockerAPI` in `runtime_test.go` with mutex-protected created containers, exec users/stdin and cleanup events; `newFakeDockerRuntime(t)` injects that fake with deterministic isolated/open network IDs. Define `fuseDockerSpecForTest` with a digest-like test image, fixed PoolKey and system egress, and define `validRuntimeAuthorization` with the supplied RuntimeUID and mount attempt 1.
 
@@ -1226,7 +1237,7 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
     spec := fuseDockerSpecForTest()
     cfg, host, err := createContainerConfig(spec)
     require.NoError(t, err)
-    assert.Equal(t, spec.Image, cfg.Image)
+    assert.Equal(t, spec.WorkspaceFUSE.DockerImage, cfg.Image)
     assert.Contains(t, host.CapAdd, "SYS_ADMIN")
     assert.NotContains(t, host.CapAdd, "DAC_OVERRIDE")
     require.Len(t, host.Devices, 1)
@@ -1252,27 +1263,27 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 
 Add tests for root-only secret bind, bounded cache volume, prepared health, one-shot bootstrap after container ID allocation, fixed root control argv, UID 1000 public exec/file paths, quiesce/resume token generation and replay rejection, gateway system egress before container start, Acquire-time user rule append, exact AppArmor/SELinux profile, restart adoption, and cleanup after failure. Assert `New` performs no orphan cleanup and `ReconcileOrphanedResources` preserves every runtime UID supplied by Manager.
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `go test ./internal/runtime/docker -run 'FUSE|PoolHit' -v`
 
 Expected: FAIL because Docker has no FUSE special path.
 
-- [ ] **Step 3: Implement the Docker path without weakening legacy containers**
+- [x] **Step 3: Implement the Docker path without weakening legacy containers**
 
-Dispatch `createContainerConfig` on `spec.WorkspaceFUSE != nil`. For FUSE only, use the provider's `DockerImage`, `/dev/fuse`, `SYS_ADMIN`, drop ALL, read-only rootfs, cache volume and a root-only Secret directory computed with `filepath.Join(secretRoot, spec.ID)`. Apply the configured minimal AppArmor or SELinux profile and reject empty/`unconfined` profiles. The container entrypoint remains the trusted supervisor; all public `Exec`, `ExecStream`, `ExecPipe` and file helpers set `User: "1000:1000"`. Only `execControl` may set root and it accepts a closed enum of fixed commands.
+Dispatch `createContainerConfig` on `spec.WorkspaceFUSE != nil`. For FUSE only, use the provider's `DockerImage`, `/dev/fuse`, `SYS_ADMIN` plus the fixed-route-only `NET_ADMIN`, drop ALL, read-only rootfs, cache volume and a root-only Secret directory computed from the opaque preparation identity. Apply the configured minimal AppArmor or SELinux profile and reject empty/`unconfined` profiles. The container entrypoint remains the trusted supervisor; FUSE public `Exec`, `ExecStream`, `ExecPipe` and file helpers set `User: "1000:1000"`, while legacy containers continue inheriting their image user. Only `execControl` may set root and it accepts a closed enum of fixed commands. Hijacked control/user attaches close on context cancellation; closing an attach is never treated as process-exit evidence.
 
 At `PrepareSandbox`, create the gateway pair with system egress only, create/start the locked container, take the returned immutable container ID as RuntimeUID, then send exactly one bootstrap JSON carrying that ID before checking prepared. Authorization passes separate JSON through stdin. Ready requires supervisor health plus the UID 1000 fixed write probe. Removal requests supervisor shutdown and removes the exact container; it deletes gateway, cache volume and Secret directory only after a reachable daemon reports `ContainerInspect` NotFound. A timeout/host loss returns `ErrTerminationUnconfirmed` and retains owner/resources rather than claiming force removal succeeded.
 
-Remove constructor-time `cleanupOrphanedResources`; Docker containers are stateful across sandbox-api process restarts, so `IsStateful()` returns true. Implement `ReconcileOrphanedResources` and invoke it only after Manager has restored sessions/owners/pool records. It may remove a gateway/network/container only when its immutable runtime UID is absent from the protected set.
+Remove constructor-time `cleanupOrphanedResources`; Docker containers are stateful across sandbox-api process restarts, so `IsStateful()` returns true. Implement `ReconcileOrphanedResources` and invoke it only after Manager has restored sessions/owners/pool records. It may remove a FUSE gateway/network/container only when its immutable runtime UID is absent from the protected set, and must ignore legacy managed resources. Prepared/ready health reports the configured cache limit and measured usage; a non-empty prepared cache is rejected, and reaching the soft limit poisons the instance and terminates s3fs. The Docker PID 1 child reaper accepts one exact UID-1000 broker PID/starttime registration and fails closed when identity cannot be proven.
 
-- [ ] **Step 4: Run Docker tests**
+- [x] **Step 4: Run Docker tests**
 
 Run: `go test -race ./internal/runtime/docker -v`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/runtime/docker/container.go internal/runtime/docker/container_test.go internal/runtime/docker/control.go internal/runtime/docker/control_test.go internal/runtime/docker/network.go internal/runtime/docker/runtime.go internal/runtime/docker/runtime_test.go

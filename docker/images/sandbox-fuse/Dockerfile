@@ -20,6 +20,7 @@ RUN base_sha="${BASE_IMAGE##*@sha256:}" \
  && case "$PROFILE_ID" in ''|*[!a-z0-9.-]*) exit 1;; esac \
  && command -v python3 >/dev/null \
  && command -v node >/dev/null \
+ && test -x /usr/sbin/ip \
  && test "$(id -u sandbox)" = 1000 \
  && test "$(id -g sandbox)" = 1000
 

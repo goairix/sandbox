@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -220,6 +221,9 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	if !boundedTimeout(b.MountTimeoutSeconds) || !boundedTimeout(b.FlushTimeoutSeconds) || !boundedTimeout(b.UnmountTimeoutSeconds) {
 		return fmt.Errorf("bootstrap timeouts are invalid")
 	}
+	if b.CacheLimitBytes <= 0 {
+		return fmt.Errorf("bootstrap cache limit is invalid")
+	}
 	if b.PasswdFile != filepath.Join(s.config.RunDir, "passwd-s3fs") || filepath.Clean(b.PasswdFile) != b.PasswdFile || b.MountPath != s.config.MountPath || !withinRootOrSelf(b.CacheDir, s.config.CacheRoot) || !withinRoot(b.AccessKeyFile, s.config.CredentialRoot) || !withinRoot(b.SecretKeyFile, s.config.CredentialRoot) || (b.CAFile != "" && !withinRoot(b.CAFile, s.config.CredentialRoot)) {
 		return fmt.Errorf("bootstrap path is outside its trusted root")
 	}
@@ -324,7 +328,7 @@ func (s *Supervisor) reap(process Process, done chan struct{}) {
 	}
 }
 
-func (s *Supervisor) PreparedStatus() (fuseprotocol.MounterStatus, error) {
+func (s *Supervisor) PreparedStatus(ctx context.Context) (fuseprotocol.MounterStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.statusLocked()
@@ -333,6 +337,12 @@ func (s *Supervisor) PreparedStatus() (fuseprotocol.MounterStatus, error) {
 	}
 	if err := s.checkPreparedLocked(); err != nil {
 		return status, err
+	}
+	if err := s.populateCacheStatusLocked(ctx, &status); err != nil {
+		return status, err
+	}
+	if status.CacheBytes != 0 {
+		return status, fmt.Errorf("prepared cache is not empty")
 	}
 	return status, nil
 }
@@ -419,7 +429,21 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 	}
 	s.mountID = mount.ID
 	s.state = StateReady
-	return s.statusLocked(), nil
+	status = s.statusLocked()
+	if err := s.populateCacheStatusLocked(ctx, &status); err != nil {
+		s.state = StateUnhealthy
+		status.State = string(s.state)
+		status.MountType = ""
+		return status, err
+	}
+	if status.CacheExceeded {
+		s.state = StateUnhealthy
+		status.State = string(s.state)
+		status.MountType = ""
+		_ = s.process.Signal(syscall.SIGTERM)
+		return status, fmt.Errorf("workspace cache soft limit reached")
+	}
+	return status, nil
 }
 
 func (s *Supervisor) waitForMountLocked(ctx context.Context) (Mount, error) {
@@ -590,7 +614,46 @@ func (s *Supervisor) statusLocked() fuseprotocol.MounterStatus {
 			return "fuse"
 		}
 		return ""
-	}(), Generation: s.auth.LeaseGeneration, RestartDetected: s.state == StateRestartDetected}
+	}(), Generation: s.auth.LeaseGeneration, RestartDetected: s.state == StateRestartDetected, CacheLimitBytes: s.bootstrap.CacheLimitBytes}
+}
+
+func (s *Supervisor) populateCacheStatusLocked(ctx context.Context, status *fuseprotocol.MounterStatus) error {
+	bytes, err := cacheUsageBytes(ctx, s.bootstrap.CacheDir)
+	if err != nil {
+		return fmt.Errorf("measure workspace cache: %w", err)
+	}
+	status.CacheBytes = bytes
+	status.CacheLimitBytes = s.bootstrap.CacheLimitBytes
+	status.CacheExceeded = bytes >= s.bootstrap.CacheLimitBytes
+	return nil
+}
+
+func cacheUsageBytes(ctx context.Context, root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root || entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("cache contains a symbolic link")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() < 0 || total > int64(^uint64(0)>>1)-info.Size() {
+			return fmt.Errorf("cache contains an unsupported entry")
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
 }
 
 func (s *Supervisor) Status() fuseprotocol.MounterStatus {

@@ -24,17 +24,20 @@ const (
 )
 
 type localBroker struct {
-	processes  processTable
-	random     io.Reader
-	executable func() (string, error)
-	reaper     func() error
+	processes      processTable
+	random         io.Reader
+	executable     func() (string, error)
+	reaper         func() error
+	registerReaper func(processIdentity) error
 }
 
 type hybridBroker struct {
-	pid1      *pid1Broker
-	local     *localBroker
-	usePID1   bool
-	pid1Probe bool
+	pid1            *pid1Broker
+	local           *localBroker
+	usePID1         bool
+	pid1Probe       bool
+	dockerReaper    *dockerReaperClient
+	useDockerReaper bool
 }
 
 type brokerLaunch struct {
@@ -64,13 +67,32 @@ func newLocalBroker(processes processTable, random io.Reader) *localBroker {
 }
 
 func newHybridBroker(processes processTable, random io.Reader) *hybridBroker {
-	return &hybridBroker{pid1: &pid1Broker{processes: processes}, local: newLocalBroker(processes, random)}
+	return &hybridBroker{pid1: &pid1Broker{processes: processes}, local: newLocalBroker(processes, random), dockerReaper: &dockerReaperClient{processes: processes}}
 }
 
 func (b *hybridBroker) protectedProcess() (*processIdentity, error) {
 	process, available, err := b.pid1.protectedProcess()
 	b.pid1Probe = true
 	b.usePID1 = available
+	if err != nil || available {
+		return process, err
+	}
+	process, available, err = b.dockerReaper.protectedProcess()
+	b.useDockerReaper = available
+	if available {
+		b.local.registerReaper = b.dockerReaper.register
+	} else if err == nil {
+		// The Docker image deliberately runs a root supervisor as PID 1.  It
+		// must prove that it will reap this exact broker through the versioned
+		// registration protocol; signal disposition alone is not sufficient.
+		pid1, identityErr := b.local.processes.identity(1)
+		if identityErr != nil {
+			return nil, fmt.Errorf("pid 1 identity cannot be verified: %w", identityErr)
+		}
+		if pid1.UID == 0 {
+			return nil, fmt.Errorf("trusted Docker pid 1 reaper handshake is unavailable")
+		}
+	}
 	return process, err
 }
 
@@ -92,8 +114,10 @@ func (b *hybridBroker) resume(request resumeRequest) error {
 }
 
 func (b *localBroker) start(state brokerState) (string, error) {
-	if err := b.reaper(); err != nil {
-		return "", fmt.Errorf("sandbox pid 1 cannot reap quiesce broker: %w", err)
+	if b.registerReaper == nil {
+		if err := b.reaper(); err != nil {
+			return "", fmt.Errorf("sandbox pid 1 cannot reap quiesce broker: %w", err)
+		}
 	}
 	if len(state.Processes) == 0 {
 		// A broker is still required: it binds the token to the live quiesce
@@ -162,12 +186,89 @@ func (b *localBroker) start(state brokerState) (string, error) {
 		_, _ = command.Process.Wait()
 		return "", fmt.Errorf("quiesce broker did not become ready")
 	}
+	if b.registerReaper != nil {
+		identity, identityErr := b.processes.identity(command.Process.Pid)
+		if identityErr != nil || identity.PID != command.Process.Pid || identity.UID != requiredUID || identity.StartTime == 0 || b.registerReaper(identity) != nil {
+			_ = command.Process.Kill()
+			_, _ = command.Process.Wait()
+			return "", fmt.Errorf("trusted Docker pid 1 rejected quiesce broker")
+		}
+	}
 	if err := command.Process.Release(); err != nil {
 		_ = command.Process.Kill()
 		_, _ = command.Process.Wait()
 		return "", err
 	}
 	return "v1." + socketID + "." + secret, nil
+}
+
+type dockerReaperClient struct {
+	processes processTable
+	dial      func() (net.Conn, error)
+	peer      func(net.Conn) (int, int, error)
+}
+
+func (c *dockerReaperClient) connect() (net.Conn, error) {
+	if c.dial != nil {
+		return c.dial()
+	}
+	return net.DialTimeout("unix", fuseprotocol.DockerReaperSocket, 150*time.Millisecond)
+}
+
+func (c *dockerReaperClient) protectedProcess() (*processIdentity, bool, error) {
+	connection, err := c.connect()
+	if err != nil {
+		return nil, false, nil
+	}
+	defer connection.Close()
+	peer := c.peer
+	if peer == nil {
+		peer = unixPeerIdentity
+	}
+	pid, uid, err := peer(connection)
+	if err != nil || pid != 1 || uid != 0 {
+		return nil, false, fmt.Errorf("unexpected Docker pid 1 reaper peer")
+	}
+	_ = connection.SetDeadline(time.Now().Add(time.Second))
+	request := fuseprotocol.DockerReaperRequest{Version: fuseprotocol.Version, Command: "ping", PID: 0, UID: requiredUID, StartTime: 0}
+	if err := writeBrokerFrame(connection, request); err != nil {
+		return nil, false, err
+	}
+	var response fuseprotocol.DockerReaperResponse
+	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version || !response.Accepted || response.ErrorCode != "" {
+		return nil, false, fmt.Errorf("Docker pid 1 reaper ping failed")
+	}
+	identity, err := c.processes.identity(1)
+	if err != nil || identity.PID != 1 || identity.UID != 0 || identity.StartTime == 0 {
+		return nil, false, fmt.Errorf("Docker pid 1 identity cannot be verified")
+	}
+	return &identity, true, nil
+}
+
+func (c *dockerReaperClient) register(identity processIdentity) error {
+	connection, err := c.connect()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	peer := c.peer
+	if peer == nil {
+		peer = unixPeerIdentity
+	}
+	pid, uid, err := peer(connection)
+	if err != nil || pid != 1 || uid != 0 {
+		return fmt.Errorf("unexpected Docker pid 1 reaper peer")
+	}
+	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
+	request := fuseprotocol.DockerReaperRequest{Version: fuseprotocol.Version, Command: "register", PID: identity.PID, UID: identity.UID, StartTime: identity.StartTime}
+	if err := writeBrokerFrame(connection, request); err != nil {
+		return err
+	}
+	var response fuseprotocol.DockerReaperResponse
+	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version || !response.Accepted || response.ErrorCode != "" {
+		return fmt.Errorf("Docker pid 1 rejected broker registration")
+	}
+	return nil
 }
 
 func localBrokerCommand(executable string, state brokerState) *exec.Cmd {

@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 func TestLocalBrokerChildNeverStartsInWorkspace(t *testing.T) {
@@ -89,6 +91,54 @@ func TestReaperContractRequiresSIGCHLDHandling(t *testing.T) {
 	require.Error(t, validateReaperSignals(0, sigchld, 0), "a caught signal does not prove that pid 1 calls wait")
 	require.Error(t, validateReaperSignals(0, 0, sigchld), "blocking SIGCHLD does not prove that pid 1 waits for children")
 	require.Error(t, validateReaperSignals(0, 0, 0))
+}
+
+func TestDockerReaperHandshakeReplacesSignalDispositionFallback(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{1: {PID: 1, UID: 0, StartTime: 11, State: 'S'}}}
+	client := &dockerReaperClient{
+		processes: processes,
+		peer:      func(net.Conn) (int, int, error) { return 1, 0, nil },
+	}
+	client.dial = func() (net.Conn, error) {
+		server, caller := net.Pipe()
+		go func() {
+			defer server.Close()
+			var request fuseprotocol.DockerReaperRequest
+			if readBrokerFrame(server, &request) != nil {
+				return
+			}
+			accepted := request.Version == 1 && request.UID == 1000 &&
+				((request.Command == "ping" && request.PID == 0) || (request.Command == "register" && request.PID == 20 && request.StartTime == 99))
+			_ = writeBrokerFrame(server, fuseprotocol.DockerReaperResponse{Version: 1, Accepted: accepted, ErrorCode: ""})
+		}()
+		return caller, nil
+	}
+	identity, available, err := client.protectedProcess()
+	require.NoError(t, err)
+	assert.True(t, available)
+	assert.Equal(t, 1, identity.PID)
+	require.NoError(t, client.register(processIdentity{PID: 20, UID: 1000, StartTime: 99, State: 'S'}))
+}
+
+func TestRootPID1WithoutDockerReaperHandshakeFailsClosed(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{1: {PID: 1, UID: 0, StartTime: 11, State: 'S'}}}
+	broker := newHybridBroker(processes, bytes.NewReader(make([]byte, 64)))
+	broker.dockerReaper.dial = func() (net.Conn, error) { return nil, syscall.ECONNREFUSED }
+
+	_, err := broker.protectedProcess()
+	require.ErrorContains(t, err, "trusted Docker pid 1 reaper handshake is unavailable")
+}
+
+func TestUnreadablePID1IdentityWithoutDockerReaperHandshakeFailsClosed(t *testing.T) {
+	processes := &fakeProcesses{
+		states:         map[int]processIdentity{},
+		identityErrors: map[int]error{1: syscall.EACCES},
+	}
+	broker := newHybridBroker(processes, bytes.NewReader(make([]byte, 64)))
+	broker.dockerReaper.dial = func() (net.Conn, error) { return nil, syscall.ECONNREFUSED }
+
+	_, err := broker.protectedProcess()
+	require.ErrorContains(t, err, "pid 1 identity cannot be verified")
 }
 
 func TestPID1InvocationRequiresFixedImageContract(t *testing.T) {

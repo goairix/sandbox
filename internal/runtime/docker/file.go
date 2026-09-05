@@ -25,6 +25,10 @@ func shellEscape(s string) string {
 }
 
 func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, reader io.Reader) error {
+	fuseContainer, err := r.isFUSEContainer(ctx, id)
+	if err != nil {
+		return err
+	}
 	content, err := io.ReadAll(reader)
 	if err != nil {
 		return fmt.Errorf("read file content: %w", err)
@@ -38,8 +42,9 @@ func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, 
 		Mode:    0644,
 		Size:    int64(len(content)),
 		ModTime: time.Now(),
-		Uid:     1000,
-		Gid:     1000,
+	}
+	if fuseContainer {
+		hdr.Uid, hdr.Gid = 1000, 1000
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("write tar header: %w", err)
@@ -57,10 +62,20 @@ func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, 
 	}); err != nil {
 		return fmt.Errorf("create directory %s: %w", dir, err)
 	}
+	if fuseContainer {
+		return r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", dir}, &buf)
+	}
 	return r.cli.CopyToContainer(ctx, id, dir, &buf, container.CopyToContainerOptions{})
 }
 
 func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	fuseContainer, err := r.isFUSEContainer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if fuseContainer {
+		return r.downloadFile(ctx, id, srcPath)
+	}
 	tarReader, _, err := r.cli.CopyFromContainer(ctx, id, srcPath)
 	if err != nil {
 		return nil, err
@@ -73,8 +88,13 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 		return nil, err
 	}
 
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
 		Cmd:          []string{"cat", srcPath},
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -88,7 +108,9 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 	}
 
 	pr, pw := io.Pipe()
+	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
 	go func() {
+		defer stopWatch()
 		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
 		attachResp.Close()
 		pw.CloseWithError(err)
@@ -111,10 +133,24 @@ func (r *Runtime) FileExists(ctx context.Context, id string, filePath string) er
 }
 
 func (r *Runtime) UploadArchive(ctx context.Context, id string, destDir string, archive io.Reader) error {
+	fuseContainer, err := r.isFUSEContainer(ctx, id)
+	if err != nil {
+		return err
+	}
+	if fuseContainer {
+		return r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", destDir}, archive)
+	}
 	return r.cli.CopyToContainer(ctx, id, destDir, archive, container.CopyToContainerOptions{})
 }
 
 func (r *Runtime) DownloadDir(ctx context.Context, id string, dirPath string) (io.ReadCloser, error) {
+	fuseContainer, err := r.isFUSEContainer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if fuseContainer {
+		return r.downloadFile(ctx, id, dirPath)
+	}
 	reader, _, err := r.cli.CopyFromContainer(ctx, id, dirPath)
 	if err != nil {
 		return nil, err
@@ -476,8 +512,13 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 	baseDir := pattern[:lastSlashBeforeStar]
 	relPattern := pattern[lastSlashBeforeStar+1:]
 
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          []string{"find", baseDir, "-path", baseDir + "/" + relPattern, "-type", "f"},
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -490,10 +531,15 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		return nil, fmt.Errorf("attach exec: %w", err)
 	}
 	defer attachResp.Close()
+	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
+	defer stopWatch()
 
 	var stdout bytes.Buffer
 	if _, err := stdcopy.StdCopy(&stdout, io.Discard, attachResp.Reader); err != nil {
 		return nil, fmt.Errorf("read exec output: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -551,8 +597,13 @@ func (r *Runtime) DownloadFiles(ctx context.Context, id string, paths []string) 
 }
 
 func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
+	user, err := r.publicExecUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
 		Cmd:          []string{"tar", "cf", "-", srcPath},
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -566,11 +617,39 @@ func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (
 	}
 
 	pr, pw := io.Pipe()
+	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
 	go func() {
+		defer stopWatch()
 		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
 		attachResp.Close()
 		pw.CloseWithError(err)
 	}()
 
 	return pr, nil
+}
+
+func (r *Runtime) isFUSEContainer(ctx context.Context, id string) (bool, error) {
+	info, err := r.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("inspect container before file transfer: %w", err)
+	}
+	if info.Config == nil {
+		return false, runtime.ErrInvalidRuntimeRef
+	}
+	isFUSE := info.Config.Labels["sandbox.managed"] == "true" && info.Config.Labels["sandbox.role"] == "fuse-runtime"
+	if isFUSE && info.ID != id {
+		return false, runtime.ErrInvalidRuntimeRef
+	}
+	return isFUSE, nil
+}
+
+func (r *Runtime) publicExecUser(ctx context.Context, id string) (string, error) {
+	isFUSE, err := r.isFUSEContainer(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if isFUSE {
+		return dockerPublicUser, nil
+	}
+	return "", nil
 }

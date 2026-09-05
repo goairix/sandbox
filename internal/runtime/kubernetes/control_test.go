@@ -66,18 +66,18 @@ func TestProbeAllowlistRequiresCanonicalPositiveGeneration(t *testing.T) {
 }
 
 func TestDecodeMounterStatusIsStrictBoundedAndVersioned(t *testing.T) {
-	valid := `{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false}`
+	valid := `{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`
 	status, err := decodeMounterStatus([]byte(valid))
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), status.Generation)
 
 	invalid := []string{
-		`{"version":2,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false}`,
+		`{"version":2,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`,
 		`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7}`,
-		`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":null}`,
-		`{"version":1,"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false}`,
+		`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":null,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`,
+		`{"version":1,"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`,
 		valid + ` {}`,
-		`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false,"secret":"must-not-appear"}`,
+		`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"pool-a","mount_type":"fuse","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false,"secret":"must-not-appear"}`,
 	}
 	for _, raw := range invalid {
 		_, err := decodeMounterStatus([]byte(raw))
