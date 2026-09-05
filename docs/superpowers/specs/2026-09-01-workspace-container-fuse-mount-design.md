@@ -736,6 +736,7 @@ FUSE workspace 不再复制整棵目录，但保留 `SyncWorkspace` 的持久化
 
 - 每个已发布 sandbox 使用可关闭、引用计数的 operation gate；所有 Exec/stream/file/workspace 操作从开始到流结束都持有引用。`from_container` 进入 `flushing` 状态并取得 exclusive token：先关闭新 admission，等待已有引用归零，再调用 runtime `QuiesceWorkspace` 和 `FlushWorkspace`；只有目标 s3fs 版本与 provider profile 的故障注入测试证明该 flush/close 路径已把全部已关闭文件上传到远端时，才返回 `files_synced=0`、`flushed=true` 和 `last_flushed_at`。
 - Kubernetes 保持 `shareProcessNamespace=false`，因此不能让 sidecar 检查主容器 `/proc`。`QuiesceWorkspace` 必须在 sandbox 容器内运行固定的非特权 `workspace-probe`：停止同 UID 的其余进程、枚举 `/proc/*/fd` 并确认没有指向 `/workspace` 的可写 fd，返回可恢复 token。无法枚举/停止、发现后台/脱离进程或写句柄、或 generation 在 flush 后变化时，`SyncWorkspace` 返回 409/503 与 `flushed=false`，不能调用 mounter flush 或宣称持久化完成；健康复检成功后才恢复进程并重开 gate。
+- `workspace-probe` 的临时对象使用共享 `fuseprotocol.DeriveProbeObjectName(RuntimeUID, generation)` 生成版本化、域分隔 SHA-256 basename；原始 RuntimeUID 不出现在 key 中，请求也不能传入该名称。Task 14 的公共 FUSE file API 必须隐藏/拒绝 `IsReservedProbeObjectName` 唯一匹配的 basename。Task 15 只有取得 exact runtime termination evidence 后，才由 Manager 持有的 `WorkspaceObjectClient` 在 canonical workspace prefix 下删除并验证这个 exact derived key；补偿与恢复都禁止按前缀、glob 或 list 结果批量删除，以免触及用户对象。
 - flush 超时、quiesce 失败、s3fs 返回错误或 provider spike 无法证明持久化边界时，API 返回错误或明确的 `flushed=false`/unsupported，不能把健康检查、Linux `syncfs` 返回成功或 Exec 流结束单独当成数据已持久化。
 - `to_container` 不执行复制并返回明确 no-op；其前提是持有租约期间禁止其他客户端或管理工具修改同一 prefix。s3fs 不提供可靠的跨客户端缓存失效，因此外部修改不属于一期支持语义。
 - 响应包含 `mount_type=fuse`，区分“未复制但已 flush”和 legacy sync 的文件复制计数。

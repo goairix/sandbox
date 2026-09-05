@@ -3,29 +3,25 @@ package kubernetes
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"reflect"
-	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 const (
 	workspaceMounterContainer = "workspace-mounter"
 	sandboxContainer          = "sandbox"
-	workspaceProbeBinary      = "/usr/local/bin/workspace-probe"
-	maxControlJSONBytes       = 64 << 10
-	controlWireVersion        = 1
+	workspaceProbeBinary      = fuseprotocol.ProbeBinary
+	maxControlJSONBytes       = fuseprotocol.MaxJSONBytes
+	controlWireVersion        = fuseprotocol.Version
 )
 
 var (
@@ -95,60 +91,13 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	return original, nil
 }
 
-type mounterStatusWire struct {
-	Version         int    `json:"version"`
-	State           string `json:"state"`
-	RuntimeUID      string `json:"runtime_uid"`
-	PoolKey         string `json:"pool_key"`
-	MountType       string `json:"mount_type"`
-	Generation      int64  `json:"generation"`
-	RestartDetected bool   `json:"restart_detected"`
-}
-
-type controlAckWire struct {
-	Version    int    `json:"version"`
-	Accepted   bool   `json:"accepted"`
-	RuntimeUID string `json:"runtime_uid"`
-	Generation int64  `json:"generation"`
-}
-
-type authorizeRequestWire struct {
-	Version         int    `json:"version"`
-	RuntimeUID      string `json:"runtime_uid"`
-	PoolKey         string `json:"pool_key"`
-	WorkspaceHash   string `json:"workspace_hash"`
-	Prefix          string `json:"prefix"`
-	LeaseGeneration int64  `json:"lease_generation"`
-	MountAttempt    uint8  `json:"mount_attempt"`
-}
-
-type controlRequestWire struct {
-	Version    int    `json:"version"`
-	RuntimeUID string `json:"runtime_uid"`
-	Generation int64  `json:"generation"`
-}
-
-type probeResumeRequestWire struct {
-	Version    int    `json:"version"`
-	RuntimeUID string `json:"runtime_uid"`
-	Generation int64  `json:"generation"`
-	Token      string `json:"token"`
-}
-
-type shutdownAckWire struct {
-	Version         int    `json:"version"`
-	RuntimeUID      string `json:"runtime_uid"`
-	Generation      int64  `json:"generation"`
-	GracefulUnmount bool   `json:"graceful_unmount"`
-}
-
-type probeStatusWire struct {
-	Version    int    `json:"version"`
-	RuntimeUID string `json:"runtime_uid"`
-	Generation int64  `json:"generation"`
-	OK         bool   `json:"ok"`
-	Token      string `json:"token"`
-}
+type mounterStatusWire = fuseprotocol.MounterStatus
+type controlAckWire = fuseprotocol.ControlAck
+type authorizeRequestWire = fuseprotocol.AuthorizeRequest
+type controlRequestWire = fuseprotocol.ControlRequest
+type probeResumeRequestWire = fuseprotocol.ProbeResumeRequest
+type shutdownAckWire = fuseprotocol.ShutdownAck
+type probeStatusWire = fuseprotocol.ProbeStatus
 
 func (r *Runtime) execControl(ctx context.Context, pod, container string, argv []string, stdin []byte) ([]byte, error) {
 	if container != workspaceMounterContainer {
@@ -180,42 +129,15 @@ func (r *Runtime) execSandboxProbe(ctx context.Context, pod string, argv []strin
 }
 
 func allowedMounterCommand(argv []string) bool {
-	if len(argv) == 2 && argv[0] == mounterBinary {
-		switch argv[1] {
-		case "authorize", "flush", "shutdown":
-			return true
-		}
-	}
-	return len(argv) == 3 && argv[0] == mounterBinary && argv[1] == "health" && (argv[2] == "prepared" || argv[2] == "ready")
+	return fuseprotocol.AllowedMounterCommand(argv)
 }
 
 func allowedProbeCommand(argv []string) bool {
-	if len(argv) != 6 && len(argv) != 7 {
-		return false
-	}
-	if argv[0] != workspaceProbeBinary || (argv[1] != "write-read-delete" && argv[1] != "quiesce" && argv[1] != "resume") || argv[2] != "--runtime-uid" || !validControlIdentity(argv[3]) || argv[4] != "--generation" {
-		return false
-	}
-	generation, err := strconv.ParseInt(argv[5], 10, 64)
-	if err != nil || generation <= 0 || strconv.FormatInt(generation, 10) != argv[5] {
-		return false
-	}
-	if argv[1] == "resume" {
-		return len(argv) == 7 && argv[6] == "--token-stdin"
-	}
-	return len(argv) == 6
+	return fuseprotocol.AllowedProbeCommand(argv)
 }
 
 func validControlIdentity(value string) bool {
-	if value == "" || len(value) > 1024 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, char := range value {
-		if char == 0 || unicode.IsControl(char) {
-			return false
-		}
-	}
-	return true
+	return fuseprotocol.ValidIdentity(value)
 }
 
 func decodeMounterStatus(raw []byte) (mounterStatusWire, error) {
@@ -263,59 +185,5 @@ func decodeProbeStatus(raw []byte) (probeStatusWire, error) {
 }
 
 func strictDecodeControlJSON(raw []byte, out any) error {
-	if len(raw) == 0 || len(raw) > maxControlJSONBytes {
-		return fmt.Errorf("workspace control response has invalid size")
-	}
-	typ := reflect.TypeOf(out)
-	if typ.Kind() != reflect.Pointer || typ.Elem().Kind() != reflect.Struct {
-		return fmt.Errorf("workspace control decoder requires a struct pointer")
-	}
-	expected := make(map[string]struct{}, typ.Elem().NumField())
-	for i := 0; i < typ.Elem().NumField(); i++ {
-		name := strings.Split(typ.Elem().Field(i).Tag.Get("json"), ",")[0]
-		if name != "" && name != "-" {
-			expected[name] = struct{}{}
-		}
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
-		return fmt.Errorf("workspace control response must be one JSON object")
-	}
-	seen := make(map[string]struct{}, len(expected))
-	for decoder.More() {
-		token, tokenErr := decoder.Token()
-		key, ok := token.(string)
-		if tokenErr != nil || !ok {
-			return fmt.Errorf("workspace control response contains an invalid field")
-		}
-		if _, ok := expected[key]; !ok {
-			return fmt.Errorf("workspace control response contains an unknown field")
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("workspace control response contains a duplicate field")
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return fmt.Errorf("workspace control response contains an invalid value")
-		}
-		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return fmt.Errorf("workspace control response contains a null field")
-		}
-		seen[key] = struct{}{}
-	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') {
-		return fmt.Errorf("workspace control response is malformed")
-	}
-	if len(seen) != len(expected) {
-		return fmt.Errorf("workspace control response is missing a field")
-	}
-	if token, err := decoder.Token(); !errors.Is(err, io.EOF) || token != nil {
-		return fmt.Errorf("workspace control response contains trailing data")
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("workspace control response has invalid field types")
-	}
-	return nil
+	return fuseprotocol.DecodeExact(raw, out)
 }

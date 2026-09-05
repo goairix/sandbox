@@ -21,6 +21,7 @@ import (
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -210,29 +211,12 @@ const (
 	mounterRunPath          = "/run/s3fs"
 	mounterSecretPath       = "/run/secrets/workspace"
 	mounterCachePath        = "/var/cache/s3fs"
-	mounterBinary           = "/usr/local/bin/workspace-mounter"
+	mounterBinary           = fuseprotocol.MounterBinary
 	mounterRunVolumeSize    = "16Mi"
 	preparedTerminationSecs = int64(90)
 )
 
-type preparedMounterBootstrap struct {
-	Version               int    `json:"version"`
-	Provider              string `json:"provider"`
-	Bucket                string `json:"bucket"`
-	Endpoint              string `json:"endpoint"`
-	Region                string `json:"region,omitempty"`
-	Profile               string `json:"profile"`
-	AccessKeyFile         string `json:"access_key_file"`
-	SecretKeyFile         string `json:"secret_key_file"`
-	PasswdFile            string `json:"passwd_file"`
-	CAFile                string `json:"ca_file,omitempty"`
-	CacheDir              string `json:"cache_dir"`
-	MountPath             string `json:"mount_path"`
-	PoolKey               string `json:"pool_key"`
-	MountTimeoutSeconds   int64  `json:"mount_timeout_seconds"`
-	FlushTimeoutSeconds   int64  `json:"flush_timeout_seconds"`
-	UnmountTimeoutSeconds int64  `json:"unmount_timeout_seconds"`
-}
+type preparedMounterBootstrap = fuseprotocol.BootstrapConfig
 
 type validatedPreparedFUSEPod struct {
 	cacheSize               resource.Quantity
@@ -375,7 +359,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 				{
 					Name:       "sandbox",
 					Image:      spec.Image,
-					Command:    []string{"sleep", "infinity"},
+					Command:    []string{fuseprotocol.ProbeBinary, "self-check"},
 					WorkingDir: workspaceMountPath,
 					Resources:  validated.sandboxResources,
 					SecurityContext: &corev1.SecurityContext{
@@ -388,13 +372,16 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 							Drop: []corev1.Capability{"ALL"},
 						},
 					},
-					Env: append(sandboxKubernetesEnv(), corev1.EnvVar{
-						Name: "SANDBOX_POD_UID",
-						ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
-							APIVersion: "v1",
-							FieldPath:  "metadata.uid",
-						}},
-					}),
+					Env: append(sandboxKubernetesEnv(),
+						corev1.EnvVar{Name: fuseprotocol.ProbePID1EnvironmentName, Value: fuseprotocol.ProbePID1EnvironmentValue},
+						corev1.EnvVar{
+							Name: "SANDBOX_POD_UID",
+							ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.uid",
+							}},
+						},
+					),
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: workspaceMountPath, MountPropagation: &sandboxPropagation},
 						{Name: "tmp", MountPath: "/tmp"},
@@ -587,6 +574,9 @@ func validateLSMProfile(profile string) error {
 
 func validateFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, bool, int32, error) {
 	const invalidEndpoint = "invalid workspace FUSE endpoint"
+	if !fuse.UseSSL {
+		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+	}
 	raw := fuse.Endpoint
 	var parsed *url.URL
 	var err error

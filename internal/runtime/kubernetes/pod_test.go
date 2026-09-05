@@ -190,6 +190,8 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 
 	require.Len(t, pod.Spec.Containers, 1)
 	sandbox := pod.Spec.Containers[0]
+	assert.Equal(t, []string{"/usr/local/bin/workspace-probe", "self-check"}, sandbox.Command)
+	assert.Equal(t, "serve", podEnv(t, sandbox.Env, "WORKSPACE_PROBE_INTERNAL_PID1_V1").Value)
 	require.NotNil(t, sandbox.SecurityContext)
 	require.NotNil(t, sandbox.SecurityContext.RunAsNonRoot)
 	assert.True(t, *sandbox.SecurityContext.RunAsNonRoot)
@@ -289,6 +291,7 @@ func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
 		{"runtime type", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.RuntimeType = "docker" }},
 		{"provider", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Provider = "s3" }},
 		{"driver", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Driver = "goofys" }},
+		{"plaintext endpoint", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.UseSSL = false }},
 		{"profile", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Profile = "" }},
 		{"bucket", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Bucket = "" }},
 		{"storage identity", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.StorageIdentity = "" }},
