@@ -51,6 +51,25 @@ var (
 	// Session restore (persistent sandbox restore on startup / multi-replica)
 	SandboxSessionRestoreTotal metric.Int64Counter
 
+	// FUSE workspace instruments. Attribute keys are intentionally bounded to
+	// runtime/provider/pool_key/state/result/reason/operation.
+	SandboxWorkspaceMountDuration       metric.Float64Histogram
+	SandboxWorkspaceMountTotal          metric.Int64Counter
+	SandboxWorkspaceUnmountTotal        metric.Int64Counter
+	SandboxWorkspaceFlushDuration       metric.Float64Histogram
+	SandboxWorkspaceFlushTotal          metric.Int64Counter
+	SandboxWorkspaceRecoveryTotal       metric.Int64Counter
+	SandboxWorkspaceUnavailableTotal    metric.Int64Counter
+	SandboxWorkspaceLeaseConflict       metric.Int64Counter
+	SandboxWorkspaceLeaseLost           metric.Int64Counter
+	SandboxWorkspaceOwnerBlocked        metric.Int64Counter
+	SandboxWorkspacePoolSize            metric.Int64Gauge
+	SandboxWorkspacePoolAcquire         metric.Int64Counter
+	SandboxWorkspacePoolPrepareDuration metric.Float64Histogram
+	SandboxWorkspacePoolDiscard         metric.Int64Counter
+	SandboxWorkspaceFUSECacheBytes      metric.Int64Gauge
+	SandboxWorkspaceFUSEErrors          metric.Int64Counter
+
 	// Error instruments
 	SandboxErrorTotal metric.Int64Counter
 )
@@ -224,6 +243,71 @@ func initInstruments() (err error) {
 		return fmt.Errorf("metrics: sandbox_session_restore_total: %w", err)
 	}
 
+	SandboxWorkspaceMountDuration, err = meter.Float64Histogram("sandbox.workspace.mount.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace mount duration: %w", err)
+	}
+	SandboxWorkspaceMountTotal, err = meter.Int64Counter("sandbox.workspace.mount.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace mount total: %w", err)
+	}
+	SandboxWorkspaceUnmountTotal, err = meter.Int64Counter("sandbox.workspace.unmount.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace unmount total: %w", err)
+	}
+	SandboxWorkspaceFlushDuration, err = meter.Float64Histogram("sandbox.workspace.flush.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace flush duration: %w", err)
+	}
+	SandboxWorkspaceFlushTotal, err = meter.Int64Counter("sandbox.workspace.flush.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace flush total: %w", err)
+	}
+	SandboxWorkspaceRecoveryTotal, err = meter.Int64Counter("sandbox.workspace.recovery.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace recovery total: %w", err)
+	}
+	SandboxWorkspaceUnavailableTotal, err = meter.Int64Counter("sandbox.workspace.unavailable.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace unavailable total: %w", err)
+	}
+	SandboxWorkspaceLeaseConflict, err = meter.Int64Counter("sandbox.workspace.lease.conflict.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace lease conflict total: %w", err)
+	}
+	SandboxWorkspaceLeaseLost, err = meter.Int64Counter("sandbox.workspace.lease.lost.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace lease lost total: %w", err)
+	}
+	SandboxWorkspaceOwnerBlocked, err = meter.Int64Counter("sandbox.workspace.owner.blocked.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace owner blocked total: %w", err)
+	}
+	SandboxWorkspacePoolSize, err = meter.Int64Gauge("sandbox.workspace.pool.size")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool size: %w", err)
+	}
+	SandboxWorkspacePoolAcquire, err = meter.Int64Counter("sandbox.workspace.pool.acquire.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool acquire total: %w", err)
+	}
+	SandboxWorkspacePoolPrepareDuration, err = meter.Float64Histogram("sandbox.workspace.pool.prepare.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool prepare duration: %w", err)
+	}
+	SandboxWorkspacePoolDiscard, err = meter.Int64Counter("sandbox.workspace.pool.discard.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool discard total: %w", err)
+	}
+	SandboxWorkspaceFUSECacheBytes, err = meter.Int64Gauge("sandbox.workspace.fuse.cache.bytes", metric.WithUnit("By"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace FUSE cache bytes: %w", err)
+	}
+	SandboxWorkspaceFUSEErrors, err = meter.Int64Counter("sandbox.workspace.fuse.errors.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace FUSE errors total: %w", err)
+	}
+
 	SandboxErrorTotal, err = meter.Int64Counter(
 		"sandbox.error.total",
 		metric.WithDescription("Total number of sandbox business errors"),
@@ -245,6 +329,15 @@ func InitNoop() error {
 	otel.SetMeterProvider(noop.NewMeterProvider())
 	meter = otel.Meter("noop")
 	return initInstruments()
+}
+
+// ResetForTest clears FUSE instruments so registration tests can assert that
+// Init installs every required handle. It must not be used by production code.
+func ResetForTest() {
+	SandboxWorkspacePoolSize = nil
+	SandboxWorkspacePoolAcquire = nil
+	SandboxWorkspaceMountDuration = nil
+	SandboxWorkspaceLeaseLost = nil
 }
 
 // RecordHTTP records HTTP request count and duration.
@@ -341,6 +434,69 @@ func RecordSessionRestore(ctx context.Context, status string) {
 	SandboxSessionRestoreTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("status", status),
 	))
+}
+
+func RecordWorkspaceMount(ctx context.Context, runtimeName, provider, result string, duration float64) {
+	attrs := []attribute.KeyValue{attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("result", result)}
+	SandboxWorkspaceMountTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	SandboxWorkspaceMountDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
+}
+
+func RecordWorkspaceUnmount(ctx context.Context, runtimeName, result string) {
+	SandboxWorkspaceUnmountTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("result", result)))
+}
+
+func RecordWorkspaceFlush(ctx context.Context, runtimeName, provider, result string, duration float64) {
+	attrs := []attribute.KeyValue{attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("result", result)}
+	SandboxWorkspaceFlushTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	SandboxWorkspaceFlushDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
+}
+
+func RecordWorkspaceRecovery(ctx context.Context, runtimeName, provider, result string) {
+	SandboxWorkspaceRecoveryTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("result", result)))
+}
+
+func RecordWorkspaceUnavailable(ctx context.Context, reason string) {
+	SandboxWorkspaceUnavailableTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+func RecordWorkspaceLeaseConflict(ctx context.Context) {
+	SandboxWorkspaceLeaseConflict.Add(ctx, 1)
+}
+
+func RecordWorkspaceLeaseLost(ctx context.Context, runtimeName string) {
+	SandboxWorkspaceLeaseLost.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName)))
+}
+
+func RecordWorkspaceOwnerBlocked(ctx context.Context, reason string) {
+	SandboxWorkspaceOwnerBlocked.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+func RecordWorkspacePoolSize(ctx context.Context, runtimeName, provider, poolKey, poolState string, size int64) {
+	SandboxWorkspacePoolSize.Record(ctx, size, metric.WithAttributes(
+		attribute.String("runtime", runtimeName), attribute.String("provider", provider),
+		attribute.String("pool_key", poolKey), attribute.String("state", poolState),
+	))
+}
+
+func RecordWorkspacePoolAcquire(ctx context.Context, runtimeName, provider, result string) {
+	SandboxWorkspacePoolAcquire.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("result", result)))
+}
+
+func RecordWorkspacePoolPrepare(ctx context.Context, runtimeName, provider, result string, duration float64) {
+	SandboxWorkspacePoolPrepareDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("result", result)))
+}
+
+func RecordWorkspacePoolDiscard(ctx context.Context, runtimeName, provider, reason string) {
+	SandboxWorkspacePoolDiscard.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("reason", reason)))
+}
+
+func RecordWorkspaceFUSECache(ctx context.Context, runtimeName, provider string, cacheBytes int64) {
+	SandboxWorkspaceFUSECacheBytes.Record(ctx, cacheBytes, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider)))
+}
+
+func RecordWorkspaceFUSEError(ctx context.Context, operation string) {
+	SandboxWorkspaceFUSEErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", operation)))
 }
 
 // RecordError records a sandbox business error.

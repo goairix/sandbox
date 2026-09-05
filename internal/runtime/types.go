@@ -160,6 +160,9 @@ type WorkspaceHealth struct {
 	Generation      int64
 	RestartCount    int32
 	RestartDetected bool
+	CacheBytes      int64
+	CacheLimitBytes int64
+	CacheExceeded   bool
 	LastSuccessful  time.Time
 	Error           string
 }

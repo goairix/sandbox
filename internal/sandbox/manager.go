@@ -73,6 +73,7 @@ type fuseSandboxLifecycle struct {
 	runtimeRemoved   bool
 	evidence         runtime.TerminationEvidence
 	probeRemoved     bool
+	unmountRecorded  bool
 	leaseReleased    bool
 	sessionRemoved   bool
 }
@@ -581,6 +582,15 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.config.WorkspaceObjectClient == nil || m.fsMeta == nil || m.sessions == nil || m.fusePool.spec.WorkspaceFUSE == nil {
 		return nil, ErrInvalidFUSEPoolConfig
 	}
+	mountStarted := time.Now()
+	defer func() {
+		result := "success"
+		if returnErr != nil {
+			result = "error"
+		}
+		spec := m.fusePool.spec.WorkspaceFUSE
+		metrics.RecordWorkspaceMount(ctx, spec.RuntimeType, spec.Provider, result, time.Since(mountStarted).Seconds())
+	}()
 	if !fuseResourcesCompatible(cfg.Resources, m.fusePool.spec) {
 		return nil, errors.Join(ErrInvalidFUSEPoolConfig, errors.New("requested resources do not match the prepared FUSE pool"))
 	}
@@ -954,6 +964,8 @@ func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLi
 				return
 			case <-ticker.C:
 				if err := m.checkFUSELifecycle(ctx, lifecycle); err != nil {
+					metrics.RecordWorkspaceUnavailable(ctx, "health_check")
+					metrics.RecordWorkspaceFUSEError(ctx, "health")
 					m.runFUSETeardown(context.Background(), lifecycle, err)
 					return
 				}
@@ -973,6 +985,13 @@ func (m *Manager) checkFUSELifecycle(ctx context.Context, lifecycle *fuseSandbox
 	health, err := m.runtime.WorkspaceHealth(ctx, runtime.RuntimeRef{ID: lifecycle.record.RuntimeID, UID: lifecycle.record.RuntimeUID})
 	if err != nil {
 		return err
+	}
+	if health != nil && m.fusePool != nil && m.fusePool.spec.WorkspaceFUSE != nil {
+		spec := m.fusePool.spec.WorkspaceFUSE
+		metrics.RecordWorkspaceFUSECache(ctx, spec.RuntimeType, spec.Provider, health.CacheBytes)
+		if health.CacheExceeded || (health.CacheLimitBytes > 0 && health.CacheBytes >= health.CacheLimitBytes) {
+			metrics.RecordWorkspaceFUSEError(ctx, "cache_threshold")
+		}
 	}
 	if health == nil || !health.Ready || health.MountType != "fuse" || health.RuntimeUID != lifecycle.record.RuntimeUID || health.Generation != lifecycle.lease.OwnerSnapshot().Generation || health.RestartCount != 0 || health.RestartDetected {
 		return ErrSandboxNotReady
@@ -1029,7 +1048,17 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		// Destruction must remain possible when a best-effort flush fails. The
 		// immutable runtime is removed next and the owner is retained until that
 		// removal plus remote probe cleanup are both proven.
-		_ = m.runtime.FlushWorkspace(ctx, ref, generation)
+		started := time.Now()
+		flushErr := m.runtime.FlushWorkspace(ctx, ref, generation)
+		result := "success"
+		if flushErr != nil {
+			result = "error"
+			metrics.RecordWorkspaceFUSEError(ctx, "flush")
+		}
+		if m.fusePool.spec.WorkspaceFUSE != nil {
+			spec := m.fusePool.spec.WorkspaceFUSE
+			metrics.RecordWorkspaceFlush(ctx, spec.RuntimeType, spec.Provider, result, time.Since(started).Seconds())
+		}
 		lifecycle.flushAttempted = true
 	}
 	if lifecycle.claimed == nil {
@@ -1055,6 +1084,10 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 			return
 		}
 		lifecycle.evidence = evidence
+	}
+	if !lifecycle.unmountRecorded && m.fusePool.spec.WorkspaceFUSE != nil {
+		metrics.RecordWorkspaceUnmount(ctx, m.fusePool.spec.WorkspaceFUSE.RuntimeType, "success")
+		lifecycle.unmountRecorded = true
 	}
 	if !lifecycle.probeRemoved {
 		probeName, err := fuseprotocol.DeriveProbeObjectName(lifecycle.record.RuntimeUID, generation)
@@ -2354,6 +2387,10 @@ func (m *Manager) restoreFUSESandbox(ctx context.Context, sb *Sandbox) error {
 	if spec == nil || m.fsMeta == nil {
 		return ErrInvalidFUSEPoolConfig
 	}
+	recoveryResult := "error"
+	defer func() {
+		metrics.RecordWorkspaceRecovery(ctx, spec.RuntimeType, spec.Provider, recoveryResult)
+	}()
 	expectedPrefix, err := storage.BuildWorkspacePrefix(m.fsMeta.SubPath, workspace.RootPath)
 	if err != nil {
 		return ErrSandboxNotReady
@@ -2466,6 +2503,7 @@ func (m *Manager) restoreFUSESandbox(ctx context.Context, sb *Sandbox) error {
 	restoreMu.Unlock()
 	m.mu.Unlock()
 	m.startFUSEWatcher(lifecycleCtx, lifecycle)
+	recoveryResult = "success"
 	return nil
 }
 

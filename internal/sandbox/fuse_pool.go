@@ -17,6 +17,7 @@ import (
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage/state"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 const (
@@ -239,6 +240,12 @@ func (p *FUSEPool) WarmUp(ctx context.Context) error {
 // Acquire reserves a pristine prepared shell, or cold-prepares one carrying
 // the request's token directly from preparing to reserved.
 func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPoolRecord, error) {
+	result := "error"
+	defer func() {
+		if p != nil && p.spec.WorkspaceFUSE != nil {
+			metrics.RecordWorkspacePoolAcquire(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, result)
+		}
+	}()
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
@@ -265,6 +272,7 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 				return nil, err
 			}
 			p.scheduleRefill()
+			result = "cold"
 			return record, nil
 		}
 		if err := p.validateReservedRecord(*record, token); err != nil {
@@ -296,6 +304,7 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 				return nil, ErrFUSEPoolStopped
 			}
 			p.scheduleRefill()
+			result = "hit"
 			return record, nil
 		}
 	}
@@ -624,6 +633,7 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 	if err != nil {
 		return true, fmt.Errorf("refresh FUSE pool inventory: %w", err)
 	}
+	p.recordInventoryMetrics(ctx, current)
 	for _, record := range current {
 		if record.State == state.FUSEPoolPrepared {
 			prepared++
@@ -638,6 +648,19 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		prepared++
 	}
 	return true, inspectionErr
+}
+
+func (p *FUSEPool) recordInventoryMetrics(ctx context.Context, records []state.FUSEPoolRecord) {
+	if p == nil || p.spec.WorkspaceFUSE == nil {
+		return
+	}
+	counts := make(map[state.FUSEPoolState]int64)
+	for _, record := range records {
+		counts[record.State]++
+	}
+	for _, poolState := range []state.FUSEPoolState{state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup} {
+		metrics.RecordWorkspacePoolSize(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, p.poolKey, string(poolState), counts[poolState])
+	}
 }
 
 func (p *FUSEPool) inspectPrepared(ctx context.Context) error {
@@ -813,6 +836,13 @@ func (p *FUSEPool) scheduleRefill() {
 }
 
 func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken string) (*state.FUSEPoolRecord, error) {
+	started := time.Now()
+	result := "error"
+	defer func() {
+		if p.spec.WorkspaceFUSE != nil {
+			metrics.RecordWorkspacePoolPrepare(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, result, time.Since(started).Seconds())
+		}
+	}()
 	prepareCtx, cancel := context.WithTimeout(ctx, p.config.PrepareTimeout)
 	defer cancel()
 	spec := cloneFUSESandboxSpec(p.spec)
@@ -862,6 +892,7 @@ func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken
 	if stopErr := p.publicationStopError(prepareCtx); stopErr != nil {
 		return nil, errors.Join(stopErr, p.compensatePublication(record, *transitioned))
 	}
+	result = "success"
 	return transitioned, nil
 }
 
@@ -950,6 +981,9 @@ func (p *FUSEPool) claimAndDestroy(ctx context.Context, record state.FUSEPoolRec
 	}
 	if !deleted {
 		return state.ErrFUSEPoolConflict
+	}
+	if p.spec.WorkspaceFUSE != nil {
+		metrics.RecordWorkspacePoolDiscard(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, string(record.State))
 	}
 	return nil
 }

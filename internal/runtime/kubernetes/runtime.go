@@ -412,7 +412,9 @@ func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (
 	return &runtime.WorkspaceHealth{
 		Ready:     status.State == "ready" && status.MountType == "fuse" && status.PoolKey == bootstrap.PoolKey && !status.RestartDetected && !status.CacheExceeded && status.CacheBytes >= 0 && status.CacheBytes < status.CacheLimitBytes && status.CacheLimitBytes == bootstrap.CacheLimitBytes && restartCount == 0,
 		MountType: status.MountType, RuntimeUID: status.RuntimeUID, Generation: status.Generation,
-		RestartCount: restartCount, RestartDetected: status.RestartDetected, LastSuccessful: time.Now(),
+		RestartCount: restartCount, RestartDetected: status.RestartDetected,
+		CacheBytes: status.CacheBytes, CacheLimitBytes: status.CacheLimitBytes, CacheExceeded: status.CacheExceeded,
+		LastSuccessful: time.Now(),
 	}, nil
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 const (
@@ -295,6 +296,7 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, primary)
 	}
 	if !acquired {
+		metrics.RecordWorkspaceLeaseConflict(ctx)
 		return nil, ErrWorkspaceLeased
 	}
 	ownerRaw, err := c.store.Get(ctx, keys.owner)
@@ -302,6 +304,7 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, fmt.Errorf("check workspace owner: %w", err))
 	}
 	if ownerRaw != nil {
+		metrics.RecordWorkspaceOwnerBlocked(ctx, "persistent_owner")
 		return nil, c.compensateAcquire(ctx, keys, [][]byte{provisionalRaw}, nil, ErrWorkspaceOwned)
 	}
 
@@ -702,6 +705,7 @@ func (c *WorkspaceCoordinator) StartRenewal(ctx context.Context, lease *Workspac
 		onLost = func(error) {}
 	}
 	if err := c.Renew(ctx, lease); err != nil {
+		metrics.RecordWorkspaceLeaseLost(ctx, lease.OwnerSnapshot().Runtime)
 		onLost(err)
 		return nil, err
 	}
@@ -719,6 +723,7 @@ func (c *WorkspaceCoordinator) StartRenewal(ctx context.Context, lease *Workspac
 			case <-ticker.C:
 				if err := c.Renew(loopCtx, lease); err != nil {
 					if renewal.state.CompareAndSwap(renewalRunning, renewalLost) {
+						metrics.RecordWorkspaceLeaseLost(loopCtx, lease.OwnerSnapshot().Runtime)
 						onLost(err)
 					}
 					return

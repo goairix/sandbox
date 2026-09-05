@@ -878,6 +878,53 @@
       ],
       "title": "HTTP 请求延迟 P95/P99（by route）",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 84},
+      "id": 108,
+      "title": "Workspace FUSE",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 85},
+      "id": 80,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(sandbox_workspace_pool_size{job=~\"$service\",state=\"prepared\"})", "legendFormat": "prepared", "refId": "A"}],
+      "title": "FUSE Prepared 可用量（0 即短缺）",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 85},
+      "id": 81,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by(state) (sandbox_workspace_pool_size{job=~\"$service\",state=~\"preparing|reserved|binding\"})", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "FUSE 过渡状态滞留",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 85},
+      "id": 82,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(rate(sandbox_workspace_mount_total{job=~\"$service\",result=\"error\"}[$__rate_interval])) / clamp_min(sum(rate(sandbox_workspace_mount_total{job=~\"$service\"}[$__rate_interval])), 1)", "legendFormat": "错误率", "refId": "A"}],
+      "title": "FUSE Mount 错误率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 85},
+      "id": 83,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by(runtime) (rate(sandbox_workspace_lease_lost_total{job=~\"$service\"}[$__rate_interval]))", "legendFormat": "{{runtime}}", "refId": "A"}],
+      "title": "FUSE Lease 丢失速率",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

@@ -498,7 +498,11 @@ func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (
 	}
 	ready := state.authorized && !state.poisoned && status.State == "ready" && status.RuntimeUID == ref.UID && status.PoolKey == state.poolKey && status.Generation == state.generation && status.MountType == "fuse" && !status.RestartDetected && status.CacheLimitBytes == state.cacheBytes && status.CacheBytes >= 0 && status.CacheBytes < status.CacheLimitBytes && !status.CacheExceeded
 	state.mu.Unlock()
-	return &runtime.WorkspaceHealth{Ready: ready, MountType: status.MountType, RuntimeUID: status.RuntimeUID, Generation: status.Generation, RestartDetected: status.RestartDetected, LastSuccessful: time.Now()}, nil
+	return &runtime.WorkspaceHealth{
+		Ready: ready, MountType: status.MountType, RuntimeUID: status.RuntimeUID, Generation: status.Generation,
+		RestartDetected: status.RestartDetected, CacheBytes: status.CacheBytes, CacheLimitBytes: status.CacheLimitBytes,
+		CacheExceeded: status.CacheExceeded, LastSuccessful: time.Now(),
+	}, nil
 }
 
 func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (runtime.WorkspaceQuiesceToken, error) {

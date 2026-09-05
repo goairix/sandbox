@@ -280,7 +280,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 // streams, and runs the generation-bound quiesce/flush/resume protocol. Any
 // ambiguity permanently closes the gate; admission reopens only after the
 // runtime and manager still agree on the exact runtime generation.
-func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) error {
+func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) (returnErr error) {
 	m.mu.RLock()
 	sb := m.sandboxes[sandboxID]
 	gate := m.operationGates[sandboxID]
@@ -295,6 +295,18 @@ func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) erro
 	ref := runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID}
 	generation := sb.Workspace.LeaseGeneration
 	m.mu.RUnlock()
+	started := time.Now()
+	defer func() {
+		result := "success"
+		if returnErr != nil {
+			result = "error"
+			metrics.RecordWorkspaceFUSEError(ctx, "flush")
+		}
+		if m.fusePool != nil && m.fusePool.spec.WorkspaceFUSE != nil {
+			spec := m.fusePool.spec.WorkspaceFUSE
+			metrics.RecordWorkspaceFlush(ctx, spec.RuntimeType, spec.Provider, result, time.Since(started).Seconds())
+		}
+	}()
 
 	exclusive, err := gate.BeginExclusive(ctx)
 	if err != nil {
