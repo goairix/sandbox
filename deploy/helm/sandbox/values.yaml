@@ -71,10 +71,38 @@ config:
       endpoint: ""
       accessKey: ""
       secretKey: ""
+      credentialFiles:
+        accessKeyFile: "/run/secrets/workspace/accessKey"
+        secretKeyFile: "/run/secrets/workspace/secretKey"
+      caFile: ""
       subPath: ""
       useSSL: false
   workspace:
+    mode: sync
     autoSyncIntervalSeconds: 0
+    secretName: ""
+    cacheSize: 2Gi
+    cacheMedium: disk
+    mountTimeoutSeconds: 30
+    flushTimeoutSeconds: 30
+    unmountTimeoutSeconds: 15
+    recreateMaxAttempts: 1
+    leaseTTLSeconds: 120
+    leaseRenewIntervalSeconds: 30
+    quotaMode: soft
+    mounterResources:
+      cpuRequest: 50m
+      cpuLimit: "1"
+      memoryRequest: 64Mi
+      memoryLimit: 512Mi
+      ephemeralStorageRequest: 512Mi
+      ephemeralStorageLimit: 3Gi
+    fusePool:
+      minSize: 3
+      maxSize: 20
+      refillIntervalSeconds: 10
+      prepareTimeoutSeconds: 120
+    providers: {}
   security:
     apiKey: ""
     rateLimit: 100
@@ -87,6 +115,8 @@ config:
     maxPids: 100
     maxCpu: "500m"
     maxCpuRequest: "100m"
+    maxUploadBytes: 2147483648
+    seccompProfile: RuntimeDefault
     networkEnabled: false
     networkBlockPrivate: false
   telemetry:
@@ -104,3 +134,15 @@ config:
 
 networkPolicy:
   enabled: true
+
+# In FUSE mode this Secret must exist in the control namespace. A Secret with
+# config.workspace.secretName and the same keys must separately exist in the
+# runtime namespace for dynamically-created Pods.
+workspaceCredentials:
+  apiSecretName: ""
+  accessKeyKey: accessKey
+  secretKeyKey: secretKey
+  caKey: ca.crt
+  # Required only when sandbox-api runs in Kubernetes but controls a Docker
+  # daemon. It must be the same root-owned absolute path on the Docker host.
+  dockerStagingHostPath: ""

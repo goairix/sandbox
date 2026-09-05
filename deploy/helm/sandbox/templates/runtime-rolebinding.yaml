@@ -1,0 +1,17 @@
+{{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-runtime-controller
+  namespace: {{ $sandboxNs }}
+  labels:
+    app: sandbox
+    release: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-runtime-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-api
+    namespace: {{ .Release.Namespace }}

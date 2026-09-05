@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log"
@@ -12,6 +14,7 @@ import (
 
 	"time"
 
+	"github.com/goairix/fs"
 	"github.com/goairix/sandbox/internal/api"
 	"github.com/goairix/sandbox/internal/api/handler"
 	"github.com/goairix/sandbox/internal/config"
@@ -21,6 +24,7 @@ import (
 	k8sruntime "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/storage/state"
 	redisstate "github.com/goairix/sandbox/internal/storage/state/redis"
 	"github.com/goairix/sandbox/internal/telemetry"
 	telemetrylog "github.com/goairix/sandbox/internal/telemetry/log"
@@ -69,11 +73,24 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize runtime
+	fuseMode := cfg.Workspace.Mode == "fuse"
+
+	// Initialize runtime. Docker FUSE uses a root-owned staging directory and
+	// copies only the operator-selected credential files into each special
+	// container; ordinary containers never receive /dev/fuse or these files.
 	var rt runtime.Runtime
 	switch cfg.Runtime.Type {
 	case "docker":
-		rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
+		if fuseMode {
+			rt, err = docker.NewWithFUSESecrets(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, &docker.FileSecretMaterializer{
+				Root:          "/var/lib/sandbox/workspace-secrets",
+				AccessKeyFile: cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile,
+				SecretKeyFile: cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile,
+				CAFile:        cfg.Storage.FileSystem.CAFile,
+			})
+		} else {
+			rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
+		}
 		if err != nil {
 			log.Fatalf("failed to create docker runtime: %v", err)
 		}
@@ -86,10 +103,46 @@ func main() {
 		log.Fatalf("unknown runtime type: %s", cfg.Runtime.Type)
 	}
 
-	// Initialize filesystem
-	fsys, fsMeta, err := storage.NewFileSystem(cfg.Storage.FileSystem)
-	if err != nil {
-		log.Fatalf("failed to create filesystem: %v", err)
+	// Keep the Redis Store concrete so exactly one production FUSE repository
+	// wrapper owns its Lua state machine. The compile-time assertion documents
+	// the only broader capability the coordinator/session code relies on.
+	var redisStore *redisstate.Store
+	if cfg.Storage.State.Redis.Addr != "" {
+		redisStore, err = redisstate.New(ctx, redisstate.Options{
+			Addr: cfg.Storage.State.Redis.Addr, Password: cfg.Storage.State.Redis.Password, DB: cfg.Storage.State.Redis.DB,
+		})
+		if err != nil {
+			log.Fatalf("failed to create redis state store: %v", err)
+		}
+		defer redisStore.Close()
+		var _ state.AtomicStore = redisStore
+	}
+
+	var fsys fs.FileSystem
+	var fsMeta *storage.FileSystemMeta
+	var objectClient storage.WorkspaceObjectClient
+	if fuseMode {
+		selected := cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider]
+		fsMeta = &storage.FileSystemMeta{
+			Provider: storage.StorageProvider(cfg.Storage.FileSystem.Provider), Bucket: cfg.Storage.FileSystem.Bucket,
+			Region: cfg.Storage.FileSystem.Region, Endpoint: cfg.Storage.FileSystem.Endpoint,
+			SubPath: cfg.Storage.FileSystem.SubPath, UseSSL: cfg.Storage.FileSystem.UseSSL,
+			StorageIdentity: selected.StorageIdentity,
+		}
+		credentials, credentialErr := storage.LoadFileSystemCredentials(cfg.Storage.FileSystem)
+		if credentialErr != nil {
+			log.Fatalf("failed to load FUSE control-plane credentials: %v", credentialErr)
+		}
+		objectClient, err = storage.NewWorkspaceObjectClient(cfg.Storage.FileSystem, credentials)
+		credentials.Zero()
+		if err != nil {
+			log.Fatalf("failed to create FUSE workspace object client: %v", err)
+		}
+	} else {
+		fsys, fsMeta, err = storage.NewFileSystem(cfg.Storage.FileSystem)
+		if err != nil {
+			log.Fatalf("failed to create filesystem: %v", err)
+		}
 	}
 
 	// Build pool config
@@ -98,7 +151,7 @@ func main() {
 		sandboxImage = "sandbox:latest"
 	}
 
-	mgr := sandbox.NewManager(rt, fsys, fsMeta, sandbox.ManagerConfig{
+	managerConfig := sandbox.ManagerConfig{
 		PoolConfig: sandbox.PoolConfig{
 			MinSize:       cfg.Pool.MinSize,
 			MaxSize:       cfg.Pool.MaxSize,
@@ -114,21 +167,47 @@ func main() {
 		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,
 		MaxExecTimeoutSeconds:   cfg.Security.MaxExecTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,
-	})
+		WorkspaceMode:           cfg.Workspace.Mode,
+	}
+	if fuseMode {
+		if redisStore == nil {
+			log.Fatal("FUSE mode requires Redis")
+		}
+		fuseSpec, specErr := buildFUSESpec(cfg, sandboxImage)
+		if specErr != nil {
+			log.Fatalf("failed to build FUSE pool spec: %v", specErr)
+		}
+		ownershipToken, tokenErr := newOwnershipToken()
+		if tokenErr != nil {
+			log.Fatalf("failed to create FUSE pool ownership token: %v", tokenErr)
+		}
+		poolRepo := redisstate.NewFUSEPoolRepository(redisStore)
+		managerConfig.FUSEPool = sandbox.NewFUSEPool(rt, poolRepo, sandbox.FUSEPoolConfig{
+			MinSize: cfg.Workspace.FUSEPool.MinSize, MaxSize: cfg.Workspace.FUSEPool.MaxSize,
+			RefillInterval:  time.Duration(cfg.Workspace.FUSEPool.RefillIntervalSeconds) * time.Second,
+			PrepareTimeout:  time.Duration(cfg.Workspace.FUSEPool.PrepareTimeoutSeconds) * time.Second,
+			ReservationTTL:  time.Duration(cfg.Workspace.LeaseTTLSeconds) * time.Second,
+			MaintainerToken: ownershipToken,
+		}, fuseSpec)
+		managerConfig.WorkspaceCoordinator = sandbox.NewWorkspaceCoordinator(redisStore,
+			time.Duration(cfg.Workspace.LeaseTTLSeconds)*time.Second,
+			time.Duration(cfg.Workspace.LeaseRenewIntervalSeconds)*time.Second,
+		)
+		managerConfig.WorkspaceObjectClient = objectClient
+		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider].Profile)
+		if profileErr != nil {
+			log.Fatalf("failed to select FUSE marker profile: %v", profileErr)
+		}
+		managerConfig.WorkspaceMarkerProfile = profile
+		managerConfig.FUSEHealthInterval = 5 * time.Second
+	}
+	mgr := sandbox.NewManager(rt, fsys, fsMeta, managerConfig)
 
 	// Initialize session store for persistent sandbox state
-	if cfg.Storage.State.Redis.Addr != "" {
-		store, storeErr := redisstate.New(ctx, redisstate.Options{
-			Addr:     cfg.Storage.State.Redis.Addr,
-			Password: cfg.Storage.State.Redis.Password,
-			DB:       cfg.Storage.State.Redis.DB,
-		})
-		if storeErr != nil {
-			log.Fatalf("failed to create redis state store: %v", storeErr)
-		}
+	if redisStore != nil {
 		ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
-		mgr.SetSessionStore(sandbox.NewSessionStore(store, ttl))
-		mgr.SetMultipartStore(store)
+		mgr.SetSessionStore(sandbox.NewSessionStore(redisStore, ttl))
+		mgr.SetMultipartStore(redisStore)
 		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
 	}
 
@@ -176,4 +255,65 @@ func main() {
 	// Wait for graceful shutdown to complete (signal-triggered path)
 	<-shutdownDone
 	log.Println("shutdown complete")
+}
+
+func newOwnershipToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	defer clear(raw)
+	return hex.EncodeToString(raw), nil
+}
+
+func buildFUSESpec(cfg *config.Config, sandboxImage string) (runtime.SandboxSpec, error) {
+	if cfg == nil {
+		return runtime.SandboxSpec{}, sandbox.ErrInvalidFUSEPoolConfig
+	}
+	provider, ok := cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider]
+	if !ok {
+		return runtime.SandboxSpec{}, sandbox.ErrInvalidFUSEPoolConfig
+	}
+	image := sandboxImage
+	if cfg.Runtime.Type == "docker" {
+		image = provider.DockerImage
+	}
+	fuse := &runtime.WorkspaceFUSESpec{
+		RuntimeType: cfg.Runtime.Type, Provider: cfg.Storage.FileSystem.Provider, Driver: provider.Driver,
+		Profile: provider.Profile, StorageIdentity: provider.StorageIdentity,
+		CredentialGeneration: provider.CredentialGeneration, MounterImage: provider.MounterImage, DockerImage: provider.DockerImage,
+		SecretName: cfg.Workspace.SecretName, CASecretKey: provider.CASecretKey, EndpointHostIPs: append([]string(nil), provider.EndpointHostIPs...),
+		Bucket: cfg.Storage.FileSystem.Bucket, Endpoint: cfg.Storage.FileSystem.Endpoint, Region: cfg.Storage.FileSystem.Region,
+		UseSSL: cfg.Storage.FileSystem.UseSSL, CacheSize: cfg.Workspace.CacheSize, CacheMedium: cfg.Workspace.CacheMedium,
+		MountTimeout:   time.Duration(cfg.Workspace.MountTimeoutSeconds) * time.Second,
+		FlushTimeout:   time.Duration(cfg.Workspace.FlushTimeoutSeconds) * time.Second,
+		UnmountTimeout: time.Duration(cfg.Workspace.UnmountTimeoutSeconds) * time.Second,
+		LSMProfile:     provider.LSMProfile,
+		MounterResources: runtime.WorkspaceFUSEResources{
+			CPURequest: cfg.Workspace.MounterResources.CPURequest, CPULimit: cfg.Workspace.MounterResources.CPULimit,
+			MemoryRequest: cfg.Workspace.MounterResources.MemoryRequest, MemoryLimit: cfg.Workspace.MounterResources.MemoryLimit,
+			EphemeralStorageRequest: cfg.Workspace.MounterResources.EphemeralStorageRequest,
+			EphemeralStorageLimit:   cfg.Workspace.MounterResources.EphemeralStorageLimit,
+		},
+		SystemEgress: runtime.SystemEgressSpec{
+			Mode: runtime.SystemEgressMode(provider.SystemEgressMode), DNSCIDRs: append([]string(nil), provider.DNSCIDRs...),
+			DNSPorts: []int32{53}, EndpointCIDRs: append([]string(nil), provider.SystemEgressCIDRs...),
+			EndpointFQDNs: append([]string(nil), provider.SystemEgressFQDNs...), EndpointPorts: append([]int32(nil), provider.EndpointPorts...),
+			ProxyURL: provider.ProxyURL,
+		},
+	}
+	spec := runtime.SandboxSpec{
+		ID: "sandbox-fuse-pool-template", Image: image,
+		Memory: cfg.Security.MaxMemory, MemoryRequest: cfg.Security.MaxMemoryRequest,
+		CPU: cfg.Security.MaxCPU, CPURequest: cfg.Security.MaxCPURequest,
+		Disk: cfg.Security.MaxDisk, TmpDisk: cfg.Security.MaxTmpDisk, PidLimit: cfg.Security.MaxPids,
+		ReadOnlyRootFS: true, RunAsUser: 1000, SeccompProfile: cfg.Security.SeccompProfile,
+		Labels: map[string]string{"sandbox.pool": "true"}, WorkspaceFUSE: fuse,
+	}
+	poolKey, err := sandbox.ComputeFUSEPoolKey(spec)
+	if err != nil {
+		return runtime.SandboxSpec{}, err
+	}
+	fuse.PoolKey = poolKey
+	return spec, nil
 }

@@ -1,0 +1,57 @@
+image:
+  repository: sandbox-api
+  tag: test
+
+autoscaling:
+  enabled: false
+
+redis:
+  enabled: true
+
+workspaceCredentials:
+  apiSecretName: sandbox-workspace-control
+
+config:
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: sandbox-runtime
+  images:
+    sandbox: registry.local/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    gateway: registry.local/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  storage:
+    filesystem:
+      provider: minio
+      bucket: sandbox
+      region: us-east-1
+      endpoint: minio.sandbox-storage.svc:9000
+      subPath: workspaces
+      useSSL: true
+  workspace:
+    mode: fuse
+    secretName: sandbox-workspace-runtime
+    providers:
+      minio:
+        driver: s3fs
+        profile: minio-sigv4-path-style-v1
+        storageIdentity: minio-local-test
+        mounterImage: registry.local/workspace-mounter@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+        dockerImage: registry.local/sandbox-fuse@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        caSecretKey: ""
+        credentialGeneration: test-v1
+        endpointHostIPs:
+          - 192.0.2.10
+        lsmProfile: sandbox-fuse
+        systemEgressMode: cidr
+        dnsCIDRs:
+          - 1.1.1.1/32
+        systemEgressFQDNs:
+          - minio.sandbox-storage.svc
+        systemEgressCIDRs:
+          - 192.0.2.10/32
+        endpointPorts:
+          - 9000
+        proxyURL: ""
+  security:
+    apiKey: test
+    seccompProfile: RuntimeDefault

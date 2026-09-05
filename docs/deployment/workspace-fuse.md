@@ -4,7 +4,17 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 目标部署契约，分阶段实现中。Task 13 已实现 Kubernetes sidecar 与 Docker 特殊容器的 prepared/延迟授权生命周期及运行时缓存健康门禁；控制面生产配置注入、启动恢复编排、真实环境 preflight/兼容性矩阵与 durable-flush 证据仍未完成。当前三个 profile 均未通过 release gate，因此还不能启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。真实 provider 六组合兼容性矩阵与 durable-flush 证据仍是发布门禁；当前三个 profile 在证据提升前仍不能用于生产启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
+
+## 0. 当前部署入口
+
+- Helm：`deploy/helm/sandbox`。`workspace.mode=sync` 保持默认；FUSE 渲染示例是 `testdata/values-fuse-minio.yaml`，其中 digest、IP 和 Secret 名仅为测试占位，部署前必须替换为 Task 18 的实测产物。
+- Kubernetes：sandbox-api 位于 control namespace，动态 sandbox Pod 位于 runtime namespace；Chart 分别创建 runtime Role/RoleBinding 和 runtime default-deny。运行时 Secret 必须预先存在于 runtime namespace，控制面读取的同内容 Secret则位于 control namespace，因为 Kubernetes 不允许跨 namespace 投射 Secret。
+- Docker Compose：只启动控制面、Redis 和镜像构建辅助服务。特殊 FUSE 容器由 sandbox-api 动态创建；Compose 不创建长期 mounter 容器，也不挂载宿主机业务 `/workspace`。
+- Docker Secret 暂存：`${WORKSPACE_SECRET_STAGING_ROOT}` 必须是 Docker 宿主机上的绝对目录，并以相同绝对路径挂入 sandbox-api；目录必须为 `root:root`、mode `0700`。`${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`。
+- 预检：先执行 `bash -n scripts/workspace-fuse-preflight.sh`；有真实 profile、digest 和 Secret 后执行 `scripts/workspace-fuse-preflight.sh kubernetes --profile <report.yaml>` 或 `docker --profile <report.yaml>`。设置 `WORKSPACE_FUSE_RUN_INTEGRATION=1` 才会进入完整 Acquire/读写/销毁集成用例。
+
+FUSE 模式下控制面不构造旧 `goairix/fs` MinIO/OBS driver：它只读取一次文件型 AK/SK 创建原生 marker/probe object client，随后立即清零持有的字节缓冲。`Manager.Start` 负责恢复、orphan reconcile 和 Pool WarmUp；任一步失败都会发生在 HTTP listener 启动前。
 
 ## 1. 部署结论
 
@@ -416,7 +426,7 @@ helm upgrade --install sandbox deploy/helm/sandbox \
 
 服务端 dry-run 只验证资源 schema、原生 sidecar 字段和准入/PSA 是否接受，不能证明 Secret 存在、ServiceAccount RBAC 可用或 FUSE mount propagation 正常。`kubectl auth can-i` 与 Secret 检查必须全部成功；`false` 或 not found 都是发布阻断项。
 
-`rendered-sandbox-preflight-policy.yaml`、`rendered-sandbox-preflight-pod.yaml` 与示例中的 `sandbox-runtime-preflight` 都是本方案要求实现的 runtime render/preflight 工具产物，不是当前仓库已经提供的命令。manifest 字段必须与真实 sandbox 完全一致。runtime namespace 的 default-deny 是预先部署且长期持有的基础设施，不放进临时文件。
+`scripts/workspace-fuse-preflight.sh` 已提供环境、RBAC、Secret、镜像和设备的外层门禁；完整 runtime 生命周期由 `WORKSPACE_FUSE_RUN_INTEGRATION=1` 调用 Task 18 集成测试执行。任何用于预检的 manifest 字段必须与真实 sandbox 完全一致。runtime namespace 的 default-deny 是长期基础设施，由 Helm 单独渲染，不放进临时 workload 文件。
 
 preflight 工具必须使用与 sandbox-api 相同的 Kubernetes 身份和 Redis owner/lease 状态机，完整执行 Pool WarmUp、Acquire、authorize、ready 流程：先创建精确 system egress allow policy 和 supervisor locked 的一次性空壳 Pod，确认 sandbox 主容器已启动且 Pod 因未挂载保持 NotReady，再 CAS 消费一次 mount authorization 并等待完整 Ready。预检 Pod 必须真实投射 Secret，并由 sandbox 内的固定 helper 验证 mount 类型、传播及远端创建/读取/删除。成功或失败后都必须在 finally/defer 中按“先删除 Pod 并确认退出、后删除 policy”清理；任一步失败或清理不完整均返回非零。外层脚本使用 `set -euo pipefail` 和 `kubectl auth can-i --quiet`，因此不会继续 Helm 发布。只做 dry-run、跳过 prepared 状态、直接 apply 一个无法授权的 locked Pod，或只检查 Pod Ready，都不构成 FUSE runtime 验证。
 
@@ -666,32 +676,20 @@ docker run --rm --device /dev/fuse:/dev/fuse alpine:3.22 \
 
 ### 7.2 Compose 控制面配置
 
-以下同样是目标配置形状；当前所有 FUSE profile 都会被启动配置校验 fail closed，不能作为可上线 Compose 配置直接使用。
+Compose wiring 已落地，但当前所有 FUSE profile 仍会被 release gate fail closed，不能作为可上线配置直接使用。
 
 Compose 需要把 Secret 暂存目录以同一绝对路径挂载给 API，以便 API 创建动态容器时使用宿主机可解析的 source path：
 
 ```yaml
 services:
   sandbox-api:
-    secrets:
-      - storage_access_key
-      - storage_secret_key
-      - storage_ca
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/sandbox/fuse-secrets:/var/lib/sandbox/fuse-secrets:rw
-      - ./config-fuse.yaml:/etc/sandbox/config.yaml:ro
-
-secrets:
-  storage_access_key:
-    file: ${STORAGE_ACCESS_KEY_FILE}
-  storage_secret_key:
-    file: ${STORAGE_SECRET_KEY_FILE}
-  storage_ca:
-    file: ${STORAGE_CA_FILE}
+      - ${WORKSPACE_CREDENTIAL_DIR}:/run/secrets/workspace:ro
+      - /var/lib/sandbox/workspace-secrets:/var/lib/sandbox/workspace-secrets:rw
 ```
 
-嵌套 provider profile 推荐通过只读配置文件传入，不依赖 Compose 环境变量展开 map key。目标配置示例：
+仓库 Compose 文件已显式映射 MinIO provider 的环境变量；OBS 或生产多 profile 部署推荐改用只读配置文件，避免在 Compose 中复制整套 map key。配置示例：
 
 ```yaml
 runtime:
@@ -708,9 +706,9 @@ storage:
     sub_path: workspaces
     use_ssl: true
     credential_files:
-      access_key_file: /run/secrets/storage_access_key
-      secret_key_file: /run/secrets/storage_secret_key
-    ca_file: /run/secrets/storage_ca
+      access_key_file: /run/secrets/workspace/accessKey
+      secret_key_file: /run/secrets/workspace/secretKey
+    ca_file: /run/secrets/workspace/ca.crt
 
 workspace:
   mode: fuse
@@ -772,7 +770,7 @@ workspace:
       system_egress_cidrs: [192.0.2.20/32]
 ```
 
-对象存储的 provider、bucket、endpoint、region、sub path 和 TLS 开关继续使用 `storage.filesystem` 配置。MinIO endpoint 使用 `host[:port]`，runtime 根据 `use_ssl` 派生 s3fs URL；OBS endpoint 使用华为 SDK 要求的格式。AK/SK 不出现在该文件；Compose Secret 默认出现在 `/run/secrets/storage_access_key` 和 `/run/secrets/storage_secret_key`，sandbox-api 读取后在 `/var/lib/sandbox/fuse-secrets` 中为动态容器生成 root-only 文件。私有 CA 同样从 `/run/secrets/storage_ca` 读取并复制为 root-only 文件供特殊容器使用，同时配置到控制面存储客户端；CA 或凭证轮换都需要排空并重建相关 sandbox。实现需要新增文件型 credential/CA provider，不能继续使用当前 Compose 中的明文环境变量。
+对象存储的 provider、bucket、endpoint、region、sub path 和 TLS 开关继续使用 `storage.filesystem` 配置。MinIO endpoint 使用 `host[:port]`，runtime 根据 `use_ssl` 派生 s3fs URL；OBS endpoint 使用华为 SDK 要求的格式。AK/SK 不出现在该文件或环境变量；Compose 把 `${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`，sandbox-api 读取后在 `/var/lib/sandbox/workspace-secrets` 中为动态容器生成 root-only 文件。私有 CA 同样从该只读目录读取并复制给特殊容器，同时配置到控制面原生存储客户端；CA 或凭证轮换都需要排空并重建相关 sandbox。
 
 上面的 Compose 片段按私有 CA 场景给出；使用系统公共 CA 时删除 `storage_ca` Secret 和 `ca_file` 配置，不能保留指向不存在文件的路径。
 

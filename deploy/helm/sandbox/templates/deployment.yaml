@@ -74,8 +74,90 @@ spec:
               value: "{{ .Values.config.storage.filesystem.subPath }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
+            - name: SANDBOX_WORKSPACE_MODE
+              value: "{{ .Values.config.workspace.mode }}"
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
+          {{- if eq .Values.config.workspace.mode "fuse" }}
+            {{- $providerName := .Values.config.storage.filesystem.provider }}
+            {{- $provider := index .Values.config.workspace.providers $providerName }}
+            - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE
+              value: "/run/secrets/workspace/accessKey"
+            - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE
+              value: "/run/secrets/workspace/secretKey"
+            - name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
+              value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne ($provider.caSecretKey | default "") "") | quote }}
+            - name: SANDBOX_WORKSPACE_SECRET_NAME
+              value: {{ .Values.config.workspace.secretName | quote }}
+            - name: SANDBOX_WORKSPACE_CACHE_SIZE
+              value: {{ .Values.config.workspace.cacheSize | quote }}
+            - name: SANDBOX_WORKSPACE_CACHE_MEDIUM
+              value: {{ .Values.config.workspace.cacheMedium | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNT_TIMEOUT_SECONDS
+              value: {{ .Values.config.workspace.mountTimeoutSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_FLUSH_TIMEOUT_SECONDS
+              value: {{ .Values.config.workspace.flushTimeoutSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_UNMOUNT_TIMEOUT_SECONDS
+              value: {{ .Values.config.workspace.unmountTimeoutSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_RECREATE_MAX_ATTEMPTS
+              value: {{ .Values.config.workspace.recreateMaxAttempts | quote }}
+            - name: SANDBOX_WORKSPACE_LEASE_TTL_SECONDS
+              value: {{ .Values.config.workspace.leaseTTLSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_LEASE_RENEW_INTERVAL_SECONDS
+              value: {{ .Values.config.workspace.leaseRenewIntervalSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_QUOTA_MODE
+              value: {{ .Values.config.workspace.quotaMode | quote }}
+            - name: SANDBOX_WORKSPACE_FUSE_POOL_MIN_SIZE
+              value: {{ .Values.config.workspace.fusePool.minSize | quote }}
+            - name: SANDBOX_WORKSPACE_FUSE_POOL_MAX_SIZE
+              value: {{ .Values.config.workspace.fusePool.maxSize | quote }}
+            - name: SANDBOX_WORKSPACE_FUSE_POOL_REFILL_INTERVAL_SECONDS
+              value: {{ .Values.config.workspace.fusePool.refillIntervalSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_FUSE_POOL_PREPARE_TIMEOUT_SECONDS
+              value: {{ .Values.config.workspace.fusePool.prepareTimeoutSeconds | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_CPU_REQUEST
+              value: {{ .Values.config.workspace.mounterResources.cpuRequest | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_CPU_LIMIT
+              value: {{ .Values.config.workspace.mounterResources.cpuLimit | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_MEMORY_REQUEST
+              value: {{ .Values.config.workspace.mounterResources.memoryRequest | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_MEMORY_LIMIT
+              value: {{ .Values.config.workspace.mounterResources.memoryLimit | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_EPHEMERAL_STORAGE_REQUEST
+              value: {{ .Values.config.workspace.mounterResources.ephemeralStorageRequest | quote }}
+            - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_EPHEMERAL_STORAGE_LIMIT
+              value: {{ .Values.config.workspace.mounterResources.ephemeralStorageLimit | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DRIVER
+              value: {{ $provider.driver | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_PROFILE
+              value: {{ $provider.profile | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_STORAGE_IDENTITY
+              value: {{ $provider.storageIdentity | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_MOUNTER_IMAGE
+              value: {{ $provider.mounterImage | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DOCKER_IMAGE
+              value: {{ $provider.dockerImage | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_CA_SECRET_KEY
+              value: {{ $provider.caSecretKey | default "" | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_CREDENTIAL_GENERATION
+              value: {{ $provider.credentialGeneration | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_ENDPOINT_HOST_IPS
+              value: {{ join "," ($provider.endpointHostIPs | default list) | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_LSM_PROFILE
+              value: {{ $provider.lsmProfile | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_MODE
+              value: {{ $provider.systemEgressMode | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DNS_CIDRS
+              value: {{ join "," $provider.dnsCIDRs | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_FQDNS
+              value: {{ join "," ($provider.systemEgressFQDNs | default list) | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_CIDRS
+              value: {{ join "," ($provider.systemEgressCIDRs | default list) | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_ENDPOINT_PORTS
+              value: {{ join "," $provider.endpointPorts | quote }}
+            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_PROXY_URL
+              value: {{ $provider.proxyURL | default "" | quote }}
+          {{- end }}
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
             - name: SANDBOX_SECURITY_SANDBOX_TIMEOUT_SECONDS
@@ -94,6 +176,10 @@ spec:
               value: "{{ .Values.config.security.maxCpu }}"
             - name: SANDBOX_SECURITY_MAX_CPU_REQUEST
               value: "{{ .Values.config.security.maxCpuRequest }}"
+            - name: SANDBOX_SECURITY_MAX_UPLOAD_BYTES
+              value: {{ .Values.config.security.maxUploadBytes | default 2147483648 | quote }}
+            - name: SANDBOX_SECURITY_SECCOMP_PROFILE
+              value: {{ .Values.config.security.seccompProfile | default "RuntimeDefault" | quote }}
             - name: SANDBOX_SECURITY_NETWORK_ENABLED
               value: "{{ .Values.config.security.networkEnabled }}"
             - name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE
@@ -141,3 +227,36 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 5
             periodSeconds: 5
+          {{- if eq .Values.config.workspace.mode "fuse" }}
+          volumeMounts:
+            - name: workspace-credentials
+              mountPath: /run/secrets/workspace
+              readOnly: true
+            {{- if eq .Values.config.runtime.type "docker" }}
+            - name: workspace-secret-staging
+              mountPath: /var/lib/sandbox/workspace-secrets
+            {{- end }}
+          {{- end }}
+      {{- if eq .Values.config.workspace.mode "fuse" }}
+      volumes:
+        - name: workspace-credentials
+          secret:
+            secretName: {{ required "workspaceCredentials.apiSecretName is required in FUSE mode" .Values.workspaceCredentials.apiSecretName }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.workspaceCredentials.accessKeyKey }}
+                path: accessKey
+              - key: {{ .Values.workspaceCredentials.secretKeyKey }}
+                path: secretKey
+              {{- $selected := index .Values.config.workspace.providers .Values.config.storage.filesystem.provider }}
+              {{- if ne ($selected.caSecretKey | default "") "" }}
+              - key: {{ .Values.workspaceCredentials.caKey }}
+                path: ca.crt
+              {{- end }}
+        {{- if eq .Values.config.runtime.type "docker" }}
+        - name: workspace-secret-staging
+          hostPath:
+            path: {{ required "workspaceCredentials.dockerStagingHostPath is required for Docker FUSE" .Values.workspaceCredentials.dockerStagingHostPath }}
+            type: Directory
+        {{- end }}
+      {{- end }}

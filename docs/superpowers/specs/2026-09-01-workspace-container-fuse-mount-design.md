@@ -4,11 +4,11 @@
 
 **复审修订：** 2026-09-03
 
-**状态：** 设计已确认，分阶段实现中；Task 13 已落地 Kubernetes/Docker prepared 与延迟挂载生命周期，但生产 wiring、真实环境验证和可上线 FUSE profile 仍未完成
+**状态：** 设计已确认，控制面 wiring、恢复/销毁、观测和部署资源已落地；真实 provider 矩阵与可上线 FUSE profile 仍由发布门禁控制
 
 **目标分支：** `feat/workspace-fuse-mount`
 
-**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册给出 Kubernetes sidecar 与 Docker 特殊容器的目标部署契约、MinIO/华为 OBS 配置模板、Secret 管理、验证、灰度及回滚步骤；在控制面 production wiring、release gate 与真实环境验收完成前，模板中的新增配置项不可直接用于生产。
+**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册是 Helm/Compose、Secret、RBAC/NetworkPolicy、preflight、MinIO/华为 OBS 验证、灰度及回滚的可执行入口；release gate 与真实环境验收未通过前，FUSE profile 不可直接用于生产。
 
 ## 1. 决策摘要
 

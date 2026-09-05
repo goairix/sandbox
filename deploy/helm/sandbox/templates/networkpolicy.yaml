@@ -2,10 +2,29 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-api-default
+  name: {{ .Release.Name }}-api-ingress
   namespace: {{ .Release.Namespace }}
   labels:
     app: sandbox
+    release: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox
+      release: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}
+---
+{{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-runtime-default-deny
+  namespace: {{ $sandboxNs }}
+  labels:
+    app: sandbox-runtime
     release: {{ .Release.Name }}
 spec:
   podSelector:
@@ -15,11 +34,5 @@ spec:
     - Ingress
     - Egress
   ingress: []
-  egress:
-    # Allow DNS
-    - ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+  egress: []
 {{- end }}
