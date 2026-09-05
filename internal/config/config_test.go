@@ -28,6 +28,7 @@ func TestLoadDefaults(t *testing.T) {
 	// Runtime defaults
 	assert.Equal(t, "docker", cfg.Runtime.Type)
 	assert.Equal(t, "", cfg.Runtime.Docker.Host)
+	assert.Equal(t, "/var/lib/sandbox/workspace-secrets", cfg.Runtime.Docker.WorkspaceSecretRoot)
 	assert.Equal(t, "", cfg.Runtime.Kubernetes.Kubeconfig)
 	assert.Equal(t, "", cfg.Runtime.Kubernetes.Namespace)
 
@@ -170,34 +171,35 @@ security:
 func TestEnvOverrides(t *testing.T) {
 	// Set env vars before loading; clean up after
 	envVars := map[string]string{
-		"SANDBOX_SERVER_PORT":                       "7070",
-		"SANDBOX_SERVER_HOST":                       "localhost",
-		"SANDBOX_RUNTIME_TYPE":                      "kubernetes",
-		"SANDBOX_RUNTIME_DOCKER_HOST":               "tcp://docker.example.com:2376",
-		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG":     "/root/.kube/config",
-		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":      "production",
-		"SANDBOX_POOL_MIN_SIZE":                     "10",
-		"SANDBOX_POOL_MAX_SIZE":                     "100",
-		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":      "30",
-		"SANDBOX_STORAGE_STATE_REDIS_ADDR":          "cache.example.com:6379",
-		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":      "redispass",
-		"SANDBOX_STORAGE_STATE_REDIS_DB":            "2",
-		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":       "cos",
-		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":         "env-bucket",
-		"SANDBOX_STORAGE_FILESYSTEM_REGION":         "ap-guangzhou",
-		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":       "https://cos.ap-guangzhou.myqcloud.com",
-		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":     "env-access-key",
-		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":     "env-secret-key",
-		"SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH":     "/env/sandbox-storage",
-		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS":     "120",
-		"SANDBOX_SECURITY_MAX_EXEC_TIMEOUT_SECONDS": "900",
-		"SANDBOX_SECURITY_API_KEY":                  "env-api-key",
-		"SANDBOX_SECURITY_MAX_MEMORY":               "1Gi",
-		"SANDBOX_SECURITY_MAX_DISK":                 "500Mi",
-		"SANDBOX_SECURITY_MAX_TMP_DISK":             "600Mi",
-		"SANDBOX_SECURITY_MAX_PIDS":                 "500",
-		"SANDBOX_SECURITY_NETWORK_ENABLED":          "true",
-		"SANDBOX_SECURITY_SECCOMP_PROFILE":          "/etc/seccomp/custom.json",
+		"SANDBOX_SERVER_PORT":                          "7070",
+		"SANDBOX_SERVER_HOST":                          "localhost",
+		"SANDBOX_RUNTIME_TYPE":                         "kubernetes",
+		"SANDBOX_RUNTIME_DOCKER_HOST":                  "tcp://docker.example.com:2376",
+		"SANDBOX_RUNTIME_DOCKER_WORKSPACE_SECRET_ROOT": "/srv/sandbox/workspace-secrets",
+		"SANDBOX_RUNTIME_KUBERNETES_KUBECONFIG":        "/root/.kube/config",
+		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":         "production",
+		"SANDBOX_POOL_MIN_SIZE":                        "10",
+		"SANDBOX_POOL_MAX_SIZE":                        "100",
+		"SANDBOX_POOL_REFILL_INTERVAL_SECONDS":         "30",
+		"SANDBOX_STORAGE_STATE_REDIS_ADDR":             "cache.example.com:6379",
+		"SANDBOX_STORAGE_STATE_REDIS_PASSWORD":         "redispass",
+		"SANDBOX_STORAGE_STATE_REDIS_DB":               "2",
+		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":          "cos",
+		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":            "env-bucket",
+		"SANDBOX_STORAGE_FILESYSTEM_REGION":            "ap-guangzhou",
+		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":          "https://cos.ap-guangzhou.myqcloud.com",
+		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":        "env-access-key",
+		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":        "env-secret-key",
+		"SANDBOX_STORAGE_FILESYSTEM_LOCAL_PATH":        "/env/sandbox-storage",
+		"SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS":        "120",
+		"SANDBOX_SECURITY_MAX_EXEC_TIMEOUT_SECONDS":    "900",
+		"SANDBOX_SECURITY_API_KEY":                     "env-api-key",
+		"SANDBOX_SECURITY_MAX_MEMORY":                  "1Gi",
+		"SANDBOX_SECURITY_MAX_DISK":                    "500Mi",
+		"SANDBOX_SECURITY_MAX_TMP_DISK":                "600Mi",
+		"SANDBOX_SECURITY_MAX_PIDS":                    "500",
+		"SANDBOX_SECURITY_NETWORK_ENABLED":             "true",
+		"SANDBOX_SECURITY_SECCOMP_PROFILE":             "/etc/seccomp/custom.json",
 	}
 
 	for k, v := range envVars {
@@ -213,6 +215,7 @@ func TestEnvOverrides(t *testing.T) {
 
 	assert.Equal(t, "kubernetes", cfg.Runtime.Type)
 	assert.Equal(t, "tcp://docker.example.com:2376", cfg.Runtime.Docker.Host)
+	assert.Equal(t, "/srv/sandbox/workspace-secrets", cfg.Runtime.Docker.WorkspaceSecretRoot)
 	assert.Equal(t, "/root/.kube/config", cfg.Runtime.Kubernetes.Kubeconfig)
 	assert.Equal(t, "production", cfg.Runtime.Kubernetes.Namespace)
 
@@ -341,9 +344,11 @@ func minimalValidConfig() *config.Config {
 
 func newValidFUSEConfig() *config.Config {
 	valid := minimalValidConfig()
+	valid.Runtime.Docker.WorkspaceSecretRoot = "/var/lib/sandbox/workspace-secrets"
 	valid.Storage.State.Redis.Addr = "redis:6379"
 	valid.Storage.FileSystem.Provider = "minio"
 	valid.Storage.FileSystem.Bucket = "sandbox"
+	valid.Storage.FileSystem.Region = "us-east-1"
 	valid.Storage.FileSystem.Endpoint = "minio.example.com:9000"
 	valid.Storage.FileSystem.UseSSL = true
 	valid.Storage.FileSystem.SubPath = "workspaces/团队"
@@ -444,6 +449,7 @@ storage:
   filesystem:
     provider: obs
     bucket: sandbox
+    region: cn-north-4
     endpoint: https://obs.example.com
     use_ssl: true
     sub_path: teams/project
@@ -722,7 +728,17 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "workspace.providers.minio"},
 		{name: "missing redis", edit: func(c *config.Config) { c.Storage.State.Redis.Addr = "" }, want: "storage.state.redis.addr"},
 		{name: "missing secret name", edit: func(c *config.Config) { c.Workspace.SecretName = "" }, want: "workspace.secret_name"},
+		{name: "relative docker workspace secret root", edit: func(c *config.Config) {
+			c.Runtime.Type = "docker"
+			c.Runtime.Docker.WorkspaceSecretRoot = "relative/workspace-secrets"
+		}, want: "runtime.docker.workspace_secret_root"},
+		{name: "docker workspace secret root directory", edit: func(c *config.Config) {
+			c.Runtime.Type = "docker"
+			c.Runtime.Docker.WorkspaceSecretRoot = "/"
+		}, want: "runtime.docker.workspace_secret_root"},
 		{name: "missing bucket", edit: func(c *config.Config) { c.Storage.FileSystem.Bucket = "" }, want: "storage.filesystem.bucket"},
+		{name: "missing region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "" }, want: "storage.filesystem.region"},
+		{name: "noncanonical region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "CN-North-4" }, want: "storage.filesystem.region"},
 		{name: "missing endpoint", edit: func(c *config.Config) { c.Storage.FileSystem.Endpoint = "" }, want: "storage.filesystem.endpoint"},
 		{name: "missing access key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.AccessKeyFile = "" }, want: "access_key_file"},
 		{name: "missing secret key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SecretKeyFile = "" }, want: "secret_key_file"},

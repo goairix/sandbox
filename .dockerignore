@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+var/logs
+var/tmp
+docker/secrets
+docker/docker-auth-*
+**/docker-auth-private*
+**/.docker/config.json
+**/secrets/workspace

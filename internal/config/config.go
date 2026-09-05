@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -23,6 +25,8 @@ const (
 	LogPath         = VarPath + "/logs"
 	TempPath        = VarPath + "/tmp"
 )
+
+var canonicalFUSERegion = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // Config is the root configuration structure for the sandbox service.
 type Config struct {
@@ -51,7 +55,8 @@ type RuntimeConfig struct {
 
 // DockerConfig holds Docker-specific runtime settings.
 type DockerConfig struct {
-	Host string `mapstructure:"host"`
+	Host                string `mapstructure:"host"`
+	WorkspaceSecretRoot string `mapstructure:"workspace_secret_root"`
 }
 
 // KubernetesConfig holds Kubernetes-specific runtime settings.
@@ -340,6 +345,9 @@ func (c *Config) Validate() error {
 func (c *Config) validateFUSE() error {
 	filesystem := c.Storage.FileSystem
 	workspace := c.Workspace
+	if c.Runtime.Type == "docker" && (c.Runtime.Docker.WorkspaceSecretRoot == "/" || !filepath.IsAbs(c.Runtime.Docker.WorkspaceSecretRoot) || filepath.Clean(c.Runtime.Docker.WorkspaceSecretRoot) != c.Runtime.Docker.WorkspaceSecretRoot) {
+		return fmt.Errorf("config: runtime.docker.workspace_secret_root must be a canonical absolute path when workspace.mode is \"fuse\"")
+	}
 
 	if filesystem.Provider != "minio" && filesystem.Provider != "obs" {
 		return fmt.Errorf("config: workspace.mode=fuse supports only minio or obs, got %q", filesystem.Provider)
@@ -478,6 +486,9 @@ func (c *Config) validateFUSE() error {
 	}
 	if provider.Profile == "" {
 		return fmt.Errorf("config: %s.profile must not be empty", providerPath)
+	}
+	if profile, ok := mounter.InspectCompiledProfile(provider.Profile); ok && profile.Provider == filesystem.Provider && profile.Descriptor.RegionOption == "endpoint" && !canonicalFUSERegion.MatchString(filesystem.Region) {
+		return fmt.Errorf("config: storage.filesystem.region must be a canonical region for FUSE profile %q", provider.Profile)
 	}
 	if provider.StorageIdentity == "" {
 		return fmt.Errorf("config: %s.storage_identity must not be empty", providerPath)
@@ -678,6 +689,7 @@ func setDefaults(v *viper.Viper) {
 	// Runtime
 	v.SetDefault("runtime.type", "docker")
 	v.SetDefault("runtime.docker.host", "")
+	v.SetDefault("runtime.docker.workspace_secret_root", "/var/lib/sandbox/workspace-secrets")
 	v.SetDefault("runtime.kubernetes.kubeconfig", "")
 	v.SetDefault("runtime.kubernetes.namespace", "")
 

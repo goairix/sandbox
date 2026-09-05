@@ -87,10 +87,35 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 	assert.Equal(t, info.RuntimeUID, fake.bootstrap.RuntimeUID)
 	assert.Equal(t, "https://objects.example.com:9000", fake.bootstrap.Endpoint)
 	assert.Equal(t, int64(1), fake.generation)
-	require.Len(t, fake.routeControls, 1)
-	assert.Equal(t, []string{"/usr/sbin/ip", "route", "replace", "default", "via", "172.20.0.2"}, fake.routeControls[0].Cmd)
-	assert.Equal(t, "root", fake.routeControls[0].User)
-	assert.False(t, fake.routeControls[0].Privileged, "route control must not request Docker extended privileges")
+	require.Len(t, fake.routeControls, 2)
+	assert.Equal(t, []string{"/usr/sbin/ip", "route", "replace", "blackhole", "172.20.0.1/32"}, fake.routeControls[0].Cmd)
+	assert.Equal(t, []string{"/usr/sbin/ip", "route", "replace", "default", "via", "172.20.0.2"}, fake.routeControls[1].Cmd)
+	for _, routeControl := range fake.routeControls {
+		assert.Equal(t, "root", routeControl.User)
+		assert.Equal(t, "/", routeControl.WorkingDir)
+		assert.False(t, routeControl.Privileged, "route control must not request Docker extended privileges")
+	}
+}
+
+func TestDockerFUSEFixedControlExecsAvoidWorkspaceWorkingDirectory(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	ref := runtime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, validRuntimeAuthorization(info.RuntimeUID)))
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 1)
+	require.NoError(t, err)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, call := range fake.execs {
+		if call.containerID != info.RuntimeID || len(call.options.Cmd) == 0 {
+			continue
+		}
+		if call.options.Cmd[0] == fuseprotocol.MounterBinary || call.options.Cmd[0] == fuseprotocol.ProbeBinary || call.options.Cmd[0] == "/usr/sbin/ip" {
+			assert.Equal(t, "/", call.options.WorkingDir, "fixed control must not chdir into a potentially blocked FUSE mount: %v", call.options.Cmd)
+		}
+	}
 }
 
 func TestDockerCreateSandboxRejectsFUSEBeforeMutation(t *testing.T) {
@@ -417,6 +442,23 @@ func TestDockerReconcileProtectsRuntimeUIDs(t *testing.T) {
 	assert.True(t, rt.IsStateful())
 }
 
+func TestDockerFUSEReconcileRejectsWorkspaceSecretRootChange(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	rt.secretRoot = "/srv/sandbox/workspace-secrets-a"
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	rt.secretRoot = "/srv/sandbox/workspace-secrets-b"
+
+	err = rt.ReconcileOrphanedResources(context.Background(), map[string]struct{}{info.RuntimeUID: {}})
+	require.ErrorContains(t, err, "workspace secret root")
+	require.ErrorIs(t, err, runtime.ErrTerminationUnconfirmed)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Contains(t, fake.containers, info.RuntimeUID)
+	assert.Empty(t, fake.removedSecrets)
+}
+
 func TestDockerFUSEReconcileIgnoresLegacyManagedResources(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	fake.mu.Lock()
@@ -439,7 +481,7 @@ func TestDockerFUSEReconcileIgnoresLegacyManagedResources(t *testing.T) {
 	assert.Contains(t, fake.containers, "legacy-gateway")
 }
 
-func TestDockerFUSEGatewayIsInternalAndUsesExactSystemEgress(t *testing.T) {
+func TestDockerFUSEGatewayUsesRoutablePairAndExactSystemEgress(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
 	require.NoError(t, err)
@@ -447,7 +489,7 @@ func TestDockerFUSEGatewayIsInternalAndUsesExactSystemEgress(t *testing.T) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	pair := fake.networkCreateOptions[pairNetworkPrefix+preparationID]
-	assert.True(t, pair.Internal, "FUSE runtime must never have a direct Docker NAT route")
+	assert.False(t, pair.Internal, "Docker internal bridges drop transit packets before they reach the policy gateway")
 	command := strings.Join(fake.rootGatewayCommands, "\n")
 	assert.Contains(t, command, "-d 1.1.1.1/32 -p udp --dport 53 -j ACCEPT")
 	assert.Contains(t, command, "-d 198.51.100.10/32 -p tcp --dport 9000 -j ACCEPT")
@@ -486,6 +528,22 @@ func TestDockerFUSEMaterializesExactRootOnlySecretDirectory(t *testing.T) {
 	defer fake.mu.Unlock()
 	require.Len(t, fake.materializedSecrets, 1)
 	assert.Equal(t, filepath.Join(dockerWorkspaceSecretRoot, preparationID), fake.materializedSecrets[0])
+}
+
+func TestDockerFUSEUsesConfiguredSecretRootForMaterializationAndContainerBind(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	rt.secretRoot = "/srv/sandbox/workspace-secrets"
+
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	preparationID := rt.workspaceState(info.RuntimeID).preparationID
+	expectedSource := filepath.Join(rt.secretRoot, preparationID)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.Equal(t, []string{expectedSource}, fake.materializedSecrets)
+	require.NotNil(t, fake.containers[info.RuntimeID])
+	assert.Contains(t, fake.containers[info.RuntimeID].host.Binds, expectedSource+":"+dockerMounterSecretPath+":ro")
 }
 
 func TestDockerFUSEUserNetworkUpdateRetainsSystemRules(t *testing.T) {
@@ -723,7 +781,7 @@ func (f *fakeDockerAPI) ContainerExecCreate(_ context.Context, containerID strin
 	if len(options.Cmd) >= 2 && options.Cmd[0] == fuseprotocol.MounterBinary && options.Cmd[1] == "authorize" {
 		f.authorizeExecCreates++
 	}
-	if len(options.Cmd) == 6 && options.Cmd[0] == "/usr/sbin/ip" && options.Cmd[1] == "route" {
+	if len(options.Cmd) >= 3 && options.Cmd[0] == "/usr/sbin/ip" && options.Cmd[1] == "route" {
 		f.routeControls = append(f.routeControls, options)
 	}
 	return types.IDResponse{ID: id}, nil
@@ -865,7 +923,10 @@ func (f *fakeDockerAPI) NetworkCreate(_ context.Context, name string, opts dnetw
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := "network-" + name
-	f.networks[id] = dnetwork.Inspect{ID: id, Name: name, Labels: opts.Labels}
+	f.networks[id] = dnetwork.Inspect{
+		ID: id, Name: name, Labels: opts.Labels,
+		IPAM: dnetwork.IPAM{Config: []dnetwork.IPAMConfig{{Subnet: "172.20.0.0/16", Gateway: "172.20.0.1"}}},
+	}
 	f.networkCreateOptions[name] = opts
 	return dnetwork.CreateResponse{ID: id}, nil
 }

@@ -15,7 +15,7 @@ func TestFUSEPairNetworkExplicitlyDisablesIPv6(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	spec := fuseDockerSpecForTest()
 
-	_, _, _, err := createFUSESandboxPair(context.Background(), fake, spec.ID, rt.openNetworkID, rt.gatewayImage, spec.WorkspaceFUSE.SystemEgress)
+	_, _, _, err := createFUSESandboxPair(context.Background(), fake, spec.ID, rt.openNetworkID, rt.gatewayImage, dockerWorkspaceSecretRoot, spec.WorkspaceFUSE.SystemEgress)
 	require.NoError(t, err)
 	pair := fake.networkCreateOptions[pairNetworkPrefix+spec.ID]
 	require.NotNil(t, pair.EnableIPv6)

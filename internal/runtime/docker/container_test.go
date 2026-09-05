@@ -61,13 +61,14 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 	assert.NotContains(t, host.SecurityOpt, "unconfined")
 	assert.NotContains(t, strings.Join(host.Binds, " "), ":/workspace")
 	assert.Contains(t, strings.Join(host.Binds, " "), ":/run/secrets/workspace:ro")
-	assert.Contains(t, strings.Join(host.Binds, " "), "/var/lib/sandbox/fuse-secrets/"+spec.ID+":")
+	assert.Contains(t, strings.Join(host.Binds, " "), "/var/lib/sandbox/workspace-secrets/"+spec.ID+":")
 	require.Len(t, host.Mounts, 1)
 	assert.Equal(t, "/var/cache/s3fs", host.Mounts[0].Target)
 	assert.Contains(t, host.Mounts[0].Source, spec.ID)
 	_, wholeRunTmpfs := host.Tmpfs["/run"]
 	assert.False(t, wholeRunTmpfs, "mounting tmpfs on /run hides the trusted image directory /run/s3fs")
 	assert.Equal(t, "size=16777216,mode=0700", host.Tmpfs["/run/s3fs"])
+	assert.Equal(t, "size=65536,mode=0555", host.Tmpfs["/workspace"])
 	assert.Equal(t, []string{"1.1.1.1"}, []string(host.DNS))
 	assert.Equal(t, []string{"objects.example.com:198.51.100.10"}, []string(host.ExtraHosts))
 }

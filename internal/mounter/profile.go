@@ -62,7 +62,7 @@ var compiledProfileCatalog = map[string]Profile{
 		Descriptor: ProfileDescriptor{
 			ID: "minio-sigv4-path-style-v1", Provider: "minio",
 			MountParameters: MountParametersVerified, DurableFlush: DurableFlushPendingSpike,
-			TLSRequired: true, EndpointOption: "url", RegionOption: "region",
+			TLSRequired: true, EndpointOption: "url", RegionOption: "endpoint",
 			AddressingStyle: "path", SignatureVersion: "sigv4",
 		},
 		Options: minioOptions,
@@ -101,7 +101,7 @@ func minioOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
 	if !canonicalRegion.MatchString(config.Region) {
 		return nil, fmt.Errorf("minio profile requires a canonical SigV4 region")
 	}
-	return []string{"-o", "url=" + config.Endpoint, "-o", "region=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
+	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
 }
 
 func huaweiPublicCandidateOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {

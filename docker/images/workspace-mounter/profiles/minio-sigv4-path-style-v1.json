@@ -7,7 +7,7 @@
     "durable_flush": "blocked-pending-flush-spike",
     "tls_required": true,
     "endpoint_option": "url",
-    "region_option": "region",
+    "region_option": "endpoint",
     "addressing_style": "path",
     "signature_version": "sigv4"
   },

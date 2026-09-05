@@ -224,7 +224,7 @@ sandbox-api 的配置同时把控制面 Secret 中的 `ca.crt` 映射为 `storag
 Docker sandbox 不能把凭证放入 `Env` 或 `Cmd`，否则可通过 `docker inspect` 读取。宿主机准备专用暂存根目录，并以相同绝对路径读写挂载给受信任的 sandbox-api；API 为动态容器生成子目录后，再把该子目录只读挂载到特殊 sandbox：
 
 ```bash
-sudo install -d -m 0700 -o root -g root /var/lib/sandbox/fuse-secrets
+sudo install -d -m 0700 -o root -g root /var/lib/sandbox/workspace-secrets
 ```
 
 运行时为每个 sandbox 创建独立子目录和 mode `0600` 文件；特殊容器只读挂载该子目录。销毁容器后立即删除文件，reconciler 负责清理失联容器留下的过期目录。文件名和目录名只使用经过校验的内部 sandbox ID，不使用用户输入路径。
@@ -683,10 +683,12 @@ Compose 需要把 Secret 暂存目录以同一绝对路径挂载给 API，以便
 ```yaml
 services:
   sandbox-api:
+    environment:
+      SANDBOX_RUNTIME_DOCKER_WORKSPACE_SECRET_ROOT: ${WORKSPACE_SECRET_STAGING_ROOT}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${WORKSPACE_CREDENTIAL_DIR}:/run/secrets/workspace:ro
-      - /var/lib/sandbox/workspace-secrets:/var/lib/sandbox/workspace-secrets:rw
+      - ${WORKSPACE_SECRET_STAGING_ROOT}:${WORKSPACE_SECRET_STAGING_ROOT}:rw
 ```
 
 仓库 Compose 文件已显式映射 MinIO provider 的环境变量；OBS 或生产多 profile 部署推荐改用只读配置文件，避免在 Compose 中复制整套 map key。配置示例：
@@ -696,6 +698,7 @@ runtime:
   type: docker
   docker:
     host: unix:///var/run/docker.sock
+    workspace_secret_root: /var/lib/sandbox/workspace-secrets
 
 storage:
   filesystem:
@@ -772,6 +775,8 @@ workspace:
 
 对象存储的 provider、bucket、endpoint、region、sub path 和 TLS 开关继续使用 `storage.filesystem` 配置。MinIO endpoint 使用 `host[:port]`，runtime 根据 `use_ssl` 派生 s3fs URL；OBS endpoint 使用华为 SDK 要求的格式。AK/SK 不出现在该文件或环境变量；Compose 把 `${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`，sandbox-api 读取后在 `/var/lib/sandbox/workspace-secrets` 中为动态容器生成 root-only 文件。私有 CA 同样从该只读目录读取并复制给特殊容器，同时配置到控制面原生存储客户端；CA 或凭证轮换都需要排空并重建相关 sandbox。
 
+仓库 Compose 使用 `STORAGE_REGION` 传递 SigV4 region；MinIO 和公有云 OBS profile 要求该值为非空、小写 canonical region。`SANDBOX_IMAGE` 和 `GATEWAY_IMAGE` 用于覆盖普通 sandbox 与 gateway 镜像。`sandbox-api` 会等待 Redis healthcheck 通过且 `sandbox-images` 成功准备完全部镜像后才启动，避免 API 已经接流量但 pool 所需镜像仍不存在：未配置镜像覆盖时构建仓库默认镜像；配置 `SANDBOX_IMAGE`、`GATEWAY_IMAGE`、`FUSE_MOUNTER_IMAGE` 或 `FUSE_SANDBOX_IMAGE` 时先检查 Docker daemon 的本地缓存，缺失则从 registry 拉取。默认 `DOCKER_AUTH_CONFIG_FILE=./docker-auth-public/config.json` 只提供空的 Docker client 配置；使用需认证的私有 registry 时，必须把该变量设为仓库根目录之外的宿主机绝对路径，例如 `/etc/sandbox/docker-auth/config.json`，并只读挂入 `sandbox-images`。禁止把真实认证文件复制到本仓库；`.dockerignore` 的防御性规则不能替代这一部署约束。该文件应使用最小权限的只读账号，父目录/文件分别为 `0700`/`0600`，且必须包含可由 `docker:cli` 直接读取的 `auths`，不能依赖宿主机 `credsStore`/credential helper，也不能通过环境变量传递认证内容。只有该文件以只读方式进入一次性镜像准备容器；`/root/.docker` 的其余空间保持容器内可写，以供 buildx 保存非敏感状态，认证配置不进入 `sandbox-api`。Docker FUSE 启用时，后三个 FUSE 相关值都必须填写 registry 返回的真实 `@sha256:` digest；tag 或本地 image ID 会在 pool WarmUp 前被拒绝。若设置 `WORKSPACE_SECRET_STAGING_ROOT`，它必须是宿主机绝对路径且不能是 `/`，Compose 会以相同绝对 target 挂入 API，并同步写入 `runtime.docker.workspace_secret_root`，不能只改 volume source。该路径会写入 container、gateway、network、cache volume 的受管资源标签，并作为部署期不可变的资源身份；如必须迁移，先用旧配置排空全部 FUSE sandbox，确认旧目录为空且无 `sandbox.managed=true` Docker 资源，再同时修改目录与配置。存在旧资源时 runtime 会 fail closed，不会跨 root 猜测或删除 Secret。
+
 上面的 Compose 片段按私有 CA 场景给出；使用系统公共 CA 时删除 `storage_ca` Secret 和 `ca_file` 配置，不能保留指向不存在文件的路径。
 
 示例中的 `192.0.2.0/24` 属于文档保留地址，部署时必须替换为平台批准的真实稳定 IP/CIDR。`endpoint_host_ips` 只负责把当前 provider endpoint 的 FQDN 写入 `extra_hosts`，TLS 仍校验 FQDN；其 IP 必须同时存在于 `system_egress_cidrs` 精确白名单中。
@@ -807,7 +812,13 @@ securityOpt:
   - no-new-privileges=true
   - apparmor=sandbox-fuse
 readOnlyRootfs: true
+tmpfs:
+  /workspace: size=65536,mode=0555
 ```
+
+`/workspace` tmpfs 只提供容器私有的初始 mount anchor，不映射宿主机目录，也不保存业务数据；Acquire 后 `fuse.s3fs` 覆盖其上。可信 mounter/control/probe exec 固定在 `/` 下启动，避免挂载异常时因预先进入 `/workspace` 而阻塞控制面的超时和回收。
+
+Docker 的 `Internal` bridge 会在转发包进入容器 gateway 前丢弃外部目的流量，因此 FUSE pair 使用普通、每-sandbox 独立 bridge。安全边界由启动顺序与能力共同保证：digest-pinned gateway 先安装 default-deny、永久拒绝和精确 system 白名单，之后才启动可信 runtime；runtime 首先为 Docker bridge 的宿主机 gateway `/32` 安装 blackhole route，再把默认路由替换为 policy gateway。公开用户进程固定 UID/GID 1000 且没有 `NET_ADMIN`/`NET_RAW`，不能恢复 Docker 默认网关或移除 blackhole。未列入白名单的宿主机发布端口、内网 CIDR/端口继续不可访问。仓库 Compose 另将 API/Redis 端口限制在宿主机 loopback，作为开发部署的纵深防御。
 
 并挂载：
 
@@ -836,7 +847,7 @@ FUSE Pool 空壳从 WarmUp 起就加入只允许以下目的地的系统网络�
 
 私有云 endpoint FQDN 无法由公共 DNS 解析时，Docker runtime 可从只读运维配置生成精确 `extra_hosts` 映射，仍以原 FQDN 发起 TLS 请求；不得由 CreateSandbox 参数控制映射，也不得因为解析困难改用跳过证书校验。
 
-Docker 一期网络只支持 IPv4 CIDR，并在创建 sandbox-facing internal bridge 时显式关闭 IPv6。gateway 使用固定 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：先安装主链跳转和不可变 system/permanent 规则，再启动 runtime；Acquire 只通过单次 `iptables-restore --noflush` 原子替换 `SBOX_USER`，不得 flush `FORWARD` 或重写前两条链。DNS 只接受 1–3 个公共 IPv4 `/32` resolver，并仅开放 TCP/UDP 53；对象 endpoint 仅开放 TCP 且端口集合必须覆盖规范化 endpoint 的实际端口。`0.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`224.0.0.0/4` 永久先于 system/user 规则拒绝，用户白名单或 open 模式不能覆盖。所有 CIDR、端口和静态 host 映射在生成规则前排序去重；Docker 收到任何 IPv6 endpoint、DNS、静态映射或用户白名单输入时必须 fail closed。
+Docker 一期网络只支持 IPv4 CIDR。sandbox-facing bridge 必须可路由，因为 Docker `Internal` bridge 会在包进入容器 gateway 前丢弃外部目的流量；这不代表 runtime 获得直连权限。gateway 使用固定 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：先安装主链跳转和不可变 system/permanent 规则，再启动 digest-pinned runtime；runtime 先 blackhole Docker bridge host gateway 的精确 `/32`，再把默认路由替换为 policy gateway。公开 UID 1000 进程没有 `NET_ADMIN`/`NET_RAW`，不能恢复 Docker 默认网关。Acquire 只通过单次 `iptables-restore --noflush` 原子替换 `SBOX_USER`，不得 flush `FORWARD` 或重写前两条链。DNS 只接受 1–3 个公共 IPv4 `/32` resolver，并仅开放 TCP/UDP 53；对象 endpoint 仅开放 TCP 且端口集合必须覆盖规范化 endpoint 的实际端口。`0.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`224.0.0.0/4` 永久先于 system/user 规则拒绝，用户白名单或 open 模式不能覆盖。所有 CIDR、端口和静态 host 映射在生成规则前排序去重；Docker 收到任何 IPv6 endpoint、DNS、静态映射或用户白名单输入时必须 fail closed。
 
 ### 7.6 Docker 验证
 
@@ -936,6 +947,10 @@ findmnt -rn -o FSTYPE -T /workspace | grep -qx fuse.s3fs
 
 kind 中只有 trusted mounter sidecar 以 `privileged: true` 打开 `/dev/fuse`；单纯给非 privileged 容器增加 `SYS_ADMIN` 并挂入字符设备，在常见 containerd 设备 cgroup 下仍会得到 `Operation not permitted`。sandbox 容器继续以 UID/GID 1000、drop `ALL` capabilities 和 `HostToContainer` propagation 运行。mounter 使用 `Bidirectional` 后，实测上层 `fuse.s3fs` 会传播到 sandbox；删除 Pod 前必须先由 mounter 完成 flush/unmount，否则节点 kubelet 会因仍存在的传播挂载而阻塞 volume 清理。
 
+2026-09-06 的 Docker Compose 本地验收使用仓库 `docker/docker-compose.yml` 完整执行镜像准备、Redis、sandbox-api 和 Pool WarmUp，并由 HTTP API 驱动真实 sandbox：sync 基线完成创建、UID 1000 Exec 与销毁；FUSE 使用 TLS 前置的本地 MinIO 和本地 registry digest，确认空壳容器先启动、请求仅传 `workspace_path` 后才挂载、pool hit 后自动补回 `min_size=1`、`findmnt` 返回 `fuse.s3fs`、UID/GID 1000 写入内容可从对象存储签名读回、同 prefix 第二个 owner 返回 409，以及只放行 9443 时同一内网主机未列入白名单的 9000 端口不可访问。最终复审又以真实宿主机发布端口复现普通 bridge host-gateway 旁路；加入 `/32` blackhole 后，Acquire 前后 UID 1000 对 bridge gateway:9443 均失败，同时正常对象存储挂载继续成功。验收还从 Docker daemon 删除本地 digest 引用，确认 `sandbox-images` 能分别从无认证和带认证的私有 registry 冷拉取 gateway/FUSE 镜像，并确认持有旧 root 标签的资源会阻止 secret root 热切换。该验收修正了 Compose region/gateway image 透传、私有 registry 认证与冷缓存准备、Secret 同绝对路径及迁移身份、Docker `/workspace` mount anchor、control exec 工作目录、s3fs 1.95 region option、Docker bridge 三层转发和 host-gateway 旁路问题。
+
+上述 FUSE 验收使用一次性本地 API 镜像仅跳过 durable-flush 配置门禁，以验证挂载与 Pool wiring；仓库生产源码、正式镜像 `release-check` 和本文发布结论仍保持 fail closed，不能把该结果当作 durable flush 或生产发布证据。
+
 若旧版 kind CLI 无法向较新的 containerd v2 节点执行 `kind load docker-image`（例如报 `failed to detect containerd snapshotter`），发布/长期测试仍应优先把镜像推到本地 registry 并让 Pod 按 digest 拉取。仅限一次性开发冒烟时，可把同一 Docker 镜像导入每个 kind 节点的 `k8s.io` namespace，并核对导入后的 image ID：
 
 ```bash
@@ -957,7 +972,7 @@ done
 - 显式 HTTPS endpoint；
 - `use_path_request_style`；
 - SigV4；
-- region，默认不依赖 AWS endpoint 推导；
+- 使用兼容 s3fs 1.95 及新版别名的 `endpoint=<region>` 固定 SigV4 region，不依赖 AWS endpoint 推导；
 - `allow_other`、`uid=1000`、`gid=1000`、`umask=0022`、`mp_umask=0022`；
 - 前台运行、有界 cache 和 multipart 参数；
 - TLS 主机名与 CA 校验。

@@ -16,6 +16,7 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 	assert.Equal(t, MountParametersVerified, profile.Descriptor.MountParameters)
 	assert.Equal(t, DurableFlushPendingSpike, profile.Descriptor.DurableFlush)
 	assert.True(t, profile.Descriptor.TLSRequired)
+	assert.Equal(t, "endpoint", profile.Descriptor.RegionOption)
 
 	options, err := profile.Options(fuseprotocol.BootstrapConfig{
 		Provider: "minio", Endpoint: "https://minio.example.com:9000", Region: "us-east-1",
@@ -23,7 +24,7 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		"-o", "url=https://minio.example.com:9000",
-		"-o", "region=us-east-1",
+		"-o", "endpoint=us-east-1",
 		"-o", "use_path_request_style",
 		"-o", "sigv4",
 	}, options)

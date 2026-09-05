@@ -137,7 +137,7 @@ GOOS=linux GOARCH=amd64 go build \
 
 同一 profile-bound artifact 必须进入该 profile 的 Kubernetes mounter 和 Docker 特殊镜像；普通 sandbox 与 Docker 特殊镜像所需的 `workspace-probe` 可由同一无特权构建产物提供。不得用未设置上述 ldflags 的普通 mounter build 覆盖专属 artifact。
 
-普通 sandbox 不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 复制 `go.mod`/`go.sum`、`cmd/workspace-probe`、`internal/fuseprotocol` 和 `internal/workspaceprobe`，再以 `CGO_ENABLED=0` 编译静态 probe。Compose/dev 将仓库根目录只读挂载为 `/repo`，使用 `docker build -f /repo/docker/images/sandbox/Dockerfile ... /repo`；不再使用缺少这些输入的 `/images/sandbox` context。开发默认 builder 是 `golang:1.25-alpine`，生产 CI 必须通过 `WORKSPACE_PROBE_BUILDER=<digest-pinned-ref>` 覆盖，并同样固定 `SANDBOX_BASE_IMAGE`。
+普通 sandbox 不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 复制 `go.mod`/`go.sum`、`cmd/workspace-probe`、`internal/fuseprotocol` 和 `internal/workspaceprobe`，再以 `CGO_ENABLED=0` 编译静态 probe。Compose/dev 将仓库根目录只读挂载为 `/repo`，使用 `docker build -f /repo/docker/images/sandbox/Dockerfile ... /repo`；不再使用缺少这些输入的 `/images/sandbox` context。开发默认 builder 是 `golang:1.25-alpine`，生产 CI 必须通过 `WORKSPACE_PROBE_BUILDER=<digest-pinned-ref>` 覆盖，并同样固定 `SANDBOX_BASE_IMAGE`。Compose 的私有 registry 冷拉取使用只挂给一次性 `sandbox-images` 服务的独立只读 Docker client config；具体权限、配置格式和启动参数以[部署手册](../../deployment/workspace-fuse.md)为准。真实认证文件必须位于仓库根目录之外；认证材料不能进入 API 环境、镜像构建上下文或 BuildKit cache。
 
 只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON manifest 只记录 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析和逐项比对可以发现包被拼错，但 manifest 不能注入或覆盖任意 `-o` 参数。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
 
@@ -313,7 +313,7 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 
 - `/dev/fuse` device mapping；
 - `CAP_SYS_ADMIN`；
-- `CAP_NET_ADMIN`，仅供私有 root control 通过固定 `/usr/sbin/ip route replace default via <gateway-ip>` 设置 gateway 默认路由；
+- `CAP_NET_ADMIN`，仅供私有 root control 通过固定 `/usr/sbin/ip route replace blackhole <bridge-host-ip>/32` 阻断宿主机 bridge gateway，并通过固定 `/usr/sbin/ip route replace default via <policy-gateway-ip>` 设置默认路由；
 - mount/umount 所需 seccomp syscall；
 - 专用 AppArmor profile；
 - `no-new-privileges`；
@@ -358,6 +358,8 @@ Docker `CopyToContainer` 写入的 tar header 必须保持 UID/GID 1000。安全
 5. 删除容器和临时 Secret，并确认 runtime 不再存在。
 6. 最后释放 Redis workspace 租约。
 
+Secret staging root 会作为受校验的绝对路径写入 FUSE runtime、gateway、pair network 与 cache volume 标签，并参与恢复资源身份比较。该配置在仍存在受管资源时不可变更；迁移必须先以旧配置排空容器和受管资源、确认旧 root 为空，再切换所有 API 副本。发现标签 root 与当前配置不一致时必须保留资源并阻止启动，不能使用当前 root 猜测旧凭证位置。
+
 ## 7. 网络模型
 
 ### 7.1 Kubernetes 约束
@@ -396,7 +398,7 @@ Sandbox 主容器也能连接这些地址，但没有存储凭证。必须使用
 
 Docker 特殊容器同样需要访问对象存储 endpoint。FUSE Pool 在 WarmUp 时创建 gateway pair，并只把已经过平台审批的对象存储 endpoint 精确白名单作为不可被用户配置删除的 system egress；Acquire 后、开放 Exec 前再追加用户网络规则。用户进程可连接该已批准 endpoint，但不能获得凭证。若要求按进程隔离 endpoint，单容器模型同样需要认证 egress proxy，不能仅靠 Docker network。
 
-Docker 一期只实现 IPv4 CIDR egress，sandbox-facing internal bridge 显式禁用 IPv6；任何 IPv6 endpoint、DNS、静态 host IP 或用户白名单输入都 fail closed。gateway 固定使用按顺序执行的 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：runtime 启动前原子安装 main jump 与不可变 permanent/system 规则，Acquire 只能通过 `iptables-restore --noflush` 原子替换 USER 链，不能 flush `FORWARD` 或重写 permanent/system。DNS 仅允许批准 resolver 的 TCP/UDP 53，对象 endpoint 仅允许 TCP 且批准端口必须覆盖规范化 endpoint 的实际端口；unspecified、loopback、link-local/metadata 与 multicast 网段在 user whitelist/open 之前永久拒绝。CIDR、端口和静态 host 映射全部排序去重。
+Docker 一期只实现 IPv4 CIDR egress；任何 IPv6 endpoint、DNS、静态 host IP 或用户白名单输入都 fail closed。sandbox-facing bridge 使用每-sandbox 普通 bridge，因为 Docker `Internal` bridge 会在包进入容器 gateway 前丢弃外部目的流量，无法承载三层转发。gateway 固定使用按顺序执行的 `SBOX_PERMANENT`、`SBOX_SYSTEM`、`SBOX_USER` 三条链：runtime 启动前原子安装 main jump 与不可变 permanent/system 规则；可信 runtime 启动后先为 Docker bridge 的宿主机 gateway 精确 `/32` 安装 blackhole route，再将默认路由替换为 policy gateway。公开 UID 1000 进程没有 `NET_ADMIN`/`NET_RAW`，不能移除 blackhole 或恢复 Docker 默认网关。Acquire 只能通过 `iptables-restore --noflush` 原子替换 USER 链，不能 flush `FORWARD` 或重写 permanent/system。DNS 仅允许批准 resolver 的 TCP/UDP 53，对象 endpoint 仅允许 TCP 且批准端口必须覆盖规范化 endpoint 的实际端口；unspecified、loopback、link-local/metadata 与 multicast 网段在 user whitelist/open 之前永久拒绝。CIDR、端口和静态 host 映射全部排序去重。
 
 ## 8. Workspace 隔离与租约
 

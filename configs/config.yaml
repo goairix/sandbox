@@ -39,6 +39,9 @@ runtime:
     # Docker daemon socket or TCP address.
     # Leave empty to use the default socket (/var/run/docker.sock on Linux).
     host: ""
+    # Root-only staging directory visible at this identical absolute path to
+    # both sandbox-api and the Docker daemon when workspace.mode is "fuse".
+    workspace_secret_root: "/var/lib/sandbox/workspace-secrets"
 
   # Kubernetes-specific settings (used when type = "kubernetes")
   kubernetes:

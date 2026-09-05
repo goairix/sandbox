@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker/api/types/container"
+	dnetwork "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
@@ -32,17 +33,53 @@ func (r *Runtime) execControl(ctx context.Context, containerID string, argv []st
 	return r.execFixed(ctx, containerID, "root", argv, stdin)
 }
 
-// setupFUSERoute is a private closed control operation. Docker grants this one
-// fixed exec the route capability required to install the route; public
-// UID-1000 execs cannot retain the root-only effective capability.
-func (r *Runtime) setupFUSERoute(ctx context.Context, containerID, gatewayIP string) error {
+// setupFUSERoute is a private closed control operation. Docker grants these
+// fixed execs the route capability required to block the Docker host gateway
+// and install the policy gateway; public UID-1000 execs cannot retain the
+// root-only effective capability.
+func (r *Runtime) setupFUSERoute(ctx context.Context, containerID, pairNetworkID, gatewayIP string) error {
 	ip := net.ParseIP(gatewayIP)
-	if ip == nil || ip.String() != gatewayIP {
+	if ip == nil || ip.To4() == nil || ip.String() != gatewayIP {
 		return ErrInvalidControlCommand
 	}
-	argv := []string{"/usr/sbin/ip", "route", "replace", "default", "via", gatewayIP}
+	network, err := r.cli.NetworkInspect(ctx, pairNetworkID, dnetwork.InspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect Docker FUSE pair network route: %w", err)
+	}
+	hostGatewayIP, err := dockerBridgeGatewayIPv4(network)
+	if err != nil || hostGatewayIP == gatewayIP {
+		return ErrInvalidControlCommand
+	}
+	if err := r.runFixedRouteControl(ctx, containerID, []string{"/usr/sbin/ip", "route", "replace", "blackhole", hostGatewayIP + "/32"}); err != nil {
+		return fmt.Errorf("block Docker bridge host gateway: %w", err)
+	}
+	if err := r.runFixedRouteControl(ctx, containerID, []string{"/usr/sbin/ip", "route", "replace", "default", "via", gatewayIP}); err != nil {
+		return fmt.Errorf("install Docker FUSE policy gateway: %w", err)
+	}
+	return nil
+}
+
+func dockerBridgeGatewayIPv4(network dnetwork.Inspect) (string, error) {
+	var result string
+	for _, item := range network.IPAM.Config {
+		ip := net.ParseIP(item.Gateway)
+		if ip == nil || ip.To4() == nil || ip.String() != item.Gateway {
+			continue
+		}
+		if result != "" {
+			return "", fmt.Errorf("Docker FUSE pair network has multiple IPv4 gateways")
+		}
+		result = item.Gateway
+	}
+	if result == "" {
+		return "", fmt.Errorf("Docker FUSE pair network has no canonical IPv4 gateway")
+	}
+	return result, nil
+}
+
+func (r *Runtime) runFixedRouteControl(ctx context.Context, containerID string, argv []string) error {
 	execResponse, err := r.cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
-		Cmd: argv, User: "root",
+		Cmd: argv, User: "root", WorkingDir: "/",
 	})
 	if err != nil {
 		return fmt.Errorf("create fixed Docker FUSE route control: %w", err)
@@ -69,7 +106,7 @@ func (r *Runtime) execFixed(ctx context.Context, containerID, user string, argv 
 	}
 	execResponse, err := r.cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
 		Cmd: append([]string(nil), argv...), User: user, AttachStdin: len(stdin) != 0,
-		AttachStdout: true, AttachStderr: true,
+		AttachStdout: true, AttachStderr: true, WorkingDir: "/",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create Docker workspace control exec: %w", err)

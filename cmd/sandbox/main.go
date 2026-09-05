@@ -82,8 +82,8 @@ func main() {
 	switch cfg.Runtime.Type {
 	case "docker":
 		if fuseMode {
-			rt, err = docker.NewWithFUSESecrets(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, &docker.FileSecretMaterializer{
-				Root:          "/var/lib/sandbox/workspace-secrets",
+			rt, err = docker.NewWithFUSESecretsAtRoot(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, cfg.Runtime.Docker.WorkspaceSecretRoot, &docker.FileSecretMaterializer{
+				Root:          cfg.Runtime.Docker.WorkspaceSecretRoot,
 				AccessKeyFile: cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile,
 				SecretKeyFile: cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile,
 				CAFile:        cfg.Storage.FileSystem.CAFile,

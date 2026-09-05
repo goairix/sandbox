@@ -51,6 +51,7 @@ type dockerWorkspaceState struct {
 	poisoned      bool
 	cacheVolume   string
 	cacheBytes    int64
+	secretRoot    string
 	systemEgress  runtime.SystemEgressSpec
 }
 
@@ -59,6 +60,7 @@ const (
 	dockerLogicalIDLabel    = "sandbox.logical.id"
 	dockerSystemEgressLabel = "sandbox.system-egress.v1"
 	dockerCacheBytesLabel   = "sandbox.workspace.cache.bytes"
+	dockerSecretRootLabel   = "sandbox.workspace.secret-root"
 	dockerCleanupTimeout    = 30 * time.Second
 )
 
@@ -99,6 +101,13 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 // credential materializer. Legacy callers of New remain unchanged and fail
 // closed if they accidentally request a FUSE runtime.
 func NewWithFUSESecrets(ctx context.Context, host, gatewayImage string, materializer FUSESecretMaterializer) (*Runtime, error) {
+	return NewWithFUSESecretsAtRoot(ctx, host, gatewayImage, dockerWorkspaceSecretRoot, materializer)
+}
+
+// NewWithFUSESecretsAtRoot enables Docker FUSE preparation with a staging root
+// that is visible at the identical absolute path to both sandbox-api and the
+// Docker daemon.
+func NewWithFUSESecretsAtRoot(ctx context.Context, host, gatewayImage, secretRoot string, materializer FUSESecretMaterializer) (*Runtime, error) {
 	runtime, err := New(ctx, host, gatewayImage)
 	if err != nil {
 		return nil, err
@@ -107,6 +116,11 @@ func NewWithFUSESecrets(ctx context.Context, host, gatewayImage string, material
 		_ = runtime.Close()
 		return nil, fmt.Errorf("Docker workspace FUSE secret materializer is required")
 	}
+	if !validDockerWorkspaceSecretRoot(secretRoot) {
+		_ = runtime.Close()
+		return nil, fmt.Errorf("Docker workspace FUSE secret root is invalid")
+	}
+	runtime.secretRoot = secretRoot
 	runtime.secretMaterializer = materializer
 	return runtime, nil
 }
@@ -142,7 +156,7 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		networkID = r.isolatedNetworkID
 	}
 
-	containerID, err := createContainer(ctx, r.cli, spec, networkID)
+	containerID, err := createContainer(ctx, r.cli, spec, networkID, r.effectiveSecretRoot())
 	if err != nil {
 		if pairNetworkID != "" {
 			_ = removeSandboxPair(ctx, r.cli, spec.ID)
@@ -181,7 +195,7 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if spec.WorkspaceFUSE == nil {
 		return nil, runtime.ErrWorkspaceFUSEUnsupported
 	}
-	if _, _, err := createContainerConfig(spec); err != nil {
+	if _, _, err := createContainerConfigWithSecretRoot(spec, r.effectiveSecretRoot()); err != nil {
 		return nil, err
 	}
 	fuse := spec.WorkspaceFUSE
@@ -210,9 +224,10 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	resourceSpec.Labels[dockerLogicalIDLabel] = spec.ID
 	resourceSpec.Labels[dockerSystemEgressLabel] = systemEgressLabel
 	resourceSpec.Labels[dockerCacheBytesLabel] = fmt.Sprintf("%d", cacheBytes)
+	resourceSpec.Labels[dockerSecretRootLabel] = r.effectiveSecretRoot()
 	resourceState := &dockerWorkspaceState{
 		sandboxID: spec.ID, preparationID: preparationID, poolKey: fuse.PoolKey,
-		cacheVolume: fuseCacheVolumeName(preparationID), cacheBytes: cacheBytes, systemEgress: systemEgress,
+		cacheVolume: fuseCacheVolumeName(preparationID), cacheBytes: cacheBytes, secretRoot: r.effectiveSecretRoot(), systemEgress: systemEgress,
 	}
 	tombstoneKey := dockerPreparationStateKey(preparationID)
 	r.storeWorkspaceState(tombstoneKey, resourceState)
@@ -230,7 +245,7 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	cacheVolume := resourceState.cacheVolume
 	if _, err := r.cli.VolumeCreate(ctx, volume.CreateOptions{Name: cacheVolume, Labels: map[string]string{
 		"sandbox.managed": "true", "sandbox.id": preparationID, "sandbox.role": "fuse-cache",
-		dockerPreparationLabel: preparationID, dockerLogicalIDLabel: spec.ID, dockerCacheBytesLabel: fmt.Sprintf("%d", cacheBytes),
+		dockerPreparationLabel: preparationID, dockerLogicalIDLabel: spec.ID, dockerCacheBytesLabel: fmt.Sprintf("%d", cacheBytes), dockerSecretRootLabel: r.effectiveSecretRoot(),
 	}}); err != nil {
 		createErr := fmt.Errorf("create workspace FUSE cache volume: %w", err)
 		verifyCtx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
@@ -244,11 +259,11 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if _, err := r.inspectExactPreparationVolume(ctx, resourceState); err != nil {
 		return nil, r.rollbackPreparation(tombstoneKey, resourceState, fmt.Errorf("verify workspace FUSE cache volume identity: %w", err))
 	}
-	pairNetworkID, _, gatewayIP, err := createFUSESandboxPair(ctx, r.cli, preparationID, r.openNetworkID, r.gatewayImage, systemEgress)
+	pairNetworkID, _, gatewayIP, err := createFUSESandboxPair(ctx, r.cli, preparationID, r.openNetworkID, r.gatewayImage, r.effectiveSecretRoot(), systemEgress)
 	if err != nil {
 		return nil, r.rollbackPreparation(tombstoneKey, resourceState, fmt.Errorf("create workspace system egress gateway: %w", err))
 	}
-	containerID, err := createContainer(ctx, r.cli, resourceSpec, pairNetworkID)
+	containerID, err := createContainer(ctx, r.cli, resourceSpec, pairNetworkID, r.effectiveSecretRoot())
 	if err != nil {
 		verifyCtx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		absent, verifyErr := r.confirmNoFUSERuntime(verifyCtx, preparationID)
@@ -267,7 +282,7 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if err := r.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return nil, cleanupContainer(fmt.Errorf("start workspace FUSE container: %w", err))
 	}
-	if err := r.setupFUSERoute(ctx, containerID, gatewayIP); err != nil {
+	if err := r.setupFUSERoute(ctx, containerID, pairNetworkID, gatewayIP); err != nil {
 		return nil, cleanupContainer(fmt.Errorf("setup workspace FUSE system route: %w", err))
 	}
 	canonicalEndpoint, _, _, err := canonicalDockerFUSEEndpoint(fuse)
@@ -601,6 +616,9 @@ func (r *Runtime) exactWorkspaceState(ctx context.Context, ref runtime.RuntimeRe
 	if err != nil {
 		return nil, err
 	}
+	if err := r.requireCurrentWorkspaceSecretRoot(recovered); err != nil {
+		return nil, err
+	}
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
 	if state := r.ensureWorkspaceStatesLocked()[ref.ID]; state != nil {
@@ -621,7 +639,8 @@ func dockerWorkspaceStateFromLabels(runtimeUID string, labels map[string]string)
 	logicalID := labels[dockerLogicalIDLabel]
 	poolKey := labels["sandbox.pool.key"]
 	cacheBytes, err := strconv.ParseInt(labels[dockerCacheBytesLabel], 10, 64)
-	if runtimeUID == "" || !validDockerPreparationID(preparationID) || labels["sandbox.id"] != preparationID || logicalID == "" || poolKey == "" || cacheBytes <= 0 || err != nil {
+	secretRoot := labels[dockerSecretRootLabel]
+	if runtimeUID == "" || !validDockerPreparationID(preparationID) || labels["sandbox.id"] != preparationID || logicalID == "" || poolKey == "" || cacheBytes <= 0 || err != nil || !validDockerWorkspaceSecretRoot(secretRoot) {
 		return nil, fmt.Errorf("Docker workspace recovery identity is invalid")
 	}
 	systemEgress, err := decodeDockerSystemEgress(labels[dockerSystemEgressLabel])
@@ -630,8 +649,15 @@ func dockerWorkspaceStateFromLabels(runtimeUID string, labels map[string]string)
 	}
 	return &dockerWorkspaceState{
 		runtimeUID: runtimeUID, sandboxID: logicalID, preparationID: preparationID, poolKey: poolKey,
-		cacheVolume: fuseCacheVolumeName(preparationID), cacheBytes: cacheBytes, systemEgress: systemEgress,
+		cacheVolume: fuseCacheVolumeName(preparationID), cacheBytes: cacheBytes, secretRoot: secretRoot, systemEgress: systemEgress,
 	}, nil
+}
+
+func (r *Runtime) requireCurrentWorkspaceSecretRoot(state *dockerWorkspaceState) error {
+	if state == nil || !validDockerWorkspaceSecretRoot(state.secretRoot) || state.secretRoot != r.effectiveSecretRoot() {
+		return fmt.Errorf("Docker workspace secret root changed while managed FUSE resources still exist")
+	}
+	return nil
 }
 
 func systemEgressEqual(a, b runtime.SystemEgressSpec) bool {
@@ -724,6 +750,9 @@ func (r *Runtime) RemovePreparedSandbox(_ context.Context, runtimeID, runtimeUID
 	if err != nil {
 		return runtime.ErrInvalidRuntimeRef
 	}
+	if err := r.requireCurrentWorkspaceSecretRoot(recovered); err != nil {
+		return errors.Join(err, runtime.ErrTerminationUnconfirmed)
+	}
 	if state == nil {
 		state = recovered
 		r.storeWorkspaceState(runtimeID, state)
@@ -762,7 +791,7 @@ func (r *Runtime) RemovePreparedSandbox(_ context.Context, runtimeID, runtimeUID
 }
 
 func sameDockerWorkspaceResourceIdentity(a, b *dockerWorkspaceState) bool {
-	return a != nil && b != nil && a.runtimeUID == b.runtimeUID && a.sandboxID == b.sandboxID && a.preparationID == b.preparationID && a.poolKey == b.poolKey && a.cacheVolume == b.cacheVolume && a.cacheBytes == b.cacheBytes && systemEgressEqual(a.systemEgress, b.systemEgress)
+	return a != nil && b != nil && a.runtimeUID == b.runtimeUID && a.sandboxID == b.sandboxID && a.preparationID == b.preparationID && a.poolKey == b.poolKey && a.cacheVolume == b.cacheVolume && a.cacheBytes == b.cacheBytes && a.secretRoot == b.secretRoot && systemEgressEqual(a.systemEgress, b.systemEgress)
 }
 
 func (r *Runtime) cleanupConfirmedFUSEResources(runtimeID string, state *dockerWorkspaceState) error {
@@ -783,7 +812,7 @@ func (r *Runtime) inspectExactPreparationVolume(ctx context.Context, state *dock
 	if err != nil {
 		return volume.Volume{}, err
 	}
-	if item.Name != state.cacheVolume || item.Labels[dockerPreparationLabel] != state.preparationID || item.Labels["sandbox.role"] != "fuse-cache" || item.Labels[dockerLogicalIDLabel] != state.sandboxID || item.Labels[dockerCacheBytesLabel] != fmt.Sprintf("%d", state.cacheBytes) {
+	if item.Name != state.cacheVolume || item.Labels[dockerPreparationLabel] != state.preparationID || item.Labels["sandbox.role"] != "fuse-cache" || item.Labels[dockerLogicalIDLabel] != state.sandboxID || item.Labels[dockerCacheBytesLabel] != fmt.Sprintf("%d", state.cacheBytes) || item.Labels[dockerSecretRootLabel] != state.secretRoot {
 		return volume.Volume{}, fmt.Errorf("workspace cache volume identity is invalid")
 	}
 	return item, nil
@@ -792,6 +821,9 @@ func (r *Runtime) inspectExactPreparationVolume(ctx context.Context, state *dock
 func (r *Runtime) cleanupPreparationResources(ctx context.Context, state *dockerWorkspaceState) error {
 	if state == nil || state.preparationID == "" || state.cacheVolume != fuseCacheVolumeName(state.preparationID) {
 		return fmt.Errorf("workspace preparation identity is invalid")
+	}
+	if err := r.requireCurrentWorkspaceSecretRoot(state); err != nil {
+		return err
 	}
 	var result error
 	if _, err := r.inspectExactPreparationVolume(ctx, state); err == nil {
@@ -818,7 +850,7 @@ func (r *Runtime) cleanupPreparationResources(ctx context.Context, state *docker
 	}
 	if r.secretMaterializer == nil {
 		result = errors.Join(result, fmt.Errorf("workspace secret materializer is unavailable during cleanup"))
-	} else if err := r.secretMaterializer.RemoveSecret(ctx, filepath.Join(r.effectiveSecretRoot(), state.preparationID)); err != nil {
+	} else if err := r.secretMaterializer.RemoveSecret(ctx, filepath.Join(state.secretRoot, state.preparationID)); err != nil {
 		result = errors.Join(result, err)
 	}
 	return result
@@ -844,6 +876,26 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 	protectedPreparations := make(map[string]struct{})
 	blockedPreparations := make(map[string]struct{})
 	orphanPreparations := make(map[string]*dockerWorkspaceState)
+	addOrphanPreparation := func(state *dockerWorkspaceState) {
+		if err := r.requireCurrentWorkspaceSecretRoot(state); err != nil {
+			result = errors.Join(result, err, runtime.ErrTerminationUnconfirmed)
+			if state != nil && validDockerPreparationID(state.preparationID) {
+				blockedPreparations[state.preparationID] = struct{}{}
+			}
+			return
+		}
+		if existing := orphanPreparations[state.preparationID]; existing != nil {
+			if existing.secretRoot != state.secretRoot {
+				result = errors.Join(result, fmt.Errorf("managed Docker resources disagree on workspace secret root"), runtime.ErrTerminationUnconfirmed)
+				blockedPreparations[state.preparationID] = struct{}{}
+				return
+			}
+			if existing.sandboxID != "" || state.sandboxID == "" {
+				return
+			}
+		}
+		orphanPreparations[state.preparationID] = state
+	}
 	for _, item := range containers {
 		role := item.Labels["sandbox.role"]
 		if role == "gateway" {
@@ -852,10 +904,11 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 				// Its resources are outside this FUSE-only reconciler's authority.
 				continue
 			}
-			if preparationID := item.Labels["sandbox.id"]; validDockerPreparationID(preparationID) {
-				orphanPreparations[preparationID] = cleanupOnlyPreparationState(preparationID)
-			} else {
+			state, stateErr := cleanupOnlyPreparationStateFromLabels(item.Labels)
+			if stateErr != nil {
 				result = errors.Join(result, fmt.Errorf("managed Docker gateway preparation identity is invalid"), runtime.ErrTerminationUnconfirmed)
+			} else {
+				addOrphanPreparation(state)
 			}
 			continue
 		}
@@ -868,6 +921,11 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 			if preparationID := item.Labels["sandbox.id"]; validDockerPreparationID(preparationID) {
 				blockedPreparations[preparationID] = struct{}{}
 			}
+			continue
+		}
+		if rootErr := r.requireCurrentWorkspaceSecretRoot(state); rootErr != nil {
+			result = errors.Join(result, rootErr, runtime.ErrTerminationUnconfirmed)
+			blockedPreparations[state.preparationID] = struct{}{}
 			continue
 		}
 		if _, protected := protectedRuntimeUIDs[item.ID]; protected {
@@ -890,19 +948,18 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 			result = errors.Join(result, stateErr, runtime.ErrTerminationUnconfirmed)
 			continue
 		}
-		orphanPreparations[state.preparationID] = state
+		addOrphanPreparation(state)
 	}
 	networks, err := r.cli.NetworkList(ctx, network.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "sandbox.managed=true"), filters.Arg("label", "sandbox.role=fuse-pair"))})
 	if err != nil {
 		return errors.Join(result, err, runtime.ErrTerminationUnconfirmed)
 	}
 	for _, item := range networks {
-		if preparationID := item.Labels["sandbox.id"]; validDockerPreparationID(preparationID) {
-			if _, exists := orphanPreparations[preparationID]; !exists {
-				orphanPreparations[preparationID] = cleanupOnlyPreparationState(preparationID)
-			}
-		} else {
+		state, stateErr := cleanupOnlyPreparationStateFromLabels(item.Labels)
+		if stateErr != nil {
 			result = errors.Join(result, fmt.Errorf("managed Docker network preparation identity is invalid"), runtime.ErrTerminationUnconfirmed)
+		} else {
+			addOrphanPreparation(state)
 		}
 	}
 	if r.secretMaterializer == nil {
@@ -920,7 +977,7 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 				continue
 			}
 			if _, exists := orphanPreparations[preparationID]; !exists {
-				orphanPreparations[preparationID] = cleanupOnlyPreparationState(preparationID)
+				addOrphanPreparation(cleanupOnlyPreparationState(preparationID, r.effectiveSecretRoot()))
 			}
 		}
 	}
@@ -954,14 +1011,24 @@ func cleanupPreparationStateFromVolume(item *volume.Volume) (*dockerWorkspaceSta
 	}
 	preparationID := item.Labels[dockerPreparationLabel]
 	cacheBytes, err := strconv.ParseInt(item.Labels[dockerCacheBytesLabel], 10, 64)
-	if !validDockerPreparationID(preparationID) || item.Labels["sandbox.id"] != preparationID || item.Name != fuseCacheVolumeName(preparationID) || item.Labels[dockerLogicalIDLabel] == "" || err != nil || cacheBytes <= 0 {
+	secretRoot := item.Labels[dockerSecretRootLabel]
+	if !validDockerPreparationID(preparationID) || item.Labels["sandbox.id"] != preparationID || item.Name != fuseCacheVolumeName(preparationID) || item.Labels[dockerLogicalIDLabel] == "" || err != nil || cacheBytes <= 0 || !validDockerWorkspaceSecretRoot(secretRoot) {
 		return nil, fmt.Errorf("managed Docker cache volume identity is invalid")
 	}
-	return &dockerWorkspaceState{sandboxID: item.Labels[dockerLogicalIDLabel], preparationID: preparationID, cacheVolume: item.Name, cacheBytes: cacheBytes}, nil
+	return &dockerWorkspaceState{sandboxID: item.Labels[dockerLogicalIDLabel], preparationID: preparationID, cacheVolume: item.Name, cacheBytes: cacheBytes, secretRoot: secretRoot}, nil
 }
 
-func cleanupOnlyPreparationState(preparationID string) *dockerWorkspaceState {
-	return &dockerWorkspaceState{preparationID: preparationID, cacheVolume: fuseCacheVolumeName(preparationID)}
+func cleanupOnlyPreparationStateFromLabels(labels map[string]string) (*dockerWorkspaceState, error) {
+	preparationID := labels["sandbox.id"]
+	secretRoot := labels[dockerSecretRootLabel]
+	if !validDockerPreparationID(preparationID) || !validDockerWorkspaceSecretRoot(secretRoot) {
+		return nil, fmt.Errorf("managed Docker preparation identity is invalid")
+	}
+	return cleanupOnlyPreparationState(preparationID, secretRoot), nil
+}
+
+func cleanupOnlyPreparationState(preparationID, secretRoot string) *dockerWorkspaceState {
+	return &dockerWorkspaceState{preparationID: preparationID, cacheVolume: fuseCacheVolumeName(preparationID), secretRoot: secretRoot}
 }
 
 func validDockerPreparationID(value string) bool {

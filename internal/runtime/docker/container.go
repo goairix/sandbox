@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	dockerWorkspaceSecretRoot = "/var/lib/sandbox/fuse-secrets"
+	dockerWorkspaceSecretRoot = "/var/lib/sandbox/workspace-secrets"
 	dockerMounterSecretPath   = "/run/secrets/workspace"
 	dockerMounterCachePath    = "/var/cache/s3fs"
 	dockerMounterRunPath      = "/run/s3fs"
 	dockerWorkspacePath       = "/workspace"
 	dockerRunTmpfsSize        = 16 * 1024 * 1024
+	dockerWorkspaceTmpfsSize  = 64 * 1024
 )
 
 var digestPinnedImagePattern = regexp.MustCompile(`^[^[:space:]@]+@sha256:[0-9a-f]{64}$`)
@@ -51,8 +52,12 @@ func imageForSpec(spec runtime.SandboxSpec) string {
 
 // createContainerConfig builds Docker container configuration from a SandboxSpec.
 func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *container.HostConfig, error) {
+	return createContainerConfigWithSecretRoot(spec, dockerWorkspaceSecretRoot)
+}
+
+func createContainerConfigWithSecretRoot(spec runtime.SandboxSpec, secretRoot string) (*container.Config, *container.HostConfig, error) {
 	if spec.WorkspaceFUSE != nil {
-		return createFUSEContainerConfig(spec)
+		return createFUSEContainerConfig(spec, secretRoot)
 	}
 	config := &container.Config{
 		Image:      imageForSpec(spec),
@@ -124,7 +129,7 @@ func createContainerConfig(spec runtime.SandboxSpec) (*container.Config, *contai
 	return config, hostConfig, nil
 }
 
-func createFUSEContainerConfig(spec runtime.SandboxSpec) (*container.Config, *container.HostConfig, error) {
+func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*container.Config, *container.HostConfig, error) {
 	fuse := spec.WorkspaceFUSE
 	if fuse == nil || fuse.RuntimeType != "docker" || fuse.Driver != "s3fs" {
 		return nil, nil, fmt.Errorf("valid Docker workspace FUSE spec is required")
@@ -134,6 +139,9 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec) (*container.Config, *co
 	}
 	if spec.ID == "" || filepath.Base(spec.ID) != spec.ID || strings.ContainsAny(spec.ID, `/\\`) {
 		return nil, nil, fmt.Errorf("workspace FUSE sandbox ID is invalid")
+	}
+	if !validDockerWorkspaceSecretRoot(secretRoot) {
+		return nil, nil, fmt.Errorf("workspace FUSE secret root is invalid")
 	}
 	securityOpt, err := fuseSecurityOptions(fuse.LSMProfile)
 	if err != nil {
@@ -180,15 +188,20 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec) (*container.Config, *co
 		// execs run as 1000:1000 and cannot retain effective capabilities.
 		CapAdd:      []string{"SYS_ADMIN", "NET_ADMIN"},
 		SecurityOpt: securityOpt,
-		Binds:       []string{filepath.Join(dockerWorkspaceSecretRoot, spec.ID) + ":" + dockerMounterSecretPath + ":ro"},
+		Binds:       []string{filepath.Join(secretRoot, spec.ID) + ":" + dockerMounterSecretPath + ":ro"},
 		Mounts:      []mount.Mount{{Type: mount.TypeVolume, Source: fuseCacheVolumeName(spec.ID), Target: dockerMounterCachePath}},
 		Tmpfs: map[string]string{
 			dockerMounterRunPath: fmt.Sprintf("size=%d,mode=0700", dockerRunTmpfsSize),
+			dockerWorkspacePath:  fmt.Sprintf("size=%d,mode=0555", dockerWorkspaceTmpfsSize),
 			"/tmp":               fmt.Sprintf("size=%d", tmpDiskBytes),
 		},
 		DNS: dns, ExtraHosts: extraHosts,
 	}
 	return config, host, nil
+}
+
+func validDockerWorkspaceSecretRoot(root string) bool {
+	return root != "/" && filepath.IsAbs(root) && filepath.Clean(root) == root
 }
 
 func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []string, error) {
@@ -419,8 +432,8 @@ func int64Ptr(v int64) *int64 {
 }
 
 // createContainer creates a Docker container from spec.
-func createContainer(ctx context.Context, cli dockerAPI, spec runtime.SandboxSpec, networkID string) (string, error) {
-	config, hostConfig, err := createContainerConfig(spec)
+func createContainer(ctx context.Context, cli dockerAPI, spec runtime.SandboxSpec, networkID, secretRoot string) (string, error) {
+	config, hostConfig, err := createContainerConfigWithSecretRoot(spec, secretRoot)
 	if err != nil {
 		return "", err
 	}
