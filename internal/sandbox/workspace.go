@@ -6,19 +6,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"mime"
-
 	"github.com/goairix/fs"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
+
+func validatePublicFUSEFilePath(sb *Sandbox, path string) error {
+	if sb != nil && sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE &&
+		fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(path))) {
+		return ErrReservedFUSEWorkspacePath
+	}
+	return nil
+}
+
+func hideReservedFUSEFileInfos(sb *Sandbox, files []runtime.FileInfo) []runtime.FileInfo {
+	if sb == nil || sb.Workspace == nil || sb.Workspace.MountType != WorkspaceMountFUSE {
+		return files
+	}
+	filtered := files[:0]
+	for _, file := range files {
+		if !fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(file.Name))) &&
+			!fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(file.Path))) {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
+}
 
 // storageWriteOptions returns object-storage metadata based on the file extension.
 func storageWriteOptions(name string) []fs.Option {
@@ -71,7 +94,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 	m.mu.RUnlock()
 
 	if isFUSE {
-		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
+		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceImmutable, sandboxID)
 	}
 	logger.Info(ctx, "MountWorkspace: starting",
 		logger.AddField("sandbox_id", sandboxID),
@@ -145,7 +168,7 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	m.mu.RUnlock()
 
 	if isFUSE {
-		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
+		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceImmutable, sandboxID)
 	}
 	logger.Info(ctx, "UnmountWorkspace: starting",
 		logger.AddField("sandbox_id", sandboxID),
@@ -185,6 +208,29 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 // SyncWorkspace manually syncs files in the given direction.
 // exclude is an optional list of path prefixes to skip during from_container sync.
 func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string, exclude []string) error {
+	if direction != "to_container" && direction != "from_container" {
+		return fmt.Errorf("invalid sync direction: %s", direction)
+	}
+
+	m.mu.RLock()
+	sb := m.sandboxes[sandboxID]
+	isFUSE := sb != nil && sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
+	m.mu.RUnlock()
+
+	if isFUSE {
+		if direction == "to_container" {
+			// A FUSE workspace is already the container's live workspace. Copying
+			// object storage into it would bypass the mount protocol.
+			_, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+			if err != nil {
+				return err
+			}
+			release()
+			return nil
+		}
+		return m.flushFUSEWorkspace(ctx, sandboxID)
+	}
+
 	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return err
@@ -193,12 +239,8 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
 	scoped, hasWS := m.workspaces[sandboxID]
-	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
 	m.mu.RUnlock()
 
-	if isFUSE {
-		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceOperationUnsupported, sandboxID)
-	}
 	logger.Info(ctx, "SyncWorkspace: request received",
 		logger.AddField("sandbox_id", sandboxID),
 		logger.AddField("direction", direction),
@@ -214,8 +256,6 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		syncErr = m.syncToContainer(ctx, scoped, runtimeID)
 	case "from_container":
 		syncErr = m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
-	default:
-		return fmt.Errorf("invalid sync direction: %s", direction)
 	}
 	syncDuration := time.Since(syncStart).Seconds()
 
@@ -236,6 +276,133 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	return syncErr
 }
 
+// flushFUSEWorkspace obtains exclusive admission, drains all existing API
+// streams, and runs the generation-bound quiesce/flush/resume protocol. Any
+// ambiguity permanently closes the gate; admission reopens only after the
+// runtime and manager still agree on the exact runtime generation.
+func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) error {
+	m.mu.RLock()
+	sb := m.sandboxes[sandboxID]
+	gate := m.operationGates[sandboxID]
+	if sb == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	}
+	if sb.Workspace == nil || sb.Workspace.MountType != WorkspaceMountFUSE {
+		m.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
+	}
+	ref := runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID}
+	generation := sb.Workspace.LeaseGeneration
+	m.mu.RUnlock()
+
+	exclusive, err := gate.BeginExclusive(ctx)
+	if err != nil {
+		return fmt.Errorf("begin FUSE workspace flush: %w", err)
+	}
+	reopen := false
+	defer func() {
+		if !reopen {
+			exclusive.Close()
+		}
+	}()
+
+	err = exclusive.withOwnership(func() error {
+		m.mu.Lock()
+		current := m.sandboxes[sandboxID]
+		if !fuseWorkspaceGenerationMatches(current, ref, generation) {
+			m.mu.Unlock()
+			return fmt.Errorf("FUSE workspace runtime generation changed")
+		}
+		current.Workspace.Flushed = false
+		current.UpdatedAt = time.Now()
+		pendingSnapshot := cloneSandbox(current)
+		m.mu.Unlock()
+		if m.sessions != nil {
+			if err := m.sessions.Save(ctx, &pendingSnapshot); err != nil {
+				return fmt.Errorf("persist pending FUSE workspace flush: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	var token runtime.WorkspaceQuiesceToken
+	err = exclusive.withOwnership(func() error {
+		var quiesceErr error
+		token, quiesceErr = m.runtime.QuiesceWorkspace(ctx, ref, generation)
+		return quiesceErr
+	})
+	if err != nil {
+		return fmt.Errorf("quiesce FUSE workspace: %w", err)
+	}
+	if token.RuntimeUID != ref.UID || token.Generation != generation || token.Opaque == "" {
+		return fmt.Errorf("quiesce FUSE workspace returned an invalid generation-bound token")
+	}
+	if err := exclusive.withOwnership(func() error { return m.runtime.FlushWorkspace(ctx, ref, generation) }); err != nil {
+		return fmt.Errorf("flush FUSE workspace: %w", err)
+	}
+	if err := exclusive.withOwnership(func() error { return m.runtime.ResumeWorkspace(ctx, ref, token) }); err != nil {
+		return fmt.Errorf("resume FUSE workspace: %w", err)
+	}
+	var health *runtime.WorkspaceHealth
+	err = exclusive.withOwnership(func() error {
+		var healthErr error
+		health, healthErr = m.runtime.WorkspaceHealth(ctx, ref)
+		return healthErr
+	})
+	if err != nil {
+		return fmt.Errorf("verify FUSE workspace after resume: %w", err)
+	}
+	if health == nil || !health.Ready || health.RuntimeUID != ref.UID || health.Generation != generation || health.MountType != string(WorkspaceMountFUSE) {
+		return fmt.Errorf("FUSE workspace generation changed after resume")
+	}
+	err = exclusive.commit(func() error {
+		now := time.Now()
+		m.mu.Lock()
+		current := m.sandboxes[sandboxID]
+		if !fuseWorkspaceGenerationMatches(current, ref, generation) {
+			m.mu.Unlock()
+			return fmt.Errorf("FUSE workspace runtime generation changed")
+		}
+		snapshot := cloneSandbox(current)
+		snapshot.Workspace.Flushed = true
+		snapshot.Workspace.LastFlushedAt = &now
+		snapshot.UpdatedAt = now
+		m.mu.Unlock()
+		if m.sessions != nil {
+			if err := m.sessions.Save(ctx, &snapshot); err != nil {
+				return fmt.Errorf("persist completed FUSE workspace flush: %w", err)
+			}
+		}
+		m.mu.Lock()
+		current = m.sandboxes[sandboxID]
+		if !fuseWorkspaceGenerationMatches(current, ref, generation) {
+			m.mu.Unlock()
+			return fmt.Errorf("FUSE workspace runtime generation changed")
+		}
+		current.Workspace.Flushed = true
+		current.Workspace.LastFlushedAt = &now
+		current.UpdatedAt = now
+		m.mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reopen FUSE workspace admission: %w", err)
+	}
+	reopen = true
+	return nil
+}
+
+func fuseWorkspaceGenerationMatches(sb *Sandbox, ref runtime.RuntimeRef, generation int64) bool {
+	if sb == nil || sb.Workspace == nil || sb.Workspace.MountType != WorkspaceMountFUSE ||
+		sb.RuntimeID != ref.ID || sb.RuntimeUID != ref.UID || sb.Workspace.LeaseGeneration != generation || generation <= 0 {
+		return false
+	}
+	return true
+}
+
 // GetWorkspaceInfo returns workspace info for a sandbox.
 func (m *Manager) GetWorkspaceInfo(ctx context.Context, sandboxID string) (*WorkspaceInfo, error) {
 	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
@@ -250,6 +417,10 @@ func (m *Manager) GetWorkspaceInfo(ctx context.Context, sandboxID string) (*Work
 	}
 	workspace := *sb.Workspace
 	workspace.SyncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
+	if sb.Workspace.LastFlushedAt != nil {
+		lastFlushedAt := *sb.Workspace.LastFlushedAt
+		workspace.LastFlushedAt = &lastFlushedAt
+	}
 	m.mu.RUnlock()
 	return &workspace, nil
 }

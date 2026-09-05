@@ -136,7 +136,7 @@ func main() {
 		log.Fatalf("failed to start sandbox manager: %v", err)
 	}
 
-	h := handler.NewHandler(mgr)
+	h := handler.NewHandler(mgr, cfg.Security.MaxUploadBytes)
 	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit, cfg.Telemetry.ServiceName)
 	server := api.NewServer(router, cfg.Server.Host, cfg.Server.Port)
 

@@ -1,6 +1,16 @@
 package runtime
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
+)
+
+// ReservedProbeObjectFindPattern is the GNU find -name pattern for precisely
+// the basename shape accepted by fuseprotocol.IsReservedProbeObjectName.
+func ReservedProbeObjectFindPattern() string {
+	return fuseprotocol.ProbeObjectBasenamePrefix + strings.Repeat("[0-9a-f]", 64)
+}
 
 // GlobToFindArgs translates a glob pattern into find command arguments.
 // It handles:

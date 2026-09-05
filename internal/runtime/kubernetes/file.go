@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -21,31 +23,15 @@ import (
 )
 
 // uploadFileToPod uploads a file into a pod via tar stream through exec.
-func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destPath string, reader io.Reader) error {
-	// Read all content
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("read upload content: %w", err)
+func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destPath string, size int64, reader io.Reader) error {
+	if size < 0 {
+		return fmt.Errorf("%w: size must be non-negative", runtime.ErrInvalidUploadSize)
 	}
-
-	// Create tar archive
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := tw.WriteHeader(&tar.Header{
-		Name: destPath,
-		Size: int64(len(content)),
-		Mode: 0644,
-		Uid:  1000,
-		Gid:  1000,
-	}); err != nil {
-		return fmt.Errorf("tar header: %w", err)
-	}
-	if _, err := tw.Write(content); err != nil {
-		return fmt.Errorf("tar write: %w", err)
-	}
-	tw.Close()
-
-	// Extract inside pod
+	tempPath := filepath.Join(filepath.Dir(destPath), ".sandbox-upload-"+uuid.NewString())
+	tarName := strings.TrimPrefix(filepath.Clean(tempPath), "/")
+	command := uploadFileCommand(tempPath, destPath)
+	// Extract into a same-directory temporary file and publish only after the
+	// exact-size tar stream closes successfully.
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -53,7 +39,7 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"tar", "xf", "-", "-C", "/"},
+			Command:   []string{"sh", "-c", command},
 			Stdin:     true,
 			Stdout:    true,
 			Stderr:    true,
@@ -64,11 +50,67 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 		return fmt.Errorf("create executor: %w", err)
 	}
 
-	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  &buf,
+	pr, pw := io.Pipe()
+	writeDone := make(chan error, 1)
+	go func() {
+		writeErr := writeSizedTar(pw, tarName, 0o644, 1000, 1000, size, reader)
+		_ = pw.CloseWithError(writeErr)
+		writeDone <- writeErr
+	}()
+	consumeErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  pr,
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	_ = pr.CloseWithError(consumeErr)
+	writeErr := <-writeDone
+	if errors.Is(writeErr, runtime.ErrInvalidUploadSize) {
+		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
+		return writeErr
+	}
+	if writeErr != nil {
+		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
+		return writeErr
+	}
+	if consumeErr != nil {
+		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
+		return consumeErr
+	}
+	return nil
+}
+
+func uploadFileCommand(tempPath, destPath string) string {
+	return fmt.Sprintf("mkdir -p %s && tar xf - -C / && test ! -d %s && mv -f -- %s %s",
+		shellEscape(filepath.Dir(destPath)), shellEscape(destPath), shellEscape(tempPath), shellEscape(destPath))
+}
+
+func removePartialPodUpload(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, tempPath string) {
+	_, _ = execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{Command: "rm -f -- " + shellEscape(tempPath)})
+}
+
+func writeSizedTar(dst io.Writer, name string, mode int64, uid, gid int, size int64, reader io.Reader) error {
+	if size < 0 {
+		return fmt.Errorf("%w: size must be non-negative", runtime.ErrInvalidUploadSize)
+	}
+	tw := tar.NewWriter(dst)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Size: size, Mode: mode, Uid: uid, Gid: gid}); err != nil {
+		return fmt.Errorf("tar header: %w", err)
+	}
+	if _, err := io.CopyN(tw, reader, size); err != nil {
+		return fmt.Errorf("%w: body shorter than declared size: %v", runtime.ErrInvalidUploadSize, err)
+	}
+	var extra [1]byte
+	n, err := reader.Read(extra[:])
+	if n != 0 || err == nil {
+		return fmt.Errorf("%w: body exceeds declared size", runtime.ErrInvalidUploadSize)
+	}
+	if err != io.EOF {
+		return fmt.Errorf("read upload trailer: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("close tar: %w", err)
+	}
+	return nil
 }
 
 // downloadFileFromPod downloads a file from a pod via tar stream.
@@ -579,6 +621,56 @@ func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 		Page:       page,
 		PageSize:   pageSize,
 	}, nil
+}
+
+// countReservedFilesInPod counts exact reserved probe basenames without
+// materialising matching paths in the API process.
+func countReservedFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, baseDir string, maxDepth int, globPattern string) (int, error) {
+	command := reservedFileCountCommand(baseDir, maxDepth, globPattern)
+	result, err := execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{Command: command, WorkDir: "/workspace"})
+	if err != nil {
+		return 0, fmt.Errorf("count reserved FUSE files: %w", err)
+	}
+	if result == nil {
+		return 0, fmt.Errorf("count reserved FUSE files: runtime returned no result")
+	}
+	if result.ExitCode != 0 {
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return 0, fmt.Errorf("count reserved FUSE files: %s", detail)
+	}
+	var count int
+	if scanned, scanErr := fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &count); scanErr != nil || scanned != 1 || count < 0 {
+		return 0, fmt.Errorf("count reserved FUSE files: invalid count %q", strings.TrimSpace(result.Stdout))
+	}
+	return count, nil
+}
+
+func reservedFileCountCommand(baseDir string, maxDepth int, globPattern string) string {
+	depthArg := ""
+	predicate := "\\( -type f -o -type d \\)"
+	if globPattern == "" {
+		if maxDepth > 0 {
+			depthArg = fmt.Sprintf("-maxdepth %d ", maxDepth)
+		}
+	} else {
+		findArgs, maxDepth1 := runtime.GlobToFindArgs(globPattern)
+		if maxDepth1 {
+			depthArg = "-maxdepth 1 "
+		}
+		predicate = fmt.Sprintf("\\( %s \\) -type f", findArgs)
+	}
+	findCommand := fmt.Sprintf(
+		"find %s -mindepth 1 %s%s -name %s -printf '.\\n'",
+		shellEscape(baseDir), depthArg, predicate, shellEscape(runtime.ReservedProbeObjectFindPattern()),
+	)
+	return fmt.Sprintf(
+		"{ %s; sandbox_find_status=$?; printf 'sandbox-find-status:%%d\\n' \"$sandbox_find_status\"; } | "+
+			"awk '/^sandbox-find-status:/ { status=$0; sub(/^sandbox-find-status:/, \"\", status); seen=1; if (status != 0) exit status; print count+0; next } { count++ } END { if (!seen) exit 125 }'",
+		findCommand,
+	)
 }
 
 // readFileLinesInPod reads a range of lines from a file inside a pod.

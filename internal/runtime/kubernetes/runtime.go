@@ -1746,8 +1746,8 @@ func (r *Runtime) ExecPipe(ctx context.Context, id string, cmd []string, stdin i
 	return execPipeInPod(ctx, r.client, r.restConfig, r.namespace, id, cmd, stdin)
 }
 
-func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, reader io.Reader) error {
-	return uploadFileToPod(ctx, r.client, r.restConfig, r.namespace, id, destPath, reader)
+func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error {
+	return uploadFileToPod(ctx, r.client, r.restConfig, r.namespace, id, destPath, size, reader)
 }
 
 func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
@@ -1772,6 +1772,10 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 
 func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, pattern string, page int, pageSize int) (*runtime.FileListResult, error) {
 	return globFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, baseDir, pattern, page, pageSize)
+}
+
+func (r *Runtime) CountReservedFiles(ctx context.Context, id, baseDir string, maxDepth int, globPattern string) (int, error) {
+	return countReservedFilesInPod(ctx, r.client, r.restConfig, r.namespace, id, baseDir, maxDepth, globPattern)
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {

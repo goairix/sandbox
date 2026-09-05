@@ -19,9 +19,17 @@ var (
 	// workspace but none exists.
 	ErrNoWorkspaceMounted = errors.New("no workspace mounted")
 
-	// ErrFUSEWorkspaceOperationUnsupported prevents legacy copy-sync workspace
-	// APIs from mutating the lifecycle of a runtime-bound FUSE workspace.
-	ErrFUSEWorkspaceOperationUnsupported = errors.New("legacy workspace operation is unsupported for FUSE sandbox")
+	// ErrFUSEWorkspaceImmutable prevents public mount APIs from mutating the
+	// lifecycle of a runtime-bound FUSE workspace.
+	ErrFUSEWorkspaceImmutable = errors.New("FUSE workspace mount is immutable")
+
+	// ErrFUSEWorkspaceOperationUnsupported is kept as a compatibility alias.
+	// New callers should use ErrFUSEWorkspaceImmutable.
+	ErrFUSEWorkspaceOperationUnsupported = ErrFUSEWorkspaceImmutable
+
+	// ErrReservedFUSEWorkspacePath prevents public file APIs from exposing the
+	// exact internal probe object used by the FUSE propagation protocol.
+	ErrReservedFUSEWorkspacePath = errors.New("path is reserved by the FUSE workspace protocol")
 
 	// ErrWorkspaceAcquireCleanupUnconfirmed means lease acquisition failed and
 	// exact compensation could not prove that every provisional write vanished.

@@ -17,13 +17,24 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	manager *sandbox.Manager
+	manager        *sandbox.Manager
+	maxUploadBytes int64
 }
 
+const defaultMaxUploadBytes int64 = 2 << 30
+
 // NewHandler creates a new Handler.
-func NewHandler(mgr *sandbox.Manager) *Handler {
-	return &Handler{manager: mgr}
+func NewHandler(mgr *sandbox.Manager, maxUploadBytes ...int64) *Handler {
+	limit := defaultMaxUploadBytes
+	if len(maxUploadBytes) > 0 && maxUploadBytes[0] > 0 {
+		limit = maxUploadBytes[0]
+	}
+	return &Handler{manager: mgr, maxUploadBytes: limit}
 }
+
+// MaxUploadBytes is the configured payload limit for the direct streaming
+// upload route. It excludes bounded multipart framing overhead.
+func (h *Handler) MaxUploadBytes() int64 { return h.maxUploadBytes }
 
 // internalError records the error on the current span and responds with the
 // appropriate HTTP status code and error code. context.Canceled is silently
@@ -35,6 +46,12 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, sandbox.ErrSandboxNotReady):
+		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{
+			Code:    "SANDBOX_NOT_READY",
+			Message: err.Error(),
+		})
+		return
 	case errors.Is(err, sandbox.ErrInvalidExecTimeout):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Code:    "INVALID_EXEC_TIMEOUT",
@@ -53,6 +70,12 @@ func internalError(c *gin.Context, err error) {
 			Message: err.Error(),
 		})
 		return
+	case errors.Is(err, runtime.ErrInvalidUploadSize):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "INVALID_UPLOAD_SIZE",
+			Message: err.Error(),
+		})
+		return
 	case errors.Is(err, sandbox.ErrSandboxNotFound):
 		c.JSON(http.StatusNotFound, types.ErrorResponse{
 			Code:    "SANDBOX_NOT_FOUND",
@@ -68,6 +91,24 @@ func internalError(c *gin.Context, err error) {
 	case errors.Is(err, sandbox.ErrWorkspaceAlreadyMounted):
 		c.JSON(http.StatusConflict, types.ErrorResponse{
 			Code:    "WORKSPACE_ALREADY_MOUNTED",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrFUSEWorkspaceImmutable):
+		c.JSON(http.StatusConflict, types.ErrorResponse{
+			Code:    "FUSE_WORKSPACE_IMMUTABLE",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrWorkspaceOwned):
+		c.JSON(http.StatusConflict, types.ErrorResponse{
+			Code:    "WORKSPACE_OWNED",
+			Message: err.Error(),
+		})
+		return
+	case errors.Is(err, sandbox.ErrReservedFUSEWorkspacePath):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "RESERVED_WORKSPACE_PATH",
 			Message: err.Error(),
 		})
 		return

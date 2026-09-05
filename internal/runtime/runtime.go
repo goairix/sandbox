@@ -14,6 +14,10 @@ var ErrNotFound = errors.New("sandbox not found")
 // ErrFileNotFound is returned when the target file does not exist inside the sandbox.
 var ErrFileNotFound = errors.New("file not found")
 
+// ErrInvalidUploadSize is returned when the declared upload size is negative
+// or does not exactly match the streamed body.
+var ErrInvalidUploadSize = errors.New("invalid upload size")
+
 // ErrWorkspaceFUSEUnsupported is returned by runtimes that do not yet
 // implement the trusted FUSE control contract.
 var ErrWorkspaceFUSEUnsupported = errors.New("workspace FUSE is unsupported")
@@ -68,6 +72,15 @@ type PreparedSandboxRemover interface {
 // restored state and supplied the complete set of protected runtime UIDs.
 type OrphanReconciler interface {
 	ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error
+}
+
+// ReservedFileCounter counts exact reserved FUSE probe basenames within the
+// same scope as a public recursive or glob listing. An empty globPattern means
+// the recursive listing semantics (files and directories); otherwise it means
+// the file-only GlobFiles semantics. Implementations must keep result memory
+// bounded rather than returning every matching path to the manager.
+type ReservedFileCounter interface {
+	CountReservedFiles(ctx context.Context, id, baseDir string, maxDepth int, globPattern string) (int, error)
 }
 
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).

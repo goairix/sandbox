@@ -1,7 +1,9 @@
 package api
 
 import (
+	"math"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -12,11 +14,40 @@ import (
 // BodySizeLimit returns a middleware that limits the size of request bodies.
 func BodySizeLimit(maxBytes int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request.ContentLength > maxBytes {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return
+		}
 		if c.Request.Body != nil {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 		}
 		c.Next()
 	}
+}
+
+func routeAwareBodySizeLimit(defaultMaxBytes, uploadMaxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		limit := defaultMaxBytes
+		if directUploadRoute(c.Request.Method, c.Request.URL.Path) {
+			// Permit bounded multipart framing in addition to the configured file
+			// payload. The handler separately enforces the exact declared size.
+			if uploadMaxBytes > math.MaxInt64-(1<<20) {
+				limit = math.MaxInt64
+			} else {
+				limit = uploadMaxBytes + (1 << 20)
+			}
+		}
+		BodySizeLimit(limit)(c)
+	}
+}
+
+func directUploadRoute(method, requestPath string) bool {
+	if method != http.MethodPost || strings.HasSuffix(requestPath, "/") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(requestPath, "/"), "/")
+	return len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "sandboxes" &&
+		parts[3] != "" && parts[4] == "files" && parts[5] == "upload"
 }
 
 // SetupRouter configures all routes.
@@ -34,8 +65,9 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	// Limit multipart memory to 32MB
 	r.MaxMultipartMemory = 32 << 20
 
-	// Limit request body size to 64MB
-	r.Use(BodySizeLimit(64 << 20))
+	// Preserve the 64 MiB cap everywhere except the exact direct streaming
+	// upload route, whose payload cap comes from security.max_upload_bytes.
+	r.Use(routeAwareBodySizeLimit(64<<20, h.MaxUploadBytes()))
 
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.Auth(apiKey))

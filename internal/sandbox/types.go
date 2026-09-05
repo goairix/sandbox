@@ -102,6 +102,8 @@ type WorkspaceInfo struct {
 	FUSEPoolKey          string              `json:"fuse_pool_key,omitempty"`
 	FUSEReservationToken string              `json:"fuse_reservation_token,omitempty"`
 	FUSERecordRevision   uint64              `json:"fuse_record_revision,omitempty"`
+	Flushed              bool                `json:"flushed,omitempty"`
+	LastFlushedAt        *time.Time          `json:"last_flushed_at,omitempty"`
 }
 
 // SandboxConfig holds all configuration for creating a sandbox.

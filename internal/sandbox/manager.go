@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
@@ -1059,6 +1060,10 @@ func cloneSandbox(sb *Sandbox) Sandbox {
 	if sb.Workspace != nil {
 		workspace := *sb.Workspace
 		workspace.SyncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
+		if sb.Workspace.LastFlushedAt != nil {
+			lastFlushedAt := *sb.Workspace.LastFlushedAt
+			workspace.LastFlushedAt = &lastFlushedAt
+		}
 		clone.Workspace = &workspace
 	}
 	return clone
@@ -1091,13 +1096,20 @@ func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sand
 				m.mu.RUnlock()
 				return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 			}
+			m.mu.RUnlock()
 			release, err := gate.Acquire()
 			if err != nil {
-				m.mu.RUnlock()
 				return nil, nil, fmt.Errorf("%w: %s", err, id)
 			}
+			m.mu.RLock()
+			current := m.sandboxes[id]
+			if current == nil || current != sb || m.operationGates[id] != gate || current.Workspace == nil || current.Workspace.MountType != WorkspaceMountFUSE {
+				m.mu.RUnlock()
+				release()
+				return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
+			}
 			m.mu.RUnlock()
-			return sb, release, nil
+			return current, release, nil
 		}
 		m.mu.RUnlock()
 		return sb, func() {}, nil
@@ -1511,6 +1523,9 @@ func (m *Manager) UploadFile(ctx context.Context, id, destPath string, size int6
 		return err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, destPath); err != nil {
+		return err
+	}
 
 	runtimeID := m.sandboxRuntimeID(sb)
 	if err := m.runtime.UploadFile(ctx, runtimeID, destPath, size, reader); err != nil {
@@ -1530,6 +1545,10 @@ func (m *Manager) DownloadFile(ctx context.Context, id string, srcPath string) (
 
 	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := validatePublicFUSEFilePath(sb, srcPath); err != nil {
+		release()
 		return nil, err
 	}
 
@@ -1559,6 +1578,10 @@ func (m *Manager) ReadFileContent(ctx context.Context, id string, srcPath string
 	if err != nil {
 		return nil, err
 	}
+	if err := validatePublicFUSEFilePath(sb, srcPath); err != nil {
+		release()
+		return nil, err
+	}
 
 	runtimeID := m.sandboxRuntimeID(sb)
 	rc, err := m.runtime.ReadFileContent(ctx, runtimeID, srcPath)
@@ -1586,6 +1609,10 @@ func (m *Manager) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 	if err != nil {
 		return nil, err
 	}
+	if err := validatePublicFUSEFilePath(sb, pattern); err != nil {
+		release()
+		return nil, err
+	}
 	runtimeID := m.sandboxRuntimeID(sb)
 	files, err := m.runtime.GlobInfo(ctx, runtimeID, pattern)
 	if err != nil {
@@ -1596,6 +1623,19 @@ func (m *Manager) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		}
 		release()
 		return files, err
+	}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		filtered := files[:0]
+		for _, file := range files {
+			if fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(file.Path))) {
+				if file.Content != nil {
+					_ = file.Content.Close()
+				}
+				continue
+			}
+			filtered = append(filtered, file)
+		}
+		files = filtered
 	}
 	return holdGateForFileContents(files, release), nil
 }
@@ -1610,6 +1650,12 @@ func (m *Manager) DownloadFiles(ctx context.Context, id string, paths []string) 
 	sb, release, err := m.acquireSandboxOperation(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	for _, path := range paths {
+		if err := validatePublicFUSEFilePath(sb, path); err != nil {
+			release()
+			return nil, err
+		}
 	}
 
 	runtimeID := m.sandboxRuntimeID(sb)
@@ -1633,8 +1679,11 @@ func (m *Manager) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 		return nil, err
 	}
 	defer release()
-
-	return m.runtime.ListFiles(ctx, m.sandboxRuntimeID(sb), dirPath)
+	if err := validatePublicFUSEFilePath(sb, dirPath); err != nil {
+		return nil, err
+	}
+	files, err := m.runtime.ListFiles(ctx, m.sandboxRuntimeID(sb), dirPath)
+	return hideReservedFUSEFileInfos(sb, files), err
 }
 
 // ListFilesRecursive lists files recursively in a sandbox directory.
@@ -1644,7 +1693,20 @@ func (m *Manager) ListFilesRecursive(ctx context.Context, id string, dirPath str
 		return nil, err
 	}
 	defer release()
-	return m.runtime.ListFilesRecursive(ctx, m.sandboxRuntimeID(sb), dirPath, maxDepth, page, pageSize)
+	if err := validatePublicFUSEFilePath(sb, dirPath); err != nil {
+		return nil, err
+	}
+	runtimeID := m.sandboxRuntimeID(sb)
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		hiddenCount, probeErr := m.countReservedFUSEFiles(ctx, runtimeID, dirPath, maxDepth, "")
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		return collectAndPaginateVisibleFUSEFiles(page, pageSize, hiddenCount, func(fetchPage, fetchPageSize int) (*runtime.FileListResult, error) {
+			return m.runtime.ListFilesRecursive(ctx, runtimeID, dirPath, maxDepth, fetchPage, fetchPageSize)
+		})
+	}
+	return m.runtime.ListFilesRecursive(ctx, runtimeID, dirPath, maxDepth, page, pageSize)
 }
 
 // GlobFiles finds files matching a glob pattern in a sandbox directory.
@@ -1654,7 +1716,90 @@ func (m *Manager) GlobFiles(ctx context.Context, id string, baseDir string, patt
 		return nil, err
 	}
 	defer release()
-	return m.runtime.GlobFiles(ctx, m.sandboxRuntimeID(sb), baseDir, pattern, page, pageSize)
+	if err := validatePublicFUSEFilePath(sb, baseDir); err != nil {
+		return nil, err
+	}
+	runtimeID := m.sandboxRuntimeID(sb)
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		hiddenCount, probeErr := m.countReservedFUSEFiles(ctx, runtimeID, baseDir, 0, pattern)
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		return collectAndPaginateVisibleFUSEFiles(page, pageSize, hiddenCount, func(fetchPage, fetchPageSize int) (*runtime.FileListResult, error) {
+			return m.runtime.GlobFiles(ctx, runtimeID, baseDir, pattern, fetchPage, fetchPageSize)
+		})
+	}
+	return m.runtime.GlobFiles(ctx, runtimeID, baseDir, pattern, page, pageSize)
+}
+
+func collectAndPaginateVisibleFUSEFiles(page, pageSize, expectedHidden int, fetch func(int, int) (*runtime.FileListResult, error)) (*runtime.FileListResult, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 100
+	}
+	const minScanPageSize = 128
+	scanPageSize := pageSize
+	if scanPageSize < minScanPageSize {
+		scanPageSize = minScanPageSize
+	}
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	visibleIndex := 0
+	rawScanned := 0
+	rawTotal := -1
+	visible := make([]runtime.FileInfo, 0, pageSize)
+	for fetchPage := 1; ; fetchPage++ {
+		result, err := fetch(fetchPage, scanPageSize)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return nil, fmt.Errorf("runtime returned no file list result")
+		}
+		if rawTotal < 0 {
+			rawTotal = result.TotalCount
+		}
+		for _, file := range result.Files {
+			rawScanned++
+			if !fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(file.Name))) &&
+				!fuseprotocol.IsReservedProbeObjectName(filepath.Base(filepath.Clean(file.Path))) {
+				if visibleIndex >= start && visibleIndex < end {
+					visible = append(visible, file)
+				}
+				visibleIndex++
+			}
+		}
+		if len(visible) == pageSize || len(result.Files) == 0 || len(result.Files) < scanPageSize || (rawTotal >= 0 && rawScanned >= rawTotal) {
+			break
+		}
+	}
+	visibleTotal := rawTotal - expectedHidden
+	if visibleTotal < 0 {
+		visibleTotal = 0
+	}
+	return &runtime.FileListResult{
+		Files:      visible,
+		TotalCount: visibleTotal,
+		Page:       page,
+		PageSize:   pageSize,
+	}, nil
+}
+
+func (m *Manager) countReservedFUSEFiles(ctx context.Context, runtimeID, baseDir string, maxDepth int, globPattern string) (int, error) {
+	counter, ok := m.runtime.(runtime.ReservedFileCounter)
+	if !ok {
+		return 0, fmt.Errorf("count reserved FUSE files: runtime does not support bounded reserved-file counting")
+	}
+	count, err := counter.CountReservedFiles(ctx, runtimeID, baseDir, maxDepth, globPattern)
+	if err != nil {
+		return 0, fmt.Errorf("count reserved FUSE files: %w", err)
+	}
+	if count < 0 {
+		return 0, fmt.Errorf("count reserved FUSE files: runtime returned negative count")
+	}
+	return count, nil
 }
 
 // FileExists reports whether a regular file exists at the given path inside the sandbox.
@@ -1665,6 +1810,9 @@ func (m *Manager) FileExists(ctx context.Context, id string, filePath string) er
 		return err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, filePath); err != nil {
+		return err
+	}
 	return m.runtime.FileExists(ctx, m.sandboxRuntimeID(sb), filePath)
 }
 
@@ -1675,6 +1823,9 @@ func (m *Manager) ReadFileLines(ctx context.Context, id string, filePath string,
 		return nil, err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, filePath); err != nil {
+		return nil, err
+	}
 	result, err := m.runtime.ReadFileLines(ctx, m.sandboxRuntimeID(sb), filePath, startLine, endLine)
 	if err != nil {
 		metrics.RecordFileOp(ctx, "read_lines", "error")
@@ -1697,6 +1848,9 @@ func (m *Manager) EditFile(ctx context.Context, id string, filePath string, oldS
 		return err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, filePath); err != nil {
+		return err
+	}
 	if err := m.runtime.EditFile(ctx, m.sandboxRuntimeID(sb), filePath, oldStr, newStr, replaceAll); err != nil {
 		metrics.RecordFileOp(ctx, "edit", "error")
 		return err
@@ -1718,6 +1872,9 @@ func (m *Manager) EditFileLines(ctx context.Context, id string, filePath string,
 		return err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, filePath); err != nil {
+		return err
+	}
 	if err := m.runtime.EditFileLines(ctx, m.sandboxRuntimeID(sb), filePath, startLine, endLine, newContent); err != nil {
 		metrics.RecordFileOp(ctx, "edit_lines", "error")
 		return err
@@ -2276,6 +2433,9 @@ func (m *Manager) InitMultipartUpload(ctx context.Context, sandboxID, destPath s
 		return "", err
 	}
 	defer release()
+	if err := validatePublicFUSEFilePath(sb, destPath); err != nil {
+		return "", err
+	}
 	runtimeID := m.sandboxRuntimeID(sb)
 
 	uploadID := uuid.New().String()
@@ -2388,6 +2548,9 @@ func (m *Manager) CompleteMultipartUpload(ctx context.Context, sandboxID, upload
 	runtimeID := m.sandboxRuntimeID(sb)
 	st, err := m.loadMultipartState(ctx, sandboxID, uploadID)
 	if err != nil {
+		return "", 0, err
+	}
+	if err := validatePublicFUSEFilePath(sb, st.DestPath); err != nil {
 		return "", 0, err
 	}
 	if st.ReceivedChunks != st.TotalChunks {

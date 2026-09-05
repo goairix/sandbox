@@ -2,9 +2,12 @@ package handler
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +18,39 @@ import (
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
+
+var errStreamingMultipartPath = errors.New("streaming upload path must only be provided in the query")
+
+type declaredUploadPartReader struct {
+	part      io.Reader
+	multipart *multipart.Reader
+	done      bool
+}
+
+func (r *declaredUploadPartReader) Read(p []byte) (int, error) {
+	n, err := r.part.Read(p)
+	if n > 0 {
+		return n, nil
+	}
+	if !errors.Is(err, io.EOF) || r.done {
+		return n, err
+	}
+	r.done = true
+	for {
+		part, nextErr := r.multipart.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			return 0, io.EOF
+		}
+		if nextErr != nil {
+			return 0, fmt.Errorf("validate trailing multipart data: %w", nextErr)
+		}
+		if part.FormName() == "path" {
+			_ = part.Close()
+			return 0, errStreamingMultipartPath
+		}
+		_ = part.Close()
+	}
+}
 
 // validateSandboxPath checks that the path does not contain ".." and starts with
 // an allowed prefix (/workspace/ or /tmp/). This prevents path traversal attacks.
@@ -35,62 +71,168 @@ func (h *Handler) UploadFile(c *gin.Context) {
 	defer span.End()
 
 	id := c.Param("id")
-	destPath := c.DefaultPostForm("path", "/workspace/")
+	declaredHeader := strings.TrimSpace(c.GetHeader("X-Sandbox-File-Size"))
+	hasDeclaredSize := declaredHeader != ""
+	var declaredSize int64
+	var err error
+	if hasDeclaredSize {
+		declaredSize, err = strconv.ParseInt(declaredHeader, 10, 64)
+		if err != nil || declaredSize < 0 {
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "X-Sandbox-File-Size must be a non-negative integer"})
+			return
+		}
+		if declaredSize > h.maxUploadBytes {
+			c.JSON(http.StatusRequestEntityTooLarge, types.ErrorResponse{Message: "declared file size exceeds upload limit"})
+			return
+		}
+	}
 
-	file, header, err := c.Request.FormFile("file")
+	multipartReader, err := c.Request.MultipartReader()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Message: "file is required",
-		})
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "multipart form data is required"})
 		return
 	}
-	defer func() { _ = file.Close() }()
 
 	sb, err := h.manager.Get(spanCtx, id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, types.ErrorResponse{
-			Message: err.Error(),
-		})
+		internalError(c, err)
 		return
 	}
 	_ = sb // used to confirm sandbox exists
 
-	// Sanitize filename to prevent path traversal via filename
-	safeFilename := filepath.Base(header.Filename)
-	if safeFilename == "." || safeFilename == "/" {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Message: "invalid filename",
-		})
+	destPath := c.Query("path")
+	if hasDeclaredSize && destPath == "" {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "streaming upload requires path query parameter"})
 		return
 	}
+	if destPath == "" {
+		destPath = "/workspace/"
+	}
+	var legacyFile *os.File
+	var legacyFilename string
+	defer func() {
+		if legacyFile != nil {
+			name := legacyFile.Name()
+			_ = legacyFile.Close()
+			_ = os.Remove(name)
+		}
+	}()
+	for {
+		part, nextErr := multipartReader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "invalid multipart upload"})
+			return
+		}
+		if part.FormName() == "path" {
+			if hasDeclaredSize {
+				_ = part.Close()
+				c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: errStreamingMultipartPath.Error()})
+				return
+			}
+			value, readErr := io.ReadAll(io.LimitReader(part, 4097))
+			_ = part.Close()
+			if readErr != nil || len(value) > 4096 || len(value) == 0 {
+				c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "invalid upload path"})
+				return
+			}
+			destPath = string(value)
+			continue
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
 
-	fullPath := destPath
-	if fullPath == "" {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Message: "path must not be empty",
-		})
+		safeFilename := filepath.Base(part.FileName())
+		if safeFilename == "." || safeFilename == "/" {
+			_ = part.Close()
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "invalid filename"})
+			return
+		}
+		if hasDeclaredSize {
+			fullPath, pathErr := uploadDestination(destPath, safeFilename)
+			if pathErr != nil {
+				_ = part.Close()
+				c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: pathErr.Error()})
+				return
+			}
+			stream := &declaredUploadPartReader{part: part, multipart: multipartReader}
+			if err := h.manager.UploadFile(spanCtx, id, fullPath, declaredSize, stream); err != nil {
+				_ = part.Close()
+				if errors.Is(err, errStreamingMultipartPath) {
+					c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: errStreamingMultipartPath.Error()})
+					return
+				}
+				internalError(c, err)
+				return
+			}
+			_ = part.Close()
+			c.JSON(http.StatusOK, types.FileUploadResponse{Path: fullPath, Size: declaredSize})
+			return
+		}
+
+		if legacyFile != nil {
+			_ = part.Close()
+			c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "only one file part is allowed"})
+			return
+		}
+		legacyFile, err = os.CreateTemp("", "sandbox-upload-*")
+		if err != nil {
+			_ = part.Close()
+			internalError(c, fmt.Errorf("create upload spool: %w", err))
+			return
+		}
+		legacyLimit := int64(64 << 20)
+		if h.maxUploadBytes < legacyLimit {
+			legacyLimit = h.maxUploadBytes
+		}
+		declaredSize, err = io.Copy(legacyFile, io.LimitReader(part, legacyLimit+1))
+		_ = part.Close()
+		if err != nil {
+			internalError(c, fmt.Errorf("spool upload: %w", err))
+			return
+		}
+		if declaredSize > legacyLimit {
+			c.JSON(http.StatusRequestEntityTooLarge, types.ErrorResponse{Message: "uploads larger than 64 MiB require X-Sandbox-File-Size"})
+			return
+		}
+		legacyFilename = safeFilename
+	}
+	if legacyFile == nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: "file is required"})
 		return
 	}
-	if fullPath[len(fullPath)-1] == '/' {
-		fullPath += safeFilename
-	}
-
-	if err := validateSandboxPath(fullPath); err != nil {
-		c.JSON(http.StatusBadRequest, types.ErrorResponse{
-			Message: err.Error(),
-		})
+	fullPath, err := uploadDestination(destPath, legacyFilename)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
-	if err := h.manager.UploadFile(spanCtx, id, fullPath, header.Size, file); err != nil {
+	if _, err := legacyFile.Seek(0, io.SeekStart); err != nil {
+		internalError(c, fmt.Errorf("rewind upload spool: %w", err))
+		return
+	}
+	if err := h.manager.UploadFile(spanCtx, id, fullPath, declaredSize, legacyFile); err != nil {
 		internalError(c, err)
 		return
 	}
+	c.JSON(http.StatusOK, types.FileUploadResponse{Path: fullPath, Size: declaredSize})
+}
 
-	c.JSON(http.StatusOK, types.FileUploadResponse{
-		Path: fullPath,
-		Size: header.Size,
-	})
+func uploadDestination(destPath, filename string) (string, error) {
+	if destPath == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	fullPath := destPath
+	if fullPath[len(fullPath)-1] == '/' {
+		fullPath += filename
+	}
+	if err := validateSandboxPath(fullPath); err != nil {
+		return "", err
+	}
+	return fullPath, nil
 }
 
 func (h *Handler) DownloadFile(c *gin.Context) {
@@ -112,7 +254,6 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 		})
 		return
 	}
-
 	tarStream, err := h.manager.DownloadFile(spanCtx, id, path)
 	if err != nil {
 		internalError(c, err)
@@ -165,7 +306,6 @@ func (h *Handler) ReadFile(c *gin.Context) {
 		})
 		return
 	}
-
 	reader, err := h.manager.ReadFileContent(spanCtx, id, path)
 	if err != nil {
 		internalError(c, err)
@@ -190,7 +330,6 @@ func (h *Handler) ListFiles(c *gin.Context) {
 		})
 		return
 	}
-
 	files, err := h.manager.ListFiles(spanCtx, id, dir)
 	if err != nil {
 		internalError(c, err)
@@ -207,7 +346,6 @@ func (h *Handler) ListFiles(c *gin.Context) {
 			ModTime: f.ModTime,
 		})
 	}
-
 	c.JSON(http.StatusOK, types.FileListResponse{
 		Files: fileInfos,
 		Path:  dir,
@@ -230,7 +368,6 @@ func (h *Handler) ListFilesRecursive(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	page := req.Page
 	if page < 1 {
 		page = 1
@@ -258,7 +395,6 @@ func (h *Handler) ListFilesRecursive(c *gin.Context) {
 			ModTime: f.ModTime,
 		})
 	}
-
 	c.JSON(http.StatusOK, types.ListFilesRecursiveResponse{
 		Files:      fileInfos,
 		Path:       req.Path,
@@ -284,7 +420,6 @@ func (h *Handler) GlobFiles(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	page := req.Page
 	if page < 1 {
 		page = 1
@@ -312,7 +447,6 @@ func (h *Handler) GlobFiles(c *gin.Context) {
 			ModTime: f.ModTime,
 		})
 	}
-
 	c.JSON(http.StatusOK, types.GlobFilesResponse{
 		Files:      fileInfos,
 		Path:       req.Path,
@@ -339,7 +473,6 @@ func (h *Handler) ReadFileLines(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	result, err := h.manager.ReadFileLines(spanCtx, id, req.Path, req.StartLine, req.EndLine)
 	if err != nil {
 		internalError(c, err)
@@ -370,7 +503,6 @@ func (h *Handler) EditFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	if err := h.manager.EditFile(spanCtx, id, req.Path, req.OldStr, req.NewStr, req.ReplaceAll); err != nil {
 		internalError(c, err)
 		return
@@ -395,7 +527,6 @@ func (h *Handler) EditFileLines(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	if err := h.manager.EditFileLines(spanCtx, id, req.Path, req.StartLine, req.EndLine, req.NewContent); err != nil {
 		internalError(c, err)
 		return
@@ -419,7 +550,6 @@ func (h *Handler) InitMultipartUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Message: err.Error()})
 		return
 	}
-
 	uploadID, err := h.manager.InitMultipartUpload(spanCtx, id, req.Path, req.TotalChunks)
 	if err != nil {
 		internalError(c, err)

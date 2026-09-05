@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/pkg/types"
@@ -51,6 +52,51 @@ func TestInternalErrorInvalidExecTimeout(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.JSONEq(t, `{"code":"INVALID_EXEC_TIMEOUT","message":"timeout=601: invalid execution timeout"}`, recorder.Body.String())
+}
+
+func TestInternalErrorFUSEWorkspaceConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "immutable", err: sandbox.ErrFUSEWorkspaceImmutable, code: "FUSE_WORKSPACE_IMMUTABLE"},
+		{name: "owned", err: sandbox.ErrWorkspaceOwned, code: "WORKSPACE_OWNED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/id/workspace/mount", nil)
+
+			internalError(c, tc.err)
+
+			assert.Equal(t, http.StatusConflict, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), tc.code)
+		})
+	}
+}
+
+func TestInternalErrorSandboxNotReadyIsServiceUnavailable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/id/files/read", nil)
+
+	require.NotPanics(t, func() { internalError(c, sandbox.ErrSandboxNotReady) })
+
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "SANDBOX_NOT_READY")
+}
+
+func TestHandleSkillNotReadyUsesServiceUnavailable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/id/skills", nil)
+
+	handled := handleSkillNotReady(c, fmt.Errorf("skill read: %w", sandbox.ErrSandboxNotReady))
+
+	require.True(t, handled)
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "SANDBOX_NOT_READY")
 }
 
 func TestStreamErrorData(t *testing.T) {

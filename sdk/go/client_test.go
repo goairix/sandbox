@@ -186,7 +186,15 @@ func TestClientSyncWorkspace(t *testing.T) {
 }
 
 func TestClientGetWorkspaceInfo(t *testing.T) {
-	want := sandbox.WorkspaceInfoResponse{Mounted: true, RootPath: "/data/user123"}
+	lastFlushedAt := time.Now().UTC().Truncate(time.Second)
+	want := sandbox.WorkspaceInfoResponse{
+		Mounted:       true,
+		RootPath:      "/data/user123",
+		MountType:     "fuse",
+		MountState:    "ready",
+		Flushed:       true,
+		LastFlushedAt: &lastFlushedAt,
+	}
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sandboxes/sb-info/workspace/info" {
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -198,7 +206,7 @@ func TestClientGetWorkspaceInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkspaceInfo error: %v", err)
 	}
-	if !got.Mounted || got.RootPath != "/data/user123" {
+	if !got.Mounted || got.RootPath != "/data/user123" || got.MountType != "fuse" || got.MountState != "ready" || !got.Flushed || got.LastFlushedAt == nil || !got.LastFlushedAt.Equal(lastFlushedAt) {
 		t.Errorf("unexpected response: %+v", got)
 	}
 }
@@ -290,4 +298,3 @@ func TestClient_EditFileLines(t *testing.T) {
 		t.Fatalf("EditFileLines error: %v", err)
 	}
 }
-

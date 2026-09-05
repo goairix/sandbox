@@ -11,13 +11,14 @@ import (
 // operationGate controls admission to one published sandbox. References cover
 // the complete lifetime of an operation, including returned streams.
 type operationGate struct {
-	mu         sync.Mutex
-	open       bool
-	permanent  bool
-	exclusive  bool
-	generation uint64
-	refs       int
-	drained    chan struct{}
+	mu           sync.Mutex
+	exclusiveUse sync.Mutex
+	open         bool
+	permanent    bool
+	exclusive    bool
+	generation   uint64
+	refs         int
+	drained      chan struct{}
 }
 
 func newOperationGate(open bool) *operationGate {
@@ -88,6 +89,12 @@ func (g *operationGate) closeAdmission() <-chan struct{} {
 	}
 	drained := g.drained
 	g.mu.Unlock()
+
+	// An exclusive workspace transition is not counted in refs. Wait until its
+	// current side effect completes before teardown removes the runtime/session.
+	// Admission only takes mu, so new requests still fail immediately.
+	g.exclusiveUse.Lock()
+	g.exclusiveUse.Unlock()
 	return drained
 }
 
@@ -134,6 +141,64 @@ type operationGateExclusive struct {
 	gate       *operationGate
 	generation uint64
 	once       sync.Once
+}
+
+func (t *operationGateExclusive) withOwnership(fn func() error) error {
+	if t == nil || t.gate == nil {
+		return ErrSandboxNotReady
+	}
+	g := t.gate
+	g.exclusiveUse.Lock()
+	defer g.exclusiveUse.Unlock()
+	g.mu.Lock()
+	valid := g.exclusive && !g.permanent && g.generation == t.generation
+	g.mu.Unlock()
+	if !valid {
+		return ErrSandboxNotReady
+	}
+	return fn()
+}
+
+// commit runs the final state transition while teardown is excluded, then
+// atomically reopens admission. A failed commit permanently closes the gate.
+func (t *operationGateExclusive) commit(fn func() error) error {
+	if t == nil || t.gate == nil {
+		return ErrSandboxNotReady
+	}
+	result := ErrSandboxNotReady
+	t.once.Do(func() {
+		g := t.gate
+		g.exclusiveUse.Lock()
+		defer g.exclusiveUse.Unlock()
+
+		g.mu.Lock()
+		if !g.exclusive || g.permanent || g.generation != t.generation {
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Unlock()
+
+		if err := fn(); err != nil {
+			g.mu.Lock()
+			g.open = false
+			g.exclusive = false
+			g.permanent = true
+			g.generation++
+			g.mu.Unlock()
+			result = err
+			return
+		}
+
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !g.exclusive || g.permanent || g.generation != t.generation {
+			return
+		}
+		g.exclusive = false
+		g.open = true
+		result = nil
+	})
+	return result
 }
 
 func (t *operationGateExclusive) Reopen() error {

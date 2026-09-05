@@ -3,6 +3,7 @@ package handler
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +14,20 @@ import (
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goccy/go-yaml"
 
+	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
 
 const skillsBasePath = "/workspace/.agent/skills"
+
+func handleSkillNotReady(c *gin.Context, err error) bool {
+	if !errors.Is(err, sandbox.ErrSandboxNotReady) {
+		return false
+	}
+	internalError(c, err)
+	return true
+}
 
 // ParseFrontmatter splits a SKILL.md string into structured metadata and body.
 // If no frontmatter block is found, meta is zero-value and body equals the full input.
@@ -147,6 +157,9 @@ func (h *Handler) ListSkills(c *gin.Context) {
 	id := c.Param("id")
 
 	if _, err := h.manager.Get(spanCtx, id); err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
@@ -155,6 +168,9 @@ func (h *Handler) ListSkills(c *gin.Context) {
 	pattern := skillsBasePath + "/*/SKILL.md"
 	files, err := h.manager.GlobInfo(spanCtx, id, pattern)
 	if err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusOK, types.SkillListResponse{Skills: []types.SkillMeta{}})
 		return
 	}
@@ -188,6 +204,9 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	}
 
 	if _, err := h.manager.Get(spanCtx, id); err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
@@ -195,6 +214,9 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	skillMDPath := skillsBasePath + "/" + name + "/SKILL.md"
 	reader, err := h.manager.ReadFileContent(spanCtx, id, skillMDPath)
 	if err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "skill not found"})
 		return
 	}
@@ -218,6 +240,9 @@ func (h *Handler) GetSkill(c *gin.Context) {
 	skillDir := skillsBasePath + "/" + name
 	skillFiles, err := h.listSkillFilesRecursive(spanCtx, id, skillDir)
 	if err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		logger.Warn(spanCtx, "failed to list skill files",
 			logger.AddField("skill", name),
 			logger.ErrorField(err))
@@ -242,6 +267,9 @@ func (h *Handler) GetSkillFile(c *gin.Context) {
 	relPath := c.Param("filepath")
 
 	if _, err := h.manager.Get(spanCtx, id); err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: err.Error()})
 		return
 	}
@@ -265,6 +293,9 @@ func (h *Handler) GetSkillFile(c *gin.Context) {
 
 	reader, err := h.manager.ReadFileContent(spanCtx, id, fullPath)
 	if err != nil {
+		if handleSkillNotReady(c, err) {
+			return
+		}
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Message: "file not found"})
 		return
 	}

@@ -114,3 +114,74 @@ func TestOperationGateExclusiveCannotSucceedAfterPermanentCloseWinsDrain(t *test
 	require.NoError(t, <-closeResult)
 	require.ErrorIs(t, <-exclusiveResult, ErrSandboxNotReady)
 }
+
+func TestOperationGateExclusiveCommitCannotRunAfterTeardownInvalidatesToken(t *testing.T) {
+	gate := newOperationGate(true)
+	token, err := gate.BeginExclusive(context.Background())
+	require.NoError(t, err)
+	gate.closeAdmission()
+	called := false
+
+	err = token.commit(func() error {
+		called = true
+		return nil
+	})
+
+	require.ErrorIs(t, err, ErrSandboxNotReady)
+	require.False(t, called)
+}
+
+func TestOperationGateTeardownWaitsForExclusiveStepWhileAdmissionRejectsImmediately(t *testing.T) {
+	gate := newOperationGate(true)
+	token, err := gate.BeginExclusive(context.Background())
+	require.NoError(t, err)
+
+	stepStarted := make(chan struct{})
+	releaseStep := make(chan struct{})
+	stepDone := make(chan error, 1)
+	go func() {
+		stepDone <- token.withOwnership(func() error {
+			close(stepStarted)
+			<-releaseStep
+			return nil
+		})
+	}()
+	<-stepStarted
+
+	teardownStarted := make(chan struct{})
+	teardownDone := make(chan struct{})
+	go func() {
+		close(teardownStarted)
+		gate.closeAdmission()
+		close(teardownDone)
+	}()
+	<-teardownStarted
+
+	acquireDone := make(chan error, 1)
+	go func() {
+		release, acquireErr := gate.Acquire()
+		if acquireErr == nil {
+			release()
+		}
+		acquireDone <- acquireErr
+	}()
+	select {
+	case acquireErr := <-acquireDone:
+		require.ErrorIs(t, acquireErr, ErrSandboxNotReady)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("new admission blocked behind an exclusive workspace step")
+	}
+	select {
+	case <-teardownDone:
+		t.Fatal("teardown returned while an exclusive workspace step was live")
+	default:
+	}
+
+	close(releaseStep)
+	require.NoError(t, <-stepDone)
+	select {
+	case <-teardownDone:
+	case <-time.After(time.Second):
+		t.Fatal("teardown did not finish after the exclusive step completed")
+	}
+}

@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -552,6 +553,9 @@ type fakeDockerAPI struct {
 	containerRemoveRequested map[string]bool
 	copyToCalls              int
 	copyFromCalls            int
+	lastCopyToUID            int
+	lastCopyToGID            int
+	lastCopyToOptions        container.CopyToContainerOptions
 	networkCreateOptions     map[string]dnetwork.CreateOptions
 	rootGatewayCommands      []string
 	routeControls            []container.ExecOptions
@@ -566,6 +570,8 @@ type fakeDockerAPI struct {
 	authorizeAttachErr       error
 	authorizeExecCreates     int
 	blockControlOutput       bool
+	removeExecExitCode       int
+	removeExecInspectErr     error
 }
 
 func newFakeDockerRuntime(t *testing.T) (*Runtime, *fakeDockerAPI) {
@@ -807,7 +813,16 @@ func (f *fakeDockerAPI) execOutput(exec fakeExec, input []byte) []byte {
 	return framed.Bytes()
 }
 
-func (f *fakeDockerAPI) ContainerExecInspect(context.Context, string) (container.ExecInspect, error) {
+func (f *fakeDockerAPI) ContainerExecInspect(_ context.Context, execID string) (container.ExecInspect, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	exec := f.execs[execID]
+	if len(exec.options.Cmd) >= 3 && exec.options.Cmd[0] == "sh" && exec.options.Cmd[1] == "-c" && strings.Contains(exec.options.Cmd[2], "rm -f --") {
+		if f.removeExecInspectErr != nil {
+			return container.ExecInspect{}, f.removeExecInspectErr
+		}
+		return container.ExecInspect{ExitCode: f.removeExecExitCode}, nil
+	}
 	return container.ExecInspect{ExitCode: 0}, nil
 }
 func (f *fakeDockerAPI) CopyFromContainer(context.Context, string, string) (io.ReadCloser, container.PathStat, error) {
@@ -816,9 +831,32 @@ func (f *fakeDockerAPI) CopyFromContainer(context.Context, string, string) (io.R
 	f.mu.Unlock()
 	return io.NopCloser(bytes.NewReader(nil)), container.PathStat{}, nil
 }
-func (f *fakeDockerAPI) CopyToContainer(context.Context, string, string, io.Reader, container.CopyToContainerOptions) error {
+func (f *fakeDockerAPI) CopyToContainer(_ context.Context, _ string, _ string, reader io.Reader, options container.CopyToContainerOptions) error {
+	tarReader := tar.NewReader(reader)
+	header, err := tarReader.Next()
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(io.Discard, tarReader); err != nil {
+		return err
+	}
+	for {
+		_, err = tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, tarReader); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	f.copyToCalls++
+	f.lastCopyToUID = header.Uid
+	f.lastCopyToGID = header.Gid
+	f.lastCopyToOptions = options
 	f.mu.Unlock()
 	return nil
 }

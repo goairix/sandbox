@@ -27,8 +27,12 @@ type SyncWorkspaceResponse struct {
 }
 
 type WorkspaceInfoResponse struct {
-	Mounted      bool      `json:"mounted"`
-	RootPath     string    `json:"root_path,omitempty"`
-	MountedAt    time.Time `json:"mounted_at,omitempty"`
-	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
+	Mounted       bool       `json:"mounted"`
+	RootPath      string     `json:"root_path,omitempty"`
+	MountedAt     time.Time  `json:"mounted_at,omitempty"`
+	LastSyncedAt  time.Time  `json:"last_synced_at,omitempty"`
+	MountType     string     `json:"mount_type,omitempty"`
+	MountState    string     `json:"mount_state,omitempty"`
+	Flushed       bool       `json:"flushed,omitempty"`
+	LastFlushedAt *time.Time `json:"last_flushed_at,omitempty"`
 }

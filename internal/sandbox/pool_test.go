@@ -16,26 +16,38 @@ import (
 
 // mockRuntime is a simple mock for testing pool logic.
 type mockRuntime struct {
-	mu             sync.Mutex
-	created        int
-	removed        int
-	sandboxes      map[string]*runtime.SandboxInfo
-	execContext    context.Context
-	execRequest    runtime.ExecRequest
-	execFunc       func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error)
-	streamContext  context.Context
-	streamRequest  runtime.ExecRequest
-	execStreamFunc func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
-	createdSpec    runtime.SandboxSpec
-	uploadSize     int64
-	prepareSeq     int
-	prepareErr     error
-	prepareEntered chan struct{}
-	prepareRelease chan struct{}
-	prepareSignal  sync.Once
-	healthFailures map[string]error
-	removeFailures map[string]error
-	removedIDs     map[string]int
+	mu                sync.Mutex
+	created           int
+	removed           int
+	sandboxes         map[string]*runtime.SandboxInfo
+	execContext       context.Context
+	execRequest       runtime.ExecRequest
+	execFunc          func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error)
+	streamContext     context.Context
+	streamRequest     runtime.ExecRequest
+	execStreamFunc    func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error)
+	createdSpec       runtime.SandboxSpec
+	uploadSize        int64
+	uploadCalls       int
+	listFiles         []runtime.FileInfo
+	listRecursiveFunc func(page, pageSize int) *runtime.FileListResult
+	reservedFileCount int
+	quiesceCalls      int
+	flushCalls        int
+	resumeCalls       int
+	quiesceErr        error
+	flushErr          error
+	resumeErr         error
+	quiesceToken      runtime.WorkspaceQuiesceToken
+	workspaceOps      []string
+	prepareSeq        int
+	prepareErr        error
+	prepareEntered    chan struct{}
+	prepareRelease    chan struct{}
+	prepareSignal     sync.Once
+	healthFailures    map[string]error
+	removeFailures    map[string]error
+	removedIDs        map[string]int
 }
 
 func newMockRuntime() *mockRuntime {
@@ -236,20 +248,39 @@ func (m *mockRuntime) WorkspaceHealth(context.Context, runtime.RuntimeRef) (*run
 }
 
 func (m *mockRuntime) QuiesceWorkspace(context.Context, runtime.RuntimeRef, int64) (runtime.WorkspaceQuiesceToken, error) {
-	return runtime.WorkspaceQuiesceToken{}, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.quiesceCalls++
+	m.workspaceOps = append(m.workspaceOps, "quiesce")
+	if m.quiesceErr != nil {
+		return runtime.WorkspaceQuiesceToken{}, m.quiesceErr
+	}
+	if m.quiesceToken.Opaque != "" {
+		return m.quiesceToken, nil
+	}
+	return runtime.WorkspaceQuiesceToken{RuntimeUID: "prepared-uid-1", Generation: 1, Opaque: "token-1"}, nil
 }
 
 func (m *mockRuntime) ResumeWorkspace(context.Context, runtime.RuntimeRef, runtime.WorkspaceQuiesceToken) error {
-	return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resumeCalls++
+	m.workspaceOps = append(m.workspaceOps, "resume")
+	return m.resumeErr
 }
 
 func (m *mockRuntime) FlushWorkspace(context.Context, runtime.RuntimeRef, int64) error {
-	return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushCalls++
+	m.workspaceOps = append(m.workspaceOps, "flush")
+	return m.flushErr
 }
 
 func (m *mockRuntime) UploadFile(_ context.Context, _ string, _ string, size int64, _ io.Reader) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.uploadCalls++
 	m.uploadSize = size
 	return nil
 }
@@ -265,7 +296,9 @@ func (m *mockRuntime) DownloadFile(_ context.Context, _ string, _ string) (io.Re
 }
 
 func (m *mockRuntime) ListFiles(context.Context, string, string) ([]runtime.FileInfo, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]runtime.FileInfo(nil), m.listFiles...), nil
 }
 
 func (m *mockRuntime) UploadArchive(context.Context, string, string, io.Reader) error {
@@ -294,7 +327,12 @@ func (m *mockRuntime) ListSandboxes(_ context.Context, _ map[string]string) ([]r
 
 func (m *mockRuntime) IsStateful() bool { return false }
 
-func (m *mockRuntime) ListFilesRecursive(context.Context, string, string, int, int, int) (*runtime.FileListResult, error) {
+func (m *mockRuntime) ListFilesRecursive(_ context.Context, _, _ string, _ int, page, pageSize int) (*runtime.FileListResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.listRecursiveFunc != nil {
+		return m.listRecursiveFunc(page, pageSize), nil
+	}
 	return nil, nil
 }
 func (m *mockRuntime) ReadFileLines(context.Context, string, string, int, int) (*runtime.FileLineResult, error) {
@@ -318,6 +356,12 @@ func (m *mockRuntime) DownloadFiles(context.Context, string, []string) ([]runtim
 
 func (m *mockRuntime) FileExists(_ context.Context, _ string, _ string) error {
 	return nil
+}
+
+func (m *mockRuntime) CountReservedFiles(context.Context, string, string, int, string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reservedFileCount, nil
 }
 
 func (m *mockRuntime) ReadFileContent(_ context.Context, _ string, _ string) (io.ReadCloser, error) {

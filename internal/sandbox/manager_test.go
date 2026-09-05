@@ -1299,7 +1299,7 @@ func TestManagerRejectsLegacyWorkspaceOperationsForFUSESandbox(t *testing.T) {
 
 	require.ErrorIs(t, mgr.MountWorkspace(context.Background(), sb.ID, "team/b", nil), ErrFUSEWorkspaceOperationUnsupported)
 	require.ErrorIs(t, mgr.UnmountWorkspace(context.Background(), sb.ID), ErrFUSEWorkspaceOperationUnsupported)
-	require.ErrorIs(t, mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil), ErrFUSEWorkspaceOperationUnsupported)
+	require.NoError(t, mgr.SyncWorkspace(context.Background(), sb.ID, "to_container", nil))
 
 	info, err := mgr.GetWorkspaceInfo(context.Background(), sb.ID)
 	require.NoError(t, err)

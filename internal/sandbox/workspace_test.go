@@ -18,8 +18,335 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage/state"
 )
+
+type failingSessionSetStore struct {
+	state.AtomicStore
+	mu     sync.Mutex
+	set    int
+	failAt int
+}
+
+func (s *failingSessionSetStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	s.mu.Lock()
+	s.set++
+	fail := s.set == s.failAt
+	s.mu.Unlock()
+	if fail {
+		return errors.New("session save failed")
+	}
+	return s.AtomicStore.Set(ctx, key, value, ttl)
+}
+
+func replaceSessionStoreWithFailingSet(t *testing.T, mgr *Manager, failAt int) {
+	t.Helper()
+	atomicStore, ok := mgr.sessions.store.(state.AtomicStore)
+	require.True(t, ok)
+	mgr.sessions = NewSessionStore(&failingSessionSetStore{AtomicStore: atomicStore, failAt: failAt}, time.Hour)
+}
+
+func readyFUSEManager(t *testing.T) (*Manager, *Sandbox) {
+	t.Helper()
+	mgr, sb, _ := readyFUSEManagerWithRuntime(t)
+	return mgr, sb
+}
+
+func readyFUSEManagerWithRuntime(t *testing.T) (*Manager, *Sandbox, *mockRuntime) {
+	t.Helper()
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	return mgr, sb, rt.mockRuntime
+}
+
+func TestFUSEWorkspacePublicMountAndUnmountConflict(t *testing.T) {
+	mgr, sb := readyFUSEManager(t)
+
+	err := mgr.MountWorkspace(context.Background(), sb.ID, "team/b", nil)
+	require.ErrorIs(t, err, ErrFUSEWorkspaceImmutable)
+	err = mgr.UnmountWorkspace(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrFUSEWorkspaceImmutable)
+}
+
+func TestFUSESyncDirections(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+
+	require.NoError(t, mgr.SyncWorkspace(context.Background(), sb.ID, "to_container", nil))
+	rt.mu.Lock()
+	assert.Zero(t, rt.quiesceCalls)
+	assert.Zero(t, rt.flushCalls)
+	assert.Zero(t, rt.resumeCalls)
+	rt.mu.Unlock()
+
+	require.NoError(t, mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil))
+	rt.mu.Lock()
+	assert.Equal(t, 1, rt.quiesceCalls)
+	assert.Equal(t, 1, rt.flushCalls)
+	assert.Equal(t, 1, rt.resumeCalls)
+	assert.Equal(t, []string{"quiesce", "flush", "resume"}, rt.workspaceOps)
+	rt.mu.Unlock()
+	info, infoErr := mgr.GetWorkspaceInfo(context.Background(), sb.ID)
+	require.NoError(t, infoErr)
+	assert.True(t, info.Flushed)
+	require.NotNil(t, info.LastFlushedAt)
+}
+
+func TestFUSESyncWaitsForExistingFileStreamBeforeQuiesce(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	fuseRuntime := mgr.runtime.(*fuseManagerRuntime)
+	fuseRuntime.mu.Lock()
+	fuseRuntime.downloadReader = io.NopCloser(strings.NewReader("hello"))
+	fuseRuntime.mu.Unlock()
+	stream, err := mgr.DownloadFile(context.Background(), sb.ID, "/workspace/a.txt")
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil) }()
+	time.Sleep(20 * time.Millisecond)
+	rt.mu.Lock()
+	assert.Zero(t, rt.quiesceCalls)
+	rt.mu.Unlock()
+	require.NoError(t, stream.Close())
+	require.NoError(t, <-done)
+
+	rt.mu.Lock()
+	assert.Equal(t, 1, rt.quiesceCalls)
+	rt.mu.Unlock()
+}
+
+func TestFUSESyncQuiesceFailureDoesNotFlushAndClosesAdmission(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	rt.mu.Lock()
+	rt.quiesceErr = errors.New("open writer enumeration failed")
+	rt.mu.Unlock()
+
+	err := mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil)
+	require.ErrorContains(t, err, "open writer enumeration failed")
+	rt.mu.Lock()
+	assert.Zero(t, rt.flushCalls)
+	assert.Zero(t, rt.resumeCalls)
+	rt.mu.Unlock()
+	mgr.mu.RLock()
+	gate := mgr.operationGates[sb.ID]
+	flushed := mgr.sandboxes[sb.ID].Workspace.Flushed
+	mgr.mu.RUnlock()
+	assert.False(t, gate.isOpen())
+	assert.False(t, flushed)
+	require.ErrorIs(t, mgr.SyncWorkspace(context.Background(), sb.ID, "to_container", nil), ErrSandboxNotReady)
+}
+
+func TestFUSERecursiveListHidesReservedProbeFromStablePaginationCount(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	reserved, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	all := []runtime.FileInfo{
+		{Name: reserved, Path: "/workspace/" + reserved},
+		{Name: "user.txt", Path: "/workspace/user.txt"},
+	}
+	rt.mu.Lock()
+	rt.reservedFileCount = 1
+	rt.listRecursiveFunc = func(page, pageSize int) *runtime.FileListResult {
+		start := (page - 1) * pageSize
+		if start >= len(all) {
+			return &runtime.FileListResult{TotalCount: len(all), Page: page, PageSize: pageSize}
+		}
+		end := start + pageSize
+		if end > len(all) {
+			end = len(all)
+		}
+		return &runtime.FileListResult{Files: append([]runtime.FileInfo(nil), all[start:end]...), TotalCount: len(all), Page: page, PageSize: pageSize}
+	}
+	rt.mu.Unlock()
+
+	result, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalCount)
+	require.Len(t, result.Files, 1)
+	assert.Equal(t, "user.txt", result.Files[0].Name)
+}
+
+func TestFUSERecursiveListFirstPageUsesBoundedIncrementalScan(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	reserved, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	const total = 100_000
+	var calls, largestPageSize int
+	rt.mu.Lock()
+	rt.reservedFileCount = 1
+	rt.listRecursiveFunc = func(page, pageSize int) *runtime.FileListResult {
+		calls++
+		if pageSize > largestPageSize {
+			largestPageSize = pageSize
+		}
+		start := (page - 1) * pageSize
+		end := start + pageSize
+		if end > total {
+			end = total
+		}
+		files := make([]runtime.FileInfo, 0, end-start)
+		for i := start; i < end; i++ {
+			name := fmt.Sprintf("user-%06d.txt", i)
+			if i == 0 {
+				name = reserved
+			}
+			files = append(files, runtime.FileInfo{Name: name, Path: "/workspace/" + name})
+		}
+		return &runtime.FileListResult{Files: files, TotalCount: total, Page: page, PageSize: pageSize}
+	}
+	rt.mu.Unlock()
+
+	result, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 1, 1)
+	require.NoError(t, err)
+	require.Len(t, result.Files, 1)
+	assert.Equal(t, "user-000001.txt", result.Files[0].Name)
+	assert.Equal(t, total-1, result.TotalCount)
+	assert.LessOrEqual(t, calls, 2)
+	assert.LessOrEqual(t, largestPageSize, 256)
+}
+
+func TestFUSERecursiveListDoesNotSubtractAbsentProbeFromTotal(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	rt.mu.Lock()
+	rt.reservedFileCount = 0
+	rt.listRecursiveFunc = func(page, pageSize int) *runtime.FileListResult {
+		return &runtime.FileListResult{
+			Files:      []runtime.FileInfo{{Name: "user.txt", Path: "/workspace/user.txt"}},
+			TotalCount: 1,
+			Page:       page,
+			PageSize:   pageSize,
+		}
+	}
+	rt.mu.Unlock()
+
+	result, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalCount)
+}
+
+func TestFUSERecursiveListCountsMultipleReservedBasenamesAcrossPages(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	current, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	oldGeneration, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration+1)
+	require.NoError(t, err)
+	otherRuntime, err := fuseprotocol.DeriveProbeObjectName("other-runtime", sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	all := []runtime.FileInfo{
+		{Name: current, Path: "/workspace/" + current},
+		{Name: "user-a.txt", Path: "/workspace/user-a.txt"},
+		{Name: oldGeneration, Path: "/workspace/" + oldGeneration},
+		{Name: "user-b.txt", Path: "/workspace/user-b.txt"},
+		{Name: otherRuntime, Path: "/workspace/" + otherRuntime},
+		{Name: "user-c.txt", Path: "/workspace/user-c.txt"},
+	}
+	rt.mu.Lock()
+	rt.reservedFileCount = 3
+	rt.listRecursiveFunc = func(page, pageSize int) *runtime.FileListResult {
+		start := (page - 1) * pageSize
+		if start >= len(all) {
+			return &runtime.FileListResult{TotalCount: len(all), Page: page, PageSize: pageSize}
+		}
+		end := start + pageSize
+		if end > len(all) {
+			end = len(all)
+		}
+		return &runtime.FileListResult{Files: append([]runtime.FileInfo(nil), all[start:end]...), TotalCount: len(all), Page: page, PageSize: pageSize}
+	}
+	rt.mu.Unlock()
+
+	first, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 1, 2)
+	require.NoError(t, err)
+	require.Len(t, first.Files, 2)
+	assert.Equal(t, []string{"user-a.txt", "user-b.txt"}, []string{first.Files[0].Name, first.Files[1].Name})
+	assert.Equal(t, 3, first.TotalCount)
+	second, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 2, 2)
+	require.NoError(t, err)
+	require.Len(t, second.Files, 1)
+	assert.Equal(t, "user-c.txt", second.Files[0].Name)
+	assert.Equal(t, 3, second.TotalCount)
+	ghost, err := mgr.ListFilesRecursive(context.Background(), sb.ID, "/workspace", 0, 3, 2)
+	require.NoError(t, err)
+	assert.Empty(t, ghost.Files)
+	assert.Equal(t, 3, ghost.TotalCount)
+}
+
+func TestFUSESyncRejectsStaleQuiesceTokenWithoutFlush(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	rt.mu.Lock()
+	rt.quiesceToken = runtime.WorkspaceQuiesceToken{RuntimeUID: sb.RuntimeUID, Generation: sb.Workspace.LeaseGeneration + 1, Opaque: "stale"}
+	rt.mu.Unlock()
+
+	err := mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil)
+	require.ErrorContains(t, err, "invalid generation-bound token")
+	rt.mu.Lock()
+	assert.Zero(t, rt.flushCalls)
+	assert.Zero(t, rt.resumeCalls)
+	rt.mu.Unlock()
+}
+
+func TestFUSESyncPendingSessionFailureClosesAdmissionBeforeQuiesce(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	replaceSessionStoreWithFailingSet(t, mgr, 1)
+
+	err := mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil)
+	require.ErrorContains(t, err, "session save failed")
+	rt.mu.Lock()
+	assert.Zero(t, rt.quiesceCalls)
+	rt.mu.Unlock()
+	mgr.mu.RLock()
+	gate := mgr.operationGates[sb.ID]
+	flushed := mgr.sandboxes[sb.ID].Workspace.Flushed
+	mgr.mu.RUnlock()
+	assert.False(t, gate.isOpen())
+	assert.False(t, flushed)
+}
+
+func TestFUSESyncCompletedSessionFailureDoesNotReportFlushed(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	replaceSessionStoreWithFailingSet(t, mgr, 2)
+
+	err := mgr.SyncWorkspace(context.Background(), sb.ID, "from_container", nil)
+	require.ErrorContains(t, err, "session save failed")
+	rt.mu.Lock()
+	assert.Equal(t, []string{"quiesce", "flush", "resume"}, rt.workspaceOps)
+	rt.mu.Unlock()
+	mgr.mu.RLock()
+	gate := mgr.operationGates[sb.ID]
+	flushed := mgr.sandboxes[sb.ID].Workspace.Flushed
+	mgr.mu.RUnlock()
+	assert.False(t, gate.isOpen())
+	assert.False(t, flushed)
+}
+
+func TestFUSEPublicFilesHideAndRejectOnlyExactReservedProbeBasename(t *testing.T) {
+	mgr, sb, rt := readyFUSEManagerWithRuntime(t)
+	reserved, err := fuseprotocol.DeriveProbeObjectName(sb.RuntimeUID, sb.Workspace.LeaseGeneration)
+	require.NoError(t, err)
+	lookalike := reserved + "-user"
+	rt.mu.Lock()
+	rt.listFiles = []runtime.FileInfo{
+		{Name: reserved, Path: "/workspace/" + reserved},
+		{Name: lookalike, Path: "/workspace/" + lookalike},
+	}
+	rt.mu.Unlock()
+
+	files, err := mgr.ListFiles(context.Background(), sb.ID, "/workspace")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, lookalike, files[0].Name)
+
+	err = mgr.UploadFile(context.Background(), sb.ID, "/workspace/"+reserved, 1, strings.NewReader("x"))
+	require.ErrorIs(t, err, ErrReservedFUSEWorkspacePath)
+	require.NoError(t, mgr.UploadFile(context.Background(), sb.ID, "/workspace/"+lookalike, 1, strings.NewReader("x")))
+	rt.mu.Lock()
+	assert.Equal(t, 1, rt.uploadCalls)
+	rt.mu.Unlock()
+}
 
 func TestIsExcluded(t *testing.T) {
 	exclude := []string{".agent", ".cache"}

@@ -88,9 +88,13 @@ func (h *Handler) GetWorkspaceInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, types.WorkspaceInfoResponse{
-		Mounted:      true,
-		RootPath:     info.RootPath,
-		MountedAt:    info.MountedAt,
-		LastSyncedAt: info.LastSyncedAt,
+		Mounted:       true,
+		RootPath:      info.RootPath,
+		MountedAt:     info.MountedAt,
+		LastSyncedAt:  info.LastSyncedAt,
+		MountType:     string(info.MountType),
+		MountState:    string(info.MountState),
+		Flushed:       info.Flushed,
+		LastFlushedAt: info.LastFlushedAt,
 	})
 }

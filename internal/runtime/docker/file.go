@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/google/uuid"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -24,48 +26,116 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, _ int64, reader io.Reader) error {
+func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, size int64, reader io.Reader) error {
+	if size < 0 {
+		return fmt.Errorf("%w: size must be non-negative", runtime.ErrInvalidUploadSize)
+	}
 	fuseContainer, err := r.isFUSEContainer(ctx, id)
 	if err != nil {
 		return err
 	}
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("read file content: %w", err)
+
+	dir := filepath.Dir(destPath)
+	mkdirResult, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: fmt.Sprintf("mkdir -p %s", shellEscape(dir)),
+	})
+	if err := uploadExecResult("create directory "+dir, mkdirResult, err); err != nil {
+		return err
 	}
 
-	// Docker CopyToContainer expects a tar archive.
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	hdr := &tar.Header{
-		Name:    filepath.Base(destPath),
-		Mode:    0644,
-		Size:    int64(len(content)),
-		ModTime: time.Now(),
-	}
+	// Manager-created sandboxes run as UID/GID 1000. The staging object must
+	// belong to that user so publish and cleanup also work in sticky directories
+	// such as /tmp.
+	const uid, gid = 1000, 1000
+	tempPath := filepath.Join(dir, ".sandbox-upload-"+uuid.NewString())
+	pr, pw := io.Pipe()
+	writeDone := make(chan error, 1)
+	go func() {
+		writeErr := writeSizedTar(pw, filepath.Base(tempPath), 0o644, uid, gid, size, reader)
+		_ = pw.CloseWithError(writeErr)
+		writeDone <- writeErr
+	}()
+	var consumeErr error
 	if fuseContainer {
-		hdr.Uid, hdr.Gid = 1000, 1000
+		consumeErr = r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", dir}, pr)
+	} else {
+		consumeErr = r.cli.CopyToContainer(ctx, id, dir, pr, container.CopyToContainerOptions{CopyUIDGID: true})
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	_ = pr.CloseWithError(consumeErr)
+	writeErr := <-writeDone
+	if errors.Is(writeErr, runtime.ErrInvalidUploadSize) {
+		return r.uploadFailureWithCleanup(ctx, id, tempPath, writeErr)
+	}
+	if writeErr != nil {
+		return r.uploadFailureWithCleanup(ctx, id, tempPath, writeErr)
+	}
+	if consumeErr != nil {
+		return r.uploadFailureWithCleanup(ctx, id, tempPath, consumeErr)
+	}
+	publishResult, err := r.Exec(ctx, id, runtime.ExecRequest{Command: uploadPublishCommand(tempPath, destPath)})
+	if err := uploadExecResult("publish uploaded file", publishResult, err); err != nil {
+		return r.uploadFailureWithCleanup(ctx, id, tempPath, err)
+	}
+	return nil
+}
+
+func uploadPublishCommand(tempPath, destPath string) string {
+	return fmt.Sprintf("test ! -d %s && mv -f -- %s %s", shellEscape(destPath), shellEscape(tempPath), shellEscape(destPath))
+}
+
+func uploadExecResult(action string, result *runtime.ExecResult, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	if result == nil {
+		return fmt.Errorf("%s: runtime returned no result", action)
+	}
+	if result.ExitCode != 0 {
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return fmt.Errorf("%s: %s", action, detail)
+	}
+	return nil
+}
+
+func (r *Runtime) uploadFailureWithCleanup(ctx context.Context, id, tempPath string, uploadErr error) error {
+	cleanupErr := r.removePartialUpload(ctx, id, tempPath)
+	if cleanupErr == nil {
+		return uploadErr
+	}
+	return errors.Join(uploadErr, cleanupErr)
+}
+
+func (r *Runtime) removePartialUpload(ctx context.Context, id, tempPath string) error {
+	result, err := r.Exec(ctx, id, runtime.ExecRequest{Command: "rm -f -- " + shellEscape(tempPath)})
+	return uploadExecResult("cleanup partial upload", result, err)
+}
+
+func writeSizedTar(dst io.Writer, name string, mode int64, uid, gid int, size int64, reader io.Reader) error {
+	if size < 0 {
+		return fmt.Errorf("%w: size must be non-negative", runtime.ErrInvalidUploadSize)
+	}
+	tw := tar.NewWriter(dst)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: size, ModTime: time.Now(), Uid: uid, Gid: gid}); err != nil {
 		return fmt.Errorf("write tar header: %w", err)
 	}
-	if _, err := tw.Write(content); err != nil {
-		return fmt.Errorf("write tar content: %w", err)
+	if _, err := io.CopyN(tw, reader, size); err != nil {
+		return fmt.Errorf("%w: body shorter than declared size: %v", runtime.ErrInvalidUploadSize, err)
+	}
+	var extra [1]byte
+	n, err := reader.Read(extra[:])
+	if n != 0 || err == nil {
+		return fmt.Errorf("%w: body exceeds declared size", runtime.ErrInvalidUploadSize)
+	}
+	if err != io.EOF {
+		return fmt.Errorf("read upload trailer: %w", err)
 	}
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("close tar: %w", err)
 	}
-
-	dir := filepath.Dir(destPath)
-	if _, err := r.Exec(ctx, id, runtime.ExecRequest{
-		Command: fmt.Sprintf("mkdir -p %s", shellEscape(dir)),
-	}); err != nil {
-		return fmt.Errorf("create directory %s: %w", dir, err)
-	}
-	if fuseContainer {
-		return r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", dir}, &buf)
-	}
-	return r.cli.CopyToContainer(ctx, id, dir, &buf, container.CopyToContainerOptions{})
+	return nil
 }
 
 func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (io.ReadCloser, error) {
@@ -355,6 +425,47 @@ func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, patt
 		Page:       page,
 		PageSize:   pageSize,
 	}, nil
+}
+
+// CountReservedFiles returns the exact number of reserved FUSE probe
+// basenames in the same scope as ListFilesRecursive (empty globPattern) or
+// GlobFiles (non-empty globPattern), without materialising matching paths.
+func (r *Runtime) CountReservedFiles(ctx context.Context, id, baseDir string, maxDepth int, globPattern string) (int, error) {
+	command := reservedFileCountCommand(baseDir, maxDepth, globPattern)
+	result, err := r.Exec(ctx, id, runtime.ExecRequest{Command: command, WorkDir: "/workspace"})
+	if err := uploadExecResult("count reserved FUSE files", result, err); err != nil {
+		return 0, err
+	}
+	var count int
+	if scanned, scanErr := fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &count); scanErr != nil || scanned != 1 || count < 0 {
+		return 0, fmt.Errorf("count reserved FUSE files: invalid count %q", strings.TrimSpace(result.Stdout))
+	}
+	return count, nil
+}
+
+func reservedFileCountCommand(baseDir string, maxDepth int, globPattern string) string {
+	depthArg := ""
+	predicate := "\\( -type f -o -type d \\)"
+	if globPattern == "" {
+		if maxDepth > 0 {
+			depthArg = fmt.Sprintf("-maxdepth %d ", maxDepth)
+		}
+	} else {
+		findArgs, maxDepth1 := runtime.GlobToFindArgs(globPattern)
+		if maxDepth1 {
+			depthArg = "-maxdepth 1 "
+		}
+		predicate = fmt.Sprintf("\\( %s \\) -type f", findArgs)
+	}
+	findCommand := fmt.Sprintf(
+		"find %s -mindepth 1 %s%s -name %s -printf '.\\n'",
+		shellEscape(baseDir), depthArg, predicate, shellEscape(runtime.ReservedProbeObjectFindPattern()),
+	)
+	return fmt.Sprintf(
+		"{ %s; sandbox_find_status=$?; printf 'sandbox-find-status:%%d\\n' \"$sandbox_find_status\"; } | "+
+			"awk '/^sandbox-find-status:/ { status=$0; sub(/^sandbox-find-status:/, \"\", status); seen=1; if (status != 0) exit status; print count+0; next } { count++ } END { if (!seen) exit 125 }'",
+		findCommand,
+	)
 }
 
 func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string, startLine int, endLine int) (*runtime.FileLineResult, error) {
