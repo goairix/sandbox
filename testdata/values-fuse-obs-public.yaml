@@ -1,6 +1,6 @@
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
-  tag: feat-workspace-fuse-obs-egress@sha256:5b71e6a2c8ce2f2c79b227a73e8797236ceef6ea827716a4aabd297dcfa16177
+  tag: feat-workspace-fuse-obs-public@sha256:7d3f05c5c60674e0fc5fdbc0da76b0bfa7d5872b45eba55322400a80de3e4efc
   pullPolicy: Always
 
 replicaCount: 1
@@ -18,7 +18,7 @@ redis:
     enabled: false
 
 workspaceCredentials:
-  apiSecretName: sandbox-workspace-obs-private
+  apiSecretName: sandbox-workspace-obs-public
 
 config:
   runtime:
@@ -35,13 +35,13 @@ config:
     filesystem:
       provider: obs
       bucket: sandbox-fuse-workspace
-      region: cn-southwest-268
-      endpoint: https://obs.cn-southwest-268.shuanghuayun.com
+      region: cn-southwest-2
+      endpoint: https://obs.cn-southwest-2.myhuaweicloud.com
       subPath: ""
       useSSL: true
   workspace:
     mode: fuse
-    secretName: sandbox-workspace-obs-private
+    secretName: sandbox-workspace-obs-public
     allowMissingLSMForKind: false
     cacheSize: 512Mi
     flushTimeoutSeconds: 60
@@ -54,12 +54,12 @@ config:
     providers:
       obs:
         driver: s3fs
-        profile: huawei-obs-private-2023-v1
-        storageIdentity: formal-obs-private-2023-primary
-        mounterImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-private@sha256:c3a87f6ce96c00d6cf8225ef74a0586880ee02638207c3f483066f23a5886816
-        dockerImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-private@sha256:ba10e2829786deb927a41c3a28689d0ef4a12f16f42fe3c731969f58c4a0bf1f
+        profile: huawei-obs-public-v1
+        storageIdentity: formal-obs-public-cn-southwest-2
+        mounterImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-public@sha256:c38fbd98e5b6adb9c8d3a8ec212f696ef942cab2758a04f23f0c04614d7a7103
+        dockerImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-public@sha256:df0dfa3ccbcd93c1698ae305236c904a6b6aa403b96b74b010edf8c56984828d
         caSecretKey: ""
-        credentialGeneration: formal-obs-private-20260906-v1
+        credentialGeneration: formal-obs-public-20260906-v1
         endpointHostIPs: []
         lsmProfile: sandbox-fuse
         systemEgressMode: cilium-fqdn
@@ -67,8 +67,8 @@ config:
           - 223.5.5.5/32
           - 114.114.114.114/32
         systemEgressFQDNs:
-          - obs.cn-southwest-268.shuanghuayun.com
-          - sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com
+          - obs.cn-southwest-2.myhuaweicloud.com
+          - sandbox-fuse-workspace.obs.cn-southwest-2.myhuaweicloud.com
         systemEgressCIDRs: []
         endpointPorts:
           - 443

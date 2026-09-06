@@ -110,8 +110,8 @@ func TestCheckImageContractValidatesTrustedRegularManifestAndS3FS(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(manifest, publicManifest, 0o644))
 	config.BoundProfileID = public.Descriptor.ID
-	require.NoError(t, CheckImageWithConfig(config), "candidate packaging must be testable")
-	require.ErrorContains(t, CheckImageReleaseWithConfig(config), "pending provider spike")
+	require.NoError(t, CheckImageWithConfig(config), "public OBS packaging must be testable")
+	require.NoError(t, CheckImageReleaseWithConfig(config), "verified public OBS mount and durable-flush evidence must be releaseable")
 
 	link := filepath.Join(root, "profile-link.json")
 	require.NoError(t, os.Symlink(manifest, link))

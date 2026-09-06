@@ -85,7 +85,7 @@ func runWithSocket(args []string, stdin io.Reader, stdout io.Writer, socketPath 
 			return fmt.Errorf("control command requires input")
 		}
 	}
-	output, err := (mounter.Client{SocketPath: socketPath, IOTimeout: 10 * time.Second}).Do(context.Background(), command, input)
+	output, err := (mounter.Client{SocketPath: socketPath, IOTimeout: controlClientTimeout(command)}).Do(context.Background(), command, input)
 	if err != nil {
 		return err
 	}
@@ -102,6 +102,19 @@ func runWithSocket(args []string, stdin io.Reader, stdout io.Writer, socketPath 
 	}
 	_, err = stdout.Write(output)
 	return err
+}
+
+func controlClientTimeout(command string) time.Duration {
+	switch command {
+	case "flush", "shutdown", "shutdown-best-effort":
+		// The supervisor bounds these operations independently using the
+		// configured flush/unmount deadlines. Keep the transport alive longer
+		// than the server's two-hour durability-operation ceiling; callers such
+		// as the Kubernetes runtime still apply their tighter context deadline.
+		return 2*time.Hour + 15*time.Second
+	default:
+		return 10 * time.Second
+	}
 }
 
 func validateHealthOutput(command string, output []byte) error {

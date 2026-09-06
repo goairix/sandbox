@@ -4,7 +4,7 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。MinIO 的 mount parameters 与 `/bin/sync -f -- /workspace` durable-flush profile 已提升为 `verified`，并完成 Docker 本地环境与 ARM64 Kubernetes 正式 MinIO endpoint 的真实生命周期验收。2023 私有云 OBS 的目标 endpoint provider spike 也已完成并提升为独立 verified profile；华为公有云 OBS 仍保持 fail closed，不能继承私有云结论。生产仍必须补齐专用 LSM、镜像签名/扫描和 fault matrix。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。MinIO、华为公有云 OBS 与 2023 私有云 OBS 已分别完成目标 endpoint 的真实挂载和 durable-flush 验证，并保持独立 profile、镜像 digest 与部署 values。生产仍必须补齐专用 LSM、镜像签名/扫描和 fault matrix。现有 `workspace.mode=sync` 部署不受影响。
 
 ## 0. 当前部署入口
 
@@ -113,7 +113,7 @@ CI 必须向两个 FUSE Dockerfile 传入：
 
 manifest 是严格审计证据，不是运行时配置扩展点。它记录 profile/status/参数元数据和 s3fs SHA-256，并与编译进 Go 二进制的 typed catalog 逐项匹配；只有 compiled catalog 可以构造 s3fs argv。未知字段、重复字段、ID/状态不匹配、s3fs hash 不匹配或未通过 ldflags 绑定都会使镜像构建自检失败。package self-check 还会真实执行固定 `s3fs --version`，以提前发现 artifact 架构错误、loader 缺失或动态依赖缺失。任何租户、API 参数或 manifest 都不能注入额外 `-o` 参数。
 
-当前仓库没有真实 `BASE_IMAGE` digest、s3fs artifact URL/hash 或已发布镜像 digest；这些输入及实际 image build、漏洞扫描、CycloneDX SBOM、签名 attestation 均由 CI/Task 18 生成，不能以本地 contract test 或 Compose config 校验代替。
+仓库中的测试 overlay 已记录本次实测使用的发布镜像 digest，但其派生基础镜像与 s3fs artifact 仍必须由正式 CI 固定并重新构建。漏洞扫描、CycloneDX SBOM、签名和 attestation 不能由本地 contract test、provider spike 或 Compose config 校验代替。
 
 ### 3.3 package-check 与 release-check
 
@@ -122,10 +122,10 @@ manifest 是严格审计证据，不是运行时配置扩展点。它记录 prof
 | Profile ID | Mount parameters | Durable flush | 当前部署资格 |
 |---|---|---|---|
 | `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check；仍须满足环境发布门禁 |
-| `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+| `huawei-obs-public-v1` | `verified` | `verified` | 可使用公有云专用 digest 启用；不得复用私有云或 MinIO 镜像 |
 | `huawei-obs-private-2023-v1` | `verified` | `verified` | 可使用专用 digest 启用；不得复用公有云或 MinIO 镜像 |
 
-MinIO 与 2023 私有云 OBS 均已使用固定 `/bin/sync -f -- /workspace` 完成 durable-flush 提升；这只放开各自 profile 资格，不豁免最终镜像 digest、TLS、LSM、扫描和 fault matrix。公有 OBS 仍只是从官方资料得到的候选参数，不能继承私有云结论。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
+三个 profile 均已使用固定 `/bin/sync -f -- /workspace` 完成各自目标 endpoint 的 durable-flush 验证；这只放开各自 profile 资格，不豁免最终镜像 digest、TLS、LSM、扫描和 fault matrix。公有云与私有云 OBS 的结论不能互相继承。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
 
 静态 contract test：
 
@@ -347,23 +347,22 @@ config:
         systemEgressCIDRs: ["192.0.2.10/32"]
       obs:
         driver: s3fs
-        # 当前仅为 candidate，以下配置会被 fail-closed 校验拒绝；
-        # Task 18 完成公有云实测并显式提升状态后方可启用。
         profile: huawei-obs-public-v1
-        storageIdentity: huawei-obs-public-cn-north-4
-        caSecretKey: ca.crt
+        storageIdentity: huawei-obs-public-cn-southwest-2
+        caSecretKey: ""
         credentialGeneration: "2026-09-03-01"
         endpointHostIPs: []
         mounterImage: registry.example.com/sandbox-s3fs-obs@sha256:<64-hex-digest>
         dockerImage: registry.example.com/sandbox-fuse-obs@sha256:<64-hex-digest>
         lsmProfile: sandbox-fuse
-        systemEgressMode: cidr
+        systemEgressMode: cilium-fqdn
         dnsCIDRs: ["8.8.8.8/32", "1.1.1.1/32"]
         endpointPorts: [443]
         proxyURL: ""
         systemEgressFQDNs:
-          - obs.cn-north-4.myhuaweicloud.com
-        systemEgressCIDRs: ["192.0.2.20/32"]
+          - obs.cn-southwest-2.myhuaweicloud.com
+          - sandbox-fuse-workspace.obs.cn-southwest-2.myhuaweicloud.com
+        systemEgressCIDRs: []
 
 workspaceCredentials:
   # 控制面 namespace 中预先存在；FUSE Pod 使用的 Secret 名由
@@ -374,7 +373,7 @@ workspaceCredentials:
   caKey: ca.crt
 ```
 
-`<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名且已通过 release gate 的 profile；没有验证结果、durable flush 未验证或 profile 不匹配时启动失败。上面的公有云 OBS 段只是展示配置形状，当前不能启用。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置；公有云与 2023 私有云也分别使用独立 values、digest 和报告。
+`<64-hex-digest>` 必须替换为真实镜像 digest。运行时只选择与 `storage.filesystem.provider` 同名且已通过 release gate 的 profile；没有验证结果、durable flush 未验证或 profile 不匹配时启动失败。不同 provider 推荐使用独立 release values，避免 endpoint、bucket、Secret 与 profile 交叉配置；公有云与 2023 私有云也分别使用独立 values、digest 和报告。公有云可直接参考仓库中的 `testdata/values-fuse-obs-public.yaml`，但必须先创建同名 Secret，并按目标环境替换镜像 digest、LSM 和 DNS 配置。
 
 `workspace.fusePool.minSize/maxSize` 表示当前活动 provider 配置下的 prepared 空壳数量，而不是已挂载 workspace 的复用容器；它与现有通用 `pool` 分开，后者继续服务 sync/无 workspace sandbox。和当前 Pool 一样，FUSE Pool 由 `sandbox-api` 的 Manager 启动并维护：启动时 WarmUp，Acquire/异常移除后调用 `refillIfNeeded`，并按 `refillIntervalSeconds` 周期对账。Redis 让多个 sandbox-api 副本原子领取空壳、续租本轮 refill 权并计算全局水位；进程内 slice 只能做非权威缓存。创建 runtime 前必须先以不可复用的 `PreparationID/spec.ID` 原子占用容量槽，`maxSize` 只限制 preparing + prepared；RuntimeUID 返回后原子绑定且不可变。reservation 超时不能自动回池，必须经 Manager owner/session/gate guard 得到明确 disposition。Protected、Unknown 或 guard 检查错误的记录保持不可领取且不得删除；只有明确 Abandoned（或无引用的 Pristine 过期空壳）才能先 claim cleanup、再精确删除 `(RuntimeID, RuntimeUID)`。guard 已明确证明 Pristine 后若 prepared runtime health 明确失败，也必须 cleanup 而不能重新发布。`reserved → prepared` 在同一 Redis 事务中重新检查 `preparing + prepared < maxSize`；若异步 refill 已占满容量，则销毁旧 reservation。删除失败保留 cleanup tombstone 重试。`minSize=0` 只启用 cold prepare；生产要获得预热收益必须配置 `minSize>=1`，并按实测突发并发量定容。
 
@@ -686,7 +685,7 @@ docker run --rm --device /dev/fuse:/dev/fuse alpine:3.22 \
 
 ### 7.2 Compose 控制面配置
 
-Compose wiring 已落地，但当前所有 FUSE profile 仍会被 release gate fail closed，不能作为可上线配置直接使用。本节的本地验证开关只用于让正式仓库源码通过配置加载并完成 Docker/MinIO 功能冒烟，不改变这一发布结论。
+Compose wiring 已落地，并显式透传 MinIO 与 OBS 两组 typed provider 配置。启用任一 profile 仍必须使用与该 profile 匹配的不可变镜像 digest、凭证、endpoint 与受限 system egress；本节的本地 MinIO 例外开关不适用于 OBS。
 
 Compose 需要把 Secret 暂存目录以同一绝对路径挂载给 API，以便 API 创建动态容器时使用宿主机可解析的 source path：
 
@@ -701,7 +700,7 @@ services:
       - ${WORKSPACE_SECRET_STAGING_ROOT}:${WORKSPACE_SECRET_STAGING_ROOT}:rw
 ```
 
-仓库 Compose 文件已显式映射 MinIO provider 的环境变量；OBS 或生产多 profile 部署推荐改用只读配置文件，避免在 Compose 中复制整套 map key。配置示例：
+仓库 Compose 文件已显式映射 MinIO 和 OBS provider 的环境变量。两组映射共享 `.env` 中的 `WORKSPACE_PROFILE`、`STORAGE_IDENTITY`、`FUSE_MOUNTER_IMAGE`、`FUSE_SANDBOX_IMAGE` 与出口参数，但运行时只选择与 `STORAGE_PROVIDER` 同名的一组；profile/provider 不匹配会 fail closed。生产多 profile 部署仍推荐使用只读配置文件，减少切换时交叉配置的风险。配置示例：
 
 ```yaml
 runtime:
@@ -768,8 +767,6 @@ workspace:
       system_egress_cidrs: [192.0.2.10/32]
     obs:
       driver: s3fs
-      # 当前仍为 unverified，以下配置会被 fail-closed 校验拒绝；
-      # Task 18 完成目标私有云实测并显式提升状态后方可启用。
       profile: huawei-obs-private-2023-v1
       storage_identity: huawei-obs-private-primary
       credential_generation: "2026-09-03-01"
@@ -787,7 +784,7 @@ workspace:
 
 对象存储的 provider、bucket、endpoint、region、sub path 和 TLS 开关继续使用 `storage.filesystem` 配置。MinIO endpoint 使用 `host[:port]`，runtime 根据 `use_ssl` 派生 s3fs URL；OBS endpoint 使用华为 SDK 要求的格式。AK/SK 不出现在该文件或环境变量；Compose 把 `${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`，sandbox-api 读取后在 `/var/lib/sandbox/workspace-secrets` 中为动态容器生成 root-only 文件。私有 CA 同样从该只读目录读取并复制给特殊容器，同时配置到控制面原生存储客户端；CA 或凭证轮换都需要排空并重建相关 sandbox。
 
-仓库 Compose 使用 `STORAGE_REGION` 传递 SigV4 region；MinIO 和公有云 OBS profile 要求该值为非空、小写 canonical region。`SANDBOX_IMAGE` 和 `GATEWAY_IMAGE` 用于覆盖普通 sandbox 与 gateway 镜像。`sandbox-api` 会等待 Redis healthcheck 通过且 `sandbox-images` 成功准备完全部镜像后才启动，避免 API 已经接流量但 pool 所需镜像仍不存在：未配置镜像覆盖时构建仓库默认镜像；配置 `SANDBOX_IMAGE`、`GATEWAY_IMAGE`、`FUSE_MOUNTER_IMAGE` 或 `FUSE_SANDBOX_IMAGE` 时先检查 Docker daemon 的本地缓存，缺失则从 registry 拉取。默认 `DOCKER_AUTH_CONFIG_FILE=./docker-auth-public/config.json` 只提供空的 Docker client 配置；使用需认证的私有 registry 时，必须把该变量设为仓库根目录之外的宿主机绝对路径，例如 `/etc/sandbox/docker-auth/config.json`，并只读挂入 `sandbox-images`。禁止把真实认证文件复制到本仓库；`.dockerignore` 的防御性规则不能替代这一部署约束。该文件应使用最小权限的只读账号，父目录/文件分别为 `0700`/`0600`，且必须包含可由 `docker:cli` 直接读取的 `auths`，不能依赖宿主机 `credsStore`/credential helper，也不能通过环境变量传递认证内容。只有该文件以只读方式进入一次性镜像准备容器；`/root/.docker` 的其余空间保持容器内可写，以供 buildx 保存非敏感状态，认证配置不进入 `sandbox-api`。Docker FUSE 启用时，后三个 FUSE 相关值都必须填写 registry 返回的真实 `@sha256:` digest；tag 或本地 image ID 会在 pool WarmUp 前被拒绝。若设置 `WORKSPACE_SECRET_STAGING_ROOT`，它必须是宿主机绝对路径且不能是 `/`，Compose 会以相同绝对 target 挂入 API，并同步写入 `runtime.docker.workspace_secret_root`，不能只改 volume source。该路径会写入 container、gateway、network、cache volume 的受管资源标签，并作为部署期不可变的资源身份；如必须迁移，先用旧配置排空全部 FUSE sandbox，确认旧目录为空且无 `sandbox.managed=true` Docker 资源，再同时修改目录与配置。存在旧资源时 runtime 会 fail closed，不会跨 root 猜测或删除 Secret。
+仓库 Compose 使用 `STORAGE_REGION` 传递固定 region；MinIO 和公有云 OBS profile 要求该值为非空、小写 canonical region。Docker 不能使用 Cilium FQDN policy，因此正式域名必须在部署时解析为经过审批的当前公网 `/32` 集合，写入 `STORAGE_ENDPOINT_CIDRS`，并在 DNS 变化时排空 Pool、更新集合后重建；不能填 `0.0.0.0/0` 或内网宽网段。`SANDBOX_IMAGE` 和 `GATEWAY_IMAGE` 用于覆盖普通 sandbox 与 gateway 镜像。`sandbox-api` 会等待 Redis healthcheck 通过且 `sandbox-images` 成功准备完全部镜像后才启动，避免 API 已经接流量但 pool 所需镜像仍不存在：未配置镜像覆盖时构建仓库默认镜像；配置 `SANDBOX_IMAGE`、`GATEWAY_IMAGE`、`FUSE_MOUNTER_IMAGE` 或 `FUSE_SANDBOX_IMAGE` 时先检查 Docker daemon 的本地缓存，缺失则从 registry 拉取。默认 `DOCKER_AUTH_CONFIG_FILE=./docker-auth-public/config.json` 只提供空的 Docker client 配置；使用需认证的私有 registry 时，必须把该变量设为仓库根目录之外的宿主机绝对路径，例如 `/etc/sandbox/docker-auth/config.json`，并只读挂入 `sandbox-images`。禁止把真实认证文件复制到本仓库；`.dockerignore` 的防御性规则不能替代这一部署约束。该文件应使用最小权限的只读账号，父目录/文件分别为 `0700`/`0600`，且必须包含可由 `docker:cli` 直接读取的 `auths`，不能依赖宿主机 `credsStore`/credential helper，也不能通过环境变量传递认证内容。只有该文件以只读方式进入一次性镜像准备容器；`/root/.docker` 的其余空间保持容器内可写，以供 buildx 保存非敏感状态，认证配置不进入 `sandbox-api`。Docker FUSE 启用时，后三个 FUSE 相关值都必须填写 registry 返回的真实 `@sha256:` digest；tag 或本地 image ID 会在 pool WarmUp 前被拒绝。若设置 `WORKSPACE_SECRET_STAGING_ROOT`，它必须是宿主机绝对路径且不能是 `/`，Compose 会以相同绝对 target 挂入 API，并同步写入 `runtime.docker.workspace_secret_root`，不能只改 volume source。该路径会写入 container、gateway、network、cache volume 的受管资源标签，并作为部署期不可变的资源身份；如必须迁移，先用旧配置排空全部 FUSE sandbox，确认旧目录为空且无 `sandbox.managed=true` Docker 资源，再同时修改目录与配置。存在旧资源时 runtime 会 fail closed，不会跨 root 猜测或删除 Secret。
 
 `WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH=true` 仅保留给历史/候选 MinIO profile 的受限本地 Docker 试验；当前已验证的 MinIO profile 不需要设置它。sandbox-api 仍只在以下条件全部成立时接受该例外：runtime 为 Docker；provider 为 MinIO；endpoint 是私网或回环 literal IPv4；`system_egress_cidrs` 只有一项且是该 endpoint 的精确 `/32`；`endpoint_ports` 只有一项且精确匹配 endpoint 端口；compiled profile 的挂载参数已经验证。OBS、Kubernetes、公网 endpoint、FQDN endpoint、宽网段出口或额外端口均拒绝该开关。它不能改变 `release-check` 或生成生产发布证据。
 
@@ -996,7 +993,7 @@ helm --kube-context ds-ai-research upgrade --install sandbox-fuse \
 
 验收结果：prepared 空壳为 `1/2 Running` 且 mounter PID 1 cwd 为 `/`；请求仅提供 `mode` 与动态 `workspace_path` 后命中同一 Pod/UID并变为 Ready；UID 1000 用户看到 effective `fuse.s3fs`，写入后显式 sync，独立 MinIO 客户端读回一致；DELETE 在 2 秒内返回 200，旧 Pod 变为 NotFound，`sandbox-api` 自动补回新的 `1/2` prepared 空壳。该流程同时验证了 pool naming 为 `sandbox-pool-<10位后缀>`，没有重新引入早期过长的 preparation ID 名称。
 
-卸载预算由 `2 × flush_timeout + unmount_timeout + 30s` 控制面余量构成：manager 先 quiesce/flush，strong shutdown 再做一次经 profile 验证的 flush 后普通卸载，并等待 exact Pod UID 消失。teardown 任一失败会记录不含凭证的 `sandbox_id`、`runtime_id` 和阶段名；API 返回 cleanup pending 后后台继续对同一 tombstone 重试，不能释放 owner 或把已授权实例放回 Pool。
+卸载预算由 `2 × flush_timeout + unmount_timeout + 30s` 控制面余量构成：manager 先 quiesce/flush，strong shutdown 再做一次经 profile 验证的 flush。flush 成功后 supervisor 先向自己创建的 exact s3fs 子进程发送一次 `SIGTERM`，让 s3fs 完成自身的正常卸载和退出，并同时验证 mount 已消失、子进程已退出；仅当该路径尚未完成时才在剩余预算内重试普通 `fusermount3 -u`。控制客户端对 flush/shutdown 使用长于服务端两小时上限的传输超时，runtime 调用方仍保留更短的 teardown context。全程不使用 lazy/force unmount。teardown 任一失败会记录不含凭证的 `sandbox_id`、`runtime_id` 和阶段名；API 返回 cleanup pending 后后台继续对同一 tombstone 重试，不能释放 owner 或把已授权实例放回 Pool。
 
 Chart 默认启用 `preDeleteDrain`。`helm uninstall` 真正删除 release 资源前，hook Job 先删除该 release 的 HPA、把自身 `sandbox-api` Deployment 缩到 0，并等待所有 API Pod 完成 `Manager.Stop`；因此内置 Redis 仍在线时即可完成 session teardown 和 Pool drain，不会发生 API 与 Redis 同时终止造成的 fail-closed 遗留。hook ServiceAccount 只能 `get/update` 精确的 `<release>-api` Deployment，以及 `get/delete` 同名 HPA。API Deployment 在使用内置 Redis 时还带有 `wait-for-redis` init container，避免 Redis 尚未 Ready 导致 API 反复退出。若显式设置 `preDeleteDrain.enabled=false`，运维必须先手工禁用 HPA、把 API Deployment 缩到 0、确认所有 managed pool Pod 已清理，再执行 Helm 卸载；不得直接同时删除 API 与 Redis。
 
@@ -1023,13 +1020,27 @@ MinIO durable flush 固定为 `/bin/sync -f -- /workspace`，在停止新用户�
 
 这项 profile 结论不替代生产部署门禁：仍须使用最终 digest、专用 AppArmor/SELinux profile、正式 endpoint TLS、镜像签名/扫描和故障矩阵。开发集群的 `allowMissingLSMForKind: true` 只能作为明确的测试例外。
 
-### 8.2 华为 OBS 公有云候选与 2023 私有云验证基线
+### 8.2 华为 OBS 公有云与 2023 私有云验证基线
 
 [华为云公有云 CCE OBS 挂载参数文档](https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html)与本项目使用的[双华云私有云 CCE OBS 挂载参数文档](https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0631.html)均明确规定：普通对象桶使用 s3fs，并行文件系统使用 obsfs。私有云文档还显示普通对象桶自动使用 `sigv2`，s3fs 1.92 会自动添加 `compat_dir`。一期只接入普通对象桶，因此 OBS profile 的客户端固定为 s3fs，不使用 obsfs。
 
 该文档描述的是 Everest 集成路径，不等于任意自建 sidecar/Docker 镜像已兼容。并且目标私有云部署于 2023 年，在线文档的当前内容不能证明现网组件版本。上线前须向平台侧或厂商确认并留档实际 OBS 服务版本/补丁、CCE Everest 插件版本及集成路径客户端版本；无法取得服务端版本时，至少保存 endpoint、桶类型、Everest 版本和全套兼容性测试证据。
 
-当前 `huawei-obs-public-v1` 只把官方公有云资料中的 `url`、`endpoint` 与 SigV2 形状记录为 `candidate`，addressing style 尚未验证，durable flush 仍是 `blocked-pending-flush-spike`，不能通过配置或 release gate。`huawei-obs-private-2023-v1` 已按目标 2023 私有云 endpoint 的实测结果提升为 `verified`，不代表公有云兼容性结论。
+`huawei-obs-public-v1` 与 `huawei-obs-private-2023-v1` 已分别针对目标公有云和 2023 私有云 endpoint 完成独立 provider spike 并提升为 `verified`；两者的 profile、参数、镜像和证据仍严格分离，任何一方的结果都不能证明另一方兼容。
+
+2026-09-06 在华为公有云西南二区 `obs.cn-southwest-2.myhuaweicloud.com` 的目标普通对象桶完成公有云 provider spike。上游 s3fs 1.95 在完整 TLS/SNI/主机名校验下使用 virtual-host addressing、`endpoint=cn-southwest-2` 与 `sigv2`，不需要私有云 profile 的 `compat_dir`。隔离 Pod 在 Cilium 精确 FQDN 策略下完成目录 marker、仅给定 prefix 的子路径挂载、写入、`/bin/sync -f -- /workspace`、普通卸载、重挂载 SHA-256 读回和精确 prefix 删除；path-style 独立客户端被服务端拒绝，固定 virtual-host 后读回成功，因此 addressing style 是实测结论。
+
+同日 Helm revision 14 使用公有云专用 API 与 mounter digest 完成 Kubernetes API lifecycle matrix：pool hit/延迟挂载、UID/GID 1000、三语言、SSE、直接文件与分片 API、skills、路径逃逸拒绝、覆盖、append、truncate、rename/delete、本地 git init/clone、分批小文件、25 MiB 流式上传、同 prefix 租约冲突、durable flush、独立 S3v2 读回、single-use 删除和自动补池全部通过。复测同时暴露并修复了两个真实退出问题：控制客户端原有 10 秒传输超时早于持久化预算，以及该节点上外部 `fusermount3 -u` 对健康 s3fs mount 返回 `EBUSY`；最终镜像使用上述“flush 后向 exact s3fs 发送一次 `SIGTERM`、验证正常自卸载、普通卸载兜底”的路径，完整 API 用例在 175.56 秒内通过。另一个启用 `network.enabled=true, block_private=true` 的真实 sandbox 成功访问公网 HTTPS，同时无法连接集群内 Redis 私网地址，确认 FUSE system egress 没有改变“开放公网、禁止内网、内网仅白名单”的用户网络策略。
+
+Docker 使用项目 `docker/docker-compose.yml` 正常启动控制面、Redis、镜像准备和 FUSE Pool，并完成 pool hit、延迟挂载、写入、durable flush、独立 S3v2 读回、网络关闭、single-use 删除和精确 prefix 清理。首次派生的特殊镜像只更新 mounter、未同步更新 probe，真实 quiesce 因二进制不成对而失败；最终镜像同时装入同次源码构建的 `workspace-mounter` 与 `workspace-probe` 后，同一 API 用例通过。构建和发布特殊镜像时这两个二进制必须始终来自同一源码 revision。
+
+本次公有云验收使用的不可变镜像为：
+
+- sandbox-api：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api@sha256:7d3f05c5c60674e0fc5fdbc0da76b0bfa7d5872b45eba55322400a80de3e4efc`；
+- Kubernetes mounter：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-public@sha256:c38fbd98e5b6adb9c8d3a8ec212f696ef942cab2758a04f23f0c04614d7a7103`；
+- Docker 特殊容器：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-public@sha256:df0dfa3ccbcd93c1698ae305236c904a6b6aa403b96b74b010edf8c56984828d`。
+
+仓库提供不含凭证的 `testdata/values-fuse-obs-public.yaml` 作为 Helm 公有云 overlay。Kubernetes 使用 Cilium 精确放行基础 endpoint 与 `<bucket>.<endpoint>` 两个 FQDN 的 TCP/443；Docker 使用部署时解析并审批的公网 `/32` 集合，禁止 wildcard、`world`、`0.0.0.0/0` 或内网宽网段。公有云和私有云测试 overlay 都显式使用内部 Redis 镜像并关闭 PVC，只适用于可丢弃状态的开发验收；生产 Redis 必须持久化。已存在的 Redis StatefulSet 不能通过 Helm 原地切换 `volumeClaimTemplates`，需要新 release 或明确的数据迁移方案。overlay 本身仍保持 `allowMissingLSMForKind=false`，本次缺少专用 LSM 的开发集群例外只通过一次性 Helm 参数显式开启，不得固化进部署文件。测试结束后 Helm 已回滚到私有云基线 revision 9（形成当前 revision 15），公有云测试 Secret、临时客户端凭证、测试对象 prefix、孤儿 Pool tombstone 和临时网络策略均已删除。
 
 2026-09-06 在 `ds-ai-research` ARM64 Linux 集群、`sandbox-fuse` namespace 对目标普通对象桶完成了独立 provider spike。使用上游 s3fs 1.95（artifact SHA-256 `fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695`），完整启用 TLS 证书、SNI 与主机名校验；固定 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，未使用 `no_check_certificate`、`ssl_verify_hostname=0` 或 path-style。实测覆盖 UID/GID 1000 创建、读取、追加、截断、目录、rename，25 MiB multipart 写入后执行 `/bin/sync -f -- /workspace`，再通过独立 S3v2 客户端按对象读取并校验 SHA-256；Pod 重建后重新挂载仍能读回一致内容，普通 `fusermount3 -u` 成功，所有测试对象按精确 prefix 清理。Cilium 验收同时确认 s3fs 实际访问 `<bucket>.<endpoint>`：部署必须精确放行基础 endpoint 与 bucket FQDN 两项，仍禁止 wildcard 和其他内网访问。
 

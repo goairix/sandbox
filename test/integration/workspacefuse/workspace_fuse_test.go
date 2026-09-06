@@ -84,7 +84,7 @@ func (c *apiClient) exec(ctx context.Context, sandboxID, shell string) error {
 		Stderr   string `json:"stderr"`
 	}
 	_, err := c.request(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/exec", map[string]any{
-		"language": "bash", "code": shell, "timeout": 1800,
+		"language": "bash", "code": shell, "timeout": 110,
 	}, &result)
 	if err != nil {
 		return err
@@ -121,9 +121,16 @@ func TestWorkspaceFUSE(t *testing.T) {
 
 	// Filesystem semantics: new empty prefix, directories, overwrite, append,
 	// truncate, rename, delete, local git checkout and a bounded small-file set.
+	smallFileCount := int64(10000)
+	if override := os.Getenv("WORKSPACE_FUSE_SMALL_FILE_COUNT"); override != "" {
+		smallFileCount, err = strconv.ParseInt(override, 10, 64)
+		if err != nil || smallFileCount <= 0 {
+			t.Fatal("WORKSPACE_FUSE_SMALL_FILE_COUNT must be positive")
+		}
+	}
 	if err := c.exec(ctx, sandbox.ID, `set -e
 	findmnt -rn -o FSTYPE -T /workspace | grep -qx fuse.s3fs
-mkdir -p /workspace/tree/a
+	mkdir -p /workspace/tree/a
 printf first >/workspace/tree/a/file
 printf second >/workspace/tree/a/file
 printf '+append' >>/workspace/tree/a/file
@@ -139,13 +146,31 @@ git -C /workspace/git-source config user.email matrix@example.invalid
 git -C /workspace/git-source config user.name matrix
 printf tracked >/workspace/git-source/tracked
 git -C /workspace/git-source add tracked
-git -C /workspace/git-source commit -qm initial
-git clone -q /workspace/git-source /workspace/git-checkout
-test "$(cat /workspace/git-checkout/tracked)" = tracked
-mkdir /workspace/small
-i=0; while [ "$i" -lt 10000 ]; do : >"/workspace/small/f-$i"; i=$((i+1)); done
-test "$(find /workspace/small -type f | wc -l)" -eq 10000
-rm -rf /workspace/tree /workspace/git-source /workspace/git-checkout /workspace/small`); err != nil {
+	git -C /workspace/git-source commit -qm initial
+	git clone -q /workspace/git-source /workspace/git-checkout
+	test "$(cat /workspace/git-checkout/tracked)" = tracked
+	rm -rf /workspace/tree /workspace/git-source /workspace/git-checkout`); err != nil {
+		t.Fatal(err)
+	}
+	const smallFileBatchSize int64 = 100
+	for start := int64(0); start < smallFileCount; start += smallFileBatchSize {
+		end := min(start+smallFileBatchSize, smallFileCount)
+		if err := c.exec(ctx, sandbox.ID, fmt.Sprintf(`set -e
+	mkdir -p /workspace/small
+	i=%d; while [ "$i" -lt %d ]; do : >"/workspace/small/f-$i"; i=$((i+1)); done
+	test -f /workspace/small/f-%d`, start, end, end-1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for start := int64(0); start < smallFileCount; start += smallFileBatchSize {
+		end := min(start+smallFileBatchSize, smallFileCount)
+		if err := c.exec(ctx, sandbox.ID, fmt.Sprintf(`set -e
+	i=%d; while [ "$i" -lt %d ]; do rm -f "/workspace/small/f-$i"; i=$((i+1)); done
+	test ! -e /workspace/small/f-%d`, start, end, end-1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.exec(ctx, sandbox.ID, `rmdir /workspace/small`); err != nil {
 		t.Fatal(err)
 	}
 

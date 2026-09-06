@@ -72,14 +72,12 @@ var compiledProfileCatalog = map[string]Profile{
 		ID: "huawei-obs-public-v1", Provider: "obs",
 		Descriptor: ProfileDescriptor{
 			ID: "huawei-obs-public-v1", Provider: "obs",
-			MountParameters: MountParametersCandidate, DurableFlush: DurableFlushPendingSpike,
+			MountParameters: MountParametersVerified, DurableFlush: DurableFlushVerified,
 			TLSRequired: true, EndpointOption: "url", RegionOption: "endpoint",
-			AddressingStyle: "unverified", SignatureVersion: "sigv2",
+			AddressingStyle: "virtual-host", SignatureVersion: "sigv2",
 		},
-		// This records the vendor-documented public-cloud candidate contract.
-		// It is deliberately unreachable from production Lookup until its
-		// target-region provider spike promotes the descriptor to verified.
-		Options: huaweiPublicCandidateOptions,
+		Options: huaweiPublicOptions,
+		Flush:   syncFilesystem,
 	},
 	"huawei-obs-private-2023-v1": {
 		ID: "huawei-obs-private-2023-v1", Provider: "obs",
@@ -111,7 +109,7 @@ func minioOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
 	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
 }
 
-func huaweiPublicCandidateOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
+func huaweiPublicOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
 	if err := requireHTTPS(config.Endpoint); err != nil {
 		return nil, err
 	}
@@ -119,7 +117,7 @@ func huaweiPublicCandidateOptions(config fuseprotocol.BootstrapConfig) ([]string
 		return nil, fmt.Errorf("Huawei OBS profile provider mismatch")
 	}
 	if !canonicalRegion.MatchString(config.Region) {
-		return nil, fmt.Errorf("Huawei OBS public candidate requires a region endpoint value")
+		return nil, fmt.Errorf("Huawei OBS public profile requires a region endpoint value")
 	}
 	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "sigv2"}, nil
 }

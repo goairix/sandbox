@@ -2,7 +2,7 @@ schema_version: 1
 profile_id: huawei-obs-public-v1
 provider: obs
 enabled: false
-status: blocked-pending-provider-spike
+status: blocked-pending-full-fault-matrix
 mounter_image_digest: ""
 sandbox_image_digest: ""
 service_version: ""
@@ -12,4 +12,4 @@ evidence_sha256: ""
 directory_marker: trailing-slash-zero-byte
 tls_verify: true
 options: []
-blocked_reason: public Huawei OBS endpoint compatibility has not been verified
+blocked_reason: provider and API lifecycle passed; full two-runtime fault evidence has not been recorded

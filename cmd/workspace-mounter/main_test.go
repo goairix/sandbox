@@ -27,14 +27,20 @@ func TestImageProfileBindingIsBuildTimeRestrictedAndTestInjectable(t *testing.T)
 	t.Cleanup(func() { imageProfileID = original })
 
 	imageProfileID = "huawei-obs-public-v1"
-	_, err := mounter.BoundProfiles(imageProfileID)
-	require.Error(t, err)
-
-	imageProfileID = "minio-sigv4-path-style-v1"
 	registry, err := mounter.BoundProfiles(imageProfileID)
 	require.NoError(t, err)
 	_, ok := registry.Lookup(imageProfileID)
 	assert.True(t, ok)
+
+	imageProfileID = "minio-sigv4-path-style-v1"
+	registry, err = mounter.BoundProfiles(imageProfileID)
+	require.NoError(t, err)
+	_, ok = registry.Lookup(imageProfileID)
+	assert.True(t, ok)
+
+	imageProfileID = "unknown-v1"
+	_, err = mounter.BoundProfiles(imageProfileID)
+	require.Error(t, err)
 }
 
 func TestReleaseImageCLIUsesGoReleaseGate(t *testing.T) {
@@ -54,6 +60,14 @@ func TestReleaseImageCLIUsesGoReleaseGate(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError)
 	assert.Zero(t, packageCalls)
 	assert.Equal(t, 1, releaseCalls)
+}
+
+func TestControlClientTimeoutAllowsLongDurabilityOperations(t *testing.T) {
+	for _, command := range []string{"flush", "shutdown", "shutdown-best-effort"} {
+		assert.Greater(t, controlClientTimeout(command), 2*time.Hour, command)
+	}
+	assert.Equal(t, 10*time.Second, controlClientTimeout("health-ready"))
+	assert.Equal(t, 10*time.Second, controlClientTimeout("authorize"))
 }
 
 type cliTestRunner struct{}

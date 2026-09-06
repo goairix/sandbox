@@ -2,9 +2,9 @@
 
 **日期：** 2026-09-01
 
-**复审修订：** 2026-09-03
+**复审修订：** 2026-09-06
 
-**状态：** 设计已确认，控制面 wiring、恢复/销毁、观测和部署资源已落地；MinIO profile 已通过 mount/durable-flush gate，OBS 与生产故障矩阵仍由发布门禁控制
+**状态：** 设计已确认，控制面 wiring、恢复/销毁、观测和部署资源已落地；MinIO、华为公有云 OBS 与 2023 私有云 OBS profile 均已独立通过 mount/durable-flush gate，生产大文件/小文件规模测试、专用 LSM 和完整故障矩阵仍由发布门禁控制
 
 **目标分支：** `feat/workspace-fuse-mount`
 
@@ -146,10 +146,12 @@ GOOS=linux GOARCH=amd64 go build \
 | Profile ID | Mount parameters | Durable flush | 结论 |
 |---|---|---|---|
 | `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check，部署仍须满足 LSM、TLS、digest 和 fault matrix |
-| `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 仅为公有云文档候选参数，仍不能发布 |
+| `huawei-obs-public-v1` | `verified` | `verified` | 公有云西南二区目标 endpoint 已完成 Kubernetes 与 Docker 验证；仍须使用公有云专用 digest |
 | `huawei-obs-private-2023-v1` | `verified` | `verified` | 2023 私有云目标 endpoint provider spike 已通过；部署仍须使用专用 digest 并完成 runtime 验收 |
 
-公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。2026-09-06 已在目标私有云普通对象桶完成上游 s3fs 1.95 provider spike：启用完整 TLS/SNI 校验，使用 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，完成 UID/GID 1000 创建、追加、截断、目录与重命名、25 MiB multipart、`sync -f`、独立 S3v2 API SHA-256 读回、普通卸载及 Pod 重建后重挂载读回。该证据只提升 `huawei-obs-private-2023-v1`，不提升公有云 profile；生产仍须固定专用镜像 digest、完成两套 runtime/fault matrix、LSM、签名、扫描、SBOM 和 attestation。
+公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告，两者都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。2026-09-06 已在目标私有云普通对象桶完成上游 s3fs 1.95 provider spike：启用完整 TLS/SNI 校验，使用 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，完成 UID/GID 1000 创建、追加、截断、目录与重命名、25 MiB multipart、`sync -f`、独立 S3v2 API SHA-256 读回、普通卸载及 Pod 重建后重挂载读回。
+
+同日又在华为公有云西南二区目标普通对象桶独立验证 `huawei-obs-public-v1`：上游 s3fs 1.95 使用完整 TLS/SNI、virtual-host addressing、`endpoint=cn-southwest-2` 与 `sigv2`，不携带私有云 `compat_dir`。Kubernetes sidecar 通过 Cilium 精确基础 endpoint + bucket FQDN 出口完成全 API lifecycle，并实测公网可访问、集群私网不可访问；Docker 特殊容器通过项目 Compose 正常启动链路完成 pool hit、延迟挂载、durable flush、独立 S3v2 读回、single-use 删除和精确清理。Docker 镜像中的 `workspace-mounter` 与 `workspace-probe` 必须来自同一源码 revision；仅更新其中一个会在 quiesce 阶段 fail closed。上述证据分别提升对应 profile，不允许交叉复用；生产仍须完成 LSM、fault matrix、签名、扫描、SBOM 和 attestation。
 
 同日 Kubernetes API lifecycle matrix 已在 `ds-ai-research/sandbox-fuse` 通过：空壳先启动、仅在 Acquire 确定 prefix 后挂载、Pool hit 保持 Pod UID、single-use 销毁后自动补池，并覆盖三语言 exec、SSE、文件/分片/skills、路径与网络拒绝、flush、独立对象存储读回和 404 映射。该结果完成 Kubernetes × 2023 私有云 OBS 的功能基线，不替代 Docker runtime、fault matrix、专用 LSM 或华为公有云验证。
 
@@ -359,8 +361,8 @@ Docker `CopyToContainer` 写入的 tar header 必须保持 UID/GID 1000。安全
 
 1. sandbox 状态改为 `destroying` 并拒绝新 Exec。
 2. supervisor 终止并回收全部用户进程及其脱离的后代，验证不存在指向 `/workspace` 的打开写句柄；不能把 Docker attach 关闭当作进程退出。
-3. quiesce 成功时执行 provider profile 验证过的 flush，再执行 `fusermount3 -u`；quiesce 失败时只记录有界、尽力 flush 结果，不宣称强持久化。
-4. 优雅卸载暂时失败时，在 `unmount_timeout` 内重试普通 `fusermount3 -u`。只有已证明 durable flush 成功的同一强关闭请求可以恢复重试；flush 失败、mount identity 不可验证或超时都保持 fail closed，不执行 lazy unmount。
+3. quiesce 成功时执行 provider profile 验证过的 flush；flush 成功后只向 supervisor 自己创建且 identity 已验证的 exact s3fs 子进程发送一次 `SIGTERM`，优先让 s3fs 正常结束并自行卸载，同时验证 mount 消失和进程退出。quiesce 失败时只记录有界、尽力 flush 结果，不宣称强持久化。
+4. s3fs 正常退出尚未完成时，才在 `unmount_timeout` 内重试普通 `fusermount3 -u`。只有已证明 durable flush 成功的同一强关闭请求可以继续该退出/卸载流程；flush 失败、mount identity 不可验证、signal 失败或超时都保持 fail closed，不执行 lazy/force unmount。CLI 控制通道对 flush/shutdown 的传输超时必须大于服务端持久化操作上限，runtime 外层 context 仍负责更短的部署预算。
 5. 删除容器和临时 Secret，并确认 runtime 不再存在。
 6. 最后释放 Redis workspace 租约。
 
@@ -960,7 +962,7 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 
 ### 17.1 测试矩阵
 
-最终发布必须覆盖以下矩阵。MinIO profile 已通过 mount/durable-flush release gate，并已完成两种 runtime 的功能冒烟；OBS 两个 profile 及全量 fault matrix 仍未完成，因此不能把六组合写成全部已验收：
+最终发布必须覆盖以下矩阵。三个 profile 均已分别通过 mount/durable-flush release gate，并完成两种 runtime 的真实功能冒烟；华为公有云 Kubernetes 还完成了覆盖、append、truncate、rename/delete、git、分批小文件、25 MiB 流式上传、租约冲突、durable flush 和 single-use refill 复测。由于 1 GiB、默认 10,000 小文件及全量 fault matrix 仍未全部完成，不能把六组合写成最终生产验收通过：
 
 | Runtime | Provider |
 |---|---|

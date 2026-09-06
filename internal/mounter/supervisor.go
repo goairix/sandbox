@@ -67,23 +67,24 @@ type Config struct {
 }
 
 type Supervisor struct {
-	mu              sync.Mutex
-	config          Config
-	runner          Runner
-	state           State
-	bootstrap       fuseprotocol.BootstrapConfig
-	profile         Profile
-	auth            fuseprotocol.AuthorizeRequest
-	process         Process
-	processDone     chan struct{}
-	bootstrapped    bool
-	consumed        bool
-	stopping        bool
-	shutdownTried   bool
-	shutdownStrong  bool
-	shutdownFlushed bool
-	mountID         uint64
-	mountDeadline   time.Time
+	mu               sync.Mutex
+	config           Config
+	runner           Runner
+	state            State
+	bootstrap        fuseprotocol.BootstrapConfig
+	profile          Profile
+	auth             fuseprotocol.AuthorizeRequest
+	process          Process
+	processDone      chan struct{}
+	bootstrapped     bool
+	consumed         bool
+	stopping         bool
+	shutdownTried    bool
+	shutdownStrong   bool
+	shutdownFlushed  bool
+	shutdownSignaled bool
+	mountID          uint64
+	mountDeadline    time.Time
 }
 
 func NewSupervisor(config Config, runner Runner) *Supervisor {
@@ -609,6 +610,13 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 	s.stopping = true
 	unmountCtx, cancel := context.WithTimeout(ctx, time.Duration(s.bootstrap.UnmountTimeoutSeconds)*time.Second)
 	defer cancel()
+	if !s.shutdownSignaled {
+		if err := s.process.Signal(syscall.SIGTERM); err != nil {
+			s.state = StateUnhealthy
+			return ack, fmt.Errorf("signal s3fs for graceful shutdown: %w", err)
+		}
+		s.shutdownSignaled = true
+	}
 	if complete, err := s.shutdownCompleteLocked(unmountCtx); err != nil {
 		s.state = StateUnhealthy
 		return ack, err
@@ -622,6 +630,14 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 		unmountErr = s.runner.Run(unmountCtx, []string{"/usr/bin/fusermount3", "-u", s.bootstrap.MountPath})
 		if unmountErr == nil {
 			break
+		}
+		if complete, err := s.shutdownCompleteLocked(unmountCtx); err != nil {
+			s.state = StateUnhealthy
+			return ack, err
+		} else if complete {
+			s.state = StateStopped
+			ack.GracefulUnmount = strong
+			return ack, nil
 		}
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {

@@ -500,7 +500,7 @@ workspace:
       lsm_profile: sandbox-fuse
       system_egress_mode: cilium-fqdn
       dns_cidrs: [1.1.1.1/32]
-      system_egress_fqdns: [obs.example.com]
+      system_egress_fqdns: [obs.example.com, sandbox.obs.example.com]
       system_egress_cidrs: [192.0.2.0/24]
       endpoint_ports: [443]
       proxy_url: ""
@@ -515,11 +515,12 @@ func TestLoadFUSEConfigFromYAML(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "fuse.yaml")
 	require.NoError(t, os.WriteFile(cfgFile, []byte(validFUSEYAML), 0o600))
 
-	_, err := config.Load(cfgFile)
-	require.ErrorContains(t, err, "pending provider spike")
+	cfg, err := config.Load(cfgFile)
+	require.NoError(t, err)
+	assert.Equal(t, "huawei-obs-public-v1", cfg.Workspace.Providers["obs"].Profile)
 }
 
-func TestLoadDecodesBlockedFUSEProviderWithoutSelectingIt(t *testing.T) {
+func TestLoadDecodesFUSEProviderWithoutSelectingIt(t *testing.T) {
 	content := strings.Replace(validFUSEYAML, "mode: fuse", "mode: sync", 1)
 	require.NotEqual(t, validFUSEYAML, content)
 	cfgFile := filepath.Join(t.TempDir(), "fuse-provider.yaml")
@@ -546,7 +547,7 @@ func TestLoadDecodesBlockedFUSEProviderWithoutSelectingIt(t *testing.T) {
 	assert.Equal(t, "ca.crt", provider.CASecretKey)
 	assert.Equal(t, []string{"192.0.2.20"}, provider.EndpointHostIPs)
 	assert.Equal(t, []string{"1.1.1.1/32"}, provider.DNSCIDRs)
-	assert.Equal(t, []string{"obs.example.com"}, provider.SystemEgressFQDNs)
+	assert.Equal(t, []string{"obs.example.com", "sandbox.obs.example.com"}, provider.SystemEgressFQDNs)
 	assert.Equal(t, []int32{443}, provider.EndpointPorts)
 	assert.Equal(t, "/run/secrets/access-key", cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile)
 	assert.Equal(t, "/run/secrets/secret-key", cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile)
@@ -730,18 +731,20 @@ func TestFUSEConfigValidation(t *testing.T) {
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
 		}, want: "virtual-host bucket FQDN"},
-		{name: "valid obs cilium fqdn", edit: func(c *config.Config) {
+		{name: "valid public obs cilium fqdn", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
 			c.Storage.FileSystem.Endpoint = "https://obs.example.com"
 			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
 				"obs": validFUSEProvider("obs.example.com", "cilium-fqdn"),
 			}
 			p := c.Workspace.Providers["obs"]
 			p.Profile = "huawei-obs-public-v1"
+			p.SystemEgressFQDNs = append(p.SystemEgressFQDNs, "sandbox-fuse-workspace.obs.example.com")
 			p.SystemEgressCIDRs = nil
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
-		}, want: "pending provider spike"},
+		}, want: ""},
 		{name: "unknown minio profile", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "unknown-v1" })
 		}, want: "unknown or does not match provider"},

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,11 +18,22 @@ import (
 )
 
 type fakeProcess struct {
-	exit chan error
+	exit      chan error
+	signal    func(os.Signal) error
+	signalsMu sync.Mutex
+	signals   []os.Signal
 }
 
-func (p *fakeProcess) Wait() error            { return <-p.exit }
-func (p *fakeProcess) Signal(os.Signal) error { return nil }
+func (p *fakeProcess) Wait() error { return <-p.exit }
+func (p *fakeProcess) Signal(signal os.Signal) error {
+	p.signalsMu.Lock()
+	p.signals = append(p.signals, signal)
+	p.signalsMu.Unlock()
+	if p.signal != nil {
+		return p.signal(signal)
+	}
+	return nil
+}
 
 type fakeRunner struct {
 	mu         sync.Mutex
@@ -356,6 +368,34 @@ func TestStrongShutdownWaitsForChildExitAndEffectiveUnmount(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, second.GracefulUnmount)
 	assert.Len(t, runner.runs, 3)
+}
+
+func TestStrongShutdownLetsS3FSPerformGracefulUnmountAfterFlush(t *testing.T) {
+	process := &fakeProcess{exit: make(chan error, 1)}
+	runner := &fakeRunner{process: process}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	process.signal = func(signal os.Signal) error {
+		require.Equal(t, os.Signal(syscall.SIGTERM), signal)
+		runner.mu.Lock()
+		require.NotEmpty(t, runner.runs)
+		assert.Equal(t, "/usr/bin/verified-flush", runner.runs[len(runner.runs)-1][0])
+		runner.mu.Unlock()
+		s.config.MountInfo = func() (Mount, error) {
+			return Mount{ID: 10, MountPoint: s.bootstrap.MountPath, FilesystemType: "tmpfs"}, nil
+		}
+		process.exit <- nil
+		return nil
+	}
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	ack, err := s.Shutdown(context.Background(), &request)
+	require.NoError(t, err)
+	assert.True(t, ack.GracefulUnmount)
+	assert.Equal(t, StateStopped, s.State())
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for _, argv := range runner.runs {
+		assert.NotEqual(t, "/usr/bin/fusermount3", argv[0])
+	}
 }
 
 func TestStrongShutdownRetriesAfterBoundedUnmountFailureWithoutRepeatingFlush(t *testing.T) {

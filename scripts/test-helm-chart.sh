@@ -35,5 +35,25 @@ private_obs_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
 grep -Fq 'value: "huawei-obs-private-2023-v1"' <<<"$private_obs_rendered"
 grep -A1 'name: SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_FQDNS' <<<"$private_obs_rendered" \
   | grep -Fq 'value: "obs.cn-southwest-268.shuanghuayun.com,sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com"'
+grep -Fq 'image: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis:feat-workspace-fuse"' <<<"$private_obs_rendered"
+if grep -Fq 'volumeClaimTemplates:' <<<"$private_obs_rendered"; then
+  printf 'private OBS test overlay unexpectedly enables Redis persistence\n' >&2
+  exit 1
+fi
+
+public_obs_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
+  --values "$repo_root/testdata/values-fuse-obs-public.yaml")"
+grep -Fq 'value: "huawei-obs-public-v1"' <<<"$public_obs_rendered"
+grep -A1 'name: SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_FQDNS' <<<"$public_obs_rendered" \
+  | grep -Fq 'value: "obs.cn-southwest-2.myhuaweicloud.com,sandbox-fuse-workspace.obs.cn-southwest-2.myhuaweicloud.com"'
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$public_obs_rendered" \
+  | grep -Fq 'value: "false"'
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$public_obs_rendered" \
+  | grep -Fq 'value: "true"'
+grep -Fq 'image: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis:feat-workspace-fuse"' <<<"$public_obs_rendered"
+if grep -Fq 'volumeClaimTemplates:' <<<"$public_obs_rendered"; then
+  printf 'public OBS test overlay unexpectedly enables Redis persistence\n' >&2
+  exit 1
+fi
 helm lint "$repo_root/deploy/helm/sandbox"
 printf 'helm chart tests: PASS\n'

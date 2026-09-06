@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 verify="$repo_root/scripts/verify-fuse-image.sh"
+real_docker="$(command -v docker || true)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -77,7 +78,7 @@ grep -Fq -- '--entrypoint /usr/local/bin/workspace-mounter' "$tmp/docker.log" ||
 grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp/docker.log" || fail "docker UID 1000 probe self-check missing"
 grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "docker package contract missing"
 
-expect_failure env MOCK_PROFILE_STATUS=blocked-pending-provider-spike SANDBOX_IMAGE="$digest" \
+expect_success env MOCK_PROFILE_STATUS=release-verified SANDBOX_IMAGE="$digest" \
   "$verify" docker release-check huawei-obs-public-v1
 
 expect_failure env SANDBOX_IMAGE="$digest" \
@@ -94,6 +95,30 @@ fuse="$repo_root/docker/images/sandbox-fuse/Dockerfile"
 ordinary="$repo_root/docker/images/sandbox/Dockerfile"
 ordinary_ignore="$repo_root/docker/images/sandbox/Dockerfile.dockerignore"
 compose="$repo_root/docker/docker-compose.yml"
+
+if [[ -n "$real_docker" ]]; then
+  compose_json="$("$real_docker" compose --env-file "$repo_root/docker/.env.example" -f "$compose" config --format json)"
+  python3 -c '
+import json, sys
+environment = json.load(sys.stdin)["services"]["sandbox-api"]["environment"]
+required = {
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DRIVER",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_PROFILE",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_STORAGE_IDENTITY",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_MOUNTER_IMAGE",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DOCKER_IMAGE",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_CREDENTIAL_GENERATION",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_MODE",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DNS_CIDRS",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_FQDNS",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_CIDRS",
+    "SANDBOX_WORKSPACE_PROVIDERS_OBS_ENDPOINT_PORTS",
+}
+missing = sorted(required.difference(environment))
+if missing:
+    raise SystemExit("Compose omits OBS provider environment: " + ", ".join(missing))
+' <<<"$compose_json"
+fi
 
 for file in "$mounter" "$fuse"; do
   test -f "$file" || fail "missing $file"
@@ -134,7 +159,7 @@ grep -Fxq '!internal/workspaceprobe/**' "$ordinary_ignore" || fail "ordinary bui
 profile_dir="$repo_root/docker/images/workspace-mounter/profiles"
 for tuple in \
   'minio-sigv4-path-style-v1 verified' \
-  'huawei-obs-public-v1 blocked-pending-flush-spike' \
+  'huawei-obs-public-v1 verified' \
   'huawei-obs-private-2023-v1 verified'; do
   set -- $tuple
   file="$profile_dir/$1.json"
