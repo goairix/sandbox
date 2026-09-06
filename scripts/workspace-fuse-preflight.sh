@@ -73,7 +73,7 @@ runtime_preflight() {
   local image_check="package-check"
   [[ -n "$profile_file" ]] && image_check="release-check"
   FUSE_IMAGE="$fuse_image" SANDBOX_IMAGE="$sandbox_image" \
-    "$repo_root/scripts/verify-fuse-image.sh" "$runtime_name" "$image_check" "$profile_id"
+    "$repo_root/scripts/verify-fuse-image.sh" "$runtime_name" "$image_check"
 
   case "$runtime_name" in
     kubernetes)

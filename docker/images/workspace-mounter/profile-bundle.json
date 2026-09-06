@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "minio-sigv4-path-style-v1",
+      "provider": "minio",
+      "mount_parameters": "verified",
+      "durable_flush": "verified",
+      "tls_required": true,
+      "endpoint_option": "url",
+      "region_option": "endpoint",
+      "addressing_style": "path",
+      "signature_version": "sigv4"
+    },
+    {
+      "id": "huawei-obs-public-v1",
+      "provider": "obs",
+      "mount_parameters": "verified",
+      "durable_flush": "verified",
+      "tls_required": true,
+      "endpoint_option": "url",
+      "region_option": "endpoint",
+      "addressing_style": "virtual-host",
+      "signature_version": "sigv2"
+    },
+    {
+      "id": "huawei-obs-private-2023-v1",
+      "provider": "obs",
+      "mount_parameters": "verified",
+      "durable_flush": "verified",
+      "tls_required": true,
+      "endpoint_option": "url",
+      "region_option": "endpoint",
+      "addressing_style": "virtual-host",
+      "signature_version": "sigv2"
+    }
+  ],
+  "s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

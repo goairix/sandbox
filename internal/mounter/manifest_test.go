@@ -26,51 +26,101 @@ test -z "${S3FS_PACKAGE_URL:-}"
 printf '%s\n' 'Amazon Simple Storage Service File System V1.95 (commit:test) with OpenSSL'
 `
 
-func validManifest(t *testing.T) ([]byte, string) {
+func validProfileBundle(t *testing.T) ([]byte, string) {
 	t.Helper()
-	profile, ok := InspectCompiledProfile("minio-sigv4-path-style-v1")
-	require.True(t, ok)
 	hash := sha256.Sum256([]byte("trusted-s3fs"))
 	digest := hex.EncodeToString(hash[:])
-	raw, err := json.Marshal(ProfileManifest{Version: ProfileManifestVersion, Profile: profile.Descriptor, S3FSSHA256: digest})
+	descriptors := make([]ProfileDescriptor, 0, 3)
+	for _, id := range []string{
+		"minio-sigv4-path-style-v1",
+		"huawei-obs-public-v1",
+		"huawei-obs-private-2023-v1",
+	} {
+		profile, ok := InspectCompiledProfile(id)
+		require.True(t, ok)
+		descriptors = append(descriptors, profile.Descriptor)
+	}
+	raw, err := json.Marshal(ProfileBundle{
+		Version: ProfileBundleVersion, Profiles: descriptors, S3FSSHA256: digest,
+	})
 	require.NoError(t, err)
 	return raw, digest
 }
 
-func TestProfileManifestRequiresExactCompiledDescriptorAndBinaryHash(t *testing.T) {
-	raw, digest := validManifest(t)
-	require.NoError(t, validateProfileManifest(raw, "minio-sigv4-path-style-v1", digest))
+func TestProfileBundleRequiresExactCompiledCatalogAndBinaryHash(t *testing.T) {
+	raw, digest := validProfileBundle(t)
+	require.NoError(t, validateProfileBundle(raw, digest))
 
-	var manifest ProfileManifest
-	require.NoError(t, json.Unmarshal(raw, &manifest))
-	manifest.Profile.SignatureVersion = "sigv2"
-	tampered, err := json.Marshal(manifest)
+	var bundle ProfileBundle
+	require.NoError(t, json.Unmarshal(raw, &bundle))
+	bundle.Profiles[0], bundle.Profiles[2] = bundle.Profiles[2], bundle.Profiles[0]
+	reordered, err := json.Marshal(bundle)
 	require.NoError(t, err)
-	require.ErrorContains(t, validateProfileManifest(tampered, "minio-sigv4-path-style-v1", digest), "descriptor")
-	require.ErrorContains(t, validateProfileManifest(raw, "huawei-obs-public-v1", digest), "binding")
-	require.ErrorContains(t, validateProfileManifest(raw, "minio-sigv4-path-style-v1", "0"+digest[1:]), "SHA-256")
+	require.NoError(t, validateProfileBundle(reordered, digest), "descriptor order must not affect the exact-set check")
+
+	require.NoError(t, json.Unmarshal(raw, &bundle))
+	bundle.Profiles = bundle.Profiles[:2]
+	missing, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	require.ErrorContains(t, validateProfileBundle(missing, digest), "exact compiled catalog")
+
+	require.NoError(t, json.Unmarshal(raw, &bundle))
+	bundle.Profiles[0].ID = "unknown-v1"
+	unknown, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	require.ErrorContains(t, validateProfileBundle(unknown, digest), "not compiled")
+
+	require.NoError(t, json.Unmarshal(raw, &bundle))
+	bundle.Profiles[0].SignatureVersion = "sigv2"
+	tampered, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	require.ErrorContains(t, validateProfileBundle(tampered, digest), "descriptor")
+	require.ErrorContains(t, validateProfileBundle(raw, "0"+digest[1:]), "SHA-256")
 }
 
-func TestProfileManifestRejectsNonCanonicalSchema(t *testing.T) {
-	raw, digest := validManifest(t)
-	var disabled ProfileManifest
+func TestBundledProfilesContainsEveryProductionProfile(t *testing.T) {
+	profiles := BundledProfiles()
+	for _, tc := range []struct {
+		provider string
+		id       string
+	}{
+		{provider: "minio", id: "minio-sigv4-path-style-v1"},
+		{provider: "obs", id: "huawei-obs-public-v1"},
+		{provider: "obs", id: "huawei-obs-private-2023-v1"},
+	} {
+		profile, ok := profiles.Lookup(tc.id)
+		require.True(t, ok, tc.id)
+		require.Equal(t, tc.provider, profile.Provider)
+		require.NoError(t, CheckProductionProfile(tc.provider, tc.id))
+	}
+}
+
+func TestProfileBundleRejectsNonCanonicalSchema(t *testing.T) {
+	raw, digest := validProfileBundle(t)
+	var disabled ProfileBundle
 	require.NoError(t, json.Unmarshal(raw, &disabled))
-	disabled.Profile.TLSRequired = false
+	disabled.Profiles[0].TLSRequired = false
 	tlsDisabled, err := json.Marshal(disabled)
 	require.NoError(t, err)
+	duplicateID := disabled
+	duplicateID.Profiles = append([]ProfileDescriptor(nil), disabled.Profiles...)
+	duplicateID.Profiles[0] = duplicateID.Profiles[1]
+	duplicateProfile, err := json.Marshal(duplicateID)
+	require.NoError(t, err)
 	cases := map[string][]byte{
-		"unknown":          append(raw[:len(raw)-1], []byte(`,"options":["-o","allow_other"]}`)...),
-		"extra args":       append(raw[:len(raw)-1], []byte(`,"extra_args":["-o","allow_other"]}`)...),
-		"duplicate":        append(raw[:len(raw)-1], []byte(`,"version":1}`)...),
-		"nested duplicate": []byte(strings.Replace(string(raw), `"provider":"minio"`, `"provider":"minio","provider":"obs"`, 1)),
-		"null":             []byte(`{"version":1,"profile":null,"s3fs_sha256":"` + digest + `"}`),
-		"missing":          []byte(`{"version":1,"s3fs_sha256":"` + digest + `"}`),
-		"multiple":         []byte(`{"version":1,"profiles":[],"s3fs_sha256":"` + digest + `"}`),
-		"tls disabled":     tlsDisabled,
+		"unknown":           append(raw[:len(raw)-1], []byte(`,"options":["-o","allow_other"]}`)...),
+		"extra args":        append(raw[:len(raw)-1], []byte(`,"extra_args":["-o","allow_other"]}`)...),
+		"duplicate":         append(raw[:len(raw)-1], []byte(`,"version":1}`)...),
+		"nested duplicate":  []byte(strings.Replace(string(raw), `"provider":"minio"`, `"provider":"minio","provider":"obs"`, 1)),
+		"null":              []byte(`{"version":1,"profiles":null,"s3fs_sha256":"` + digest + `"}`),
+		"missing":           []byte(`{"version":1,"s3fs_sha256":"` + digest + `"}`),
+		"empty":             []byte(`{"version":1,"profiles":[],"s3fs_sha256":"` + digest + `"}`),
+		"duplicate profile": duplicateProfile,
+		"tls disabled":      tlsDisabled,
 	}
 	for name, candidate := range cases {
 		t.Run(name, func(t *testing.T) {
-			require.Error(t, validateProfileManifest(candidate, "minio-sigv4-path-style-v1", digest))
+			require.Error(t, validateProfileBundle(candidate, digest))
 		})
 	}
 }
@@ -91,32 +141,21 @@ func TestCheckImageContractValidatesTrustedRegularManifestAndS3FS(t *testing.T) 
 
 	s3fs := filepath.Join(root, "s3fs")
 	require.NoError(t, os.WriteFile(s3fs, []byte(validS3FSVersionStub), 0o755))
-	manifest := filepath.Join(root, "profile.json")
+	manifest := filepath.Join(root, "profile-bundle.json")
 
 	config := ImageCheckConfig{
 		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: manifest, S3FSPath: s3fs,
 		WorkspacePath: workspace, FuseConfigPath: fuseConfig, RequiredBinaries: []string{s3fs},
-		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
+		ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
 	}
-	rewriteManifestForS3FS(t, config)
+	rewriteBundleForS3FS(t, config)
 	require.NoError(t, CheckImageWithConfig(config), "packaging checks must validate the release profile image")
-	require.NoError(t, CheckImageReleaseWithConfig(config), "verified MinIO mount and durable-flush evidence must be releaseable")
-
-	public, ok := InspectCompiledProfile("huawei-obs-public-v1")
-	require.True(t, ok)
-	actualDigest, err := sha256File(s3fs)
-	require.NoError(t, err)
-	publicManifest, err := json.Marshal(ProfileManifest{Version: ProfileManifestVersion, Profile: public.Descriptor, S3FSSHA256: actualDigest})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(manifest, publicManifest, 0o644))
-	config.BoundProfileID = public.Descriptor.ID
-	require.NoError(t, CheckImageWithConfig(config), "public OBS packaging must be testable")
-	require.NoError(t, CheckImageReleaseWithConfig(config), "verified public OBS mount and durable-flush evidence must be releaseable")
+	require.NoError(t, CheckImageReleaseWithConfig(config), "every bundled production profile must be releaseable")
 
 	link := filepath.Join(root, "profile-link.json")
 	require.NoError(t, os.Symlink(manifest, link))
 	config.ManifestPath = link
-	err = CheckImageWithConfig(config)
+	err := CheckImageWithConfig(config)
 	require.ErrorContains(t, err, "regular non-symlink")
 
 	config.ManifestPath = manifest
@@ -134,7 +173,7 @@ func TestCheckImageContractExecutesFixedS3FSVersionProbe(t *testing.T) {
 	require.NoError(t, CheckImageWithConfig(config))
 
 	require.NoError(t, os.WriteFile(config.S3FSPath, []byte("not an executable image"), 0o755))
-	rewriteManifestForS3FS(t, config)
+	rewriteBundleForS3FS(t, config)
 	require.ErrorContains(t, CheckImageWithConfig(config), "version probe")
 }
 
@@ -159,7 +198,7 @@ func newExecutableImageCheckConfig(t *testing.T, executable []byte) ImageCheckCo
 	root := t.TempDir()
 	runDir, cacheRoot := filepath.Join(root, "run"), filepath.Join(root, "cache")
 	workspace, fuseConfig := filepath.Join(root, "workspace"), filepath.Join(root, "fuse.conf")
-	s3fs, manifest := filepath.Join(root, "s3fs"), filepath.Join(root, "profile.json")
+	s3fs, manifest := filepath.Join(root, "s3fs"), filepath.Join(root, "profile-bundle.json")
 	require.NoError(t, os.MkdirAll(runDir, 0o700))
 	require.NoError(t, os.MkdirAll(filepath.Join(cacheRoot, "tmp"), 0o700))
 	require.NoError(t, os.Mkdir(workspace, 0o555))
@@ -168,19 +207,23 @@ func newExecutableImageCheckConfig(t *testing.T, executable []byte) ImageCheckCo
 	config := ImageCheckConfig{
 		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: manifest, S3FSPath: s3fs,
 		WorkspacePath: workspace, FuseConfigPath: fuseConfig, RequiredBinaries: []string{s3fs},
-		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
+		ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
 	}
-	rewriteManifestForS3FS(t, config)
+	rewriteBundleForS3FS(t, config)
 	return config
 }
 
-func rewriteManifestForS3FS(t *testing.T, config ImageCheckConfig) {
+func rewriteBundleForS3FS(t *testing.T, config ImageCheckConfig) {
 	t.Helper()
 	digest, err := sha256File(config.S3FSPath)
 	require.NoError(t, err)
-	profile, ok := InspectCompiledProfile(config.BoundProfileID)
-	require.True(t, ok)
-	raw, err := json.Marshal(ProfileManifest{Version: ProfileManifestVersion, Profile: profile.Descriptor, S3FSSHA256: digest})
+	descriptors := make([]ProfileDescriptor, 0, len(bundledProfileIDs))
+	for _, id := range bundledProfileIDs {
+		profile, ok := InspectCompiledProfile(id)
+		require.True(t, ok)
+		descriptors = append(descriptors, profile.Descriptor)
+	}
+	raw, err := json.Marshal(ProfileBundle{Version: ProfileBundleVersion, Profiles: descriptors, S3FSSHA256: digest})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(config.ManifestPath, raw, 0o644))
 }
@@ -192,18 +235,18 @@ func TestCheckImageContractRejectsUnsafeWorkspaceAndFuseConfig(t *testing.T) {
 	root := t.TempDir()
 	runDir, cacheRoot := filepath.Join(root, "run"), filepath.Join(root, "cache")
 	workspace, fuseConfig := filepath.Join(root, "workspace"), filepath.Join(root, "fuse.conf")
-	s3fs, manifest := filepath.Join(root, "s3fs"), filepath.Join(root, "profile.json")
+	s3fs, manifest := filepath.Join(root, "s3fs"), filepath.Join(root, "profile-bundle.json")
 	require.NoError(t, os.MkdirAll(runDir, 0o700))
 	require.NoError(t, os.MkdirAll(filepath.Join(cacheRoot, "tmp"), 0o700))
 	require.NoError(t, os.Mkdir(workspace, 0o755))
 	require.NoError(t, os.WriteFile(fuseConfig, []byte("user_allow_other\n"), 0o644))
 	require.NoError(t, os.WriteFile(s3fs, []byte("trusted-s3fs"), 0o755))
-	raw, _ := validManifest(t)
+	raw, _ := validProfileBundle(t)
 	require.NoError(t, os.WriteFile(manifest, raw, 0o644))
 	config := ImageCheckConfig{
 		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: manifest, S3FSPath: s3fs,
 		WorkspacePath: workspace, FuseConfigPath: fuseConfig, RequiredBinaries: []string{s3fs},
-		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(),
+		ExpectedOwnerUID: os.Geteuid(),
 	}
 	require.ErrorContains(t, CheckImageWithConfig(config), "workspace anchor")
 
@@ -227,30 +270,27 @@ func TestCheckImageContractRejectsUnsafeWorkspaceAndFuseConfig(t *testing.T) {
 	require.ErrorContains(t, CheckImageWithConfig(config), "fuse.conf")
 }
 
-func TestProfileManifestDoesNotSupplyRuntimeOptions(t *testing.T) {
-	raw, digest := validManifest(t)
+func TestProfileBundleDoesNotSupplyRuntimeOptions(t *testing.T) {
+	raw, digest := validProfileBundle(t)
 	assert.NotContains(t, string(raw), "options")
 	assert.NotContains(t, string(raw), "extra_args")
-	require.NoError(t, validateProfileManifest(raw, "minio-sigv4-path-style-v1", digest))
+	require.NoError(t, validateProfileBundle(raw, digest))
 }
 
-func TestRepositoryProfileManifestTemplatesMatchCompiledDescriptors(t *testing.T) {
-	paths, err := filepath.Glob(filepath.Join("..", "..", "docker", "images", "workspace-mounter", "profiles", "*.json"))
+func TestRepositoryProfileBundleTemplateMatchesCompiledDescriptors(t *testing.T) {
+	path := filepath.Join("..", "..", "docker", "images", "workspace-mounter", "profile-bundle.json")
+	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Len(t, paths, 3)
 	placeholder := strings.Repeat("0", sha256.Size*2)
 	actualDigest := strings.Repeat("a", sha256.Size*2)
-	seen := make(map[string]bool)
-	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		require.NoError(t, err)
-		require.Equal(t, 1, strings.Count(string(raw), placeholder), path)
-		raw = []byte(strings.Replace(string(raw), placeholder, actualDigest, 1))
-
-		var manifest ProfileManifest
-		require.NoError(t, decodeStrictManifest(raw, &manifest), path)
-		require.NoError(t, validateProfileManifest(raw, manifest.Profile.ID, actualDigest), path)
-		seen[manifest.Profile.ID] = true
+	require.Equal(t, 1, strings.Count(string(raw), placeholder), path)
+	raw = []byte(strings.Replace(string(raw), placeholder, actualDigest, 1))
+	var bundle ProfileBundle
+	require.NoError(t, decodeStrictBundle(raw, &bundle), path)
+	require.NoError(t, validateProfileBundle(raw, actualDigest), path)
+	seen := make(map[string]bool, len(bundle.Profiles))
+	for _, descriptor := range bundle.Profiles {
+		seen[descriptor.ID] = true
 	}
 	assert.Equal(t, map[string]bool{
 		"minio-sigv4-path-style-v1":  true,

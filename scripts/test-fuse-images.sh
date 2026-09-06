@@ -49,18 +49,18 @@ export MOCK_DOCKER_LOG="$tmp/docker.log"
 
 # RED/GREEN behavior tests for the executable verifier.
 expect_failure env FUSE_IMAGE=repo/mounter:latest SANDBOX_IMAGE="$digest" \
-  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+  "$verify" kubernetes package-check
 test ! -s "$tmp/docker.log" || fail "invalid digest reached docker"
 
 : >"$tmp/docker.log"
 expect_failure env FUSE_IMAGE="repo/mounter@sha256:abc" SANDBOX_IMAGE="$digest" \
-  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+  "$verify" kubernetes package-check
 test ! -s "$tmp/docker.log" || fail "short digest reached docker"
 
 : >"$tmp/docker.log"
 MOCK_PROFILE_STATUS=blocked-pending-flush-spike expect_success env \
   FUSE_IMAGE="$fuse_digest" SANDBOX_IMAGE="$digest" \
-  "$verify" kubernetes package-check minio-sigv4-path-style-v1
+  "$verify" kubernetes package-check
 grep -Fq -- '--entrypoint /usr/local/bin/workspace-mounter' "$tmp/docker.log" || fail "mounter self-check missing"
 grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp/docker.log" || fail "UID 1000 probe self-check missing"
 grep -Fq -- 'ordinary sandbox contract' "$tmp/docker.log" || fail "ordinary sandbox negative contract missing"
@@ -68,25 +68,25 @@ grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "mounter package 
 
 expect_success env MOCK_PROFILE_STATUS=release-verified \
   FUSE_IMAGE="$fuse_digest" SANDBOX_IMAGE="$digest" \
-  "$verify" kubernetes release-check minio-sigv4-path-style-v1
+  "$verify" kubernetes release-check
 grep -Fq -- 'health prepared --release-check-image' "$tmp/docker.log" || fail "Go release gate missing"
 
 : >"$tmp/docker.log"
 MOCK_PROFILE_STATUS=blocked-pending-provider-spike expect_success env SANDBOX_IMAGE="$digest" \
-  "$verify" docker package-check huawei-obs-private-2023-v1
+  "$verify" docker package-check
 grep -Fq -- '--entrypoint /usr/local/bin/workspace-mounter' "$tmp/docker.log" || fail "docker mounter self-check missing"
 grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp/docker.log" || fail "docker UID 1000 probe self-check missing"
 grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "docker package contract missing"
 
 expect_success env MOCK_PROFILE_STATUS=release-verified SANDBOX_IMAGE="$digest" \
-  "$verify" docker release-check huawei-obs-public-v1
+  "$verify" docker release-check
 
 expect_failure env SANDBOX_IMAGE="$digest" \
-  "$verify" invalid-runtime package-check minio-sigv4-path-style-v1
+  "$verify" invalid-runtime package-check
 expect_failure env SANDBOX_IMAGE="$digest" \
-  "$verify" docker invalid-check minio-sigv4-path-style-v1
+  "$verify" docker invalid-check
 expect_failure env SANDBOX_IMAGE="$digest" \
-  "$verify" docker package-check 'bad/profile'
+  "$verify" docker package-check unexpected-argument
 
 # Static image contracts. These intentionally avoid builds so they also run in
 # CI workers without a Docker daemon.
@@ -156,26 +156,28 @@ grep -Fxq '**' "$ordinary_ignore" || fail "ordinary build context is not deny-by
 grep -Fxq '!cmd/workspace-probe/**' "$ordinary_ignore" || fail "ordinary build context omits workspace-probe source"
 grep -Fxq '!internal/workspaceprobe/**' "$ordinary_ignore" || fail "ordinary build context omits workspaceprobe package"
 
-profile_dir="$repo_root/docker/images/workspace-mounter/profiles"
-for tuple in \
-  'minio-sigv4-path-style-v1 verified' \
-  'huawei-obs-public-v1 verified' \
-  'huawei-obs-private-2023-v1 verified'; do
-  set -- $tuple
-  file="$profile_dir/$1.json"
-  test -f "$file" || fail "missing profile $file"
-  grep -Fq '"id": "'"$1"'"' "$file" || fail "$file has wrong profile ID"
-  grep -Fq '"durable_flush": "'"$2"'"' "$file" || fail "$file has wrong durable flush status"
-  grep -Fq '"s3fs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"' "$file" \
-    || fail "$file lacks the unique build-time s3fs hash placeholder"
+profile_bundle="$repo_root/docker/images/workspace-mounter/profile-bundle.json"
+test -f "$profile_bundle" || fail "missing common profile bundle"
+for profile_id in \
+  minio-sigv4-path-style-v1 \
+  huawei-obs-public-v1 \
+  huawei-obs-private-2023-v1; do
+  test "$(grep -Fc '"id": "'"$profile_id"'"' "$profile_bundle")" -eq 1 \
+    || fail "$profile_bundle does not contain exactly one $profile_id descriptor"
 done
+test "$(grep -Fc '"durable_flush": "verified"' "$profile_bundle")" -eq 3 \
+  || fail "$profile_bundle has a non-releaseable durability profile"
+test "$(grep -Fc '"mount_parameters": "verified"' "$profile_bundle")" -eq 3 \
+  || fail "$profile_bundle has a non-releaseable mount profile"
+test "$(grep -Fc '0000000000000000000000000000000000000000000000000000000000000000' "$profile_bundle")" -eq 1 \
+  || fail "$profile_bundle lacks the unique build-time s3fs hash placeholder"
 
-grep -Fq '"mount_parameters": "verified"' "$profile_dir/minio-sigv4-path-style-v1.json" \
-  || fail "MinIO mount packaging contract is not marked verified"
+! grep -Eiq '(no_check_certificate|ssl_verify_hostname|compat_dir|support_compat_dir|use_path_request_style|"options"|"extra_args"|"tls_required": false)' "$profile_bundle" \
+  || fail "$profile_bundle contains executable or TLS-weakening options"
 
-for file in "$profile_dir"/huawei-obs-*.json; do
-  ! grep -Eiq '(no_check_certificate|ssl_verify_hostname|compat_dir|support_compat_dir|use_path_request_style|"options"|"extra_args"|"tls_required": false)' "$file" \
-    || fail "$file contains unverified OBS options"
+for file in "$mounter" "$fuse"; do
+  grep -Fq 'PROFILE_BUNDLE=profile-bundle.json' "$file" || fail "$file does not use the common bundle"
+  ! grep -Eq 'PROFILE_(ID|MANIFEST)|imageProfileID|profile\.json' "$file" || fail "$file still binds a backend-specific profile"
 done
 
 printf 'fuse image contract tests: PASS\n'

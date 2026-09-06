@@ -23,11 +23,6 @@ const (
 	controlSocket  = "/run/s3fs/control.sock"
 )
 
-// imageProfileID is set only by the trusted release build with
-// -ldflags=-X=main.imageProfileID=<compiled-profile-id>. Empty, unknown, and
-// candidate values fail closed before the supervisor or image check starts.
-var imageProfileID string
-
 var (
 	checkPackagedImage = mounter.CheckImage
 	checkReleaseImage  = mounter.CheckImageRelease
@@ -58,9 +53,9 @@ func runWithSocket(args []string, stdin io.Reader, stdout io.Writer, socketPath 
 	if len(args) == 4 && args[1] == "health" && args[2] == "prepared" {
 		switch args[3] {
 		case "--self-check-image":
-			return checkPackagedImage(runDir, cacheRoot, imageProfileID)
+			return checkPackagedImage(runDir, cacheRoot)
 		case "--release-check-image":
-			return checkReleaseImage(runDir, cacheRoot, imageProfileID)
+			return checkReleaseImage(runDir, cacheRoot)
 		}
 	}
 	input, err := readBounded(stdin)
@@ -148,13 +143,9 @@ func supervise() error {
 	if os.Getpid() != 1 {
 		return fmt.Errorf("supervisor must be container PID 1")
 	}
-	profiles, err := mounter.BoundProfiles(imageProfileID)
-	if err != nil {
-		return fmt.Errorf("invalid image profile binding")
-	}
 	supervisor := mounter.NewSupervisor(mounter.Config{
 		RunDir: runDir, CredentialRoot: credentialRoot, CacheRoot: cacheRoot, MountPath: mountPath,
-		Profiles:  profiles,
+		Profiles:  mounter.BundledProfiles(),
 		CheckFuse: mounter.CheckFuseDevice, PrepareAnchor: mounter.PrepareWorkspaceAnchor, CheckAnchor: mounter.CheckWorkspaceAnchor,
 		MountInfo: func() (mounter.Mount, error) { return mounter.ReadEffectiveMount(mountPath) },
 	}, mounter.CommandRunner{})

@@ -15,42 +15,55 @@ import (
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
-const ProfileManifestVersion = 1
+const ProfileBundleVersion = 1
 
-// ProfileManifest contains exactly one compiled descriptor and the digest of
-// the s3fs binary it accompanies. It is audit evidence, never configuration.
-type ProfileManifest struct {
-	Version    int               `json:"version"`
-	Profile    ProfileDescriptor `json:"profile"`
-	S3FSSHA256 string            `json:"s3fs_sha256"`
+// ProfileBundle contains the exact compiled production profile catalog and
+// the digest of the s3fs binary it accompanies. It is audit evidence, never
+// configuration: runtime options still come exclusively from compiled code.
+type ProfileBundle struct {
+	Version    int                 `json:"version"`
+	Profiles   []ProfileDescriptor `json:"profiles"`
+	S3FSSHA256 string              `json:"s3fs_sha256"`
 }
 
-func validateProfileManifest(raw []byte, boundProfileID, actualS3FSSHA256 string) error {
-	var manifest ProfileManifest
-	if err := decodeStrictManifest(raw, &manifest); err != nil {
-		return fmt.Errorf("profile manifest schema is invalid: %w", err)
+func validateProfileBundle(raw []byte, actualS3FSSHA256 string) error {
+	var bundle ProfileBundle
+	if err := decodeStrictBundle(raw, &bundle); err != nil {
+		return fmt.Errorf("profile bundle schema is invalid: %w", err)
 	}
-	if manifest.Version != ProfileManifestVersion {
-		return fmt.Errorf("profile manifest version is unsupported")
+	if bundle.Version != ProfileBundleVersion {
+		return fmt.Errorf("profile bundle version is unsupported")
 	}
-	if manifest.Profile.ID == "" || manifest.Profile.Provider == "" || manifest.Profile.MountParameters == "" || manifest.Profile.DurableFlush == "" || manifest.Profile.EndpointOption == "" || manifest.Profile.RegionOption == "" || manifest.Profile.AddressingStyle == "" || manifest.Profile.SignatureVersion == "" {
-		return fmt.Errorf("profile manifest is missing a descriptor field")
+	if len(bundle.Profiles) != len(bundledProfileIDs) {
+		return fmt.Errorf("profile bundle does not contain the exact compiled catalog")
 	}
-	if !manifest.Profile.TLSRequired {
-		return fmt.Errorf("profile manifest cannot disable TLS")
+	seen := make(map[string]struct{}, len(bundle.Profiles))
+	for _, descriptor := range bundle.Profiles {
+		if descriptor.ID == "" || descriptor.Provider == "" || descriptor.MountParameters == "" || descriptor.DurableFlush == "" || descriptor.EndpointOption == "" || descriptor.RegionOption == "" || descriptor.AddressingStyle == "" || descriptor.SignatureVersion == "" {
+			return fmt.Errorf("profile bundle is missing a descriptor field")
+		}
+		if !descriptor.TLSRequired {
+			return fmt.Errorf("profile bundle cannot disable TLS")
+		}
+		if _, duplicate := seen[descriptor.ID]; duplicate {
+			return fmt.Errorf("profile bundle contains duplicate profile ID")
+		}
+		seen[descriptor.ID] = struct{}{}
+		compiled, ok := InspectCompiledProfile(descriptor.ID)
+		if !ok {
+			return fmt.Errorf("profile bundle contains a profile that is not compiled")
+		}
+		if descriptor != compiled.Descriptor {
+			return fmt.Errorf("profile bundle descriptor does not exactly match compiled code")
+		}
 	}
-	if manifest.Profile.ID != boundProfileID {
-		return fmt.Errorf("profile manifest does not match the binary profile binding")
+	for _, id := range bundledProfileIDs {
+		if _, ok := seen[id]; !ok {
+			return fmt.Errorf("profile bundle does not contain the exact compiled catalog")
+		}
 	}
-	compiled, ok := InspectCompiledProfile(boundProfileID)
-	if !ok {
-		return fmt.Errorf("profile manifest binding is not compiled")
-	}
-	if manifest.Profile != compiled.Descriptor {
-		return fmt.Errorf("profile manifest descriptor does not exactly match compiled code")
-	}
-	if !validSHA256(manifest.S3FSSHA256) || !validSHA256(actualS3FSSHA256) || manifest.S3FSSHA256 != actualS3FSSHA256 {
-		return fmt.Errorf("profile manifest s3fs SHA-256 does not match the packaged binary")
+	if !validSHA256(bundle.S3FSSHA256) || !validSHA256(actualS3FSSHA256) || bundle.S3FSSHA256 != actualS3FSSHA256 {
+		return fmt.Errorf("profile bundle s3fs SHA-256 does not match the packaged binary")
 	}
 	return nil
 }
@@ -63,7 +76,7 @@ func validSHA256(value string) bool {
 	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
 }
 
-func decodeStrictManifest(raw []byte, out *ProfileManifest) error {
+func decodeStrictBundle(raw []byte, out *ProfileBundle) error {
 	if len(raw) == 0 || len(raw) > fuseprotocol.MaxJSONBytes || !utf8.Valid(raw) {
 		return fmt.Errorf("invalid size or encoding")
 	}
@@ -78,7 +91,7 @@ func decodeStrictManifest(raw []byte, out *ProfileManifest) error {
 	if token, err := decoder.Token(); !errors.Is(err, io.EOF) || token != nil {
 		return fmt.Errorf("trailing data")
 	}
-	return requireManifestFields(raw)
+	return requireBundleFields(raw)
 }
 
 func rejectDuplicateJSONKeys(raw []byte) error {
@@ -141,27 +154,32 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 	return nil
 }
 
-func requireManifestFields(raw []byte) error {
+func requireBundleFields(raw []byte) error {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return err
 	}
-	for _, field := range []string{"version", "profile", "s3fs_sha256"} {
+	for _, field := range []string{"version", "profiles", "s3fs_sha256"} {
 		value, ok := top[field]
 		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return fmt.Errorf("missing or null field %q", field)
 		}
 	}
-	var profile map[string]json.RawMessage
-	if err := json.Unmarshal(top["profile"], &profile); err != nil || profile == nil {
-		return fmt.Errorf("profile must be an object")
+	var profiles []map[string]json.RawMessage
+	if err := json.Unmarshal(top["profiles"], &profiles); err != nil || profiles == nil || len(profiles) == 0 {
+		return fmt.Errorf("profiles must be a non-empty array")
 	}
 	profileType := reflect.TypeOf(ProfileDescriptor{})
-	for i := 0; i < profileType.NumField(); i++ {
-		name := profileType.Field(i).Tag.Get("json")
-		value, ok := profile[name]
-		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return fmt.Errorf("missing or null profile field %q", name)
+	for _, profile := range profiles {
+		if profile == nil {
+			return fmt.Errorf("profile must be an object")
+		}
+		for i := 0; i < profileType.NumField(); i++ {
+			name := profileType.Field(i).Tag.Get("json")
+			value, ok := profile[name]
+			if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return fmt.Errorf("missing or null profile field %q", name)
+			}
 		}
 	}
 	return nil

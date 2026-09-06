@@ -62,7 +62,7 @@ Modify these existing files without unrelated restructuring:
 - Modify: `scripts/verify-fuse-image.sh`
 - Modify: `scripts/test-fuse-images.sh`
 
-- [ ] **Step 1: Write failing bundle-contract tests**
+- [x] **Step 1: Write failing bundle-contract tests**
 
 Add tests that require all three compiled verified profiles, reject missing/duplicate/unknown descriptors, reject descriptor drift, and require one exact s3fs hash:
 
@@ -98,13 +98,13 @@ func TestBundledProfilesContainsEveryProductionProfile(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm the old one-profile contract fails**
+- [x] **Step 2: Run the focused tests and confirm the old one-profile contract fails**
 
 Run: `go test ./internal/mounter ./cmd/workspace-mounter -run 'Test(ProfileBundle|BundledProfiles)' -count=1`
 
 Expected: FAIL because `ProfileBundle`, `validateProfileBundle`, and `BundledProfiles` do not exist.
 
-- [ ] **Step 3: Implement strict bundle validation and remove linker profile selection**
+- [x] **Step 3: Implement strict bundle validation and remove linker profile selection**
 
 Use one schema and the compiled typed catalog as the only source of runtime options:
 
@@ -132,7 +132,7 @@ func BundledProfiles() ProfileRegistry {
 
 Package `/etc/workspace-fuse/profile-bundle.json`; Docker build arguments become only `BASE_IMAGE`, `S3FS_PACKAGE_URL`, `S3FS_PACKAGE_SHA256`, and `PROFILE_BUNDLE`. Both Dockerfiles must replace the hash exactly once and run the same self-check. `scripts/verify-fuse-image.sh` accepts exactly a runtime (`kubernetes` or `docker`) and a check (`package-check` or `release-check`), then verifies all three IDs inside the bundle.
 
-- [ ] **Step 4: Run Go and packaging contract tests**
+- [x] **Step 4: Run Go and packaging contract tests**
 
 Run:
 
@@ -143,7 +143,7 @@ go test ./internal/mounter ./cmd/workspace-mounter -count=1
 
 Expected: both commands PASS; the shell test confirms there is no `PROFILE_ID`, `imageProfileID`, or `/etc/workspace-fuse/profile.json` reference.
 
-- [ ] **Step 5: Commit the common-image contract**
+- [x] **Step 5: Commit the common-image contract**
 
 ```bash
 git add internal/mounter cmd/workspace-mounter docker/images/workspace-mounter docker/images/sandbox-fuse scripts/verify-fuse-image.sh scripts/test-fuse-images.sh

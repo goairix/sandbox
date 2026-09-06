@@ -22,37 +22,29 @@ func TestRunRejectsUndocumentedGrammarBeforeIO(t *testing.T) {
 	require.Error(t, run(nil, strings.NewReader("secret"), &bytes.Buffer{}))
 }
 
-func TestImageProfileBindingIsBuildTimeRestrictedAndTestInjectable(t *testing.T) {
-	original := imageProfileID
-	t.Cleanup(func() { imageProfileID = original })
-
-	imageProfileID = "huawei-obs-public-v1"
-	registry, err := mounter.BoundProfiles(imageProfileID)
-	require.NoError(t, err)
-	_, ok := registry.Lookup(imageProfileID)
-	assert.True(t, ok)
-
-	imageProfileID = "minio-sigv4-path-style-v1"
-	registry, err = mounter.BoundProfiles(imageProfileID)
-	require.NoError(t, err)
-	_, ok = registry.Lookup(imageProfileID)
-	assert.True(t, ok)
-
-	imageProfileID = "unknown-v1"
-	_, err = mounter.BoundProfiles(imageProfileID)
-	require.Error(t, err)
+func TestCommonMounterBinaryContainsEveryProductionProfile(t *testing.T) {
+	registry := mounter.BundledProfiles()
+	for _, id := range []string{
+		"minio-sigv4-path-style-v1",
+		"huawei-obs-public-v1",
+		"huawei-obs-private-2023-v1",
+	} {
+		_, ok := registry.Lookup(id)
+		assert.True(t, ok, id)
+	}
+	_, ok := registry.Lookup("unknown-v1")
+	assert.False(t, ok)
 }
 
 func TestReleaseImageCLIUsesGoReleaseGate(t *testing.T) {
 	originalPackage, originalRelease := checkPackagedImage, checkReleaseImage
 	t.Cleanup(func() { checkPackagedImage, checkReleaseImage = originalPackage, originalRelease })
 	packageCalls, releaseCalls := 0, 0
-	checkPackagedImage = func(string, string, string) error { packageCalls++; return nil }
-	checkReleaseImage = func(run, cache, profile string) error {
+	checkPackagedImage = func(string, string) error { packageCalls++; return nil }
+	checkReleaseImage = func(run, cache string) error {
 		releaseCalls++
 		assert.Equal(t, runDir, run)
 		assert.Equal(t, cacheRoot, cache)
-		assert.Equal(t, imageProfileID, profile)
 		return assert.AnError
 	}
 

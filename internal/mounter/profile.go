@@ -92,6 +92,12 @@ var compiledProfileCatalog = map[string]Profile{
 	},
 }
 
+var bundledProfileIDs = [...]string{
+	"minio-sigv4-path-style-v1",
+	"huawei-obs-public-v1",
+	"huawei-obs-private-2023-v1",
+}
+
 func syncFilesystem(config fuseprotocol.BootstrapConfig) []string {
 	return []string{"/bin/sync", "-f", "--", config.MountPath}
 }
@@ -161,21 +167,22 @@ func LookupCompiledProfile(provider, id string) (Profile, bool) {
 }
 
 func CompiledProfiles() ProfileRegistry {
-	profile, _ := LookupCompiledProfile("minio", "minio-sigv4-path-style-v1")
-	return StaticProfiles{profile.ID: profile}
+	return BundledProfiles()
 }
 
-// BoundProfiles converts the constrained build-time profile ID into a
-// single-entry runtime registry. Packaged JSON is never consulted here.
-func BoundProfiles(id string) (ProfileRegistry, error) {
-	profile, ok := InspectCompiledProfile(id)
-	if !ok {
-		return nil, fmt.Errorf("image profile binding is unknown")
+// BundledProfiles returns every production profile compiled into the common
+// mounter binary. The packaged profile bundle is audit evidence only; it
+// cannot add or override executable mount behavior.
+func BundledProfiles() ProfileRegistry {
+	profiles := make(StaticProfiles, len(bundledProfileIDs))
+	for _, id := range bundledProfileIDs {
+		profile, ok := compiledProfileCatalog[id]
+		if !ok || profile.Descriptor.MountParameters != MountParametersVerified || profile.Options == nil {
+			continue
+		}
+		profiles[id] = profile
 	}
-	if profile.Descriptor.MountParameters != MountParametersVerified || profile.Options == nil {
-		return nil, fmt.Errorf("image profile binding is not mount-verified")
-	}
-	return StaticProfiles{id: profile}, nil
+	return profiles
 }
 
 func CheckProductionProfile(provider, id string) error {

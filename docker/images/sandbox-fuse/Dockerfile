@@ -4,8 +4,7 @@ FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 ARG S3FS_PACKAGE_URL
 ARG S3FS_PACKAGE_SHA256
-ARG PROFILE_MANIFEST=profile.json
-ARG PROFILE_ID
+ARG PROFILE_BUNDLE=profile-bundle.json
 
 USER root
 
@@ -17,7 +16,6 @@ RUN base_sha="${BASE_IMAGE##*@sha256:}" \
  && test "${#S3FS_PACKAGE_SHA256}" -eq 64 \
  && case "$S3FS_PACKAGE_SHA256" in *[!0-9a-f]*) exit 1;; esac \
  && test "$S3FS_PACKAGE_SHA256" != 0000000000000000000000000000000000000000000000000000000000000000 \
- && case "$PROFILE_ID" in ''|*[!a-z0-9.-]*) exit 1;; esac \
  && command -v python3 >/dev/null \
  && command -v node >/dev/null \
  && test -x /usr/sbin/ip \
@@ -25,10 +23,7 @@ RUN base_sha="${BASE_IMAGE##*@sha256:}" \
  && test "$(id -g sandbox)" = 1000
 
 ADD ${S3FS_PACKAGE_URL} /tmp/s3fs-package
-COPY ${PROFILE_MANIFEST} /tmp/workspace-fuse-profile.json
-# CI must compile this binary with:
-#   go build -ldflags "-X main.imageProfileID=${PROFILE_ID}"
-# The build-time self-check below rejects an empty or mismatched binding.
+COPY ${PROFILE_BUNDLE} /tmp/workspace-fuse-profile-bundle.json
 COPY workspace-mounter /usr/local/bin/workspace-mounter
 COPY workspace-probe /usr/local/bin/workspace-probe
 
@@ -39,22 +34,21 @@ RUN printf '%s  %s\n' "$S3FS_PACKAGE_SHA256" /tmp/s3fs-package | sha256sum -c - 
  && install -d -o root -g root -m 0555 /workspace \
  && install -d -o root -g root -m 0700 /run/s3fs /var/cache/s3fs /var/cache/s3fs/tmp \
  && install -d -o root -g root -m 0755 /etc/workspace-fuse \
- && grep -Fq "\"id\": \"$PROFILE_ID\"" /tmp/workspace-fuse-profile.json \
- && test "$(grep -Fc 0000000000000000000000000000000000000000000000000000000000000000 /tmp/workspace-fuse-profile.json)" -eq 1 \
- && sed "s/0000000000000000000000000000000000000000000000000000000000000000/$S3FS_PACKAGE_SHA256/" /tmp/workspace-fuse-profile.json > /etc/workspace-fuse/profile.json \
- && chown root:root /etc/workspace-fuse/profile.json \
- && chmod 0444 /etc/workspace-fuse/profile.json \
+ && test "$(grep -Fc 0000000000000000000000000000000000000000000000000000000000000000 /tmp/workspace-fuse-profile-bundle.json)" -eq 1 \
+ && sed "s/0000000000000000000000000000000000000000000000000000000000000000/$S3FS_PACKAGE_SHA256/" /tmp/workspace-fuse-profile-bundle.json > /etc/workspace-fuse/profile-bundle.json \
+ && chown root:root /etc/workspace-fuse/profile-bundle.json \
+ && chmod 0444 /etc/workspace-fuse/profile-bundle.json \
  && printf 'user_allow_other\n' > /etc/fuse.conf \
  && chown root:root /etc/fuse.conf \
  && chmod 0444 /etc/fuse.conf \
  && printf '%s\n' "$BASE_IMAGE" > /etc/workspace-fuse/base-image.digest \
  && printf '%s\n' "$S3FS_PACKAGE_SHA256" > /etc/workspace-fuse/s3fs-package.sha256 \
  && cd /etc/workspace-fuse \
- && sha256sum profile.json > profile.sha256 \
- && chown root:root base-image.digest s3fs-package.sha256 profile.sha256 \
- && chmod 0444 base-image.digest s3fs-package.sha256 profile.sha256 \
+ && sha256sum profile-bundle.json > profile-bundle.sha256 \
+ && chown root:root base-image.digest s3fs-package.sha256 profile-bundle.sha256 \
+ && chmod 0444 base-image.digest s3fs-package.sha256 profile-bundle.sha256 \
  && find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + \
- && rm -f /tmp/s3fs-package /tmp/workspace-fuse-profile.json
+ && rm -f /tmp/s3fs-package /tmp/workspace-fuse-profile-bundle.json
 
 RUN /usr/local/bin/workspace-mounter health prepared --self-check-image
 

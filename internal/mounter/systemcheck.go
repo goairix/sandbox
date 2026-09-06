@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const packagedProfileManifest = "/etc/workspace-fuse/profile.json"
+const packagedProfileBundle = "/etc/workspace-fuse/profile-bundle.json"
 
 const packagedFuseConfig = "/etc/fuse.conf"
 
@@ -34,7 +34,6 @@ type ImageCheckConfig struct {
 	WorkspacePath    string
 	FuseConfigPath   string
 	RequiredBinaries []string
-	BoundProfileID   string
 	ExpectedOwnerUID int
 	VersionTimeout   time.Duration
 }
@@ -72,25 +71,25 @@ func PrepareWorkspaceAnchor(path string) error {
 	return CheckWorkspaceAnchor(path)
 }
 
-func CheckImage(runDir, cacheRoot, boundProfileID string) error {
-	return CheckImageWithConfig(packagedImageCheckConfig(runDir, cacheRoot, boundProfileID))
+func CheckImage(runDir, cacheRoot string) error {
+	return CheckImageWithConfig(packagedImageCheckConfig(runDir, cacheRoot))
 }
 
-func CheckImageRelease(runDir, cacheRoot, boundProfileID string) error {
-	return CheckImageReleaseWithConfig(packagedImageCheckConfig(runDir, cacheRoot, boundProfileID))
+func CheckImageRelease(runDir, cacheRoot string) error {
+	return CheckImageReleaseWithConfig(packagedImageCheckConfig(runDir, cacheRoot))
 }
 
-func packagedImageCheckConfig(runDir, cacheRoot, boundProfileID string) ImageCheckConfig {
+func packagedImageCheckConfig(runDir, cacheRoot string) ImageCheckConfig {
 	return ImageCheckConfig{
-		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: packagedProfileManifest,
+		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: packagedProfileBundle,
 		S3FSPath: "/usr/bin/s3fs", WorkspacePath: "/workspace", FuseConfigPath: packagedFuseConfig,
 		RequiredBinaries: requiredImageBinaries,
-		BoundProfileID:   boundProfileID, ExpectedOwnerUID: 0,
+		ExpectedOwnerUID: 0,
 	}
 }
 
 func CheckImageWithConfig(config ImageCheckConfig) error {
-	if config.ExpectedOwnerUID < 0 || config.ManifestPath == "" || config.S3FSPath == "" || config.WorkspacePath == "" || config.FuseConfigPath == "" || config.BoundProfileID == "" || len(config.RequiredBinaries) == 0 {
+	if config.ExpectedOwnerUID < 0 || config.ManifestPath == "" || config.S3FSPath == "" || config.WorkspacePath == "" || config.FuseConfigPath == "" || len(config.RequiredBinaries) == 0 {
 		return fmt.Errorf("image contract is incomplete")
 	}
 	for _, binary := range config.RequiredBinaries {
@@ -121,17 +120,17 @@ func CheckImageWithConfig(config ImageCheckConfig) error {
 	}
 	manifestInfo, err := os.Lstat(config.ManifestPath)
 	if err != nil || !manifestInfo.Mode().IsRegular() || manifestInfo.Mode()&os.ModeSymlink != 0 || manifestInfo.Mode().Perm()&0o022 != 0 || !ownedByUID(manifestInfo, config.ExpectedOwnerUID) {
-		return fmt.Errorf("profile manifest must be a trusted regular non-symlink file")
+		return fmt.Errorf("profile bundle must be a trusted regular non-symlink file")
 	}
 	raw, err := os.ReadFile(config.ManifestPath)
 	if err != nil || len(raw) > 64<<10 {
-		return fmt.Errorf("read profile manifest")
+		return fmt.Errorf("read profile bundle")
 	}
 	digest, err := sha256File(config.S3FSPath)
 	if err != nil {
 		return fmt.Errorf("hash packaged s3fs")
 	}
-	if err := validateProfileManifest(raw, config.BoundProfileID, digest); err != nil {
+	if err := validateProfileBundle(raw, digest); err != nil {
 		return err
 	}
 	if err := checkS3FSVersion(config.S3FSPath, config.VersionTimeout); err != nil {
@@ -188,17 +187,22 @@ func (w *boundedVersionOutput) Write(p []byte) (int, error) {
 }
 
 // CheckImageReleaseWithConfig layers production eligibility on top of the
-// packaging/integrity check. Candidate images can pass CheckImageWithConfig so
-// they can be built and tested without accidentally becoming selectable.
+// packaging/integrity check. Every descriptor in the common bundle must remain
+// independently eligible for production use.
 func CheckImageReleaseWithConfig(config ImageCheckConfig) error {
 	if err := CheckImageWithConfig(config); err != nil {
 		return err
 	}
-	profile, ok := InspectCompiledProfile(config.BoundProfileID)
-	if !ok {
-		return fmt.Errorf("image profile binding is not compiled")
+	for _, id := range bundledProfileIDs {
+		profile, ok := InspectCompiledProfile(id)
+		if !ok {
+			return fmt.Errorf("bundled image profile is not compiled")
+		}
+		if err := CheckProductionProfile(profile.Provider, id); err != nil {
+			return fmt.Errorf("bundled image profile %q is not releaseable: %w", id, err)
+		}
 	}
-	return CheckProductionProfile(profile.Provider, config.BoundProfileID)
+	return nil
 }
 
 func checkOwnedDirectory(path string, exactMode os.FileMode, uid int) error {

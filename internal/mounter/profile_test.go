@@ -1,7 +1,6 @@
 package mounter
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -117,23 +116,19 @@ func TestCompiledCatalogKeepsPublicAndPrivateOBSIndependentlySelectable(t *testi
 	assert.False(t, ok)
 }
 
-func TestBoundProfilesContainsOnlyTheRequestedVerifiedProfile(t *testing.T) {
-	registry, err := BoundProfiles("minio-sigv4-path-style-v1")
-	require.NoError(t, err)
-	profile, ok := registry.Lookup("minio-sigv4-path-style-v1")
-	require.True(t, ok)
-	assert.Equal(t, "minio", profile.Provider)
-	_, ok = registry.Lookup("huawei-obs-public-v1")
+func TestBundledProfilesContainsEveryVerifiedProductionProfile(t *testing.T) {
+	registry := BundledProfiles()
+	for id, provider := range map[string]string{
+		"minio-sigv4-path-style-v1":  "minio",
+		"huawei-obs-public-v1":       "obs",
+		"huawei-obs-private-2023-v1": "obs",
+	} {
+		profile, ok := registry.Lookup(id)
+		require.True(t, ok, id)
+		assert.Equal(t, provider, profile.Provider)
+	}
+	_, ok := registry.Lookup("unknown-v1")
 	assert.False(t, ok)
-
-	registry, err = BoundProfiles("huawei-obs-public-v1")
-	require.NoError(t, err)
-	_, ok = registry.Lookup("huawei-obs-public-v1")
-	assert.True(t, ok)
-	_, ok = registry.Lookup("huawei-obs-private-2023-v1")
-	assert.False(t, ok)
-	_, err = BoundProfiles(strings.Repeat("x", 1024))
-	require.Error(t, err)
 }
 
 func TestProductionProfileReadinessRequiresDurableFlushEvidence(t *testing.T) {
