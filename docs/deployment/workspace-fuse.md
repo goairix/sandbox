@@ -798,6 +798,8 @@ Docker FUSE 镜像不是简单把 s3fs 安装进现有 sandbox 镜像。它必�
 
 镜像入口点必须使用 exec 形式，s3fs 参数必须由参数数组构造。禁止在命令行包含明文 AK/SK，也不接受 API 调用方传入任意 `-o` 参数。
 
+FUSE Pool 的 Docker 资源采用与 sync Pool 一致的 10 位小写字母数字短后缀。runtime 容器名为 `sandbox-pool-<suffix>`，对应 gateway、pair network 与 cache volume 分别为 `sandbox-gw-pool-<suffix>`、`sandbox-pair-pool-<suffix>`、`sandbox-fuse-cache-pool-<suffix>`。这些名称仅用于运维识别；安全身份仍由受管标签、完整 preparation/logical ID、PoolKey、secret root 与不可变 runtime UID 联合确认。升级后仍识别旧 `prep-<32-hex>` preparation ID，并只按旧标签和旧资源名进行保守清理，不会把旧资源接管为新 Pool 空壳。
+
 ### 7.4 动态容器 HostConfig
 
 Docker runtime 创建特殊容器时至少设置：

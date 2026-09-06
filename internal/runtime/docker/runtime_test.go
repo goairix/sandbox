@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,45 @@ import (
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
 )
+
+func TestDockerPreparationIDNaming(t *testing.T) {
+	pattern := regexp.MustCompile(`^sandbox-pool-[a-z0-9]{10}$`)
+	seen := make(map[string]struct{}, 128)
+	for range 128 {
+		id, err := newDockerPreparationID()
+		require.NoError(t, err)
+		assert.Regexp(t, pattern, id)
+		assert.True(t, validDockerPreparationID(id))
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate preparation ID %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	legacy := "prep-00000000000000000000000000000000"
+	assert.True(t, validDockerPreparationID(legacy), "legacy resources must remain recoverable")
+	for _, invalid := range []string{
+		"sandbox-pool-short",
+		"sandbox-pool-abcdefghij-extra",
+		"sandbox-pool-ABCDE12345",
+		"prep-0000000000000000000000000000000",
+		"prep-0000000000000000000000000000000A",
+	} {
+		assert.False(t, validDockerPreparationID(invalid), invalid)
+	}
+}
+
+func TestDockerFUSEResourceNames(t *testing.T) {
+	current := "sandbox-pool-a1b2c3d4e5"
+	assert.Equal(t, "sandbox-pair-pool-a1b2c3d4e5", dockerFUSEPairNetworkName(current))
+	assert.Equal(t, "sandbox-gw-pool-a1b2c3d4e5", dockerFUSEGatewayName(current))
+	assert.Equal(t, "sandbox-fuse-cache-pool-a1b2c3d4e5", fuseCacheVolumeName(current))
+
+	legacy := "prep-00000000000000000000000000000000"
+	assert.Equal(t, pairNetworkPrefix+legacy, dockerFUSEPairNetworkName(legacy))
+	assert.Equal(t, gatewayNamePrefix+legacy, dockerFUSEGatewayName(legacy))
+	assert.Equal(t, "sandbox-fuse-cache-"+legacy, fuseCacheVolumeName(legacy))
+}
 
 func TestNewDoesNotDeleteManagedOrphanResources(t *testing.T) {
 	var deletePaths []string
@@ -488,8 +528,19 @@ func TestDockerFUSEGatewayUsesRoutablePairAndExactSystemEgress(t *testing.T) {
 	preparationID := rt.workspaceState(info.RuntimeID).preparationID
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	pair := fake.networkCreateOptions[pairNetworkPrefix+preparationID]
+	require.Equal(t, preparationID, fake.containers[info.RuntimeID].name)
+	pair, exists := fake.networkCreateOptions[dockerFUSEPairNetworkName(preparationID)]
+	require.True(t, exists)
 	assert.False(t, pair.Internal, "Docker internal bridges drop transit packets before they reach the policy gateway")
+	assert.Contains(t, fake.volumes, fuseCacheVolumeName(preparationID))
+	var gatewayName string
+	for _, item := range fake.containers {
+		if item.config.Labels["sandbox.role"] == "gateway" && item.config.Labels["sandbox.id"] == preparationID {
+			gatewayName = item.name
+			break
+		}
+	}
+	assert.Equal(t, dockerFUSEGatewayName(preparationID), gatewayName)
 	command := strings.Join(fake.rootGatewayCommands, "\n")
 	assert.Contains(t, command, "-d 1.1.1.1/32 -p udp --dport 53 -j ACCEPT")
 	assert.Contains(t, command, "-d 198.51.100.10/32 -p tcp --dport 9000 -j ACCEPT")

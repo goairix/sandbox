@@ -362,7 +362,9 @@ func canonicalDockerStrings(values []string) []string {
 	return result
 }
 
-func fuseCacheVolumeName(id string) string { return "sandbox-fuse-cache-" + id }
+func fuseCacheVolumeName(id string) string {
+	return "sandbox-fuse-cache-" + dockerFUSEResourceSuffix(id)
+}
 
 func fuseSecurityOptions(profile string) ([]string, error) {
 	if profile == "" || strings.TrimSpace(profile) != profile || len(profile) > 128 || strings.ContainsAny(profile, ",\x00\r\n") {

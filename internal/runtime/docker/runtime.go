@@ -327,11 +327,15 @@ func (r *Runtime) confirmNoFUSERuntime(ctx context.Context, sandboxID string) (b
 }
 
 func newDockerPreparationID() (string, error) {
-	var random [16]byte
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var random [10]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", err
 	}
-	return "prep-" + hex.EncodeToString(random[:]), nil
+	for index := range random {
+		random[index] = alphabet[int(random[index])%len(alphabet)]
+	}
+	return dockerPreparationIDPrefix + string(random[:]), nil
 }
 
 func encodeDockerSystemEgress(spec runtime.SystemEgressSpec) (string, runtime.SystemEgressSpec, error) {
@@ -835,7 +839,7 @@ func (r *Runtime) cleanupPreparationResources(ctx context.Context, state *docker
 	} else if !dockerclient.IsErrNotFound(err) {
 		result = errors.Join(result, err)
 	}
-	if err := removeSandboxPair(ctx, r.cli, state.preparationID); err != nil {
+	if err := removeFUSESandboxPair(ctx, r.cli, state.preparationID); err != nil {
 		result = errors.Join(result, err)
 	}
 	gateways, err := r.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
@@ -1032,11 +1036,37 @@ func cleanupOnlyPreparationState(preparationID, secretRoot string) *dockerWorksp
 }
 
 func validDockerPreparationID(value string) bool {
-	if !strings.HasPrefix(value, "prep-") || len(value) != len("prep-")+32 {
+	if strings.HasPrefix(value, dockerPreparationIDPrefix) {
+		suffix := strings.TrimPrefix(value, dockerPreparationIDPrefix)
+		if len(suffix) != 10 {
+			return false
+		}
+		for _, char := range suffix {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+				return false
+			}
+		}
+		return true
+	}
+	const legacyPrefix = "prep-"
+	if !strings.HasPrefix(value, legacyPrefix) || len(value) != len(legacyPrefix)+32 {
 		return false
 	}
-	_, err := hex.DecodeString(strings.TrimPrefix(value, "prep-"))
+	suffix := strings.TrimPrefix(value, legacyPrefix)
+	if suffix != strings.ToLower(suffix) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
 	return err == nil
+}
+
+const dockerPreparationIDPrefix = "sandbox-pool-"
+
+func dockerFUSEResourceSuffix(preparationID string) string {
+	if validDockerPreparationID(preparationID) && strings.HasPrefix(preparationID, dockerPreparationIDPrefix) {
+		return strings.TrimPrefix(preparationID, "sandbox-")
+	}
+	return preparationID
 }
 
 func (r *Runtime) workspaceState(runtimeID string) *dockerWorkspaceState {

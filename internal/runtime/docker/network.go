@@ -37,7 +37,7 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 	if err != nil {
 		return "", "", "", err
 	}
-	pairNetName := pairNetworkPrefix + sandboxID
+	pairNetName := dockerFUSEPairNetworkName(sandboxID)
 	ipv6Disabled := false
 	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
 		Driver: "bridge", Attachable: true, EnableIPv6: &ipv6Disabled,
@@ -53,7 +53,7 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 		}
 		_ = cli.NetworkRemove(ctx, pairNetworkID)
 	}
-	gwName := gatewayNamePrefix + sandboxID
+	gwName := dockerFUSEGatewayName(sandboxID)
 	gwResp, err := cli.ContainerCreate(ctx, &container.Config{
 		Image: gatewayImage, Cmd: []string{"sleep", "infinity"},
 		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "gateway", "sandbox.gateway.contract": "fuse-v1", dockerSecretRootLabel: secretRoot},
@@ -558,6 +558,14 @@ func isIPv6(addr string) bool {
 
 // removeSandboxPair removes the gateway container and pair network for a sandbox.
 func removeSandboxPair(ctx context.Context, cli dockerAPI, sandboxID string) error {
+	return removeSandboxPairWithName(ctx, cli, sandboxID, pairNetworkPrefix+sandboxID)
+}
+
+func removeFUSESandboxPair(ctx context.Context, cli dockerAPI, preparationID string) error {
+	return removeSandboxPairWithName(ctx, cli, preparationID, dockerFUSEPairNetworkName(preparationID))
+}
+
+func removeSandboxPairWithName(ctx context.Context, cli dockerAPI, sandboxID, pairNetName string) error {
 	// Find and remove gateway container by label
 	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
 		All: true,
@@ -573,12 +581,19 @@ func removeSandboxPair(ctx context.Context, cli dockerAPI, sandboxID string) err
 	}
 
 	// Remove pair network
-	pairNetName := pairNetworkPrefix + sandboxID
 	err = cli.NetworkRemove(ctx, pairNetName)
 	if err != nil && !dockerclient.IsErrNotFound(err) {
 		return fmt.Errorf("remove pair network: %w", err)
 	}
 	return nil
+}
+
+func dockerFUSEPairNetworkName(preparationID string) string {
+	return pairNetworkPrefix + dockerFUSEResourceSuffix(preparationID)
+}
+
+func dockerFUSEGatewayName(preparationID string) string {
+	return gatewayNamePrefix + dockerFUSEResourceSuffix(preparationID)
 }
 
 // setupSandboxRoute configures the default route inside the sandbox container
