@@ -115,7 +115,7 @@ config:
     maxPids: 100
     maxCpu: "500m"
     maxCpuRequest: "100m"
-    maxUploadBytes: 2147483648
+    maxUploadBytes: "2147483648"
     seccompProfile: RuntimeDefault
     networkEnabled: false
     networkBlockPrivate: false
