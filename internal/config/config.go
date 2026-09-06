@@ -173,20 +173,24 @@ type WorkspaceConfig struct {
 	// AllowUnverifiedDurableFlush is a local Docker/MinIO functional-test gate.
 	// validateLocalDevelopmentFUSEProfile keeps it unavailable to production-shaped
 	// runtimes and it never changes the independent image release check.
-	AllowUnverifiedDurableFlush bool                                   `mapstructure:"allow_unverified_durable_flush"`
-	SecretName                  string                                 `mapstructure:"secret_name"`
-	CacheSize                   string                                 `mapstructure:"cache_size"`
-	CacheMedium                 string                                 `mapstructure:"cache_medium"`
-	MountTimeoutSeconds         int                                    `mapstructure:"mount_timeout_seconds"`
-	FlushTimeoutSeconds         int                                    `mapstructure:"flush_timeout_seconds"`
-	UnmountTimeoutSeconds       int                                    `mapstructure:"unmount_timeout_seconds"`
-	RecreateMaxAttempts         int                                    `mapstructure:"recreate_max_attempts"`
-	LeaseTTLSeconds             int                                    `mapstructure:"lease_ttl_seconds"`
-	LeaseRenewIntervalSeconds   int                                    `mapstructure:"lease_renew_interval_seconds"`
-	QuotaMode                   string                                 `mapstructure:"quota_mode"`
-	MounterResources            WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
-	FUSEPool                    WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
-	Providers                   map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
+	AllowUnverifiedDurableFlush bool `mapstructure:"allow_unverified_durable_flush"`
+	// AllowMissingLSMForKind permits macOS/Windows local kind clusters whose
+	// LinuxKit kernel has no AppArmor/SELinux LSM. It must never be enabled in
+	// a production Kubernetes deployment.
+	AllowMissingLSMForKind    bool                                   `mapstructure:"allow_missing_lsm_for_kind"`
+	SecretName                string                                 `mapstructure:"secret_name"`
+	CacheSize                 string                                 `mapstructure:"cache_size"`
+	CacheMedium               string                                 `mapstructure:"cache_medium"`
+	MountTimeoutSeconds       int                                    `mapstructure:"mount_timeout_seconds"`
+	FlushTimeoutSeconds       int                                    `mapstructure:"flush_timeout_seconds"`
+	UnmountTimeoutSeconds     int                                    `mapstructure:"unmount_timeout_seconds"`
+	RecreateMaxAttempts       int                                    `mapstructure:"recreate_max_attempts"`
+	LeaseTTLSeconds           int                                    `mapstructure:"lease_ttl_seconds"`
+	LeaseRenewIntervalSeconds int                                    `mapstructure:"lease_renew_interval_seconds"`
+	QuotaMode                 string                                 `mapstructure:"quota_mode"`
+	MounterResources          WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
+	FUSEPool                  WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
+	Providers                 map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -508,7 +512,14 @@ func (c *Config) validateFUSE() error {
 		return fmt.Errorf("config: %s.docker_image must contain a valid @sha256 digest", providerPath)
 	}
 	lsmProfile := strings.ToLower(strings.TrimSpace(provider.LSMProfile))
-	if lsmProfile == "" || lsmProfile == "unconfined" || lsmProfile == "label=disable" {
+	if workspace.AllowMissingLSMForKind {
+		if c.Runtime.Type != "kubernetes" {
+			return fmt.Errorf("config: workspace.allow_missing_lsm_for_kind is only supported with Kubernetes runtime")
+		}
+		if lsmProfile != "" {
+			return fmt.Errorf("config: workspace.allow_missing_lsm_for_kind requires an empty %s.lsm_profile", providerPath)
+		}
+	} else if lsmProfile == "" || lsmProfile == "unconfined" || lsmProfile == "label=disable" {
 		return fmt.Errorf("config: %s.lsm_profile must be a confined profile", providerPath)
 	}
 	if provider.SystemEgressMode != "cidr" && provider.SystemEgressMode != "cilium-fqdn" {
@@ -776,6 +787,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("workspace.auto_sync_interval_seconds", 0)
 	v.SetDefault("workspace.mode", "sync")
 	v.SetDefault("workspace.allow_unverified_durable_flush", false)
+	v.SetDefault("workspace.allow_missing_lsm_for_kind", false)
 	v.SetDefault("workspace.secret_name", "")
 	v.SetDefault("workspace.cache_size", "2Gi")
 	v.SetDefault("workspace.cache_medium", "disk")

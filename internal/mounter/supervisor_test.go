@@ -32,6 +32,7 @@ type fakeRunner struct {
 	process    *fakeProcess
 	runs       [][]string
 	runErr     error
+	runFunc    func([]string) error
 	runHook    func([]string)
 	runDelay   time.Duration
 	runStarted chan<- struct{}
@@ -56,7 +57,7 @@ func (r *fakeRunner) Start(_ context.Context, argv, environment []string) (Proce
 func (r *fakeRunner) Run(ctx context.Context, argv []string) error {
 	r.mu.Lock()
 	r.runs = append(r.runs, append([]string(nil), argv...))
-	hook, delay, runErr := r.runHook, r.runDelay, r.runErr
+	hook, delay, runErr, runFunc := r.runHook, r.runDelay, r.runErr, r.runFunc
 	started, release := r.runStarted, r.runRelease
 	r.mu.Unlock()
 	if hook != nil {
@@ -78,6 +79,9 @@ func (r *fakeRunner) Run(ctx context.Context, argv []string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if runFunc != nil {
+		return runFunc(argv)
 	}
 	return runErr
 }
@@ -240,6 +244,31 @@ func TestBootstrapCanonicalizesRuntimeUIDAndAllowsCacheRoot(t *testing.T) {
 	assert.Equal(t, "uid-a", persisted.RuntimeUID)
 }
 
+func TestBootstrapSecuresRootOwnedEmptyDirCache(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"secrets", "run", "cache", "workspace"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
+	}
+	cache := filepath.Join(root, "cache")
+	require.NoError(t, os.Chmod(cache, 0o777), "model Kubernetes emptyDir mount root")
+	bootstrap := validBootstrap(root)
+	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
+	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
+	s := NewSupervisor(Config{
+		RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: cache, MountPath: bootstrap.MountPath,
+		CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil },
+		MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil },
+	}, &fakeRunner{})
+
+	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
+	cacheInfo, err := os.Stat(cache)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), cacheInfo.Mode().Perm())
+	tmpInfo, err := os.Stat(filepath.Join(cache, "tmp"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), tmpInfo.Mode().Perm())
+}
+
 func TestAuthorizeChildLifetimeDoesNotUseRequestCancellation(t *testing.T) {
 	runner := &contextRecordingRunner{fakeRunner: fakeRunner{}}
 	s, _ := newTestSupervisorWithRunner(t, runner)
@@ -323,9 +352,129 @@ func TestStrongShutdownWaitsForChildExitAndEffectiveUnmount(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ack.GracefulUnmount)
 	assert.Equal(t, StateStopped, s.State())
+	second, err := s.Shutdown(context.Background(), &request)
+	require.NoError(t, err)
+	assert.True(t, second.GracefulUnmount)
+	assert.Len(t, runner.runs, 3)
+}
+
+func TestStrongShutdownRetriesAfterBoundedUnmountFailureWithoutRepeatingFlush(t *testing.T) {
+	process := &fakeProcess{exit: make(chan error, 1)}
+	runner := &fakeRunner{process: process}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	unmountMaySucceed := false
+	unmountAttempts := 0
+	runner.runFunc = func(argv []string) error {
+		if len(argv) == 0 || argv[0] != "/usr/bin/fusermount3" {
+			return nil
+		}
+		unmountAttempts++
+		if !unmountMaySucceed {
+			return errors.New("temporarily busy")
+		}
+		process.exit <- nil
+		s.config.MountInfo = func() (Mount, error) {
+			return Mount{ID: 10, MountPoint: s.bootstrap.MountPath, FilesystemType: "tmpfs"}, nil
+		}
+		return nil
+	}
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	firstCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	first, err := s.Shutdown(firstCtx, &request)
+	require.Error(t, err)
+	assert.False(t, first.GracefulUnmount)
+
+	unmountMaySucceed = true
+	second, err := s.Shutdown(context.Background(), &request)
+	require.NoError(t, err)
+	assert.True(t, second.GracefulUnmount)
+	assert.Equal(t, StateStopped, s.State())
+	assert.GreaterOrEqual(t, unmountAttempts, 2)
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	flushes := 0
+	for _, argv := range runner.runs {
+		if len(argv) > 0 && argv[0] == "/usr/bin/verified-flush" {
+			flushes++
+		}
+	}
+	assert.Equal(t, 1, flushes)
+}
+
+func TestStrongShutdownRetryWaitsForAlreadyUnmountedChild(t *testing.T) {
+	process := &fakeProcess{exit: make(chan error, 1)}
+	runner := &fakeRunner{process: process}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	unmountAttempts := 0
+	runner.runFunc = func(argv []string) error {
+		if len(argv) > 0 && argv[0] == "/usr/bin/fusermount3" {
+			unmountAttempts++
+			return errors.New("temporarily busy")
+		}
+		return nil
+	}
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	firstCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := s.Shutdown(firstCtx, &request)
+	require.Error(t, err)
+	firstAttempts := unmountAttempts
+
+	s.config.MountInfo = func() (Mount, error) {
+		return Mount{ID: 10, MountPoint: s.bootstrap.MountPath, FilesystemType: "tmpfs"}, nil
+	}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		process.exit <- nil
+	}()
+	ack, err := s.Shutdown(context.Background(), &request)
+	require.NoError(t, err)
+	assert.True(t, ack.GracefulUnmount)
+	assert.Equal(t, firstAttempts, unmountAttempts, "an already absent mount must not be unmounted again")
+}
+
+func TestStrongShutdownDoesNotRetryWhenDurableFlushFailed(t *testing.T) {
+	runner := &fakeRunner{}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	runner.runErr = errors.New("flush failed")
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	_, err := s.Shutdown(context.Background(), &request)
+	require.Error(t, err)
+	runner.runErr = nil
 	_, err = s.Shutdown(context.Background(), &request)
 	require.Error(t, err)
-	assert.Len(t, runner.runs, 3)
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for _, argv := range runner.runs {
+		assert.NotEqual(t, "/usr/bin/fusermount3", argv[0])
+	}
+}
+
+func TestStrongShutdownRetriesOrdinaryUnmountWithinDeadline(t *testing.T) {
+	process := &fakeProcess{exit: make(chan error, 1)}
+	runner := &fakeRunner{process: process}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	unmountAttempts := 0
+	runner.runFunc = func(argv []string) error {
+		if len(argv) == 0 || argv[0] != "/usr/bin/fusermount3" {
+			return nil
+		}
+		unmountAttempts++
+		if unmountAttempts == 1 {
+			return errors.New("temporarily busy")
+		}
+		process.exit <- nil
+		s.config.MountInfo = func() (Mount, error) {
+			return Mount{ID: 10, MountPoint: s.bootstrap.MountPath, FilesystemType: "tmpfs"}, nil
+		}
+		return nil
+	}
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	ack, err := s.Shutdown(context.Background(), &request)
+	require.NoError(t, err)
+	assert.True(t, ack.GracefulUnmount)
+	assert.Equal(t, 2, unmountAttempts)
 }
 
 func TestStrongShutdownFailsClosedWhenChildDoesNotExit(t *testing.T) {
@@ -579,6 +728,7 @@ func TestStrongShutdownRequiresVerifiedFlushStrategy(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
 	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
+	s.profile.Flush = nil
 	s.mountID = 42
 	s.state = StateReady
 	s.config.MountInfo = func() (Mount, error) {

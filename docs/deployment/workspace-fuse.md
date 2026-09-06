@@ -4,12 +4,13 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。真实 provider 六组合兼容性矩阵与 durable-flush 证据仍是发布门禁；当前三个 profile 在证据提升前仍不能用于生产启用 `workspace.mode=fuse`。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。MinIO 的 mount parameters 与 `/bin/sync -f -- /workspace` durable-flush profile 已提升为 `verified`，并完成 Docker 本地环境与 ARM64 Kubernetes 正式 MinIO endpoint 的真实生命周期验收；生产仍必须补齐专用 LSM、镜像签名/扫描和 fault matrix。华为公有云 OBS 与 2023 私有云 OBS profile 继续 fail closed，等待各自独立 provider spike。现有 `workspace.mode=sync` 部署不受影响。
 
 ## 0. 当前部署入口
 
 - Helm：`deploy/helm/sandbox`。`workspace.mode=sync` 保持默认；FUSE 渲染示例是 `testdata/values-fuse-minio.yaml`，其中 digest、IP 和 Secret 名仅为测试占位，部署前必须替换为 Task 18 的实测产物。
 - Kubernetes：sandbox-api 位于 control namespace，动态 sandbox Pod 位于 runtime namespace；Chart 分别创建 runtime Role/RoleBinding 和 runtime default-deny。运行时 Secret 必须预先存在于 runtime namespace，控制面读取的同内容 Secret则位于 control namespace，因为 Kubernetes 不允许跨 namespace 投射 Secret。
+- API key 推荐预先创建为独立 Secret（固定键名 `api-key`），并设置 `config.security.apiKeySecretName`；不要把 key 写入 values 或每次 `helm upgrade --set`。Chart 不接管该外部 Secret，普通升级不会删除或清空 API key。
 - Docker Compose：只启动控制面、Redis 和镜像构建辅助服务。特殊 FUSE 容器由 sandbox-api 动态创建；Compose 不创建长期 mounter 容器，也不挂载宿主机业务 `/workspace`。
 - Docker Secret 暂存：`${WORKSPACE_SECRET_STAGING_ROOT}` 必须是 Docker 宿主机上的绝对目录，并以相同绝对路径挂入 sandbox-api；目录必须为 `root:root`、mode `0700`。`${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`。
 - 预检：先执行 `bash -n scripts/workspace-fuse-preflight.sh`；有真实 profile、digest 和 Secret 后执行 `scripts/workspace-fuse-preflight.sh kubernetes --profile <report.yaml>` 或 `docker --profile <report.yaml>`。设置 `WORKSPACE_FUSE_RUN_INTEGRATION=1` 才会进入完整 Acquire/读写/销毁集成用例。
@@ -120,11 +121,11 @@ manifest 是严格审计证据，不是运行时配置扩展点。它记录 prof
 
 | Profile ID | Mount parameters | Durable flush | 当前部署资格 |
 |---|---|---|---|
-| `minio-sigv4-path-style-v1` | `verified` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+| `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check；仍须满足环境发布门禁 |
 | `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
 | `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
 
-因此三者当前都必须在 `release-check` 和 `workspace.mode=fuse` 配置校验处 fail closed。MinIO 的 mount 参数已冻结不代表 durable flush 已获证明；公有 OBS 只是从官方资料得到的候选参数；2023 私有云不能继承公有云结论。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
+MinIO 已使用固定 `/bin/sync -f -- /workspace` 完成 durable-flush 提升；这只放开 profile 资格，不豁免最终镜像 digest、TLS、LSM、扫描和 fault matrix。公有 OBS 仍只是从官方资料得到的候选参数，2023 私有云不能继承公有云结论；两者继续 fail closed。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
 
 静态 contract test：
 
@@ -284,10 +285,13 @@ volumes:
 
 ### 6.3 目标 Helm values
 
-以下配置块是实现完成后 Chart 应支持的目标 schema。它补充现有 `config.workspace`，不应把 AK/SK 写入 values。当前即使填入真实镜像 digest，MinIO 和 OBS 也都会因 durable-flush/profile release gate 未通过而拒绝启动；示例只用于开发和渲染检查：
+以下配置块是 Chart 已支持的 schema。它补充现有 `config.workspace`，不应把 API key 或对象存储 AK/SK 写入 values。MinIO 只有在 profile-bound 镜像通过 release-check 且引用真实 digest 时可启用；两个 OBS profile 仍会被 release gate 拒绝。示例中的地址和 digest 仅用于说明形状：
 
 ```yaml
 config:
+  security:
+    # 预先存在的 Secret，键名固定为 api-key。
+    apiKeySecretName: sandbox-api-key
   storage:
     filesystem:
       provider: minio
@@ -361,8 +365,10 @@ config:
           - obs.cn-north-4.myhuaweicloud.com
         systemEgressCIDRs: ["192.0.2.20/32"]
 
-storageCredentials:
-  existingSecret: sandbox-storage-minio
+workspaceCredentials:
+  # 控制面 namespace 中预先存在；FUSE Pod 使用的 Secret 名由
+  # config.workspace.secretName 指定，跨 namespace 时需分别创建。
+  apiSecretName: sandbox-storage-minio
   accessKeyKey: accessKey
   secretKeyKey: secretKey
   caKey: ca.crt
@@ -374,9 +380,9 @@ storageCredentials:
 
 PoolKey 必须覆盖 runtime、sandbox 镜像/资源/安全配置、provider、storage identity、bucket、endpoint、profile、mounter 镜像 digest、Secret 名、`credentialGeneration`、CA、cache 和 system egress；明确排除 Acquire 时才知道的 `workspace_path/prefix`、workspace identity、lease generation、reservation token 和请求级用户网络规则。任一固定字段变化都创建新 key 并排空旧 key 空壳；请求固定字段与现有 key 不匹配时只能 cold prepare。Secret 或 CA 每次轮换都必须递增 `credentialGeneration`，因为 sandbox-api 不读取 runtime namespace Secret 的 resourceVersion。
 
-`storageCredentials` 是 Chart 层配置：实现后应把该 Secret 作为只读文件投射给 sandbox-api，并将文件路径映射到 `storage.filesystem.credential_files`。它和 `config.workspace.secretName` 职责不同：前者供控制面存储 driver 使用，后者是动态 sandbox sidecar 的 Secret 引用。
+`workspaceCredentials` 是 Chart 层配置：它把已有 Secret 作为只读文件投射给 sandbox-api，并将文件路径映射到 `storage.filesystem.credential_files`。它和 `config.workspace.secretName` 职责不同：前者供控制面 marker/probe object client 使用，后者是动态 sandbox sidecar 的 Secret 引用。
 
-MinIO 的 `storage.filesystem.endpoint` 必须写为 `host[:port]`，不能带 `https://`；`useSSL: true` 由现有控制面 driver 使用，runtime 再派生 s3fs 的完整 `url=https://host[:port]`。OBS endpoint 继续遵循华为 SDK 的完整 URL 格式。`storageCredentials.caKey` 在使用公共 CA 时可留空；非空时必须同时接入控制面 transport 和 sidecar。
+MinIO 的 `storage.filesystem.endpoint` 必须写为 `host[:port]`，不能带 `https://`；`useSSL: true` 由控制面对象客户端使用，runtime 再派生 s3fs 的完整 `url=https://host[:port]`。OBS endpoint 继续遵循华为 SDK 的完整 URL 格式。`workspaceCredentials.caKey` 在使用公共 CA 时可留空；非空时必须同时接入控制面 transport 和 sidecar。
 
 部署前先渲染并检查 schema/准入。以下脚本假定 sandbox-api ServiceAccount/RBAC 已存在；首次安装必须先以 `workspace.mode=sync` 安装控制面和 RBAC，完成预检后才用 FUSE values 升级，不能让尚未验收的 FUSE 创建入口先对外生效：
 
@@ -466,6 +472,8 @@ spec:
     - name: workspace-mounter
       image: registry.example.com/sandbox-s3fs-minio@sha256:<64-hex-digest>
       restartPolicy: Always
+      # 必须离开 FUSE mountpoint；否则 PID 1 的 cwd 会使普通卸载持续 EBUSY。
+      workingDir: /
       securityContext:
         privileged: true
         runAsUser: 0
@@ -634,6 +642,8 @@ kubectl -n "$SANDBOX_NAMESPACE" exec "$PREPARED_POD" -c sandbox -- \
 
 预期 sandbox 主容器已经 running、Pod Ready 为 False、supervisor 为 prepared，且 UID 1000 不能写底层 `/workspace`。此阶段通过公共 API 发起的 Exec/file 操作必须被 gate 拒绝。
 
+`kubectl get pod` 显示 `1/2 Running` 是 prepared 空壳的预期结果：sandbox 主容器 Ready，mounter readiness 在没有 FUSE mount 时为 False。Acquire 成功后该 Pod 才变为 `2/2`；销毁后补回的新空壳再次是 `1/2`。告警和发布脚本必须按 Pool record 与 `health prepared` 判断空壳，不得把通用 Pod Ready 当作预热失败。
+
 使用该空壳 Acquire 测试 workspace 后执行：
 
 ```bash
@@ -779,7 +789,7 @@ workspace:
 
 仓库 Compose 使用 `STORAGE_REGION` 传递 SigV4 region；MinIO 和公有云 OBS profile 要求该值为非空、小写 canonical region。`SANDBOX_IMAGE` 和 `GATEWAY_IMAGE` 用于覆盖普通 sandbox 与 gateway 镜像。`sandbox-api` 会等待 Redis healthcheck 通过且 `sandbox-images` 成功准备完全部镜像后才启动，避免 API 已经接流量但 pool 所需镜像仍不存在：未配置镜像覆盖时构建仓库默认镜像；配置 `SANDBOX_IMAGE`、`GATEWAY_IMAGE`、`FUSE_MOUNTER_IMAGE` 或 `FUSE_SANDBOX_IMAGE` 时先检查 Docker daemon 的本地缓存，缺失则从 registry 拉取。默认 `DOCKER_AUTH_CONFIG_FILE=./docker-auth-public/config.json` 只提供空的 Docker client 配置；使用需认证的私有 registry 时，必须把该变量设为仓库根目录之外的宿主机绝对路径，例如 `/etc/sandbox/docker-auth/config.json`，并只读挂入 `sandbox-images`。禁止把真实认证文件复制到本仓库；`.dockerignore` 的防御性规则不能替代这一部署约束。该文件应使用最小权限的只读账号，父目录/文件分别为 `0700`/`0600`，且必须包含可由 `docker:cli` 直接读取的 `auths`，不能依赖宿主机 `credsStore`/credential helper，也不能通过环境变量传递认证内容。只有该文件以只读方式进入一次性镜像准备容器；`/root/.docker` 的其余空间保持容器内可写，以供 buildx 保存非敏感状态，认证配置不进入 `sandbox-api`。Docker FUSE 启用时，后三个 FUSE 相关值都必须填写 registry 返回的真实 `@sha256:` digest；tag 或本地 image ID 会在 pool WarmUp 前被拒绝。若设置 `WORKSPACE_SECRET_STAGING_ROOT`，它必须是宿主机绝对路径且不能是 `/`，Compose 会以相同绝对 target 挂入 API，并同步写入 `runtime.docker.workspace_secret_root`，不能只改 volume source。该路径会写入 container、gateway、network、cache volume 的受管资源标签，并作为部署期不可变的资源身份；如必须迁移，先用旧配置排空全部 FUSE sandbox，确认旧目录为空且无 `sandbox.managed=true` Docker 资源，再同时修改目录与配置。存在旧资源时 runtime 会 fail closed，不会跨 root 猜测或删除 Secret。
 
-本地开发需要在 profile 尚未取得 durable-flush 证据时跑通正式 Compose 流程，可以显式设置 `WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH=true`。sandbox-api 只在以下条件全部成立时接受：runtime 为 Docker；provider 为 MinIO；endpoint 是私网或回环 literal IPv4；`system_egress_cidrs` 只有一项且是该 endpoint 的精确 `/32`；`endpoint_ports` 只有一项且精确匹配 endpoint 端口；compiled profile 的挂载参数已经验证。进程会输出警告。OBS、Kubernetes、公网 endpoint、FQDN endpoint、宽网段出口或额外端口均拒绝该开关。它仅跳过配置加载阶段的 durable-flush 资格检查；`workspace-mounter ... --release-check-image`、`CheckProductionProfile`、profile manifest 状态与 Task 18 矩阵保持不变，不能用此开关生成生产发布证据。
+`WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH=true` 仅保留给历史/候选 MinIO profile 的受限本地 Docker 试验；当前已验证的 MinIO profile 不需要设置它。sandbox-api 仍只在以下条件全部成立时接受该例外：runtime 为 Docker；provider 为 MinIO；endpoint 是私网或回环 literal IPv4；`system_egress_cidrs` 只有一项且是该 endpoint 的精确 `/32`；`endpoint_ports` 只有一项且精确匹配 endpoint 端口；compiled profile 的挂载参数已经验证。OBS、Kubernetes、公网 endpoint、FQDN endpoint、宽网段出口或额外端口均拒绝该开关。它不能改变 `release-check` 或生成生产发布证据。
 
 上面的 Compose 片段按私有 CA 场景给出；使用系统公共 CA 时删除 `storage_ca` Secret 和 `ca_file` 配置，不能保留指向不存在文件的路径。
 
@@ -869,7 +879,7 @@ docker exec -u 1000:1000 "$PREPARED_CONTAINER" sh -c 'test ! -w /workspace'
 
 预期容器和 supervisor 已运行、prepared health 通过、没有 s3fs/mount generation，且公共 API 不能对它执行用户命令。Acquire 测试 workspace 后执行：
 
-sandbox-api 重启不等于 Docker 容器退出。Docker runtime 构造函数禁止清理 managed gateway/network/container；Manager 必须先从 Redis session、owner 与 Pool record 恢复受保护的 runtime UID 集合并做健康校验，再调用 orphan reconciliation。只有不在保护集合中的资源才能删除；仍存活的 FUSE container 与 gateway 必须按原 generation 恢复，不能重新 bootstrap 或 authorize。
+sandbox-api 重启不等于 Docker 容器或 Kubernetes Pod 退出。runtime 构造阶段禁止无状态地清理 managed 资源；Manager 必须先从 Redis session、owner 与 Pool record 恢复受保护的 runtime UID 集合，再调用 orphan reconciliation。Kubernetes reconciler 只枚举带 `sandbox.managed=true`、`sandbox.pool=true`、`sandbox.workspace.mode=fuse` 的 Pod，并重新校验 Pod UID、instance label、prepare attempt 与 bootstrap identity；只有不在保护集合且 identity 完整匹配的 Pod 才能经强关闭路径删除，identity 漂移或查询失败一律保留并阻止启动。Docker 同样只有不在保护集合中的 FUSE container/gateway/cache/Secret 才能删除；仍存活的已绑定实例必须按原 generation 恢复，不能重新 bootstrap 或 authorize。
 
 ```bash
 docker inspect "$SANDBOX_CONTAINER" \
@@ -969,9 +979,34 @@ done
 
 上述 HTTP MinIO、临时包镜像或手工导入只提供本地功能证据，不能生成 release profile：正式矩阵仍要求 TLS 主机名/CA 校验、digest-pinned 专用镜像、完整 sandbox-api Pool 生命周期、fault driver、清理确认以及 durable-flush 证据。
 
+### 7.9 ARM64 开发集群 Helm 验收记录
+
+2026-09-06 在 `ds-ai-research` ARM64 Linux 集群、`sandbox-fuse` 测试 namespace 使用仓库 Chart 完成了一次正式 MinIO endpoint 验收。镜像统一推送到 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-*` 并在 values 中使用 registry 返回的 `@sha256:` digest；对象存储凭证和 API key 使用预先存在的 Secret，未写入 values、命令输出或文档。部署命令形状为：
+
+```bash
+helm --kube-context ds-ai-research upgrade --install sandbox-fuse \
+  deploy/helm/sandbox \
+  --namespace sandbox-fuse \
+  --create-namespace \
+  --values /secure/path/minio-values.yaml \
+  --wait --timeout 8m
+```
+
+该开发节点尚未安装项目专用 AppArmor profile，因此验收 values 明确使用了 `allowMissingLSMForKind: true`；这只是开发集群例外，生产 values 必须恢复为 `false` 并配置 `lsmProfile`。system egress 使用 Cilium FQDN policy，只放行指定公共 DNS、正式 MinIO FQDN 和 443，不改变“不允许访问内网服务，确需访问必须开白名单”的现有规则。
+
+验收结果：prepared 空壳为 `1/2 Running` 且 mounter PID 1 cwd 为 `/`；请求仅提供 `mode` 与动态 `workspace_path` 后命中同一 Pod/UID并变为 Ready；UID 1000 用户看到 effective `fuse.s3fs`，写入后显式 sync，独立 MinIO 客户端读回一致；DELETE 在 2 秒内返回 200，旧 Pod 变为 NotFound，`sandbox-api` 自动补回新的 `1/2` prepared 空壳。该流程同时验证了 pool naming 为 `sandbox-pool-<10位后缀>`，没有重新引入早期过长的 preparation ID 名称。
+
+卸载预算由 `2 × flush_timeout + unmount_timeout + 30s` 控制面余量构成：manager 先 quiesce/flush，strong shutdown 再做一次经 profile 验证的 flush 后普通卸载，并等待 exact Pod UID 消失。teardown 任一失败会记录不含凭证的 `sandbox_id`、`runtime_id` 和阶段名；API 返回 cleanup pending 后后台继续对同一 tombstone 重试，不能释放 owner 或把已授权实例放回 Pool。
+
+Chart 默认启用 `preDeleteDrain`。`helm uninstall` 真正删除 release 资源前，hook Job 先删除该 release 的 HPA、把自身 `sandbox-api` Deployment 缩到 0，并等待所有 API Pod 完成 `Manager.Stop`；因此内置 Redis 仍在线时即可完成 session teardown 和 Pool drain，不会发生 API 与 Redis 同时终止造成的 fail-closed 遗留。hook ServiceAccount 只能 `get/update` 精确的 `<release>-api` Deployment，以及 `get/delete` 同名 HPA。API Deployment 在使用内置 Redis 时还带有 `wait-for-redis` init container，避免 Redis 尚未 Ready 导致 API 反复退出。若显式设置 `preDeleteDrain.enabled=false`，运维必须先手工禁用 HPA、把 API Deployment 缩到 0、确认所有 managed pool Pod 已清理，再执行 Helm 卸载；不得直接同时删除 API 与 Redis。
+
+异常断电、`SIGKILL` 或非持久 Redis 丢失 inventory 时无法依赖优雅 Stop。下一次 API 启动会先恢复所有持久保护来源，再由 Kubernetes/Docker orphan reconciler 清理未受保护的 exact managed 资源；该恢复是兜底，不替代上述 pre-delete drain。`preDeleteDrain.timeoutSeconds` 必须覆盖最慢的 active sandbox teardown，hook 失败时 Helm 卸载应失败并保留 release 供诊断，而不是跳过清理。
+
+同一 ARM64 验收还实际覆盖了这条部署退出链路：先制造“API 与非持久 Redis 同时消失”的旧 prepared Pod，升级到带 Kubernetes orphan reconciler 的镜像后，启动阶段自动删除旧 exact Pod 与对应 Cilium policy；随后直接执行带 `--wait` 的 `helm uninstall`，pre-delete Job 在 Redis 退出前把 API 缩到 0，当前 prepared Pod 被删除，Job 成功后 release 中 Pod、Deployment、StatefulSet、动态 Cilium policy、Role/RoleBinding 均为空。再次 `helm upgrade --install` 后 API/Redis 主容器 restart count 均为 0，Pool 自动恢复为新的 `1/2 Running` 空壳；最终环境保持该状态供现场检查。
+
 ## 8. Provider profile
 
-### 8.1 MinIO mount 参数基线（尚未通过 durable-flush gate）
+### 8.1 MinIO mount 与 durable-flush 基线（已验证）
 
 `minio-sigv4-path-style-v1` 的 mount parameters 已标记为 `verified`，至少固定：
 
@@ -984,7 +1019,9 @@ done
 - TLS 主机名与 CA 校验。
 - provider 级静态长期 AK/SK，写入 root-only s3fs `passwd_file`；出现 session token 时拒绝启动。
 
-但其 durable flush 当前仍为 `blocked-pending-flush-spike`，所以这不是可上线结论。配置校验和 `release-check` 必须继续拒绝该 profile，直至 Task 18 证明 exact profile 的写入静止、flush、卸载和终止语义并显式提升状态。
+MinIO durable flush 固定为 `/bin/sync -f -- /workspace`，在停止新用户操作并验证 exact mount identity 后执行；强关闭在该 flush 成功后才允许普通 `fusermount3 -u`。profile 与 manifest 当前均为 `verified`，配置校验和镜像 `release-check` 可通过。卸载遇到暂时 `EBUSY` 时只在 `unmount_timeout` 内重试普通卸载；不会使用 lazy unmount，也不会在 flush 未成功时伪造强持久化确认。supervisor 的 PID 1 工作目录必须为 `/`，用户命令仍以 `/workspace` 为工作目录。
+
+这项 profile 结论不替代生产部署门禁：仍须使用最终 digest、专用 AppArmor/SELinux profile、正式 endpoint TLS、镜像签名/扫描和故障矩阵。开发集群的 `allowMissingLSMForKind: true` 只能作为明确的测试例外。
 
 ### 8.2 华为 OBS 公有云候选与 2023 私有云未验证基线
 

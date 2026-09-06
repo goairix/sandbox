@@ -114,9 +114,13 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	mounter := pod.Spec.InitContainers[0]
 	assert.Equal(t, "workspace-mounter", mounter.Name)
 	assert.Equal(t, spec.WorkspaceFUSE.MounterImage, mounter.Image)
+	assert.Equal(t, corev1.PullIfNotPresent, mounter.ImagePullPolicy)
+	assert.Equal(t, corev1.TerminationMessagePathDefault, mounter.TerminationMessagePath)
+	assert.Equal(t, corev1.TerminationMessageReadFile, mounter.TerminationMessagePolicy)
 	require.NotNil(t, mounter.RestartPolicy)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *mounter.RestartPolicy)
 	assert.Equal(t, []string{"/usr/local/bin/workspace-mounter", "supervise"}, mounter.Command)
+	assert.Equal(t, "/", mounter.WorkingDir, "the sidecar supervisor must not pin the FUSE mount as its current directory")
 	require.NotNil(t, mounter.SecurityContext)
 	require.NotNil(t, mounter.SecurityContext.Privileged)
 	assert.True(t, *mounter.SecurityContext.Privileged)
@@ -166,12 +170,16 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	require.NotNil(t, mounter.StartupProbe)
 	require.NotNil(t, mounter.StartupProbe.Exec)
 	assert.Equal(t, []string{"/usr/local/bin/workspace-mounter", "health", "prepared"}, mounter.StartupProbe.Exec.Command)
+	assert.Equal(t, int32(1), mounter.StartupProbe.TimeoutSeconds)
 	assert.Equal(t, int32(2), mounter.StartupProbe.PeriodSeconds)
+	assert.Equal(t, int32(1), mounter.StartupProbe.SuccessThreshold)
 	assert.Equal(t, int32(30), mounter.StartupProbe.FailureThreshold)
 	require.NotNil(t, mounter.ReadinessProbe)
 	require.NotNil(t, mounter.ReadinessProbe.Exec)
 	assert.Equal(t, []string{"/usr/local/bin/workspace-mounter", "health", "ready"}, mounter.ReadinessProbe.Exec.Command)
+	assert.Equal(t, int32(1), mounter.ReadinessProbe.TimeoutSeconds)
 	assert.Equal(t, int32(10), mounter.ReadinessProbe.PeriodSeconds)
+	assert.Equal(t, int32(1), mounter.ReadinessProbe.SuccessThreshold)
 	assert.Equal(t, int32(3), mounter.ReadinessProbe.FailureThreshold)
 	assert.Nil(t, mounter.LivenessProbe)
 	require.NotNil(t, mounter.Lifecycle)
@@ -181,6 +189,9 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 
 	require.NotNil(t, pod.Spec.AutomountServiceAccountToken)
 	assert.False(t, *pod.Spec.AutomountServiceAccountToken)
+	assert.Equal(t, "default", pod.Spec.ServiceAccountName)
+	assert.Equal(t, "default", pod.Spec.DeprecatedServiceAccount)
+	assert.Equal(t, corev1.DefaultSchedulerName, pod.Spec.SchedulerName)
 	require.NotNil(t, pod.Spec.ShareProcessNamespace)
 	assert.False(t, *pod.Spec.ShareProcessNamespace)
 	require.NotNil(t, pod.Spec.EnableServiceLinks)
@@ -190,7 +201,11 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 
 	require.Len(t, pod.Spec.Containers, 1)
 	sandbox := pod.Spec.Containers[0]
+	assert.Equal(t, corev1.PullIfNotPresent, sandbox.ImagePullPolicy)
+	assert.Equal(t, corev1.TerminationMessagePathDefault, sandbox.TerminationMessagePath)
+	assert.Equal(t, corev1.TerminationMessageReadFile, sandbox.TerminationMessagePolicy)
 	assert.Equal(t, []string{"/usr/local/bin/workspace-probe", "self-check"}, sandbox.Command)
+	assert.Equal(t, "/workspace", sandbox.WorkingDir, "user commands keep the public workspace working directory contract")
 	assert.Equal(t, "serve", podEnv(t, sandbox.Env, "WORKSPACE_PROBE_INTERNAL_PID1_V1").Value)
 	require.NotNil(t, sandbox.SecurityContext)
 	require.NotNil(t, sandbox.SecurityContext.RunAsNonRoot)
@@ -258,6 +273,18 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 		{IP: "192.0.2.10", Hostnames: []string{"minio.example.com"}},
 		{IP: "192.0.2.11", Hostnames: []string{"minio.example.com"}},
 	}, pod.Spec.HostAliases)
+}
+
+func TestCreatePodAllowsExplicitMissingLSMForLocalKind(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.LSMProfile = ""
+	spec.WorkspaceFUSE.AllowMissingLSMForKind = true
+
+	pod, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+
+	require.NoError(t, err)
+	assert.NotContains(t, pod.Annotations, "container.apparmor.security.beta.kubernetes.io/workspace-mounter")
 }
 
 func TestCreatePodPreparedFUSERejectsNonHostDNSCIDR(t *testing.T) {

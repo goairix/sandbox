@@ -1,0 +1,34 @@
+{{- if .Values.preDeleteDrain.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-api-drain
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-drain
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.preDeleteDrain.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-drain
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-api
+      restartPolicy: Never
+      containers:
+        - name: drain
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ printf "--drain-kubernetes-deployment=%s-api" .Release.Name | quote }}
+            - {{ printf "--drain-kubernetes-hpa=%s-api" .Release.Name | quote }}
+            - {{ printf "--drain-kubernetes-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
+{{- end }}

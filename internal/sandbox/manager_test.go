@@ -1215,6 +1215,13 @@ func TestDestroyFUSEDeletesExactProbeOnlyAfterRuntimeExitBeforeLeaseRelease(t *t
 	}
 }
 
+func TestFUSETeardownTimeoutCoversQuiesceTwoFlushesAndUnmount(t *testing.T) {
+	mgr, _, _, _ := newFUSETestManager(t, newFUSEManagerRuntime())
+	mgr.fusePool.spec.WorkspaceFUSE.FlushTimeout = 60 * time.Second
+	mgr.fusePool.spec.WorkspaceFUSE.UnmountTimeout = 30 * time.Second
+	assert.Equal(t, 3*time.Minute, mgr.fuseTeardownTimeout())
+}
+
 func TestFUSEOrphanReconcileProtectsSessionOwnerAndPoolRuntimeUIDs(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	mgr, _, repo, store := newFUSETestManager(t, rt)

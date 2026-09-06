@@ -4,7 +4,7 @@
     "id": "minio-sigv4-path-style-v1",
     "provider": "minio",
     "mount_parameters": "verified",
-    "durable_flush": "blocked-pending-flush-spike",
+    "durable_flush": "verified",
     "tls_required": true,
     "endpoint_option": "url",
     "region_option": "endpoint",

@@ -14,7 +14,7 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 	profile, ok := LookupCompiledProfile("minio", "minio-sigv4-path-style-v1")
 	require.True(t, ok)
 	assert.Equal(t, MountParametersVerified, profile.Descriptor.MountParameters)
-	assert.Equal(t, DurableFlushPendingSpike, profile.Descriptor.DurableFlush)
+	assert.Equal(t, DurableFlushVerified, profile.Descriptor.DurableFlush)
 	assert.True(t, profile.Descriptor.TLSRequired)
 	assert.Equal(t, "endpoint", profile.Descriptor.RegionOption)
 
@@ -28,6 +28,8 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 		"-o", "use_path_request_style",
 		"-o", "sigv4",
 	}, options)
+	require.NotNil(t, profile.Flush)
+	assert.Equal(t, []string{"/bin/sync", "-f", "--", "/workspace"}, profile.Flush(fuseprotocol.BootstrapConfig{MountPath: "/workspace"}))
 
 	_, err = profile.Options(fuseprotocol.BootstrapConfig{Provider: "minio", Endpoint: "http://minio.example.com", Region: "us-east-1"})
 	require.ErrorContains(t, err, "TLS")
@@ -77,7 +79,7 @@ func TestBoundProfilesContainsExactlyOneMountVerifiedProfile(t *testing.T) {
 
 func TestProductionProfileReadinessRequiresDurableFlushEvidence(t *testing.T) {
 	err := CheckProductionProfile("minio", "minio-sigv4-path-style-v1")
-	require.ErrorContains(t, err, "pending durable-flush provider spike")
+	require.NoError(t, err)
 	err = CheckProductionProfile("obs", "huawei-obs-public-v1")
 	require.ErrorContains(t, err, "pending provider spike")
 }

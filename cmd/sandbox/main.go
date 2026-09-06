@@ -14,6 +14,9 @@ import (
 
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/goairix/fs"
 	"github.com/goairix/sandbox/internal/api"
 	"github.com/goairix/sandbox/internal/api/handler"
@@ -46,7 +49,31 @@ func main() {
 	}()
 
 	configPath := flag.String("config", "", "path to config file")
+	drainDeployment := flag.String("drain-kubernetes-deployment", "", "scale this in-cluster Deployment to zero and wait for its Pods")
+	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
+	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
+	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain")
 	flag.Parse()
+	if *drainDeployment != "" {
+		if *drainNamespace == "" || *drainTimeout <= 0 {
+			log.Fatal("drain-kubernetes-namespace and a positive drain-timeout are required")
+		}
+		restConfig, configErr := rest.InClusterConfig()
+		if configErr != nil {
+			log.Fatalf("failed to load in-cluster drain configuration: %v", configErr)
+		}
+		client, clientErr := kubernetes.NewForConfig(restConfig)
+		if clientErr != nil {
+			log.Fatalf("failed to create in-cluster drain client: %v", clientErr)
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
+		defer drainCancel()
+		if drainErr := drainKubernetesDeployment(drainCtx, client, *drainNamespace, *drainDeployment, *drainHPA, time.Second); drainErr != nil {
+			log.Fatalf("failed to drain Kubernetes API deployment: %v", drainErr)
+		}
+		log.Printf("Kubernetes API deployment %s/%s drained", *drainNamespace, *drainDeployment)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -54,6 +81,9 @@ func main() {
 	}
 	if cfg.Workspace.AllowUnverifiedDurableFlush {
 		log.Printf("WARNING: local Docker MinIO validation is allowing an unverified durable-flush profile; do not use this mode for production or durability claims")
+	}
+	if cfg.Workspace.AllowMissingLSMForKind {
+		log.Printf("WARNING: local kind validation is running without AppArmor/SELinux enforcement; production must disable workspace.allow_missing_lsm_for_kind")
 	}
 
 	// Initialize telemetry
@@ -288,10 +318,11 @@ func buildFUSESpec(cfg *config.Config, sandboxImage string) (runtime.SandboxSpec
 		SecretName: cfg.Workspace.SecretName, CASecretKey: provider.CASecretKey, EndpointHostIPs: append([]string(nil), provider.EndpointHostIPs...),
 		Bucket: cfg.Storage.FileSystem.Bucket, Endpoint: cfg.Storage.FileSystem.Endpoint, Region: cfg.Storage.FileSystem.Region,
 		UseSSL: cfg.Storage.FileSystem.UseSSL, CacheSize: cfg.Workspace.CacheSize, CacheMedium: cfg.Workspace.CacheMedium,
-		MountTimeout:   time.Duration(cfg.Workspace.MountTimeoutSeconds) * time.Second,
-		FlushTimeout:   time.Duration(cfg.Workspace.FlushTimeoutSeconds) * time.Second,
-		UnmountTimeout: time.Duration(cfg.Workspace.UnmountTimeoutSeconds) * time.Second,
-		LSMProfile:     provider.LSMProfile,
+		MountTimeout:           time.Duration(cfg.Workspace.MountTimeoutSeconds) * time.Second,
+		FlushTimeout:           time.Duration(cfg.Workspace.FlushTimeoutSeconds) * time.Second,
+		UnmountTimeout:         time.Duration(cfg.Workspace.UnmountTimeoutSeconds) * time.Second,
+		LSMProfile:             provider.LSMProfile,
+		AllowMissingLSMForKind: cfg.Workspace.AllowMissingLSMForKind,
 		MounterResources: runtime.WorkspaceFUSEResources{
 			CPURequest: cfg.Workspace.MounterResources.CPURequest, CPULimit: cfg.Workspace.MounterResources.CPULimit,
 			MemoryRequest: cfg.Workspace.MounterResources.MemoryRequest, MemoryLimit: cfg.Workspace.MounterResources.MemoryLimit,

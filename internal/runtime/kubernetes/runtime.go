@@ -243,7 +243,8 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, fmt.Errorf("prepared Pod has no immutable UID"))
 	}
 	if !preparedPodIntentMatches(created, pod, false) {
-		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, fmt.Errorf("created prepared Pod does not match the requested security contract"))
+		reason := preparedPodIntentMismatchReason(created, pod)
+		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, fmt.Errorf("created prepared Pod does not match the requested security contract: %s", reason))
 	}
 	ref := runtime.RuntimeRef{ID: created.Name, UID: string(created.UID)}
 	if err := r.bindPreparedSystemPolicy(ctx, ref, spec.WorkspaceFUSE.SystemEgress.Mode, policy, ciliumPolicy); err != nil {
@@ -851,6 +852,35 @@ func (r *Runtime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeU
 	return nil
 }
 
+// ReconcileOrphanedResources removes managed FUSE Pods that are not referenced
+// by any restored session, workspace owner, or pool record. Identity validation
+// is deliberately performed before deletion so a malformed or replaced Pod is
+// retained fail-closed for operator inspection.
+func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error {
+	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "sandbox.managed=true,sandbox.pool=true,sandbox.workspace.mode=fuse",
+	})
+	if err != nil {
+		return errors.Join(fmt.Errorf("list managed Kubernetes FUSE Pods: %w", err), runtime.ErrTerminationUnconfirmed)
+	}
+	var result error
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		ref := runtime.RuntimeRef{ID: pod.Name, UID: string(pod.UID)}
+		if validateExactFUSEPodIdentity(pod, ref) != nil {
+			result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE Pod identity is invalid: %s", pod.Name), runtime.ErrTerminationUnconfirmed)
+			continue
+		}
+		if _, protected := protectedRuntimeUIDs[ref.UID]; protected {
+			continue
+		}
+		if err := r.RemovePreparedSandbox(ctx, ref.ID, ref.UID); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove orphaned Kubernetes FUSE Pod %s: %w", ref.ID, err))
+		}
+	}
+	return result
+}
+
 func (r *Runtime) ConfirmTerminated(_ context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {
 	ref, err := runtime.NewRuntimeRef(runtimeID, runtimeUID)
 	if err != nil {
@@ -1136,6 +1166,10 @@ func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeNa
 	// retain the exact requested NodeName.
 	kubescheme.Scheme.Default(currentCopy)
 	kubescheme.Scheme.Default(desiredCopy)
+	if len(currentCopy.Annotations) == 0 && len(desiredCopy.Annotations) == 0 {
+		currentCopy.Annotations = nil
+		desiredCopy.Annotations = nil
+	}
 	if allowScheduledNodeName {
 		currentCopy.Spec.NodeName = ""
 		desiredCopy.Spec.NodeName = ""
@@ -1157,6 +1191,42 @@ func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeNa
 	return reflect.DeepEqual(currentCopy.Labels, desiredCopy.Labels) &&
 		reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) &&
 		apiequality.Semantic.DeepEqual(currentCopy.Spec, desiredCopy.Spec)
+}
+
+func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
+	if current == nil || desired == nil {
+		return "identity"
+	}
+	currentCopy, desiredCopy := current.DeepCopy(), desired.DeepCopy()
+	kubescheme.Scheme.Default(currentCopy)
+	kubescheme.Scheme.Default(desiredCopy)
+	if len(currentCopy.Annotations) == 0 && len(desiredCopy.Annotations) == 0 {
+		currentCopy.Annotations, desiredCopy.Annotations = nil, nil
+	}
+	if !reflect.DeepEqual(currentCopy.Labels, desiredCopy.Labels) {
+		return "labels"
+	}
+	if !reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) {
+		return "annotations"
+	}
+	currentSpec, desiredSpec := reflect.ValueOf(currentCopy.Spec), reflect.ValueOf(desiredCopy.Spec)
+	typ := currentSpec.Type()
+	for index := 0; index < currentSpec.NumField(); index++ {
+		if !apiequality.Semantic.DeepEqual(currentSpec.Field(index).Interface(), desiredSpec.Field(index).Interface()) {
+			if typ.Field(index).Name == "InitContainers" && currentSpec.Field(index).Len() == desiredSpec.Field(index).Len() && currentSpec.Field(index).Len() > 0 {
+				currentContainer := currentSpec.Field(index).Index(0)
+				desiredContainer := desiredSpec.Field(index).Index(0)
+				containerType := currentContainer.Type()
+				for field := 0; field < currentContainer.NumField(); field++ {
+					if !apiequality.Semantic.DeepEqual(currentContainer.Field(field).Interface(), desiredContainer.Field(field).Interface()) {
+						return "spec.InitContainers[0]." + containerType.Field(field).Name
+					}
+				}
+			}
+			return "spec." + typ.Field(index).Name
+		}
+	}
+	return "identity"
 }
 
 func validServiceAccountImagePullSecrets(refs []corev1.LocalObjectReference) bool {
@@ -1250,9 +1320,36 @@ func validatePreparedContainerState(pod *corev1.Pod) error {
 		}
 	}
 	if pod.DeletionTimestamp != nil || !mounterOK || !sandboxOK {
-		return fmt.Errorf("prepared Pod containers are not healthy")
+		return fmt.Errorf("prepared Pod containers are not healthy: phase=%s workspace-mounter=%s sandbox=%s",
+			pod.Status.Phase,
+			preparedContainerStatusSummary(pod.Status.InitContainerStatuses, workspaceMounterContainer),
+			preparedContainerStatusSummary(pod.Status.ContainerStatuses, sandboxContainer))
 	}
 	return nil
+}
+
+func preparedContainerStatusSummary(statuses []corev1.ContainerStatus, name string) string {
+	for _, status := range statuses {
+		if status.Name != name {
+			continue
+		}
+		started := "unknown"
+		if status.Started != nil {
+			started = strconv.FormatBool(*status.Started)
+		}
+		switch {
+		case status.State.Terminated != nil:
+			state := status.State.Terminated
+			return fmt.Sprintf("terminated(reason=%s exit=%d signal=%d restart=%d started=%s)", state.Reason, state.ExitCode, state.Signal, status.RestartCount, started)
+		case status.State.Waiting != nil:
+			return fmt.Sprintf("waiting(reason=%s restart=%d started=%s)", status.State.Waiting.Reason, status.RestartCount, started)
+		case status.State.Running != nil:
+			return fmt.Sprintf("running(restart=%d started=%s)", status.RestartCount, started)
+		default:
+			return fmt.Sprintf("unknown(restart=%d started=%s)", status.RestartCount, started)
+		}
+	}
+	return "missing"
 }
 
 func hasFatalPreparedState(pod *corev1.Pod) bool {

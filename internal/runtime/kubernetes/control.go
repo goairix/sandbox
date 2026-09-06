@@ -58,9 +58,7 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 	}
 	stdout := &boundedBuffer{limit: maxControlJSONBytes}
 	stderr := &boundedBuffer{limit: maxControlJSONBytes}
-	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin: strings.NewReader(string(stdin)), Stdout: stdout, Stderr: stderr,
-	}); err != nil {
+	if err := executor.StreamWithContext(ctx, controlStreamOptions(stdin, stdout, stderr)); err != nil {
 		// stderr can contain supervisor input-derived diagnostics; do not include it.
 		return nil, fmt.Errorf("execute Kubernetes control command: %w", err)
 	}
@@ -68,6 +66,14 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 		return nil, fmt.Errorf("Kubernetes control output exceeds limit")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func controlStreamOptions(stdin []byte, stdout, stderr *boundedBuffer) remotecommand.StreamOptions {
+	options := remotecommand.StreamOptions{Stdout: stdout, Stderr: stderr}
+	if len(stdin) != 0 {
+		options.Stdin = strings.NewReader(string(stdin))
+	}
+	return options
 }
 
 type boundedBuffer struct {

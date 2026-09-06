@@ -25,6 +25,33 @@ spec:
         release: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Release.Name }}-api
+      {{- if .Values.redis.enabled }}
+      initContainers:
+        - name: wait-for-redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - 'until redis-cli -h "$REDIS_HOST" ping >/dev/null 2>&1; do sleep 1; done'
+          env:
+            - name: REDIS_HOST
+              value: {{ printf "%s-redis" .Release.Name | quote }}
+            {{- if .Values.redis.password }}
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+            {{- end }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      {{- end }}
       containers:
         - name: sandbox
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -76,6 +103,8 @@ spec:
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
             - name: SANDBOX_WORKSPACE_MODE
               value: "{{ .Values.config.workspace.mode }}"
+            - name: SANDBOX_WORKSPACE_ALLOW_MISSING_LSM_FOR_KIND
+              value: {{ .Values.config.workspace.allowMissingLSMForKind | default false | quote }}
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
           {{- if eq .Values.config.workspace.mode "fuse" }}
@@ -184,11 +213,11 @@ spec:
               value: "{{ .Values.config.security.networkEnabled }}"
             - name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE
               value: "{{ .Values.config.security.networkBlockPrivate }}"
-          {{- if .Values.config.security.apiKey }}
+          {{- if or .Values.config.security.apiKey .Values.config.security.apiKeySecretName }}
             - name: SANDBOX_SECURITY_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-api
+                  name: {{ .Values.config.security.apiKeySecretName | default (printf "%s-api" .Release.Name) }}
                   key: api-key
           {{- end }}
             - name: SANDBOX_TELEMETRY_SERVICE_NAME
@@ -215,6 +244,15 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.config.server.port }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health

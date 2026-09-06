@@ -138,7 +138,7 @@ func (b *localBroker) start(state brokerState) (string, error) {
 	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
 	launch := brokerLaunch{
 		Version: fuseprotocol.Version, RuntimeUID: state.RuntimeUID, Generation: state.Generation,
-		Processes: append([]processIdentity(nil), state.Processes...), SocketID: socketID, Secret: secret,
+		Processes: cloneProcessSnapshot(state.Processes), SocketID: socketID, Secret: secret,
 	}
 	encoded, err := json.Marshal(launch)
 	if err != nil || len(encoded) > fuseprotocol.MaxJSONBytes {
@@ -416,6 +416,13 @@ func validTokenPart(value string, encodedLength int) bool {
 }
 
 func abstractSocket(socketID string) string { return "\x00workspace-probe-" + socketID }
+
+// cloneProcessSnapshot deliberately returns a non-nil empty slice. The strict
+// control decoder rejects JSON null, so idle sandboxes must encode the process
+// set as [] on both the PID 1 and local broker paths.
+func cloneProcessSnapshot(processes []processIdentity) []processIdentity {
+	return append([]processIdentity{}, processes...)
+}
 
 func decodeLimitedJSON(reader io.Reader, out any) error {
 	raw, err := io.ReadAll(io.LimitReader(reader, fuseprotocol.MaxJSONBytes+1))

@@ -678,6 +678,19 @@ func TestFUSEPoolWarmAcquireAndRefill(t *testing.T) {
 	pool.Stop(context.Background())
 }
 
+func TestFUSEPoolUsesSyncCompatibleConciseRuntimeName(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	cfg := fusePoolConfig()
+	cfg.MinSize, cfg.MaxSize = 0, 1
+	pool := NewFUSEPool(rt, newMemoryFUSEPoolRepository(), cfg, fixedFUSESpec("pool-key"))
+
+	record, err := pool.Acquire(context.Background(), "pool-key")
+	require.NoError(t, err)
+	assert.Regexp(t, `^sandbox-pool-[a-z0-9]{10}$`, rt.lastCreatedSpec().ID)
+	assert.Equal(t, rt.lastCreatedSpec().ID, record.PreparationID)
+	pool.Stop(context.Background())
+}
+
 func TestFUSEPoolColdAcquireNeverPublishesPrepared(t *testing.T) {
 	rt := newFUSEMockRuntime()
 	repo := newMemoryFUSEPoolRepository()

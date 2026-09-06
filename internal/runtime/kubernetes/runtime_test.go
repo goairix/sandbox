@@ -29,6 +29,50 @@ import (
 
 type podExecutorFunc func(context.Context, string, string, []string, []byte) ([]byte, error)
 
+func TestValidatePreparedContainerStateReportsSafeExitEvidence(t *testing.T) {
+	started := false
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Phase: corev1.PodFailed,
+		InitContainerStatuses: []corev1.ContainerStatus{{
+			Name: workspaceMounterContainer, RestartCount: 1, Started: &started,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 23, Signal: 0}},
+		}},
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  sandboxContainer,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+		}},
+	}}
+
+	err := validatePreparedContainerState(pod)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "phase=Failed")
+	assert.ErrorContains(t, err, "workspace-mounter=terminated(reason=Error exit=23 signal=0 restart=1 started=false)")
+	assert.ErrorContains(t, err, "sandbox=waiting(reason=PodInitializing restart=0 started=unknown)")
+}
+
+func TestRemoveSandboxMapsMissingPodToRuntimeNotFound(t *testing.T) {
+	r := &Runtime{client: kubefake.NewSimpleClientset(), namespace: "sandbox-runtime"}
+
+	err := r.RemoveSandbox(context.Background(), "never-created")
+
+	require.ErrorIs(t, err, sandboxruntime.ErrNotFound)
+}
+
+func TestPreparedPodIntentTreatsEmptyAdmissionMetadataAsEquivalent(t *testing.T) {
+	desired, err := buildPreparedFUSEPod("sandbox-runtime", func() sandboxruntime.SandboxSpec {
+		spec := preparedFUSESpecForTest()
+		spec.WorkspaceFUSE.LSMProfile = ""
+		spec.WorkspaceFUSE.AllowMissingLSMForKind = true
+		return spec
+	}())
+	require.NoError(t, err)
+	current := desired.DeepCopy()
+	current.UID = "pod-uid"
+	current.Annotations = nil
+
+	assert.True(t, preparedPodIntentMatches(current, desired, false))
+}
+
 func (f podExecutorFunc) Exec(ctx context.Context, pod, container string, argv []string, stdin []byte) ([]byte, error) {
 	return f(ctx, pod, container, argv, stdin)
 }
@@ -284,6 +328,63 @@ func preparedScript() *commandScript {
 			return nil, fmt.Errorf("unexpected command")
 		}
 	}}
+}
+
+func preparedOrphanCleanupScript() *commandScript {
+	return &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		switch fmt.Sprint(command.argv) {
+		case fmt.Sprint([]string{mounterBinary, "health", "prepared"}):
+			return []byte(`{"version":1,"state":"prepared","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"","generation":0,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`), nil
+		case fmt.Sprint([]string{mounterBinary, "shutdown"}):
+			return []byte(`{"version":1,"runtime_uid":"pod-uid-a","generation":0,"graceful_unmount":true}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command")
+		}
+	}}
+}
+
+func TestReconcileOrphanedResourcesRemovesOnlyUnprotectedManagedFUSEPods(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedOrphanCleanupScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+
+	rt.stateMu.Lock()
+	rt.workspaceStates = nil // simulate a new sandbox-api process
+	rt.stateMu.Unlock()
+
+	require.NoError(t, rt.ReconcileOrphanedResources(context.Background(), nil))
+	_, podErr := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(podErr))
+	_, policyErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), fuseSystemPolicyPrefix+info.RuntimeID, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(policyErr))
+}
+
+func TestReconcileOrphanedResourcesProtectsRuntimeUIDAndFailsClosedOnInvalidIdentity(t *testing.T) {
+	t.Run("protected", func(t *testing.T) {
+		rt, client := newFakeKubernetesRuntime(t, preparedOrphanCleanupScript())
+		info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+		require.NoError(t, err)
+
+		require.NoError(t, rt.ReconcileOrphanedResources(context.Background(), map[string]struct{}{info.RuntimeUID: {}}))
+		_, err = client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+		require.NoError(t, err)
+	})
+
+	t.Run("invalid identity", func(t *testing.T) {
+		rt, client := newFakeKubernetesRuntime(t, preparedOrphanCleanupScript())
+		info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+		require.NoError(t, err)
+		pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+		require.NoError(t, err)
+		pod.Labels["sandbox.pool.instance"] = "replacement"
+		_, err = client.CoreV1().Pods("runtime").Update(context.Background(), pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		err = rt.ReconcileOrphanedResources(context.Background(), nil)
+		require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
+		_, getErr := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+		require.NoError(t, getErr)
+	})
 }
 
 func TestPrepareSandboxCreatesSystemPolicyBeforePodAndPatchesPreparedWithResourceVersion(t *testing.T) {

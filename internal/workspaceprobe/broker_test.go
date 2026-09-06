@@ -3,6 +3,7 @@ package workspaceprobe
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"net"
 	"syscall"
 	"testing"
@@ -151,6 +152,27 @@ func TestPID1InvocationRequiresFixedImageContract(t *testing.T) {
 	} {
 		assert.False(t, valid)
 	}
+}
+
+func TestSafePID1ErrorCodeAllowsOnlyFixedDiagnostics(t *testing.T) {
+	for _, code := range []string{"invalid_request", "invalid_command", "invalid_ping", "invalid_registration", "unverified_process", "entropy_failure", "cycle_active"} {
+		assert.Equal(t, code, safePID1ErrorCode(code))
+	}
+	assert.Equal(t, "rejected", safePID1ErrorCode("secret-derived-detail"))
+	assert.Equal(t, "rejected", safePID1ErrorCode(""))
+}
+
+func TestBrokerProcessSnapshotIsNeverEncodedAsNull(t *testing.T) {
+	processes := cloneProcessSnapshot(nil)
+	require.NotNil(t, processes)
+	raw, err := json.Marshal(pid1Request{
+		Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7,
+		Processes: processes, Token: "",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"processes":[]`)
+	var decoded pid1Request
+	require.NoError(t, fuseprotocol.DecodeExact(raw, &decoded))
 }
 
 func TestBrokerFrameRejectsDuplicateFields(t *testing.T) {

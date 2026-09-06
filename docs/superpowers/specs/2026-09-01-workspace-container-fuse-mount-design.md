@@ -4,7 +4,7 @@
 
 **复审修订：** 2026-09-03
 
-**状态：** 设计已确认，控制面 wiring、恢复/销毁、观测和部署资源已落地；真实 provider 矩阵与可上线 FUSE profile 仍由发布门禁控制
+**状态：** 设计已确认，控制面 wiring、恢复/销毁、观测和部署资源已落地；MinIO profile 已通过 mount/durable-flush gate，OBS 与生产故障矩阵仍由发布门禁控制
 
 **目标分支：** `feat/workspace-fuse-mount`
 
@@ -141,17 +141,17 @@ GOOS=linux GOARCH=amd64 go build \
 
 只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON manifest 只记录 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析和逐项比对可以发现包被拼错，但 manifest 不能注入或覆盖任意 `-o` 参数。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
 
-镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制绑定、manifest、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并调用 Go `CheckProductionProfile`，进一步要求 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep manifest 代替。当前状态如下，因此生产默认的 `workspace.mode=fuse` 配置校验与全部 `release-check` 都应 fail closed：
+镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制绑定、manifest、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并调用 Go `CheckProductionProfile`，进一步要求 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep manifest 代替。当前状态如下：
 
 | Profile ID | Mount parameters | Durable flush | 结论 |
 |---|---|---|---|
-| `minio-sigv4-path-style-v1` | `verified` | `blocked-pending-flush-spike` | 挂载参数已冻结，仍不能发布 |
+| `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check，部署仍须满足 LSM、TLS、digest 和 fault matrix |
 | `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 仅为公有云文档候选参数，仍不能发布 |
 | `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 2023 私有云必须实测，仍不能发布 |
 
 公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。真实基础镜像 digest、s3fs artifact URL/hash、镜像 build/scan、SBOM 和 attestation 由 CI 与 Task 18 产出；在这些证据完成并显式提升状态前，文档示例不代表已可启用。本地静态 contract 与 Compose config 校验不能作为镜像构建或生产发布证据。
 
-为了让开发者能够用仓库正式源码执行 Docker Compose 本地功能验收，配置提供默认关闭的 `workspace.allow_unverified_durable_flush`。该开关只在 Docker runtime、MinIO、私网或回环的 literal IPv4 endpoint、唯一且精确匹配 endpoint 的 `/32` system egress CIDR、唯一且精确匹配 endpoint 的端口、以及已经 mount-verified 的 compiled profile 同时满足时，跳过配置加载阶段的 durable-flush 生产资格检查；启动时必须输出显眼警告。它不适用于 Kubernetes、OBS、公网 endpoint 或宽网段白名单，也不改变 `CheckProductionProfile`、镜像 `release-check`、compiled catalog/manifest 状态和 Task 18 证据要求，因此不能被视为生产发布或持久性结论。
+配置仍保留默认关闭的 `workspace.allow_unverified_durable_flush`，只用于历史/候选 MinIO profile 的受限本地 Docker 试验；当前已验证的 MinIO profile 不需要该开关。它只在 Docker runtime、MinIO、私网或回环 literal IPv4 endpoint、唯一精确 `/32` system egress CIDR、唯一 endpoint 端口和 mount-verified compiled profile 同时满足时生效，并输出显眼警告。它不适用于 Kubernetes、OBS、公网 endpoint 或宽网段白名单，也不改变 `CheckProductionProfile`、镜像 `release-check` 或生产证据要求。
 
 ## 5. Kubernetes 架构
 
@@ -252,6 +252,7 @@ Sidecar 不配置 `livenessProbe`。startup probe 只表示“空壳可绑定”
 - s3fs 密码文件位于 sidecar 私有 tmpfs，权限 `0600`。
 - 不暴露监听端口。
 - 必须配置 CPU、内存和 `ephemeral-storage` request/limit；limit 必须覆盖 `cache_size`、容器日志和少量安全余量。
+- supervisor 进程固定以 `/` 为工作目录，不能让 PID 1 的 cwd 持有 `/workspace`；否则内核会让普通 `fusermount3 -u` 持续返回 `EBUSY`。sandbox 用户命令仍以 `/workspace` 为工作目录。
 - 配置固定 argv 的 `preStop`：prepared 空壳没有 mount 时立即成功；已授权实例在 termination grace period 内完成尽力 flush 和 unmount。主容器不设置长时间 preStop。
 - `terminationGracePeriodSeconds` 至少为 90 秒，并且不得小于向上取整的 `flush_timeout + unmount_timeout` 再加 15 秒收尾余量。
 - 一期只读取 provider 级静态长期 AK/SK，并生成 s3fs `passwd_file`；Secret 中出现 session token 时配置校验必须失败。静态凭证轮换不做热加载，按 provider 排空并重建 FUSE sandbox。
@@ -302,6 +303,7 @@ Docker 不使用两个独立容器模拟 Kubernetes sidecar。若不经过宿主
 ### 6.2 预热与 Acquire
 
 1. Pool 使用固定 provider 配置指纹创建特殊容器，以 root supervisor 作为 PID 1 启动；Swarm 使用 Docker Secret，普通 Docker Engine 使用 sandbox-api 创建的 root-only 临时凭证目录。该 bind mount 只承载 provider 级凭证/CA，不承载 `/workspace`。
+   容器默认 `WorkingDir` 必须为 `/`，避免 supervisor PID 1 持有 FUSE mountpoint；所有用户 Docker Exec 仍显式使用 `/workspace`。
 2. supervisor 先保持 locked；sandbox-api 从 `ContainerCreate` 返回值取得不可变 container ID，通过 root-only 控制通道提交一次相同 schema 的 versioned bootstrap JSON。supervisor 校验 RuntimeUID 与固定配置、拒绝重放后，从只读 Secret 的 AK/SK 源生成私有 `/run/s3fs/passwd-s3fs`（mode `0600`）并进入 prepared/locked；用户环境基础进程已经启动，但 API 不允许任何用户 Exec/file 操作，且此时不存在 s3fs 进程或 workspace mount。
 3. Pool 用私有 `execControl` 检查容器进程、底层 `/workspace` mode、Secret/cache 和“无 mount、无 generation”状态，将合格空壳加入对应配置指纹队列。Docker engine health 只能表示 supervisor 存活，不能代表 workspace ready。
 4. Acquire 时 manager 原子保留空壳、获取 prefix 租约并准备目录标记，再绑定 sandbox identity并 CAS 消费一次 `mount_attempt`。
@@ -356,7 +358,7 @@ Docker `CopyToContainer` 写入的 tar header 必须保持 UID/GID 1000。安全
 1. sandbox 状态改为 `destroying` 并拒绝新 Exec。
 2. supervisor 终止并回收全部用户进程及其脱离的后代，验证不存在指向 `/workspace` 的打开写句柄；不能把 Docker attach 关闭当作进程退出。
 3. quiesce 成功时执行 provider profile 验证过的 flush，再执行 `fusermount3 -u`；quiesce 失败时只记录有界、尽力 flush 结果，不宣称强持久化。
-4. 优雅卸载失败时执行 lazy unmount，并记录错误指标。
+4. 优雅卸载暂时失败时，在 `unmount_timeout` 内重试普通 `fusermount3 -u`。只有已证明 durable flush 成功的同一强关闭请求可以恢复重试；flush 失败、mount identity 不可验证或超时都保持 fail closed，不执行 lazy unmount。
 5. 删除容器和临时 Secret，并确认 runtime 不再存在。
 6. 最后释放 Redis workspace 租约。
 
@@ -755,12 +757,13 @@ Pool 空壳不创建 `WorkspaceInfo`，使用 Redis 持久 FUSE pool record 保�
 - 每个 `sandbox-api` 还按 `refill_interval_seconds` 运行有抖动的 reconciliation；只有取得对应 PoolKey refill lock 的副本执行本轮增删。lock 必须按 token 续租，失锁立即取消本轮；容量 admission、runtime UID bind 和 publish 的 Lua 仍再次校验 lock token，形成最终 fencing。`min_size` 是期望的 `prepared` 可用数，`max_size` 限制 `preparing + prepared`，`reserved/binding/consumed/cleanup` 已离开可用 Pool、不计入容量。补池创建先登记 `preparing`，避免并发副本超配。
 - `Drain(poolKey)` 用于 profile、镜像、credential generation、CA、endpoint、bucket、网络或安全配置变化，只删除该 key 的 prepared 空壳；已绑定实例按正常排空策略结束。
 - `Manager.Stop` 只考虑本副本持有 ownership token 的 `preparing/prepared` 空壳，并仍须经过 guard；仅 `Pristine`/`Abandoned` 可 cleanup，`Protected`/`Unknown`/检查错误保留并报告未完全 drain。其他 maintainer 的记录和所有 reserved/binding/consumed 记录不由该副本 Stop 删除；滚动发布时其他副本继续维护全局水位。最后一个副本退出或明确禁用 FUSE 时，运维 drain 流程负责删除剩余未绑定空壳。
+- Helm 删除整个 release 时不能并行终止 API 与内置 Redis。Chart 的 `pre-delete` drain hook 必须先禁用同名 HPA、把 API Deployment 缩到 0，并等待所有 API Pod 完成 `Manager.Stop`，随后才允许 Helm 删除 Redis 与其他 release 资源；hook 使用 resourceName 收敛的 RBAC，超时则卸载失败并保留现场。使用内置 Redis 时，API 还必须通过 init container 等待 Redis Ready，不能靠容器反复重启碰运气。
 - Pool 大小指标增加 `runtime/provider/pool_key/state` 标签，但日志和指标只记录 PoolKey/ workspace hash，不记录 prefix、AK/SK 或 Secret 内容。
 - API 副本崩溃后，`prepared` record 由新副本先原子改为 inspection reservation，再调用 Manager guard 和 pristine health；只有明确 `Pristine` 才退回 `prepared`，`Protected`、`Unknown` 或 guard 错误保持不可领取、不得删除且初次启动 fail-closed，明确 `Abandoned` 才 cleanup。guard 已明确返回 `Pristine` 后，若 runtime health 明确失败，则该空壳已被证明不可安全复用，可以 cleanup。超时的 `preparing/reserved` 也必须先查询 guard；有效 owner/session/open gate 是 `Protected`，不确定状态禁止物理删除，只有 `Pristine` 或 `Abandoned` 才可 cleanup。`binding` 同样只在明确 `Abandoned` 时清理，`consumed` 由持久 sandbox session 接管。所有到期判断使用 Redis 服务端时间，reconciler 不能把其他副本仍持有的实例当孤儿删除。
 
 FUSE Pool 复用现有 `Pool` 的 `WarmUp → Acquire → refill → single-use Release/Drain` 生命周期，但使用独立的 `workspace.fuse_pool` 配置与 Redis registry，不能占用或改变现有通用 `pool` 的 sync/无 workspace 空壳队列。独立配置是因为两类空壳的镜像、权限和 ready 判定不同，不表示由其他组件维护。当前部署只有一个活动 filesystem provider，因此一期只维护一个活动 FUSE PoolKey；未来同时服务多个 provider 时可自然增加多个 key，不需要把进程内队列作为跨副本协调源。
 
-Redis key 必须分域：session 使用 `sandbox:session:v2:`，Pool、workspace lease、owner 与 generation 使用各自独立前缀。恢复只扫描 v2 session 前缀；旧 `sandbox:<id>` 只有在 exact key 读取且 JSON 验证为合法 Sandbox 后才能迁移，不能用 `sandbox:*` 把 Pool/lease/owner 当 session。Docker 容器会跨 sandbox-api 进程重启存活，runtime 构造时禁止清理 managed 资源；Manager 先恢复 session/owner/Pool、构造受保护 RuntimeUID 集合，再调用 runtime orphan reconciliation。
+Redis key 必须分域：session 使用 `sandbox:session:v2:`，Pool、workspace lease、owner 与 generation 使用各自独立前缀。恢复只扫描 v2 session 前缀；旧 `sandbox:<id>` 只有在 exact key 读取且 JSON 验证为合法 Sandbox 后才能迁移，不能用 `sandbox:*` 把 Pool/lease/owner 当 session。Docker 容器和 Kubernetes Pod 都会跨 sandbox-api 进程重启存活，runtime 构造时禁止清理 managed 资源；Manager 先恢复 session/owner/Pool、构造受保护 RuntimeUID 集合，再调用 runtime orphan reconciliation。Kubernetes 只枚举完整 FUSE managed labels 的 Pod，并在删除前验证不可变 Pod UID、instance、prepare attempt 与 bootstrap identity；任何漂移都 fail closed。
 
 ## 11. API 语义
 
@@ -885,7 +888,7 @@ s3fs 写入可能使用本地临时文件：
 | API 重启 | 从 owner/session 恢复已绑定实例；按 Redis pool record + runtime probe 复核 prepared 空壳，销毁超时/不明 reservation 或 binding；不重复挂载已有健康实例 |
 | Pod/容器丢失 | 清理 session 和租约；按持久 sandbox 规则重新创建 |
 | 静态 AK/SK 计划轮换 | 停止该 provider 的新建流量，排空并重建全部 FUSE sandbox 后切换 Secret；不热加载凭证 |
-| 优雅卸载超时 | lazy unmount 后强制删除，记录告警 |
+| 优雅卸载超时 | 保持 fail closed，保留 cleanup tombstone 并继续重试普通卸载；禁止 lazy unmount 或伪造持久化确认 |
 
 任何故障路径都不能把空 emptyDir、容器目录或 writable layer 当作 workspace 继续运行。
 
@@ -955,7 +958,7 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 
 ### 17.1 测试矩阵
 
-最终发布必须覆盖以下矩阵；当前三个 profile 均未通过 durable-flush release gate，不能把矩阵写成已验收：
+最终发布必须覆盖以下矩阵。MinIO profile 已通过 mount/durable-flush release gate，并已完成两种 runtime 的功能冒烟；OBS 两个 profile 及全量 fault matrix 仍未完成，因此不能把六组合写成全部已验收：
 
 | Runtime | Provider |
 |---|---|

@@ -846,7 +846,7 @@ func (p *FUSEPool) prepareOne(ctx context.Context, reservationToken, refillToken
 	prepareCtx, cancel := context.WithTimeout(ctx, p.config.PrepareTimeout)
 	defer cancel()
 	spec := cloneFUSESandboxSpec(p.spec)
-	spec.ID = "sandbox-fuse-pool-" + uuid.NewString()
+	spec.ID = "sandbox-pool-" + randSuffix(randSuffixLen)
 	record := state.FUSEPoolRecord{
 		PreparationID: spec.ID, PoolKey: p.poolKey, State: state.FUSEPoolPreparing,
 		MaintainerToken: p.config.MaintainerToken, Revision: 1,

@@ -49,6 +49,7 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 
 	assert.Equal(t, spec.WorkspaceFUSE.DockerImage, cfg.Image)
 	assert.Empty(t, cfg.Cmd, "the trusted image entrypoint must remain PID 1")
+	assert.Equal(t, "/", cfg.WorkingDir, "the supervisor must not pin the FUSE mount as its current directory")
 	assert.Equal(t, []string{"ALL"}, []string(host.CapDrop))
 	assert.Equal(t, []string{"SYS_ADMIN", "NET_ADMIN"}, []string(host.CapAdd))
 	require.Len(t, host.Devices, 1)

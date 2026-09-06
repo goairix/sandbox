@@ -410,6 +410,7 @@ func TestLoadFUSEDefaults(t *testing.T) {
 
 	assert.Equal(t, "sync", cfg.Workspace.Mode)
 	assert.False(t, cfg.Workspace.AllowUnverifiedDurableFlush)
+	assert.False(t, cfg.Workspace.AllowMissingLSMForKind)
 	assert.Equal(t, "", cfg.Workspace.SecretName)
 	assert.Equal(t, "2Gi", cfg.Workspace.CacheSize)
 	assert.Equal(t, "disk", cfg.Workspace.CacheMedium)
@@ -684,7 +685,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 		edit func(*config.Config)
 		want string
 	}{
-		{name: "minio blocked pending durable flush spike", edit: func(*config.Config) {}, want: "pending durable-flush provider spike"},
+		{name: "release verified minio", edit: func(*config.Config) {}, want: ""},
 		{name: "valid obs cilium fqdn", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Endpoint = "https://obs.example.com"
@@ -706,7 +707,19 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "valid with no custom CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
-		}, want: "pending durable-flush provider spike"},
+		}, want: ""},
+		{name: "kind explicitly allows missing LSM", edit: func(c *config.Config) {
+			c.Runtime.Type = "kubernetes"
+			c.Runtime.Kubernetes.Namespace = "sandbox-runtime"
+			c.Workspace.AllowMissingLSMForKind = true
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
+		}, want: ""},
+		{name: "missing LSM override rejects Docker", edit: func(c *config.Config) {
+			c.Runtime.Type = "docker"
+			c.Runtime.Docker.WorkspaceSecretRoot = "/var/lib/sandbox/workspace-secrets"
+			c.Workspace.AllowMissingLSMForKind = true
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
+		}, want: "only supported with Kubernetes"},
 		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "fuse supports only minio or obs"},
 		{name: "minio TLS disabled", edit: func(c *config.Config) { c.Storage.FileSystem.UseSSL = false }, want: "TLS"},
 		{name: "obs TLS disabled", edit: func(c *config.Config) {
@@ -955,7 +968,7 @@ func TestFUSESubPathValidation(t *testing.T) {
 		t.Run("valid_"+subPath, func(t *testing.T) {
 			cfg := newValidFUSEConfig()
 			cfg.Storage.FileSystem.SubPath = subPath
-			require.ErrorContains(t, cfg.Validate(), "pending durable-flush provider spike")
+			require.NoError(t, cfg.Validate())
 		})
 	}
 

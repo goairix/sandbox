@@ -121,6 +121,8 @@ workspace:
   # Local Docker + private/loopback MinIO validation only. Production must
   # leave this false until the selected profile has verified durable flush.
   allow_unverified_durable_flush: false
+  # Local kind on Docker Desktop only; production requires a real LSM profile.
+  allow_missing_lsm_for_kind: false
   # Automatic sync interval in seconds. When > 0, a background goroutine
   # periodically syncs changed files from containers back to storage,
   # reducing data loss if a container crashes between manual syncs.

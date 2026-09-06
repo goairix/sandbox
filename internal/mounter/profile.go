@@ -61,11 +61,12 @@ var compiledProfileCatalog = map[string]Profile{
 		ID: "minio-sigv4-path-style-v1", Provider: "minio",
 		Descriptor: ProfileDescriptor{
 			ID: "minio-sigv4-path-style-v1", Provider: "minio",
-			MountParameters: MountParametersVerified, DurableFlush: DurableFlushPendingSpike,
+			MountParameters: MountParametersVerified, DurableFlush: DurableFlushVerified,
 			TLSRequired: true, EndpointOption: "url", RegionOption: "endpoint",
 			AddressingStyle: "path", SignatureVersion: "sigv4",
 		},
 		Options: minioOptions,
+		Flush:   syncFilesystem,
 	},
 	"huawei-obs-public-v1": {
 		ID: "huawei-obs-public-v1", Provider: "obs",
@@ -89,6 +90,10 @@ var compiledProfileCatalog = map[string]Profile{
 			AddressingStyle: "unverified", SignatureVersion: "unverified",
 		},
 	},
+}
+
+func syncFilesystem(config fuseprotocol.BootstrapConfig) []string {
+	return []string{"/bin/sync", "-f", "--", config.MountPath}
 }
 
 func minioOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {

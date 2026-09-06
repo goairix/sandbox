@@ -65,7 +65,7 @@ grep -Fq -- '--user 1000:1000 --entrypoint /usr/local/bin/workspace-probe' "$tmp
 grep -Fq -- 'ordinary sandbox contract' "$tmp/docker.log" || fail "ordinary sandbox negative contract missing"
 grep -Fq -- 'image package contract' "$tmp/docker.log" || fail "mounter package contract missing"
 
-expect_failure env MOCK_PROFILE_STATUS=blocked-pending-flush-spike \
+expect_success env MOCK_PROFILE_STATUS=release-verified \
   FUSE_IMAGE="$fuse_digest" SANDBOX_IMAGE="$digest" \
   "$verify" kubernetes release-check minio-sigv4-path-style-v1
 grep -Fq -- 'health prepared --release-check-image' "$tmp/docker.log" || fail "Go release gate missing"
@@ -133,7 +133,7 @@ grep -Fxq '!internal/workspaceprobe/**' "$ordinary_ignore" || fail "ordinary bui
 
 profile_dir="$repo_root/docker/images/workspace-mounter/profiles"
 for tuple in \
-  'minio-sigv4-path-style-v1 blocked-pending-flush-spike' \
+  'minio-sigv4-path-style-v1 verified' \
   'huawei-obs-public-v1 blocked-pending-flush-spike' \
   'huawei-obs-private-2023-v1 blocked-pending-flush-spike'; do
   set -- $tuple

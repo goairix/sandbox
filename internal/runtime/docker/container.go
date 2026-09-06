@@ -174,7 +174,7 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*co
 	labels["sandbox.pool.key"] = fuse.PoolKey
 	labels["sandbox.workspace.cache.bytes"] = fmt.Sprintf("%d", cacheBytes)
 	config := &container.Config{
-		Image: fuse.DockerImage, Labels: labels, WorkingDir: dockerWorkspacePath,
+		Image: fuse.DockerImage, Labels: labels, WorkingDir: "/",
 		Tty: false,
 	}
 	host := &container.HostConfig{

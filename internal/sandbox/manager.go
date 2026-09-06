@@ -63,6 +63,8 @@ type fuseSandboxLifecycle struct {
 	teardownMu       sync.Mutex
 	teardownRunning  bool
 	teardownDone     bool
+	lastFailureStage string
+	lastFailureAt    time.Time
 	gateClosed       bool
 	renewalStopped   bool
 	quiesceAttempted bool
@@ -802,7 +804,11 @@ func (m *Manager) publishSandboxAndSession(ctx context.Context, sb *Sandbox, gat
 }
 
 func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguousAfter *state.FUSEPoolRecord, lease *WorkspaceLease, renewal *WorkspaceLeaseRenewal, claim *fuseBindingClaim, bindingStarted bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+	timeout := workspaceCleanupTimeout
+	if bindingStarted {
+		timeout = m.fuseTeardownTimeout()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if !bindingStarted {
 		if lease != nil {
@@ -1025,6 +1031,7 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	_ = cause
 	if !lifecycle.gateClosed {
 		if err := lifecycle.gate.CloseAndWait(context.Background()); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "close-operation-gate", err)
 			return
 		}
 		lifecycle.gateClosed = true
@@ -1033,7 +1040,7 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		lifecycle.renewal.Stop()
 		lifecycle.renewalStopped = true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), m.fuseTeardownTimeout())
 	defer cancel()
 	ref := runtime.RuntimeRef{ID: lifecycle.record.RuntimeID, UID: lifecycle.record.RuntimeUID}
 	generation := lifecycle.lease.OwnerSnapshot().Generation
@@ -1042,6 +1049,12 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		lifecycle.quiesceAttempted = true
 		if err == nil && token.RuntimeUID == ref.UID && token.Generation == generation && token.Opaque != "" {
 			lifecycle.quiesced = true
+		} else if err != nil {
+			logger.Warn(context.Background(), "FUSE sandbox quiesce failed; continuing with fail-closed runtime removal",
+				logger.AddField("sandbox_id", lifecycle.sandboxID),
+				logger.AddField("runtime_id", lifecycle.record.RuntimeID),
+				logger.ErrorField(err),
+			)
 		}
 	}
 	if lifecycle.quiesced && !lifecycle.flushAttempted {
@@ -1054,6 +1067,11 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		if flushErr != nil {
 			result = "error"
 			metrics.RecordWorkspaceFUSEError(ctx, "flush")
+			logger.Warn(context.Background(), "FUSE sandbox pre-removal flush failed; strong shutdown must still prove durability",
+				logger.AddField("sandbox_id", lifecycle.sandboxID),
+				logger.AddField("runtime_id", lifecycle.record.RuntimeID),
+				logger.ErrorField(flushErr),
+			)
 		}
 		if m.fusePool.spec.WorkspaceFUSE != nil {
 			spec := m.fusePool.spec.WorkspaceFUSE
@@ -1064,12 +1082,14 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	if lifecycle.claimed == nil {
 		claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, lifecycle.record)
 		if err != nil {
+			m.logFUSETeardownFailure(lifecycle, "claim-pool-cleanup", err)
 			return
 		}
 		lifecycle.claimed = claimed
 	}
 	if !lifecycle.runtimeRemoved {
 		if err := m.fusePool.RemoveClaimedRuntime(ctx, *lifecycle.claimed); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "remove-runtime", err)
 			return
 		}
 		lifecycle.runtimeRemoved = true
@@ -1077,10 +1097,12 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	if lifecycle.evidence.RuntimeUID == "" {
 		fencer, ok := m.runtime.(runtime.RuntimeFencer)
 		if !ok {
+			m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", errors.New("runtime has no termination fencer"))
 			return
 		}
 		evidence, err := fencer.ConfirmTerminated(ctx, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID)
 		if err != nil {
+			m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", err)
 			return
 		}
 		lifecycle.evidence = evidence
@@ -1092,31 +1114,40 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	if !lifecycle.probeRemoved {
 		probeName, err := fuseprotocol.DeriveProbeObjectName(lifecycle.record.RuntimeUID, generation)
 		if err != nil {
+			m.logFUSETeardownFailure(lifecycle, "derive-probe-object", err)
 			return
 		}
 		probeKey := lifecycle.lease.OwnerSnapshot().Prefix + probeName
 		if err := m.config.WorkspaceObjectClient.DeleteObject(ctx, probeKey); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "delete-probe-object", err)
 			return
 		}
 		exists, err := m.config.WorkspaceObjectClient.HeadObject(ctx, probeKey)
 		if err != nil || exists {
+			if err == nil {
+				err = errors.New("probe object still exists after deletion")
+			}
+			m.logFUSETeardownFailure(lifecycle, "verify-probe-object-deletion", err)
 			return
 		}
 		lifecycle.probeRemoved = true
 	}
 	if !lifecycle.leaseReleased {
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, lifecycle.evidence); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "release-workspace-lease", err)
 			return
 		}
 		lifecycle.leaseReleased = true
 	}
 	if !lifecycle.sessionRemoved && m.sessions != nil {
 		if err := m.sessions.RemoveMatchingFUSESession(ctx, lifecycle.sandboxID, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID, lifecycle.record.PreparationID, lifecycle.lease.OwnerSnapshot().Generation); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "remove-session", err)
 			return
 		}
 		lifecycle.sessionRemoved = true
 	}
 	if err := m.fusePool.CompleteClaimedCleanup(ctx, *lifecycle.claimed); err != nil {
+		m.logFUSETeardownFailure(lifecycle, "complete-pool-cleanup", err)
 		return
 	}
 	lifecycle.poolRemoved = true
@@ -1128,6 +1159,55 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	lifecycle.teardownMu.Lock()
 	lifecycle.teardownDone = true
 	lifecycle.teardownMu.Unlock()
+}
+
+func (m *Manager) logFUSETeardownFailure(lifecycle *fuseSandboxLifecycle, stage string, err error) {
+	if lifecycle == nil || err == nil {
+		return
+	}
+	now := time.Now()
+	lifecycle.teardownMu.Lock()
+	if lifecycle.lastFailureStage == stage && now.Sub(lifecycle.lastFailureAt) < 10*time.Second {
+		lifecycle.teardownMu.Unlock()
+		return
+	}
+	lifecycle.lastFailureStage = stage
+	lifecycle.lastFailureAt = now
+	lifecycle.teardownMu.Unlock()
+	logger.Error(context.Background(), "FUSE sandbox teardown stage failed",
+		logger.AddField("sandbox_id", lifecycle.sandboxID),
+		logger.AddField("runtime_id", lifecycle.record.RuntimeID),
+		logger.AddField("stage", stage),
+		logger.ErrorField(err),
+	)
+}
+
+func (m *Manager) fuseTeardownTimeout() time.Duration {
+	const controlMargin = 30 * time.Second
+	timeout := controlMargin
+	if m == nil || m.fusePool == nil || m.fusePool.spec.WorkspaceFUSE == nil {
+		return workspaceCleanupTimeout
+	}
+	// Destruction flushes once after quiescing and the strong supervisor
+	// shutdown flushes again before unmounting. Leave a bounded control-plane
+	// margin for quiesce, acknowledgements, and exact runtime termination proof.
+	for _, duration := range []time.Duration{
+		m.fusePool.spec.WorkspaceFUSE.FlushTimeout,
+		m.fusePool.spec.WorkspaceFUSE.FlushTimeout,
+		m.fusePool.spec.WorkspaceFUSE.UnmountTimeout,
+	} {
+		if duration <= 0 {
+			continue
+		}
+		if duration > time.Duration(1<<63-1)-timeout {
+			return time.Duration(1<<63 - 1)
+		}
+		timeout += duration
+	}
+	if timeout < workspaceCleanupTimeout {
+		return workspaceCleanupTimeout
+	}
+	return timeout
 }
 
 func (m *Manager) scheduleFUSETeardown(lifecycle *fuseSandboxLifecycle, cause error) {

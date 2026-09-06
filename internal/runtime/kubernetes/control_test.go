@@ -22,6 +22,14 @@ type recordingPodExecutor struct {
 	err      error
 }
 
+func TestControlStreamOptionsMatchesExecStdinFlag(t *testing.T) {
+	withoutInput := controlStreamOptions(nil, &boundedBuffer{}, &boundedBuffer{})
+	assert.Nil(t, withoutInput.Stdin)
+
+	withInput := controlStreamOptions([]byte(`{"version":1}`), &boundedBuffer{}, &boundedBuffer{})
+	require.NotNil(t, withInput.Stdin)
+}
+
 func (e *recordingPodExecutor) Exec(_ context.Context, pod, container string, argv []string, stdin []byte) ([]byte, error) {
 	e.commands = append(e.commands, recordedPodCommand{pod: pod, container: container, argv: append([]string(nil), argv...), stdin: append([]byte(nil), stdin...)})
 	return append([]byte(nil), e.stdout...), e.err

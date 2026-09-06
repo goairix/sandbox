@@ -91,16 +91,28 @@ func (b *pid1Broker) start(state brokerState) (string, error) {
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 	request := pid1Request{
 		Version: fuseprotocol.Version, Command: "register", RuntimeUID: state.RuntimeUID,
-		Generation: state.Generation, Processes: append([]processIdentity(nil), state.Processes...), Token: "",
+		Generation: state.Generation, Processes: cloneProcessSnapshot(state.Processes), Token: "",
 	}
 	if err := writeBrokerFrame(connection, request); err != nil {
 		return "", err
 	}
 	var response pid1Response
-	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version || !response.OK || !validPID1Token(response.Token) {
+	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version {
 		return "", fmt.Errorf("pid 1 broker rejected quiesce registration")
 	}
+	if !response.OK || !validPID1Token(response.Token) {
+		return "", fmt.Errorf("pid 1 broker rejected quiesce registration: %s", safePID1ErrorCode(response.ErrorCode))
+	}
 	return response.Token, nil
+}
+
+func safePID1ErrorCode(code string) string {
+	switch code {
+	case "invalid_request", "invalid_command", "invalid_ping", "invalid_registration", "unverified_process", "entropy_failure", "cycle_active":
+		return code
+	default:
+		return "rejected"
+	}
 }
 
 func (b *pid1Broker) resume(request resumeRequest) error {
@@ -224,7 +236,7 @@ func (l *pid1Ledger) register(connection net.Conn, request pid1Request, processe
 		writePID1Response(connection, false, "", "cycle_active")
 		return
 	}
-	l.active = &pid1Cycle{RuntimeUID: request.RuntimeUID, Generation: request.Generation, Processes: append([]processIdentity(nil), request.Processes...), Token: token}
+	l.active = &pid1Cycle{RuntimeUID: request.RuntimeUID, Generation: request.Generation, Processes: cloneProcessSnapshot(request.Processes), Token: token}
 	writePID1Response(connection, true, token, "")
 }
 

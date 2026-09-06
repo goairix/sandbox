@@ -67,21 +67,23 @@ type Config struct {
 }
 
 type Supervisor struct {
-	mu            sync.Mutex
-	config        Config
-	runner        Runner
-	state         State
-	bootstrap     fuseprotocol.BootstrapConfig
-	profile       Profile
-	auth          fuseprotocol.AuthorizeRequest
-	process       Process
-	processDone   chan struct{}
-	bootstrapped  bool
-	consumed      bool
-	stopping      bool
-	shutdownTried bool
-	mountID       uint64
-	mountDeadline time.Time
+	mu              sync.Mutex
+	config          Config
+	runner          Runner
+	state           State
+	bootstrap       fuseprotocol.BootstrapConfig
+	profile         Profile
+	auth            fuseprotocol.AuthorizeRequest
+	process         Process
+	processDone     chan struct{}
+	bootstrapped    bool
+	consumed        bool
+	stopping        bool
+	shutdownTried   bool
+	shutdownStrong  bool
+	shutdownFlushed bool
+	mountID         uint64
+	mountDeadline   time.Time
 }
 
 func NewSupervisor(config Config, runner Runner) *Supervisor {
@@ -237,6 +239,9 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	}
 	if err := prepareSecureDirectory(s.config.RunDir, 0o700); err != nil {
 		return err
+	}
+	if err := prepareSecureDirectory(b.CacheDir, 0o700); err != nil {
+		return fmt.Errorf("secure cache directory: %w", err)
 	}
 	if err := secureResolvedDirectory(b.CacheDir, s.config.CacheRoot); err != nil {
 		return fmt.Errorf("validate cache directory: %w", err)
@@ -547,14 +552,28 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 	if err := ctx.Err(); err != nil {
 		return ack, err
 	}
-	if s.shutdownTried {
-		return ack, fmt.Errorf("shutdown was already attempted")
-	}
 	strong := request != nil
 	if strong && (request.Version != fuseprotocol.Version || request.RuntimeUID != ack.RuntimeUID || request.Generation != generation || request.Generation < 0) {
 		return ack, fmt.Errorf("shutdown request does not match runtime")
 	}
-	s.shutdownTried = true
+	if s.state == StateStopped {
+		if strong && (!s.shutdownStrong || (generation > 0 && !s.shutdownFlushed)) {
+			return ack, fmt.Errorf("strong shutdown proof is unavailable")
+		}
+		ack.GracefulUnmount = strong
+		return ack, nil
+	}
+	if s.shutdownTried {
+		if strong != s.shutdownStrong {
+			return ack, fmt.Errorf("shutdown mode changed after the first attempt")
+		}
+		if strong && !s.shutdownFlushed {
+			return ack, fmt.Errorf("durable flush was not proven by the first shutdown attempt")
+		}
+	} else {
+		s.shutdownTried = true
+		s.shutdownStrong = strong
+	}
 	if s.state == StatePrepared && generation == 0 {
 		if s.config.MountInfo == nil {
 			s.state = StateUnhealthy
@@ -570,14 +589,19 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 		return ack, nil
 	}
 	if strong {
-		if s.state != StateReady {
-			return ack, fmt.Errorf("strong shutdown requires a ready mount")
-		}
-		if err := s.flushLocked(ctx); err != nil {
-			return ack, fmt.Errorf("strong shutdown flush failed: %w", err)
+		if !s.shutdownFlushed {
+			if s.state != StateReady {
+				return ack, fmt.Errorf("strong shutdown requires a ready mount")
+			}
+			if err := s.flushLocked(ctx); err != nil {
+				return ack, fmt.Errorf("strong shutdown flush failed: %w", err)
+			}
+			s.shutdownFlushed = true
 		}
 	} else if s.state == StateReady && s.profile.Flush != nil {
-		_ = s.flushLocked(ctx)
+		if s.flushLocked(ctx) == nil {
+			s.shutdownFlushed = true
+		}
 	}
 	if s.process == nil {
 		return ack, fmt.Errorf("active s3fs process is unavailable")
@@ -585,9 +609,28 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 	s.stopping = true
 	unmountCtx, cancel := context.WithTimeout(ctx, time.Duration(s.bootstrap.UnmountTimeoutSeconds)*time.Second)
 	defer cancel()
-	if err := s.runner.Run(unmountCtx, []string{"/usr/bin/fusermount3", "-u", s.bootstrap.MountPath}); err != nil {
+	if complete, err := s.shutdownCompleteLocked(unmountCtx); err != nil {
 		s.state = StateUnhealthy
-		return ack, fmt.Errorf("bounded FUSE unmount failed: %w", err)
+		return ack, err
+	} else if complete {
+		s.state = StateStopped
+		ack.GracefulUnmount = strong
+		return ack, nil
+	}
+	var unmountErr error
+	for {
+		unmountErr = s.runner.Run(unmountCtx, []string{"/usr/bin/fusermount3", "-u", s.bootstrap.MountPath})
+		if unmountErr == nil {
+			break
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-unmountCtx.Done():
+			timer.Stop()
+			s.state = StateUnhealthy
+			return ack, fmt.Errorf("bounded FUSE unmount failed: %w", errors.Join(unmountErr, unmountCtx.Err()))
+		case <-timer.C:
+		}
 	}
 	select {
 	case <-s.processDone:
@@ -606,6 +649,32 @@ func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.Control
 	s.state = StateStopped
 	ack.GracefulUnmount = strong
 	return ack, nil
+}
+
+// shutdownCompleteLocked permits an exact strong-shutdown retry to recover
+// after a response loss or a bounded unmount failure. It never manufactures
+// durability: the caller separately requires the first attempt's successful
+// verified flush before accepting this proof.
+func (s *Supervisor) shutdownCompleteLocked(ctx context.Context) (bool, error) {
+	if s.config.MountInfo == nil {
+		return false, fmt.Errorf("effective mount verification is unavailable")
+	}
+	mount, err := s.config.MountInfo()
+	if err != nil {
+		return false, fmt.Errorf("effective FUSE unmount cannot be verified")
+	}
+	if strings.HasPrefix(mount.FilesystemType, "fuse") {
+		return false, nil
+	}
+	if s.processDone == nil {
+		return false, fmt.Errorf("s3fs process completion is unavailable")
+	}
+	select {
+	case <-s.processDone:
+		return true, nil
+	case <-ctx.Done():
+		return false, fmt.Errorf("s3fs process did not exit after effective unmount")
+	}
 }
 
 func (s *Supervisor) statusLocked() fuseprotocol.MounterStatus {

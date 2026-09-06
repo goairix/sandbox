@@ -96,12 +96,11 @@ func TestCheckImageContractValidatesTrustedRegularManifestAndS3FS(t *testing.T) 
 	config := ImageCheckConfig{
 		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: manifest, S3FSPath: s3fs,
 		WorkspacePath: workspace, FuseConfigPath: fuseConfig, RequiredBinaries: []string{s3fs},
-		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(),
+		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
 	}
 	rewriteManifestForS3FS(t, config)
-	require.NoError(t, CheckImageWithConfig(config), "packaging checks must permit a blocked profile to be built and tested")
-	err := CheckImageReleaseWithConfig(config)
-	require.ErrorContains(t, err, "pending durable-flush provider spike", "release readiness remains fail closed without flush evidence")
+	require.NoError(t, CheckImageWithConfig(config), "packaging checks must validate the release profile image")
+	require.NoError(t, CheckImageReleaseWithConfig(config), "verified MinIO mount and durable-flush evidence must be releaseable")
 
 	public, ok := InspectCompiledProfile("huawei-obs-public-v1")
 	require.True(t, ok)
@@ -169,7 +168,7 @@ func newExecutableImageCheckConfig(t *testing.T, executable []byte) ImageCheckCo
 	config := ImageCheckConfig{
 		RunDir: runDir, CacheRoot: cacheRoot, ManifestPath: manifest, S3FSPath: s3fs,
 		WorkspacePath: workspace, FuseConfigPath: fuseConfig, RequiredBinaries: []string{s3fs},
-		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(),
+		BoundProfileID: "minio-sigv4-path-style-v1", ExpectedOwnerUID: os.Geteuid(), VersionTimeout: maxS3FSVersionTimeout,
 	}
 	rewriteManifestForS3FS(t, config)
 	return config

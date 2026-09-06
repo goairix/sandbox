@@ -17,6 +17,21 @@ resources:
     cpu: "1"
     memory: 512Mi
 
+# sandbox-api initializes and reconciles its runtime pools before opening the
+# HTTP listener. Keep liveness disabled during that bounded initialization.
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  timeoutSeconds: 1
+  failureThreshold: 120
+
+# Before Helm deletes Redis, run the API's own graceful shutdown by scaling its
+# Deployment to zero. This prevents fail-closed FUSE pool records from leaving
+# managed runtime shells behind when release resources are deleted concurrently.
+preDeleteDrain:
+  enabled: true
+  timeoutSeconds: 600
+
 autoscaling:
   enabled: true
   minReplicas: 2
@@ -79,6 +94,9 @@ config:
       useSSL: false
   workspace:
     mode: sync
+    # Local kind on Docker Desktop only. Production must keep this false and
+    # configure a real AppArmor/SELinux profile.
+    allowMissingLSMForKind: false
     autoSyncIntervalSeconds: 0
     secretName: ""
     cacheSize: 2Gi
@@ -104,6 +122,10 @@ config:
       prepareTimeoutSeconds: 120
     providers: {}
   security:
+    # Prefer apiKeySecretName in real deployments so Helm upgrades do not need
+    # the API key on the command line or in a values file. The referenced
+    # Secret must contain the key `api-key`.
+    apiKeySecretName: ""
     apiKey: ""
     rateLimit: 100
     execTimeoutSeconds: 30

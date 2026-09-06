@@ -16,6 +16,7 @@ import (
 
 	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -277,14 +278,16 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		RunAsUser:              &rootUID,
 		ReadOnlyRootFilesystem: &trueVal,
 	}
+	annotations := map[string]string{}
+	if fuse.LSMProfile != "" {
+		annotations["container.apparmor.security.beta.kubernetes.io/workspace-mounter"] = "localhost/" + fuse.LSMProfile
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      spec.ID,
-			Namespace: namespace,
-			Annotations: map[string]string{
-				"container.apparmor.security.beta.kubernetes.io/workspace-mounter": "localhost/" + fuse.LSMProfile,
-			},
+			Name:        spec.ID,
+			Namespace:   namespace,
+			Annotations: annotations,
 			Labels: map[string]string{
 				"app":                        "sandbox",
 				"sandbox.id":                 spec.ID,
@@ -299,7 +302,9 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
+			SchedulerName:                 corev1.DefaultSchedulerName,
 			ServiceAccountName:            "default",
+			DeprecatedServiceAccount:      "default",
 			AutomountServiceAccountToken:  &falseVal,
 			EnableServiceLinks:            &falseVal,
 			ShareProcessNamespace:         &falseVal,
@@ -316,11 +321,15 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			},
 			InitContainers: []corev1.Container{
 				{
-					Name:  "workspace-mounter",
-					Image: fuse.MounterImage,
+					Name:                     "workspace-mounter",
+					Image:                    fuse.MounterImage,
+					ImagePullPolicy:          corev1.PullIfNotPresent,
+					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 					// The trusted supervisor sets the emptyDir anchor to root:root
 					// mode 0555 before its prepared health command can succeed.
 					Command:         []string{mounterBinary, "supervise"},
+					WorkingDir:      "/",
 					RestartPolicy:   &restartAlways,
 					SecurityContext: mounterSecurity,
 					Resources:       validated.mounterResources,
@@ -346,23 +355,30 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 					},
 					StartupProbe: &corev1.Probe{
 						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{mounterBinary, "health", "prepared"}}},
+						TimeoutSeconds:   1,
 						PeriodSeconds:    2,
+						SuccessThreshold: 1,
 						FailureThreshold: 30,
 					},
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{mounterBinary, "health", "ready"}}},
+						TimeoutSeconds:   1,
 						PeriodSeconds:    10,
+						SuccessThreshold: 1,
 						FailureThreshold: 3,
 					},
 				},
 			},
 			Containers: []corev1.Container{
 				{
-					Name:       "sandbox",
-					Image:      spec.Image,
-					Command:    []string{fuseprotocol.ProbeBinary, "self-check"},
-					WorkingDir: workspaceMountPath,
-					Resources:  validated.sandboxResources,
+					Name:                     "sandbox",
+					Image:                    spec.Image,
+					ImagePullPolicy:          corev1.PullIfNotPresent,
+					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+					Command:                  []string{fuseprotocol.ProbeBinary, "self-check"},
+					WorkingDir:               workspaceMountPath,
+					Resources:                validated.sandboxResources,
 					SecurityContext: &corev1.SecurityContext{
 						RunAsNonRoot:             &trueVal,
 						RunAsUser:                &sandboxUID,
@@ -441,8 +457,17 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 	if errs := kvalidation.IsDNS1123Subdomain(fuse.SecretName); len(errs) != 0 {
 		return validated, fmt.Errorf("workspace FUSE Secret name is invalid")
 	}
-	if err := validateLSMProfile(fuse.LSMProfile); err != nil {
-		return validated, err
+	if fuse.LSMProfile == "" {
+		if !fuse.AllowMissingLSMForKind {
+			return validated, fmt.Errorf("workspace FUSE LSM profile must be a confined profile name")
+		}
+	} else {
+		if fuse.AllowMissingLSMForKind {
+			return validated, fmt.Errorf("workspace FUSE local kind LSM override requires an empty profile")
+		}
+		if err := validateLSMProfile(fuse.LSMProfile); err != nil {
+			return validated, err
+		}
 	}
 	poolKeyLabel, err := preparedPoolKeyLabel(fuse.PoolKey)
 	if err != nil {
@@ -901,7 +926,11 @@ func sandboxKubernetesEnv() []corev1.EnvVar {
 
 // deletePod deletes a pod by name.
 func deletePod(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
-	return client.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	err := client.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return runtime.ErrNotFound
+	}
+	return err
 }
 
 // getPod retrieves a pod by name.
