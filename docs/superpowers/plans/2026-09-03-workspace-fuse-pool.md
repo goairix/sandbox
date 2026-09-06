@@ -1561,6 +1561,8 @@ git commit -m "deploy: wire sandbox api managed fuse pool"
 
 ### Task 18: Execute Provider Compatibility and Fault Matrix
 
+> 2026-09-06：仓库增加了默认关闭、严格限制于本地 Docker + 私网 MinIO 的 `workspace.allow_unverified_durable_flush`，用于让正式 Compose 构建完成挂载与 Pool wiring 功能验收。该开关不改变 `release-check` 或 profile 状态，不能满足本 Task 的真实 provider、故障注入、durable flush、镜像扫描和 attestation 证据要求；MinIO、公有云 OBS、2023 私有云 OBS 的两个 runtime 矩阵仍须分别执行。
+
 **Files:**
 - Create: `testdata/fuse/profiles/minio-sigv4-path-style-v1.yaml`
 - Create: `testdata/fuse/profiles/huawei-obs-public-v1.yaml`

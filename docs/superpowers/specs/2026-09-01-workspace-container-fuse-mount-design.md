@@ -141,7 +141,7 @@ GOOS=linux GOARCH=amd64 go build \
 
 只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON manifest 只记录 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析和逐项比对可以发现包被拼错，但 manifest 不能注入或覆盖任意 `-o` 参数。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
 
-镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制绑定、manifest、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并调用 Go `CheckProductionProfile`，进一步要求 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep manifest 代替。当前状态如下，因此 `workspace.mode=fuse` 配置校验与全部 `release-check` 都应 fail closed：
+镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制绑定、manifest、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并调用 Go `CheckProductionProfile`，进一步要求 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep manifest 代替。当前状态如下，因此生产默认的 `workspace.mode=fuse` 配置校验与全部 `release-check` 都应 fail closed：
 
 | Profile ID | Mount parameters | Durable flush | 结论 |
 |---|---|---|---|
@@ -150,6 +150,8 @@ GOOS=linux GOARCH=amd64 go build \
 | `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 2023 私有云必须实测，仍不能发布 |
 
 公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。真实基础镜像 digest、s3fs artifact URL/hash、镜像 build/scan、SBOM 和 attestation 由 CI 与 Task 18 产出；在这些证据完成并显式提升状态前，文档示例不代表已可启用。本地静态 contract 与 Compose config 校验不能作为镜像构建或生产发布证据。
+
+为了让开发者能够用仓库正式源码执行 Docker Compose 本地功能验收，配置提供默认关闭的 `workspace.allow_unverified_durable_flush`。该开关只在 Docker runtime、MinIO、私网或回环的 literal IPv4 endpoint、唯一且精确匹配 endpoint 的 `/32` system egress CIDR、唯一且精确匹配 endpoint 的端口、以及已经 mount-verified 的 compiled profile 同时满足时，跳过配置加载阶段的 durable-flush 生产资格检查；启动时必须输出显眼警告。它不适用于 Kubernetes、OBS、公网 endpoint 或宽网段白名单，也不改变 `CheckProductionProfile`、镜像 `release-check`、compiled catalog/manifest 状态和 Task 18 证据要求，因此不能被视为生产发布或持久性结论。
 
 ## 5. Kubernetes 架构
 

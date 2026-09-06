@@ -52,6 +52,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+	if cfg.Workspace.AllowUnverifiedDurableFlush {
+		log.Printf("WARNING: local Docker MinIO validation is allowing an unverified durable-flush profile; do not use this mode for production or durability claims")
+	}
 
 	// Initialize telemetry
 	if err = telemetry.Init(cfg); err != nil {

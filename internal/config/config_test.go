@@ -409,6 +409,7 @@ func TestLoadFUSEDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "sync", cfg.Workspace.Mode)
+	assert.False(t, cfg.Workspace.AllowUnverifiedDurableFlush)
 	assert.Equal(t, "", cfg.Workspace.SecretName)
 	assert.Equal(t, "2Gi", cfg.Workspace.CacheSize)
 	assert.Equal(t, "disk", cfg.Workspace.CacheMedium)
@@ -1013,4 +1014,101 @@ func TestLoadFUSEProviderFromEnvironmentOnly(t *testing.T) {
 	assert.Equal(t, []string{"8.8.8.8/32", "1.1.1.1/32"}, provider.DNSCIDRs)
 	assert.Equal(t, []string{"192.0.2.10"}, provider.EndpointHostIPs)
 	assert.Equal(t, []int32{9000}, provider.EndpointPorts)
+}
+
+func setLocalDevelopmentFUSEEnv(t *testing.T) {
+	t.Helper()
+	env := map[string]string{
+		"SANDBOX_RUNTIME_TYPE":                                               "docker",
+		"SANDBOX_RUNTIME_DOCKER_WORKSPACE_SECRET_ROOT":                       "/var/lib/sandbox/workspace-secrets",
+		"SANDBOX_RUNTIME_KUBERNETES_NAMESPACE":                               "default",
+		"SANDBOX_SECURITY_API_KEY":                                           "test-key",
+		"SANDBOX_STORAGE_STATE_REDIS_ADDR":                                   "redis:6379",
+		"SANDBOX_STORAGE_FILESYSTEM_PROVIDER":                                "minio",
+		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":                                  "sandbox-workspace",
+		"SANDBOX_STORAGE_FILESYSTEM_REGION":                                  "us-east-1",
+		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":                                "192.168.10.19:9443",
+		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":                              "",
+		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":                              "",
+		"SANDBOX_STORAGE_FILESYSTEM_SESSION_TOKEN":                           "",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_EXPIRY":                       "",
+		"SANDBOX_STORAGE_FILESYSTEM_SUB_PATH":                                "",
+		"SANDBOX_STORAGE_FILESYSTEM_USE_SSL":                                 "true",
+		"SANDBOX_STORAGE_FILESYSTEM_CA_FILE":                                 "/run/secrets/workspace/ca.crt",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "/run/secrets/workspace/accessKey",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "/run/secrets/workspace/secretKey",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SESSION_TOKEN_FILE":     "",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_CREDENTIAL_EXPIRY_FILE": "",
+		"SANDBOX_WORKSPACE_MODE":                                             "fuse",
+		"SANDBOX_WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH":                   "true",
+		"SANDBOX_WORKSPACE_SECRET_NAME":                                      "workspace-storage",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DRIVER":                           "s3fs",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROFILE":                          "minio-sigv4-path-style-v1",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_STORAGE_IDENTITY":                 "local-minio",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_MOUNTER_IMAGE":                    "registry.example.com/mounter@sha256:" + strings.Repeat("a", 64),
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DOCKER_IMAGE":                     "registry.example.com/sandbox@sha256:" + strings.Repeat("b", 64),
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_CA_SECRET_KEY":                    "ca.crt",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_CREDENTIAL_GENERATION":            "local-v1",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_HOST_IPS":                "",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_LSM_PROFILE":                      "sandbox-fuse",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_MODE":               "cidr",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_DNS_CIDRS":                        "1.1.1.1/32",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_FQDNS":              "",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_CIDRS":              "192.168.10.19/32",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_PORTS":                   "9443",
+		"SANDBOX_WORKSPACE_PROVIDERS_MINIO_PROXY_URL":                        "",
+	}
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+}
+
+func TestLoadAllowsExplicitLocalDockerMinIODurableFlushDevelopmentGate(t *testing.T) {
+	setLocalDevelopmentFUSEEnv(t)
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	assert.Equal(t, "fuse", cfg.Workspace.Mode)
+	assert.True(t, cfg.Workspace.AllowUnverifiedDurableFlush)
+}
+
+func TestLoadRejectsUnverifiedDurableFlushDevelopmentGateOutsideLocalDockerMinIO(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{name: "kubernetes runtime", key: "SANDBOX_RUNTIME_TYPE", value: "kubernetes", want: "only supported with Docker runtime"},
+		{name: "public endpoint", key: "SANDBOX_STORAGE_FILESYSTEM_ENDPOINT", value: "8.8.8.8:9443", want: "private or loopback IPv4 endpoint"},
+		{name: "endpoint hostname", key: "SANDBOX_STORAGE_FILESYSTEM_ENDPOINT", value: "minio.internal:9443", want: "private or loopback IPv4 endpoint"},
+		{name: "broad endpoint CIDR", key: "SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_CIDRS", value: "192.168.10.0/24", want: "exact endpoint /32"},
+		{name: "different endpoint port", key: "SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_PORTS", value: "443", want: "exact endpoint port"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setLocalDevelopmentFUSEEnv(t)
+			t.Setenv(tt.key, tt.value)
+			_, err := config.Load("")
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestValidateRejectsUnverifiedDurableFlushDevelopmentGateForOBS(t *testing.T) {
+	cfg := newValidFUSEConfig()
+	cfg.Workspace.AllowUnverifiedDurableFlush = true
+	cfg.Storage.FileSystem.Provider = "obs"
+	cfg.Storage.FileSystem.Region = "cn-north-4"
+	cfg.Storage.FileSystem.Endpoint = "https://192.168.10.19:443"
+	provider := validFUSEProvider("", "cidr")
+	provider.Profile = "huawei-obs-private-2023-v1"
+	provider.EndpointHostIPs = nil
+	provider.EndpointPorts = []int32{443}
+	provider.SystemEgressCIDRs = []string{"192.168.10.19/32"}
+	provider.SystemEgressFQDNs = nil
+	cfg.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{"obs": provider}
+
+	err := cfg.Validate()
+	require.ErrorContains(t, err, "only supported with MinIO")
 }

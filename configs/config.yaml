@@ -118,6 +118,9 @@ workspace:
   # Workspace implementation. Keep "sync" for the existing copy-in/copy-out
   # behavior. "fuse" requires every fail-closed setting in the template below.
   mode: "sync"
+  # Local Docker + private/loopback MinIO validation only. Production must
+  # leave this false until the selected profile has verified durable flush.
+  allow_unverified_durable_flush: false
   # Automatic sync interval in seconds. When > 0, a background goroutine
   # periodically syncs changed files from containers back to storage,
   # reducing data loss if a container crashes between manual syncs.

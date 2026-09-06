@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -167,21 +168,25 @@ type WorkspaceConfig struct {
 	// AutoSyncIntervalSeconds is the interval between automatic sync-from-container
 	// cycles. Set to 0 to disable auto-sync. Recommended: 30 for long-running
 	// agent sessions.
-	AutoSyncIntervalSeconds   int                                    `mapstructure:"auto_sync_interval_seconds"`
-	Mode                      string                                 `mapstructure:"mode"`
-	SecretName                string                                 `mapstructure:"secret_name"`
-	CacheSize                 string                                 `mapstructure:"cache_size"`
-	CacheMedium               string                                 `mapstructure:"cache_medium"`
-	MountTimeoutSeconds       int                                    `mapstructure:"mount_timeout_seconds"`
-	FlushTimeoutSeconds       int                                    `mapstructure:"flush_timeout_seconds"`
-	UnmountTimeoutSeconds     int                                    `mapstructure:"unmount_timeout_seconds"`
-	RecreateMaxAttempts       int                                    `mapstructure:"recreate_max_attempts"`
-	LeaseTTLSeconds           int                                    `mapstructure:"lease_ttl_seconds"`
-	LeaseRenewIntervalSeconds int                                    `mapstructure:"lease_renew_interval_seconds"`
-	QuotaMode                 string                                 `mapstructure:"quota_mode"`
-	MounterResources          WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
-	FUSEPool                  WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
-	Providers                 map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
+	AutoSyncIntervalSeconds int    `mapstructure:"auto_sync_interval_seconds"`
+	Mode                    string `mapstructure:"mode"`
+	// AllowUnverifiedDurableFlush is a local Docker/MinIO functional-test gate.
+	// validateLocalDevelopmentFUSEProfile keeps it unavailable to production-shaped
+	// runtimes and it never changes the independent image release check.
+	AllowUnverifiedDurableFlush bool                                   `mapstructure:"allow_unverified_durable_flush"`
+	SecretName                  string                                 `mapstructure:"secret_name"`
+	CacheSize                   string                                 `mapstructure:"cache_size"`
+	CacheMedium                 string                                 `mapstructure:"cache_medium"`
+	MountTimeoutSeconds         int                                    `mapstructure:"mount_timeout_seconds"`
+	FlushTimeoutSeconds         int                                    `mapstructure:"flush_timeout_seconds"`
+	UnmountTimeoutSeconds       int                                    `mapstructure:"unmount_timeout_seconds"`
+	RecreateMaxAttempts         int                                    `mapstructure:"recreate_max_attempts"`
+	LeaseTTLSeconds             int                                    `mapstructure:"lease_ttl_seconds"`
+	LeaseRenewIntervalSeconds   int                                    `mapstructure:"lease_renew_interval_seconds"`
+	QuotaMode                   string                                 `mapstructure:"quota_mode"`
+	MounterResources            WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
+	FUSEPool                    WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
+	Providers                   map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -582,10 +587,52 @@ func (c *Config) validateFUSE() error {
 	if !isCanonicalRelativePrefix(filesystem.SubPath) {
 		return fmt.Errorf("config: storage.filesystem.sub_path must be a canonical relative prefix, got %q", filesystem.SubPath)
 	}
+	if workspace.AllowUnverifiedDurableFlush {
+		if err := c.validateLocalDevelopmentFUSEProfile(provider); err != nil {
+			return err
+		}
+		return nil
+	}
 	if err := mounter.CheckProductionProfile(filesystem.Provider, provider.Profile); err != nil {
 		return fmt.Errorf("config: %s.profile %q is not production-ready: %w", providerPath, provider.Profile, err)
 	}
 
+	return nil
+}
+
+func (c *Config) validateLocalDevelopmentFUSEProfile(provider WorkspaceFUSEProviderConfig) error {
+	const prefix = "config: workspace.allow_unverified_durable_flush"
+	if c.Runtime.Type != "docker" {
+		return fmt.Errorf("%s is only supported with Docker runtime", prefix)
+	}
+	if c.Storage.FileSystem.Provider != "minio" {
+		return fmt.Errorf("%s is only supported with MinIO", prefix)
+	}
+	endpoint, err := url.Parse("https://" + c.Storage.FileSystem.Endpoint)
+	if err != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Path != "" || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return fmt.Errorf("%s requires a private or loopback IPv4 endpoint", prefix)
+	}
+	address, err := netip.ParseAddr(endpoint.Hostname())
+	if err != nil || !address.Is4() || (!address.IsPrivate() && !address.IsLoopback()) {
+		return fmt.Errorf("%s requires a private or loopback IPv4 endpoint", prefix)
+	}
+	exactEndpointCIDR := netip.PrefixFrom(address, address.BitLen()).String()
+	if len(provider.SystemEgressCIDRs) != 1 || provider.SystemEgressCIDRs[0] != exactEndpointCIDR {
+		return fmt.Errorf("%s requires the exact endpoint /32 as the only system egress CIDR", prefix)
+	}
+	endpointPort := uint64(443)
+	if rawPort := endpoint.Port(); rawPort != "" {
+		endpointPort, err = strconv.ParseUint(rawPort, 10, 16)
+		if err != nil || endpointPort == 0 {
+			return fmt.Errorf("%s requires a valid endpoint port", prefix)
+		}
+	}
+	if len(provider.EndpointPorts) != 1 || uint64(provider.EndpointPorts[0]) != endpointPort {
+		return fmt.Errorf("%s requires the exact endpoint port as the only allowed endpoint port", prefix)
+	}
+	if _, ok := mounter.LookupCompiledProfile("minio", provider.Profile); !ok {
+		return fmt.Errorf("%s requires a mount-verified MinIO profile", prefix)
+	}
 	return nil
 }
 
@@ -728,6 +775,7 @@ func setDefaults(v *viper.Viper) {
 	// Workspace
 	v.SetDefault("workspace.auto_sync_interval_seconds", 0)
 	v.SetDefault("workspace.mode", "sync")
+	v.SetDefault("workspace.allow_unverified_durable_flush", false)
 	v.SetDefault("workspace.secret_name", "")
 	v.SetDefault("workspace.cache_size", "2Gi")
 	v.SetDefault("workspace.cache_medium", "disk")

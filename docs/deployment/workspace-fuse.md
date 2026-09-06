@@ -676,7 +676,7 @@ docker run --rm --device /dev/fuse:/dev/fuse alpine:3.22 \
 
 ### 7.2 Compose 控制面配置
 
-Compose wiring 已落地，但当前所有 FUSE profile 仍会被 release gate fail closed，不能作为可上线配置直接使用。
+Compose wiring 已落地，但当前所有 FUSE profile 仍会被 release gate fail closed，不能作为可上线配置直接使用。本节的本地验证开关只用于让正式仓库源码通过配置加载并完成 Docker/MinIO 功能冒烟，不改变这一发布结论。
 
 Compose 需要把 Secret 暂存目录以同一绝对路径挂载给 API，以便 API 创建动态容器时使用宿主机可解析的 source path：
 
@@ -715,6 +715,8 @@ storage:
 
 workspace:
   mode: fuse
+  # 仅限严格约束的本地 Docker + MinIO 功能验收；生产必须为 false。
+  allow_unverified_durable_flush: false
   quota_mode: soft
   auto_sync_interval_seconds: 0
   secret_name: sandbox-workspace-minio
@@ -776,6 +778,8 @@ workspace:
 对象存储的 provider、bucket、endpoint、region、sub path 和 TLS 开关继续使用 `storage.filesystem` 配置。MinIO endpoint 使用 `host[:port]`，runtime 根据 `use_ssl` 派生 s3fs URL；OBS endpoint 使用华为 SDK 要求的格式。AK/SK 不出现在该文件或环境变量；Compose 把 `${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`，sandbox-api 读取后在 `/var/lib/sandbox/workspace-secrets` 中为动态容器生成 root-only 文件。私有 CA 同样从该只读目录读取并复制给特殊容器，同时配置到控制面原生存储客户端；CA 或凭证轮换都需要排空并重建相关 sandbox。
 
 仓库 Compose 使用 `STORAGE_REGION` 传递 SigV4 region；MinIO 和公有云 OBS profile 要求该值为非空、小写 canonical region。`SANDBOX_IMAGE` 和 `GATEWAY_IMAGE` 用于覆盖普通 sandbox 与 gateway 镜像。`sandbox-api` 会等待 Redis healthcheck 通过且 `sandbox-images` 成功准备完全部镜像后才启动，避免 API 已经接流量但 pool 所需镜像仍不存在：未配置镜像覆盖时构建仓库默认镜像；配置 `SANDBOX_IMAGE`、`GATEWAY_IMAGE`、`FUSE_MOUNTER_IMAGE` 或 `FUSE_SANDBOX_IMAGE` 时先检查 Docker daemon 的本地缓存，缺失则从 registry 拉取。默认 `DOCKER_AUTH_CONFIG_FILE=./docker-auth-public/config.json` 只提供空的 Docker client 配置；使用需认证的私有 registry 时，必须把该变量设为仓库根目录之外的宿主机绝对路径，例如 `/etc/sandbox/docker-auth/config.json`，并只读挂入 `sandbox-images`。禁止把真实认证文件复制到本仓库；`.dockerignore` 的防御性规则不能替代这一部署约束。该文件应使用最小权限的只读账号，父目录/文件分别为 `0700`/`0600`，且必须包含可由 `docker:cli` 直接读取的 `auths`，不能依赖宿主机 `credsStore`/credential helper，也不能通过环境变量传递认证内容。只有该文件以只读方式进入一次性镜像准备容器；`/root/.docker` 的其余空间保持容器内可写，以供 buildx 保存非敏感状态，认证配置不进入 `sandbox-api`。Docker FUSE 启用时，后三个 FUSE 相关值都必须填写 registry 返回的真实 `@sha256:` digest；tag 或本地 image ID 会在 pool WarmUp 前被拒绝。若设置 `WORKSPACE_SECRET_STAGING_ROOT`，它必须是宿主机绝对路径且不能是 `/`，Compose 会以相同绝对 target 挂入 API，并同步写入 `runtime.docker.workspace_secret_root`，不能只改 volume source。该路径会写入 container、gateway、network、cache volume 的受管资源标签，并作为部署期不可变的资源身份；如必须迁移，先用旧配置排空全部 FUSE sandbox，确认旧目录为空且无 `sandbox.managed=true` Docker 资源，再同时修改目录与配置。存在旧资源时 runtime 会 fail closed，不会跨 root 猜测或删除 Secret。
+
+本地开发需要在 profile 尚未取得 durable-flush 证据时跑通正式 Compose 流程，可以显式设置 `WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH=true`。sandbox-api 只在以下条件全部成立时接受：runtime 为 Docker；provider 为 MinIO；endpoint 是私网或回环 literal IPv4；`system_egress_cidrs` 只有一项且是该 endpoint 的精确 `/32`；`endpoint_ports` 只有一项且精确匹配 endpoint 端口；compiled profile 的挂载参数已经验证。进程会输出警告。OBS、Kubernetes、公网 endpoint、FQDN endpoint、宽网段出口或额外端口均拒绝该开关。它仅跳过配置加载阶段的 durable-flush 资格检查；`workspace-mounter ... --release-check-image`、`CheckProductionProfile`、profile manifest 状态与 Task 18 矩阵保持不变，不能用此开关生成生产发布证据。
 
 上面的 Compose 片段按私有 CA 场景给出；使用系统公共 CA 时删除 `storage_ca` Secret 和 `ca_file` 配置，不能保留指向不存在文件的路径。
 
@@ -949,7 +953,7 @@ kind 中只有 trusted mounter sidecar 以 `privileged: true` 打开 `/dev/fuse`
 
 2026-09-06 的 Docker Compose 本地验收使用仓库 `docker/docker-compose.yml` 完整执行镜像准备、Redis、sandbox-api 和 Pool WarmUp，并由 HTTP API 驱动真实 sandbox：sync 基线完成创建、UID 1000 Exec 与销毁；FUSE 使用 TLS 前置的本地 MinIO 和本地 registry digest，确认空壳容器先启动、请求仅传 `workspace_path` 后才挂载、pool hit 后自动补回 `min_size=1`、`findmnt` 返回 `fuse.s3fs`、UID/GID 1000 写入内容可从对象存储签名读回、同 prefix 第二个 owner 返回 409，以及只放行 9443 时同一内网主机未列入白名单的 9000 端口不可访问。最终复审又以真实宿主机发布端口复现普通 bridge host-gateway 旁路；加入 `/32` blackhole 后，Acquire 前后 UID 1000 对 bridge gateway:9443 均失败，同时正常对象存储挂载继续成功。验收还从 Docker daemon 删除本地 digest 引用，确认 `sandbox-images` 能分别从无认证和带认证的私有 registry 冷拉取 gateway/FUSE 镜像，并确认持有旧 root 标签的资源会阻止 secret root 热切换。该验收修正了 Compose region/gateway image 透传、私有 registry 认证与冷缓存准备、Secret 同绝对路径及迁移身份、Docker `/workspace` mount anchor、control exec 工作目录、s3fs 1.95 region option、Docker bridge 三层转发和 host-gateway 旁路问题。
 
-上述 FUSE 验收使用一次性本地 API 镜像仅跳过 durable-flush 配置门禁，以验证挂载与 Pool wiring；仓库生产源码、正式镜像 `release-check` 和本文发布结论仍保持 fail closed，不能把该结果当作 durable flush 或生产发布证据。
+上述 FUSE 验收现由仓库正式源码构建的 `sandbox-api:latest` 完成：`docker/.env` 显式打开严格受限的本地开发开关，并通过 `docker compose --env-file docker/.env -p sandbox-local-e2e -f docker/docker-compose.yml up -d --build` 执行正常镜像构建、镜像准备、服务启动和 Pool WarmUp，不再依赖一次性修改过的 API 镜像。正式镜像 `release-check` 和本文生产发布结论仍保持 fail closed，不能把该结果当作 durable flush 或生产发布证据。
 
 若旧版 kind CLI 无法向较新的 containerd v2 节点执行 `kind load docker-image`（例如报 `failed to detect containerd snapshotter`），发布/长期测试仍应优先把镜像推到本地 registry 并让 Pod 按 digest 拉取。仅限一次性开发冒烟时，可把同一 Docker 镜像导入每个 kind 节点的 `k8s.io` namespace，并核对导入后的 image ID：
 
