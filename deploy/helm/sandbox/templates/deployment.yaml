@@ -225,7 +225,7 @@ spec:
             httpGet:
               path: /health
               port: {{ .Values.config.server.port }}
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
           {{- if eq .Values.config.workspace.mode "fuse" }}
           volumeMounts:
