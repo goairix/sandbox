@@ -1007,7 +1007,7 @@ git commit -m "test: cover hybrid workspace lifecycle matrix"
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-09-01-workspace-container-fuse-mount-design.md` only if implementation names differ from the approved names
 
-- [ ] **Step 1: Update the deployment runbook**
+- [x] **Step 1: Update the deployment runbook**
 
 Document:
 
@@ -1023,7 +1023,7 @@ Document:
 - trusted mounter system egress as a separate narrowly scoped path;
 - an explicit warning not to restart Docker merely to recover an application deployment.
 
-- [ ] **Step 2: Run static and unit verification**
+- [x] **Step 2: Run static and unit verification**
 
 Run:
 

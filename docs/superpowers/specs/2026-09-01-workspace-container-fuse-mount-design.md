@@ -4,11 +4,11 @@
 
 **复审修订：** 2026-09-06
 
-**状态：** 原单 profile FUSE 控制面、恢复/销毁、观测和部署资源已落地，三个 profile 均已独立通过 mount/durable-flush gate；2026-09-06 确认的通用镜像、单后端 preset、sync/FUSE 同部署与 ephemeral lifecycle 修订待实现，生产大文件/小文件规模测试、专用 LSM 和完整故障矩阵仍由发布门禁控制
+**状态：** 通用 profile bundle、单后端 preset、sync/FUSE 同部署、双 Pool、共享租约、persistent/ephemeral crash-safe finalization、release drain 与 Helm/Compose 配置均已实现；真实 profile 是否可发布仍由各自 evidence、架构镜像、专用 LSM、大/小文件规模测试和完整故障矩阵独立控制
 
 **目标分支：** `feat/workspace-fuse-mount`
 
-**配套部署手册：** [Workspace FUSE 部署与运维手册](../../deployment/workspace-fuse.md)。该手册是 Helm/Compose、Secret、RBAC/NetworkPolicy、preflight、MinIO/华为 OBS 验证、灰度及回滚的可执行入口；release gate 与真实环境验收未通过前，FUSE profile 不可直接用于生产。
+**配套部署手册：** [Workspace 存储部署与运维手册](../../deployment/workspace-fuse.md)。该手册是 Helm/Compose、Secret、RBAC/NetworkPolicy、preflight、MinIO/华为 OBS 验证、灰度及回滚的可执行入口；release gate 与真实环境验收未通过前，FUSE profile 不可直接用于生产。
 
 ## 1. 决策摘要
 

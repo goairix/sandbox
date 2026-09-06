@@ -7,10 +7,10 @@
 - **统一多语言运行时** — 单一容器同时支持 Python、Node.js/TypeScript、Bash，执行时指定语言
 - **双运行时后端** — Docker（通过 Gateway Sidecar 实现网络过滤）和 Kubernetes（通过 NetworkPolicy 实现网络隔离）
 - **RESTful API** — 一次性执行、持久化沙箱、同步/流式（SSE）输出
-- **预热容器池** — 预热容器池实现低延迟分配，启动时自动清理上次遗留的孤儿容器
+- **双预热池** — sandbox-api 同时维护普通 sync Pool 与按需绑定 prefix 的 FUSE Pool
 - **安全隔离** — 资源限制（CPU、内存、PID、磁盘）、只读根文件系统、Seccomp 安全配置、三种网络隔离模式、API Key 认证、速率限制
 - **文件操作** — 沙箱内文件的上传、下载、列表查看、按行读取/编辑、Glob 模式匹配
-- **工作空间** — 基于 ScopedFS 的持久化工作空间，支持挂载/卸载/增量同步，路径限定防止目录逃逸
+- **工作空间** — 同一 release 可提供默认 sync 与显式 FUSE；MinIO、华为公有云 OBS、2023 私有云 OBS 使用固定 preset 和共享 runtime 镜像
 - **会话持久化** — Persistent 模式沙箱元数据存储到 Redis，API 重启后自动恢复
 - **文件存储** — 可插拔后端：Local、S3、COS、OBS、OSS、MinIO
 - **Helm Chart** — 生产级 Kubernetes 部署，支持 HPA 自动伸缩
@@ -22,7 +22,7 @@
 ```bash
 cd docker
 cp .env.example .env   # 编辑 .env 配置 API Key 等参数
-docker-compose up -d
+docker compose --env-file .env -f docker-compose.yml up -d --build
 ```
 
 服务启动后，API 默认监听 `http://localhost:8080`。
@@ -91,24 +91,17 @@ curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
   -H "Content-Type: application/json" \
   -d '{"enabled":false}'
 
-# 模式二：开放 — 允许所有出站流量
-curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled":true}'
-
-# 模式三：白名单 — 仅允许访问指定目标（IP、CIDR 或域名）
-curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled":true,"whitelist":["api.openai.com","8.8.8.8"]}'
-
-# 模式四：屏蔽内网 — 允许所有外网访问，默认屏蔽 RFC1918 私有地址段
-# whitelist 为内网白名单（可选），列表中的内网地址仍可访问
+# 模式二：开放公网、禁止内网（推荐）— 内网服务必须另开白名单
 curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"enabled":true,"block_private":true}'
+
+# 模式三：显式白名单 — 允许指定的公网或内网目标
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"block_private":true,"whitelist":["api.openai.com","8.8.8.8"]}'
 
 # 屏蔽内网 + 允许特定内网地址（如内部 API 服务）
 curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
@@ -140,12 +133,20 @@ curl -X POST http://localhost:8080/api/v1/sandboxes \
 
 **创建带工作空间的沙箱：**
 
+部署、Secret、Pool、后端切换和发布门禁见 [Workspace 存储部署与运维手册](docs/deployment/workspace-fuse.md)。
+
 ```bash
 # 创建沙箱并挂载工作空间（自动将存储后端的文件同步到容器 /workspace）
 curl -X POST http://localhost:8080/api/v1/sandboxes \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"mode":"persistent","workspace_path":"user123/project-a"}'
+
+# 显式使用 FUSE；后端仍由运维 preset 固定，调用方只能选择 mount mode 和 prefix
+curl -X POST http://localhost:8080/api/v1/sandboxes \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"persistent","workspace_path":"user123/project-fuse","workspace_mount_mode":"fuse"}'
 
 # 也可以创建沙箱后再动态挂载
 curl -X POST http://localhost:8080/api/v1/sandboxes/<id>/workspace/mount \
