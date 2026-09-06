@@ -39,7 +39,41 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 	}
 }
 
-func TestCompiledCatalogRecordsBlockedOBSProfilesWithoutMakingThemSelectable(t *testing.T) {
+func TestCompiledHuaweiOBSPrivateProfileHasExactVerifiedMountContract(t *testing.T) {
+	profile, ok := LookupCompiledProfile("obs", "huawei-obs-private-2023-v1")
+	require.True(t, ok)
+	assert.Equal(t, MountParametersVerified, profile.Descriptor.MountParameters)
+	assert.Equal(t, DurableFlushVerified, profile.Descriptor.DurableFlush)
+	assert.True(t, profile.Descriptor.TLSRequired)
+	assert.Equal(t, "url", profile.Descriptor.EndpointOption)
+	assert.Equal(t, "endpoint", profile.Descriptor.RegionOption)
+	assert.Equal(t, "virtual-host", profile.Descriptor.AddressingStyle)
+	assert.Equal(t, "sigv2", profile.Descriptor.SignatureVersion)
+
+	options, err := profile.Options(fuseprotocol.BootstrapConfig{
+		Provider: "obs", Endpoint: "https://obs.cn-southwest-268.shuanghuayun.com", Region: "cn-southwest-268",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"-o", "url=https://obs.cn-southwest-268.shuanghuayun.com",
+		"-o", "endpoint=cn-southwest-268",
+		"-o", "sigv2",
+		"-o", "compat_dir",
+	}, options)
+	require.NotNil(t, profile.Flush)
+	assert.Equal(t, []string{"/bin/sync", "-f", "--", "/workspace"}, profile.Flush(fuseprotocol.BootstrapConfig{MountPath: "/workspace"}))
+
+	_, err = profile.Options(fuseprotocol.BootstrapConfig{Provider: "obs", Endpoint: "http://obs.example.com", Region: "cn-southwest-268"})
+	require.ErrorContains(t, err, "TLS")
+	_, err = profile.Options(fuseprotocol.BootstrapConfig{Provider: "minio", Endpoint: "https://obs.example.com", Region: "cn-southwest-268"})
+	require.ErrorContains(t, err, "provider mismatch")
+	for _, region := range []string{"", "CN Southwest 268", "../cn-southwest-268", "cn_southwest_268"} {
+		_, err = profile.Options(fuseprotocol.BootstrapConfig{Provider: "obs", Endpoint: "https://obs.example.com", Region: region})
+		require.ErrorContains(t, err, "canonical")
+	}
+}
+
+func TestCompiledCatalogKeepsPublicOBSBlockedAndPrivateOBSSelectable(t *testing.T) {
 	public, ok := InspectCompiledProfile("huawei-obs-public-v1")
 	require.True(t, ok)
 	assert.Equal(t, MountParametersCandidate, public.Descriptor.MountParameters)
@@ -50,9 +84,11 @@ func TestCompiledCatalogRecordsBlockedOBSProfilesWithoutMakingThemSelectable(t *
 
 	private, ok := InspectCompiledProfile("huawei-obs-private-2023-v1")
 	require.True(t, ok)
-	assert.Equal(t, MountParametersUnverified, private.Descriptor.MountParameters)
-	assert.Equal(t, "unverified", private.Descriptor.EndpointOption)
-	assert.Nil(t, private.Options)
+	assert.Equal(t, MountParametersVerified, private.Descriptor.MountParameters)
+	assert.Equal(t, DurableFlushVerified, private.Descriptor.DurableFlush)
+	assert.NotNil(t, private.Options)
+	_, ok = LookupCompiledProfile("obs", private.Descriptor.ID)
+	assert.True(t, ok, "verified private profile must be selectable")
 
 	_, ok = LookupCompiledProfile("obs", public.Descriptor.ID)
 	assert.False(t, ok, "candidate profiles must not be selectable")

@@ -1376,6 +1376,14 @@ func TestSessionStoreV2ListIgnoresWorkspaceStateNamespaces(t *testing.T) {
 	assert.Equal(t, "session-a", loaded.ID)
 }
 
+func TestSessionStoreLoadMissingReturnsSandboxNotFound(t *testing.T) {
+	store := newAtomicMemoryStore()
+	sessions := NewSessionStore(store, time.Minute)
+
+	_, err := sessions.Load(context.Background(), "missing")
+	require.ErrorIs(t, err, ErrSandboxNotFound)
+}
+
 func TestSessionStoreLoadMigratesExactLegacySession(t *testing.T) {
 	store := newAtomicMemoryStore()
 	sessions := NewSessionStore(store, time.Minute)

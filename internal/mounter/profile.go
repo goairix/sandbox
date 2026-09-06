@@ -85,10 +85,12 @@ var compiledProfileCatalog = map[string]Profile{
 		ID: "huawei-obs-private-2023-v1", Provider: "obs",
 		Descriptor: ProfileDescriptor{
 			ID: "huawei-obs-private-2023-v1", Provider: "obs",
-			MountParameters: MountParametersUnverified, DurableFlush: DurableFlushPendingSpike,
-			TLSRequired: true, EndpointOption: "unverified", RegionOption: "unverified",
-			AddressingStyle: "unverified", SignatureVersion: "unverified",
+			MountParameters: MountParametersVerified, DurableFlush: DurableFlushVerified,
+			TLSRequired: true, EndpointOption: "url", RegionOption: "endpoint",
+			AddressingStyle: "virtual-host", SignatureVersion: "sigv2",
 		},
+		Options: huaweiPrivate2023Options,
+		Flush:   syncFilesystem,
 	},
 }
 
@@ -120,6 +122,19 @@ func huaweiPublicCandidateOptions(config fuseprotocol.BootstrapConfig) ([]string
 		return nil, fmt.Errorf("Huawei OBS public candidate requires a region endpoint value")
 	}
 	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "sigv2"}, nil
+}
+
+func huaweiPrivate2023Options(config fuseprotocol.BootstrapConfig) ([]string, error) {
+	if err := requireHTTPS(config.Endpoint); err != nil {
+		return nil, err
+	}
+	if config.Provider != "" && config.Provider != "obs" {
+		return nil, fmt.Errorf("Huawei OBS private profile provider mismatch")
+	}
+	if !canonicalRegion.MatchString(config.Region) {
+		return nil, fmt.Errorf("Huawei OBS private profile requires a canonical region endpoint value")
+	}
+	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "sigv2", "-o", "compat_dir"}, nil
 }
 
 func requireHTTPS(raw string) error {

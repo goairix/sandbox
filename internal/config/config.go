@@ -496,7 +496,8 @@ func (c *Config) validateFUSE() error {
 	if provider.Profile == "" {
 		return fmt.Errorf("config: %s.profile must not be empty", providerPath)
 	}
-	if profile, ok := mounter.InspectCompiledProfile(provider.Profile); ok && profile.Provider == filesystem.Provider && profile.Descriptor.RegionOption == "endpoint" && !canonicalFUSERegion.MatchString(filesystem.Region) {
+	profile, profileOK := mounter.InspectCompiledProfile(provider.Profile)
+	if profileOK && profile.Provider == filesystem.Provider && profile.Descriptor.RegionOption == "endpoint" && !canonicalFUSERegion.MatchString(filesystem.Region) {
 		return fmt.Errorf("config: storage.filesystem.region must be a canonical region for FUSE profile %q", provider.Profile)
 	}
 	if provider.StorageIdentity == "" {
@@ -592,6 +593,23 @@ func (c *Config) validateFUSE() error {
 		}
 		if strings.Contains(fqdn, "*") {
 			return fmt.Errorf("config: %s.system_egress_fqdns must not contain wildcard names, got %q", providerPath, fqdn)
+		}
+	}
+	if provider.SystemEgressMode == "cilium-fqdn" && profileOK && profile.Provider == filesystem.Provider && profile.Descriptor.AddressingStyle == "virtual-host" {
+		endpoint, err := url.Parse(filesystem.Endpoint)
+		if err != nil || endpoint.Hostname() == "" {
+			return fmt.Errorf("config: storage.filesystem.endpoint cannot derive virtual-host bucket FQDN")
+		}
+		requiredFQDN := filesystem.Bucket + "." + endpoint.Hostname()
+		found := false
+		for _, fqdn := range provider.SystemEgressFQDNs {
+			if fqdn == requiredFQDN {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("config: %s.system_egress_fqdns must include exact virtual-host bucket FQDN %q for profile %q", providerPath, requiredFQDN, provider.Profile)
 		}
 	}
 

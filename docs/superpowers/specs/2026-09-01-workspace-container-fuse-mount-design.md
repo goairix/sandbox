@@ -147,9 +147,11 @@ GOOS=linux GOARCH=amd64 go build \
 |---|---|---|---|
 | `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check，部署仍须满足 LSM、TLS、digest 和 fault matrix |
 | `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 仅为公有云文档候选参数，仍不能发布 |
-| `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 2023 私有云必须实测，仍不能发布 |
+| `huawei-obs-private-2023-v1` | `verified` | `verified` | 2023 私有云目标 endpoint provider spike 已通过；部署仍须使用专用 digest 并完成 runtime 验收 |
 
-公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。真实基础镜像 digest、s3fs artifact URL/hash、镜像 build/scan、SBOM 和 attestation 由 CI 与 Task 18 产出；在这些证据完成并显式提升状态前，文档示例不代表已可启用。本地静态 contract 与 Compose config 校验不能作为镜像构建或生产发布证据。
+公有云和 2023 私有云始终使用不同 profile、镜像 digest 与验证报告。公有云候选参数也不得推导为私有云结论。两个 OBS profile 都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。2026-09-06 已在目标私有云普通对象桶完成上游 s3fs 1.95 provider spike：启用完整 TLS/SNI 校验，使用 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，完成 UID/GID 1000 创建、追加、截断、目录与重命名、25 MiB multipart、`sync -f`、独立 S3v2 API SHA-256 读回、普通卸载及 Pod 重建后重挂载读回。该证据只提升 `huawei-obs-private-2023-v1`，不提升公有云 profile；生产仍须固定专用镜像 digest、完成两套 runtime/fault matrix、LSM、签名、扫描、SBOM 和 attestation。
+
+同日 Kubernetes API lifecycle matrix 已在 `ds-ai-research/sandbox-fuse` 通过：空壳先启动、仅在 Acquire 确定 prefix 后挂载、Pool hit 保持 Pod UID、single-use 销毁后自动补池，并覆盖三语言 exec、SSE、文件/分片/skills、路径与网络拒绝、flush、独立对象存储读回和 404 映射。该结果完成 Kubernetes × 2023 私有云 OBS 的功能基线，不替代 Docker runtime、fault matrix、专用 LSM 或华为公有云验证。
 
 配置仍保留默认关闭的 `workspace.allow_unverified_durable_flush`，只用于历史/候选 MinIO profile 的受限本地 Docker 试验；当前已验证的 MinIO profile 不需要该开关。它只在 Docker runtime、MinIO、私网或回环 literal IPv4 endpoint、唯一精确 `/32` system egress CIDR、唯一 endpoint 端口和 mount-verified compiled profile 同时满足时生效，并输出显眼警告。它不适用于 Kubernetes、OBS、公网 endpoint 或宽网段白名单，也不改变 `CheckProductionProfile`、镜像 `release-check` 或生产证据要求。
 
@@ -383,7 +385,7 @@ system egress 的实现按集群能力固定：
 - MinIO/OBS 必须使用公共 nameserver 可解析的稳定专用 endpoint；私有云 FQDN 无法公共解析时，可由运维使用 Pod `hostAliases`/等价 CNI 机制把该 FQDN 静态映射到平台批准的稳定 IP，且证书必须匹配原 FQDN。只有证书包含 IP SAN 时才允许直接配置 IP endpoint；`cluster.local` Service 不属于一期支持形式。
 - DNS egress 只允许配置的公共 nameserver。Cilium 可按 endpoint FQDN 放行；标准 NetworkPolicy 不支持稳定 FQDN 策略，必须使用运维配置的稳定 CIDR 或显式 endpoint IP，不能把一次 DNS 解析结果当作长期规则。一期 `ProxyURL` 必须为空，egress proxy 仅作为后续安全增强方向。
 - 用户网络启用时，独立 user NetworkPolicy 只向 exact Pod `DNSConfig` 中经校验的公共 nameserver 主机地址（IPv4 `/32`、IPv6 `/128`）额外开放 TCP/UDP 53；禁用时不加入用户 DNS rule。用户域名白名单由控制面在每次更新时解析并审批对应 CIDR，不生成 user `toFQDNs`，避免 DNS 重绑定绕过私网审批；解析结果变化时必须重新执行网络更新。
-- Cilium 下的 FUSE `block_private` 还必须使用绑定 exact instance 与 Pod UID 的独立 user-deny CiliumNetworkPolicy，不能依赖可能被 `world` identity 绕过的标准 NetworkPolicy `Except`。先应用 deny、再应用 allow；移除时先收紧 allow、再删除 deny。RFC1918/ULA deny 只对 system policy 中持久保存的已审批 endpoint CIDR及用户显式私网白名单做 exception；FQDN mode 的批准 CIDR仅用于 deny exception，不转换为额外 system CIDR allow。元数据、link-local、loopback、multicast 与 unspecified 永久拒绝。
+- Cilium 下的 FUSE `block_private` 还必须使用绑定 exact instance 与 Pod UID 的独立 user-deny CiliumNetworkPolicy，不能依赖可能被 `world` identity 绕过的标准 NetworkPolicy `Except`。先应用 deny、再应用 allow；移除时先收紧 allow、再删除 deny。RFC1918/ULA deny 只对 system policy 中持久保存的已审批 endpoint CIDR及用户显式私网白名单做 exception；FQDN mode 的批准 CIDR仅用于 deny exception，不转换为额外 system CIDR allow。元数据、link-local、loopback、multicast 与 unspecified 永久拒绝。使用 virtual-host addressing 时，system FQDN 白名单必须同时精确包含 endpoint 与 `<bucket>.<endpoint>`，配置校验拒绝缺项且仍禁止 wildcard。
 - runtime 对批准列表先排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 是可包含额外批准项的 canonical set，但必须覆盖当前 endpoint 的有效端口及目标地址/FQDN。Cilium FQDN 集合中的每个元素必须是 canonical FQDN，不接受 IP 或通配符；输入重复和乱序只做集合归一化，不能扩大 system egress。
 - endpoint 解析和连通性必须在挂载前检查。仅加入网络白名单不能让公共 nameserver 解析 `cluster.local`。
 - runtime 为每个空壳生成不可变的 instance selector，先创建对应 system egress policy，再创建 Pod；取得 Pod UID 后把 system policy 绑定到该不可变 UID，用户 policy 同样绑定 UID，后续更新和删除必须同时匹配 instance、role 与 UID。Acquire 时保留这条 policy，并在开放 Exec 前另外应用用户请求对应的网络策略。多个 NetworkPolicy 的 allow 语义是并集，用户策略不能删除 system egress，也不能额外获得未批准的内网目的地。同名 Pod replacement 不是旧 UID 的退出证明，也不能授权旧清理流程删除新 UID 的策略。

@@ -4,11 +4,11 @@
 
 **适用范围：** Kubernetes sidecar、Docker 特殊容器、MinIO、华为 OBS 普通对象桶
 
-**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。MinIO 的 mount parameters 与 `/bin/sync -f -- /workspace` durable-flush profile 已提升为 `verified`，并完成 Docker 本地环境与 ARM64 Kubernetes 正式 MinIO endpoint 的真实生命周期验收；生产仍必须补齐专用 LSM、镜像签名/扫描和 fault matrix。华为公有云 OBS 与 2023 私有云 OBS profile 继续 fail closed，等待各自独立 provider spike。现有 `workspace.mode=sync` 部署不受影响。
+**文档状态：** 控制面装配、启动恢复、FUSE Pool、Kubernetes sidecar、Docker 特殊容器、Helm/Compose 配置和 preflight 入口均已实现。MinIO 的 mount parameters 与 `/bin/sync -f -- /workspace` durable-flush profile 已提升为 `verified`，并完成 Docker 本地环境与 ARM64 Kubernetes 正式 MinIO endpoint 的真实生命周期验收。2023 私有云 OBS 的目标 endpoint provider spike 也已完成并提升为独立 verified profile；华为公有云 OBS 仍保持 fail closed，不能继承私有云结论。生产仍必须补齐专用 LSM、镜像签名/扫描和 fault matrix。现有 `workspace.mode=sync` 部署不受影响。
 
 ## 0. 当前部署入口
 
-- Helm：`deploy/helm/sandbox`。`workspace.mode=sync` 保持默认；FUSE 渲染示例是 `testdata/values-fuse-minio.yaml`，其中 digest、IP 和 Secret 名仅为测试占位，部署前必须替换为 Task 18 的实测产物。
+- Helm：`deploy/helm/sandbox`。`workspace.mode=sync` 保持默认；MinIO 渲染示例是 `testdata/values-fuse-minio.yaml`，其中 digest、IP 和 Secret 名仅为测试占位。已验证的 2023 私有云 OBS release overlay 是 `testdata/values-fuse-obs-private.yaml`，不包含 AK/SK，固定当前 profile、镜像 digest 与双精确 FQDN；Secret 必须在部署前由外部系统创建。
 - Kubernetes：sandbox-api 位于 control namespace，动态 sandbox Pod 位于 runtime namespace；Chart 分别创建 runtime Role/RoleBinding 和 runtime default-deny。运行时 Secret 必须预先存在于 runtime namespace，控制面读取的同内容 Secret则位于 control namespace，因为 Kubernetes 不允许跨 namespace 投射 Secret。
 - API key 推荐预先创建为独立 Secret（固定键名 `api-key`），并设置 `config.security.apiKeySecretName`；不要把 key 写入 values 或每次 `helm upgrade --set`。Chart 不接管该外部 Secret，普通升级不会删除或清空 API key。
 - Docker Compose：只启动控制面、Redis 和镜像构建辅助服务。特殊 FUSE 容器由 sandbox-api 动态创建；Compose 不创建长期 mounter 容器，也不挂载宿主机业务 `/workspace`。
@@ -123,9 +123,9 @@ manifest 是严格审计证据，不是运行时配置扩展点。它记录 prof
 |---|---|---|---|
 | `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check；仍须满足环境发布门禁 |
 | `huawei-obs-public-v1` | `candidate` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
-| `huawei-obs-private-2023-v1` | `unverified` | `blocked-pending-flush-spike` | 禁止启用 FUSE |
+| `huawei-obs-private-2023-v1` | `verified` | `verified` | 可使用专用 digest 启用；不得复用公有云或 MinIO 镜像 |
 
-MinIO 已使用固定 `/bin/sync -f -- /workspace` 完成 durable-flush 提升；这只放开 profile 资格，不豁免最终镜像 digest、TLS、LSM、扫描和 fault matrix。公有 OBS 仍只是从官方资料得到的候选参数，2023 私有云不能继承公有云结论；两者继续 fail closed。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
+MinIO 与 2023 私有云 OBS 均已使用固定 `/bin/sync -f -- /workspace` 完成 durable-flush 提升；这只放开各自 profile 资格，不豁免最终镜像 digest、TLS、LSM、扫描和 fault matrix。公有 OBS 仍只是从官方资料得到的候选参数，不能继承私有云结论。不得使用 `no_check_certificate` 或 `ssl_verify_hostname=0` 绕过任何门禁。
 
 静态 contract test：
 
@@ -565,7 +565,7 @@ prepared health 必须报告 `cache_bytes=0`、`cache_limit_bytes` 与 PoolKey �
 
 目标最低版本包含 Kubernetes 1.29，因此 runtime 不使用 1.30 才稳定可用的结构化 `securityContext.appArmorProfile` 字段；mounter 的已校验、非 `unconfined` profile 通过兼容的 container AppArmor annotation 注入。升级最低版本前不得同时渲染两种形式，避免不同 API Server/准入插件产生不一致结果。
 
-Pod 渲染前会把批准列表排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 集合可以包含额外的运维批准项，但必须覆盖当前 endpoint。`cilium-fqdn` 的每个元素都必须是 canonical FQDN，不接受 IP literal 或通配符；重复、乱序输入按集合归一化，不能扩大 system egress。
+Pod 渲染前会把批准列表排序去重。DNS 端口集合必须精确为 `{53}`；对象存储端口、FQDN 与 CIDR 集合可以包含额外的运维批准项，但必须覆盖当前 endpoint。`cilium-fqdn` 的每个元素都必须是 canonical FQDN，不接受 IP literal 或通配符；重复、乱序输入按集合归一化，不能扩大 system egress。对 `virtual-host` addressing profile，白名单必须同时显式包含基础 endpoint 与 `<bucket>.<endpoint>`；配置校验会拒绝遗漏 bucket FQDN 的部署，不能用 `*.<endpoint>` 代替。
 
 空壳创建时只携带固定 provider 配置和 PoolKey，初始 label state 必须是 `preparing`，不能在 health 验证前标成 `prepared`。Pool availability 不能等待 Pod Ready：私有 `PreparedSandboxHealth` 验证 sidecar locked、sandbox 主容器 running、无 s3fs 和无 mount/generation；Pool/manager 另外从 Redis owner/session 反查确认该 runtime UID 未绑定 workspace，且公共 Exec/file gate 关闭。prepared 空壳不创建用户 session，不出现在公共 sandbox list/get 响应中，runtime ID/UID 也不能返回给调用方；公共 Exec/file API 必须校验已提交的用户 session 和 gate，不能仅凭 runtime ID 访问。全部通过后 Kubernetes 才以 resourceVersion 冲突保护把 state patch 为 `prepared` 并入队；Acquire 后 runtime 才根据请求生成唯一 prefix、租约标签和 workspace identity。对象 key 根路径严格为：
 
@@ -1023,13 +1023,27 @@ MinIO durable flush 固定为 `/bin/sync -f -- /workspace`，在停止新用户�
 
 这项 profile 结论不替代生产部署门禁：仍须使用最终 digest、专用 AppArmor/SELinux profile、正式 endpoint TLS、镜像签名/扫描和故障矩阵。开发集群的 `allowMissingLSMForKind: true` 只能作为明确的测试例外。
 
-### 8.2 华为 OBS 公有云候选与 2023 私有云未验证基线
+### 8.2 华为 OBS 公有云候选与 2023 私有云验证基线
 
 [华为云公有云 CCE OBS 挂载参数文档](https://support.huaweicloud.com/intl/zh-cn/usermanual-cce/cce_10_0631.html)与本项目使用的[双华云私有云 CCE OBS 挂载参数文档](https://docs.shuanghuayun.com/zh-cn/usermanual/cce/cce_10_0631.html)均明确规定：普通对象桶使用 s3fs，并行文件系统使用 obsfs。私有云文档还显示普通对象桶自动使用 `sigv2`，s3fs 1.92 会自动添加 `compat_dir`。一期只接入普通对象桶，因此 OBS profile 的客户端固定为 s3fs，不使用 obsfs。
 
 该文档描述的是 Everest 集成路径，不等于任意自建 sidecar/Docker 镜像已兼容。并且目标私有云部署于 2023 年，在线文档的当前内容不能证明现网组件版本。上线前须向平台侧或厂商确认并留档实际 OBS 服务版本/补丁、CCE Everest 插件版本及集成路径客户端版本；无法取得服务端版本时，至少保存 endpoint、桶类型、Everest 版本和全套兼容性测试证据。
 
-当前 `huawei-obs-public-v1` 只把官方公有云资料中的 `url`、`endpoint` 与 SigV2 形状记录为 `candidate`，addressing style 尚未验证；`huawei-obs-private-2023-v1` 的 mount parameters 为 `unverified`。两者 durable flush 都是 `blocked-pending-flush-spike`，不能通过配置或 release gate。
+当前 `huawei-obs-public-v1` 只把官方公有云资料中的 `url`、`endpoint` 与 SigV2 形状记录为 `candidate`，addressing style 尚未验证，durable flush 仍是 `blocked-pending-flush-spike`，不能通过配置或 release gate。`huawei-obs-private-2023-v1` 已按目标 2023 私有云 endpoint 的实测结果提升为 `verified`，不代表公有云兼容性结论。
+
+2026-09-06 在 `ds-ai-research` ARM64 Linux 集群、`sandbox-fuse` namespace 对目标普通对象桶完成了独立 provider spike。使用上游 s3fs 1.95（artifact SHA-256 `fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695`），完整启用 TLS 证书、SNI 与主机名校验；固定 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，未使用 `no_check_certificate`、`ssl_verify_hostname=0` 或 path-style。实测覆盖 UID/GID 1000 创建、读取、追加、截断、目录、rename，25 MiB multipart 写入后执行 `/bin/sync -f -- /workspace`，再通过独立 S3v2 客户端按对象读取并校验 SHA-256；Pod 重建后重新挂载仍能读回一致内容，普通 `fusermount3 -u` 成功，所有测试对象按精确 prefix 清理。Cilium 验收同时确认 s3fs 实际访问 `<bucket>.<endpoint>`：部署必须精确放行基础 endpoint 与 bucket FQDN 两项，仍禁止 wildcard 和其他内网访问。
+
+同日使用 Helm revision 6 完成 Kubernetes × 2023 私有云 OBS 的完整 API 驱动验收；随后增加 lowercase canonical bucket FQDN 配置门禁，使用最终 API digest 升级为 revision 7，并再次完成 create、FUSE 写入、durable flush、独立 OBS 读回、single-use 销毁和精确 prefix 清理。revision 7 保持运行供检查。最终发布镜像固定为：
+
+- sandbox-api：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api@sha256:5b71e6a2c8ce2f2c79b227a73e8797236ceef6ea827716a4aabd297dcfa16177`；
+- Kubernetes mounter：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-private@sha256:c3a87f6ce96c00d6cf8225ef74a0586880ee02638207c3f483066f23a5886816`；
+- Docker 特殊容器：`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-private@sha256:ba10e2829786deb927a41c3a28689d0ef4a12f16f42fe3c731969f58c4a0bf1f`。
+
+验收确认空壳 Pod 先启动且 `/workspace` 尚未挂载，请求只给出 `workspace_path/prefix` 后命中同一 Pod UID 并延后挂载；销毁后该 Pod single-use 删除，Pool 自动补回 `min_size=1`。HTTP 矩阵覆盖 health/认证、create/get/delete、TTL、网络更新与 network-required 拒绝、Bash/Python/Node、同步与 SSE exec、直接文件 upload/read/list/recursive/glob/read-lines/edit/edit-lines/download、分片 init/chunk/status/complete、skills list/get/file、路径逃逸拒绝、FUSE mount/unmount immutable 409、双向 workspace sync、durable-flush info、独立 S3v2 读回、缺失 sandbox 404，以及 one-shot 同步/SSE。测试 prefix 均按精确名称删除；故障诊断留下的旧 runtime UID、Cilium policy、owner、lease 和 cleanup record 也在逐项确认 runtime 不存在后清理，generation fencing counter 按设计保留。
+
+预热空壳的 Pod `READY` 显示 `1/2` 是预期状态：sandbox 主容器可用，但 `workspace-mounter` 在未收到 Acquire 授权、尚未挂载时 readiness 必须为 false，避免把空壳误判为已挂载 workspace；这不影响 sandbox-api 按私有 prepared health 将其纳入 Pool。
+
+诊断过程中曾复现一次 `EBUSY`：临时 Pod 的 PID 1 继承了 `/workspace` 作为 cwd。将 PID 1 `workingDir` 固定为 `/` 后，普通卸载立即成功；正式 mounter supervisor 已遵守相同约束。该现象不是 OBS 兼容性问题，也不能用 lazy/force unmount 掩盖。
 
 OBS profile 必须由目标区域、目标普通对象桶和最终镜像完成 provider spike 后冻结。至少验证：
 

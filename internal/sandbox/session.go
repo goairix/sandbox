@@ -70,11 +70,11 @@ func (s *SessionStore) Load(ctx context.Context, id string) (*Sandbox, error) {
 
 func (s *SessionStore) loadAndMigrateLegacy(ctx context.Context, id string) (*Sandbox, error) {
 	if id == "" {
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	atomicStore, ok := s.store.(state.AtomicStore)
 	if !ok {
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	legacyKey := legacySandboxSessionKeyPrefix + id
 	raw, err := s.store.Get(ctx, legacyKey)
@@ -82,7 +82,7 @@ func (s *SessionStore) loadAndMigrateLegacy(ctx context.Context, id string) (*Sa
 		return nil, fmt.Errorf("get legacy sandbox: %w", err)
 	}
 	if raw == nil {
-		return nil, fmt.Errorf("sandbox not found: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	var sb Sandbox
 	if err := json.Unmarshal(raw, &sb); err != nil || sb.ID != id || sb.RuntimeID == "" || sb.CreatedAt.IsZero() {

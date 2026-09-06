@@ -135,7 +135,7 @@ profile_dir="$repo_root/docker/images/workspace-mounter/profiles"
 for tuple in \
   'minio-sigv4-path-style-v1 verified' \
   'huawei-obs-public-v1 blocked-pending-flush-spike' \
-  'huawei-obs-private-2023-v1 blocked-pending-flush-spike'; do
+  'huawei-obs-private-2023-v1 verified'; do
   set -- $tuple
   file="$profile_dir/$1.json"
   test -f "$file" || fail "missing profile $file"

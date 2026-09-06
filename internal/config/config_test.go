@@ -686,6 +686,50 @@ func TestFUSEConfigValidation(t *testing.T) {
 		want string
 	}{
 		{name: "release verified minio", edit: func(*config.Config) {}, want: ""},
+		{name: "release verified private obs", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
+			c.Storage.FileSystem.Endpoint = "https://obs.cn-southwest-268.shuanghuayun.com"
+			c.Storage.FileSystem.Region = "cn-southwest-268"
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
+				"obs": validFUSEProvider("obs.cn-southwest-268.shuanghuayun.com", "cilium-fqdn"),
+			}
+			p := c.Workspace.Providers["obs"]
+			p.Profile = "huawei-obs-private-2023-v1"
+			p.SystemEgressFQDNs = append(p.SystemEgressFQDNs, "sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com")
+			p.SystemEgressCIDRs = nil
+			p.EndpointHostIPs = nil
+			c.Workspace.Providers["obs"] = p
+		}, want: ""},
+		{name: "private obs missing virtual host bucket fqdn", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
+			c.Storage.FileSystem.Endpoint = "https://obs.cn-southwest-268.shuanghuayun.com"
+			c.Storage.FileSystem.Region = "cn-southwest-268"
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
+				"obs": validFUSEProvider("obs.cn-southwest-268.shuanghuayun.com", "cilium-fqdn"),
+			}
+			p := c.Workspace.Providers["obs"]
+			p.Profile = "huawei-obs-private-2023-v1"
+			p.SystemEgressCIDRs = nil
+			p.EndpointHostIPs = nil
+			c.Workspace.Providers["obs"] = p
+		}, want: "virtual-host bucket FQDN"},
+		{name: "private obs uppercase virtual host bucket fqdn", edit: func(c *config.Config) {
+			c.Storage.FileSystem.Provider = "obs"
+			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
+			c.Storage.FileSystem.Endpoint = "https://obs.cn-southwest-268.shuanghuayun.com"
+			c.Storage.FileSystem.Region = "cn-southwest-268"
+			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
+				"obs": validFUSEProvider("obs.cn-southwest-268.shuanghuayun.com", "cilium-fqdn"),
+			}
+			p := c.Workspace.Providers["obs"]
+			p.Profile = "huawei-obs-private-2023-v1"
+			p.SystemEgressFQDNs = append(p.SystemEgressFQDNs, "SANDBOX-FUSE-WORKSPACE.obs.cn-southwest-268.shuanghuayun.com")
+			p.SystemEgressCIDRs = nil
+			p.EndpointHostIPs = nil
+			c.Workspace.Providers["obs"] = p
+		}, want: "virtual-host bucket FQDN"},
 		{name: "valid obs cilium fqdn", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Endpoint = "https://obs.example.com"

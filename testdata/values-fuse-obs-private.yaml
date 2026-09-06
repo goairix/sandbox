@@ -1,0 +1,68 @@
+image:
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
+  tag: feat-workspace-fuse-obs-egress@sha256:5b71e6a2c8ce2f2c79b227a73e8797236ceef6ea827716a4aabd297dcfa16177
+
+autoscaling:
+  enabled: false
+
+redis:
+  enabled: true
+
+workspaceCredentials:
+  apiSecretName: sandbox-workspace-obs-private
+
+config:
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: sandbox-fuse
+  images:
+    sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
+    gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
+  storage:
+    filesystem:
+      provider: obs
+      bucket: sandbox-fuse-workspace
+      region: cn-southwest-268
+      endpoint: https://obs.cn-southwest-268.shuanghuayun.com
+      subPath: ""
+      useSSL: true
+  workspace:
+    mode: fuse
+    secretName: sandbox-workspace-obs-private
+    allowMissingLSMForKind: false
+    cacheSize: 512Mi
+    flushTimeoutSeconds: 60
+    unmountTimeoutSeconds: 30
+    fusePool:
+      minSize: 1
+      maxSize: 2
+      refillIntervalSeconds: 5
+      prepareTimeoutSeconds: 180
+    providers:
+      obs:
+        driver: s3fs
+        profile: huawei-obs-private-2023-v1
+        storageIdentity: formal-obs-private-2023-primary
+        mounterImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-private@sha256:c3a87f6ce96c00d6cf8225ef74a0586880ee02638207c3f483066f23a5886816
+        dockerImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-private@sha256:ba10e2829786deb927a41c3a28689d0ef4a12f16f42fe3c731969f58c4a0bf1f
+        caSecretKey: ""
+        credentialGeneration: formal-obs-private-20260906-v1
+        endpointHostIPs: []
+        lsmProfile: sandbox-fuse
+        systemEgressMode: cilium-fqdn
+        dnsCIDRs:
+          - 223.5.5.5/32
+          - 114.114.114.114/32
+        systemEgressFQDNs:
+          - obs.cn-southwest-268.shuanghuayun.com
+          - sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com
+        systemEgressCIDRs: []
+        endpointPorts:
+          - 443
+        proxyURL: ""
+  security:
+    apiKeySecretName: sandbox-fuse-api-key
+    seccompProfile: RuntimeDefault
+    networkEnabled: false
+    networkBlockPrivate: true
