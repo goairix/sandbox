@@ -402,13 +402,110 @@ func validFUSEProvider(endpointFQDN, egressMode string) config.WorkspaceFUSEProv
 	}
 }
 
+func validHybridConfig() *config.Config {
+	cfg := newValidFUSEConfig()
+	legacy := cfg.Workspace.Providers["minio"]
+	cfg.Workspace.Mode = ""
+	cfg.Workspace.Providers = nil
+	cfg.Workspace.DefaultMountMode = "sync"
+	cfg.Workspace.EnabledMountModes = []string{"sync", "fuse"}
+	cfg.Workspace.Backend = config.WorkspaceBackendConfig{
+		Preset: legacyPresetForTest("minio"), Driver: legacy.Driver, Profile: legacy.Profile,
+		StorageIdentity: legacy.StorageIdentity, MounterImage: legacy.MounterImage, DockerImage: legacy.DockerImage,
+		CASecretKey: legacy.CASecretKey, CredentialGeneration: legacy.CredentialGeneration,
+		EndpointHostIPs: legacy.EndpointHostIPs, LSMProfile: legacy.LSMProfile, SystemEgressMode: legacy.SystemEgressMode,
+		DNSCIDRs: legacy.DNSCIDRs, SystemEgressFQDNs: legacy.SystemEgressFQDNs,
+		SystemEgressCIDRs: legacy.SystemEgressCIDRs, EndpointPorts: legacy.EndpointPorts, ProxyURL: legacy.ProxyURL,
+	}
+	return cfg
+}
+
+func legacyPresetForTest(provider string) string {
+	if provider == "minio" {
+		return "minio"
+	}
+	return ""
+}
+
+func TestLoadDefaultsWorkspaceToSyncOnly(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	assert.Equal(t, "sync", cfg.Workspace.DefaultMountMode)
+	assert.Equal(t, []string{"sync"}, cfg.Workspace.EnabledMountModes)
+	assert.True(t, cfg.Workspace.MountModeEnabled("sync"))
+	assert.False(t, cfg.Workspace.MountModeEnabled("fuse"))
+}
+
+func TestValidateHybridWorkspaceBackendPreset(t *testing.T) {
+	cfg := validHybridConfig()
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "minio", cfg.Workspace.Backend.Preset)
+	assert.Equal(t, "minio-sigv4-path-style-v1", cfg.Workspace.Backend.Profile)
+	assert.True(t, cfg.Workspace.MountModeEnabled("sync"))
+	assert.True(t, cfg.Workspace.MountModeEnabled("fuse"))
+}
+
+func TestValidateRejectsPresetProviderOrProfileDrift(t *testing.T) {
+	for name, edit := range map[string]func(*config.Config){
+		"profile":  func(cfg *config.Config) { cfg.Workspace.Backend.Profile = "huawei-obs-public-v1" },
+		"provider": func(cfg *config.Config) { cfg.Storage.FileSystem.Provider = "obs" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validHybridConfig()
+			edit(cfg)
+			require.ErrorContains(t, cfg.Validate(), "preset mapping")
+		})
+	}
+}
+
+func TestValidateRejectsInvalidWorkspaceMountModeSelection(t *testing.T) {
+	for name, edit := range map[string]func(*config.Config){
+		"duplicate":           func(cfg *config.Config) { cfg.Workspace.EnabledMountModes = []string{"sync", "sync"} },
+		"unknown":             func(cfg *config.Config) { cfg.Workspace.EnabledMountModes = []string{"sync", "volume"} },
+		"default not enabled": func(cfg *config.Config) { cfg.Workspace.EnabledMountModes = []string{"fuse"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validHybridConfig()
+			edit(cfg)
+			require.Error(t, cfg.Validate())
+		})
+	}
+}
+
+func TestValidateRejectsNewWorkspaceSelectionMixedWithLegacyConfig(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Workspace.Mode = "fuse"
+	cfg.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
+		"minio": validFUSEProvider("minio.example.com", "cidr"),
+	}
+	require.ErrorContains(t, cfg.Validate(), "legacy")
+}
+
+func TestValidateRejectsMultipleLegacyWorkspaceBackends(t *testing.T) {
+	cfg := newValidFUSEConfig()
+	cfg.Workspace.Providers["obs"] = validFUSEProvider("obs.example.com", "cidr")
+	require.ErrorContains(t, cfg.Validate(), "one backend")
+}
+
+func TestLoadMapsLegacyFuseWithoutCreatingHybridMode(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "legacy-fuse.yaml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(validFUSEYAML), 0o600))
+	cfg, err := config.Load(cfgFile)
+	require.NoError(t, err)
+	assert.Equal(t, "fuse", cfg.Workspace.DefaultMountMode)
+	assert.Equal(t, []string{"fuse"}, cfg.Workspace.EnabledMountModes)
+	assert.Equal(t, "huawei-obs-public", cfg.Workspace.Backend.Preset)
+}
+
 func TestLoadFUSEDefaults(t *testing.T) {
 	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-key")
 
 	cfg, err := config.Load("")
 	require.NoError(t, err)
 
-	assert.Equal(t, "sync", cfg.Workspace.Mode)
+	assert.Equal(t, "sync", cfg.Workspace.DefaultMountMode)
+	assert.Equal(t, []string{"sync"}, cfg.Workspace.EnabledMountModes)
 	assert.False(t, cfg.Workspace.AllowUnverifiedDurableFlush)
 	assert.False(t, cfg.Workspace.AllowMissingLSMForKind)
 	assert.Equal(t, "", cfg.Workspace.SecretName)
@@ -635,7 +732,8 @@ func TestRepositoryConfigDefaultsToSync(t *testing.T) {
 
 	cfg, err := config.Load(filepath.Join("..", "..", "configs", "config.yaml"))
 	require.NoError(t, err)
-	assert.Equal(t, "sync", cfg.Workspace.Mode)
+	assert.Equal(t, "sync", cfg.Workspace.DefaultMountMode)
+	assert.Equal(t, []string{"sync"}, cfg.Workspace.EnabledMountModes)
 }
 
 func TestSyncModePreservesLegacyCompatibility(t *testing.T) {
@@ -658,8 +756,7 @@ func TestWorkspaceModeValidation(t *testing.T) {
 		mode string
 		want string
 	}{
-		{name: "empty", mode: "", want: "workspace.mode"},
-		{name: "unknown", mode: "sidecar", want: "workspace.mode"},
+		{name: "unknown", mode: "sidecar", want: "legacy workspace.mode"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -747,10 +844,10 @@ func TestFUSEConfigValidation(t *testing.T) {
 		}, want: ""},
 		{name: "unknown minio profile", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "unknown-v1" })
-		}, want: "unknown or does not match provider"},
+		}, want: "preset mapping"},
 		{name: "provider profile mismatch", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "huawei-obs-public-v1" })
-		}, want: "unknown or does not match provider"},
+		}, want: "preset mapping"},
 		{name: "valid with no custom CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
@@ -767,7 +864,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 			c.Workspace.AllowMissingLSMForKind = true
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
 		}, want: "only supported with Kubernetes"},
-		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "fuse supports only minio or obs"},
+		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "exactly one backend"},
 		{name: "minio TLS disabled", edit: func(c *config.Config) { c.Storage.FileSystem.UseSSL = false }, want: "TLS"},
 		{name: "obs TLS disabled", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
@@ -786,7 +883,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 			p.Profile, p.SystemEgressCIDRs, p.EndpointHostIPs = "huawei-obs-public-v1", nil, nil
 			c.Workspace.Providers["obs"] = p
 		}, want: "use_ssl"},
-		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "workspace.providers.minio"},
+		{name: "missing selected provider", edit: func(c *config.Config) { c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{} }, want: "exactly one backend"},
 		{name: "missing redis", edit: func(c *config.Config) { c.Storage.State.Redis.Addr = "" }, want: "storage.state.redis.addr"},
 		{name: "missing secret name", edit: func(c *config.Config) { c.Workspace.SecretName = "" }, want: "workspace.secret_name"},
 		{name: "relative docker workspace secret root", edit: func(c *config.Config) {

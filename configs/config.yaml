@@ -40,7 +40,7 @@ runtime:
     # Leave empty to use the default socket (/var/run/docker.sock on Linux).
     host: ""
     # Root-only staging directory visible at this identical absolute path to
-    # both sandbox-api and the Docker daemon when workspace.mode is "fuse".
+    # both sandbox-api and the Docker daemon when FUSE mount mode is enabled.
     workspace_secret_root: "/var/lib/sandbox/workspace-secrets"
 
   # Kubernetes-specific settings (used when type = "kubernetes")
@@ -115,9 +115,11 @@ storage:
 # Workspace — workspace sync strategy
 # -----------------------------------------------------------------------------
 workspace:
-  # Workspace implementation. Keep "sync" for the existing copy-in/copy-out
-  # behavior. "fuse" requires every fail-closed setting in the template below.
-  mode: "sync"
+  # Requests without workspace_mount_mode use this mode. It must also appear
+  # in enabled_mount_modes.
+  default_mount_mode: "sync"
+  # A release may serve sync and FUSE concurrently against one fixed backend.
+  enabled_mount_modes: ["sync"]
   # Local Docker + private/loopback MinIO validation only. Production must
   # leave this false until the selected profile has verified durable flush.
   allow_unverified_durable_flush: false
@@ -156,14 +158,14 @@ workspace:
     refill_interval_seconds: 10
     prepare_timeout_seconds: 120
 
-  # Provider profiles are deliberately not active by default. Copy only the
-  # selected storage.filesystem.provider entry, replace all operational
-  # placeholders, and keep both images pinned to immutable sha256 digests.
-  providers: {}
-  # providers:
-  #   minio:
+  # Exactly one release backend. Leave empty for the default local/sync setup.
+  # For remote storage, choose one fixed preset and keep both common runtime
+  # images pinned to immutable sha256 digests.
+  backend: {}
+  # backend:
+  #     preset: "minio" # minio, huawei-obs-public, huawei-obs-private
   #     driver: "s3fs"
-  #     profile: "approved-minio-profile"
+  #     profile: "minio-sigv4-path-style-v1"
   #     storage_identity: "stable-physical-storage-id"
   #     mounter_image: "registry.example.com/mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   #     docker_image: "registry.example.com/sandbox-fuse@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

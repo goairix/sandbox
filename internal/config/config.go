@@ -144,6 +144,39 @@ type WorkspaceFUSEProviderConfig struct {
 	ProxyURL             string   `mapstructure:"proxy_url"`
 }
 
+// WorkspaceBackendConfig is the single backend resolved for this release.
+// Preset fixes provider/profile semantics; the remaining fields are operator
+// inputs that cannot be selected or overridden by an API request.
+type WorkspaceBackendConfig struct {
+	Preset               string   `mapstructure:"preset"`
+	Driver               string   `mapstructure:"driver"`
+	Profile              string   `mapstructure:"profile"`
+	StorageIdentity      string   `mapstructure:"storage_identity"`
+	MounterImage         string   `mapstructure:"mounter_image"`
+	DockerImage          string   `mapstructure:"docker_image"`
+	CASecretKey          string   `mapstructure:"ca_secret_key"`
+	CredentialGeneration string   `mapstructure:"credential_generation"`
+	EndpointHostIPs      []string `mapstructure:"endpoint_host_ips"`
+	LSMProfile           string   `mapstructure:"lsm_profile"`
+	SystemEgressMode     string   `mapstructure:"system_egress_mode"`
+	DNSCIDRs             []string `mapstructure:"dns_cidrs"`
+	SystemEgressFQDNs    []string `mapstructure:"system_egress_fqdns"`
+	SystemEgressCIDRs    []string `mapstructure:"system_egress_cidrs"`
+	EndpointPorts        []int32  `mapstructure:"endpoint_ports"`
+	ProxyURL             string   `mapstructure:"proxy_url"`
+}
+
+type backendPreset struct {
+	Provider string
+	Profile  string
+}
+
+var backendPresets = map[string]backendPreset{
+	"minio":              {Provider: "minio", Profile: "minio-sigv4-path-style-v1"},
+	"huawei-obs-public":  {Provider: "obs", Profile: "huawei-obs-public-v1"},
+	"huawei-obs-private": {Provider: "obs", Profile: "huawei-obs-private-2023-v1"},
+}
+
 // WorkspaceFUSEResourceConfig holds mounter sidecar/container resource
 // requests and limits.
 type WorkspaceFUSEResourceConfig struct {
@@ -168,8 +201,13 @@ type WorkspaceConfig struct {
 	// AutoSyncIntervalSeconds is the interval between automatic sync-from-container
 	// cycles. Set to 0 to disable auto-sync. Recommended: 30 for long-running
 	// agent sessions.
-	AutoSyncIntervalSeconds int    `mapstructure:"auto_sync_interval_seconds"`
-	Mode                    string `mapstructure:"mode"`
+	AutoSyncIntervalSeconds int                    `mapstructure:"auto_sync_interval_seconds"`
+	DefaultMountMode        string                 `mapstructure:"default_mount_mode"`
+	EnabledMountModes       []string               `mapstructure:"enabled_mount_modes"`
+	Backend                 WorkspaceBackendConfig `mapstructure:"backend"`
+	// Mode and Providers are legacy compatibility inputs. New deployments must
+	// use DefaultMountMode, EnabledMountModes, and Backend exclusively.
+	Mode string `mapstructure:"mode"`
 	// AllowUnverifiedDurableFlush is a local Docker/MinIO functional-test gate.
 	// validateLocalDevelopmentFUSEProfile keeps it unavailable to production-shaped
 	// runtimes and it never changes the independent image release check.
@@ -191,6 +229,16 @@ type WorkspaceConfig struct {
 	MounterResources          WorkspaceFUSEResourceConfig            `mapstructure:"mounter_resources"`
 	FUSEPool                  WorkspaceFUSEPoolConfig                `mapstructure:"fuse_pool"`
 	Providers                 map[string]WorkspaceFUSEProviderConfig `mapstructure:"providers"`
+	legacySelectionNormalized bool
+}
+
+func (c WorkspaceConfig) MountModeEnabled(mode string) bool {
+	for _, enabled := range c.EnabledMountModes {
+		if enabled == mode {
+			return true
+		}
+	}
+	return false
 }
 
 // SecurityConfig holds sandbox security constraints.
@@ -288,6 +336,10 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for invalid or missing values.
 func (c *Config) Validate() error {
+	if err := c.normalizeWorkspaceSelection(); err != nil {
+		return err
+	}
+
 	// Security: api_key
 	if c.Security.APIKey == "" {
 		return fmt.Errorf("config: security.api_key must not be empty")
@@ -341,13 +393,115 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: workspace.auto_sync_interval_seconds must be >= 0, got %d", c.Workspace.AutoSyncIntervalSeconds)
 	}
 
-	switch c.Workspace.Mode {
-	case "sync":
-		return nil
-	case "fuse":
+	if err := c.validateWorkspaceSelection(); err != nil {
+		return err
+	}
+	if c.Workspace.MountModeEnabled("fuse") {
 		return c.validateFUSE()
-	default:
-		return fmt.Errorf("config: workspace.mode must be \"sync\" or \"fuse\", got %q", c.Workspace.Mode)
+	}
+	return nil
+}
+
+func (c *Config) normalizeWorkspaceSelection() error {
+	workspace := &c.Workspace
+	if workspace.legacySelectionNormalized {
+		return nil
+	}
+	hasNew := workspace.DefaultMountMode != "" || len(workspace.EnabledMountModes) != 0 || backendConfigured(workspace.Backend)
+	hasLegacy := workspace.Mode != "" || len(workspace.Providers) != 0
+	if hasNew && hasLegacy {
+		return fmt.Errorf("config: new workspace mount-mode/backend selection cannot be mixed with legacy workspace.mode/providers")
+	}
+	if hasNew {
+		return nil
+	}
+	if workspace.Mode == "" {
+		workspace.DefaultMountMode = "sync"
+		workspace.EnabledMountModes = []string{"sync"}
+		// Keep the old resolved field populated until all runtime wiring has
+		// migrated to the request-level mount mode.
+		workspace.Mode = "sync"
+		workspace.legacySelectionNormalized = true
+		return nil
+	}
+	if workspace.Mode != "sync" && workspace.Mode != "fuse" {
+		return fmt.Errorf("config: legacy workspace.mode must be \"sync\" or \"fuse\", got %q", workspace.Mode)
+	}
+	if len(workspace.Providers) > 1 {
+		return fmt.Errorf("config: legacy workspace.providers must resolve to at most one backend")
+	}
+	workspace.DefaultMountMode = workspace.Mode
+	workspace.EnabledMountModes = []string{workspace.Mode}
+	if workspace.Mode == "fuse" {
+		legacy, ok := workspace.Providers[c.Storage.FileSystem.Provider]
+		if !ok || len(workspace.Providers) != 1 {
+			return fmt.Errorf("config: legacy workspace.mode=fuse must resolve to exactly one backend for storage.filesystem.provider")
+		}
+		preset, ok := presetForProviderProfile(c.Storage.FileSystem.Provider, legacy.Profile)
+		if !ok {
+			return fmt.Errorf("config: legacy workspace provider/profile has no fixed preset mapping")
+		}
+		workspace.Backend = backendFromLegacy(preset, legacy)
+	}
+	workspace.legacySelectionNormalized = true
+	return nil
+}
+
+func (c *Config) validateWorkspaceSelection() error {
+	workspace := c.Workspace
+	if workspace.DefaultMountMode != "sync" && workspace.DefaultMountMode != "fuse" {
+		return fmt.Errorf("config: workspace.default_mount_mode must be \"sync\" or \"fuse\", got %q", workspace.DefaultMountMode)
+	}
+	if len(workspace.EnabledMountModes) == 0 {
+		return fmt.Errorf("config: workspace.enabled_mount_modes must not be empty")
+	}
+	seen := make(map[string]struct{}, len(workspace.EnabledMountModes))
+	for _, mode := range workspace.EnabledMountModes {
+		if mode != "sync" && mode != "fuse" {
+			return fmt.Errorf("config: workspace.enabled_mount_modes contains unknown mode %q", mode)
+		}
+		if _, duplicate := seen[mode]; duplicate {
+			return fmt.Errorf("config: workspace.enabled_mount_modes contains duplicate mode %q", mode)
+		}
+		seen[mode] = struct{}{}
+	}
+	if _, ok := seen[workspace.DefaultMountMode]; !ok {
+		return fmt.Errorf("config: workspace.default_mount_mode must be enabled")
+	}
+	if backendConfigured(workspace.Backend) {
+		preset, ok := backendPresets[workspace.Backend.Preset]
+		if !ok || preset.Provider != c.Storage.FileSystem.Provider || preset.Profile != workspace.Backend.Profile {
+			return fmt.Errorf("config: workspace.backend does not match the fixed preset mapping")
+		}
+	} else if workspace.MountModeEnabled("fuse") {
+		return fmt.Errorf("config: workspace.backend.preset must select one backend when FUSE is enabled")
+	}
+	return nil
+}
+
+func backendConfigured(backend WorkspaceBackendConfig) bool {
+	return backend.Preset != "" || backend.Driver != "" || backend.Profile != "" || backend.StorageIdentity != "" ||
+		backend.MounterImage != "" || backend.DockerImage != "" || backend.CASecretKey != "" || backend.CredentialGeneration != "" ||
+		len(backend.EndpointHostIPs) != 0 || backend.LSMProfile != "" || backend.SystemEgressMode != "" || len(backend.DNSCIDRs) != 0 ||
+		len(backend.SystemEgressFQDNs) != 0 || len(backend.SystemEgressCIDRs) != 0 || len(backend.EndpointPorts) != 0 || backend.ProxyURL != ""
+}
+
+func presetForProviderProfile(provider, profile string) (string, bool) {
+	for preset, mapping := range backendPresets {
+		if mapping.Provider == provider && mapping.Profile == profile {
+			return preset, true
+		}
+	}
+	return "", false
+}
+
+func backendFromLegacy(preset string, legacy WorkspaceFUSEProviderConfig) WorkspaceBackendConfig {
+	return WorkspaceBackendConfig{
+		Preset: preset, Driver: legacy.Driver, Profile: legacy.Profile, StorageIdentity: legacy.StorageIdentity,
+		MounterImage: legacy.MounterImage, DockerImage: legacy.DockerImage, CASecretKey: legacy.CASecretKey,
+		CredentialGeneration: legacy.CredentialGeneration, EndpointHostIPs: legacy.EndpointHostIPs, LSMProfile: legacy.LSMProfile,
+		SystemEgressMode: legacy.SystemEgressMode, DNSCIDRs: legacy.DNSCIDRs, SystemEgressFQDNs: legacy.SystemEgressFQDNs,
+		SystemEgressCIDRs: legacy.SystemEgressCIDRs, EndpointPorts: legacy.EndpointPorts, ProxyURL: legacy.ProxyURL,
 	}
 }
 
@@ -361,11 +515,8 @@ func (c *Config) validateFUSE() error {
 	if filesystem.Provider != "minio" && filesystem.Provider != "obs" {
 		return fmt.Errorf("config: workspace.mode=fuse supports only minio or obs, got %q", filesystem.Provider)
 	}
-	providerPath := "workspace.providers." + filesystem.Provider
-	provider, ok := workspace.Providers[filesystem.Provider]
-	if !ok {
-		return fmt.Errorf("config: workspace.providers.%s must be configured", filesystem.Provider)
-	}
+	providerPath := "workspace.backend"
+	provider := workspace.Backend
 	if c.Storage.State.Redis.Addr == "" {
 		return fmt.Errorf("config: storage.state.redis.addr must not be empty when workspace.mode is \"fuse\"")
 	}
@@ -629,7 +780,7 @@ func (c *Config) validateFUSE() error {
 	return nil
 }
 
-func (c *Config) validateLocalDevelopmentFUSEProfile(provider WorkspaceFUSEProviderConfig) error {
+func (c *Config) validateLocalDevelopmentFUSEProfile(provider WorkspaceBackendConfig) error {
 	const prefix = "config: workspace.allow_unverified_durable_flush"
 	if c.Runtime.Type != "docker" {
 		return fmt.Errorf("%s is only supported with Docker runtime", prefix)
@@ -720,6 +871,17 @@ var fuseProviderEnvKeys = []string{
 }
 
 func bindFUSEProviderEnv(v *viper.Viper) error {
+	for _, configKey := range []string{"workspace.default_mount_mode", "workspace.enabled_mount_modes", "workspace.mode"} {
+		if err := v.BindEnv(configKey); err != nil {
+			return fmt.Errorf("config: bind env for %q: %w", configKey, err)
+		}
+	}
+	for _, key := range append([]string{"preset"}, fuseProviderEnvKeys...) {
+		configKey := "workspace.backend." + key
+		if err := v.BindEnv(configKey); err != nil {
+			return fmt.Errorf("config: bind env for %q: %w", configKey, err)
+		}
+	}
 	for _, provider := range []string{"minio", "obs"} {
 		for _, key := range fuseProviderEnvKeys {
 			configKey := "workspace.providers." + provider + "." + key
@@ -803,7 +965,6 @@ func setDefaults(v *viper.Viper) {
 
 	// Workspace
 	v.SetDefault("workspace.auto_sync_interval_seconds", 0)
-	v.SetDefault("workspace.mode", "sync")
 	v.SetDefault("workspace.allow_unverified_durable_flush", false)
 	v.SetDefault("workspace.allow_missing_lsm_for_kind", false)
 	v.SetDefault("workspace.secret_name", "")

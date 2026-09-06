@@ -158,7 +158,7 @@ git commit -m "feat: bundle verified workspace fuse profiles"
 - Modify: `internal/config/config_test.go`
 - Modify: `configs/config.yaml`
 
-- [ ] **Step 1: Write failing configuration migration and validation tests**
+- [x] **Step 1: Write failing configuration migration and validation tests**
 
 Cover the default, hybrid, legacy, and mismatch cases:
 
@@ -191,13 +191,13 @@ func TestLoadMapsLegacyFuseWithoutCreatingHybridMode(t *testing.T) {
 
 Also test duplicate modes, unknown modes, default not enabled, more than one backend, FUSE without Redis/Secret/digest images, and a new configuration mixed with legacy `workspace.mode/providers`.
 
-- [ ] **Step 2: Run configuration tests and confirm failure**
+- [x] **Step 2: Run configuration tests and confirm failure**
 
 Run: `go test ./internal/config -run 'Test(LoadDefaultsWorkspace|ValidateHybrid|ValidateRejectsPreset|LoadMapsLegacy)' -count=1`
 
 Expected: FAIL because the new fields and preset resolver are absent.
 
-- [ ] **Step 3: Implement the resolved configuration model and compatibility normalization**
+- [x] **Step 3: Implement the resolved configuration model and compatibility normalization**
 
 Use a fixed catalog and a single resolved backend:
 
@@ -238,13 +238,13 @@ type WorkspaceConfigSelection struct {
 
 Add the five `WorkspaceConfigSelection` fields directly to the existing `WorkspaceConfig`; the named type above defines their exact tags and types without replacing its cache, timeout, resources, Pool, auto-sync, or local-test fields. Do not register a Viper default for `workspace.mode`. After unmarshal, normalize an explicit legacy mode only when all new mode/backend fields are absent; map legacy `sync` to `[sync]` and legacy `fuse` to `[fuse]`. New blank configuration becomes `default=sync, enabled=[sync]`. Validate the selected preset against both `storage.filesystem.provider` and the resolved profile, and expose `WorkspaceConfig.MountModeEnabled(string) bool`.
 
-- [ ] **Step 4: Run configuration and command wiring tests**
+- [x] **Step 4: Run configuration and command wiring tests**
 
 Run: `go test ./internal/config ./cmd/sandbox -count=1`
 
 Expected: PASS with old config fixtures migrated explicitly and new hybrid fixtures accepted.
 
-- [ ] **Step 5: Commit the configuration model**
+- [x] **Step 5: Commit the configuration model**
 
 ```bash
 git add internal/config/config.go internal/config/config_test.go configs/config.yaml
