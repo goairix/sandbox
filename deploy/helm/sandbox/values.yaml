@@ -25,9 +25,8 @@ startupProbe:
   timeoutSeconds: 1
   failureThreshold: 120
 
-# Before Helm deletes Redis, run the API's own graceful shutdown by scaling its
-# Deployment to zero. This prevents fail-closed FUSE pool records from leaving
-# managed runtime shells behind when release resources are deleted concurrently.
+# Before Helm deletes Redis, scale the API Deployment to zero, finalize all
+# persistent and ephemeral workspaces, drain both pools, and audit zero state.
 preDeleteDrain:
   enabled: true
   timeoutSeconds: 600
@@ -80,25 +79,41 @@ config:
     gateway: "sandbox-gateway:latest"
   storage:
     filesystem:
-      provider: s3
+      # Exactly one release-wide backend preset is selected. The preset fixes
+      # the provider/profile pair; API requests cannot override it.
+      preset: minio
       bucket: sandbox-storage
       region: us-east-1
-      endpoint: ""
-      accessKey: ""
-      secretKey: ""
+      endpoint: minio.example.com
+      storageIdentity: production-object-store
+      credentialGeneration: rotation-1
+      caSecretKey: ""
+      endpointHostIPs: []
+      systemEgressMode: cidr
+      dnsCIDRs:
+        - 1.1.1.1/32
+      systemEgressCIDRs:
+        - 192.0.2.10/32
+      endpointPorts:
+        - 443
       credentialFiles:
         accessKeyFile: "/run/secrets/workspace/accessKey"
         secretKeyFile: "/run/secrets/workspace/secretKey"
-      caFile: ""
       subPath: ""
-      useSSL: false
+      useSSL: true
   workspace:
-    mode: sync
+    defaultMountMode: sync
+    enabledMountModes:
+      - sync
+      - fuse
+    fuseImages:
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     # Local kind on Docker Desktop only. Production must keep this false and
     # configure a real AppArmor/SELinux profile.
     allowMissingLSMForKind: false
     autoSyncIntervalSeconds: 0
-    secretName: ""
+    secretName: sandbox-workspace-runtime
     cacheSize: 2Gi
     cacheMedium: disk
     mountTimeoutSeconds: 30
@@ -120,7 +135,8 @@ config:
       maxSize: 20
       refillIntervalSeconds: 10
       prepareTimeoutSeconds: 120
-    providers: {}
+    lsmProfile: sandbox-fuse
+    proxyURL: ""
   security:
     # Prefer apiKeySecretName in real deployments so Helm upgrades do not need
     # the API key on the command line or in a values file. The referenced
@@ -161,10 +177,9 @@ networkPolicy:
 # config.workspace.secretName and the same keys must separately exist in the
 # runtime namespace for dynamically-created Pods.
 workspaceCredentials:
-  apiSecretName: ""
+  apiSecretName: sandbox-workspace-control
   accessKeyKey: accessKey
   secretKeyKey: secretKey
-  caKey: ca.crt
   # Required only when sandbox-api runs in Kubernetes but controls a Docker
   # daemon. It must be the same root-owned absolute path on the Docker host.
   dockerStagingHostPath: ""

@@ -33,14 +33,26 @@ config:
     gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
   storage:
     filesystem:
-      provider: obs
+      preset: huawei-obs-private
       bucket: sandbox-fuse-workspace
       region: cn-southwest-268
       endpoint: https://obs.cn-southwest-268.shuanghuayun.com
+      storageIdentity: formal-obs-private-2023-primary
+      credentialGeneration: formal-obs-private-20260906-v1
+      caSecretKey: ""
+      endpointHostIPs: []
+      systemEgressMode: cilium-fqdn
+      dnsCIDRs:
+        - 223.5.5.5/32
+        - 114.114.114.114/32
+      systemEgressCIDRs: []
+      endpointPorts:
+        - 443
       subPath: ""
       useSSL: true
   workspace:
-    mode: fuse
+    defaultMountMode: sync
+    enabledMountModes: [sync, fuse]
     secretName: sandbox-workspace-obs-private
     allowMissingLSMForKind: false
     cacheSize: 512Mi
@@ -51,28 +63,11 @@ config:
       maxSize: 2
       refillIntervalSeconds: 5
       prepareTimeoutSeconds: 180
-    providers:
-      obs:
-        driver: s3fs
-        profile: huawei-obs-private-2023-v1
-        storageIdentity: formal-obs-private-2023-primary
-        mounterImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter-obs-private@sha256:c3a87f6ce96c00d6cf8225ef74a0586880ee02638207c3f483066f23a5886816
-        dockerImage: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker-obs-private@sha256:ba10e2829786deb927a41c3a28689d0ef4a12f16f42fe3c731969f58c4a0bf1f
-        caSecretKey: ""
-        credentialGeneration: formal-obs-private-20260906-v1
-        endpointHostIPs: []
-        lsmProfile: sandbox-fuse
-        systemEgressMode: cilium-fqdn
-        dnsCIDRs:
-          - 223.5.5.5/32
-          - 114.114.114.114/32
-        systemEgressFQDNs:
-          - obs.cn-southwest-268.shuanghuayun.com
-          - sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com
-        systemEgressCIDRs: []
-        endpointPorts:
-          - 443
-        proxyURL: ""
+    fuseImages:
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:c38fbd98e5b6adb9c8d3a8ec212f696ef942cab2758a04f23f0c04614d7a7103
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:df0dfa3ccbcd93c1698ae305236c904a6b6aa403b96b74b010edf8c56984828d
+    lsmProfile: sandbox-fuse
+    proxyURL: ""
   security:
     apiKeySecretName: sandbox-fuse-api-key
     seccompProfile: RuntimeDefault

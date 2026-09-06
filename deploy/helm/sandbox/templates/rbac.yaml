@@ -1,5 +1,4 @@
 {{/* Runtime permissions live in runtime-role*.yaml so the control and runtime namespaces stay explicit. */}}
-{{- if .Values.preDeleteDrain.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -17,6 +16,15 @@ rules:
     resources: ["horizontalpodautoscalers"]
     resourceNames: [{{ printf "%s-api" .Release.Name | quote }}]
     verbs: ["get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -34,4 +42,3 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-api
     namespace: {{ .Release.Namespace }}
-{{- end }}

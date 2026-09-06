@@ -2,6 +2,8 @@
 {{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled }}
 {{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled }}
 {{- $redisDB := ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled }}
+{{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
+{{- $provider := include "sandbox.backend.provider" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +22,8 @@ spec:
       release: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        sandbox.huaxisy.com/backend-fingerprint: {{ include "sandbox.backend.fingerprint" . | quote }}
       labels:
         app: sandbox
         release: {{ .Release.Name }}
@@ -80,42 +84,38 @@ spec:
             - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ ternary (printf "%s-redis" .Release.Name) (printf "%s-sandbox" .Release.Name) .Values.redis.enabled }}
+                  name: {{ printf "%s-redis" .Release.Name }}
                   key: password
             {{- end }}
             - name: SANDBOX_STORAGE_STATE_REDIS_DB
               value: "{{ $redisDB }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
-              value: "{{ .Values.config.storage.filesystem.provider }}"
+              value: {{ $provider | quote }}
             - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET
               value: "{{ .Values.config.storage.filesystem.bucket }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_REGION
               value: "{{ .Values.config.storage.filesystem.region }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_ENDPOINT
               value: "{{ .Values.config.storage.filesystem.endpoint }}"
-            - name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY
-              value: "{{ .Values.config.storage.filesystem.accessKey }}"
-            - name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
-              value: "{{ .Values.config.storage.filesystem.secretKey }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_SUB_PATH
               value: "{{ .Values.config.storage.filesystem.subPath }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
-            - name: SANDBOX_WORKSPACE_MODE
-              value: "{{ .Values.config.workspace.mode }}"
+            - name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE
+              value: {{ .Values.config.workspace.defaultMountMode | quote }}
+            - name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES
+              value: {{ join "," .Values.config.workspace.enabledMountModes | quote }}
             - name: SANDBOX_WORKSPACE_ALLOW_MISSING_LSM_FOR_KIND
               value: {{ .Values.config.workspace.allowMissingLSMForKind | default false | quote }}
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
-          {{- if eq .Values.config.workspace.mode "fuse" }}
-            {{- $providerName := .Values.config.storage.filesystem.provider }}
-            {{- $provider := index .Values.config.workspace.providers $providerName }}
+          {{- if $fuseEnabled }}
             - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE
               value: "/run/secrets/workspace/accessKey"
             - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE
               value: "/run/secrets/workspace/secretKey"
             - name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
-              value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne ($provider.caSecretKey | default "") "") | quote }}
+              value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") | quote }}
             - name: SANDBOX_WORKSPACE_SECRET_NAME
               value: {{ .Values.config.workspace.secretName | quote }}
             - name: SANDBOX_WORKSPACE_CACHE_SIZE
@@ -156,36 +156,38 @@ spec:
               value: {{ .Values.config.workspace.mounterResources.ephemeralStorageRequest | quote }}
             - name: SANDBOX_WORKSPACE_MOUNTER_RESOURCES_EPHEMERAL_STORAGE_LIMIT
               value: {{ .Values.config.workspace.mounterResources.ephemeralStorageLimit | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DRIVER
-              value: {{ $provider.driver | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_PROFILE
-              value: {{ $provider.profile | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_STORAGE_IDENTITY
-              value: {{ $provider.storageIdentity | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_MOUNTER_IMAGE
-              value: {{ $provider.mounterImage | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DOCKER_IMAGE
-              value: {{ $provider.dockerImage | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_CA_SECRET_KEY
-              value: {{ $provider.caSecretKey | default "" | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_CREDENTIAL_GENERATION
-              value: {{ $provider.credentialGeneration | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_ENDPOINT_HOST_IPS
-              value: {{ join "," ($provider.endpointHostIPs | default list) | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_LSM_PROFILE
-              value: {{ $provider.lsmProfile | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_MODE
-              value: {{ $provider.systemEgressMode | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_DNS_CIDRS
-              value: {{ join "," $provider.dnsCIDRs | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_FQDNS
-              value: {{ join "," ($provider.systemEgressFQDNs | default list) | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_SYSTEM_EGRESS_CIDRS
-              value: {{ join "," ($provider.systemEgressCIDRs | default list) | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_ENDPOINT_PORTS
-              value: {{ join "," $provider.endpointPorts | quote }}
-            - name: SANDBOX_WORKSPACE_PROVIDERS_{{ $providerName | upper }}_PROXY_URL
-              value: {{ $provider.proxyURL | default "" | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_PRESET
+              value: {{ .Values.config.storage.filesystem.preset | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_DRIVER
+              value: "s3fs"
+            - name: SANDBOX_WORKSPACE_BACKEND_PROFILE
+              value: {{ include "sandbox.backend.profile" . | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_STORAGE_IDENTITY
+              value: {{ .Values.config.storage.filesystem.storageIdentity | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_MOUNTER_IMAGE
+              value: {{ .Values.config.workspace.fuseImages.mounter | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE
+              value: {{ .Values.config.workspace.fuseImages.docker | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_CA_SECRET_KEY
+              value: {{ .Values.config.storage.filesystem.caSecretKey | default "" | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_CREDENTIAL_GENERATION
+              value: {{ .Values.config.storage.filesystem.credentialGeneration | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_HOST_IPS
+              value: {{ join "," (.Values.config.storage.filesystem.endpointHostIPs | default list) | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE
+              value: {{ .Values.config.workspace.lsmProfile | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_MODE
+              value: {{ .Values.config.storage.filesystem.systemEgressMode | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_DNS_CIDRS
+              value: {{ join "," .Values.config.storage.filesystem.dnsCIDRs | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS
+              value: {{ include "sandbox.backend.systemEgressFQDNs" . | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_CIDRS
+              value: {{ join "," (.Values.config.storage.filesystem.systemEgressCIDRs | default list) | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_PORTS
+              value: {{ join "," .Values.config.storage.filesystem.endpointPorts | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_PROXY_URL
+              value: {{ .Values.config.workspace.proxyURL | default "" | quote }}
           {{- end }}
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
@@ -265,7 +267,7 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
-          {{- if eq .Values.config.workspace.mode "fuse" }}
+          {{- if $fuseEnabled }}
           volumeMounts:
             - name: workspace-credentials
               mountPath: /run/secrets/workspace
@@ -275,7 +277,7 @@ spec:
               mountPath: /var/lib/sandbox/workspace-secrets
             {{- end }}
           {{- end }}
-      {{- if eq .Values.config.workspace.mode "fuse" }}
+      {{- if $fuseEnabled }}
       volumes:
         - name: workspace-credentials
           secret:
@@ -286,9 +288,8 @@ spec:
                 path: accessKey
               - key: {{ .Values.workspaceCredentials.secretKeyKey }}
                 path: secretKey
-              {{- $selected := index .Values.config.workspace.providers .Values.config.storage.filesystem.provider }}
-              {{- if ne ($selected.caSecretKey | default "") "" }}
-              - key: {{ .Values.workspaceCredentials.caKey }}
+              {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
+              - key: {{ .Values.config.storage.filesystem.caSecretKey }}
                 path: ca.crt
               {{- end }}
         {{- if eq .Values.config.runtime.type "docker" }}

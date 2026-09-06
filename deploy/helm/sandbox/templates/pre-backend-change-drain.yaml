@@ -1,16 +1,27 @@
-{{- if .Values.preDeleteDrain.enabled }}
+{{- $installed := (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-backend-fingerprint" .Release.Name)) | default dict -}}
+{{- $installedFingerprint := dig "metadata" "annotations" "sandbox.huaxisy.com/backend-fingerprint" "" $installed -}}
+{{- $desiredFingerprint := include "sandbox.backend.fingerprint" . -}}
+{{- $installedDeployment := (lookup "apps/v1" "Deployment" .Release.Namespace (printf "%s-api" .Release.Name)) | default dict -}}
+{{- $installedContainers := dig "spec" "template" "spec" "containers" (list) $installedDeployment -}}
+{{- $installedVolumes := dig "spec" "template" "spec" "volumes" (list) $installedDeployment -}}
+{{- $installedContainer := dict -}}
+{{- if gt (len $installedContainers) 0 -}}
+{{- $installedContainer = index $installedContainers 0 -}}
+{{- end -}}
+{{- if ne $installedFingerprint $desiredFingerprint }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Release.Name }}-api-drain
+  name: {{ .Release.Name }}-backend-change-drain
   namespace: {{ .Release.Namespace }}
   labels:
     app: sandbox-drain
     release: {{ .Release.Name }}
   annotations:
-    "helm.sh/hook": pre-delete
-    "helm.sh/hook-weight": "0"
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    sandbox.huaxisy.com/backend-fingerprint: {{ $desiredFingerprint | quote }}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: {{ .Values.preDeleteDrain.timeoutSeconds }}
@@ -24,7 +35,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: drain
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "sandbox.apiImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - {{ printf "--drain-kubernetes-deployment=%s-api" .Release.Name | quote }}
@@ -33,12 +44,22 @@ spec:
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
             - "--drain-release"
           env:
+          {{- if hasKey $installedContainer "env" }}
+{{ toYaml (get $installedContainer "env") | nindent 12 }}
+          {{- else }}
 {{ include "sandbox.drainEnv" . | nindent 12 }}
+          {{- end }}
+          {{- if hasKey $installedContainer "volumeMounts" }}
           volumeMounts:
-            - name: workspace-credentials
-              mountPath: /run/secrets/workspace
-              readOnly: true
+{{ toYaml (get $installedContainer "volumeMounts") | nindent 12 }}
+          {{- else }}
+          volumeMounts:
+            - {name: workspace-credentials, mountPath: /run/secrets/workspace, readOnly: true}
+          {{- end }}
       volumes:
+      {{- if gt (len $installedVolumes) 0 }}
+{{ toYaml $installedVolumes | nindent 8 }}
+      {{- else }}
         - name: workspace-credentials
           secret:
             secretName: {{ required "workspaceCredentials.apiSecretName is required when remote workspace storage is configured" .Values.workspaceCredentials.apiSecretName }}
@@ -52,4 +73,5 @@ spec:
               - key: {{ .Values.config.storage.filesystem.caSecretKey }}
                 path: ca.crt
               {{- end }}
+      {{- end }}
 {{- end }}

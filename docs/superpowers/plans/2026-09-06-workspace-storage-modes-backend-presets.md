@@ -813,7 +813,7 @@ git commit -m "feat: audit complete sandbox release drains"
 - Modify: `testdata/values-fuse-obs-private.yaml`
 - Modify: `scripts/test-helm-chart.sh`
 
-- [ ] **Step 1: Write failing render tests for all presets and both modes**
+- [x] **Step 1: Write failing render tests for all presets and both modes**
 
 Extend `scripts/test-helm-chart.sh` to render each overlay and assert:
 
@@ -830,13 +830,13 @@ grep -Fq 'sandbox.huaxisy.com/backend-fingerprint:' <<<"$rendered"
 
 For MinIO assert the path-style endpoint FQDN only. For both OBS presets assert the base endpoint plus the bucket-prefixed virtual-host endpoint. Assert public/private overlays use the same mounter digest and the same Docker FUSE digest. `helm lint` must reject an unknown preset or a default mode outside the enabled list.
 
-- [ ] **Step 2: Run Helm tests and confirm failure**
+- [x] **Step 2: Run Helm tests and confirm failure**
 
 Run: `./scripts/test-helm-chart.sh`
 
 Expected: FAIL because the Chart still exposes provider maps and one global `workspace.mode`.
 
-- [ ] **Step 3: Implement helpers, schema, values, and backend fingerprint resources**
+- [x] **Step 3: Implement helpers, schema, values, and backend fingerprint resources**
 
 The main values shape is:
 
@@ -868,7 +868,7 @@ config:
 
 Render the fingerprint on a ConfigMap annotation and on the API Pod template. The pre-upgrade/pre-rollback template uses `lookup` to read the installed ConfigMap; a missing or different old annotation renders the current Chart image with Redis/runtime configuration and `--drain-release`. The command scales the old API to zero before recovering and draining its state. The same fingerprint renders no backend drain Job. Keep the pre-delete hook independent, but make it invoke the same `--drain-release` command before Redis can be deleted.
 
-- [ ] **Step 4: Run render/lint tests, then exercise the hook in kind**
+- [x] **Step 4: Run render/lint tests, then exercise the hook in kind**
 
 Run:
 
@@ -879,7 +879,9 @@ Run:
 
 Expected: PASS. The kind script proves an image-only upgrade preserves active lifecycle state, while a changed storage identity triggers scale-to-zero and refuses the upgrade until runtime and Redis state are empty.
 
-- [ ] **Step 5: Commit Helm presets and guard**
+Execution note (2026-09-07): the local kind cluster was absent after the host restart, so the same live `lookup`/hook gate was exercised in an isolated temporary namespace on `ds-ai-research`; the namespace and test release were removed afterward.
+
+- [x] **Step 5: Commit Helm presets and guard**
 
 ```bash
 git add deploy/helm/sandbox testdata/values-fuse-minio.yaml testdata/values-fuse-obs-public.yaml testdata/values-fuse-obs-private.yaml scripts/test-helm-chart.sh scripts/test-helm-backend-switch.sh

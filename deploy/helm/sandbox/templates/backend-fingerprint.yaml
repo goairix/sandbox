@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-backend-fingerprint
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox
+    release: {{ .Release.Name }}
+  annotations:
+    sandbox.huaxisy.com/backend-fingerprint: {{ include "sandbox.backend.fingerprint" . | quote }}
+data:
+  preset: {{ .Values.config.storage.filesystem.preset | quote }}
+  provider: {{ include "sandbox.backend.provider" . | quote }}
+  profile: {{ include "sandbox.backend.profile" . | quote }}

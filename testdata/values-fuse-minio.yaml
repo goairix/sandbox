@@ -21,37 +21,33 @@ config:
     gateway: registry.local/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   storage:
     filesystem:
-      provider: minio
+      preset: minio
       bucket: sandbox
       region: us-east-1
       endpoint: minio.sandbox-storage.svc:9000
+      storageIdentity: minio-local-test
+      credentialGeneration: test-v1
+      caSecretKey: ""
+      endpointHostIPs:
+        - 192.0.2.10
+      systemEgressMode: cidr
+      dnsCIDRs:
+        - 1.1.1.1/32
+      systemEgressCIDRs:
+        - 192.0.2.10/32
+      endpointPorts:
+        - 9000
       subPath: workspaces
       useSSL: true
   workspace:
-    mode: fuse
+    defaultMountMode: sync
+    enabledMountModes: [sync, fuse]
     secretName: sandbox-workspace-runtime
-    providers:
-      minio:
-        driver: s3fs
-        profile: minio-sigv4-path-style-v1
-        storageIdentity: minio-local-test
-        mounterImage: registry.local/workspace-mounter@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-        dockerImage: registry.local/sandbox-fuse@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-        caSecretKey: ""
-        credentialGeneration: test-v1
-        endpointHostIPs:
-          - 192.0.2.10
-        lsmProfile: sandbox-fuse
-        systemEgressMode: cidr
-        dnsCIDRs:
-          - 1.1.1.1/32
-        systemEgressFQDNs:
-          - minio.sandbox-storage.svc
-        systemEgressCIDRs:
-          - 192.0.2.10/32
-        endpointPorts:
-          - 9000
-        proxyURL: ""
+    fuseImages:
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:c38fbd98e5b6adb9c8d3a8ec212f696ef942cab2758a04f23f0c04614d7a7103
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:df0dfa3ccbcd93c1698ae305236c904a6b6aa403b96b74b010edf8c56984828d
+    lsmProfile: sandbox-fuse
+    proxyURL: ""
   security:
     apiKey: test
     seccompProfile: RuntimeDefault
