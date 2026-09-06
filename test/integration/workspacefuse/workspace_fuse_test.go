@@ -78,6 +78,11 @@ func (c *apiClient) request(ctx context.Context, method, path string, input, out
 }
 
 func (c *apiClient) exec(ctx context.Context, sandboxID, shell string) error {
+	_, err := c.execOutput(ctx, sandboxID, shell)
+	return err
+}
+
+func (c *apiClient) execOutput(ctx context.Context, sandboxID, shell string) (string, error) {
 	var result struct {
 		ExitCode int    `json:"exit_code"`
 		Stdout   string `json:"stdout"`
@@ -87,24 +92,289 @@ func (c *apiClient) exec(ctx context.Context, sandboxID, shell string) error {
 		"language": "bash", "code": shell, "timeout": 110,
 	}, &result)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("exec failed: exit=%d stderr=%s", result.ExitCode, result.Stderr)
+		return "", fmt.Errorf("exec failed: exit=%d stderr=%s", result.ExitCode, result.Stderr)
 	}
-	return nil
+	return result.Stdout, nil
+}
+
+type sandboxRef struct {
+	ID                 string `json:"id"`
+	WorkspaceMountMode string `json:"workspace_mount_mode"`
+}
+
+var requiredAPIPaths = []string{
+	"ephemeral_no_workspace",
+	"ephemeral_sync_workspace",
+	"persistent_sync_workspace",
+	"ephemeral_fuse_workspace",
+	"persistent_fuse_workspace",
+	"same_prefix_sync_fuse_conflict",
+	"different_prefix_sync_fuse_concurrency",
+}
+
+func createSandbox(ctx context.Context, c *apiClient, mode, workspacePath, mountMode string) (sandboxRef, int, error) {
+	input := map[string]any{"mode": mode, "timeout": -1}
+	if workspacePath != "" {
+		input["workspace_path"] = workspacePath
+	}
+	// Sync is intentionally omitted: it verifies the release default remains
+	// backward-compatible. FUSE must always be an explicit request choice.
+	if mountMode == "fuse" {
+		input["workspace_mount_mode"] = "fuse"
+	}
+	var result sandboxRef
+	status, err := c.request(ctx, http.MethodPost, "/api/v1/sandboxes", input, &result)
+	if err == nil && workspacePath != "" {
+		expected := mountMode
+		if expected == "" {
+			expected = "sync"
+		}
+		if result.WorkspaceMountMode != expected {
+			return result, status, fmt.Errorf("create selected mount mode %q, want %q", result.WorkspaceMountMode, expected)
+		}
+	}
+	return result, status, err
+}
+
+func destroySandbox(ctx context.Context, c *apiClient, sandboxID string) error {
+	if sandboxID == "" {
+		return nil
+	}
+	_, err := c.request(ctx, http.MethodDelete, "/api/v1/sandboxes/"+sandboxID, nil, nil)
+	return err
+}
+
+func flushWorkspace(ctx context.Context, c *apiClient, sandboxID string) error {
+	_, err := c.request(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/workspace/sync", map[string]string{"direction": "from_container"}, nil)
+	return err
+}
+
+func verifyPersisted(ctx context.Context, c *apiClient, workspacePath, mountMode, expected string) error {
+	sandbox, _, err := createSandbox(ctx, c, "persistent", workspacePath, mountMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = destroySandbox(context.Background(), c, sandbox.ID) }()
+	stdout, err := c.execOutput(ctx, sandbox.ID, "cat /workspace/lifecycle-value")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(stdout) != expected {
+		return fmt.Errorf("persisted workspace content=%q, want %q", strings.TrimSpace(stdout), expected)
+	}
+	return destroySandbox(ctx, c, sandbox.ID)
+}
+
+func presetForProfile(profile string) string {
+	switch profile {
+	case "minio-sigv4-path-style-v1":
+		return "minio"
+	case "huawei-obs-public-v1":
+		return "huawei-obs-public"
+	case "huawei-obs-private-2023-v1":
+		return "huawei-obs-private"
+	default:
+		return ""
+	}
+}
+
+func objectCounterSnapshot(ctx context.Context, prefix string) (string, bool, error) {
+	command := os.Getenv("WORKSPACE_FUSE_OBJECT_COUNTER_CMD")
+	if command == "" {
+		if os.Getenv("WORKSPACE_FUSE_REQUIRE_OBJECT_COUNTER") == "1" {
+			return "", false, fmt.Errorf("WORKSPACE_FUSE_OBJECT_COUNTER_CMD is required")
+		}
+		return "", false, nil
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	cmd.Env = append(os.Environ(), "WORKSPACE_FUSE_COUNTER_PREFIX="+prefix)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", true, fmt.Errorf("object counter command failed")
+	}
+	return strings.TrimSpace(string(output)), true, nil
+}
+
+func writeAPIEvidence(t *testing.T, results map[string]bool) {
+	t.Helper()
+	output := os.Getenv("WORKSPACE_FUSE_EVIDENCE_OUTPUT")
+	if output == "" {
+		return
+	}
+	for _, path := range requiredAPIPaths {
+		if !results[path] {
+			t.Fatalf("cannot record incomplete API evidence: %s did not pass", path)
+		}
+	}
+	evidence := struct {
+		SchemaVersion      int             `json:"schema_version"`
+		Passed             bool            `json:"passed"`
+		Preset             string          `json:"preset"`
+		ProfileID          string          `json:"profile_id"`
+		Runtime            string          `json:"runtime"`
+		MounterImageDigest string          `json:"mounter_image_digest"`
+		DockerImageDigest  string          `json:"docker_image_digest"`
+		APIPaths           map[string]bool `json:"api_paths"`
+	}{
+		SchemaVersion: 1, Passed: true, Preset: presetForProfile(*profileID), ProfileID: *profileID,
+		Runtime: *runtimeName, MounterImageDigest: os.Getenv("WORKSPACE_FUSE_MOUNTER_IMAGE_DIGEST"),
+		DockerImageDigest: os.Getenv("WORKSPACE_FUSE_DOCKER_IMAGE_DIGEST"), APIPaths: results,
+	}
+	if evidence.Preset == "" || evidence.MounterImageDigest == "" || evidence.DockerImageDigest == "" {
+		t.Fatal("evidence output requires preset and both common image digests")
+	}
+	raw, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(output, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWorkspaceFUSE(t *testing.T) {
 	c := integrationClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
-	workspacePath := fmt.Sprintf("matrix/%s/%s/%d", *profileID, *runtimeName, time.Now().UnixNano())
+	runRoot := fmt.Sprintf("matrix/%s/%s/%d", *profileID, *runtimeName, time.Now().UnixNano())
+	results := make(map[string]bool, len(requiredAPIPaths))
+
+	results["ephemeral_no_workspace"] = t.Run("ephemeral no workspace", func(t *testing.T) {
+		counterPrefix := runRoot + "/no-workspace-counter"
+		before, counterEnabled, err := objectCounterSnapshot(ctx, counterPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sandbox, _, err := createSandbox(ctx, c, "ephemeral", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, sandbox.ID) }()
+		var info struct {
+			Mounted bool `json:"mounted"`
+		}
+		if _, err := c.request(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandbox.ID+"/workspace/info", nil, &info); err != nil {
+			t.Fatal(err)
+		}
+		if info.Mounted {
+			t.Fatal("workspace-less ephemeral sandbox unexpectedly reports a mount")
+		}
+		if err := c.exec(ctx, sandbox.ID, "printf transient >/workspace/no-workspace-value"); err != nil {
+			t.Fatal(err)
+		}
+		if err := destroySandbox(ctx, c, sandbox.ID); err != nil {
+			t.Fatal(err)
+		}
+		after, afterEnabled, err := objectCounterSnapshot(ctx, counterPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if counterEnabled != afterEnabled || (counterEnabled && before != after) {
+			t.Fatal("workspace-less execution changed object-store marker/list counters")
+		}
+	})
+
+	runPersistence := func(t *testing.T, mode, mountMode, path, content string, manualFlush bool) {
+		sandbox, _, err := createSandbox(ctx, c, mode, path, mountMode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, sandbox.ID) }()
+		if err := c.exec(ctx, sandbox.ID, "printf '"+content+"' >/workspace/lifecycle-value"); err != nil {
+			t.Fatal(err)
+		}
+		if manualFlush {
+			if err := flushWorkspace(ctx, c, sandbox.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := destroySandbox(ctx, c, sandbox.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyPersisted(ctx, c, path, mountMode, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results["ephemeral_sync_workspace"] = t.Run("ephemeral sync finalization", func(t *testing.T) {
+		runPersistence(t, "ephemeral", "", runRoot+"/ephemeral-sync", "ephemeral-sync", false)
+	})
+	results["persistent_sync_workspace"] = t.Run("persistent sync manual sync", func(t *testing.T) {
+		runPersistence(t, "persistent", "", runRoot+"/persistent-sync", "persistent-sync", true)
+	})
+	results["ephemeral_fuse_workspace"] = t.Run("ephemeral FUSE finalization", func(t *testing.T) {
+		runPersistence(t, "ephemeral", "fuse", runRoot+"/ephemeral-fuse", "ephemeral-fuse", false)
+	})
+	results["persistent_fuse_workspace"] = t.Run("persistent FUSE durable flush", func(t *testing.T) {
+		runPersistence(t, "persistent", "fuse", runRoot+"/persistent-fuse", "persistent-fuse", true)
+	})
+
+	results["same_prefix_sync_fuse_conflict"] = t.Run("same prefix cross-mode conflict both orders", func(t *testing.T) {
+		path := runRoot + "/conflict"
+		first, _, err := createSandbox(ctx, c, "persistent", path, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, first.ID) }()
+		if _, status, err := createSandbox(ctx, c, "persistent", path, "fuse"); err == nil || status != http.StatusConflict {
+			t.Fatalf("sync then FUSE conflict status=%d err=%v", status, err)
+		}
+		if err := destroySandbox(ctx, c, first.ID); err != nil {
+			t.Fatal(err)
+		}
+		second, _, err := createSandbox(ctx, c, "persistent", path, "fuse")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, second.ID) }()
+		if _, status, err := createSandbox(ctx, c, "persistent", path, ""); err == nil || status != http.StatusConflict {
+			t.Fatalf("FUSE then sync conflict status=%d err=%v", status, err)
+		}
+		if err := destroySandbox(ctx, c, second.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	results["different_prefix_sync_fuse_concurrency"] = t.Run("different prefix cross-mode concurrency", func(t *testing.T) {
+		syncSandbox, _, err := createSandbox(ctx, c, "persistent", runRoot+"/concurrent-sync", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, syncSandbox.ID) }()
+		fuseSandbox, _, err := createSandbox(ctx, c, "persistent", runRoot+"/concurrent-fuse", "fuse")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = destroySandbox(context.Background(), c, fuseSandbox.ID) }()
+		if err := c.exec(ctx, syncSandbox.ID, "printf sync >/workspace/concurrent"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.exec(ctx, fuseSandbox.ID, "printf fuse >/workspace/concurrent"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if os.Getenv("WORKSPACE_FUSE_SKIP_STRESS") != "1" {
+		t.Run("FUSE filesystem stress", func(t *testing.T) {
+			runFUSEStress(t, c, ctx, runRoot+"/stress")
+		})
+	}
+	if !t.Failed() {
+		writeAPIEvidence(t, results)
+	}
+}
+
+func runFUSEStress(t *testing.T, c *apiClient, ctx context.Context, workspacePath string) {
+	t.Helper()
 	var sandbox struct {
 		ID string `json:"id"`
 	}
 	_, err := c.request(ctx, http.MethodPost, "/api/v1/sandboxes", map[string]any{
-		"mode": "persistent", "timeout": -1, "workspace_path": workspacePath,
+		"mode": "persistent", "timeout": -1, "workspace_path": workspacePath, "workspace_mount_mode": "fuse",
 	}, &sandbox)
 	if err != nil {
 		t.Fatal(err)

@@ -34,22 +34,28 @@ runtime_preflight() {
   done
 
   local profile_id="${WORKSPACE_FUSE_PROFILE_ID:-}"
-  local fuse_image="${FUSE_IMAGE:-}"
+  local fuse_image="${FUSE_MOUNTER_IMAGE:-${FUSE_IMAGE:-}}"
+  local docker_image="${FUSE_DOCKER_IMAGE:-}"
   local sandbox_image="${SANDBOX_IMAGE:-}"
   if [[ -n "$profile_file" ]]; then
     [[ -f "$profile_file" ]] || fail "profile does not exist: $profile_file"
     require_command python3
-    local report_profile_id report_fuse_image report_sandbox_image report_provider
+    local report_profile_id report_fuse_image report_docker_image report_sandbox_image report_provider
     report_profile_id="$(profile_value "$profile_file" profile_id)"
     report_fuse_image="$(profile_value "$profile_file" mounter_image_digest)"
+    report_docker_image="$(profile_value "$profile_file" docker_image_digest)"
     report_sandbox_image="$(profile_value "$profile_file" sandbox_image_digest)"
     report_provider="$(profile_value "$profile_file" provider)"
     [[ -z "$profile_id" || "$profile_id" == "$report_profile_id" ]] || fail "WORKSPACE_FUSE_PROFILE_ID does not match the verified report"
     [[ -z "$fuse_image" || "$fuse_image" == "$report_fuse_image" ]] || fail "FUSE_IMAGE does not match the verified report"
-    [[ -z "$sandbox_image" || "$sandbox_image" == "$report_sandbox_image" ]] || fail "SANDBOX_IMAGE does not match the verified report"
+    [[ -z "$docker_image" || "$docker_image" == "$report_docker_image" ]] || fail "FUSE_DOCKER_IMAGE does not match the verified report"
+    local runtime_sandbox_image="$report_sandbox_image"
+    [[ "$runtime_name" == "docker" ]] && runtime_sandbox_image="$report_docker_image"
+    [[ -z "$sandbox_image" || "$sandbox_image" == "$runtime_sandbox_image" ]] || fail "SANDBOX_IMAGE does not match the verified runtime image"
     profile_id="$report_profile_id"
     fuse_image="$report_fuse_image"
-    sandbox_image="$report_sandbox_image"
+    docker_image="$report_docker_image"
+    sandbox_image="$runtime_sandbox_image"
     case "$profile_id:$report_provider" in
       minio-sigv4-path-style-v1:minio|huawei-obs-public-v1:obs|huawei-obs-private-2023-v1:obs) ;;
       *) fail "profile report provider does not match its immutable profile ID" ;;
@@ -66,6 +72,7 @@ runtime_preflight() {
   fi
   [[ "$profile_id" =~ ^[a-z0-9][a-z0-9._-]+$ ]] || fail "profile ID is required and must be canonical"
   require_digest FUSE_IMAGE "$fuse_image"
+  require_digest FUSE_DOCKER_IMAGE "$docker_image"
   require_digest SANDBOX_IMAGE "$sandbox_image"
   [[ "${FUSE_LSM_PROFILE:-}" != "" && "${FUSE_LSM_PROFILE,,}" != "unconfined" && "${FUSE_LSM_PROFILE,,}" != "label=disable" ]] || fail "FUSE_LSM_PROFILE must name a confined profile"
   [[ -z "${WORKSPACE_PROXY_URL:-}" ]] || fail "workspace proxy is forbidden"
@@ -119,19 +126,60 @@ for pod in json.load(sys.stdin).get("items", []):
   esac
 
   if [[ "${WORKSPACE_FUSE_RUN_INTEGRATION:-0}" == "1" ]]; then
-    go test "$repo_root/test/integration/workspacefuse" -run TestWorkspaceFUSE -v \
-      -args -runtime "$runtime_name" -profile "$profile_id"
+    local preset="minio"
+    [[ "$profile_id" == huawei-obs-public-v1 ]] && preset="huawei-obs-public"
+    [[ "$profile_id" == huawei-obs-private-2023-v1 ]] && preset="huawei-obs-private"
+    local api_evidence="${WORKSPACE_FUSE_EVIDENCE_OUTPUT:-$tmp_dir/api-evidence-$runtime_name.json}"
+    WORKSPACE_FUSE_EVIDENCE_OUTPUT="$api_evidence" \
+    WORKSPACE_FUSE_MOUNTER_IMAGE_DIGEST="$fuse_image" \
+    WORKSPACE_FUSE_DOCKER_IMAGE_DIGEST="$docker_image" \
+      go test "$repo_root/test/integration/workspacefuse" \
+        -run '^(TestWorkspaceFUSE|TestWorkspaceFUSEFaultMatrix)$' -count=1 -v \
+        -args -runtime "$runtime_name" -profile "$profile_id"
+    python3 - "$api_evidence" "$preset" "$profile_id" "$runtime_name" "$fuse_image" "$docker_image" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    evidence = json.load(stream)
+expected_paths = {
+    "ephemeral_no_workspace",
+    "ephemeral_sync_workspace",
+    "persistent_sync_workspace",
+    "ephemeral_fuse_workspace",
+    "persistent_fuse_workspace",
+    "same_prefix_sync_fuse_conflict",
+    "different_prefix_sync_fuse_concurrency",
+}
+expected = {
+    "schema_version": 1,
+    "passed": True,
+    "preset": sys.argv[2],
+    "profile_id": sys.argv[3],
+    "runtime": sys.argv[4],
+    "mounter_image_digest": sys.argv[5],
+    "docker_image_digest": sys.argv[6],
+}
+if any(evidence.get(key) != value for key, value in expected.items()):
+    raise SystemExit("API evidence identity does not match the preflight contract")
+paths = evidence.get("api_paths")
+if not isinstance(paths, dict) or set(paths) != expected_paths or any(paths[path] is not True for path in expected_paths):
+    raise SystemExit("API evidence does not contain all seven passing paths")
+for key in evidence:
+    normalized = key.lower().replace("-", "_")
+    if normalized in {"access_key", "secret_key", "credentials", "token"}:
+        raise SystemExit("API evidence contains a credential field")
+PY
   fi
   printf 'workspace-fuse preflight passed: runtime=%s profile=%s\n' "$runtime_name" "$profile_id"
 }
 
 record_profile() {
-  local profile_id="" image_digest="" sandbox_digest="" service_version="" everest_version="" s3fs_version="" marker="" tls_verify="" output="" evidence=""
+  local profile_id="" image_digest="" docker_digest="" sandbox_digest="" service_version="" everest_version="" s3fs_version="" marker="" tls_verify="" output="" evidence=""
   local -a options=()
   while (($#)); do
     case "$1" in
       --profile-id) profile_id="$2"; shift 2 ;;
       --image-digest) image_digest="$2"; shift 2 ;;
+      --docker-image-digest) docker_digest="$2"; shift 2 ;;
       --sandbox-image-digest) sandbox_digest="$2"; shift 2 ;;
       --service-version) service_version="$2"; shift 2 ;;
       --everest-version) everest_version="$2"; shift 2 ;;
@@ -146,6 +194,7 @@ record_profile() {
   done
   [[ "$profile_id" =~ ^(minio-sigv4-path-style-v1|huawei-obs-public-v1|huawei-obs-private-2023-v1)$ ]] || fail "unsupported profile ID"
   require_digest image_digest "$image_digest"
+  require_digest docker_image_digest "$docker_digest"
   require_digest sandbox_image_digest "$sandbox_digest"
   [[ -n "$service_version" && -n "$s3fs_version" ]] || fail "observed service and s3fs versions are required"
   [[ "$service_version" =~ ^[A-Za-z0-9._:+/-]+$ && "$s3fs_version" =~ ^[A-Za-z0-9._:+/-]+$ ]] || fail "version values must be canonical"
@@ -162,36 +211,52 @@ record_profile() {
   local joined_options
   joined_options="$(IFS=,; printf '%s' "${options[*]}")"
   local evidence_sha
-  evidence_sha="$(python3 - "$evidence" "$profile_id" "$image_digest" "$sandbox_digest" "$service_version" "$everest_version" "$s3fs_version" "$marker" "$tls_verify" "$joined_options" <<'PY'
+  local preset="minio"
+  [[ "$profile_id" == huawei-obs-public-v1 ]] && preset="huawei-obs-public"
+  [[ "$profile_id" == huawei-obs-private-2023-v1 ]] && preset="huawei-obs-private"
+  evidence_sha="$(python3 - "$evidence" "$profile_id" "$preset" "$image_digest" "$docker_digest" "$sandbox_digest" "$service_version" "$everest_version" "$s3fs_version" "$marker" "$tls_verify" "$joined_options" <<'PY'
 import hashlib, json, sys
 with open(sys.argv[1], "rb") as stream:
     raw = stream.read()
 evidence = json.loads(raw)
-if evidence.get("profile_id") != sys.argv[2] or evidence.get("passed") is not True:
+if evidence.get("profile_id") != sys.argv[2] or evidence.get("preset") != sys.argv[3] or evidence.get("passed") is not True:
     raise SystemExit(1)
 expected_fields = {
-    "mounter_image_digest": sys.argv[3],
-    "sandbox_image_digest": sys.argv[4],
-    "service_version": sys.argv[5],
-    "everest_version": sys.argv[6],
-    "s3fs_version": sys.argv[7],
-    "directory_marker": sys.argv[8],
+    "mounter_image_digest": sys.argv[4],
+    "docker_image_digest": sys.argv[5],
+    "sandbox_image_digest": sys.argv[6],
+    "service_version": sys.argv[7],
+    "everest_version": sys.argv[8],
+    "s3fs_version": sys.argv[9],
+    "directory_marker": sys.argv[10],
 }
 if any(evidence.get(key, "") != value for key, value in expected_fields.items()):
     raise SystemExit(1)
 if evidence.get("tls_verify") is not True:
     raise SystemExit(1)
-if evidence.get("options") != ([value for value in sys.argv[10].split(",") if value]):
+if evidence.get("options") != ([value for value in sys.argv[12].split(",") if value]):
     raise SystemExit(1)
 items = evidence.get("combinations")
 if not isinstance(items, list):
     raise SystemExit(1)
 expected = {"kubernetes", "docker"}
+required_paths = {
+    "ephemeral_no_workspace",
+    "ephemeral_sync_workspace",
+    "persistent_sync_workspace",
+    "ephemeral_fuse_workspace",
+    "persistent_fuse_workspace",
+    "same_prefix_sync_fuse_conflict",
+    "different_prefix_sync_fuse_concurrency",
+}
 seen = set()
 for item in items:
     if not isinstance(item, dict) or item.get("runtime") not in expected or item.get("runtime") in seen:
         raise SystemExit(1)
     if any(item.get(field) is not True for field in ("functional", "faults", "cleanup_confirmed")):
+        raise SystemExit(1)
+    paths = item.get("api_paths")
+    if not isinstance(paths, dict) or set(paths) != required_paths or any(paths[path] is not True for path in required_paths):
         raise SystemExit(1)
     seen.add(item["runtime"])
 if seen != expected:
@@ -210,6 +275,7 @@ PY
     printf 'enabled: true\n'
     printf 'status: release-verified\n'
     printf 'mounter_image_digest: %s\n' "$image_digest"
+    printf 'docker_image_digest: %s\n' "$docker_digest"
     printf 'sandbox_image_digest: %s\n' "$sandbox_digest"
     printf 'service_version: %s\n' "$service_version"
     printf 'everest_version: %s\n' "$everest_version"

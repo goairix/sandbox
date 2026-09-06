@@ -950,7 +950,7 @@ git commit -m "chore: simplify hybrid workspace configuration"
 - Modify: `scripts/workspace-fuse-matrix.sh`
 - Modify: `scripts/test-workspace-fuse-matrix.sh`
 
-- [ ] **Step 1: Add failing matrix assertions**
+- [x] **Step 1: Add failing matrix assertions**
 
 The script-level test must require these API paths for every enabled backend:
 
@@ -966,13 +966,13 @@ different-prefix sync/FUSE concurrency
 
 Keep the six provider/runtime combinations: MinIO, Huawei public OBS, Huawei private OBS × Kubernetes, Docker. Require one common Kubernetes mounter digest and one common Docker FUSE digest across all three profile evidence files.
 
-- [ ] **Step 2: Run the matrix unit test and confirm failure**
+- [x] **Step 2: Run the matrix unit test and confirm failure**
 
 Run: `./scripts/test-workspace-fuse-matrix.sh`
 
 Expected: FAIL because the current test only counts six profile/runtime calls and does not check hybrid lifecycle cases or common digests.
 
-- [ ] **Step 3: Implement API-driven hybrid integration cases**
+- [x] **Step 3: Implement API-driven hybrid integration cases**
 
 Extend the Go integration test to create sandboxes only through sandbox-api. For sync, write a file, call `SyncWorkspace(from_container)`, destroy, recreate, and verify content. For FUSE, write, call durable flush, destroy, recreate, and verify content. For ephemeral final-sync, omit manual sync and verify destruction persists content. For no workspace, verify object-store marker/list counters remain unchanged. Conflict tests must assert HTTP 409 for the second same-prefix request regardless of mode order.
 
@@ -990,7 +990,9 @@ WORKSPACE_FUSE_RUN_INTEGRATION=1 ./scripts/workspace-fuse-preflight.sh docker --
 
 Expected: PASS against the existing local MinIO through the project Compose startup path. Do not restart the Docker daemon.
 
-- [ ] **Step 5: Commit the hybrid matrix**
+Execution note (2026-09-07): script and Go gates pass, but the real Docker preflight remains fail-closed because the checked-in MinIO report is still `blocked-pending-flush-spike` and the restarted Docker Desktop VM exposes no `/dev/fuse`. No release evidence was fabricated; Kubernetes backend runs continue in Task 12.
+
+- [x] **Step 5: Commit the hybrid matrix**
 
 ```bash
 git add test/integration/workspacefuse/workspace_fuse_test.go scripts/workspace-fuse-preflight.sh scripts/workspace-fuse-matrix.sh scripts/test-workspace-fuse-matrix.sh
