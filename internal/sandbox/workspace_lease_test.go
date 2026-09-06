@@ -379,6 +379,7 @@ func (s *atomicMemoryStore) hasKey(key string) bool {
 
 func validLeaseRequest() WorkspaceLeaseRequest {
 	return WorkspaceLeaseRequest{
+		MountType:       WorkspaceMountFUSE,
 		Provider:        "minio",
 		StorageIdentity: "minio-primary",
 		Bucket:          "sandbox",
@@ -387,6 +388,53 @@ func validLeaseRequest() WorkspaceLeaseRequest {
 		Runtime:         "docker",
 		RuntimeID:       "container-a",
 	}
+}
+
+func TestWorkspaceCoordinatorUsesOneLeaseAcrossSyncAndFUSE(t *testing.T) {
+	store := newAtomicMemoryStore()
+	coordinator := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	fuseRequest := validLeaseRequest()
+	fuseLease, err := coordinator.Acquire(context.Background(), fuseRequest)
+	require.NoError(t, err)
+
+	syncRequest := fuseRequest
+	syncRequest.MountType = WorkspaceMountSync
+	syncRequest.SandboxID = "sandbox-sync"
+	syncRequest.RuntimeID = "container-sync"
+	_, err = coordinator.Acquire(context.Background(), syncRequest)
+	require.ErrorIs(t, err, ErrWorkspaceLeased)
+
+	fuseKeys, err := workspaceStateKeys(fuseRequest)
+	require.NoError(t, err)
+	syncKeys, err := workspaceStateKeys(syncRequest)
+	require.NoError(t, err)
+	assert.Equal(t, fuseKeys, syncKeys)
+	assert.Equal(t, WorkspaceMountFUSE, fuseLease.OwnerSnapshot().MountType)
+}
+
+func TestWorkspaceCoordinatorAllowsSyncReleaseWithoutRuntimeTermination(t *testing.T) {
+	store := newAtomicMemoryStore()
+	coordinator := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	req := validLeaseRequest()
+	req.MountType = WorkspaceMountSync
+	req.RuntimeUID = "uid-sync"
+	lease, err := coordinator.Acquire(context.Background(), req)
+	require.NoError(t, err)
+
+	require.NoError(t, coordinator.Release(context.Background(), lease, runtime.TerminationEvidence{}))
+	assert.False(t, store.hasKey(lease.Key))
+}
+
+func TestWorkspaceCoordinatorKeepsFUSETerminationEvidenceRequirement(t *testing.T) {
+	store := newAtomicMemoryStore()
+	coordinator := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	req := validLeaseRequest()
+	req.RuntimeUID = "uid-fuse"
+	lease, err := coordinator.Acquire(context.Background(), req)
+	require.NoError(t, err)
+
+	err = coordinator.Release(context.Background(), lease, runtime.TerminationEvidence{})
+	require.ErrorIs(t, err, ErrRuntimeExitUnconfirmed)
 }
 
 func TestWorkspaceCoordinatorPublishesFinalLeaseRecord(t *testing.T) {
@@ -1418,6 +1466,28 @@ func TestWorkspaceCoordinatorRestoresExactConsumedLeaseWithoutNewGeneration(t *t
 	require.NoError(t, err)
 	assert.Equal(t, owner, restored.OwnerSnapshot())
 	assert.Equal(t, lease.Key, restored.Key)
+	require.NoError(t, coordinator.Renew(context.Background(), restored))
+	store.mu.Lock()
+	generation := store.increments[lease.generationKey]
+	store.mu.Unlock()
+	assert.Equal(t, int64(1), generation)
+}
+
+func TestWorkspaceCoordinatorRestoresExpiredLeaseFromExactOwner(t *testing.T) {
+	store := newAtomicMemoryStore()
+	coordinator := NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+	lease, err := coordinator.Acquire(context.Background(), validLeaseRequest())
+	require.NoError(t, err)
+	require.NoError(t, coordinator.BindRuntime(context.Background(), lease, "uid-a"))
+	_, err = coordinator.ConsumeMountAttempt(context.Background(), lease, "pool-key")
+	require.NoError(t, err)
+	owner := lease.OwnerSnapshot()
+	store.expireKey(lease.Key)
+
+	restored, err := coordinator.Restore(context.Background(), owner)
+	require.NoError(t, err)
+	assert.Equal(t, owner, restored.OwnerSnapshot())
+	assert.NotEqual(t, string(lease.Value), string(restored.Value), "republication needs a fresh capability token")
 	require.NoError(t, coordinator.Renew(context.Background(), restored))
 	store.mu.Lock()
 	generation := store.increments[lease.generationKey]

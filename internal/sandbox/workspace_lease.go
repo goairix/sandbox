@@ -70,6 +70,7 @@ var (
 // storage.BuildWorkspacePrefix. RuntimeUID may be empty when acquisition
 // happens before runtime preparation; otherwise it becomes immutable owner state.
 type WorkspaceLeaseRequest struct {
+	MountType       WorkspaceMountType
 	Provider        string
 	StorageIdentity string
 	Bucket          string
@@ -84,18 +85,19 @@ type WorkspaceLeaseRequest struct {
 // workspace. StorageIdentityHash deliberately avoids persisting the configured
 // storage identity in Redis keys or owner values.
 type WorkspaceOwner struct {
-	Provider            string    `json:"provider"`
-	StorageIdentityHash string    `json:"storage_identity_hash"`
-	Bucket              string    `json:"bucket"`
-	Prefix              string    `json:"prefix"`
-	WorkspaceHash       string    `json:"workspace_hash"`
-	SandboxID           string    `json:"sandbox_id"`
-	Runtime             string    `json:"runtime"`
-	RuntimeID           string    `json:"runtime_id"`
-	RuntimeUID          string    `json:"runtime_uid"`
-	Generation          int64     `json:"generation"`
-	MountAttempt        uint8     `json:"mount_attempt"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	MountType           WorkspaceMountType `json:"mount_type"`
+	Provider            string             `json:"provider"`
+	StorageIdentityHash string             `json:"storage_identity_hash"`
+	Bucket              string             `json:"bucket"`
+	Prefix              string             `json:"prefix"`
+	WorkspaceHash       string             `json:"workspace_hash"`
+	SandboxID           string             `json:"sandbox_id"`
+	Runtime             string             `json:"runtime"`
+	RuntimeID           string             `json:"runtime_id"`
+	RuntimeUID          string             `json:"runtime_uid"`
+	Generation          int64              `json:"generation"`
+	MountAttempt        uint8              `json:"mount_attempt"`
+	UpdatedAt           time.Time          `json:"updated_at"`
 }
 
 // WorkspaceLease is an opaque capability for mutating one workspace owner.
@@ -141,20 +143,21 @@ func (l *WorkspaceLease) OwnerSnapshot() WorkspaceOwner {
 }
 
 type workspaceLeaseRecord struct {
-	Version             uint8     `json:"version"`
-	Phase               string    `json:"phase"`
-	Token               string    `json:"token"`
-	Provider            string    `json:"provider"`
-	StorageIdentityHash string    `json:"storage_identity_hash"`
-	Bucket              string    `json:"bucket"`
-	Prefix              string    `json:"prefix"`
-	WorkspaceHash       string    `json:"workspace_hash"`
-	SandboxID           string    `json:"sandbox_id"`
-	Runtime             string    `json:"runtime"`
-	RuntimeID           string    `json:"runtime_id"`
-	RuntimeUID          string    `json:"runtime_uid"`
-	CreatedAt           time.Time `json:"created_at"`
-	Generation          int64     `json:"generation"`
+	Version             uint8              `json:"version"`
+	Phase               string             `json:"phase"`
+	Token               string             `json:"token"`
+	MountType           WorkspaceMountType `json:"mount_type"`
+	Provider            string             `json:"provider"`
+	StorageIdentityHash string             `json:"storage_identity_hash"`
+	Bucket              string             `json:"bucket"`
+	Prefix              string             `json:"prefix"`
+	WorkspaceHash       string             `json:"workspace_hash"`
+	SandboxID           string             `json:"sandbox_id"`
+	Runtime             string             `json:"runtime"`
+	RuntimeID           string             `json:"runtime_id"`
+	RuntimeUID          string             `json:"runtime_uid"`
+	CreatedAt           time.Time          `json:"created_at"`
+	Generation          int64              `json:"generation"`
 }
 
 type workspaceKeys struct {
@@ -274,6 +277,7 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 		Version:             workspaceLeaseRecordVersion,
 		Phase:               workspaceLeasePhaseProvisional,
 		Token:               base64.RawURLEncoding.EncodeToString(token),
+		MountType:           req.MountType,
 		Provider:            req.Provider,
 		StorageIdentityHash: storageIdentityHash(req.StorageIdentity),
 		Bucket:              req.Bucket,
@@ -321,6 +325,7 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 	}
 
 	owner := WorkspaceOwner{
+		MountType:           req.MountType,
 		Provider:            req.Provider,
 		StorageIdentityHash: storageIdentityHash(req.StorageIdentity),
 		Bucket:              req.Bucket,
@@ -380,10 +385,14 @@ func (c *WorkspaceCoordinator) Acquire(ctx context.Context, req WorkspaceLeaseRe
 }
 
 // Restore reconstructs the in-memory capability for an already-consumed
-// workspace owner without allocating a new generation or mount attempt. Both
-// the persistent owner and active lease must still match exactly.
+// workspace owner without allocating a new generation or mount attempt. The
+// persistent owner must match exactly. If its TTL lease expired, Restore may
+// atomically republish the lease for that same owner; it never changes owner
+// identity or allocates a new generation.
 func (c *WorkspaceCoordinator) Restore(ctx context.Context, expected WorkspaceOwner) (*WorkspaceLease, error) {
-	if c == nil || c.configErr != nil || validateStoredOwner(expected) != nil || expected.RuntimeUID == "" || expected.MountAttempt != 1 {
+	if c == nil || c.configErr != nil || validateStoredOwner(expected) != nil || expected.RuntimeUID == "" ||
+		(expected.MountType == WorkspaceMountFUSE && expected.MountAttempt != 1) ||
+		(expected.MountType == WorkspaceMountSync && expected.MountAttempt != 0) {
 		return nil, ErrInvalidWorkspaceLease
 	}
 	keys, err := workspaceStateKeysFromOwner(expected)
@@ -406,10 +415,38 @@ func (c *WorkspaceCoordinator) Restore(ctx context.Context, expected WorkspaceOw
 		return nil, fmt.Errorf("restore workspace lease: %w", err)
 	}
 	if leaseRaw == nil {
-		return nil, ErrWorkspaceLeaseLost
+		token := make([]byte, workspaceLeaseTokenBytes)
+		if _, err := rand.Read(token); err != nil {
+			return nil, fmt.Errorf("create restored workspace lease token: %w", err)
+		}
+		defer clear(token)
+		restoredRecord := workspaceLeaseRecord{
+			Version: workspaceLeaseRecordVersion, Phase: workspaceLeasePhaseActive,
+			Token: base64.RawURLEncoding.EncodeToString(token), MountType: owner.MountType,
+			Provider: owner.Provider, StorageIdentityHash: owner.StorageIdentityHash,
+			Bucket: owner.Bucket, Prefix: owner.Prefix, WorkspaceHash: owner.WorkspaceHash,
+			SandboxID: owner.SandboxID, Runtime: owner.Runtime, RuntimeID: owner.RuntimeID,
+			RuntimeUID: owner.RuntimeUID, CreatedAt: time.Now().UTC(), Generation: owner.Generation,
+		}
+		leaseRaw, err = json.Marshal(restoredRecord)
+		if err != nil {
+			return nil, fmt.Errorf("marshal restored workspace lease: %w", err)
+		}
+		created, setErr := c.store.SetNX(ctx, keys.lease, append([]byte(nil), leaseRaw...), c.leaseTTL)
+		if setErr != nil {
+			current, verifyErr := c.store.Get(context.WithoutCancel(ctx), keys.lease)
+			if verifyErr != nil || !bytes.Equal(current, leaseRaw) {
+				return nil, errors.Join(ErrWorkspaceLeaseLost, fmt.Errorf("restore expired workspace lease: %w", setErr), verifyErr)
+			}
+			created = true
+		}
+		if !created {
+			metrics.RecordWorkspaceLeaseConflict(ctx)
+			return nil, ErrWorkspaceLeased
+		}
 	}
 	record, err := parseActiveWorkspaceLeaseRecord(leaseRaw)
-	if err != nil || record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
+	if err != nil || record.MountType != owner.MountType || record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
 		record.Bucket != owner.Bucket || record.Prefix != owner.Prefix || record.WorkspaceHash != owner.WorkspaceHash ||
 		record.SandboxID != owner.SandboxID || record.Runtime != owner.Runtime || record.RuntimeID != owner.RuntimeID ||
 		record.Generation != owner.Generation || (record.RuntimeUID != "" && record.RuntimeUID != owner.RuntimeUID) {
@@ -505,6 +542,9 @@ func (c *WorkspaceCoordinator) ConsumeMountAttempt(ctx context.Context, lease *W
 		return zero, ErrInvalidWorkspaceLease
 	}
 	if lease == nil {
+		return zero, ErrInvalidWorkspaceLease
+	}
+	if lease.Owner.MountType != WorkspaceMountFUSE {
 		return zero, ErrInvalidWorkspaceLease
 	}
 	lease.runtimeMu.Lock()
@@ -738,6 +778,9 @@ func (c *WorkspaceCoordinator) validateRequest(req WorkspaceLeaseRequest) error 
 	if c == nil || c.configErr != nil {
 		return ErrInvalidWorkspaceLease
 	}
+	if req.MountType != WorkspaceMountSync && req.MountType != WorkspaceMountFUSE {
+		return ErrInvalidWorkspaceLease
+	}
 	for _, value := range []string{req.Provider, req.StorageIdentity, req.Bucket, req.SandboxID} {
 		if err := validateOpaqueText(value, false); err != nil {
 			return ErrInvalidWorkspaceLease
@@ -776,7 +819,7 @@ func (c *WorkspaceCoordinator) validateLeaseLocked(lease *WorkspaceLease) (works
 	}
 	if lease.Key != keys.lease || lease.ownerKey != keys.owner || lease.generationKey != keys.generation ||
 		lease.Prefix != owner.Prefix || lease.WorkspaceHash != keys.workspaceHash || owner.WorkspaceHash != keys.workspaceHash ||
-		record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
+		record.MountType != owner.MountType || record.Provider != owner.Provider || record.StorageIdentityHash != owner.StorageIdentityHash ||
 		record.Bucket != owner.Bucket || record.Prefix != owner.Prefix || record.WorkspaceHash != owner.WorkspaceHash ||
 		record.SandboxID != owner.SandboxID || record.Runtime != owner.Runtime || record.RuntimeID != owner.RuntimeID ||
 		record.RuntimeUID != owner.RuntimeUID || record.Generation != owner.Generation ||
@@ -799,6 +842,7 @@ func (c *WorkspaceCoordinator) loadMatchingOwner(ctx context.Context, lease *Wor
 		return WorkspaceOwner{}, nil, ErrWorkspaceOwnerLost
 	}
 	if err := validateStoredOwner(owner); err != nil ||
+		owner.MountType != lease.Owner.MountType ||
 		owner.Provider != lease.Owner.Provider ||
 		owner.StorageIdentityHash != lease.Owner.StorageIdentityHash ||
 		owner.Bucket != lease.Owner.Bucket ||
@@ -819,6 +863,9 @@ func leaseRuntimeUID(lease *WorkspaceLease) string {
 }
 
 func validateStoredOwner(owner WorkspaceOwner) error {
+	if owner.MountType != WorkspaceMountSync && owner.MountType != WorkspaceMountFUSE {
+		return ErrInvalidWorkspaceLease
+	}
 	if _, err := workspaceStateKeysFromOwner(owner); err != nil {
 		return err
 	}
@@ -840,6 +887,9 @@ func validateStoredOwner(owner WorkspaceOwner) error {
 	if owner.RuntimeUID == "" && owner.MountAttempt != 0 {
 		return ErrInvalidWorkspaceLease
 	}
+	if owner.MountType == WorkspaceMountSync && owner.MountAttempt != 0 {
+		return ErrInvalidWorkspaceLease
+	}
 	return nil
 }
 
@@ -850,6 +900,9 @@ func parseActiveWorkspaceLeaseRecord(raw []byte) (workspaceLeaseRecord, error) {
 	}
 	if record.Version != workspaceLeaseRecordVersion || record.Phase != workspaceLeasePhaseActive ||
 		record.Generation <= 0 || record.CreatedAt.IsZero() {
+		return workspaceLeaseRecord{}, ErrInvalidWorkspaceLease
+	}
+	if record.MountType != WorkspaceMountSync && record.MountType != WorkspaceMountFUSE {
 		return workspaceLeaseRecord{}, ErrInvalidWorkspaceLease
 	}
 	token, err := base64.RawURLEncoding.DecodeString(record.Token)
@@ -957,6 +1010,9 @@ func strictDecodeFlatJSONObject(raw []byte, dst any) error {
 }
 
 func safeToReleaseOwner(owner WorkspaceOwner, evidence runtime.TerminationEvidence) bool {
+	if owner.MountType == WorkspaceMountSync {
+		return evidence == (runtime.TerminationEvidence{})
+	}
 	if owner.RuntimeUID == "" {
 		return evidence == (runtime.TerminationEvidence{})
 	}

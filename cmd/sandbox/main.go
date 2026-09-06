@@ -178,6 +178,7 @@ func main() {
 	}
 
 	managerConfig := sandbox.ManagerConfig{
+		RuntimeType: cfg.Runtime.Type,
 		PoolConfig: sandbox.PoolConfig{
 			MinSize:       cfg.Pool.MinSize,
 			MaxSize:       cfg.Pool.MaxSize,
@@ -199,6 +200,15 @@ func main() {
 	for _, mode := range cfg.Workspace.EnabledMountModes {
 		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
 	}
+	if fsMeta != nil && fsMeta.Provider != storage.ProviderLocal {
+		if redisStore == nil {
+			log.Fatal("remote workspace modes require Redis for cross-mode ownership")
+		}
+		managerConfig.WorkspaceCoordinator = sandbox.NewWorkspaceCoordinator(redisStore,
+			time.Duration(cfg.Workspace.LeaseTTLSeconds)*time.Second,
+			time.Duration(cfg.Workspace.LeaseRenewIntervalSeconds)*time.Second,
+		)
+	}
 	if fuseEnabled {
 		if redisStore == nil {
 			log.Fatal("FUSE mode requires Redis")
@@ -219,10 +229,6 @@ func main() {
 			ReservationTTL:  time.Duration(cfg.Workspace.LeaseTTLSeconds) * time.Second,
 			MaintainerToken: ownershipToken,
 		}, fuseSpec)
-		managerConfig.WorkspaceCoordinator = sandbox.NewWorkspaceCoordinator(redisStore,
-			time.Duration(cfg.Workspace.LeaseTTLSeconds)*time.Second,
-			time.Duration(cfg.Workspace.LeaseRenewIntervalSeconds)*time.Second,
-		)
 		managerConfig.WorkspaceObjectClient = objectClient
 		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Backend.Profile)
 		if profileErr != nil {

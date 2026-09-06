@@ -836,7 +836,7 @@ func TestManagerCreateFUSELeaseConflictReturnsPristineShell(t *testing.T) {
 	prefix, err := storage.BuildWorkspacePrefix("workspaces", "team/a")
 	require.NoError(t, err)
 	other, err := mgr.config.WorkspaceCoordinator.Acquire(context.Background(), WorkspaceLeaseRequest{
-		Provider: "minio", StorageIdentity: "storage-primary", Bucket: "sandbox", Prefix: prefix, SandboxID: "other",
+		MountType: WorkspaceMountFUSE, Provider: "minio", StorageIdentity: "storage-primary", Bucket: "sandbox", Prefix: prefix, SandboxID: "other",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {

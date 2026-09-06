@@ -434,7 +434,7 @@ git commit -m "feat: run sync and fuse workspace pools together"
 - Modify: `internal/sandbox/manager.go`
 - Modify: `internal/sandbox/session.go`
 
-- [ ] **Step 1: Write failing cross-mode exclusion and safe-unmount tests**
+- [x] **Step 1: Write failing cross-mode exclusion and safe-unmount tests**
 
 ```go
 func TestSyncAndFUSEUseTheSameWorkspaceLeaseKey(t *testing.T) {
@@ -464,13 +464,13 @@ func TestRestoreReacquiresExpiredLeaseFromExactOwner(t *testing.T) {
 
 Also test two sync sandboxes conflict, different prefixes succeed, renewal loss closes the sync operation gate, and a stale FUSE owner still blocks sync after TTL expiry.
 
-- [ ] **Step 2: Run lease/lifecycle tests and confirm failure**
+- [x] **Step 2: Run lease/lifecycle tests and confirm failure**
 
 Run: `go test ./internal/sandbox -run 'Test(SyncAndFUSE|SyncUnmount|SyncLease|WorkspaceLease)' -count=1`
 
 Expected: FAIL because sync does not currently acquire the coordinator lease.
 
-- [ ] **Step 3: Add access-mode-aware owner records and sync lifecycle management**
+- [x] **Step 3: Add access-mode-aware owner records and sync lifecycle management**
 
 Persist the mount type in both lease and owner values without adding it to the Redis key:
 
@@ -515,7 +515,7 @@ The lease key remains provider + storage identity hash + bucket + canonical pref
 
 Extend `WorkspaceCoordinator.Restore` so an exact non-expiring owner can atomically republish an expired TTL lease with the same generation after the Manager has already verified the exact runtime UID and mode-specific health. It must never allocate a new generation, overwrite a live lease, or adopt a changed owner; concurrent replicas race through `SetNX`, and only the winner starts renewal.
 
-- [ ] **Step 4: Run sandbox and race tests**
+- [x] **Step 4: Run sandbox and race tests**
 
 Run:
 
@@ -526,7 +526,7 @@ go test -race ./internal/sandbox -run 'Test(SyncAndFUSE|SyncLease|SyncUnmount)' 
 
 Expected: PASS with no data race and no cross-mode concurrent owner.
 
-- [ ] **Step 5: Commit common workspace leasing**
+- [x] **Step 5: Commit common workspace leasing**
 
 ```bash
 git add internal/sandbox/sync_lifecycle.go internal/sandbox/sync_lifecycle_test.go internal/sandbox/workspace_lease.go internal/sandbox/workspace_lease_test.go internal/sandbox/workspace.go internal/sandbox/manager.go internal/sandbox/session.go

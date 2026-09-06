@@ -82,17 +82,36 @@ func isExcluded(path string, exclude []string) bool {
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
 // exclude is an optional list of path prefixes to skip during all subsequent syncs.
 func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
-	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
-	if err != nil {
-		return err
+	m.mu.Lock()
+	sb := m.sandboxes[sandboxID]
+	if sb == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
-	defer release()
+	gate := m.operationGates[sandboxID]
+	if gate == nil {
+		gate = newOperationGate(true)
+		m.operationGates[sandboxID] = gate
+	}
+	m.mu.Unlock()
+	exclusive, err := gate.BeginExclusive(ctx)
+	if err != nil {
+		return fmt.Errorf("begin workspace mount: %w", err)
+	}
+	resolved := false
+	defer func() {
+		if !resolved {
+			_ = exclusive.Reopen()
+		}
+	}()
 	m.mu.RLock()
-	runtimeID := sb.RuntimeID
+	current := m.sandboxes[sandboxID]
 	_, exists := m.workspaces[sandboxID]
-	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
+	isFUSE := current != nil && current.Workspace != nil && current.Workspace.MountType == WorkspaceMountFUSE
 	m.mu.RUnlock()
-
+	if current != sb {
+		return fmt.Errorf("%w: %s", ErrSandboxNotReady, sandboxID)
+	}
 	if isFUSE {
 		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceImmutable, sandboxID)
 	}
@@ -104,48 +123,69 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		return fmt.Errorf("%w: %s", ErrWorkspaceAlreadyMounted, sandboxID)
 	}
 
-	scoped, err := storage.NewScopedFS(m.filesystem, rootPath)
+	scoped, lifecycle, err := m.prepareSyncWorkspace(ctx, sb, gate, rootPath, exclude)
 	if err != nil {
-		logger.Error(ctx, "MountWorkspace: create scoped filesystem failed",
-			logger.AddField("sandbox_id", sandboxID),
-			logger.AddField("root_path", rootPath),
-			logger.ErrorField(err),
-		)
-		return fmt.Errorf("create scoped filesystem: %w", err)
-	}
-
-	// Sync files from storage to container
-	if err := m.syncToContainer(ctx, scoped, runtimeID); err != nil {
 		logger.Error(ctx, "MountWorkspace: sync to container failed",
 			logger.AddField("sandbox_id", sandboxID),
-			logger.AddField("runtime_id", runtimeID),
+			logger.AddField("runtime_id", sb.RuntimeID),
 			logger.ErrorField(err),
 		)
-		return fmt.Errorf("sync to container: %w", err)
+		return err
 	}
 
 	now := time.Now()
-	m.mu.Lock()
-	m.workspaces[sandboxID] = scoped
-	sb.Workspace = &WorkspaceInfo{
+	workspace := &WorkspaceInfo{
 		RootPath:     rootPath,
 		MountedAt:    now,
 		LastSyncedAt: now,
 		SyncExclude:  append([]string(nil), exclude...),
 		MountType:    WorkspaceMountSync,
 	}
-	sb.UpdatedAt = now
-	sessionSnapshot := cloneSandbox(sb)
-	m.mu.Unlock()
-
-	// Persist workspace info to session store
-	if m.sessions != nil {
-		_ = m.sessions.Save(ctx, &sessionSnapshot)
+	if lifecycle != nil {
+		owner := lifecycle.lease.OwnerSnapshot()
+		workspace.Owner = owner
+		workspace.LeaseGeneration = owner.Generation
 	}
+	sessionSnapshot := cloneSandbox(sb)
+	sessionSnapshot.Workspace = workspace
+	sessionSnapshot.UpdatedAt = now
+
+	if sb.Config.Mode == ModePersistent && m.sessions != nil {
+		if err := m.sessions.Save(ctx, &sessionSnapshot); err != nil {
+			_ = m.releasePreparedSyncWorkspace(lifecycle)
+			return fmt.Errorf("save mounted workspace session: %w", err)
+		}
+	}
+	err = exclusive.commit(func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.sandboxes[sandboxID] != sb || m.workspaces[sandboxID] != nil {
+			return ErrSandboxNotReady
+		}
+		if !publishSyncLifecycle(lifecycle) {
+			return ErrWorkspaceLeaseLost
+		}
+		m.workspaces[sandboxID] = scoped
+		sb.Workspace = workspace
+		sb.UpdatedAt = now
+		if lifecycle != nil {
+			m.syncLifecycles[sandboxID] = lifecycle
+		}
+		return nil
+	})
+	if err != nil {
+		_ = m.releasePreparedSyncWorkspace(lifecycle)
+		if sb.Config.Mode == ModePersistent && m.sessions != nil {
+			_ = m.sessions.RemoveExact(ctx, &sessionSnapshot)
+		}
+		resolved = true
+		return err
+	}
+	resolved = true
 
 	logger.Info(ctx, "MountWorkspace: completed",
 		logger.AddField("sandbox_id", sandboxID),
-		logger.AddField("runtime_id", runtimeID),
+		logger.AddField("runtime_id", sb.RuntimeID),
 	)
 
 	return nil
@@ -153,15 +193,17 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 
 // UnmountWorkspace syncs files back from container to storage, then detaches.
 func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error {
-	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	defer release()
 	m.mu.RLock()
+	sb := m.sandboxes[sandboxID]
+	gate := m.operationGates[sandboxID]
+	if sb == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	}
 	runtimeID := sb.RuntimeID
 	_, hasWS := m.workspaces[sandboxID]
 	isFUSE := sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE
+	lifecycle := m.syncLifecycles[sandboxID]
 	var syncExclude []string
 	if sb.Workspace != nil {
 		syncExclude = append([]string(nil), sb.Workspace.SyncExclude...)
@@ -171,6 +213,19 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 	if isFUSE {
 		return fmt.Errorf("%w: %s", ErrFUSEWorkspaceImmutable, sandboxID)
 	}
+	if gate == nil {
+		return fmt.Errorf("%w: %s", ErrSandboxNotReady, sandboxID)
+	}
+	exclusive, err := gate.BeginExclusive(ctx)
+	if err != nil {
+		return fmt.Errorf("begin workspace unmount: %w", err)
+	}
+	resolved := false
+	defer func() {
+		if !resolved {
+			_ = exclusive.Reopen()
+		}
+	}()
 	logger.Info(ctx, "UnmountWorkspace: starting",
 		logger.AddField("sandbox_id", sandboxID),
 	)
@@ -186,17 +241,46 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 		)
 		return fmt.Errorf("sync from container: %w", err)
 	}
+	if lifecycle != nil {
+		lifecycle.renewal.Stop()
+		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, runtime.TerminationEvidence{}); err != nil {
+			if renewErr := m.restartSyncRenewal(lifecycle); renewErr != nil {
+				exclusive.Close()
+				resolved = true
+				m.scheduleSyncFinalization(lifecycle, errors.Join(err, renewErr))
+			}
+			return fmt.Errorf("release workspace lease: %w", err)
+		}
+	}
 
-	m.mu.Lock()
-	delete(m.workspaces, sandboxID)
-	sb.Workspace = nil
-	sb.UpdatedAt = time.Now()
+	now := time.Now()
 	sessionSnapshot := cloneSandbox(sb)
-	m.mu.Unlock()
-
-	// Persist workspace removal to session store
-	if m.sessions != nil {
-		_ = m.sessions.Save(ctx, &sessionSnapshot)
+	sessionSnapshot.Workspace = nil
+	sessionSnapshot.UpdatedAt = now
+	if sb.Config.Mode == ModePersistent && m.sessions != nil {
+		if err := m.sessions.Save(ctx, &sessionSnapshot); err != nil {
+			exclusive.Close()
+			resolved = true
+			m.scheduleSyncFinalization(lifecycle, err)
+			return fmt.Errorf("save unmounted workspace session: %w", err)
+		}
+	}
+	err = exclusive.commit(func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.sandboxes[sandboxID] != sb || m.syncLifecycles[sandboxID] != lifecycle {
+			return ErrSandboxNotReady
+		}
+		delete(m.workspaces, sandboxID)
+		delete(m.syncLifecycles, sandboxID)
+		sb.Workspace = nil
+		sb.UpdatedAt = now
+		return nil
+	})
+	resolved = true
+	if err != nil {
+		m.scheduleSyncFinalization(lifecycle, err)
+		return err
 	}
 
 	logger.Info(ctx, "UnmountWorkspace: completed",

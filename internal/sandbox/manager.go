@@ -80,6 +80,17 @@ type fuseSandboxLifecycle struct {
 	sessionRemoved   bool
 }
 
+type syncSandboxLifecycle struct {
+	sandboxID string
+	gate      *operationGate
+	lease     *WorkspaceLease
+	renewal   *WorkspaceLeaseRenewal
+	once      sync.Once
+	mu        sync.Mutex
+	lost      bool
+	published bool
+}
+
 // randSuffix generates a random lowercase alphanumeric string of length n.
 func randSuffix(n int) string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -100,6 +111,7 @@ func multipartKey(sandboxID, uploadID string) string {
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
 	PoolConfig              PoolConfig
+	RuntimeType             string
 	DefaultMountMode        WorkspaceMountType
 	EnabledMountModes       map[WorkspaceMountType]bool
 	FUSEPool                *FUSEPool
@@ -157,6 +169,7 @@ type Manager struct {
 	workspaces     map[string]storage.ScopedFS // sandbox ID -> ScopedFS
 	operationGates map[string]*operationGate
 	fuseLifecycles map[string]*fuseSandboxLifecycle
+	syncLifecycles map[string]*syncSandboxLifecycle
 	fuseInFlight   map[string]*fuseBindingClaim
 	mu             sync.RWMutex
 
@@ -185,6 +198,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		workspaces:     make(map[string]storage.ScopedFS),
 		operationGates: make(map[string]*operationGate),
 		fuseLifecycles: make(map[string]*fuseSandboxLifecycle),
+		syncLifecycles: make(map[string]*syncSandboxLifecycle),
 		fuseInFlight:   make(map[string]*fuseBindingClaim),
 		stopCh:         make(chan struct{}),
 		shutdownDone:   make(chan struct{}),
@@ -395,7 +409,16 @@ func (m *Manager) finishShutdown() {
 	for _, lifecycle := range m.fuseLifecycles {
 		lifecycles = append(lifecycles, lifecycle)
 	}
+	syncLifecycles := make([]*syncSandboxLifecycle, 0, len(m.syncLifecycles))
+	for _, lifecycle := range m.syncLifecycles {
+		syncLifecycles = append(syncLifecycles, lifecycle)
+	}
 	m.mu.RUnlock()
+	for _, lifecycle := range syncLifecycles {
+		if lifecycle.renewal != nil {
+			lifecycle.renewal.Stop()
+		}
+	}
 	for _, lifecycle := range lifecycles {
 		m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
 	}
@@ -519,13 +542,14 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	_ = m.runtime.RenameSandbox(spanCtx, info.RuntimeID, id)
 
 	sb := &Sandbox{
-		ID:        id,
-		Config:    cfg,
-		State:     StateReady,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		RuntimeID: info.RuntimeID,
-		Timeout:   timeoutDuration,
+		ID:         id,
+		Config:     cfg,
+		State:      StateReady,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		RuntimeID:  info.RuntimeID,
+		RuntimeUID: info.RuntimeUID,
+		Timeout:    timeoutDuration,
 	}
 
 	// Install dependencies if requested
@@ -554,45 +578,79 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}
 	}
 
-	m.mu.Lock()
-	m.sandboxes[id] = sb
-	m.mu.Unlock()
-
-	// Persist persistent sandboxes to session store
-	if cfg.Mode == ModePersistent && m.sessions != nil {
-		m.mu.RLock()
-		sessionSnapshot := cloneSandbox(sb)
-		m.mu.RUnlock()
-		if err := m.sessions.Save(spanCtx, &sessionSnapshot); err != nil {
-			logger.Error(spanCtx, "Create: persist sandbox to session store failed",
-				logger.AddField("sandbox_id", id),
-				logger.ErrorField(err),
-			)
+	gate := newOperationGate(true)
+	if cfg.WorkspacePath != "" && !bindMounted {
+		scoped, lifecycle, mountErr := m.prepareSyncWorkspace(spanCtx, sb, gate, cfg.WorkspacePath, cfg.WorkspaceSyncExclude)
+		if mountErr != nil {
+			_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+			if source == "pool" {
+				m.pool.NotifyRemoved()
+			}
+			metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
+			metrics.RecordError(spanCtx, "mount_workspace_failed")
+			return nil, fmt.Errorf("mount workspace: %w", mountErr)
 		}
-	}
+		now := time.Now()
+		workspace := &WorkspaceInfo{RootPath: cfg.WorkspacePath, MountedAt: now, LastSyncedAt: now,
+			SyncExclude: append([]string(nil), cfg.WorkspaceSyncExclude...), MountType: WorkspaceMountSync}
+		if lifecycle != nil {
+			owner := lifecycle.lease.OwnerSnapshot()
+			workspace.Owner = owner
+			workspace.LeaseGeneration = owner.Generation
+		}
+		sb.Workspace = workspace
+		sb.UpdatedAt = now
+		if cfg.Mode == ModePersistent && m.sessions != nil {
+			if saveErr := m.sessions.Save(spanCtx, sb); saveErr != nil {
+				_ = m.releasePreparedSyncWorkspace(lifecycle)
+				_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+				if source == "pool" {
+					m.pool.NotifyRemoved()
+				}
+				return nil, fmt.Errorf("persist mounted sandbox: %w", saveErr)
+			}
+		}
+		m.mu.Lock()
+		if !publishSyncLifecycle(lifecycle) {
+			m.mu.Unlock()
+			_ = m.releasePreparedSyncWorkspace(lifecycle)
+			if cfg.Mode == ModePersistent && m.sessions != nil {
+				_ = m.sessions.RemoveExact(context.WithoutCancel(spanCtx), sb)
+			}
+			_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+			return nil, ErrWorkspaceLeaseLost
+		}
+		m.sandboxes[id] = sb
+		m.operationGates[id] = gate
+		m.workspaces[id] = scoped
+		if lifecycle != nil {
+			m.syncLifecycles[id] = lifecycle
+		}
+		m.mu.Unlock()
+	} else {
+		m.mu.Lock()
+		m.sandboxes[id] = sb
+		m.operationGates[id] = gate
+		m.mu.Unlock()
 
-	// Auto-mount workspace if specified
-	if cfg.WorkspacePath != "" {
-		if bindMounted {
+		if cfg.Mode == ModePersistent && m.sessions != nil {
+			if err := m.sessions.Save(spanCtx, sb); err != nil {
+				logger.Error(spanCtx, "Create: persist sandbox to session store failed",
+					logger.AddField("sandbox_id", id), logger.ErrorField(err))
+			}
+		}
+
+		if cfg.WorkspacePath != "" && bindMounted {
 			// Bind mount: just register the scoped FS, no file copy needed.
 			if err := m.registerWorkspace(spanCtx, id, cfg.WorkspacePath); err != nil {
 				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
 				m.mu.Lock()
 				delete(m.sandboxes, id)
+				delete(m.operationGates, id)
 				m.mu.Unlock()
 				metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
 				metrics.RecordError(spanCtx, "register_workspace_failed")
 				return nil, fmt.Errorf("register workspace: %w", err)
-			}
-		} else {
-			if err := m.MountWorkspace(spanCtx, id, cfg.WorkspacePath, cfg.WorkspaceSyncExclude); err != nil {
-				_ = m.runtime.RemoveSandbox(spanCtx, info.RuntimeID)
-				m.mu.Lock()
-				delete(m.sandboxes, id)
-				m.mu.Unlock()
-				metrics.RecordSandboxCreate(spanCtx, source, "error", 0)
-				metrics.RecordError(spanCtx, "mount_workspace_failed")
-				return nil, fmt.Errorf("mount workspace: %w", err)
 			}
 		}
 	}
@@ -673,6 +731,7 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	}()
 
 	lease, err = m.config.WorkspaceCoordinator.Acquire(txnCtx, WorkspaceLeaseRequest{
+		MountType:       WorkspaceMountFUSE,
 		Provider:        m.fusePool.spec.WorkspaceFUSE.Provider,
 		StorageIdentity: m.fusePool.spec.WorkspaceFUSE.StorageIdentity,
 		Bucket:          m.fusePool.spec.WorkspaceFUSE.Bucket,
@@ -1323,11 +1382,7 @@ func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sand
 	sb, ok := m.sandboxes[id]
 	gate := m.operationGates[id]
 	if ok {
-		if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
-			if gate == nil {
-				m.mu.RUnlock()
-				return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
-			}
+		if gate != nil {
 			m.mu.RUnlock()
 			release, err := gate.Acquire()
 			if err != nil {
@@ -1335,13 +1390,17 @@ func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sand
 			}
 			m.mu.RLock()
 			current := m.sandboxes[id]
-			if current == nil || current != sb || m.operationGates[id] != gate || current.Workspace == nil || current.Workspace.MountType != WorkspaceMountFUSE {
+			if current == nil || current != sb || m.operationGates[id] != gate {
 				m.mu.RUnlock()
 				release()
 				return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 			}
 			m.mu.RUnlock()
 			return current, release, nil
+		}
+		if sb.Workspace != nil && (sb.Workspace.MountType == WorkspaceMountFUSE || sb.Workspace.Owner.Generation > 0) {
+			m.mu.RUnlock()
+			return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 		}
 		m.mu.RUnlock()
 		return sb, func() {}, nil
@@ -1353,7 +1412,7 @@ func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sand
 		if err != nil {
 			return nil, nil, err
 		}
-		if loaded.Workspace != nil && loaded.Workspace.MountType == WorkspaceMountFUSE {
+		if loaded.Workspace != nil && (loaded.Workspace.MountType == WorkspaceMountFUSE || loaded.Workspace.Owner.Generation > 0) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 		}
 		m.mu.Lock()
@@ -1361,6 +1420,7 @@ func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sand
 			loaded = current
 		} else {
 			m.sandboxes[id] = loaded
+			m.operationGates[id] = newOperationGate(true)
 		}
 		m.mu.Unlock()
 		return loaded, func() {}, nil
@@ -1431,6 +1491,7 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 	defer span.End()
 	m.mu.RLock()
 	fuseLifecycle := m.fuseLifecycles[id]
+	syncLifecycle := m.syncLifecycles[id]
 	m.mu.RUnlock()
 	if fuseLifecycle != nil {
 		m.teardownFUSESandbox(fuseLifecycle, fmt.Errorf("sandbox destroy: %s", reason))
@@ -1444,11 +1505,28 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 		metrics.RecordSandboxDestroy(ctx, reason)
 		return nil
 	}
+	if syncLifecycle != nil {
+		if err := m.destroySyncSandbox(ctx, syncLifecycle); err != nil {
+			return err
+		}
+		metrics.SandboxActiveGauge.Add(ctx, -1)
+		metrics.RecordSandboxDestroy(ctx, reason)
+		return nil
+	}
 
 	sb, err := m.resolve(ctx, id)
 	if err != nil {
 		telemetry.Error(err, span)
 		return err
+	}
+
+	m.mu.RLock()
+	gate := m.operationGates[id]
+	m.mu.RUnlock()
+	if gate != nil {
+		if err := gate.CloseAndWait(ctx); err != nil {
+			return fmt.Errorf("drain sandbox operations: %w", err)
+		}
 	}
 
 	m.mu.Lock()
@@ -1475,6 +1553,7 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)
+	delete(m.operationGates, id)
 	m.mu.Unlock()
 
 	// Remove the container
@@ -2404,6 +2483,18 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) error {
 			metrics.SandboxActiveGauge.Add(ctx, 1)
 			continue
 		}
+		if sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountSync && sbPtr.Workspace.Owner.Generation > 0 {
+			if err := m.restoreSyncSandbox(ctx, sbPtr); err != nil {
+				failed++
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("restore sync sandbox %q: %w", id, err))
+				metrics.RecordSessionRestore(ctx, "error")
+				continue
+			}
+			restored++
+			metrics.RecordSessionRestore(ctx, "success")
+			metrics.SandboxActiveGauge.Add(ctx, 1)
+			continue
+		}
 
 		// Check if the container still exists and is running
 		existingInfo, rtErr := m.runtime.GetSandbox(ctx, sbPtr.RuntimeID)
@@ -2438,6 +2529,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) error {
 
 		// Register into in-memory map
 		m.sandboxes[id] = sbPtr
+		m.operationGates[id] = newOperationGate(true)
 
 		// Restore workspace ScopedFS and sync if needed
 		if sbPtr.Workspace != nil && sbPtr.Workspace.RootPath != "" {
