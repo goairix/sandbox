@@ -106,7 +106,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	fuseMode := cfg.Workspace.Mode == "fuse"
+	fuseEnabled := cfg.Workspace.MountModeEnabled("fuse")
 
 	// Initialize runtime. Docker FUSE uses a root-owned staging directory and
 	// copies only the operator-selected credential files into each special
@@ -114,7 +114,7 @@ func main() {
 	var rt runtime.Runtime
 	switch cfg.Runtime.Type {
 	case "docker":
-		if fuseMode {
+		if fuseEnabled {
 			rt, err = docker.NewWithFUSESecretsAtRoot(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, cfg.Runtime.Docker.WorkspaceSecretRoot, &docker.FileSecretMaterializer{
 				Root:          cfg.Runtime.Docker.WorkspaceSecretRoot,
 				AccessKeyFile: cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile,
@@ -154,14 +154,12 @@ func main() {
 	var fsys fs.FileSystem
 	var fsMeta *storage.FileSystemMeta
 	var objectClient storage.WorkspaceObjectClient
-	if fuseMode {
-		selected := cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider]
-		fsMeta = &storage.FileSystemMeta{
-			Provider: storage.StorageProvider(cfg.Storage.FileSystem.Provider), Bucket: cfg.Storage.FileSystem.Bucket,
-			Region: cfg.Storage.FileSystem.Region, Endpoint: cfg.Storage.FileSystem.Endpoint,
-			SubPath: cfg.Storage.FileSystem.SubPath, UseSSL: cfg.Storage.FileSystem.UseSSL,
-			StorageIdentity: selected.StorageIdentity,
-		}
+	selected := cfg.Workspace.Backend
+	fsys, fsMeta, err = storage.NewFileSystemFromConfiguredCredentials(cfg.Storage.FileSystem, selected.StorageIdentity)
+	if err != nil {
+		log.Fatalf("failed to create filesystem: %v", err)
+	}
+	if fuseEnabled {
 		credentials, credentialErr := storage.LoadFileSystemCredentials(cfg.Storage.FileSystem)
 		if credentialErr != nil {
 			log.Fatalf("failed to load FUSE control-plane credentials: %v", credentialErr)
@@ -170,11 +168,6 @@ func main() {
 		credentials.Zero()
 		if err != nil {
 			log.Fatalf("failed to create FUSE workspace object client: %v", err)
-		}
-	} else {
-		fsys, fsMeta, err = storage.NewFileSystem(cfg.Storage.FileSystem)
-		if err != nil {
-			log.Fatalf("failed to create filesystem: %v", err)
 		}
 	}
 
@@ -200,9 +193,13 @@ func main() {
 		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,
 		MaxExecTimeoutSeconds:   cfg.Security.MaxExecTimeoutSeconds,
 		AutoSyncIntervalSeconds: cfg.Workspace.AutoSyncIntervalSeconds,
-		WorkspaceMode:           cfg.Workspace.Mode,
+		DefaultMountMode:        sandbox.WorkspaceMountType(cfg.Workspace.DefaultMountMode),
+		EnabledMountModes:       make(map[sandbox.WorkspaceMountType]bool, len(cfg.Workspace.EnabledMountModes)),
 	}
-	if fuseMode {
+	for _, mode := range cfg.Workspace.EnabledMountModes {
+		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
+	}
+	if fuseEnabled {
 		if redisStore == nil {
 			log.Fatal("FUSE mode requires Redis")
 		}
@@ -227,7 +224,7 @@ func main() {
 			time.Duration(cfg.Workspace.LeaseRenewIntervalSeconds)*time.Second,
 		)
 		managerConfig.WorkspaceObjectClient = objectClient
-		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider].Profile)
+		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Backend.Profile)
 		if profileErr != nil {
 			log.Fatalf("failed to select FUSE marker profile: %v", profileErr)
 		}
@@ -303,8 +300,8 @@ func buildFUSESpec(cfg *config.Config, sandboxImage string) (runtime.SandboxSpec
 	if cfg == nil {
 		return runtime.SandboxSpec{}, sandbox.ErrInvalidFUSEPoolConfig
 	}
-	provider, ok := cfg.Workspace.Providers[cfg.Storage.FileSystem.Provider]
-	if !ok {
+	provider := cfg.Workspace.Backend
+	if provider.Preset == "" {
 		return runtime.SandboxSpec{}, sandbox.ErrInvalidFUSEPoolConfig
 	}
 	image := sandboxImage

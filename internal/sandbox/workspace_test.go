@@ -84,7 +84,8 @@ func TestSyncModeAfterFUSERollbackUsesLegacyPoolAndFullCopy(t *testing.T) {
 	require.NoError(t, err)
 	rt := newMockRuntime()
 	mgr := NewManager(rt, filesystem, &storage.FileSystemMeta{Provider: storage.ProviderMinIO}, ManagerConfig{
-		WorkspaceMode: "sync",
+		DefaultMountMode:  WorkspaceMountSync,
+		EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountSync: true},
 		// A leftover FUSE pool reference must not influence the rollback path;
 		// only workspace.mode selects FUSE acquisition.
 		FUSEPool:   &FUSEPool{},

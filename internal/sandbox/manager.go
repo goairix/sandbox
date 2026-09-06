@@ -100,7 +100,8 @@ func multipartKey(sandboxID, uploadID string) string {
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
 	PoolConfig              PoolConfig
-	WorkspaceMode           string
+	DefaultMountMode        WorkspaceMountType
+	EnabledMountModes       map[WorkspaceMountType]bool
 	FUSEPool                *FUSEPool
 	WorkspaceCoordinator    *WorkspaceCoordinator
 	WorkspaceObjectClient   storage.WorkspaceObjectClient
@@ -110,6 +111,35 @@ type ManagerConfig struct {
 	ExecTimeoutSeconds      int // per-execution timeout; 0 = no limit
 	MaxExecTimeoutSeconds   int // maximum request timeout; 0 = no additional maximum
 	AutoSyncIntervalSeconds int // 0 = disabled
+}
+
+func (m *Manager) resolveWorkspaceMountMode(cfg SandboxConfig) (WorkspaceMountType, error) {
+	if cfg.WorkspacePath == "" {
+		if cfg.WorkspaceMountMode != "" {
+			return "", fmt.Errorf("workspace mount mode requires workspace path: %w", ErrInvalidWorkspaceMountMode)
+		}
+		return "", nil
+	}
+	mode := WorkspaceMountType(cfg.WorkspaceMountMode)
+	if mode == "" {
+		mode = m.config.DefaultMountMode
+		if mode == "" {
+			mode = WorkspaceMountSync
+		}
+	}
+	if mode != WorkspaceMountSync && mode != WorkspaceMountFUSE {
+		return "", fmt.Errorf("unknown workspace mount mode %q: %w", mode, ErrInvalidWorkspaceMountMode)
+	}
+	enabled := m.config.EnabledMountModes
+	if len(enabled) == 0 {
+		// Preserve the historical zero-value ManagerConfig as sync-only for
+		// internal callers while production wiring always passes the map.
+		enabled = map[WorkspaceMountType]bool{WorkspaceMountSync: true}
+	}
+	if !enabled[mode] {
+		return "", fmt.Errorf("workspace mount mode %q is disabled: %w", mode, ErrInvalidWorkspaceMountMode)
+	}
+	return mode, nil
 }
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
@@ -247,42 +277,34 @@ func (m *Manager) Start(ctx context.Context) error {
 	spanCtx, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Start")
 	defer span.End()
 
-	if m.config.WorkspaceMode == "fuse" {
+	fuseEnabled := m.config.EnabledMountModes[WorkspaceMountFUSE]
+	if fuseEnabled {
 		if m.fusePool == nil {
 			return errors.Join(ErrInvalidFUSEPoolConfig, errors.New("FUSE mode requires a FUSE pool"))
 		}
-		if err := m.restorePersistentSandboxes(spanCtx); err != nil {
+	}
+
+	// Restore state before either pool becomes available so live runtimes are
+	// protected from orphan reconciliation. FUSE remains fail-closed; sync-only
+	// retains best-effort recovery for compatibility.
+	if err := m.restorePersistentSandboxes(spanCtx); err != nil {
+		if fuseEnabled {
 			return fmt.Errorf("restore persistent sandboxes for FUSE mode: %w", err)
 		}
+		logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
+	}
+	if fuseEnabled {
 		if err := m.reconcileFUSEOrphans(spanCtx); err != nil {
 			return fmt.Errorf("reconcile FUSE runtime orphans: %w", err)
 		}
+	}
+	m.cleanupOrphanedPoolContainers(spanCtx)
+	m.pool.WarmUp(spanCtx)
+	if fuseEnabled {
 		if err := m.fusePool.Start(spanCtx); err != nil {
+			m.pool.Drain(context.Background())
 			return fmt.Errorf("start FUSE pool: %w", err)
 		}
-	} else if m.runtime.IsStateful() {
-		// Stateful runtimes (e.g. Kubernetes): pods survive process restarts, so
-		// we must restore persistent sandboxes synchronously first. This registers
-		// their RuntimeIDs in m.sandboxes before cleanupOrphanedPoolContainers
-		// runs, preventing live pods from being mistakenly deleted as orphans.
-		if err := m.restorePersistentSandboxes(spanCtx); err != nil {
-			logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
-		}
-		m.cleanupOrphanedPoolContainers(spanCtx)
-		m.pool.WarmUp(spanCtx)
-	} else {
-		// Non-stateful runtimes (e.g. Docker): containers are gone after restart,
-		// so cleanup first, then warm up, then restore in background to avoid
-		// blocking API startup.
-		m.cleanupOrphanedPoolContainers(spanCtx)
-		m.pool.WarmUp(spanCtx)
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			if err := m.restorePersistentSandboxes(spanCtx); err != nil {
-				logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
-			}
-		}()
 	}
 
 	m.wg.Add(1)
@@ -395,13 +417,18 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	m.lifecycleMu.Unlock()
 	defer m.createWG.Done()
 	cfg = cloneSandboxConfig(cfg)
+	workspaceMountMode, err := m.resolveWorkspaceMountMode(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.WorkspaceMountMode = WorkspaceMountMode(workspaceMountMode)
 	createCtx, cancelCreate := context.WithCancel(ctx)
 	stopCreate := context.AfterFunc(m.controlCtx, cancelCreate)
 	defer stopCreate()
 	defer cancelCreate()
 	spanCtx, span := telemetry.Tracer().Start(createCtx, "sandbox.Manager.Create")
 	defer span.End()
-	if m.config.WorkspaceMode == "fuse" && cfg.WorkspacePath != "" {
+	if workspaceMountMode == WorkspaceMountFUSE {
 		return m.createFUSESandbox(spanCtx, cfg)
 	}
 
@@ -425,7 +452,6 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	m.mu.Unlock()
 
 	var info *runtime.SandboxInfo
-	var err error
 	var bindMounted bool
 	var source string
 
@@ -2757,6 +2783,7 @@ func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath str
 		MountedAt:    now,
 		LastSyncedAt: now,
 		BindMounted:  true,
+		MountType:    WorkspaceMountLocal,
 	}
 	sb.UpdatedAt = now
 	sessionSnapshot := cloneSandbox(sb)

@@ -128,6 +128,27 @@ func NewFileSystemWithStorageIdentity(cfg config.FileSystemConfig, storageIdenti
 	}
 }
 
+// NewFileSystemFromConfiguredCredentials constructs the sync filesystem from
+// either inline or file-backed credentials. Credential bytes are owned only
+// for the duration of provider construction and are zeroed before return.
+// Local storage never attempts to load object-store credentials.
+func NewFileSystemFromConfiguredCredentials(cfg config.FileSystemConfig, storageIdentity string) (fs.FileSystem, *FileSystemMeta, error) {
+	if cfg.Provider == "local" {
+		return NewFileSystemWithStorageIdentity(cfg, storageIdentity)
+	}
+	credentials, err := LoadFileSystemCredentials(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer credentials.Zero()
+
+	providerConfig := cfg
+	providerConfig.AccessKey = string(credentials.AccessKey)
+	providerConfig.SecretKey = string(credentials.SecretKey)
+	providerConfig.CredentialFiles = config.FileSystemCredentialFileConfig{}
+	return NewFileSystemWithStorageIdentity(providerConfig, storageIdentity)
+}
+
 // FileSystemCredentials owns the credential buffers returned by
 // LoadFileSystemCredentials. Callers should zero them immediately after client
 // construction.

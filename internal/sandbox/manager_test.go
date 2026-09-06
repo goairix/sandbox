@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/goairix/fs/driver/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -177,6 +180,7 @@ type fuseMarkerClient struct {
 	deletedKeys []string
 	deleteErr   error
 	onDelete    func(string)
+	headCalls   int
 }
 
 type ambiguousSessionStore struct {
@@ -334,10 +338,15 @@ func (c *fuseMarkerClient) PutEmptyObject(_ context.Context, _ string, _ storage
 }
 
 func (c *fuseMarkerClient) HeadObject(context.Context, string) (bool, error) {
-	if c.err != nil {
-		return false, c.err
+	c.mu.Lock()
+	c.headCalls++
+	err := c.err
+	exists := c.exists
+	c.mu.Unlock()
+	if err != nil {
+		return false, err
 	}
-	return c.exists, nil
+	return exists, nil
 }
 
 func (c *fuseMarkerClient) DeleteObject(_ context.Context, key string) error {
@@ -367,7 +376,7 @@ func newFUSETestManager(t *testing.T, rt *fuseManagerRuntime) (*Manager, string,
 	mgr := NewManager(rt, nil, &storage.FileSystemMeta{
 		Provider: storage.ProviderMinIO, Bucket: "sandbox", SubPath: "workspaces", StorageIdentity: "storage-primary",
 	}, ManagerConfig{
-		WorkspaceMode: "fuse", FUSEPool: pool,
+		DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool,
 		WorkspaceCoordinator:  NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
 		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
 		FUSEHealthInterval: time.Hour,
@@ -379,6 +388,108 @@ func newFUSETestManager(t *testing.T, rt *fuseManagerRuntime) (*Manager, string,
 	require.Len(t, records, 1)
 	require.Equal(t, state.FUSEPoolPrepared, records[0].State)
 	return mgr, records[0].RuntimeID, repo, store
+}
+
+func TestManagerHybridRoutesDefaultSyncAndExplicitFUSE(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "team", "sync"), 0o755))
+	filesystem, err := local.New(local.Config{RootPath: root})
+	require.NoError(t, err)
+	rt := newFUSEManagerRuntime()
+	mgr, preparedID, _, _ := newFUSETestManager(t, rt)
+	mgr.filesystem = filesystem
+	mgr.config.DefaultMountMode = WorkspaceMountSync
+	mgr.config.EnabledMountModes = map[WorkspaceMountType]bool{WorkspaceMountSync: true, WorkspaceMountFUSE: true}
+
+	syncSandbox, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/sync"})
+	require.NoError(t, err)
+	assert.Equal(t, WorkspaceMountSync, syncSandbox.Config.WorkspaceMountMode)
+	require.NotNil(t, syncSandbox.Workspace)
+	assert.Equal(t, WorkspaceMountSync, syncSandbox.Workspace.MountType)
+	assert.NotEqual(t, preparedID, syncSandbox.RuntimeID)
+
+	fuseSandbox, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode: ModePersistent, WorkspacePath: "team/fuse", WorkspaceMountMode: WorkspaceMountFUSE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, WorkspaceMountFUSE, fuseSandbox.Config.WorkspaceMountMode)
+	assert.Equal(t, preparedID, fuseSandbox.RuntimeID)
+}
+
+func TestManagerNoWorkspaceUsesOrdinaryPoolWithoutStorage(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	events := []string{}
+	objectStore := &fuseMarkerClient{events: &events}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		DefaultMountMode:      WorkspaceMountSync,
+		EnabledMountModes:     map[WorkspaceMountType]bool{WorkspaceMountSync: true, WorkspaceMountFUSE: true},
+		WorkspaceObjectClient: objectStore,
+	})
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
+	require.NoError(t, err)
+	assert.Empty(t, sb.Config.WorkspaceMountMode)
+	assert.Empty(t, events)
+	objectStore.mu.Lock()
+	assert.Zero(t, objectStore.headCalls)
+	assert.Empty(t, objectStore.deletedKeys)
+	objectStore.mu.Unlock()
+	assert.NotEmpty(t, sb.RuntimeID)
+}
+
+func TestResolveWorkspaceMountModeRejectsDisabledOrWorkspaceLessSelection(t *testing.T) {
+	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{
+		DefaultMountMode:  WorkspaceMountSync,
+		EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountSync: true},
+	})
+	_, err := mgr.resolveWorkspaceMountMode(SandboxConfig{WorkspaceMountMode: WorkspaceMountFUSE})
+	require.ErrorIs(t, err, ErrInvalidWorkspaceMountMode)
+	_, err = mgr.resolveWorkspaceMountMode(SandboxConfig{WorkspacePath: "team/a", WorkspaceMountMode: WorkspaceMountFUSE})
+	require.ErrorIs(t, err, ErrInvalidWorkspaceMountMode)
+	mode, err := mgr.resolveWorkspaceMountMode(SandboxConfig{WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	assert.Equal(t, WorkspaceMountSync, mode)
+}
+
+func TestManagerStartWarmsBothPoolsWhenFUSEEnabled(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	store := newAtomicMemoryStore()
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	profile, err := storage.RootMarkerProfileByID(storage.RootMarkerProfileMinIO)
+	require.NoError(t, err)
+	mgr := NewManager(rt, nil, &storage.FileSystemMeta{Provider: storage.ProviderMinIO, StorageIdentity: "physical-a"}, ManagerConfig{
+		PoolConfig:        PoolConfig{MinSize: 1, MaxSize: 2, Image: "sandbox:ordinary"},
+		DefaultMountMode:  WorkspaceMountSync,
+		EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountSync: true, WorkspaceMountFUSE: true},
+		FUSEPool:          pool, WorkspaceCoordinator: NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
+	})
+	mgr.SetSessionStore(NewSessionStore(store, time.Hour))
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { mgr.Stop(context.Background()) })
+
+	assert.Equal(t, 1, mgr.pool.Size(), "ordinary Pool must always warm")
+	assert.Equal(t, 1, repo.countState("pool-key", state.FUSEPoolPrepared), "enabled FUSE Pool must warm")
+}
+
+func TestManagerStartWarmsOnlyOrdinaryPoolWhenFUSEDisabled(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		PoolConfig:        PoolConfig{MinSize: 1, MaxSize: 2, Image: "sandbox:ordinary"},
+		DefaultMountMode:  WorkspaceMountSync,
+		EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountSync: true},
+		FUSEPool:          pool,
+	})
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { mgr.Stop(context.Background()) })
+
+	assert.Equal(t, 1, mgr.pool.Size())
+	assert.Zero(t, repo.countState("pool-key", state.FUSEPoolPrepared))
+	rt.mu.Lock()
+	assert.Zero(t, rt.prepareSeq)
+	rt.mu.Unlock()
 }
 
 func TestManagerCreateFUSEUsesPreparedRuntimeAndPublishesAfterProbe(t *testing.T) {
@@ -706,7 +817,7 @@ func TestManagerDirectFUSESessionLoadDoesNotOpenGate(t *testing.T) {
 	sb.Config.Mode = ModePersistent
 	sb.Workspace = &WorkspaceInfo{MountType: WorkspaceMountFUSE, MountState: WorkspaceMountReady}
 	require.NoError(t, sessions.Save(context.Background(), sb))
-	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse"})
+	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}})
 	mgr.SetSessionStore(sessions)
 
 	_, err := mgr.Get(context.Background(), sb.ID)
@@ -1146,7 +1257,7 @@ func TestRestoreNeverReauthorizesExistingRuntimeUID(t *testing.T) {
 	profile, err := storage.RootMarkerProfileByID(storage.RootMarkerProfileMinIO)
 	require.NoError(t, err)
 	restored := NewManager(rt, nil, first.fsMeta, ManagerConfig{
-		WorkspaceMode: "fuse", FUSEPool: pool,
+		DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool,
 		WorkspaceCoordinator:  NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
 		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
 		FUSEHealthInterval: time.Hour,

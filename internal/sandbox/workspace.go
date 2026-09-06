@@ -132,6 +132,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		MountedAt:    now,
 		LastSyncedAt: now,
 		SyncExclude:  append([]string(nil), exclude...),
+		MountType:    WorkspaceMountSync,
 	}
 	sb.UpdatedAt = now
 	sessionSnapshot := cloneSandbox(sb)

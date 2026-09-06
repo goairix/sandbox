@@ -350,7 +350,7 @@ git commit -m "feat: expose workspace mount mode per sandbox"
 - Modify: `cmd/sandbox/main.go`
 - Modify: `cmd/sandbox/main_test.go`
 
-- [ ] **Step 1: Write failing dual-Pool routing tests**
+- [x] **Step 1: Write failing dual-Pool routing tests**
 
 ```go
 func TestManagerHybridRoutesDefaultSyncAndExplicitFUSE(t *testing.T) {
@@ -378,13 +378,13 @@ func TestManagerNoWorkspaceUsesOrdinaryPoolWithoutStorage(t *testing.T) {
 
 Add startup tests asserting the ordinary Pool always warms and FUSE Pool warms only when `fuse` is enabled. Add a negative test for explicit FUSE when only sync is enabled.
 
-- [ ] **Step 2: Run focused manager/wiring tests and confirm failure**
+- [x] **Step 2: Run focused manager/wiring tests and confirm failure**
 
 Run: `go test ./internal/storage ./internal/sandbox ./cmd/sandbox -run 'Test.*(Hybrid|MountMode|NoWorkspace|BothPools)' -count=1`
 
 Expected: FAIL because `ManagerConfig` still has one global `WorkspaceMode` and FUSE startup skips the ordinary Pool.
 
-- [ ] **Step 3: Initialize both data paths and resolve the request mode once**
+- [x] **Step 3: Initialize both data paths and resolve the request mode once**
 
 Replace `ManagerConfig.WorkspaceMode` with:
 
@@ -409,13 +409,13 @@ func NewFileSystemFromConfiguredCredentials(cfg config.FileSystemConfig, storage
 
 For remote providers it calls `LoadFileSystemCredentials`, injects the pair only into a private provider-construction copy, constructs the driver, and zeroes the owned byte buffers before returning; local storage bypasses credential loading. It never logs either value. In `cmd/sandbox/main.go`, always construct this filesystem for sync. Construct the object client, FUSE secret materializer, coordinator, and FUSE Pool only when FUSE is enabled.
 
-- [ ] **Step 4: Run storage, manager, and wiring tests**
+- [x] **Step 4: Run storage, manager, and wiring tests**
 
 Run: `go test ./internal/storage ./internal/sandbox ./cmd/sandbox -count=1`
 
 Expected: PASS; existing sync tests and existing FUSE Pool tests both remain green.
 
-- [ ] **Step 5: Commit dual-Pool routing**
+- [x] **Step 5: Commit dual-Pool routing**
 
 ```bash
 git add internal/storage/filesystem.go internal/storage/filesystem_test.go internal/sandbox/manager.go internal/sandbox/manager_test.go internal/sandbox/workspace.go internal/sandbox/workspace_test.go cmd/sandbox

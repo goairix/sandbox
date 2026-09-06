@@ -1653,7 +1653,7 @@ func TestFUSEPoolStopCancelsBlockedInitialStart(t *testing.T) {
 
 func TestFUSEPoolStartFailsClosed(t *testing.T) {
 	t.Run("missing pool", func(t *testing.T) {
-		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse"})
+		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}})
 		require.ErrorIs(t, mgr.Start(context.Background()), ErrInvalidFUSEPoolConfig)
 	})
 
@@ -1661,7 +1661,7 @@ func TestFUSEPoolStartFailsClosed(t *testing.T) {
 		repo := newMemoryFUSEPoolRepository()
 		repo.failNext("TryRefillLock", errors.New("redis unavailable"))
 		pool := NewFUSEPool(newFUSEMockRuntime(), repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
-		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse", FUSEPool: pool})
+		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool})
 
 		err := mgr.Start(context.Background())
 		require.Error(t, err)
@@ -1683,7 +1683,7 @@ func TestFUSEPoolStartFailsClosed(t *testing.T) {
 		repo := newMemoryFUSEPoolRepository()
 		repo.failNext("CountPreparingAndPrepared", errors.New("count unavailable"))
 		pool := NewFUSEPool(newFUSEMockRuntime(), repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
-		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse", FUSEPool: pool})
+		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool})
 
 		err := mgr.Start(context.Background())
 		require.Error(t, err)
@@ -1695,7 +1695,7 @@ func TestFUSEPoolStartFailsClosed(t *testing.T) {
 		rt := newFUSEMockRuntime()
 		rt.prepareErr = errors.New("runtime unavailable")
 		pool := NewFUSEPool(rt, newMemoryFUSEPoolRepository(), fusePoolConfig(), fixedFUSESpec("pool-key"))
-		mgr := NewManager(rt, nil, nil, ManagerConfig{WorkspaceMode: "fuse", FUSEPool: pool})
+		mgr := NewManager(rt, nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool})
 
 		err := mgr.Start(context.Background())
 		require.Error(t, err)
@@ -1707,7 +1707,7 @@ func TestFUSEPoolStartFailsClosed(t *testing.T) {
 		store := newAtomicMemoryStore()
 		store.failNext("Keys", errors.New("state unavailable"))
 		pool := NewFUSEPool(newFUSEMockRuntime(), newMemoryFUSEPoolRepository(), fusePoolConfig(), fixedFUSESpec("pool-key"))
-		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{WorkspaceMode: "fuse", FUSEPool: pool})
+		mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{DefaultMountMode: WorkspaceMountFUSE, EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true}, FUSEPool: pool})
 		mgr.SetSessionStore(NewSessionStore(store, time.Minute))
 
 		err := mgr.Start(context.Background())

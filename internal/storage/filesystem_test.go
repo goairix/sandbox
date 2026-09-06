@@ -70,6 +70,51 @@ func TestNewFileSystem_UnknownProvider(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported filesystem provider")
 }
 
+func TestNewFileSystemFromConfiguredCredentialsSupportsInlineFilesAndLocal(t *testing.T) {
+	t.Run("local bypasses credentials", func(t *testing.T) {
+		root := t.TempDir()
+		fsys, meta, err := NewFileSystemFromConfiguredCredentials(config.FileSystemConfig{Provider: "local", LocalPath: root}, "")
+		require.NoError(t, err)
+		require.NotNil(t, fsys)
+		assert.Equal(t, ProviderLocal, meta.Provider)
+	})
+
+	t.Run("inline remote", func(t *testing.T) {
+		cfg := config.FileSystemConfig{Provider: "obs", Endpoint: "https://obs.example.com", Bucket: "workspace", AccessKey: "inline-access", SecretKey: "inline-secret"}
+		fsys, meta, err := NewFileSystemFromConfiguredCredentials(cfg, "physical-a")
+		require.NoError(t, err)
+		require.NotNil(t, fsys)
+		assert.Equal(t, "physical-a", meta.StorageIdentity)
+		assert.Equal(t, "inline-access", cfg.AccessKey, "caller-owned config must not be mutated")
+	})
+
+	t.Run("credential files", func(t *testing.T) {
+		root := t.TempDir()
+		accessFile, secretFile := filepath.Join(root, "access"), filepath.Join(root, "secret")
+		require.NoError(t, os.WriteFile(accessFile, []byte("file-access"), 0o600))
+		require.NoError(t, os.WriteFile(secretFile, []byte("file-secret"), 0o600))
+		cfg := config.FileSystemConfig{
+			Provider: "obs", Endpoint: "https://obs.example.com", Bucket: "workspace",
+			CredentialFiles: config.FileSystemCredentialFileConfig{AccessKeyFile: accessFile, SecretKeyFile: secretFile},
+		}
+		fsys, _, err := NewFileSystemFromConfiguredCredentials(cfg, "physical-b")
+		require.NoError(t, err)
+		require.NotNil(t, fsys)
+		assert.Empty(t, cfg.AccessKey)
+		assert.Empty(t, cfg.SecretKey)
+	})
+
+	t.Run("mixed sources fail closed", func(t *testing.T) {
+		_, _, err := NewFileSystemFromConfiguredCredentials(config.FileSystemConfig{
+			Provider: "minio", AccessKey: "inline-access", SecretKey: "inline-secret",
+			CredentialFiles: config.FileSystemCredentialFileConfig{AccessKeyFile: "/secret/access", SecretKeyFile: "/secret/key"},
+		}, "physical-c")
+		require.ErrorContains(t, err, "mutually exclusive")
+		assert.NotContains(t, err.Error(), "inline-access")
+		assert.NotContains(t, err.Error(), "inline-secret")
+	})
+}
+
 func TestLoadFileSystemCredentialsInlineReturnsOwnedBuffers(t *testing.T) {
 	cfg := config.FileSystemConfig{AccessKey: "access", SecretKey: "secret"}
 
