@@ -2,14 +2,22 @@ package types
 
 import "time"
 
+type WorkspaceMountMode string
+
+const (
+	WorkspaceMountSync WorkspaceMountMode = "sync"
+	WorkspaceMountFUSE WorkspaceMountMode = "fuse"
+)
+
 type CreateSandboxRequest struct {
-	Mode                 string           `json:"mode" binding:"required,oneof=ephemeral persistent"`
-	Timeout              int              `json:"timeout,omitempty" binding:"min=-1"` // seconds; 0 = use default, -1 = never expire
-	Resources            *ResourceLimits  `json:"resources,omitempty"`
-	Network              *NetworkConfig   `json:"network,omitempty"`
-	Dependencies         []DependencySpec `json:"dependencies,omitempty"`
-	WorkspacePath        string           `json:"workspace_path,omitempty"`
-	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
+	Mode                 string             `json:"mode" binding:"required,oneof=ephemeral persistent"`
+	Timeout              int                `json:"timeout,omitempty" binding:"min=-1"` // seconds; 0 = use default, -1 = never expire
+	Resources            *ResourceLimits    `json:"resources,omitempty"`
+	Network              *NetworkConfig     `json:"network,omitempty"`
+	Dependencies         []DependencySpec   `json:"dependencies,omitempty"`
+	WorkspacePath        string             `json:"workspace_path,omitempty"`
+	WorkspaceMountMode   WorkspaceMountMode `json:"workspace_mount_mode,omitempty" binding:"omitempty,oneof=sync fuse"`
+	WorkspaceSyncExclude []string           `json:"workspace_sync_exclude,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -35,13 +43,14 @@ type DependencySpec struct {
 }
 
 type SandboxResponse struct {
-	ID        string     `json:"id"`
-	Mode      string     `json:"mode"`
-	State     string     `json:"state"`
-	RuntimeID string     `json:"runtime_id"`
-	CreatedAt time.Time  `json:"created_at"`
-	Timeout   int        `json:"timeout"`              // seconds; -1 = never expire
-	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil when timeout = -1
+	ID                 string     `json:"id"`
+	Mode               string     `json:"mode"`
+	State              string     `json:"state"`
+	RuntimeID          string     `json:"runtime_id"`
+	CreatedAt          time.Time  `json:"created_at"`
+	Timeout            int        `json:"timeout"`              // seconds; -1 = never expire
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"` // nil when timeout = -1
+	WorkspaceMountMode string     `json:"workspace_mount_mode,omitempty"`
 }
 
 type ErrorResponse struct {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,43 @@ import (
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/pkg/types"
 )
+
+func TestCreateSandboxRejectsMountModeWithoutWorkspace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"mode":"ephemeral","workspace_mount_mode":"fuse"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	NewHandler(nil).CreateSandbox(c)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "WORKSPACE_MOUNT_MODE_INVALID")
+}
+
+func TestCreateSandboxRejectsUnknownWorkspaceMountModeWithStableCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"mode":"ephemeral","workspace_path":"jobs/a","workspace_mount_mode":"volume"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	NewHandler(nil).CreateSandbox(c)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "WORKSPACE_MOUNT_MODE_INVALID")
+}
+
+func TestSandboxResponseIncludesResolvedWorkspaceMountMode(t *testing.T) {
+	sb := &sandbox.Sandbox{
+		Config:    sandbox.SandboxConfig{Mode: sandbox.ModePersistent, WorkspaceMountMode: sandbox.WorkspaceMountFUSE},
+		Workspace: &sandbox.WorkspaceInfo{MountType: sandbox.WorkspaceMountFUSE},
+	}
+	assert.Equal(t, "fuse", sandboxToResponse(sb).WorkspaceMountMode)
+
+	sb.Workspace = nil
+	assert.Empty(t, sandboxToResponse(sb).WorkspaceMountMode)
+}
 
 func TestResourceLimitsFromRequestIncludesTmpDisk(t *testing.T) {
 	got := resourceLimitsFromRequest(&types.ResourceLimits{

@@ -11,6 +11,14 @@ const (
 	ModePersistent Mode = "persistent"
 )
 
+// WorkspaceMountMode selects how a configured workspace is attached.
+type WorkspaceMountMode string
+
+const (
+	WorkspaceMountSync WorkspaceMountMode = "sync"
+	WorkspaceMountFUSE WorkspaceMountMode = "fuse"
+)
+
 // SyncDirection specifies the direction of a workspace sync operation.
 type SyncDirection string
 
@@ -48,24 +56,26 @@ type DependencySpec struct {
 // CreateSandboxRequest is the request body for POST /api/v1/sandboxes.
 // Mode is required; use ModeEphemeral or ModePersistent.
 type CreateSandboxRequest struct {
-	Mode                 Mode             `json:"mode"`
-	Timeout              int              `json:"timeout,omitempty"`
-	Resources            *ResourceLimits  `json:"resources,omitempty"`
-	Network              *NetworkConfig   `json:"network,omitempty"`
-	Dependencies         []DependencySpec `json:"dependencies,omitempty"`
-	WorkspacePath        string           `json:"workspace_path,omitempty"`
-	WorkspaceSyncExclude []string         `json:"workspace_sync_exclude,omitempty"`
+	Mode                 Mode               `json:"mode"`
+	Timeout              int                `json:"timeout,omitempty"`
+	Resources            *ResourceLimits    `json:"resources,omitempty"`
+	Network              *NetworkConfig     `json:"network,omitempty"`
+	Dependencies         []DependencySpec   `json:"dependencies,omitempty"`
+	WorkspacePath        string             `json:"workspace_path,omitempty"`
+	WorkspaceMountMode   WorkspaceMountMode `json:"workspace_mount_mode,omitempty"`
+	WorkspaceSyncExclude []string           `json:"workspace_sync_exclude,omitempty"`
 }
 
 // SandboxResponse is returned by sandbox lifecycle endpoints.
 type SandboxResponse struct {
-	ID        string     `json:"id"`
-	Mode      Mode       `json:"mode"`
-	State     string     `json:"state"`
-	RuntimeID string     `json:"runtime_id"`
-	CreatedAt time.Time  `json:"created_at"`
-	Timeout   int        `json:"timeout"`              // seconds; -1 = never expire
-	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil when timeout = -1
+	ID                 string             `json:"id"`
+	Mode               Mode               `json:"mode"`
+	State              string             `json:"state"`
+	RuntimeID          string             `json:"runtime_id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Timeout            int                `json:"timeout"`              // seconds; -1 = never expire
+	ExpiresAt          *time.Time         `json:"expires_at,omitempty"` // nil when timeout = -1
+	WorkspaceMountMode WorkspaceMountMode `json:"workspace_mount_mode,omitempty"`
 }
 
 // UpdateNetworkRequest is the request body for PUT /api/v1/sandboxes/:id/network.

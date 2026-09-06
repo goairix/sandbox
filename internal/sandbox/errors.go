@@ -19,6 +19,10 @@ var (
 	// workspace but none exists.
 	ErrNoWorkspaceMounted = errors.New("no workspace mounted")
 
+	// ErrInvalidWorkspaceMountMode is returned when request-level workspace
+	// mode selection is invalid for the requested workspace or release.
+	ErrInvalidWorkspaceMountMode = errors.New("invalid workspace mount mode")
+
 	// ErrFUSEWorkspaceImmutable prevents public mount APIs from mutating the
 	// lifecycle of a runtime-bound FUSE workspace.
 	ErrFUSEWorkspaceImmutable = errors.New("FUSE workspace mount is immutable")

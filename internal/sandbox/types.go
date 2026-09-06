@@ -69,12 +69,16 @@ type NetworkConfig struct {
 	BlockPrivate bool `json:"block_private"`
 }
 
-type WorkspaceMountType string
+type WorkspaceMountMode string
+
+// WorkspaceMountType is retained as a compatibility name for persisted
+// workspace metadata. Request routing uses WorkspaceMountMode.
+type WorkspaceMountType = WorkspaceMountMode
 
 const (
-	WorkspaceMountSync  WorkspaceMountType = "sync"
-	WorkspaceMountLocal WorkspaceMountType = "local"
-	WorkspaceMountFUSE  WorkspaceMountType = "fuse"
+	WorkspaceMountSync  WorkspaceMountMode = "sync"
+	WorkspaceMountLocal WorkspaceMountMode = "local"
+	WorkspaceMountFUSE  WorkspaceMountMode = "fuse"
 )
 
 type WorkspaceMountState string
@@ -108,13 +112,14 @@ type WorkspaceInfo struct {
 
 // SandboxConfig holds all configuration for creating a sandbox.
 type SandboxConfig struct {
-	Mode                 Mode           `json:"mode"`
-	Timeout              int            `json:"timeout"` // seconds; 0 = use default, -1 = never expire
-	Resources            ResourceLimits `json:"resources"`
-	Network              NetworkConfig  `json:"network"`
-	Dependencies         []Dependency   `json:"dependencies"`
-	WorkspacePath        string         `json:"workspace_path,omitempty"`
-	WorkspaceSyncExclude []string       `json:"workspace_sync_exclude,omitempty"`
+	Mode                 Mode               `json:"mode"`
+	Timeout              int                `json:"timeout"` // seconds; 0 = use default, -1 = never expire
+	Resources            ResourceLimits     `json:"resources"`
+	Network              NetworkConfig      `json:"network"`
+	Dependencies         []Dependency       `json:"dependencies"`
+	WorkspacePath        string             `json:"workspace_path,omitempty"`
+	WorkspaceMountMode   WorkspaceMountMode `json:"workspace_mount_mode,omitempty"`
+	WorkspaceSyncExclude []string           `json:"workspace_sync_exclude,omitempty"`
 }
 
 // Sandbox represents a running sandbox instance.

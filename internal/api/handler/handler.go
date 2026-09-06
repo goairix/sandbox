@@ -46,6 +46,12 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, sandbox.ErrInvalidWorkspaceMountMode):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    "WORKSPACE_MOUNT_MODE_INVALID",
+			Message: err.Error(),
+		})
+		return
 	case errors.Is(err, sandbox.ErrSandboxNotReady):
 		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{
 			Code:    "SANDBOX_NOT_READY",

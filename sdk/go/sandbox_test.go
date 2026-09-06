@@ -42,6 +42,29 @@ func TestNewSandbox(t *testing.T) {
 	}
 }
 
+func TestNewSandboxPassesWorkspaceMountMode(t *testing.T) {
+	var request sandbox.CreateSandboxRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sandbox.SandboxResponse{ID: "sb-fuse", Mode: sandbox.ModePersistent, State: "running"})
+	}))
+	t.Cleanup(srv.Close)
+	client := sandbox.NewClient(srv.URL, "test-key")
+
+	_, err := client.NewSandbox(context.Background(), sandbox.SandboxOptions{
+		Mode: sandbox.ModePersistent, WorkspacePath: "jobs/a", WorkspaceMountMode: sandbox.WorkspaceMountFUSE,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.WorkspaceMountMode != sandbox.WorkspaceMountFUSE {
+		t.Fatalf("WorkspaceMountMode = %q, want fuse", request.WorkspaceMountMode)
+	}
+}
+
 func TestSandboxRun(t *testing.T) {
 	_, client := newSandboxTestServer(t, "sb-abc")
 	sb, _ := client.NewSandbox(context.Background(), sandbox.SandboxOptions{})

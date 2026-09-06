@@ -56,6 +56,18 @@ fmt.Println(info.Timeout)   // seconds; -1 = never expire
 fmt.Println(info.ExpiresAt) // nil when timeout = -1
 ```
 
+需要持久工作空间时可逐请求选择挂载方式；省略 `WorkspaceMountMode` 时由服务端的 `default_mount_mode` 决定：
+
+```go
+sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
+    Mode:               sandbox.ModePersistent,
+    WorkspacePath:      "teams/example/project-a",
+    WorkspaceMountMode: sandbox.WorkspaceMountFUSE, // 或 WorkspaceMountSync
+})
+```
+
+不设置 `WorkspacePath` 的代码执行器不要设置 `WorkspaceMountMode`，它始终使用普通运行时 Pool，也不会访问后端对象存储。
+
 ### Execute code
 
 ```go

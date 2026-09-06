@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
@@ -47,6 +49,15 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 
 	var req types.CreateSandboxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var validationErrors validator.ValidationErrors
+		if errors.As(err, &validationErrors) {
+			for _, fieldError := range validationErrors {
+				if fieldError.StructField() == "WorkspaceMountMode" {
+					internalError(c, fmt.Errorf("workspace_mount_mode must be sync or fuse: %w", sandbox.ErrInvalidWorkspaceMountMode))
+					return
+				}
+			}
+		}
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Message: err.Error(),
 		})
@@ -57,6 +68,10 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{
 			Message: "invalid mode, must be one of: ephemeral, persistent",
 		})
+		return
+	}
+	if req.WorkspaceMountMode != "" && req.WorkspacePath == "" {
+		internalError(c, fmt.Errorf("workspace_mount_mode requires workspace_path: %w", sandbox.ErrInvalidWorkspaceMountMode))
 		return
 	}
 
@@ -86,6 +101,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	}
 
 	cfg.WorkspacePath = req.WorkspacePath
+	cfg.WorkspaceMountMode = sandbox.WorkspaceMountMode(req.WorkspaceMountMode)
 	cfg.WorkspaceSyncExclude = req.WorkspaceSyncExclude
 
 	sb, err := h.manager.Create(spanCtx, cfg)
@@ -193,6 +209,16 @@ func sandboxToResponse(sb *sandbox.Sandbox) types.SandboxResponse {
 	if sb.Timeout > 0 {
 		expiresAt := sb.CreatedAt.Add(sb.Timeout)
 		resp.ExpiresAt = &expiresAt
+	}
+	if sb.Workspace != nil {
+		mountMode := sb.Config.WorkspaceMountMode
+		if mountMode == "" {
+			mountMode = sandbox.WorkspaceMountSync
+			if sb.Workspace.MountType == sandbox.WorkspaceMountFUSE {
+				mountMode = sandbox.WorkspaceMountFUSE
+			}
+		}
+		resp.WorkspaceMountMode = string(mountMode)
 	}
 	return resp
 }

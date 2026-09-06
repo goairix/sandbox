@@ -267,7 +267,7 @@ git commit -m "feat: add workspace backend presets and mount modes"
 - Modify: `sdk/go/client_test.go`
 - Modify: `sdk/go/README.md`
 
-- [ ] **Step 1: Write failing handler and SDK contract tests**
+- [x] **Step 1: Write failing handler and SDK contract tests**
 
 ```go
 func TestCreateSandboxRejectsMountModeWithoutWorkspace(t *testing.T) {
@@ -291,7 +291,7 @@ func TestWorkspaceMountModeJSON(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run API/SDK tests and confirm failure**
+- [x] **Step 2: Run API/SDK tests and confirm failure**
 
 Run:
 
@@ -302,7 +302,7 @@ go test ./internal/api/handler ./pkg/types -count=1
 
 Expected: FAIL on the missing request, response, SDK, and internal config fields.
 
-- [ ] **Step 3: Implement typed request, response, and error mapping**
+- [x] **Step 3: Implement typed request, response, and error mapping**
 
 Add these public SDK constants and mirror their string values internally:
 
@@ -324,13 +324,13 @@ type CreateSandboxRequest struct {
 
 The snippet shows the four workspace/lifecycle fields to add or replace; retain the existing `Timeout`, `Resources`, `Network`, and `Dependencies` fields with their current tags. `pkg/types.CreateSandboxRequest` uses `binding:"omitempty,oneof=sync fuse"`. The handler rejects a supplied mount mode when `workspace_path` is empty before calling the manager. Add `ErrInvalidWorkspaceMountMode`, map it to HTTP 400 and `WORKSPACE_MOUNT_MODE_INVALID`, pass the value into `sandbox.SandboxConfig`, and return the resolved mode only when a workspace exists. `sdk/go.SandboxOptions` must pass the same field.
 
-- [ ] **Step 4: Run API and SDK tests**
+- [x] **Step 4: Run API and SDK tests**
 
 Run the two commands from Step 2.
 
 Expected: PASS, including backward-compatible JSON with the field omitted.
 
-- [ ] **Step 5: Commit the API contract**
+- [x] **Step 5: Commit the API contract**
 
 ```bash
 git add pkg/types/sandbox.go internal/sandbox/types.go internal/sandbox/errors.go internal/api/handler sdk/go

@@ -36,11 +36,20 @@ func TestClientCreateSandbox(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Error("missing or invalid Authorization header")
 		}
+		var request sandbox.CreateSandboxRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.WorkspaceMountMode != sandbox.WorkspaceMountFUSE {
+			t.Errorf("WorkspaceMountMode = %q, want fuse", request.WorkspaceMountMode)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(want)
 	})
 
-	got, err := client.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{Mode: sandbox.ModeEphemeral})
+	got, err := client.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{
+		Mode: sandbox.ModeEphemeral, WorkspacePath: "jobs/a", WorkspaceMountMode: sandbox.WorkspaceMountFUSE,
+	})
 	if err != nil {
 		t.Fatalf("CreateSandbox error: %v", err)
 	}

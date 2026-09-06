@@ -13,6 +13,7 @@ type SandboxOptions struct {
 	Network              *NetworkConfig
 	Dependencies         []DependencySpec
 	WorkspacePath        string
+	WorkspaceMountMode   WorkspaceMountMode
 	WorkspaceSyncExclude []string
 }
 
@@ -39,6 +40,7 @@ func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox,
 		Network:              opts.Network,
 		Dependencies:         opts.Dependencies,
 		WorkspacePath:        opts.WorkspacePath,
+		WorkspaceMountMode:   opts.WorkspaceMountMode,
 		WorkspaceSyncExclude: opts.WorkspaceSyncExclude,
 	}
 	resp, err := c.CreateSandbox(ctx, req)
