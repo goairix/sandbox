@@ -155,6 +155,13 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 			_ = m.releasePreparedSyncWorkspace(lifecycle)
 			return fmt.Errorf("save mounted workspace session: %w", err)
 		}
+	} else if sb.Config.Mode == ModeEphemeral && lifecycle != nil {
+		record, err := m.createWorkspaceLifecycle(ctx, &sessionSnapshot)
+		if err != nil {
+			_ = m.releasePreparedSyncWorkspace(lifecycle)
+			return fmt.Errorf("save ephemeral workspace lifecycle: %w", err)
+		}
+		lifecycle.ephemeralRecord = record
 	}
 	err = exclusive.commit(func() error {
 		m.mu.Lock()
@@ -177,6 +184,8 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		_ = m.releasePreparedSyncWorkspace(lifecycle)
 		if sb.Config.Mode == ModePersistent && m.sessions != nil {
 			_ = m.sessions.RemoveExact(ctx, &sessionSnapshot)
+		} else if lifecycle != nil && lifecycle.ephemeralRecord != nil {
+			_ = m.removeWorkspaceLifecycle(ctx, &sessionSnapshot, lifecycle.ephemeralRecord)
 		}
 		resolved = true
 		return err
@@ -263,6 +272,14 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 			resolved = true
 			m.scheduleSyncFinalization(lifecycle, err)
 			return fmt.Errorf("save unmounted workspace session: %w", err)
+		}
+	} else if sb.Config.Mode == ModeEphemeral && lifecycle != nil {
+		mountedSnapshot := cloneSandbox(sb)
+		if err := m.removeWorkspaceLifecycle(ctx, &mountedSnapshot, lifecycle.ephemeralRecord); err != nil {
+			exclusive.Close()
+			resolved = true
+			m.scheduleSyncFinalization(lifecycle, err)
+			return fmt.Errorf("remove ephemeral workspace lifecycle: %w", err)
 		}
 	}
 	err = exclusive.commit(func() error {
@@ -415,10 +432,8 @@ func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) (ret
 		current.UpdatedAt = time.Now()
 		pendingSnapshot := cloneSandbox(current)
 		m.mu.Unlock()
-		if m.sessions != nil {
-			if err := m.sessions.Save(ctx, &pendingSnapshot); err != nil {
-				return fmt.Errorf("persist pending FUSE workspace flush: %w", err)
-			}
+		if err := m.verifyWorkspaceLifecycle(ctx, &pendingSnapshot); err != nil {
+			return fmt.Errorf("persist pending FUSE workspace flush: %w", err)
 		}
 		return nil
 	})
@@ -468,10 +483,8 @@ func (m *Manager) flushFUSEWorkspace(ctx context.Context, sandboxID string) (ret
 		snapshot.Workspace.LastFlushedAt = &now
 		snapshot.UpdatedAt = now
 		m.mu.Unlock()
-		if m.sessions != nil {
-			if err := m.sessions.Save(ctx, &snapshot); err != nil {
-				return fmt.Errorf("persist completed FUSE workspace flush: %w", err)
-			}
+		if err := m.verifyWorkspaceLifecycle(ctx, &snapshot); err != nil {
+			return fmt.Errorf("persist completed FUSE workspace flush: %w", err)
 		}
 		m.mu.Lock()
 		current = m.sandboxes[sandboxID]
@@ -885,7 +898,7 @@ func (m *Manager) setLastSyncedAt(sb *Sandbox, t time.Time) {
 // having its key re-created by an in-flight autoSync goroutine that captured
 // the sb pointer before Destroy ran.
 func (m *Manager) saveSessionIfAlive(ctx context.Context, sandboxID string, sb *Sandbox) {
-	if m.sessions == nil || sb == nil {
+	if sb == nil {
 		return
 	}
 	m.mu.RLock()
@@ -896,7 +909,11 @@ func (m *Manager) saveSessionIfAlive(ctx context.Context, sandboxID string, sb *
 	}
 	m.mu.RUnlock()
 	if alive {
-		_ = m.sessions.Save(ctx, &snapshot)
+		if snapshot.Config.Mode == ModePersistent && m.sessions != nil {
+			_ = m.sessions.Save(ctx, &snapshot)
+		} else if snapshot.Config.Mode == ModeEphemeral && snapshot.Workspace != nil && snapshot.Workspace.Owner.Generation > 0 {
+			_ = m.verifyWorkspaceLifecycle(ctx, &snapshot)
+		}
 	}
 }
 

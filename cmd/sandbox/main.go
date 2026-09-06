@@ -243,6 +243,7 @@ func main() {
 	if redisStore != nil {
 		ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
 		mgr.SetSessionStore(sandbox.NewSessionStore(redisStore, ttl))
+		mgr.SetEphemeralLifecycleStore(sandbox.NewEphemeralLifecycleStore(redisStore))
 		mgr.SetMultipartStore(redisStore)
 		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
 	}

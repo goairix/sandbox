@@ -544,7 +544,7 @@ git commit -m "feat: share workspace leases across sync and fuse"
 - Modify: `internal/sandbox/manager_test.go`
 - Modify: `internal/sandbox/workspace.go`
 
-- [ ] **Step 1: Write failing namespace, CAS, and publication tests**
+- [x] **Step 1: Write failing namespace, CAS, and publication tests**
 
 ```go
 func TestEphemeralLifecycleStoreUsesIsolatedNamespace(t *testing.T) {
@@ -569,13 +569,13 @@ func TestEphemeralFUSECreateDoesNotPublishUserSession(t *testing.T) {
 
 Add strict decode tests for unknown fields, invalid mode/state, empty runtime UID, inconsistent FUSE fields, stale revision CAS, and exact delete after a newer record replaces the expected value.
 
-- [ ] **Step 2: Run ephemeral tests and confirm failure**
+- [x] **Step 2: Run ephemeral tests and confirm failure**
 
 Run: `go test ./internal/sandbox -run 'TestEphemeral' -count=1`
 
 Expected: FAIL because the ephemeral lifecycle store does not exist and FUSE publication always writes a session.
 
-- [ ] **Step 3: Implement the private cleanup record and mode-aware publication**
+- [x] **Step 3: Implement the private cleanup record and mode-aware publication**
 
 Use this schema and state progression:
 
@@ -613,13 +613,13 @@ Require `state.AtomicStore`; implement `Create` with `SetNX`, `Load`, `List`, `T
 
 Replace `publishSandboxAndSession` with `publishSandboxLifecycle`: persistent mode saves `sandbox:session:v2:` before in-memory publication; ephemeral workspace mode creates `sandbox:ephemeral:v1:` before publication. No-workspace ephemeral sandboxes write neither namespace. All later FUSE flush/session updates call a helper that writes the correct persistent or ephemeral store.
 
-- [ ] **Step 4: Run session, ephemeral, and FUSE manager tests**
+- [x] **Step 4: Run session, ephemeral, and FUSE manager tests**
 
 Run: `go test ./internal/sandbox -run 'Test(Session|Ephemeral|Manager.*FUSE)' -count=1`
 
 Expected: PASS; `SessionStore.List` never sees ephemeral records and public Get/List recovery never exposes them.
 
-- [ ] **Step 5: Commit lifecycle namespace separation**
+- [x] **Step 5: Commit lifecycle namespace separation**
 
 ```bash
 git add internal/sandbox/ephemeral.go internal/sandbox/ephemeral_test.go internal/sandbox/session.go internal/sandbox/manager.go internal/sandbox/manager_test.go internal/sandbox/workspace.go

@@ -164,9 +164,7 @@ func (m *Manager) finalizeLostSyncWorkspace(lifecycle *syncSandboxLifecycle, _ e
 		delete(m.sandboxes, sb.ID)
 	}
 	m.mu.Unlock()
-	if m.sessions != nil {
-		_ = m.sessions.Remove(ctx, sb.ID)
-	}
+	_ = m.removeWorkspaceLifecycle(ctx, sb, lifecycle.ephemeralRecord)
 	m.pool.NotifyRemoved()
 }
 
@@ -212,10 +210,8 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 			return fmt.Errorf("release workspace lease: %w", err)
 		}
 	}
-	if m.sessions != nil {
-		if err := m.sessions.Remove(ctx, sb.ID); err != nil {
-			return fmt.Errorf("remove sandbox session: %w", err)
-		}
+	if err := m.removeWorkspaceLifecycle(ctx, sb, lifecycle.ephemeralRecord); err != nil {
+		return fmt.Errorf("remove workspace lifecycle: %w", err)
 	}
 	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
 		return fmt.Errorf("remove sandbox: %w", err)

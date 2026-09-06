@@ -51,6 +51,7 @@ type fuseBindingClaim struct {
 	lifecycle       *fuseSandboxLifecycle
 	cleanupRecord   *state.FUSEPoolRecord
 	sessionIdentity *Sandbox
+	ephemeralRecord *EphemeralLifecycleRecord
 }
 
 type fuseSandboxLifecycle struct {
@@ -78,17 +79,19 @@ type fuseSandboxLifecycle struct {
 	unmountRecorded  bool
 	leaseReleased    bool
 	sessionRemoved   bool
+	ephemeralRecord  *EphemeralLifecycleRecord
 }
 
 type syncSandboxLifecycle struct {
-	sandboxID string
-	gate      *operationGate
-	lease     *WorkspaceLease
-	renewal   *WorkspaceLeaseRenewal
-	once      sync.Once
-	mu        sync.Mutex
-	lost      bool
-	published bool
+	sandboxID       string
+	gate            *operationGate
+	lease           *WorkspaceLease
+	renewal         *WorkspaceLeaseRenewal
+	once            sync.Once
+	mu              sync.Mutex
+	lost            bool
+	published       bool
+	ephemeralRecord *EphemeralLifecycleRecord
 }
 
 // randSuffix generates a random lowercase alphanumeric string of length n.
@@ -161,7 +164,8 @@ type Manager struct {
 	fsMeta         *storage.FileSystemMeta
 	config         ManagerConfig
 	sessions       *SessionStore // optional, for persistent sandboxes
-	multipartStore state.Store   // optional, for multipart upload state
+	ephemeral      *EphemeralLifecycleStore
+	multipartStore state.Store // optional, for multipart upload state
 
 	pool           *Pool
 	fusePool       *FUSEPool
@@ -277,6 +281,12 @@ func sendStreamTerminal(outCh chan runtime.StreamEvent, event runtime.StreamEven
 // SetSessionStore sets an optional SessionStore for persistent sandbox state.
 func (m *Manager) SetSessionStore(ss *SessionStore) {
 	m.sessions = ss
+}
+
+// SetEphemeralLifecycleStore sets the private, non-user-visible cleanup store
+// used by ephemeral workspaces.
+func (m *Manager) SetEphemeralLifecycleStore(store *EphemeralLifecycleStore) {
+	m.ephemeral = store
 }
 
 // SetMultipartStore sets the state.Store used for multipart upload state.
@@ -609,6 +619,17 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 				}
 				return nil, fmt.Errorf("persist mounted sandbox: %w", saveErr)
 			}
+		} else if cfg.Mode == ModeEphemeral && lifecycle != nil {
+			record, lifecycleErr := m.createWorkspaceLifecycle(spanCtx, sb)
+			if lifecycleErr != nil {
+				_ = m.releasePreparedSyncWorkspace(lifecycle)
+				_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+				if source == "pool" {
+					m.pool.NotifyRemoved()
+				}
+				return nil, fmt.Errorf("persist ephemeral workspace lifecycle: %w", lifecycleErr)
+			}
+			lifecycle.ephemeralRecord = record
 		}
 		m.mu.Lock()
 		if !publishSyncLifecycle(lifecycle) {
@@ -616,6 +637,8 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 			_ = m.releasePreparedSyncWorkspace(lifecycle)
 			if cfg.Mode == ModePersistent && m.sessions != nil {
 				_ = m.sessions.RemoveExact(context.WithoutCancel(spanCtx), sb)
+			} else if lifecycle != nil && lifecycle.ephemeralRecord != nil {
+				_ = m.removeWorkspaceLifecycle(context.WithoutCancel(spanCtx), sb, lifecycle.ephemeralRecord)
 			}
 			_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
 			return nil, ErrWorkspaceLeaseLost
@@ -836,7 +859,7 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	sessionIdentity := cloneSandbox(sb)
 	claim.sessionIdentity = &sessionIdentity
 	m.mu.Unlock()
-	if err = m.publishSandboxAndSession(txnCtx, sb, gate, lifecycle, claim); err != nil {
+	if err = m.publishSandboxLifecycle(txnCtx, sb, gate, lifecycle, claim); err != nil {
 		cancelLifecycle()
 		lifecycle = nil
 		return nil, err
@@ -856,18 +879,24 @@ func fuseResourcesCompatible(requested ResourceLimits, prepared runtime.SandboxS
 		(requested.TmpDisk == "" || requested.TmpDisk == prepared.TmpDisk)
 }
 
-func (m *Manager) publishSandboxAndSession(ctx context.Context, sb *Sandbox, gate *operationGate, lifecycle *fuseSandboxLifecycle, claim *fuseBindingClaim) error {
-	if err := m.sessions.Save(ctx, sb); err != nil {
+func (m *Manager) publishSandboxLifecycle(ctx context.Context, sb *Sandbox, gate *operationGate, lifecycle *fuseSandboxLifecycle, claim *fuseBindingClaim) error {
+	ephemeralRecord, err := m.createWorkspaceLifecycle(ctx, sb)
+	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
 		defer cancel()
-		return errors.Join(fmt.Errorf("save FUSE sandbox session: %w", err), m.sessions.RemoveExact(cleanupCtx, sb))
+		if sb.Config.Mode == ModePersistent && m.sessions != nil {
+			return errors.Join(fmt.Errorf("save FUSE sandbox lifecycle: %w", err), m.sessions.RemoveExact(cleanupCtx, sb))
+		}
+		return fmt.Errorf("save FUSE sandbox lifecycle: %w", err)
 	}
+	lifecycle.ephemeralRecord = ephemeralRecord
+	claim.ephemeralRecord = ephemeralRecord
 	m.mu.Lock()
 	if ctx.Err() != nil || claim.lost {
 		m.mu.Unlock()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
 		defer cancel()
-		return errors.Join(ErrWorkspaceLeaseLost, m.sessions.RemoveExact(cleanupCtx, sb))
+		return errors.Join(ErrWorkspaceLeaseLost, m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
 	}
 	m.lifecycleMu.Lock()
 	stopping := m.stopping
@@ -876,7 +905,7 @@ func (m *Manager) publishSandboxAndSession(ctx context.Context, sb *Sandbox, gat
 		m.mu.Unlock()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
 		defer cancel()
-		return errors.Join(ErrSandboxNotReady, m.sessions.RemoveExact(cleanupCtx, sb))
+		return errors.Join(ErrSandboxNotReady, m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
 	}
 	m.sandboxes[sb.ID] = sb
 	m.operationGates[sb.ID] = gate
@@ -958,13 +987,14 @@ func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguous
 	}
 	m.mu.RLock()
 	sessionIdentity := claim.sessionIdentity
+	ephemeralRecord := claim.ephemeralRecord
 	m.mu.RUnlock()
-	if sessionIdentity != nil && m.sessions != nil {
+	if sessionIdentity != nil {
 		workspace := sessionIdentity.Workspace
 		if workspace == nil {
 			return ErrSessionPublicationConflict
 		}
-		if err := m.sessions.RemoveMatchingFUSESession(ctx, sessionIdentity.ID, sessionIdentity.RuntimeID, sessionIdentity.RuntimeUID, workspace.FUSEPreparationID, workspace.LeaseGeneration); err != nil {
+		if err := m.removeWorkspaceLifecycle(ctx, sessionIdentity, ephemeralRecord); err != nil {
 			return err
 		}
 	}
@@ -1017,6 +1047,17 @@ func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPool
 				return FUSEPoolDispositionUnknown, err
 			}
 			if sb.RuntimeUID == record.RuntimeUID || (sb.Workspace != nil && sb.Workspace.FUSEPreparationID == record.PreparationID) {
+				return FUSEPoolProtected, nil
+			}
+		}
+	}
+	if m.ephemeral != nil {
+		records, err := m.ephemeral.List(ctx)
+		if err != nil {
+			return FUSEPoolDispositionUnknown, err
+		}
+		for _, lifecycle := range records {
+			if lifecycle.RuntimeUID == record.RuntimeUID || lifecycle.PreparationID == record.PreparationID {
 				return FUSEPoolProtected, nil
 			}
 		}
@@ -1224,8 +1265,11 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		}
 		lifecycle.leaseReleased = true
 	}
-	if !lifecycle.sessionRemoved && m.sessions != nil {
-		if err := m.sessions.RemoveMatchingFUSESession(ctx, lifecycle.sandboxID, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID, lifecycle.record.PreparationID, lifecycle.lease.OwnerSnapshot().Generation); err != nil {
+	if !lifecycle.sessionRemoved {
+		m.mu.RLock()
+		sb := cloneSandbox(m.sandboxes[lifecycle.sandboxID])
+		m.mu.RUnlock()
+		if err := m.removeWorkspaceLifecycle(ctx, &sb, lifecycle.ephemeralRecord); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "remove-session", err)
 			return
 		}
@@ -2881,7 +2925,7 @@ func (m *Manager) registerWorkspace(ctx context.Context, sandboxID, rootPath str
 	sessionSnapshot := cloneSandbox(sb)
 	m.mu.Unlock()
 
-	if m.sessions != nil {
+	if sb.Config.Mode == ModePersistent && m.sessions != nil {
 		_ = m.sessions.Save(ctx, &sessionSnapshot)
 	}
 	return nil
