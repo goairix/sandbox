@@ -22,9 +22,7 @@ server:
 # Images — sandbox container images
 # -----------------------------------------------------------------------------
 images:
-  python: "sandbox-python:latest"
-  nodejs: "sandbox-nodejs:latest"
-  bash: "sandbox-bash:latest"
+  sandbox: "sandbox:latest"
   gateway: "sandbox-gateway:latest"
 
 # -----------------------------------------------------------------------------
@@ -87,9 +85,9 @@ storage:
     # Custom endpoint URL (optional, for private / compatible storage).
     # For COS, this is the full bucket URL (e.g. "https://bucket-xxx.cos.ap-guangzhou.myqcloud.com").
     endpoint: ""
-    # Access key ID.
+    # Legacy inline credentials are supported only for compatibility. New
+    # remote deployments mount the read-only credential files below.
     access_key: ""
-    # Secret access key.
     secret_key: ""
     # Temporary/session credentials are explicit so FUSE mode can reject them.
     # FUSE v1 supports long-lived AK/SK credentials only.
@@ -131,8 +129,8 @@ workspace:
   # Set to 0 to disable. Recommended: 30 for long-running agent sessions.
   auto_sync_interval_seconds: 0
 
-  # FUSE defaults. They are inert while mode = "sync"; switching to "fuse"
-  # additionally requires storage credentials and a selected provider profile.
+  # FUSE defaults. They are inert unless "fuse" is present in
+  # enabled_mount_modes; both modes may run concurrently against one backend.
   secret_name: ""
   cache_size: "2Gi"
   cache_medium: "disk"
@@ -158,38 +156,37 @@ workspace:
     refill_interval_seconds: 10
     prepare_timeout_seconds: 120
 
-  # Exactly one release backend. Leave empty for the default local/sync setup.
-  # For remote storage, choose one fixed preset and keep both common runtime
-  # images pinned to immutable sha256 digests.
+  # The repository default remains local/sync for source-tree development.
+  # Every remote deployment selects exactly one preset and one pair of common
+  # runtime images; the preset fixes the provider/profile mapping.
   backend: {}
   # backend:
-  #     preset: "minio" # minio, huawei-obs-public, huawei-obs-private
-  #     driver: "s3fs"
-  #     profile: "minio-sigv4-path-style-v1"
-  #     storage_identity: "stable-physical-storage-id"
-  #     mounter_image: "registry.example.com/mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  #     docker_image: "registry.example.com/sandbox-fuse@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  #     ca_secret_key: "ca.crt"
-  #     credential_generation: "rotation-generation"
-  #     endpoint_host_ips:
-  #       - "192.0.2.10"
-  #     lsm_profile: "sandbox-fuse"
-  #     system_egress_mode: "cidr" # "cidr" or "cilium-fqdn"
-  #     dns_cidrs:
-  #       - "10.96.0.10/32"
-  #     system_egress_fqdns:
-  #       - "minio.example.com"
-  #     system_egress_cidrs:
-  #       - "192.0.2.10/32"
-  #     endpoint_ports:
-  #       - 9000
-  #     proxy_url: "" # Proxies are forbidden in FUSE mode.
+  #   preset: "minio" # minio, huawei-obs-public, huawei-obs-private
+  #   driver: "s3fs"
+  #   profile: "minio-sigv4-path-style-v1" # fixed by the preset
+  #   storage_identity: "stable-physical-storage-id"
+  #   mounter_image: "registry.example.com/sandbox-fuse-mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  #   docker_image: "registry.example.com/sandbox-fuse-docker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  #   ca_secret_key: ""
+  #   credential_generation: "rotation-generation"
+  #   endpoint_host_ips:
+  #     - "192.0.2.10"
+  #   lsm_profile: "sandbox-fuse"
+  #   system_egress_mode: "cidr" # Docker requires cidr; Kubernetes also supports cilium-fqdn.
+  #   dns_cidrs:
+  #     - "1.1.1.1/32"
+  #   system_egress_fqdns: []
+  #   system_egress_cidrs:
+  #     - "192.0.2.10/32"
+  #   endpoint_ports:
+  #     - 9000
+  #   proxy_url: "" # Proxies are forbidden in FUSE mode.
 
 # -----------------------------------------------------------------------------
 # Security — sandbox isolation and resource limits
 # -----------------------------------------------------------------------------
 security:
-  # API key for authentication. Empty string disables auth.
+  # API key for authentication. It is required at startup.
   api_key: ""
   # Rate limit (requests per second per client IP). 0 = disabled.
   rate_limit: 0

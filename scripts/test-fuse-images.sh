@@ -95,6 +95,8 @@ fuse="$repo_root/docker/images/sandbox-fuse/Dockerfile"
 ordinary="$repo_root/docker/images/sandbox/Dockerfile"
 ordinary_ignore="$repo_root/docker/images/sandbox/Dockerfile.dockerignore"
 compose="$repo_root/docker/docker-compose.yml"
+compose_env="$repo_root/docker/.env.example"
+operator_config="$repo_root/configs/config.yaml"
 
 if [[ -n "$real_docker" ]]; then
   compose_json="$("$real_docker" compose --env-file "$repo_root/docker/.env.example" -f "$compose" config --format json)"
@@ -102,23 +104,38 @@ if [[ -n "$real_docker" ]]; then
 import json, sys
 environment = json.load(sys.stdin)["services"]["sandbox-api"]["environment"]
 required = {
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DRIVER",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_PROFILE",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_STORAGE_IDENTITY",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_MOUNTER_IMAGE",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DOCKER_IMAGE",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_CREDENTIAL_GENERATION",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_MODE",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_DNS_CIDRS",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_FQDNS",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_SYSTEM_EGRESS_CIDRS",
-    "SANDBOX_WORKSPACE_PROVIDERS_OBS_ENDPOINT_PORTS",
+    "SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE",
+    "SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES",
+    "SANDBOX_WORKSPACE_BACKEND_PRESET",
+    "SANDBOX_WORKSPACE_BACKEND_MOUNTER_IMAGE",
+    "SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE",
 }
 missing = sorted(required.difference(environment))
 if missing:
-    raise SystemExit("Compose omits OBS provider environment: " + ", ".join(missing))
+    raise SystemExit("Compose omits hybrid backend environment: " + ", ".join(missing))
+legacy = sorted(key for key in environment if key.startswith("SANDBOX_WORKSPACE_PROVIDERS_"))
+if legacy:
+    raise SystemExit("Compose still exports legacy provider maps: " + ", ".join(legacy))
 ' <<<"$compose_json"
 fi
+
+grep -Fq 'SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE=${WORKSPACE_DEFAULT_MOUNT_MODE:-sync}' "$compose" || fail "Compose omits the default mount mode"
+grep -Fq 'SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES=${WORKSPACE_ENABLED_MOUNT_MODES:-sync}' "$compose" || fail "Compose omits enabled mount modes"
+grep -Fq 'SANDBOX_WORKSPACE_BACKEND_PRESET=${STORAGE_PRESET:-minio}' "$compose" || fail "Compose omits the storage preset"
+grep -Fq 'SANDBOX_WORKSPACE_BACKEND_MOUNTER_IMAGE=${FUSE_MOUNTER_IMAGE:-}' "$compose" || fail "Compose omits the common mounter image"
+grep -Fq 'SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE=${FUSE_SANDBOX_IMAGE:-}' "$compose" || fail "Compose omits the common Docker FUSE image"
+! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_MINIO_' "$compose" || fail "Compose still exports the MinIO provider map"
+! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_OBS_' "$compose" || fail "Compose still exports the OBS provider map"
+! grep -Fq 'SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY=' "$compose" || fail "Compose exposes the access key in process environment"
+! grep -Fq 'SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY=' "$compose" || fail "Compose exposes the secret key in process environment"
+grep -Fq 'export SANDBOX_STORAGE_FILESYSTEM_PROVIDER=minio' "$compose" || fail "Compose does not derive the MinIO provider"
+grep -Fq 'export SANDBOX_WORKSPACE_BACKEND_PROFILE=huawei-obs-public-v1' "$compose" || fail "Compose does not derive the public OBS profile"
+grep -Fq 'export SANDBOX_WORKSPACE_BACKEND_PROFILE=huawei-obs-private-2023-v1' "$compose" || fail "Compose does not derive the private OBS profile"
+grep -Fq '*,fuse,*)' "$compose" || fail "Compose image helper does not gate common FUSE image pulls"
+grep -Fxq 'STORAGE_PRESET=minio' "$compose_env" || fail "example environment omits its single preset selector"
+! grep -Eq '^(STORAGE_PROVIDER|WORKSPACE_PROFILE)=' "$compose_env" || fail "example environment permits preset mapping drift"
+grep -Fq 'enabled_mount_modes: ["sync"]' "$operator_config" || fail "repository config does not default execution requests to sync"
+! grep -Eq '^  providers:' "$operator_config" || fail "repository config still declares provider maps"
 
 for file in "$mounter" "$fuse"; do
   test -f "$file" || fail "missing $file"

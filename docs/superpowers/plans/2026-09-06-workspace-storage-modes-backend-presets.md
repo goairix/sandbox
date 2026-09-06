@@ -897,7 +897,7 @@ git commit -m "feat: guard helm workspace backend presets"
 - Modify: `configs/config.yaml`
 - Modify: `scripts/test-fuse-images.sh`
 
-- [ ] **Step 1: Add failing Compose/config contract assertions**
+- [x] **Step 1: Add failing Compose/config contract assertions**
 
 Add shell assertions that Compose exposes one preset/backend and common images, and removes duplicated MinIO/OBS provider maps:
 
@@ -911,19 +911,19 @@ grep -Fq 'SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE=${FUSE_SANDBOX_IMAGE:-}' "$comp
 ! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_OBS_' "$compose"
 ```
 
-- [ ] **Step 2: Run the image/Compose contract and confirm failure**
+- [x] **Step 2: Run the image/Compose contract and confirm failure**
 
 Run: `./scripts/test-fuse-images.sh`
 
 Expected: FAIL on the old mode and duplicated provider environment variables.
 
-- [ ] **Step 3: Simplify Compose and the example environment**
+- [x] **Step 3: Simplify Compose and the example environment**
 
 Use `STORAGE_PRESET=minio|huawei-obs-public|huawei-obs-private`, one storage endpoint/bucket/identity/generation, and the two runtime-specific common FUSE image digests. Default to `WORKSPACE_DEFAULT_MOUNT_MODE=sync` and `WORKSPACE_ENABLED_MOUNT_MODES=sync`; enabling FUSE uses the literal comma-separated `sync,fuse`.
 
 The `sandbox-images` helper must pull/build each common FUSE image once. Do not alter the Docker daemon, restart Docker Desktop, or introduce a host `/workspace` mount. Keep the root-only credential staging directory behavior unchanged.
 
-- [ ] **Step 4: Run Compose rendering and image contract tests**
+- [x] **Step 4: Run Compose rendering and image contract tests**
 
 Run:
 
@@ -934,7 +934,7 @@ docker compose --env-file docker/.env.example -f docker/docker-compose.yml confi
 
 Expected: PASS without reading or printing `docker/.env`.
 
-- [ ] **Step 5: Commit operator configuration**
+- [x] **Step 5: Commit operator configuration**
 
 ```bash
 git add docker/docker-compose.yml docker/.env.example configs/config.yaml scripts/test-fuse-images.sh
