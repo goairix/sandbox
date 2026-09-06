@@ -684,6 +684,8 @@ FUSE runtime 还必须使用 `RuntimeFencer` 产生与 exact RuntimeUID 匹配�
 
 `PrepareSandbox` 先创建固定 system egress policy，再创建 supervisor locked、无 prefix 的 Pod/容器，等待 sandbox 基础进程启动并返回不可复用的 runtime UID；它不得启动 s3fs 或开放用户 Exec。Pool 使用新增的 `PreparedSandboxHealth` 验证 supervisor locked、sandbox 进程存活、无 mount/generation 后才入队。
 
+Docker FUSE Pool 的 preparation ID 与资源名沿用 sync Pool 的可读命名风格：每次准备生成一个 10 位小写字母数字随机后缀，runtime 容器名为 `sandbox-pool-<suffix>`，同组 gateway、pair network 和 cache volume 分别为 `sandbox-gw-pool-<suffix>`、`sandbox-pair-pool-<suffix>`、`sandbox-fuse-cache-pool-<suffix>`。四类资源共享同一 suffix，但名称只用于运维识别，不是安全身份；恢复、接管和删除仍必须同时校验 `sandbox.managed`、role、完整 preparation ID、logical ID、PoolKey、secret root 标签以及 Docker 返回的不可变 runtime UID。旧版 `prep-<32-hex>` 资源在升级时仍按旧标签保守识别和清理，不能因不符合新命名而被新实例接管。
+
 Acquire 时 manager 确认 PoolKey 相等、实例仍 pristine 且 Kubernetes sidecar `restartCount=0`，再以 runtime UID 和 lease generation 对持久 owner 执行 `mount_attempt: 0→1` CAS；只有 CAS 成功才调用 `AuthorizeWorkspaceMount`。授权命令固定且只能通过可信控制通道调用，失败、超时或进程在 CAS 前后重启时必须删除该实例并用新 generation 重建，不能回滚 `mount_attempt` 或重放授权。`WaitSandboxReady` 先等 FUSE health，再从 sandbox 容器内部以 UID/GID 1000 执行固定读写探测；全部通过后才返回可用。现有 `CreateSandbox` 继续服务 sync 模式；FUSE 创建由 Pool 和上述三阶段方法编排，禁止 runtime 自己绕过 owner CAS。
 
 runtime 接口同时增加以下可信控制能力：
