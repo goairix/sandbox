@@ -14,6 +14,7 @@ import (
 
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -53,6 +54,7 @@ func main() {
 	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
 	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
 	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain")
+	drainRelease := flag.Bool("drain-release", false, "finalize all sandbox state and verify a release-wide zero-state drain")
 	flag.Parse()
 	if *drainDeployment != "" {
 		if *drainNamespace == "" || *drainTimeout <= 0 {
@@ -72,7 +74,9 @@ func main() {
 			log.Fatalf("failed to drain Kubernetes API deployment: %v", drainErr)
 		}
 		log.Printf("Kubernetes API deployment %s/%s drained", *drainNamespace, *drainDeployment)
-		return
+		if !*drainRelease {
+			return
+		}
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -247,6 +251,32 @@ func main() {
 		mgr.SetMultipartStore(redisStore)
 		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
 	}
+	if *drainRelease {
+		drainCtx, drainCancel := context.WithTimeout(ctx, *drainTimeout)
+		defer drainCancel()
+		if err := mgr.DrainRelease(drainCtx); err != nil {
+			log.Fatalf("release drain failed: %v", err)
+		}
+		if cfg.Runtime.Type == "kubernetes" {
+			restConfig, configErr := rest.InClusterConfig()
+			if configErr != nil {
+				log.Fatalf("load in-cluster drain audit configuration: %v", configErr)
+			}
+			client, clientErr := kubernetes.NewForConfig(restConfig)
+			if clientErr != nil {
+				log.Fatalf("create Kubernetes drain audit client: %v", clientErr)
+			}
+			dynamicClient, dynamicErr := dynamic.NewForConfig(restConfig)
+			if dynamicErr != nil {
+				log.Fatalf("create Kubernetes dynamic drain audit client: %v", dynamicErr)
+			}
+			if auditErr := auditKubernetesDrainedResources(drainCtx, client, dynamicClient, cfg.Runtime.Kubernetes.Namespace); auditErr != nil {
+				log.Fatalf("Kubernetes release drain audit failed: %v", auditErr)
+			}
+		}
+		log.Printf("release drain completed with zero managed state")
+		return
+	}
 
 	if err = mgr.Start(ctx); err != nil {
 		log.Fatalf("failed to start sandbox manager: %v", err)
@@ -265,7 +295,9 @@ func main() {
 		<-sigCh
 		log.Println("shutting down...")
 		cancel()
-		mgr.Stop(context.Background())
+		if stopErr := mgr.Stop(context.Background()); stopErr != nil {
+			log.Printf("sandbox manager shutdown error: %v", stopErr)
+		}
 		if shutdownErr := server.Stop(context.Background()); shutdownErr != nil {
 			log.Printf("server shutdown error: %v", shutdownErr)
 		}
@@ -284,7 +316,9 @@ func main() {
 		// Cancel context to trigger cleanup in the shutdown goroutine, then
 		// exit immediately — do not wait for a signal that will never arrive.
 		cancel()
-		mgr.Stop(context.Background())
+		if stopErr := mgr.Stop(context.Background()); stopErr != nil {
+			log.Printf("sandbox manager shutdown error: %v", stopErr)
+		}
 		log.Println("shutdown complete")
 		return
 	}

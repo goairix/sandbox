@@ -716,7 +716,7 @@ git commit -m "fix: make workspace finalization crash safe"
 - Modify: `cmd/sandbox/main.go`
 - Modify: `cmd/sandbox/main_test.go`
 
-- [ ] **Step 1: Write failing full-drain and audit tests**
+- [x] **Step 1: Write failing full-drain and audit tests**
 
 ```go
 func TestManagerStopPreservesPersistentAndFinalizesEphemeral(t *testing.T) {
@@ -750,13 +750,13 @@ func TestDrainAuditAllowsGenerationCountersButRejectsLifecycleState(t *testing.T
 
 Add drain command tests that reject any managed Pod, NetworkPolicy, CiliumNetworkPolicy, session, owner, active lease, ephemeral record, or FUSE pool record. Unrelated namespace resources and workspace generation counters must not block.
 
-- [ ] **Step 2: Run shutdown/drain tests and confirm failure**
+- [x] **Step 2: Run shutdown/drain tests and confirm failure**
 
 Run: `go test ./internal/sandbox ./cmd/sandbox -run 'Test.*(StopPreserves|DrainRelease|DrainAudit|DrainKubernetes)' -count=1`
 
 Expected: FAIL because `Manager.Stop` has no error result, there is no separate release-wide drain, and the drain command only waits for API replicas.
 
-- [ ] **Step 3: Implement full Manager shutdown and post-scale audit**
+- [x] **Step 3: Implement full Manager shutdown and post-scale audit**
 
 Change `Manager.Stop(context.Context) error` into the normal rolling-shutdown path. It must reject new creates, wait for in-flight creates, finalize ephemeral workspaces, preserve persistent sandboxes and their session/owner/lease records for a new replica, stop this replica's FUSE Pool maintenance, drain its ordinary prepared Pool, and join failures. Add `Manager.DrainRelease(context.Context) error` for backend switching and Helm deletion; it restores both lifecycle namespaces, finalizes every persistent and ephemeral sandbox, drains both Pools, and runs the zero-state audit. Callers log errors and never claim a successful drain when either method is non-nil.
 
@@ -775,7 +775,7 @@ func AuditDrainedState(ctx context.Context, store state.Store) error
 
 The audit lists each explicit prefix plus read-only `fusepool:*`, and never uses broad deletion. The Kubernetes drain command first disables HPA, scales the API Deployment to zero, waits for its Pods to terminate, then constructs a drain-only Manager from the current Chart image/config, calls `DrainRelease`, and verifies zero managed runtime Pods and dynamic policies in the runtime namespace plus zero blocking Redis state. It reports findings but does not force-delete unknown resources.
 
-- [ ] **Step 4: Run shutdown, race, and full Go tests**
+- [x] **Step 4: Run shutdown, race, and full Go tests**
 
 Run:
 
@@ -787,7 +787,7 @@ go test ./... -count=1
 
 Expected: PASS; timeout/failure tests return a non-nil drain error and leave evidence intact.
 
-- [ ] **Step 5: Commit audited drain support**
+- [x] **Step 5: Commit audited drain support**
 
 ```bash
 git add internal/sandbox/drain_audit.go internal/sandbox/drain_audit_test.go internal/sandbox/manager.go internal/sandbox/manager_test.go cmd/sandbox

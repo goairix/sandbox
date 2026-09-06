@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 )
+
+var drainCiliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}
 
 func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName string, pollInterval time.Duration) error {
 	if client == nil || namespace == "" || deploymentName == "" || pollInterval <= 0 {
@@ -49,7 +54,15 @@ func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface,
 		if err != nil {
 			return fmt.Errorf("read Kubernetes API deployment during drain: %w", err)
 		}
-		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 && deployment.Status.Replicas == 0 {
+		selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+		if err != nil {
+			return fmt.Errorf("resolve Kubernetes API Pod selector during drain: %w", err)
+		}
+		pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+		if err != nil {
+			return fmt.Errorf("list Kubernetes API Pods during drain: %w", err)
+		}
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 && deployment.Status.Replicas == 0 && len(pods.Items) == 0 {
 			return nil
 		}
 		select {
@@ -58,4 +71,33 @@ func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface,
 		case <-ticker.C:
 		}
 	}
+}
+
+func auditKubernetesDrainedResources(ctx context.Context, client kubernetes.Interface, dynamicClient dynamic.Interface, namespace string) error {
+	if client == nil || namespace == "" {
+		return fmt.Errorf("invalid Kubernetes drain audit configuration")
+	}
+	const selector = "sandbox.managed=true"
+	var auditErr error
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		auditErr = errors.Join(auditErr, fmt.Errorf("list managed sandbox Pods: %w", err))
+	} else if len(pods.Items) != 0 {
+		auditErr = errors.Join(auditErr, fmt.Errorf("drain blocked by %d managed sandbox Pods", len(pods.Items)))
+	}
+	policies, err := client.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		auditErr = errors.Join(auditErr, fmt.Errorf("list managed sandbox NetworkPolicies: %w", err))
+	} else if len(policies.Items) != 0 {
+		auditErr = errors.Join(auditErr, fmt.Errorf("drain blocked by %d managed sandbox NetworkPolicies", len(policies.Items)))
+	}
+	if dynamicClient != nil {
+		cilium, err := dynamicClient.Resource(drainCiliumNetworkPolicyGVR).Namespace(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil && !apierrors.IsNotFound(err) {
+			auditErr = errors.Join(auditErr, fmt.Errorf("list managed CiliumNetworkPolicies: %w", err))
+		} else if err == nil && len(cilium.Items) != 0 {
+			auditErr = errors.Join(auditErr, fmt.Errorf("drain blocked by %d managed CiliumNetworkPolicies", len(cilium.Items)))
+		}
+	}
+	return auditErr
 }

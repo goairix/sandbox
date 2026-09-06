@@ -10,9 +10,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 )
@@ -49,6 +52,29 @@ func TestDrainKubernetesDeploymentDisablesHPAAndWaitsForAPIPods(t *testing.T) {
 	assert.Equal(t, int32(0), *deployment.Spec.Replicas)
 	_, err = client.CoreV1().Pods("sandbox-fuse").Get(context.Background(), "unrelated", metav1.GetOptions{})
 	require.NoError(t, err)
+}
+
+func TestDrainKubernetesAuditRejectsOnlyManagedResources(t *testing.T) {
+	client := kubefake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "managed", Namespace: "sandbox-fuse", Labels: map[string]string{"sandbox.managed": "true"}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "sandbox-fuse"}},
+		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "managed", Namespace: "sandbox-fuse", Labels: map[string]string{"sandbox.managed": "true"}}},
+	)
+	cilium := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
+		"metadata": map[string]any{"name": "managed", "namespace": "sandbox-fuse", "labels": map[string]any{"sandbox.managed": "true"}},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cilium)
+
+	err := auditKubernetesDrainedResources(context.Background(), client, dynamicClient, "sandbox-fuse")
+	require.ErrorContains(t, err, "managed sandbox Pods")
+	require.ErrorContains(t, err, "managed sandbox NetworkPolicies")
+	require.ErrorContains(t, err, "managed CiliumNetworkPolicies")
+
+	require.NoError(t, client.CoreV1().Pods("sandbox-fuse").Delete(context.Background(), "managed", metav1.DeleteOptions{}))
+	require.NoError(t, client.NetworkingV1().NetworkPolicies("sandbox-fuse").Delete(context.Background(), "managed", metav1.DeleteOptions{}))
+	require.NoError(t, dynamicClient.Resource(drainCiliumNetworkPolicyGVR).Namespace("sandbox-fuse").Delete(context.Background(), "managed", metav1.DeleteOptions{}))
+	require.NoError(t, auditKubernetesDrainedResources(context.Background(), client, dynamicClient, "sandbox-fuse"))
 }
 
 func TestDrainKubernetesDeploymentHonorsCancellationWhilePodRemains(t *testing.T) {

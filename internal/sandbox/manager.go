@@ -185,6 +185,7 @@ type Manager struct {
 	stopCh        chan struct{}
 	stopOnce      sync.Once
 	shutdownDone  chan struct{}
+	shutdownErr   error
 	wg            sync.WaitGroup
 	createWG      sync.WaitGroup
 	lifecycleMu   sync.Mutex
@@ -413,7 +414,7 @@ func (m *Manager) reconcileFUSEOrphans(ctx context.Context) error {
 }
 
 // Stop drains the pool and cleans up.
-func (m *Manager) Stop(ctx context.Context) {
+func (m *Manager) Stop(ctx context.Context) error {
 	_, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
 	defer span.End()
 
@@ -427,12 +428,15 @@ func (m *Manager) Stop(ctx context.Context) {
 	})
 	select {
 	case <-m.shutdownDone:
+		return m.shutdownErr
 	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
 func (m *Manager) finishShutdown() {
 	defer close(m.shutdownDone)
+	var shutdownErr error
 	m.createWG.Wait()
 	m.mu.RLock()
 	lifecycles := make([]*fuseSandboxLifecycle, 0, len(m.fuseLifecycles))
@@ -445,18 +449,141 @@ func (m *Manager) finishShutdown() {
 	}
 	m.mu.RUnlock()
 	for _, lifecycle := range syncLifecycles {
-		if lifecycle.renewal != nil {
+		if lifecycle.ephemeralRecord != nil {
+			if err := m.destroySyncSandbox(context.Background(), lifecycle); err != nil {
+				shutdownErr = errors.Join(shutdownErr, err)
+			}
+		} else if lifecycle.renewal != nil {
 			lifecycle.renewal.Stop()
 		}
 	}
 	for _, lifecycle := range lifecycles {
-		m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
+		if lifecycle.sandbox != nil && lifecycle.sandbox.Config.Mode == ModeEphemeral {
+			m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
+		} else {
+			lifecycle.cancel()
+			lifecycle.renewal.Stop()
+		}
 	}
 	m.wg.Wait()
 	if m.fusePool != nil {
-		_ = m.fusePool.Stop(context.Background())
+		shutdownErr = errors.Join(shutdownErr, m.fusePool.Stop(context.Background()))
 	}
 	m.pool.Drain(context.Background())
+	m.shutdownErr = shutdownErr
+}
+
+// DrainRelease performs the destructive, release-wide drain used only for a
+// backend switch or Helm deletion. Unlike Stop, it finalizes persistent state.
+func (m *Manager) DrainRelease(ctx context.Context) error {
+	started := false
+	m.stopOnce.Do(func() {
+		started = true
+		m.lifecycleMu.Lock()
+		m.stopping = true
+		m.cancelControl()
+		close(m.stopCh)
+		m.lifecycleMu.Unlock()
+	})
+	if !started {
+		select {
+		case <-m.shutdownDone:
+			return m.shutdownErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer close(m.shutdownDone)
+
+	created := make(chan struct{})
+	go func() {
+		m.createWG.Wait()
+		close(created)
+	}()
+	select {
+	case <-created:
+	case <-ctx.Done():
+		m.shutdownErr = ctx.Err()
+		return m.shutdownErr
+	}
+
+	m.mu.RLock()
+	needRestore := len(m.sandboxes) == 0
+	m.mu.RUnlock()
+	var drainErr error
+	if needRestore && m.sessions != nil {
+		drainErr = errors.Join(drainErr, m.restorePersistentSandboxes(ctx))
+	}
+
+	m.mu.RLock()
+	syncLifecycles := make([]*syncSandboxLifecycle, 0, len(m.syncLifecycles))
+	for _, lifecycle := range m.syncLifecycles {
+		syncLifecycles = append(syncLifecycles, lifecycle)
+	}
+	fuseLifecycles := make([]*fuseSandboxLifecycle, 0, len(m.fuseLifecycles))
+	for _, lifecycle := range m.fuseLifecycles {
+		fuseLifecycles = append(fuseLifecycles, lifecycle)
+	}
+	m.mu.RUnlock()
+	for _, lifecycle := range syncLifecycles {
+		if err := m.destroySyncSandbox(ctx, lifecycle); err != nil {
+			drainErr = errors.Join(drainErr, err)
+		}
+	}
+	for _, lifecycle := range fuseLifecycles {
+		m.runFUSETeardown(ctx, lifecycle, ErrSandboxCleanupPending)
+		lifecycle.teardownMu.Lock()
+		done := lifecycle.teardownDone
+		lifecycle.teardownMu.Unlock()
+		if !done {
+			drainErr = errors.Join(drainErr, ErrSandboxCleanupPending)
+		}
+	}
+
+	// Sandboxes without a coordinated workspace still need exact gate drain,
+	// session removal, and runtime removal during a release-wide drain.
+	m.mu.RLock()
+	remaining := make([]*Sandbox, 0, len(m.sandboxes))
+	for id, sb := range m.sandboxes {
+		if m.syncLifecycles[id] == nil && m.fuseLifecycles[id] == nil {
+			copy := cloneSandbox(sb)
+			remaining = append(remaining, &copy)
+		}
+	}
+	m.mu.RUnlock()
+	for _, sb := range remaining {
+		m.mu.RLock()
+		gate := m.operationGates[sb.ID]
+		m.mu.RUnlock()
+		if gate != nil {
+			drainErr = errors.Join(drainErr, gate.CloseAndWait(ctx))
+		}
+		if sb.Config.Mode == ModePersistent && m.sessions != nil {
+			drainErr = errors.Join(drainErr, m.sessions.Remove(ctx, sb.ID))
+		}
+		if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
+			drainErr = errors.Join(drainErr, err)
+			continue
+		}
+		m.mu.Lock()
+		delete(m.sandboxes, sb.ID)
+		delete(m.workspaces, sb.ID)
+		delete(m.operationGates, sb.ID)
+		m.mu.Unlock()
+	}
+
+	if m.ephemeral != nil {
+		drainErr = errors.Join(drainErr, m.finalizeEphemeralLifecycles(ctx))
+	}
+	if m.fusePool != nil {
+		drainErr = errors.Join(drainErr, m.fusePool.Stop(ctx))
+	}
+	m.pool.Drain(ctx)
+	if m.sessions != nil {
+		drainErr = errors.Join(drainErr, AuditDrainedState(ctx, m.sessions.store))
+	}
+	m.shutdownErr = drainErr
+	return drainErr
 }
 
 // Create creates a new sandbox.
@@ -1112,7 +1239,9 @@ func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLi
 			case <-ctx.Done():
 				return
 			case <-m.stopCh:
-				m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
+				if lifecycle.sandbox != nil && lifecycle.sandbox.Config.Mode == ModeEphemeral {
+					m.runFUSETeardown(context.Background(), lifecycle, ErrSandboxNotReady)
+				}
 				return
 			case <-ticker.C:
 				if err := m.checkFUSELifecycle(ctx, lifecycle); err != nil {

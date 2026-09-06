@@ -624,7 +624,7 @@ func TestManagerStopHonorsDeadlineWhileLegacyCreateIsBlocked(t *testing.T) {
 	mgr.Stop(context.Background())
 }
 
-func TestManagerStopHonorsDeadlineWithoutRemovingFUSERuntimeUnderReader(t *testing.T) {
+func TestManagerStopPreservesPersistentFUSERuntimeUnderReader(t *testing.T) {
 	reader := newSignalReadCloser()
 	rt := newFUSEManagerRuntime()
 	rt.downloadReader = reader
@@ -650,7 +650,10 @@ func TestManagerStopHonorsDeadlineWithoutRemovingFUSERuntimeUnderReader(t *testi
 	assert.False(t, rt.wasRemoved(sb.RuntimeID), "deadline return must not remove a runtime with a live gate reference")
 	require.NoError(t, rc.Close())
 	mgr.Stop(context.Background())
-	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+	assert.False(t, rt.wasRemoved(sb.RuntimeID), "rolling shutdown preserves persistent FUSE runtimes")
+	exists, err := mgr.sessions.Exists(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.True(t, exists)
 }
 
 type managerStreamRuntime struct {
