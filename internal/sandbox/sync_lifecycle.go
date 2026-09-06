@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
@@ -100,7 +101,23 @@ func (m *Manager) scheduleSyncFinalization(lifecycle *syncSandboxLifecycle, caus
 		return
 	}
 	lifecycle.once.Do(func() {
-		go m.finalizeLostSyncWorkspace(lifecycle, cause)
+		go func() {
+			_ = cause
+			backoff := 100 * time.Millisecond
+			for {
+				if err := m.destroySyncSandbox(context.Background(), lifecycle); err == nil || errors.Is(err, ErrSandboxNotFound) {
+					return
+				}
+				select {
+				case <-m.controlCtx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 5*time.Second {
+					backoff *= 2
+				}
+			}
+		}()
 	})
 }
 
@@ -131,43 +148,6 @@ func publishSyncLifecycle(lifecycle *syncSandboxLifecycle) bool {
 	return true
 }
 
-// finalizeLostSyncWorkspace fails closed. A sync runtime has no direct object
-// store access, so draining its gate, making one final copy-out attempt, and
-// removing the runtime prevents any further divergence after lease loss.
-func (m *Manager) finalizeLostSyncWorkspace(lifecycle *syncSandboxLifecycle, _ error) {
-	ctx, cancel := context.WithTimeout(context.Background(), m.fuseTeardownTimeout())
-	defer cancel()
-	_ = lifecycle.gate.CloseAndWait(ctx)
-	if lifecycle.renewal != nil {
-		lifecycle.renewal.Stop()
-	}
-	m.mu.RLock()
-	sb := m.sandboxes[lifecycle.sandboxID]
-	m.mu.RUnlock()
-	if sb == nil {
-		return
-	}
-	var exclude []string
-	if sb.Workspace != nil {
-		exclude = append([]string(nil), sb.Workspace.SyncExclude...)
-	}
-	_ = m.syncFromContainer(ctx, sb.ID, sb.RuntimeID, exclude)
-	_ = m.runtime.RemoveSandbox(ctx, sb.RuntimeID)
-	if lifecycle.lease != nil {
-		_ = m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, runtime.TerminationEvidence{})
-	}
-	m.mu.Lock()
-	if m.syncLifecycles[sb.ID] == lifecycle {
-		delete(m.syncLifecycles, sb.ID)
-		delete(m.operationGates, sb.ID)
-		delete(m.workspaces, sb.ID)
-		delete(m.sandboxes, sb.ID)
-	}
-	m.mu.Unlock()
-	_ = m.removeWorkspaceLifecycle(ctx, sb, lifecycle.ephemeralRecord)
-	m.pool.NotifyRemoved()
-}
-
 func (m *Manager) restartSyncRenewal(lifecycle *syncSandboxLifecycle) error {
 	if lifecycle == nil || lifecycle.lease == nil {
 		return nil
@@ -186,8 +166,10 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if lifecycle == nil {
 		return ErrSandboxNotReady
 	}
+	lifecycle.finalizeMu.Lock()
+	defer lifecycle.finalizeMu.Unlock()
 	if err := lifecycle.gate.CloseAndWait(ctx); err != nil {
-		return fmt.Errorf("drain sync sandbox operations: %w", err)
+		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain sync sandbox operations: %w", err))
 	}
 	m.mu.RLock()
 	sb := m.sandboxes[lifecycle.sandboxID]
@@ -195,26 +177,74 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if sb == nil {
 		return fmt.Errorf("%w: %s", ErrSandboxNotFound, lifecycle.sandboxID)
 	}
+	if sb.State != StateDestroying {
+		snapshot := cloneSandbox(sb)
+		snapshot.State = StateDestroying
+		snapshot.UpdatedAt = time.Now()
+		if sb.Config.Mode == ModePersistent {
+			if m.sessions == nil {
+				return errors.Join(ErrSandboxCleanupPending, ErrSandboxNotReady)
+			}
+			if err := m.sessions.Save(ctx, &snapshot); err != nil {
+				return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist destroying sandbox: %w", err))
+			}
+		} else if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralActive {
+			next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralFinalizing)
+			if err != nil {
+				return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist sync finalization: %w", err))
+			}
+			lifecycle.ephemeralRecord = next
+		}
+		m.mu.Lock()
+		if current := m.sandboxes[sb.ID]; current == sb {
+			current.State = StateDestroying
+			current.UpdatedAt = snapshot.UpdatedAt
+		}
+		m.mu.Unlock()
+	}
 	var exclude []string
 	if sb.Workspace != nil {
 		exclude = append([]string(nil), sb.Workspace.SyncExclude...)
 	}
-	if err := m.syncFromContainer(ctx, sb.ID, sb.RuntimeID, exclude); err != nil {
-		return fmt.Errorf("final sync from container: %w", err)
+	if !lifecycle.finalSyncDone && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralFinalizing) {
+		if err := m.syncFromContainer(ctx, sb.ID, sb.RuntimeID, exclude); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("final sync from container: %w", err))
+		}
+		lifecycle.finalSyncDone = true
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralFinalizing {
+		next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralRemovingRuntime)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist completed final sync: %w", err))
+		}
+		lifecycle.ephemeralRecord = next
+	}
+	if !lifecycle.runtimeRemoved && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime) {
+		if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove sandbox: %w", err))
+		}
+		lifecycle.runtimeRemoved = true
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime {
+		next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralReleasingLease)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist removed runtime: %w", err))
+		}
+		lifecycle.ephemeralRecord = next
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State != EphemeralReleasingLease {
+		return errors.Join(ErrSandboxCleanupPending, ErrEphemeralLifecycleConflict)
 	}
 	if lifecycle.renewal != nil {
 		lifecycle.renewal.Stop()
 	}
 	if lifecycle.lease != nil {
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, runtime.TerminationEvidence{}); err != nil {
-			return fmt.Errorf("release workspace lease: %w", err)
+			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("release workspace lease: %w", err))
 		}
 	}
 	if err := m.removeWorkspaceLifecycle(ctx, sb, lifecycle.ephemeralRecord); err != nil {
-		return fmt.Errorf("remove workspace lifecycle: %w", err)
-	}
-	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
-		return fmt.Errorf("remove sandbox: %w", err)
+		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove workspace lifecycle: %w", err))
 	}
 	m.mu.Lock()
 	if m.syncLifecycles[sb.ID] == lifecycle {
@@ -274,5 +304,47 @@ func (m *Manager) restoreSyncSandbox(ctx context.Context, sb *Sandbox) error {
 	m.operationGates[sb.ID] = gate
 	m.syncLifecycles[sb.ID] = lifecycle
 	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) finalizeRecoveredPersistentSync(ctx context.Context, sb *Sandbox) error {
+	if sb == nil || sb.Workspace == nil || sb.Workspace.MountType != WorkspaceMountSync ||
+		sb.State != StateDestroying || m.config.WorkspaceCoordinator == nil || m.sessions == nil {
+		return ErrSandboxCleanupPending
+	}
+	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, sb.Workspace.Owner)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, nil)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	defer renewal.Stop()
+	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	if info != nil {
+		if info.RuntimeUID != sb.RuntimeUID || info.State != "running" {
+			return errors.Join(ErrSandboxCleanupPending, ErrSandboxNotReady)
+		}
+		scoped, err := storage.NewScopedFS(m.filesystem, sb.Workspace.RootPath)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		if err := m.fullSyncFromContainer(ctx, scoped, sb.RuntimeID, sb.Workspace.SyncExclude); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+	}
+	if err := m.config.WorkspaceCoordinator.Release(ctx, lease, runtime.TerminationEvidence{}); err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	if err := m.sessions.Remove(ctx, sb.ID); err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
 	return nil
 }

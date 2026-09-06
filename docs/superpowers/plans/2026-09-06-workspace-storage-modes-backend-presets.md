@@ -640,7 +640,7 @@ git commit -m "feat: persist ephemeral workspace cleanup state"
 - Modify: `internal/sandbox/errors.go`
 - Modify: `internal/api/handler/handler.go`
 
-- [ ] **Step 1: Write failing finalization and restart-recovery tests**
+- [x] **Step 1: Write failing finalization and restart-recovery tests**
 
 ```go
 func TestDestroyEphemeralSyncRetainsRuntimeAndLeaseWhenFinalSyncFails(t *testing.T) {
@@ -666,13 +666,13 @@ func TestStartupFinalizesEphemeralFUSEWithoutRestoringUserSession(t *testing.T) 
 
 Add cases for retrying sync success, FUSE durable-flush failure, runtime removal ambiguity, release CAS conflict, persistent sync shutdown, and orphan reconciliation including ephemeral runtime UIDs.
 
-- [ ] **Step 2: Run finalization tests and confirm failure**
+- [x] **Step 2: Run finalization tests and confirm failure**
 
 Run: `go test ./internal/sandbox ./internal/api/handler -run 'Test.*(FinalSync|Finaliz|CleanupPending|EphemeralFUSE)' -count=1`
 
 Expected: FAIL because sync destroy ignores `syncFromContainer` errors and startup ignores ephemeral records.
 
-- [ ] **Step 3: Implement an idempotent finalization state machine**
+- [x] **Step 3: Implement an idempotent finalization state machine**
 
 Add `ErrSandboxCleanupPending` and map it to HTTP 503 with code `SANDBOX_CLEANUP_PENDING`. Finalization order is fixed:
 
@@ -685,7 +685,7 @@ Each completed external boundary must transition the stored record before procee
 
 At startup, restore `StateReady` persistent sessions for users; a persistent session already in `StateDestroying` resumes finalization instead of being recreated or published. Then list ephemeral lifecycle records and run only their finalization. Include all of their RuntimeUIDs in the protected set before runtime orphan reconciliation. A malformed or unreadable lifecycle record aborts startup fail-closed. No ephemeral record is inserted into `m.sandboxes` for public lookup.
 
-- [ ] **Step 4: Run sandbox, handler, and race tests**
+- [x] **Step 4: Run sandbox, handler, and race tests**
 
 Run:
 
@@ -696,7 +696,7 @@ go test -race ./internal/sandbox -run 'Test.*(Destroy|Finaliz|Ephemeral|Lease)' 
 
 Expected: PASS; no test observes a deleted runtime after failed final sync or an exposed recovered ephemeral sandbox.
 
-- [ ] **Step 5: Commit strong finalization**
+- [x] **Step 5: Commit strong finalization**
 
 ```bash
 git add internal/sandbox internal/api/handler

@@ -3,11 +3,14 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/goairix/sandbox/internal/storage"
 )
 
 func validEphemeralRecord() EphemeralLifecycleRecord {
@@ -123,4 +126,64 @@ func TestEphemeralSandboxWithoutWorkspaceUsesNoLifecycleNamespace(t *testing.T) 
 	require.NoError(t, err)
 	assert.False(t, exists)
 	assert.False(t, ephemeral.Exists(context.Background(), sb.ID))
+}
+
+func TestDestroyEphemeralFUSERetainsRuntimeAndLeaseWhenFlushFails(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, store := newFUSETestManager(t, rt)
+	ephemeral := NewEphemeralLifecycleStore(store)
+	mgr.SetEphemeralLifecycleStore(ephemeral)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{
+		Mode: ModeEphemeral, WorkspacePath: "jobs/a", WorkspaceMountMode: WorkspaceMountFUSE,
+	})
+	require.NoError(t, err)
+	rt.mockRuntime.mu.Lock()
+	rt.flushErr = errors.New("durable flush failed")
+	rt.mockRuntime.mu.Unlock()
+
+	err = mgr.Destroy(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrSandboxCleanupPending)
+	assert.False(t, rt.wasRemoved(sb.RuntimeID))
+	assert.True(t, ephemeral.Exists(context.Background(), sb.ID))
+	assert.True(t, store.hasKey(mgr.fuseLifecycles[sb.ID].lease.Key))
+	rt.mockRuntime.mu.Lock()
+	rt.flushErr = nil
+	rt.mockRuntime.mu.Unlock()
+	mgr.Stop(context.Background())
+}
+
+func TestStartupFinalizesEphemeralFUSEWithoutRestoringUserSession(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	first, _, repo, store := newFUSETestManager(t, rt)
+	first.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	sb, err := first.Create(context.Background(), SandboxConfig{
+		Mode: ModeEphemeral, WorkspacePath: "jobs/a", WorkspaceMountMode: WorkspaceMountFUSE,
+	})
+	require.NoError(t, err)
+	first.mu.RLock()
+	crashed := first.fuseLifecycles[sb.ID]
+	first.mu.RUnlock()
+	crashed.cancel()
+	crashed.renewal.Stop()
+	store.expireKey(crashed.lease.Key)
+
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	profile, err := storage.RootMarkerProfileByID(storage.RootMarkerProfileMinIO)
+	require.NoError(t, err)
+	restored := NewManager(rt, nil, first.fsMeta, ManagerConfig{
+		RuntimeType: "docker", DefaultMountMode: WorkspaceMountFUSE,
+		EnabledMountModes: map[WorkspaceMountType]bool{WorkspaceMountFUSE: true},
+		FUSEPool:          pool, WorkspaceCoordinator: NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+		WorkspaceObjectClient: &fuseMarkerClient{exists: true}, WorkspaceMarkerProfile: profile,
+		FUSEHealthInterval: time.Hour,
+	})
+	restored.SetSessionStore(NewSessionStore(store, time.Hour))
+	restored.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	require.NoError(t, restored.Start(context.Background()))
+	t.Cleanup(func() { restored.Stop(context.Background()) })
+
+	_, err = restored.Get(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrSandboxNotFound)
+	assert.False(t, restored.ephemeral.Exists(context.Background(), sb.ID))
+	assert.True(t, rt.wasRemoved(sb.RuntimeID))
 }

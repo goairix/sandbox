@@ -55,31 +55,33 @@ type fuseBindingClaim struct {
 }
 
 type fuseSandboxLifecycle struct {
-	sandboxID        string
-	gate             *operationGate
-	lease            *WorkspaceLease
-	renewal          *WorkspaceLeaseRenewal
-	record           state.FUSEPoolRecord
-	cancel           context.CancelFunc
-	teardownMu       sync.Mutex
-	teardownRunning  bool
-	teardownDone     bool
-	lastFailureStage string
-	lastFailureAt    time.Time
-	gateClosed       bool
-	renewalStopped   bool
-	quiesceAttempted bool
-	quiesced         bool
-	flushAttempted   bool
-	poolRemoved      bool
-	claimed          *state.FUSEPoolRecord
-	runtimeRemoved   bool
-	evidence         runtime.TerminationEvidence
-	probeRemoved     bool
-	unmountRecorded  bool
-	leaseReleased    bool
-	sessionRemoved   bool
-	ephemeralRecord  *EphemeralLifecycleRecord
+	sandboxID           string
+	sandbox             *Sandbox
+	gate                *operationGate
+	lease               *WorkspaceLease
+	renewal             *WorkspaceLeaseRenewal
+	record              state.FUSEPoolRecord
+	cancel              context.CancelFunc
+	teardownMu          sync.Mutex
+	teardownRunning     bool
+	teardownDone        bool
+	lastFailureStage    string
+	lastFailureAt       time.Time
+	finalizingPersisted bool
+	gateClosed          bool
+	renewalStopped      bool
+	quiesceAttempted    bool
+	quiesced            bool
+	flushAttempted      bool
+	poolRemoved         bool
+	claimed             *state.FUSEPoolRecord
+	runtimeRemoved      bool
+	evidence            runtime.TerminationEvidence
+	probeRemoved        bool
+	unmountRecorded     bool
+	leaseReleased       bool
+	sessionRemoved      bool
+	ephemeralRecord     *EphemeralLifecycleRecord
 }
 
 type syncSandboxLifecycle struct {
@@ -92,6 +94,9 @@ type syncSandboxLifecycle struct {
 	lost            bool
 	published       bool
 	ephemeralRecord *EphemeralLifecycleRecord
+	finalizeMu      sync.Mutex
+	finalSyncDone   bool
+	runtimeRemoved  bool
 }
 
 // randSuffix generates a random lowercase alphanumeric string of length n.
@@ -317,6 +322,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 		logger.Error(spanCtx, "failed to restore persistent sandboxes", logger.ErrorField(err))
 	}
+	if err := m.finalizeEphemeralLifecycles(spanCtx); err != nil {
+		return fmt.Errorf("finalize ephemeral workspace lifecycles: %w", err)
+	}
 	if fuseEnabled {
 		if err := m.reconcileFUSEOrphans(spanCtx); err != nil {
 			return fmt.Errorf("reconcile FUSE runtime orphans: %w", err)
@@ -368,6 +376,18 @@ func (m *Manager) reconcileFUSEOrphans(ctx context.Context) error {
 		}
 		if sb.RuntimeUID != "" {
 			protected[sb.RuntimeUID] = struct{}{}
+		}
+	}
+	if m.ephemeral != nil {
+		records, err := m.ephemeral.List(ctx)
+		if err != nil {
+			return fmt.Errorf("list protected ephemeral lifecycles: %w", err)
+		}
+		for _, record := range records {
+			if validateOpaqueText(record.RuntimeUID, false) != nil {
+				return ErrEphemeralLifecycleInvalid
+			}
+			protected[record.RuntimeUID] = struct{}{}
 		}
 	}
 	ownerUIDs, err := m.config.WorkspaceCoordinator.ProtectedRuntimeUIDs(ctx)
@@ -853,7 +873,7 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	}
 	gate := newOperationGate(true)
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
-	lifecycle = &fuseSandboxLifecycle{sandboxID: id, gate: gate, lease: lease, renewal: renewal, record: *record, cancel: cancelLifecycle}
+	lifecycle = &fuseSandboxLifecycle{sandboxID: id, sandbox: sb, gate: gate, lease: lease, renewal: renewal, record: *record, cancel: cancelLifecycle}
 	_ = lifecycleCtx
 	m.mu.Lock()
 	sessionIdentity := cloneSandbox(sb)
@@ -1162,6 +1182,41 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		}
 		lifecycle.gateClosed = true
 	}
+	if !lifecycle.finalizingPersisted {
+		m.mu.RLock()
+		sb := m.sandboxes[lifecycle.sandboxID]
+		if sb == nil {
+			sb = lifecycle.sandbox
+		}
+		snapshot := cloneSandbox(sb)
+		m.mu.RUnlock()
+		if sb == nil || sb.Workspace == nil {
+			m.logFUSETeardownFailure(lifecycle, "load-lifecycle", ErrSandboxNotReady)
+			return
+		}
+		snapshot.State = StateDestroying
+		snapshot.UpdatedAt = time.Now()
+		if snapshot.Config.Mode == ModePersistent {
+			if m.sessions == nil || m.sessions.Save(context.Background(), &snapshot) != nil {
+				m.logFUSETeardownFailure(lifecycle, "persist-finalizing", ErrSessionPublicationConflict)
+				return
+			}
+		} else if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralActive {
+			next, err := m.ephemeral.Transition(context.Background(), lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralFinalizing)
+			if err != nil {
+				m.logFUSETeardownFailure(lifecycle, "persist-finalizing", err)
+				return
+			}
+			lifecycle.ephemeralRecord = next
+		}
+		m.mu.Lock()
+		if current := m.sandboxes[lifecycle.sandboxID]; current != nil {
+			current.State = StateDestroying
+			current.UpdatedAt = snapshot.UpdatedAt
+		}
+		m.mu.Unlock()
+		lifecycle.finalizingPersisted = true
+	}
 	if !lifecycle.renewalStopped {
 		lifecycle.renewal.Stop()
 		lifecycle.renewalStopped = true
@@ -1172,38 +1227,42 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 	generation := lifecycle.lease.OwnerSnapshot().Generation
 	if !lifecycle.quiesceAttempted {
 		token, err := m.runtime.QuiesceWorkspace(ctx, ref, generation)
-		lifecycle.quiesceAttempted = true
 		if err == nil && token.RuntimeUID == ref.UID && token.Generation == generation && token.Opaque != "" {
+			lifecycle.quiesceAttempted = true
 			lifecycle.quiesced = true
-		} else if err != nil {
-			logger.Warn(context.Background(), "FUSE sandbox quiesce failed; continuing with fail-closed runtime removal",
-				logger.AddField("sandbox_id", lifecycle.sandboxID),
-				logger.AddField("runtime_id", lifecycle.record.RuntimeID),
-				logger.ErrorField(err),
-			)
+		} else {
+			if err == nil {
+				err = errors.New("invalid generation-bound quiesce token")
+			}
+			m.logFUSETeardownFailure(lifecycle, "quiesce", err)
+			return
 		}
 	}
 	if lifecycle.quiesced && !lifecycle.flushAttempted {
-		// Destruction must remain possible when a best-effort flush fails. The
-		// immutable runtime is removed next and the owner is retained until that
-		// removal plus remote probe cleanup are both proven.
 		started := time.Now()
 		flushErr := m.runtime.FlushWorkspace(ctx, ref, generation)
 		result := "success"
 		if flushErr != nil {
 			result = "error"
 			metrics.RecordWorkspaceFUSEError(ctx, "flush")
-			logger.Warn(context.Background(), "FUSE sandbox pre-removal flush failed; strong shutdown must still prove durability",
-				logger.AddField("sandbox_id", lifecycle.sandboxID),
-				logger.AddField("runtime_id", lifecycle.record.RuntimeID),
-				logger.ErrorField(flushErr),
-			)
 		}
 		if m.fusePool.spec.WorkspaceFUSE != nil {
 			spec := m.fusePool.spec.WorkspaceFUSE
 			metrics.RecordWorkspaceFlush(ctx, spec.RuntimeType, spec.Provider, result, time.Since(started).Seconds())
 		}
+		if flushErr != nil {
+			m.logFUSETeardownFailure(lifecycle, "durable-flush", flushErr)
+			return
+		}
 		lifecycle.flushAttempted = true
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralFinalizing {
+		next, err := m.ephemeral.Transition(ctx, lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralRemovingRuntime)
+		if err != nil {
+			m.logFUSETeardownFailure(lifecycle, "persist-durable-flush", err)
+			return
+		}
+		lifecycle.ephemeralRecord = next
 	}
 	if lifecycle.claimed == nil {
 		claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, lifecycle.record)
@@ -1219,6 +1278,18 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 			return
 		}
 		lifecycle.runtimeRemoved = true
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime {
+		next, err := m.ephemeral.Transition(ctx, lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralReleasingLease)
+		if err != nil {
+			m.logFUSETeardownFailure(lifecycle, "persist-runtime-removed", err)
+			return
+		}
+		lifecycle.ephemeralRecord = next
+	}
+	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State != EphemeralReleasingLease {
+		m.logFUSETeardownFailure(lifecycle, "invalid-finalization-state", ErrEphemeralLifecycleConflict)
+		return
 	}
 	if lifecycle.evidence.RuntimeUID == "" {
 		fencer, ok := m.runtime.(runtime.RuntimeFencer)
@@ -1265,9 +1336,20 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		}
 		lifecycle.leaseReleased = true
 	}
+	if !lifecycle.poolRemoved {
+		if err := m.fusePool.CompleteClaimedCleanup(ctx, *lifecycle.claimed); err != nil {
+			m.logFUSETeardownFailure(lifecycle, "complete-pool-cleanup", err)
+			return
+		}
+		lifecycle.poolRemoved = true
+	}
 	if !lifecycle.sessionRemoved {
 		m.mu.RLock()
-		sb := cloneSandbox(m.sandboxes[lifecycle.sandboxID])
+		source := m.sandboxes[lifecycle.sandboxID]
+		if source == nil {
+			source = lifecycle.sandbox
+		}
+		sb := cloneSandbox(source)
 		m.mu.RUnlock()
 		if err := m.removeWorkspaceLifecycle(ctx, &sb, lifecycle.ephemeralRecord); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "remove-session", err)
@@ -1275,11 +1357,6 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		}
 		lifecycle.sessionRemoved = true
 	}
-	if err := m.fusePool.CompleteClaimedCleanup(ctx, *lifecycle.claimed); err != nil {
-		m.logFUSETeardownFailure(lifecycle, "complete-pool-cleanup", err)
-		return
-	}
-	lifecycle.poolRemoved = true
 	m.mu.Lock()
 	delete(m.sandboxes, lifecycle.sandboxID)
 	delete(m.operationGates, lifecycle.sandboxID)
@@ -1544,13 +1621,16 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 		fuseLifecycle.teardownMu.Unlock()
 		if !done {
 			m.scheduleFUSETeardown(fuseLifecycle, fmt.Errorf("sandbox destroy retry: %s", reason))
-			return fmt.Errorf("destroy FUSE sandbox cleanup is pending")
+			return fmt.Errorf("%w: destroy FUSE sandbox", ErrSandboxCleanupPending)
 		}
 		metrics.RecordSandboxDestroy(ctx, reason)
 		return nil
 	}
 	if syncLifecycle != nil {
 		if err := m.destroySyncSandbox(ctx, syncLifecycle); err != nil {
+			if errors.Is(err, ErrSandboxCleanupPending) {
+				m.scheduleSyncFinalization(syncLifecycle, err)
+			}
 			return err
 		}
 		metrics.SandboxActiveGauge.Add(ctx, -1)
@@ -2515,6 +2595,24 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) error {
 			metrics.RecordSessionRestore(ctx, "error")
 			continue
 		}
+		if sbPtr.State == StateDestroying && sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountSync {
+			if err := m.finalizeRecoveredPersistentSync(ctx, sbPtr); err != nil {
+				failed++
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("finalize persistent sync sandbox %q: %w", id, err))
+				metrics.RecordSessionRestore(ctx, "error")
+				continue
+			}
+			continue
+		}
+		if sbPtr.State == StateDestroying && sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountFUSE {
+			if err := m.finalizeRecoveredPersistentFUSE(ctx, sbPtr); err != nil {
+				failed++
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("finalize persistent FUSE sandbox %q: %w", id, err))
+				metrics.RecordSessionRestore(ctx, "error")
+				continue
+			}
+			continue
+		}
 		if sbPtr.Workspace != nil && sbPtr.Workspace.MountType == WorkspaceMountFUSE {
 			if err := m.restoreFUSESandbox(ctx, sbPtr); err != nil {
 				failed++
@@ -2709,6 +2807,7 @@ func (m *Manager) restoreFUSESandbox(ctx context.Context, sb *Sandbox) error {
 	restoreMu.Lock()
 	lifecycle = &fuseSandboxLifecycle{
 		sandboxID: sb.ID,
+		sandbox:   sb,
 		gate:      gate,
 		lease:     lease,
 		renewal:   renewal,

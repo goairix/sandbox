@@ -143,3 +143,87 @@ func TestSyncRestoreRepublishesExpiredLeaseForExactRuntimeOwner(t *testing.T) {
 	require.NotNil(t, restoredLifecycle)
 	assert.Equal(t, firstLifecycle.lease.OwnerSnapshot().Generation, restoredLifecycle.lease.OwnerSnapshot().Generation)
 }
+
+func TestDestroyEphemeralSyncRetainsRuntimeAndLeaseWhenFinalSyncFails(t *testing.T) {
+	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
+	ephemeral := NewEphemeralLifecycleStore(store)
+	mgr.SetEphemeralLifecycleStore(ephemeral)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	rt.mu.Lock()
+	rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+		return nil, errors.New("manifest unavailable")
+	}
+	rt.downloadDirErr = errors.New("archive unavailable")
+	rt.mu.Unlock()
+
+	err = mgr.Destroy(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrSandboxCleanupPending)
+	assert.False(t, rt.wasRemoved(sb.RuntimeID))
+	assert.True(t, ephemeral.Exists(context.Background(), sb.ID))
+	keys, keyErr := workspaceStateKeys(WorkspaceLeaseRequest{
+		Provider: "minio", StorageIdentity: "storage-primary", Bucket: "sandbox", Prefix: sb.Workspace.Owner.Prefix,
+	})
+	require.NoError(t, keyErr)
+	assert.True(t, store.hasKey(keys.owner))
+}
+
+func TestDestroyEphemeralSyncRetriesAfterFinalSyncRecovers(t *testing.T) {
+	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
+	ephemeral := NewEphemeralLifecycleStore(store)
+	mgr.SetEphemeralLifecycleStore(ephemeral)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	rt.mu.Lock()
+	rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+		return nil, errors.New("manifest unavailable")
+	}
+	rt.downloadDirErr = errors.New("archive unavailable")
+	rt.mu.Unlock()
+	mgr.mu.RLock()
+	lifecycle := mgr.syncLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	require.ErrorIs(t, mgr.destroySyncSandbox(context.Background(), lifecycle), ErrSandboxCleanupPending)
+	rt.mu.Lock()
+	rt.execFunc = nil
+	rt.downloadDirErr = nil
+	rt.mu.Unlock()
+
+	require.NoError(t, mgr.Destroy(context.Background(), sb.ID))
+	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+	assert.False(t, ephemeral.Exists(context.Background(), sb.ID))
+}
+
+func TestStartupFinalizesDestroyingPersistentSyncWithoutPublishing(t *testing.T) {
+	first, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
+	sb, err := first.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	rt.mu.Lock()
+	rt.execFunc = func(context.Context, string, runtime.ExecRequest) (*runtime.ExecResult, error) {
+		return nil, errors.New("manifest unavailable")
+	}
+	rt.downloadDirErr = errors.New("archive unavailable")
+	rt.mu.Unlock()
+	first.mu.RLock()
+	lifecycle := first.syncLifecycles[sb.ID]
+	first.mu.RUnlock()
+	require.ErrorIs(t, first.destroySyncSandbox(context.Background(), lifecycle), ErrSandboxCleanupPending)
+	lifecycle.renewal.Stop()
+	store.expireKey(lifecycle.lease.Key)
+	rt.mu.Lock()
+	rt.execFunc = nil
+	rt.downloadDirErr = nil
+	rt.mu.Unlock()
+
+	restored := NewManager(rt, first.filesystem, first.fsMeta, ManagerConfig{
+		RuntimeType: "docker", DefaultMountMode: WorkspaceMountSync,
+		EnabledMountModes:    map[WorkspaceMountType]bool{WorkspaceMountSync: true},
+		WorkspaceCoordinator: NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+		PoolConfig:           PoolConfig{Image: "sandbox:sync"},
+	})
+	restored.SetSessionStore(NewSessionStore(store, time.Hour))
+	require.NoError(t, restored.restorePersistentSandboxes(context.Background()))
+	_, err = restored.Get(context.Background(), sb.ID)
+	require.ErrorIs(t, err, ErrSandboxNotFound)
+	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+}

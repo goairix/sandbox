@@ -126,6 +126,17 @@ func TestInternalErrorSandboxNotReadyIsServiceUnavailable(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "SANDBOX_NOT_READY")
 }
 
+func TestInternalErrorSandboxCleanupPendingIsServiceUnavailable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/sandboxes/id", nil)
+
+	internalError(c, sandbox.ErrSandboxCleanupPending)
+
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "SANDBOX_CLEANUP_PENDING")
+}
+
 func TestHandleSkillNotReadyUsesServiceUnavailable(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

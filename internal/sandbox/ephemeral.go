@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
 )
@@ -365,4 +366,194 @@ func (m *Manager) removeWorkspaceLifecycle(ctx context.Context, sb *Sandbox, eph
 		return ErrEphemeralLifecycleConflict
 	}
 	return m.ephemeral.RemoveExact(ctx, *ephemeralRecord)
+}
+
+// finalizeEphemeralLifecycles resumes private cleanup records at startup. It
+// never publishes them into m.sandboxes, so one-shot executors cannot become
+// user-visible persistent sandboxes after an API restart.
+func (m *Manager) finalizeEphemeralLifecycles(ctx context.Context) error {
+	if m.ephemeral == nil {
+		return nil
+	}
+	records, err := m.ephemeral.List(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range records {
+		record := records[i]
+		if record.State == EphemeralActive {
+			next, err := m.ephemeral.Transition(ctx, record.SandboxID, record.Revision, EphemeralFinalizing)
+			if err != nil {
+				return err
+			}
+			record = *next
+		}
+		switch record.MountType {
+		case WorkspaceMountSync:
+			if err := m.finalizeRecoveredEphemeralSync(ctx, &record); err != nil {
+				return fmt.Errorf("finalize ephemeral sync %q: %w", record.SandboxID, err)
+			}
+		case WorkspaceMountFUSE:
+			if err := m.finalizeRecoveredEphemeralFUSE(ctx, &record); err != nil {
+				return fmt.Errorf("finalize ephemeral FUSE %q: %w", record.SandboxID, err)
+			}
+		default:
+			return ErrEphemeralLifecycleInvalid
+		}
+	}
+	return nil
+}
+
+func (m *Manager) finalizeRecoveredEphemeralSync(ctx context.Context, record *EphemeralLifecycleRecord) error {
+	if m.config.WorkspaceCoordinator == nil || m.fsMeta == nil || record == nil {
+		return ErrSandboxCleanupPending
+	}
+	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, record.Owner)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, nil)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	defer renewal.Stop()
+	if record.State == EphemeralFinalizing {
+		info, err := m.runtime.GetSandbox(ctx, record.RuntimeID)
+		if err != nil || info == nil || info.RuntimeUID != record.RuntimeUID || info.State != "running" {
+			return errors.Join(ErrSandboxCleanupPending, ErrSandboxNotReady, err)
+		}
+		scoped, err := storage.NewScopedFS(m.filesystem, record.WorkspacePath)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		if err := m.fullSyncFromContainer(ctx, scoped, record.RuntimeID, nil); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		next, err := m.ephemeral.Transition(ctx, record.SandboxID, record.Revision, EphemeralRemovingRuntime)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		record = next
+	}
+	if record.State == EphemeralRemovingRuntime {
+		if err := m.runtime.RemoveSandbox(ctx, record.RuntimeID); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		next, err := m.ephemeral.Transition(ctx, record.SandboxID, record.Revision, EphemeralReleasingLease)
+		if err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		record = next
+	}
+	if record.State != EphemeralReleasingLease {
+		return ErrEphemeralLifecycleInvalid
+	}
+	if err := m.config.WorkspaceCoordinator.Release(ctx, lease, runtime.TerminationEvidence{}); err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	return m.ephemeral.RemoveExact(ctx, *record)
+}
+
+func (m *Manager) finalizeRecoveredEphemeralFUSE(ctx context.Context, record *EphemeralLifecycleRecord) error {
+	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || record == nil {
+		return ErrSandboxCleanupPending
+	}
+	records, err := m.fusePool.repo.ListByPoolKey(ctx, record.PoolKey)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	var poolRecord *state.FUSEPoolRecord
+	for i := range records {
+		candidate := records[i]
+		if candidate.PreparationID == record.PreparationID && candidate.RuntimeID == record.RuntimeID && candidate.RuntimeUID == record.RuntimeUID &&
+			candidate.ReservationToken == record.ReservationToken {
+			poolRecord = &candidate
+			break
+		}
+	}
+	if poolRecord == nil {
+		return errors.Join(ErrSandboxCleanupPending, state.ErrFUSEPoolCorrupt)
+	}
+	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, record.Owner)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, nil)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	sb := &Sandbox{
+		ID: record.SandboxID, Config: SandboxConfig{Mode: ModeEphemeral, WorkspacePath: record.WorkspacePath, WorkspaceMountMode: WorkspaceMountFUSE},
+		State: StateDestroying, RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+		Workspace: &WorkspaceInfo{
+			RootPath: record.WorkspacePath, MountType: WorkspaceMountFUSE, Owner: record.Owner, LeaseGeneration: record.Owner.Generation,
+			FUSEPreparationID: record.PreparationID, FUSEPoolKey: record.PoolKey, FUSEReservationToken: record.ReservationToken, FUSERecordRevision: record.PoolRevision,
+		},
+	}
+	_, cancel := context.WithCancel(context.Background())
+	lifecycle := &fuseSandboxLifecycle{
+		sandboxID: record.SandboxID, sandbox: sb, gate: newOperationGate(false), lease: lease, renewal: renewal,
+		record: *poolRecord, cancel: cancel, ephemeralRecord: record, finalizingPersisted: true, gateClosed: true,
+	}
+	if record.State == EphemeralRemovingRuntime || record.State == EphemeralReleasingLease {
+		lifecycle.quiesceAttempted = true
+		lifecycle.quiesced = true
+		lifecycle.flushAttempted = true
+	}
+	if record.State == EphemeralReleasingLease {
+		lifecycle.runtimeRemoved = true
+	}
+	m.teardownFUSESandbox(lifecycle, ErrSandboxCleanupPending)
+	lifecycle.teardownMu.Lock()
+	done := lifecycle.teardownDone
+	lifecycle.teardownMu.Unlock()
+	if !done {
+		return ErrSandboxCleanupPending
+	}
+	return nil
+}
+
+func (m *Manager) finalizeRecoveredPersistentFUSE(ctx context.Context, sb *Sandbox) error {
+	if sb == nil || sb.Workspace == nil || sb.State != StateDestroying || m.fusePool == nil ||
+		m.config.WorkspaceCoordinator == nil || m.sessions == nil {
+		return ErrSandboxCleanupPending
+	}
+	workspace := sb.Workspace
+	records, err := m.fusePool.repo.ListByPoolKey(ctx, workspace.FUSEPoolKey)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	var poolRecord *state.FUSEPoolRecord
+	for i := range records {
+		candidate := records[i]
+		if candidate.PreparationID == workspace.FUSEPreparationID && candidate.RuntimeID == sb.RuntimeID && candidate.RuntimeUID == sb.RuntimeUID &&
+			candidate.ReservationToken == workspace.FUSEReservationToken {
+			poolRecord = &candidate
+			break
+		}
+	}
+	if poolRecord == nil {
+		return errors.Join(ErrSandboxCleanupPending, state.ErrFUSEPoolCorrupt)
+	}
+	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, workspace.Owner)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, nil)
+	if err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	_, cancel := context.WithCancel(context.Background())
+	lifecycle := &fuseSandboxLifecycle{
+		sandboxID: sb.ID, sandbox: sb, gate: newOperationGate(false), lease: lease, renewal: renewal,
+		record: *poolRecord, cancel: cancel, finalizingPersisted: true, gateClosed: true,
+	}
+	m.teardownFUSESandbox(lifecycle, ErrSandboxCleanupPending)
+	lifecycle.teardownMu.Lock()
+	done := lifecycle.teardownDone
+	lifecycle.teardownMu.Unlock()
+	if !done {
+		return ErrSandboxCleanupPending
+	}
+	return nil
 }

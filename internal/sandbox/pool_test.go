@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,7 @@ type mockRuntime struct {
 	healthFailures    map[string]error
 	removeFailures    map[string]error
 	removedIDs        map[string]int
+	downloadDirErr    error
 }
 
 func newMockRuntime() *mockRuntime {
@@ -311,7 +313,13 @@ func (m *mockRuntime) UploadArchive(context.Context, string, string, io.Reader) 
 }
 
 func (m *mockRuntime) DownloadDir(context.Context, string, string) (io.ReadCloser, error) {
-	return nil, nil
+	m.mu.Lock()
+	err := m.downloadDirErr
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (m *mockRuntime) UpdateNetwork(context.Context, string, bool, []string, bool) error {

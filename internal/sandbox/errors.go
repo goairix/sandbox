@@ -11,6 +11,10 @@ var (
 	// ErrSandboxNotReady is returned when the sandbox operation gate is closed.
 	ErrSandboxNotReady = errors.New("sandbox not ready")
 
+	// ErrSandboxCleanupPending means final sync/flush or an exact teardown
+	// boundary failed and the runtime plus ownership state were retained.
+	ErrSandboxCleanupPending = errors.New("sandbox cleanup pending")
+
 	// ErrWorkspaceAlreadyMounted is returned when a workspace is already
 	// mounted for a sandbox.
 	ErrWorkspaceAlreadyMounted = errors.New("workspace already mounted")

@@ -172,6 +172,9 @@ func TestFUSESyncQuiesceFailureDoesNotFlushAndClosesAdmission(t *testing.T) {
 	assert.False(t, gate.isOpen())
 	assert.False(t, flushed)
 	require.ErrorIs(t, mgr.SyncWorkspace(context.Background(), sb.ID, "to_container", nil), ErrSandboxNotReady)
+	rt.mu.Lock()
+	rt.quiesceErr = nil
+	rt.mu.Unlock()
 }
 
 func TestFUSERecursiveListHidesReservedProbeFromStablePaginationCount(t *testing.T) {
@@ -320,6 +323,7 @@ func TestFUSESyncRejectsStaleQuiesceTokenWithoutFlush(t *testing.T) {
 	rt.mu.Lock()
 	assert.Zero(t, rt.flushCalls)
 	assert.Zero(t, rt.resumeCalls)
+	rt.quiesceToken = runtime.WorkspaceQuiesceToken{}
 	rt.mu.Unlock()
 }
 
