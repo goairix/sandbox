@@ -26,6 +26,7 @@ import (
 	typednetworkingv1 "k8s.io/client-go/kubernetes/typed/networking/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1147,37 +1148,46 @@ func (r *Runtime) bindPreparedCiliumSystemPolicy(ctx context.Context, ref runtim
 	}
 	policies := r.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(r.namespace)
 	name := fuseSystemPolicyPrefix + ref.ID
-	current, err := policies.Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get prepared Cilium system policy for runtime binding: %w", err)
-	}
-	if !ciliumSystemPolicyIntentMatches(current, desired) {
-		return fmt.Errorf("prepared Cilium system policy intent changed before runtime binding")
-	}
-	updated := desired.DeepCopy()
-	updated.SetResourceVersion(current.GetResourceVersion())
-	updated.SetUID(current.GetUID())
-	annotations := updated.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations[fuseRuntimeUIDAnnotation] = ref.UID
-	updated.SetAnnotations(annotations)
-	result, updateErr := policies.Update(ctx, updated, metav1.UpdateOptions{})
-	if updateErr == nil {
-		if result.GetUID() == current.GetUID() && ciliumSystemPolicyIntentMatches(result, updated) {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, getErr := policies.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get prepared Cilium system policy for runtime binding: %w", getErr)
+		}
+		updated := desired.DeepCopy()
+		updated.SetResourceVersion(current.GetResourceVersion())
+		updated.SetUID(current.GetUID())
+		annotations := updated.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[fuseRuntimeUIDAnnotation] = ref.UID
+		updated.SetAnnotations(annotations)
+		if current.GetUID() == updated.GetUID() && ciliumSystemPolicyIntentMatches(current, updated) {
 			return nil
 		}
-		cleanupCtx, cancel := r.newCleanupContext(ctx)
-		defer cancel()
-		cleanupErr := deleteCreatedCiliumPolicy(cleanupCtx, policies, result)
-		return errors.Join(fmt.Errorf("bound prepared Cilium system policy does not match requested intent"), cleanupErr)
+		if !ciliumSystemPolicyIntentMatches(current, desired) {
+			return fmt.Errorf("prepared Cilium system policy intent changed before runtime binding")
+		}
+		result, updateErr := policies.Update(ctx, updated, metav1.UpdateOptions{})
+		if updateErr == nil {
+			if result.GetUID() == current.GetUID() && ciliumSystemPolicyIntentMatches(result, updated) {
+				return nil
+			}
+			cleanupCtx, cancel := r.newCleanupContext(ctx)
+			defer cancel()
+			cleanupErr := deleteCreatedCiliumPolicy(cleanupCtx, policies, result)
+			return errors.Join(fmt.Errorf("bound prepared Cilium system policy does not match requested intent"), cleanupErr)
+		}
+		verified, verifyErr := policies.Get(ctx, name, metav1.GetOptions{})
+		if verifyErr == nil && verified.GetUID() == current.GetUID() && ciliumSystemPolicyIntentMatches(verified, updated) {
+			return nil
+		}
+		return updateErr
+	})
+	if err != nil {
+		return fmt.Errorf("bind prepared Cilium system policy to runtime UID: %w", err)
 	}
-	verified, verifyErr := policies.Get(ctx, name, metav1.GetOptions{})
-	if verifyErr == nil && verified.GetUID() == current.GetUID() && ciliumSystemPolicyIntentMatches(verified, updated) {
-		return nil
-	}
-	return fmt.Errorf("bind prepared Cilium system policy to runtime UID: %w", updateErr)
+	return nil
 }
 
 func ciliumSystemPolicyIntentMatches(current, desired *unstructured.Unstructured) bool {

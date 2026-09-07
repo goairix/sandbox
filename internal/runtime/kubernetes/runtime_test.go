@@ -332,6 +332,31 @@ func preparedScript() *commandScript {
 	}}
 }
 
+func TestPrepareSandboxRetriesCiliumPolicyBindingConflict(t *testing.T) {
+	rt, _ := newFakeKubernetesRuntime(t, preparedScript())
+	rt.hasCilium = true
+	dynamicClient := rt.dynClient.(*fake.FakeDynamicClient)
+	var updates atomic.Int32
+	dynamicClient.PrependReactor("update", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		if updates.Add(1) == 1 {
+			name := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured).GetName()
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "cilium.io", Resource: "ciliumnetworkpolicies"}, name, errors.New("controller updated resourceVersion"))
+		}
+		return false, nil, nil
+	})
+
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.EndpointHostIPs = nil
+	spec.WorkspaceFUSE.SystemEgress = sandboxruntime.SystemEgressSpec{
+		Mode: sandboxruntime.SystemEgressCiliumFQDN, DNSCIDRs: []string{"8.8.8.8/32"}, DNSPorts: []int32{53},
+		EndpointFQDNs: []string{"minio.example.com"}, EndpointPorts: []int32{9000},
+	}
+	info, err := rt.PrepareSandbox(context.Background(), spec)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, int32(2), updates.Load())
+}
+
 func preparedOrphanCleanupScript() *commandScript {
 	return &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
 		switch fmt.Sprint(command.argv) {
