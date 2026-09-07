@@ -1,6 +1,6 @@
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
-  tag: feat-workspace-fuse-obs-public@sha256:7d3f05c5c60674e0fc5fdbc0da76b0bfa7d5872b45eba55322400a80de3e4efc
+  tag: hybrid-187cf62-arm64@sha256:42b3c5dcdc55581cfad4ea539ff4ffc7298baa8bfae3c0c5fcb6df1ef3928ef9
   pullPolicy: Always
 
 replicaCount: 1
@@ -64,12 +64,12 @@ config:
       refillIntervalSeconds: 5
       prepareTimeoutSeconds: 180
     fuseImages:
-      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:c38fbd98e5b6adb9c8d3a8ec212f696ef942cab2758a04f23f0c04614d7a7103
-      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:df0dfa3ccbcd93c1698ae305236c904a6b6aa403b96b74b010edf8c56984828d
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:5d616d2225d593a3669e257d6ba7834fa44773843c19adba1b8e87fda699a2dc
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:1eb72296858a2ebcdef4940d9a21b5b637b12c5a258ae245f9e3a40b618a50ca
     lsmProfile: sandbox-fuse
     proxyURL: ""
   security:
     apiKeySecretName: sandbox-fuse-api-key
     seccompProfile: RuntimeDefault
-    networkEnabled: false
+    networkEnabled: true
     networkBlockPrivate: true

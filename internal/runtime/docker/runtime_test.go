@@ -698,6 +698,25 @@ func newFakeDockerRuntime(t *testing.T) (*Runtime, *fakeDockerAPI) {
 	}, fake
 }
 
+func TestListSandboxesReturnsRuntimeLabels(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	labels := map[string]string{
+		"sandbox.id":             "sandbox-pool-fuse",
+		"sandbox.pool":           "true",
+		"sandbox.workspace.mode": "fuse",
+	}
+	fake.containers["fuse-runtime"] = &fakeContainer{
+		config:  &container.Config{Labels: labels},
+		name:    "sandbox-pool-fuse",
+		running: true,
+	}
+
+	infos, err := rt.ListSandboxes(context.Background(), map[string]string{"sandbox.pool": "true"})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	assert.Equal(t, labels, infos[0].Labels)
+}
+
 func (f *fakeDockerAPI) Materialize(_ context.Context, _ runtime.SandboxSpec, target string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

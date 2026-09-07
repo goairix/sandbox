@@ -525,6 +525,20 @@ func TestManagerStartWarmsOnlyOrdinaryPoolWhenFUSEDisabled(t *testing.T) {
 	rt.mu.Unlock()
 }
 
+func TestCleanupOrphanedOrdinaryPoolSkipsFUSEPoolRuntimes(t *testing.T) {
+	rt := newMockRuntime()
+	rt.listedSandboxes = []runtime.SandboxInfo{
+		{ID: "ordinary", RuntimeID: "ordinary-runtime", RuntimeUID: "ordinary-uid", Labels: map[string]string{"sandbox.pool": "true"}},
+		{ID: "fuse", RuntimeID: "fuse-runtime", RuntimeUID: "fuse-uid", Labels: map[string]string{"sandbox.pool": "true", "sandbox.workspace.mode": "fuse"}},
+	}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+
+	mgr.cleanupOrphanedPoolContainers(context.Background())
+
+	assert.True(t, rt.wasRemoved("ordinary-runtime"))
+	assert.False(t, rt.wasRemoved("fuse-runtime"), "ordinary Pool cleanup must leave FUSE inventory-owned runtimes alone")
+}
+
 func TestManagerCreateFUSEUsesPreparedRuntimeAndPublishesAfterProbe(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	mgr, preparedID, _, _ := newFUSETestManager(t, rt)

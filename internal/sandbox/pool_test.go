@@ -53,6 +53,8 @@ type mockRuntime struct {
 	removeEntered     chan string
 	removeRelease     chan struct{}
 	downloadDirErr    error
+	listedSandboxes   []runtime.SandboxInfo
+	listLabels        map[string]string
 }
 
 func newMockRuntime() *mockRuntime {
@@ -357,8 +359,14 @@ func (m *mockRuntime) RenameSandbox(context.Context, string, string) error {
 	return nil
 }
 
-func (m *mockRuntime) ListSandboxes(_ context.Context, _ map[string]string) ([]runtime.SandboxInfo, error) {
-	return nil, nil
+func (m *mockRuntime) ListSandboxes(_ context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listLabels = make(map[string]string, len(labels))
+	for key, value := range labels {
+		m.listLabels[key] = value
+	}
+	return append([]runtime.SandboxInfo(nil), m.listedSandboxes...), nil
 }
 
 func (m *mockRuntime) IsStateful() bool { return false }

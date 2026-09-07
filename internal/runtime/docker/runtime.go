@@ -1258,6 +1258,7 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 			RuntimeUID: c.ID,
 			State:      state,
 			CreatedAt:  time.Unix(c.Created, 0),
+			Labels:     cloneLabels(c.Labels),
 		})
 	}
 	return result, nil

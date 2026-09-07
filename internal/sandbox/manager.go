@@ -3008,8 +3008,10 @@ func (m *Manager) recreateSandbox(ctx context.Context, sb *Sandbox) (*runtime.Sa
 	return info, nil
 }
 
-// cleanupOrphanedPoolContainers removes pool containers left over from a
-// previous process that exited without graceful shutdown.
+// cleanupOrphanedPoolContainers removes ordinary pool containers left over
+// from a previous process that exited without graceful shutdown. FUSE pool
+// runtimes have Redis inventory and exact-UID teardown rules, so they must only
+// be reconciled by FUSEPool.
 // Must be called AFTER restorePersistentSandboxes so that active containers
 // are already registered in m.sandboxes.
 func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
@@ -3031,6 +3033,9 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 
 	var removed int
 	for _, c := range containers {
+		if c.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) {
+			continue
+		}
 		if _, active := activeRuntimeIDs[c.RuntimeID]; active {
 			continue // in use by a persistent sandbox
 		}

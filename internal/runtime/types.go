@@ -9,6 +9,10 @@ type SandboxInfo struct {
 	RuntimeUID string // immutable container ID or pod UID
 	State      string
 	CreatedAt  time.Time
+	// Labels are copied from the runtime object when it was discovered through
+	// ListSandboxes. Callers use them to keep independently-owned runtime pools
+	// isolated during startup reconciliation.
+	Labels map[string]string
 }
 
 // ExecRequest holds parameters for executing a command in a sandbox.

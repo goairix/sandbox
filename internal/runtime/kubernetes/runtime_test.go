@@ -293,6 +293,24 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 	return rt, client
 }
 
+func TestListSandboxesReturnsRuntimeLabels(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	labels := map[string]string{
+		"sandbox.id":             "sandbox-pool-fuse",
+		"sandbox.pool":           "true",
+		"sandbox.workspace.mode": "fuse",
+	}
+	_, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-pool-fuse", Labels: labels},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	infos, err := rt.ListSandboxes(context.Background(), map[string]string{"sandbox.pool": "true"})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	assert.Equal(t, labels, infos[0].Labels)
+}
+
 func setWorkspaceNodeForTest(t *testing.T, rt *Runtime, client *kubefake.Clientset, runtimeID, nodeName string) {
 	t.Helper()
 	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), runtimeID, metav1.GetOptions{})

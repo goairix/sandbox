@@ -123,7 +123,7 @@ FUSE system egress 是另一条平台维护的窄路径，即使用户网络关�
 
 ## 7. Helm 部署
 
-主 `values.yaml` 只定义配置模型，三个 `testdata/values-fuse-*.yaml` 是简短 overlay。运维选择一个 overlay，并提供当前发布镜像、Secret 名和精确网络输入。
+主 `values.yaml` 只定义配置模型，三个 `testdata/values-fuse-*.yaml` 是完整的后端验收 overlay。每个 overlay 固定该后端的 endpoint、bucket、storage identity、Secret 引用、精确网络输入，以及同一组已验证 API/mounter/Docker/runtime 镜像；凭据内容仍只存在于 Kubernetes Secret。发布新镜像时必须在同一提交中更新三个 overlay，并通过 `scripts/test-helm-chart.sh` 的一致性检查，禁止只在一次 Helm 命令中临时覆盖某个后端。
 
 ```bash
 helm lint deploy/helm/sandbox -f testdata/values-fuse-minio.yaml
@@ -131,14 +131,17 @@ helm lint deploy/helm/sandbox -f testdata/values-fuse-minio.yaml
 helm --kube-context ds-ai-research upgrade --install sandbox-fuse \
   deploy/helm/sandbox \
   --namespace sandbox-fuse --create-namespace \
-  -f testdata/values-fuse-minio.yaml \
-  --set image.repository=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api \
-  --set-string image.tag='<tag>@sha256:<api-digest>' \
-  --set-string config.workspace.fuseImages.mounter='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:<digest>' \
-  --set-string config.workspace.fuseImages.docker='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:<digest>'
+  -f testdata/values-fuse-minio.yaml
 ```
 
-本地 kind 使用同一 Chart，只替换 context、registry 镜像和 `allowMissingLSMForKind=true`。该开关只允许 macOS/Windows Docker Desktop 上缺少 AppArmor/SELinux 的开发 kind；生产必须使用受约束 LSM profile。
+三个可选 overlay 分别为 `values-fuse-minio.yaml`、`values-fuse-obs-private.yaml` 和 `values-fuse-obs-public.yaml`；一个 release 每次只能选择其中一个。三者显式保持 `networkEnabled=true`、`networkBlockPrivate=true`，即用户流量允许公网但拒绝内网，不能为解决对象存储连通性而关闭内网拒绝。
+
+本地 kind 使用同一 Chart，只替换 context、registry 镜像和 `allowMissingLSMForKind=true`。该开关只允许缺少 AppArmor/SELinux 的开发或验收集群；生产必须使用受约束 LSM profile。当前 `ds-ai-research` 若仍未配置受约束 LSM，只能作为验收环境使用，并在命令中显式追加以下两项，不能写入后端 overlay：
+
+```bash
+--set config.workspace.allowMissingLSMForKind=true \
+--set-string config.workspace.lsmProfile=''
+```
 
 ```bash
 kind create cluster --name sandbox-fuse

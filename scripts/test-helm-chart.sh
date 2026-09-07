@@ -47,6 +47,10 @@ grep -Fq 'value: "huawei-obs-private-2023-v1"' <<<"$private_obs_rendered"
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$private_obs_rendered" \
   | grep -Fq 'value: "obs.cn-southwest-268.shuanghuayun.com,sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com"'
 grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$private_obs_rendered"
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$private_obs_rendered" \
+  | grep -Fq 'value: "true"'
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$private_obs_rendered" \
+  | grep -Fq 'value: "true"'
 if grep -Fq 'volumeClaimTemplates:' <<<"$private_obs_rendered"; then
   printf 'private OBS test overlay unexpectedly enables Redis persistence\n' >&2
   exit 1
@@ -58,7 +62,7 @@ grep -Fq 'value: "huawei-obs-public-v1"' <<<"$public_obs_rendered"
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$public_obs_rendered" \
   | grep -Fq 'value: "obs.cn-southwest-2.myhuaweicloud.com,sandbox-fuse-workspace.obs.cn-southwest-2.myhuaweicloud.com"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$public_obs_rendered" \
-  | grep -Fq 'value: "false"'
+  | grep -Fq 'value: "true"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$public_obs_rendered" \
   | grep -Fq 'value: "true"'
 grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$public_obs_rendered"
@@ -74,8 +78,11 @@ if grep -Fq 'registry.local/' <<<"$minio_rendered"; then
   exit 1
 fi
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$minio_rendered" \
-  | grep -Fq 'value: "minio.sandbox-storage.svc"'
-! grep -Fq 'sandbox.minio.sandbox-storage.svc' <<<"$minio_rendered"
+  | grep -Fq 'value: "minio.huaxisy.com"'
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$minio_rendered" \
+  | grep -Fq 'value: "true"'
+grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$minio_rendered" \
+  | grep -Fq 'value: "true"'
 grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$minio_rendered"
 if grep -Fq 'volumeClaimTemplates:' <<<"$minio_rendered"; then
   printf 'MinIO test overlay unexpectedly enables Redis persistence\n' >&2
@@ -88,10 +95,33 @@ public_docker="$(awk '/docker:/{print $2; exit}' "$repo_root/testdata/values-fus
 private_docker="$(awk '/docker:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-private.yaml")"
 minio_mounter="$(awk '/mounter:/{print $2; exit}' "$repo_root/testdata/values-fuse-minio.yaml")"
 minio_docker="$(awk '/docker:/{print $2; exit}' "$repo_root/testdata/values-fuse-minio.yaml")"
+public_api_repository="$(awk '/^image:/{image=1; next} image && /repository:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-public.yaml")"
+private_api_repository="$(awk '/^image:/{image=1; next} image && /repository:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-private.yaml")"
+minio_api_repository="$(awk '/^image:/{image=1; next} image && /repository:/{print $2; exit}' "$repo_root/testdata/values-fuse-minio.yaml")"
+public_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-public.yaml")"
+private_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-private.yaml")"
+minio_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-minio.yaml")"
+expected_api_repository='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api'
+expected_api_tag='hybrid-187cf62-arm64@sha256:42b3c5dcdc55581cfad4ea539ff4ffc7298baa8bfae3c0c5fcb6df1ef3928ef9'
+expected_mounter='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:5d616d2225d593a3669e257d6ba7834fa44773843c19adba1b8e87fda699a2dc'
+expected_docker='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:1eb72296858a2ebcdef4940d9a21b5b637b12c5a258ae245f9e3a40b618a50ca'
+test "$public_api_repository" = "$expected_api_repository"
+test "$private_api_repository" = "$expected_api_repository"
+test "$minio_api_repository" = "$expected_api_repository"
+test "$public_api_tag" = "$expected_api_tag"
+test "$private_api_tag" = "$expected_api_tag"
+test "$minio_api_tag" = "$expected_api_tag"
 test -n "$public_mounter" && test "$public_mounter" = "$private_mounter"
 test -n "$public_docker" && test "$public_docker" = "$private_docker"
 test "$public_mounter" = "$minio_mounter"
 test "$public_docker" = "$minio_docker"
+test "$minio_mounter" = "$expected_mounter"
+test "$minio_docker" = "$expected_docker"
+
+grep -A4 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
+  | grep -Fq 'repository: redis'
+grep -A5 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
+  | grep -Fq 'tag: "7-alpine"'
 
 if helm lint "$repo_root/deploy/helm/sandbox" --set config.storage.filesystem.preset=unknown >/dev/null 2>&1; then
   printf 'helm lint unexpectedly accepted an unknown backend preset\n' >&2

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
 	"reflect"
 	"strconv"
@@ -2109,6 +2110,7 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 			RuntimeUID: string(pod.UID),
 			State:      podStateString(pod.Status.Phase),
 			CreatedAt:  pod.CreationTimestamp.Time,
+			Labels:     maps.Clone(pod.Labels),
 		})
 	}
 	return result, nil
