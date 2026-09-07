@@ -2,6 +2,8 @@
 
 配套设计：[Workspace 容器内 FUSE 直接挂载设计](../superpowers/specs/2026-09-01-workspace-container-fuse-mount-design.md)
 
+Helm 已有 release 升级、全新安装、镜像构建和发布验收的逐步命令见 [Helm 部署、升级与镜像发布 Runbook](helm-deployment-upgrade.md)。
+
 本文是当前 Helm、Docker Compose、后端切换和发布验收的执行入口。旧的 `workspace.mode` 和 `workspace.providers` 只用于应用读取旧配置，不再是部署接口。
 
 ## 1. 当前合同

@@ -8,7 +8,7 @@
 
 **目标分支：** `feat/workspace-fuse-mount`
 
-**配套部署手册：** [Workspace 存储部署与运维手册](../../deployment/workspace-fuse.md)。该手册是 Helm/Compose、Secret、RBAC/NetworkPolicy、preflight、MinIO/华为 OBS 验证、灰度及回滚的可执行入口；release gate 与真实环境验收未通过前，FUSE profile 不可直接用于生产。
+**配套部署手册：** [Workspace 存储部署与运维手册](../../deployment/workspace-fuse.md)；已有 release 升级、全新安装和五类镜像构建的逐步命令见 [Helm 部署、升级与镜像发布 Runbook](../../deployment/helm-deployment-upgrade.md)。release gate 与真实环境验收未通过前，FUSE profile 不可直接用于生产。
 
 ## 1. 决策摘要
 
