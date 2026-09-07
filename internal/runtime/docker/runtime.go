@@ -871,6 +871,10 @@ func (r *Runtime) ConfirmTerminated(ctx context.Context, runtimeID, runtimeUID s
 	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, ProcessExited: true}, nil
 }
 
+func (r *Runtime) ConfirmReleasedRuntime(ctx context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {
+	return r.ConfirmTerminated(ctx, runtimeID, runtimeUID)
+}
+
 func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error {
 	containers, err := r.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(filters.Arg("label", "sandbox.managed=true"))})
 	if err != nil {

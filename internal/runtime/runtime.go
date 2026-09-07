@@ -62,6 +62,13 @@ type RuntimeFencer interface {
 	ConfirmTerminated(ctx context.Context, runtimeID, runtimeUID string) (TerminationEvidence, error)
 }
 
+// ReleaseRuntimeConfirmer provides provider-backed absence evidence after a
+// release-wide caller has stopped every API replica and finalized protected
+// workspaces. It must never treat an ambiguous lookup as termination.
+type ReleaseRuntimeConfirmer interface {
+	ConfirmReleasedRuntime(ctx context.Context, runtimeID, runtimeUID string) (TerminationEvidence, error)
+}
+
 // PreparedSandboxRemover removes only the exact immutable runtime instance.
 // FUSE pool cleanup must use it after RuntimeUID has been bound.
 type PreparedSandboxRemover interface {

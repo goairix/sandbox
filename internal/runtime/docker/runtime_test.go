@@ -314,6 +314,14 @@ func TestDockerPreparedRemovalDoesNotAcceptUnknownNotFound(t *testing.T) {
 	require.ErrorIs(t, err, runtime.ErrTerminationUnconfirmed)
 }
 
+func TestDockerConfirmReleasedRuntimeUsesExactContainerAbsence(t *testing.T) {
+	rt, _ := newFakeDockerRuntime(t)
+	evidence, err := rt.ConfirmReleasedRuntime(context.Background(), "missing-runtime", "missing-runtime")
+	require.NoError(t, err)
+	assert.Equal(t, "missing-runtime", evidence.RuntimeUID)
+	assert.True(t, evidence.ProcessExited)
+}
+
 func TestDockerPreparedRemovalConfirmsNotFoundAfterRemoveError(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())

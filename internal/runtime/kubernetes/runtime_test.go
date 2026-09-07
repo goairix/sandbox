@@ -1065,6 +1065,20 @@ func TestRemovePreparedSandboxNotFoundWithoutPriorProofFailsClosed(t *testing.T)
 	require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
 }
 
+func TestConfirmReleasedRuntimeUsesExactPodAbsence(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+
+	_, err = rt.ConfirmReleasedRuntime(context.Background(), info.RuntimeID, info.RuntimeUID)
+	require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
+	require.NoError(t, client.CoreV1().Pods("runtime").Delete(context.Background(), info.RuntimeID, metav1.DeleteOptions{}))
+	evidence, err := rt.ConfirmReleasedRuntime(context.Background(), info.RuntimeID, info.RuntimeUID)
+	require.NoError(t, err)
+	assert.Equal(t, info.RuntimeUID, evidence.RuntimeUID)
+	assert.True(t, evidence.ProcessExited)
+}
+
 func TestRemovePreparedSandboxUsesOnlyMatchingInfrastructureFence(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
