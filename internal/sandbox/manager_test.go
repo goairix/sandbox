@@ -397,7 +397,7 @@ func TestManagerDrainReleaseRemovesForeignPreparingFUSEPoolRecord(t *testing.T) 
 		PreparationID:   "foreign-preparation",
 		RuntimeID:       "foreign-runtime",
 		RuntimeUID:      "foreign-runtime-uid",
-		PoolKey:         "pool-key",
+		PoolKey:         "former-pool-key",
 		State:           state.FUSEPoolPreparing,
 		MaintainerToken: "former-api",
 		Revision:        2,

@@ -309,6 +309,22 @@ func (r *memoryFUSEPoolRepository) ListByPoolKey(_ context.Context, poolKey stri
 	return result, nil
 }
 
+func (r *memoryFUSEPoolRepository) ListPoolKeys(_ context.Context) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, record := range r.records {
+		if _, exists := seen[record.PoolKey]; exists {
+			continue
+		}
+		seen[record.PoolKey] = struct{}{}
+		keys = append(keys, record.PoolKey)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
 func (r *memoryFUSEPoolRepository) CountPreparingAndPrepared(_ context.Context, poolKey string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

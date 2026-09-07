@@ -736,24 +736,32 @@ func (p *FUSEPool) Drain(ctx context.Context, poolKey string) error {
 	return result
 }
 
-// DrainRelease stops this pool and removes every unprotected record for its
-// exact PoolKey, including records left by a former API instance. Callers must
-// hold release-wide exclusivity (for example, after scaling the API to zero).
+// DrainRelease stops this pool and removes every unprotected record in the
+// release store, including records left under a former configuration's
+// PoolKey. Callers must hold release-wide exclusivity (for example, after
+// scaling the API to zero).
 func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 	result := p.Stop(ctx)
-	records, err := p.repo.ListByPoolKey(ctx, p.poolKey)
+	poolKeys, err := p.repo.ListPoolKeys(ctx)
 	if err != nil {
 		return errors.Join(result, err)
 	}
-	for _, record := range records {
-		disposition, guardErr := p.guard(ctx, record)
-		switch disposition {
-		case FUSEPoolPristine, FUSEPoolAbandoned:
-			result = errors.Join(result, p.claimAndDestroy(ctx, record))
-		case FUSEPoolProtected:
-			result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
-		default:
-			result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+	for _, poolKey := range poolKeys {
+		records, listErr := p.repo.ListByPoolKey(ctx, poolKey)
+		if listErr != nil {
+			result = errors.Join(result, listErr)
+			continue
+		}
+		for _, record := range records {
+			disposition, guardErr := p.guard(ctx, record)
+			switch disposition {
+			case FUSEPoolPristine, FUSEPoolAbandoned:
+				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+			case FUSEPoolProtected:
+				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+			default:
+				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+			}
 		}
 	}
 	return result

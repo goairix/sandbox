@@ -979,6 +979,29 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID str
 	return decodePoolRecord(payload)
 }
 
+func (r *FUSEPoolRepository) ListPoolKeys(ctx context.Context) ([]string, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fuse pool repository: nil store")
+	}
+	values, err := r.store.client.HVals(ctx, fusePoolPoolValues).Result()
+	if err != nil {
+		return nil, err
+	}
+	for _, poolKey := range values {
+		if !validOpaqueID(poolKey) {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+	}
+	sort.Strings(values)
+	result := values[:0]
+	for _, poolKey := range values {
+		if len(result) == 0 || result[len(result)-1] != poolKey {
+			result = append(result, poolKey)
+		}
+	}
+	return result, nil
+}
+
 func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) ([]state.FUSEPoolRecord, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("fuse pool repository: nil store")

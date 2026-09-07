@@ -203,6 +203,22 @@ func TestFUSEPoolAdmissionRegistersIntentBeforeRuntimeAndUsesRedisDeadline(t *te
 	assert.ErrorIs(t, err, state.ErrFUSEPoolConflict)
 }
 
+func TestFUSEPoolListPoolKeysReturnsEveryDistinctConfiguration(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolA, poolB := poolTestID("pool-a"), poolTestID("pool-b")
+	uidA, uidB, uidC := poolTestID("uid-a"), poolTestID("uid-b"), poolTestID("uid-c")
+	cleanupFUSEPool(t, s, []string{poolA, poolB}, []string{uidA, uidB, uidC})
+	require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolA, uidA)))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolA, uidB)))
+	require.NoError(t, repo.createPreparingForTest(context.Background(), preparingRecord(poolB, uidC)))
+
+	keys, err := repo.ListPoolKeys(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{poolA, poolB}, keys)
+}
+
 func TestFUSEPoolBindPreparingRuntimeFencesLockAndRuntimeUID(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
