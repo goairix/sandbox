@@ -1,6 +1,6 @@
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
-  tag: hybrid-187cf62-arm64@sha256:42b3c5dcdc55581cfad4ea539ff4ffc7298baa8bfae3c0c5fcb6df1ef3928ef9
+  tag: hybrid-3fc1ddd-arm64@sha256:db8a3065e7227b923576b72f89301a0768129e3e7e966b8b8668285be4b5d228
   pullPolicy: Always
 
 replicaCount: 1
