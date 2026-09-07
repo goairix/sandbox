@@ -17,6 +17,15 @@ func TestDrainAuditAllowsGenerationCountersButRejectsLifecycleState(t *testing.T
 	require.ErrorContains(t, AuditDrainedState(context.Background(), store), "ephemeral")
 }
 
+func TestDrainAuditAllowsFUSEPoolMembershipGenerationHistory(t *testing.T) {
+	store := newAtomicMemoryStore()
+	require.NoError(t, store.Set(context.Background(), "fusepool:membership-generations", []byte("historical fencing state"), 0))
+	require.NoError(t, AuditDrainedState(context.Background(), store))
+
+	require.NoError(t, store.Set(context.Background(), "fusepool:record:active", []byte("{}"), 0))
+	require.ErrorContains(t, AuditDrainedState(context.Background(), store), "FUSE pool")
+}
+
 func TestManagerStopPreservesPersistentAndFinalizesEphemeral(t *testing.T) {
 	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
 	mgr.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))

@@ -19,6 +19,8 @@ var blockingDrainPrefixes = []struct {
 	{name: "FUSE pool", pattern: "fusepool:*"},
 }
 
+const fusePoolMembershipGenerationsKey = "fusepool:membership-generations"
+
 // AuditDrainedState is read-only and fail-closed. Persistent workspace
 // generation counters are deliberately retained as fencing history.
 func AuditDrainedState(ctx context.Context, store state.Store) error {
@@ -32,8 +34,17 @@ func AuditDrainedState(ctx context.Context, store state.Store) error {
 			auditErr = errors.Join(auditErr, fmt.Errorf("audit %s state: %w", prefix.name, err))
 			continue
 		}
-		if len(keys) != 0 {
-			auditErr = errors.Join(auditErr, fmt.Errorf("drain blocked by %s state (%d keys)", prefix.name, len(keys)))
+		blocking := 0
+		for _, key := range keys {
+			// Membership generations are fencing history, not active pool
+			// inventory. Keeping them prevents an ABA across later refills.
+			if prefix.name == "FUSE pool" && key == fusePoolMembershipGenerationsKey {
+				continue
+			}
+			blocking++
+		}
+		if blocking != 0 {
+			auditErr = errors.Join(auditErr, fmt.Errorf("drain blocked by %s state (%d keys)", prefix.name, blocking))
 		}
 	}
 	return auditErr
