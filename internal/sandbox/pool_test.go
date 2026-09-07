@@ -50,6 +50,8 @@ type mockRuntime struct {
 	healthFailures    map[string]error
 	removeFailures    map[string]error
 	removedIDs        map[string]int
+	removeEntered     chan string
+	removeRelease     chan struct{}
 	downloadDirErr    error
 }
 
@@ -106,8 +108,29 @@ func (m *mockRuntime) RemovePreparedSandbox(ctx context.Context, runtimeID, runt
 		m.mu.Unlock()
 		return runtime.ErrNotFound
 	}
+	entered, release := m.removeEntered, m.removeRelease
 	m.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- runtimeID:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return m.RemoveSandbox(ctx, runtimeID)
+}
+
+func (m *mockRuntime) blockPreparedRemovals(count int) (<-chan string, chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeEntered = make(chan string, count)
+	m.removeRelease = make(chan struct{})
+	return m.removeEntered, m.removeRelease
 }
 
 func (m *mockRuntime) GetSandbox(_ context.Context, id string) (*runtime.SandboxInfo, error) {

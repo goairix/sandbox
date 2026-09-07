@@ -1575,6 +1575,44 @@ func TestFUSEPoolDrainAndStopAreScoped(t *testing.T) {
 	assert.True(t, ownReserved)
 }
 
+func TestFUSEPoolStopRemovesOwnedShellsConcurrently(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	now := repo.now
+	for _, suffix := range []string{"a", "b", "c"} {
+		record := state.FUSEPoolRecord{
+			PreparationID:   "prepared-" + suffix,
+			RuntimeID:       "runtime-" + suffix,
+			RuntimeUID:      "uid-" + suffix,
+			PoolKey:         "pool-key",
+			State:           state.FUSEPoolPrepared,
+			MaintainerToken: "api-a",
+			UpdatedAt:       now,
+			Revision:        2,
+		}
+		repo.seed(record)
+		rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	}
+	entered, release := rt.blockPreparedRemovals(3)
+	cfg := fusePoolConfig()
+	cfg.MinSize, cfg.MaxSize = 0, 3
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+	stopped := make(chan error, 1)
+	go func() { stopped <- pool.Stop(context.Background()) }()
+
+	for range 3 {
+		select {
+		case <-entered:
+		case <-time.After(100 * time.Millisecond):
+			close(release)
+			t.Fatal("owned FUSE shell removals did not start concurrently")
+		}
+	}
+	close(release)
+	require.NoError(t, <-stopped)
+	assert.Equal(t, 0, repo.countState("pool-key", state.FUSEPoolPrepared))
+}
+
 func TestFUSEPoolStopRetainsProtectedAndUnknownOwnedRecords(t *testing.T) {
 	rt := newFUSEMockRuntime()
 	repo := newMemoryFUSEPoolRepository()

@@ -23,6 +23,7 @@ import (
 const (
 	fusePoolKeyVersion           = "workspace-fuse-pool/v1"
 	fusePoolCleanupTimeout       = 5 * time.Second
+	fusePoolStopCleanupTimeout   = 25 * time.Second
 	fusePoolAcquireRetryInterval = 50 * time.Millisecond
 )
 
@@ -814,7 +815,7 @@ func (p *FUSEPool) Stop(ctx context.Context) error {
 func (p *FUSEPool) finishStop(ctx context.Context) {
 	p.controllerWG.Wait()
 	p.opWG.Wait()
-	cleanupCtx, cancel := context.WithTimeout(ctx, fusePoolCleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(ctx, fusePoolStopCleanupTimeout)
 	p.stopErr = p.drainOwned(cleanupCtx)
 	cancel()
 	p.lifecycleMu.Lock()
@@ -831,19 +832,31 @@ func (p *FUSEPool) drainOwned(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var result error
+	errs := make(chan error, len(records))
+	var wg sync.WaitGroup
 	for _, record := range records {
-		if record.MaintainerToken == p.config.MaintainerToken && (record.State == state.FUSEPoolPreparing || record.State == state.FUSEPoolPrepared) {
+		if record.MaintainerToken != p.config.MaintainerToken || (record.State != state.FUSEPoolPreparing && record.State != state.FUSEPoolPrepared) {
+			continue
+		}
+		wg.Add(1)
+		go func(record state.FUSEPoolRecord) {
+			defer wg.Done()
 			disposition, guardErr := p.guard(ctx, record)
 			switch disposition {
 			case FUSEPoolPristine, FUSEPoolAbandoned:
-				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+				errs <- p.claimAndDestroy(ctx, record)
 			case FUSEPoolProtected:
-				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+				errs <- errors.Join(ErrFUSEPoolProtected, guardErr)
 			default:
-				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
+				errs <- errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
 			}
-		}
+		}(record)
+	}
+	wg.Wait()
+	close(errs)
+	var result error
+	for err := range errs {
+		result = errors.Join(result, err)
 	}
 	return result
 }
