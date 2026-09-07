@@ -2,11 +2,17 @@ image:
   repository: sandbox-api
   tag: test
 
+replicaCount: 1
+
 autoscaling:
   enabled: false
 
 redis:
   enabled: true
+  image:
+    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis
+    tag: feat-workspace-fuse
+    pullPolicy: IfNotPresent
   persistence:
     enabled: false
 
