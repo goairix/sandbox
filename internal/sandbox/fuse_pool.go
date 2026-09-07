@@ -764,6 +764,7 @@ func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 			}
 		}
 	}
+	result = errors.Join(result, p.repo.DrainRefillLocks(ctx))
 	return result
 }
 

@@ -56,6 +56,7 @@ type FUSEPoolRepository interface {
 	CountPreparingAndPrepared(ctx context.Context, poolKey string) (int, error)
 	DeleteCleanup(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64) (bool, error)
 	ServerTime(ctx context.Context) (time.Time, error)
+	DrainRefillLocks(ctx context.Context) error
 	TryRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
 	RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
 	UnlockRefill(ctx context.Context, poolKey, token string) error

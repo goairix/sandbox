@@ -325,6 +325,13 @@ func (r *memoryFUSEPoolRepository) ListPoolKeys(_ context.Context) ([]string, er
 	return keys, nil
 }
 
+func (r *memoryFUSEPoolRepository) DrainRefillLocks(_ context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.locks = make(map[string]memoryRefillLock)
+	return nil
+}
+
 func (r *memoryFUSEPoolRepository) CountPreparingAndPrepared(_ context.Context, poolKey string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

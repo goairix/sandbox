@@ -403,6 +403,9 @@ func TestManagerDrainReleaseRemovesForeignPreparingFUSEPoolRecord(t *testing.T) 
 		Revision:        2,
 	}
 	repo.seed(foreign)
+	repo.mu.Lock()
+	repo.locks[foreign.PoolKey] = memoryRefillLock{token: "former-refill", until: repo.now.Add(time.Hour)}
+	repo.mu.Unlock()
 	rt.mu.Lock()
 	rt.sandboxes[foreign.RuntimeID] = &runtime.SandboxInfo{
 		RuntimeID:  foreign.RuntimeID,
@@ -414,6 +417,10 @@ func TestManagerDrainReleaseRemovesForeignPreparingFUSEPoolRecord(t *testing.T) 
 	_, exists := repo.record(foreign.PreparationID)
 	assert.False(t, exists)
 	assert.True(t, rt.wasRemoved(foreign.RuntimeID))
+	repo.mu.Lock()
+	_, lockExists := repo.locks[foreign.PoolKey]
+	repo.mu.Unlock()
+	assert.False(t, lockExists)
 }
 
 func TestManagerHybridRoutesDefaultSyncAndExplicitFUSE(t *testing.T) {

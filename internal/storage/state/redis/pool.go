@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -1000,6 +1001,44 @@ func (r *FUSEPoolRepository) ListPoolKeys(ctx context.Context) ([]string, error)
 		}
 	}
 	return result, nil
+}
+
+// DrainRefillLocks removes the release's short-lived controller locks. It may
+// only be called by a release-wide drain after every API replica is stopped.
+func (r *FUSEPoolRepository) DrainRefillLocks(ctx context.Context) error {
+	if r == nil || r.store == nil {
+		return errors.New("fuse pool repository: nil store")
+	}
+	keys := make([]string, 0)
+	seen := make(map[string]struct{})
+	cursor := uint64(0)
+	for {
+		batch, next, err := r.store.client.Scan(ctx, cursor, fusePoolLockPrefix+"*", 64).Result()
+		if err != nil {
+			return err
+		}
+		for _, key := range batch {
+			digest := strings.TrimPrefix(key, fusePoolLockPrefix)
+			if len(key) != len(fusePoolLockPrefix)+sha256.Size*2 || len(digest) != sha256.Size*2 {
+				return state.ErrFUSEPoolCorrupt
+			}
+			if _, err := hex.DecodeString(digest); err != nil {
+				return state.ErrFUSEPoolCorrupt
+			}
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				keys = append(keys, key)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return r.store.client.Del(ctx, keys...).Err()
 }
 
 func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) ([]state.FUSEPoolRecord, error) {

@@ -219,6 +219,20 @@ func TestFUSEPoolListPoolKeysReturnsEveryDistinctConfiguration(t *testing.T) {
 	assert.Equal(t, []string{poolA, poolB}, keys)
 }
 
+func TestFUSEPoolDrainRefillLocksClearsFormerConfigurationLocks(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolA, poolB := poolTestID("pool-a"), poolTestID("pool-b")
+	cleanupFUSEPool(t, s, []string{poolA, poolB}, nil)
+	require.True(t, mustRefillLock(t, repo, poolA, "former-a", time.Hour))
+	require.True(t, mustRefillLock(t, repo, poolB, "former-b", time.Hour))
+
+	require.NoError(t, repo.DrainRefillLocks(context.Background()))
+	require.True(t, mustRefillLock(t, repo, poolA, "replacement-a", time.Hour))
+	require.True(t, mustRefillLock(t, repo, poolB, "replacement-b", time.Hour))
+}
+
 func TestFUSEPoolBindPreparingRuntimeFencesLockAndRuntimeUID(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
