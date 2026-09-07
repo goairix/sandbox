@@ -582,19 +582,6 @@ func fixedFUSESpec(poolKey string) runtime.SandboxSpec {
 
 func newFUSEMockRuntime() *mockRuntime { return newMockRuntime() }
 
-type releaseConfirmingFUSEMockRuntime struct {
-	*mockRuntime
-	evidence runtime.TerminationEvidence
-}
-
-func (r *releaseConfirmingFUSEMockRuntime) RemovePreparedSandbox(context.Context, string, string) error {
-	return runtime.ErrTerminationUnconfirmed
-}
-
-func (r *releaseConfirmingFUSEMockRuntime) ConfirmReleasedRuntime(context.Context, string, string) (runtime.TerminationEvidence, error) {
-	return r.evidence, nil
-}
-
 func allowPreparedReturn(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
 	return FUSEPoolPristine, nil
 }
@@ -1558,59 +1545,6 @@ func TestFUSEPoolDrainReleaseResumesInProgressCleanup(t *testing.T) {
 	_, exists := repo.record(record.PreparationID)
 	assert.False(t, exists)
 	assert.True(t, rt.wasRemoved(record.RuntimeID))
-}
-
-func TestFUSEPoolDrainReleaseUsesExactProviderAbsenceAfterInterruptedCleanup(t *testing.T) {
-	repo := newMemoryFUSEPoolRepository()
-	record := state.FUSEPoolRecord{
-		PreparationID:   "cleanup-with-lost-proof",
-		RuntimeID:       "runtime-with-lost-proof",
-		RuntimeUID:      "uid-with-lost-proof",
-		PoolKey:         "former-pool-key",
-		State:           state.FUSEPoolCleanup,
-		MaintainerToken: "former-api",
-		CleanupToken:    "former-api:cleanup:lost-proof",
-		CleanupUntil:    repo.now.Add(time.Minute),
-		UpdatedAt:       repo.now,
-		Revision:        4,
-	}
-	repo.seed(record)
-	rt := &releaseConfirmingFUSEMockRuntime{
-		mockRuntime: newFUSEMockRuntime(),
-		evidence:    runtime.TerminationEvidence{RuntimeUID: record.RuntimeUID, ProcessExited: true},
-	}
-	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
-
-	require.NoError(t, pool.DrainRelease(context.Background()))
-	_, exists := repo.record(record.PreparationID)
-	assert.False(t, exists)
-}
-
-func TestFUSEPoolDrainReleaseRejectsMismatchedProviderEvidence(t *testing.T) {
-	repo := newMemoryFUSEPoolRepository()
-	record := state.FUSEPoolRecord{
-		PreparationID:   "cleanup-with-wrong-proof",
-		RuntimeID:       "runtime-with-wrong-proof",
-		RuntimeUID:      "uid-with-wrong-proof",
-		PoolKey:         "former-pool-key",
-		State:           state.FUSEPoolCleanup,
-		MaintainerToken: "former-api",
-		CleanupToken:    "former-api:cleanup:wrong-proof",
-		CleanupUntil:    repo.now.Add(time.Minute),
-		UpdatedAt:       repo.now,
-		Revision:        4,
-	}
-	repo.seed(record)
-	rt := &releaseConfirmingFUSEMockRuntime{
-		mockRuntime: newFUSEMockRuntime(),
-		evidence:    runtime.TerminationEvidence{RuntimeUID: "replacement-uid", ProcessExited: true},
-	}
-	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
-
-	err := pool.DrainRelease(context.Background())
-	require.ErrorIs(t, err, runtime.ErrTerminationUnconfirmed)
-	_, exists := repo.record(record.PreparationID)
-	assert.True(t, exists)
 }
 
 func TestFUSEPoolDrainAndStopAreScoped(t *testing.T) {

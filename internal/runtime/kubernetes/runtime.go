@@ -1016,24 +1016,6 @@ func (r *Runtime) ConfirmTerminated(_ context.Context, runtimeID, runtimeUID str
 	return *state.proof, nil
 }
 
-func (r *Runtime) ConfirmReleasedRuntime(ctx context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {
-	ref, err := runtime.NewRuntimeRef(runtimeID, runtimeUID)
-	if err != nil {
-		return runtime.TerminationEvidence{}, err
-	}
-	_, err = r.getExactPod(ctx, ref)
-	if errors.Is(err, runtime.ErrNotFound) {
-		return runtime.TerminationEvidence{RuntimeUID: ref.UID, ProcessExited: true}, nil
-	}
-	if errors.Is(err, runtime.ErrInvalidRuntimeRef) {
-		return runtime.TerminationEvidence{}, err
-	}
-	if err != nil {
-		return runtime.TerminationEvidence{}, errors.Join(err, runtime.ErrTerminationUnconfirmed)
-	}
-	return runtime.TerminationEvidence{}, runtime.ErrTerminationUnconfirmed
-}
-
 func (r *Runtime) buildPreparedSystemPolicy(spec runtime.SandboxSpec) (*networkingv1.NetworkPolicy, *unstructured.Unstructured, error) {
 	if spec.WorkspaceFUSE.SystemEgress.Mode == runtime.SystemEgressCIDR {
 		policy, err := buildSystemEgressPolicy(r.namespace, spec.ID, spec.WorkspaceFUSE.SystemEgress)

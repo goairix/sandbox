@@ -1029,55 +1029,26 @@ func (p *FUSEPool) claimAndDestroy(ctx context.Context, record state.FUSEPoolRec
 // release-wide caller has stopped every API replica. Normal controllers keep
 // using their own cleanup token and cannot take over another live lease.
 func (p *FUSEPool) claimAndDestroyRelease(ctx context.Context, record state.FUSEPoolRecord) error {
-	var (
-		claimed *state.FUSEPoolRecord
-		err     error
-	)
-	if record.State == state.FUSEPoolCleanup && record.CleanupToken != "" {
-		claimed, err = p.claimCleanupWithEvidenceAndToken(ctx, record, record.RuntimeID, record.RuntimeUID, record.CleanupToken)
-	} else {
-		claimed, err = p.claimCleanup(ctx, record)
+	if record.State != state.FUSEPoolCleanup || record.CleanupToken == "" {
+		return p.claimAndDestroy(ctx, record)
 	}
+	claimed, err := p.claimCleanupWithEvidenceAndToken(ctx, record, record.RuntimeID, record.RuntimeUID, record.CleanupToken)
 	if err != nil {
 		return err
 	}
-	return p.destroyClaimedCleanupRelease(ctx, *claimed, record.State)
+	return p.destroyClaimedCleanup(ctx, *claimed, record.State)
 }
 
 func (p *FUSEPool) destroyClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord, discardedState state.FUSEPoolState) error {
-	err := p.removeClaimedRuntime(ctx, claimed)
+	var err error
+	if claimed.RuntimeID == "" {
+		err = p.runtime.RemoveSandbox(ctx, claimed.PreparationID)
+	} else {
+		err = p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID)
+	}
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return fmt.Errorf("remove claimed FUSE runtime: %w", err)
 	}
-	return p.deleteClaimedCleanup(ctx, claimed, discardedState)
-}
-
-func (p *FUSEPool) destroyClaimedCleanupRelease(ctx context.Context, claimed state.FUSEPoolRecord, discardedState state.FUSEPoolState) error {
-	err := p.removeClaimedRuntime(ctx, claimed)
-	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
-		if !errors.Is(err, runtime.ErrTerminationUnconfirmed) || claimed.RuntimeID == "" {
-			return fmt.Errorf("remove claimed FUSE runtime: %w", err)
-		}
-		confirmer, ok := p.runtime.(runtime.ReleaseRuntimeConfirmer)
-		if !ok {
-			return fmt.Errorf("remove claimed FUSE runtime: %w", err)
-		}
-		evidence, confirmErr := confirmer.ConfirmReleasedRuntime(ctx, claimed.RuntimeID, claimed.RuntimeUID)
-		if confirmErr != nil || evidence.RuntimeUID != claimed.RuntimeUID || (!evidence.ProcessExited && !evidence.InfrastructureFenced) {
-			return errors.Join(fmt.Errorf("remove claimed FUSE runtime: %w", err), confirmErr)
-		}
-	}
-	return p.deleteClaimedCleanup(ctx, claimed, discardedState)
-}
-
-func (p *FUSEPool) removeClaimedRuntime(ctx context.Context, claimed state.FUSEPoolRecord) error {
-	if claimed.RuntimeID == "" {
-		return p.runtime.RemoveSandbox(ctx, claimed.PreparationID)
-	}
-	return p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID)
-}
-
-func (p *FUSEPool) deleteClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord, discardedState state.FUSEPoolState) error {
 	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
 	if err != nil {
 		return fmt.Errorf("delete cleanup record: %w", err)
