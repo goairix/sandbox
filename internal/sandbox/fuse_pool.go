@@ -779,7 +779,7 @@ func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 			disposition, guardErr := p.guard(ctx, record)
 			switch disposition {
 			case FUSEPoolPristine, FUSEPoolAbandoned:
-				result = errors.Join(result, p.claimAndDestroy(ctx, record))
+				result = errors.Join(result, p.claimAndDestroyRelease(ctx, record))
 			case FUSEPoolProtected:
 				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
 			default:
@@ -1022,6 +1022,25 @@ func (p *FUSEPool) claimAndDestroy(ctx context.Context, record state.FUSEPoolRec
 	if err != nil {
 		return err
 	}
+	return p.destroyClaimedCleanup(ctx, *claimed, record.State)
+}
+
+// claimAndDestroyRelease resumes an existing cleanup lease only after the
+// release-wide caller has stopped every API replica. Normal controllers keep
+// using their own cleanup token and cannot take over another live lease.
+func (p *FUSEPool) claimAndDestroyRelease(ctx context.Context, record state.FUSEPoolRecord) error {
+	if record.State != state.FUSEPoolCleanup || record.CleanupToken == "" {
+		return p.claimAndDestroy(ctx, record)
+	}
+	claimed, err := p.claimCleanupWithEvidenceAndToken(ctx, record, record.RuntimeID, record.RuntimeUID, record.CleanupToken)
+	if err != nil {
+		return err
+	}
+	return p.destroyClaimedCleanup(ctx, *claimed, record.State)
+}
+
+func (p *FUSEPool) destroyClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord, discardedState state.FUSEPoolState) error {
+	var err error
 	if claimed.RuntimeID == "" {
 		err = p.runtime.RemoveSandbox(ctx, claimed.PreparationID)
 	} else {
@@ -1038,7 +1057,7 @@ func (p *FUSEPool) claimAndDestroy(ctx context.Context, record state.FUSEPoolRec
 		return state.ErrFUSEPoolConflict
 	}
 	if p.spec.WorkspaceFUSE != nil {
-		metrics.RecordWorkspacePoolDiscard(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, string(record.State))
+		metrics.RecordWorkspacePoolDiscard(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, string(discardedState))
 	}
 	return nil
 }
@@ -1050,6 +1069,10 @@ func (p *FUSEPool) claimCleanup(ctx context.Context, record state.FUSEPoolRecord
 func (p *FUSEPool) claimCleanupWithEvidence(ctx context.Context, record state.FUSEPoolRecord, runtimeID, runtimeUID string) (*state.FUSEPoolRecord, error) {
 	digest := sha256.Sum256([]byte(record.PreparationID))
 	token := p.config.MaintainerToken + ":cleanup:" + hex.EncodeToString(digest[:])
+	return p.claimCleanupWithEvidenceAndToken(ctx, record, runtimeID, runtimeUID, token)
+}
+
+func (p *FUSEPool) claimCleanupWithEvidenceAndToken(ctx context.Context, record state.FUSEPoolRecord, runtimeID, runtimeUID, token string) (*state.FUSEPoolRecord, error) {
 	return p.repo.ClaimCleanup(ctx, record.PreparationID, record.State, record.MaintainerToken, record.ReservationToken, record.Revision, runtimeID, runtimeUID, token, p.config.PrepareTimeout)
 }
 

@@ -1522,6 +1522,31 @@ func TestFUSEPoolDrainRemovesOnlyPreparedForExactPoolKey(t *testing.T) {
 	assert.True(t, other)
 }
 
+func TestFUSEPoolDrainReleaseResumesInProgressCleanup(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	record := state.FUSEPoolRecord{
+		PreparationID:   "cleanup-from-stopped-api",
+		RuntimeID:       "runtime-from-stopped-api",
+		RuntimeUID:      "uid-from-stopped-api",
+		PoolKey:         "former-pool-key",
+		State:           state.FUSEPoolCleanup,
+		MaintainerToken: "former-api",
+		CleanupToken:    "former-api:cleanup:record",
+		CleanupUntil:    repo.now.Add(time.Minute),
+		UpdatedAt:       repo.now,
+		Revision:        4,
+	}
+	repo.seed(record)
+	rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+
+	require.NoError(t, pool.DrainRelease(context.Background()))
+	_, exists := repo.record(record.PreparationID)
+	assert.False(t, exists)
+	assert.True(t, rt.wasRemoved(record.RuntimeID))
+}
+
 func TestFUSEPoolDrainAndStopAreScoped(t *testing.T) {
 	rt := newFUSEMockRuntime()
 	repo := newMemoryFUSEPoolRepository()
