@@ -7,6 +7,8 @@ autoscaling:
 
 redis:
   enabled: true
+  persistence:
+    enabled: false
 
 workspaceCredentials:
   apiSecretName: sandbox-workspace-control

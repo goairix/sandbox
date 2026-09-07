@@ -72,6 +72,10 @@ minio_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$minio_rendered" \
   | grep -Fq 'value: "minio.sandbox-storage.svc"'
 ! grep -Fq 'sandbox.minio.sandbox-storage.svc' <<<"$minio_rendered"
+if grep -Fq 'volumeClaimTemplates:' <<<"$minio_rendered"; then
+  printf 'MinIO test overlay unexpectedly enables Redis persistence\n' >&2
+  exit 1
+fi
 
 public_mounter="$(awk '/mounter:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-public.yaml")"
 private_mounter="$(awk '/mounter:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-private.yaml")"
