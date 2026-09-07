@@ -25,8 +25,8 @@ config:
     kubernetes:
       namespace: sandbox-runtime
   images:
-    sandbox: registry.local/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    gateway: registry.local/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
+    gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
   storage:
     filesystem:
       preset: minio

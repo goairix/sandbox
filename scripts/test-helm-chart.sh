@@ -69,6 +69,10 @@ fi
 
 minio_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
   --values "$repo_root/testdata/values-fuse-minio.yaml")"
+if grep -Fq 'registry.local/' <<<"$minio_rendered"; then
+  printf 'MinIO ds-ai-research overlay still contains a local-registry placeholder\n' >&2
+  exit 1
+fi
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$minio_rendered" \
   | grep -Fq 'value: "minio.sandbox-storage.svc"'
 ! grep -Fq 'sandbox.minio.sandbox-storage.svc' <<<"$minio_rendered"
