@@ -577,6 +577,7 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 	}
 	if m.fusePool != nil {
 		drainErr = errors.Join(drainErr, m.fusePool.DrainRelease(ctx))
+		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
 	}
 	m.pool.Drain(ctx)
 	if m.sessions != nil {

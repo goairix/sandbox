@@ -852,10 +852,10 @@ func (r *Runtime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeU
 	return nil
 }
 
-// ReconcileOrphanedResources removes managed FUSE Pods that are not referenced
-// by any restored session, workspace owner, or pool record. Identity validation
-// is deliberately performed before deletion so a malformed or replaced Pod is
-// retained fail-closed for operator inspection.
+// ReconcileOrphanedResources removes managed FUSE Pods and policies that are
+// not referenced by any restored session, workspace owner, or pool record.
+// Identity validation is deliberately performed before deletion so malformed
+// or replaced resources are retained fail-closed for operator inspection.
 func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error {
 	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "sandbox.managed=true,sandbox.pool=true,sandbox.workspace.mode=fuse",
@@ -878,7 +878,127 @@ func (r *Runtime) ReconcileOrphanedResources(ctx context.Context, protectedRunti
 			result = errors.Join(result, fmt.Errorf("remove orphaned Kubernetes FUSE Pod %s: %w", ref.ID, err))
 		}
 	}
+	return errors.Join(result, r.reconcileOrphanedFUSEPolicies(ctx, protectedRuntimeUIDs))
+}
+
+func (r *Runtime) reconcileOrphanedFUSEPolicies(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error {
+	var result error
+	policies, err := r.client.NetworkingV1().NetworkPolicies(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true"})
+	if err != nil {
+		result = errors.Join(result, fmt.Errorf("list managed Kubernetes FUSE NetworkPolicies: %w", err), runtime.ErrTerminationUnconfirmed)
+	} else {
+		for i := range policies.Items {
+			policy := &policies.Items[i]
+			instance, role := policy.Labels["sandbox.pool.instance"], policy.Labels["sandbox.policy.role"]
+			if role != "system" && role != "user" {
+				continue
+			}
+			expectedName := fuseSystemPolicyPrefix + instance
+			if role == "user" {
+				expectedName = fuseUserPolicyPrefix + instance
+			}
+			if policy.Name != expectedName || !networkPolicyOwnershipMatches(policy, instance, role) ||
+				(role == "system" && policy.Annotations[fusePrepareAttemptAnnotation] == "") {
+				result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE NetworkPolicy identity is invalid: %s", policy.Name), runtime.ErrTerminationUnconfirmed)
+				continue
+			}
+			runtimeUID := policy.Annotations[fuseRuntimeUIDAnnotation]
+			if role == "user" && runtimeUID == "" {
+				result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE user NetworkPolicy has no runtime UID: %s", policy.Name), runtime.ErrTerminationUnconfirmed)
+				continue
+			}
+			if runtimeUID != "" {
+				if _, err := runtime.NewRuntimeRef(instance, runtimeUID); err != nil {
+					result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE NetworkPolicy runtime identity is invalid: %s", policy.Name), runtime.ErrTerminationUnconfirmed)
+					continue
+				}
+			}
+			if _, protected := protectedRuntimeUIDs[runtimeUID]; runtimeUID != "" && protected {
+				continue
+			}
+			absent, podErr := r.orphanPolicyPodAbsent(ctx, instance)
+			if podErr != nil {
+				result = errors.Join(result, podErr)
+				continue
+			}
+			if !absent {
+				result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE NetworkPolicy still selects an unprotected Pod: %s", policy.Name), runtime.ErrTerminationUnconfirmed)
+				continue
+			}
+			if err := deleteCreatedNetworkPolicy(ctx, r.client.NetworkingV1().NetworkPolicies(r.namespace), policy); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove orphaned Kubernetes FUSE NetworkPolicy %s: %w", policy.Name, err))
+			}
+		}
+	}
+	if !r.hasCilium || r.dynClient == nil {
+		return result
+	}
+	cilium, err := r.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true"})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return errors.Join(result, fmt.Errorf("list managed Kubernetes FUSE CiliumNetworkPolicies: %w", err), runtime.ErrTerminationUnconfirmed)
+	}
+	if err != nil {
+		return result
+	}
+	for i := range cilium.Items {
+		policy := &cilium.Items[i]
+		instance, role := policy.GetLabels()["sandbox.pool.instance"], policy.GetLabels()["sandbox.policy.role"]
+		valid := role == "system" && ciliumSystemPolicyOwnershipMatches(policy, instance)
+		valid = valid || role == "user-deny" && ciliumUserPolicyOwnershipMatches(policy, instance)
+		if role != "system" && role != "user-deny" {
+			continue
+		}
+		expectedName := fuseSystemPolicyPrefix + instance
+		if role == "user-deny" {
+			expectedName = fuseUserDenyPolicyPrefix + instance
+		}
+		if policy.GetName() != expectedName || !valid ||
+			(role == "system" && policy.GetAnnotations()[fusePrepareAttemptAnnotation] == "") {
+			result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE CiliumNetworkPolicy identity is invalid: %s", policy.GetName()), runtime.ErrTerminationUnconfirmed)
+			continue
+		}
+		runtimeUID := policy.GetAnnotations()[fuseRuntimeUIDAnnotation]
+		if role == "user-deny" && runtimeUID == "" {
+			result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE user CiliumNetworkPolicy has no runtime UID: %s", policy.GetName()), runtime.ErrTerminationUnconfirmed)
+			continue
+		}
+		if runtimeUID != "" {
+			if _, err := runtime.NewRuntimeRef(instance, runtimeUID); err != nil {
+				result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE CiliumNetworkPolicy runtime identity is invalid: %s", policy.GetName()), runtime.ErrTerminationUnconfirmed)
+				continue
+			}
+		}
+		if _, protected := protectedRuntimeUIDs[runtimeUID]; runtimeUID != "" && protected {
+			continue
+		}
+		absent, podErr := r.orphanPolicyPodAbsent(ctx, instance)
+		if podErr != nil {
+			result = errors.Join(result, podErr)
+			continue
+		}
+		if !absent {
+			result = errors.Join(result, fmt.Errorf("managed Kubernetes FUSE CiliumNetworkPolicy still selects an unprotected Pod: %s", policy.GetName()), runtime.ErrTerminationUnconfirmed)
+			continue
+		}
+		if err := deleteCreatedCiliumPolicy(ctx, r.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(r.namespace), policy); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove orphaned Kubernetes FUSE CiliumNetworkPolicy %s: %w", policy.GetName(), err))
+		}
+	}
 	return result
+}
+
+func (r *Runtime) orphanPolicyPodAbsent(ctx context.Context, instance string) (bool, error) {
+	if instance == "" || len(validation.IsDNS1123Subdomain(instance)) != 0 {
+		return false, runtime.ErrTerminationUnconfirmed
+	}
+	_, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, instance, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, errors.Join(fmt.Errorf("verify orphaned Kubernetes FUSE policy Pod: %w", err), runtime.ErrTerminationUnconfirmed)
+	}
+	return false, nil
 }
 
 func (r *Runtime) ConfirmTerminated(_ context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {

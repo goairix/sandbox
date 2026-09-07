@@ -272,7 +272,9 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 		}}
 		return false, nil, nil
 	})
-	dynamicClient := fake.NewSimpleDynamicClient(k8sruntime.NewScheme())
+	dynamicClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
 	dynamicClient.PrependReactor("create", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
 		policy := action.(ktesting.CreateAction).GetObject().(*unstructured.Unstructured)
 		if policy.GetUID() == "" {
@@ -357,6 +359,28 @@ func TestReconcileOrphanedResourcesRemovesOnlyUnprotectedManagedFUSEPods(t *test
 	require.True(t, apierrors.IsNotFound(podErr))
 	_, policyErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), fuseSystemPolicyPrefix+info.RuntimeID, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(policyErr))
+}
+
+func TestReconcileOrphanedResourcesRemovesCiliumPolicyAfterInterruptedPodCleanup(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedOrphanCleanupScript())
+	rt.hasCilium = true
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.Endpoint = "objects.example.com:443"
+	spec.WorkspaceFUSE.EndpointHostIPs = nil
+	spec.WorkspaceFUSE.SystemEgress.Mode = sandboxruntime.SystemEgressCiliumFQDN
+	spec.WorkspaceFUSE.SystemEgress.EndpointCIDRs = nil
+	spec.WorkspaceFUSE.SystemEgress.EndpointFQDNs = []string{"objects.example.com"}
+	spec.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443}
+	info, err := rt.PrepareSandbox(context.Background(), spec)
+	require.NoError(t, err)
+	require.NoError(t, client.CoreV1().Pods("runtime").Delete(context.Background(), info.RuntimeID, metav1.DeleteOptions{}))
+	rt.stateMu.Lock()
+	rt.workspaceStates = nil
+	rt.stateMu.Unlock()
+
+	require.NoError(t, rt.ReconcileOrphanedResources(context.Background(), nil))
+	_, err = rt.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Get(context.Background(), fuseSystemPolicyPrefix+info.RuntimeID, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
 }
 
 func TestReconcileOrphanedResourcesProtectsRuntimeUIDAndFailsClosedOnInvalidIdentity(t *testing.T) {
