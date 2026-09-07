@@ -728,6 +728,55 @@ func TestFUSEPoolColdAcquireNeverPublishesPrepared(t *testing.T) {
 	assert.NotEmpty(t, record.ReservationToken)
 }
 
+func TestFUSEPoolAcquireWaitsForConcurrentRefill(t *testing.T) {
+	rt := newFUSEMockRuntime()
+	repo := newMemoryFUSEPoolRepository()
+	cfg := fusePoolConfig()
+	cfg.MinSize, cfg.MaxSize, cfg.PrepareTimeout = 0, 1, 250*time.Millisecond
+	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+	record := state.FUSEPoolRecord{
+		PreparationID:   "prep-waiting",
+		RuntimeID:       "runtime-waiting",
+		RuntimeUID:      "uid-waiting",
+		PoolKey:         "pool-key",
+		State:           state.FUSEPoolPrepared,
+		MaintainerToken: "other-api",
+		UpdatedAt:       repo.now,
+		Revision:        2,
+	}
+	rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID}
+	repo.locks[record.PoolKey] = memoryRefillLock{token: "other-refill", until: repo.now.Add(time.Minute)}
+
+	published := make(chan struct{})
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		repo.seed(record)
+		close(published)
+	}()
+
+	got, err := pool.Acquire(context.Background(), "pool-key")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, record.RuntimeUID, got.RuntimeUID)
+	assert.Equal(t, state.FUSEPoolReserved, got.State)
+	<-published
+	pool.Stop(context.Background())
+}
+
+func TestFUSEPoolAcquireRefillWaitHonorsCallerCancellation(t *testing.T) {
+	repo := newMemoryFUSEPoolRepository()
+	cfg := fusePoolConfig()
+	cfg.MinSize, cfg.MaxSize, cfg.PrepareTimeout = 0, 1, time.Second
+	pool := NewFUSEPool(newFUSEMockRuntime(), repo, cfg, fixedFUSESpec("pool-key"))
+	repo.locks["pool-key"] = memoryRefillLock{token: "other-refill", until: repo.now.Add(time.Minute)}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := pool.Acquire(ctx, "pool-key")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	pool.Stop(context.Background())
+}
+
 func TestFUSEPoolColdAcquireHonorsMaxAcrossReplicas(t *testing.T) {
 	repo := newMemoryFUSEPoolRepository()
 	rtA, rtB := newFUSEMockRuntime(), newFUSEMockRuntime()
@@ -735,6 +784,7 @@ func TestFUSEPoolColdAcquireHonorsMaxAcrossReplicas(t *testing.T) {
 	cfgA.MinSize, cfgA.MaxSize = 0, 1
 	cfgB := cfgA
 	cfgB.MaintainerToken = "api-b"
+	cfgB.PrepareTimeout = 20 * time.Millisecond
 	poolA := NewFUSEPool(rtA, repo, cfgA, fixedFUSESpec("pool-key"))
 	poolB := NewFUSEPool(rtB, repo, cfgB, fixedFUSESpec("pool-key"))
 	entered, release := rtA.blockPrepare()

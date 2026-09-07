@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	fusePoolKeyVersion     = "workspace-fuse-pool/v1"
-	fusePoolCleanupTimeout = 5 * time.Second
+	fusePoolKeyVersion           = "workspace-fuse-pool/v1"
+	fusePoolCleanupTimeout       = 5 * time.Second
+	fusePoolAcquireRetryInterval = 50 * time.Millisecond
 )
 
 var (
@@ -257,6 +258,7 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 		return nil, err
 	}
 	defer done()
+	var refillWaitDeadline time.Time
 	for {
 		if err := opCtx.Err(); err != nil {
 			return nil, err
@@ -267,8 +269,29 @@ func (p *FUSEPool) Acquire(ctx context.Context, poolKey string) (*state.FUSEPool
 			return nil, fmt.Errorf("reserve prepared FUSE sandbox: %w", err)
 		}
 		if record == nil {
+			if !refillWaitDeadline.IsZero() && !time.Now().Before(refillWaitDeadline) {
+				return nil, ErrFUSEPoolRefillBusy
+			}
 			record, err = p.prepareCold(opCtx, token)
 			if err != nil {
+				if errors.Is(err, ErrFUSEPoolRefillBusy) {
+					if refillWaitDeadline.IsZero() {
+						refillWaitDeadline = time.Now().Add(p.config.PrepareTimeout)
+					}
+					remaining := time.Until(refillWaitDeadline)
+					if remaining <= 0 {
+						return nil, ErrFUSEPoolRefillBusy
+					}
+					delay := min(fusePoolAcquireRetryInterval, remaining)
+					timer := time.NewTimer(delay)
+					select {
+					case <-timer.C:
+						continue
+					case <-opCtx.Done():
+						timer.Stop()
+						return nil, opCtx.Err()
+					}
+				}
 				return nil, err
 			}
 			p.scheduleRefill()
