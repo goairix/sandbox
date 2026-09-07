@@ -46,7 +46,7 @@ private_obs_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
 grep -Fq 'value: "huawei-obs-private-2023-v1"' <<<"$private_obs_rendered"
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$private_obs_rendered" \
   | grep -Fq 'value: "obs.cn-southwest-268.shuanghuayun.com,sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com"'
-grep -Fq 'image: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis:feat-workspace-fuse"' <<<"$private_obs_rendered"
+grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$private_obs_rendered"
 if grep -Fq 'volumeClaimTemplates:' <<<"$private_obs_rendered"; then
   printf 'private OBS test overlay unexpectedly enables Redis persistence\n' >&2
   exit 1
@@ -61,7 +61,7 @@ grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$public_obs_rendered" \
   | grep -Fq 'value: "false"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$public_obs_rendered" \
   | grep -Fq 'value: "true"'
-grep -Fq 'image: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis:feat-workspace-fuse"' <<<"$public_obs_rendered"
+grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$public_obs_rendered"
 if grep -Fq 'volumeClaimTemplates:' <<<"$public_obs_rendered"; then
   printf 'public OBS test overlay unexpectedly enables Redis persistence\n' >&2
   exit 1
@@ -72,7 +72,7 @@ minio_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$minio_rendered" \
   | grep -Fq 'value: "minio.sandbox-storage.svc"'
 ! grep -Fq 'sandbox.minio.sandbox-storage.svc' <<<"$minio_rendered"
-grep -Fq 'image: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis:feat-workspace-fuse"' <<<"$minio_rendered"
+grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$minio_rendered"
 if grep -Fq 'volumeClaimTemplates:' <<<"$minio_rendered"; then
   printf 'MinIO test overlay unexpectedly enables Redis persistence\n' >&2
   exit 1

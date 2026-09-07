@@ -11,8 +11,8 @@ autoscaling:
 redis:
   enabled: true
   image:
-    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-redis
-    tag: feat-workspace-fuse
+    repository: registry.i.huaxisy.com/library/redis
+    tag: 7.4.2
     pullPolicy: IfNotPresent
   persistence:
     enabled: false
