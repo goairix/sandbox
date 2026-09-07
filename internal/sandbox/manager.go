@@ -576,7 +576,7 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		drainErr = errors.Join(drainErr, m.finalizeEphemeralLifecycles(ctx))
 	}
 	if m.fusePool != nil {
-		drainErr = errors.Join(drainErr, m.fusePool.Stop(ctx))
+		drainErr = errors.Join(drainErr, m.fusePool.DrainRelease(ctx))
 	}
 	m.pool.Drain(ctx)
 	if m.sessions != nil {

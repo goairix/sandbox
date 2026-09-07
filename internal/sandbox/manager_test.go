@@ -390,6 +390,32 @@ func newFUSETestManager(t *testing.T, rt *fuseManagerRuntime) (*Manager, string,
 	return mgr, records[0].RuntimeID, repo, store
 }
 
+func TestManagerDrainReleaseRemovesForeignPreparingFUSEPoolRecord(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, repo, _ := newFUSETestManager(t, rt)
+	foreign := state.FUSEPoolRecord{
+		PreparationID:   "foreign-preparation",
+		RuntimeID:       "foreign-runtime",
+		RuntimeUID:      "foreign-runtime-uid",
+		PoolKey:         "pool-key",
+		State:           state.FUSEPoolPreparing,
+		MaintainerToken: "former-api",
+		Revision:        2,
+	}
+	repo.seed(foreign)
+	rt.mu.Lock()
+	rt.sandboxes[foreign.RuntimeID] = &runtime.SandboxInfo{
+		RuntimeID:  foreign.RuntimeID,
+		RuntimeUID: foreign.RuntimeUID,
+	}
+	rt.mu.Unlock()
+
+	require.NoError(t, mgr.DrainRelease(context.Background()))
+	_, exists := repo.record(foreign.PreparationID)
+	assert.False(t, exists)
+	assert.True(t, rt.wasRemoved(foreign.RuntimeID))
+}
+
 func TestManagerHybridRoutesDefaultSyncAndExplicitFUSE(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "team", "sync"), 0o755))
