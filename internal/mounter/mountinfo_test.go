@@ -30,6 +30,14 @@ func TestEffectiveMountUsesKernelMountIDForStackedMount(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestEffectiveMountReturnsCoveringParentAfterFUSEUnmount(t *testing.T) {
+	raw := "36 25 0:32 / / rw - overlay overlay rw\n"
+	mount, err := EffectiveMount(strings.NewReader(raw), "/workspace", func(string) (uint64, error) { return 36, nil })
+	require.NoError(t, err)
+	assert.Equal(t, "/", mount.MountPoint)
+	assert.Equal(t, "overlay", mount.FilesystemType)
+}
+
 func TestParseMountInfoRejectsMalformedAndOversizedInput(t *testing.T) {
 	_, err := ParseMountInfo(strings.NewReader("36 25 malformed\n"))
 	require.Error(t, err)

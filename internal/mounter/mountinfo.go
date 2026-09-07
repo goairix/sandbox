@@ -86,7 +86,7 @@ func EffectiveMount(reader io.Reader, path string, resolve MountIDResolver) (Mou
 		return Mount{}, err
 	}
 	for _, mount := range mounts {
-		if mount.ID == id && mount.MountPoint == path {
+		if mount.ID == id {
 			return mount, nil
 		}
 	}
