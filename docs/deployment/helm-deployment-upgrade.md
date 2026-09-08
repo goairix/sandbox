@@ -83,17 +83,116 @@ kubectl --context <context> -n <control-namespace> create secret generic <api-ke
 
 ## 3. 升级已有 release
 
-以下变量贯穿升级命令：
+### 3.1 服务器上已有 Chart 目录时，先处理文件
+
+不要只覆盖 `templates/` 并保留旧 Chart 内的 `values.yaml`。`Chart.yaml`、`templates/`、`values.yaml` 和 `values.schema.json` 是同一个 Chart 版本的完整合同，混用新模板和旧默认值可能导致字段缺失、旧字段残留，或者 backend fingerprint 计算错误。
+
+Helm 安装后，服务器上的 Chart 目录不会被运行中的 release 持续读取。把新版 Chart 放到新目录不会改变集群；只有执行 `helm upgrade` 才会更新集群。因此推荐保留旧目录，新旧版本并排存放：
+
+```text
+/opt/sandbox/
+├── charts/
+│   ├── sandbox-old/             # 旧 Chart，只用于回看
+│   └── sandbox-0.2.0/           # 新 Chart，整套复制
+├── env/
+│   └── values-prod-minio.yaml   # 本服务器的环境配置
+└── backups/
+    └── <upgrade-id>/            # 升级前导出的现场
+```
+
+各文件的处理规则如下：
+
+| 服务器现有文件 | 升级时如何处理 |
+|---|---|
+| `templates/*` | 整套使用新版，不能新旧混合 |
+| `Chart.yaml` | 使用新版 |
+| `values.schema.json` | 使用新版 |
+| Chart 自带 `values.yaml` | 使用新版，不能保留旧版 |
+| 服务器环境参数 | 从旧配置中迁移到 Chart 目录外的 `values-prod-*.yaml` |
+| AK/SK、API key | 保留在 Kubernetes Secret，不写进任何 values 文件 |
+
+如果服务器以前直接修改了 Chart 自带的 `values.yaml`，先把它备份为参考文件；不要再把它放回新版 Chart。升级步骤如下。
+
+第一步，定义实际目录并保存现场：
+
+```bash
+CTX=<context>
+NS=<namespace>
+RELEASE=<release>
+OLD_CHART=/opt/sandbox/charts/sandbox-old
+NEW_CHART=/opt/sandbox/charts/sandbox-0.2.0
+ENV_VALUES=/opt/sandbox/env/values-prod-minio.yaml
+UPGRADE_ID="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/opt/sandbox/backups/$UPGRADE_ID"
+
+umask 077
+install -d -m 0700 "$BACKUP_DIR" "$(dirname "$ENV_VALUES")"
+cp -a "$OLD_CHART" "$BACKUP_DIR/chart"
+
+helm --kube-context "$CTX" get values "$RELEASE" -n "$NS" -o yaml \
+  > "$BACKUP_DIR/release-user-values.yaml"
+
+helm --kube-context "$CTX" get values "$RELEASE" -n "$NS" --all -o yaml \
+  > "$BACKUP_DIR/release-effective-values.yaml"
+
+helm --kube-context "$CTX" get manifest "$RELEASE" -n "$NS" \
+  > "$BACKUP_DIR/release-manifest.yaml"
+```
+
+`release-user-values.yaml` 可能为空：如果旧部署是通过直接修改 Chart 自带 `values.yaml` 完成的，这些参数在 Helm 看来属于旧 Chart 默认值。此时以备份的 `chart/values.yaml` 和 `release-effective-values.yaml` 为迁移参考。历史 values 或 manifest 可能包含旧部署写入 Helm 的敏感值，备份目录必须保持 `0700`，不得提交到 Git 或复制到普通共享目录。
+
+第二步，把新版 `deploy/helm/sandbox` **完整复制到一个不存在的新目录**，包括新版 `values.yaml` 和 `values.schema.json`：
+
+```bash
+test ! -e "$NEW_CHART"
+cp -a /path/to/new-source/deploy/helm/sandbox "$NEW_CHART"
+```
+
+如果受服务器目录限制必须原地替换，正确顺序是：先备份旧 Chart，整套覆盖为新版（包括新版 `values.yaml`），再参考旧文件把环境参数迁移进**新版** `values.yaml`。不能先保留旧 `values.yaml`，再只补几个新字段。这个原地方案技术上可行，但会继续把 Chart 默认值和服务器环境值混在一起；并排 Chart + 外部环境 values 更容易审计和回看，因此优先使用并排方式。
+
+第三步，创建 Chart 外部的环境 values。不要把 `release-effective-values.yaml` 直接作为 `-f` 输入；它包含旧 Chart 的全部默认值，会把废弃字段和旧默认行为带回新版。以新版后端 overlay 为字段结构参考，从备份中逐项迁移以下环境配置：
+
+- API 镜像、副本、HPA 和资源限制；
+- Redis 持久化或外部 Redis；
+- runtime namespace、普通 Pool 和 FUSE Pool 数量；
+- ordinary runtime 和 gateway 镜像；
+- 单一 backend preset、endpoint、bucket、region、TLS、storage identity；
+- system egress 的 DNS、FQDN/CIDR 和精确端口；
+- workspace Secret 名称、mounter/Docker FUSE 镜像和 LSM profile；
+- API key Secret 名称；
+- `networkEnabled=true`、`networkBlockPrivate=true`；业务请求需要访问内网时仍由调用方提交明确白名单。
+
+后端和凭据都没有变化时，保持原 Secret 名称、`storageIdentity` 和 `credentialGeneration` 不变。只更新 API 镜像不会触发 backend drain。若轮换了凭据，使用新 Secret 名称并递增 `credentialGeneration`，按照第 5 节执行。
+
+最终升级命令始终指向**完整的新 Chart 目录**和**Chart 外部的环境 values**：
+
+```bash
+helm --kube-context "$CTX" upgrade "$RELEASE" "$NEW_CHART" \
+  --namespace "$NS" \
+  -f "$ENV_VALUES" \
+  --reset-values \
+  --atomic \
+  --wait \
+  --timeout 15m
+```
+
+不要执行下面这种混合升级：
+
+```text
+新 templates + 新 Chart.yaml + 旧 values.yaml
+```
+
+### 3.2 保存现场并检查升级能力
+
+以下变量用于后续通用示例；在服务器上操作时，`CHART` 和 `VALUES` 应分别指向上一节的 `NEW_CHART` 和 `ENV_VALUES`：
 
 ```bash
 CTX=ds-ai-research
 NS=sandbox-fuse
 RELEASE=sandbox-fuse
-CHART=deploy/helm/sandbox
-VALUES=testdata/values-fuse-minio.yaml
+CHART=/opt/sandbox/charts/sandbox-0.2.0
+VALUES=/opt/sandbox/env/values-prod-minio.yaml
 ```
-
-### 3.1 保存现场并检查升级能力
 
 ```bash
 helm --kube-context "$CTX" get values "$RELEASE" -n "$NS" -o yaml \
@@ -137,7 +236,7 @@ kubectl --context "$CTX" -n "$NS" \
 
 任一结果为 `no` 时，不得直接跨版本升级。先在维护窗口补齐 drain RBAC，并使用旧 backend 配置完成 release drain；不能通过删除 Redis、强删 Pod 或跳过 hook 迁移。
 
-### 3.2 渲染检查
+### 3.3 渲染检查
 
 ```bash
 helm lint "$CHART" -f "$VALUES"
@@ -158,7 +257,7 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 生产环境不得追加这两个参数。
 
-### 3.3 正式升级
+### 3.4 正式升级
 
 ```bash
 helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
@@ -181,7 +280,7 @@ kubectl --context "$CTX" -n "$NS" \
 
 排空失败时 Helm 不会切换后端。保留旧 endpoint、旧 Secret、Redis 和受管 runtime，修复失败原因后删除失败 Job，并用完全相同的目标 values 重试 `helm upgrade`。
 
-### 3.4 升级后验证
+### 3.5 升级后验证
 
 ```bash
 helm --kube-context "$CTX" status "$RELEASE" -n "$NS"
@@ -223,7 +322,7 @@ helm --kube-context "$CTX" install "$RELEASE" "$CHART" \
   --timeout 15m
 ```
 
-全新安装没有旧 release，因此不会运行 backend-change drain。安装成功后必须执行 3.4 节检查，并分别通过 API 验证：
+全新安装没有旧 release，因此不会运行 backend-change drain。安装成功后必须执行 3.5 节检查，并分别通过 API 验证：
 
 1. ephemeral 无 workspace；
 2. ephemeral + sync；
