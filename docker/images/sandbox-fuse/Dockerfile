@@ -1,10 +1,26 @@
+ARG GO_BUILDER_IMAGE=golang:1.25-alpine
 ARG BASE_IMAGE
+FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/workspace-mounter ./cmd/workspace-mounter
+COPY cmd/workspace-probe ./cmd/workspace-probe
+COPY internal/fuseprotocol ./internal/fuseprotocol
+COPY internal/mounter ./internal/mounter
+COPY internal/workspaceprobe ./internal/workspaceprobe
+RUN mkdir -p /out \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/workspace-mounter ./cmd/workspace-mounter \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/workspace-probe ./cmd/workspace-probe
+
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
 ARG S3FS_PACKAGE_URL
 ARG S3FS_PACKAGE_SHA256
-ARG PROFILE_BUNDLE=profile-bundle.json
 
 USER root
 
@@ -23,9 +39,9 @@ RUN base_sha="${BASE_IMAGE##*@sha256:}" \
  && test "$(id -g sandbox)" = 1000
 
 ADD ${S3FS_PACKAGE_URL} /tmp/s3fs-package
-COPY ${PROFILE_BUNDLE} /tmp/workspace-fuse-profile-bundle.json
-COPY workspace-mounter /usr/local/bin/workspace-mounter
-COPY workspace-probe /usr/local/bin/workspace-probe
+COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json
+COPY --from=workspace-tools-builder /out/workspace-mounter /usr/local/bin/workspace-mounter
+COPY --from=workspace-tools-builder /out/workspace-probe /usr/local/bin/workspace-probe
 
 RUN printf '%s  %s\n' "$S3FS_PACKAGE_SHA256" /tmp/s3fs-package | sha256sum -c - \
  && install -o root -g root -m 0755 /tmp/s3fs-package /usr/bin/s3fs \

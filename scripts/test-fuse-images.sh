@@ -147,6 +147,11 @@ grep -Fq 'enabled_mount_modes: ["sync"]' "$operator_config" || fail "repository 
 
 for file in "$mounter" "$fuse"; do
   test -f "$file" || fail "missing $file"
+  grep -Fq 'ARG GO_BUILDER_IMAGE=golang:1.25-alpine' "$file" || fail "$file has no Go builder input"
+  grep -Fq 'FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder' "$file" || fail "$file has no workspace tools builder stage"
+  grep -Fq 'COPY go.mod go.sum ./' "$file" || fail "$file does not use the repository root build context"
+  grep -Fq 'COPY --from=workspace-tools-builder /out/workspace-mounter /usr/local/bin/workspace-mounter' "$file" || fail "$file does not install its self-built mounter"
+  ! grep -Fxq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$file" || fail "$file still requires a host-built mounter"
   grep -Eq '^ARG BASE_IMAGE$' "$file" || fail "$file does not require BASE_IMAGE"
   grep -Fq '@sha256:' "$file" || fail "$file does not enforce a digest base"
   grep -Eq '^ARG S3FS_PACKAGE_URL$' "$file" || fail "$file does not require S3FS_PACKAGE_URL"
@@ -162,10 +167,14 @@ done
 
 grep -Fq 'setuid/setgid files are forbidden' "$verify" || fail "runtime image verification does not reject setuid/setgid files"
 
-grep -Fq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$mounter" || fail "mounter binary missing"
 ! grep -Fq 'workspace-probe' "$mounter" || fail "Kubernetes mounter image must not contain workspace-probe"
-grep -Fq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$fuse" || fail "special image mounter missing"
-grep -Fq 'COPY workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image probe missing"
+grep -Fq 'go build -trimpath' "$mounter" || fail "mounter image does not compile workspace-mounter"
+grep -Fq './cmd/workspace-mounter' "$mounter" || fail "mounter builder omits workspace-mounter source"
+grep -Fq 'COPY --from=workspace-tools-builder /out/workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image does not install its self-built probe"
+! grep -Fxq 'COPY workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image still requires a host-built probe"
+grep -Fq './cmd/workspace-probe' "$fuse" || fail "special image builder omits workspace-probe source"
+grep -Fq 'COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json' "$mounter" || fail "mounter image does not use the fixed repository profile bundle"
+grep -Fq 'COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json' "$fuse" || fail "special image does not use the fixed repository profile bundle"
 grep -Fq 'ENTRYPOINT ["/usr/local/bin/workspace-mounter", "supervise"]' "$fuse" || fail "special image supervisor entrypoint missing"
 grep -Fq 'command -v python3' "$fuse" || fail "special image does not enforce Python tooling in its base"
 grep -Fq 'command -v node' "$fuse" || fail "special image does not enforce Node.js tooling in its base"
@@ -201,7 +210,6 @@ test "$(grep -Fc '00000000000000000000000000000000000000000000000000000000000000
   || fail "$profile_bundle contains executable or TLS-weakening options"
 
 for file in "$mounter" "$fuse"; do
-  grep -Fq 'PROFILE_BUNDLE=profile-bundle.json' "$file" || fail "$file does not use the common bundle"
   ! grep -Eq 'PROFILE_(ID|MANIFEST)|imageProfileID|profile\.json' "$file" || fail "$file still binds a backend-specific profile"
 done
 
