@@ -18,7 +18,7 @@ Workspace 从“sandbox-api 中转 tar 并定期同步”改为“在 sandbox �
 
 - Kubernetes：每个 sandbox Pod 注入一个可信 FUSE 原生 sidecar；sidecar 与非特权 sandbox 容器通过 memory-backed `emptyDir` 和 mount propagation 共享 `/workspace`。
 - Docker：每个 sandbox 使用一个自带 FUSE 的特殊容器；可信 root supervisor 管理 FUSE，所有用户代码和文件命令强制以 UID/GID 1000 执行。
-- 同一 `sandbox-api` release 只激活一个对象存储后端，但同时维护普通 Pool 与 FUSE Pool。两个 runtime 都可预热“未绑定 workspace”的 locked FUSE 空壳；provider、endpoint、bucket、profile、通用镜像 digest、Secret 与 system egress 在预热时固定，只有 `workspace_path/prefix` 在 Pool Acquire 时确定并触发 s3fs 挂载。空壳一旦消费挂载授权，无论成功失败都必须销毁，不得卸载后回池复用。
+- 同一 `sandbox-api` release 只激活一个对象存储后端，但同时维护普通 Pool 与 FUSE Pool。两个 runtime 都可预热“未绑定 workspace”的 locked FUSE 空壳；provider、endpoint、bucket、profile、通用版本镜像、Secret 与 system egress 在预热时固定，只有 `workspace_path/prefix` 在 Pool Acquire 时确定并触发 s3fs 挂载。空壳一旦消费挂载授权，无论成功失败都必须销毁，不得卸载后回池复用。
 - FUSE Pool 与当前通用 Pool 一样由 `sandbox-api` 内的 `sandbox.Manager` 维护目标数量和生命周期，不部署独立 Pool Controller、Operator 或 CronJob。Redis 只为多 API 副本保存库存状态并提供原子保留/refill 互斥，不会自行创建或删除 Pod/容器。
 - MinIO 和普通华为 OBS 对象桶一期统一使用经过验证的上游 s3fs 1.95 artifact。Kubernetes 共用一个 mounter 镜像，Docker 共用一个特殊 FUSE sandbox 镜像；MinIO、公有云 OBS、私有云 OBS 仍使用各自独立验证的受信 profile 和证据。若未来某个 profile 必须使用不同的厂商兼容 artifact，才按“客户端兼容族”拆镜像。华为 OBS 并行文件系统后续使用 obsfs，不在一期范围内。
 - 每个 sandbox 只挂载其自己的对象前缀，不暴露 bucket 中的其他 workspace。
@@ -119,23 +119,15 @@ goofys 仅保留为 MinIO A 类负载的性能对照项。如果 MinIO 的 Kuber
 
 ### 4.4 版本策略
 
-不直接追随 `latest` 标签。发布前针对 MinIO 和 OBS 验证 `bucket:/prefix` 挂载，选择通过测试的 s3fs 版本并固定镜像 digest。升级 s3fs 必须重新执行兼容性和故障测试。
+不使用 `latest` 标签。项目镜像使用显式的 `vMAJOR.MINOR.PATCH`（可带预发布后缀）版本 tag；为兼容已有环境也接受合法 sha256 digest 引用。发布前针对 MinIO 和 OBS 验证 `bucket:/prefix` 挂载，选择通过测试的 s3fs 版本。升级 s3fs 必须重新执行兼容性和故障测试。
 
 ### 4.5 镜像与 profile 的目标状态
 
 Task 12 已把运行时镜像拆为三个明确职责边界：Kubernetes 使用只承载 s3fs 与可信 supervisor 的 `workspace-mounter` sidecar 镜像；Docker 使用保留语言工具链、同时包含 s3fs、supervisor 与 `workspace-probe` 的特殊 `sandbox-fuse` 镜像；普通 sandbox 镜像只增加非特权 `workspace-probe`，不得包含 s3fs 或 `workspace-mounter`。当前代码仍使用单 profile `PROFILE_ID`/manifest 绑定；本次修订把同一 s3fs artifact 的三个 profile 合并为受信 bundle，但不合并上述 runtime 职责边界。
 
-镜像构建采用“编译期 typed profile catalog + 严格审计 profile bundle”双重绑定。CI 只为每个 runtime/architecture 构建一次 mounter artifact；bundle 必须列出本镜像允许的全部 profile descriptor，并绑定同一个实际 s3fs SHA-256：
+镜像构建采用“编译期 typed profile catalog + 严格审计 profile bundle”双重绑定。Kubernetes mounter 与 Docker 特殊镜像职责不同，仍分别构建；但各自不再按 MinIO、公有云 OBS、私有云 OBS 重复构建。两份 FUSE Dockerfile 都通过 builder stage 从 repository-root context 编译所需 Go 工具，Docker 特殊镜像在同一 stage、同一源码 revision 构建 `workspace-mounter` 与 `workspace-probe`。运维直接执行一条 `docker buildx build` 构建每份镜像，不在宿主机预编译、不创建临时 context，也不复制生成的二进制。
 
-```bash
-: "${BUILD_ARTIFACT_DIR:?set BUILD_ARTIFACT_DIR}"
-GOOS=linux GOARCH=amd64 go build \
-  -o "$BUILD_ARTIFACT_DIR/workspace-mounter" ./cmd/workspace-mounter
-```
-
-Kubernetes mounter 与 Docker 特殊镜像职责不同，仍分别构建；但各自不再按 MinIO、公有云 OBS、私有云 OBS 重复构建。Docker 特殊镜像中的 `workspace-mounter` 与 `workspace-probe` 必须来自同一源码 revision；普通 sandbox 与 Docker 特殊镜像所需的 `workspace-probe` 可由同一无特权构建产物提供。
-
-普通 sandbox 不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 复制 `go.mod`/`go.sum`、`cmd/workspace-probe`、`internal/fuseprotocol` 和 `internal/workspaceprobe`，再以 `CGO_ENABLED=0` 编译静态 probe。Compose/dev 将仓库根目录只读挂载为 `/repo`，使用 `docker build -f /repo/docker/images/sandbox/Dockerfile ... /repo`；不再使用缺少这些输入的 `/images/sandbox` context。开发默认 builder 是 `golang:1.25-alpine`，生产 CI 必须通过 `WORKSPACE_PROBE_BUILDER=<digest-pinned-ref>` 覆盖，并同样固定 `SANDBOX_BASE_IMAGE`。Compose 的私有 registry 冷拉取使用只挂给一次性 `sandbox-images` 服务的独立只读 Docker client config；具体权限、配置格式和启动参数以[部署手册](../../deployment/workspace-fuse.md)为准。真实认证文件必须位于仓库根目录之外；认证材料不能进入 API 环境、镜像构建上下文或 BuildKit cache。
+普通 sandbox 同样不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 编译静态 probe。需要 Go 源码的 API、普通 runtime、mounter 和 Docker FUSE 镜像都以仓库根目录为 build context；gateway 继续使用自身目录。构建完成后只把统一版本 tag 更新到 Helm values 或 Compose `.env`，生产启动不在 Compose 内重新构建项目镜像。真实 registry 认证文件必须位于仓库根目录之外；认证材料不能进入 API 环境、镜像构建上下文或 BuildKit cache。完整命令以[Helm 部署、升级与镜像发布 Runbook](../../deployment/helm-deployment-upgrade.md)为准。
 
 只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON bundle 只记录允许的 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析、拒绝重复 ID 并逐项比对 compiled catalog，可以发现包被拼错，但 bundle 不能注入或覆盖任意 `-o` 参数。运行时 bootstrap 只能选择 bundle 中的一个 exact profile。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
 
@@ -143,11 +135,11 @@ Kubernetes mounter 与 Docker 特殊镜像职责不同，仍分别构建；但�
 
 | Profile ID | Mount parameters | Durable flush | 结论 |
 |---|---|---|---|
-| `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check，部署仍须满足 LSM、TLS、digest 和 fault matrix |
+| `minio-sigv4-path-style-v1` | `verified` | `verified` | 可通过 profile/release-check，部署仍须满足 LSM、TLS、版本镜像和 fault matrix |
 | `huawei-obs-public-v1` | `verified` | `verified` | 公有云西南二区目标 endpoint 已完成 Kubernetes 与 Docker 验证；可进入通用 s3fs bundle |
 | `huawei-obs-private-2023-v1` | `verified` | `verified` | 2023 私有云目标 endpoint provider spike 已通过；可进入通用 s3fs bundle，仍须完成 runtime 验收 |
 
-公有云和 2023 私有云始终使用不同 profile 与验证报告；当且仅当它们验证的是同一个 s3fs artifact 时才共用通用镜像 digest。两者都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。2026-09-06 已在目标私有云普通对象桶完成上游 s3fs 1.95 provider spike：启用完整 TLS/SNI 校验，使用 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，完成 UID/GID 1000 创建、追加、截断、目录与重命名、25 MiB multipart、`sync -f`、独立 S3v2 API SHA-256 读回、普通卸载及 Pod 重建后重挂载读回。
+公有云和 2023 私有云始终使用不同 profile 与验证报告；当且仅当它们验证的是同一个 s3fs artifact 时才共用通用版本镜像。两者都禁止 `no_check_certificate` 与 `ssl_verify_hostname=0`。2026-09-06 已在目标私有云普通对象桶完成上游 s3fs 1.95 provider spike：启用完整 TLS/SNI 校验，使用 virtual-host addressing、`endpoint=cn-southwest-268`、`sigv2`、`compat_dir`，完成 UID/GID 1000 创建、追加、截断、目录与重命名、25 MiB multipart、`sync -f`、独立 S3v2 API SHA-256 读回、普通卸载及 Pod 重建后重挂载读回。
 
 同日又在华为公有云西南二区目标普通对象桶独立验证 `huawei-obs-public-v1`：上游 s3fs 1.95 使用完整 TLS/SNI、virtual-host addressing、`endpoint=cn-southwest-2` 与 `sigv2`，不携带私有云 `compat_dir`。Kubernetes sidecar 通过 Cilium 精确基础 endpoint + bucket FQDN 出口完成全 API lifecycle，并实测公网可访问、集群私网不可访问；Docker 特殊容器通过项目 Compose 正常启动链路完成 pool hit、延迟挂载、durable flush、独立 S3v2 读回、single-use 删除和精确清理。Docker 镜像中的 `workspace-mounter` 与 `workspace-probe` 必须来自同一源码 revision；仅更新其中一个会在 quiesce 阶段 fail closed。上述证据分别提升对应 profile，不允许交叉复用；生产仍须完成 LSM、fault matrix、签名、扫描、SBOM 和 attestation。
 
@@ -587,8 +579,8 @@ config:
     defaultMountMode: "sync"
     enabledMountModes: ["sync", "fuse"]
     fuseImages:
-      mounter: "registry.example.com/sandbox-fuse-mounter@sha256:<digest>"
-      docker: "registry.example.com/sandbox-fuse-docker@sha256:<digest>"
+      mounter: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12"
+      docker: "registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12"
     cacheSize: "2Gi"
     cacheMedium: "disk"
     mountTimeoutSeconds: 30
@@ -1070,11 +1062,11 @@ Kubernetes prepared 空壳长期 Pod NotReady 是预期状态，通用 NotReady 
 
 ### 18.1 灰度
 
-1. 默认 `default_mount_mode=sync`，先完成三个 backend preset 的 profile spike，产出固定证据、通用镜像 digest 和 TLS/签名验证结果。
+1. 默认 `default_mount_mode=sync`，先完成三个 backend preset 的 profile spike，产出固定证据、通用版本镜像和 TLS/签名验证结果。
 2. 完成 runtime、普通/FUSE 双 Pool、跨模式租约、ephemeral finalization、flush、system egress、流式文件 API 和后端切换 hook 的单元及集成测试。
 3. 测试环境配置 `enabled_mount_modes=[sync,fuse]`，同时启动普通 Pool 与 prepared FUSE 空壳但只接 sync 流量，验证无 mount/owner/lease、Exec gate、NotReady、补池和配置换代排空。
 4. 在同一个 release 中分别创建无 workspace ephemeral、sync ephemeral/persistent 和 FUSE ephemeral/persistent，验证请求级选择、默认 sync、同 prefix 交叉互斥和不同 prefix 并行。
-5. 分别完成 MinIO、华为公有云 OBS、2023 私有云 OBS 与两套 runtime 的六组合 Pool hit/miss、Acquire 挂载与 single-use 销毁验证，并确认使用相同 runtime 对应的通用镜像 digest。
+5. 分别完成 MinIO、华为公有云 OBS、2023 私有云 OBS 与两套 runtime 的六组合 Pool hit/miss、Acquire 挂载与 single-use 销毁验证，并确认使用相同 runtime 对应的通用版本镜像。
 6. 先在 MinIO Kubernetes 对少量请求显式发送 `workspace_mount_mode=fuse`，再扩展到 MinIO Docker。
 7. 分别扩展已验证的公有云/私有云 OBS preset；preset 只改变部署配置和 profile 选择，不更换同 runtime 的通用镜像。
 8. 演练一次 backend fingerprint 变化：pre-upgrade 自动缩容 API、排空两个 Pool 和活动 sandbox 后切换，再以原 preset 回滚。

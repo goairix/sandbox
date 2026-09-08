@@ -22,7 +22,7 @@ import (
 // prepared FUSE runtime. The sandbox-facing bridge must remain routable because
 // Docker internal bridges drop transit packets before they enter a container
 // acting as a layer-3 gateway. The gateway policy is loaded before the trusted
-// digest-pinned runtime starts; its default route is then replaced with the
+// versioned runtime starts; its default route is then replaced with the
 // gateway address before any workspace authorization or public exec.
 func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage, secretRoot string, system runtime.SystemEgressSpec) (pairNetworkID, gatewayID, gatewayIP string, err error) {
 	if system.Mode != runtime.SystemEgressCIDR {

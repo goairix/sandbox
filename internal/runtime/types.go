@@ -91,7 +91,7 @@ type WorkspaceFUSESpec struct {
 	// part of the pool identity so credential rotations cannot reuse old shells.
 	CredentialGeneration string
 	MounterImage         string
-	// DockerImage is the digest-pinned special sandbox image that contains the
+	// DockerImage is the versioned special sandbox image that contains the
 	// trusted PID 1 supervisor, s3fs and the unprivileged workspace probe.
 	DockerImage            string
 	SecretName             string
