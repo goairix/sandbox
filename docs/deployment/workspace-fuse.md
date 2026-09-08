@@ -65,8 +65,8 @@ config:
 
 三个 preset 在同一架构上共用两份 FUSE 镜像：
 
-- Kubernetes：`sandbox-fuse-mounter@sha256:<digest>`；
-- Docker：`sandbox-fuse-docker@sha256:<digest>`。
+- Kubernetes：`sandbox-fuse-mounter:v0.2.12`；
+- Docker：`sandbox-fuse-docker:v0.2.12`。
 
 镜像内包含只读的三个 profile descriptor bundle。profile 仍各自保存 mount、durable flush、服务版本、s3fs/Everest 版本、TLS、故障和 API 生命周期证据，不能用一个 backend 的证据替代另一个。所有 profile evidence 必须记录同一 mounter digest 和同一 Docker FUSE digest。
 
@@ -184,22 +184,24 @@ Chart 对 preset/provider/profile、storage identity、endpoint、TLS、region�
 STORAGE_PRESET=minio
 WORKSPACE_DEFAULT_MOUNT_MODE=sync
 WORKSPACE_ENABLED_MOUNT_MODES=sync,fuse
-FUSE_MOUNTER_IMAGE=registry.example.com/sandbox-fuse-mounter@sha256:<digest>
-FUSE_SANDBOX_IMAGE=registry.example.com/sandbox-fuse-docker@sha256:<digest>
+SANDBOX_API_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-api:v0.2.12
+SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12
+GATEWAY_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12
+FUSE_MOUNTER_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
+FUSE_SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
 ```
 
 按项目正常启动链路执行，不打印 `.env`：
 
 ```bash
 docker compose --env-file docker/.env -f docker/docker-compose.yml config >/dev/null
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --build -t 600 \
-  sandbox-images redis sandbox-api
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d -t 600
 docker compose --env-file docker/.env -f docker/docker-compose.yml ps
 ```
 
-没有需要保留的 active/persistent sandbox，且 backend、凭据和 FUSE 镜像不变时，上述 `up -d --build -t 600` 就是完整升级动作；不需要预先 `down` 或单独排空。`-t 600` 用于给旧 API 足够时间清理 Pool/FUSE 空壳。需要保留旧 workspace 的最终写入，或 backend contract 有变化时，才执行完整 release drain。
+没有需要保留的 active/persistent sandbox 时，更新五个版本 tag 后执行上述 `up -d -t 600` 就是完整升级动作；不需要预先 `down`、本地 build 或单独排空。`-t 600` 用于给旧 API 足够时间清理 Pool/FUSE 空壳。需要保留旧 workspace 的最终写入，或 backend contract 有变化时，才执行完整 release drain。
 
-Compose 不创建长期 mounter service，也不挂载宿主机业务 `/workspace`。`sandbox-images` 在启用 FUSE 时各拉取/构建公共镜像一次，实际特殊容器仍由 sandbox-api Pool 动态管理。
+Compose 不创建长期 mounter service，也不挂载宿主机业务 `/workspace`。生产镜像在部署前单独发布；Compose 只确认或拉取配置的镜像，实际特殊容器仍由 sandbox-api Pool 动态管理。
 
 切换 Docker backend 前，必须先停止旧 API，再使用新版 drain 二进制配合旧 backend 配置、旧凭据和现有 Redis 运行一次 `--drain-release`；确认 `sandbox.managed=true` 的 container/network/volume 以及 Redis 受管前缀为空后，才能切换新 `.env`。旧版本二进制可能没有 drain 参数，完整兼容步骤以 Docker Compose 部署与升级 Runbook 为准。不要靠删除 Redis 或强删容器完成切换。
 

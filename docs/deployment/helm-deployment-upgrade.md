@@ -39,7 +39,7 @@ MinIO、公有云 OBS、私有云 OBS 在同一 CPU 架构上共用 Kubernetes m
 - 节点提供 `/dev/fuse`。
 - 生产节点配置受约束的 AppArmor 或 SELinux profile。
 - `cilium-fqdn` 模式要求集群已安装并启用 Cilium FQDN policy。
-- 集群能够拉取 values 中全部 digest-pinned 镜像。
+- 集群能够拉取 values 中全部版本化镜像。
 - 生产 Redis 必须使用持久化存储或外部高可用 Redis。
 
 `config.workspace.allowMissingLSMForKind=true` 只允许在 kind 或明确的验收集群使用。没有专用 LSM 的集群不能作为生产环境。
@@ -364,167 +364,87 @@ helm --kube-context "$CTX" uninstall "$RELEASE" \
 
 pre-delete Job 会先缩容 API、完成 persistent/ephemeral finalization、排空普通 Pool 和 FUSE Pool，并进行零状态审计，然后 Helm 才能删除 Redis 等 release 资源。
 
-## 7. 镜像构建清单
+## 7. 镜像构建与回填
 
-仅部署 Kubernetes runtime 时需要三份项目镜像：
+Kubernetes runtime 使用 API、普通 runtime 和 mounter 三份项目镜像；Docker runtime 再使用 gateway 和 Docker FUSE 两份镜像。Redis 使用批准的仓库镜像，不在本项目构建。MinIO、华为公有云 OBS 和华为私有云 OBS 共用同一份 mounter/Docker FUSE 镜像。
 
-| 镜像 | 必需 | 用途 |
-|---|---|---|
-| `sandbox-fuse-api` | 是 | API、Pool、租约、排空控制面 |
-| `sandbox-fuse-runtime` | 是 | 普通/sync/无 workspace sandbox，内含非特权 probe |
-| `sandbox-fuse-mounter` | 是 | Kubernetes Pod 内可信 FUSE sidecar |
-
-同时交付 Docker runtime 时再增加：
-
-| 镜像 | 必需 | 用途 |
-|---|---|---|
-| `sandbox-fuse-docker` | 是 | Docker 特殊 FUSE sandbox |
-| `sandbox-fuse-gateway` | 是 | Docker 用户网络和 FUSE system egress gateway |
-
-Redis 使用批准的仓库镜像，不在本项目构建。mounter 和 Docker FUSE 镜像内包含全部三个受信 profile，不按 MinIO/OBS 重复构建。
-
-以下示例构建 `ds-ai-research` 使用的 ARM64 镜像。AMD64 应重新以 `GOARCH=amd64` 和 `--platform linux/amd64` 构建；FUSE 二进制在 Docker build 前生成，不能把 ARM64 二进制放进 AMD64 镜像。
+发布人在仓库根目录显式设置版本。示例构建单一 ARM64 架构；多架构镜像继续使用现有 `docker manifest` 流程组装，本项目不重复编排。
 
 ```bash
-REG=registry.i.huaxisy.com/library/ai-infra
-ARCH=arm64
+REGISTRY=registry.i.huaxisy.com/library/ai-infra
+VERSION=v0.2.12
 PLATFORM=linux/arm64
-VERSION="$(git rev-parse --short=12 HEAD)"
 ```
 
-### 7.1 API
+### 7.1 API、普通 runtime 和 gateway
+
+每份镜像直接执行一次 `docker buildx build`：
 
 ```bash
-docker buildx build \
-  --platform "$PLATFORM" \
+docker buildx build --platform "$PLATFORM" \
   -f docker/Dockerfile \
-  -t "$REG/sandbox-fuse-api:${VERSION}-${ARCH}" \
-  --push \
-  .
-```
+  -t "$REGISTRY/sandbox-api:$VERSION" --push .
 
-### 7.2 普通 runtime
-
-生产构建必须向两个基础镜像变量传入 digest-pinned 引用：
-
-```bash
-: "${GO_BUILDER_IMAGE:?set digest-pinned Go builder image}"
-: "${SANDBOX_BASE_IMAGE:?set digest-pinned sandbox base image}"
-
-docker buildx build \
-  --platform "$PLATFORM" \
+docker buildx build --platform "$PLATFORM" \
   -f docker/images/sandbox/Dockerfile \
   --build-arg WORKSPACE_PROBE_BUILDER="$GO_BUILDER_IMAGE" \
   --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_BASE_IMAGE" \
-  -t "$REG/sandbox-fuse-runtime:${VERSION}-${ARCH}" \
-  --push \
-  .
-```
+  -t "$REGISTRY/sandbox-runtime:$VERSION" --push .
 
-### 7.3 Docker gateway
-
-```bash
-docker buildx build \
-  --platform "$PLATFORM" \
+docker buildx build --platform "$PLATFORM" \
   -f docker/images/gateway/Dockerfile \
-  -t "$REG/sandbox-fuse-gateway:${VERSION}-${ARCH}" \
-  --push \
+  -t "$REGISTRY/sandbox-gateway:$VERSION" --push \
   docker/images/gateway
 ```
 
-Kubernetes runtime 不创建 gateway 容器；该镜像只用于 Docker runtime。
+`GO_BUILDER_IMAGE` 和 `SANDBOX_BASE_IMAGE` 是批准的基础镜像引用。gateway 只用于 Docker runtime。
 
-### 7.4 Kubernetes mounter 与 Docker FUSE
+### 7.2 Kubernetes mounter 和 Docker FUSE
 
-两个 FUSE 镜像的 `workspace-mounter` 和 `workspace-probe` 必须来自同一源码 revision：
-
-```bash
-BUILD_DIR="$(mktemp -d)"
-cleanup_build_dir() {
-  test -n "${BUILD_DIR:-}" && rm -rf -- "$BUILD_DIR"
-}
-trap cleanup_build_dir EXIT
-mkdir -p "$BUILD_DIR/mounter" "$BUILD_DIR/docker-fuse"
-
-CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
-  go build -trimpath -ldflags='-s -w' \
-  -o "$BUILD_DIR/workspace-mounter" ./cmd/workspace-mounter
-
-CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
-  go build -trimpath -ldflags='-s -w' \
-  -o "$BUILD_DIR/workspace-probe" ./cmd/workspace-probe
-
-cp docker/images/workspace-mounter/Dockerfile \
-  docker/images/workspace-mounter/profile-bundle.json \
-  "$BUILD_DIR/mounter/"
-cp "$BUILD_DIR/workspace-mounter" "$BUILD_DIR/mounter/"
-
-cp docker/images/sandbox-fuse/Dockerfile "$BUILD_DIR/docker-fuse/"
-cp docker/images/workspace-mounter/profile-bundle.json "$BUILD_DIR/docker-fuse/"
-cp "$BUILD_DIR/workspace-mounter" "$BUILD_DIR/workspace-probe" \
-  "$BUILD_DIR/docker-fuse/"
-```
-
-构建输入要求：
-
-- `MOUNTER_BASE_IMAGE`：digest-pinned，提供 `fusermount3`、CA 和 s3fs 所需动态库；
-- `DOCKER_FUSE_BASE_IMAGE`：digest-pinned，除上述依赖外还提供 Python、Node、`/usr/sbin/ip` 和 UID/GID 1000 的 `sandbox` 用户；
-- `S3FS_PACKAGE_URL`：无 credential、query、fragment 的固定 HTTPS artifact URL；
-- `S3FS_PACKAGE_SHA256`：与 artifact 完全一致。本次验证的 s3fs 1.95 ARM64 artifact SHA-256 为 `fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695`。
+Dockerfile 会在 builder stage 内从当前源码编译 `workspace-mounter`/`workspace-probe`。不需要先执行宿主机 `go build`，也不需要创建、复制或删除临时 build context。
 
 ```bash
-: "${MOUNTER_BASE_IMAGE:?set digest-pinned mounter base image}"
-: "${DOCKER_FUSE_BASE_IMAGE:?set digest-pinned Docker FUSE base image}"
-: "${S3FS_PACKAGE_URL:?set immutable HTTPS s3fs artifact URL}"
 S3FS_PACKAGE_SHA256=fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695
 
-docker buildx build \
-  --platform "$PLATFORM" \
+docker buildx build --platform "$PLATFORM" \
+  -f docker/images/workspace-mounter/Dockerfile \
+  --build-arg GO_BUILDER_IMAGE="$GO_BUILDER_IMAGE" \
   --build-arg BASE_IMAGE="$MOUNTER_BASE_IMAGE" \
   --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
   --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
-  -t "$REG/sandbox-fuse-mounter:${VERSION}-${ARCH}" \
-  --push \
-  "$BUILD_DIR/mounter"
+  -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" --push .
 
-docker buildx build \
-  --platform "$PLATFORM" \
+docker buildx build --platform "$PLATFORM" \
+  -f docker/images/sandbox-fuse/Dockerfile \
+  --build-arg GO_BUILDER_IMAGE="$GO_BUILDER_IMAGE" \
   --build-arg BASE_IMAGE="$DOCKER_FUSE_BASE_IMAGE" \
   --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
   --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
-  -t "$REG/sandbox-fuse-docker:${VERSION}-${ARCH}" \
-  --push \
-  "$BUILD_DIR/docker-fuse"
+  -t "$REGISTRY/sandbox-fuse-docker:$VERSION" --push .
 ```
 
-构建结束后可以提前删除本次临时目录；退出 shell 时上面的 trap 也会清理：
+基础镜像使用批准的引用；`S3FS_PACKAGE_URL` 必须是无 credential/query/fragment 的固定 HTTPS 地址，Dockerfile 会校验 artifact SHA256。
 
-```bash
-cleanup_build_dir
-BUILD_DIR=
-```
+### 7.3 更新 Helm values
 
-`BUILD_DIR` 必须是本次 `mktemp -d` 返回的精确路径；不要把仓库根目录或通用环境变量作为删除目标。
-
-### 7.5 获取 digest 并回填 values
-
-```bash
-docker buildx imagetools inspect "$REG/sandbox-fuse-api:${VERSION}-${ARCH}"
-docker buildx imagetools inspect "$REG/sandbox-fuse-runtime:${VERSION}-${ARCH}"
-docker buildx imagetools inspect "$REG/sandbox-fuse-mounter:${VERSION}-${ARCH}"
-docker buildx imagetools inspect "$REG/sandbox-fuse-docker:${VERSION}-${ARCH}"
-docker buildx imagetools inspect "$REG/sandbox-fuse-gateway:${VERSION}-${ARCH}"
-```
-
-Helm/Compose 最终配置必须使用 registry 返回的 `@sha256:<digest>`，不能只使用可变 tag。API values 的写法为：
+构建和 manifest 发布完成后，只把同一个版本 tag 回填到部署 values：
 
 ```yaml
 image:
-  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
-  tag: <tag>@sha256:<digest>
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
+  tag: v0.2.12
+
+config:
+  images:
+    sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12
+    gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12
+  workspace:
+    fuseImages:
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
 ```
 
-runtime 和 FUSE 镜像字段填写完整的 `repository@sha256:<digest>`。
+然后按本文第 4 节执行原有 `helm upgrade --install`。新部署使用 `vMAJOR.MINOR.PATCH`（或预发布版本）tag；已有合法 digest 引用仍兼容，`latest` 和无版本 tag 会被拒绝。
 
 ## 8. 发布验证
 
@@ -547,11 +467,11 @@ git diff --check
 镜像门禁：
 
 ```bash
-FUSE_IMAGE=<mounter-image@sha256:digest> \
-SANDBOX_IMAGE=<ordinary-runtime-image@sha256:digest> \
+FUSE_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12 \
+SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12 \
   ./scripts/verify-fuse-image.sh kubernetes release-check
 
-SANDBOX_IMAGE=<docker-fuse-image@sha256:digest> \
+SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12 \
   ./scripts/verify-fuse-image.sh docker release-check
 ```
 
@@ -567,4 +487,4 @@ SANDBOX_IMAGE=<docker-fuse-image@sha256:digest> \
 2. digest-pinned 基础镜像与固定 s3fs artifact URL/SHA；
 3. ARM64/AMD64 分架构构建；
 4. package-check、release-check、扫描、SBOM、签名和 attestation；
-5. 自动取得发布 digest，并在同一变更中更新全部后端 overlay。
+5. 使用同一版本 tag 更新全部后端 overlay，并由现有流程发布多架构 manifest。

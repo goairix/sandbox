@@ -12,7 +12,7 @@
 
 ### 1.1 无状态或状态可丢弃：直接升级
 
-如果当前没有需要保留的 active/persistent sandbox，Pool 和 Redis 中的运行态也允许重建，并且不切换 backend、凭据或 FUSE 镜像，直接使用新版源码和原服务器环境文件执行：
+如果当前没有需要保留的 active/persistent sandbox，Pool 和 Redis 中的运行态也允许重建，直接在 `.env` 中更新五份项目镜像的版本 tag，然后执行：
 
 ```bash
 PROJECT=<docker-compose-ls中的NAME>
@@ -21,10 +21,10 @@ ENV_FILE=/opt/sandbox/env/production.env
 
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
   -f "$NEW_RELEASE/docker/docker-compose.yml" \
-  up -d --build -t 600 sandbox-images redis sandbox-api
+  up -d -t 600
 ```
 
-这就是常规的 Docker Compose 快速升级：构建新版 sandbox-api，准备 runtime/FUSE 镜像，保留未变更的 Redis volume，并替换 API 容器。`-t 600` 不是额外迁移步骤，只是给旧 API 最多 600 秒完成普通 Pool/FUSE 空壳清理，避免 Compose 默认短超时把它强制终止。
+这就是常规的 Docker Compose 快速升级：拉取已发布的版本镜像，保留未变更的 Redis volume，并替换 API 容器。`-t 600` 不是额外迁移步骤，只是给旧 API 最多 600 秒完成普通 Pool/FUSE 空壳清理，避免 Compose 默认短超时把它强制终止。
 
 升级后检查：
 
@@ -42,14 +42,14 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
 
 - 旧 workspace 的数据还必须完成最后一次同步或卸载；
 - 切换 endpoint、bucket、preset、凭据、CA、storage identity 或 system egress；
-- 修改 FUSE mounter/sandbox 镜像或 staging root；
+- 有 active/persistent workspace 且修改 FUSE mounter/sandbox 镜像或 staging root；
 - 首次从不具备当前 FUSE lifecycle contract 的旧版本升级。
 
 ### 1.2 需要保留状态或首次迁移：使用完整流程
 
 不要只复制一份新的 `docker-compose.yml`，也不要直接用新版 `.env.example` 覆盖服务器 `.env`。
 
-当前 Compose 会从仓库根目录构建 sandbox-api 和默认 ordinary runtime，因此一个发布版本应包含完整项目源码。推荐新旧版本并排存放，把服务器环境文件、凭据和持久目录放在 release 目录之外：
+生产 Compose 使用提前发布的版本镜像；release 目录只需要包含与该版本配套的 Compose 文件。推荐新旧版本并排存放，把服务器环境文件、凭据和持久目录放在 release 目录之外：
 
 ```text
 /opt/sandbox/
@@ -69,8 +69,8 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
 
 | 文件或目录 | 升级方式 |
 |---|---|
-| 新版项目源码 | 完整放入新的 release 目录 |
-| `docker/docker-compose.yml` | 使用新版，不能与旧源码/Dockerfile 混用 |
+| 新版发布文件 | 把新版 `docker-compose.yml` 放入新的 release 目录 |
+| `docker/docker-compose.yml` | 使用与镜像版本配套的新版文件 |
 | `docker/.env.example` | 只作为新版字段清单，不能直接用于生产 |
 | 服务器 `.env` | 保留为外部文件，按新版 `.env.example` 逐项迁移 |
 | workspace AK/SK/CA | 使用 release 外的 root-only 文件目录 |
@@ -163,9 +163,9 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
 
 旧 API 收到 SIGTERM 后会完成 ephemeral finalization、排空未绑定普通/FUSE 空壳，并保留 persistent sandbox。新 API 使用同一 Redis DB 和 Docker daemon 恢复 persistent 状态。
 
-### 4.2 Backend 变化，必须先 release drain
+### 4.2 Backend 变化或需保留 workspace，必须先 release drain
 
-以下任一变化都必须先使用新版 drain 二进制配合旧 backend 配置、旧凭据和现有 Redis 执行 `--drain-release`：
+存在需要保留的 active/persistent workspace，或无法确认受管状态可丢弃时，以下任一变化都必须先使用新版 drain 二进制配合旧 backend 配置、旧凭据和现有 Redis 执行 `--drain-release`：
 
 - `STORAGE_PRESET`、endpoint、bucket、region、TLS 或 subPath；
 - `STORAGE_IDENTITY`；
@@ -181,47 +181,28 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
 
 Docker Compose 不会自动比较这些字段，也不会自动创建升级前 hook。不能直接修改 `.env` 后执行 `up -d`。
 
+已经确认没有需要保留的 active/persistent sandbox，且 Pool/Redis 运行态允许重建时，按第 1.1 节直接更新全部镜像 tag 并执行 `up -d -t 600`。
+
 ## 5. 普通升级步骤
 
-先让入口停止向 API 发送新请求。只停止 sandbox-api，保持 Redis 运行；显式提供 600 秒优雅停止时间，不能依赖 Compose 默认的短超时：
+先发布对应的 `:vMAJOR.MINOR.PATCH` 镜像，并在服务器 `.env` 中更新本次普通升级涉及的镜像 tag。backend、凭据、FUSE 镜像和其他 contract 不变时，不需要手工 stop、build 或运行 image helper：
 
 ```bash
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" stop -t 600 sandbox-api
+  -f "$NEW_COMPOSE" config >/dev/null
+
+docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
+  -f "$NEW_COMPOSE" up -d -t 600
 ```
 
-确认旧 API 已停止、Redis 仍在运行：
+Compose 会拉取本机缺少的新版本镜像、优雅替换 API，并复用同一个 Redis volume。若启动失败，把 `.env` 中五个镜像 tag 恢复为旧版本，再使用旧 Compose 执行同一条 `up -d -t 600`；不要执行 `down` 或重新构建镜像。
+
+只有本地源码开发才使用 `--build`：
 
 ```bash
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" ps -a
-```
-
-使用新源码构建 API，并拉取或构建新 runtime 镜像：
-
-```bash
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$NEW_COMPOSE" build sandbox-api
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$NEW_COMPOSE" run --rm --no-deps sandbox-images
-```
-
-最后只替换 API，不重建 Redis：
-
-```bash
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$NEW_COMPOSE" up -d --no-deps --no-build sandbox-api
-```
-
-如果构建或启动失败，保留 Redis、persistent sandbox 和旧 release 文件，使用旧 Compose 重新启动旧 API；不要执行 `down`：
-
-```bash
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" build sandbox-api
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" up -d --no-deps sandbox-api
+SANDBOX_API_IMAGE=sandbox-api:latest \
+docker compose --env-file docker/.env -f docker/docker-compose.yml \
+  up -d --build -t 600
 ```
 
 ## 6. Backend、凭据或 FUSE 镜像变化的升级步骤
@@ -243,6 +224,7 @@ DRAIN_ENV=/opt/sandbox/env/drain-old-backend.env
 
 `DRAIN_ENV` 至少要保持旧环境的以下值：
 
+- `SANDBOX_API_IMAGE` 使用包含 `--drain-release` 的新版本 API 镜像；
 - `STORAGE_PRESET`、endpoint、bucket、region、TLS、subPath 和 storage identity；
 - 旧 workspace credential 目录和 credential generation；
 - 旧 CA、system egress、runtime/gateway/FUSE 镜像；
@@ -256,11 +238,11 @@ docker compose -p "$PROJECT" --env-file "$DRAIN_ENV" \
   -f "$NEW_COMPOSE" config > "$BACKUP_DIR/drain-compose-rendered.yaml"
 ```
 
-第三步，在 Redis 仍运行时构建新版 API，然后使用新版 Compose wiring 和 `DRAIN_ENV` 启动一次性 drain 容器：
+第三步，在 Redis 仍运行时拉取新版 API，然后使用新版 Compose wiring 和 `DRAIN_ENV` 启动一次性 drain 容器：
 
 ```bash
 docker compose -p "$PROJECT" --env-file "$DRAIN_ENV" \
-  -f "$NEW_COMPOSE" build sandbox-api
+  -f "$NEW_COMPOSE" pull sandbox-api
 ```
 
 下面的 preset 映射必须保持与新版 `docker-compose.yml` 一致：
@@ -313,14 +295,11 @@ docker volume ls --filter label=sandbox.managed=true
 
 如果 drain 失败，不能修改旧凭据、Redis 或受管容器。修复旧 endpoint、旧凭据、Docker/FUSE 故障后，使用同一条旧配置命令重试。
 
-如果需要恢复旧服务，先用旧源码重新构建被新版 build 覆盖的 `sandbox-api:latest`，再使用旧 Compose 和旧环境文件启动：
+如果需要恢复旧服务，把环境文件中的 `SANDBOX_API_IMAGE` 恢复为旧版本，再使用旧 Compose 和旧环境文件启动：
 
 ```bash
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" build sandbox-api
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$OLD_COMPOSE" up -d --no-deps sandbox-api
+  -f "$OLD_COMPOSE" up -d -t 600
 ```
 
 第四步，drain 成功后才创建新的凭据目录或新的 `.env`。凭据轮换不能原地覆盖旧 `accessKey`/`secretKey`；先写入新的 root-only 目录，再让新环境文件引用新目录：
@@ -340,7 +319,7 @@ WORKSPACE_CREDENTIAL_DIR=/opt/sandbox/secrets/workspace-new
 WORKSPACE_CREDENTIAL_GENERATION=<new-non-secret-generation>
 ```
 
-第五步，使用新 Compose 和新环境文件完成 `config`、build、image helper 和 API 启动，仍保持同一个 `PROJECT` 和 Redis volume：
+第五步，使用新 Compose 和新环境文件完成启动，仍保持同一个 `PROJECT` 和 Redis volume：
 
 ```bash
 NEW_ENV_FILE=/opt/sandbox/env/production-new.env
@@ -349,13 +328,7 @@ docker compose -p "$PROJECT" --env-file "$NEW_ENV_FILE" \
   -f "$NEW_COMPOSE" config >/dev/null
 
 docker compose -p "$PROJECT" --env-file "$NEW_ENV_FILE" \
-  -f "$NEW_COMPOSE" build sandbox-api
-
-docker compose -p "$PROJECT" --env-file "$NEW_ENV_FILE" \
-  -f "$NEW_COMPOSE" run --rm --no-deps sandbox-images
-
-docker compose -p "$PROJECT" --env-file "$NEW_ENV_FILE" \
-  -f "$NEW_COMPOSE" up -d --no-deps --no-build sandbox-api
+  -f "$NEW_COMPOSE" up -d -t 600
 ```
 
 后端切换已经销毁旧 backend 的 persistent/ephemeral sandbox 和两类 Pool。新 API 启动后会按新配置重新补池。
@@ -378,23 +351,14 @@ install -d -o root -g root -m 0700 /opt/sandbox/secrets/workspace
 install -d -o root -g root -m 0700 /opt/sandbox/state/workspace-secrets
 ```
 
-根据新版 `docker/.env.example` 创建外部环境文件，使用绝对路径并只选择一个 `STORAGE_PRESET`。启用 FUSE 时必须配置 digest-pinned `FUSE_MOUNTER_IMAGE` 和 `FUSE_SANDBOX_IMAGE`；Docker 主机必须是提供 `/dev/fuse` 和受约束 LSM 的 Linux 主机。
+根据新版 `docker/.env.example` 创建外部环境文件，使用绝对路径并只选择一个 `STORAGE_PRESET`。五份项目镜像填写同一个版本 tag，例如 `v0.2.12`；Docker 主机必须是提供 `/dev/fuse` 和受约束 LSM 的 Linux 主机。
 
 ```bash
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
   -f "$COMPOSE_FILE" config >/dev/null
 
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" build sandbox-api
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" run --rm --no-deps sandbox-images
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" up -d --no-build redis
-
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" up -d --no-deps --no-build sandbox-api
+  -f "$COMPOSE_FILE" up -d -t 600
 ```
 
 不要在 macOS Docker Desktop 缺少 `/dev/fuse` 时用 privileged 绕过 preflight；该环境只能验证 sync 或改用真实 Linux Docker 主机验证 FUSE。
