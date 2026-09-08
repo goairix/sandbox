@@ -22,6 +22,7 @@
 - Modify `scripts/test-fuse-images.sh`: assert self-contained root-context FUSE builds.
 - Modify `docker/docker-compose.yml` and `docker/.env.example`: make the API and runtime image references explicit production inputs.
 - Modify `deploy/helm/sandbox/values.yaml`, `testdata/values-fuse-*.yaml`, and `scripts/test-helm-chart.sh`: use the version-tagged release naming convention.
+- Modify `deploy/helm/sandbox/values.schema.json`: allow strict release tags while retaining digest compatibility.
 - Modify `docs/deployment/helm-deployment-upgrade.md`, `docs/deployment/docker-compose-deployment-upgrade.md`, and `docs/deployment/workspace-fuse.md`: document direct builds and simple image-reference updates.
 
 ### Task 1: Shared release image reference validation
@@ -243,6 +244,7 @@ git commit -m "build: compile fuse tools inside images"
 - Modify: `docker/docker-compose.yml`
 - Modify: `docker/.env.example`
 - Modify: `deploy/helm/sandbox/values.yaml`
+- Modify: `deploy/helm/sandbox/values.schema.json`
 - Modify: `testdata/values-fuse-minio.yaml`
 - Modify: `testdata/values-fuse-obs-private.yaml`
 - Modify: `testdata/values-fuse-obs-public.yaml`

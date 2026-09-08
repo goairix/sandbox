@@ -1,6 +1,6 @@
 image:
-  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api
-  tag: hybrid-3fc1ddd-arm64@sha256:db8a3065e7227b923576b72f89301a0768129e3e7e966b8b8668285be4b5d228
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
+  tag: v0.2.12
   pullPolicy: Always
 
 replicaCount: 1
@@ -29,8 +29,8 @@ config:
     minSize: 0
     maxSize: 1
   images:
-    sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
-    gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-runtime@sha256:ed4cf37c7066fcb68f9943f632786dd1497144f81f3a7e2072a21c56da4dd788
+    sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12
+    gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12
   storage:
     filesystem:
       preset: huawei-obs-private
@@ -64,8 +64,8 @@ config:
       refillIntervalSeconds: 5
       prepareTimeoutSeconds: 180
     fuseImages:
-      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:5d616d2225d593a3669e257d6ba7834fa44773843c19adba1b8e87fda699a2dc
-      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:1eb72296858a2ebcdef4940d9a21b5b637b12c5a258ae245f9e3a40b618a50ca
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
     lsmProfile: sandbox-fuse
     proxyURL: ""
   security:

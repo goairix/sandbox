@@ -1,8 +1,8 @@
 replicaCount: 2
 
 image:
-  repository: sandbox
-  tag: latest
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
+  tag: v0.2.12
   pullPolicy: IfNotPresent
 
 service:
@@ -75,8 +75,8 @@ config:
     minSize: 3
     maxSize: 20
   images:
-    sandbox: "sandbox:latest"
-    gateway: "sandbox-gateway:latest"
+    sandbox: "registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12"
+    gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12"
   storage:
     filesystem:
       # Exactly one release-wide backend preset is selected. The preset fixes
@@ -107,8 +107,8 @@ config:
       - sync
       - fuse
     fuseImages:
-      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
     # Local kind on Docker Desktop only. Production must keep this false and
     # configure a real AppArmor/SELinux profile.
     allowMissingLSMForKind: false

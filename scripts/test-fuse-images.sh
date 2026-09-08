@@ -132,6 +132,7 @@ grep -Fq 'SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES=${WORKSPACE_ENABLED_MOUNT_MODES:
 grep -Fq 'SANDBOX_WORKSPACE_BACKEND_PRESET=${STORAGE_PRESET:-minio}' "$compose" || fail "Compose omits the storage preset"
 grep -Fq 'SANDBOX_WORKSPACE_BACKEND_MOUNTER_IMAGE=${FUSE_MOUNTER_IMAGE:-}' "$compose" || fail "Compose omits the common mounter image"
 grep -Fq 'SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE=${FUSE_SANDBOX_IMAGE:-}' "$compose" || fail "Compose omits the common Docker FUSE image"
+grep -Fq 'image: ${SANDBOX_API_IMAGE:-sandbox-api:latest}' "$compose" || fail "Compose API image is not configurable"
 ! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_MINIO_' "$compose" || fail "Compose still exports the MinIO provider map"
 ! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_OBS_' "$compose" || fail "Compose still exports the OBS provider map"
 ! grep -Fq 'SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY=' "$compose" || fail "Compose exposes the access key in process environment"
@@ -141,6 +142,14 @@ grep -Fq 'export SANDBOX_WORKSPACE_BACKEND_PROFILE=huawei-obs-public-v1' "$compo
 grep -Fq 'export SANDBOX_WORKSPACE_BACKEND_PROFILE=huawei-obs-private-2023-v1' "$compose" || fail "Compose does not derive the private OBS profile"
 grep -Fq '*,fuse,*)' "$compose" || fail "Compose image helper does not gate common FUSE image pulls"
 grep -Fxq 'STORAGE_PRESET=minio' "$compose_env" || fail "example environment omits its single preset selector"
+for image in \
+  'SANDBOX_API_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-api:v0.2.12' \
+  'SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12' \
+  'GATEWAY_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12' \
+  'FUSE_MOUNTER_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12' \
+  'FUSE_SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12'; do
+  grep -Fxq "$image" "$compose_env" || fail "example environment omits versioned image: $image"
+done
 ! grep -Eq '^(STORAGE_PROVIDER|WORKSPACE_PROFILE)=' "$compose_env" || fail "example environment permits preset mapping drift"
 grep -Fq 'enabled_mount_modes: ["sync"]' "$operator_config" || fail "repository config does not default execution requests to sync"
 ! grep -Eq '^  providers:' "$operator_config" || fail "repository config still declares provider maps"

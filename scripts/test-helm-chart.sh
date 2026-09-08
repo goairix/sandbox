@@ -101,10 +101,10 @@ minio_api_repository="$(awk '/^image:/{image=1; next} image && /repository:/{pri
 public_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-public.yaml")"
 private_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-obs-private.yaml")"
 minio_api_tag="$(awk '/^image:/{image=1; next} image && /tag:/{print $2; exit}' "$repo_root/testdata/values-fuse-minio.yaml")"
-expected_api_repository='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-api'
-expected_api_tag='hybrid-3fc1ddd-arm64@sha256:db8a3065e7227b923576b72f89301a0768129e3e7e966b8b8668285be4b5d228'
-expected_mounter='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:5d616d2225d593a3669e257d6ba7834fa44773843c19adba1b8e87fda699a2dc'
-expected_docker='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker@sha256:1eb72296858a2ebcdef4940d9a21b5b637b12c5a258ae245f9e3a40b618a50ca'
+expected_api_repository='registry.i.huaxisy.com/library/ai-infra/sandbox-api'
+expected_api_tag='v0.2.12'
+expected_mounter='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12'
+expected_docker='registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12'
 test "$public_api_repository" = "$expected_api_repository"
 test "$private_api_repository" = "$expected_api_repository"
 test "$minio_api_repository" = "$expected_api_repository"

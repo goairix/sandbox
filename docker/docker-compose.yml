@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: sandbox-api:latest
+    image: ${SANDBOX_API_IMAGE:-sandbox-api:latest}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
