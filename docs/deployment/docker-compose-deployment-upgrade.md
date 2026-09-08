@@ -8,7 +8,44 @@
 
 本文面向使用 `docker/docker-compose.yml` 部署 sandbox-api 的 Linux Docker 环境。Docker Compose 没有 Helm backend fingerprint hook，涉及 backend 的升级必须由运维先使用旧配置手工执行 release drain。
 
-## 1. 先回答服务器文件怎么处理
+## 1. 先选升级方式
+
+### 1.1 无状态或状态可丢弃：直接升级
+
+如果当前没有需要保留的 active/persistent sandbox，Pool 和 Redis 中的运行态也允许重建，并且不切换 backend、凭据或 FUSE 镜像，直接使用新版源码和原服务器环境文件执行：
+
+```bash
+PROJECT=<docker-compose-ls中的NAME>
+NEW_RELEASE=/opt/sandbox/releases/sandbox-new
+ENV_FILE=/opt/sandbox/env/production.env
+
+docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
+  -f "$NEW_RELEASE/docker/docker-compose.yml" \
+  up -d --build -t 600 sandbox-images redis sandbox-api
+```
+
+这就是常规的 Docker Compose 快速升级：构建新版 sandbox-api，准备 runtime/FUSE 镜像，保留未变更的 Redis volume，并替换 API 容器。`-t 600` 不是额外迁移步骤，只是给旧 API 最多 600 秒完成普通 Pool/FUSE 空壳清理，避免 Compose 默认短超时把它强制终止。
+
+升级后检查：
+
+```bash
+docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
+  -f "$NEW_RELEASE/docker/docker-compose.yml" ps
+
+docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
+  -f "$NEW_RELEASE/docker/docker-compose.yml" logs --tail=200 sandbox-api
+```
+
+不要执行 `down -v`，也不要改变 `PROJECT`；前者会删除 Redis volume，后者会另建一套网络、容器和 volume。即使业务没有持久化 sandbox，Redis named volume 仍保存 Pool、租约等运行态，原地 `up` 会自然复用它。
+
+以下情况不能套用这条快速命令，必须执行本文第 6 节的 release drain：
+
+- 旧 workspace 的数据还必须完成最后一次同步或卸载；
+- 切换 endpoint、bucket、preset、凭据、CA、storage identity 或 system egress；
+- 修改 FUSE mounter/sandbox 镜像或 staging root；
+- 首次从不具备当前 FUSE lifecycle contract 的旧版本升级。
+
+### 1.2 需要保留状态或首次迁移：使用完整流程
 
 不要只复制一份新的 `docker-compose.yml`，也不要直接用新版 `.env.example` 覆盖服务器 `.env`。
 

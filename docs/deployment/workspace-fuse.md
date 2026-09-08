@@ -192,10 +192,12 @@ FUSE_SANDBOX_IMAGE=registry.example.com/sandbox-fuse-docker@sha256:<digest>
 
 ```bash
 docker compose --env-file docker/.env -f docker/docker-compose.yml config >/dev/null
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --build \
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --build -t 600 \
   sandbox-images redis sandbox-api
 docker compose --env-file docker/.env -f docker/docker-compose.yml ps
 ```
+
+没有需要保留的 active/persistent sandbox，且 backend、凭据和 FUSE 镜像不变时，上述 `up -d --build -t 600` 就是完整升级动作；不需要预先 `down` 或单独排空。`-t 600` 用于给旧 API 足够时间清理 Pool/FUSE 空壳。需要保留旧 workspace 的最终写入，或 backend contract 有变化时，才执行完整 release drain。
 
 Compose 不创建长期 mounter service，也不挂载宿主机业务 `/workspace`。`sandbox-images` 在启用 FUSE 时各拉取/构建公共镜像一次，实际特殊容器仍由 sandbox-api Pool 动态管理。
 
