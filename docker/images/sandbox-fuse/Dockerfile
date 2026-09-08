@@ -1,5 +1,5 @@
 ARG GO_BUILDER_IMAGE=golang:1.25-alpine
-ARG BASE_IMAGE
+ARG BASE_IMAGE=scratch
 FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder
 
 WORKDIR /src

@@ -161,7 +161,7 @@ for file in "$mounter" "$fuse"; do
   grep -Fq 'COPY go.mod go.sum ./' "$file" || fail "$file does not use the repository root build context"
   grep -Fq 'COPY --from=workspace-tools-builder /out/workspace-mounter /usr/local/bin/workspace-mounter' "$file" || fail "$file does not install its self-built mounter"
   ! grep -Fxq 'COPY workspace-mounter /usr/local/bin/workspace-mounter' "$file" || fail "$file still requires a host-built mounter"
-  grep -Eq '^ARG BASE_IMAGE$' "$file" || fail "$file does not require BASE_IMAGE"
+  grep -Fxq 'ARG BASE_IMAGE=scratch' "$file" || fail "$file has no safe placeholder for the required BASE_IMAGE"
   grep -Fq '@sha256:' "$file" || fail "$file does not enforce a digest base"
   grep -Eq '^ARG S3FS_PACKAGE_URL$' "$file" || fail "$file does not require S3FS_PACKAGE_URL"
   grep -Eq '^ARG S3FS_PACKAGE_SHA256$' "$file" || fail "$file does not require S3FS_PACKAGE_SHA256"
