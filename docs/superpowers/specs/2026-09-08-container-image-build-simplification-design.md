@@ -10,6 +10,7 @@
 - 运维不再手工编译或复制 `workspace-mounter`、`workspace-probe`。
 - 构建后只需要更新 Helm values 或 Docker Compose 环境中的镜像引用，再执行原有部署命令。
 - 五份项目镜像使用同一个人工指定的发布版本 tag，例如 `v0.2.12`；部署配置直接引用该版本 tag。
+- 运行时、配置校验、preflight 和发布矩阵允许规范版本 tag，继续兼容已有的 `@sha256:` 引用，并拒绝 `latest`、无 tag 和任意字符串 tag。
 - MinIO、华为公有云 OBS、华为私有云 OBS 共用同一份 mounter 镜像和同一份 Docker FUSE 镜像。
 - 保留基础镜像 digest、s3fs artifact URL/SHA256、profile bundle 和镜像自检等现有安全约束。
 
@@ -56,6 +57,8 @@ registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
 
 多架构镜像由现有 `docker manifest` 发布流程组装，本次调整不新增或替代该流程。构建说明只负责生成各架构镜像；Helm values 和 Docker Compose 始终引用最终的统一版本 tag，例如 `:v0.2.12`。
 
+规范版本 tag 使用 `vMAJOR.MINOR.PATCH`，允许可选的预发布后缀，例如 `v0.2.12-rc.1`。为了兼容已经部署的环境，完整且合法的 `@sha256:<64位小写十六进制>` 引用仍可使用。`latest`、无 tag、架构后缀充当部署版本以及其他可变 tag 均不通过生产配置校验。
+
 发布完成后：
 
 - Helm：更新 API、ordinary runtime、mounter，以及实际需要的 gateway/Docker FUSE 镜像字段，再执行 `helm upgrade`。
@@ -66,6 +69,7 @@ registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
 ## 兼容性与安全
 
 - Go builder 和最终基础镜像按生产要求使用 digest-pinned 引用；这里约束的是 Dockerfile 的基础镜像，不要求 Helm/Compose 把项目发布镜像的版本 tag 改写成 digest。
+- Go 配置校验、Docker runtime、Kubernetes runtime、FUSE image verifier、preflight 和 matrix 使用同一语义：项目镜像接受规范版本 tag 或已有 digest 引用。
 - mounter 与 probe 必须由同一 build context、同一源码 revision 构建。
 - s3fs artifact 必须使用无凭据、无 query/fragment 的 HTTPS URL，并在镜像内校验 SHA256。
 - profile bundle 固定从仓库路径复制，并继续执行镜像自检。
@@ -77,6 +81,7 @@ registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
 - 五类镜像均有一条可独立执行的 `docker buildx build` 示例。
 - 构建示例使用人工指定的 `VERSION=v0.2.12`，不使用 Git SHA 或 `${VERSION}-${ARCH}` 作为部署 tag。
 - Helm values 和 Docker Compose 示例使用统一的 `:v0.2.12` 镜像引用；多架构 manifest 组装不纳入本次实现。
+- `:v0.2.12` 和 `:v0.2.12-rc.1` 通过项目镜像校验；`:latest`、无 tag 和非版本 tag 被拒绝；已有合法 digest 引用继续通过。
 - mounter/Docker FUSE Dockerfile 可从仓库根 context 自行编译所需 Go 二进制。
 - Helm 与 Compose 文档只要求回填镜像引用并执行升级命令。
 - `scripts/test-fuse-images.sh`、Helm 测试、Compose config 校验和相关 Go 测试通过。
