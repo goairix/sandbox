@@ -311,6 +311,18 @@ func TestCreatePodPreparedFUSERejectsNonDigestPoolKey(t *testing.T) {
 	assert.Empty(t, pods.Items)
 }
 
+func TestCreatePodPreparedFUSEAcceptsVersionTaggedImages(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	spec := preparedFUSESpecForTest()
+	spec.Image = "registry.example.com/sandbox-runtime:v0.2.12"
+	spec.WorkspaceFUSE.MounterImage = "registry.example.com/sandbox-fuse-mounter:v0.2.12-rc.1"
+
+	pod, err := createPod(context.Background(), client, "sandbox-runtime", spec)
+	require.NoError(t, err)
+	assert.Equal(t, spec.Image, pod.Spec.Containers[0].Image)
+	assert.Equal(t, spec.WorkspaceFUSE.MounterImage, pod.Spec.InitContainers[0].Image)
+}
+
 func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
 	tests := []struct {
 		name   string

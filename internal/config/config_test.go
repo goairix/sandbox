@@ -402,6 +402,16 @@ func validFUSEProvider(endpointFQDN, egressMode string) config.WorkspaceFUSEProv
 	}
 }
 
+func TestValidateAcceptsVersionTaggedFUSEImages(t *testing.T) {
+	cfg := newValidFUSEConfig()
+	provider := cfg.Workspace.Providers["minio"]
+	provider.MounterImage = "registry.example.com/sandbox-fuse-mounter:v0.2.12"
+	provider.DockerImage = "registry.example.com/sandbox-fuse-docker:v0.2.12-rc.1"
+	cfg.Workspace.Providers["minio"] = provider
+
+	require.NoError(t, cfg.Validate())
+}
+
 func validHybridConfig() *config.Config {
 	cfg := newValidFUSEConfig()
 	legacy := cfg.Workspace.Providers["minio"]

@@ -14,6 +14,7 @@ import (
 	dnetwork "github.com/docker/docker/api/types/network"
 	dockerclient "github.com/docker/docker/client"
 
+	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -27,8 +28,8 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 	if system.Mode != runtime.SystemEgressCIDR {
 		return "", "", "", fmt.Errorf("Docker workspace FUSE supports only CIDR system egress")
 	}
-	if !digestPinnedImagePattern.MatchString(gatewayImage) {
-		return "", "", "", fmt.Errorf("Docker gateway image must be pinned by sha256 digest")
+	if !imageref.IsRelease(gatewayImage) {
+		return "", "", "", fmt.Errorf("Docker gateway image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
 	if !validDockerWorkspaceSecretRoot(secretRoot) {
 		return "", "", "", fmt.Errorf("Docker workspace FUSE secret root is invalid")

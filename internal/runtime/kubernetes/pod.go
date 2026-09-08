@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -23,6 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -448,11 +448,11 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 		!nonEmptyCanonicalValue(fuse.StorageIdentity) || !nonEmptyCanonicalValue(fuse.CredentialGeneration) {
 		return validated, fmt.Errorf("workspace FUSE fixed identity fields must not be empty")
 	}
-	if !isDigestPinnedImage(spec.Image) {
-		return validated, fmt.Errorf("workspace FUSE sandbox image must be pinned by sha256 digest")
+	if !imageref.IsRelease(spec.Image) {
+		return validated, fmt.Errorf("workspace FUSE sandbox image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
-	if !isDigestPinnedImage(fuse.MounterImage) {
-		return validated, fmt.Errorf("workspace FUSE mounter image must be pinned by sha256 digest")
+	if !imageref.IsRelease(fuse.MounterImage) {
+		return validated, fmt.Errorf("workspace FUSE mounter image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
 	if errs := kvalidation.IsDNS1123Subdomain(fuse.SecretName); len(errs) != 0 {
 		return validated, fmt.Errorf("workspace FUSE Secret name is invalid")
@@ -566,23 +566,6 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 
 func nonEmptyCanonicalValue(value string) bool {
 	return value != "" && strings.TrimSpace(value) == value
-}
-
-func isDigestPinnedImage(image string) bool {
-	named, err := reference.ParseNormalizedNamed(image)
-	if err != nil {
-		return false
-	}
-	digested, ok := named.(reference.Digested)
-	if !ok || digested.Digest().Algorithm() != "sha256" {
-		return false
-	}
-	encoded := digested.Digest().Encoded()
-	if len(encoded) != 64 || encoded != strings.ToLower(encoded) {
-		return false
-	}
-	_, err = hex.DecodeString(encoded)
-	return err == nil
 }
 
 func validateLSMProfile(profile string) error {

@@ -12,11 +12,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/distribution/reference"
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/mounter"
 	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 )
@@ -657,11 +657,11 @@ func (c *Config) validateFUSE() error {
 	if provider.CredentialGeneration == "" {
 		return fmt.Errorf("config: %s.credential_generation must not be empty", providerPath)
 	}
-	if !isDigestPinnedImage(provider.MounterImage) {
-		return fmt.Errorf("config: %s.mounter_image must contain a valid @sha256 digest", providerPath)
+	if !imageref.IsRelease(provider.MounterImage) {
+		return fmt.Errorf("config: %s.mounter_image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest", providerPath)
 	}
-	if !isDigestPinnedImage(provider.DockerImage) {
-		return fmt.Errorf("config: %s.docker_image must contain a valid @sha256 digest", providerPath)
+	if !imageref.IsRelease(provider.DockerImage) {
+		return fmt.Errorf("config: %s.docker_image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest", providerPath)
 	}
 	lsmProfile := strings.ToLower(strings.TrimSpace(provider.LSMProfile))
 	if workspace.AllowMissingLSMForKind {
@@ -828,28 +828,6 @@ func positiveQuantity(path, value string) (resource.Quantity, error) {
 		return resource.Quantity{}, fmt.Errorf("config: %s must be a positive Kubernetes quantity, got %q", path, value)
 	}
 	return quantity, nil
-}
-
-func isDigestPinnedImage(image string) bool {
-	named, err := reference.ParseNormalizedNamed(image)
-	if err != nil {
-		return false
-	}
-	digested, ok := named.(reference.Digested)
-	if !ok {
-		return false
-	}
-	digest := digested.Digest()
-	encoded := digest.Encoded()
-	if digest.Algorithm() != "sha256" || len(encoded) != 64 || encoded != strings.ToLower(encoded) {
-		return false
-	}
-	for _, r := range encoded {
-		if !strings.ContainsRune("0123456789abcdef", r) {
-			return false
-		}
-	}
-	return true
 }
 
 var fuseProviderEnvKeys = []string{

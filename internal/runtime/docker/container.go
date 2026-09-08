@@ -6,7 +6,6 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	dnetwork "github.com/docker/docker/api/types/network"
 
+	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -27,8 +27,6 @@ const (
 	dockerRunTmpfsSize        = 16 * 1024 * 1024
 	dockerWorkspaceTmpfsSize  = 64 * 1024
 )
-
-var digestPinnedImagePattern = regexp.MustCompile(`^[^[:space:]@]+@sha256:[0-9a-f]{64}$`)
 
 // imageForSpec returns the Docker image to use for a sandbox spec.
 func imageForSpec(spec runtime.SandboxSpec) string {
@@ -134,8 +132,8 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*co
 	if fuse == nil || fuse.RuntimeType != "docker" || fuse.Driver != "s3fs" {
 		return nil, nil, fmt.Errorf("valid Docker workspace FUSE spec is required")
 	}
-	if !digestPinnedImagePattern.MatchString(fuse.DockerImage) {
-		return nil, nil, fmt.Errorf("workspace FUSE Docker image must be pinned by sha256 digest")
+	if !imageref.IsRelease(fuse.DockerImage) {
+		return nil, nil, fmt.Errorf("workspace FUSE Docker image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
 	if spec.ID == "" || filepath.Base(spec.ID) != spec.ID || strings.ContainsAny(spec.ID, `/\\`) {
 		return nil, nil, fmt.Errorf("workspace FUSE sandbox ID is invalid")

@@ -74,6 +74,15 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 	assert.Equal(t, []string{"objects.example.com:198.51.100.10"}, []string(host.ExtraHosts))
 }
 
+func TestCreateContainerConfigAcceptsVersionTaggedFUSEImage(t *testing.T) {
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.DockerImage = "registry.example.com/sandbox-fuse-docker:v0.2.12"
+
+	cfg, _, err := createContainerConfig(spec)
+	require.NoError(t, err)
+	assert.Equal(t, spec.WorkspaceFUSE.DockerImage, cfg.Image)
+}
+
 func TestCreateContainerConfigRejectsEndpointHostIPOutsideSystemEgress(t *testing.T) {
 	spec := fuseDockerSpecForTest()
 	spec.WorkspaceFUSE.EndpointHostIPs = []string{"203.0.113.10"}
