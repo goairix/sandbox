@@ -387,8 +387,6 @@ docker buildx build --platform "$PLATFORM" \
 
 docker buildx build --platform "$PLATFORM" \
   -f docker/images/sandbox/Dockerfile \
-  --build-arg WORKSPACE_PROBE_BUILDER="$GO_BUILDER_IMAGE" \
-  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_BASE_IMAGE" \
   -t "$REGISTRY/sandbox-runtime:$VERSION" --push .
 
 docker buildx build --platform "$PLATFORM" \
@@ -397,18 +395,22 @@ docker buildx build --platform "$PLATFORM" \
   docker/images/gateway
 ```
 
-`GO_BUILDER_IMAGE` 和 `SANDBOX_BASE_IMAGE` 是批准的基础镜像引用。gateway 只用于 Docker runtime。
+普通 runtime 的 Dockerfile 已内置 `WORKSPACE_PROBE_BUILDER=golang:1.25-alpine` 和 `SANDBOX_BASE_IMAGE=python:3.13-slim`，不需要额外设置 shell 变量。只有需要切换到内部基础镜像时，才显式传入对应的 build arg。gateway 只用于 Docker runtime。
 
 ### 7.2 Kubernetes mounter 和 Docker FUSE
 
 Dockerfile 会在 builder stage 内从当前源码编译 `workspace-mounter`/`workspace-probe`。不需要先执行宿主机 `go build`，也不需要创建、复制或删除临时 build context。
 
 ```bash
+# 这三个值由 FUSE 基础镜像和 s3fs 制品的发布流程提供，不来自应用 .env 或 Helm values。
+# 两个基础镜像必须使用不可变的 sha256 digest；不能保留下面的占位值直接执行。
+MOUNTER_BASE_IMAGE='<mounter 基础镜像>@sha256:<64位摘要>'
+DOCKER_FUSE_BASE_IMAGE='<sandbox runtime 基础镜像>@sha256:<64位摘要>'
+S3FS_PACKAGE_URL='https://<内部制品地址>/s3fs'
 S3FS_PACKAGE_SHA256=fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695
 
 docker buildx build --platform "$PLATFORM" \
   -f docker/images/workspace-mounter/Dockerfile \
-  --build-arg GO_BUILDER_IMAGE="$GO_BUILDER_IMAGE" \
   --build-arg BASE_IMAGE="$MOUNTER_BASE_IMAGE" \
   --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
   --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
@@ -416,7 +418,6 @@ docker buildx build --platform "$PLATFORM" \
 
 docker buildx build --platform "$PLATFORM" \
   -f docker/images/sandbox-fuse/Dockerfile \
-  --build-arg GO_BUILDER_IMAGE="$GO_BUILDER_IMAGE" \
   --build-arg BASE_IMAGE="$DOCKER_FUSE_BASE_IMAGE" \
   --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
   --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
