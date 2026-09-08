@@ -4,6 +4,8 @@
 
 Helm 已有 release 升级、全新安装、镜像构建和发布验收的逐步命令见 [Helm 部署、升级与镜像发布 Runbook](helm-deployment-upgrade.md)。
 
+Docker Compose 已有环境升级、backend/凭据切换、release drain 和回滚的逐步命令见 [Docker Compose 部署与升级 Runbook](docker-compose-deployment-upgrade.md)。
+
 本文是当前 Helm、Docker Compose、后端切换和发布验收的执行入口。旧的 `workspace.mode` 和 `workspace.providers` 只用于应用读取旧配置，不再是部署接口。
 
 ## 1. 当前合同
@@ -197,7 +199,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml ps
 
 Compose 不创建长期 mounter service，也不挂载宿主机业务 `/workspace`。`sandbox-images` 在启用 FUSE 时各拉取/构建公共镜像一次，实际特殊容器仍由 sandbox-api Pool 动态管理。
 
-切换 Docker backend 前，必须用旧 `.env` 和旧镜像运行一次 API `--drain-release`，确认 `sandbox.managed=true` 的 container/network/volume 以及 Redis 受管前缀为空，再更新 `.env`。不要靠删除 Redis 或强删容器完成切换。
+切换 Docker backend 前，必须先停止旧 API，再使用新版 drain 二进制配合旧 backend 配置、旧凭据和现有 Redis 运行一次 `--drain-release`；确认 `sandbox.managed=true` 的 container/network/volume 以及 Redis 受管前缀为空后，才能切换新 `.env`。旧版本二进制可能没有 drain 参数，完整兼容步骤以 Docker Compose 部署与升级 Runbook 为准。不要靠删除 Redis 或强删容器完成切换。
 
 不要为了恢复单个应用 deployment 重启 Docker daemon 或 Docker Desktop。先查看 Compose logs、容器状态、Secret mount、registry/network；只重启具体 service。daemon 级操作必须由宿主机管理员单独批准，因为它会影响无关容器与本地 Kubernetes。
 

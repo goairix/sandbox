@@ -3,9 +3,10 @@
 配套资料：
 
 - [Workspace 存储部署与运维手册](workspace-fuse.md)
+- [Docker Compose 部署与升级 Runbook](docker-compose-deployment-upgrade.md)
 - [Workspace 容器内 FUSE 直接挂载设计](../superpowers/specs/2026-09-01-workspace-container-fuse-mount-design.md)
 
-本文面向负责 Kubernetes 发布的运维人员，说明如何升级已有 release、安装全新 release，以及需要构建和发布哪些镜像。本文只讨论 Helm/Kubernetes；Docker Compose 的运行方式见 Workspace 存储部署与运维手册。
+本文面向负责 Kubernetes 发布的运维人员，说明如何升级已有 release、安装全新 release，以及需要构建和发布哪些镜像。本文只讨论 Helm/Kubernetes；Docker 环境必须遵循独立的 Docker Compose 部署与升级 Runbook。
 
 ## 1. 发布合同
 
