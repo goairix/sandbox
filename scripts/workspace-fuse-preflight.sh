@@ -11,6 +11,10 @@ require_command() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1
 require_digest() {
   [[ "$2" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "$1 must be an immutable lowercase sha256 image digest"
 }
+require_release_image() {
+  [[ "$2" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ || "$2" =~ ^[^[:space:]@]+:v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] \
+    || fail "$1 must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest"
+}
 profile_value() {
   python3 - "$1" "$2" <<'PY'
 import sys, yaml
@@ -71,9 +75,9 @@ runtime_preflight() {
     fi
   fi
   [[ "$profile_id" =~ ^[a-z0-9][a-z0-9._-]+$ ]] || fail "profile ID is required and must be canonical"
-  require_digest FUSE_IMAGE "$fuse_image"
-  require_digest FUSE_DOCKER_IMAGE "$docker_image"
-  require_digest SANDBOX_IMAGE "$sandbox_image"
+  require_release_image FUSE_IMAGE "$fuse_image"
+  require_release_image FUSE_DOCKER_IMAGE "$docker_image"
+  require_release_image SANDBOX_IMAGE "$sandbox_image"
   [[ "${FUSE_LSM_PROFILE:-}" != "" && "${FUSE_LSM_PROFILE,,}" != "unconfined" && "${FUSE_LSM_PROFILE,,}" != "label=disable" ]] || fail "FUSE_LSM_PROFILE must name a confined profile"
   [[ -z "${WORKSPACE_PROXY_URL:-}" ]] || fail "workspace proxy is forbidden"
 

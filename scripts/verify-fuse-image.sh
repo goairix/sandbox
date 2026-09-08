@@ -11,19 +11,22 @@ die() {
   exit 1
 }
 
-require_digest_image() {
+require_release_image() {
   image=$1
   label=$2
   case "$image" in
-    *@sha256:*) ;;
-    *) die "$label must be pinned by sha256 digest" ;;
+    *@sha256:*)
+      name=${image%@sha256:*}
+      digest=${image##*@sha256:}
+      test -n "$name" || die "$label has an empty repository name"
+      case "$name" in *@*) die "$label has an invalid repository name" ;; esac
+      test "${#digest}" -eq 64 || die "$label has an invalid sha256 digest"
+      case "$digest" in *[!0-9a-f]*) die "$label has an invalid sha256 digest" ;; esac
+      return
+      ;;
   esac
-  name=${image%@sha256:*}
-  digest=${image##*@sha256:}
-  test -n "$name" || die "$label has an empty repository name"
-  case "$name" in *@*) die "$label has an invalid repository name" ;; esac
-  test "${#digest}" -eq 64 || die "$label has an invalid sha256 digest"
-  case "$digest" in *[!0-9a-f]*) die "$label has an invalid sha256 digest" ;; esac
+  printf '%s\n' "$image" | grep -Eq '^[^[:space:]@]+:v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+    || die "$label must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest"
 }
 
 test "$#" -eq 2 || usage
@@ -37,16 +40,16 @@ command -v docker >/dev/null 2>&1 || die "docker is required"
 
 case "$runtime" in
   kubernetes)
-    : "${FUSE_IMAGE:?set FUSE_IMAGE to the digest-pinned mounter image}"
-    : "${SANDBOX_IMAGE:?set SANDBOX_IMAGE to the digest-pinned ordinary sandbox image}"
-    require_digest_image "$FUSE_IMAGE" FUSE_IMAGE
-    require_digest_image "$SANDBOX_IMAGE" SANDBOX_IMAGE
+    : "${FUSE_IMAGE:?set FUSE_IMAGE to the versioned mounter image}"
+    : "${SANDBOX_IMAGE:?set SANDBOX_IMAGE to the versioned ordinary sandbox image}"
+    require_release_image "$FUSE_IMAGE" FUSE_IMAGE
+    require_release_image "$SANDBOX_IMAGE" SANDBOX_IMAGE
     package_image=$FUSE_IMAGE
     probe_image=$SANDBOX_IMAGE
     ;;
   docker)
-    : "${SANDBOX_IMAGE:?set SANDBOX_IMAGE to the digest-pinned special sandbox image}"
-    require_digest_image "$SANDBOX_IMAGE" SANDBOX_IMAGE
+    : "${SANDBOX_IMAGE:?set SANDBOX_IMAGE to the versioned special sandbox image}"
+    require_release_image "$SANDBOX_IMAGE" SANDBOX_IMAGE
     package_image=$SANDBOX_IMAGE
     probe_image=$SANDBOX_IMAGE
     ;;

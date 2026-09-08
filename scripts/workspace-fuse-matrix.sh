@@ -47,19 +47,19 @@ for profile_id in "${profiles[@]}"; do
   }
   mounter_digest="$(profile_value "$profile_file" mounter_image_digest)"
   docker_digest="$(profile_value "$profile_file" docker_image_digest)"
-  [[ "$mounter_digest" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
-    printf 'matrix: enabled profile has no common mounter digest: %s\n' "$profile_id" >&2
+  [[ "$mounter_digest" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ || "$mounter_digest" =~ ^[^[:space:]@]+:v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || {
+    printf 'matrix: enabled profile has no common versioned mounter image: %s\n' "$profile_id" >&2
     exit 1
   }
-  [[ "$docker_digest" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
-    printf 'matrix: enabled profile has no common Docker FUSE digest: %s\n' "$profile_id" >&2
+  [[ "$docker_digest" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ || "$docker_digest" =~ ^[^[:space:]@]+:v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || {
+    printf 'matrix: enabled profile has no common versioned Docker FUSE image: %s\n' "$profile_id" >&2
     exit 1
   }
   if [[ -z "$common_mounter_digest" ]]; then
     common_mounter_digest="$mounter_digest"
     common_docker_digest="$docker_digest"
   elif [[ "$mounter_digest" != "$common_mounter_digest" || "$docker_digest" != "$common_docker_digest" ]]; then
-    printf 'matrix: all enabled profiles must use the same common FUSE image digests\n' >&2
+    printf 'matrix: all enabled profiles must use the same common FUSE image references\n' >&2
     exit 1
   fi
   enabled_count=$((enabled_count + 1))

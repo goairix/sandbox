@@ -8,8 +8,8 @@ trap cleanup EXIT INT TERM
 fail() { printf 'test-workspace-fuse-matrix: %s\n' "$*" >&2; exit 1; }
 
 profiles=(minio-sigv4-path-style-v1 huawei-obs-public-v1 huawei-obs-private-2023-v1)
-common_mounter="registry.invalid/mounter@sha256:$(printf '1%.0s' {1..64})"
-common_docker="registry.invalid/docker@sha256:$(printf '2%.0s' {1..64})"
+common_mounter="registry.invalid/mounter:v0.2.12"
+common_docker="registry.invalid/docker:v0.2.12"
 mkdir -p "$tmp_dir/profiles"
 for profile in "${profiles[@]}"; do
   provider=minio
@@ -38,7 +38,7 @@ EOF
 chmod +x "$tmp_dir/preflight"
 
 cp "$tmp_dir/profiles/huawei-obs-private-2023-v1.yaml" "$tmp_dir/private-profile.yaml"
-sed 's#registry.invalid/mounter@sha256:1\{64\}#registry.invalid/mounter@sha256:3333333333333333333333333333333333333333333333333333333333333333#' \
+sed 's#registry.invalid/mounter:v0.2.12#registry.invalid/mounter:v0.2.13#' \
   "$tmp_dir/private-profile.yaml" >"$tmp_dir/profiles/huawei-obs-private-2023-v1.yaml"
 if WORKSPACE_FUSE_PROFILE_DIR="$tmp_dir/profiles" \
   WORKSPACE_FUSE_EVIDENCE_DIR="$tmp_dir/evidence" \

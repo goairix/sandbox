@@ -44,6 +44,8 @@ chmod +x "$tmp/bin/docker"
 
 digest="registry.example.com/sandbox@sha256:$(printf 'a%.0s' {1..64})"
 fuse_digest="registry.example.com/mounter@sha256:$(printf 'b%.0s' {1..64})"
+versioned="registry.example.com/sandbox:v0.2.12"
+prerelease="registry.example.com/mounter:v0.2.12-rc.1"
 export PATH="$tmp/bin:$PATH"
 export MOCK_DOCKER_LOG="$tmp/docker.log"
 
@@ -56,6 +58,12 @@ test ! -s "$tmp/docker.log" || fail "invalid digest reached docker"
 expect_failure env FUSE_IMAGE="repo/mounter@sha256:abc" SANDBOX_IMAGE="$digest" \
   "$verify" kubernetes package-check
 test ! -s "$tmp/docker.log" || fail "short digest reached docker"
+
+: >"$tmp/docker.log"
+expect_success env FUSE_IMAGE="$prerelease" SANDBOX_IMAGE="$versioned" \
+  "$verify" kubernetes package-check
+grep -Fq -- "$prerelease health prepared --self-check-image" "$tmp/docker.log" || fail "versioned mounter image did not reach docker"
+grep -Fq -- "$versioned self-check" "$tmp/docker.log" || fail "versioned sandbox image did not reach docker"
 
 : >"$tmp/docker.log"
 MOCK_PROFILE_STATUS=blocked-pending-flush-spike expect_success env \
