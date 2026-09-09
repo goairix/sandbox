@@ -8,6 +8,16 @@
 
 本文面向使用 `docker/docker-compose.yml` 部署 sandbox-api 的 Linux Docker 环境。Docker Compose 没有 Helm backend fingerprint hook，涉及 backend 的升级必须由运维先使用旧配置手工执行 release drain。
 
+`docker/secrets/workspace` 只是不会提交到 Git、也不会打进镜像的本地凭据目录：
+
+| 文件 | 是否必需 | 来源 |
+|---|---|---|
+| `accessKey` | 是 | MinIO/OBS 分配的 AK |
+| `secretKey` | 是 | MinIO/OBS 分配的 SK |
+| `ca.crt` | 否 | 仅企业私有 CA 场景，由证书签发方提供 |
+
+项目不会生成 CA 或服务端证书。公网可信证书不需要 `ca.crt`；自行生成的 CA 也不能验证对象存储已有的服务端证书。首次安装使用 `docker/prepare.sh` 创建凭据文件、权限、API key 和 FUSE staging 目录，不要手工拼这些目录。
+
 ## 1. 先选升级方式
 
 ### 1.1 无状态或状态可丢弃：直接升级
@@ -302,28 +312,30 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
   -f "$OLD_COMPOSE" up -d -t 600
 ```
 
-第四步，drain 成功后才创建新的凭据目录或新的 `.env`。凭据轮换不能原地覆盖旧 `accessKey`/`secretKey`；先写入新的 root-only 目录，再让新环境文件引用新目录：
+第四步，drain 成功后才创建新的凭据目录或新的 `.env`。凭据轮换不能原地覆盖旧 `accessKey`/`secretKey`；使用新 release 的初始化脚本把新文件原子导入另一个目录：
 
 ```bash
-install -d -o root -g root -m 0700 /opt/sandbox/secrets/workspace-new
-install -o root -g root -m 0400 /secure/new/accessKey \
-  /opt/sandbox/secrets/workspace-new/accessKey
-install -o root -g root -m 0400 /secure/new/secretKey \
-  /opt/sandbox/secrets/workspace-new/secretKey
+cp "$ENV_FILE" /opt/sandbox/env/production-new.env
+NEW_ENV_FILE=/opt/sandbox/env/production-new.env
+
+"$NEW_RELEASE/docker/prepare.sh" \
+  --env-file "$NEW_ENV_FILE" \
+  --credential-dir /opt/sandbox/secrets/workspace-new \
+  --access-key-file /secure/new/accessKey \
+  --secret-key-file /secure/new/secretKey \
+  --staging-root /opt/sandbox/state/workspace-secrets \
+  --non-interactive
 ```
 
-在新环境文件中同步更新：
+脚本会更新 `WORKSPACE_CREDENTIAL_DIR`。运维只需在新环境文件中递增非敏感 generation：
 
 ```dotenv
-WORKSPACE_CREDENTIAL_DIR=/opt/sandbox/secrets/workspace-new
 WORKSPACE_CREDENTIAL_GENERATION=<new-non-secret-generation>
 ```
 
 第五步，使用新 Compose 和新环境文件完成启动，仍保持同一个 `PROJECT` 和 Redis volume：
 
 ```bash
-NEW_ENV_FILE=/opt/sandbox/env/production-new.env
-
 docker compose -p "$PROJECT" --env-file "$NEW_ENV_FILE" \
   -f "$NEW_COMPOSE" config >/dev/null
 
@@ -344,19 +356,30 @@ ENV_FILE=/opt/sandbox/env/production.env
 COMPOSE_FILE="$RELEASE_DIR/docker/docker-compose.yml"
 ```
 
-创建 release 外部的凭据和 staging 目录：
+先从当前 release 的示例生成生产环境文件，填写唯一 backend、endpoint、bucket、网络白名单和五份相同版本的项目镜像。不要把 AK/SK 写入该文件：
 
 ```bash
-install -d -o root -g root -m 0700 /opt/sandbox/secrets/workspace
-install -d -o root -g root -m 0700 /opt/sandbox/state/workspace-secrets
+install -d -m 0700 /opt/sandbox/env
+install -m 0600 "$RELEASE_DIR/docker/.env.example" "$ENV_FILE"
+vi "$ENV_FILE"
 ```
 
-根据新版 `docker/.env.example` 创建外部环境文件，使用绝对路径并只选择一个 `STORAGE_PRESET`。五份项目镜像填写同一个版本 tag，例如 `v0.2.12`；Docker 主机必须是提供 `/dev/fuse` 和受约束 LSM 的 Linux 主机。
+然后用一个初始化命令导入对象存储凭据，并自动创建所需权限和 FUSE staging 目录；如不使用私有 CA，省略 `--ca-file`：
 
 ```bash
-docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" config >/dev/null
+"$RELEASE_DIR/docker/prepare.sh" \
+  --env-file "$ENV_FILE" \
+  --credential-dir /opt/sandbox/secrets/workspace \
+  --access-key-file /secure/source/accessKey \
+  --secret-key-file /secure/source/secretKey \
+  --ca-file /secure/source/ca.crt \
+  --staging-root /opt/sandbox/state/workspace-secrets \
+  --non-interactive
+```
 
+也可以直接运行 `"$RELEASE_DIR/docker/prepare.sh" --env-file "$ENV_FILE"`，由脚本交互读取 AK/SK；secret key 不回显。Docker 主机必须是提供 `/dev/fuse` 和受约束 LSM 的 Linux 主机。
+
+```bash
 docker compose -p "$PROJECT" --env-file "$ENV_FILE" \
   -f "$COMPOSE_FILE" up -d -t 600
 ```

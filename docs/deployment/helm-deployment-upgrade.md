@@ -395,36 +395,23 @@ docker buildx build --platform "$PLATFORM" \
   docker/images/gateway
 ```
 
-普通 runtime 的 Dockerfile 已内置 `WORKSPACE_PROBE_BUILDER=golang:1.25-alpine` 和 `SANDBOX_BASE_IMAGE=python:3.13-slim`，不需要额外设置 shell 变量。只有需要切换到内部基础镜像时，才显式传入对应的 build arg。gateway 只用于 Docker runtime。
+普通 runtime 的 Dockerfile 已内置基础镜像，不需要设置额外 shell 变量。gateway 只用于 Docker runtime。
 
 ### 7.2 Kubernetes mounter 和 Docker FUSE
 
 Dockerfile 会在 builder stage 内从当前源码编译 `workspace-mounter`/`workspace-probe`。不需要先执行宿主机 `go build`，也不需要创建、复制或删除临时 build context。
 
 ```bash
-# 这三个值由 FUSE 基础镜像和 s3fs 制品的发布流程提供，不来自应用 .env 或 Helm values。
-# 两个基础镜像必须使用不可变的 sha256 digest；不能保留下面的占位值直接执行。
-MOUNTER_BASE_IMAGE='<mounter 基础镜像>@sha256:<64位摘要>'
-DOCKER_FUSE_BASE_IMAGE='<sandbox runtime 基础镜像>@sha256:<64位摘要>'
-S3FS_PACKAGE_URL='https://<内部制品地址>/s3fs'
-S3FS_PACKAGE_SHA256=fb45cbc9f8303ae6d919b8b27ee9f443e285b08e1250f4aa85ca50ea2cfea695
-
 docker buildx build --platform "$PLATFORM" \
   -f docker/images/workspace-mounter/Dockerfile \
-  --build-arg BASE_IMAGE="$MOUNTER_BASE_IMAGE" \
-  --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
-  --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
   -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" --push .
 
 docker buildx build --platform "$PLATFORM" \
   -f docker/images/sandbox-fuse/Dockerfile \
-  --build-arg BASE_IMAGE="$DOCKER_FUSE_BASE_IMAGE" \
-  --build-arg S3FS_PACKAGE_URL="$S3FS_PACKAGE_URL" \
-  --build-arg S3FS_PACKAGE_SHA256="$S3FS_PACKAGE_SHA256" \
   -t "$REGISTRY/sandbox-fuse-docker:$VERSION" --push .
 ```
 
-基础镜像使用批准的引用；`S3FS_PACKAGE_URL` 必须是无 credential/query/fragment 的固定 HTTPS 地址，Dockerfile 会校验 artifact SHA256。
+两份 Dockerfile 会从固定上游提交编译已验证的 s3fs 1.95，并把最终二进制 SHA 自动写入镜像 profile bundle；发布人员不需要准备基础镜像、下载地址或 SHA256。
 
 ### 7.3 更新 Helm values
 
@@ -482,10 +469,8 @@ SANDBOX_IMAGE=registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.1
 
 当前仓库中的三份 `testdata/fuse/profiles/*.yaml` 仍为 `enabled: false`，表示完整的两 runtime 故障证据尚未全部归档。验收集群中的功能通过不等于生产 release gate 已通过。
 
-此外，两份 FUSE Dockerfile 依赖外部提供的 base image 和 s3fs artifact URL；仓库目前没有正式的 FUSE base image Dockerfile/CI 定义。当前验收 mounter 内记录的 base 引用来自本地中间仓库，不能作为长期可复现的生产构建来源。正式交付前必须把以下内容纳入 CI：
+正式交付仍必须把以下内容纳入 CI：
 
-1. FUSE base image 的受版本控制 Dockerfile；
-2. digest-pinned 基础镜像与固定 s3fs artifact URL/SHA；
-3. ARM64/AMD64 分架构构建；
-4. package-check、release-check、扫描、SBOM、签名和 attestation；
-5. 使用同一版本 tag 更新全部后端 overlay，并由现有流程发布多架构 manifest。
+1. ARM64/AMD64 分架构构建；
+2. package-check、release-check、扫描、SBOM、签名和 attestation；
+3. 使用同一版本 tag 更新全部后端 overlay，并由现有流程发布多架构 manifest。

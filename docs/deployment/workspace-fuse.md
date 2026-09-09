@@ -73,7 +73,7 @@ config:
 生产镜像必须：
 
 - 使用与节点架构匹配的 immutable digest；
-- 使用固定 digest 的 base image 和经过 SHA-256 校验的 s3fs artifact；
+- 从 Dockerfile 固定的 s3fs 1.95 上游提交构建，并自动记录最终二进制 SHA-256；
 - 通过 `scripts/verify-fuse-image.sh ... release-check`；
 - 归档 SBOM、漏洞扫描、签名和 attestation；
 - 不包含 AK/SK、registry token 或任意可执行 s3fs options。
@@ -98,7 +98,9 @@ kubectl --context <context> -n <runtime-namespace> create secret generic <runtim
 
 如使用私有 CA，在两份 Secret 中增加同名 key，并把该 key 写入 `config.storage.filesystem.caSecretKey`。控制面固定读取 `/run/secrets/workspace/ca.crt`，runtime 使用配置的 Secret key。
 
-Docker 中 `${WORKSPACE_CREDENTIAL_DIR}` 只读挂到 `/run/secrets/workspace`。`${WORKSPACE_SECRET_STAGING_ROOT}` 必须是 Docker 宿主机上的 canonical 绝对路径、`root:root`、mode `0700`，并以相同路径挂入 API。sandbox-api 只为特殊 FUSE 容器生成短生命周期 root-only 文件。
+Docker 的 `docker/secrets/workspace` 不是证书生成目录，也不会进入 Git 或镜像。它只包含必需的 `accessKey`、`secretKey` 和可选的 `ca.crt`。只有对象存储 endpoint 使用企业私有 CA 时才需要由证书签发方提供 `ca.crt`；项目不生成 CA，公网可信证书无需该文件。
+
+首次安装运行 `./docker/prepare.sh`。脚本安全读取或导入 AK/SK、设置目录和文件权限、按需导入 CA、生成 API key，并在 Linux FUSE 模式下创建和校验 `${WORKSPACE_SECRET_STAGING_ROOT}`。`${WORKSPACE_CREDENTIAL_DIR}` 随后只读挂到 `/run/secrets/workspace`；sandbox-api 只为特殊 FUSE 容器生成短生命周期 root-only 文件。
 
 每次 AK/SK 或 CA 内容轮换必须：
 
