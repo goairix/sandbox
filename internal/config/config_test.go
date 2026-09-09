@@ -546,6 +546,14 @@ func TestValidatePreservesExplicitFUSERegion(t *testing.T) {
 	assert.Equal(t, "custom-region-1", cfg.Storage.FileSystem.Region)
 }
 
+func TestValidateSelectsPrivateHTTPMinIOProfile(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Storage.FileSystem.UseSSL = false
+
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "minio-sigv4-path-style-private-http-v1", cfg.Workspace.Backend.Profile)
+}
+
 func TestValidateFUSEDoesNotRequireOperatorEndpointPolicyOrCustomCA(t *testing.T) {
 	cfg := validHybridConfig()
 	cfg.Storage.FileSystem.CAFile = ""
@@ -562,17 +570,10 @@ func TestValidateFUSEDoesNotRequireOperatorEndpointPolicyOrCustomCA(t *testing.T
 	require.NoError(t, cfg.Validate())
 }
 
-func TestValidateRejectsPresetProviderOrProfileDrift(t *testing.T) {
-	for name, edit := range map[string]func(*config.Config){
-		"profile":  func(cfg *config.Config) { cfg.Workspace.Backend.Profile = "huawei-obs-public-v1" },
-		"provider": func(cfg *config.Config) { cfg.Storage.FileSystem.Provider = "obs" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := validHybridConfig()
-			edit(cfg)
-			require.ErrorContains(t, cfg.Validate(), "preset mapping")
-		})
-	}
+func TestValidateRejectsPresetProviderDrift(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Storage.FileSystem.Provider = "obs"
+	require.ErrorContains(t, cfg.Validate(), "preset mapping")
 }
 
 func TestValidateRejectsInvalidWorkspaceMountModeSelection(t *testing.T) {
@@ -933,12 +934,6 @@ func TestFUSEConfigValidation(t *testing.T) {
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
 		}, want: ""},
-		{name: "unknown minio profile", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "unknown-v1" })
-		}, want: "preset mapping"},
-		{name: "provider profile mismatch", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.Profile = "huawei-obs-public-v1" })
-		}, want: "preset mapping"},
 		{name: "valid with no custom CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
 			c.Workspace.SecretName = ""
@@ -957,7 +952,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
 		}, want: "only supported with Kubernetes"},
 		{name: "unsupported provider", edit: func(c *config.Config) { c.Storage.FileSystem.Provider = "s3" }, want: "exactly one backend"},
-		{name: "minio TLS disabled", edit: func(c *config.Config) { c.Storage.FileSystem.UseSSL = false }, want: "TLS"},
+		{name: "private HTTP minio profile derived", edit: func(c *config.Config) { c.Storage.FileSystem.UseSSL = false }, want: ""},
 		{name: "obs TLS disabled", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Endpoint = "http://obs.example.com"

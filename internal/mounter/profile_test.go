@@ -38,6 +38,28 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 	}
 }
 
+func TestCompiledPrivateHTTPMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
+	profile, ok := LookupCompiledProfile("minio", "minio-sigv4-path-style-private-http-v1")
+	require.True(t, ok)
+	assert.Equal(t, MountParametersVerified, profile.Descriptor.MountParameters)
+	assert.Equal(t, DurableFlushVerified, profile.Descriptor.DurableFlush)
+	assert.False(t, profile.Descriptor.TLSRequired)
+
+	options, err := profile.Options(fuseprotocol.BootstrapConfig{
+		Provider: "minio", Endpoint: "http://minio.internal:9000", Region: "us-east-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"-o", "url=http://minio.internal:9000",
+		"-o", "endpoint=us-east-1",
+		"-o", "use_path_request_style",
+		"-o", "sigv4",
+	}, options)
+
+	_, err = profile.Options(fuseprotocol.BootstrapConfig{Provider: "minio", Endpoint: "https://minio.internal:9000", Region: "us-east-1"})
+	require.ErrorContains(t, err, "HTTP")
+}
+
 func TestCompiledHuaweiOBSPrivateProfileHasExactVerifiedMountContract(t *testing.T) {
 	profile, ok := LookupCompiledProfile("obs", "huawei-obs-private-2023-v1")
 	require.True(t, ok)
@@ -119,9 +141,10 @@ func TestCompiledCatalogKeepsPublicAndPrivateOBSIndependentlySelectable(t *testi
 func TestBundledProfilesContainsEveryVerifiedProductionProfile(t *testing.T) {
 	registry := BundledProfiles()
 	for id, provider := range map[string]string{
-		"minio-sigv4-path-style-v1":  "minio",
-		"huawei-obs-public-v1":       "obs",
-		"huawei-obs-private-2023-v1": "obs",
+		"minio-sigv4-path-style-v1":              "minio",
+		"minio-sigv4-path-style-private-http-v1": "minio",
+		"huawei-obs-public-v1":                   "obs",
+		"huawei-obs-private-2023-v1":             "obs",
 	} {
 		profile, ok := registry.Lookup(id)
 		require.True(t, ok, id)

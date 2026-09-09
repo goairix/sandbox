@@ -219,20 +219,23 @@ profile_bundle="$repo_root/docker/images/workspace-mounter/profile-bundle.json"
 test -f "$profile_bundle" || fail "missing common profile bundle"
 for profile_id in \
   minio-sigv4-path-style-v1 \
+  minio-sigv4-path-style-private-http-v1 \
   huawei-obs-public-v1 \
   huawei-obs-private-2023-v1; do
   test "$(grep -Fc '"id": "'"$profile_id"'"' "$profile_bundle")" -eq 1 \
     || fail "$profile_bundle does not contain exactly one $profile_id descriptor"
 done
-test "$(grep -Fc '"durable_flush": "verified"' "$profile_bundle")" -eq 3 \
+test "$(grep -Fc '"durable_flush": "verified"' "$profile_bundle")" -eq 4 \
   || fail "$profile_bundle has a non-releaseable durability profile"
-test "$(grep -Fc '"mount_parameters": "verified"' "$profile_bundle")" -eq 3 \
+test "$(grep -Fc '"mount_parameters": "verified"' "$profile_bundle")" -eq 4 \
   || fail "$profile_bundle has a non-releaseable mount profile"
 test "$(grep -Fc '0000000000000000000000000000000000000000000000000000000000000000' "$profile_bundle")" -eq 1 \
   || fail "$profile_bundle lacks the unique build-time s3fs hash placeholder"
 
-! grep -Eiq '(no_check_certificate|ssl_verify_hostname|compat_dir|support_compat_dir|use_path_request_style|"options"|"extra_args"|"tls_required": false)' "$profile_bundle" \
+! grep -Eiq '(no_check_certificate|ssl_verify_hostname|compat_dir|support_compat_dir|use_path_request_style|"options"|"extra_args")' "$profile_bundle" \
   || fail "$profile_bundle contains executable or TLS-weakening options"
+test "$(grep -Fc '"tls_required": false' "$profile_bundle")" -eq 1 \
+  || fail "$profile_bundle must contain exactly one private HTTP MinIO profile"
 
 for file in "$mounter" "$fuse"; do
   ! grep -Eq 'PROFILE_(ID|MANIFEST)|imageProfileID|profile\.json' "$file" || fail "$file still binds a backend-specific profile"

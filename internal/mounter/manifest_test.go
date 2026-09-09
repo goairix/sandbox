@@ -30,9 +30,10 @@ func validProfileBundle(t *testing.T) ([]byte, string) {
 	t.Helper()
 	hash := sha256.Sum256([]byte("trusted-s3fs"))
 	digest := hex.EncodeToString(hash[:])
-	descriptors := make([]ProfileDescriptor, 0, 3)
+	descriptors := make([]ProfileDescriptor, 0, 4)
 	for _, id := range []string{
 		"minio-sigv4-path-style-v1",
+		"minio-sigv4-path-style-private-http-v1",
 		"huawei-obs-public-v1",
 		"huawei-obs-private-2023-v1",
 	} {
@@ -85,6 +86,7 @@ func TestBundledProfilesContainsEveryProductionProfile(t *testing.T) {
 		id       string
 	}{
 		{provider: "minio", id: "minio-sigv4-path-style-v1"},
+		{provider: "minio", id: "minio-sigv4-path-style-private-http-v1"},
 		{provider: "obs", id: "huawei-obs-public-v1"},
 		{provider: "obs", id: "huawei-obs-private-2023-v1"},
 	} {
@@ -293,8 +295,9 @@ func TestRepositoryProfileBundleTemplateMatchesCompiledDescriptors(t *testing.T)
 		seen[descriptor.ID] = true
 	}
 	assert.Equal(t, map[string]bool{
-		"minio-sigv4-path-style-v1":  true,
-		"huawei-obs-public-v1":       true,
-		"huawei-obs-private-2023-v1": true,
+		"minio-sigv4-path-style-v1":              true,
+		"minio-sigv4-path-style-private-http-v1": true,
+		"huawei-obs-public-v1":                   true,
+		"huawei-obs-private-2023-v1":             true,
 	}, seen)
 }

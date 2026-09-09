@@ -13,6 +13,17 @@
       "signature_version": "sigv4"
     },
     {
+      "id": "minio-sigv4-path-style-private-http-v1",
+      "provider": "minio",
+      "mount_parameters": "verified",
+      "durable_flush": "verified",
+      "tls_required": false,
+      "endpoint_option": "url",
+      "region_option": "endpoint",
+      "addressing_style": "path",
+      "signature_version": "sigv4"
+    },
+    {
       "id": "huawei-obs-public-v1",
       "provider": "obs",
       "mount_parameters": "verified",

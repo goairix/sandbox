@@ -335,6 +335,7 @@ func (c *Config) Validate() error {
 	if err := c.normalizeWorkspaceSelection(); err != nil {
 		return err
 	}
+	c.normalizeFUSEProfile()
 	if err := c.normalizeFUSERegion(); err != nil {
 		return err
 	}
@@ -399,6 +400,17 @@ func (c *Config) Validate() error {
 		return c.validateFUSE()
 	}
 	return nil
+}
+
+func (c *Config) normalizeFUSEProfile() {
+	if !c.Workspace.MountModeEnabled("fuse") || c.Workspace.Backend.Preset != "minio" {
+		return
+	}
+	if c.Storage.FileSystem.UseSSL {
+		c.Workspace.Backend.Profile = "minio-sigv4-path-style-v1"
+	} else {
+		c.Workspace.Backend.Profile = "minio-sigv4-path-style-private-http-v1"
+	}
 }
 
 func (c *Config) normalizeFUSERegion() error {
@@ -493,7 +505,11 @@ func (c *Config) validateWorkspaceSelection() error {
 	}
 	if backendConfigured(workspace.Backend) {
 		preset, ok := backendPresets[workspace.Backend.Preset]
-		if !ok || preset.Provider != c.Storage.FileSystem.Provider || preset.Profile != workspace.Backend.Profile {
+		expectedProfile := preset.Profile
+		if workspace.Backend.Preset == "minio" && !c.Storage.FileSystem.UseSSL {
+			expectedProfile = "minio-sigv4-path-style-private-http-v1"
+		}
+		if !ok || preset.Provider != c.Storage.FileSystem.Provider || expectedProfile != workspace.Backend.Profile {
 			return fmt.Errorf("config: workspace.backend does not match the fixed preset mapping")
 		}
 	} else if workspace.MountModeEnabled("fuse") {
@@ -552,7 +568,7 @@ func (c *Config) validateFUSE() error {
 	if filesystem.Endpoint == "" {
 		return fmt.Errorf("config: storage.filesystem.endpoint must not be empty when workspace.mode is \"fuse\"")
 	}
-	if !filesystem.UseSSL {
+	if filesystem.Provider == "obs" && !filesystem.UseSSL {
 		return fmt.Errorf("config: storage.filesystem.use_ssl must be true for TLS-required FUSE profiles")
 	}
 	switch filesystem.Provider {

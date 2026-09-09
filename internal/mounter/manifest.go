@@ -42,7 +42,7 @@ func validateProfileBundle(raw []byte, actualS3FSSHA256 string) error {
 		if descriptor.ID == "" || descriptor.Provider == "" || descriptor.MountParameters == "" || descriptor.DurableFlush == "" || descriptor.EndpointOption == "" || descriptor.RegionOption == "" || descriptor.AddressingStyle == "" || descriptor.SignatureVersion == "" {
 			return fmt.Errorf("profile bundle is missing a descriptor field")
 		}
-		if !descriptor.TLSRequired {
+		if !descriptor.TLSRequired && descriptor.ID != "minio-sigv4-path-style-private-http-v1" {
 			return fmt.Errorf("profile bundle cannot disable TLS")
 		}
 		if _, duplicate := seen[descriptor.ID]; duplicate {

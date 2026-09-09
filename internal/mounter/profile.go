@@ -68,6 +68,17 @@ var compiledProfileCatalog = map[string]Profile{
 		Options: minioOptions,
 		Flush:   syncFilesystem,
 	},
+	"minio-sigv4-path-style-private-http-v1": {
+		ID: "minio-sigv4-path-style-private-http-v1", Provider: "minio",
+		Descriptor: ProfileDescriptor{
+			ID: "minio-sigv4-path-style-private-http-v1", Provider: "minio",
+			MountParameters: MountParametersVerified, DurableFlush: DurableFlushVerified,
+			TLSRequired: false, EndpointOption: "url", RegionOption: "endpoint",
+			AddressingStyle: "path", SignatureVersion: "sigv4",
+		},
+		Options: minioPrivateHTTPOptions,
+		Flush:   syncFilesystem,
+	},
 	"huawei-obs-public-v1": {
 		ID: "huawei-obs-public-v1", Provider: "obs",
 		Descriptor: ProfileDescriptor{
@@ -94,6 +105,7 @@ var compiledProfileCatalog = map[string]Profile{
 
 var bundledProfileIDs = [...]string{
 	"minio-sigv4-path-style-v1",
+	"minio-sigv4-path-style-private-http-v1",
 	"huawei-obs-public-v1",
 	"huawei-obs-private-2023-v1",
 }
@@ -104,6 +116,19 @@ func syncFilesystem(config fuseprotocol.BootstrapConfig) []string {
 
 func minioOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
 	if err := requireHTTPS(config.Endpoint); err != nil {
+		return nil, err
+	}
+	if config.Provider != "" && config.Provider != "minio" {
+		return nil, fmt.Errorf("minio profile provider mismatch")
+	}
+	if !canonicalRegion.MatchString(config.Region) {
+		return nil, fmt.Errorf("minio profile requires a canonical SigV4 region")
+	}
+	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
+}
+
+func minioPrivateHTTPOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
+	if err := requireHTTP(config.Endpoint); err != nil {
 		return nil, err
 	}
 	if config.Provider != "" && config.Provider != "minio" {
@@ -145,6 +170,14 @@ func requireHTTPS(raw string) error {
 	endpoint, err := url.Parse(raw)
 	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
 		return fmt.Errorf("profile requires a canonical TLS HTTPS endpoint")
+	}
+	return nil
+}
+
+func requireHTTP(raw string) error {
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Scheme != "http" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+		return fmt.Errorf("profile requires a canonical HTTP endpoint")
 	}
 	return nil
 }
