@@ -25,16 +25,12 @@ services:
             exit 2
             ;;
         esac
-        if [ -n "$${SANDBOX_WORKSPACE_BACKEND_CA_SECRET_KEY}" ]; then
-          export SANDBOX_STORAGE_FILESYSTEM_CA_FILE=/run/secrets/workspace/ca.crt
-        fi
         exec /app/sandbox --config /etc/sandbox/config.yaml
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       - SANDBOX_RUNTIME_TYPE=docker
       - SANDBOX_RUNTIME_DOCKER_HOST=unix:///var/run/docker.sock
-      - SANDBOX_RUNTIME_DOCKER_WORKSPACE_SECRET_ROOT=${WORKSPACE_SECRET_STAGING_ROOT:-/var/lib/sandbox/workspace-secrets}
       - SANDBOX_STORAGE_STATE_REDIS_ADDR=redis:6379
       - SANDBOX_STORAGE_STATE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - SANDBOX_STORAGE_STATE_REDIS_DB=${REDIS_DB:-0}
@@ -43,12 +39,11 @@ services:
       - SANDBOX_STORAGE_FILESYSTEM_ENDPOINT=${STORAGE_ENDPOINT:-}
       - SANDBOX_STORAGE_FILESYSTEM_SUB_PATH=${STORAGE_SUB_PATH:-}
       - SANDBOX_STORAGE_FILESYSTEM_USE_SSL=${STORAGE_USE_SSL:-true}
-      - SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE=/run/secrets/workspace/accessKey
-      - SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE=/run/secrets/workspace/secretKey
+      - SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY=${STORAGE_ACCESS_KEY:-}
+      - SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY=${STORAGE_SECRET_KEY:-}
       - SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE=${WORKSPACE_DEFAULT_MOUNT_MODE:-sync}
       - SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES=${WORKSPACE_ENABLED_MOUNT_MODES:-sync}
       - SANDBOX_WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH=${WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH:-false}
-      - SANDBOX_WORKSPACE_SECRET_NAME=${WORKSPACE_SECRET_NAME:-workspace-storage}
       - SANDBOX_WORKSPACE_CACHE_SIZE=${WORKSPACE_CACHE_SIZE:-2Gi}
       - SANDBOX_WORKSPACE_CACHE_MEDIUM=disk
       - SANDBOX_WORKSPACE_MOUNT_TIMEOUT_SECONDS=${WORKSPACE_MOUNT_TIMEOUT_SECONDS:-30}
@@ -67,7 +62,6 @@ services:
       - SANDBOX_WORKSPACE_BACKEND_STORAGE_IDENTITY=${STORAGE_IDENTITY:-local-minio}
       - SANDBOX_WORKSPACE_BACKEND_MOUNTER_IMAGE=${FUSE_MOUNTER_IMAGE:-}
       - SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE=${FUSE_SANDBOX_IMAGE:-}
-      - SANDBOX_WORKSPACE_BACKEND_CA_SECRET_KEY=${WORKSPACE_CA_SECRET_KEY:-}
       - SANDBOX_WORKSPACE_BACKEND_CREDENTIAL_GENERATION=${WORKSPACE_CREDENTIAL_GENERATION:-local-v1}
       - SANDBOX_WORKSPACE_BACKEND_ENDPOINT_HOST_IPS=${STORAGE_ENDPOINT_HOST_IPS:-}
       - SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE=${FUSE_LSM_PROFILE:-sandbox-fuse}
@@ -91,10 +85,6 @@ services:
       - SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT=${TELEMETRY_LOG_ENDPOINT:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${WORKSPACE_CREDENTIAL_DIR:-./secrets/workspace}:/run/secrets/workspace:ro
-      # This source path must exist on the Docker host as root:root mode 0700.
-      # sandbox-api passes this identical absolute path only to special FUSE containers.
-      - ${WORKSPACE_SECRET_STAGING_ROOT:-/var/lib/sandbox/workspace-secrets}:${WORKSPACE_SECRET_STAGING_ROOT:-/var/lib/sandbox/workspace-secrets}
     depends_on:
       redis:
         condition: service_healthy

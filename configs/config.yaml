@@ -85,16 +85,16 @@ storage:
     # Custom endpoint URL (optional, for private / compatible storage).
     # For COS, this is the full bucket URL (e.g. "https://bucket-xxx.cos.ap-guangzhou.myqcloud.com").
     endpoint: ""
-    # Legacy inline credentials are supported only for compatibility. New
-    # remote deployments mount the read-only credential files below.
+    # Object-storage credentials. Docker Compose and Helm map their inline
+    # accessKey/secretKey settings to these fields.
     access_key: ""
     secret_key: ""
     # Temporary/session credentials are explicit so FUSE mode can reject them.
     # FUSE v1 supports long-lived AK/SK credentials only.
     session_token: ""
     credential_expiry: ""
-    # Read-only Secret file paths used by the FUSE control plane. These must
-    # remain empty in sync mode unless the storage client is configured to use them.
+    # Optional file-based compatibility for sync-only deployments. FUSE mode
+    # deliberately rejects these fields and requires the inline pair above.
     credential_files:
       access_key_file: ""
       secret_key_file: ""

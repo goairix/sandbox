@@ -17,8 +17,6 @@ redis:
   persistence:
     enabled: false
 
-workspaceCredentials:
-  apiSecretName: sandbox-workspace-obs-private
 
 config:
   runtime:
@@ -37,6 +35,8 @@ config:
       bucket: sandbox-fuse-workspace
       region: cn-southwest-268
       endpoint: https://obs.cn-southwest-268.shuanghuayun.com
+      accessKey: test-access-key
+      secretKey: test-secret-key
       storageIdentity: formal-obs-private-2023-primary
       credentialGeneration: formal-obs-private-20260906-v1
       caSecretKey: ""
@@ -53,7 +53,6 @@ config:
   workspace:
     defaultMountMode: sync
     enabledMountModes: [sync, fuse]
-    secretName: sandbox-workspace-obs-private
     allowMissingLSMForKind: false
     cacheSize: 512Mi
     flushTimeoutSeconds: 60

@@ -101,6 +101,10 @@ spec:
               value: "{{ .Values.config.storage.filesystem.subPath }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
+            - name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY
+              value: {{ .Values.config.storage.filesystem.accessKey | quote }}
+            - name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
+              value: {{ .Values.config.storage.filesystem.secretKey | quote }}
             - name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE
               value: {{ .Values.config.workspace.defaultMountMode | quote }}
             - name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES
@@ -110,14 +114,10 @@ spec:
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
           {{- if $fuseEnabled }}
-            - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE
-              value: "/run/secrets/workspace/accessKey"
-            - name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE
-              value: "/run/secrets/workspace/secretKey"
             - name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
               value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") | quote }}
             - name: SANDBOX_WORKSPACE_SECRET_NAME
-              value: {{ .Values.config.workspace.secretName | quote }}
+              value: {{ .Values.workspaceCA.secretName | default "" | quote }}
             - name: SANDBOX_WORKSPACE_CACHE_SIZE
               value: {{ .Values.config.workspace.cacheSize | quote }}
             - name: SANDBOX_WORKSPACE_CACHE_MEDIUM
@@ -267,9 +267,9 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
-          {{- if $fuseEnabled }}
+          {{- if and $fuseEnabled (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") }}
           volumeMounts:
-            - name: workspace-credentials
+            - name: workspace-ca
               mountPath: /run/secrets/workspace
               readOnly: true
             {{- if eq .Values.config.runtime.type "docker" }}
@@ -277,25 +277,19 @@ spec:
               mountPath: /var/lib/sandbox/workspace-secrets
             {{- end }}
           {{- end }}
-      {{- if $fuseEnabled }}
+      {{- if and $fuseEnabled (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") }}
       volumes:
-        - name: workspace-credentials
+        - name: workspace-ca
           secret:
-            secretName: {{ required "workspaceCredentials.apiSecretName is required in FUSE mode" .Values.workspaceCredentials.apiSecretName }}
+            secretName: {{ required "workspaceCA.secretName is required when a custom CA is configured" .Values.workspaceCA.secretName }}
             defaultMode: 0400
             items:
-              - key: {{ .Values.workspaceCredentials.accessKeyKey }}
-                path: accessKey
-              - key: {{ .Values.workspaceCredentials.secretKeyKey }}
-                path: secretKey
-              {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
               - key: {{ .Values.config.storage.filesystem.caSecretKey }}
                 path: ca.crt
-              {{- end }}
         {{- if eq .Values.config.runtime.type "docker" }}
         - name: workspace-secret-staging
           hostPath:
-            path: {{ required "workspaceCredentials.dockerStagingHostPath is required for Docker FUSE" .Values.workspaceCredentials.dockerStagingHostPath }}
+            path: {{ required "workspaceCA.dockerStagingHostPath is required for Docker FUSE with a custom CA" .Values.workspaceCA.dockerStagingHostPath }}
             type: Directory
         {{- end }}
       {{- end }}

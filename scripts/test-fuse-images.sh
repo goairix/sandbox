@@ -238,6 +238,6 @@ for file in "$mounter" "$fuse"; do
   ! grep -Eq 'PROFILE_(ID|MANIFEST)|imageProfileID|profile\.json' "$file" || fail "$file still binds a backend-specific profile"
 done
 
-"$repo_root/scripts/test-compose-prepare.sh"
+"$repo_root/scripts/test-inline-credential-config.sh"
 
 printf 'fuse image contract tests: PASS\n'

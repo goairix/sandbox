@@ -85,6 +85,10 @@ config:
       bucket: sandbox-storage
       region: us-east-1
       endpoint: minio.example.com
+      # AK/SK are read directly by sandbox-api. They are delivered to the
+      # mounter only through the private one-shot authorize stdin channel.
+      accessKey: ""
+      secretKey: ""
       storageIdentity: production-object-store
       credentialGeneration: rotation-1
       caSecretKey: ""
@@ -96,9 +100,6 @@ config:
         - 192.0.2.10/32
       endpointPorts:
         - 443
-      credentialFiles:
-        accessKeyFile: "/run/secrets/workspace/accessKey"
-        secretKeyFile: "/run/secrets/workspace/secretKey"
       subPath: ""
       useSSL: true
   workspace:
@@ -113,7 +114,6 @@ config:
     # configure a real AppArmor/SELinux profile.
     allowMissingLSMForKind: false
     autoSyncIntervalSeconds: 0
-    secretName: sandbox-workspace-runtime
     cacheSize: 2Gi
     cacheMedium: disk
     mountTimeoutSeconds: 30
@@ -173,13 +173,10 @@ config:
 networkPolicy:
   enabled: true
 
-# In FUSE mode this Secret must exist in the control namespace. A Secret with
-# config.workspace.secretName and the same keys must separately exist in the
-# runtime namespace for dynamically-created Pods.
-workspaceCredentials:
-  apiSecretName: sandbox-workspace-control
-  accessKeyKey: accessKey
-  secretKeyKey: secretKey
-  # Required only when sandbox-api runs in Kubernetes but controls a Docker
-  # daemon. It must be the same root-owned absolute path on the Docker host.
+# Optional custom-CA compatibility. Ordinary MinIO/OBS deployments leave all
+# of these empty and do not create or mount a Secret.
+workspaceCA:
+  secretName: ""
+  # Required only when sandbox-api runs in Kubernetes, controls Docker, and a
+  # custom CA is configured. It must be the same absolute path on the host.
   dockerStagingHostPath: ""

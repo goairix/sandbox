@@ -17,8 +17,6 @@ redis:
   persistence:
     enabled: false
 
-workspaceCredentials:
-  apiSecretName: sandbox-workspace-minio
 
 config:
   runtime:
@@ -37,6 +35,8 @@ config:
       bucket: sandbox-fuse-workspace
       region: us-east-1
       endpoint: minio.huaxisy.com
+      accessKey: test-access-key
+      secretKey: test-secret-key
       storageIdentity: formal-minio-primary
       credentialGeneration: formal-minio-20260907-v1
       caSecretKey: ""
@@ -53,7 +53,6 @@ config:
   workspace:
     defaultMountMode: sync
     enabledMountModes: [sync, fuse]
-    secretName: sandbox-workspace-minio
     fuseImages:
       mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
       docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12

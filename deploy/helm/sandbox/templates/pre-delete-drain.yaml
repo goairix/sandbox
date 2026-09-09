@@ -34,22 +34,20 @@ spec:
             - "--drain-release"
           env:
 {{ include "sandbox.drainEnv" . | nindent 12 }}
+          {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
           volumeMounts:
-            - name: workspace-credentials
+            - name: workspace-ca
               mountPath: /run/secrets/workspace
               readOnly: true
+          {{- end }}
+      {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
       volumes:
-        - name: workspace-credentials
+        - name: workspace-ca
           secret:
-            secretName: {{ required "workspaceCredentials.apiSecretName is required when remote workspace storage is configured" .Values.workspaceCredentials.apiSecretName }}
+            secretName: {{ required "workspaceCA.secretName is required when a custom CA is configured" .Values.workspaceCA.secretName }}
             defaultMode: 0400
             items:
-              - key: {{ .Values.workspaceCredentials.accessKeyKey }}
-                path: accessKey
-              - key: {{ .Values.workspaceCredentials.secretKeyKey }}
-                path: secretKey
-              {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
               - key: {{ .Values.config.storage.filesystem.caSecretKey }}
                 path: ca.crt
-              {{- end }}
+      {{- end }}
 {{- end }}

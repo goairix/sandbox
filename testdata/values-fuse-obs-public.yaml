@@ -17,8 +17,6 @@ redis:
   persistence:
     enabled: false
 
-workspaceCredentials:
-  apiSecretName: sandbox-workspace-obs-public
 
 config:
   runtime:
@@ -37,6 +35,8 @@ config:
       bucket: sandbox-fuse-workspace
       region: cn-southwest-2
       endpoint: https://obs.cn-southwest-2.myhuaweicloud.com
+      accessKey: test-access-key
+      secretKey: test-secret-key
       storageIdentity: formal-obs-public-cn-southwest-2
       credentialGeneration: formal-obs-public-20260906-v1
       caSecretKey: ""
@@ -53,7 +53,6 @@ config:
   workspace:
     defaultMountMode: sync
     enabledMountModes: [sync, fuse]
-    secretName: sandbox-workspace-obs-public
     allowMissingLSMForKind: false
     cacheSize: 512Mi
     flushTimeoutSeconds: 60

@@ -44,10 +44,7 @@
   "region" $filesystem.region
   "bucket" $filesystem.bucket
   "subPath" $filesystem.subPath
-  "apiSecretName" .Values.workspaceCredentials.apiSecretName
-  "accessKeyKey" .Values.workspaceCredentials.accessKeyKey
-  "secretKeyKey" .Values.workspaceCredentials.secretKeyKey
-  "runtimeSecretName" .Values.config.workspace.secretName
+  "caSecretName" .Values.workspaceCA.secretName
   "credentialGeneration" $filesystem.credentialGeneration
   "caSecretKey" $filesystem.caSecretKey
   "endpointHostIPs" $filesystem.endpointHostIPs
@@ -101,10 +98,10 @@
   value: {{ .Values.config.storage.filesystem.subPath | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
   value: {{ .Values.config.storage.filesystem.useSSL | quote }}
-- name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE
-  value: /run/secrets/workspace/accessKey
-- name: SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE
-  value: /run/secrets/workspace/secretKey
+- name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY
+  value: {{ .Values.config.storage.filesystem.accessKey | quote }}
+- name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
+  value: {{ .Values.config.storage.filesystem.secretKey | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
   value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") | quote }}
 - name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE
@@ -112,7 +109,7 @@
 - name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES
   value: {{ join "," .Values.config.workspace.enabledMountModes | quote }}
 - name: SANDBOX_WORKSPACE_SECRET_NAME
-  value: {{ .Values.config.workspace.secretName | quote }}
+  value: {{ .Values.workspaceCA.secretName | default "" | quote }}
 - name: SANDBOX_WORKSPACE_ALLOW_MISSING_LSM_FOR_KIND
   value: {{ .Values.config.workspace.allowMissingLSMForKind | default false | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_PRESET
