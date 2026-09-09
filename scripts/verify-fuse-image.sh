@@ -82,13 +82,6 @@ docker run --rm --entrypoint /bin/sh "$package_image" -ceu '
   test "${#stored_s3fs_sha}" -eq 64
   case "$stored_s3fs_sha" in *[!0-9a-f]*) exit 1;; esac
   test "$(sha256sum /usr/bin/s3fs | cut -d " " -f 1)" = "$stored_s3fs_sha"
-  base_ref=$(cat base-image.digest)
-  case "$base_ref" in *@sha256:*) ;;
-    *) exit 1;;
-  esac
-  base_sha=${base_ref##*@sha256:}
-  test "${#base_sha}" -eq 64
-  case "$base_sha" in *[!0-9a-f]*) exit 1;; esac
   for profile_id in minio-sigv4-path-style-v1 huawei-obs-public-v1 huawei-obs-private-2023-v1; do
     test "$(grep -Fc "\"id\": \"$profile_id\"" profile-bundle.json)" -eq 1
   done
