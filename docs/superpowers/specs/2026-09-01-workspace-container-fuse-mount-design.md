@@ -129,7 +129,7 @@ Task 12 已把运行时镜像拆为三个明确职责边界：Kubernetes 使用�
 
 普通 sandbox 同样不提交生成的 probe binary，而是在 Dockerfile 的 `workspace-probe-builder` 阶段从 repository-root context 编译静态 probe。需要 Go 源码的 API、普通 runtime、mounter 和 Docker FUSE 镜像都以仓库根目录为 build context；gateway 继续使用自身目录。构建完成后只把统一版本 tag 更新到 Helm values 或 Compose `.env`，生产启动不在 Compose 内重新构建项目镜像。真实 registry 认证文件必须位于仓库根目录之外；认证材料不能进入 API 环境、镜像构建上下文或 BuildKit cache。完整命令以[Helm 部署、升级与镜像发布 Runbook](../../deployment/helm-deployment-upgrade.md)为准。
 
-只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON bundle 只记录允许的 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析、拒绝重复 ID 并逐项比对 compiled catalog，可以发现包被拼错，但 bundle 不能注入或覆盖任意 `-o` 参数。运行时 bootstrap 只能选择 bundle 中的一个 exact profile。基础镜像必须使用 `@sha256:` 引用，s3fs artifact 必须来自 HTTPS URL 并在安装前匹配 CI 提供的 SHA-256。
+只有编译进二进制的 typed profile catalog 可以生成 s3fs argv。镜像中的 JSON bundle 只记录允许的 profile ID、参数验证状态、durable-flush 状态、TLS/endpoint/region/addressing/signature 元数据和实际 s3fs SHA-256；严格解析、拒绝重复 ID 并逐项比对 compiled catalog，可以发现包被拼错，但 bundle 不能注入或覆盖任意 `-o` 参数。运行时 bootstrap 只能选择 bundle 中的一个 exact profile。基础镜像与固定的 s3fs 1.95 上游提交直接版本化在 Dockerfile 中，构建时计算最终 s3fs 二进制 SHA 并写入 bundle，不要求发布运维传入基础镜像 digest、artifact URL 或 SHA。具体构建入口与 Compose 初始化见[简化 FUSE 镜像构建与 Docker Compose 初始化设计](2026-09-09-simple-fuse-build-compose-bootstrap-design.md)。
 
 镜像内容完整性与生产资格使用两道独立门禁：`package-check` 验证二进制与 bundle 绑定、文件权限、固定目录和 artifact 哈希，并实际执行固定 `s3fs --version`，从而在发布前发现错误架构、loader 缺失或动态依赖缺失；`release-check` 通过固定 CLI `workspace-mounter health prepared --release-check-image` 重做 package 检查并逐个调用 Go `CheckProductionProfile`，要求 bundle 中每个 profile 的 mount parameters 与 durable flush 都为 `verified`，不能用 shell grep bundle 代替。当前状态如下：
 
