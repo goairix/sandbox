@@ -2,6 +2,7 @@ ARG WORKSPACE_PROBE_BUILDER=golang:1.25-alpine
 FROM ${WORKSPACE_PROBE_BUILDER} AS workspace-probe-builder
 
 WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 COPY cmd/workspace-probe ./cmd/workspace-probe
 COPY internal/fuseprotocol ./internal/fuseprotocol

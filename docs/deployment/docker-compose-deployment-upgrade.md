@@ -126,12 +126,13 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 ```bash
 VERSION=v0.2.13
 REGISTRY=registry.i.huaxisy.com/library/ai-infra
+PLATFORM=linux/arm64
 
-docker buildx build -f docker/Dockerfile -t "$REGISTRY/sandbox-api:$VERSION" .
-docker buildx build -f docker/images/sandbox/Dockerfile -t "$REGISTRY/sandbox-runtime:$VERSION" .
-docker buildx build -f docker/images/gateway/Dockerfile -t "$REGISTRY/sandbox-gateway:$VERSION" docker/images/gateway
-docker buildx build -f docker/images/workspace-mounter/Dockerfile -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" .
-docker buildx build -f docker/images/sandbox-fuse/Dockerfile -t "$REGISTRY/sandbox-fuse-docker:$VERSION" .
+docker buildx build -f docker/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-api:$VERSION" .
+docker buildx build -f docker/images/sandbox/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-runtime:$VERSION" .
+docker buildx build -f docker/images/gateway/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-gateway:$VERSION" docker/images/gateway
+docker buildx build -f docker/images/workspace-mounter/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" .
+docker buildx build -f docker/images/sandbox-fuse/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-docker:$VERSION" .
 ```
 
 分别构建各 CPU 架构后，可以继续使用现有 `docker manifest` 流程合并成同一个版本 tag。构建完成后只需把这些 tag 更新到 `.env`，然后 `docker compose up -d`。
