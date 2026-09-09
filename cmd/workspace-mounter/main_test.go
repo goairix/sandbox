@@ -77,11 +77,9 @@ func TestCLIUsesSharedSocketContractEndToEnd(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, directory), 0o700))
 	}
 	require.NoError(t, os.Chmod(filepath.Join(root, "run"), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "accessKey"), []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "secretKey"), []byte("SK\n"), 0o400))
 	bootstrap := fuseprotocol.BootstrapConfig{
 		Version: fuseprotocol.Version, RuntimeUID: "uid-a", Provider: "minio", Bucket: "bucket-a", Endpoint: "https://minio.example.com", Region: "us-east-1", Profile: "minio-sigv4-path-style-v1",
-		AccessKeyFile: filepath.Join(root, "secrets", "accessKey"), SecretKeyFile: filepath.Join(root, "secrets", "secretKey"), PasswdFile: filepath.Join(root, "run", "passwd-s3fs"), CacheDir: filepath.Join(root, "cache"), CacheLimitBytes: 1024, MountPath: filepath.Join(root, "workspace"), PoolKey: strings.Repeat("a", 64), MountTimeoutSeconds: 1, FlushTimeoutSeconds: 1, UnmountTimeoutSeconds: 1,
+		PasswdFile: filepath.Join(root, "run", "passwd-s3fs"), CacheDir: filepath.Join(root, "cache"), CacheLimitBytes: 1024, MountPath: filepath.Join(root, "workspace"), PoolKey: strings.Repeat("a", 64), MountTimeoutSeconds: 1, FlushTimeoutSeconds: 1, UnmountTimeoutSeconds: 1,
 	}
 	supervisor := mounter.NewSupervisor(mounter.Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (mounter.Mount, error) {
 		return mounter.Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil

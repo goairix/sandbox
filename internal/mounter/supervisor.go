@@ -164,26 +164,6 @@ func (s *Supervisor) Bootstrap(_ context.Context, bootstrap fuseprotocol.Bootstr
 		return err
 	}
 	bootstrap.RuntimeUID = expectedRuntimeUID
-	access, err := readCredential(bootstrap.AccessKeyFile, s.config.CredentialRoot, true)
-	if err != nil {
-		return err
-	}
-	defer wipe(access)
-	secret, err := readCredential(bootstrap.SecretKeyFile, s.config.CredentialRoot, false)
-	if err != nil {
-		return err
-	}
-	defer wipe(secret)
-	passwd := make([]byte, 0, len(access)+len(secret)+2)
-	passwd = append(passwd, access...)
-	passwd = append(passwd, ':')
-	passwd = append(passwd, secret...)
-	passwd = append(passwd, '\n')
-	defer wipe(passwd)
-	if err := atomicPublish(bootstrap.PasswdFile, passwd, 0o600); err != nil {
-		s.state = StateUnhealthy
-		return fmt.Errorf("publish s3fs credential file: %w", err)
-	}
 	sanitized, err := json.Marshal(bootstrap)
 	if err != nil {
 		return fmt.Errorf("marshal sanitized bootstrap: %w", err)
@@ -227,16 +207,11 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	if b.CacheLimitBytes <= 0 {
 		return fmt.Errorf("bootstrap cache limit is invalid")
 	}
-	if b.PasswdFile != filepath.Join(s.config.RunDir, "passwd-s3fs") || filepath.Clean(b.PasswdFile) != b.PasswdFile || b.MountPath != s.config.MountPath || !withinRootOrSelf(b.CacheDir, s.config.CacheRoot) || !withinRoot(b.AccessKeyFile, s.config.CredentialRoot) || !withinRoot(b.SecretKeyFile, s.config.CredentialRoot) || (b.CAFile != "" && !withinRoot(b.CAFile, s.config.CredentialRoot)) {
+	if b.AccessKeyFile != "" || b.SecretKeyFile != "" {
+		return fmt.Errorf("bootstrap credential file paths are not supported")
+	}
+	if b.PasswdFile != filepath.Join(s.config.RunDir, "passwd-s3fs") || filepath.Clean(b.PasswdFile) != b.PasswdFile || b.MountPath != s.config.MountPath || !withinRootOrSelf(b.CacheDir, s.config.CacheRoot) || (b.CAFile != "" && !withinRoot(b.CAFile, s.config.CredentialRoot)) {
 		return fmt.Errorf("bootstrap path is outside its trusted root")
-	}
-	if b.AccessKeyFile == b.SecretKeyFile || b.AccessKeyFile == b.PasswdFile || b.SecretKeyFile == b.PasswdFile {
-		return fmt.Errorf("bootstrap input and output paths overlap")
-	}
-	resolvedAccess, accessErr := filepath.EvalSymlinks(b.AccessKeyFile)
-	resolvedSecret, secretErr := filepath.EvalSymlinks(b.SecretKeyFile)
-	if accessErr != nil || secretErr != nil || resolvedAccess == resolvedSecret {
-		return fmt.Errorf("bootstrap credential sources are invalid or overlap")
 	}
 	if err := prepareSecureDirectory(s.config.RunDir, 0o700); err != nil {
 		return err
@@ -249,11 +224,6 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	}
 	if err := prepareCacheTemp(filepath.Join(b.CacheDir, "tmp"), s.config.CacheRoot); err != nil {
 		return fmt.Errorf("validate cache temporary directory: %w", err)
-	}
-	for _, path := range []string{b.AccessKeyFile, b.SecretKeyFile} {
-		if err := secureResolvedCredential(path, s.config.CredentialRoot); err != nil {
-			return fmt.Errorf("validate credential source: %w", err)
-		}
 	}
 	if b.CAFile != "" {
 		if err := secureResolvedFile(b.CAFile, s.config.CredentialRoot); err != nil {
@@ -280,6 +250,7 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer auth.Credentials.Zero()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -295,17 +266,32 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 	if auth.Version != fuseprotocol.Version || auth.RuntimeUID != effectiveRuntimeUID(s.bootstrap) || auth.PoolKey != s.bootstrap.PoolKey || !validHexDigest(auth.WorkspaceHash) || !fuseprotocol.ValidCanonicalPrefix(auth.Prefix) || auth.LeaseGeneration <= 0 || auth.MountAttempt != 1 {
 		return fmt.Errorf("workspace authorization is invalid")
 	}
-	s.consumed, s.auth, s.state = true, auth, StateMounting
+	passwd, err := buildPasswd(auth.Credentials)
+	if err != nil {
+		return err
+	}
+	defer wipe(passwd)
+	options, err := s.profile.Options(s.bootstrap)
+	if err != nil {
+		return fmt.Errorf("build fixed s3fs profile: %w", err)
+	}
+	if err := atomicPublish(s.bootstrap.PasswdFile, passwd, 0o600); err != nil {
+		s.state = StateUnhealthy
+		return fmt.Errorf("publish s3fs credential file: %w", err)
+	}
+	cleanupPasswd := true
+	defer func() {
+		if cleanupPasswd {
+			_ = os.Remove(s.bootstrap.PasswdFile)
+		}
+	}()
+	durableAuth := auth.Sanitized()
+	s.consumed, s.auth, s.state = true, durableAuth, StateMounting
 	s.mountDeadline = time.Now().Add(time.Duration(s.bootstrap.MountTimeoutSeconds) * time.Second)
-	marker, _ := json.Marshal(auth)
+	marker, _ := json.Marshal(durableAuth)
 	if err := createExclusiveSynced(filepath.Join(s.config.RunDir, mountGenerationFile), marker, 0o600); err != nil {
 		s.state = StateUnhealthy
 		return fmt.Errorf("consume mount generation: %w", err)
-	}
-	options, err := s.profile.Options(s.bootstrap)
-	if err != nil {
-		s.state = StateUnhealthy
-		return fmt.Errorf("build fixed s3fs profile: %w", err)
 	}
 	argv := []string{"/usr/bin/s3fs", s.bootstrap.Bucket + ":/" + strings.TrimSuffix(auth.Prefix, "/"), s.bootstrap.MountPath, "-f", "-o", "allow_other", "-o", "uid=1000", "-o", "gid=1000", "-o", "umask=0022", "-o", "mp_umask=0022", "-o", "passwd_file=" + s.bootstrap.PasswdFile, "-o", "tmpdir=" + filepath.Join(s.bootstrap.CacheDir, "tmp")}
 	argv = append(argv, options...)
@@ -320,6 +306,7 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 	}
 	s.process = process
 	s.processDone = make(chan struct{})
+	cleanupPasswd = false
 	go s.reap(process, s.processDone)
 	return nil
 }
@@ -363,20 +350,16 @@ func (s *Supervisor) checkPreparedLocked() error {
 	if err := s.config.CheckAnchor(s.bootstrap.MountPath); err != nil {
 		return fmt.Errorf("workspace anchor check failed")
 	}
-	for _, path := range []string{s.bootstrap.AccessKeyFile, s.bootstrap.SecretKeyFile} {
-		if err := secureResolvedCredential(path, s.config.CredentialRoot); err != nil {
-			return fmt.Errorf("credential source check failed")
-		}
-	}
 	if s.bootstrap.CAFile != "" {
 		if err := secureResolvedFile(s.bootstrap.CAFile, s.config.CredentialRoot); err != nil {
 			return fmt.Errorf("CA source check failed")
 		}
 	}
-	for _, path := range []string{s.bootstrap.PasswdFile, filepath.Join(s.config.RunDir, "bootstrap.json")} {
-		if err := securePublishedFile(path); err != nil {
-			return fmt.Errorf("persisted bootstrap artifact check failed")
-		}
+	if _, err := os.Lstat(s.bootstrap.PasswdFile); !os.IsNotExist(err) {
+		return fmt.Errorf("s3fs credential file is present before authorization")
+	}
+	if err := securePublishedFile(filepath.Join(s.config.RunDir, "bootstrap.json")); err != nil {
+		return fmt.Errorf("persisted bootstrap artifact check failed")
 	}
 	if _, err := os.Lstat(filepath.Join(s.config.RunDir, mountGenerationFile)); !os.IsNotExist(err) {
 		return fmt.Errorf("mount generation is present")
@@ -871,21 +854,6 @@ func secureResolvedFile(path, root string) error {
 	return nil
 }
 
-func secureResolvedCredential(path, root string) error {
-	if err := secureResolvedFile(path, root); err != nil {
-		return err
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve credential source")
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || (info.Mode().Perm() != 0o400 && info.Mode().Perm() != 0o600) {
-		return fmt.Errorf("credential source mode is invalid")
-	}
-	return nil
-}
-
 func securePublishedFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || !ownedByCurrentUser(info) {
@@ -906,42 +874,16 @@ func readBoundedFile(path string) ([]byte, error) {
 	}
 	return raw, nil
 }
-func readCredential(path, root string, access bool) ([]byte, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || !withinRoot(resolved, mustResolveRoot(root)) {
-		return nil, fmt.Errorf("read credential source")
+func buildPasswd(credentials fuseprotocol.MountCredentials) ([]byte, error) {
+	if len(credentials.AccessKey) == 0 || len(credentials.SecretKey) == 0 || len(credentials.AccessKey) > fuseprotocol.MaxCredentialBytes || len(credentials.SecretKey) > fuseprotocol.MaxCredentialBytes || containsCredentialDelimiter(credentials.AccessKey, true) || containsCredentialDelimiter(credentials.SecretKey, false) {
+		return nil, fmt.Errorf("workspace mount credentials are invalid")
 	}
-	file, err := os.Open(resolved)
-	if err != nil {
-		return nil, fmt.Errorf("read credential source")
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !ownedByCurrentUser(info) || (info.Mode().Perm() != 0o400 && info.Mode().Perm() != 0o600) {
-		return nil, fmt.Errorf("read credential source")
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, 4097))
-	if err != nil {
-		return nil, fmt.Errorf("read credential source")
-	}
-	if len(raw) == 0 || len(raw) > 4096 {
-		wipe(raw)
-		return nil, fmt.Errorf("credential source size is invalid")
-	}
-	raw = bytesTrimOneNewline(raw)
-	if len(raw) == 0 || containsCredentialDelimiter(raw, access) {
-		wipe(raw)
-		return nil, fmt.Errorf("credential source format is invalid")
-	}
-	return raw, nil
-}
-
-func mustResolveRoot(root string) string {
-	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return ""
-	}
-	return resolved
+	passwd := make([]byte, 0, len(credentials.AccessKey)+len(credentials.SecretKey)+2)
+	passwd = append(passwd, credentials.AccessKey...)
+	passwd = append(passwd, ':')
+	passwd = append(passwd, credentials.SecretKey...)
+	passwd = append(passwd, '\n')
+	return passwd, nil
 }
 
 func containsCredentialDelimiter(raw []byte, access bool) bool {
@@ -951,12 +893,6 @@ func containsCredentialDelimiter(raw []byte, access bool) bool {
 		}
 	}
 	return false
-}
-func bytesTrimOneNewline(raw []byte) []byte {
-	if len(raw) > 0 && raw[len(raw)-1] == '\n' {
-		return raw[:len(raw)-1]
-	}
-	return raw
 }
 func wipe(raw []byte) {
 	for i := range raw {

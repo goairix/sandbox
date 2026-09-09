@@ -19,6 +19,7 @@ import (
 const (
 	Version                   = 1
 	MaxJSONBytes              = 64 << 10
+	MaxCredentialBytes        = 4 << 10
 	MounterBinary             = "/usr/local/bin/workspace-mounter"
 	ProbeBinary               = "/usr/local/bin/workspace-probe"
 	ProbePID1EnvironmentName  = "WORKSPACE_PROBE_INTERNAL_PID1_V1"
@@ -94,14 +95,43 @@ type ControlAck struct {
 	Generation int64  `json:"generation"`
 }
 
+// MountCredentials are transported only in the private authorize request.
+// They must be cleared by every receiver after the mount attempt and must
+// never be copied into durable authorization state.
+type MountCredentials struct {
+	AccessKey []byte `json:"access_key"`
+	SecretKey []byte `json:"secret_key"`
+}
+
+func (credentials *MountCredentials) Zero() {
+	if credentials == nil {
+		return
+	}
+	for index := range credentials.AccessKey {
+		credentials.AccessKey[index] = 0
+	}
+	for index := range credentials.SecretKey {
+		credentials.SecretKey[index] = 0
+	}
+	credentials.AccessKey = nil
+	credentials.SecretKey = nil
+}
+
 type AuthorizeRequest struct {
-	Version         int    `json:"version"`
-	RuntimeUID      string `json:"runtime_uid"`
-	PoolKey         string `json:"pool_key"`
-	WorkspaceHash   string `json:"workspace_hash"`
-	Prefix          string `json:"prefix"`
-	LeaseGeneration int64  `json:"lease_generation"`
-	MountAttempt    uint8  `json:"mount_attempt"`
+	Version         int              `json:"version"`
+	RuntimeUID      string           `json:"runtime_uid"`
+	PoolKey         string           `json:"pool_key"`
+	WorkspaceHash   string           `json:"workspace_hash"`
+	Prefix          string           `json:"prefix"`
+	LeaseGeneration int64            `json:"lease_generation"`
+	MountAttempt    uint8            `json:"mount_attempt"`
+	Credentials     MountCredentials `json:"credentials"`
+}
+
+// Sanitized returns the durable authorization identity without credentials.
+func (request AuthorizeRequest) Sanitized() AuthorizeRequest {
+	request.Credentials = MountCredentials{}
+	return request
 }
 
 type ControlRequest struct {

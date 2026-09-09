@@ -101,7 +101,7 @@ func (r *fakeRunner) Run(ctx context.Context, argv []string) error {
 func validBootstrap(root string) fuseprotocol.BootstrapConfig {
 	return fuseprotocol.BootstrapConfig{
 		Version: fuseprotocol.Version, RuntimeUID: "uid-a", Provider: "minio", Bucket: "bucket-a", Endpoint: "https://minio.example.com", Region: "us-east-1",
-		Profile: "minio-sigv4-path-style-v1", AccessKeyFile: filepath.Join(root, "secrets", "accessKey"), SecretKeyFile: filepath.Join(root, "secrets", "secretKey"),
+		Profile:    "minio-sigv4-path-style-v1",
 		PasswdFile: filepath.Join(root, "run", "passwd-s3fs"), CacheDir: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"),
 		PoolKey: strings.Repeat("a", 64), CacheLimitBytes: 1024,
 		MountTimeoutSeconds: 2, FlushTimeoutSeconds: 2, UnmountTimeoutSeconds: 2,
@@ -114,8 +114,6 @@ func newTestSupervisor(t *testing.T, runner *fakeRunner) (*Supervisor, fuseproto
 	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "accessKey"), []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "secretKey"), []byte("SK\n"), 0o400))
 	bootstrap := validBootstrap(root)
 	s := NewSupervisor(Config{
 		RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"),
@@ -127,7 +125,7 @@ func newTestSupervisor(t *testing.T, runner *fakeRunner) (*Supervisor, fuseproto
 }
 
 func validAuthorization() fuseprotocol.AuthorizeRequest {
-	return fuseprotocol.AuthorizeRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", PoolKey: strings.Repeat("a", 64), WorkspaceHash: strings.Repeat("b", 64), Prefix: "workspaces/a/", LeaseGeneration: 1, MountAttempt: 1}
+	return fuseprotocol.AuthorizeRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", PoolKey: strings.Repeat("a", 64), WorkspaceHash: strings.Repeat("b", 64), Prefix: "workspaces/a/", LeaseGeneration: 1, MountAttempt: 1, Credentials: fuseprotocol.MountCredentials{AccessKey: []byte("AK"), SecretKey: []byte("SK")}}
 }
 
 func TestSupervisorConsumesAuthorizationOnce(t *testing.T) {
@@ -140,6 +138,8 @@ func TestSupervisorConsumesAuthorizationOnce(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(filepath.Dir(bootstrap.PasswdFile), mountGenerationFile))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), auth.WorkspaceHash)
+	assert.NotContains(t, string(raw), "AK")
+	assert.NotContains(t, string(raw), "SK")
 	info, err := os.Stat(filepath.Join(filepath.Dir(bootstrap.PasswdFile), mountGenerationFile))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
@@ -185,9 +185,10 @@ func TestSupervisorStaysLockedWhenGenerationMarkerExists(t *testing.T) {
 	require.ErrorIs(t, s.Authorize(context.Background(), validAuthorization()), ErrAuthorizationConsumed)
 }
 
-func TestBootstrapWritesMode0600CredentialAndRejectsReplay(t *testing.T) {
+func TestAuthorizeWritesMode0600CredentialAndBootstrapRejectsReplay(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
+	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
 	raw, err := os.ReadFile(bootstrap.PasswdFile)
 	require.NoError(t, err)
 	assert.Equal(t, "AK:SK\n", string(raw))
@@ -197,30 +198,32 @@ func TestBootstrapWritesMode0600CredentialAndRejectsReplay(t *testing.T) {
 	require.ErrorIs(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"), ErrBootstrapConsumed)
 }
 
-func TestBootstrapRejectsMultilineCredentialsWithoutOutput(t *testing.T) {
+func TestAuthorizeRejectsInvalidCredentialsWithoutOutput(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
-	_ = s
-	// A new supervisor sees the persisted bootstrap as consumed, so use a new root.
-	root := t.TempDir()
-	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
+	for _, credentials := range []fuseprotocol.MountCredentials{
+		{AccessKey: []byte("AK\nINJECT"), SecretKey: []byte("SK")},
+		{AccessKey: []byte("AK:OTHER"), SecretKey: []byte("SK")},
+		{AccessKey: []byte("AK")},
+		{AccessKey: []byte("AK"), SecretKey: []byte("SK\x00INJECT")},
+		{AccessKey: make([]byte, fuseprotocol.MaxCredentialBytes+1), SecretKey: []byte("SK")},
+	} {
+		auth := validAuthorization()
+		auth.Credentials = credentials
+		require.Error(t, s.Authorize(context.Background(), auth))
+		_, err := os.Stat(bootstrap.PasswdFile)
+		assert.True(t, os.IsNotExist(err))
 	}
-	bootstrap = validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\nINJECT\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
-	bad := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"), CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }}, runner)
-	require.Error(t, bad.Bootstrap(context.Background(), bootstrap, "uid-a"))
-	_, err := os.Stat(bootstrap.PasswdFile)
-	assert.True(t, os.IsNotExist(err))
 }
 
 func TestAuthorizationMarkerPermanentlyConsumesStartFailure(t *testing.T) {
 	runner := &fakeRunner{startErr: errors.New("start failed")}
-	s, _ := newTestSupervisor(t, runner)
+	s, bootstrap := newTestSupervisor(t, runner)
 	require.Error(t, s.Authorize(context.Background(), validAuthorization()))
 	require.ErrorIs(t, s.Authorize(context.Background(), validAuthorization()), ErrAuthorizationConsumed)
 	assert.Equal(t, StateUnhealthy, s.State())
+	_, err := os.Stat(bootstrap.PasswdFile)
+	assert.True(t, os.IsNotExist(err))
 }
 
 func TestAuthorizeBuildsArgvWithoutShellInterpolation(t *testing.T) {
@@ -242,8 +245,6 @@ func TestBootstrapCanonicalizesRuntimeUIDAndAllowsCacheRoot(t *testing.T) {
 	}
 	bootstrap := validBootstrap(root)
 	bootstrap.RuntimeUID = ""
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: bootstrap.CacheDir, MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, &fakeRunner{})
 	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 	status, err := s.PreparedStatus(context.Background())
@@ -264,8 +265,6 @@ func TestBootstrapSecuresRootOwnedEmptyDirCache(t *testing.T) {
 	cache := filepath.Join(root, "cache")
 	require.NoError(t, os.Chmod(cache, 0o777), "model Kubernetes emptyDir mount root")
 	bootstrap := validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	s := NewSupervisor(Config{
 		RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: cache, MountPath: bootstrap.MountPath,
 		CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil },
@@ -290,51 +289,30 @@ func TestAuthorizeChildLifetimeDoesNotUseRequestCancellation(t *testing.T) {
 	assert.NoError(t, runner.startContext.Err())
 }
 
-func TestBootstrapAcceptsProjectedSecretSymlinkOnlyInsideTrustedRoot(t *testing.T) {
+func TestBootstrapRejectsLegacyCredentialFilePaths(t *testing.T) {
 	root := t.TempDir()
-	for _, dir := range []string{"secrets/..data", "run", "cache/tmp", "workspace"} {
+	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "..data", "access"), []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "..data", "secret"), []byte("SK\n"), 0o400))
-	require.NoError(t, os.Symlink(filepath.Join("..data", "access"), filepath.Join(root, "secrets", "accessKey")))
-	require.NoError(t, os.Symlink(filepath.Join("..data", "secret"), filepath.Join(root, "secrets", "secretKey")))
 	bootstrap := validBootstrap(root)
-	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, &fakeRunner{})
-	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
-}
-
-func TestBootstrapRejectsCredentialSymlinkEscapingTrustedRoot(t *testing.T) {
-	root := t.TempDir()
-	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace", "foreign"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
-	}
-	require.NoError(t, os.WriteFile(filepath.Join(root, "foreign", "access"), []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "secrets", "secretKey"), []byte("SK\n"), 0o400))
-	require.NoError(t, os.Symlink(filepath.Join(root, "foreign", "access"), filepath.Join(root, "secrets", "accessKey")))
-	bootstrap := validBootstrap(root)
+	bootstrap.AccessKeyFile = filepath.Join(root, "secrets", "accessKey")
+	bootstrap.SecretKeyFile = filepath.Join(root, "secrets", "secretKey")
 	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }}, &fakeRunner{})
 	require.Error(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 	_, err := os.Stat(bootstrap.PasswdFile)
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestBootstrapRejectsWorldReadableCredentialButAllowsReadOnlyCA(t *testing.T) {
+func TestBootstrapAllowsReadOnlyCA(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 	}
 	bootstrap := validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o444))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	bootstrap.CAFile = filepath.Join(root, "secrets", "ca.crt")
 	require.NoError(t, os.WriteFile(bootstrap.CAFile, []byte("CA"), 0o444))
 	config := Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}
 	s := NewSupervisor(config, &fakeRunner{})
-	require.Error(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
-
-	require.NoError(t, os.Chmod(bootstrap.AccessKeyFile, 0o400))
-	s = NewSupervisor(config, &fakeRunner{})
 	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 }
 
@@ -558,8 +536,6 @@ func TestBootstrapRejectsUnboundedTimeoutAndNonFixedPasswdPath(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 		}
 		bootstrap := validBootstrap(root)
-		require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-		require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 		mutate(&bootstrap)
 		s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"), CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{}, nil }}, &fakeRunner{})
 		require.Error(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
@@ -572,8 +548,6 @@ func TestBootstrapPreparesEmptyDirRunAndCacheLayout(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
 	}
 	bootstrap := validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, &fakeRunner{})
 	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 	for _, path := range []string{filepath.Join(root, "run"), filepath.Join(root, "cache", "tmp")} {
@@ -585,10 +559,16 @@ func TestBootstrapPreparesEmptyDirRunAndCacheLayout(t *testing.T) {
 
 func TestAuthorizePassesOnlyValidatedCAEnvironmentToS3FS(t *testing.T) {
 	runner := &fakeRunner{}
-	s, bootstrap := newTestSupervisor(t, runner)
-	caPath := filepath.Join(filepath.Dir(bootstrap.AccessKeyFile), "ca.crt")
+	root := t.TempDir()
+	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
+	}
+	bootstrap := validBootstrap(root)
+	caPath := filepath.Join(root, "secrets", "ca.crt")
 	require.NoError(t, os.WriteFile(caPath, []byte("test-ca"), 0o400))
-	s.bootstrap.CAFile = caPath
+	bootstrap.CAFile = caPath
+	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, runner)
+	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
 	require.Equal(t, [][]string{{"CURL_CA_BUNDLE=" + caPath}}, runner.env)
 }
@@ -606,7 +586,7 @@ func TestPreparedStatusRevalidatesFuseAnchorAndCredentialState(t *testing.T) {
 	require.Error(t, err)
 
 	s.config.CheckAnchor = func(string) error { return nil }
-	require.NoError(t, os.Chmod(bootstrap.PasswdFile, 0o644))
+	require.NoError(t, os.WriteFile(bootstrap.PasswdFile, []byte("unexpected"), 0o600))
 	_, err = s.PreparedStatus(context.Background())
 	require.Error(t, err)
 }
@@ -662,8 +642,6 @@ func newTestSupervisorWithRunner(t *testing.T, runner Runner) (*Supervisor, fuse
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 	}
 	bootstrap := validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: filepath.Join(root, "workspace"), CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }, MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil }}, runner)
 	require.NoError(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
 	return s, bootstrap
@@ -733,8 +711,6 @@ func newVerifiedFlushSupervisor(t *testing.T, runner *fakeRunner) (*Supervisor, 
 		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
 	}
 	bootstrap := validBootstrap(root)
-	require.NoError(t, os.WriteFile(bootstrap.AccessKeyFile, []byte("AK\n"), 0o400))
-	require.NoError(t, os.WriteFile(bootstrap.SecretKeyFile, []byte("SK\n"), 0o400))
 	profile := Profile{ID: bootstrap.Profile, Provider: "minio", Options: func(fuseprotocol.BootstrapConfig) ([]string, error) { return nil, nil }, Flush: func(fuseprotocol.BootstrapConfig) []string { return []string{"/usr/bin/verified-flush"} }}
 	mountID := uint64(42)
 	filesystemType := "tmpfs"

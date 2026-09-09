@@ -13,6 +13,7 @@ func TestControlDTOsUseOneStrictVersionedSchema(t *testing.T) {
 	auth := AuthorizeRequest{
 		Version: Version, RuntimeUID: "uid-a", PoolKey: strings.Repeat("a", 64), WorkspaceHash: strings.Repeat("b", 64),
 		Prefix: "workspaces/a/", LeaseGeneration: 7, MountAttempt: 1,
+		Credentials: MountCredentials{AccessKey: []byte("access-a"), SecretKey: []byte("secret-a")},
 	}
 	raw, err := json.Marshal(auth)
 	require.NoError(t, err)
@@ -31,6 +32,22 @@ func TestControlDTOsUseOneStrictVersionedSchema(t *testing.T) {
 	} {
 		require.Error(t, DecodeExact(invalid, &decoded))
 	}
+}
+
+func TestAuthorizeRequestSanitizedRemovesCredentials(t *testing.T) {
+	request := AuthorizeRequest{
+		Version: Version,
+		Credentials: MountCredentials{
+			AccessKey: []byte("do-not-persist-access"),
+			SecretKey: []byte("do-not-persist-secret"),
+		},
+	}
+
+	sanitized := request.Sanitized()
+	assert.Empty(t, sanitized.Credentials.AccessKey)
+	assert.Empty(t, sanitized.Credentials.SecretKey)
+	assert.Equal(t, []byte("do-not-persist-access"), request.Credentials.AccessKey)
+	assert.Equal(t, []byte("do-not-persist-secret"), request.Credentials.SecretKey)
 }
 
 func TestFixedCommandAllowlistsMatchRuntimeAndBinaries(t *testing.T) {
