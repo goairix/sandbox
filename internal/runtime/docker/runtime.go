@@ -42,6 +42,12 @@ type Runtime struct {
 // NewWithFUSECredentials enables Docker FUSE authorization with an owned,
 // process-local copy of the configured storage credentials.
 func NewWithFUSECredentials(ctx context.Context, host, gatewayImage string, credentials runtime.FUSECredentials) (*Runtime, error) {
+	return NewWithFUSECredentialsAndCAAtRoot(ctx, host, gatewayImage, credentials, dockerWorkspaceSecretRoot, nil)
+}
+
+// NewWithFUSECredentialsAndCAAtRoot additionally enables the optional custom
+// CA materializer. AK/SK never pass through the materializer.
+func NewWithFUSECredentialsAndCAAtRoot(ctx context.Context, host, gatewayImage string, credentials runtime.FUSECredentials, secretRoot string, materializer FUSESecretMaterializer) (*Runtime, error) {
 	runtimeImpl, err := New(ctx, host, gatewayImage)
 	if err != nil {
 		return nil, err
@@ -51,6 +57,14 @@ func NewWithFUSECredentials(ctx context.Context, host, gatewayImage string, cred
 		return nil, fmt.Errorf("Docker workspace FUSE credentials are required")
 	}
 	runtimeImpl.fuseCredentials = credentials.Clone()
+	if materializer != nil {
+		if !validDockerWorkspaceSecretRoot(secretRoot) {
+			_ = runtimeImpl.Close()
+			return nil, fmt.Errorf("Docker workspace FUSE CA root is invalid")
+		}
+		runtimeImpl.secretRoot = secretRoot
+		runtimeImpl.secretMaterializer = materializer
+	}
 	return runtimeImpl, nil
 }
 

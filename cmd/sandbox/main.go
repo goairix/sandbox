@@ -111,20 +111,25 @@ func main() {
 	defer cancel()
 
 	fuseEnabled := cfg.Workspace.MountModeEnabled("fuse")
+	fuseCredentials, err := loadRuntimeFUSECredentials(cfg)
+	if err != nil {
+		log.Fatalf("failed to load FUSE credentials: %v", err)
+	}
+	defer fuseCredentials.Zero()
 
-	// Initialize runtime. Docker FUSE uses a root-owned staging directory and
-	// copies only the operator-selected credential files into each special
-	// container; ordinary containers never receive /dev/fuse or these files.
+	// Initialize the runtime with its own in-memory credential copy. Prepared
+	// containers and Pods remain credential-free until one-shot authorization.
 	var rt runtime.Runtime
 	switch cfg.Runtime.Type {
 	case "docker":
 		if fuseEnabled {
-			rt, err = docker.NewWithFUSESecretsAtRoot(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, cfg.Runtime.Docker.WorkspaceSecretRoot, &docker.FileSecretMaterializer{
-				Root:          cfg.Runtime.Docker.WorkspaceSecretRoot,
-				AccessKeyFile: cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile,
-				SecretKeyFile: cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile,
-				CAFile:        cfg.Storage.FileSystem.CAFile,
-			})
+			if cfg.Workspace.Backend.CASecretKey != "" {
+				rt, err = docker.NewWithFUSECredentialsAndCAAtRoot(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials, cfg.Runtime.Docker.WorkspaceSecretRoot, &docker.FileSecretMaterializer{
+					Root: cfg.Runtime.Docker.WorkspaceSecretRoot, CAFile: cfg.Storage.FileSystem.CAFile,
+				})
+			} else {
+				rt, err = docker.NewWithFUSECredentials(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials)
+			}
 		} else {
 			rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
 		}
@@ -132,7 +137,11 @@ func main() {
 			log.Fatalf("failed to create docker runtime: %v", err)
 		}
 	case "kubernetes":
-		rt, err = k8sruntime.New(cfg.Runtime.Kubernetes.Kubeconfig, cfg.Runtime.Kubernetes.Namespace)
+		var options []k8sruntime.Option
+		if fuseEnabled {
+			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))
+		}
+		rt, err = k8sruntime.New(cfg.Runtime.Kubernetes.Kubeconfig, cfg.Runtime.Kubernetes.Namespace, options...)
 		if err != nil {
 			log.Fatalf("failed to create kubernetes runtime: %v", err)
 		}
@@ -164,12 +173,10 @@ func main() {
 		log.Fatalf("failed to create filesystem: %v", err)
 	}
 	if fuseEnabled {
-		credentials, credentialErr := storage.LoadFileSystemCredentials(cfg.Storage.FileSystem)
-		if credentialErr != nil {
-			log.Fatalf("failed to load FUSE control-plane credentials: %v", credentialErr)
-		}
-		objectClient, err = storage.NewWorkspaceObjectClient(cfg.Storage.FileSystem, credentials)
-		credentials.Zero()
+		objectClient, err = storage.NewWorkspaceObjectClient(cfg.Storage.FileSystem, storage.FileSystemCredentials{
+			AccessKey: fuseCredentials.AccessKey, SecretKey: fuseCredentials.SecretKey,
+		})
+		fuseCredentials.Zero()
 		if err != nil {
 			log.Fatalf("failed to create FUSE workspace object client: %v", err)
 		}
@@ -326,6 +333,18 @@ func main() {
 	// Wait for graceful shutdown to complete (signal-triggered path)
 	<-shutdownDone
 	log.Println("shutdown complete")
+}
+
+func loadRuntimeFUSECredentials(cfg *config.Config) (runtime.FUSECredentials, error) {
+	if cfg == nil || !cfg.Workspace.MountModeEnabled("fuse") {
+		return runtime.FUSECredentials{}, nil
+	}
+	loaded, err := storage.LoadFileSystemCredentials(cfg.Storage.FileSystem)
+	if err != nil {
+		return runtime.FUSECredentials{}, err
+	}
+	defer loaded.Zero()
+	return runtime.FUSECredentials{AccessKey: append([]byte(nil), loaded.AccessKey...), SecretKey: append([]byte(nil), loaded.SecretKey...)}, nil
 }
 
 func newOwnershipToken() (string, error) {

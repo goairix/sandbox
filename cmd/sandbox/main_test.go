@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/config"
+	"github.com/goairix/sandbox/internal/runtime"
 )
 
 func TestBuildFUSESpecUsesOnlyFixedProviderConfiguration(t *testing.T) {
@@ -46,6 +47,24 @@ func TestBuildFUSESpecUsesOnlyFixedProviderConfiguration(t *testing.T) {
 	spec, err = buildFUSESpec(cfg, "ordinary@sha256:"+strings.Repeat("c", 64))
 	require.NoError(t, err)
 	assert.Equal(t, "ordinary@sha256:"+strings.Repeat("c", 64), spec.Image)
+}
+
+func TestLoadRuntimeFUSECredentialsUsesInlineConfigOnlyForFUSE(t *testing.T) {
+	cfg := &config.Config{
+		Storage:   config.StorageConfig{FileSystem: config.FileSystemConfig{AccessKey: "inline-access", SecretKey: "inline-secret"}},
+		Workspace: config.WorkspaceConfig{DefaultMountMode: "fuse", EnabledMountModes: []string{"fuse"}},
+	}
+	credentials, err := loadRuntimeFUSECredentials(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, runtime.FUSECredentials{AccessKey: []byte("inline-access"), SecretKey: []byte("inline-secret")}, credentials)
+	credentials.Zero()
+
+	cfg.Workspace.DefaultMountMode = "sync"
+	cfg.Workspace.EnabledMountModes = []string{"sync"}
+	credentials, err = loadRuntimeFUSECredentials(cfg)
+	require.NoError(t, err)
+	assert.Empty(t, credentials.AccessKey)
+	assert.Empty(t, credentials.SecretKey)
 }
 
 func TestOwnershipTokensAreOpaqueAndUnique(t *testing.T) {
