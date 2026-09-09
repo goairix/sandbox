@@ -169,10 +169,18 @@ type SystemEgressSpec struct {
 	Mode          SystemEgressMode
 	DNSCIDRs      []string
 	DNSPorts      []int32
+	Hosts         []EndpointHostMapping
 	EndpointCIDRs []string
 	EndpointFQDNs []string
 	EndpointPorts []int32
 	ProxyURL      string
+}
+
+// EndpointHostMapping pins one canonical object-storage hostname to the exact
+// addresses resolved while a prepared FUSE runtime is created.
+type EndpointHostMapping struct {
+	Host string   `json:"host"`
+	IPs  []string `json:"ips"`
 }
 
 // WorkspaceMountAuthorization is the one-shot, lease-bound authorization that
