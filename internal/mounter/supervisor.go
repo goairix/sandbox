@@ -207,9 +207,6 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	if b.CacheLimitBytes <= 0 {
 		return fmt.Errorf("bootstrap cache limit is invalid")
 	}
-	if b.AccessKeyFile != "" || b.SecretKeyFile != "" {
-		return fmt.Errorf("bootstrap credential file paths are not supported")
-	}
 	if b.PasswdFile != filepath.Join(s.config.RunDir, "passwd-s3fs") || filepath.Clean(b.PasswdFile) != b.PasswdFile || b.MountPath != s.config.MountPath || !withinRootOrSelf(b.CacheDir, s.config.CacheRoot) || (b.CAFile != "" && !withinRoot(b.CAFile, s.config.CredentialRoot)) {
 		return fmt.Errorf("bootstrap path is outside its trusted root")
 	}
@@ -752,7 +749,7 @@ func validBucket(value string) bool {
 func boundedTimeout(seconds int64) bool { return seconds > 0 && seconds <= 3600 }
 
 func boundedBootstrapStrings(value fuseprotocol.BootstrapConfig) bool {
-	fields := []string{value.RuntimeUID, value.Provider, value.Bucket, value.Endpoint, value.Region, value.Profile, value.AccessKeyFile, value.SecretKeyFile, value.PasswdFile, value.CAFile, value.CacheDir, value.MountPath, value.PoolKey}
+	fields := []string{value.RuntimeUID, value.Provider, value.Bucket, value.Endpoint, value.Region, value.Profile, value.PasswdFile, value.CAFile, value.CacheDir, value.MountPath, value.PoolKey}
 	for _, field := range fields {
 		if len(field) > 4096 || !utf8.ValidString(field) {
 			return false

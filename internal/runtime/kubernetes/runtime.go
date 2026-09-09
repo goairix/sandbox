@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -52,6 +53,15 @@ type Option func(*Runtime)
 func WithInfrastructureFencer(fencer InfrastructureFencer) Option {
 	return func(r *Runtime) {
 		r.infraFencer = fencer
+	}
+}
+
+// WithFUSECredentials installs an owned, process-local credential copy used
+// only for the private one-shot mounter authorization request.
+func WithFUSECredentials(credentials runtime.FUSECredentials) Option {
+	return func(r *Runtime) {
+		r.fuseCredentials.Zero()
+		r.fuseCredentials = credentials.Clone()
 	}
 }
 
@@ -84,6 +94,7 @@ type Runtime struct {
 	hasCilium          bool // whether CiliumNetworkPolicy CRD is available on this cluster
 	controlExecutor    podCommandExecutor
 	infraFencer        InfrastructureFencer
+	fuseCredentials    runtime.FUSECredentials
 	pollInterval       time.Duration
 	prepareTimeout     time.Duration
 	readyTimeout       time.Duration
@@ -290,10 +301,14 @@ func (r *Runtime) AuthorizeWorkspaceMount(ctx context.Context, ref runtime.Runti
 		Version: controlWireVersion, RuntimeUID: auth.RuntimeUID, PoolKey: auth.PoolKey,
 		WorkspaceHash: auth.WorkspaceHash, Prefix: auth.Prefix, LeaseGeneration: auth.LeaseGeneration, MountAttempt: auth.MountAttempt,
 	}
+	credentials := r.fuseCredentials.Clone()
+	defer credentials.Zero()
+	request.Credentials = fuseprotocol.MountCredentials{AccessKey: credentials.AccessKey, SecretKey: credentials.SecretKey}
 	stdin, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("marshal workspace authorization")
 	}
+	defer clear(stdin)
 	raw, err := r.execControl(ctx, ref.ID, workspaceMounterContainer, []string{mounterBinary, "authorize"}, stdin)
 	if err != nil {
 		return err

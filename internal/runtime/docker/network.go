@@ -24,7 +24,7 @@ import (
 // acting as a layer-3 gateway. The gateway policy is loaded before the trusted
 // versioned runtime starts; its default route is then replaced with the
 // gateway address before any workspace authorization or public exec.
-func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage, secretRoot string, system runtime.SystemEgressSpec) (pairNetworkID, gatewayID, gatewayIP string, err error) {
+func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage, secretRoot, caSecretKey string, system runtime.SystemEgressSpec) (pairNetworkID, gatewayID, gatewayIP string, err error) {
 	if system.Mode != runtime.SystemEgressCIDR {
 		return "", "", "", fmt.Errorf("Docker workspace FUSE supports only CIDR system egress")
 	}
@@ -42,7 +42,7 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 	ipv6Disabled := false
 	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
 		Driver: "bridge", Attachable: true, EnableIPv6: &ipv6Disabled,
-		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "fuse-pair", dockerSecretRootLabel: secretRoot},
+		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "fuse-pair", dockerSecretRootLabel: secretRoot, dockerCASecretKeyLabel: caSecretKey},
 	})
 	if err != nil {
 		return "", "", "", fmt.Errorf("create FUSE pair network: %w", err)
@@ -57,7 +57,7 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 	gwName := dockerFUSEGatewayName(sandboxID)
 	gwResp, err := cli.ContainerCreate(ctx, &container.Config{
 		Image: gatewayImage, Cmd: []string{"sleep", "infinity"},
-		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "gateway", "sandbox.gateway.contract": "fuse-v1", dockerSecretRootLabel: secretRoot},
+		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "gateway", "sandbox.gateway.contract": "fuse-v1", dockerSecretRootLabel: secretRoot, dockerCASecretKeyLabel: caSecretKey},
 	}, &container.HostConfig{
 		CapDrop: []string{"ALL"}, CapAdd: []string{"NET_ADMIN", "NET_RAW"},
 		SecurityOpt: []string{"no-new-privileges=true"}, ReadonlyRootfs: true,

@@ -289,20 +289,6 @@ func TestAuthorizeChildLifetimeDoesNotUseRequestCancellation(t *testing.T) {
 	assert.NoError(t, runner.startContext.Err())
 }
 
-func TestBootstrapRejectsLegacyCredentialFilePaths(t *testing.T) {
-	root := t.TempDir()
-	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
-	}
-	bootstrap := validBootstrap(root)
-	bootstrap.AccessKeyFile = filepath.Join(root, "secrets", "accessKey")
-	bootstrap.SecretKeyFile = filepath.Join(root, "secrets", "secretKey")
-	s := NewSupervisor(Config{RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath, CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil }}, &fakeRunner{})
-	require.Error(t, s.Bootstrap(context.Background(), bootstrap, "uid-a"))
-	_, err := os.Stat(bootstrap.PasswdFile)
-	assert.True(t, os.IsNotExist(err))
-}
-
 func TestBootstrapAllowsReadOnlyCA(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {

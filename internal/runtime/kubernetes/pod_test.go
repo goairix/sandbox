@@ -133,7 +133,7 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 
 	assert.Equal(t, corev1.MountPropagationBidirectional, *podVolumeMount(t, mounter.VolumeMounts, "workspace").MountPropagation)
 	assert.Equal(t, corev1.MountPropagationHostToContainer, *podVolumeMount(t, pod.Spec.Containers[0].VolumeMounts, "workspace").MountPropagation)
-	assert.False(t, hasPodVolumeMount(pod.Spec.Containers[0].VolumeMounts, "workspace-credentials"))
+	assert.False(t, hasPodVolumeMount(pod.Spec.Containers[0].VolumeMounts, "workspace-ca"))
 	assert.False(t, hasPodVolumeMount(pod.Spec.Containers[0].VolumeMounts, "dev-fuse"))
 	assert.False(t, hasPodVolumeMount(pod.Spec.Containers[0].VolumeMounts, "mounter-run"))
 
@@ -155,17 +155,15 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, "/dev/fuse", fuseDevice.HostPath.Path)
 	require.NotNil(t, fuseDevice.HostPath.Type)
 	assert.Equal(t, corev1.HostPathCharDev, *fuseDevice.HostPath.Type)
-	credentials := podVolume(t, pod.Spec.Volumes, "workspace-credentials")
-	require.NotNil(t, credentials.Secret)
-	assert.Equal(t, spec.WorkspaceFUSE.SecretName, credentials.Secret.SecretName)
-	require.NotNil(t, credentials.Secret.DefaultMode)
-	assert.Equal(t, int32(0o400), *credentials.Secret.DefaultMode)
+	caVolume := podVolume(t, pod.Spec.Volumes, "workspace-ca")
+	require.NotNil(t, caVolume.Secret)
+	assert.Equal(t, spec.WorkspaceFUSE.SecretName, caVolume.Secret.SecretName)
+	require.NotNil(t, caVolume.Secret.DefaultMode)
+	assert.Equal(t, int32(0o400), *caVolume.Secret.DefaultMode)
 	assert.Equal(t, []corev1.KeyToPath{
-		{Key: "accessKey", Path: "accessKey"},
-		{Key: "secretKey", Path: "secretKey"},
 		{Key: "ca.crt", Path: "ca.crt"},
-	}, credentials.Secret.Items)
-	assert.True(t, podVolumeMount(t, mounter.VolumeMounts, "workspace-credentials").ReadOnly)
+	}, caVolume.Secret.Items)
+	assert.True(t, podVolumeMount(t, mounter.VolumeMounts, "workspace-ca").ReadOnly)
 
 	require.NotNil(t, mounter.StartupProbe)
 	require.NotNil(t, mounter.StartupProbe.Exec)
@@ -241,8 +239,8 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, "https://minio.example.com:9000", bootstrap["endpoint"])
 	assert.Equal(t, spec.WorkspaceFUSE.Region, bootstrap["region"])
 	assert.Equal(t, spec.WorkspaceFUSE.Profile, bootstrap["profile"])
-	assert.Equal(t, "/run/secrets/workspace/accessKey", bootstrap["access_key_file"])
-	assert.Equal(t, "/run/secrets/workspace/secretKey", bootstrap["secret_key_file"])
+	assert.NotContains(t, bootstrap, "access_key_file")
+	assert.NotContains(t, bootstrap, "secret_key_file")
 	assert.Equal(t, "/run/s3fs/passwd-s3fs", bootstrap["passwd_file"])
 	assert.Equal(t, "/run/secrets/workspace/ca.crt", bootstrap["ca_file"])
 	assert.Equal(t, "/var/cache/s3fs", bootstrap["cache_dir"])
@@ -363,6 +361,21 @@ func TestCreatePodPreparedFUSEValidatesBeforeAPICreate(t *testing.T) {
 			assertNoPods(t, client, "sandbox-runtime")
 		})
 	}
+}
+
+func TestPreparedFUSEPodWithoutCustomCADoesNotReferenceASecret(t *testing.T) {
+	spec := preparedFUSESpecForTest()
+	spec.WorkspaceFUSE.SecretName = ""
+	spec.WorkspaceFUSE.CASecretKey = ""
+
+	pod, err := buildPreparedFUSEPod("sandbox-runtime", spec)
+	require.NoError(t, err)
+	raw, err := json.Marshal(pod)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "workspace-credentials")
+	assert.NotContains(t, string(raw), "workspace-ca")
+	assert.NotContains(t, string(raw), "accessKey")
+	assert.NotContains(t, string(raw), "secretKey")
 }
 
 func TestCreatePodPreparedFUSEValidatesEndpointWithoutEchoingIt(t *testing.T) {

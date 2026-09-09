@@ -246,8 +246,6 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 		Endpoint:              validated.endpoint,
 		Region:                fuse.Region,
 		Profile:               fuse.Profile,
-		AccessKeyFile:         path.Join(mounterSecretPath, "accessKey"),
-		SecretKeyFile:         path.Join(mounterSecretPath, "secretKey"),
 		PasswdFile:            path.Join(mounterRunPath, "passwd-s3fs"),
 		CAFile:                secretFilePath(fuse.CASecretKey),
 		CacheDir:              mounterCachePath,
@@ -350,7 +348,6 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 						{Name: "workspace", MountPath: workspaceMountPath, MountPropagation: &workspacePropagation},
 						{Name: "fuse-cache", MountPath: mounterCachePath},
 						{Name: "dev-fuse", MountPath: "/dev/fuse"},
-						{Name: "workspace-credentials", MountPath: mounterSecretPath, ReadOnly: true},
 						{Name: "mounter-run", MountPath: mounterRunPath},
 					},
 					StartupProbe: &corev1.Probe{
@@ -409,11 +406,14 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 				{Name: "fuse-cache", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &validated.cacheSize}}},
 				{Name: "dev-fuse", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/fuse", Type: &deviceType}}},
-				{Name: "workspace-credentials", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: fuse.SecretName, DefaultMode: &secretMode, Items: validated.secretItems}}},
 				{Name: "mounter-run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &validated.mounterRunSize}}},
 				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &validated.tmpDiskSize}}},
 			},
 		},
+	}
+	if fuse.CASecretKey != "" {
+		pod.Spec.InitContainers[0].VolumeMounts = append(pod.Spec.InitContainers[0].VolumeMounts, corev1.VolumeMount{Name: "workspace-ca", MountPath: mounterSecretPath, ReadOnly: true})
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: "workspace-ca", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: fuse.SecretName, DefaultMode: &secretMode, Items: validated.secretItems}}})
 	}
 	return pod, nil
 }
@@ -454,9 +454,6 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 	if !imageref.IsRelease(fuse.MounterImage) {
 		return validated, fmt.Errorf("workspace FUSE mounter image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
-	if errs := kvalidation.IsDNS1123Subdomain(fuse.SecretName); len(errs) != 0 {
-		return validated, fmt.Errorf("workspace FUSE Secret name is invalid")
-	}
 	if fuse.LSMProfile == "" {
 		if !fuse.AllowMissingLSMForKind {
 			return validated, fmt.Errorf("workspace FUSE LSM profile must be a confined profile name")
@@ -476,13 +473,13 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 	validated.poolKeyLabel = poolKeyLabel
 
 	if fuse.CASecretKey != "" {
+		if errs := kvalidation.IsDNS1123Subdomain(fuse.SecretName); len(errs) != 0 {
+			return validated, fmt.Errorf("workspace FUSE Secret name is invalid")
+		}
 		if errs := kvalidation.IsConfigMapKey(fuse.CASecretKey); len(errs) != 0 || fuse.CASecretKey == "accessKey" || fuse.CASecretKey == "secretKey" {
 			return validated, fmt.Errorf("workspace FUSE CA Secret key is invalid or conflicts with credential keys")
 		}
-	}
-	validated.secretItems = []corev1.KeyToPath{{Key: "accessKey", Path: "accessKey"}, {Key: "secretKey", Path: "secretKey"}}
-	if fuse.CASecretKey != "" {
-		validated.secretItems = append(validated.secretItems, corev1.KeyToPath{Key: fuse.CASecretKey, Path: fuse.CASecretKey})
+		validated.secretItems = []corev1.KeyToPath{{Key: fuse.CASecretKey, Path: fuse.CASecretKey}}
 	}
 
 	endpoint, endpointHostname, endpointIP, endpointPort, err := validateFUSEEndpoint(fuse)

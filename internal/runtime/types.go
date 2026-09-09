@@ -2,6 +2,35 @@ package runtime
 
 import "time"
 
+// FUSECredentials are process-local storage credentials owned by a runtime.
+// They are deliberately kept outside SandboxSpec and WorkspaceFUSESpec so
+// prepared resource metadata and pool state cannot serialize them.
+type FUSECredentials struct {
+	AccessKey []byte
+	SecretKey []byte
+}
+
+func (credentials FUSECredentials) Clone() FUSECredentials {
+	return FUSECredentials{
+		AccessKey: append([]byte(nil), credentials.AccessKey...),
+		SecretKey: append([]byte(nil), credentials.SecretKey...),
+	}
+}
+
+func (credentials *FUSECredentials) Zero() {
+	if credentials == nil {
+		return
+	}
+	for index := range credentials.AccessKey {
+		credentials.AccessKey[index] = 0
+	}
+	for index := range credentials.SecretKey {
+		credentials.SecretKey[index] = 0
+	}
+	credentials.AccessKey = nil
+	credentials.SecretKey = nil
+}
+
 // SandboxInfo holds runtime-level sandbox information.
 type SandboxInfo struct {
 	ID         string

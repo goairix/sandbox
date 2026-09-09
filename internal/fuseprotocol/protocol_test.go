@@ -68,8 +68,8 @@ func TestFixedCommandAllowlistsMatchRuntimeAndBinaries(t *testing.T) {
 func TestBootstrapAllowsOnlyOptionalRuntimeUIDRegionAndCA(t *testing.T) {
 	bootstrap := BootstrapConfig{
 		Version: Version, Provider: "minio", Bucket: "bucket-a", Endpoint: "https://minio.example.com", Profile: "minio-sigv4-path-style-v1",
-		AccessKeyFile: "/run/secrets/workspace/accessKey", SecretKeyFile: "/run/secrets/workspace/secretKey", PasswdFile: "/run/s3fs/passwd-s3fs",
-		CacheDir: "/var/cache/s3fs", MountPath: "/workspace", PoolKey: strings.Repeat("a", 64), CacheLimitBytes: 2 << 30,
+		PasswdFile: "/run/s3fs/passwd-s3fs",
+		CacheDir:   "/var/cache/s3fs", MountPath: "/workspace", PoolKey: strings.Repeat("a", 64), CacheLimitBytes: 2 << 30,
 		MountTimeoutSeconds: 30, FlushTimeoutSeconds: 30, UnmountTimeoutSeconds: 15,
 	}
 	raw, err := json.Marshal(bootstrap)

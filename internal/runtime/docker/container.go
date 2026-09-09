@@ -138,7 +138,7 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*co
 	if spec.ID == "" || filepath.Base(spec.ID) != spec.ID || strings.ContainsAny(spec.ID, `/\\`) {
 		return nil, nil, fmt.Errorf("workspace FUSE sandbox ID is invalid")
 	}
-	if !validDockerWorkspaceSecretRoot(secretRoot) {
+	if fuse.CASecretKey != "" && !validDockerWorkspaceSecretRoot(secretRoot) {
 		return nil, nil, fmt.Errorf("workspace FUSE secret root is invalid")
 	}
 	securityOpt, err := fuseSecurityOptions(fuse.LSMProfile)
@@ -186,7 +186,6 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*co
 		// execs run as 1000:1000 and cannot retain effective capabilities.
 		CapAdd:      []string{"SYS_ADMIN", "NET_ADMIN"},
 		SecurityOpt: securityOpt,
-		Binds:       []string{filepath.Join(secretRoot, spec.ID) + ":" + dockerMounterSecretPath + ":ro"},
 		Mounts:      []mount.Mount{{Type: mount.TypeVolume, Source: fuseCacheVolumeName(spec.ID), Target: dockerMounterCachePath}},
 		Tmpfs: map[string]string{
 			dockerMounterRunPath: fmt.Sprintf("size=%d,mode=0700", dockerRunTmpfsSize),
@@ -195,11 +194,18 @@ func createFUSEContainerConfig(spec runtime.SandboxSpec, secretRoot string) (*co
 		},
 		DNS: dns, ExtraHosts: extraHosts,
 	}
+	if fuse.CASecretKey != "" {
+		host.Binds = []string{filepath.Join(secretRoot, spec.ID) + ":" + dockerMounterSecretPath + ":ro"}
+	}
 	return config, host, nil
 }
 
 func validDockerWorkspaceSecretRoot(root string) bool {
 	return root != "/" && filepath.IsAbs(root) && filepath.Clean(root) == root
+}
+
+func validDockerCASecretKey(name string) bool {
+	return name == "" || (filepath.Base(name) == name && !strings.ContainsAny(name, "/\\\x00\r\n"))
 }
 
 func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []string, error) {

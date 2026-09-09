@@ -16,7 +16,7 @@ func TestFUSEPairNetworkExplicitlyDisablesIPv6(t *testing.T) {
 	spec := fuseDockerSpecForTest()
 	rt.gatewayImage = "registry.example.com/sandbox-gateway:v0.2.12"
 
-	_, _, _, err := createFUSESandboxPair(context.Background(), fake, spec.ID, rt.openNetworkID, rt.gatewayImage, dockerWorkspaceSecretRoot, spec.WorkspaceFUSE.SystemEgress)
+	_, _, _, err := createFUSESandboxPair(context.Background(), fake, spec.ID, rt.openNetworkID, rt.gatewayImage, dockerWorkspaceSecretRoot, spec.WorkspaceFUSE.CASecretKey, spec.WorkspaceFUSE.SystemEgress)
 	require.NoError(t, err)
 	pair := fake.networkCreateOptions[pairNetworkPrefix+spec.ID]
 	require.NotNil(t, pair.EnableIPv6)

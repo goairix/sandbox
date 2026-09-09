@@ -62,8 +62,6 @@ type BootstrapConfig struct {
 	Endpoint              string `json:"endpoint"`
 	Region                string `json:"region,omitempty"`
 	Profile               string `json:"profile"`
-	AccessKeyFile         string `json:"access_key_file"`
-	SecretKeyFile         string `json:"secret_key_file"`
 	PasswdFile            string `json:"passwd_file"`
 	CAFile                string `json:"ca_file,omitempty"`
 	CacheDir              string `json:"cache_dir"`

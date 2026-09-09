@@ -127,6 +127,17 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 	assert.Equal(t, info.RuntimeUID, fake.bootstrap.RuntimeUID)
 	assert.Equal(t, "https://objects.example.com:9000", fake.bootstrap.Endpoint)
 	assert.Equal(t, int64(1), fake.generation)
+	assert.Equal(t, []byte("do-not-persist-access"), fake.authorize.Credentials.AccessKey)
+	assert.Equal(t, []byte("do-not-persist-secret"), fake.authorize.Credentials.SecretKey)
+	assert.Empty(t, fake.materializedSecrets)
+	preparedJSON, err := json.Marshal(fake.containers[info.RuntimeID])
+	require.NoError(t, err)
+	assert.NotContains(t, string(preparedJSON), "do-not-persist-access")
+	assert.NotContains(t, string(preparedJSON), "do-not-persist-secret")
+	bootstrapJSON, err := json.Marshal(fake.bootstrap)
+	require.NoError(t, err)
+	assert.NotContains(t, string(bootstrapJSON), "access_key_file")
+	assert.NotContains(t, string(bootstrapJSON), "secret_key_file")
 	require.Len(t, fake.routeControls, 2)
 	assert.Equal(t, []string{"/usr/sbin/ip", "route", "replace", "blackhole", "172.20.0.1/32"}, fake.routeControls[0].Cmd)
 	assert.Equal(t, []string{"/usr/sbin/ip", "route", "replace", "default", "via", "172.20.0.2"}, fake.routeControls[1].Cmd)
@@ -380,7 +391,7 @@ func TestDockerReconcileRemovesResourceOnlyPreparationByIdentity(t *testing.T) {
 	require.NoError(t, rt.ReconcileOrphanedResources(context.Background(), nil))
 	fake.mu.Lock()
 	assert.Empty(t, fake.volumes)
-	assert.Contains(t, fake.removedSecrets, filepath.Join(dockerWorkspaceSecretRoot, preparationID))
+	assert.Empty(t, fake.removedSecrets)
 	fake.mu.Unlock()
 }
 
@@ -399,7 +410,9 @@ func TestDockerPrepareRejectsReusedCacheVolumeIdentity(t *testing.T) {
 
 func TestDockerReconcileRemovesSecretOnlyPreparation(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
-	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	info, err := rt.PrepareSandbox(context.Background(), spec)
 	require.NoError(t, err)
 	preparationID := rt.workspaceState(info.RuntimeID).preparationID
 	fake.mu.Lock()
@@ -485,7 +498,9 @@ func TestDockerReconcileProtectsRuntimeUIDs(t *testing.T) {
 func TestDockerFUSEReconcileRejectsWorkspaceSecretRootChange(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	rt.secretRoot = "/srv/sandbox/workspace-secrets-a"
-	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	info, err := rt.PrepareSandbox(context.Background(), spec)
 	require.NoError(t, err)
 	rt.secretRoot = "/srv/sandbox/workspace-secrets-b"
 
@@ -562,7 +577,9 @@ func TestDockerFUSERejectsCiliumModeWithoutMutatingDocker(t *testing.T) {
 func TestDockerFUSERequiresTrustedSecretMaterializerBeforeMutation(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	rt.secretMaterializer = nil
-	_, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	_, err := rt.PrepareSandbox(context.Background(), spec)
 	require.Error(t, err)
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -572,7 +589,9 @@ func TestDockerFUSERequiresTrustedSecretMaterializerBeforeMutation(t *testing.T)
 
 func TestDockerFUSEMaterializesExactRootOnlySecretDirectory(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
-	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	info, err := rt.PrepareSandbox(context.Background(), spec)
 	require.NoError(t, err)
 	preparationID := rt.workspaceState(info.RuntimeID).preparationID
 	fake.mu.Lock()
@@ -584,8 +603,9 @@ func TestDockerFUSEMaterializesExactRootOnlySecretDirectory(t *testing.T) {
 func TestDockerFUSEUsesConfiguredSecretRootForMaterializationAndContainerBind(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	rt.secretRoot = "/srv/sandbox/workspace-secrets"
-
-	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	info, err := rt.PrepareSandbox(context.Background(), spec)
 	require.NoError(t, err)
 	preparationID := rt.workspaceState(info.RuntimeID).preparationID
 	expectedSource := filepath.Join(rt.secretRoot, preparationID)
@@ -678,6 +698,7 @@ type fakeDockerAPI struct {
 	containerRemoveDeletes   bool
 	authorizeAttachErr       error
 	authorizeExecCreates     int
+	authorize                fuseprotocol.AuthorizeRequest
 	blockControlOutput       bool
 	removeExecExitCode       int
 	removeExecInspectErr     error
@@ -695,6 +716,7 @@ func newFakeDockerRuntime(t *testing.T) (*Runtime, *fakeDockerAPI) {
 	return &Runtime{
 		cli: fake, isolatedNetworkID: "isolated-id", openNetworkID: "open-id", gatewayImage: "gateway@sha256:" + strings.Repeat("3", 64),
 		secretMaterializer: fake, secretValidator: func(string, string) error { return nil },
+		fuseCredentials: runtime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
 	}, fake
 }
 
@@ -914,6 +936,7 @@ func (f *fakeDockerAPI) execOutput(exec fakeExec, input []byte) []byte {
 		case "authorize":
 			var auth fuseprotocol.AuthorizeRequest
 			_ = fuseprotocol.DecodeExact(input, &auth)
+			f.authorize = auth
 			f.generation = auth.LeaseGeneration
 			output = fuseprotocol.ControlAck{Version: 1, Accepted: true, RuntimeUID: auth.RuntimeUID, Generation: auth.LeaseGeneration}
 		case "health-prepared":

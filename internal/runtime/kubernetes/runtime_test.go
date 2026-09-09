@@ -289,6 +289,7 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 		client: client, dynClient: dynamicClient, namespace: "runtime", controlExecutor: script,
 		pollInterval: time.Millisecond, prepareTimeout: 100 * time.Millisecond, readyTimeout: 100 * time.Millisecond,
 		terminationTimeout: 100 * time.Millisecond,
+		fuseCredentials:    sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
 	}
 	return rt, client
 }
@@ -889,9 +890,11 @@ func TestAuthorizeWorkspaceMountRequiresExactUIDAndIsOneShot(t *testing.T) {
 	for _, command := range script.commands {
 		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "authorize"}) {
 			count++
-			var envelope map[string]any
-			require.NoError(t, json.Unmarshal(command.stdin, &envelope))
-			assert.Equal(t, info.RuntimeUID, envelope["runtime_uid"])
+			var request authorizeRequestWire
+			require.NoError(t, json.Unmarshal(command.stdin, &request))
+			assert.Equal(t, info.RuntimeUID, request.RuntimeUID)
+			assert.Equal(t, []byte("do-not-persist-access"), request.Credentials.AccessKey)
+			assert.Equal(t, []byte("do-not-persist-secret"), request.Credentials.SecretKey)
 		}
 	}
 	assert.Equal(t, 1, count)

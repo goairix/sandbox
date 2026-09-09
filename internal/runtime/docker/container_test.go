@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +62,7 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 	assert.Contains(t, host.SecurityOpt, "apparmor=sandbox-fuse")
 	assert.NotContains(t, host.SecurityOpt, "unconfined")
 	assert.NotContains(t, strings.Join(host.Binds, " "), ":/workspace")
-	assert.Contains(t, strings.Join(host.Binds, " "), ":/run/secrets/workspace:ro")
-	assert.Contains(t, strings.Join(host.Binds, " "), "/var/lib/sandbox/workspace-secrets/"+spec.ID+":")
+	assert.Empty(t, host.Binds, "AK/SK and ordinary FUSE mounts must not require host credential files")
 	require.Len(t, host.Mounts, 1)
 	assert.Equal(t, "/var/cache/s3fs", host.Mounts[0].Target)
 	assert.Contains(t, host.Mounts[0].Source, spec.ID)
@@ -72,6 +72,15 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 	assert.Equal(t, "size=65536,mode=0555", host.Tmpfs["/workspace"])
 	assert.Equal(t, []string{"1.1.1.1"}, []string(host.DNS))
 	assert.Equal(t, []string{"objects.example.com:198.51.100.10"}, []string(host.ExtraHosts))
+}
+
+func TestCreateContainerConfigForFUSEMountsOnlyOptionalCA(t *testing.T) {
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
+	_, host, err := createContainerConfig(spec)
+	require.NoError(t, err)
+	require.Len(t, host.Binds, 1)
+	assert.Equal(t, filepath.Join(dockerWorkspaceSecretRoot, spec.ID)+":"+dockerMounterSecretPath+":ro", host.Binds[0])
 }
 
 func TestCreateContainerConfigAcceptsVersionTaggedFUSEImage(t *testing.T) {

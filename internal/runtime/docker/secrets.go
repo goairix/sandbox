@@ -49,7 +49,7 @@ func (m *FileSecretMaterializer) ListSecretPreparations(ctx context.Context) ([]
 // FileSecretMaterializer copies operator-selected files; request data never
 // selects a source path.
 type FileSecretMaterializer struct {
-	Root, AccessKeyFile, SecretKeyFile, CAFile string
+	Root, CAFile string
 }
 
 func (m *FileSecretMaterializer) Materialize(ctx context.Context, spec runtime.SandboxSpec, target string) (result error) {
@@ -70,17 +70,11 @@ func (m *FileSecretMaterializer) Materialize(ctx context.Context, spec runtime.S
 			_ = removeExactSecretDirectory(target)
 		}
 	}()
-	files := []struct{ source, name string }{{m.AccessKeyFile, "accessKey"}, {m.SecretKeyFile, "secretKey"}}
-	if spec.WorkspaceFUSE != nil && spec.WorkspaceFUSE.CASecretKey != "" {
-		if filepath.Base(spec.WorkspaceFUSE.CASecretKey) != spec.WorkspaceFUSE.CASecretKey || m.CAFile == "" {
-			return fmt.Errorf("workspace CA secret source is invalid")
-		}
-		files = append(files, struct{ source, name string }{m.CAFile, spec.WorkspaceFUSE.CASecretKey})
+	if spec.WorkspaceFUSE == nil || spec.WorkspaceFUSE.CASecretKey == "" || filepath.Base(spec.WorkspaceFUSE.CASecretKey) != spec.WorkspaceFUSE.CASecretKey || m.CAFile == "" {
+		return fmt.Errorf("workspace CA secret source is invalid")
 	}
-	for _, file := range files {
-		if err := copySecretFile(file.source, filepath.Join(target, file.name)); err != nil {
-			return err
-		}
+	if err := copySecretFile(m.CAFile, filepath.Join(target, spec.WorkspaceFUSE.CASecretKey)); err != nil {
+		return err
 	}
 	return validateRootSecretDirectory(target, caSecretName(spec))
 }
@@ -129,7 +123,7 @@ func validateRootSecretDirectory(target, caName string) error {
 	if err := validateRootDirectory(target, 0o700); err != nil {
 		return err
 	}
-	expected := map[string]struct{}{"accessKey": {}, "secretKey": {}}
+	expected := make(map[string]struct{}, 1)
 	if caName != "" {
 		expected[caName] = struct{}{}
 	}
