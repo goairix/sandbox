@@ -83,9 +83,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
-	if cfg.Workspace.AllowUnverifiedDurableFlush {
-		log.Printf("WARNING: local Docker MinIO validation is allowing an unverified durable-flush profile; do not use this mode for production or durability claims")
-	}
 	if cfg.Workspace.AllowMissingLSMForKind {
 		log.Printf("WARNING: local kind validation is running without AppArmor/SELinux enforcement; production must disable workspace.allow_missing_lsm_for_kind")
 	}
@@ -123,13 +120,7 @@ func main() {
 	switch cfg.Runtime.Type {
 	case "docker":
 		if fuseEnabled {
-			if cfg.Workspace.Backend.CASecretKey != "" {
-				rt, err = docker.NewWithFUSECredentialsAndCAAtRoot(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials, cfg.Runtime.Docker.WorkspaceSecretRoot, &docker.FileSecretMaterializer{
-					Root: cfg.Runtime.Docker.WorkspaceSecretRoot, CAFile: cfg.Storage.FileSystem.CAFile,
-				})
-			} else {
-				rt, err = docker.NewWithFUSECredentials(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials)
-			}
+			rt, err = docker.NewWithFUSECredentials(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials)
 		} else {
 			rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
 		}
@@ -372,7 +363,6 @@ func buildFUSESpec(cfg *config.Config, sandboxImage string) (runtime.SandboxSpec
 		RuntimeType: cfg.Runtime.Type, Provider: cfg.Storage.FileSystem.Provider, Driver: provider.Driver,
 		Profile: provider.Profile, StorageIdentity: provider.StorageIdentity,
 		CredentialGeneration: provider.CredentialGeneration, MounterImage: provider.MounterImage, DockerImage: provider.DockerImage,
-		SecretName: cfg.Workspace.SecretName, CASecretKey: provider.CASecretKey, EndpointHostIPs: append([]string(nil), provider.EndpointHostIPs...),
 		Bucket: cfg.Storage.FileSystem.Bucket, Endpoint: cfg.Storage.FileSystem.Endpoint, Region: cfg.Storage.FileSystem.Region,
 		UseSSL: cfg.Storage.FileSystem.UseSSL, CacheSize: cfg.Workspace.CacheSize, CacheMedium: cfg.Workspace.CacheMedium,
 		MountTimeout:           time.Duration(cfg.Workspace.MountTimeoutSeconds) * time.Second,
@@ -385,12 +375,6 @@ func buildFUSESpec(cfg *config.Config, sandboxImage string) (runtime.SandboxSpec
 			MemoryRequest: cfg.Workspace.MounterResources.MemoryRequest, MemoryLimit: cfg.Workspace.MounterResources.MemoryLimit,
 			EphemeralStorageRequest: cfg.Workspace.MounterResources.EphemeralStorageRequest,
 			EphemeralStorageLimit:   cfg.Workspace.MounterResources.EphemeralStorageLimit,
-		},
-		SystemEgress: runtime.SystemEgressSpec{
-			Mode: runtime.SystemEgressMode(provider.SystemEgressMode), DNSCIDRs: append([]string(nil), provider.DNSCIDRs...),
-			DNSPorts: []int32{53}, EndpointCIDRs: append([]string(nil), provider.SystemEgressCIDRs...),
-			EndpointFQDNs: append([]string(nil), provider.SystemEgressFQDNs...), EndpointPorts: append([]int32(nil), provider.EndpointPorts...),
-			ProxyURL: provider.ProxyURL,
 		},
 	}
 	spec := runtime.SandboxSpec{

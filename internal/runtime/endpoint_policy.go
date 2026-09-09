@@ -34,12 +34,10 @@ func ResolveFUSEEndpointPolicy(ctx context.Context, spec *WorkspaceFUSESpec, loo
 		lookup = resolver.LookupIP
 	}
 	resolved := cloneWorkspaceFUSESpec(spec)
-	endpoint, hosts, port, privateHTTP, err := canonicalFUSEEndpoint(spec)
+	_, hosts, port, privateHTTP, err := canonicalFUSEEndpoint(spec)
 	if err != nil {
 		return nil, err
 	}
-	resolved.Endpoint = endpoint
-
 	mappings := make([]EndpointHostMapping, 0, len(hosts))
 	cidrSet := make(map[string]struct{})
 	for _, host := range hosts {
@@ -77,6 +75,36 @@ func ResolveFUSEEndpointPolicy(ctx context.Context, spec *WorkspaceFUSESpec, loo
 	return resolved, nil
 }
 
+// FUSEEndpointMappingsCurrent reports whether a prepared runtime's pinned
+// hostname mappings still match current DNS. A mismatch is not an error; the
+// pool should discard that pristine shell and prepare a replacement.
+func FUSEEndpointMappingsCurrent(ctx context.Context, mappings []EndpointHostMapping, lookup LookupNetIPFunc, family EndpointAddressFamily) (bool, error) {
+	if len(mappings) == 0 || lookup == nil {
+		return true, nil
+	}
+	for _, mapping := range mappings {
+		addresses, err := resolveEndpointHost(ctx, lookup, mapping.Host, family)
+		if err != nil {
+			return false, err
+		}
+		current := make([]string, 0, len(addresses))
+		for _, address := range addresses {
+			current = append(current, address.String())
+		}
+		expected := append([]string(nil), mapping.IPs...)
+		sort.Strings(expected)
+		if len(current) != len(expected) {
+			return false, nil
+		}
+		for index := range current {
+			if current[index] != expected[index] {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
 func cloneWorkspaceFUSESpec(spec *WorkspaceFUSESpec) *WorkspaceFUSESpec {
 	clone := *spec
 	clone.EndpointHostIPs = append([]string(nil), spec.EndpointHostIPs...)
@@ -98,6 +126,9 @@ func canonicalFUSEEndpoint(spec *WorkspaceFUSESpec) (string, []string, int32, bo
 	var err error
 	switch spec.Provider {
 	case "minio":
+		if !spec.UseSSL && spec.Profile != "minio-sigv4-path-style-private-http-v1" {
+			return "", nil, 0, false, fmt.Errorf("workspace FUSE private HTTP MinIO profile is required")
+		}
 		if strings.Contains(spec.Endpoint, "://") {
 			return "", nil, 0, false, fmt.Errorf("%s", invalid)
 		}

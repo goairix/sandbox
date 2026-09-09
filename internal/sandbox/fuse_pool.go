@@ -1204,41 +1204,37 @@ func isStalePoolMutation(err error) bool {
 }
 
 type fusePoolKeyProjection struct {
-	Version              string                         `json:"version"`
-	RuntimeType          string                         `json:"runtime_type"`
-	Image                string                         `json:"image"`
-	Memory               string                         `json:"memory"`
-	MemoryRequest        string                         `json:"memory_request"`
-	CPU                  string                         `json:"cpu"`
-	CPURequest           string                         `json:"cpu_request"`
-	Disk                 string                         `json:"disk"`
-	TmpDisk              string                         `json:"tmp_disk"`
-	PidLimit             int                            `json:"pid_limit"`
-	ReadOnlyRootFS       bool                           `json:"read_only_root_fs"`
-	RunAsUser            int64                          `json:"run_as_user"`
-	SeccompProfile       string                         `json:"seccomp_profile"`
-	Provider             string                         `json:"provider"`
-	Driver               string                         `json:"driver"`
-	Profile              string                         `json:"profile"`
-	StorageIdentity      string                         `json:"storage_identity"`
-	CredentialGeneration string                         `json:"credential_generation"`
-	MounterImage         string                         `json:"mounter_image"`
-	DockerImage          string                         `json:"docker_image"`
-	SecretName           string                         `json:"secret_name"`
-	CASecretKey          string                         `json:"ca_secret_key"`
-	EndpointHostIPs      []string                       `json:"endpoint_host_ips"`
-	Bucket               string                         `json:"bucket"`
-	Endpoint             string                         `json:"endpoint"`
-	Region               string                         `json:"region"`
-	UseSSL               bool                           `json:"use_ssl"`
-	CacheSize            string                         `json:"cache_size"`
-	CacheMedium          string                         `json:"cache_medium"`
-	MountTimeout         time.Duration                  `json:"mount_timeout"`
-	FlushTimeout         time.Duration                  `json:"flush_timeout"`
-	UnmountTimeout       time.Duration                  `json:"unmount_timeout"`
-	LSMProfile           string                         `json:"lsm_profile"`
-	MounterResources     fusePoolResourcesProjection    `json:"mounter_resources"`
-	SystemEgress         fusePoolSystemEgressProjection `json:"system_egress"`
+	Version              string                      `json:"version"`
+	RuntimeType          string                      `json:"runtime_type"`
+	Image                string                      `json:"image"`
+	Memory               string                      `json:"memory"`
+	MemoryRequest        string                      `json:"memory_request"`
+	CPU                  string                      `json:"cpu"`
+	CPURequest           string                      `json:"cpu_request"`
+	Disk                 string                      `json:"disk"`
+	TmpDisk              string                      `json:"tmp_disk"`
+	PidLimit             int                         `json:"pid_limit"`
+	ReadOnlyRootFS       bool                        `json:"read_only_root_fs"`
+	RunAsUser            int64                       `json:"run_as_user"`
+	SeccompProfile       string                      `json:"seccomp_profile"`
+	Provider             string                      `json:"provider"`
+	Driver               string                      `json:"driver"`
+	Profile              string                      `json:"profile"`
+	StorageIdentity      string                      `json:"storage_identity"`
+	CredentialGeneration string                      `json:"credential_generation"`
+	MounterImage         string                      `json:"mounter_image"`
+	DockerImage          string                      `json:"docker_image"`
+	Bucket               string                      `json:"bucket"`
+	Endpoint             string                      `json:"endpoint"`
+	Region               string                      `json:"region"`
+	UseSSL               bool                        `json:"use_ssl"`
+	CacheSize            string                      `json:"cache_size"`
+	CacheMedium          string                      `json:"cache_medium"`
+	MountTimeout         time.Duration               `json:"mount_timeout"`
+	FlushTimeout         time.Duration               `json:"flush_timeout"`
+	UnmountTimeout       time.Duration               `json:"unmount_timeout"`
+	LSMProfile           string                      `json:"lsm_profile"`
+	MounterResources     fusePoolResourcesProjection `json:"mounter_resources"`
 }
 
 type fusePoolResourcesProjection struct {
@@ -1248,16 +1244,6 @@ type fusePoolResourcesProjection struct {
 	MemoryLimit             string `json:"memory_limit"`
 	EphemeralStorageRequest string `json:"ephemeral_storage_request"`
 	EphemeralStorageLimit   string `json:"ephemeral_storage_limit"`
-}
-
-type fusePoolSystemEgressProjection struct {
-	Mode          runtime.SystemEgressMode `json:"mode"`
-	DNSCIDRs      []string                 `json:"dns_cidrs"`
-	DNSPorts      []int32                  `json:"dns_ports"`
-	EndpointCIDRs []string                 `json:"endpoint_cidrs"`
-	EndpointFQDNs []string                 `json:"endpoint_fqdns"`
-	EndpointPorts []int32                  `json:"endpoint_ports"`
-	ProxyURL      string                   `json:"proxy_url"`
 }
 
 // ComputeFUSEPoolKey hashes an explicit versioned projection. It deliberately
@@ -1274,7 +1260,6 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 		PidLimit: spec.PidLimit, ReadOnlyRootFS: spec.ReadOnlyRootFS, RunAsUser: spec.RunAsUser, SeccompProfile: spec.SeccompProfile,
 		Provider: fuse.Provider, Driver: fuse.Driver, Profile: fuse.Profile, StorageIdentity: fuse.StorageIdentity,
 		CredentialGeneration: fuse.CredentialGeneration, MounterImage: fuse.MounterImage, DockerImage: fuse.DockerImage,
-		SecretName: fuse.SecretName, CASecretKey: fuse.CASecretKey, EndpointHostIPs: canonicalStrings(fuse.EndpointHostIPs),
 		Bucket: fuse.Bucket, Endpoint: fuse.Endpoint, Region: fuse.Region, UseSSL: fuse.UseSSL,
 		CacheSize: fuse.CacheSize, CacheMedium: fuse.CacheMedium, MountTimeout: fuse.MountTimeout, FlushTimeout: fuse.FlushTimeout, UnmountTimeout: fuse.UnmountTimeout,
 		LSMProfile: fuse.LSMProfile,
@@ -1284,11 +1269,6 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 			EphemeralStorageRequest: fuse.MounterResources.EphemeralStorageRequest,
 			EphemeralStorageLimit:   fuse.MounterResources.EphemeralStorageLimit,
 		},
-		SystemEgress: fusePoolSystemEgressProjection{
-			Mode: fuse.SystemEgress.Mode, DNSCIDRs: canonicalStrings(fuse.SystemEgress.DNSCIDRs), DNSPorts: canonicalPorts(fuse.SystemEgress.DNSPorts),
-			EndpointCIDRs: canonicalStrings(fuse.SystemEgress.EndpointCIDRs), EndpointFQDNs: canonicalStrings(fuse.SystemEgress.EndpointFQDNs),
-			EndpointPorts: canonicalPorts(fuse.SystemEgress.EndpointPorts), ProxyURL: fuse.SystemEgress.ProxyURL,
-		},
 	}
 	raw, err := json.Marshal(projection)
 	if err != nil {
@@ -1296,40 +1276,6 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
-}
-
-func canonicalStrings(values []string) []string {
-	result := append([]string(nil), values...)
-	sort.Strings(result)
-	return dedupeSorted(result)
-}
-
-func canonicalPorts(values []int32) []int32 {
-	result := append([]int32(nil), values...)
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	if len(result) == 0 {
-		return result
-	}
-	out := result[:1]
-	for _, value := range result[1:] {
-		if value != out[len(out)-1] {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
-func dedupeSorted(values []string) []string {
-	if len(values) == 0 {
-		return values
-	}
-	out := values[:1]
-	for _, value := range values[1:] {
-		if value != out[len(out)-1] {
-			out = append(out, value)
-		}
-	}
-	return out
 }
 
 func cloneFUSESandboxSpec(spec runtime.SandboxSpec) runtime.SandboxSpec {

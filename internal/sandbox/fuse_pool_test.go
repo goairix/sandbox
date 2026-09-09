@@ -642,9 +642,6 @@ func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {
 		{"docker image", func(s *runtime.SandboxSpec) {
 			s.WorkspaceFUSE.DockerImage = "sandbox-fuse@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 		}},
-		{"secret", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SecretName = "storage-secret-v2" }},
-		{"CA", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "private-ca.crt" }},
-		{"endpoint host IP", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.EndpointHostIPs = []string{"192.0.2.12"} }},
 		{"bucket", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Bucket = "sandbox-v2" }},
 		{"endpoint", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Endpoint = "minio-v2.example.com:9000" }},
 		{"region", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.Region = "cn-north-4" }},
@@ -661,15 +658,26 @@ func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {
 		{"mounter memory", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.MemoryLimit = "1Gi" }},
 		{"mounter ephemeral request", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.EphemeralStorageRequest = "3Gi" }},
 		{"mounter ephemeral", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.MounterResources.EphemeralStorageLimit = "8Gi" }},
-		{"egress mode", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.Mode = runtime.SystemEgressCiliumFQDN }},
-		{"DNS CIDR", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSCIDRs = []string{"9.9.9.9/32"} }},
-		{"DNS port", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{5353} }},
-		{"endpoint CIDR", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointCIDRs = []string{"198.51.100.0/24"} }},
-		{"endpoint FQDN", func(s *runtime.SandboxSpec) {
+	}
+	for _, mutation := range []func(*runtime.SandboxSpec){
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SecretName = "storage-secret-v2" },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.CASecretKey = "private-ca.crt" },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.EndpointHostIPs = []string{"192.0.2.12"} },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.Mode = runtime.SystemEgressCiliumFQDN },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSCIDRs = []string{"9.9.9.9/32"} },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.DNSPorts = []int32{5353} },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointCIDRs = []string{"198.51.100.0/24"} },
+		func(s *runtime.SandboxSpec) {
 			s.WorkspaceFUSE.SystemEgress.EndpointFQDNs = []string{"objects.example.com"}
-		}},
-		{"endpoint port", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443} }},
-		{"proxy URL", func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.ProxyURL = "http://proxy.example.com" }},
+		},
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.EndpointPorts = []int32{443} },
+		func(s *runtime.SandboxSpec) { s.WorkspaceFUSE.SystemEgress.ProxyURL = "http://proxy.example.com" },
+	} {
+		changed := fixedFUSESpec("anything")
+		mutation(&changed)
+		key, gotErr := ComputeFUSEPoolKey(changed)
+		require.NoError(t, gotErr)
+		assert.Equal(t, keyA, key, "derived endpoint policy must not affect the logical pool key")
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {

@@ -60,6 +60,17 @@ func buildSystemEgressPolicy(namespace, instance string, spec runtime.SystemEgre
 	_ = endpointFQDNs // An inactive approved set remains part of PoolKey only.
 
 	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
+	egress := make([]networkingv1.NetworkPolicyEgressRule, 0, 2)
+	if len(dnsCIDRs) != 0 {
+		egress = append(egress, networkingv1.NetworkPolicyEgressRule{
+			To: cidrPeers(dnsCIDRs),
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &udp, Port: portValue(53)},
+				{Protocol: &tcp, Port: portValue(53)},
+			},
+		})
+	}
+	egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: cidrPeers(endpointCIDRs), Ports: tcpPorts(endpointPorts)})
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fuseSystemPolicyPrefix + instance,
@@ -73,16 +84,7 @@ func buildSystemEgressPolicy(namespace, instance string, spec runtime.SystemEgre
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"sandbox.pool.instance": instance}},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				{
-					To: cidrPeers(dnsCIDRs),
-					Ports: []networkingv1.NetworkPolicyPort{
-						{Protocol: &udp, Port: portValue(53)},
-						{Protocol: &tcp, Port: portValue(53)},
-					},
-				},
-				{To: cidrPeers(endpointCIDRs), Ports: tcpPorts(endpointPorts)},
-			},
+			Egress:      egress,
 		},
 	}, nil
 }
@@ -180,9 +182,6 @@ func validateSystemEgressPolicySpec(instance string, spec runtime.SystemEgressSp
 		return nil, nil, nil, nil, fmt.Errorf("system egress proxy is unsupported")
 	}
 	dnsPorts := canonicalPortSet(spec.DNSPorts)
-	if len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-		return nil, nil, nil, nil, fmt.Errorf("system egress DNS ports must be exactly 53")
-	}
 	endpointPorts := canonicalPortSet(spec.EndpointPorts)
 	if len(endpointPorts) == 0 {
 		return nil, nil, nil, nil, fmt.Errorf("system egress endpoint ports must not be empty")
@@ -193,8 +192,12 @@ func validateSystemEgressPolicySpec(instance string, spec runtime.SystemEgressSp
 		}
 	}
 	dnsCIDRs, err := canonicalHostCIDRs(spec.DNSCIDRs, true)
-	if err != nil || len(dnsCIDRs) == 0 {
-		return nil, nil, nil, nil, fmt.Errorf("system egress DNS CIDRs must be canonical public host CIDRs")
+	if len(spec.Hosts) == 0 {
+		if err != nil || len(dnsCIDRs) == 0 || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+			return nil, nil, nil, nil, fmt.Errorf("system egress DNS CIDRs must be canonical public host CIDRs and port 53 is required for legacy policy")
+		}
+	} else if err != nil || len(dnsCIDRs) != 0 || len(dnsPorts) != 0 {
+		return nil, nil, nil, nil, fmt.Errorf("resolved system egress must not require DNS")
 	}
 	endpointCIDRs, err := canonicalEndpointCIDRs(spec.EndpointCIDRs)
 	if err != nil {

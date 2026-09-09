@@ -118,16 +118,22 @@ var permanentlyDeniedDockerIPv4 = []string{
 }
 
 func buildFUSEGatewayIptablesCmd(system runtime.SystemEgressSpec, userEnabled bool, userCIDRs []string, blockPrivate bool) (string, error) {
-	if system.Mode != runtime.SystemEgressCIDR || len(system.DNSCIDRs) == 0 || len(system.EndpointCIDRs) == 0 || len(system.EndpointPorts) == 0 || len(system.EndpointFQDNs) != 0 || system.ProxyURL != "" {
+	if system.Mode != runtime.SystemEgressCIDR || len(system.EndpointCIDRs) == 0 || len(system.EndpointPorts) == 0 || len(system.EndpointFQDNs) != 0 || system.ProxyURL != "" {
 		return "", fmt.Errorf("invalid Docker FUSE system egress contract")
 	}
-	dnsPorts, err := canonicalDockerPorts(system.DNSPorts)
-	if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-		return "", fmt.Errorf("Docker FUSE DNS ports must be exactly 53")
-	}
-	dnsCIDRs, err := canonicalDockerDNSCIDRs(system.DNSCIDRs)
-	if err != nil {
-		return "", err
+	var dnsCIDRs []string
+	var err error
+	if len(system.Hosts) == 0 {
+		dnsPorts, err := canonicalDockerPorts(system.DNSPorts)
+		if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+			return "", fmt.Errorf("Docker FUSE DNS ports must be exactly 53")
+		}
+		dnsCIDRs, err = canonicalDockerDNSCIDRs(system.DNSCIDRs)
+		if err != nil {
+			return "", err
+		}
+	} else if len(system.DNSCIDRs) != 0 || len(system.DNSPorts) != 0 {
+		return "", fmt.Errorf("resolved Docker FUSE system egress must not require DNS")
 	}
 	endpointCIDRs, err := canonicalDockerIPv4CIDRs(system.EndpointCIDRs, true)
 	if err != nil {

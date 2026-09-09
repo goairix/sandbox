@@ -148,6 +148,25 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 	}
 }
 
+func TestDockerPrepareDerivesAndRevalidatesEndpointPolicy(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	resolvedIP := "36.170.50.43"
+	rt.endpointLookup = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP(resolvedIP)}, nil
+	}
+
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.Contains(t, fake.containers, info.RuntimeID)
+	assert.Equal(t, []string{"objects.example.com:36.170.50.43"}, []string(fake.containers[info.RuntimeID].host.ExtraHosts))
+	fake.mu.Unlock()
+
+	resolvedIP = "36.170.50.44"
+	err = rt.PreparedSandboxHealth(context.Background(), runtime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}, fuseDockerSpecForTest().WorkspaceFUSE.PoolKey)
+	require.ErrorContains(t, err, "endpoint addresses changed")
+}
+
 func TestDockerFUSEFixedControlExecsAvoidWorkspaceWorkingDirectory(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())

@@ -209,18 +209,21 @@ func validDockerCASecretKey(name string) bool {
 }
 
 func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []string, error) {
-	dnsPorts, err := canonicalDockerPorts(fuse.SystemEgress.DNSPorts)
-	if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-		return nil, nil, fmt.Errorf("Docker workspace FUSE DNS ports must be exactly 53")
-	}
-	dnsCIDRs, err := canonicalDockerDNSCIDRs(fuse.SystemEgress.DNSCIDRs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workspace FUSE DNS CIDR is invalid")
-	}
-	dns := make([]string, 0, len(dnsCIDRs))
-	for _, cidr := range dnsCIDRs {
-		prefix, _ := netip.ParsePrefix(cidr)
-		dns = append(dns, prefix.Addr().String())
+	var dns []string
+	if len(fuse.SystemEgress.Hosts) == 0 {
+		dnsPorts, err := canonicalDockerPorts(fuse.SystemEgress.DNSPorts)
+		if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+			return nil, nil, fmt.Errorf("Docker workspace FUSE DNS ports must be exactly 53")
+		}
+		dnsCIDRs, err := canonicalDockerDNSCIDRs(fuse.SystemEgress.DNSCIDRs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("workspace FUSE DNS CIDR is invalid")
+		}
+		dns = make([]string, 0, len(dnsCIDRs))
+		for _, cidr := range dnsCIDRs {
+			prefix, _ := netip.ParsePrefix(cidr)
+			dns = append(dns, prefix.Addr().String())
+		}
 	}
 	_, endpointHostname, _, err := canonicalDockerFUSEEndpoint(fuse)
 	if err != nil {
@@ -248,10 +251,10 @@ func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []stri
 		}
 	}
 	var extraHosts []string
-	for _, raw := range fuse.EndpointHostIPs {
+	addHostIP := func(hostname, raw string) error {
 		ip, parseErr := netip.ParseAddr(raw)
 		if parseErr != nil || !ip.Is4() || ip.String() != raw {
-			return nil, nil, fmt.Errorf("workspace FUSE endpoint host IP is invalid")
+			return fmt.Errorf("workspace FUSE endpoint host IP is invalid")
 		}
 		allowed := false
 		for _, network := range approved {
@@ -261,9 +264,28 @@ func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []stri
 			}
 		}
 		if !allowed {
-			return nil, nil, fmt.Errorf("workspace FUSE endpoint host IP is outside approved system egress")
+			return fmt.Errorf("workspace FUSE endpoint host IP is outside approved system egress")
 		}
-		extraHosts = append(extraHosts, endpointHostname+":"+raw)
+		extraHosts = append(extraHosts, hostname+":"+raw)
+		return nil
+	}
+	if len(fuse.SystemEgress.Hosts) != 0 {
+		for _, mapping := range fuse.SystemEgress.Hosts {
+			if !canonicalDockerEndpointHostname(mapping.Host) || len(mapping.IPs) == 0 {
+				return nil, nil, fmt.Errorf("workspace FUSE endpoint host mapping is invalid")
+			}
+			for _, raw := range mapping.IPs {
+				if err := addHostIP(mapping.Host, raw); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+	} else {
+		for _, raw := range fuse.EndpointHostIPs {
+			if err := addHostIP(endpointHostname, raw); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 	// Docker's resolver and extra_hosts are ordered inputs. Canonical ordering
 	// makes the prepared-container contract stable across equivalent config.
@@ -272,11 +294,11 @@ func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []stri
 }
 
 // canonicalDockerFUSEEndpoint converts the provider-specific endpoint into the
-// exact HTTPS URL accepted by the trusted mounter. MinIO configuration remains
+// exact URL accepted by the trusted mounter. MinIO configuration remains
 // host[:port]; OBS configuration remains an explicit HTTPS URL.
 func canonicalDockerFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, int32, error) {
 	const invalid = "workspace FUSE endpoint is invalid"
-	if fuse == nil || !fuse.UseSSL {
+	if fuse == nil || (!fuse.UseSSL && fuse.Provider != "minio") {
 		return "", "", 0, fmt.Errorf("%s", invalid)
 	}
 	raw := fuse.Endpoint
@@ -284,10 +306,17 @@ func canonicalDockerFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, strin
 	var err error
 	switch fuse.Provider {
 	case "minio":
+		if !fuse.UseSSL && fuse.Profile != "minio-sigv4-path-style-private-http-v1" {
+			return "", "", 0, fmt.Errorf("%s", invalid)
+		}
 		if strings.Contains(raw, "://") {
 			return "", "", 0, fmt.Errorf("%s", invalid)
 		}
-		parsed, err = url.Parse("https://" + raw)
+		scheme := "http"
+		if fuse.UseSSL {
+			scheme = "https"
+		}
+		parsed, err = url.Parse(scheme + "://" + raw)
 	case "obs":
 		parsed, err = url.Parse(raw)
 		if err == nil && parsed.Scheme != "https" {
@@ -296,7 +325,7 @@ func canonicalDockerFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, strin
 	default:
 		return "", "", 0, fmt.Errorf("workspace FUSE provider is invalid")
 	}
-	if err != nil || parsed == nil || parsed.Scheme != "https" || parsed.Host == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	if err != nil || parsed == nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", "", 0, fmt.Errorf("%s", invalid)
 	}
 	hostname := parsed.Hostname()

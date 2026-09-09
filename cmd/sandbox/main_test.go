@@ -38,8 +38,9 @@ func TestBuildFUSESpecUsesOnlyFixedProviderConfiguration(t *testing.T) {
 	require.NotNil(t, spec.WorkspaceFUSE)
 	assert.Equal(t, cfg.Workspace.Backend.DockerImage, spec.Image)
 	assert.NotEmpty(t, spec.WorkspaceFUSE.PoolKey)
-	assert.Equal(t, []string{"1.1.1.1/32"}, spec.WorkspaceFUSE.SystemEgress.DNSCIDRs)
-	assert.Equal(t, []int32{53}, spec.WorkspaceFUSE.SystemEgress.DNSPorts)
+	assert.Empty(t, spec.WorkspaceFUSE.SystemEgress.DNSCIDRs)
+	assert.Empty(t, spec.WorkspaceFUSE.SystemEgress.DNSPorts)
+	assert.Empty(t, spec.WorkspaceFUSE.SystemEgress.EndpointCIDRs)
 	assert.Equal(t, 30*time.Second, spec.WorkspaceFUSE.MountTimeout)
 	assert.NotContains(t, spec.WorkspaceFUSE.PoolKey, "workspaces")
 

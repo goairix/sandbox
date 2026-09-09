@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -476,6 +477,23 @@ func TestPrepareSandboxCreatesSystemPolicyBeforePodAndPatchesPreparedWithResourc
 	assert.Equal(t, []string{"create-networkpolicies", "create-pods"}, first)
 	assert.Contains(t, string(patch), `"resourceVersion":"7"`)
 	assert.Contains(t, string(patch), `"sandbox.pool.state":"prepared"`)
+}
+
+func TestKubernetesPrepareDerivesEndpointPolicyAndHostAliases(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	rt.endpointLookup = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("36.170.50.43")}, nil
+	}
+
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, []corev1.HostAlias{{IP: "36.170.50.43", Hostnames: []string{"minio.example.com"}}}, pod.Spec.HostAliases)
+	policy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), fuseSystemPolicyPrefix+info.RuntimeID, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, policy.Spec.Egress, 1, "hostAliases remove the need for DNS egress")
+	assert.Equal(t, "36.170.50.43/32", policy.Spec.Egress[0].To[0].IPBlock.CIDR)
 }
 
 func TestCreateSandboxRejectsFUSEBeforeAnyMutation(t *testing.T) {

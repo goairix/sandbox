@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ type Runtime struct {
 	workspaceStates    map[string]*dockerWorkspaceState
 	secretMaterializer FUSESecretMaterializer
 	secretValidator    func(string, string) error
+	endpointLookup     runtime.LookupNetIPFunc
 }
 
 // NewWithFUSECredentials enables Docker FUSE authorization with an owned,
@@ -126,6 +128,7 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 		gatewayImage:      gatewayImage,
 		secretRoot:        dockerWorkspaceSecretRoot,
 		workspaceStates:   make(map[string]*dockerWorkspaceState),
+		endpointLookup:    net.DefaultResolver.LookupIP,
 	}, nil
 }
 
@@ -199,6 +202,13 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
 	if spec.WorkspaceFUSE == nil {
 		return nil, runtime.ErrWorkspaceFUSEUnsupported
+	}
+	if r.endpointLookup != nil {
+		resolved, err := runtime.ResolveFUSEEndpointPolicy(ctx, spec.WorkspaceFUSE, r.endpointLookup, runtime.EndpointIPv4Only)
+		if err != nil {
+			return nil, err
+		}
+		spec.WorkspaceFUSE = resolved
 	}
 	if _, _, err := createContainerConfigWithSecretRoot(spec, r.effectiveSecretRoot()); err != nil {
 		return nil, err
@@ -502,7 +512,15 @@ func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.Runtime
 		state.mu.Unlock()
 		return fmt.Errorf("prepared workspace state is not pristine")
 	}
+	mappings := append([]runtime.EndpointHostMapping(nil), state.systemEgress.Hosts...)
 	state.mu.Unlock()
+	current, err := runtime.FUSEEndpointMappingsCurrent(ctx, mappings, r.endpointLookup, runtime.EndpointIPv4Only)
+	if err != nil {
+		return fmt.Errorf("revalidate prepared workspace endpoint: %w", err)
+	}
+	if !current {
+		return fmt.Errorf("prepared workspace endpoint addresses changed")
+	}
 	status, err := r.readMounterStatus(ctx, ref, "prepared")
 	if err != nil || status.State != "prepared" || status.RuntimeUID != ref.UID || status.PoolKey != poolKey || status.MountType != "" || status.Generation != 0 || status.RestartDetected || status.CacheLimitBytes != state.cacheBytes || status.CacheBytes != 0 || status.CacheExceeded {
 		return fmt.Errorf("prepared workspace status is not pristine")

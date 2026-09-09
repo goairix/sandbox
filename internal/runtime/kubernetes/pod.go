@@ -502,11 +502,15 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 			return validated, fmt.Errorf("workspace FUSE endpoint is outside approved system egress CIDRs")
 		}
 	}
-	validated.nameservers, err = hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
-	if err != nil {
-		return validated, err
+	if len(fuse.SystemEgress.Hosts) == 0 {
+		validated.nameservers, err = hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
+		if err != nil {
+			return validated, err
+		}
+		validated.hostAliases, err = endpointHostAliases(endpointHostname, endpointIP, fuse.EndpointHostIPs, approvedNetworks)
+	} else {
+		validated.hostAliases, err = resolvedEndpointHostAliases(fuse.SystemEgress.Hosts, approvedNetworks)
 	}
-	validated.hostAliases, err = endpointHostAliases(endpointHostname, endpointIP, fuse.EndpointHostIPs, approvedNetworks)
 	if err != nil {
 		return validated, err
 	}
@@ -580,13 +584,16 @@ func validateLSMProfile(profile string) error {
 
 func validateFUSEEndpoint(fuse *runtime.WorkspaceFUSESpec) (string, string, bool, int32, error) {
 	const invalidEndpoint = "invalid workspace FUSE endpoint"
-	if !fuse.UseSSL {
+	if !fuse.UseSSL && fuse.Provider != "minio" {
 		return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
 	}
 	raw := fuse.Endpoint
 	var parsed *url.URL
 	var err error
 	if fuse.Provider == "minio" {
+		if !fuse.UseSSL && fuse.Profile != "minio-sigv4-path-style-private-http-v1" {
+			return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
+		}
 		if strings.Contains(raw, "://") {
 			return "", "", false, 0, fmt.Errorf("%s", invalidEndpoint)
 		}
@@ -638,12 +645,16 @@ func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string
 	if spec.ProxyURL != "" {
 		return nil, fmt.Errorf("workspace FUSE system egress proxy must be empty")
 	}
-	dnsPorts, err := canonicalPorts("DNS", spec.DNSPorts)
-	if err != nil {
-		return nil, err
-	}
-	if len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-		return nil, fmt.Errorf("workspace FUSE system egress DNS port set must be exactly 53")
+	if len(spec.Hosts) == 0 {
+		dnsPorts, err := canonicalPorts("DNS", spec.DNSPorts)
+		if err != nil {
+			return nil, err
+		}
+		if len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+			return nil, fmt.Errorf("workspace FUSE system egress DNS port set must be exactly 53")
+		}
+	} else if len(spec.DNSCIDRs) != 0 || len(spec.DNSPorts) != 0 {
+		return nil, fmt.Errorf("resolved workspace FUSE system egress must not require DNS")
 	}
 	endpointPorts, err := canonicalPorts("endpoint", spec.EndpointPorts)
 	if err != nil {
@@ -754,6 +765,42 @@ func endpointHostAliases(hostname string, endpointIP bool, rawIPs []string, appr
 		aliases = append(aliases, corev1.HostAlias{IP: rawIP, Hostnames: []string{hostname}})
 		previous = rawIP
 	}
+	return aliases, nil
+}
+
+func resolvedEndpointHostAliases(mappings []runtime.EndpointHostMapping, approvedNetworks []netip.Prefix) ([]corev1.HostAlias, error) {
+	aliases := make([]corev1.HostAlias, 0)
+	seen := make(map[string]struct{})
+	for _, mapping := range mappings {
+		if mapping.Host == "" || mapping.Host != strings.ToLower(mapping.Host) || len(kvalidation.IsDNS1123Subdomain(mapping.Host)) != 0 || len(mapping.IPs) == 0 {
+			return nil, fmt.Errorf("workspace FUSE endpoint host mapping is invalid")
+		}
+		for _, rawIP := range mapping.IPs {
+			addr, err := netip.ParseAddr(rawIP)
+			if err != nil || addr.Is4In6() || addr.Zone() != "" || addr.String() != rawIP {
+				return nil, fmt.Errorf("workspace FUSE endpoint host mapping IP is invalid")
+			}
+			approved := false
+			for _, network := range approvedNetworks {
+				approved = approved || network.Contains(addr)
+			}
+			if !approved {
+				return nil, fmt.Errorf("workspace FUSE endpoint host mapping is outside approved system egress CIDRs")
+			}
+			key := rawIP + "\x00" + mapping.Host
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			aliases = append(aliases, corev1.HostAlias{IP: rawIP, Hostnames: []string{mapping.Host}})
+		}
+	}
+	sort.Slice(aliases, func(i, j int) bool {
+		if aliases[i].IP == aliases[j].IP {
+			return aliases[i].Hostnames[0] < aliases[j].Hostnames[0]
+		}
+		return aliases[i].IP < aliases[j].IP
+	})
 	return aliases, nil
 }
 

@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/netip"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -65,6 +67,12 @@ func WithFUSECredentials(credentials runtime.FUSECredentials) Option {
 	}
 }
 
+// WithEndpointLookup overrides endpoint DNS resolution. Production uses the
+// process resolver; this option exists for deterministic runtime tests.
+func WithEndpointLookup(lookup runtime.LookupNetIPFunc) Option {
+	return func(r *Runtime) { r.endpointLookup = lookup }
+}
+
 type workspaceRuntimeState struct {
 	runtimeUID      string
 	poolKey         string
@@ -95,6 +103,7 @@ type Runtime struct {
 	controlExecutor    podCommandExecutor
 	infraFencer        InfrastructureFencer
 	fuseCredentials    runtime.FUSECredentials
+	endpointLookup     runtime.LookupNetIPFunc
 	pollInterval       time.Duration
 	prepareTimeout     time.Duration
 	readyTimeout       time.Duration
@@ -144,6 +153,7 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 		readyTimeout:       defaultKubernetesControlTimeout,
 		terminationTimeout: defaultKubernetesControlTimeout,
 		workspaceStates:    make(map[string]*workspaceRuntimeState),
+		endpointLookup:     net.DefaultResolver.LookupIP,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -202,6 +212,13 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
 	if spec.WorkspaceFUSE == nil {
 		return nil, runtime.ErrWorkspaceFUSEUnsupported
+	}
+	if r.endpointLookup != nil {
+		resolved, err := runtime.ResolveFUSEEndpointPolicy(ctx, spec.WorkspaceFUSE, r.endpointLookup, runtime.EndpointIPv4AndIPv6)
+		if err != nil {
+			return nil, err
+		}
+		spec.WorkspaceFUSE = resolved
 	}
 	// Pure construction validates both resources before the first API mutation.
 	pod, err := buildPreparedFUSEPod(r.namespace, spec)
@@ -391,6 +408,14 @@ func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.Runtime
 	if err != nil {
 		return err
 	}
+	mappings := endpointMappingsFromHostAliases(pod.Spec.HostAliases)
+	current, err := runtime.FUSEEndpointMappingsCurrent(ctx, mappings, r.endpointLookup, runtime.EndpointIPv4AndIPv6)
+	if err != nil {
+		return fmt.Errorf("revalidate prepared workspace endpoint: %w", err)
+	}
+	if !current {
+		return fmt.Errorf("prepared workspace endpoint addresses changed")
+	}
 	status, err := r.readMounterStatus(ctx, ref, "prepared")
 	if err != nil {
 		return err
@@ -403,6 +428,27 @@ func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.Runtime
 	state.nodeName = pod.Spec.NodeName
 	r.stateMu.Unlock()
 	return nil
+}
+
+func endpointMappingsFromHostAliases(aliases []corev1.HostAlias) []runtime.EndpointHostMapping {
+	byHost := make(map[string][]string)
+	for _, alias := range aliases {
+		for _, host := range alias.Hostnames {
+			byHost[host] = append(byHost[host], alias.IP)
+		}
+	}
+	hosts := make([]string, 0, len(byHost))
+	for host := range byHost {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	result := make([]runtime.EndpointHostMapping, 0, len(hosts))
+	for _, host := range hosts {
+		ips := byHost[host]
+		sort.Strings(ips)
+		result = append(result, runtime.EndpointHostMapping{Host: host, IPs: ips})
+	}
+	return result
 }
 
 func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (*runtime.WorkspaceHealth, error) {

@@ -32,7 +32,7 @@ func TestResolveFUSEEndpointPolicy(t *testing.T) {
 		},
 		{
 			name:      "private HTTP MinIO explicit port",
-			spec:      WorkspaceFUSESpec{Provider: "minio", Bucket: "sandbox", Endpoint: "10.20.30.40:9000", UseSSL: false},
+			spec:      WorkspaceFUSESpec{Provider: "minio", Profile: "minio-sigv4-path-style-private-http-v1", Bucket: "sandbox", Endpoint: "10.20.30.40:9000", UseSSL: false},
 			wantHosts: []EndpointHostMapping{{Host: "10.20.30.40", IPs: []string{"10.20.30.40"}}},
 			wantCIDRs: []string{"10.20.30.40/32"}, wantPorts: []int32{9000},
 		},
@@ -86,7 +86,7 @@ func TestResolveFUSEEndpointPolicyRejectsUnsafeAddresses(t *testing.T) {
 }
 
 func TestResolveFUSEEndpointPolicyRejectsPublicHTTPMinIO(t *testing.T) {
-	spec := &WorkspaceFUSESpec{Provider: "minio", Bucket: "sandbox", Endpoint: "minio.example.com", UseSSL: false}
+	spec := &WorkspaceFUSESpec{Provider: "minio", Profile: "minio-sigv4-path-style-private-http-v1", Bucket: "sandbox", Endpoint: "minio.example.com", UseSSL: false}
 	_, err := ResolveFUSEEndpointPolicy(context.Background(), spec, lookupFixture(map[string][]string{"minio.example.com": {"36.170.50.43"}}), EndpointIPv4Only)
 	require.ErrorContains(t, err, "HTTP MinIO endpoint must resolve only to private addresses")
 }
@@ -95,6 +95,17 @@ func TestResolveFUSEEndpointPolicyRequiresUsableAddressFamily(t *testing.T) {
 	spec := &WorkspaceFUSESpec{Provider: "minio", Bucket: "sandbox", Endpoint: "minio.example.com", UseSSL: true}
 	_, err := ResolveFUSEEndpointPolicy(context.Background(), spec, lookupFixture(map[string][]string{"minio.example.com": {"2001:4860:4860::8888"}}), EndpointIPv4Only)
 	require.ErrorContains(t, err, "no usable IPv4 address")
+}
+
+func TestFUSEEndpointMappingsCurrentDetectsDNSRotation(t *testing.T) {
+	mappings := []EndpointHostMapping{{Host: "minio.example.com", IPs: []string{"36.170.50.43"}}}
+	current, err := FUSEEndpointMappingsCurrent(context.Background(), mappings, lookupFixture(map[string][]string{"minio.example.com": {"36.170.50.43"}}), EndpointIPv4Only)
+	require.NoError(t, err)
+	assert.True(t, current)
+
+	current, err = FUSEEndpointMappingsCurrent(context.Background(), mappings, lookupFixture(map[string][]string{"minio.example.com": {"36.170.50.44"}}), EndpointIPv4Only)
+	require.NoError(t, err)
+	assert.False(t, current)
 }
 
 func lookupFixture(values map[string][]string) LookupNetIPFunc {
