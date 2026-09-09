@@ -353,10 +353,8 @@ func newValidFUSEConfig() *config.Config {
 	valid.Storage.FileSystem.UseSSL = true
 	valid.Storage.FileSystem.SubPath = "workspaces/团队"
 	valid.Storage.FileSystem.CAFile = "/run/secrets/ca.crt"
-	valid.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{
-		AccessKeyFile: "/run/secrets/storage_access_key",
-		SecretKeyFile: "/run/secrets/storage_secret_key",
-	}
+	valid.Storage.FileSystem.AccessKey = "inline-access"
+	valid.Storage.FileSystem.SecretKey = "inline-secret"
 	valid.Workspace = config.WorkspaceConfig{
 		Mode:                      "fuse",
 		SecretName:                "sandbox-workspace-minio",
@@ -410,6 +408,50 @@ func TestValidateAcceptsVersionTaggedFUSEImages(t *testing.T) {
 	cfg.Workspace.Providers["minio"] = provider
 
 	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateFUSEAcceptsInlineWorkspaceCredentials(t *testing.T) {
+	cfg := newValidFUSEConfig()
+	cfg.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{}
+	cfg.Storage.FileSystem.AccessKey = "inline-access"
+	cfg.Storage.FileSystem.SecretKey = "inline-secret"
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateFUSERejectsIncompleteOrMixedInlineWorkspaceCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{name: "missing access key", edit: func(c *config.Config) {
+			c.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{}
+			c.Storage.FileSystem.AccessKey = ""
+			c.Storage.FileSystem.SecretKey = "do-not-leak-secret"
+		}, want: "access_key and secret_key"},
+		{name: "missing secret key", edit: func(c *config.Config) {
+			c.Storage.FileSystem.CredentialFiles = config.FileSystemCredentialFileConfig{}
+			c.Storage.FileSystem.AccessKey = "do-not-leak-access"
+			c.Storage.FileSystem.SecretKey = ""
+		}, want: "access_key and secret_key"},
+		{name: "mixed sources", edit: func(c *config.Config) {
+			c.Storage.FileSystem.AccessKey = "do-not-leak-access"
+			c.Storage.FileSystem.SecretKey = "do-not-leak-secret"
+			c.Storage.FileSystem.CredentialFiles.AccessKeyFile = "/run/secrets/access"
+		}, want: "credential sources"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newValidFUSEConfig()
+			tt.edit(cfg)
+			err := cfg.Validate()
+			require.ErrorContains(t, err, tt.want)
+			assert.NotContains(t, err.Error(), "do-not-leak-access")
+			assert.NotContains(t, err.Error(), "do-not-leak-secret")
+		})
+	}
 }
 
 func validHybridConfig() *config.Config {
@@ -562,9 +604,11 @@ storage:
     endpoint: https://obs.example.com
     use_ssl: true
     sub_path: teams/project
+    access_key: inline-access
+    secret_key: inline-secret
     credential_files:
-      access_key_file: /run/secrets/access-key
-      secret_key_file: /run/secrets/secret-key
+      access_key_file: ""
+      secret_key_file: ""
       session_token_file: ""
       credential_expiry_file: ""
     ca_file: /run/secrets/ca.crt
@@ -656,8 +700,10 @@ func TestLoadDecodesFUSEProviderWithoutSelectingIt(t *testing.T) {
 	assert.Equal(t, []string{"1.1.1.1/32"}, provider.DNSCIDRs)
 	assert.Equal(t, []string{"obs.example.com", "sandbox.obs.example.com"}, provider.SystemEgressFQDNs)
 	assert.Equal(t, []int32{443}, provider.EndpointPorts)
-	assert.Equal(t, "/run/secrets/access-key", cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile)
-	assert.Equal(t, "/run/secrets/secret-key", cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile)
+	assert.Equal(t, "inline-access", cfg.Storage.FileSystem.AccessKey)
+	assert.Equal(t, "inline-secret", cfg.Storage.FileSystem.SecretKey)
+	assert.Empty(t, cfg.Storage.FileSystem.CredentialFiles.AccessKeyFile)
+	assert.Empty(t, cfg.Storage.FileSystem.CredentialFiles.SecretKeyFile)
 	assert.Equal(t, "/run/secrets/ca.crt", cfg.Storage.FileSystem.CAFile)
 	assert.Equal(t, int64(3221225472), cfg.Security.MaxUploadBytes)
 }
@@ -908,10 +954,10 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "missing region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "" }, want: "storage.filesystem.region"},
 		{name: "noncanonical region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "CN-North-4" }, want: "storage.filesystem.region"},
 		{name: "missing endpoint", edit: func(c *config.Config) { c.Storage.FileSystem.Endpoint = "" }, want: "storage.filesystem.endpoint"},
-		{name: "missing access key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.AccessKeyFile = "" }, want: "access_key_file"},
-		{name: "missing secret key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SecretKeyFile = "" }, want: "secret_key_file"},
-		{name: "inline access key", edit: func(c *config.Config) { c.Storage.FileSystem.AccessKey = "inline" }, want: "inline access_key"},
-		{name: "inline secret key", edit: func(c *config.Config) { c.Storage.FileSystem.SecretKey = "inline" }, want: "inline secret_key"},
+		{name: "missing access key", edit: func(c *config.Config) { c.Storage.FileSystem.AccessKey = "" }, want: "access_key and secret_key"},
+		{name: "missing secret key", edit: func(c *config.Config) { c.Storage.FileSystem.SecretKey = "" }, want: "access_key and secret_key"},
+		{name: "mixed access key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.AccessKeyFile = "/run/secrets/access" }, want: "credential sources"},
+		{name: "mixed secret key file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SecretKeyFile = "/run/secrets/secret" }, want: "credential sources"},
 		{name: "session token", edit: func(c *config.Config) { c.Storage.FileSystem.SessionToken = "token" }, want: "session token or credential expiry"},
 		{name: "credential expiry", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialExpiry = "tomorrow" }, want: "session token or credential expiry"},
 		{name: "session token file", edit: func(c *config.Config) { c.Storage.FileSystem.CredentialFiles.SessionTokenFile = "/secret/token" }, want: "session token or credential expiry"},
@@ -1195,15 +1241,15 @@ func setLocalDevelopmentFUSEEnv(t *testing.T) {
 		"SANDBOX_STORAGE_FILESYSTEM_BUCKET":                                  "sandbox-workspace",
 		"SANDBOX_STORAGE_FILESYSTEM_REGION":                                  "us-east-1",
 		"SANDBOX_STORAGE_FILESYSTEM_ENDPOINT":                                "192.168.10.19:9443",
-		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":                              "",
-		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":                              "",
+		"SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY":                              "inline-access",
+		"SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY":                              "inline-secret",
 		"SANDBOX_STORAGE_FILESYSTEM_SESSION_TOKEN":                           "",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_EXPIRY":                       "",
 		"SANDBOX_STORAGE_FILESYSTEM_SUB_PATH":                                "",
 		"SANDBOX_STORAGE_FILESYSTEM_USE_SSL":                                 "true",
 		"SANDBOX_STORAGE_FILESYSTEM_CA_FILE":                                 "/run/secrets/workspace/ca.crt",
-		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "/run/secrets/workspace/accessKey",
-		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "/run/secrets/workspace/secretKey",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_ACCESS_KEY_FILE":        "",
+		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SECRET_KEY_FILE":        "",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_SESSION_TOKEN_FILE":     "",
 		"SANDBOX_STORAGE_FILESYSTEM_CREDENTIAL_FILES_CREDENTIAL_EXPIRY_FILE": "",
 		"SANDBOX_WORKSPACE_MODE":                                             "fuse",

@@ -539,17 +539,13 @@ func (c *Config) validateFUSE() error {
 			return fmt.Errorf("config: storage.filesystem.endpoint must be a canonical TLS HTTPS URL for OBS FUSE")
 		}
 	}
-	if filesystem.CredentialFiles.AccessKeyFile == "" {
-		return fmt.Errorf("config: storage.filesystem.credential_files.access_key_file must not be empty when workspace.mode is \"fuse\"")
+	hasInlineCredentials := filesystem.AccessKey != "" || filesystem.SecretKey != ""
+	hasFileCredentials := filesystem.CredentialFiles.AccessKeyFile != "" || filesystem.CredentialFiles.SecretKeyFile != ""
+	if hasInlineCredentials && hasFileCredentials {
+		return fmt.Errorf("config: inline and file credential sources cannot be mixed when workspace.mode is \"fuse\"")
 	}
-	if filesystem.CredentialFiles.SecretKeyFile == "" {
-		return fmt.Errorf("config: storage.filesystem.credential_files.secret_key_file must not be empty when workspace.mode is \"fuse\"")
-	}
-	if filesystem.AccessKey != "" {
-		return fmt.Errorf("config: inline access_key is forbidden when workspace.mode is \"fuse\"")
-	}
-	if filesystem.SecretKey != "" {
-		return fmt.Errorf("config: inline secret_key is forbidden when workspace.mode is \"fuse\"")
+	if !hasInlineCredentials || filesystem.AccessKey == "" || filesystem.SecretKey == "" {
+		return fmt.Errorf("config: storage.filesystem.access_key and secret_key must both be configured when workspace.mode is \"fuse\"")
 	}
 	if hasTemporaryCredentialFields(filesystem) {
 		return fmt.Errorf("config: session token or credential expiry fields are unsupported when workspace.mode is \"fuse\"")
