@@ -18,6 +18,10 @@ fi
 
 cd "$source_dir"
 ./autogen.sh
+# Debian Bookworm ships Autoconf 2.71. autoupdate modernizes the pinned
+# configure.ac in-place, which would make s3fs report a dirty source tree in
+# its version string even though the generated configure script is valid.
+git checkout -- configure.ac
 ./configure --prefix=/usr
 make -j"$(getconf _NPROCESSORS_ONLN)"
 make DESTDIR="$destination" install

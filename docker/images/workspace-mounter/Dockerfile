@@ -12,22 +12,28 @@ RUN mkdir -p /out \
     -o /out/workspace-mounter ./cmd/workspace-mounter
 
 FROM debian:bookworm-slim AS s3fs-builder
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ENV S3FS_COMMIT=561ce1e20600bab42133b5e51511483800d3ef76
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-    automake autotools-dev g++ git libcurl4-openssl-dev libfuse3-dev \
+RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g; s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Pipeline-Depth=0 -o Acquire::http::No-Cache=true -o Acquire::BrokenProxy=true update \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Pipeline-Depth=0 -o Acquire::http::No-Cache=true -o Acquire::BrokenProxy=true install -y --no-install-recommends \
+    automake autotools-dev g++ git libcurl4-openssl-dev libfuse-dev \
     libssl-dev libxml2-dev make pkg-config ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY docker/images/common/build-s3fs.sh /usr/local/bin/build-s3fs
 RUN /usr/local/bin/build-s3fs /out
 
 FROM debian:bookworm-slim
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 
 USER root
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-    ca-certificates fuse3 libcurl4 libssl3 libxml2 \
+RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g; s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Pipeline-Depth=0 -o Acquire::http::No-Cache=true -o Acquire::BrokenProxy=true update \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Pipeline-Depth=0 -o Acquire::http::No-Cache=true -o Acquire::BrokenProxy=true install -y --no-install-recommends \
+    ca-certificates fuse3 libcurl4 libfuse2 libssl3 libxml2 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json

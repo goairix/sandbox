@@ -413,6 +413,8 @@ docker buildx build --platform "$PLATFORM" \
 
 两份 Dockerfile 会从固定上游提交编译已验证的 s3fs 1.95，并把最终二进制 SHA 自动写入镜像 profile bundle；发布人员不需要准备基础镜像、下载地址或 SHA256。
 
+镜像内的 Debian 软件包默认从阿里云镜像站安装，常规构建仍直接使用上面的命令，不需要配置代理。只有需要改用公司内部镜像站时，才在构建命令中追加 `--build-arg DEBIAN_MIRROR=<debian-mirror> --build-arg DEBIAN_SECURITY_MIRROR=<debian-security-mirror>`。
+
 ### 7.3 更新 Helm values
 
 构建和 manifest 发布完成后，只把同一个版本 tag 回填到部署 values：
