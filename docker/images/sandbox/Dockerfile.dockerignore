@@ -9,3 +9,7 @@
 !internal/fuseprotocol/**
 !internal/workspaceprobe/
 !internal/workspaceprobe/**
+!docker/
+!docker/images/
+!docker/images/sandbox/
+!docker/images/sandbox/install-runtime.sh
