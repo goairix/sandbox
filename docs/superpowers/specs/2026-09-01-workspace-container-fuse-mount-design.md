@@ -1,5 +1,7 @@
 # Workspace 容器内 FUSE 直接挂载设计
 
+> 凭据输入与下发方式由 [Workspace 配置内凭据设计](2026-09-09-inline-workspace-credentials-design.md) 更新：Docker Compose 和 Helm 直接读取配置内 AK/SK，不再要求外部凭证文件或预创建 Kubernetes Secret；FUSE 凭据在 Acquire 时通过私有控制通道下发。
+
 **日期：** 2026-09-01
 
 **复审修订：** 2026-09-06
