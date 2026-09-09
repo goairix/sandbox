@@ -498,6 +498,70 @@ func TestValidateHybridWorkspaceBackendPreset(t *testing.T) {
 	assert.True(t, cfg.Workspace.MountModeEnabled("fuse"))
 }
 
+func TestValidateDefaultsEmptyMinIOFUSERegion(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Storage.FileSystem.Region = ""
+
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "us-east-1", cfg.Storage.FileSystem.Region)
+}
+
+func TestValidateDerivesEmptyOBSFUSERegion(t *testing.T) {
+	tests := []struct {
+		name     string
+		preset   string
+		profile  string
+		endpoint string
+		want     string
+	}{
+		{
+			name: "huawei public cloud", preset: "huawei-obs-public", profile: "huawei-obs-public-v1",
+			endpoint: "https://obs.cn-southwest-2.myhuaweicloud.com", want: "cn-southwest-2",
+		},
+		{
+			name: "huawei private cloud", preset: "huawei-obs-private", profile: "huawei-obs-private-2023-v1",
+			endpoint: "https://obs.cn-southwest-268.shuanghuayun.com", want: "cn-southwest-268",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validHybridConfig()
+			cfg.Storage.FileSystem.Provider = "obs"
+			cfg.Storage.FileSystem.Endpoint = tt.endpoint
+			cfg.Storage.FileSystem.Region = ""
+			cfg.Workspace.Backend.Preset = tt.preset
+			cfg.Workspace.Backend.Profile = tt.profile
+
+			require.NoError(t, cfg.Validate())
+			assert.Equal(t, tt.want, cfg.Storage.FileSystem.Region)
+		})
+	}
+}
+
+func TestValidatePreservesExplicitFUSERegion(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Storage.FileSystem.Region = "custom-region-1"
+
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "custom-region-1", cfg.Storage.FileSystem.Region)
+}
+
+func TestValidateFUSEDoesNotRequireOperatorEndpointPolicyOrCustomCA(t *testing.T) {
+	cfg := validHybridConfig()
+	cfg.Storage.FileSystem.CAFile = ""
+	cfg.Workspace.SecretName = ""
+	cfg.Workspace.Backend.CASecretKey = ""
+	cfg.Workspace.Backend.EndpointHostIPs = nil
+	cfg.Workspace.Backend.SystemEgressMode = ""
+	cfg.Workspace.Backend.DNSCIDRs = nil
+	cfg.Workspace.Backend.SystemEgressFQDNs = nil
+	cfg.Workspace.Backend.SystemEgressCIDRs = nil
+	cfg.Workspace.Backend.EndpointPorts = nil
+	cfg.Workspace.AllowUnverifiedDurableFlush = true // ignored legacy input
+
+	require.NoError(t, cfg.Validate())
+}
+
 func TestValidateRejectsPresetProviderOrProfileDrift(t *testing.T) {
 	for name, edit := range map[string]func(*config.Config){
 		"profile":  func(cfg *config.Config) { cfg.Workspace.Backend.Profile = "huawei-obs-public-v1" },
@@ -855,35 +919,6 @@ func TestFUSEConfigValidation(t *testing.T) {
 			p.EndpointHostIPs = nil
 			c.Workspace.Providers["obs"] = p
 		}, want: ""},
-		{name: "private obs missing virtual host bucket fqdn", edit: func(c *config.Config) {
-			c.Storage.FileSystem.Provider = "obs"
-			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
-			c.Storage.FileSystem.Endpoint = "https://obs.cn-southwest-268.shuanghuayun.com"
-			c.Storage.FileSystem.Region = "cn-southwest-268"
-			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
-				"obs": validFUSEProvider("obs.cn-southwest-268.shuanghuayun.com", "cilium-fqdn"),
-			}
-			p := c.Workspace.Providers["obs"]
-			p.Profile = "huawei-obs-private-2023-v1"
-			p.SystemEgressCIDRs = nil
-			p.EndpointHostIPs = nil
-			c.Workspace.Providers["obs"] = p
-		}, want: "virtual-host bucket FQDN"},
-		{name: "private obs uppercase virtual host bucket fqdn", edit: func(c *config.Config) {
-			c.Storage.FileSystem.Provider = "obs"
-			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
-			c.Storage.FileSystem.Endpoint = "https://obs.cn-southwest-268.shuanghuayun.com"
-			c.Storage.FileSystem.Region = "cn-southwest-268"
-			c.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{
-				"obs": validFUSEProvider("obs.cn-southwest-268.shuanghuayun.com", "cilium-fqdn"),
-			}
-			p := c.Workspace.Providers["obs"]
-			p.Profile = "huawei-obs-private-2023-v1"
-			p.SystemEgressFQDNs = append(p.SystemEgressFQDNs, "SANDBOX-FUSE-WORKSPACE.obs.cn-southwest-268.shuanghuayun.com")
-			p.SystemEgressCIDRs = nil
-			p.EndpointHostIPs = nil
-			c.Workspace.Providers["obs"] = p
-		}, want: "virtual-host bucket FQDN"},
 		{name: "valid public obs cilium fqdn", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
@@ -952,7 +987,6 @@ func TestFUSEConfigValidation(t *testing.T) {
 			c.Runtime.Docker.WorkspaceSecretRoot = "/"
 		}, want: "runtime.docker.workspace_secret_root"},
 		{name: "missing bucket", edit: func(c *config.Config) { c.Storage.FileSystem.Bucket = "" }, want: "storage.filesystem.bucket"},
-		{name: "missing region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "" }, want: "storage.filesystem.region"},
 		{name: "noncanonical region", edit: func(c *config.Config) { c.Storage.FileSystem.Region = "CN-North-4" }, want: "storage.filesystem.region"},
 		{name: "missing endpoint", edit: func(c *config.Config) { c.Storage.FileSystem.Endpoint = "" }, want: "storage.filesystem.endpoint"},
 		{name: "missing access key", edit: func(c *config.Config) { c.Storage.FileSystem.AccessKey = "" }, want: "access_key and secret_key"},
@@ -1032,81 +1066,12 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "disabled lsm", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "label=disable" })
 		}, want: "lsm_profile"},
-		{name: "missing egress mode", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressMode = "" })
-		}, want: "system_egress_mode"},
-		{name: "unknown egress mode", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressMode = "allow-all" })
-		}, want: "system_egress_mode"},
-		{name: "missing dns cidrs", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = nil })
-		}, want: "dns_cidrs"},
-		{name: "bare dns ip", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"8.8.8.8"} })
-		}, want: "host-only"},
-		{name: "dns subnet", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"8.8.8.0/24"} })
-		}, want: "host-only"},
-		{name: "ipv6 dns subnet", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"2001:db8::/64"} })
-		}, want: "host-only"},
-		{name: "shared address DNS", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"100.64.0.53/32"} })
-		}, want: "public resolver"},
-		{name: "benchmark DNS", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"198.18.0.53/32"} })
-		}, want: "public resolver"},
-		{name: "documentation DNS", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DNSCIDRs = []string{"2001:db8::53/128"} })
-		}, want: "public resolver"},
-		{name: "missing endpoint ports", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = nil })
-		}, want: "endpoint_ports"},
-		{name: "zero endpoint port", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = []int32{0} })
-		}, want: "endpoint_ports"},
-		{name: "high endpoint port", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointPorts = []int32{65536} })
-		}, want: "endpoint_ports"},
-		{name: "proxy configured", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.ProxyURL = "http://proxy.example.com" })
-		}, want: "proxy_url"},
 		{name: "only control plane CA", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
 		}, want: "ca_file and ca_secret_key"},
 		{name: "only provider CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
 		}, want: "ca_file and ca_secret_key"},
-		{name: "endpoint host alias is not an IP", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointHostIPs = []string{"minio.example.com"} })
-		}, want: "endpoint_host_ips"},
-		{name: "endpoint host alias is not approved", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.EndpointHostIPs = []string{"198.51.100.20"} })
-		}, want: "approved system_egress_cidrs"},
-		{name: "missing cidr egress", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressCIDRs = nil })
-		}, want: "system_egress_cidrs"},
-		{name: "invalid cidr egress", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.SystemEgressCIDRs = []string{"not-a-cidr"} })
-		}, want: "system_egress_cidrs"},
-		{name: "missing fqdn egress", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
-				p.SystemEgressMode = "cilium-fqdn"
-				p.SystemEgressFQDNs = nil
-			})
-		}, want: "system_egress_fqdns"},
-		{name: "empty fqdn egress", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
-				p.SystemEgressMode = "cilium-fqdn"
-				p.SystemEgressFQDNs = []string{""}
-			})
-		}, want: "system_egress_fqdns"},
-		{name: "wildcard fqdn egress", edit: func(c *config.Config) {
-			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) {
-				p.SystemEgressMode = "cilium-fqdn"
-				p.SystemEgressFQDNs = []string{"*.example.com"}
-			})
-		}, want: "wildcard"},
 	}
 
 	for _, tt := range tests {
@@ -1284,45 +1249,4 @@ func TestLoadAllowsExplicitLocalDockerMinIODurableFlushDevelopmentGate(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, "fuse", cfg.Workspace.Mode)
 	assert.True(t, cfg.Workspace.AllowUnverifiedDurableFlush)
-}
-
-func TestLoadRejectsUnverifiedDurableFlushDevelopmentGateOutsideLocalDockerMinIO(t *testing.T) {
-	tests := []struct {
-		name  string
-		key   string
-		value string
-		want  string
-	}{
-		{name: "kubernetes runtime", key: "SANDBOX_RUNTIME_TYPE", value: "kubernetes", want: "only supported with Docker runtime"},
-		{name: "public endpoint", key: "SANDBOX_STORAGE_FILESYSTEM_ENDPOINT", value: "8.8.8.8:9443", want: "private or loopback IPv4 endpoint"},
-		{name: "endpoint hostname", key: "SANDBOX_STORAGE_FILESYSTEM_ENDPOINT", value: "minio.internal:9443", want: "private or loopback IPv4 endpoint"},
-		{name: "broad endpoint CIDR", key: "SANDBOX_WORKSPACE_PROVIDERS_MINIO_SYSTEM_EGRESS_CIDRS", value: "192.168.10.0/24", want: "exact endpoint /32"},
-		{name: "different endpoint port", key: "SANDBOX_WORKSPACE_PROVIDERS_MINIO_ENDPOINT_PORTS", value: "443", want: "exact endpoint port"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setLocalDevelopmentFUSEEnv(t)
-			t.Setenv(tt.key, tt.value)
-			_, err := config.Load("")
-			require.ErrorContains(t, err, tt.want)
-		})
-	}
-}
-
-func TestValidateRejectsUnverifiedDurableFlushDevelopmentGateForOBS(t *testing.T) {
-	cfg := newValidFUSEConfig()
-	cfg.Workspace.AllowUnverifiedDurableFlush = true
-	cfg.Storage.FileSystem.Provider = "obs"
-	cfg.Storage.FileSystem.Region = "cn-north-4"
-	cfg.Storage.FileSystem.Endpoint = "https://192.168.10.19:443"
-	provider := validFUSEProvider("", "cidr")
-	provider.Profile = "huawei-obs-private-2023-v1"
-	provider.EndpointHostIPs = nil
-	provider.EndpointPorts = []int32{443}
-	provider.SystemEgressCIDRs = []string{"192.168.10.19/32"}
-	provider.SystemEgressFQDNs = nil
-	cfg.Workspace.Providers = map[string]config.WorkspaceFUSEProviderConfig{"obs": provider}
-
-	err := cfg.Validate()
-	require.ErrorContains(t, err, "only supported with MinIO")
 }

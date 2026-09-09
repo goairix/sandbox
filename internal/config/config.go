@@ -2,12 +2,9 @@ package config
 
 import (
 	"fmt"
-	"net"
-	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -18,7 +15,6 @@ import (
 
 	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/mounter"
-	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 )
 
 const (
@@ -339,6 +335,9 @@ func (c *Config) Validate() error {
 	if err := c.normalizeWorkspaceSelection(); err != nil {
 		return err
 	}
+	if err := c.normalizeFUSERegion(); err != nil {
+		return err
+	}
 
 	// Security: api_key
 	if c.Security.APIKey == "" {
@@ -400,6 +399,30 @@ func (c *Config) Validate() error {
 		return c.validateFUSE()
 	}
 	return nil
+}
+
+func (c *Config) normalizeFUSERegion() error {
+	if !c.Workspace.MountModeEnabled("fuse") || c.Storage.FileSystem.Region != "" {
+		return nil
+	}
+	switch c.Storage.FileSystem.Provider {
+	case "minio":
+		c.Storage.FileSystem.Region = "us-east-1"
+		return nil
+	case "obs":
+		endpoint, err := url.Parse(c.Storage.FileSystem.Endpoint)
+		if err != nil || endpoint.Hostname() == "" {
+			return fmt.Errorf("config: storage.filesystem.region is empty and cannot be derived from OBS endpoint")
+		}
+		labels := strings.Split(strings.ToLower(endpoint.Hostname()), ".")
+		if len(labels) < 3 || labels[0] != "obs" || !canonicalFUSERegion.MatchString(labels[1]) {
+			return fmt.Errorf("config: storage.filesystem.region is empty and cannot be derived from OBS endpoint %q", endpoint.Hostname())
+		}
+		c.Storage.FileSystem.Region = labels[1]
+		return nil
+	default:
+		return nil
+	}
 }
 
 func (c *Config) normalizeWorkspaceSelection() error {
@@ -670,104 +693,8 @@ func (c *Config) validateFUSE() error {
 	} else if lsmProfile == "" || lsmProfile == "unconfined" || lsmProfile == "label=disable" {
 		return fmt.Errorf("config: %s.lsm_profile must be a confined profile", providerPath)
 	}
-	if provider.SystemEgressMode != "cidr" && provider.SystemEgressMode != "cilium-fqdn" {
-		return fmt.Errorf("config: %s.system_egress_mode must be \"cidr\" or \"cilium-fqdn\", got %q", providerPath, provider.SystemEgressMode)
-	}
-	if len(provider.DNSCIDRs) == 0 {
-		return fmt.Errorf("config: %s.dns_cidrs must not be empty", providerPath)
-	}
-	for _, cidr := range provider.DNSCIDRs {
-		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil || prefix.String() != cidr || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" {
-			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
-		}
-		if prefix.Bits() != prefix.Addr().BitLen() {
-			return fmt.Errorf("config: %s.dns_cidrs must contain host-only /32 or /128 CIDRs, got %q", providerPath, cidr)
-		}
-		if !sandboxruntime.IsPublicDNSAddress(prefix.Addr()) {
-			return fmt.Errorf("config: %s.dns_cidrs must contain public resolver addresses, got %q", providerPath, cidr)
-		}
-	}
-	if len(provider.EndpointPorts) == 0 {
-		return fmt.Errorf("config: %s.endpoint_ports must not be empty", providerPath)
-	}
-	for _, port := range provider.EndpointPorts {
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("config: %s.endpoint_ports must be in range 1-65535, got %d", providerPath, port)
-		}
-	}
-	if provider.ProxyURL != "" {
-		return fmt.Errorf("config: %s.proxy_url must be empty", providerPath)
-	}
-
-	approvedNetworks := make([]*net.IPNet, 0, len(provider.SystemEgressCIDRs))
-	for _, cidr := range provider.SystemEgressCIDRs {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			return fmt.Errorf("config: %s.system_egress_cidrs contains invalid CIDR %q", providerPath, cidr)
-		}
-		approvedNetworks = append(approvedNetworks, network)
-	}
-	if provider.SystemEgressMode == "cidr" && len(approvedNetworks) == 0 {
-		return fmt.Errorf("config: %s.system_egress_cidrs must not be empty in cidr mode", providerPath)
-	}
-	for _, rawIP := range provider.EndpointHostIPs {
-		ip := net.ParseIP(rawIP)
-		if ip == nil {
-			return fmt.Errorf("config: %s.endpoint_host_ips must contain literal IP addresses, got %q", providerPath, rawIP)
-		}
-		approved := false
-		for _, network := range approvedNetworks {
-			if network.Contains(ip) {
-				approved = true
-				break
-			}
-		}
-		if !approved {
-			return fmt.Errorf("config: %s.endpoint_host_ips entry %q must be contained in approved system_egress_cidrs", providerPath, rawIP)
-		}
-	}
-
-	switch provider.SystemEgressMode {
-	case "cilium-fqdn":
-		if len(provider.SystemEgressFQDNs) == 0 {
-			return fmt.Errorf("config: %s.system_egress_fqdns must not be empty in cilium-fqdn mode", providerPath)
-		}
-	}
-	for _, fqdn := range provider.SystemEgressFQDNs {
-		if strings.TrimSpace(fqdn) == "" {
-			return fmt.Errorf("config: %s.system_egress_fqdns must not contain empty names", providerPath)
-		}
-		if strings.Contains(fqdn, "*") {
-			return fmt.Errorf("config: %s.system_egress_fqdns must not contain wildcard names, got %q", providerPath, fqdn)
-		}
-	}
-	if provider.SystemEgressMode == "cilium-fqdn" && profileOK && profile.Provider == filesystem.Provider && profile.Descriptor.AddressingStyle == "virtual-host" {
-		endpoint, err := url.Parse(filesystem.Endpoint)
-		if err != nil || endpoint.Hostname() == "" {
-			return fmt.Errorf("config: storage.filesystem.endpoint cannot derive virtual-host bucket FQDN")
-		}
-		requiredFQDN := filesystem.Bucket + "." + endpoint.Hostname()
-		found := false
-		for _, fqdn := range provider.SystemEgressFQDNs {
-			if fqdn == requiredFQDN {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("config: %s.system_egress_fqdns must include exact virtual-host bucket FQDN %q for profile %q", providerPath, requiredFQDN, provider.Profile)
-		}
-	}
-
 	if !isCanonicalRelativePrefix(filesystem.SubPath) {
 		return fmt.Errorf("config: storage.filesystem.sub_path must be a canonical relative prefix, got %q", filesystem.SubPath)
-	}
-	if workspace.AllowUnverifiedDurableFlush {
-		if err := c.validateLocalDevelopmentFUSEProfile(provider); err != nil {
-			return err
-		}
-		return nil
 	}
 	if err := mounter.CheckProductionProfile(filesystem.Provider, provider.Profile); err != nil {
 		return fmt.Errorf("config: %s.profile %q is not production-ready: %w", providerPath, provider.Profile, err)
@@ -775,43 +702,6 @@ func (c *Config) validateFUSE() error {
 
 	return nil
 }
-
-func (c *Config) validateLocalDevelopmentFUSEProfile(provider WorkspaceBackendConfig) error {
-	const prefix = "config: workspace.allow_unverified_durable_flush"
-	if c.Runtime.Type != "docker" {
-		return fmt.Errorf("%s is only supported with Docker runtime", prefix)
-	}
-	if c.Storage.FileSystem.Provider != "minio" {
-		return fmt.Errorf("%s is only supported with MinIO", prefix)
-	}
-	endpoint, err := url.Parse("https://" + c.Storage.FileSystem.Endpoint)
-	if err != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Path != "" || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return fmt.Errorf("%s requires a private or loopback IPv4 endpoint", prefix)
-	}
-	address, err := netip.ParseAddr(endpoint.Hostname())
-	if err != nil || !address.Is4() || (!address.IsPrivate() && !address.IsLoopback()) {
-		return fmt.Errorf("%s requires a private or loopback IPv4 endpoint", prefix)
-	}
-	exactEndpointCIDR := netip.PrefixFrom(address, address.BitLen()).String()
-	if len(provider.SystemEgressCIDRs) != 1 || provider.SystemEgressCIDRs[0] != exactEndpointCIDR {
-		return fmt.Errorf("%s requires the exact endpoint /32 as the only system egress CIDR", prefix)
-	}
-	endpointPort := uint64(443)
-	if rawPort := endpoint.Port(); rawPort != "" {
-		endpointPort, err = strconv.ParseUint(rawPort, 10, 16)
-		if err != nil || endpointPort == 0 {
-			return fmt.Errorf("%s requires a valid endpoint port", prefix)
-		}
-	}
-	if len(provider.EndpointPorts) != 1 || uint64(provider.EndpointPorts[0]) != endpointPort {
-		return fmt.Errorf("%s requires the exact endpoint port as the only allowed endpoint port", prefix)
-	}
-	if _, ok := mounter.LookupCompiledProfile("minio", provider.Profile); !ok {
-		return fmt.Errorf("%s requires a mount-verified MinIO profile", prefix)
-	}
-	return nil
-}
-
 func hasTemporaryCredentialFields(filesystem FileSystemConfig) bool {
 	files := filesystem.CredentialFiles
 	return filesystem.SessionToken != "" || filesystem.CredentialExpiry != "" ||
