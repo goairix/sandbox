@@ -129,34 +129,6 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 	}, nil
 }
 
-// NewWithFUSESecrets enables Docker FUSE preparation with an explicit trusted
-// credential materializer. Legacy callers of New remain unchanged and fail
-// closed if they accidentally request a FUSE runtime.
-func NewWithFUSESecrets(ctx context.Context, host, gatewayImage string, materializer FUSESecretMaterializer) (*Runtime, error) {
-	return NewWithFUSESecretsAtRoot(ctx, host, gatewayImage, dockerWorkspaceSecretRoot, materializer)
-}
-
-// NewWithFUSESecretsAtRoot enables Docker FUSE preparation with a staging root
-// that is visible at the identical absolute path to both sandbox-api and the
-// Docker daemon.
-func NewWithFUSESecretsAtRoot(ctx context.Context, host, gatewayImage, secretRoot string, materializer FUSESecretMaterializer) (*Runtime, error) {
-	runtime, err := New(ctx, host, gatewayImage)
-	if err != nil {
-		return nil, err
-	}
-	if materializer == nil {
-		_ = runtime.Close()
-		return nil, fmt.Errorf("Docker workspace FUSE secret materializer is required")
-	}
-	if !validDockerWorkspaceSecretRoot(secretRoot) {
-		_ = runtime.Close()
-		return nil, fmt.Errorf("Docker workspace FUSE secret root is invalid")
-	}
-	runtime.secretRoot = secretRoot
-	runtime.secretMaterializer = materializer
-	return runtime, nil
-}
-
 // Close releases resources held by the Docker runtime.
 func (r *Runtime) Close() error {
 	r.fuseCredentials.Zero()

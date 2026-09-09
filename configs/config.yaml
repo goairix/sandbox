@@ -93,13 +93,6 @@ storage:
     # FUSE v1 supports long-lived AK/SK credentials only.
     session_token: ""
     credential_expiry: ""
-    # Optional file-based compatibility for sync-only deployments. FUSE mode
-    # deliberately rejects these fields and requires the inline pair above.
-    credential_files:
-      access_key_file: ""
-      secret_key_file: ""
-      session_token_file: ""
-      credential_expiry_file: ""
     # Optional private CA bundle used by the control-plane object client.
     ca_file: ""
     # Local directory for the "local" provider.

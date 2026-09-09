@@ -906,6 +906,7 @@ func TestFUSEConfigValidation(t *testing.T) {
 		}, want: "preset mapping"},
 		{name: "valid with no custom CA", edit: func(c *config.Config) {
 			c.Storage.FileSystem.CAFile = ""
+			c.Workspace.SecretName = ""
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.CASecretKey = "" })
 		}, want: ""},
 		{name: "kind explicitly allows missing LSM", edit: func(c *config.Config) {

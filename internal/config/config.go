@@ -520,7 +520,7 @@ func (c *Config) validateFUSE() error {
 	if c.Storage.State.Redis.Addr == "" {
 		return fmt.Errorf("config: storage.state.redis.addr must not be empty when workspace.mode is \"fuse\"")
 	}
-	if workspace.SecretName == "" {
+	if workspace.SecretName == "" && (filesystem.CAFile != "" || provider.CASecretKey != "") {
 		return fmt.Errorf("config: workspace.secret_name must not be empty when workspace.mode is \"fuse\"")
 	}
 	if filesystem.Bucket == "" {
