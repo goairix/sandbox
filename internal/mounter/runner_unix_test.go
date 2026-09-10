@@ -38,3 +38,15 @@ func TestCommandRunnerTimeoutKillsAndReapsProcessGroup(t *testing.T) {
 		return errors.Is(err, syscall.ESRCH)
 	}, 3*time.Second, 10*time.Millisecond)
 }
+
+func TestCommandRunnerReturnsCategorizedFailureWithoutStderr(t *testing.T) {
+	process, err := (CommandRunner{}).Start(context.Background(), []string{
+		"/bin/sh", "-c", "echo 'SSL certificate problem AKIA-DO-NOT-LEAK' >&2; exit 60",
+	}, nil)
+	require.NoError(t, err)
+
+	err = process.Wait()
+	require.Error(t, err)
+	require.Equal(t, "endpoint-tls", DiagnosticCode(err))
+	require.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
+}

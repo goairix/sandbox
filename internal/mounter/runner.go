@@ -27,11 +27,13 @@ func (CommandRunner) Start(_ context.Context, argv, environment []string) (Proce
 		return nil, fmt.Errorf("open child null device: %w", err)
 	}
 	defer null.Close()
-	command.Stdin, command.Stdout, command.Stderr = null, null, null
+	diagnostic := newDiagnosticBuffer()
+	command.Stdin, command.Stdout, command.Stderr = null, null, diagnostic
 	if err := command.Start(); err != nil {
+		diagnostic.Clear()
 		return nil, err
 	}
-	return &commandProcess{command: command}, nil
+	return &commandProcess{command: command, diagnostic: diagnostic}, nil
 }
 
 func (CommandRunner) Run(ctx context.Context, argv []string) error {
@@ -74,9 +76,19 @@ func safeCommandEnvironment(overrides []string) ([]string, error) {
 	return append(environment, overrides[0]), nil
 }
 
-type commandProcess struct{ command *exec.Cmd }
+type commandProcess struct {
+	command    *exec.Cmd
+	diagnostic *boundedDiagnosticBuffer
+}
 
-func (p *commandProcess) Wait() error { return p.command.Wait() }
+func (p *commandProcess) Wait() error {
+	err := p.command.Wait()
+	if p.diagnostic == nil {
+		return classifyS3FSDiagnostic(err, nil)
+	}
+	defer p.diagnostic.Clear()
+	return classifyS3FSDiagnostic(err, p.diagnostic.Bytes())
+}
 
 func (p *commandProcess) Signal(signal os.Signal) error {
 	systemSignal, ok := signal.(syscall.Signal)
