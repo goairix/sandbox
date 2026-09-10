@@ -148,6 +148,43 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 	}
 }
 
+func TestWaitReadyPreservesDockerMounterStatusError(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	ref := runtime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, validRuntimeAuthorization(info.RuntimeUID)))
+	fake.mu.Lock()
+	fake.healthReadyErrorCode = fuseprotocol.MounterErrorEndpointTLS
+	fake.mu.Unlock()
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read workspace ready status")
+	assert.Contains(t, err.Error(), fuseprotocol.MounterErrorEndpointTLS)
+}
+
+func TestWaitReadyReportsOnlyDockerStatusMismatchFields(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
+	require.NoError(t, err)
+	ref := runtime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, validRuntimeAuthorization(info.RuntimeUID)))
+	fake.mu.Lock()
+	fake.healthReadyStatus = &fuseprotocol.MounterStatus{
+		Version: 1, State: "mounting", RuntimeUID: info.RuntimeUID,
+		PoolKey: strings.Repeat("a", 64), MountType: "fuse", Generation: 9,
+		CacheLimitBytes: 3 << 30,
+	}
+	fake.mu.Unlock()
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 1)
+	require.EqualError(t, err, "workspace ready status mismatch: state,generation,cache_limit")
+	assert.NotContains(t, err.Error(), info.RuntimeUID)
+	assert.NotContains(t, err.Error(), strings.Repeat("a", 64))
+	assert.NotContains(t, err.Error(), "3221225472")
+}
+
 func TestDockerPrepareDerivesAndRevalidatesEndpointPolicy(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	resolvedIP := "36.170.50.43"
@@ -721,6 +758,8 @@ type fakeDockerAPI struct {
 	blockControlOutput       bool
 	removeExecExitCode       int
 	removeExecInspectErr     error
+	healthReadyErrorCode     string
+	healthReadyStatus        *fuseprotocol.MounterStatus
 }
 
 func newFakeDockerRuntime(t *testing.T) (*Runtime, *fakeDockerAPI) {
@@ -961,7 +1000,15 @@ func (f *fakeDockerAPI) execOutput(exec fakeExec, input []byte) []byte {
 		case "health-prepared":
 			output = fuseprotocol.MounterStatus{Version: 1, State: "prepared", RuntimeUID: exec.containerID, PoolKey: strings.Repeat("a", 64), CacheLimitBytes: 2 << 30}
 		case "health-ready":
-			output = fuseprotocol.MounterStatus{Version: 1, State: "ready", RuntimeUID: exec.containerID, PoolKey: strings.Repeat("a", 64), MountType: "fuse", Generation: f.generation, CacheLimitBytes: 2 << 30}
+			if f.healthReadyErrorCode != "" {
+				raw := []byte("workspace-mounter-error:" + f.healthReadyErrorCode + "\n")
+				return append([]byte{2, 0, 0, 0, byte(len(raw) >> 24), byte(len(raw) >> 16), byte(len(raw) >> 8), byte(len(raw))}, raw...)
+			}
+			if f.healthReadyStatus != nil {
+				output = *f.healthReadyStatus
+			} else {
+				output = fuseprotocol.MounterStatus{Version: 1, State: "ready", RuntimeUID: exec.containerID, PoolKey: strings.Repeat("a", 64), MountType: "fuse", Generation: f.generation, CacheLimitBytes: 2 << 30}
+			}
 		case "flush":
 			output = fuseprotocol.ControlAck{Version: 1, Accepted: true, RuntimeUID: exec.containerID, Generation: f.generation}
 		case "shutdown":
@@ -987,6 +1034,9 @@ func (f *fakeDockerAPI) ContainerExecInspect(_ context.Context, execID string) (
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	exec := f.execs[execID]
+	if len(exec.options.Cmd) == 3 && exec.options.Cmd[0] == fuseprotocol.MounterBinary && exec.options.Cmd[1] == "health" && exec.options.Cmd[2] == "ready" && f.healthReadyErrorCode != "" {
+		return container.ExecInspect{ExitCode: 1}, nil
+	}
 	if len(exec.options.Cmd) >= 3 && exec.options.Cmd[0] == "sh" && exec.options.Cmd[1] == "-c" && strings.Contains(exec.options.Cmd[2], "rm -f --") {
 		if f.removeExecInspectErr != nil {
 			return container.ExecInspect{}, f.removeExecInspectErr

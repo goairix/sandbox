@@ -424,14 +424,14 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 	}
 	health, err := r.readMounterStatus(ctx, ref, "ready")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read workspace ready status: %w", err)
 	}
 	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
 	if err != nil {
 		return nil, err
 	}
-	if health.State != "ready" || health.RuntimeUID != ref.UID || health.PoolKey != poolKey || health.MountType != "fuse" || health.Generation != generation || health.RestartDetected || health.CacheExceeded || health.CacheBytes < 0 || health.CacheBytes >= health.CacheLimitBytes || health.CacheLimitBytes != bootstrap.CacheLimitBytes {
-		return nil, fmt.Errorf("workspace ready status does not match authorization")
+	if mismatches := kubernetesReadyStatusMismatches(health, ref.UID, poolKey, generation, bootstrap.CacheLimitBytes); len(mismatches) != 0 {
+		return nil, fmt.Errorf("workspace ready status mismatch: %s", strings.Join(mismatches, ","))
 	}
 	argv := probeArgv("write-read-delete", ref, generation, false)
 	raw, err := r.execSandboxProbe(ctx, ref.ID, argv, nil)
@@ -443,6 +443,38 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 		return nil, fmt.Errorf("sandbox workspace propagation probe failed")
 	}
 	return sandboxInfoForPod(pod.Labels["sandbox.id"], pod), nil
+}
+
+func kubernetesReadyStatusMismatches(status mounterStatusWire, runtimeUID, poolKey string, generation, cacheLimit int64) []string {
+	var mismatches []string
+	if status.State != "ready" {
+		mismatches = append(mismatches, "state")
+	}
+	if status.RuntimeUID != runtimeUID {
+		mismatches = append(mismatches, "runtime_uid")
+	}
+	if status.PoolKey != poolKey {
+		mismatches = append(mismatches, "pool_key")
+	}
+	if status.MountType != "fuse" {
+		mismatches = append(mismatches, "mount_type")
+	}
+	if status.Generation != generation {
+		mismatches = append(mismatches, "generation")
+	}
+	if status.RestartDetected {
+		mismatches = append(mismatches, "restart_detected")
+	}
+	if status.CacheBytes < 0 || status.CacheBytes >= status.CacheLimitBytes {
+		mismatches = append(mismatches, "cache_bytes")
+	}
+	if status.CacheLimitBytes != cacheLimit {
+		mismatches = append(mismatches, "cache_limit")
+	}
+	if status.CacheExceeded {
+		mismatches = append(mismatches, "cache_exceeded")
+	}
+	return mismatches
 }
 
 func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.RuntimeRef, poolKey string) error {

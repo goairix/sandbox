@@ -485,8 +485,11 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 	poolKey, sandboxID := state.poolKey, state.sandboxID
 	state.mu.Unlock()
 	status, err := r.readMounterStatus(ctx, ref, "ready")
-	if err != nil || status.State != "ready" || status.RuntimeUID != ref.UID || status.PoolKey != poolKey || status.MountType != "fuse" || status.Generation != expectedGeneration || status.RestartDetected || status.CacheLimitBytes != state.cacheBytes || status.CacheBytes < 0 || status.CacheBytes >= status.CacheLimitBytes || status.CacheExceeded {
-		return nil, fmt.Errorf("workspace ready status does not match authorization")
+	if err != nil {
+		return nil, fmt.Errorf("read workspace ready status: %w", err)
+	}
+	if mismatches := dockerReadyStatusMismatches(status, ref.UID, poolKey, expectedGeneration, state.cacheBytes); len(mismatches) != 0 {
+		return nil, fmt.Errorf("workspace ready status mismatch: %s", strings.Join(mismatches, ","))
 	}
 	raw, err := r.execProbe(ctx, ref.ID, dockerProbeArgv("write-read-delete", ref.UID, expectedGeneration, false), nil)
 	if err != nil {
@@ -497,6 +500,38 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 		return nil, fmt.Errorf("sandbox workspace propagation probe failed")
 	}
 	return &runtime.SandboxInfo{ID: sandboxID, RuntimeID: ref.ID, RuntimeUID: ref.UID, State: "running", CreatedAt: time.Now()}, nil
+}
+
+func dockerReadyStatusMismatches(status fuseprotocol.MounterStatus, runtimeUID, poolKey string, generation, cacheLimit int64) []string {
+	var mismatches []string
+	if status.State != "ready" {
+		mismatches = append(mismatches, "state")
+	}
+	if status.RuntimeUID != runtimeUID {
+		mismatches = append(mismatches, "runtime_uid")
+	}
+	if status.PoolKey != poolKey {
+		mismatches = append(mismatches, "pool_key")
+	}
+	if status.MountType != "fuse" {
+		mismatches = append(mismatches, "mount_type")
+	}
+	if status.Generation != generation {
+		mismatches = append(mismatches, "generation")
+	}
+	if status.RestartDetected {
+		mismatches = append(mismatches, "restart_detected")
+	}
+	if status.CacheBytes < 0 || status.CacheBytes >= status.CacheLimitBytes {
+		mismatches = append(mismatches, "cache_bytes")
+	}
+	if status.CacheLimitBytes != cacheLimit {
+		mismatches = append(mismatches, "cache_limit")
+	}
+	if status.CacheExceeded {
+		mismatches = append(mismatches, "cache_exceeded")
+	}
+	return mismatches
 }
 
 func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.RuntimeRef, poolKey string) error {

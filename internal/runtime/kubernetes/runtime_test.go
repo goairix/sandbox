@@ -977,6 +977,59 @@ func TestWaitReadyChecksGenerationAndRunsFixedExactUIDProbe(t *testing.T) {
 	assert.Equal(t, []string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", ref.UID, "--generation", "7"}, last.argv)
 }
 
+func TestWaitReadyPreservesKubernetesMounterStatusError(t *testing.T) {
+	base := preparedScript()
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "ready"}) {
+			return nil, errors.New("workspace mounter control failed: endpoint-tls")
+		}
+		return base.handler(command)
+	}}
+	rt, client := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.NoError(t, err)
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	_, err = client.CoreV1().Pods("runtime").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read workspace ready status")
+	assert.Contains(t, err.Error(), "endpoint-tls")
+}
+
+func TestWaitReadyReportsOnlyKubernetesStatusMismatchFields(t *testing.T) {
+	base := preparedScript()
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "ready"}) {
+			return []byte(`{"version":1,"state":"mounting","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"fuse","generation":9,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":3221225472,"cache_exceeded":false}`), nil
+		}
+		return base.handler(command)
+	}}
+	rt, client := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.NoError(t, err)
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	_, err = client.CoreV1().Pods("runtime").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.EqualError(t, err, "workspace ready status mismatch: state,generation,cache_limit")
+	assert.NotContains(t, err.Error(), ref.UID)
+	assert.NotContains(t, err.Error(), "0123456789abcdef")
+	assert.NotContains(t, err.Error(), "3221225472")
+}
+
 func TestQuiesceResumeTokenIsExactAndSingleUse(t *testing.T) {
 	script := preparedScript()
 	rt, client := newFakeKubernetesRuntime(t, script)
