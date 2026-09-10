@@ -287,12 +287,12 @@ Run:
 ```bash
 go test ./... -count=1
 go vet ./...
-docker compose -f docker/docker-compose.yaml config >/dev/null
+docker compose -f docker/docker-compose.yml config >/dev/null
 helm lint deploy/helm/sandbox
 helm template sandbox deploy/helm/sandbox >/dev/null
 ```
 
-Also run the repository's existing FUSE contract script discovered with `rg --files | rg 'fuse.*(test|contract)|contract.*fuse'`. Expected: every command exits 0.
+The repository's FUSE contract is the Go package `./test/integration/workspacefuse`, already included by `go test ./...`; run it separately with `go test ./test/integration/workspacefuse -count=1` to retain explicit evidence. Expected: every command exits 0.
 
 - [ ] **Step 3: Review the diff for secret and policy safety**
 
