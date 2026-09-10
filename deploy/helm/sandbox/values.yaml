@@ -83,7 +83,8 @@ config:
       # the provider/profile pair; API requests cannot override it.
       preset: minio
       bucket: sandbox-storage
-      region: us-east-1
+      # Optional. MinIO defaults to us-east-1; standard Huawei OBS endpoints derive it.
+      region: ""
       endpoint: minio.example.com
       # AK/SK are read directly by sandbox-api. They are delivered to the
       # mounter only through the private one-shot authorize stdin channel.
@@ -91,15 +92,6 @@ config:
       secretKey: ""
       storageIdentity: production-object-store
       credentialGeneration: rotation-1
-      caSecretKey: ""
-      endpointHostIPs: []
-      systemEgressMode: cidr
-      dnsCIDRs:
-        - 1.1.1.1/32
-      systemEgressCIDRs:
-        - 192.0.2.10/32
-      endpointPorts:
-        - 443
       subPath: ""
       useSSL: true
   workspace:
@@ -136,7 +128,6 @@ config:
       refillIntervalSeconds: 10
       prepareTimeoutSeconds: 120
     lsmProfile: sandbox-fuse
-    proxyURL: ""
   security:
     # Prefer apiKeySecretName in real deployments so Helm upgrades do not need
     # the API key on the command line or in a values file. The referenced
@@ -172,11 +163,3 @@ config:
 
 networkPolicy:
   enabled: true
-
-# Optional custom-CA compatibility. Ordinary MinIO/OBS deployments leave all
-# of these empty and do not create or mount a Secret.
-workspaceCA:
-  secretName: ""
-  # Required only when sandbox-api runs in Kubernetes, controls Docker, and a
-  # custom CA is configured. It must be the same absolute path on the host.
-  dockerStagingHostPath: ""

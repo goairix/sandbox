@@ -37,9 +37,6 @@ runtime:
     # Docker daemon socket or TCP address.
     # Leave empty to use the default socket (/var/run/docker.sock on Linux).
     host: ""
-    # Root-only staging directory visible at this identical absolute path to
-    # both sandbox-api and the Docker daemon when FUSE mount mode is enabled.
-    workspace_secret_root: "/var/lib/sandbox/workspace-secrets"
 
   # Kubernetes-specific settings (used when type = "kubernetes")
   kubernetes:
@@ -93,8 +90,6 @@ storage:
     # FUSE v1 supports long-lived AK/SK credentials only.
     session_token: ""
     credential_expiry: ""
-    # Optional private CA bundle used by the control-plane object client.
-    ca_file: ""
     # Local directory for the "local" provider.
     local_path: "/tmp/sandbox-storage"
     # Sub-path prefix within the bucket / root directory (optional).
@@ -111,9 +106,6 @@ workspace:
   default_mount_mode: "sync"
   # A release may serve sync and FUSE concurrently against one fixed backend.
   enabled_mount_modes: ["sync"]
-  # Local Docker + private/loopback MinIO validation only. Production must
-  # leave this false until the selected profile has verified durable flush.
-  allow_unverified_durable_flush: false
   # Local kind on Docker Desktop only; production requires a real LSM profile.
   allow_missing_lsm_for_kind: false
   # Automatic sync interval in seconds. When > 0, a background goroutine
@@ -124,7 +116,6 @@ workspace:
 
   # FUSE defaults. They are inert unless "fuse" is present in
   # enabled_mount_modes; both modes may run concurrently against one backend.
-  secret_name: ""
   cache_size: "2Gi"
   cache_medium: "disk"
   mount_timeout_seconds: 30
@@ -160,20 +151,8 @@ workspace:
   #   storage_identity: "stable-physical-storage-id"
   #   mounter_image: "registry.example.com/sandbox-fuse-mounter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   #   docker_image: "registry.example.com/sandbox-fuse-docker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  #   ca_secret_key: ""
   #   credential_generation: "rotation-generation"
-  #   endpoint_host_ips:
-  #     - "192.0.2.10"
   #   lsm_profile: "sandbox-fuse"
-  #   system_egress_mode: "cidr" # Docker requires cidr; Kubernetes also supports cilium-fqdn.
-  #   dns_cidrs:
-  #     - "1.1.1.1/32"
-  #   system_egress_fqdns: []
-  #   system_egress_cidrs:
-  #     - "192.0.2.10/32"
-  #   endpoint_ports:
-  #     - 9000
-  #   proxy_url: "" # Proxies are forbidden in FUSE mode.
 
 # -----------------------------------------------------------------------------
 # Security — sandbox isolation and resource limits

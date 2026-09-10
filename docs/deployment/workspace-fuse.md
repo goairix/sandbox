@@ -6,7 +6,7 @@
 
 | preset | 后端 | s3fs profile |
 |---|---|---|
-| `minio` | MinIO / S3 兼容存储 | `minio-sigv4-path-style-v1` |
+| `minio` | MinIO / S3 兼容存储 | HTTPS 使用 `minio-sigv4-path-style-v1`；内网 HTTP 自动使用私网 profile |
 | `huawei-obs-public` | 华为公有云 OBS | `huawei-obs-public-v1` |
 | `huawei-obs-private` | 2023 年部署的华为私有云 OBS | `huawei-obs-private-2023-v1` |
 
@@ -49,26 +49,20 @@ Docker 使用专用 `sandbox-fuse-docker` 容器，root PID 1 只负责 mounter�
 
 AK/SK 轮换时应先排空需要保留的 sandbox，并递增非敏感的 `credentialGeneration`，让新 Pool 使用新的配置身份。
 
-## 5. 自定义 CA
-
-公网可信证书不需要额外 CA。只有 endpoint 使用企业私有 CA 时，才需要由证书签发方提供 CA bundle；项目不会生成 CA 或服务端证书。
-
-自定义 CA 是独立的可选文件兼容入口，不用于传递 AK/SK。Helm 使用 `config.storage.filesystem.caSecretKey` 与 `workspaceCA.secretName`；Docker 自定义 CA 属于高级部署场景。没有私有 CA 时这些字段保持空值，不创建目录或 Secret。
-
-## 6. 网络安全边界
+## 5. Endpoint、TLS 与网络安全边界
 
 原有用户网络规则保持不变：
 
 - `networkEnabled=true` 且没有白名单时，可以访问公网但禁止 RFC1918、loopback、link-local 等内网地址；
 - 需要访问内网服务时，调用方必须提交明确白名单；
-- FUSE system egress 独立于用户网络，只允许 DNS 和当前对象存储的精确 FQDN/CIDR、端口；
+- FUSE system egress 独立于用户网络，只允许当前对象存储解析得到的精确 IP 和端口；
 - 禁止使用 `0.0.0.0/0`、通配符 FQDN或代理绕过默认拒绝。
 
-Kubernetes 的 `cilium-fqdn` 需要 Cilium FQDN policy。Docker 使用精确 CIDR，运维需要解析 endpoint 并填写 `STORAGE_ENDPOINT_HOST_IPS` 和 `STORAGE_ENDPOINT_CIDRS`。
+sandbox-api 在每个空壳准备时解析 endpoint，并通过 Docker `extra_hosts` 或 Kubernetes `hostAliases` 固定地址，因此 FUSE 容器/Pod 不需要独立 DNS 出口。公网 MinIO 和华为 OBS 使用系统 CA；内网无证书 MinIO 设置 `useSSL=false`，且只有全部解析地址均为私网地址时才允许。DNS 结果变化时，旧的未绑定空壳会被销毁并补池。
 
-## 7. 后端切换与升级
+## 6. 后端切换与升级
 
-Helm 通过不含凭据内容的 backend fingerprint 判断是否排空。preset、endpoint、bucket、storage identity、credential generation、system egress 或 FUSE 镜像变化时，pre-upgrade hook 先停止旧 API 并执行 release drain。
+Helm 通过不含凭据内容的 backend fingerprint 判断是否排空。preset、endpoint、bucket、storage identity、credential generation 或 FUSE 镜像变化时，pre-upgrade hook 先停止旧 API 并执行 release drain。
 
 Docker Compose 没有 Helm hook。如果没有要保留的 sandbox，可以直接更新镜像/配置并 `docker compose up -d`；如果还有需要保留的 active/persistent workspace，先用旧后端配置完成 release drain。
 
@@ -77,13 +71,13 @@ Docker Compose 没有 Helm hook。如果没有要保留的 sandbox，可以直�
 - [Helm 部署与升级](helm-deployment-upgrade.md)
 - [Docker Compose 部署与升级](docker-compose-deployment-upgrade.md)
 
-## 8. 故障定位
+## 7. 故障定位
 
 优先按以下顺序检查：
 
 1. sandbox-api、mounter 和 runtime 的版本 tag 是否一致；
 2. `/dev/fuse`、LSM profile 和 mount propagation 是否可用；
-3. endpoint DNS、精确 system egress 与 TLS/CA 是否正确；
+3. sandbox-api 是否能解析和访问 endpoint，TLS 开关是否正确；
 4. bucket、prefix 和 AK/SK 权限；
 5. Redis 中的 owner/lease/Pool 状态与 teardown 日志。
 

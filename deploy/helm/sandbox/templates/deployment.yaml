@@ -114,10 +114,6 @@ spec:
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
           {{- if $fuseEnabled }}
-            - name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
-              value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") | quote }}
-            - name: SANDBOX_WORKSPACE_SECRET_NAME
-              value: {{ .Values.workspaceCA.secretName | default "" | quote }}
             - name: SANDBOX_WORKSPACE_CACHE_SIZE
               value: {{ .Values.config.workspace.cacheSize | quote }}
             - name: SANDBOX_WORKSPACE_CACHE_MEDIUM
@@ -168,26 +164,10 @@ spec:
               value: {{ .Values.config.workspace.fuseImages.mounter | quote }}
             - name: SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE
               value: {{ .Values.config.workspace.fuseImages.docker | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_CA_SECRET_KEY
-              value: {{ .Values.config.storage.filesystem.caSecretKey | default "" | quote }}
             - name: SANDBOX_WORKSPACE_BACKEND_CREDENTIAL_GENERATION
               value: {{ .Values.config.storage.filesystem.credentialGeneration | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_HOST_IPS
-              value: {{ join "," (.Values.config.storage.filesystem.endpointHostIPs | default list) | quote }}
             - name: SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE
               value: {{ .Values.config.workspace.lsmProfile | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_MODE
-              value: {{ .Values.config.storage.filesystem.systemEgressMode | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_DNS_CIDRS
-              value: {{ join "," .Values.config.storage.filesystem.dnsCIDRs | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS
-              value: {{ include "sandbox.backend.systemEgressFQDNs" . | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_CIDRS
-              value: {{ join "," (.Values.config.storage.filesystem.systemEgressCIDRs | default list) | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_PORTS
-              value: {{ join "," .Values.config.storage.filesystem.endpointPorts | quote }}
-            - name: SANDBOX_WORKSPACE_BACKEND_PROXY_URL
-              value: {{ .Values.config.workspace.proxyURL | default "" | quote }}
           {{- end }}
             - name: SANDBOX_SECURITY_EXEC_TIMEOUT_SECONDS
               value: "{{ .Values.config.security.execTimeoutSeconds }}"
@@ -267,29 +247,3 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
-          {{- if and $fuseEnabled (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") }}
-          volumeMounts:
-            - name: workspace-ca
-              mountPath: /run/secrets/workspace
-              readOnly: true
-            {{- if eq .Values.config.runtime.type "docker" }}
-            - name: workspace-secret-staging
-              mountPath: /var/lib/sandbox/workspace-secrets
-            {{- end }}
-          {{- end }}
-      {{- if and $fuseEnabled (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") }}
-      volumes:
-        - name: workspace-ca
-          secret:
-            secretName: {{ required "workspaceCA.secretName is required when a custom CA is configured" .Values.workspaceCA.secretName }}
-            defaultMode: 0400
-            items:
-              - key: {{ .Values.config.storage.filesystem.caSecretKey }}
-                path: ca.crt
-        {{- if eq .Values.config.runtime.type "docker" }}
-        - name: workspace-secret-staging
-          hostPath:
-            path: {{ required "workspaceCA.dockerStagingHostPath is required for Docker FUSE with a custom CA" .Values.workspaceCA.dockerStagingHostPath }}
-            type: Directory
-        {{- end }}
-      {{- end }}

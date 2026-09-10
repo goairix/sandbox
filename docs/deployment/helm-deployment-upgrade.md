@@ -10,7 +10,7 @@
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
 - 普通升级执行一次 `helm upgrade`；backend、凭据或 FUSE 镜像变化时，Chart 会根据 backend fingerprint 先排空。
 
-原有网络规则不能改：开放公网访问时仍禁止内网访问；确需访问内网服务时必须加明确白名单。FUSE 的 system egress 只开放对象存储 endpoint、DNS 和精确端口。
+原有网络规则不能改：开放公网访问时仍禁止内网访问；确需访问其他内网服务时必须加明确白名单。FUSE 的 system egress 由 sandbox-api 自动解析，只开放对象存储 endpoint 的精确地址和端口。
 
 ## 2. 已有服务器目录怎么更新
 
@@ -34,6 +34,8 @@
 
 也就是说，不能采用“保留旧 `values.yaml`，只覆盖其他文件”的方式。旧 values 只能作为迁移参考。
 
+迁移旧环境 values 时，删除 `caSecretKey`、`endpointHostIPs`、`systemEgressMode`、`dnsCIDRs`、`systemEgressCIDRs`、`endpointPorts`、workspace `proxyURL`，以及根级 `workspaceCA`。这些值现在全部由程序自动处理或已不再支持；保留在 `filesystem` 中会被新版 schema 明确拒绝，避免旧配置悄悄生效。
+
 ## 3. 环境 values 最小示例
 
 MinIO：
@@ -53,19 +55,13 @@ config:
       preset: minio
       bucket: sandbox-workspace
       endpoint: minio.example.com
-      region: us-east-1
+      region: "" # MinIO 自动使用 us-east-1
       accessKey: "<access-key>"
       secretKey: "<secret-key>"
       useSSL: true
       subPath: workspaces
       storageIdentity: production-minio
       credentialGeneration: rotation-1
-      caSecretKey: ""
-      endpointHostIPs: []
-      systemEgressMode: cilium-fqdn
-      dnsCIDRs: ["223.5.5.5/32"]
-      systemEgressCIDRs: []
-      endpointPorts: [443]
   workspace:
     defaultMountMode: sync
     enabledMountModes: [sync, fuse]
@@ -78,11 +74,9 @@ config:
     gateway: registry.example.com/sandbox-gateway:v0.2.13
 ```
 
-只需把 `preset` 改成 `huawei-obs-public` 或 `huawei-obs-private`，并填写对应 endpoint、region 和网络出口配置，即可使用同一套 API、runtime 和 mounter 镜像。一次部署只选一个 preset。
+只需把 `preset` 改成 `huawei-obs-public` 或 `huawei-obs-private`，并填写对应 endpoint；标准 `obs.<region>.<domain>` endpoint 的 region 可以留空自动派生。三种后端使用同一套 API、runtime 和 mounter 镜像，一次部署只选一个 preset。
 
 AK/SK 轮换时同时递增 `credentialGeneration`，例如从 `rotation-1` 改为 `rotation-2`，确保旧 FUSE 空壳不会进入新凭据对应的 Pool。该字段不包含凭据。
-
-普通公网证书不需要 CA 配置。只有企业私有 CA 场景才设置 `caSecretKey` 与根级 `workspaceCA.secretName`；这是 CA 文件兼容入口，与 AK/SK 无关。
 
 因为 AK/SK 直接进入 values，它们也会出现在 Helm release 历史和 `sandbox-api` 环境中。环境 values 文件应限制为运维账号可读，集群 RBAC 也应限制读取 release Secret、Deployment 和 Pod 详情；排障时不要输出完整 values、渲染清单或容器环境。
 
@@ -125,7 +119,7 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 不要使用 `--reuse-values`，否则已经删除的 credential-file/Secret 字段可能被旧 release 带回来。
 
-只改 API tag、普通 runtime tag、副本或资源时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration`、system egress 或 FUSE 镜像时，会改变 backend fingerprint，Chart 的 pre-upgrade hook 会先执行 release drain。
+只改 API tag、普通 runtime tag、副本或资源时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint，Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
 ## 6. 镜像怎么构建
 

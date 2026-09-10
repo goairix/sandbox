@@ -17,21 +17,6 @@
 {{- if has "fuse" .Values.config.workspace.enabledMountModes -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
-{{- define "sandbox.backend.endpointHost" -}}
-{{- $withoutScheme := regexReplaceAll "^https?://" .Values.config.storage.filesystem.endpoint "" -}}
-{{- $withoutPath := first (splitList "/" $withoutScheme) -}}
-{{- regexReplaceAll ":[0-9]+$" $withoutPath "" -}}
-{{- end -}}
-
-{{- define "sandbox.backend.systemEgressFQDNs" -}}
-{{- $host := include "sandbox.backend.endpointHost" . -}}
-{{- if eq (include "sandbox.backend.provider" .) "obs" -}}
-{{- printf "%s,%s.%s" $host .Values.config.storage.filesystem.bucket $host -}}
-{{- else -}}
-{{- $host -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "sandbox.backend.fingerprint" -}}
 {{- $filesystem := .Values.config.storage.filesystem -}}
 {{- $contract := dict
@@ -44,15 +29,7 @@
   "region" $filesystem.region
   "bucket" $filesystem.bucket
   "subPath" $filesystem.subPath
-  "caSecretName" .Values.workspaceCA.secretName
   "credentialGeneration" $filesystem.credentialGeneration
-  "caSecretKey" $filesystem.caSecretKey
-  "endpointHostIPs" $filesystem.endpointHostIPs
-  "systemEgressMode" $filesystem.systemEgressMode
-  "systemEgressFQDNs" (include "sandbox.backend.systemEgressFQDNs" .)
-  "dnsCIDRs" $filesystem.dnsCIDRs
-  "systemEgressCIDRs" $filesystem.systemEgressCIDRs
-  "endpointPorts" $filesystem.endpointPorts
   "mounterImage" .Values.config.workspace.fuseImages.mounter
   "dockerImage" .Values.config.workspace.fuseImages.docker
 -}}
@@ -102,14 +79,10 @@
   value: {{ .Values.config.storage.filesystem.accessKey | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
   value: {{ .Values.config.storage.filesystem.secretKey | quote }}
-- name: SANDBOX_STORAGE_FILESYSTEM_CA_FILE
-  value: {{ ternary "/run/secrets/workspace/ca.crt" "" (ne (.Values.config.storage.filesystem.caSecretKey | default "") "") | quote }}
 - name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE
   value: {{ .Values.config.workspace.defaultMountMode | quote }}
 - name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES
   value: {{ join "," .Values.config.workspace.enabledMountModes | quote }}
-- name: SANDBOX_WORKSPACE_SECRET_NAME
-  value: {{ .Values.workspaceCA.secretName | default "" | quote }}
 - name: SANDBOX_WORKSPACE_ALLOW_MISSING_LSM_FOR_KIND
   value: {{ .Values.config.workspace.allowMissingLSMForKind | default false | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_PRESET
@@ -124,26 +97,10 @@
   value: {{ .Values.config.workspace.fuseImages.mounter | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_DOCKER_IMAGE
   value: {{ .Values.config.workspace.fuseImages.docker | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_CA_SECRET_KEY
-  value: {{ .Values.config.storage.filesystem.caSecretKey | default "" | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_CREDENTIAL_GENERATION
   value: {{ .Values.config.storage.filesystem.credentialGeneration | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_HOST_IPS
-  value: {{ join "," (.Values.config.storage.filesystem.endpointHostIPs | default list) | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE
   value: {{ .Values.config.workspace.lsmProfile | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_MODE
-  value: {{ .Values.config.storage.filesystem.systemEgressMode | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_DNS_CIDRS
-  value: {{ join "," .Values.config.storage.filesystem.dnsCIDRs | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS
-  value: {{ include "sandbox.backend.systemEgressFQDNs" . | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_CIDRS
-  value: {{ join "," (.Values.config.storage.filesystem.systemEgressCIDRs | default list) | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_ENDPOINT_PORTS
-  value: {{ join "," .Values.config.storage.filesystem.endpointPorts | quote }}
-- name: SANDBOX_WORKSPACE_BACKEND_PROXY_URL
-  value: {{ .Values.config.workspace.proxyURL | default "" | quote }}
 {{- if or .Values.config.security.apiKey .Values.config.security.apiKeySecretName }}
 - name: SANDBOX_SECURITY_API_KEY
   valueFrom:

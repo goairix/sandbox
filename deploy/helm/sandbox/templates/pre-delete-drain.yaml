@@ -34,20 +34,4 @@ spec:
             - "--drain-release"
           env:
 {{ include "sandbox.drainEnv" . | nindent 12 }}
-          {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
-          volumeMounts:
-            - name: workspace-ca
-              mountPath: /run/secrets/workspace
-              readOnly: true
-          {{- end }}
-      {{- if ne (.Values.config.storage.filesystem.caSecretKey | default "") "" }}
-      volumes:
-        - name: workspace-ca
-          secret:
-            secretName: {{ required "workspaceCA.secretName is required when a custom CA is configured" .Values.workspaceCA.secretName }}
-            defaultMode: 0400
-            items:
-              - key: {{ .Values.config.storage.filesystem.caSecretKey }}
-                path: ca.crt
-      {{- end }}
 {{- end }}

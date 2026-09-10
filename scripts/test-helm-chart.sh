@@ -12,6 +12,7 @@ grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_PRESET' <<<"$rendered" \
   | grep -Fq 'value: "minio"'
 grep -Fq 'sandbox.huaxisy.com/backend-fingerprint:' <<<"$rendered"
 ! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_' <<<"$rendered"
+! grep -Eq 'SANDBOX_WORKSPACE_(SECRET_NAME|ALLOW_UNVERIFIED_DURABLE_FLUSH|BACKEND_(CA_SECRET_KEY|ENDPOINT_HOST_IPS|SYSTEM_EGRESS|DNS_CIDRS|ENDPOINT_PORTS))|SANDBOX_STORAGE_FILESYSTEM_CA_FILE' <<<"$rendered"
 ! grep -Fq '0.0.0.0/0' <<<"$rendered"
 
 grep -A1 'name: SANDBOX_SECURITY_MAX_UPLOAD_BYTES' <<<"$rendered" \
@@ -44,8 +45,6 @@ grep -A4 'name: SANDBOX_SECURITY_API_KEY' <<<"$external_api_key_rendered" \
 private_obs_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
   --values "$repo_root/testdata/values-fuse-obs-private.yaml")"
 grep -Fq 'value: "huawei-obs-private-2023-v1"' <<<"$private_obs_rendered"
-grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$private_obs_rendered" \
-  | grep -Fq 'value: "obs.cn-southwest-268.shuanghuayun.com,sandbox-fuse-workspace.obs.cn-southwest-268.shuanghuayun.com"'
 grep -Fq 'image: "registry.i.huaxisy.com/library/redis:7.4.2"' <<<"$private_obs_rendered"
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$private_obs_rendered" \
   | grep -Fq 'value: "true"'
@@ -59,8 +58,6 @@ fi
 public_obs_rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
   --values "$repo_root/testdata/values-fuse-obs-public.yaml")"
 grep -Fq 'value: "huawei-obs-public-v1"' <<<"$public_obs_rendered"
-grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$public_obs_rendered" \
-  | grep -Fq 'value: "obs.cn-southwest-2.myhuaweicloud.com,sandbox-fuse-workspace.obs.cn-southwest-2.myhuaweicloud.com"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$public_obs_rendered" \
   | grep -Fq 'value: "true"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$public_obs_rendered" \
@@ -77,8 +74,6 @@ if grep -Fq 'registry.local/' <<<"$minio_rendered"; then
   printf 'MinIO ds-ai-research overlay still contains a local-registry placeholder\n' >&2
   exit 1
 fi
-grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_SYSTEM_EGRESS_FQDNS' <<<"$minio_rendered" \
-  | grep -Fq 'value: "minio.huaxisy.com"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_ENABLED' <<<"$minio_rendered" \
   | grep -Fq 'value: "true"'
 grep -A1 'name: SANDBOX_SECURITY_NETWORK_BLOCK_PRIVATE' <<<"$minio_rendered" \

@@ -32,7 +32,8 @@ STORAGE_BUCKET=aiadp-dev
 STORAGE_ENDPOINT=minio.example.com
 STORAGE_ACCESS_KEY=<access-key>
 STORAGE_SECRET_KEY=<secret-key>
-STORAGE_REGION=us-east-1
+# 可留空：MinIO 自动使用 us-east-1
+STORAGE_REGION=
 STORAGE_SUB_PATH=workspaces
 STORAGE_USE_SSL=true
 STORAGE_IDENTITY=production-minio
@@ -51,12 +52,6 @@ WORKSPACE_CREDENTIAL_GENERATION=rotation-1
 FUSE_MOUNTER_IMAGE=registry.example.com/sandbox-fuse-mounter:v0.2.13
 FUSE_SANDBOX_IMAGE=registry.example.com/sandbox-fuse-docker:v0.2.13
 FUSE_LSM_PROFILE=sandbox-fuse
-
-FUSE_SYSTEM_EGRESS_MODE=cidr
-FUSE_DNS_CIDRS=1.1.1.1/32
-STORAGE_ENDPOINT_HOST_IPS=<对象存储解析出的IP>
-STORAGE_ENDPOINT_CIDRS=<对象存储IP/32>
-STORAGE_ENDPOINT_PORTS=443
 ```
 
 华为公有云 OBS 改为：
@@ -64,7 +59,8 @@ STORAGE_ENDPOINT_PORTS=443
 ```dotenv
 STORAGE_PRESET=huawei-obs-public
 STORAGE_ENDPOINT=https://obs.<region>.myhuaweicloud.com
-STORAGE_REGION=<region>
+# 标准 endpoint 可留空并自动派生
+STORAGE_REGION=
 ```
 
 2023 私有云 OBS 改为：
@@ -72,7 +68,8 @@ STORAGE_REGION=<region>
 ```dotenv
 STORAGE_PRESET=huawei-obs-private
 STORAGE_ENDPOINT=https://<私有云OBS endpoint>
-STORAGE_REGION=<私有云region>
+# obs.<region>.<domain> 形式可留空并自动派生
+STORAGE_REGION=
 ```
 
 同一部署只配置一个 preset。MinIO、公有云 OBS、私有云 OBS 共用同一组 FUSE 镜像；sync 和 FUSE 也共用同一组 `STORAGE_*` 凭据。
@@ -81,7 +78,7 @@ STORAGE_REGION=<私有云region>
 
 `.env` 应设置为仅部署账号可读，例如 `chmod 600 docker/.env`。AK/SK 会存在于 `sandbox-api` 容器环境中，因此应限制 Docker daemon/Socket 权限，排障时不要粘贴完整的 `docker compose config` 或 `docker inspect` 输出。
 
-Docker FUSE 的 system egress 必须填写对象存储的精确 IP/CIDR 和端口。不能用 `0.0.0.0/0`，也不能为了连通对象存储修改“开放公网、禁止内网”的原网络策略；访问内网业务服务仍必须走白名单。
+sandbox-api 会解析对象存储 endpoint，并只为 FUSE system egress 放行本次解析得到的精确 IP 和端口，不需要人工填写 DNS、IP、CIDR 或端口。内网无证书 MinIO 可设置 `STORAGE_USE_SSL=false`；程序只在 endpoint 全部解析为私网地址时接受。不能为了连通对象存储修改“开放公网、禁止内网”的原网络策略；访问其他内网业务服务仍必须走白名单。
 
 ## 3. 全新部署
 
@@ -102,11 +99,13 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 - 使用新版 `docker/docker-compose.yml`。
 - 保留服务器现有 `.env`，参照新版 `docker/.env.example` 补充新字段。
-- 删除旧的 `WORKSPACE_CREDENTIAL_DIR`、`WORKSPACE_SECRET_STAGING_ROOT` 和 credential-file 配置；它们不再生效。
+- 可删除旧的凭据目录、CA、FUSE DNS/FQDN/IP/CIDR/端口和 durability 测试开关；新版 Compose 不再传递这些字段。
 - 在 `.env` 中直接保留 `STORAGE_ACCESS_KEY`、`STORAGE_SECRET_KEY`。
 - 更新需要升级的镜像 tag，执行一次 `docker compose up -d`。
 
 不需要先 stop，不需要运行 `prepare.sh`，也不需要创建 `docker/secrets`。
+
+旧 `.env` 中的 `WORKSPACE_CREDENTIAL_DIR`、`WORKSPACE_SECRET_STAGING_ROOT`、`WORKSPACE_SECRET_NAME`、`WORKSPACE_CA_SECRET_KEY`、`WORKSPACE_MODE`、`WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH`、`FUSE_SYSTEM_EGRESS_MODE`、`FUSE_DNS_CIDRS`、`STORAGE_ENDPOINT_HOST_IPS`、`STORAGE_ENDPOINT_FQDNS`、`STORAGE_ENDPOINT_CIDRS`、`STORAGE_ENDPOINT_PORTS` 都可以直接删除。
 
 ## 5. 什么时候要先排空
 
@@ -114,7 +113,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 - 更换 preset、endpoint、bucket、region、subPath 或 storage identity；
 - 轮换 AK/SK；
-- 修改 FUSE mounter/sandbox 镜像或 system egress；
+- 修改 FUSE mounter/sandbox 镜像；
 - 从不具备当前 FUSE lifecycle 的旧版本首次升级。
 
 如果明确没有需要保留的 sandbox，Pool 和运行态可以重建，则仍可直接 `up -d`。
@@ -144,4 +143,4 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml ps
 docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=200 sandbox-api
 ```
 
-再通过 sandbox-api 分别验证 sync 和 FUSE 的创建、代码执行、文件读写、销毁和 Pool 回补。若 FUSE 失败，优先检查 `/dev/fuse`、LSM、endpoint DNS/CIDR 和对象存储权限，不要重启 Docker daemon。
+再通过 sandbox-api 分别验证 sync 和 FUSE 的创建、代码执行、文件读写、销毁和 Pool 回补。若 FUSE 失败，优先检查 `/dev/fuse`、LSM、sandbox-api 对 endpoint 的 DNS 解析和对象存储权限，不要重启 Docker daemon。

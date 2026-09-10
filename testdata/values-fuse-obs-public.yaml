@@ -39,15 +39,6 @@ config:
       secretKey: test-secret-key
       storageIdentity: formal-obs-public-cn-southwest-2
       credentialGeneration: formal-obs-public-20260906-v1
-      caSecretKey: ""
-      endpointHostIPs: []
-      systemEgressMode: cilium-fqdn
-      dnsCIDRs:
-        - 223.5.5.5/32
-        - 114.114.114.114/32
-      systemEgressCIDRs: []
-      endpointPorts:
-        - 443
       subPath: ""
       useSSL: true
   workspace:
@@ -66,7 +57,6 @@ config:
       mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
       docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
     lsmProfile: sandbox-fuse
-    proxyURL: ""
   security:
     apiKeySecretName: sandbox-fuse-api-key
     seccompProfile: RuntimeDefault
