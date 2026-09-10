@@ -81,6 +81,19 @@ Docker Compose 没有 Helm hook。如果没有要保留的 sandbox，可以直�
 4. bucket、prefix 和 AK/SK 权限；
 5. Redis 中的 owner/lease/Pool 状态与 teardown 日志。
 
+新版 mounter 会在创建失败信息中返回一个不含 endpoint、prefix 或凭据的固定类别：
+
+| 类别 | 优先检查 |
+| --- | --- |
+| `fuse-permission` | Linux 主机是否存在可用的 `/dev/fuse`，容器是否获得 Compose/Pod 模板中声明的 FUSE 权限 |
+| `endpoint-dns` | sandbox-api 解析 endpoint 的结果、容器或 Pod 的固定 host 映射 |
+| `endpoint-tls` | `STORAGE_USE_SSL`/preset 是否正确，endpoint 证书链是否被系统 CA 信任 |
+| `storage-auth` | AK/SK、签名版本、region 与 endpoint 是否匹配 |
+| `storage-bucket` | bucket 名称以及账号对该 bucket 的访问权限 |
+| `s3fs-exited` | s3fs 在挂载前退出但未匹配到以上类别；检查对应 FUSE runtime 容器或 mounter sidecar 状态 |
+
+这些类别由 mounter 对有界 stderr 做本地分类；原始 stderr 不会进入 API 响应或普通日志。排查时不要把 AK/SK、完整 `docker inspect` 或带签名 URL 的输出粘贴到工单。
+
 出现 `runtime termination is unconfirmed` 时，系统会保留 owner/lease 并把实例视为不可复用，直到确认 exact runtime 已终止。不要直接删除 Redis 记录或强行把实例放回 Pool。
 
 不要为了排查单个 sandbox 重启 Docker daemon；只检查或重启具体服务。daemon 重启会影响无关容器和本地 Kubernetes。
