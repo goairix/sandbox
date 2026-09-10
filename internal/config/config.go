@@ -706,7 +706,7 @@ func (c *Config) validateFUSE() error {
 		if lsmProfile != "" {
 			return fmt.Errorf("config: workspace.allow_missing_lsm_for_kind requires an empty %s.lsm_profile", providerPath)
 		}
-	} else if lsmProfile == "" || lsmProfile == "unconfined" || lsmProfile == "label=disable" {
+	} else if lsmProfile == "unconfined" || lsmProfile == "label=disable" || (lsmProfile == "" && c.Runtime.Type != "docker") {
 		return fmt.Errorf("config: %s.lsm_profile must be a confined profile", providerPath)
 	}
 	if !isCanonicalRelativePrefix(filesystem.SubPath) {

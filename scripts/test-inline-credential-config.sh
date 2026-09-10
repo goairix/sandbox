@@ -10,6 +10,8 @@ helm_doc="$repo_root/docs/deployment/helm-deployment-upgrade.md"
 grep -Fq 'SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY=${STORAGE_ACCESS_KEY:-}' "$compose"
 grep -Fq 'SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY=${STORAGE_SECRET_KEY:-}' "$compose"
 ! grep -Eq 'CREDENTIAL_FILES|WORKSPACE_CREDENTIAL_DIR|workspace-credentials' "$compose"
+grep -Fq 'SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE=${FUSE_LSM_PROFILE:-}' "$compose"
+! grep -Fq 'FUSE_LSM_PROFILE=' "$repo_root/docker/.env.example"
 
 rendered="$(helm template sandbox "$chart" --values "$repo_root/testdata/values-fuse-minio.yaml")"
 grep -A1 'name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY' <<<"$rendered" | grep -Fq 'value: "test-access-key"'

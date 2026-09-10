@@ -76,7 +76,7 @@ Docker Compose 没有 Helm hook。如果没有要保留的 sandbox，可以直�
 优先按以下顺序检查：
 
 1. sandbox-api、mounter 和 runtime 的版本 tag 是否一致；
-2. `/dev/fuse`、LSM profile 和 mount propagation 是否可用；
+2. `/dev/fuse` 和 mount propagation 是否可用；若显式配置了 LSM profile，再确认宿主机已启用并加载该 profile；
 3. sandbox-api 是否能解析和访问 endpoint，TLS 开关是否正确；
 4. bucket、prefix 和 AK/SK 权限；
 5. Redis 中的 owner/lease/Pool 状态与 teardown 日志。

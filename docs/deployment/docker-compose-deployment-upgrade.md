@@ -51,7 +51,6 @@ WORKSPACE_ENABLED_MOUNT_MODES=sync,fuse
 WORKSPACE_CREDENTIAL_GENERATION=rotation-1
 FUSE_MOUNTER_IMAGE=registry.example.com/sandbox-fuse-mounter:v0.2.13
 FUSE_SANDBOX_IMAGE=registry.example.com/sandbox-fuse-docker:v0.2.13
-FUSE_LSM_PROFILE=sandbox-fuse
 ```
 
 华为公有云 OBS 改为：
@@ -80,6 +79,8 @@ STORAGE_REGION=
 
 sandbox-api 会解析对象存储 endpoint，并只为 FUSE system egress 放行本次解析得到的精确 IP 和端口，不需要人工填写 DNS、IP、CIDR 或端口。内网无证书 MinIO 可设置 `STORAGE_USE_SSL=false`；程序只在 endpoint 全部解析为私网地址时接受。不能为了连通对象存储修改“开放公网、禁止内网”的原网络策略；访问其他内网业务服务仍必须走白名单。
 
+Docker 部署默认不指定 AppArmor/SELinux profile，只保留 `no-new-privileges`，因此不要求宿主机启用 AppArmor。只有宿主机已经启用对应 LSM 且管理员已经加载了自定义 profile 时，才可选配置 `FUSE_LSM_PROFILE=<profile>`；不能仅填写一个宿主机不存在的 profile 名称。
+
 ## 3. 全新部署
 
 1. 把仓库中的新版 `docker/docker-compose.yml` 和你的 `.env` 放到服务器。
@@ -93,7 +94,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml ps
 docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=200 sandbox-api
 ```
 
-启用 FUSE 的 Docker 主机必须是 Linux，并提供 `/dev/fuse` 和受约束的 AppArmor/SELinux profile。macOS Docker Desktop 只能用于有限的构建或 kind 验证，不能等同于真实 Linux Docker FUSE 运行环境。
+启用 FUSE 的 Docker 主机必须是 Linux 并提供 `/dev/fuse`。AppArmor/SELinux 自定义 profile 是宿主机支持时的可选加固项，不是启动前提。macOS Docker Desktop 只能用于有限的构建或 kind 验证，不能等同于真实 Linux Docker FUSE 运行环境。
 
 ## 4. 已有部署怎么替换文件
 
@@ -105,7 +106,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 不需要先 stop，不需要运行 `prepare.sh`，也不需要创建 `docker/secrets`。
 
-旧 `.env` 中的 `WORKSPACE_CREDENTIAL_DIR`、`WORKSPACE_SECRET_STAGING_ROOT`、`WORKSPACE_SECRET_NAME`、`WORKSPACE_CA_SECRET_KEY`、`WORKSPACE_MODE`、`WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH`、`FUSE_SYSTEM_EGRESS_MODE`、`FUSE_DNS_CIDRS`、`STORAGE_ENDPOINT_HOST_IPS`、`STORAGE_ENDPOINT_FQDNS`、`STORAGE_ENDPOINT_CIDRS`、`STORAGE_ENDPOINT_PORTS` 都可以直接删除。
+旧 `.env` 中的 `WORKSPACE_CREDENTIAL_DIR`、`WORKSPACE_SECRET_STAGING_ROOT`、`WORKSPACE_SECRET_NAME`、`WORKSPACE_CA_SECRET_KEY`、`WORKSPACE_MODE`、`WORKSPACE_ALLOW_UNVERIFIED_DURABLE_FLUSH`、`FUSE_SYSTEM_EGRESS_MODE`、`FUSE_DNS_CIDRS`、`STORAGE_ENDPOINT_HOST_IPS`、`STORAGE_ENDPOINT_FQDNS`、`STORAGE_ENDPOINT_CIDRS`、`STORAGE_ENDPOINT_PORTS` 都可以直接删除。在不支持 AppArmor 的 Docker 主机上还应删除 `FUSE_LSM_PROFILE`。
 
 ## 5. 什么时候要先排空
 

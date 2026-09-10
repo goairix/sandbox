@@ -78,7 +78,9 @@ runtime_preflight() {
   require_release_image FUSE_IMAGE "$fuse_image"
   require_release_image FUSE_DOCKER_IMAGE "$docker_image"
   require_release_image SANDBOX_IMAGE "$sandbox_image"
-  [[ "${FUSE_LSM_PROFILE:-}" != "" && "${FUSE_LSM_PROFILE,,}" != "unconfined" && "${FUSE_LSM_PROFILE,,}" != "label=disable" ]] || fail "FUSE_LSM_PROFILE must name a confined profile"
+  if [[ "$runtime_name" == "kubernetes" || -n "${FUSE_LSM_PROFILE:-}" ]]; then
+    [[ "${FUSE_LSM_PROFILE:-}" != "" && "${FUSE_LSM_PROFILE,,}" != "unconfined" && "${FUSE_LSM_PROFILE,,}" != "label=disable" ]] || fail "FUSE_LSM_PROFILE must name a confined profile"
+  fi
   [[ -z "${WORKSPACE_PROXY_URL:-}" ]] || fail "workspace proxy is forbidden"
 
   local image_check="package-check"

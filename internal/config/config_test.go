@@ -905,6 +905,11 @@ func TestFUSEConfigValidation(t *testing.T) {
 		want string
 	}{
 		{name: "release verified minio", edit: func(*config.Config) {}, want: ""},
+		{name: "docker accepts missing optional LSM profile", edit: func(c *config.Config) {
+			c.Runtime.Type = "docker"
+			c.Runtime.Docker.WorkspaceSecretRoot = "/var/lib/sandbox/workspace-secrets"
+			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
+		}, want: ""},
 		{name: "release verified private obs", edit: func(c *config.Config) {
 			c.Storage.FileSystem.Provider = "obs"
 			c.Storage.FileSystem.Bucket = "sandbox-fuse-workspace"
@@ -1052,7 +1057,9 @@ func TestFUSEConfigValidation(t *testing.T) {
 		{name: "mutable docker image", edit: func(c *config.Config) {
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.DockerImage = "sandbox:latest" })
 		}, want: "sha256 digest"},
-		{name: "missing lsm profile", edit: func(c *config.Config) {
+		{name: "kubernetes missing lsm profile", edit: func(c *config.Config) {
+			c.Runtime.Type = "kubernetes"
+			c.Runtime.Kubernetes.Namespace = "sandbox-runtime"
 			editSelectedProvider(c, func(p *config.WorkspaceFUSEProviderConfig) { p.LSMProfile = "" })
 		}, want: "lsm_profile"},
 		{name: "unconfined lsm", edit: func(c *config.Config) {

@@ -400,7 +400,10 @@ func fuseCacheVolumeName(id string) string {
 }
 
 func fuseSecurityOptions(profile string) ([]string, error) {
-	if profile == "" || strings.TrimSpace(profile) != profile || len(profile) > 128 || strings.ContainsAny(profile, ",\x00\r\n") {
+	if profile == "" {
+		return []string{"no-new-privileges=true"}, nil
+	}
+	if strings.TrimSpace(profile) != profile || len(profile) > 128 || strings.ContainsAny(profile, ",\x00\r\n") {
 		return nil, fmt.Errorf("workspace FUSE requires a confined LSM profile")
 	}
 	lower := strings.ToLower(profile)

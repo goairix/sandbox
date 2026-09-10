@@ -74,6 +74,16 @@ func TestCreateContainerConfigForFUSE(t *testing.T) {
 	assert.Equal(t, []string{"objects.example.com:198.51.100.10"}, []string(host.ExtraHosts))
 }
 
+func TestCreateContainerConfigForFUSEWithoutOptionalLSMProfile(t *testing.T) {
+	spec := fuseDockerSpecForTest()
+	spec.WorkspaceFUSE.LSMProfile = ""
+
+	_, host, err := createContainerConfig(spec)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"no-new-privileges=true"}, host.SecurityOpt)
+}
+
 func TestCreateContainerConfigForFUSEMountsOnlyOptionalCA(t *testing.T) {
 	spec := fuseDockerSpecForTest()
 	spec.WorkspaceFUSE.CASecretKey = "ca.crt"
@@ -109,7 +119,7 @@ func TestCreateContainerConfigRejectsLiteralEndpointOutsideSystemEgress(t *testi
 }
 
 func TestCreateContainerConfigRejectsUnsafeFUSESecurity(t *testing.T) {
-	for _, profile := range []string{"", "unconfined", "apparmor=", "apparmor=unconfined", "label=", "label=disable", "label=type:", "label=type:spc_t", "label=user:system_u", " sandbox-fuse", "../sandbox-fuse"} {
+	for _, profile := range []string{"unconfined", "apparmor=", "apparmor=unconfined", "label=", "label=disable", "label=type:", "label=type:spc_t", "label=user:system_u", " sandbox-fuse", "../sandbox-fuse"} {
 		t.Run(profile, func(t *testing.T) {
 			spec := fuseDockerSpecForTest()
 			spec.WorkspaceFUSE.LSMProfile = profile
