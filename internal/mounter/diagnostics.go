@@ -11,6 +11,8 @@ import (
 
 const diagnosticLimit = 16 << 10
 
+const diagnosticTokenPrefix = "workspace-mounter-error:"
+
 type DiagnosticError struct {
 	Code     string
 	ExitCode int
@@ -39,6 +41,29 @@ func DiagnosticCode(err error) string {
 	default:
 		return ""
 	}
+}
+
+func FormatDiagnosticToken(err error) (string, bool) {
+	code := DiagnosticCode(err)
+	if code == "" || !fuseprotocol.ValidMounterErrorCode(code) || code == fuseprotocol.MounterErrorRejected {
+		return "", false
+	}
+	return diagnosticTokenPrefix + code + "\n", true
+}
+
+func ParseDiagnosticToken(raw []byte) (string, bool) {
+	if len(raw) == 0 || len(raw) > 128 || raw[len(raw)-1] != '\n' {
+		return "", false
+	}
+	value := string(raw[:len(raw)-1])
+	if strings.ContainsAny(value, "\r\n") || !strings.HasPrefix(value, diagnosticTokenPrefix) {
+		return "", false
+	}
+	code := strings.TrimPrefix(value, diagnosticTokenPrefix)
+	if code == fuseprotocol.MounterErrorRejected || !fuseprotocol.ValidMounterErrorCode(code) {
+		return "", false
+	}
+	return code, true
 }
 
 type boundedDiagnosticBuffer struct {

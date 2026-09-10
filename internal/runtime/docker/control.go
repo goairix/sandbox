@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/mounter"
 )
 
 const dockerPublicUser = "1000:1000"
@@ -142,9 +143,16 @@ func (r *Runtime) execFixed(ctx context.Context, containerID, user string, argv 
 		return nil, fmt.Errorf("inspect Docker workspace control exec: %w", err)
 	}
 	if inspect.ExitCode != 0 {
-		return nil, fmt.Errorf("Docker workspace control command failed")
+		return nil, dockerControlExecError(stderr.Bytes())
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func dockerControlExecError(stderr []byte) error {
+	if code, ok := mounter.ParseDiagnosticToken(stderr); ok {
+		return fmt.Errorf("Docker workspace control command failed: %s", code)
+	}
+	return fmt.Errorf("Docker workspace control command failed")
 }
 
 func watchDockerAttachContext(ctx context.Context, closeAttach func()) func() {

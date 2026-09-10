@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/mounter"
 )
 
 const (
@@ -59,13 +60,20 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 	stdout := &boundedBuffer{limit: maxControlJSONBytes}
 	stderr := &boundedBuffer{limit: maxControlJSONBytes}
 	if err := executor.StreamWithContext(ctx, controlStreamOptions(stdin, stdout, stderr)); err != nil {
-		// stderr can contain supervisor input-derived diagnostics; do not include it.
-		return nil, fmt.Errorf("execute Kubernetes control command: %w", err)
+		return nil, kubernetesControlExecError(err, stderr.Bytes())
 	}
 	if stdout.overflow || stderr.overflow {
 		return nil, fmt.Errorf("Kubernetes control output exceeds limit")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func kubernetesControlExecError(streamErr error, stderr []byte) error {
+	if code, ok := mounter.ParseDiagnosticToken(stderr); ok {
+		return fmt.Errorf("execute Kubernetes control command: workspace mounter failure: %s", code)
+	}
+	// Arbitrary stderr can contain supervisor input-derived diagnostics.
+	return fmt.Errorf("execute Kubernetes control command: %w", streamErr)
 }
 
 func controlStreamOptions(stdin []byte, stdout, stderr *boundedBuffer) remotecommand.StreamOptions {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -60,6 +61,16 @@ func TestControlClientTimeoutAllowsLongDurabilityOperations(t *testing.T) {
 	}
 	assert.Equal(t, 10*time.Second, controlClientTimeout("health-ready"))
 	assert.Equal(t, 10*time.Second, controlClientTimeout("authorize"))
+}
+
+func TestPrintFailureEmitsOnlySafeDiagnosticToken(t *testing.T) {
+	var output bytes.Buffer
+	printFailure(&output, &mounter.DiagnosticError{Code: fuseprotocol.MounterErrorEndpointTLS, ExitCode: 60})
+	assert.Equal(t, "workspace-mounter-error:endpoint-tls\n", output.String())
+
+	output.Reset()
+	printFailure(&output, errors.New("AKIA-DO-NOT-LEAK secret-value"))
+	assert.Equal(t, "workspace-mounter: request failed\n", output.String())
 }
 
 type cliTestRunner struct{}

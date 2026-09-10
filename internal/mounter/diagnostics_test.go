@@ -49,3 +49,35 @@ func TestClassifyS3FSDiagnosticReturnsOnlySafeCodes(t *testing.T) {
 func TestClassifyS3FSDiagnosticPreservesSuccessfulExit(t *testing.T) {
 	assert.NoError(t, classifyS3FSDiagnostic(nil, []byte("ignored diagnostic")))
 }
+
+func TestDiagnosticTokenUsesExactAllowListedGrammar(t *testing.T) {
+	for _, code := range []string{
+		"fuse-permission", "endpoint-dns", "endpoint-tls",
+		"storage-auth", "storage-bucket", "s3fs-exited",
+	} {
+		token, ok := FormatDiagnosticToken(&DiagnosticError{Code: code, ExitCode: 1})
+		require.True(t, ok)
+		assert.Equal(t, "workspace-mounter-error:"+code+"\n", token)
+		parsed, ok := ParseDiagnosticToken([]byte(token))
+		require.True(t, ok)
+		assert.Equal(t, code, parsed)
+	}
+}
+
+func TestDiagnosticTokenRejectsUntrustedText(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte("workspace-mounter-error:rejected\n"),
+		[]byte("workspace-mounter-error:unknown\n"),
+		[]byte("prefix workspace-mounter-error:endpoint-tls\n"),
+		[]byte("workspace-mounter-error:endpoint-tls"),
+		[]byte("workspace-mounter-error:endpoint-tls\nAKIA-DO-NOT-LEAK\n"),
+		[]byte(strings.Repeat("x", diagnosticLimit+1)),
+	} {
+		code, ok := ParseDiagnosticToken(raw)
+		assert.False(t, ok, string(raw))
+		assert.Empty(t, code)
+	}
+	token, ok := FormatDiagnosticToken(errors.New("AKIA-DO-NOT-LEAK"))
+	assert.False(t, ok)
+	assert.Empty(t, token)
+}

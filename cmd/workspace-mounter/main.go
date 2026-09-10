@@ -30,9 +30,17 @@ var (
 
 func main() {
 	if err := run(os.Args, os.Stdin, os.Stdout); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "workspace-mounter: request failed")
+		printFailure(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func printFailure(writer io.Writer, err error) {
+	if token, ok := mounter.FormatDiagnosticToken(err); ok {
+		_, _ = io.WriteString(writer, token)
+		return
+	}
+	_, _ = fmt.Fprintln(writer, "workspace-mounter: request failed")
 }
 
 func run(args []string, stdin io.Reader, stdout io.Writer) error {

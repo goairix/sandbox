@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -111,4 +112,15 @@ func TestDecodeControlAcknowledgementsRejectMalformedFields(t *testing.T) {
 	require.NoError(t, err)
 	_, err = decodeProbeStatus([]byte(`{"version":1,"runtime_uid":"uid-a","generation":7,"ok":true,"token":"opaque","x":1}`))
 	require.Error(t, err)
+}
+
+func TestKubernetesControlErrorAcceptsOnlySafeDiagnosticToken(t *testing.T) {
+	err := kubernetesControlExecError(errors.New("stream failed"), []byte("workspace-mounter-error:storage-auth\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storage-auth")
+
+	err = kubernetesControlExecError(errors.New("stream failed"), []byte("workspace-mounter-error:storage-auth\nAKIA-DO-NOT-LEAK\n"))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "storage-auth")
+	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
 }

@@ -60,3 +60,14 @@ func TestDockerControlAttachClosesOnContextCancellation(t *testing.T) {
 		t.Fatal("Docker control attach did not close after context cancellation")
 	}
 }
+
+func TestDockerControlErrorAcceptsOnlySafeDiagnosticToken(t *testing.T) {
+	err := dockerControlExecError([]byte("workspace-mounter-error:endpoint-tls\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "endpoint-tls")
+
+	err = dockerControlExecError([]byte("workspace-mounter-error:endpoint-tls\nAKIA-DO-NOT-LEAK\n"))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "endpoint-tls")
+	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
+}
