@@ -78,7 +78,7 @@ System egress 是 FUSE 特权进程的内部隔离机制，与用户 sandbox 的
 5. endpoint 使用显式端口；没有显式端口时从 TLS 状态派生 443 或 80。
 6. Docker/Kubernetes 只放行这些精确地址和端口，并通过 `extra_hosts`/`hostAliases` 固定本次空壳使用的解析结果。
 
-FUSE Pod/容器不再需要独立 DNS egress，因此不需要运维提供 DNS CIDR。sandbox-api 自身的正常 DNS 与对象存储访问方式保持不变。
+对象存储访问通过固定 host mapping，不再依赖 FUSE Pod/容器自行解析，因此不需要运维提供 DNS CIDR。Kubernetes Pod 中的用户容器仍可能需要 DNS 访问普通公网；sandbox-api 读取自身 `/etc/resolv.conf` 中由 Kubernetes 注入的 nameserver，并只放行这些精确地址的 53 端口，不需要新增跨 namespace RBAC。sandbox-api 自身的正常 DNS 与对象存储访问方式保持不变。
 
 解析得到的 IP 是 runtime 准备结果，不是 release 配置输入，也不写入 API 请求。PoolKey 使用逻辑 endpoint、bucket、端口、TLS 和 credential generation，不使用运维不可控的 DNS 结果。prepared 空壳在 Acquire 前重新核对 endpoint 解析结果；结果变化时销毁旧空壳并按新地址补池，不把旧网络策略交付给请求。
 
@@ -96,7 +96,7 @@ FUSE Pod/容器不再需要独立 DNS egress，因此不需要运维提供 DNS C
 
 Docker 继续使用专用 gateway 执行 fail-closed iptables 规则。区别是规则输入由 runtime 内部解析生成，而不是来自 `.env`。内网 MinIO 的精确私网 IP 可以进入 system chain；其他内网访问仍受 user chain 规则限制。域名没有可用 IPv4 地址时返回明确的不支持错误。
 
-Kubernetes 统一使用基于解析结果的标准 NetworkPolicy 与 hostAliases，不要求运维选择 `cidr` 或 `cilium-fqdn`，也不要求集群安装 Cilium FQDN policy。动态 Pod 仍不包含 AK/SK。
+Kubernetes 统一使用基于解析结果的标准 NetworkPolicy 与 hostAliases，并自动加入精确的集群 nameserver 规则，不要求运维选择 `cidr` 或 `cilium-fqdn`，也不要求集群安装 Cilium FQDN policy。动态 Pod 仍不包含 AK/SK。
 
 ## 8. 升级与兼容
 

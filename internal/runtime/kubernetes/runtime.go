@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,9 +12,11 @@ import (
 	"maps"
 	"net"
 	"net/netip"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,6 +107,7 @@ type Runtime struct {
 	infraFencer        InfrastructureFencer
 	fuseCredentials    runtime.FUSECredentials
 	endpointLookup     runtime.LookupNetIPFunc
+	clusterDNSLookup   func() ([]netip.Addr, error)
 	pollInterval       time.Duration
 	prepareTimeout     time.Duration
 	readyTimeout       time.Duration
@@ -154,6 +158,7 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 		terminationTimeout: defaultKubernetesControlTimeout,
 		workspaceStates:    make(map[string]*workspaceRuntimeState),
 		endpointLookup:     net.DefaultResolver.LookupIP,
+		clusterDNSLookup:   systemResolverAddresses,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -218,6 +223,12 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 		if err != nil {
 			return nil, err
 		}
+		dnsCIDRs, err := r.clusterDNSCIDRs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		resolved.SystemEgress.DNSCIDRs = dnsCIDRs
+		resolved.SystemEgress.DNSPorts = []int32{53}
 		spec.WorkspaceFUSE = resolved
 	}
 	// Pure construction validates both resources before the first API mutation.
@@ -297,6 +308,57 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, err)
 	}
 	return sandboxInfoForPod(spec.ID, preparedPod), nil
+}
+
+func (r *Runtime) clusterDNSCIDRs(ctx context.Context) ([]string, error) {
+	_ = ctx
+	if r.clusterDNSLookup == nil {
+		return nil, fmt.Errorf("discover Kubernetes cluster DNS: resolver lookup is unavailable")
+	}
+	addresses, err := r.clusterDNSLookup()
+	if err != nil {
+		return nil, fmt.Errorf("discover Kubernetes cluster DNS: %w", err)
+	}
+	set := make(map[string]struct{})
+	for _, address := range addresses {
+		if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() {
+			continue
+		}
+		set[netip.PrefixFrom(address, address.BitLen()).String()] = struct{}{}
+	}
+	if len(set) == 0 || len(set) > 3 {
+		return nil, fmt.Errorf("discover Kubernetes cluster DNS: expected one to three kube-dns ClusterIPs")
+	}
+	result := make([]string, 0, len(set))
+	for cidr := range set {
+		result = append(result, cidr)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func systemResolverAddresses() ([]netip.Addr, error) {
+	file, err := os.Open("/etc/resolv.conf")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var result []netip.Addr
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 || fields[0] != "nameserver" {
+			continue
+		}
+		address, parseErr := netip.ParseAddr(fields[1])
+		if parseErr == nil {
+			result = append(result, address.Unmap())
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *Runtime) AuthorizeWorkspaceMount(ctx context.Context, ref runtime.RuntimeRef, auth runtime.WorkspaceMountAuthorization) error {

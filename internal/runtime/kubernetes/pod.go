@@ -502,11 +502,11 @@ func validatePreparedFUSEPod(spec runtime.SandboxSpec) (validatedPreparedFUSEPod
 			return validated, fmt.Errorf("workspace FUSE endpoint is outside approved system egress CIDRs")
 		}
 	}
+	validated.nameservers, err = hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
+	if err != nil {
+		return validated, err
+	}
 	if len(fuse.SystemEgress.Hosts) == 0 {
-		validated.nameservers, err = hostOnlyNameservers(fuse.SystemEgress.DNSCIDRs)
-		if err != nil {
-			return validated, err
-		}
 		validated.hostAliases, err = endpointHostAliases(endpointHostname, endpointIP, fuse.EndpointHostIPs, approvedNetworks)
 	} else {
 		validated.hostAliases, err = resolvedEndpointHostAliases(fuse.SystemEgress.Hosts, approvedNetworks)
@@ -653,8 +653,11 @@ func validateSystemEgress(spec runtime.SystemEgressSpec, endpointHostname string
 		if len(dnsPorts) != 1 || dnsPorts[0] != 53 {
 			return nil, fmt.Errorf("workspace FUSE system egress DNS port set must be exactly 53")
 		}
-	} else if len(spec.DNSCIDRs) != 0 || len(spec.DNSPorts) != 0 {
-		return nil, fmt.Errorf("resolved workspace FUSE system egress must not require DNS")
+	} else {
+		dnsPorts, err := canonicalPorts("DNS", spec.DNSPorts)
+		if err != nil || len(spec.DNSCIDRs) == 0 || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+			return nil, fmt.Errorf("resolved workspace FUSE system egress requires cluster DNS")
+		}
 	}
 	endpointPorts, err := canonicalPorts("endpoint", spec.EndpointPorts)
 	if err != nil {

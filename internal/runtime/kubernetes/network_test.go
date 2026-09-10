@@ -140,7 +140,9 @@ func TestBuildEnabledFUSEUserNetworkPolicyAllowsOnlyExactApprovedDNSHosts(t *tes
 	}
 
 	_, err = buildFUSEUserNetworkPolicy("runtime", "instance-a", "uid-a", true, []string{"192.0.2.10/32"}, false, []string{"10.0.0.53/32"})
-	require.Error(t, err)
+	require.NoError(t, err, "the exact cluster DNS Service IP may be private")
+	_, err = buildFUSEUserNetworkPolicy("runtime", "instance-a", "uid-a", true, nil, false, []string{"10.0.0.0/24"})
+	require.Error(t, err, "cluster DNS egress must remain host-only")
 }
 
 func TestBuildOpenFUSEUserNetworkPolicyKeepsExplicitDNSRule(t *testing.T) {

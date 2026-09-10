@@ -58,7 +58,7 @@ AK/SK 轮换时应先排空需要保留的 sandbox，并递增非敏感的 `cred
 - FUSE system egress 独立于用户网络，只允许当前对象存储解析得到的精确 IP 和端口；
 - 禁止使用 `0.0.0.0/0`、通配符 FQDN或代理绕过默认拒绝。
 
-sandbox-api 在每个空壳准备时解析 endpoint，并通过 Docker `extra_hosts` 或 Kubernetes `hostAliases` 固定地址，因此 FUSE 容器/Pod 不需要独立 DNS 出口。公网 MinIO 和华为 OBS 使用系统 CA；内网无证书 MinIO 设置 `useSSL=false`，且只有全部解析地址均为私网地址时才允许。DNS 结果变化时，旧的未绑定空壳会被销毁并补池。
+sandbox-api 在每个空壳准备时解析 endpoint，并通过 Docker `extra_hosts` 或 Kubernetes `hostAliases` 固定对象存储地址。Kubernetes 会自动读取 sandbox-api Pod 的 `/etc/resolv.conf`，只放行其中精确的集群 nameserver，供用户容器访问普通域名，不需要运维填写 DNS CIDR 或新增 RBAC。公网 MinIO 和华为 OBS 使用系统 CA；内网无证书 MinIO 设置 `useSSL=false`，且只有全部解析地址均为私网地址时才允许。DNS 结果变化时，旧的未绑定空壳会被销毁并补池。
 
 ## 6. 后端切换与升级
 

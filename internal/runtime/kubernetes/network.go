@@ -191,13 +191,13 @@ func validateSystemEgressPolicySpec(instance string, spec runtime.SystemEgressSp
 			return nil, nil, nil, nil, fmt.Errorf("system egress endpoint port is invalid")
 		}
 	}
-	dnsCIDRs, err := canonicalHostCIDRs(spec.DNSCIDRs, true)
+	dnsCIDRs, err := canonicalHostCIDRs(spec.DNSCIDRs, len(spec.Hosts) == 0)
 	if len(spec.Hosts) == 0 {
 		if err != nil || len(dnsCIDRs) == 0 || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
 			return nil, nil, nil, nil, fmt.Errorf("system egress DNS CIDRs must be canonical public host CIDRs and port 53 is required for legacy policy")
 		}
-	} else if err != nil || len(dnsCIDRs) != 0 || len(dnsPorts) != 0 {
-		return nil, nil, nil, nil, fmt.Errorf("resolved system egress must not require DNS")
+	} else if err != nil || len(dnsCIDRs) == 0 || len(dnsCIDRs) > 3 || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
+		return nil, nil, nil, nil, fmt.Errorf("resolved system egress requires exact cluster DNS CIDRs and port 53")
 	}
 	endpointCIDRs, err := canonicalEndpointCIDRs(spec.EndpointCIDRs)
 	if err != nil {
@@ -241,7 +241,7 @@ func canonicalNameserverHostCIDRs(values []string) ([]string, error) {
 		}
 		result = append(result, netip.PrefixFrom(addr, addr.BitLen()).String())
 	}
-	return canonicalHostCIDRs(result, true)
+	return canonicalHostCIDRs(result, false)
 }
 
 func canonicalEndpointCIDRs(values []string) ([]string, error) {
@@ -317,9 +317,9 @@ func buildFUSEUserNetworkPolicy(namespace, instance, runtimeUID string, enabled 
 	if runtimeUID == "" || len(runtimeUID) > 1024 {
 		return nil, fmt.Errorf("FUSE runtime UID is invalid")
 	}
-	approvedDNS, err := canonicalHostCIDRs(dnsCIDRs, true)
+	approvedDNS, err := canonicalHostCIDRs(dnsCIDRs, false)
 	if err != nil || len(approvedDNS) == 0 || len(approvedDNS) > 3 {
-		return nil, fmt.Errorf("FUSE user policy DNS CIDRs must be approved public host CIDRs")
+		return nil, fmt.Errorf("FUSE user policy DNS CIDRs must be exact cluster resolver host CIDRs")
 	}
 	resolvedCIDRs, err := resolveToCIDRs(whitelist)
 	if err != nil {
