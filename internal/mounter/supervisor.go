@@ -76,6 +76,8 @@ type Supervisor struct {
 	auth             fuseprotocol.AuthorizeRequest
 	process          Process
 	processDone      chan struct{}
+	processResult    chan error
+	processExitErr   error
 	bootstrapped     bool
 	consumed         bool
 	stopping         bool
@@ -303,13 +305,15 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 	}
 	s.process = process
 	s.processDone = make(chan struct{})
+	s.processResult = make(chan error, 1)
+	s.processExitErr = nil
 	cleanupPasswd = false
-	go s.reap(process, s.processDone)
+	go s.reap(process, s.processDone, s.processResult)
 	return nil
 }
 
-func (s *Supervisor) reap(process Process, done chan struct{}) {
-	_ = process.Wait()
+func (s *Supervisor) reap(process Process, done chan struct{}, result chan<- error) {
+	result <- process.Wait()
 	close(done)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -373,6 +377,10 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 	status := s.statusLocked()
 	if err := ctx.Err(); err != nil {
 		return status, err
+	}
+	if err, exited := s.processExitErrorLocked(); exited {
+		s.state = StateUnhealthy
+		return s.statusLocked(), err
 	}
 	if (s.state != StateMounting && s.state != StateReady) || s.process == nil || s.config.MountInfo == nil {
 		return status, fmt.Errorf("supervisor is not mounted")
@@ -446,7 +454,8 @@ func (s *Supervisor) waitForMountLocked(ctx context.Context) (Mount, error) {
 	for {
 		select {
 		case <-s.processDone:
-			return Mount{}, fmt.Errorf("s3fs process exited before mount became ready")
+			err, _ := s.processExitErrorLocked()
+			return Mount{}, err
 		default:
 		}
 		mount, err := s.config.MountInfo()
@@ -467,6 +476,33 @@ func (s *Supervisor) waitForMountLocked(ctx context.Context) (Mount, error) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (s *Supervisor) processExitErrorLocked() (error, bool) {
+	if s.processDone == nil {
+		return nil, false
+	}
+	select {
+	case <-s.processDone:
+	default:
+		return nil, false
+	}
+	if s.processExitErr != nil {
+		return s.processExitErr, true
+	}
+	var processErr error
+	if s.processResult != nil {
+		select {
+		case processErr = <-s.processResult:
+		default:
+		}
+	}
+	if code := DiagnosticCode(processErr); code != "" {
+		s.processExitErr = processErr
+	} else {
+		s.processExitErr = &DiagnosticError{Code: fuseprotocol.MounterErrorS3FSExited, ExitCode: -1}
+	}
+	return s.processExitErr, true
 }
 
 func (s *Supervisor) verifyActiveMountLocked(expectedID uint64) error {

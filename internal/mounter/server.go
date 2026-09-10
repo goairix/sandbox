@@ -16,10 +16,7 @@ import (
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
-const (
-	defaultIOTimeout = 10 * time.Second
-	errCodeRejected  = "rejected"
-)
+const defaultIOTimeout = 10 * time.Second
 
 type Server struct {
 	Supervisor         *Supervisor
@@ -91,14 +88,14 @@ func (s *Server) handle(serverContext context.Context, connection *net.UnixConn)
 	raw, err := readFrame(connection)
 	if err != nil {
 		_ = connection.SetWriteDeadline(time.Now().Add(timeout))
-		_ = writeResponse(connection, nil, errCodeRejected)
+		_ = writeResponse(connection, nil, fuseprotocol.MounterErrorRejected)
 		return
 	}
 	_ = connection.SetReadDeadline(time.Time{})
 	_ = connection.SetWriteDeadline(time.Now().Add(timeout))
 	var request fuseprotocol.SocketRequest
 	if err := fuseprotocol.DecodeExact(raw, &request); err != nil || request.Version != fuseprotocol.Version || len(request.Input) == 0 {
-		_ = writeResponse(connection, nil, errCodeRejected)
+		_ = writeResponse(connection, nil, fuseprotocol.MounterErrorRejected)
 		return
 	}
 	connectionContext, disconnect := context.WithCancel(serverContext)
@@ -113,10 +110,18 @@ func (s *Server) handle(serverContext context.Context, connection *net.UnixConn)
 	output, dispatchErr := s.dispatch(operationContext, request.Command, request.Input)
 	_ = connection.SetWriteDeadline(time.Now().Add(timeout))
 	if dispatchErr != nil {
-		_ = writeResponse(connection, nil, errCodeRejected)
+		_ = writeResponse(connection, nil, serverErrorCode(dispatchErr))
 		return
 	}
 	_ = writeResponse(connection, output, "")
+}
+
+func serverErrorCode(err error) string {
+	code := DiagnosticCode(err)
+	if code != "" && fuseprotocol.ValidMounterErrorCode(code) {
+		return code
+	}
+	return fuseprotocol.MounterErrorRejected
 }
 
 func controlOperationTimeout(command string) time.Duration {
@@ -316,6 +321,9 @@ func (c Client) Do(ctx context.Context, command string, input []byte) ([]byte, e
 		return nil, fmt.Errorf("mounter supervisor response is invalid")
 	}
 	if !response.OK || response.ErrorCode != "" {
+		if response.ErrorCode != fuseprotocol.MounterErrorRejected && fuseprotocol.ValidMounterErrorCode(response.ErrorCode) {
+			return nil, &DiagnosticError{Code: response.ErrorCode, ExitCode: -1}
+		}
 		return nil, fmt.Errorf("mounter supervisor rejected request")
 	}
 	return append([]byte(nil), response.Output...), nil

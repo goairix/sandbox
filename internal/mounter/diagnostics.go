@@ -5,18 +5,11 @@ import (
 	"errors"
 	"os/exec"
 	"strings"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 const diagnosticLimit = 16 << 10
-
-const (
-	diagnosticFusePermission = "fuse-permission"
-	diagnosticEndpointDNS    = "endpoint-dns"
-	diagnosticEndpointTLS    = "endpoint-tls"
-	diagnosticStorageAuth    = "storage-auth"
-	diagnosticStorageBucket  = "storage-bucket"
-	diagnosticS3FSExited     = "s3fs-exited"
-)
 
 type DiagnosticError struct {
 	Code     string
@@ -36,8 +29,12 @@ func DiagnosticCode(err error) string {
 		return ""
 	}
 	switch diagnostic.Code {
-	case diagnosticFusePermission, diagnosticEndpointDNS, diagnosticEndpointTLS,
-		diagnosticStorageAuth, diagnosticStorageBucket, diagnosticS3FSExited:
+	case fuseprotocol.MounterErrorFusePermission,
+		fuseprotocol.MounterErrorEndpointDNS,
+		fuseprotocol.MounterErrorEndpointTLS,
+		fuseprotocol.MounterErrorStorageAuth,
+		fuseprotocol.MounterErrorStorageBucket,
+		fuseprotocol.MounterErrorS3FSExited:
 		return diagnostic.Code
 	default:
 		return ""
@@ -81,7 +78,7 @@ func classifyS3FSDiagnostic(processErr error, stderr []byte) error {
 		return nil
 	}
 	message := strings.ToLower(string(stderr))
-	code := diagnosticS3FSExited
+	code := fuseprotocol.MounterErrorS3FSExited
 	switch {
 	case containsAny(message,
 		"failed to open /dev/fuse",
@@ -89,7 +86,7 @@ func classifyS3FSDiagnostic(processErr error, stderr []byte) error {
 		"fusermount: permission denied",
 		"operation not permitted",
 	):
-		code = diagnosticFusePermission
+		code = fuseprotocol.MounterErrorFusePermission
 	case containsAny(message,
 		"could not resolve host",
 		"couldn't resolve host",
@@ -97,14 +94,14 @@ func classifyS3FSDiagnostic(processErr error, stderr []byte) error {
 		"temporary failure in name resolution",
 		"getaddrinfo",
 	):
-		code = diagnosticEndpointDNS
+		code = fuseprotocol.MounterErrorEndpointDNS
 	case containsAny(message,
 		"ssl certificate problem",
 		"certificate verify failed",
 		"peer certificate cannot be authenticated",
 		"unable to get local issuer certificate",
 	):
-		code = diagnosticEndpointTLS
+		code = fuseprotocol.MounterErrorEndpointTLS
 	case containsAny(message,
 		"accessdenied",
 		"access denied",
@@ -114,7 +111,7 @@ func classifyS3FSDiagnostic(processErr error, stderr []byte) error {
 		"http code 403",
 		"403 forbidden",
 	):
-		code = diagnosticStorageAuth
+		code = fuseprotocol.MounterErrorStorageAuth
 	case containsAny(message,
 		"specified bucket does not exist",
 		"nosuchbucket",
@@ -122,7 +119,7 @@ func classifyS3FSDiagnostic(processErr error, stderr []byte) error {
 		"http code 404",
 		"404 not found",
 	):
-		code = diagnosticStorageBucket
+		code = fuseprotocol.MounterErrorStorageBucket
 	}
 	exitCode := -1
 	var exitErr *exec.ExitError

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -138,4 +139,65 @@ func TestOperationMayOutliveFramingDeadline(t *testing.T) {
 	assert.Equal(t, "ready", status.State)
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func TestServerClientPreservesSafeReadyDiagnostic(t *testing.T) {
+	runner := &fakeRunner{process: &fakeProcess{exit: make(chan error, 1)}}
+	supervisor, _ := newTestSupervisor(t, runner)
+	require.NoError(t, supervisor.Authorize(context.Background(), validAuthorization()))
+	runner.process.exit <- &DiagnosticError{Code: "endpoint-tls", ExitCode: 60}
+	require.Eventually(t, func() bool { return supervisor.State() == StateUnhealthy }, time.Second, time.Millisecond)
+
+	socketDir, err := os.MkdirTemp("/tmp", "wm-diagnostic-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	require.NoError(t, os.Chmod(socketDir, 0o700))
+	socket := filepath.Join(socketDir, "control.sock")
+	server := &Server{Supervisor: supervisor, SocketPath: socket, ExpectedRuntimeUID: "uid-a", VerifyPeer: func(*net.UnixConn) error { return nil }, IOTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	require.Eventually(t, func() bool { _, err := os.Stat(socket); return err == nil }, time.Second, time.Millisecond)
+
+	_, err = (Client{SocketPath: socket, IOTimeout: time.Second}).Do(context.Background(), "health-ready", []byte("{}"))
+	require.Error(t, err)
+	assert.Equal(t, "endpoint-tls", DiagnosticCode(err))
+	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestServerClientRedactsUnknownReadyError(t *testing.T) {
+	runner := &fakeRunner{process: &fakeProcess{exit: make(chan error, 1)}}
+	supervisor, _ := newTestSupervisor(t, runner)
+	require.NoError(t, supervisor.Authorize(context.Background(), validAuthorization()))
+	runner.process.exit <- errors.New("AKIA-DO-NOT-LEAK secret-value")
+	require.Eventually(t, func() bool { return supervisor.State() == StateUnhealthy }, time.Second, time.Millisecond)
+
+	socketDir, err := os.MkdirTemp("/tmp", "wm-redaction-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	require.NoError(t, os.Chmod(socketDir, 0o700))
+	socket := filepath.Join(socketDir, "control.sock")
+	server := &Server{Supervisor: supervisor, SocketPath: socket, ExpectedRuntimeUID: "uid-a", VerifyPeer: func(*net.UnixConn) error { return nil }, IOTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	require.Eventually(t, func() bool { _, err := os.Stat(socket); return err == nil }, time.Second, time.Millisecond)
+
+	_, err = (Client{SocketPath: socket, IOTimeout: time.Second}).Do(context.Background(), "health-ready", []byte("{}"))
+	require.Error(t, err)
+	assert.Equal(t, "s3fs-exited", DiagnosticCode(err))
+	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
+	assert.NotContains(t, err.Error(), "secret-value")
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestServerErrorCodeRedactsUnknownInternalError(t *testing.T) {
+	code := serverErrorCode(errors.New("AKIA-DO-NOT-LEAK secret-value"))
+	assert.Equal(t, fuseprotocol.MounterErrorRejected, code)
+	assert.NotContains(t, code, "AKIA-DO-NOT-LEAK")
 }

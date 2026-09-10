@@ -17,16 +17,38 @@ import (
 )
 
 const (
-	Version                   = 1
-	MaxJSONBytes              = 64 << 10
-	MaxCredentialBytes        = 4 << 10
-	MounterBinary             = "/usr/local/bin/workspace-mounter"
-	ProbeBinary               = "/usr/local/bin/workspace-probe"
-	ProbePID1EnvironmentName  = "WORKSPACE_PROBE_INTERNAL_PID1_V1"
-	ProbePID1EnvironmentValue = "serve"
-	ProbeObjectBasenamePrefix = ".workspace-probe-v1-"
-	DockerReaperSocket        = "\x00workspace-mounter-reaper-v1"
+	Version                    = 1
+	MaxJSONBytes               = 64 << 10
+	MaxCredentialBytes         = 4 << 10
+	MounterBinary              = "/usr/local/bin/workspace-mounter"
+	ProbeBinary                = "/usr/local/bin/workspace-probe"
+	ProbePID1EnvironmentName   = "WORKSPACE_PROBE_INTERNAL_PID1_V1"
+	ProbePID1EnvironmentValue  = "serve"
+	ProbeObjectBasenamePrefix  = ".workspace-probe-v1-"
+	DockerReaperSocket         = "\x00workspace-mounter-reaper-v1"
+	MounterErrorRejected       = "rejected"
+	MounterErrorFusePermission = "fuse-permission"
+	MounterErrorEndpointDNS    = "endpoint-dns"
+	MounterErrorEndpointTLS    = "endpoint-tls"
+	MounterErrorStorageAuth    = "storage-auth"
+	MounterErrorStorageBucket  = "storage-bucket"
+	MounterErrorS3FSExited     = "s3fs-exited"
 )
+
+func ValidMounterErrorCode(code string) bool {
+	switch code {
+	case MounterErrorRejected,
+		MounterErrorFusePermission,
+		MounterErrorEndpointDNS,
+		MounterErrorEndpointTLS,
+		MounterErrorStorageAuth,
+		MounterErrorStorageBucket,
+		MounterErrorS3FSExited:
+		return true
+	default:
+		return false
+	}
+}
 
 // DeriveProbeObjectName returns the single reserved object basename used by a
 // runtime generation's propagation probe. The domain-separated digest makes

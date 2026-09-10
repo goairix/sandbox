@@ -124,6 +124,23 @@ func TestSocketEnvelopeHasExactBoundedSchema(t *testing.T) {
 	assert.Equal(t, response, decodedResponse)
 }
 
+func TestMounterErrorCodeAllowList(t *testing.T) {
+	for _, code := range []string{
+		MounterErrorRejected,
+		MounterErrorFusePermission,
+		MounterErrorEndpointDNS,
+		MounterErrorEndpointTLS,
+		MounterErrorStorageAuth,
+		MounterErrorStorageBucket,
+		MounterErrorS3FSExited,
+	} {
+		assert.True(t, ValidMounterErrorCode(code), code)
+	}
+	for _, code := range []string{"", "unknown", "endpoint-tls\nsecret", "AKIA-DO-NOT-LEAK"} {
+		assert.False(t, ValidMounterErrorCode(code), code)
+	}
+}
+
 func TestDeriveProbeObjectNameIsStableOpaqueAndVersioned(t *testing.T) {
 	first, err := DeriveProbeObjectName("runtime-secret-a", 7)
 	require.NoError(t, err)

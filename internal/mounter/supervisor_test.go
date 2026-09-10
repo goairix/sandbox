@@ -177,6 +177,21 @@ func TestSupervisorNeverRestartsExitedS3FS(t *testing.T) {
 	assert.Equal(t, 1, runner.starts)
 }
 
+func TestSupervisorReadyStatusPreservesSafeEarlyExitDiagnostic(t *testing.T) {
+	processErr := &DiagnosticError{Code: "endpoint-tls", ExitCode: 60}
+	runner := &fakeRunner{process: &fakeProcess{exit: make(chan error, 1)}}
+	s, _ := newTestSupervisor(t, runner)
+	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
+
+	runner.process.exit <- processErr
+	require.Eventually(t, func() bool { return s.State() == StateUnhealthy }, time.Second, time.Millisecond)
+	_, err := s.ReadyStatus(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, "endpoint-tls", DiagnosticCode(err))
+	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
+}
+
 func TestSupervisorStaysLockedWhenGenerationMarkerExists(t *testing.T) {
 	runDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(runDir, mountGenerationFile), []byte("{}"), 0o600))
