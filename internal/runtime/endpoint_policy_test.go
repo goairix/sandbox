@@ -97,6 +97,17 @@ func TestResolveFUSEEndpointPolicyRequiresUsableAddressFamily(t *testing.T) {
 	require.ErrorContains(t, err, "no usable IPv4 address")
 }
 
+func TestResolveFUSEEndpointPolicyAllowsCanonicalDottedOBSBucket(t *testing.T) {
+	spec := &WorkspaceFUSESpec{Provider: "obs", Bucket: "team.workspace", Endpoint: "https://obs.cn-southwest-2.myhuaweicloud.com", UseSSL: true}
+	lookup := lookupFixture(map[string][]string{
+		"obs.cn-southwest-2.myhuaweicloud.com":                {"203.0.113.10"},
+		"team.workspace.obs.cn-southwest-2.myhuaweicloud.com": {"203.0.113.11"},
+	})
+	resolved, err := ResolveFUSEEndpointPolicy(context.Background(), spec, lookup, EndpointIPv4Only)
+	require.NoError(t, err)
+	assert.Len(t, resolved.SystemEgress.Hosts, 2)
+}
+
 func TestFUSEEndpointMappingsCurrentDetectsDNSRotation(t *testing.T) {
 	mappings := []EndpointHostMapping{{Host: "minio.example.com", IPs: []string{"36.170.50.43"}}}
 	current, err := FUSEEndpointMappingsCurrent(context.Background(), mappings, lookupFixture(map[string][]string{"minio.example.com": {"36.170.50.43"}}), EndpointIPv4Only)

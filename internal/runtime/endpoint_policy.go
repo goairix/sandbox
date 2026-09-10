@@ -168,7 +168,7 @@ func canonicalFUSEEndpoint(spec *WorkspaceFUSESpec) (string, []string, int32, bo
 	}
 	hosts := []string{host}
 	if spec.Provider == "obs" {
-		if !canonicalEndpointHost(spec.Bucket) || strings.Contains(spec.Bucket, ".") {
+		if !canonicalEndpointHost(spec.Bucket) {
 			return "", nil, 0, false, fmt.Errorf("workspace FUSE OBS bucket is invalid for virtual-host addressing")
 		}
 		hosts = append(hosts, spec.Bucket+"."+host)
