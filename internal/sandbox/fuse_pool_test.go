@@ -666,6 +666,23 @@ func fixedFUSESpec(poolKey string) runtime.SandboxSpec {
 
 func newFUSEMockRuntime() *mockRuntime { return newMockRuntime() }
 
+type stagedCleanupRuntime struct {
+	*mockRuntime
+	confirmCalls  int
+	finalizeCalls int
+	finalizeErr   error
+}
+
+func (r *stagedCleanupRuntime) ConfirmPreparedSandboxTermination(_ context.Context, _, runtimeUID string) (runtime.TerminationEvidence, error) {
+	r.confirmCalls++
+	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}, nil
+}
+
+func (r *stagedCleanupRuntime) FinalizePreparedSandboxRemoval(_ context.Context, _, _ string, _ runtime.TerminationEvidence) error {
+	r.finalizeCalls++
+	return r.finalizeErr
+}
+
 func allowPreparedReturn(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
 	return FUSEPoolPristine, nil
 }
@@ -680,6 +697,41 @@ func fusePoolConfig() FUSEPoolConfig {
 
 func TestFUSEPoolKeyUsesAppArmorDefaultV2(t *testing.T) {
 	assert.Equal(t, "workspace-fuse-pool/v2", fusePoolKeyVersion)
+}
+
+func TestFUSEPoolDurableCleanupResumesAfterFinalizeFailure(t *testing.T) {
+	repo := newMemoryFUSEPoolRepository()
+	rt := &stagedCleanupRuntime{mockRuntime: newFUSEMockRuntime(), finalizeErr: errors.New("injected finalize failure")}
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	claimed := state.FUSEPoolRecord{
+		PreparationID:   "preparation-a",
+		RuntimeID:       "runtime-a",
+		RuntimeUID:      "runtime-uid-a",
+		PoolKey:         "pool-key",
+		State:           state.FUSEPoolCleanup,
+		MaintainerToken: "api-a",
+		CleanupToken:    "cleanup-a",
+		CleanupUntil:    repo.now.Add(time.Minute),
+		CleanupPhase:    state.FUSEPoolCleanupTerminating,
+		PrepareUntil:    repo.now.Add(time.Minute),
+		UpdatedAt:       repo.now,
+		Revision:        4,
+	}
+	repo.seed(claimed)
+
+	updated, err := pool.RemoveClaimedRuntime(context.Background(), claimed)
+	require.ErrorContains(t, err, "injected finalize failure")
+	require.NotNil(t, updated)
+	require.Equal(t, state.FUSEPoolCleanupTerminated, updated.CleanupPhase)
+	require.Equal(t, 1, rt.confirmCalls)
+	require.Equal(t, 1, rt.finalizeCalls)
+
+	rt.finalizeErr = nil
+	updated, err = pool.RemoveClaimedRuntime(context.Background(), *updated)
+	require.NoError(t, err)
+	require.Equal(t, 1, rt.confirmCalls, "durable evidence must skip repeated termination")
+	require.Equal(t, 2, rt.finalizeCalls)
+	require.NoError(t, pool.CompleteClaimedCleanup(context.Background(), *updated))
 }
 
 func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {

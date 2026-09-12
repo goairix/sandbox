@@ -445,7 +445,8 @@ func (p *FUSEPool) ReleaseConsumed(ctx context.Context, record state.FUSEPoolRec
 	if err != nil {
 		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
 	}
-	if err := p.RemoveClaimedRuntime(ctx, *claimed); err != nil {
+	claimed, err = p.RemoveClaimedRuntime(ctx, *claimed)
+	if err != nil {
 		return fmt.Errorf("release consumed FUSE sandbox: %w", err)
 	}
 	if err := p.CompleteClaimedCleanup(ctx, *claimed); err != nil {
@@ -466,14 +467,60 @@ func (p *FUSEPool) ClaimSingleUseCleanup(ctx context.Context, record state.FUSEP
 	return p.claimCleanup(ctx, record)
 }
 
-func (p *FUSEPool) RemoveClaimedRuntime(ctx context.Context, claimed state.FUSEPoolRecord) error {
-	if claimed.PoolKey != p.poolKey || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" || claimed.RuntimeID == "" || claimed.RuntimeUID == "" {
-		return state.ErrFUSEPoolInvalidRecord
+func (p *FUSEPool) RemoveClaimedRuntime(ctx context.Context, claimed state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
+	if claimed.PoolKey == "" || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" || claimed.RuntimeID == "" || claimed.RuntimeUID == "" {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	current := claimed
+	if cleaner, ok := p.runtime.(runtime.PreparedSandboxCleanup); ok {
+		evidence, confirmed := poolTerminationEvidence(current)
+		if !confirmed {
+			observed, err := cleaner.ConfirmPreparedSandboxTermination(ctx, current.RuntimeID, current.RuntimeUID)
+			if err != nil {
+				return &current, fmt.Errorf("confirm claimed FUSE runtime termination: %w", err)
+			}
+			persisted, err := p.repo.ConfirmCleanupTermination(ctx, current.PreparationID, current.CleanupToken, current.Revision,
+				current.RuntimeID, current.RuntimeUID, stateTerminationEvidence(observed))
+			if err != nil {
+				return &current, fmt.Errorf("checkpoint claimed FUSE runtime termination: %w", err)
+			}
+			current = *persisted
+			evidence, confirmed = poolTerminationEvidence(current)
+			if !confirmed {
+				return &current, state.ErrFUSEPoolInvalidRecord
+			}
+		}
+		if err := cleaner.FinalizePreparedSandboxRemoval(ctx, current.RuntimeID, current.RuntimeUID, evidence); err != nil {
+			return &current, fmt.Errorf("finalize claimed FUSE runtime removal: %w", err)
+		}
+		return &current, nil
 	}
 	if err := p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
-		return fmt.Errorf("remove claimed FUSE runtime: %w", err)
+		return &current, fmt.Errorf("remove claimed FUSE runtime: %w", err)
 	}
-	return nil
+	return &current, nil
+}
+
+func stateTerminationEvidence(evidence runtime.TerminationEvidence) state.FUSEPoolTerminationEvidence {
+	return state.FUSEPoolTerminationEvidence{
+		RuntimeUID: evidence.RuntimeUID, NodeName: evidence.NodeName,
+		GracefulUnmount: evidence.GracefulUnmount, ProcessExited: evidence.ProcessExited,
+		InfrastructureFenced: evidence.InfrastructureFenced,
+	}
+}
+
+func poolTerminationEvidence(record state.FUSEPoolRecord) (runtime.TerminationEvidence, bool) {
+	if record.CleanupPhase != state.FUSEPoolCleanupTerminated || record.TerminationEvidence == nil ||
+		record.TerminationEvidence.RuntimeUID != record.RuntimeUID ||
+		(!record.TerminationEvidence.ProcessExited && (!record.TerminationEvidence.InfrastructureFenced || record.TerminationEvidence.NodeName == "")) {
+		return runtime.TerminationEvidence{}, false
+	}
+	evidence := record.TerminationEvidence
+	return runtime.TerminationEvidence{
+		RuntimeUID: evidence.RuntimeUID, NodeName: evidence.NodeName,
+		GracefulUnmount: evidence.GracefulUnmount, ProcessExited: evidence.ProcessExited,
+		InfrastructureFenced: evidence.InfrastructureFenced,
+	}, true
 }
 
 func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord) error {
@@ -1023,7 +1070,8 @@ func (p *FUSEPool) claimAndDestroyWithRuntimeEvidence(record state.FUSEPoolRecor
 	if err != nil {
 		return err
 	}
-	if err := p.exactRemover().RemovePreparedSandbox(ctx, runtimeID, runtimeUID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+	claimed, err = p.RemoveClaimedRuntime(ctx, *claimed)
+	if err != nil {
 		return err
 	}
 	_, err = p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
@@ -1057,7 +1105,11 @@ func (p *FUSEPool) destroyClaimedCleanup(ctx context.Context, claimed state.FUSE
 	if claimed.RuntimeID == "" {
 		err = p.runtime.RemoveSandbox(ctx, claimed.PreparationID)
 	} else {
-		err = p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID)
+		var updated *state.FUSEPoolRecord
+		updated, err = p.RemoveClaimedRuntime(ctx, claimed)
+		if updated != nil {
+			claimed = *updated
+		}
 	}
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return fmt.Errorf("remove claimed FUSE runtime: %w", err)

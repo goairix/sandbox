@@ -1126,8 +1126,16 @@ func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguous
 	if err != nil {
 		return err
 	}
-	if err := m.fusePool.RemoveClaimedRuntime(ctx, *claimed); err != nil {
-		return err
+	updatedClaimed, removeErr := m.fusePool.RemoveClaimedRuntime(ctx, *claimed)
+	if updatedClaimed != nil {
+		claimed = updatedClaimed
+		m.mu.Lock()
+		copy := *claimed
+		claim.cleanupRecord = &copy
+		m.mu.Unlock()
+	}
+	if removeErr != nil {
+		return removeErr
 	}
 	fencer, ok := m.runtime.(runtime.RuntimeFencer)
 	if !ok {
@@ -1415,7 +1423,11 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		lifecycle.claimed = claimed
 	}
 	if !lifecycle.runtimeRemoved {
-		if err := m.fusePool.RemoveClaimedRuntime(ctx, *lifecycle.claimed); err != nil {
+		updatedClaimed, err := m.fusePool.RemoveClaimedRuntime(ctx, *lifecycle.claimed)
+		if updatedClaimed != nil {
+			lifecycle.claimed = updatedClaimed
+		}
+		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "remove-runtime", err)
 			return
 		}
