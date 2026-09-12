@@ -110,7 +110,7 @@ internal/admin/
 
 ### 6.1 数据库选择
 
-首期只支持 PostgreSQL。使用：
+首期只支持 PostgreSQL 18 或更高版本，以使用数据库原生 `uuidv7()`。使用：
 
 - `gorm.io/gorm`；
 - `gorm.io/driver/postgres`；
@@ -118,9 +118,13 @@ internal/admin/
 
 Repository 和领域模型保持数据库无关，以便未来增加 MySQL Adapter。当前不承诺无需迁移工作即可切换数据库。
 
+所有管理域自有表都使用名为 `id` 的原生 UUID 主键，DDL 统一定义为 `id uuid PRIMARY KEY DEFAULT uuidv7()`。关联表也保留独立 UUIDv7 主键，并为业务唯一关系增加唯一约束。Gormigrate 自身的迁移记录表沿用库默认结构，不纳入这一主键约束。
+
+PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RETURNING` 取回 UUIDv7。领域层使用 UUID 值，但不感知 `uuidv7()` 函数。业务 Sandbox ID、Runtime ID、Runtime UID 和 Manager Instance ID 是外部标识，继续使用字符串字段，不冒充管理表主键。
+
 为降低未来适配成本：
 
-- ID 由应用生成，使用 UUID 字符串，不依赖数据库序列；
+- Repository 接口不规定 UUID 的生成位置；未来 MySQL Adapter 可在插入前由应用生成 UUIDv7；
 - 需要保存的结构化元数据编码为 JSON 字符串，不在领域层依赖 `jsonb` 查询；
 - PostgreSQL 的 Advisory Lock、`FOR UPDATE SKIP LOCKED` 和错误码解析只存在于 Adapter；
 - Service 不拼接 SQL，也不判断数据库 Dialect。
@@ -132,6 +136,7 @@ Repository 和领域模型保持数据库无关，以便未来增加 MySQL Adapt
 - 每个 Migration 使用不可复用、不可修改的稳定 ID。
 - 已进入主分支且可能在线上执行过的 Migration 禁止改写；变更必须追加新 Migration。
 - 每项迁移提供显式 `Migrate`；可安全回滚的迁移同时提供 `Rollback`。
+- 所有管理域建表迁移必须显式声明 `id uuid PRIMARY KEY DEFAULT uuidv7()`，不得退化为 UUIDv4、自增整数或无序字符串主键。
 - Migration 在每次服务启动时由主进程自动检查并执行，不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
 - 多副本启动时，以 PostgreSQL Advisory Lock 串行执行迁移。未取得锁的副本在限定时间内等待，迁移完成前不得进入 Ready。
 - Migration 失败时服务启动失败，不对外提供业务或管理流量。
@@ -530,7 +535,7 @@ admin:
 
 1. 加载并校验配置；
 2. 初始化日志和 Telemetry；
-3. 连接 PostgreSQL；
+3. 连接 PostgreSQL，并校验服务端版本至少为 18 且 `uuidv7()` 可用；
 4. 主进程获取迁移锁，自动执行全部待执行 Migration 与 Seed；
 5. 初始化 Repository、Admin Service 和命令 Worker；
 6. 初始化现有 Runtime、Redis、Storage 和 Manager；
@@ -560,6 +565,9 @@ admin:
 - 空数据库迁移到最新版本；
 - 重复执行迁移无副作用；
 - 多副本并发迁移只有一个执行者；
+- 所有管理域自有表的主键类型为 PostgreSQL `uuid`，数据库默认值生成 UUIDv7；
+- 新增记录可用 `uuid_extract_version(id)` 验证版本为 7；
+- PostgreSQL 版本低于 18 或缺少 `uuidv7()` 时启动失败；
 - Seed 幂等且不覆盖已有密码；
 - Repository 查询、分页、事务和唯一约束；
 - 多 Worker 竞争同一命令；
@@ -596,20 +604,22 @@ admin:
 1. PostgreSQL 空库可由 `gormigrate/v2` 完整迁移并创建首个超级管理员。
 2. 代码中不存在 `AutoMigrate` 调用，所有 DDL 均可定位到 Migration。
 3. 普通服务启动会自动执行所有待执行 Migration 与 Seed，系统不依赖任何 CLI、独立 Job 或 Init Container。
-4. 三种角色只能访问其允许的页面与 API。
-5. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
-6. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
-7. 每个实例准确展示未申请、申请中或已申请状态，并保留原始 Pool 状态。
-8. 任意副本收到的 TTL 或销毁请求都能路由给正确 Owner；Owner 或 Runtime UID 变化时安全拒绝。
-9. 所有管理写操作都有完整、脱敏且可检索的审计记录。
-10. 数据库或 Owner 不可用时返回明确错误，不绕过 Manager 直接修改 Runtime。
-11. Go 测试、PostgreSQL Migration 集成测试、前端测试和生产构建全部通过。
+4. 所有管理域自有表都使用 PostgreSQL 原生 `uuid` 主键，并由数据库 `uuidv7()` 默认生成 UUIDv7。
+5. 三种角色只能访问其允许的页面与 API。
+6. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
+7. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
+8. 每个实例准确展示未申请、申请中或已申请状态，并保留原始 Pool 状态。
+9. 任意副本收到的 TTL 或销毁请求都能路由给正确 Owner；Owner 或 Runtime UID 变化时安全拒绝。
+10. 所有管理写操作都有完整、脱敏且可检索的审计记录。
+11. 数据库或 Owner 不可用时返回明确错误，不绕过 Manager 直接修改 Runtime。
+12. Go 测试、PostgreSQL Migration 集成测试、前端测试和生产构建全部通过。
 
 ## 21. 后续演进
 
 Repository 边界允许未来新增 MySQL Adapter。届时必须：
 
 - 为 MySQL 提供独立连接和数据库错误翻译；
+- 在 MySQL Adapter 中于插入前生成 UUIDv7，并映射到适合索引的原生或二进制 UUID 存储；
 - 验证所有 Migration 的 Dialect 兼容性，必要时为 Migration 增加受控的 Dialect 分支；
 - 替换 PostgreSQL Advisory Lock 和命令领取实现；
 - 使用真实 MySQL 增加完整 Repository、迁移和并发测试；
