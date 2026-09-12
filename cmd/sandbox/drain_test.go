@@ -20,6 +20,12 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
+func TestDrainMetadataAnnotationsUseProjectNamespace(t *testing.T) {
+	require.Equal(t, "goairix.github.io/sandbox-backend-fingerprint", backendFingerprintAnnotation)
+	require.Equal(t, "goairix.github.io/sandbox-drain-protocol", drainProtocolAnnotation)
+	require.Equal(t, "goairix.github.io/sandbox-cleanup-protocol", cleanupProtocolAnnotation)
+}
+
 func TestDrainKubernetesDeploymentDisablesHPAAndWaitsForAPIPods(t *testing.T) {
 	replicas := int32(2)
 	client := kubefake.NewSimpleClientset(

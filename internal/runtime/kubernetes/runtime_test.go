@@ -31,6 +31,10 @@ import (
 
 type podExecutorFunc func(context.Context, string, string, []string, []byte) ([]byte, error)
 
+func TestFUSERuntimeCleanupFinalizerUsesProjectNamespace(t *testing.T) {
+	require.Equal(t, "goairix.github.io/sandbox-fuse-runtime-cleanup", fuseRuntimeCleanupFinalizer)
+}
+
 func TestValidatePreparedContainerStateReportsSafeExitEvidence(t *testing.T) {
 	started := false
 	pod := &corev1.Pod{Status: corev1.PodStatus{

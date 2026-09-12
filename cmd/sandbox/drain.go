@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,9 +19,9 @@ import (
 var drainCiliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}
 
 const (
-	backendFingerprintAnnotation = "sandbox.huaxisy.com/backend-fingerprint"
-	drainProtocolAnnotation      = "sandbox.huaxisy.com/drain-protocol"
-	cleanupProtocolAnnotation    = "sandbox.huaxisy.com/cleanup-protocol"
+	backendFingerprintAnnotation = kubecontract.BackendFingerprintAnnotation
+	drainProtocolAnnotation      = kubecontract.DrainProtocolAnnotation
+	cleanupProtocolAnnotation    = kubecontract.CleanupProtocolAnnotation
 )
 
 func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName string, pollInterval time.Duration) error {
