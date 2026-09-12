@@ -3,7 +3,10 @@
 {{- else if or (eq .Values.config.storage.filesystem.preset "huawei-obs-public") (eq .Values.config.storage.filesystem.preset "huawei-obs-private") -}}obs
 {{- else -}}{{ fail (printf "unsupported config.storage.filesystem.preset %q" .Values.config.storage.filesystem.preset) }}
 {{- end -}}
+
 {{- end -}}
+
+{{- define "sandbox.metadataPrefix" -}}goairix.github.io{{- end -}}
 
 {{- define "sandbox.backend.profile" -}}
 {{- if eq .Values.config.storage.filesystem.preset "minio" -}}minio-sigv4-path-style-v1

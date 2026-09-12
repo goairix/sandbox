@@ -6,7 +6,7 @@ chart="$repo_root/deploy/helm/sandbox"
 
 fingerprint() {
   helm template sandbox "$chart" "$@" \
-    | awk '/name: sandbox-backend-fingerprint/{found=1} found && /sandbox.huaxisy.com\/backend-fingerprint:/{gsub(/"/, "", $2); print $2; exit}'
+    | awk '/name: sandbox-backend-fingerprint/{found=1} found && /goairix.github.io\/sandbox-backend-fingerprint:/{gsub(/"/, "", $2); print $2; exit}'
 }
 
 base_fingerprint="$(fingerprint)"
@@ -26,8 +26,9 @@ grep -Fq -- '--required-kubernetes-drain-protocol=v1' <<<"$rendered"
 grep -Fq -- '--kubernetes-backend-fingerprint-deployment=sandbox-api' <<<"$rendered"
 grep -Fq -- '--verify-kubernetes-backend-fingerprint' <<<"$rendered"
 grep -Fq -- '--resume-kubernetes-deployment=sandbox-api' <<<"$rendered"
-grep -Fq 'sandbox.huaxisy.com/drain-protocol: "v1"' <<<"$rendered"
-grep -Fq 'sandbox.huaxisy.com/cleanup-protocol: "v2"' <<<"$rendered"
+grep -Fq 'goairix.github.io/sandbox-drain-protocol: "v1"' <<<"$rendered"
+grep -Fq 'goairix.github.io/sandbox-cleanup-protocol: "v2"' <<<"$rendered"
+! grep -Fq 'sandbox.huaxisy.com/' <<<"$rendered"
 grep -Fq -- '--kubernetes-cleanup-protocol=v2' <<<"$rendered"
 if helm template sandbox "$chart" --set autoscaling.enabled=true --show-only templates/deployment.yaml | grep -Eq '^  replicas:'; then
   printf 'HPA-managed Deployment unexpectedly renders spec.replicas\n' >&2
@@ -70,7 +71,7 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
     wait --for=condition=Ready pod/"$release-redis-0" --timeout=120s >/dev/null
 
   kubectl "${kubectl_args[@]}" --namespace "$test_namespace" patch deployment "$release-api" --type=merge \
-    -p '{"spec":{"template":{"metadata":{"annotations":{"sandbox.huaxisy.com/drain-protocol":null}}}}}' >/dev/null
+    -p '{"spec":{"template":{"metadata":{"annotations":{"goairix.github.io/sandbox-drain-protocol":null}}}}}' >/dev/null
   if helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \
     --set config.storage.filesystem.storageIdentity=another-physical-store >/dev/null 2>&1; then
@@ -81,7 +82,7 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
   helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" >/dev/null
   test "$(kubectl "${kubectl_args[@]}" --namespace "$test_namespace" get deployment "$release-api" \
-    -o jsonpath='{.spec.template.metadata.annotations.sandbox\.huaxisy\.com/drain-protocol}')" = "v1"
+    -o jsonpath='{.spec.template.metadata.annotations.goairix\.github\.io/sandbox-drain-protocol}')" = "v1"
 
   helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \

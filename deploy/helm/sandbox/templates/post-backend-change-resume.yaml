@@ -11,7 +11,7 @@ metadata:
     "helm.sh/hook": post-install,post-upgrade,post-rollback
     "helm.sh/hook-weight": "10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-    sandbox.huaxisy.com/backend-fingerprint: {{ $desiredFingerprint | quote }}
+    {{ include "sandbox.metadataPrefix" . }}/sandbox-backend-fingerprint: {{ $desiredFingerprint | quote }}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: {{ .Values.preDeleteDrain.timeoutSeconds }}

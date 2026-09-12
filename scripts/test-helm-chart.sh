@@ -10,7 +10,8 @@ grep -A1 'name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES' <<<"$rendered" \
   | grep -Fq 'value: "sync,fuse"'
 grep -A1 'name: SANDBOX_WORKSPACE_BACKEND_PRESET' <<<"$rendered" \
   | grep -Fq 'value: "minio"'
-grep -Fq 'sandbox.huaxisy.com/backend-fingerprint:' <<<"$rendered"
+grep -Fq 'goairix.github.io/sandbox-backend-fingerprint:' <<<"$rendered"
+! grep -Fq 'sandbox.huaxisy.com/' <<<"$rendered"
 ! grep -Fq 'SANDBOX_WORKSPACE_PROVIDERS_' <<<"$rendered"
 ! grep -Eq 'SANDBOX_WORKSPACE_(SECRET_NAME|ALLOW_UNVERIFIED_DURABLE_FLUSH|BACKEND_(CA_SECRET_KEY|ENDPOINT_HOST_IPS|SYSTEM_EGRESS|DNS_CIDRS|ENDPOINT_PORTS))|SANDBOX_STORAGE_FILESYSTEM_CA_FILE' <<<"$rendered"
 ! grep -Fq '0.0.0.0/0' <<<"$rendered"

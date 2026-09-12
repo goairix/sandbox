@@ -23,9 +23,9 @@ spec:
   template:
     metadata:
       annotations:
-        sandbox.huaxisy.com/backend-fingerprint: {{ include "sandbox.backend.fingerprint" . | quote }}
-        sandbox.huaxisy.com/drain-protocol: "v1"
-        sandbox.huaxisy.com/cleanup-protocol: "v2"
+        {{ include "sandbox.metadataPrefix" . }}/sandbox-backend-fingerprint: {{ include "sandbox.backend.fingerprint" . | quote }}
+        {{ include "sandbox.metadataPrefix" . }}/sandbox-drain-protocol: "v1"
+        {{ include "sandbox.metadataPrefix" . }}/sandbox-cleanup-protocol: "v2"
       labels:
         app: sandbox
         release: {{ .Release.Name }}
