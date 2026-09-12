@@ -1620,6 +1620,67 @@ func TestPreparedPodContainersTerminatedRequiresEveryDeclaredStatus(t *testing.T
 	require.False(t, preparedPodContainersTerminated(pod))
 }
 
+func TestPreparedPodContainersTerminatedAcceptsProvablyNeverStartedContainer(t *testing.T) {
+	newPod := func() *corev1.Pod {
+		now := metav1.Now()
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now},
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{Name: workspaceMounterContainer}},
+				Containers:     []corev1.Container{{Name: sandboxContainer}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name:  workspaceMounterContainer,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+				}},
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  sandboxContainer,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+				}},
+			},
+		}
+	}
+
+	require.True(t, preparedPodContainersTerminated(newPod()))
+
+	started := true
+	tests := map[string]func(*corev1.Pod){
+		"not deleting": func(pod *corev1.Pod) {
+			pod.DeletionTimestamp = nil
+		},
+		"non-terminal phase": func(pod *corev1.Pod) {
+			pod.Status.Phase = corev1.PodRunning
+		},
+		"container ID present": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].ContainerID = "containerd://sandbox"
+		},
+		"restart observed": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].RestartCount = 1
+		},
+		"started observed": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].Started = &started
+		},
+		"last termination observed": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{ExitCode: 1}
+		},
+		"currently running": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+		},
+		"status missing": func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses = nil
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := newPod()
+			mutate(pod)
+			require.False(t, preparedPodContainersTerminated(pod))
+		})
+	}
+}
+
 func TestFinalizePreparedSandboxRemovalRequiresDurableEvidence(t *testing.T) {
 	rt, _ := newFakeKubernetesRuntime(t, preparedScript())
 	err := rt.FinalizePreparedSandboxRemoval(context.Background(), "sandbox-pool-a", "pod-uid-a", sandboxruntime.TerminationEvidence{RuntimeUID: "pod-uid-a"})

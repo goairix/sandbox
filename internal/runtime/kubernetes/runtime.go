@@ -1290,34 +1290,37 @@ func preparedPodContainersTerminated(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
-	return declaredContainersTerminated(pod.Spec.InitContainers, pod.Status.InitContainerStatuses) &&
-		declaredContainersTerminated(pod.Spec.Containers, pod.Status.ContainerStatuses) &&
-		declaredEphemeralContainersTerminated(pod.Spec.EphemeralContainers, pod.Status.EphemeralContainerStatuses)
+	allowNeverStarted := pod.DeletionTimestamp != nil &&
+		(pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded)
+	return declaredContainersTerminated(pod.Spec.InitContainers, pod.Status.InitContainerStatuses, allowNeverStarted) &&
+		declaredContainersTerminated(pod.Spec.Containers, pod.Status.ContainerStatuses, allowNeverStarted) &&
+		declaredEphemeralContainersTerminated(pod.Spec.EphemeralContainers, pod.Status.EphemeralContainerStatuses, allowNeverStarted)
 }
 
-func declaredContainersTerminated(containers []corev1.Container, statuses []corev1.ContainerStatus) bool {
+func declaredContainersTerminated(containers []corev1.Container, statuses []corev1.ContainerStatus, allowNeverStarted bool) bool {
 	names := make(map[string]struct{}, len(containers))
 	for _, container := range containers {
 		names[container.Name] = struct{}{}
 	}
-	return namedContainersTerminated(names, statuses)
+	return namedContainersTerminated(names, statuses, allowNeverStarted)
 }
 
-func declaredEphemeralContainersTerminated(containers []corev1.EphemeralContainer, statuses []corev1.ContainerStatus) bool {
+func declaredEphemeralContainersTerminated(containers []corev1.EphemeralContainer, statuses []corev1.ContainerStatus, allowNeverStarted bool) bool {
 	names := make(map[string]struct{}, len(containers))
 	for _, container := range containers {
 		names[container.Name] = struct{}{}
 	}
-	return namedContainersTerminated(names, statuses)
+	return namedContainersTerminated(names, statuses, allowNeverStarted)
 }
 
-func namedContainersTerminated(names map[string]struct{}, statuses []corev1.ContainerStatus) bool {
+func namedContainersTerminated(names map[string]struct{}, statuses []corev1.ContainerStatus, allowNeverStarted bool) bool {
 	if len(statuses) != len(names) {
 		return false
 	}
 	seen := make(map[string]struct{}, len(statuses))
 	for _, status := range statuses {
-		if _, declared := names[status.Name]; !declared || status.State.Terminated == nil {
+		if _, declared := names[status.Name]; !declared ||
+			(status.State.Terminated == nil && !(allowNeverStarted && containerProvablyNeverStarted(status))) {
 			return false
 		}
 		if _, duplicate := seen[status.Name]; duplicate {
@@ -1326,6 +1329,16 @@ func namedContainersTerminated(names map[string]struct{}, statuses []corev1.Cont
 		seen[status.Name] = struct{}{}
 	}
 	return len(seen) == len(names)
+}
+
+func containerProvablyNeverStarted(status corev1.ContainerStatus) bool {
+	return status.State.Waiting != nil &&
+		status.ContainerID == "" &&
+		status.RestartCount == 0 &&
+		(status.Started == nil || !*status.Started) &&
+		status.LastTerminationState.Running == nil &&
+		status.LastTerminationState.Terminated == nil &&
+		status.LastTerminationState.Waiting == nil
 }
 
 func (r *Runtime) waitExactPodTerminated(ctx context.Context, ref runtime.RuntimeRef) (*corev1.Pod, bool, error) {
