@@ -149,7 +149,7 @@ var acquireActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if record.phase ~= 'active' or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 local lease = cjson.decode(ARGV[1])
@@ -163,7 +163,7 @@ var renewActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if record.phase ~= 'active' or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local current = redis.call('GET', KEYS[2])
 if not current then return {2} end
 local lease = cjson.decode(current)

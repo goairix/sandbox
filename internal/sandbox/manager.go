@@ -1844,6 +1844,15 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 		trace.WithAttributes(attribute.String("reason", reason)),
 	)
 	defer span.End()
+	if m.distributedStateEnabled() {
+		if err := m.destroyDistributedSandbox(ctx, id); err != nil {
+			telemetry.Error(err, span)
+			return err
+		}
+		metrics.SandboxActiveGauge.Add(ctx, -1)
+		metrics.RecordSandboxDestroy(ctx, reason)
+		return nil
+	}
 	m.mu.RLock()
 	fuseLifecycle := m.fuseLifecycles[id]
 	syncLifecycle := m.syncLifecycles[id]
@@ -2561,7 +2570,7 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	)
 	defer span.End()
 
-	sb, release, err := m.acquireSandboxOperation(ctx, id)
+	sb, release, err := m.acquireSandboxMutation(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -2596,6 +2605,9 @@ func (m *Manager) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	sb.Config.Network.BlockPrivate = blockPrivate
 	sb.UpdatedAt = time.Now()
 	m.mu.Unlock()
+	if err := m.persistActiveSandboxUpdate(ctx, sb); err != nil {
+		return fmt.Errorf("persist network update: %w", err)
+	}
 
 	return nil
 }
@@ -2608,7 +2620,7 @@ func (m *Manager) UpdateTTL(ctx context.Context, id string, timeoutSeconds int) 
 		return nil, fmt.Errorf("timeout must be greater than 0")
 	}
 
-	sb, release, err := m.acquireSandboxOperation(ctx, id)
+	sb, release, err := m.acquireSandboxMutation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -2623,6 +2635,9 @@ func (m *Manager) UpdateTTL(ctx context.Context, id string, timeoutSeconds int) 
 	sb.UpdatedAt = now
 	result := cloneSandbox(sb)
 	m.mu.Unlock()
+	if err := m.persistActiveSandboxUpdate(ctx, sb); err != nil {
+		return nil, fmt.Errorf("persist sandbox TTL: %w", err)
+	}
 
 	// Persist to session store if applicable
 	if result.Config.Mode == ModePersistent && m.sessions != nil {

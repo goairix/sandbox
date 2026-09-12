@@ -15,13 +15,14 @@ import (
 )
 
 type memoryActiveRepository struct {
-	mu      sync.Mutex
-	records map[string]state.ActiveSandboxRecord
-	ops     map[string]map[string]state.ActiveSandboxOperation
+	mu          sync.Mutex
+	records     map[string]state.ActiveSandboxRecord
+	ops         map[string]map[string]state.ActiveSandboxOperation
+	controllers map[string]state.ActiveSandboxControllerLease
 }
 
 func newMemoryActiveRepository() *memoryActiveRepository {
-	return &memoryActiveRepository{records: map[string]state.ActiveSandboxRecord{}, ops: map[string]map[string]state.ActiveSandboxOperation{}}
+	return &memoryActiveRepository{records: map[string]state.ActiveSandboxRecord{}, ops: map[string]map[string]state.ActiveSandboxOperation{}, controllers: map[string]state.ActiveSandboxControllerLease{}}
 }
 
 func (r *memoryActiveRepository) Publish(_ context.Context, record state.ActiveSandboxRecord) error {
@@ -113,7 +114,21 @@ func (r *memoryActiveRepository) EndOperation(_ context.Context, op state.Active
 	return nil
 }
 func (r *memoryActiveRepository) BeginDestroy(_ context.Context, id string) (*state.ActiveSandboxRecord, int64, bool, error) {
-	return nil, 0, false, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[id]
+	if !ok {
+		return nil, 0, false, nil
+	}
+	won := record.Phase == state.ActiveSandboxActive
+	if won {
+		record.Phase = state.ActiveSandboxDestroying
+		record.Revision++
+		record.UpdatedAt = time.Now()
+		r.records[id] = record
+	}
+	copy := record
+	return &copy, int64(len(r.ops[id])), won, nil
 }
 func (r *memoryActiveRepository) LiveOperations(_ context.Context, id string) (int64, error) {
 	r.mu.Lock()
@@ -121,7 +136,21 @@ func (r *memoryActiveRepository) LiveOperations(_ context.Context, id string) (i
 	return int64(len(r.ops[id])), nil
 }
 func (r *memoryActiveRepository) Checkpoint(_ context.Context, id string, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[id]
+	if !ok {
+		return nil, nil
+	}
+	if record.Revision != revision {
+		return nil, state.ErrActiveSandboxConflict
+	}
+	record.Phase = state.ActiveSandboxCleanupPending
+	record.CleanupCheckpoint = checkpoint
+	record.Revision++
+	record.UpdatedAt = time.Now()
+	r.records[id] = record
+	return &record, nil
 }
 func (r *memoryActiveRepository) Delete(_ context.Context, id string, revision uint64, generation int64) error {
 	r.mu.Lock()
@@ -131,12 +160,34 @@ func (r *memoryActiveRepository) Delete(_ context.Context, id string, revision u
 	return nil
 }
 func (r *memoryActiveRepository) AcquireController(_ context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, bool, error) {
-	return nil, false, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current, ok := r.controllers[lease.SandboxID]; ok && current.ExpiresAt.After(time.Now()) {
+		return nil, false, nil
+	}
+	lease.ExpiresAt = time.Now().Add(ttl)
+	r.controllers[lease.SandboxID] = lease
+	return &lease, true, nil
 }
 func (r *memoryActiveRepository) RenewController(_ context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, error) {
-	return nil, state.ErrActiveSandboxStaleToken
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.controllers[lease.SandboxID]
+	if !ok || current.Token != lease.Token {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	lease.ExpiresAt = time.Now().Add(ttl)
+	r.controllers[lease.SandboxID] = lease
+	return &lease, nil
 }
 func (r *memoryActiveRepository) ReleaseController(_ context.Context, lease state.ActiveSandboxControllerLease) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.controllers[lease.SandboxID]
+	if ok && current.Token != lease.Token {
+		return state.ErrActiveSandboxStaleToken
+	}
+	delete(r.controllers, lease.SandboxID)
 	return nil
 }
 func (r *memoryActiveRepository) Scan(_ context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
@@ -166,4 +217,29 @@ func TestKubernetesActivePublicationAllowsCrossReplicaOrdinaryEphemeralOperation
 	result, err := peer.Exec(context.Background(), sb.ID, runtime.ExecRequest{Command: "echo shared"})
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.ExitCode)
+	require.NoError(t, peer.UpdateNetwork(context.Background(), sb.ID, false, []string{"example.com"}, true))
+	updated, err := creator.Get(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.False(t, updated.Config.Network.Enabled)
+	assert.Equal(t, []string{"example.com"}, updated.Config.Network.Whitelist)
+	assert.True(t, updated.Config.Network.BlockPrivate)
+}
+
+func TestKubernetesDistributedDestroyRemovesOrdinarySandboxCreatedByPeer(t *testing.T) {
+	rt := newMockRuntime()
+	repository := newMemoryActiveRepository()
+	cfg := ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repository, InstanceID: "api-a", PoolConfig: PoolConfig{Image: "sandbox:latest"}}
+	creator := NewManager(rt, nil, nil, cfg)
+	cfg.InstanceID = "api-b"
+	peer := NewManager(rt, nil, nil, cfg)
+
+	sb, err := creator.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, Network: NetworkConfig{Enabled: true}})
+	require.NoError(t, err)
+	require.NoError(t, peer.Destroy(context.Background(), sb.ID))
+	record, err := repository.Load(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.Nil(t, record)
+	info, err := rt.GetSandbox(context.Background(), sb.RuntimeID)
+	require.NoError(t, err)
+	assert.Nil(t, info)
 }

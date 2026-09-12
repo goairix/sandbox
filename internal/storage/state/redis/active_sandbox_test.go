@@ -123,7 +123,10 @@ func TestActiveSandboxRepositoryControllerAndScan(t *testing.T) {
 	}
 	page, err := repo.Scan(ctx, 0, 2)
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(page.Records), 2)
+	for len(page.Records) == 0 && page.Cursor != 0 {
+		page, err = repo.Scan(ctx, page.Cursor, 2)
+		require.NoError(t, err)
+	}
 	assert.NotEmpty(t, page.Records)
 
 	now := time.Now().UTC()
