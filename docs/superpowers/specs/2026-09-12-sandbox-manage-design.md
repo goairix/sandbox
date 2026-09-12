@@ -110,7 +110,7 @@ internal/admin/
 
 ### 6.1 数据库选择
 
-首期只支持 PostgreSQL 18 或更高版本，以使用数据库原生 `uuidv7()`。使用：
+首期支持 PostgreSQL 17 或更高版本。数据库必须提供无参数、返回 PostgreSQL 原生 `uuid` 类型的 `uuidv7()` 函数：当前 PostgreSQL 17 环境由已安装插件提供，PostgreSQL 18 及更高版本可使用内置函数。应用只做能力检测，不负责执行 `CREATE EXTENSION`、安装或升级数据库插件。使用：
 
 - `gorm.io/gorm`；
 - `gorm.io/driver/postgres`；
@@ -535,7 +535,7 @@ admin:
 
 1. 加载并校验配置；
 2. 初始化日志和 Telemetry；
-3. 连接 PostgreSQL，并校验服务端版本至少为 18 且 `uuidv7()` 可用；
+3. 连接 PostgreSQL，并调用 `uuidv7()` 校验函数存在、可执行且返回原生 `uuid` 类型；
 4. 主进程获取迁移锁，自动执行全部待执行 Migration 与 Seed；
 5. 初始化 Repository、Admin Service 和命令 Worker；
 6. 初始化现有 Runtime、Redis、Storage 和 Manager；
@@ -566,8 +566,8 @@ admin:
 - 重复执行迁移无副作用；
 - 多副本并发迁移只有一个执行者；
 - 所有管理域自有表的主键类型为 PostgreSQL `uuid`，数据库默认值生成 UUIDv7；
-- 新增记录可用 `uuid_extract_version(id)` 验证版本为 7；
-- PostgreSQL 版本低于 18 或缺少 `uuidv7()` 时启动失败；
+- 新增记录由 Go UUID 解析器验证版本为 7，不依赖 PostgreSQL 18 才提供的 UUID 版本提取函数；
+- `uuidv7()` 缺失、无执行权限或返回类型不是 PostgreSQL 原生 `uuid` 时启动失败；
 - Seed 幂等且不覆盖已有密码；
 - Repository 查询、分页、事务和唯一约束；
 - 多 Worker 竞争同一命令；
