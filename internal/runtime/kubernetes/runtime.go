@@ -1452,6 +1452,7 @@ func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeNa
 	// retain the exact requested NodeName.
 	kubescheme.Scheme.Default(currentCopy)
 	kubescheme.Scheme.Default(desiredCopy)
+	normalizeAppArmorAdmission(currentCopy, desiredCopy)
 	if len(currentCopy.Annotations) == 0 && len(desiredCopy.Annotations) == 0 {
 		currentCopy.Annotations = nil
 		desiredCopy.Annotations = nil
@@ -1486,6 +1487,7 @@ func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
 	currentCopy, desiredCopy := current.DeepCopy(), desired.DeepCopy()
 	kubescheme.Scheme.Default(currentCopy)
 	kubescheme.Scheme.Default(desiredCopy)
+	normalizeAppArmorAdmission(currentCopy, desiredCopy)
 	if len(currentCopy.Annotations) == 0 && len(desiredCopy.Annotations) == 0 {
 		currentCopy.Annotations, desiredCopy.Annotations = nil, nil
 	}
@@ -1513,6 +1515,45 @@ func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
 		}
 	}
 	return "identity"
+}
+
+func normalizeAppArmorAdmission(current, desired *corev1.Pod) {
+	normalize := func(name string, currentSecurity, desiredSecurity *corev1.SecurityContext) {
+		if desiredSecurity == nil || desiredSecurity.AppArmorProfile != nil ||
+			currentSecurity == nil || currentSecurity.AppArmorProfile == nil {
+			return
+		}
+		annotation := desired.Annotations[corev1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix+name]
+		if !strings.HasPrefix(annotation, corev1.DeprecatedAppArmorBetaProfileNamePrefix) {
+			return
+		}
+		profile := strings.TrimPrefix(annotation, corev1.DeprecatedAppArmorBetaProfileNamePrefix)
+		if validateLSMProfile(profile) != nil {
+			return
+		}
+		expected := &corev1.AppArmorProfile{
+			Type:             corev1.AppArmorProfileTypeLocalhost,
+			LocalhostProfile: &profile,
+		}
+		if apiequality.Semantic.DeepEqual(currentSecurity.AppArmorProfile, expected) {
+			currentSecurity.AppArmorProfile = nil
+		}
+	}
+	for index := 0; index < len(current.Spec.Containers) && index < len(desired.Spec.Containers); index++ {
+		if current.Spec.Containers[index].Name == desired.Spec.Containers[index].Name {
+			normalize(current.Spec.Containers[index].Name, current.Spec.Containers[index].SecurityContext, desired.Spec.Containers[index].SecurityContext)
+		}
+	}
+	for index := 0; index < len(current.Spec.InitContainers) && index < len(desired.Spec.InitContainers); index++ {
+		if current.Spec.InitContainers[index].Name == desired.Spec.InitContainers[index].Name {
+			normalize(current.Spec.InitContainers[index].Name, current.Spec.InitContainers[index].SecurityContext, desired.Spec.InitContainers[index].SecurityContext)
+		}
+	}
+	for index := 0; index < len(current.Spec.EphemeralContainers) && index < len(desired.Spec.EphemeralContainers); index++ {
+		if current.Spec.EphemeralContainers[index].Name == desired.Spec.EphemeralContainers[index].Name {
+			normalize(current.Spec.EphemeralContainers[index].Name, current.Spec.EphemeralContainers[index].SecurityContext, desired.Spec.EphemeralContainers[index].SecurityContext)
+		}
+	}
 }
 
 func validServiceAccountImagePullSecrets(refs []corev1.LocalObjectReference) bool {
