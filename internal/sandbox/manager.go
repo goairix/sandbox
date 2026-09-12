@@ -580,7 +580,9 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
 	}
 	m.pool.Drain(ctx)
-	drainErr = errors.Join(drainErr, m.drainOrphanedOrdinaryPoolContainers(ctx))
+	if m.config.RuntimeType == "kubernetes" {
+		drainErr = errors.Join(drainErr, m.drainOrphanedOrdinaryPoolContainers(ctx))
+	}
 	if m.sessions != nil {
 		drainErr = errors.Join(drainErr, AuditDrainedState(ctx, m.sessions.store))
 	}
@@ -3066,12 +3068,12 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) int {
 	return removed
 }
 
-// drainOrphanedOrdinaryPoolContainers removes ordinary warm-pool runtimes that
-// are not represented in this Manager's in-memory Pool. Release-drain callers
-// have already stopped every API replica and finalized user sandboxes, so any
-// remaining non-FUSE runtime carrying sandbox.pool=true is orphaned. Unlike the
-// startup cleanup, this path is fail-closed because Helm must not proceed while
-// managed resources remain in the runtime namespace.
+// drainOrphanedOrdinaryPoolContainers removes Kubernetes ordinary warm-pool
+// runtimes that are not represented in this Manager's in-memory Pool.
+// Release-drain callers have already stopped every API replica and finalized
+// user sandboxes, so any remaining non-FUSE runtime carrying sandbox.pool=true
+// is orphaned. Unlike the startup cleanup, this path is fail-closed because
+// Helm must not proceed while managed resources remain in the runtime namespace.
 func (m *Manager) drainOrphanedOrdinaryPoolContainers(ctx context.Context) error {
 	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{
 		"sandbox.managed": "true",
@@ -3083,7 +3085,8 @@ func (m *Manager) drainOrphanedOrdinaryPoolContainers(ctx context.Context) error
 
 	var drainErr error
 	for _, container := range containers {
-		if container.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) {
+		if container.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) ||
+			container.Labels["sandbox.role"] == "fuse-runtime" {
 			continue
 		}
 		if container.Labels["sandbox.managed"] != "true" || container.Labels["sandbox.pool"] != "true" {

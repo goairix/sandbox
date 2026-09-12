@@ -68,7 +68,7 @@ func TestManagerDrainReleaseRemovesOrphanedOrdinaryPoolRuntime(t *testing.T) {
 		RuntimeID: "sandbox-pool-orphan",
 		Labels:    map[string]string{"sandbox.managed": "true", "sandbox.pool": "true"},
 	}}
-	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
 
 	require.NoError(t, mgr.DrainRelease(context.Background()))
 	assert.True(t, rt.wasRemoved("sandbox-pool-orphan"))
@@ -85,7 +85,7 @@ func TestManagerDrainReleaseDoesNotTreatFUSEPoolRuntimeAsOrdinary(t *testing.T) 
 			"sandbox.workspace.mode": string(WorkspaceMountFUSE),
 		},
 	}}
-	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
 
 	require.NoError(t, mgr.DrainRelease(context.Background()))
 	assert.False(t, rt.wasRemoved("sandbox-pool-fuse"))
@@ -94,7 +94,7 @@ func TestManagerDrainReleaseDoesNotTreatFUSEPoolRuntimeAsOrdinary(t *testing.T) 
 func TestManagerDrainReleaseReportsOrdinaryPoolDiscoveryFailure(t *testing.T) {
 	rt := newMockRuntime()
 	rt.listSandboxesErr = errors.New("list failed")
-	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
 
 	err := mgr.DrainRelease(context.Background())
 	require.ErrorContains(t, err, "list ordinary pool runtimes during release drain")
@@ -107,7 +107,7 @@ func TestManagerDrainReleaseReportsOrdinaryPoolRemovalFailure(t *testing.T) {
 		Labels:    map[string]string{"sandbox.managed": "true", "sandbox.pool": "true"},
 	}}
 	rt.failRemove("sandbox-pool-stuck", errors.New("delete failed"))
-	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
 
 	err := mgr.DrainRelease(context.Background())
 	require.ErrorContains(t, err, "remove ordinary pool runtime sandbox-pool-stuck during release drain")
@@ -119,9 +119,38 @@ func TestManagerDrainReleaseRejectsInvalidOrdinaryPoolIdentity(t *testing.T) {
 		RuntimeID: "sandbox-pool-unmanaged",
 		Labels:    map[string]string{"sandbox.pool": "true"},
 	}}
-	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
 
 	err := mgr.DrainRelease(context.Background())
 	require.ErrorContains(t, err, "ordinary pool runtime sandbox-pool-unmanaged has invalid pool identity")
 	assert.False(t, rt.wasRemoved("sandbox-pool-unmanaged"))
+}
+
+func TestManagerDrainReleaseDoesNotTreatDockerFUSELabelsAsOrdinary(t *testing.T) {
+	rt := newMockRuntime()
+	rt.listedSandboxes = []runtime.SandboxInfo{{
+		RuntimeID: "sandbox-pool-docker-fuse",
+		Labels: map[string]string{
+			"sandbox.managed": "true",
+			"sandbox.pool":    "true",
+			"sandbox.role":    "fuse-runtime",
+		},
+	}}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
+
+	require.NoError(t, mgr.DrainRelease(context.Background()))
+	assert.False(t, rt.wasRemoved("sandbox-pool-docker-fuse"))
+}
+
+func TestManagerDrainReleaseDoesNotScanDockerPoolOrphans(t *testing.T) {
+	rt := newMockRuntime()
+	rt.listedSandboxes = []runtime.SandboxInfo{{
+		RuntimeID: "sandbox-pool-docker-legacy",
+		Labels:    map[string]string{"sandbox.pool": "true"},
+	}}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "docker"})
+
+	require.NoError(t, mgr.DrainRelease(context.Background()))
+	assert.False(t, rt.wasRemoved("sandbox-pool-docker-legacy"))
+	assert.Nil(t, rt.listLabels)
 }

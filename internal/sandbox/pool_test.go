@@ -448,6 +448,49 @@ func TestPool_Acquire(t *testing.T) {
 	assert.Equal(t, 1, pool.Size())
 }
 
+func TestPoolDrainWaitsForInFlightRefillAndRemovesItsResult(t *testing.T) {
+	base := newMockRuntime()
+	rt := &blockingCreateRuntime{
+		mockRuntime: base,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	pool := NewPool(rt, PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"})
+	pool.NotifyRemoved()
+	<-rt.entered
+
+	drained := make(chan struct{})
+	go func() {
+		pool.Drain(context.Background())
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+		assert.Fail(t, "pool drain returned before in-flight refill completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(rt.release)
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("pool drain did not finish after refill completed")
+	}
+	require.Eventually(t, func() bool {
+		base.mu.Lock()
+		defer base.mu.Unlock()
+		return base.created == 1
+	}, time.Second, 10*time.Millisecond)
+
+	base.mu.Lock()
+	created, removed := base.created, base.removed
+	remaining := len(base.sandboxes)
+	base.mu.Unlock()
+	assert.Equal(t, 1, created)
+	assert.Equal(t, 1, removed)
+	assert.Zero(t, remaining)
+}
+
 func TestPoolCreateWarmPropagatesTmpDisk(t *testing.T) {
 	rt := newMockRuntime()
 	pool := NewPool(rt, PoolConfig{

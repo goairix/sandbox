@@ -29,9 +29,13 @@ type Pool struct {
 	runtime runtime.Runtime
 	config  PoolConfig
 
-	mu        sync.Mutex
-	available []*runtime.SandboxInfo
-	refilling bool
+	mu           sync.Mutex
+	available    []*runtime.SandboxInfo
+	refilling    bool
+	stopping     bool
+	refillCtx    context.Context
+	refillCancel context.CancelFunc
+	refillWG     sync.WaitGroup
 }
 
 const (
@@ -41,9 +45,12 @@ const (
 
 // NewPool creates a new container pool.
 func NewPool(rt runtime.Runtime, cfg PoolConfig) *Pool {
+	refillCtx, refillCancel := context.WithCancel(context.Background())
 	return &Pool{
-		runtime: rt,
-		config:  cfg,
+		runtime:      rt,
+		config:       cfg,
+		refillCtx:    refillCtx,
+		refillCancel: refillCancel,
 	}
 }
 
@@ -84,7 +91,7 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 		if err == nil && got != nil && got.State == "running" {
 			metrics.SandboxPoolSize.Add(ctx, -1)
 			metrics.RecordPoolAcquire(ctx, true)
-			go p.refillIfNeeded(context.Background())
+			p.scheduleRefill()
 			return info, nil
 		}
 
@@ -106,7 +113,7 @@ func (p *Pool) Release(ctx context.Context, id string) {
 	_ = p.runtime.RemoveSandbox(ctx, id)
 
 	// Trigger async refill
-	go p.refillIfNeeded(context.Background())
+	p.scheduleRefill()
 }
 
 // Size returns the number of available warm containers.
@@ -119,11 +126,23 @@ func (p *Pool) Size() int {
 // NotifyRemoved notifies the pool that a container from this pool was removed,
 // triggering an async refill if needed.
 func (p *Pool) NotifyRemoved() {
-	go p.refillIfNeeded(context.Background())
+	p.scheduleRefill()
 }
 
 // Drain destroys all warm containers in the pool.
 func (p *Pool) Drain(ctx context.Context) {
+	p.mu.Lock()
+	if !p.stopping {
+		p.stopping = true
+		p.refillCancel()
+	}
+	p.mu.Unlock()
+
+	// Refill owns creation of new warm runtimes. Wait for every scheduled
+	// refill to observe cancellation before taking the final inventory so none
+	// can publish another runtime after the drain snapshot.
+	p.refillWG.Wait()
+
 	p.mu.Lock()
 	items := make([]*runtime.SandboxInfo, len(p.available))
 	copy(items, p.available)
@@ -133,6 +152,22 @@ func (p *Pool) Drain(ctx context.Context) {
 	for _, info := range items {
 		_ = p.runtime.RemoveSandbox(ctx, info.RuntimeID)
 	}
+}
+
+func (p *Pool) scheduleRefill() {
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return
+	}
+	ctx := p.refillCtx
+	p.refillWG.Add(1)
+	p.mu.Unlock()
+
+	go func() {
+		defer p.refillWG.Done()
+		p.refillIfNeeded(ctx)
+	}()
 }
 
 func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
@@ -160,7 +195,7 @@ func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
 
 func (p *Pool) refillIfNeeded(ctx context.Context) {
 	p.mu.Lock()
-	if p.refilling {
+	if p.refilling || p.stopping {
 		p.mu.Unlock()
 		return
 	}
@@ -181,7 +216,7 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 
 	for {
 		p.mu.Lock()
-		if len(p.available) >= p.config.MinSize {
+		if p.stopping || len(p.available) >= p.config.MinSize {
 			p.mu.Unlock()
 			return
 		}
@@ -219,6 +254,13 @@ func (p *Pool) refillIfNeeded(ctx context.Context) {
 		}
 		consecutiveFailures = 0
 		p.mu.Lock()
+		if p.stopping {
+			// Publish the just-created runtime into the final drain inventory.
+			// Drain waits for this refill before taking that inventory.
+			p.available = append(p.available, info)
+			p.mu.Unlock()
+			return
+		}
 		if len(p.available) < p.config.MaxSize {
 			p.available = append(p.available, info)
 			p.mu.Unlock()

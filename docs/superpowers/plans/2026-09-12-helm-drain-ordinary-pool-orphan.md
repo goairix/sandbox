@@ -4,7 +4,7 @@
 
 **Goal:** Make release-wide drain remove ordinary warm-pool runtimes that are not present in the drain Job's in-memory Pool before Kubernetes zero-state audit runs.
 
-**Architecture:** Add a drain-only, fail-closed Manager helper that lists `sandbox.managed=true,sandbox.pool=true` runtimes, excludes FUSE runtimes, validates returned ownership labels, and aggregates exact removal errors. Invoke it after the in-memory ordinary Pool has drained so failed or orphaned removals are retried, while the existing FUSE and final audit paths remain unchanged.
+**Architecture:** Stop, cancel, and wait for ordinary Pool refill before taking the final drain inventory. Then, only for Kubernetes, use a fail-closed Manager helper that lists `sandbox.managed=true,sandbox.pool=true` runtimes, excludes both Kubernetes- and Docker-shaped FUSE identities, validates returned ownership labels, and aggregates exact removal errors; Docker keeps its existing in-memory drain because historical labels do not provide the same safe orphan-scan contract.
 
 **Tech Stack:** Go 1.25, `errors.Join`, sandbox runtime abstraction, testify unit tests
 
@@ -208,3 +208,46 @@ git status --short
 ```
 
 Expected: no whitespace errors; only unrelated pre-existing workspace changes, if any, remain.
+
+### Task 4: Address review findings for FUSE identity and refill races
+
+**Files:**
+- Modify: `internal/sandbox/pool.go`
+- Modify: `internal/sandbox/pool_test.go`
+- Modify: `internal/sandbox/manager.go`
+- Modify: `internal/sandbox/drain_audit_test.go`
+
+- [ ] **Step 1: Add failing tests for backend identity boundaries**
+
+Cover a `sandbox.role=fuse-runtime` object without `sandbox.workspace.mode`, and verify a Docker
+Manager does not run the Kubernetes orphan scan. Run the focused Manager tests and require both to
+fail against the first implementation.
+
+- [ ] **Step 2: Limit scanning and recognize both FUSE identities**
+
+Guard the helper call with `m.config.RuntimeType == "kubernetes"`. Skip a listed object when either
+`sandbox.workspace.mode=fuse` or `sandbox.role=fuse-runtime`. Run the focused Manager tests and
+require PASS.
+
+- [ ] **Step 3: Add a failing in-flight refill race test**
+
+Block `CreateSandbox` inside a scheduled refill, start `Pool.Drain`, and assert drain cannot return
+until the refill exits and its successful result is removed. Run the focused Pool test and require
+it to fail because the old drain only snapshots `available`.
+
+- [ ] **Step 4: Add the refill stop barrier**
+
+Give Pool a pool-owned cancellable context, stopping flag, and refill wait group. Route every async
+refill through one scheduler that rejects work after stopping; have Drain cancel, wait, then snapshot
+and remove the final inventory. If creation succeeds after cancellation, append that result to the
+final drain inventory. Run the focused Pool and Manager tests and require PASS.
+
+- [ ] **Step 5: Verify all affected implementations**
+
+Run:
+
+```bash
+go test ./internal/sandbox ./internal/runtime/kubernetes ./internal/runtime/docker -count=1
+```
+
+Expected: PASS.
