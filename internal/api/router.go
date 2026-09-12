@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -51,13 +53,24 @@ func directUploadRoute(method, requestPath string) bool {
 }
 
 // SetupRouter configures all routes.
-func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName string) *gin.Engine {
+func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName string, readiness ...func(context.Context) error) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
 	// Health check — registered before OTel middleware so it is never traced
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
+	})
+	r.GET("/ready", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		for _, check := range readiness {
+			if check != nil && check(ctx) != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
 	r.Use(middleware.OTel(serviceName))

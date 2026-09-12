@@ -16,6 +16,11 @@ metadata:
     app: sandbox
     release: {{ .Release.Name }}
 spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -33,6 +38,7 @@ spec:
         app: sandbox
         release: {{ .Release.Name }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       serviceAccountName: {{ .Release.Name }}-api
       {{- if .Values.redis.enabled }}
       initContainers:
@@ -79,6 +85,8 @@ spec:
               value: "{{ .Values.config.runtime.type }}"
             - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
               value: "{{ $sandboxNs }}"
+            - name: SANDBOX_STATE_SCOPE
+              value: {{ printf "%s/%s" $sandboxNs .Release.Name | quote }}
             - name: SANDBOX_POOL_MIN_SIZE
               value: "{{ .Values.config.pool.minSize }}"
             - name: SANDBOX_POOL_MAX_SIZE
@@ -286,7 +294,7 @@ spec:
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5

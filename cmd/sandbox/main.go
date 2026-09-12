@@ -314,7 +314,11 @@ func main() {
 		if redisStore == nil {
 			log.Fatal("Kubernetes runtime requires Redis for stateless multi-replica sandbox state")
 		}
-		activeRepository, repositoryErr := redisstate.NewActiveSandboxRepository(redisStore, cfg.Runtime.Kubernetes.Namespace)
+		stateScope := os.Getenv("SANDBOX_STATE_SCOPE")
+		if stateScope == "" {
+			stateScope = cfg.Runtime.Kubernetes.Namespace
+		}
+		activeRepository, repositoryErr := redisstate.NewActiveSandboxRepository(redisStore, stateScope)
 		if repositoryErr != nil {
 			log.Fatalf("failed to create active sandbox repository: %v", repositoryErr)
 		}
@@ -336,7 +340,10 @@ func main() {
 			log.Fatal("Kubernetes ordinary pool requires Redis for shared multi-replica inventory")
 		}
 		managerConfig.PoolStateStore = redisStore
-		managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
+		managerConfig.PoolScope = os.Getenv("SANDBOX_STATE_SCOPE")
+		if managerConfig.PoolScope == "" {
+			managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
+		}
 	}
 	for _, mode := range cfg.Workspace.EnabledMountModes {
 		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
@@ -420,7 +427,7 @@ func main() {
 	}
 
 	h := handler.NewHandler(mgr, cfg.Security.MaxUploadBytes)
-	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit, cfg.Telemetry.ServiceName)
+	router := api.SetupRouter(h, cfg.Security.APIKey, cfg.Security.RateLimit, cfg.Telemetry.ServiceName, mgr.Ready)
 	server := api.NewServer(router, cfg.Server.Host, cfg.Server.Port)
 
 	// Graceful shutdown
@@ -431,12 +438,13 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("shutting down...")
+		mgr.BeginShutdown()
+		if shutdownErr := server.Stop(context.Background()); shutdownErr != nil {
+			log.Printf("server shutdown error: %v", shutdownErr)
+		}
 		cancel()
 		if stopErr := mgr.Stop(context.Background()); stopErr != nil {
 			log.Printf("sandbox manager shutdown error: %v", stopErr)
-		}
-		if shutdownErr := server.Stop(context.Background()); shutdownErr != nil {
-			log.Printf("server shutdown error: %v", shutdownErr)
 		}
 		shutdownCtx := context.Background()
 		if p := trace.TracerProvider(); p != nil {

@@ -117,6 +117,20 @@ type Runtime struct {
 	workspaceStates        map[string]*workspaceRuntimeState
 }
 
+// Ping performs a bounded one-item Pod list for readiness. It uses the request
+// context and therefore cannot pin readiness workers behind a stalled API
+// server; Limit keeps response cost independent of sandbox pool size.
+func (r *Runtime) Ping(ctx context.Context) error {
+	if r == nil || r.client == nil {
+		return errors.New("kubernetes client is not configured")
+	}
+	_, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		return fmt.Errorf("probe kubernetes pods API: %w", err)
+	}
+	return nil
+}
+
 // New creates a new Kubernetes runtime.
 func New(kubeconfig string, namespace string, options ...Option) (*Runtime, error) {
 	var restConfig *rest.Config

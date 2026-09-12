@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -39,5 +40,8 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return s.httpServer.Shutdown(shutdownCtx)
+	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(err, s.httpServer.Close())
+	}
+	return nil
 }

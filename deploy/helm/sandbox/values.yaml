@@ -1,5 +1,13 @@
 replicaCount: 2
 
+# Must exceed the HTTP drain timeout plus the distributed operation/controller
+# lease handoff window during rolling updates.
+terminationGracePeriodSeconds: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
   tag: v0.2.12

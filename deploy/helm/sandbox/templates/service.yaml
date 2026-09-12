@@ -8,6 +8,7 @@ metadata:
     release: {{ .Release.Name }}
 spec:
   type: {{ .Values.service.type }}
+  sessionAffinity: None
   ports:
     - port: {{ .Values.service.port }}
       targetPort: {{ .Values.config.server.port }}

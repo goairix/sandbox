@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,6 +77,22 @@ func streamingUploadRouter(t *testing.T, maxUploadBytes int64) (http.Handler, st
 	require.NoError(t, err)
 	router := SetupRouter(handler.NewHandler(mgr, maxUploadBytes), "", 0, "test")
 	return router, sb.ID, rt
+}
+
+func TestReadinessIsDependencyAwareWhileLivenessStaysHealthy(t *testing.T) {
+	initRouterMetrics.Do(func() { require.NoError(t, metrics.InitNoop()) })
+	rt := &streamingUploadRuntime{}
+	mgr := sandbox.NewManager(rt, nil, nil, sandbox.ManagerConfig{})
+	router := SetupRouter(handler.NewHandler(mgr, 1<<20), "", 0, "test", func(context.Context) error {
+		return errors.New("redis unavailable")
+	})
+
+	ready := httptest.NewRecorder()
+	router.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, ready.Code)
+	live := httptest.NewRecorder()
+	router.ServeHTTP(live, httptest.NewRequest(http.MethodGet, "/health", nil))
+	assert.Equal(t, http.StatusOK, live.Code)
 }
 
 func TestStreamingUploadCanExceedDefaultBodyLimitWithoutLinearMemoryGrowth(t *testing.T) {

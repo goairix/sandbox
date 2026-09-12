@@ -33,5 +33,7 @@ spec:
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
             - "--drain-release"
           env:
+            - name: SANDBOX_STATE_SCOPE
+              value: {{ printf "%s/%s" (.Values.config.runtime.kubernetes.namespace | default .Release.Namespace) .Release.Name | quote }}
 {{ include "sandbox.drainEnv" . | nindent 12 }}
 {{- end }}
