@@ -8,6 +8,8 @@ import (
 
 type FUSEPoolState string
 
+type FUSEPoolCleanupPhase string
+
 const (
 	FUSEPoolPreparing FUSEPoolState = "preparing"
 	FUSEPoolPrepared  FUSEPoolState = "prepared"
@@ -15,6 +17,9 @@ const (
 	FUSEPoolBinding   FUSEPoolState = "binding"
 	FUSEPoolConsumed  FUSEPoolState = "consumed"
 	FUSEPoolCleanup   FUSEPoolState = "cleanup"
+
+	FUSEPoolCleanupTerminating FUSEPoolCleanupPhase = "terminating"
+	FUSEPoolCleanupTerminated  FUSEPoolCleanupPhase = "terminated"
 )
 
 var (
@@ -27,20 +32,30 @@ var (
 	ErrFUSEPoolCorrupt           = errors.New("corrupt fuse pool state")
 )
 
+type FUSEPoolTerminationEvidence struct {
+	RuntimeUID           string `json:"runtime_uid"`
+	NodeName             string `json:"node_name,omitempty"`
+	GracefulUnmount      bool   `json:"graceful_unmount,omitempty"`
+	ProcessExited        bool   `json:"process_exited,omitempty"`
+	InfrastructureFenced bool   `json:"infrastructure_fenced,omitempty"`
+}
+
 type FUSEPoolRecord struct {
-	PreparationID    string        `json:"preparation_id"`
-	RuntimeID        string        `json:"runtime_id"`
-	RuntimeUID       string        `json:"runtime_uid"`
-	PoolKey          string        `json:"pool_key"`
-	State            FUSEPoolState `json:"state"`
-	MaintainerToken  string        `json:"maintainer_token"`
-	ReservationToken string        `json:"reservation_token,omitempty"`
-	ReservedUntil    time.Time     `json:"reserved_until,omitempty"`
-	PrepareUntil     time.Time     `json:"prepare_until,omitempty"`
-	CleanupToken     string        `json:"cleanup_token,omitempty"`
-	CleanupUntil     time.Time     `json:"cleanup_until,omitempty"`
-	UpdatedAt        time.Time     `json:"updated_at"`
-	Revision         uint64        `json:"revision"`
+	PreparationID       string                       `json:"preparation_id"`
+	RuntimeID           string                       `json:"runtime_id"`
+	RuntimeUID          string                       `json:"runtime_uid"`
+	PoolKey             string                       `json:"pool_key"`
+	State               FUSEPoolState                `json:"state"`
+	MaintainerToken     string                       `json:"maintainer_token"`
+	ReservationToken    string                       `json:"reservation_token,omitempty"`
+	ReservedUntil       time.Time                    `json:"reserved_until,omitempty"`
+	PrepareUntil        time.Time                    `json:"prepare_until,omitempty"`
+	CleanupToken        string                       `json:"cleanup_token,omitempty"`
+	CleanupUntil        time.Time                    `json:"cleanup_until,omitempty"`
+	CleanupPhase        FUSEPoolCleanupPhase         `json:"cleanup_phase,omitempty"`
+	TerminationEvidence *FUSEPoolTerminationEvidence `json:"termination_evidence,omitempty"`
+	UpdatedAt           time.Time                    `json:"updated_at"`
+	Revision            uint64                       `json:"revision"`
 }
 
 type FUSEPoolRepository interface {
@@ -51,6 +66,7 @@ type FUSEPoolRepository interface {
 	ReturnPreparedWithAdmission(ctx context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*FUSEPoolRecord, error)
 	TransitionWithRefillLock(ctx context.Context, preparationID string, from, to FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*FUSEPoolRecord, error)
 	ClaimCleanup(ctx context.Context, preparationID string, from FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*FUSEPoolRecord, error)
+	ConfirmCleanupTermination(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64, runtimeID, runtimeUID string, evidence FUSEPoolTerminationEvidence) (*FUSEPoolRecord, error)
 	ListPoolKeys(ctx context.Context) ([]string, error)
 	ListByPoolKey(ctx context.Context, poolKey string) ([]FUSEPoolRecord, error)
 	CountPreparingAndPrepared(ctx context.Context, poolKey string) (int, error)

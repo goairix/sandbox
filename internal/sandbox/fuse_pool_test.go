@@ -283,6 +283,9 @@ func (r *memoryFUSEPoolRepository) ClaimCleanup(_ context.Context, preparationID
 		return &copy, nil
 	}
 	record.State, record.CleanupToken = state.FUSEPoolCleanup, cleanupToken
+	if record.CleanupPhase == "" {
+		record.CleanupPhase = state.FUSEPoolCleanupTerminating
+	}
 	if !sameToken {
 		record.CleanupUntil = r.now.Add(ttl)
 	}
@@ -291,6 +294,87 @@ func (r *memoryFUSEPoolRepository) ClaimCleanup(_ context.Context, preparationID
 	r.stateHistory[preparationID] = append(r.stateHistory[preparationID], record.State)
 	copy := record
 	return &copy, nil
+}
+
+func (r *memoryFUSEPoolRepository) ConfirmCleanupTermination(_ context.Context, preparationID, cleanupToken string, expectedRevision uint64, runtimeID, runtimeUID string, evidence state.FUSEPoolTerminationEvidence) (*state.FUSEPoolRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[preparationID]
+	if !ok {
+		return nil, state.ErrFUSEPoolNotFound
+	}
+	if record.State != state.FUSEPoolCleanup || record.CleanupToken != cleanupToken {
+		return nil, state.ErrFUSEPoolTokenMismatch
+	}
+	if record.RuntimeID != runtimeID || record.RuntimeUID != runtimeUID {
+		return nil, state.ErrFUSEPoolConflict
+	}
+	if evidence.RuntimeUID != runtimeUID || (!evidence.ProcessExited && (!evidence.InfrastructureFenced || evidence.NodeName == "")) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	if record.CleanupPhase == state.FUSEPoolCleanupTerminated {
+		if record.TerminationEvidence != nil && *record.TerminationEvidence == evidence &&
+			(record.Revision == expectedRevision || record.Revision == expectedRevision+1) {
+			copy := record
+			return &copy, nil
+		}
+		return nil, state.ErrFUSEPoolCASMismatch
+	}
+	if record.Revision != expectedRevision {
+		return nil, state.ErrFUSEPoolCASMismatch
+	}
+	record.CleanupPhase = state.FUSEPoolCleanupTerminated
+	evidenceCopy := evidence
+	record.TerminationEvidence = &evidenceCopy
+	record.UpdatedAt = r.now
+	record.Revision++
+	r.records[preparationID] = record
+	copy := record
+	return &copy, nil
+}
+
+func TestMemoryFUSEPoolRepositoryPersistsCleanupTermination(t *testing.T) {
+	repo := newMemoryFUSEPoolRepository()
+	repo.records["preparation-a"] = state.FUSEPoolRecord{
+		PreparationID:   "preparation-a",
+		RuntimeID:       "sandbox-pool-a",
+		RuntimeUID:      "runtime-uid-a",
+		PoolKey:         "pool-a",
+		State:           state.FUSEPoolCleanup,
+		MaintainerToken: "maintainer-a",
+		CleanupToken:    "cleanup-a",
+		CleanupUntil:    repo.now.Add(time.Minute),
+		UpdatedAt:       repo.now,
+		Revision:        4,
+	}
+
+	evidence := state.FUSEPoolTerminationEvidence{
+		RuntimeUID:      "runtime-uid-a",
+		GracefulUnmount: true,
+		ProcessExited:   true,
+	}
+	terminated, err := repo.ConfirmCleanupTermination(
+		context.Background(), "preparation-a", "cleanup-a", 4,
+		"sandbox-pool-a", "runtime-uid-a", evidence,
+	)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanupTerminated, terminated.CleanupPhase)
+	require.NotNil(t, terminated.TerminationEvidence)
+	require.Equal(t, evidence, *terminated.TerminationEvidence)
+	require.Equal(t, uint64(5), terminated.Revision)
+
+	replayed, err := repo.ConfirmCleanupTermination(
+		context.Background(), "preparation-a", "cleanup-a", 4,
+		"sandbox-pool-a", "runtime-uid-a", evidence,
+	)
+	require.NoError(t, err)
+	require.Equal(t, terminated.Revision, replayed.Revision)
+
+	_, err = repo.ConfirmCleanupTermination(
+		context.Background(), "preparation-a", "cleanup-a", 5,
+		"sandbox-pool-a", "wrong-runtime-uid", evidence,
+	)
+	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
 }
 
 func (r *memoryFUSEPoolRepository) ListByPoolKey(_ context.Context, poolKey string) ([]state.FUSEPoolRecord, error) {
