@@ -2189,12 +2189,44 @@ func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
-	// Clean up network policy
-	if r.hasCilium {
-		_ = deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
+	pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, id, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, r.hasCilium)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		if found {
+			return nil
+		}
+		return runtime.ErrNotFound
 	}
-	_ = deleteNetworkPolicy(ctx, r.client, r.namespace, id)
-	return deletePod(ctx, r.client, r.namespace, id)
+	if err != nil {
+		return fmt.Errorf("get ordinary Pod for removal: %w", err)
+	}
+	identity, err := ordinaryIdentityFromPod(pod, id)
+	if err != nil {
+		return err
+	}
+	if err := deleteExactOrdinaryPod(ctx, r.client, r.namespace, pod, r.pollInterval, r.terminationTimeout); err != nil {
+		return err
+	}
+	var cleanupErrs []error
+	if r.hasCilium {
+		_, ciliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity, true)
+		cleanupErrs = append(cleanupErrs, ciliumErr)
+	}
+	_, standardErr := deleteOwnedOrdinaryNetworkPolicy(ctx, r.client, r.namespace, identity, true)
+	cleanupErrs = append(cleanupErrs, standardErr)
+	if identity.logicalID != identity.runtimeID {
+		legacyIdentity := ordinaryNetworkIdentity{runtimeID: identity.runtimeID, runtimeUID: identity.runtimeUID, logicalID: identity.runtimeID}
+		if r.hasCilium {
+			_, legacyCiliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, legacyIdentity, false)
+			cleanupErrs = append(cleanupErrs, legacyCiliumErr)
+		}
+		_, legacyStandardErr := deleteOwnedOrdinaryNetworkPolicy(ctx, r.client, r.namespace, legacyIdentity, false)
+		cleanupErrs = append(cleanupErrs, legacyStandardErr)
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxInfo, error) {

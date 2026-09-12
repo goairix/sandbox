@@ -3020,13 +3020,13 @@ func (m *Manager) recreateSandbox(ctx context.Context, sb *Sandbox) (*runtime.Sa
 // be reconciled by FUSEPool.
 // Must be called AFTER restorePersistentSandboxes so that active containers
 // are already registered in m.sandboxes.
-func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
+func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) int {
 	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{
 		"sandbox.pool": "true",
 	})
 	if err != nil {
 		logger.Error(ctx, "failed to list orphaned pool containers", logger.ErrorField(err))
-		return
+		return 0
 	}
 
 	// Build set of runtime IDs belonging to restored persistent sandboxes
@@ -3048,7 +3048,13 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 		logger.Info(ctx, "removing orphaned pool container",
 			logger.AddField("runtime_id", c.RuntimeID),
 		)
-		_ = m.runtime.RemoveSandbox(ctx, c.RuntimeID)
+		if err := m.runtime.RemoveSandbox(ctx, c.RuntimeID); err != nil {
+			logger.Error(ctx, "failed to remove orphaned pool container",
+				logger.AddField("runtime_id", c.RuntimeID),
+				logger.ErrorField(err),
+			)
+			continue
+		}
 		removed++
 	}
 	if removed > 0 {
@@ -3056,6 +3062,7 @@ func (m *Manager) cleanupOrphanedPoolContainers(ctx context.Context) {
 			logger.AddField("count", removed),
 		)
 	}
+	return removed
 }
 
 // buildInstallCommand generates the shell command to install dependencies,

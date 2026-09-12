@@ -60,6 +60,103 @@ func TestRemoveSandboxMapsMissingPodToRuntimeNotFound(t *testing.T) {
 	require.ErrorIs(t, err, sandboxruntime.ErrNotFound)
 }
 
+func TestRemoveSandboxDeletesExactPodBeforeLogicalPolicies(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	rt.hasCilium = true
+	pod := seedOrdinaryPodWithLogicalPolicy(t, rt, client, "runtime-a", "customer-a")
+	identity := ordinaryNetworkIdentity{runtimeID: pod.Name, runtimeUID: pod.UID, logicalID: "customer-a"}
+	cilium, err := buildOrdinaryCiliumPrivateDeny("runtime", identity, "seed-attempt")
+	require.NoError(t, err)
+	_, err = rt.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), cilium, metav1.CreateOptions{})
+	require.NoError(t, err)
+	var actions []string
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		deleteAction := action.(ktesting.DeleteAction)
+		require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
+		require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions.UID)
+		assert.Equal(t, pod.UID, *deleteAction.GetDeleteOptions().Preconditions.UID)
+		actions = append(actions, "pod")
+		return false, nil, nil
+	})
+	client.PrependReactor("delete", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		actions = append(actions, "networkpolicy")
+		return false, nil, nil
+	})
+	rt.dynClient.(*fake.FakeDynamicClient).PrependReactor("delete", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		actions = append(actions, "cilium")
+		return false, nil, nil
+	})
+
+	require.NoError(t, rt.RemoveSandbox(context.Background(), "runtime-a"))
+	require.Len(t, actions, 3)
+	assert.Equal(t, "pod", actions[0])
+}
+
+func TestRemoveSandboxDoesNotDeletePoliciesWhilePodDeletionUnconfirmed(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	rt.pollInterval = time.Millisecond
+	rt.terminationTimeout = 20 * time.Millisecond
+	seedOrdinaryPodWithLogicalPolicy(t, rt, client, "runtime-a", "customer-a")
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, nil
+	})
+
+	err := rt.RemoveSandbox(context.Background(), "runtime-a")
+	require.Error(t, err)
+	_, getErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	require.NoError(t, getErr)
+}
+
+func TestRemoveSandboxJoinsStandardAndCiliumDeleteFailures(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	rt.hasCilium = true
+	pod := seedOrdinaryPodWithLogicalPolicy(t, rt, client, "runtime-a", "customer-a")
+	identity := ordinaryNetworkIdentity{runtimeID: pod.Name, runtimeUID: pod.UID, logicalID: "customer-a"}
+	cilium, err := buildOrdinaryCiliumPrivateDeny("runtime", identity, "seed-attempt")
+	require.NoError(t, err)
+	_, err = rt.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), cilium, metav1.CreateOptions{})
+	require.NoError(t, err)
+	standardErr := errors.New("standard delete failed")
+	ciliumErr := errors.New("cilium delete failed")
+	client.PrependReactor("delete", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, standardErr
+	})
+	rt.dynClient.(*fake.FakeDynamicClient).PrependReactor("delete", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, ciliumErr
+	})
+
+	err = rt.RemoveSandbox(context.Background(), "runtime-a")
+	require.ErrorIs(t, err, standardErr)
+	require.ErrorIs(t, err, ciliumErr)
+}
+
+func TestRemoveSandboxMissingPodFindsPoliciesByRuntimeBinding(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	identity := ordinaryNetworkIdentity{runtimeID: "runtime-a", runtimeUID: types.UID("old-pod-uid"), logicalID: "customer-a"}
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, "seed-attempt", false, nil, false)
+	require.NoError(t, err)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, rt.RemoveSandbox(context.Background(), "runtime-a"))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestRemoveSandboxDoesNotGuessHistoricalLogicalPolicyFromRuntimeID(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	legacy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: "sandbox-runtime-a", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "runtime-a"},
+	}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"sandbox.id": "runtime-a"}}}}
+	_, err := client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), legacy, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = rt.RemoveSandbox(context.Background(), "runtime-a")
+	require.ErrorIs(t, err, sandboxruntime.ErrNotFound)
+	_, getErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+}
+
 func TestPreparedPodIntentTreatsEmptyAdmissionMetadataAsEquivalent(t *testing.T) {
 	desired, err := buildPreparedFUSEPod("sandbox-runtime", func() sandboxruntime.SandboxSpec {
 		spec := preparedFUSESpecForTest()

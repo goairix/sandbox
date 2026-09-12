@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -195,6 +196,129 @@ func deleteMutableOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.
 		return fmt.Errorf("delete ordinary CiliumNetworkPolicy: %w", err)
 	}
 	return nil
+}
+
+func deleteExactOrdinaryPod(ctx context.Context, client kubernetes.Interface, namespace string, pod *corev1.Pod, pollInterval, timeout time.Duration) error {
+	if pod == nil || pod.UID == "" {
+		return fmt.Errorf("ordinary Pod has no immutable UID")
+	}
+	uid := pod.UID
+	err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete exact ordinary Pod: %w", err)
+	}
+	if pollInterval <= 0 {
+		pollInterval = 250 * time.Millisecond
+	}
+	if timeout <= 0 {
+		timeout = defaultKubernetesControlTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		current, getErr := client.CoreV1().Pods(namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) || (getErr == nil && current.UID != uid) {
+			return nil
+		}
+		if getErr != nil {
+			return fmt.Errorf("verify exact ordinary Pod deletion: %w", getErr)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("exact ordinary Pod deletion is unconfirmed: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func deleteOwnedOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, identity ordinaryNetworkIdentity, allowLegacy bool) (bool, error) {
+	policies := client.NetworkingV1().NetworkPolicies(namespace)
+	name := "sandbox-" + identity.logicalID
+	current, err := policies.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get ordinary NetworkPolicy for delete: %w", err)
+	}
+	if allowLegacy {
+		err = validateMutableOrdinaryNetworkPolicy(current, identity)
+	} else {
+		err = validateOrdinaryNetworkPolicy(current, identity, "")
+	}
+	if err != nil {
+		return false, err
+	}
+	uid := current.UID
+	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+		return true, fmt.Errorf("delete ordinary NetworkPolicy: %w", err)
+	}
+	return true, nil
+}
+
+func deleteOwnedOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface, namespace string, identity ordinaryNetworkIdentity, allowLegacy bool) (bool, error) {
+	policies := client.Resource(ciliumNetworkPolicyGVR).Namespace(namespace)
+	name := "sandbox-private-deny-" + identity.logicalID
+	current, err := policies.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get ordinary CiliumNetworkPolicy for delete: %w", err)
+	}
+	if allowLegacy {
+		err = validateMutableOrdinaryCiliumPolicy(current, identity)
+	} else {
+		err = validateOrdinaryCiliumPolicy(current, identity, "")
+	}
+	if err != nil {
+		return false, err
+	}
+	uid := current.GetUID()
+	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+		return true, fmt.Errorf("delete ordinary CiliumNetworkPolicy: %w", err)
+	}
+	return true, nil
+}
+
+func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace, runtimeID string, hasCilium bool) (bool, error) {
+	found := false
+	var errs []error
+	policies, err := client.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{LabelSelector: ordinaryRuntimeIDLabel + "=" + runtimeID})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list runtime-bound NetworkPolicies: %w", err))
+	} else {
+		for index := range policies.Items {
+			policy := &policies.Items[index]
+			identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: types.UID(policy.Annotations[ordinaryRuntimeUIDAnnotation]), logicalID: policy.Labels["sandbox.id"]}
+			if identity.runtimeUID == "" || validateOrdinaryNetworkPolicy(policy, identity, "") != nil {
+				continue
+			}
+			matched, deleteErr := deleteOwnedOrdinaryNetworkPolicy(ctx, client, namespace, identity, false)
+			found = found || matched
+			errs = append(errs, deleteErr)
+		}
+	}
+	if hasCilium {
+		list, listErr := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).List(ctx, metav1.ListOptions{LabelSelector: ordinaryRuntimeIDLabel + "=" + runtimeID})
+		if listErr != nil {
+			errs = append(errs, fmt.Errorf("list runtime-bound CiliumNetworkPolicies: %w", listErr))
+		} else {
+			for index := range list.Items {
+				policy := &list.Items[index]
+				identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: types.UID(policy.GetAnnotations()[ordinaryRuntimeUIDAnnotation]), logicalID: policy.GetLabels()["sandbox.id"]}
+				if identity.runtimeUID == "" || validateOrdinaryCiliumPolicy(policy, identity, "") != nil {
+					continue
+				}
+				matched, deleteErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, dynClient, namespace, identity, false)
+				found = found || matched
+				errs = append(errs, deleteErr)
+			}
+		}
+	}
+	return found, errors.Join(errs...)
 }
 
 func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.Pod, newLogicalID string, labels map[string]*string) error {

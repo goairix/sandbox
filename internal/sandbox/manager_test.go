@@ -571,6 +571,20 @@ func TestCleanupOrphanedOrdinaryPoolSkipsFUSEPoolRuntimes(t *testing.T) {
 	assert.False(t, rt.wasRemoved("fuse-runtime"), "ordinary Pool cleanup must leave FUSE inventory-owned runtimes alone")
 }
 
+func TestCleanupOrphanedPoolContainersCountsOnlySuccessfulRemovals(t *testing.T) {
+	rt := newMockRuntime()
+	rt.listedSandboxes = []runtime.SandboxInfo{
+		{ID: "one", RuntimeID: "runtime-one", Labels: map[string]string{"sandbox.pool": "true"}},
+		{ID: "two", RuntimeID: "runtime-two", Labels: map[string]string{"sandbox.pool": "true"}},
+	}
+	rt.removeFailures["runtime-two"] = errors.New("remove failed")
+	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+
+	removed := mgr.cleanupOrphanedPoolContainers(context.Background())
+
+	assert.Equal(t, 1, removed)
+}
+
 func TestManagerCreateFUSEUsesPreparedRuntimeAndPublishesAfterProbe(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	mgr, preparedID, _, _ := newFUSETestManager(t, rt)
