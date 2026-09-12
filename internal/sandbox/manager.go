@@ -1137,13 +1137,16 @@ func (m *Manager) cleanupFailedFUSECreate(record state.FUSEPoolRecord, ambiguous
 	if removeErr != nil {
 		return removeErr
 	}
-	fencer, ok := m.runtime.(runtime.RuntimeFencer)
+	evidence, ok := poolTerminationEvidence(*claimed)
 	if !ok {
-		return ErrRuntimeExitUnconfirmed
-	}
-	evidence, err := fencer.ConfirmTerminated(ctx, record.RuntimeID, record.RuntimeUID)
-	if err != nil {
-		return err
+		fencer, available := m.runtime.(runtime.RuntimeFencer)
+		if !available {
+			return ErrRuntimeExitUnconfirmed
+		}
+		evidence, err = fencer.ConfirmTerminated(ctx, record.RuntimeID, record.RuntimeUID)
+		if err != nil {
+			return err
+		}
 	}
 	if lease != nil {
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lease, evidence); err != nil {
@@ -1446,17 +1449,21 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 		return
 	}
 	if lifecycle.evidence.RuntimeUID == "" {
-		fencer, ok := m.runtime.(runtime.RuntimeFencer)
-		if !ok {
-			m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", errors.New("runtime has no termination fencer"))
-			return
+		if evidence, persisted := poolTerminationEvidence(*lifecycle.claimed); persisted {
+			lifecycle.evidence = evidence
+		} else {
+			fencer, ok := m.runtime.(runtime.RuntimeFencer)
+			if !ok {
+				m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", errors.New("runtime has no termination fencer"))
+				return
+			}
+			evidence, err := fencer.ConfirmTerminated(ctx, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID)
+			if err != nil {
+				m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", err)
+				return
+			}
+			lifecycle.evidence = evidence
 		}
-		evidence, err := fencer.ConfirmTerminated(ctx, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID)
-		if err != nil {
-			m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", err)
-			return
-		}
-		lifecycle.evidence = evidence
 	}
 	if !lifecycle.unmountRecorded && m.fusePool.spec.WorkspaceFUSE != nil {
 		metrics.RecordWorkspaceUnmount(ctx, m.fusePool.spec.WorkspaceFUSE.RuntimeType, "success")

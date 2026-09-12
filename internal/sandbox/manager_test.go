@@ -32,23 +32,25 @@ import (
 
 type fuseManagerRuntime struct {
 	*mockRuntime
-	mu                 sync.Mutex
-	events             []string
-	authorizations     []runtime.WorkspaceMountAuthorization
-	authorizeRefs      []runtime.RuntimeRef
-	networkRefs        []runtime.RuntimeRef
-	readyRefs          []runtime.RuntimeRef
-	readyGenerations   []int64
-	legacyNetworkCalls int
-	waitReadyEntered   chan struct{}
-	allowReady         chan struct{}
-	waitReadyOnce      sync.Once
-	waitReadyErr       error
-	networkErr         error
-	health             runtime.WorkspaceHealth
-	downloadReader     io.ReadCloser
-	orphanCalls        int
-	protectedOrphans   map[string]struct{}
+	mu                  sync.Mutex
+	events              []string
+	authorizations      []runtime.WorkspaceMountAuthorization
+	authorizeRefs       []runtime.RuntimeRef
+	networkRefs         []runtime.RuntimeRef
+	readyRefs           []runtime.RuntimeRef
+	readyGenerations    []int64
+	legacyNetworkCalls  int
+	waitReadyEntered    chan struct{}
+	allowReady          chan struct{}
+	waitReadyOnce       sync.Once
+	waitReadyErr        error
+	networkErr          error
+	health              runtime.WorkspaceHealth
+	downloadReader      io.ReadCloser
+	orphanCalls         int
+	protectedOrphans    map[string]struct{}
+	cleanupConfirmCalls int
+	legacyConfirmCalls  int
 }
 
 func (r *fuseManagerRuntime) ReconcileOrphanedResources(_ context.Context, protected map[string]struct{}) error {
@@ -168,8 +170,22 @@ func (r *fuseManagerRuntime) WorkspaceHealth(_ context.Context, ref runtime.Runt
 }
 
 func (r *fuseManagerRuntime) ConfirmTerminated(_ context.Context, _, runtimeUID string) (runtime.TerminationEvidence, error) {
+	r.mu.Lock()
+	r.legacyConfirmCalls++
+	r.mu.Unlock()
 	r.recordEvent("confirm")
 	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}, nil
+}
+
+func (r *fuseManagerRuntime) ConfirmPreparedSandboxTermination(_ context.Context, _, runtimeUID string) (runtime.TerminationEvidence, error) {
+	r.mu.Lock()
+	r.cleanupConfirmCalls++
+	r.mu.Unlock()
+	return runtime.TerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}, nil
+}
+
+func (r *fuseManagerRuntime) FinalizePreparedSandboxRemoval(ctx context.Context, runtimeID, runtimeUID string, _ runtime.TerminationEvidence) error {
+	return r.RemovePreparedSandbox(ctx, runtimeID, runtimeUID)
 }
 
 type fuseMarkerClient struct {
@@ -1331,6 +1347,26 @@ func TestManagerFUSETeardownRetriesTransientExactRemoval(t *testing.T) {
 	_, exists := mgr.sandboxes[sb.ID]
 	mgr.mu.RUnlock()
 	assert.False(t, exists)
+}
+
+func TestManagerFUSETeardownUsesPersistedTerminationEvidence(t *testing.T) {
+	rt := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, rt)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	require.NotNil(t, lifecycle)
+
+	mgr.teardownFUSESandbox(lifecycle, errors.New("unhealthy"))
+
+	rt.mu.Lock()
+	cleanupConfirmCalls := rt.cleanupConfirmCalls
+	legacyConfirmCalls := rt.legacyConfirmCalls
+	rt.mu.Unlock()
+	require.Equal(t, 1, cleanupConfirmCalls)
+	require.Zero(t, legacyConfirmCalls, "Manager must use evidence checkpointed in the cleanup record")
 }
 
 func TestRestoreNeverReauthorizesExistingRuntimeUID(t *testing.T) {
