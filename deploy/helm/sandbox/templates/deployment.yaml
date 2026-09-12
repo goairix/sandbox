@@ -25,6 +25,7 @@ spec:
       annotations:
         sandbox.huaxisy.com/backend-fingerprint: {{ include "sandbox.backend.fingerprint" . | quote }}
         sandbox.huaxisy.com/drain-protocol: "v1"
+        sandbox.huaxisy.com/cleanup-protocol: "v2"
       labels:
         app: sandbox
         release: {{ .Release.Name }}

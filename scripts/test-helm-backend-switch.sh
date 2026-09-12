@@ -27,6 +27,8 @@ grep -Fq -- '--kubernetes-backend-fingerprint-deployment=sandbox-api' <<<"$rende
 grep -Fq -- '--verify-kubernetes-backend-fingerprint' <<<"$rendered"
 grep -Fq -- '--resume-kubernetes-deployment=sandbox-api' <<<"$rendered"
 grep -Fq 'sandbox.huaxisy.com/drain-protocol: "v1"' <<<"$rendered"
+grep -Fq 'sandbox.huaxisy.com/cleanup-protocol: "v2"' <<<"$rendered"
+grep -Fq -- '--kubernetes-cleanup-protocol=v2' <<<"$rendered"
 if helm template sandbox "$chart" --set autoscaling.enabled=true --show-only templates/deployment.yaml | grep -Eq '^  replicas:'; then
   printf 'HPA-managed Deployment unexpectedly renders spec.replicas\n' >&2
   exit 1

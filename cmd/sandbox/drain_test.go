@@ -208,3 +208,26 @@ func TestKubernetesDrainProtocolMatchesDeploymentTemplate(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, matches)
 }
+
+func TestKubernetesCleanupProtocolMatchesDeploymentTemplate(t *testing.T) {
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{cleanupProtocolAnnotation: "v2"},
+		}}},
+	})
+
+	matches, err := kubernetesCleanupProtocolMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "v2")
+	require.NoError(t, err)
+	assert.True(t, matches)
+	matches, err = kubernetesCleanupProtocolMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "v1")
+	require.NoError(t, err)
+	assert.False(t, matches)
+}
+
+func TestKubernetesReleaseDrainDecision(t *testing.T) {
+	assert.False(t, shouldDrainKubernetesRelease(true, true))
+	assert.True(t, shouldDrainKubernetesRelease(true, false))
+	assert.True(t, shouldDrainKubernetesRelease(false, true))
+	assert.True(t, shouldDrainKubernetesRelease(false, false))
+}

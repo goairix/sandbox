@@ -19,6 +19,7 @@ var drainCiliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io"
 const (
 	backendFingerprintAnnotation = "sandbox.huaxisy.com/backend-fingerprint"
 	drainProtocolAnnotation      = "sandbox.huaxisy.com/drain-protocol"
+	cleanupProtocolAnnotation    = "sandbox.huaxisy.com/cleanup-protocol"
 )
 
 func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName string, pollInterval time.Duration) error {
@@ -135,16 +136,24 @@ func kubernetesDrainProtocolMatches(ctx context.Context, client kubernetes.Inter
 	return kubernetesDeploymentTemplateAnnotationMatches(ctx, client, namespace, deploymentName, drainProtocolAnnotation, desired)
 }
 
+func kubernetesCleanupProtocolMatches(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, desired string) (bool, error) {
+	return kubernetesDeploymentTemplateAnnotationMatches(ctx, client, namespace, deploymentName, cleanupProtocolAnnotation, desired)
+}
+
+func shouldDrainKubernetesRelease(backendMatches, cleanupProtocolMatches bool) bool {
+	return !backendMatches || !cleanupProtocolMatches
+}
+
 func kubernetesDeploymentTemplateAnnotationMatches(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, annotation, desired string) (bool, error) {
 	if client == nil || namespace == "" || deploymentName == "" || annotation == "" || desired == "" {
-		return false, fmt.Errorf("invalid Kubernetes backend fingerprint configuration")
+		return false, fmt.Errorf("invalid Kubernetes Deployment annotation comparison")
 	}
 	deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read installed Kubernetes backend fingerprint: %w", err)
+		return false, fmt.Errorf("read installed Kubernetes Deployment annotation: %w", err)
 	}
 	return deployment.Spec.Template.Annotations[annotation] == desired, nil
 }

@@ -41,6 +41,7 @@ spec:
             - {{ printf "--kubernetes-backend-fingerprint-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--kubernetes-backend-fingerprint-deployment=%s-api" .Release.Name | quote }}
             - {{ printf "--kubernetes-backend-fingerprint=%s" $desiredFingerprint | quote }}
+            - "--kubernetes-cleanup-protocol=v2"
             - "--required-kubernetes-drain-protocol=v1"
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
             - "--drain-release"

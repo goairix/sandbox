@@ -59,6 +59,7 @@ func main() {
 	backendFingerprintNamespace := flag.String("kubernetes-backend-fingerprint-namespace", "", "namespace containing the Deployment backend fingerprint")
 	backendFingerprintDeployment := flag.String("kubernetes-backend-fingerprint-deployment", "", "Deployment containing the installed backend fingerprint")
 	backendFingerprint := flag.String("kubernetes-backend-fingerprint", "", "desired backend fingerprint used by upgrade and rollback guards")
+	cleanupProtocol := flag.String("kubernetes-cleanup-protocol", "", "desired Kubernetes FUSE cleanup protocol used by upgrade guards")
 	requiredDrainProtocol := flag.String("required-kubernetes-drain-protocol", "", "required installed drain protocol before a backend-changing upgrade")
 	verifyBackendFingerprint := flag.Bool("verify-kubernetes-backend-fingerprint", false, "fail unless the installed backend fingerprint matches the desired fingerprint")
 	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain or resume")
@@ -140,25 +141,34 @@ func main() {
 			if fingerprintArgs[0] == "" || fingerprintArgs[1] == "" || fingerprintArgs[2] == "" {
 				log.Fatal("backend fingerprint namespace, Deployment, and desired value must be configured together")
 			}
+			if *cleanupProtocol == "" {
+				log.Fatal("desired Kubernetes cleanup protocol must be configured with backend fingerprint comparison")
+			}
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), *drainTimeout)
 			defer checkCancel()
-			matches, matchErr := kubernetesBackendFingerprintMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], fingerprintArgs[2])
+			backendMatches, matchErr := kubernetesBackendFingerprintMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], fingerprintArgs[2])
 			if matchErr != nil {
 				log.Fatalf("failed to compare Kubernetes backend fingerprint before drain: %v", matchErr)
 			}
-			if matches {
-				log.Printf("Kubernetes backend fingerprint is unchanged; release drain skipped")
+			cleanupMatches, matchErr := kubernetesCleanupProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *cleanupProtocol)
+			if matchErr != nil {
+				log.Fatalf("failed to compare Kubernetes cleanup protocol before drain: %v", matchErr)
+			}
+			if !shouldDrainKubernetesRelease(backendMatches, cleanupMatches) {
+				log.Printf("Kubernetes backend fingerprint and cleanup protocol are unchanged; release drain skipped")
 				return
 			}
-			if *requiredDrainProtocol == "" {
-				log.Fatal("required Kubernetes drain protocol must be configured for a backend-changing upgrade")
-			}
-			protocolMatches, protocolErr := kubernetesDrainProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *requiredDrainProtocol)
-			if protocolErr != nil {
-				log.Fatalf("failed to verify Kubernetes drain protocol before drain: %v", protocolErr)
-			}
-			if !protocolMatches {
-				log.Fatal("backend-changing upgrade requires a prior same-backend Chart and sandbox-api protocol upgrade")
+			if !backendMatches {
+				if *requiredDrainProtocol == "" {
+					log.Fatal("required Kubernetes drain protocol must be configured for a backend-changing upgrade")
+				}
+				protocolMatches, protocolErr := kubernetesDrainProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *requiredDrainProtocol)
+				if protocolErr != nil {
+					log.Fatalf("failed to verify Kubernetes drain protocol before drain: %v", protocolErr)
+				}
+				if !protocolMatches {
+					log.Fatal("backend-changing upgrade requires a prior same-backend Chart and sandbox-api protocol upgrade")
+				}
 			}
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
