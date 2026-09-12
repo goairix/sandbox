@@ -98,22 +98,23 @@ type workspaceRuntimeState struct {
 
 // Runtime implements runtime.Runtime using Kubernetes.
 type Runtime struct {
-	client             kubernetes.Interface
-	dynClient          dynamic.Interface
-	restConfig         *rest.Config
-	namespace          string
-	hasCilium          bool // whether CiliumNetworkPolicy CRD is available on this cluster
-	controlExecutor    podCommandExecutor
-	infraFencer        InfrastructureFencer
-	fuseCredentials    runtime.FUSECredentials
-	endpointLookup     runtime.LookupNetIPFunc
-	clusterDNSLookup   func() ([]netip.Addr, error)
-	pollInterval       time.Duration
-	prepareTimeout     time.Duration
-	readyTimeout       time.Duration
-	terminationTimeout time.Duration
-	stateMu            sync.Mutex
-	workspaceStates    map[string]*workspaceRuntimeState
+	client                 kubernetes.Interface
+	dynClient              dynamic.Interface
+	restConfig             *rest.Config
+	namespace              string
+	hasCilium              bool // whether CiliumNetworkPolicy CRD is available on this cluster
+	controlExecutor        podCommandExecutor
+	infraFencer            InfrastructureFencer
+	fuseCredentials        runtime.FUSECredentials
+	endpointLookup         runtime.LookupNetIPFunc
+	clusterDNSLookup       func() ([]netip.Addr, error)
+	pollInterval           time.Duration
+	prepareTimeout         time.Duration
+	readyTimeout           time.Duration
+	terminationTimeout     time.Duration
+	ordinaryPolicyRecovery func(context.Context) error
+	stateMu                sync.Mutex
+	workspaceStates        map[string]*workspaceRuntimeState
 }
 
 // New creates a new Kubernetes runtime.
@@ -166,7 +167,23 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 		}
 	}
 	runtimeImpl.controlExecutor = &spdyPodCommandExecutor{client: client, restConfig: restConfig, namespace: namespace}
+	if err := runtimeImpl.initializeOrdinaryPolicyRecovery(); err != nil {
+		return nil, fmt.Errorf("reconcile ordinary network policies: %w", err)
+	}
 	return runtimeImpl, nil
+}
+
+func (r *Runtime) initializeOrdinaryPolicyRecovery() error {
+	timeout := r.prepareTimeout
+	if timeout <= 0 {
+		timeout = defaultKubernetesControlTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if r.ordinaryPolicyRecovery != nil {
+		return r.ordinaryPolicyRecovery(ctx)
+	}
+	return reconcileOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
 }
 
 func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {

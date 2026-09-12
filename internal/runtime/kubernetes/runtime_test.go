@@ -603,6 +603,22 @@ func TestCreateSandboxRejectsFUSEBeforeAnyMutation(t *testing.T) {
 	assert.Empty(t, client.Actions())
 }
 
+func TestInitializeOrdinaryPolicyRecoveryUsesBoundedContext(t *testing.T) {
+	rt, _ := newFakeKubernetesRuntime(t, preparedScript())
+	rt.prepareTimeout = 50 * time.Millisecond
+	seenDeadline := false
+	listErr := errors.New("list failed")
+	rt.ordinaryPolicyRecovery = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		seenDeadline = ok && time.Until(deadline) <= rt.prepareTimeout
+		return listErr
+	}
+
+	err := rt.initializeOrdinaryPolicyRecovery()
+	require.ErrorIs(t, err, listErr)
+	assert.True(t, seenDeadline)
+}
+
 func TestCreateSandboxCreatesStandardPolicyBeforePod(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	rt.readyTimeout = time.Second

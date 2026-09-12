@@ -3,16 +3,20 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
@@ -99,6 +103,75 @@ func TestBuildOrdinaryCiliumPrivateDenyCarriesExactIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, selector)
+}
+
+func TestReconcileOrdinaryPoliciesDeletesOnlyProvableOrphans(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	dynClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
+	orphanIdentity := ordinaryNetworkIdentity{runtimeID: "orphan-runtime", runtimeUID: types.UID("orphan-uid"), logicalID: "orphan"}
+	orphan, err := buildOrdinaryNetworkPolicy("runtime", orphanIdentity, "attempt-a", false, nil, false)
+	require.NoError(t, err)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), orphan, metav1.CreateOptions{})
+	require.NoError(t, err)
+	cilium, err := buildOrdinaryCiliumPrivateDeny("runtime", orphanIdentity, "attempt-a")
+	require.NoError(t, err)
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), cilium, metav1.CreateOptions{})
+	require.NoError(t, err)
+	liveIdentity := ordinaryNetworkIdentity{runtimeID: "live-runtime", runtimeUID: types.UID("live-uid"), logicalID: "live"}
+	live, err := buildOrdinaryNetworkPolicy("runtime", liveIdentity, "attempt-b", false, nil, false)
+	require.NoError(t, err)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), live, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "live-runtime", UID: "live-uid", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "live"},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, reconcileOrphanedOrdinaryPolicies(context.Background(), client, dynClient, "runtime", true))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), orphan.Name, metav1.GetOptions{})
+	require.True(t, errors.IsNotFound(err))
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Get(context.Background(), cilium.GetName(), metav1.GetOptions{})
+	require.True(t, errors.IsNotFound(err))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), live.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestReconcileOrdinaryPoliciesKeepsLiveFUSEForeignAndMalformedPolicies(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	dynClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
+	policies := []*networkingv1.NetworkPolicy{
+		{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-fuse-system-a", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", ordinaryPolicyRoleLabel: "system"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "third-party", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "foreign"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-malformed", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "malformed", ordinaryPolicyRoleLabel: ordinaryPolicyRole, ordinaryRuntimeIDLabel: "runtime-a"}, Annotations: map[string]string{ordinaryRuntimeUIDAnnotation: "uid-a"}}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"sandbox.id": "other"}}}},
+	}
+	for _, policy := range policies {
+		_, err := client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, reconcileOrphanedOrdinaryPolicies(context.Background(), client, dynClient, "runtime", true))
+	for _, policy := range policies {
+		_, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
+		require.NoError(t, err, policy.Name)
+	}
+}
+
+func TestReconcileOrdinaryPoliciesFailsClosedOnListGetOrDeleteError(t *testing.T) {
+	listErr := stderrors.New("list failed")
+	client := kubefake.NewSimpleClientset()
+	client.PrependReactor("list", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, listErr
+	})
+	dynClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
+
+	err := reconcileOrphanedOrdinaryPolicies(context.Background(), client, dynClient, "runtime", true)
+	require.ErrorIs(t, err, listErr)
 }
 
 func TestBuildSystemEgressPolicyRequiresOnlyDNSPort53(t *testing.T) {
