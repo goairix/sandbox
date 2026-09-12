@@ -26,6 +26,8 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
+const fuseRuntimeCleanupFinalizer = "sandbox.huaxisy.com/fuse-runtime-cleanup"
+
 // createPod creates a sandbox pod from the given spec.
 func createPod(ctx context.Context, client kubernetes.Interface, namespace string, spec runtime.SandboxSpec) (*corev1.Pod, error) {
 	var pod *corev1.Pod
@@ -294,6 +296,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			Name:        spec.ID,
 			Namespace:   namespace,
 			Annotations: annotations,
+			Finalizers:  []string{fuseRuntimeCleanupFinalizer},
 			Labels: map[string]string{
 				"app":                        "sandbox",
 				"sandbox.id":                 spec.ID,

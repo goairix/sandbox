@@ -1044,9 +1044,112 @@ func privateCIDRExceptions(values []string) ([]string, error) {
 }
 
 func (r *Runtime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeUID string) error {
+	evidence, err := r.ConfirmPreparedSandboxTermination(ctx, runtimeID, runtimeUID)
+	if err != nil {
+		return err
+	}
+	return r.FinalizePreparedSandboxRemoval(ctx, runtimeID, runtimeUID, evidence)
+}
+
+func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {
+	ref, err := runtime.NewRuntimeRef(runtimeID, runtimeUID)
+	if err != nil {
+		return runtime.TerminationEvidence{}, err
+	}
+	state, err := r.beginWorkspaceRemoval(ctx, ref)
+	if err != nil {
+		return runtime.TerminationEvidence{}, err
+	}
+	defer r.finishWorkspaceRemoval(state)
+
+	r.stateMu.Lock()
+	proof := cloneTerminationEvidence(state.proof)
+	generation := state.generation
+	nodeName := state.nodeName
+	r.stateMu.Unlock()
+	if validTerminationEvidence(ref, proof) {
+		return *proof, nil
+	}
+	pod, getErr := r.getExactPod(ctx, ref)
+	if getErr == nil {
+		if identityErr := validateExactFUSEPodIdentity(pod, ref); identityErr != nil {
+			return runtime.TerminationEvidence{}, identityErr
+		}
+		pod, err = r.ensureFUSERuntimeCleanupFinalizer(ctx, ref)
+		if err != nil {
+			return runtime.TerminationEvidence{}, err
+		}
+		nodeName = pod.Spec.NodeName
+		if preparedPodContainersTerminated(pod) {
+			if pod.DeletionTimestamp == nil {
+				if deleteErr := r.deleteExactPod(ctx, pod); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+					return runtime.TerminationEvidence{}, deleteErr
+				}
+			}
+			proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, ProcessExited: true}
+		} else {
+			if generation == 0 {
+				status, statusErr := r.readMounterStatus(ctx, ref, "ready")
+				if statusErr == nil && status.Generation >= 0 {
+					generation = status.Generation
+				}
+			}
+			request, _ := json.Marshal(controlRequestWire{Version: controlWireVersion, RuntimeUID: ref.UID, Generation: generation})
+			raw, shutdownErr := r.execControl(ctx, ref.ID, workspaceMounterContainer, []string{mounterBinary, "shutdown"}, request)
+			gracefulUnmount := false
+			if shutdownErr == nil {
+				ack, decodeErr := decodeShutdownAck(raw)
+				if decodeErr != nil || ack.RuntimeUID != ref.UID || ack.Generation != generation || !ack.GracefulUnmount {
+					shutdownErr = fmt.Errorf("workspace shutdown acknowledgement is invalid")
+				} else {
+					gracefulUnmount = true
+				}
+			}
+			if shutdownErr == nil {
+				deleteSucceeded := pod.DeletionTimestamp != nil
+				if !deleteSucceeded {
+					deleteErr := r.deleteExactPod(ctx, pod)
+					deleteSucceeded = deleteErr == nil || apierrors.IsNotFound(deleteErr)
+				}
+				if deleteSucceeded {
+					terminal, gone, waitErr := r.waitExactPodTerminated(ctx, ref)
+					if waitErr == nil && (terminal != nil || gone) {
+						proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, NodeName: nodeName, GracefulUnmount: gracefulUnmount, ProcessExited: true}
+					}
+				}
+			}
+		}
+	} else if !errors.Is(getErr, runtime.ErrNotFound) {
+		return runtime.TerminationEvidence{}, getErr
+	}
+	if proof == nil {
+		if r.infraFencer == nil {
+			return runtime.TerminationEvidence{}, runtime.ErrTerminationUnconfirmed
+		}
+		evidence, fenceErr := r.infraFencer.FenceRuntime(ctx, ref, nodeName)
+		if fenceErr != nil || evidence.RuntimeUID != ref.UID ||
+			(evidence.InfrastructureFenced && (nodeName == "" || evidence.NodeName != nodeName)) ||
+			(!evidence.InfrastructureFenced && !evidence.ProcessExited) {
+			return runtime.TerminationEvidence{}, runtime.ErrTerminationUnconfirmed
+		}
+		proof = &evidence
+	}
+	r.stateMu.Lock()
+	state.nodeName = nodeName
+	state.generation = generation
+	state.proof = cloneTerminationEvidence(proof)
+	state.policiesDeleted = false
+	r.stateMu.Unlock()
+	return *proof, nil
+}
+
+func (r *Runtime) FinalizePreparedSandboxRemoval(ctx context.Context, runtimeID, runtimeUID string, evidence runtime.TerminationEvidence) error {
 	ref, err := runtime.NewRuntimeRef(runtimeID, runtimeUID)
 	if err != nil {
 		return err
+	}
+	if !validTerminationEvidence(ref, &evidence) {
+		return runtime.ErrTerminationUnconfirmed
 	}
 	state, err := r.beginWorkspaceRemoval(ctx, ref)
 	if err != nil {
@@ -1054,67 +1157,202 @@ func (r *Runtime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeU
 	}
 	defer r.finishWorkspaceRemoval(state)
 
-	r.stateMu.Lock()
-	proof := cloneTerminationEvidence(state.proof)
-	policiesDeleted := state.policiesDeleted
-	generation := state.generation
-	nodeName := state.nodeName
-	r.stateMu.Unlock()
-	if proof != nil && policiesDeleted {
-		return nil
-	}
-	if proof == nil {
-		pod, getErr := r.getExactPod(ctx, ref)
-		if getErr == nil {
-			nodeName = pod.Spec.NodeName
-			request, _ := json.Marshal(controlRequestWire{Version: controlWireVersion, RuntimeUID: ref.UID, Generation: generation})
-			raw, shutdownErr := r.execControl(ctx, ref.ID, workspaceMounterContainer, []string{mounterBinary, "shutdown"}, request)
-			if shutdownErr == nil {
-				ack, decodeErr := decodeShutdownAck(raw)
-				if decodeErr != nil || ack.RuntimeUID != ref.UID || ack.Generation != generation || !ack.GracefulUnmount {
-					shutdownErr = fmt.Errorf("workspace shutdown acknowledgement is invalid")
-				}
-			}
-			if shutdownErr == nil {
-				grace := pod.Spec.TerminationGracePeriodSeconds
-				deleteErr := r.client.CoreV1().Pods(r.namespace).Delete(ctx, ref.ID, metav1.DeleteOptions{
-					GracePeriodSeconds: grace,
-					Preconditions:      &metav1.Preconditions{UID: &pod.UID},
-				})
-				if deleteErr == nil {
-					if waitErr := r.waitExactPodGone(ctx, ref); waitErr == nil {
-						proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, GracefulUnmount: true, ProcessExited: true}
-					}
-				}
-			}
-		} else if !errors.Is(getErr, runtime.ErrNotFound) {
-			// The infrastructure fencer below is the only safe fallback.
+	pod, getErr := r.getExactPod(ctx, ref)
+	if getErr == nil {
+		if identityErr := validateExactFUSEPodIdentity(pod, ref); identityErr != nil {
+			return identityErr
 		}
-	}
-	if proof == nil {
-		if r.infraFencer == nil {
+		if evidence.InfrastructureFenced && (pod.Spec.NodeName == "" || pod.Spec.NodeName != evidence.NodeName) {
 			return runtime.ErrTerminationUnconfirmed
 		}
-		evidence, fenceErr := r.infraFencer.FenceRuntime(ctx, ref, nodeName)
-		if fenceErr != nil || evidence.RuntimeUID != ref.UID ||
-			(evidence.InfrastructureFenced && (nodeName == "" || evidence.NodeName != nodeName)) ||
-			(!evidence.InfrastructureFenced && !evidence.ProcessExited) {
-			return runtime.ErrTerminationUnconfirmed
+		if pod.DeletionTimestamp == nil {
+			if deleteErr := r.deleteExactPod(ctx, pod); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+				return deleteErr
+			}
 		}
-		proof = &evidence
+		if err := r.removeFUSERuntimeCleanupFinalizer(ctx, ref); err != nil {
+			return err
+		}
+		if err := r.waitPreparedPodGoneOrReplaced(ctx, ref); err != nil {
+			return err
+		}
+	} else if !errors.Is(getErr, runtime.ErrNotFound) && !errors.Is(getErr, runtime.ErrInvalidRuntimeRef) {
+		return getErr
 	}
+
 	r.stateMu.Lock()
-	state.nodeName = nodeName
-	state.proof = cloneTerminationEvidence(proof)
+	state.nodeName = evidence.NodeName
+	state.proof = cloneTerminationEvidence(&evidence)
 	state.policiesDeleted = false
+	mode := state.systemMode
 	r.stateMu.Unlock()
-	if err := r.deleteFUSEPolicies(ctx, ref, state.systemMode); err != nil {
+	if err := r.deleteFUSEPolicies(ctx, ref, mode); err != nil {
 		return err
 	}
 	r.stateMu.Lock()
 	state.policiesDeleted = true
 	r.stateMu.Unlock()
 	return nil
+}
+
+func validTerminationEvidence(ref runtime.RuntimeRef, evidence *runtime.TerminationEvidence) bool {
+	return evidence != nil && evidence.RuntimeUID == ref.UID &&
+		(evidence.ProcessExited || (evidence.InfrastructureFenced && evidence.NodeName != ""))
+}
+
+func (r *Runtime) deleteExactPod(ctx context.Context, pod *corev1.Pod) error {
+	uid := pod.UID
+	err := r.client.CoreV1().Pods(r.namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+		GracePeriodSeconds: pod.Spec.TerminationGracePeriodSeconds,
+		Preconditions:      &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil {
+		return fmt.Errorf("delete exact FUSE Pod: %w", err)
+	}
+	return nil
+}
+
+func (r *Runtime) ensureFUSERuntimeCleanupFinalizer(ctx context.Context, ref runtime.RuntimeRef) (*corev1.Pod, error) {
+	var result *corev1.Pod
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := r.getExactPod(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if containsString(pod.Finalizers, fuseRuntimeCleanupFinalizer) {
+			result = pod
+			return nil
+		}
+		if pod.DeletionTimestamp != nil {
+			return runtime.ErrTerminationUnconfirmed
+		}
+		pod.Finalizers = append(pod.Finalizers, fuseRuntimeCleanupFinalizer)
+		updated, err := r.client.CoreV1().Pods(r.namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		if string(updated.UID) != ref.UID || !containsString(updated.Finalizers, fuseRuntimeCleanupFinalizer) {
+			return runtime.ErrInvalidRuntimeRef
+		}
+		result = updated
+		return nil
+	})
+	return result, err
+}
+
+func (r *Runtime) removeFUSERuntimeCleanupFinalizer(ctx context.Context, ref runtime.RuntimeRef) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := r.getExactPod(ctx, ref)
+		if errors.Is(err, runtime.ErrNotFound) || errors.Is(err, runtime.ErrInvalidRuntimeRef) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !containsString(pod.Finalizers, fuseRuntimeCleanupFinalizer) {
+			return nil
+		}
+		pod.Finalizers = removeString(pod.Finalizers, fuseRuntimeCleanupFinalizer)
+		updated, err := r.client.CoreV1().Pods(r.namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if string(updated.UID) != ref.UID {
+			return runtime.ErrInvalidRuntimeRef
+		}
+		return nil
+	})
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, target string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != target {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func preparedPodContainersTerminated(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return declaredContainersTerminated(pod.Spec.InitContainers, pod.Status.InitContainerStatuses) &&
+		declaredContainersTerminated(pod.Spec.Containers, pod.Status.ContainerStatuses) &&
+		declaredEphemeralContainersTerminated(pod.Spec.EphemeralContainers, pod.Status.EphemeralContainerStatuses)
+}
+
+func declaredContainersTerminated(containers []corev1.Container, statuses []corev1.ContainerStatus) bool {
+	names := make(map[string]struct{}, len(containers))
+	for _, container := range containers {
+		names[container.Name] = struct{}{}
+	}
+	return namedContainersTerminated(names, statuses)
+}
+
+func declaredEphemeralContainersTerminated(containers []corev1.EphemeralContainer, statuses []corev1.ContainerStatus) bool {
+	names := make(map[string]struct{}, len(containers))
+	for _, container := range containers {
+		names[container.Name] = struct{}{}
+	}
+	return namedContainersTerminated(names, statuses)
+}
+
+func namedContainersTerminated(names map[string]struct{}, statuses []corev1.ContainerStatus) bool {
+	if len(statuses) != len(names) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(statuses))
+	for _, status := range statuses {
+		if _, declared := names[status.Name]; !declared || status.State.Terminated == nil {
+			return false
+		}
+		if _, duplicate := seen[status.Name]; duplicate {
+			return false
+		}
+		seen[status.Name] = struct{}{}
+	}
+	return len(seen) == len(names)
+}
+
+func (r *Runtime) waitExactPodTerminated(ctx context.Context, ref runtime.RuntimeRef) (*corev1.Pod, bool, error) {
+	timeout := r.terminationTimeout
+	if timeout <= 0 {
+		timeout = defaultKubernetesControlTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		pod, err := r.client.CoreV1().Pods(r.namespace).Get(waitCtx, ref.ID, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, true, nil
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("observe exact Pod process termination: %w", err)
+		}
+		if string(pod.UID) != ref.UID {
+			return nil, false, runtime.ErrInvalidRuntimeRef
+		}
+		if preparedPodContainersTerminated(pod) {
+			return pod, false, nil
+		}
+		if err := waitPoll(waitCtx, r.pollInterval); err != nil {
+			return nil, false, fmt.Errorf("observe exact Pod process termination: %w", err)
+		}
+	}
 }
 
 // ReconcileOrphanedResources removes managed FUSE Pods and policies that are
@@ -1527,11 +1765,9 @@ func (r *Runtime) verifyAmbiguousPodCreate(ctx context.Context, desired *corev1.
 		// policy. An incompatible Pod must be left untouched, while removing that
 		// unbound policy prevents it from inheriting this operation's egress.
 		if current.UID != "" && current.Annotations[fusePrepareAttemptAnnotation] == desired.Annotations[fusePrepareAttemptAnnotation] {
-			uid := current.UID
-			deleteErr := r.client.CoreV1().Pods(r.namespace).Delete(cleanupCtx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
 			ref := runtime.RuntimeRef{ID: current.Name, UID: string(current.UID)}
-			confirmErr := r.waitPreparedPodGoneOrReplaced(cleanupCtx, ref)
-			return nil, confirmErr == nil, errors.Join(fmt.Errorf("create prepared Pod result was mutated"), deleteErr, confirmErr)
+			cleanupErr := r.terminatePreparedPodForCompensation(cleanupCtx, ref)
+			return nil, cleanupErr == nil, errors.Join(fmt.Errorf("create prepared Pod result was mutated"), cleanupErr)
 		}
 		return nil, true, fmt.Errorf("create prepared Pod result is incompatible")
 	}
@@ -1540,6 +1776,9 @@ func (r *Runtime) verifyAmbiguousPodCreate(ctx context.Context, desired *corev1.
 
 func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeName bool) bool {
 	if current == nil || desired == nil || current.UID == "" || current.Name != desired.Name || current.Namespace != desired.Namespace {
+		return false
+	}
+	if !reflect.DeepEqual(current.Finalizers, desired.Finalizers) {
 		return false
 	}
 	for key, value := range desired.Labels {
@@ -1604,6 +1843,9 @@ func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
 	}
 	if !reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) {
 		return "annotations"
+	}
+	if !reflect.DeepEqual(currentCopy.Finalizers, desiredCopy.Finalizers) {
+		return "finalizers"
 	}
 	currentSpec, desiredSpec := reflect.ValueOf(currentCopy.Spec), reflect.ValueOf(desiredCopy.Spec)
 	typ := currentSpec.Type()
@@ -1697,10 +1939,7 @@ func (r *Runtime) compensatePreparedFailure(ctx context.Context, pod *corev1.Pod
 	cleanupCtx, cancel := r.newCleanupContext(ctx)
 	defer cancel()
 	ref := runtime.RuntimeRef{ID: pod.Name, UID: string(pod.UID)}
-	deleteErr := r.client.CoreV1().Pods(r.namespace).Delete(cleanupCtx, ref.ID, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}})
-	// A delete response can be lost after the API accepted it. Only an exact
-	// readback that proves this immutable UID is gone permits policy cleanup.
-	deleteErr = r.waitPreparedPodGoneOrReplaced(cleanupCtx, ref)
+	deleteErr := r.terminatePreparedPodForCompensation(cleanupCtx, ref)
 	if deleteErr == nil {
 		deleteErr = r.deletePreparedSystemPolicy(cleanupCtx, ref.ID, mode, ref.UID, prepareAttempt, true)
 	}
@@ -1708,6 +1947,47 @@ func (r *Runtime) compensatePreparedFailure(ctx context.Context, pod *corev1.Pod
 		return errors.Join(cause, fmt.Errorf("compensate prepared Pod: %w", deleteErr))
 	}
 	return cause
+}
+
+func (r *Runtime) terminatePreparedPodForCompensation(ctx context.Context, ref runtime.RuntimeRef) error {
+	pod, err := r.getExactPod(ctx, ref)
+	if errors.Is(err, runtime.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// An unbound Pod has never been handed to a kubelet, so its exact UID
+	// cannot have started a process even if an admission response mutated other
+	// fields. This is the only compensation path that does not require the full
+	// prepared-Pod identity contract.
+	if pod.Spec.NodeName == "" {
+		pod, err = r.ensureFUSERuntimeCleanupFinalizer(ctx, ref)
+		if err != nil {
+			return err
+		}
+		deleteErr := r.deleteExactPod(ctx, pod)
+		if deleteErr != nil {
+			current, getErr := r.getExactPod(ctx, ref)
+			if getErr == nil && current != nil {
+				return deleteErr
+			}
+			if !errors.Is(getErr, runtime.ErrNotFound) && !errors.Is(getErr, runtime.ErrInvalidRuntimeRef) {
+				return errors.Join(deleteErr, getErr)
+			}
+		}
+		if err := r.removeFUSERuntimeCleanupFinalizer(ctx, ref); err != nil {
+			return err
+		}
+		return r.waitPreparedPodGoneOrReplaced(ctx, ref)
+	}
+	if _, err := r.ConfirmPreparedSandboxTermination(ctx, ref.ID, ref.UID); err != nil {
+		return err
+	}
+	if err := r.removeFUSERuntimeCleanupFinalizer(ctx, ref); err != nil {
+		return err
+	}
+	return r.waitPreparedPodGoneOrReplaced(ctx, ref)
 }
 
 func (r *Runtime) newCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {

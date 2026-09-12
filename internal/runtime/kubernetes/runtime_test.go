@@ -1591,6 +1591,157 @@ func TestRemovePreparedSandboxRequiresProofBeforePolicyDeletion(t *testing.T) {
 	assert.Equal(t, "delete-policy", events[len(events)-1])
 }
 
+func TestPrepareSandboxAddsManagedCleanupFinalizer(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, []string{fuseRuntimeCleanupFinalizer}, pod.Finalizers)
+}
+
+func TestPreparedPodContainersTerminatedRequiresEveryDeclaredStatus(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{
+		InitContainers:      []corev1.Container{{Name: workspaceMounterContainer}},
+		Containers:          []corev1.Container{{Name: sandboxContainer}},
+		EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"}}},
+	}}
+	terminated := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: workspaceMounterContainer, State: terminated}}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: sandboxContainer, State: terminated}}
+	require.False(t, preparedPodContainersTerminated(pod), "missing ephemeral status is uncertain")
+	pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{Name: "debugger", State: terminated}}
+	require.True(t, preparedPodContainersTerminated(pod))
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	require.False(t, preparedPodContainersTerminated(pod))
+}
+
+func TestFinalizePreparedSandboxRemovalRequiresDurableEvidence(t *testing.T) {
+	rt, _ := newFakeKubernetesRuntime(t, preparedScript())
+	err := rt.FinalizePreparedSandboxRemoval(context.Background(), "sandbox-pool-a", "pod-uid-a", sandboxruntime.TerminationEvidence{RuntimeUID: "pod-uid-a"})
+	require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
+}
+
+func TestFinalizePreparedSandboxRemovalRejectsFenceForDifferentNode(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	setWorkspaceNodeForTest(t, rt, client, info.RuntimeID, "node-a")
+	err = rt.FinalizePreparedSandboxRemoval(context.Background(), info.RuntimeID, info.RuntimeUID, sandboxruntime.TerminationEvidence{
+		RuntimeUID: info.RuntimeUID, NodeName: "node-b", InfrastructureFenced: true,
+	})
+	require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
+	_, err = client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestPreparedSandboxTerminationSurvivesRuntimeRestartBeforeFinalize(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	installFinalizerAwarePodDeletion(t, client)
+
+	evidence, err := rt.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.NoError(t, err)
+	require.True(t, evidence.ProcessExited)
+	retained, err := client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, retained.DeletionTimestamp)
+	require.Contains(t, retained.Finalizers, fuseRuntimeCleanupFinalizer)
+
+	restarted := *rt
+	restarted.workspaceStates = nil
+	recovered, err := restarted.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.NoError(t, err)
+	require.True(t, recovered.ProcessExited)
+	require.NoError(t, restarted.FinalizePreparedSandboxRemoval(context.Background(), ref.ID, ref.UID, recovered))
+	_, err = client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestPreparedSandboxTerminationAdoptsOnlyLiveLegacyPod(t *testing.T) {
+	for _, deleting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleting=%t", deleting), func(t *testing.T) {
+			rt, client := newFakeKubernetesRuntime(t, preparedScript())
+			info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+			require.NoError(t, err)
+			pod, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), "runtime", info.RuntimeID)
+			require.NoError(t, err)
+			legacy := pod.(*corev1.Pod).DeepCopy()
+			legacy.Finalizers = nil
+			if deleting {
+				now := metav1.Now()
+				legacy.DeletionTimestamp = &now
+			}
+			require.NoError(t, client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), legacy, "runtime"))
+			installFinalizerAwarePodDeletion(t, client)
+
+			_, err = rt.ConfirmPreparedSandboxTermination(context.Background(), info.RuntimeID, info.RuntimeUID)
+			if deleting {
+				require.ErrorIs(t, err, sandboxruntime.ErrTerminationUnconfirmed)
+				return
+			}
+			require.NoError(t, err)
+			current, err := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Contains(t, current.Finalizers, fuseRuntimeCleanupFinalizer)
+		})
+	}
+}
+
+func TestPrepareSandboxCompensationReleasesCleanupFinalizer(t *testing.T) {
+	base := preparedScript()
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "prepared"}) {
+			return nil, errors.New("injected prepared health failure")
+		}
+		return base.handler(command)
+	}}
+	rt, client := newFakeKubernetesRuntime(t, script)
+	installFinalizerAwarePodDeletion(t, client)
+
+	_, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.ErrorContains(t, err, "injected prepared health failure")
+	_, err = client.CoreV1().Pods("runtime").Get(context.Background(), preparedFUSESpecForTest().ID, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "compensation must remove its finalizer-held Pod")
+}
+
+func installFinalizerAwarePodDeletion(t *testing.T, client *kubefake.Clientset) {
+	t.Helper()
+	resource := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		name := action.(ktesting.DeleteAction).GetName()
+		current, err := client.Tracker().Get(resource, "runtime", name)
+		require.NoError(t, err)
+		pod := current.(*corev1.Pod).DeepCopy()
+		now := metav1.Now()
+		pod.DeletionTimestamp = &now
+		terminated := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
+		pod.Status.InitContainerStatuses = nil
+		for _, container := range pod.Spec.InitContainers {
+			pod.Status.InitContainerStatuses = append(pod.Status.InitContainerStatuses, corev1.ContainerStatus{Name: container.Name, State: terminated})
+		}
+		pod.Status.ContainerStatuses = nil
+		for _, container := range pod.Spec.Containers {
+			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{Name: container.Name, State: terminated})
+		}
+		require.NoError(t, client.Tracker().Update(resource, pod, "runtime"))
+		return true, nil, nil
+	})
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		pod := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod).DeepCopy()
+		if pod.DeletionTimestamp == nil || containsString(pod.Finalizers, fuseRuntimeCleanupFinalizer) {
+			return false, nil, nil
+		}
+		err := client.Tracker().Delete(resource, "runtime", pod.Name)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return true, nil, err
+		}
+		return true, pod, nil
+	})
+}
+
 func TestRemovePreparedSandboxNotFoundWithoutPriorProofFailsClosed(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())

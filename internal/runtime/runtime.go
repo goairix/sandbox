@@ -72,6 +72,14 @@ type PreparedSandboxRemover interface {
 	RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeUID string) error
 }
 
+// PreparedSandboxCleanup separates exact runtime termination proof from the
+// destructive cleanup that makes its provider object disappear. Persistent
+// callers must checkpoint the returned evidence before finalization.
+type PreparedSandboxCleanup interface {
+	ConfirmPreparedSandboxTermination(ctx context.Context, runtimeID, runtimeUID string) (TerminationEvidence, error)
+	FinalizePreparedSandboxRemoval(ctx context.Context, runtimeID, runtimeUID string, evidence TerminationEvidence) error
+}
+
 // OrphanReconciler removes managed runtime resources only after the manager has
 // restored state and supplied the complete set of protected runtime UIDs.
 type OrphanReconciler interface {
