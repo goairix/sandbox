@@ -4,7 +4,7 @@
 
 **Goal:** Make release-wide drain remove ordinary warm-pool runtimes that are not present in the drain Job's in-memory Pool before Kubernetes zero-state audit runs.
 
-**Architecture:** Add a drain-only, fail-closed Manager helper that lists `sandbox.pool=true` runtimes, excludes FUSE runtimes, and aggregates exact removal errors. Invoke it after the in-memory ordinary Pool has drained so failed or orphaned removals are retried, while the existing FUSE and final audit paths remain unchanged.
+**Architecture:** Add a drain-only, fail-closed Manager helper that lists `sandbox.managed=true,sandbox.pool=true` runtimes, excludes FUSE runtimes, validates returned ownership labels, and aggregates exact removal errors. Invoke it after the in-memory ordinary Pool has drained so failed or orphaned removals are retried, while the existing FUSE and final audit paths remain unchanged.
 
 **Tech Stack:** Go 1.25, `errors.Join`, sandbox runtime abstraction, testify unit tests
 
@@ -49,7 +49,7 @@ func TestManagerDrainReleaseRemovesOrphanedOrdinaryPoolRuntime(t *testing.T) {
 
 	require.NoError(t, mgr.DrainRelease(context.Background()))
 	assert.True(t, rt.wasRemoved("sandbox-pool-orphan"))
-	assert.Equal(t, map[string]string{"sandbox.pool": "true"}, rt.listLabels)
+	assert.Equal(t, map[string]string{"sandbox.managed": "true", "sandbox.pool": "true"}, rt.listLabels)
 }
 
 func TestManagerDrainReleaseDoesNotTreatFUSEPoolRuntimeAsOrdinary(t *testing.T) {
@@ -114,7 +114,7 @@ Add this helper near `cleanupOrphanedPoolContainers`:
 
 ```go
 func (m *Manager) drainOrphanedOrdinaryPoolContainers(ctx context.Context) error {
-	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{"sandbox.pool": "true"})
+	containers, err := m.runtime.ListSandboxes(ctx, map[string]string{"sandbox.managed": "true", "sandbox.pool": "true"})
 	if err != nil {
 		return fmt.Errorf("list ordinary pool runtimes during release drain: %w", err)
 	}
@@ -123,7 +123,7 @@ func (m *Manager) drainOrphanedOrdinaryPoolContainers(ctx context.Context) error
 		if container.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) {
 			continue
 		}
-		if container.Labels["sandbox.pool"] != "true" {
+		if container.Labels["sandbox.managed"] != "true" || container.Labels["sandbox.pool"] != "true" {
 			drainErr = errors.Join(drainErr, fmt.Errorf("ordinary pool runtime %s has invalid pool identity", container.RuntimeID))
 			continue
 		}

@@ -25,12 +25,13 @@ Deployment 缩容时留下的 `sandbox.pool=true` Pod 不会出现在 drain Job 
 
 在 Manager 中增加 drain 专用的普通 Pool 清理方法：
 
-1. 通过 runtime 列举 `sandbox.pool=true` 的运行时。
+1. 通过 runtime 列举 `sandbox.managed=true,sandbox.pool=true` 的运行时。
 2. 跳过 `sandbox.workspace.mode=fuse`，避免绕过 FUSE 的持久化所有权协议。
-3. 对每个普通 Pool runtime 调用 `RemoveSandbox`。Kubernetes 实现会读取 Pod UID，
+3. 再次验证返回对象同时带有 managed 与 pool 标识，拒绝删除身份不完整的对象。
+4. 对每个普通 Pool runtime 调用 `RemoveSandbox`。Kubernetes 实现会读取 Pod UID，
    先精确删除 Pod，再清理与该 runtime identity 绑定的 NetworkPolicy/Cilium 策略。
-4. 聚合全部删除错误并返回，确保一个失败不会阻止尝试清理其他孤儿。
-5. 在 `DrainRelease` 完成业务 sandbox、FUSE Pool 和内存普通 Pool drain 后调用该方法，
+5. 聚合全部删除错误并返回，确保一个失败不会阻止尝试清理其他孤儿。
+6. 在 `DrainRelease` 完成业务 sandbox、FUSE Pool 和内存普通 Pool drain 后调用该方法，
    随后继续执行 Redis 与 Kubernetes 零状态审计。
 
 正常启动使用的 `cleanupOrphanedPoolContainers` 保持原样；它需要保护已恢复的业务

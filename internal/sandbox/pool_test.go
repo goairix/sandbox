@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +55,7 @@ type mockRuntime struct {
 	removeRelease     chan struct{}
 	downloadDirErr    error
 	listedSandboxes   []runtime.SandboxInfo
+	listSandboxesErr  error
 	listLabels        map[string]string
 	updateLabelsErr   error
 	updateLabelsID    string
@@ -371,9 +373,9 @@ func (m *mockRuntime) RenameSandbox(context.Context, string, string) error {
 func (m *mockRuntime) ListSandboxes(_ context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.listLabels = make(map[string]string, len(labels))
-	for key, value := range labels {
-		m.listLabels[key] = value
+	m.listLabels = maps.Clone(labels)
+	if m.listSandboxesErr != nil {
+		return nil, m.listSandboxesErr
 	}
 	return append([]runtime.SandboxInfo(nil), m.listedSandboxes...), nil
 }
