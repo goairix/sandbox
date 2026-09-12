@@ -110,7 +110,7 @@ internal/admin/
 
 ### 6.1 数据库选择
 
-首期支持 PostgreSQL 17 或更高版本。数据库必须提供无参数、返回 PostgreSQL 原生 `uuid` 类型的 `uuidv7()` 函数：当前 PostgreSQL 17 环境由已安装插件提供，PostgreSQL 18 及更高版本可使用内置函数。应用只做能力检测，不负责执行 `CREATE EXTENSION`、安装或升级数据库插件。使用：
+首期支持 PostgreSQL 17 或更高版本。数据库必须通过当前已安装的插件提供无参数、返回 PostgreSQL 原生 `uuid` 类型的 `uuid_generate_v7()` 函数。应用只做能力检测，不负责执行 `CREATE EXTENSION`、安装或升级数据库插件。使用：
 
 - `gorm.io/gorm`；
 - `gorm.io/driver/postgres`；
@@ -118,9 +118,9 @@ internal/admin/
 
 Repository 和领域模型保持数据库无关，以便未来增加 MySQL Adapter。当前不承诺无需迁移工作即可切换数据库。
 
-所有管理域自有表都使用名为 `id` 的原生 UUID 主键，DDL 统一定义为 `id uuid PRIMARY KEY DEFAULT uuidv7()`。关联表也保留独立 UUIDv7 主键，并为业务唯一关系增加唯一约束。Gormigrate 自身的迁移记录表沿用库默认结构，不纳入这一主键约束。
+所有管理域自有表都使用名为 `id` 的原生 UUID 主键，DDL 统一定义为 `id uuid PRIMARY KEY DEFAULT uuid_generate_v7()`。关联表也保留独立 UUIDv7 主键，并为业务唯一关系增加唯一约束。Gormigrate 自身的迁移记录表沿用库默认结构，不纳入这一主键约束。
 
-PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RETURNING` 取回 UUIDv7。领域层使用 UUID 值，但不感知 `uuidv7()` 函数。业务 Sandbox ID、Runtime ID、Runtime UID 和 Manager Instance ID 是外部标识，继续使用字符串字段，不冒充管理表主键。
+PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RETURNING` 取回 UUIDv7。领域层使用 UUID 值，但不感知 `uuid_generate_v7()` 函数。业务 Sandbox ID、Runtime ID、Runtime UID 和 Manager Instance ID 是外部标识，继续使用字符串字段，不冒充管理表主键。
 
 为降低未来适配成本：
 
@@ -136,7 +136,7 @@ PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RE
 - 每个 Migration 使用不可复用、不可修改的稳定 ID。
 - 已进入主分支且可能在线上执行过的 Migration 禁止改写；变更必须追加新 Migration。
 - 每项迁移提供显式 `Migrate`；可安全回滚的迁移同时提供 `Rollback`。
-- 所有管理域建表迁移必须显式声明 `id uuid PRIMARY KEY DEFAULT uuidv7()`，不得退化为 UUIDv4、自增整数或无序字符串主键。
+- 所有管理域建表迁移必须显式声明 `id uuid PRIMARY KEY DEFAULT uuid_generate_v7()`，不得退化为 UUIDv4、自增整数或无序字符串主键。
 - Migration 在每次服务启动时由主进程自动检查并执行，不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
 - 多副本启动时，以 PostgreSQL Advisory Lock 串行执行迁移。未取得锁的副本在限定时间内等待，迁移完成前不得进入 Ready。
 - Migration 失败时服务启动失败，不对外提供业务或管理流量。
@@ -535,7 +535,7 @@ admin:
 
 1. 加载并校验配置；
 2. 初始化日志和 Telemetry；
-3. 连接 PostgreSQL，并调用 `uuidv7()` 校验函数存在、可执行且返回原生 `uuid` 类型；
+3. 连接 PostgreSQL，并调用 `uuid_generate_v7()` 校验函数存在、可执行且返回原生 `uuid` 类型；
 4. 主进程获取迁移锁，自动执行全部待执行 Migration 与 Seed；
 5. 初始化 Repository、Admin Service 和命令 Worker；
 6. 初始化现有 Runtime、Redis、Storage 和 Manager；
@@ -566,8 +566,8 @@ admin:
 - 重复执行迁移无副作用；
 - 多副本并发迁移只有一个执行者；
 - 所有管理域自有表的主键类型为 PostgreSQL `uuid`，数据库默认值生成 UUIDv7；
-- 新增记录由 Go UUID 解析器验证版本为 7，不依赖 PostgreSQL 18 才提供的 UUID 版本提取函数；
-- `uuidv7()` 缺失、无执行权限或返回类型不是 PostgreSQL 原生 `uuid` 时启动失败；
+- 新增记录由 Go UUID 解析器验证版本为 7；
+- `uuid_generate_v7()` 缺失、无执行权限或返回类型不是 PostgreSQL 原生 `uuid` 时启动失败；
 - Seed 幂等且不覆盖已有密码；
 - Repository 查询、分页、事务和唯一约束；
 - 多 Worker 竞争同一命令；
@@ -604,7 +604,7 @@ admin:
 1. PostgreSQL 空库可由 `gormigrate/v2` 完整迁移并创建首个超级管理员。
 2. 代码中不存在 `AutoMigrate` 调用，所有 DDL 均可定位到 Migration。
 3. 普通服务启动会自动执行所有待执行 Migration 与 Seed，系统不依赖任何 CLI、独立 Job 或 Init Container。
-4. 所有管理域自有表都使用 PostgreSQL 原生 `uuid` 主键，并由数据库 `uuidv7()` 默认生成 UUIDv7。
+4. 所有管理域自有表都使用 PostgreSQL 原生 `uuid` 主键，并由数据库 `uuid_generate_v7()` 默认生成 UUIDv7。
 5. 三种角色只能访问其允许的页面与 API。
 6. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
 7. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
