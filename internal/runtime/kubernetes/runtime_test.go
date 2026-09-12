@@ -1637,6 +1637,22 @@ func TestPreparedPodIntentRejectsSecurityExpansions(t *testing.T) {
 	withServiceAccountPullSecrets.Spec.ImagePullSecrets = append(withServiceAccountPullSecrets.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: "INVALID_SECRET"})
 	assert.False(t, preparedPodIntentMatches(withServiceAccountPullSecrets, desired, false), "only valid ServiceAccount imagePullSecret references are normalized")
 
+	equivalentAppArmor := base.DeepCopy()
+	syncMounterAppArmorField(equivalentAppArmor, corev1.AppArmorProfileTypeLocalhost, "sandbox-fuse")
+	equivalentBefore := equivalentAppArmor.DeepCopy()
+	desiredBefore := desired.DeepCopy()
+	assert.True(t, preparedPodIntentMatches(equivalentAppArmor, desired, false), "Kubernetes may copy the requested AppArmor annotation into the structured field")
+	assert.Equal(t, equivalentBefore, equivalentAppArmor, "intent comparison must not mutate the current Pod")
+	assert.Equal(t, desiredBefore, desired, "intent comparison must not mutate the desired Pod")
+
+	differentAppArmor := base.DeepCopy()
+	syncMounterAppArmorField(differentAppArmor, corev1.AppArmorProfileTypeLocalhost, "other-profile")
+	assert.False(t, preparedPodIntentMatches(differentAppArmor, desired, false), "a different AppArmor profile must remain a security-contract mismatch")
+
+	unconfinedAppArmor := base.DeepCopy()
+	syncMounterAppArmorField(unconfinedAppArmor, corev1.AppArmorProfileTypeUnconfined, "")
+	assert.False(t, preparedPodIntentMatches(unconfinedAppArmor, desired, false), "an unconfined AppArmor profile must remain a security-contract mismatch")
+
 	for _, tc := range []struct {
 		name   string
 		mutate func(*corev1.Pod)
@@ -1658,6 +1674,28 @@ func TestPreparedPodIntentRejectsSecurityExpansions(t *testing.T) {
 			assert.False(t, preparedPodIntentMatches(current, desired, false))
 		})
 	}
+}
+
+func syncMounterAppArmorField(pod *corev1.Pod, profileType corev1.AppArmorProfileType, profile string) {
+	security := pod.Spec.InitContainers[0].SecurityContext
+	security.AppArmorProfile = &corev1.AppArmorProfile{Type: profileType}
+	if profile != "" {
+		security.AppArmorProfile.LocalhostProfile = &profile
+	}
+}
+
+func TestPrepareSandboxAcceptsEquivalentAppArmorFieldFromAdmission(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		pod := action.(ktesting.CreateAction).GetObject().(*corev1.Pod)
+		syncMounterAppArmorField(pod, corev1.AppArmorProfileTypeLocalhost, "sandbox-fuse")
+		return false, nil, nil
+	})
+
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+
+	require.NoError(t, err)
+	assert.Equal(t, "pod-uid-a", info.RuntimeUID)
 }
 
 func TestPrepareSandboxRejectsNodeNameInjectedIntoSuccessfulCreateResponse(t *testing.T) {
