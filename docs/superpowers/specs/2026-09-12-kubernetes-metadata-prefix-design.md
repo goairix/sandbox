@@ -41,7 +41,7 @@ Kubernetes metadata key 只能包含一个分隔前缀和名称的 `/`。因此�
 - 替换 Kubernetes FUSE Pod cleanup finalizer 常量；
 - 替换 Helm Deployment、fingerprint ConfigMap 和 upgrade/rollback hook 中的 annotation；
 - 更新 Helm 渲染测试、Go 单元测试、部署文档和原 FUSE cleanup 设计文档；
-- 搜索仓库，确保运行时代码、模板和有效测试中不存在 `sandbox.huaxisy.com`。
+- 搜索仓库，确保除迁移背景说明和明确拒绝旧前缀的负向测试外，运行时代码、模板与文档示例中不存在 `sandbox.huaxisy.com`。
 
 不把 prefix 暴露为 `values.yaml` 配置项。它是控制器与资源之间的稳定协议标识，允许每次安装
 任意改变会使控制器无法识别自己创建的资源。
@@ -52,4 +52,4 @@ Kubernetes metadata key 只能包含一个分隔前缀和名称的 `/`。因此�
 2. 新建 FUSE Pod 携带 `goairix.github.io/sandbox-fuse-runtime-cleanup` finalizer；
 3. drain、upgrade 和 rollback guard 从新 annotation key 读取协议值；
 4. Go 测试、Helm 测试、`go vet ./...` 和 `go test ./...` 全部通过；
-5. 除历史说明外，仓库不再包含 `sandbox.huaxisy.com`。
+5. 除迁移背景说明和负向测试外，仓库不再包含 `sandbox.huaxisy.com`。

@@ -16,7 +16,7 @@
 - Create: `internal/kubecontract/metadata.go`
 - Create: `internal/kubecontract/metadata_test.go`
 
-- [ ] **Step 1: Write the failing contract test**
+- [x] **Step 1: Write the failing contract test**
 
 Create `internal/kubecontract/metadata_test.go` with exact-value assertions and Kubernetes qualified-name validation:
 
@@ -53,13 +53,13 @@ func TestMetadataNamesUseProjectNamespace(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `go test ./internal/kubecontract -count=1`
 
 Expected: FAIL because package constants and `metadata.go` do not exist.
 
-- [ ] **Step 3: Implement the contract constants**
+- [x] **Step 3: Implement the contract constants**
 
 Create `internal/kubecontract/metadata.go`:
 
@@ -76,13 +76,13 @@ const (
 )
 ```
 
-- [ ] **Step 4: Run the contract test**
+- [x] **Step 4: Run the contract test**
 
 Run: `go test ./internal/kubecontract -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the contract**
+- [x] **Step 5: Commit the contract**
 
 ```bash
 git add internal/kubecontract/metadata.go internal/kubecontract/metadata_test.go
@@ -97,7 +97,7 @@ git commit -m "feat: define kubernetes metadata contract"
 - Modify: `internal/runtime/kubernetes/pod.go`
 - Modify: `internal/runtime/kubernetes/runtime_test.go`
 
-- [ ] **Step 1: Add literal consumer assertions**
+- [x] **Step 1: Add literal consumer assertions**
 
 Add this test to `cmd/sandbox/drain_test.go`:
 
@@ -117,7 +117,7 @@ func TestFUSERuntimeCleanupFinalizerUsesProjectNamespace(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the consumer tests to verify they fail**
+- [x] **Step 2: Run the consumer tests to verify they fail**
 
 Run:
 
@@ -127,7 +127,7 @@ go test ./cmd/sandbox ./internal/runtime/kubernetes -run 'TestDrainMetadataAnnot
 
 Expected: FAIL showing the current `sandbox.huaxisy.com/*` values.
 
-- [ ] **Step 3: Replace local hardcoded values with contract aliases**
+- [x] **Step 3: Replace local hardcoded values with contract aliases**
 
 Import `github.com/goairix/sandbox/internal/kubecontract` in both production files.
 
@@ -147,7 +147,7 @@ Replace the finalizer constant in `internal/runtime/kubernetes/pod.go` with:
 const fuseRuntimeCleanupFinalizer = kubecontract.FUSERuntimeCleanupFinalizer
 ```
 
-- [ ] **Step 4: Run all affected Go package tests**
+- [x] **Step 4: Run all affected Go package tests**
 
 Run:
 
@@ -157,7 +157,7 @@ go test ./cmd/sandbox ./internal/runtime/kubernetes ./internal/kubecontract -cou
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the Go consumer cutover**
+- [x] **Step 5: Commit the Go consumer cutover**
 
 ```bash
 git add cmd/sandbox/drain.go cmd/sandbox/drain_test.go internal/runtime/kubernetes/pod.go internal/runtime/kubernetes/runtime_test.go
@@ -175,7 +175,7 @@ git commit -m "refactor: use project kubernetes metadata namespace"
 - Modify: `scripts/test-helm-chart.sh`
 - Modify: `scripts/test-helm-backend-switch.sh`
 
-- [ ] **Step 1: Change Helm tests to require only the new keys**
+- [x] **Step 1: Change Helm tests to require only the new keys**
 
 In `scripts/test-helm-chart.sh`, replace the fingerprint assertion and add an old-prefix rejection:
 
@@ -200,7 +200,7 @@ grep -Fq 'goairix.github.io/sandbox-cleanup-protocol: "v2"' <<<"$rendered"
 ! grep -Fq 'sandbox.huaxisy.com/' <<<"$rendered"
 ```
 
-- [ ] **Step 2: Run Helm tests to verify they fail**
+- [x] **Step 2: Run Helm tests to verify they fail**
 
 Run:
 
@@ -211,7 +211,7 @@ bash scripts/test-helm-backend-switch.sh
 
 Expected: both scripts FAIL because the templates still render the old keys.
 
-- [ ] **Step 3: Add the Helm metadata prefix helper**
+- [x] **Step 3: Add the Helm metadata prefix helper**
 
 Add to `deploy/helm/sandbox/templates/_helpers.tpl`:
 
@@ -219,7 +219,7 @@ Add to `deploy/helm/sandbox/templates/_helpers.tpl`:
 {{- define "sandbox.metadataPrefix" -}}goairix.github.io{{- end -}}
 ```
 
-- [ ] **Step 4: Render all Chart annotations from the helper**
+- [x] **Step 4: Render all Chart annotations from the helper**
 
 Replace each old annotation key in the four templates with the matching expression:
 
@@ -240,7 +240,7 @@ For example, the Deployment annotations become:
 
 Do not add the prefix to `values.yaml`; it remains a stable Chart/controller protocol identifier.
 
-- [ ] **Step 5: Run Helm lint and rendering tests**
+- [x] **Step 5: Run Helm lint and rendering tests**
 
 Run:
 
@@ -252,7 +252,7 @@ bash scripts/test-helm-backend-switch.sh
 
 Expected: Helm lint reports `0 chart(s) failed`; both scripts print `PASS`.
 
-- [ ] **Step 6: Commit the Helm cutover**
+- [x] **Step 6: Commit the Helm cutover**
 
 ```bash
 git add deploy/helm/sandbox/templates/_helpers.tpl deploy/helm/sandbox/templates/deployment.yaml deploy/helm/sandbox/templates/backend-fingerprint.yaml deploy/helm/sandbox/templates/pre-backend-change-drain.yaml deploy/helm/sandbox/templates/post-backend-change-resume.yaml scripts/test-helm-chart.sh scripts/test-helm-backend-switch.sh
@@ -266,7 +266,7 @@ git commit -m "refactor: rename helm kubernetes metadata keys"
 - Modify: `docs/deployment/workspace-fuse.md`
 - Modify: `docs/superpowers/plans/2026-09-12-kubernetes-fuse-cleanup-recovery.md`
 
-- [ ] **Step 1: Replace active documentation examples**
+- [x] **Step 1: Replace active documentation examples**
 
 Use these exact names in deployment documentation:
 
@@ -279,19 +279,20 @@ goairix.github.io/sandbox-fuse-runtime-cleanup
 
 Update the earlier cleanup implementation plan so its code snippets match the final project namespace. Preserve the metadata-prefix design document's references to the old key because those sentences explain the reason for the migration.
 
-- [ ] **Step 2: Verify active sources contain no old prefix**
+- [x] **Step 2: Verify active sources contain no old prefix**
 
 Run:
 
 ```bash
-if rg -n 'sandbox\.huaxisy\.com' cmd internal deploy scripts docs/deployment docs/superpowers/plans/2026-09-12-kubernetes-fuse-cleanup-recovery.md; then
+if rg -n 'sandbox\.huaxisy\.com' cmd internal deploy docs/deployment docs/superpowers/plans/2026-09-12-kubernetes-fuse-cleanup-recovery.md; then
   exit 1
 fi
+test "$(rg -n 'sandbox\.huaxisy\.com' scripts | wc -l | tr -d ' ')" = "2"
 ```
 
-Expected: no matches and exit status 0.
+Expected: no active-source matches, exactly two negative test assertions, and exit status 0.
 
-- [ ] **Step 3: Run repository verification**
+- [x] **Step 3: Run repository verification**
 
 Run:
 
@@ -307,7 +308,7 @@ bash scripts/test-helm-backend-switch.sh
 
 Expected: formatting produces no unexpected diff; `git diff --check`, vet, and tests exit 0; Helm lint reports `0 chart(s) failed`; both scripts print `PASS`.
 
-- [ ] **Step 4: Inspect the final diff and commit documentation**
+- [x] **Step 4: Inspect the final diff and commit documentation**
 
 Run:
 

@@ -139,16 +139,16 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 从不含 drain protocol 标记的旧 Chart 首次升级时，先保持 backend
 fingerprint 不变，只更新新版 Chart 和 `sandbox-api`。这一步会给 Deployment
-写入 `sandbox.huaxisy.com/drain-protocol: v1`，并把安全的 upgrade/resume/
+写入 `goairix.github.io/sandbox-drain-protocol: v1`，并把安全的 upgrade/resume/
 rollback guard Hook 写入 release revision。确认这次同 backend 升级成功后，
 才能在下一次 `helm upgrade` 中修改 backend fingerprint。若把协议迁移和
 backend 切换混在第一次升级里，pre-upgrade Hook 会在缩容前拒绝，避免旧
 revision 缺少 resume Hook 时发生不安全的 atomic rollback。
 
 Kubernetes FUSE 崩溃恢复协议从 v1 升级到 v2 时，Deployment 会写入
-`sandbox.huaxisy.com/cleanup-protocol: v2`。即使 backend fingerprint 不变，
+`goairix.github.io/sandbox-cleanup-protocol: v2`。即使 backend fingerprint 不变，
 pre-upgrade Hook 也会执行一次完整 drain。已安装 Deployment 必须先具有
-`sandbox.huaxisy.com/drain-protocol: v1`；缺少该标记时 Hook 会在缩容前拒绝，
+`goairix.github.io/sandbox-drain-protocol: v1`；缺少该标记时 Hook 会在缩容前拒绝，
 应先升级到包含 drain/resume guard 的过渡版本。v2 drain 会给仍在运行的旧 FUSE Pod
 补加 cleanup finalizer，并在 Redis 持久化终止证据后完成删除。
 

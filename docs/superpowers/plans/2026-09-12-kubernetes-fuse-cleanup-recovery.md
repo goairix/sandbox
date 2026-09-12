@@ -205,7 +205,7 @@ type PreparedSandboxCleanup interface {
 
 - [x] **Step 4: Put the finalizer on new FUSE Pods**
 
-Define `fuseRuntimeCleanupFinalizer = "sandbox.huaxisy.com/fuse-runtime-cleanup"` and add it in `buildPreparedFUSEPod`. Include finalizers in prepared Pod intent equality so admission mutation cannot silently remove or add a cleanup owner.
+Define `fuseRuntimeCleanupFinalizer = "goairix.github.io/sandbox-fuse-runtime-cleanup"` and add it in `buildPreparedFUSEPod`. Include finalizers in prepared Pod intent equality so admission mutation cannot silently remove or add a cleanup owner.
 
 - [x] **Step 5: Implement finalizer adoption and complete-status validation**
 
@@ -363,7 +363,7 @@ git commit -m "feat: expose fuse cleanup recovery stages"
 Add helper tests for installed cleanup protocol equality. Extend the Helm script to require:
 
 ```bash
-grep -Fq 'sandbox.huaxisy.com/cleanup-protocol: "v2"' <<<"$rendered"
+grep -Fq 'goairix.github.io/sandbox-cleanup-protocol: "v2"' <<<"$rendered"
 grep -Fq -- '--kubernetes-cleanup-protocol=v2' <<<"$rendered"
 ```
 
@@ -379,7 +379,7 @@ Expected: missing cleanup-protocol assertions fail.
 
 - [x] **Step 3: Add the cleanup protocol flag and decision helper**
 
-Add `cleanupProtocolAnnotation = "sandbox.huaxisy.com/cleanup-protocol"`, a
+Add `cleanupProtocolAnnotation = "goairix.github.io/sandbox-cleanup-protocol"`, a
 `--kubernetes-cleanup-protocol` desired-value flag, and a pure decision helper. Skip only if backend and
 cleanup protocol both match. Require the installed `drain-protocol=v1` compatibility guard before every
 release drain, including a same-backend cleanup protocol migration, so rollback can resume replicas.

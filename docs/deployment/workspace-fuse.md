@@ -94,7 +94,7 @@ Docker Compose 没有 Helm hook。如果没有要保留的 sandbox，可以直�
 
 这些类别由 mounter 对有界 stderr 做本地分类；原始 stderr 不会进入 API 响应或普通日志。排查时不要把 AK/SK、完整 `docker inspect` 或带签名 URL 的输出粘贴到工单。
 
-Kubernetes FUSE Pod 带有 `sandbox.huaxisy.com/fuse-runtime-cleanup` finalizer。删除期间 Pod 会先进入 `Terminating`，kubelet 确认 init/native-sidecar、普通和 ephemeral container 全部退出后，sandbox-api 才把 exact UID 的终止证据写入 Redis、移除 finalizer 并清理策略。进程在任一步重启都会从 Pod status 与 Redis cleanup phase 继续。
+Kubernetes FUSE Pod 带有 `goairix.github.io/sandbox-fuse-runtime-cleanup` finalizer。删除期间 Pod 会先进入 `Terminating`，kubelet 确认 init/native-sidecar、普通和 ephemeral container 全部退出后，sandbox-api 才把 exact UID 的终止证据写入 Redis、移除 finalizer 并清理策略。进程在任一步重启都会从 Pod status 与 Redis cleanup phase 继续。
 
 出现 `runtime termination is unconfirmed` 时，系统会保留 owner/lease 并把实例视为不可复用，直到确认 exact runtime 已终止。Pod 已经 NotFound 但 cleanup 记录没有终止证据时仍会 fail-closed；这通常表示旧协议清理中断、finalizer 被外部移除或节点状态无法确认。应使用 infrastructure fencer 或审计 Pod UID、节点和 kubelet 事件后修复，不要直接移除 finalizer、删除 Redis 记录或强行把实例放回 Pool。
 
