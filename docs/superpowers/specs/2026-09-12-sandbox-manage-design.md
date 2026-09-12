@@ -132,12 +132,13 @@ Repository 和领域模型保持数据库无关，以便未来增加 MySQL Adapt
 - 每个 Migration 使用不可复用、不可修改的稳定 ID。
 - 已进入主分支且可能在线上执行过的 Migration 禁止改写；变更必须追加新 Migration。
 - 每项迁移提供显式 `Migrate`；可安全回滚的迁移同时提供 `Rollback`。
+- Migration 在每次服务启动时由主进程自动检查并执行，不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
 - 多副本启动时，以 PostgreSQL Advisory Lock 串行执行迁移。未取得锁的副本在限定时间内等待，迁移完成前不得进入 Ready。
 - Migration 失败时服务启动失败，不对外提供业务或管理流量。
 
 ### 6.3 Seed
 
-Seed 作为具名 Migration 执行，不在普通启动代码中隐式执行。首期 Seed 包括：
+Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在服务启动的迁移阶段自动执行。已经成功记录的 Seed Migration 后续启动不会重复执行，不存在独立 Seed 命令。首期 Seed 包括：
 
 1. 稳定权限码；
 2. `super_admin`、`operator`、`auditor` 三种内置角色；
@@ -530,7 +531,7 @@ admin:
 1. 加载并校验配置；
 2. 初始化日志和 Telemetry；
 3. 连接 PostgreSQL；
-4. 获取迁移锁并执行全部 Migration 与待执行 Seed；
+4. 主进程获取迁移锁，自动执行全部待执行 Migration 与 Seed；
 5. 初始化 Repository、Admin Service 和命令 Worker；
 6. 初始化现有 Runtime、Redis、Storage 和 Manager；
 7. 恢复现有 Sandbox 状态；
@@ -594,14 +595,15 @@ admin:
 
 1. PostgreSQL 空库可由 `gormigrate/v2` 完整迁移并创建首个超级管理员。
 2. 代码中不存在 `AutoMigrate` 调用，所有 DDL 均可定位到 Migration。
-3. 三种角色只能访问其允许的页面与 API。
-4. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
-5. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
-6. 每个实例准确展示未申请、申请中或已申请状态，并保留原始 Pool 状态。
-7. 任意副本收到的 TTL 或销毁请求都能路由给正确 Owner；Owner 或 Runtime UID 变化时安全拒绝。
-8. 所有管理写操作都有完整、脱敏且可检索的审计记录。
-9. 数据库或 Owner 不可用时返回明确错误，不绕过 Manager 直接修改 Runtime。
-10. Go 测试、PostgreSQL Migration 集成测试、前端测试和生产构建全部通过。
+3. 普通服务启动会自动执行所有待执行 Migration 与 Seed，系统不依赖任何 CLI、独立 Job 或 Init Container。
+4. 三种角色只能访问其允许的页面与 API。
+5. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
+6. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
+7. 每个实例准确展示未申请、申请中或已申请状态，并保留原始 Pool 状态。
+8. 任意副本收到的 TTL 或销毁请求都能路由给正确 Owner；Owner 或 Runtime UID 变化时安全拒绝。
+9. 所有管理写操作都有完整、脱敏且可检索的审计记录。
+10. 数据库或 Owner 不可用时返回明确错误，不绕过 Manager 直接修改 Runtime。
+11. Go 测试、PostgreSQL Migration 集成测试、前端测试和生产构建全部通过。
 
 ## 21. 后续演进
 
