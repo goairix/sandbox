@@ -34,20 +34,38 @@ return 1
 `)
 
 type Options struct {
-	Addr        string
-	Password    string
-	DB          int
-	Durability  DurabilityMode
-	AckReplicas int
-	AckTimeout  time.Duration
+	Mode         Mode
+	Addr         string
+	Addrs        []string
+	MasterName   string
+	Username     string
+	Password     string
+	DB           int
+	Durability   DurabilityMode
+	AckReplicas  int
+	AckTimeout   time.Duration
+	PoolSize     int
+	MinIdleConns int
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	MaxRetries   int
 }
 
 type Store struct {
-	client      *redis.Client
+	client      redis.UniversalClient
 	durability  DurabilityMode
 	ackReplicas int
 	ackTimeout  time.Duration
 }
+
+type Mode string
+
+const (
+	ModeStandalone Mode = "standalone"
+	ModeSentinel   Mode = "sentinel"
+	ModeCluster    Mode = "cluster"
+)
 
 type DurabilityMode string
 
@@ -58,10 +76,39 @@ const (
 )
 
 func New(ctx context.Context, opts Options) (*Store, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:     opts.Addr,
-		Password: opts.Password,
-		DB:       opts.DB,
+	mode := opts.Mode
+	if mode == "" {
+		mode = ModeStandalone
+	}
+	addrs := append([]string(nil), opts.Addrs...)
+	if len(addrs) == 0 && opts.Addr != "" {
+		addrs = []string{opts.Addr}
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("redis: at least one address is required")
+	}
+	switch mode {
+	case ModeStandalone:
+		if len(addrs) != 1 {
+			return nil, errors.New("redis: standalone mode requires exactly one address")
+		}
+	case ModeSentinel:
+		if opts.MasterName == "" {
+			return nil, errors.New("redis: sentinel mode requires a master name")
+		}
+	case ModeCluster:
+		if opts.DB != 0 {
+			return nil, errors.New("redis: cluster mode supports database 0 only")
+		}
+	default:
+		return nil, fmt.Errorf("redis: unsupported mode %q", mode)
+	}
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
+		Addrs: addrs, MasterName: opts.MasterName, Username: opts.Username,
+		Password: opts.Password, DB: opts.DB, PoolSize: opts.PoolSize,
+		MinIdleConns: opts.MinIdleConns, DialTimeout: opts.DialTimeout,
+		ReadTimeout: opts.ReadTimeout, WriteTimeout: opts.WriteTimeout,
+		MaxRetries: opts.MaxRetries,
 	})
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
@@ -86,7 +133,7 @@ func (s *Store) acknowledgeSafetyWrite(ctx context.Context) error {
 	if s.durability != DurabilityReplicaAck {
 		return nil
 	}
-	acknowledged, err := s.client.Wait(ctx, s.ackReplicas, s.ackTimeout).Result()
+	acknowledged, err := s.client.Do(ctx, "WAIT", s.ackReplicas, s.ackTimeout.Milliseconds()).Int64()
 	if err != nil {
 		return errors.Join(state.ErrDurabilityUnconfirmed, err)
 	}

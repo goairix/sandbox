@@ -65,6 +65,23 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "", cfg.Security.SeccompProfile)
 }
 
+func TestRedisHAConfigurationValidation(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-api-key")
+	t.Setenv("SANDBOX_RUNTIME_TYPE", "kubernetes")
+	t.Setenv("SANDBOX_RUNTIME_KUBERNETES_NAMESPACE", "sandbox-test")
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_MODE", "cluster")
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_ADDRS", "redis-a:6379,redis-b:6379")
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_DB", "1")
+	_, err := config.Load("")
+	require.ErrorContains(t, err, "database 0")
+
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_DB", "0")
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA", "true")
+	t.Setenv("SANDBOX_STORAGE_STATE_REDIS_DURABILITY", "best_effort")
+	_, err = config.Load("")
+	require.ErrorContains(t, err, "durability")
+}
+
 func TestLoadFromYAML(t *testing.T) {
 	// Write a temp YAML config file
 	content := `

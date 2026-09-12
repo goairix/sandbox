@@ -59,9 +59,25 @@ redis:
   password: ""
   # External Redis (used when redis.enabled is false)
   external:
+    mode: standalone
     addr: ""
+    addrs: []
+    masterName: ""
+    username: ""
     password: ""
     db: 0
+    # native requires a provider with synchronous commit semantics. Use
+    # replica_ack for ordinary asynchronous Redis replication.
+    durability: best_effort
+    requireHA: false
+    ackReplicas: 1
+    ackTimeoutMs: 100
+    poolSize: 0
+    minIdleConns: 2
+    dialTimeoutMs: 5000
+    readTimeoutMs: 3000
+    writeTimeoutMs: 3000
+    maxRetries: 2
 
 config:
   server:

@@ -245,9 +245,19 @@ func main() {
 	// wrapper owns its Lua state machine. The compile-time assertion documents
 	// the only broader capability the coordinator/session code relies on.
 	var redisStore *redisstate.Store
-	if cfg.Storage.State.Redis.Addr != "" {
+	if cfg.Storage.State.Redis.Addr != "" || len(cfg.Storage.State.Redis.Addrs) > 0 {
 		redisStore, err = redisstate.New(ctx, redisstate.Options{
-			Addr: cfg.Storage.State.Redis.Addr, Password: cfg.Storage.State.Redis.Password, DB: cfg.Storage.State.Redis.DB,
+			Mode: redisstate.Mode(cfg.Storage.State.Redis.Mode), Addr: cfg.Storage.State.Redis.Addr,
+			Addrs: cfg.Storage.State.Redis.Addrs, MasterName: cfg.Storage.State.Redis.MasterName,
+			Username: cfg.Storage.State.Redis.Username, Password: cfg.Storage.State.Redis.Password,
+			DB: cfg.Storage.State.Redis.DB, Durability: redisstate.DurabilityMode(cfg.Storage.State.Redis.Durability),
+			AckReplicas: cfg.Storage.State.Redis.AckReplicas,
+			AckTimeout:  time.Duration(cfg.Storage.State.Redis.AckTimeoutMS) * time.Millisecond,
+			PoolSize:    cfg.Storage.State.Redis.PoolSize, MinIdleConns: cfg.Storage.State.Redis.MinIdleConns,
+			DialTimeout:  time.Duration(cfg.Storage.State.Redis.DialTimeoutMS) * time.Millisecond,
+			ReadTimeout:  time.Duration(cfg.Storage.State.Redis.ReadTimeoutMS) * time.Millisecond,
+			WriteTimeout: time.Duration(cfg.Storage.State.Redis.WriteTimeoutMS) * time.Millisecond,
+			MaxRetries:   cfg.Storage.State.Redis.MaxRetries,
 		})
 		if err != nil {
 			log.Fatalf("failed to create redis state store: %v", err)
@@ -376,7 +386,7 @@ func main() {
 		mgr.SetSessionStore(sandbox.NewSessionStore(redisStore, ttl))
 		mgr.SetEphemeralLifecycleStore(sandbox.NewEphemeralLifecycleStore(redisStore))
 		mgr.SetMultipartStore(redisStore)
-		log.Printf("session store connected to redis at %s", cfg.Storage.State.Redis.Addr)
+		log.Printf("session store connected to redis mode=%s endpoints=%d", cfg.Storage.State.Redis.Mode, max(1, len(cfg.Storage.State.Redis.Addrs)))
 	}
 	if *drainRelease {
 		drainCtx, drainCancel := context.WithTimeout(ctx, *drainTimeout)

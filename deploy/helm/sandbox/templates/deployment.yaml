@@ -1,7 +1,10 @@
+{{- include "sandbox.validateRedis" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled }}
 {{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled }}
 {{- $redisDB := ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled }}
+{{- $redisMode := ternary "standalone" .Values.redis.external.mode .Values.redis.enabled }}
+{{- $redisDurability := ternary "best_effort" .Values.redis.external.durability .Values.redis.enabled }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
 {{- $provider := include "sandbox.backend.provider" . }}
 apiVersion: apps/v1
@@ -66,6 +69,10 @@ spec:
             - containerPort: {{ .Values.config.server.port }}
               protocol: TCP
           env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: SANDBOX_SERVER_PORT
               value: "{{ .Values.config.server.port }}"
             - name: SANDBOX_RUNTIME_TYPE
@@ -82,6 +89,20 @@ spec:
               value: "{{ .Values.config.images.gateway }}"
             - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
               value: "{{ $redisAddr }}"
+            - name: SANDBOX_STORAGE_STATE_REDIS_MODE
+              value: {{ $redisMode | quote }}
+            {{- if and (not .Values.redis.enabled) .Values.redis.external.addrs }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
+              value: {{ join "," .Values.redis.external.addrs | quote }}
+            {{- end }}
+            {{- if and (not .Values.redis.enabled) .Values.redis.external.masterName }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
+              value: {{ .Values.redis.external.masterName | quote }}
+            {{- end }}
+            {{- if and (not .Values.redis.enabled) .Values.redis.external.username }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_USERNAME
+              value: {{ .Values.redis.external.username | quote }}
+            {{- end }}
             {{- if $redisPassword }}
             - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
               valueFrom:
@@ -91,6 +112,26 @@ spec:
             {{- end }}
             - name: SANDBOX_STORAGE_STATE_REDIS_DB
               value: "{{ $redisDB }}"
+            - name: SANDBOX_STORAGE_STATE_REDIS_DURABILITY
+              value: {{ $redisDurability | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA
+              value: {{ ternary false .Values.redis.external.requireHA .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
+              value: {{ ternary 1 (.Values.redis.external.ackReplicas | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
+              value: {{ ternary 100 (.Values.redis.external.ackTimeoutMs | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_POOL_SIZE
+              value: {{ ternary 0 (.Values.redis.external.poolSize | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_MIN_IDLE_CONNS
+              value: {{ ternary 2 (.Values.redis.external.minIdleConns | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_DIAL_TIMEOUT_MS
+              value: {{ ternary 5000 (.Values.redis.external.dialTimeoutMs | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_READ_TIMEOUT_MS
+              value: {{ ternary 3000 (.Values.redis.external.readTimeoutMs | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_WRITE_TIMEOUT_MS
+              value: {{ ternary 3000 (.Values.redis.external.writeTimeoutMs | int) .Values.redis.enabled | quote }}
+            - name: SANDBOX_STORAGE_STATE_REDIS_MAX_RETRIES
+              value: {{ ternary 2 (.Values.redis.external.maxRetries | int) .Values.redis.enabled | quote }}
             - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
               value: {{ $provider | quote }}
             - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET

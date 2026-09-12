@@ -192,6 +192,27 @@ func TestRedisStore_GetNotFound(t *testing.T) {
 	assert.Nil(t, val)
 }
 
+func TestRedisHAOptionsValidateTopology(t *testing.T) {
+	ctx := context.Background()
+	_, err := New(ctx, Options{Mode: ModeCluster, Addrs: []string{"redis-a:6379"}, DB: 1})
+	require.ErrorContains(t, err, "database 0")
+	_, err = New(ctx, Options{Mode: ModeSentinel, Addrs: []string{"sentinel-a:26379"}})
+	require.ErrorContains(t, err, "master name")
+	_, err = New(ctx, Options{Mode: ModeStandalone})
+	require.ErrorContains(t, err, "address")
+}
+
+func TestRedisHAStandaloneUniversalClient(t *testing.T) {
+	skipIfNoRedis(t)
+	store, err := New(context.Background(), Options{
+		Mode: ModeStandalone, Addrs: []string{os.Getenv("TEST_REDIS_ADDR")},
+		Durability: DurabilityBestEffort, PoolSize: 8, MinIdleConns: 2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	require.NoError(t, store.Set(context.Background(), "test:ha:standalone", []byte("ok"), time.Second))
+}
+
 func TestRedisStore_Delete(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)

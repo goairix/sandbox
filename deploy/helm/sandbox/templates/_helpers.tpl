@@ -20,6 +20,22 @@
 {{- if has "fuse" .Values.config.workspace.enabledMountModes -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{- define "sandbox.validateRedis" -}}
+{{- if not .Values.redis.enabled -}}
+  {{- $mode := .Values.redis.external.mode | default "standalone" -}}
+  {{- if and (eq $mode "cluster") (ne (int .Values.redis.external.db) 0) -}}
+    {{- fail "redis.external.db must be 0 in cluster mode" -}}
+  {{- end -}}
+  {{- if and (eq $mode "sentinel") (empty .Values.redis.external.masterName) -}}
+    {{- fail "redis.external.masterName is required in sentinel mode" -}}
+  {{- end -}}
+  {{- if .Values.redis.external.requireHA -}}
+    {{- if eq $mode "standalone" -}}{{- fail "redis.external.requireHA rejects standalone mode" -}}{{- end -}}
+    {{- if eq (.Values.redis.external.durability | default "best_effort") "best_effort" -}}{{- fail "redis.external.requireHA rejects best_effort durability" -}}{{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sandbox.backend.fingerprint" -}}
 {{- $filesystem := .Values.config.storage.filesystem -}}
 {{- $contract := dict
@@ -47,6 +63,8 @@
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace -}}
 {{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled -}}
 {{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled -}}
+{{- $redisMode := ternary "standalone" .Values.redis.external.mode .Values.redis.enabled -}}
+{{- $redisDurability := ternary "best_effort" .Values.redis.external.durability .Values.redis.enabled -}}
 - name: SANDBOX_RUNTIME_TYPE
   value: {{ .Values.config.runtime.type | quote }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
@@ -57,6 +75,20 @@
   value: {{ .Values.config.images.gateway | quote }}
 - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
   value: {{ $redisAddr | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_MODE
+  value: {{ $redisMode | quote }}
+{{- if and (not .Values.redis.enabled) .Values.redis.external.addrs }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
+  value: {{ join "," .Values.redis.external.addrs | quote }}
+{{- end }}
+{{- if and (not .Values.redis.enabled) .Values.redis.external.masterName }}
+- name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
+  value: {{ .Values.redis.external.masterName | quote }}
+{{- end }}
+{{- if and (not .Values.redis.enabled) .Values.redis.external.username }}
+- name: SANDBOX_STORAGE_STATE_REDIS_USERNAME
+  value: {{ .Values.redis.external.username | quote }}
+{{- end }}
 {{- if $redisPassword }}
 - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
   valueFrom:
@@ -66,6 +98,14 @@
 {{- end }}
 - name: SANDBOX_STORAGE_STATE_REDIS_DB
   value: {{ ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_DURABILITY
+  value: {{ $redisDurability | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA
+  value: {{ ternary false .Values.redis.external.requireHA .Values.redis.enabled | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
+  value: {{ ternary 1 (.Values.redis.external.ackReplicas | int) .Values.redis.enabled | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
+  value: {{ ternary 100 (.Values.redis.external.ackTimeoutMs | int) .Values.redis.enabled | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
   value: {{ include "sandbox.backend.provider" . | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET

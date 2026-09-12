@@ -88,9 +88,23 @@ type StateStorageConfig struct {
 
 // RedisConfig holds Redis connection settings.
 type RedisConfig struct {
-	Addr     string `mapstructure:"addr"`
-	Password string `mapstructure:"password"`
-	DB       int    `mapstructure:"db"`
+	Mode           string   `mapstructure:"mode"`
+	Addr           string   `mapstructure:"addr"`
+	Addrs          []string `mapstructure:"addrs"`
+	MasterName     string   `mapstructure:"master_name"`
+	Username       string   `mapstructure:"username"`
+	Password       string   `mapstructure:"password"`
+	DB             int      `mapstructure:"db"`
+	Durability     string   `mapstructure:"durability"`
+	RequireHA      bool     `mapstructure:"require_ha"`
+	AckReplicas    int      `mapstructure:"ack_replicas"`
+	AckTimeoutMS   int      `mapstructure:"ack_timeout_ms"`
+	PoolSize       int      `mapstructure:"pool_size"`
+	MinIdleConns   int      `mapstructure:"min_idle_conns"`
+	DialTimeoutMS  int      `mapstructure:"dial_timeout_ms"`
+	ReadTimeoutMS  int      `mapstructure:"read_timeout_ms"`
+	WriteTimeoutMS int      `mapstructure:"write_timeout_ms"`
+	MaxRetries     int      `mapstructure:"max_retries"`
 }
 
 // FileSystemConfig holds filesystem storage settings.
@@ -387,6 +401,9 @@ func (c *Config) Validate() error {
 	if c.Security.MaxUploadBytes <= 0 {
 		return fmt.Errorf("config: security.max_upload_bytes must be > 0, got %d", c.Security.MaxUploadBytes)
 	}
+	if err := validateRedisConfig(c.Storage.State.Redis, c.Runtime.Type == "kubernetes"); err != nil {
+		return err
+	}
 
 	// Workspace auto-sync
 	if c.Workspace.AutoSyncIntervalSeconds < 0 {
@@ -398,6 +415,58 @@ func (c *Config) Validate() error {
 	}
 	if c.Workspace.MountModeEnabled("fuse") {
 		return c.validateFUSE()
+	}
+	return nil
+}
+
+func validateRedisConfig(redis RedisConfig, required bool) error {
+	mode := redis.Mode
+	if mode == "" {
+		mode = "standalone"
+	}
+	durability := redis.Durability
+	if durability == "" {
+		durability = "best_effort"
+	}
+	addresses := append([]string(nil), redis.Addrs...)
+	if len(addresses) == 0 && redis.Addr != "" {
+		addresses = []string{redis.Addr}
+	}
+	if required && len(addresses) == 0 {
+		return fmt.Errorf("config: storage.state.redis requires at least one address for Kubernetes")
+	}
+	switch mode {
+	case "standalone":
+		if len(addresses) > 1 {
+			return fmt.Errorf("config: storage.state.redis standalone mode requires exactly one address")
+		}
+	case "sentinel":
+		if redis.MasterName == "" {
+			return fmt.Errorf("config: storage.state.redis sentinel mode requires master_name")
+		}
+	case "cluster":
+		if redis.DB != 0 {
+			return fmt.Errorf("config: storage.state.redis cluster mode supports database 0 only")
+		}
+	default:
+		return fmt.Errorf("config: storage.state.redis.mode must be standalone, sentinel, or cluster")
+	}
+	switch durability {
+	case "best_effort", "native", "replica_ack":
+	default:
+		return fmt.Errorf("config: storage.state.redis.durability must be best_effort, native, or replica_ack")
+	}
+	if redis.RequireHA {
+		if mode == "standalone" {
+			return fmt.Errorf("config: storage.state.redis.require_ha rejects standalone mode")
+		}
+		if durability == "best_effort" {
+			return fmt.Errorf("config: storage.state.redis.require_ha rejects best_effort durability")
+		}
+	}
+	if redis.AckReplicas < 0 || redis.AckTimeoutMS < 0 || redis.PoolSize < 0 || redis.MinIdleConns < 0 || redis.MaxRetries < 0 ||
+		redis.DialTimeoutMS < 0 || redis.ReadTimeoutMS < 0 || redis.WriteTimeoutMS < 0 {
+		return fmt.Errorf("config: storage.state.redis timeout, pool, retry, and acknowledgement values are invalid")
 	}
 	return nil
 }
@@ -822,8 +891,22 @@ func setDefaults(v *viper.Viper) {
 
 	// Storage — Redis
 	v.SetDefault("storage.state.redis.addr", "localhost:6379")
+	v.SetDefault("storage.state.redis.mode", "standalone")
+	v.SetDefault("storage.state.redis.addrs", []string{})
+	v.SetDefault("storage.state.redis.master_name", "")
+	v.SetDefault("storage.state.redis.username", "")
 	v.SetDefault("storage.state.redis.password", "")
 	v.SetDefault("storage.state.redis.db", 0)
+	v.SetDefault("storage.state.redis.durability", "best_effort")
+	v.SetDefault("storage.state.redis.require_ha", false)
+	v.SetDefault("storage.state.redis.ack_replicas", 1)
+	v.SetDefault("storage.state.redis.ack_timeout_ms", 100)
+	v.SetDefault("storage.state.redis.pool_size", 0)
+	v.SetDefault("storage.state.redis.min_idle_conns", 2)
+	v.SetDefault("storage.state.redis.dial_timeout_ms", 5000)
+	v.SetDefault("storage.state.redis.read_timeout_ms", 3000)
+	v.SetDefault("storage.state.redis.write_timeout_ms", 3000)
+	v.SetDefault("storage.state.redis.max_retries", 2)
 
 	// Storage — FileSystem
 	v.SetDefault("storage.filesystem.provider", "local")

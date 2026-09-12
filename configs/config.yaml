@@ -64,12 +64,31 @@ storage:
   # State storage (sandbox lifecycle tracking)
   state:
     redis:
+      # standalone, sentinel, or cluster. Production Kubernetes deployments
+      # should use sentinel/cluster through an external Redis service.
+      mode: "standalone"
       # Redis server address in host:port format.
       addr: "localhost:6379"
+      # Multiple topology endpoints for Sentinel or Cluster mode.
+      addrs: []
+      master_name: ""
+      username: ""
       # Redis authentication password. Leave empty for no authentication.
       password: ""
       # Redis database index (0–15).
       db: 0
+      # native means the provider synchronously commits acknowledged writes;
+      # replica_ack issues WAIT after safety-boundary Lua scripts.
+      durability: "best_effort"
+      require_ha: false
+      ack_replicas: 1
+      ack_timeout_ms: 100
+      pool_size: 0
+      min_idle_conns: 2
+      dial_timeout_ms: 5000
+      read_timeout_ms: 3000
+      write_timeout_ms: 3000
+      max_retries: 2
 
   # Filesystem storage (workspace persistent storage)
   filesystem:
