@@ -1645,13 +1645,27 @@ func TestPreparedPodIntentRejectsSecurityExpansions(t *testing.T) {
 	assert.Equal(t, equivalentBefore, equivalentAppArmor, "intent comparison must not mutate the current Pod")
 	assert.Equal(t, desiredBefore, desired, "intent comparison must not mutate the desired Pod")
 
-	differentAppArmor := base.DeepCopy()
-	syncMounterAppArmorField(differentAppArmor, corev1.AppArmorProfileTypeLocalhost, "other-profile")
-	assert.False(t, preparedPodIntentMatches(differentAppArmor, desired, false), "a different AppArmor profile must remain a security-contract mismatch")
+	for _, tc := range []struct {
+		name        string
+		profileType corev1.AppArmorProfileType
+		profile     string
+	}{
+		{name: "different localhost profile", profileType: corev1.AppArmorProfileTypeLocalhost, profile: "other-profile"},
+		{name: "unconfined profile", profileType: corev1.AppArmorProfileTypeUnconfined},
+		{name: "runtime default profile", profileType: corev1.AppArmorProfileTypeRuntimeDefault},
+		{name: "missing localhost profile", profileType: corev1.AppArmorProfileTypeLocalhost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := base.DeepCopy()
+			syncMounterAppArmorField(current, tc.profileType, tc.profile)
+			assert.False(t, preparedPodIntentMatches(current, desired, false))
+			assert.Equal(t, "spec.InitContainers[0].SecurityContext", preparedPodIntentMismatchReason(current, desired))
+		})
+	}
 
-	unconfinedAppArmor := base.DeepCopy()
-	syncMounterAppArmorField(unconfinedAppArmor, corev1.AppArmorProfileTypeUnconfined, "")
-	assert.False(t, preparedPodIntentMatches(unconfinedAppArmor, desired, false), "an unconfined AppArmor profile must remain a security-contract mismatch")
+	equivalentWithExpansion := equivalentAppArmor.DeepCopy()
+	equivalentWithExpansion.Spec.Containers[0].SecurityContext.Capabilities.Add = []corev1.Capability{"SYS_ADMIN"}
+	assert.False(t, preparedPodIntentMatches(equivalentWithExpansion, desired, false), "AppArmor normalization must not hide another security-context expansion")
 
 	for _, tc := range []struct {
 		name   string
