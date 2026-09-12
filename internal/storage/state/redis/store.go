@@ -34,14 +34,28 @@ return 1
 `)
 
 type Options struct {
-	Addr     string
-	Password string
-	DB       int
+	Addr        string
+	Password    string
+	DB          int
+	Durability  DurabilityMode
+	AckReplicas int
+	AckTimeout  time.Duration
 }
 
 type Store struct {
-	client *redis.Client
+	client      *redis.Client
+	durability  DurabilityMode
+	ackReplicas int
+	ackTimeout  time.Duration
 }
+
+type DurabilityMode string
+
+const (
+	DurabilityBestEffort DurabilityMode = "best_effort"
+	DurabilityNative     DurabilityMode = "native"
+	DurabilityReplicaAck DurabilityMode = "replica_ack"
+)
 
 func New(ctx context.Context, opts Options) (*Store, error) {
 	client := redis.NewClient(&redis.Options{
@@ -53,7 +67,33 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("redis: ping failed: %w", err)
 	}
-	return &Store{client: client}, nil
+	durability := opts.Durability
+	if durability == "" {
+		durability = DurabilityBestEffort
+	}
+	ackReplicas := opts.AckReplicas
+	if ackReplicas <= 0 {
+		ackReplicas = 1
+	}
+	ackTimeout := opts.AckTimeout
+	if ackTimeout <= 0 {
+		ackTimeout = 100 * time.Millisecond
+	}
+	return &Store{client: client, durability: durability, ackReplicas: ackReplicas, ackTimeout: ackTimeout}, nil
+}
+
+func (s *Store) acknowledgeSafetyWrite(ctx context.Context) error {
+	if s.durability != DurabilityReplicaAck {
+		return nil
+	}
+	acknowledged, err := s.client.Wait(ctx, s.ackReplicas, s.ackTimeout).Result()
+	if err != nil {
+		return errors.Join(state.ErrDurabilityUnconfirmed, err)
+	}
+	if acknowledged < int64(s.ackReplicas) {
+		return state.ErrDurabilityUnconfirmed
+	}
+	return nil
 }
 
 func (s *Store) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
