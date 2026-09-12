@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	stderrors "errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +139,65 @@ func TestReconcileOrdinaryPoliciesDeletesOnlyProvableOrphans(t *testing.T) {
 	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Get(context.Background(), cilium.GetName(), metav1.GetOptions{})
 	require.True(t, errors.IsNotFound(err))
 	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), live.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestReleaseReconcileDeletesUnboundOrdinaryAttemptOnlyAfterAPIsAreDrained(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	dynClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
+	identity := ordinaryNetworkIdentity{runtimeID: "sandbox-pool-orphan", logicalID: "sandbox-pool-orphan"}
+	attempt := strings.Repeat("a", 64)
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, attempt, false, nil, false)
+	require.NoError(t, err)
+	policy.UID = "unbound-policy-uid"
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+	require.NoError(t, err)
+	cilium, err := buildOrdinaryCiliumPrivateDeny("runtime", identity, attempt)
+	require.NoError(t, err)
+	cilium.SetUID("unbound-cilium-policy-uid")
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), cilium, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, reconcileOrphanedOrdinaryPolicies(context.Background(), client, dynClient, "runtime", true))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
+	require.NoError(t, err, "ordinary startup recovery must not race an in-flight Pod create")
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Get(context.Background(), cilium.GetName(), metav1.GetOptions{})
+	require.NoError(t, err, "ordinary startup recovery must not race an in-flight Pod create")
+
+	require.NoError(t, reconcileReleaseOrphanedOrdinaryPolicies(context.Background(), client, dynClient, "runtime", true))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
+	require.True(t, errors.IsNotFound(err))
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Get(context.Background(), cilium.GetName(), metav1.GetOptions{})
+	require.True(t, errors.IsNotFound(err))
+}
+
+func TestReleaseReconcileKeepsUnboundAttemptWhenRuntimeNameExists(t *testing.T) {
+	identity := ordinaryNetworkIdentity{runtimeID: "sandbox-pool-live", logicalID: "logical-id"}
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, strings.Repeat("b", 64), false, nil, false)
+	require.NoError(t, err)
+	policy.UID = "unbound-policy-uid"
+	client := kubefake.NewSimpleClientset(policy, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      identity.runtimeID,
+		Namespace: "runtime",
+		UID:       "runtime-uid",
+		Labels: map[string]string{
+			"sandbox.managed": "true",
+			"sandbox.id":      "different-logical-id",
+		},
+	}})
+	stored, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	_, recognized := classifyOrdinaryNetworkPolicy(stored, true)
+	require.True(t, recognized)
+	live, err := hasManagedOrdinaryPodForLogicalID(context.Background(), client, "runtime", identity.logicalID)
+	require.NoError(t, err)
+	require.False(t, live)
+
+	err = reconcileReleaseOrphanedOrdinaryPolicies(context.Background(), client, nil, "runtime", false)
+	require.ErrorIs(t, err, runtime.ErrNetworkStateUncertain)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), policy.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 }
 

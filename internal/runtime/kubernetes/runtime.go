@@ -186,6 +186,10 @@ func (r *Runtime) initializeOrdinaryPolicyRecovery() error {
 	return reconcileOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
 }
 
+func (r *Runtime) ReconcileReleaseOrphanedResources(ctx context.Context) error {
+	return reconcileReleaseOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
+}
+
 func (r *Runtime) verifyAmbiguousOrdinaryPodCreate(ctx context.Context, desired *corev1.Pod, createErr error) (*corev1.Pod, bool, error) {
 	if !mayVerifyAmbiguousCreate(createErr) {
 		return nil, true, fmt.Errorf("create ordinary Pod: %w", createErr)

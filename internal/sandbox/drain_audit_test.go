@@ -75,6 +75,34 @@ func TestManagerDrainReleaseRemovesOrphanedOrdinaryPoolRuntime(t *testing.T) {
 	assert.Equal(t, map[string]string{"sandbox.managed": "true", "sandbox.pool": "true"}, rt.listLabels)
 }
 
+type releaseOrphanRuntime struct {
+	*mockRuntime
+	calls int
+	err   error
+}
+
+func (r *releaseOrphanRuntime) ReconcileReleaseOrphanedResources(context.Context) error {
+	r.calls++
+	return r.err
+}
+
+func TestManagerDrainReleaseReconcilesPolicyOnlyKubernetesOrphans(t *testing.T) {
+	rt := &releaseOrphanRuntime{mockRuntime: newMockRuntime()}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
+
+	require.NoError(t, mgr.DrainRelease(context.Background()))
+	assert.Equal(t, 1, rt.calls)
+}
+
+func TestManagerDrainReleaseReportsPolicyOnlyKubernetesOrphanFailure(t *testing.T) {
+	rt := &releaseOrphanRuntime{mockRuntime: newMockRuntime(), err: errors.New("policy cleanup failed")}
+	mgr := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes"})
+
+	err := mgr.DrainRelease(context.Background())
+	require.ErrorContains(t, err, "policy cleanup failed")
+	assert.Equal(t, 1, rt.calls)
+}
+
 func TestManagerDrainReleaseDoesNotTreatFUSEPoolRuntimeAsOrdinary(t *testing.T) {
 	rt := newMockRuntime()
 	rt.listedSandboxes = []runtime.SandboxInfo{{

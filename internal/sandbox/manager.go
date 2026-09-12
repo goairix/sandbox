@@ -582,6 +582,9 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 	m.pool.Drain(ctx)
 	if m.config.RuntimeType == "kubernetes" {
 		drainErr = errors.Join(drainErr, m.drainOrphanedOrdinaryPoolContainers(ctx))
+		if reconciler, ok := m.runtime.(runtime.ReleaseOrphanReconciler); ok {
+			drainErr = errors.Join(drainErr, reconciler.ReconcileReleaseOrphanedResources(ctx))
+		}
 	}
 	if m.sessions != nil {
 		drainErr = errors.Join(drainErr, AuditDrainedState(ctx, m.sessions.store))

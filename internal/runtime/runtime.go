@@ -78,6 +78,13 @@ type OrphanReconciler interface {
 	ReconcileOrphanedResources(ctx context.Context, protectedRuntimeUIDs map[string]struct{}) error
 }
 
+// ReleaseOrphanReconciler removes policy-only runtime artifacts after every API
+// replica has stopped. Implementations may perform cleanup that would be unsafe
+// during ordinary multi-replica startup reconciliation.
+type ReleaseOrphanReconciler interface {
+	ReconcileReleaseOrphanedResources(ctx context.Context) error
+}
+
 // ReservedFileCounter counts exact reserved FUSE probe basenames within the
 // same scope as a public recursive or glob listing. An empty globPattern means
 // the recursive listing semantics (files and directories); otherwise it means

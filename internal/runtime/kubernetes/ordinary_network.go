@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,7 +390,7 @@ func confirmOrdinaryRuntimePodAbsent(ctx context.Context, client kubernetes.Inte
 	return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("ordinary runtime Pod %q reappeared before policy deletion", runtimeID))
 }
 
-func classifyOrdinaryNetworkPolicy(policy *networkingv1.NetworkPolicy) (ordinaryNetworkIdentity, bool) {
+func classifyOrdinaryNetworkPolicy(policy *networkingv1.NetworkPolicy, allowUnbound bool) (ordinaryNetworkIdentity, bool) {
 	if policy == nil || policy.Labels["sandbox.managed"] != "true" {
 		return ordinaryNetworkIdentity{}, false
 	}
@@ -404,15 +405,19 @@ func classifyOrdinaryNetworkPolicy(policy *networkingv1.NetworkPolicy) (ordinary
 		}
 		return ordinaryNetworkIdentity{runtimeID: logicalID, logicalID: logicalID}, true
 	}
-	if role != ordinaryPolicyRole || policy.Labels[ordinaryRuntimeIDLabel] == "" || policy.Annotations[ordinaryRuntimeUIDAnnotation] == "" {
+	if role != ordinaryPolicyRole || policy.Labels[ordinaryRuntimeIDLabel] == "" {
+		return ordinaryNetworkIdentity{}, false
+	}
+	runtimeUID := policy.Annotations[ordinaryRuntimeUIDAnnotation]
+	if runtimeUID == "" && (!allowUnbound || policy.UID == "" || !validOrdinaryAttempt(policy.Annotations[ordinaryPolicyAttemptAnnotation])) {
 		return ordinaryNetworkIdentity{}, false
 	}
 	return ordinaryNetworkIdentity{
-		runtimeID: policy.Labels[ordinaryRuntimeIDLabel], runtimeUID: types.UID(policy.Annotations[ordinaryRuntimeUIDAnnotation]), logicalID: logicalID,
+		runtimeID: policy.Labels[ordinaryRuntimeIDLabel], runtimeUID: types.UID(runtimeUID), logicalID: logicalID,
 	}, true
 }
 
-func classifyOrdinaryCiliumPolicy(policy *unstructured.Unstructured) (ordinaryNetworkIdentity, bool) {
+func classifyOrdinaryCiliumPolicy(policy *unstructured.Unstructured, allowUnbound bool) (ordinaryNetworkIdentity, bool) {
 	if policy == nil || policy.GetLabels()["sandbox.managed"] != "true" {
 		return ordinaryNetworkIdentity{}, false
 	}
@@ -428,12 +433,21 @@ func classifyOrdinaryCiliumPolicy(policy *unstructured.Unstructured) (ordinaryNe
 		}
 		return ordinaryNetworkIdentity{runtimeID: logicalID, logicalID: logicalID}, true
 	}
-	if role != ordinaryPrivateDenyPolicyRole || policy.GetLabels()[ordinaryRuntimeIDLabel] == "" || policy.GetAnnotations()[ordinaryRuntimeUIDAnnotation] == "" {
+	if role != ordinaryPrivateDenyPolicyRole || policy.GetLabels()[ordinaryRuntimeIDLabel] == "" {
+		return ordinaryNetworkIdentity{}, false
+	}
+	runtimeUID := policy.GetAnnotations()[ordinaryRuntimeUIDAnnotation]
+	if runtimeUID == "" && (!allowUnbound || policy.GetUID() == "" || !validOrdinaryAttempt(policy.GetAnnotations()[ordinaryPolicyAttemptAnnotation])) {
 		return ordinaryNetworkIdentity{}, false
 	}
 	return ordinaryNetworkIdentity{
-		runtimeID: policy.GetLabels()[ordinaryRuntimeIDLabel], runtimeUID: types.UID(policy.GetAnnotations()[ordinaryRuntimeUIDAnnotation]), logicalID: logicalID,
+		runtimeID: policy.GetLabels()[ordinaryRuntimeIDLabel], runtimeUID: types.UID(runtimeUID), logicalID: logicalID,
 	}, true
+}
+
+func validOrdinaryAttempt(attempt string) bool {
+	decoded, err := hex.DecodeString(attempt)
+	return err == nil && len(decoded) == 32
 }
 
 func hasManagedOrdinaryPodForLogicalID(ctx context.Context, client kubernetes.Interface, namespace, logicalID string) (bool, error) {
@@ -445,13 +459,21 @@ func hasManagedOrdinaryPodForLogicalID(ctx context.Context, client kubernetes.In
 }
 
 func reconcileOrphanedOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace string, hasCilium bool) error {
+	return reconcileOrdinaryPolicies(ctx, client, dynClient, namespace, hasCilium, false)
+}
+
+func reconcileReleaseOrphanedOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace string, hasCilium bool) error {
+	return reconcileOrdinaryPolicies(ctx, client, dynClient, namespace, hasCilium, true)
+}
+
+func reconcileOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace string, hasCilium, allowUnbound bool) error {
 	policies, err := client.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true"})
 	if err != nil {
 		return fmt.Errorf("list managed NetworkPolicies: %w", err)
 	}
 	for index := range policies.Items {
 		policy := &policies.Items[index]
-		identity, recognized := classifyOrdinaryNetworkPolicy(policy)
+		identity, recognized := classifyOrdinaryNetworkPolicy(policy, allowUnbound)
 		if !recognized {
 			continue
 		}
@@ -460,6 +482,15 @@ func reconcileOrphanedOrdinaryPolicies(ctx context.Context, client kubernetes.In
 			return err
 		}
 		if live {
+			continue
+		}
+		if identity.runtimeUID == "" && policy.Labels[ordinaryPolicyRoleLabel] != "" {
+			if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, identity.runtimeID); err != nil {
+				return err
+			}
+			if err := deleteCreatedNetworkPolicy(ctx, client.NetworkingV1().NetworkPolicies(namespace), policy); err != nil {
+				return fmt.Errorf("reconcile orphaned unbound ordinary NetworkPolicy %q: %w", policy.Name, err)
+			}
 			continue
 		}
 		allowLegacy := policy.Labels[ordinaryPolicyRoleLabel] == ""
@@ -476,7 +507,7 @@ func reconcileOrphanedOrdinaryPolicies(ctx context.Context, client kubernetes.In
 	}
 	for index := range ciliumPolicies.Items {
 		policy := &ciliumPolicies.Items[index]
-		identity, recognized := classifyOrdinaryCiliumPolicy(policy)
+		identity, recognized := classifyOrdinaryCiliumPolicy(policy, allowUnbound)
 		if !recognized {
 			continue
 		}
@@ -485,6 +516,15 @@ func reconcileOrphanedOrdinaryPolicies(ctx context.Context, client kubernetes.In
 			return err
 		}
 		if live {
+			continue
+		}
+		if identity.runtimeUID == "" && policy.GetLabels()[ordinaryPolicyRoleLabel] != "" {
+			if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, identity.runtimeID); err != nil {
+				return err
+			}
+			if err := deleteCreatedCiliumPolicy(ctx, dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace), policy); err != nil {
+				return fmt.Errorf("reconcile orphaned unbound ordinary CiliumNetworkPolicy %q: %w", policy.GetName(), err)
+			}
 			continue
 		}
 		allowLegacy := policy.GetLabels()[ordinaryPolicyRoleLabel] == ""
