@@ -75,7 +75,8 @@ Redis cleanup 记录删除前退出，新进程只能观察到 Pod NotFound，�
 
 Repository 增加一个专用 CAS 操作，把当前 cleanup 记录从 `terminating` 推进到
 `terminated`。操作必须校验 preparation ID、cleanup token、expected revision、runtime
-identity 和证据，并在同一个 Lua 脚本中更新记录、revision、更新时间与 deadline 索引。
+identity 和证据，并在同一个 Lua 脚本中更新记录、revision 和更新时间；Pool membership、
+计数、RuntimeUID owner 与 reservation deadline 索引保持不变。
 重复提交同一份证据可以幂等返回当前记录；不同证据或旧 revision 返回冲突。物理删除仍然
 只能通过 `DeleteCleanup` 完成。
 
