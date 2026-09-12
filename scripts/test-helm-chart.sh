@@ -3,6 +3,11 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox")"
+runtime_role="$(helm template sandbox "$repo_root/deploy/helm/sandbox" --show-only templates/runtime-role.yaml)"
+
+grep -A1 'resources: \["pods"\]' <<<"$runtime_role" \
+  | head -2 \
+  | grep -Fq '"update"'
 
 grep -A1 'name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE' <<<"$rendered" \
   | grep -Fq 'value: "sync"'
