@@ -129,8 +129,11 @@ termination 阶段执行：
 5. 使用 UID precondition 删除 Pod，使其进入 terminating；若重试时容器已经全部终止但
    Pod 尚无 deletionTimestamp，仍先提交 exact UID 删除；
 6. 观察同一 UID，直到 kubelet status 完整覆盖 Pod spec 中的 init containers（包括
-   native sidecar）、普通 containers 和已有 ephemeral containers，且每个 state 都是
-   terminated；缺失 status 不能当作终止；
+   native sidecar）、普通 containers 和已有 ephemeral containers。已启动的 container
+   必须处于 terminated；仅当 Pod 已有 deletionTimestamp、phase 为 Failed/Succeeded，且
+   某个 Waiting container 同时满足 ContainerID 为空、RestartCount=0、Started 不为 true、
+   LastTerminationState 为空时，才可证明它从未启动并视为已静止。缺失 status、Running、
+   有重启或历史运行痕迹的 Waiting 状态仍不能作为终止证据；
 7. 返回 `ProcessExited=true` 的证据。有效 shutdown ack 同时记录
    `GracefulUnmount=true`。
 
@@ -214,7 +217,8 @@ pre-upgrade hook 同时比较已安装和目标 backend fingerprint、cleanup pr
 - 新 FUSE Pod 创建时携带 finalizer，普通 Pod 不携带。
 - 合法 legacy Pod 可在删除前补加 finalizer。
 - terminating 且无 finalizer、错误 UID、同名替代 Pod、未知 container status 均 fail-closed。
-- shutdown ack 校验、UID-precondition delete、全部 container terminated 的证据重建。
+- shutdown ack 校验、UID-precondition delete、全部已启动 container terminated 或严格证明
+  container 从未启动后的证据重建。
 - 持久化证据存在时可从 Pod NotFound 继续 finalize；无证据 NotFound 仍返回
   `ErrTerminationUnconfirmed`。
 - finalizer patch 冲突、watch 重连、策略部分失败均可幂等重试。
