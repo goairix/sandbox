@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	fusePoolKeyVersion           = "workspace-fuse-pool/v1"
+	fusePoolKeyVersion           = "workspace-fuse-pool/v2"
 	fusePoolCleanupTimeout       = 5 * time.Second
 	fusePoolStopCleanupTimeout   = 25 * time.Second
 	fusePoolAcquireRetryInterval = 50 * time.Millisecond

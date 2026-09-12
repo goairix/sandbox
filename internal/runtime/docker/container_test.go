@@ -81,7 +81,7 @@ func TestCreateContainerConfigForFUSEWithoutOptionalLSMProfile(t *testing.T) {
 	_, host, err := createContainerConfig(spec)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"no-new-privileges=true"}, host.SecurityOpt)
+	assert.Equal(t, []string{"no-new-privileges=true", "apparmor=unconfined"}, host.SecurityOpt)
 }
 
 func TestCreateContainerConfigForFUSEMountsOnlyOptionalCA(t *testing.T) {

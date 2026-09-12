@@ -594,6 +594,10 @@ func fusePoolConfig() FUSEPoolConfig {
 	}
 }
 
+func TestFUSEPoolKeyUsesAppArmorDefaultV2(t *testing.T) {
+	assert.Equal(t, "workspace-fuse-pool/v2", fusePoolKeyVersion)
+}
+
 func TestComputeFUSEPoolKeyCanonicalProjection(t *testing.T) {
 	a := fixedFUSESpec("ignored-a")
 	b := fixedFUSESpec("ignored-b")
