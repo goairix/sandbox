@@ -59,6 +59,9 @@ type sharedOrdinaryPool struct {
 	poolKey     string
 	recordBase  string
 	lockKey     string
+	ownerBase   string
+	ownerKey    string
+	ownerToken  []byte
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -81,9 +84,56 @@ func newSharedOrdinaryPool(pool *Pool, store state.AtomicStore, scope string) *s
 		poolKey:     poolKey,
 		recordBase:  base + poolKey + ":record:",
 		lockKey:     base + "refill-lock",
+		ownerBase:   base + poolKey + ":owner:",
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
+
+func (p *sharedOrdinaryPool) start(ctx context.Context) error {
+	p.mu.Lock()
+	if p.ownerKey != "" {
+		p.mu.Unlock()
+		return nil
+	}
+	token := []byte(randSuffix(24))
+	key := p.ownerBase + string(token)
+	p.mu.Unlock()
+	created, err := p.store.SetNX(ctx, key, token, ordinaryPoolLockTTL)
+	if err != nil {
+		return fmt.Errorf("register shared ordinary pool owner: %w", err)
+	}
+	if !created {
+		return errors.New("shared ordinary pool owner token collision")
+	}
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), key, token)
+		return context.Canceled
+	}
+	p.ownerKey, p.ownerToken = key, token
+	p.wg.Add(1)
+	ownerCtx := p.ctx
+	p.mu.Unlock()
+	go func() {
+		defer p.wg.Done()
+		ticker := time.NewTicker(ordinaryPoolLockTTL / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ownerCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, renewErr := p.store.CompareAndSwap(ownerCtx, key, token, token, ordinaryPoolLockTTL)
+				if renewErr != nil || !renewed {
+					logger.Error(context.Background(), "shared ordinary pool owner renewal failed", logger.ErrorField(renewErr))
+					return
+				}
+			}
+		}
+	}()
+	return nil
 }
 
 func ordinaryPoolFingerprint(cfg PoolConfig) string {
@@ -146,8 +196,50 @@ func (p *sharedOrdinaryPool) stop() {
 		p.stopping = true
 		p.cancel()
 	}
+	ownerKey := p.ownerKey
+	ownerToken := append([]byte(nil), p.ownerToken...)
 	p.mu.Unlock()
 	p.wg.Wait()
+	if ownerKey == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), ordinaryPoolLockTTL)
+	defer cancel()
+	if _, err := p.store.CompareAndDelete(cleanupCtx, ownerKey, ownerToken); err != nil {
+		logger.Error(cleanupCtx, "failed to unregister shared ordinary pool owner", logger.ErrorField(err))
+		return
+	}
+	if err := p.cleanupIfLastOwner(cleanupCtx); err != nil {
+		logger.Error(cleanupCtx, "failed to clean last-owner ordinary pool inventory", logger.ErrorField(err))
+	}
+}
+
+func (p *sharedOrdinaryPool) cleanupIfLastOwner(ctx context.Context) error {
+	return p.withLock(ctx, func(lockCtx context.Context) error {
+		owners, err := p.store.Keys(lockCtx, p.ownerBase+"*")
+		if err != nil || len(owners) != 0 {
+			return err
+		}
+		pods, err := p.pool.runtime.ListSandboxes(lockCtx, map[string]string{"sandbox.pool": "true", "sandbox.pool.key": p.poolKey})
+		if err != nil {
+			return err
+		}
+		var cleanupErr error
+		for _, pod := range pods {
+			if pod.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) {
+				continue
+			}
+			cleanupErr = errors.Join(cleanupErr, p.pool.runtime.RemoveSandbox(lockCtx, pod.RuntimeID))
+		}
+		keys, err := p.store.Keys(lockCtx, p.recordBase+"*")
+		if err != nil {
+			return errors.Join(cleanupErr, err)
+		}
+		for _, key := range keys {
+			cleanupErr = errors.Join(cleanupErr, p.store.Delete(lockCtx, key))
+		}
+		return cleanupErr
+	})
 }
 
 func (p *sharedOrdinaryPool) scheduleRefill() {
@@ -221,23 +313,6 @@ func (p *sharedOrdinaryPool) acquire(ctx context.Context) (*runtime.SandboxInfo,
 			}
 			continue
 		}
-		nilValue := (*string)(nil)
-		if err := p.pool.runtime.UpdateLabels(ctx, info.RuntimeID, map[string]*string{
-			"sandbox.pool":          nilValue,
-			"sandbox.pool.key":      nilValue,
-			"sandbox.pool.instance": nilValue,
-			"sandbox.pool.state":    nilValue,
-		}); err != nil {
-			discardErr := p.discardClaimed(ctx, entry.key, claimedRaw, claimed, info)
-			return nil, errors.Join(fmt.Errorf("depool claimed ordinary runtime: %w", err), discardErr)
-		}
-		deleted, deleteErr := p.store.CompareAndDelete(ctx, entry.key, claimedRaw)
-		if deleteErr != nil || !deleted {
-			// The Pod is already uniquely claimed and no longer discoverable as
-			// pool inventory. A leftover record is safe for reconciliation.
-			logger.Error(ctx, "failed to retire claimed ordinary pool record",
-				logger.AddField("runtime_id", info.RuntimeID), logger.ErrorField(deleteErr))
-		}
 		p.decrementKnownSize()
 		metrics.SandboxPoolSize.Add(ctx, -1)
 		metrics.RecordPoolAcquire(ctx, true)
@@ -246,12 +321,37 @@ func (p *sharedOrdinaryPool) acquire(ctx context.Context) (*runtime.SandboxInfo,
 	}
 
 	metrics.RecordPoolAcquire(ctx, false)
-	info, err := p.pool.createWarmWithLabels(ctx, nil)
+	// Keep the transient pool marker so the Kubernetes runtime can perform its
+	// policy-first pool-to-sandbox identity migration. It deliberately has no
+	// shared pool key and therefore cannot be adopted as warm inventory.
+	info, err := p.pool.createWarmWithLabels(ctx, map[string]string{"sandbox.pool": "true"})
 	if err != nil {
 		return nil, err
 	}
 	p.scheduleRefill()
 	return info, nil
+}
+
+func (p *sharedOrdinaryPool) confirmAcquired(ctx context.Context, runtimeID, runtimeUID string) error {
+	entries, err := p.listCurrentRecords(ctx)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.record.State != ordinaryPoolClaimed || entry.record.RuntimeID != runtimeID || entry.record.RuntimeUID != runtimeUID {
+			continue
+		}
+		deleted, err := p.store.CompareAndDelete(ctx, entry.key, entry.raw)
+		if err != nil {
+			return err
+		}
+		if !deleted {
+			return errors.New("ordinary pool claim changed before confirmation")
+		}
+		return nil
+	}
+	// Reconciliation may already have observed the removed pool label.
+	return nil
 }
 
 func (p *sharedOrdinaryPool) discardClaimed(ctx context.Context, key string, raw []byte, record ordinaryPoolRecord, info *runtime.SandboxInfo) error {
@@ -351,6 +451,23 @@ func (p *sharedOrdinaryPool) prepareOne(ctx context.Context) (*runtime.SandboxIn
 		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), p.recordKey(preparationID), raw)
 		return nil, createErr
 	}
+	publisher, ok := p.pool.runtime.(runtime.OrdinaryPoolStatePublisher)
+	if !ok {
+		_ = p.pool.runtime.RemoveSandbox(context.WithoutCancel(ctx), info.RuntimeID)
+		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), p.recordKey(preparationID), raw)
+		return nil, errors.New("runtime does not support ordinary pool state publication")
+	}
+	ref, refErr := runtime.NewRuntimeRef(info.RuntimeID, info.RuntimeUID)
+	if refErr != nil {
+		_ = p.pool.runtime.RemoveSandbox(context.WithoutCancel(ctx), info.RuntimeID)
+		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), p.recordKey(preparationID), raw)
+		return nil, refErr
+	}
+	if publishErr := publisher.PublishOrdinaryPoolPrepared(ctx, ref, p.poolKey, preparationID); publishErr != nil {
+		_ = p.pool.runtime.RemoveSandbox(context.WithoutCancel(ctx), info.RuntimeID)
+		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), p.recordKey(preparationID), raw)
+		return nil, fmt.Errorf("publish ordinary pool Pod prepared state: %w", publishErr)
+	}
 	prepared := record
 	prepared.RuntimeID = info.RuntimeID
 	prepared.RuntimeUID = info.RuntimeUID
@@ -366,11 +483,6 @@ func (p *sharedOrdinaryPool) prepareOne(ctx context.Context) (*runtime.SandboxIn
 			return nil, fmt.Errorf("publish ordinary pool runtime: %w", swapErr)
 		}
 		return nil, errors.New("ordinary pool preparation admission lost")
-	}
-	stateValue := string(ordinaryPoolPrepared)
-	if err := p.pool.runtime.UpdateLabels(ctx, info.RuntimeID, map[string]*string{"sandbox.pool.state": &stateValue}); err != nil {
-		logger.Error(ctx, "failed to publish ordinary pool Pod state label",
-			logger.AddField("runtime_id", info.RuntimeID), logger.ErrorField(err))
 	}
 	return info, nil
 }
@@ -568,6 +680,21 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 						return fmt.Errorf("clean unhealthy ordinary runtime: %w", err)
 					}
 					delete(recordByInstance, record.PreparationID)
+				} else if pod.Labels["sandbox.pool.state"] != string(ordinaryPoolPrepared) {
+					if pod.Labels["sandbox.pool.state"] != string(ordinaryPoolPreparing) {
+						return errors.New("prepared ordinary runtime state label changed")
+					}
+					publisher, ok := p.pool.runtime.(runtime.OrdinaryPoolStatePublisher)
+					if !ok {
+						return errors.New("runtime does not support ordinary pool state publication")
+					}
+					ref, refErr := runtime.NewRuntimeRef(record.RuntimeID, record.RuntimeUID)
+					if refErr != nil {
+						return refErr
+					}
+					if err := publisher.PublishOrdinaryPoolPrepared(lockCtx, ref, p.poolKey, record.PreparationID); err != nil {
+						return fmt.Errorf("repair ordinary pool prepared state label: %w", err)
+					}
 				}
 			case ordinaryPoolClaimed:
 				if !hasPod || pod.Labels["sandbox.pool"] != "true" {

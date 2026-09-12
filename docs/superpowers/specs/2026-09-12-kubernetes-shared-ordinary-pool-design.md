@@ -37,10 +37,12 @@ The record lifecycle is:
    removed from the Pod. The record is then deleted; the Pod belongs to the
    sandbox session and is no longer pool inventory.
 
-Acquisition scans prepared records and CAS-claims one. It verifies runtime ID,
-UID, and running state, then removes all pool ownership labels before returning
-the runtime. If no valid record exists, it creates an on-demand single-use Pod
-and schedules a shared refill.
+Acquisition scans prepared records and CAS-claims one, then verifies runtime
+ID, UID, and running state. The Manager uses the Kubernetes runtime's existing
+policy-first identity migration to remove pool ownership and assign the public
+sandbox ID atomically; only then is the durable claim retired. If no valid
+record exists, it creates an on-demand single-use Pod and schedules a shared
+refill.
 
 Refill is serialized with a renewable Redis lock. The lock holder reconciles
 records and Pods, counts global preparing/prepared inventory, and creates only
@@ -54,8 +56,12 @@ without one, are left for their overlapping old replica or the release drain;
 this makes the protocol safe to introduce and to roll between image versions.
 It never treats another API replica's prepared Pod as an orphan.
 
-Normal manager shutdown only stops local refill work. Release drain separately
-stops refill, destroys every shared pool runtime, and deletes its inventory.
+Every serving replica maintains a renewable owner key for its pool fingerprint.
+Normal manager shutdown stops local refill work and unregisters that owner; the
+last owner destroys that fingerprint's warm inventory. This keeps a same-version
+rolling restart shared while retiring the old image inventory after a version
+rollout. Release drain separately destroys every fingerprint and deletes all
+ordinary-pool state.
 
 ## Failure rules
 

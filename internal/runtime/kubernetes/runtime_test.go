@@ -2512,6 +2512,27 @@ func TestUpdateLabelsRejectsProtectedFUSELabels(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestPublishOrdinaryPoolPreparedUsesExactProtectedTransition(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "sandbox-pool-a", UID: types.UID("ordinary-uid-a"), ResourceVersion: "1",
+		Labels: map[string]string{
+			"sandbox.managed": "true", "sandbox.pool": "true", "sandbox.id": "sandbox-pool-a",
+			"sandbox.pool.key": "pool-key-a", "sandbox.pool.instance": "preparation-a", "sandbox.pool.state": "preparing",
+		},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	ref := sandboxruntime.RuntimeRef{ID: pod.Name, UID: string(pod.UID)}
+	require.NoError(t, rt.PublishOrdinaryPoolPrepared(context.Background(), ref, "pool-key-a", "preparation-a"))
+	updated, err := client.CoreV1().Pods("runtime").Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "prepared", updated.Labels["sandbox.pool.state"])
+
+	err = rt.PublishOrdinaryPoolPrepared(context.Background(), ref, "other-key", "preparation-a")
+	require.Error(t, err)
+}
+
 func seedOrdinaryPoolPodAndPolicy(t *testing.T, rt *Runtime, client *kubefake.Clientset, runtimeID, logicalID string) *corev1.Pod {
 	t.Helper()
 	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
@@ -2533,7 +2554,12 @@ func seedOrdinaryPoolPodAndPolicy(t *testing.T, rt *Runtime, client *kubefake.Cl
 
 func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
-	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	pod := seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	pod.Labels["sandbox.pool.state"] = "prepared"
+	pod.Labels["sandbox.pool.key"] = "pool-key-a"
+	pod.Labels["sandbox.pool.instance"] = "preparation-a"
+	_, err := client.CoreV1().Pods("runtime").Update(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
 	var actions []string
 	client.PrependReactor("create", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
 		policy := action.(ktesting.CreateAction).GetObject().(*networkingv1.NetworkPolicy)
@@ -2555,7 +2581,7 @@ func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
 
 	nilValue := (*string)(nil)
 	newID := "customer-a"
-	err := rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
+	err = rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"create-new-policy", "patch-pod", "delete-old-policy"}, actions)
 	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
@@ -2563,6 +2589,11 @@ func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
 	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, newPolicy.Spec.PodSelector.MatchLabels)
 	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err))
+	updated, err := client.CoreV1().Pods("runtime").Get(context.Background(), "sandbox-pool-a", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, updated.Labels, "sandbox.pool.state")
+	assert.NotContains(t, updated.Labels, "sandbox.pool.key")
+	assert.NotContains(t, updated.Labels, "sandbox.pool.instance")
 }
 
 func TestUpdateLabelsRejectsLogicalIDAlreadyInUse(t *testing.T) {

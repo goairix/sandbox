@@ -341,6 +341,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 	if m.pool.Shared() {
+		if err := m.pool.Start(spanCtx); err != nil {
+			return fmt.Errorf("register shared ordinary pool owner: %w", err)
+		}
 		activeRuntimeIDs := make(map[string]struct{})
 		m.mu.RLock()
 		for _, sb := range m.sandboxes {
@@ -721,9 +724,19 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}); err != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
 			removeErr := m.runtime.RemoveSandbox(cleanupCtx, info.RuntimeID)
+			if removeErr == nil {
+				_ = m.pool.ConfirmAcquired(cleanupCtx, info)
+			}
 			cancel()
 			m.pool.NotifyRemoved()
 			return nil, errors.Join(fmt.Errorf("claim pooled sandbox: %w", err), removeErr)
+		}
+		if err := m.pool.ConfirmAcquired(spanCtx, info); err != nil {
+			// The Pod is already atomically de-pooled by the runtime identity
+			// migration. A durable claim residue is safe and reconciliation will
+			// retire it, so do not fail an otherwise successful sandbox create.
+			logger.Error(spanCtx, "failed to retire ordinary pool claim",
+				logger.AddField("runtime_id", info.RuntimeID), logger.ErrorField(err))
 		}
 	}
 	if err := spanCtx.Err(); err != nil {

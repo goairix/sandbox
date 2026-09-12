@@ -652,7 +652,35 @@ func TestManagersShareKubernetesOrdinaryWarmPool(t *testing.T) {
 	sandbox, err := second.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
 	require.NoError(t, err)
 	assert.NotEmpty(t, sandbox.RuntimeID)
+	runtimeInfo, err := rt.GetSandbox(context.Background(), sandbox.RuntimeID)
+	require.NoError(t, err)
+	require.NotNil(t, runtimeInfo)
+	assert.NotContains(t, runtimeInfo.Labels, "sandbox.pool")
+	assert.NotContains(t, runtimeInfo.Labels, "sandbox.pool.key")
+	claimKeys, err := store.Keys(context.Background(), second.pool.shared.recordBase+"*")
+	require.NoError(t, err)
+	assert.Empty(t, claimKeys)
 	require.NoError(t, second.Destroy(context.Background(), sandbox.ID))
+}
+
+func TestManagerMigratesSharedPoolOnDemandRuntimeIdentity(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		RuntimeType: "kubernetes", PoolConfig: PoolConfig{MinSize: 0, MaxSize: 1, Image: "sandbox:latest"},
+		PoolStateStore: store, PoolScope: "sandbox-system",
+	})
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { mgr.Stop(context.Background()) })
+
+	sandbox, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
+	require.NoError(t, err)
+	info, err := rt.GetSandbox(context.Background(), sandbox.RuntimeID)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, sandbox.ID, info.Labels["sandbox.id"])
+	assert.NotContains(t, info.Labels, "sandbox.pool")
+	require.NoError(t, mgr.Destroy(context.Background(), sandbox.ID))
 }
 
 func TestCleanupOrphanedOrdinaryPoolSkipsFUSEPoolRuntimes(t *testing.T) {

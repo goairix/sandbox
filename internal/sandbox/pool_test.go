@@ -416,6 +416,26 @@ func (m *sharedPoolRuntime) UpdateLabels(_ context.Context, id string, labels ma
 			info.Labels[key] = *value
 		}
 	}
+	if poolValue, removesPool := labels["sandbox.pool"]; removesPool && poolValue == nil {
+		delete(info.Labels, "sandbox.pool.state")
+		delete(info.Labels, "sandbox.pool.key")
+		delete(info.Labels, "sandbox.pool.instance")
+	}
+	return nil
+}
+
+func (m *sharedPoolRuntime) PublishOrdinaryPoolPrepared(_ context.Context, ref runtime.RuntimeRef, poolKey, preparationID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	info := m.sandboxes[ref.ID]
+	if info == nil {
+		return runtime.ErrNotFound
+	}
+	if info.RuntimeUID != ref.UID || info.Labels["sandbox.pool"] != "true" || info.Labels["sandbox.pool.key"] != poolKey ||
+		info.Labels["sandbox.pool.instance"] != preparationID || info.Labels["sandbox.pool.state"] != "preparing" {
+		return runtime.ErrInvalidRuntimeRef
+	}
+	info.Labels["sandbox.pool.state"] = "prepared"
 	return nil
 }
 
@@ -604,6 +624,8 @@ func TestSharedOrdinaryPoolWarmUpAndAcquireAreGlobalAcrossReplicas(t *testing.T)
 	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
 	poolA.EnableShared(store, "sandbox-system")
 	poolB.EnableShared(store, "sandbox-system")
+	require.NoError(t, poolA.Start(context.Background()))
+	require.NoError(t, poolB.Start(context.Background()))
 	t.Cleanup(func() {
 		poolA.Drain(context.Background())
 		poolB.Drain(context.Background())
@@ -620,7 +642,7 @@ func TestSharedOrdinaryPoolWarmUpAndAcquireAreGlobalAcrossReplicas(t *testing.T)
 	require.NoError(t, err)
 	_, reused := original[info.RuntimeID]
 	assert.True(t, reused, "a replica must claim a Pod prepared by another replica")
-	assert.NotContains(t, info.Labels, "sandbox.pool")
+	assert.Equal(t, "prepared", info.Labels["sandbox.pool.state"], "the Manager retires pool labels during logical-ID migration")
 }
 
 func TestSharedOrdinaryPoolConcurrentAcquireClaimsWarmRuntimeOnce(t *testing.T) {
@@ -630,6 +652,8 @@ func TestSharedOrdinaryPoolConcurrentAcquireClaimsWarmRuntimeOnce(t *testing.T) 
 	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
 	poolA.EnableShared(store, "sandbox-system")
 	poolB.EnableShared(store, "sandbox-system")
+	require.NoError(t, poolA.Start(context.Background()))
+	require.NoError(t, poolB.Start(context.Background()))
 	t.Cleanup(func() {
 		poolA.Drain(context.Background())
 		poolB.Drain(context.Background())
@@ -667,6 +691,8 @@ func TestSharedOrdinaryPoolConcurrentAcquireClaimsWarmRuntimeOnce(t *testing.T) 
 		warmClaims++
 	}
 	assert.Equal(t, 1, warmClaims, "CAS must grant the warm runtime to exactly one replica")
+	poolA.Release(context.Background(), first.RuntimeID)
+	poolB.Release(context.Background(), second.RuntimeID)
 }
 
 func TestSharedOrdinaryPoolNormalStopPreservesInventoryAndReleaseDrainDeletesIt(t *testing.T) {
@@ -676,6 +702,8 @@ func TestSharedOrdinaryPoolNormalStopPreservesInventoryAndReleaseDrainDeletesIt(
 	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
 	poolA.EnableShared(store, "sandbox-system")
 	poolB.EnableShared(store, "sandbox-system")
+	require.NoError(t, poolA.Start(context.Background()))
+	require.NoError(t, poolB.Start(context.Background()))
 	require.NoError(t, poolA.WarmUp(context.Background()))
 	original := rt.snapshotIDs()
 	require.Len(t, original, 1)
@@ -688,6 +716,7 @@ func TestSharedOrdinaryPoolNormalStopPreservesInventoryAndReleaseDrainDeletesIt(
 	assert.True(t, reused)
 	poolB.Release(context.Background(), info.RuntimeID)
 	poolB.Drain(context.Background())
+	assert.Empty(t, rt.snapshotIDs(), "the last owner must retire its fingerprint inventory")
 
 	require.NoError(t, poolB.DrainRelease(context.Background()))
 	assert.Empty(t, rt.snapshotIDs())
@@ -703,6 +732,8 @@ func TestSharedOrdinaryPoolRollingFingerprintDoesNotDeleteOldReplicaInventory(t 
 	newPool := NewPool(rt, PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:v2"})
 	oldPool.EnableShared(store, "sandbox-system")
 	newPool.EnableShared(store, "sandbox-system")
+	require.NoError(t, oldPool.Start(context.Background()))
+	require.NoError(t, newPool.Start(context.Background()))
 	t.Cleanup(func() {
 		oldPool.Drain(context.Background())
 		newPool.Drain(context.Background())
@@ -720,4 +751,27 @@ func TestSharedOrdinaryPoolRollingFingerprintDoesNotDeleteOldReplicaInventory(t 
 	_, reused := oldInventory[info.RuntimeID]
 	assert.True(t, reused, "new replica startup must not invalidate an old replica's pool record")
 	oldPool.Release(context.Background(), info.RuntimeID)
+}
+
+func TestSharedOrdinaryPoolReconcileRepairsPreparedStateLabel(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	pool := NewPool(rt, PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"})
+	pool.EnableShared(store, "sandbox-system")
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() { pool.Drain(context.Background()) })
+	require.NoError(t, pool.WarmUp(context.Background()))
+
+	rt.mu.Lock()
+	for _, info := range rt.sandboxes {
+		info.Labels["sandbox.pool.state"] = "preparing"
+	}
+	rt.mu.Unlock()
+	require.NoError(t, pool.Reconcile(context.Background(), nil))
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, info := range rt.sandboxes {
+		assert.Equal(t, "prepared", info.Labels["sandbox.pool.state"])
+	}
 }

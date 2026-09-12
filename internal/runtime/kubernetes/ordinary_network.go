@@ -578,8 +578,15 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	if err != nil {
 		return err
 	}
-	labelMap := make(map[string]any, len(labels))
+	migrationLabels := make(map[string]*string, len(labels)+3)
 	for key, value := range labels {
+		migrationLabels[key] = value
+	}
+	for _, key := range []string{"sandbox.pool.state", "sandbox.pool.key", "sandbox.pool.instance"} {
+		migrationLabels[key] = nil
+	}
+	labelMap := make(map[string]any, len(migrationLabels))
+	for key, value := range migrationLabels {
 		if value == nil {
 			labelMap[key] = nil
 		} else {
@@ -595,7 +602,7 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	patched, patchErr := r.client.CoreV1().Pods(r.namespace).Patch(ctx, pod.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 	if patchErr != nil {
 		verified, getErr := r.client.CoreV1().Pods(r.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if getErr == nil && ordinaryPoolPatchMatches(verified, pod.UID, newLogicalID, labels) {
+		if getErr == nil && ordinaryPoolPatchMatches(verified, pod.UID, newLogicalID, migrationLabels) {
 			patched = verified
 		} else if getErr == nil && verified.UID == pod.UID && verified.Labels["sandbox.id"] == oldIdentity.logicalID && verified.Labels["sandbox.pool"] == "true" {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
@@ -606,7 +613,7 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 			return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patch pool Pod identity: %w", patchErr), getErr)
 		}
 	}
-	if !ordinaryPoolPatchMatches(patched, pod.UID, newLogicalID, labels) {
+	if !ordinaryPoolPatchMatches(patched, pod.UID, newLogicalID, migrationLabels) {
 		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patched pool Pod identity does not match requested labels"))
 	}
 	if err := deleteCreatedNetworkPolicy(ctx, oldPolicies, oldPolicy); err != nil {

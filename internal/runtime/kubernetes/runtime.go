@@ -2150,6 +2150,39 @@ func (r *Runtime) patchPreparedState(ctx context.Context, ref runtime.RuntimeRef
 	return nil, fmt.Errorf("patch prepared state: %w", patchErr)
 }
 
+// PublishOrdinaryPoolPrepared performs the exact preparing -> prepared label
+// transition for an ordinary warm Pod. Pool identity labels are protected from
+// the generic UpdateLabels path because they participate in ownership.
+func (r *Runtime) PublishOrdinaryPoolPrepared(ctx context.Context, ref runtime.RuntimeRef, poolKey, preparationID string) error {
+	pod, err := r.getExactPod(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if pod.ResourceVersion == "" || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.pool"] != "true" ||
+		pod.Labels["sandbox.workspace.mode"] == "fuse" || pod.Labels["sandbox.pool.key"] != poolKey ||
+		pod.Labels["sandbox.pool.instance"] != preparationID || pod.Labels["sandbox.pool.state"] != "preparing" {
+		return fmt.Errorf("ordinary pool prepared-state precondition failed")
+	}
+	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{
+		"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion,
+		"labels": map[string]any{"sandbox.pool.state": "prepared"},
+	}})
+	updated, patchErr := r.client.CoreV1().Pods(r.namespace).Patch(ctx, ref.ID, types.MergePatchType, patch, metav1.PatchOptions{})
+	if patchErr == nil {
+		if updated.UID != pod.UID || updated.Labels["sandbox.pool.key"] != poolKey ||
+			updated.Labels["sandbox.pool.instance"] != preparationID || updated.Labels["sandbox.pool.state"] != "prepared" {
+			return runtime.ErrInvalidRuntimeRef
+		}
+		return nil
+	}
+	current, getErr := r.getExactPod(ctx, ref)
+	if getErr == nil && current.Labels["sandbox.pool.key"] == poolKey &&
+		current.Labels["sandbox.pool.instance"] == preparationID && current.Labels["sandbox.pool.state"] == "prepared" {
+		return nil
+	}
+	return fmt.Errorf("patch ordinary pool prepared state: %w", patchErr)
+}
+
 func validateExactFUSEPodIdentity(pod *corev1.Pod, ref runtime.RuntimeRef) error {
 	_, err := exactFUSEPodBootstrap(pod, ref)
 	return err

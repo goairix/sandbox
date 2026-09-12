@@ -68,6 +68,16 @@ func (p *Pool) EnableShared(store state.AtomicStore, scope string) {
 
 func (p *Pool) Shared() bool { return p.shared != nil }
 
+// Start registers this API replica as an owner of its shared pool
+// fingerprint. The last gracefully stopping owner retires that fingerprint's
+// warm inventory after a rolling upgrade.
+func (p *Pool) Start(ctx context.Context) error {
+	if p.shared == nil {
+		return nil
+	}
+	return p.shared.start(ctx)
+}
+
 // WarmUp fills the pool to MinSize.
 func (p *Pool) WarmUp(ctx context.Context) error {
 	if p.shared != nil {
@@ -127,6 +137,15 @@ func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
 	// No healthy warm containers, create on-demand
 	metrics.RecordPoolAcquire(ctx, false)
 	return p.createWarm(ctx)
+}
+
+// ConfirmAcquired retires the durable claim after the Manager has atomically
+// migrated the Pod from pool identity to its user-visible sandbox identity.
+func (p *Pool) ConfirmAcquired(ctx context.Context, info *runtime.SandboxInfo) error {
+	if p.shared == nil || info == nil {
+		return nil
+	}
+	return p.shared.confirmAcquired(ctx, info.RuntimeID, info.RuntimeUID)
 }
 
 // Release destroys a used container (containers are single-use for security).

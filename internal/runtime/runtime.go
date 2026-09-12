@@ -93,6 +93,13 @@ type ReleaseOrphanReconciler interface {
 	ReconcileReleaseOrphanedResources(ctx context.Context) error
 }
 
+// OrdinaryPoolStatePublisher performs the exact, protected preparing-to-
+// prepared label transition for an ordinary warm runtime. Generic label APIs
+// deliberately cannot mutate pool identity labels.
+type OrdinaryPoolStatePublisher interface {
+	PublishOrdinaryPoolPrepared(ctx context.Context, ref RuntimeRef, poolKey, preparationID string) error
+}
+
 // ReservedFileCounter counts exact reserved FUSE probe basenames within the
 // same scope as a public recursive or glob listing. An empty globPattern means
 // the recursive listing semantics (files and directories); otherwise it means
