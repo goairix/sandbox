@@ -173,44 +173,96 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if spec.WorkspaceFUSE != nil {
 		return nil, fmt.Errorf("FUSE sandboxes require the prepare/authorize/ready lifecycle")
 	}
-	pod, err := createPod(ctx, r.client, r.namespace, spec)
+	pod, err := buildOrdinaryPod(r.namespace, spec)
 	if err != nil {
 		return nil, err
 	}
-
-	// Wait for pod to be ready
-	if err := waitForPodReady(ctx, r.client, r.namespace, pod.Name, 60*time.Second); err != nil {
-		_ = deletePod(ctx, r.client, r.namespace, pod.Name)
-		return nil, fmt.Errorf("wait for pod: %w", err)
+	logicalID := pod.Labels["sandbox.id"]
+	identity := ordinaryNetworkIdentity{runtimeID: pod.Name, logicalID: logicalID}
+	attempt, err := newNetworkAttemptToken()
+	if err != nil {
+		return nil, fmt.Errorf("create ordinary network attempt: %w", err)
 	}
-
-	// Always apply a NetworkPolicy. Without one, K8s allows all egress by default.
-	// updateNetworkPolicy handles all modes: isolation, whitelist, block-private, open.
-	if err := updateNetworkPolicy(ctx, r.client, r.namespace, spec.ID, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate); err != nil {
-		_ = deletePod(ctx, r.client, r.namespace, pod.Name)
-		return nil, fmt.Errorf("apply network policy: %w", err)
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
 	}
-
-	// When network is enabled without an explicit whitelist, apply a CiliumNetworkPolicy
-	// egressDeny to block private ranges. Standard K8s NetworkPolicy IPBlock/Except is
-	// unreliable in Cilium (CIDR identity may not be assigned before the "world" catch-all
-	// matches), so an eBPF-level deny is the only reliable fix.
-	// Whitelist mode is excluded: the whitelist may intentionally allow private CIDRs.
-	// On non-Cilium clusters this is skipped; the standard NetworkPolicy suffices.
-	if r.hasCilium && spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0 {
-		if err := applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, spec.ID); err != nil {
-			_ = deleteNetworkPolicy(ctx, r.client, r.namespace, spec.ID)
-			_ = deletePod(ctx, r.client, r.namespace, pod.Name)
-			return nil, fmt.Errorf("apply cilium private deny: %w", err)
+	pod.Annotations[ordinaryPolicyAttemptAnnotation] = attempt
+	standardPolicy, err := buildOrdinaryNetworkPolicy(r.namespace, identity, attempt, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate)
+	if err != nil {
+		return nil, err
+	}
+	needsCilium := r.hasCilium && spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0
+	var ciliumPolicy *unstructured.Unstructured
+	if needsCilium {
+		ciliumPolicy, err = buildOrdinaryCiliumPrivateDeny(r.namespace, identity, attempt)
+		if err != nil {
+			return nil, err
 		}
+	}
+	if err := ensureOrdinaryIdentityAvailable(ctx, r.client, r.namespace, identity); err != nil {
+		return nil, err
+	}
+	createdStandard, err := createOrdinaryNetworkPolicy(ctx, r.client, standardPolicy, identity, attempt)
+	if err != nil {
+		return nil, err
+	}
+	var createdCilium *unstructured.Unstructured
+	cleanup := func(cause error, createdPod *corev1.Pod) error {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
+		defer cancel()
+		var cleanupErrs []error
+		if createdPod != nil {
+			if deleteErr := deletePod(cleanupCtx, r.client, r.namespace, createdPod.Name); deleteErr != nil && !errors.Is(deleteErr, runtime.ErrNotFound) {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup ordinary Pod: %w", deleteErr))
+			}
+		}
+		if createdCilium != nil {
+			cleanupErrs = append(cleanupErrs, deleteAttemptOrdinaryCiliumPrivateDeny(cleanupCtx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt))
+		}
+		if createdStandard != nil {
+			cleanupErrs = append(cleanupErrs, deleteAttemptOrdinaryNetworkPolicy(cleanupCtx, r.client, r.namespace, createdStandard.Name, identity, attempt))
+		}
+		return errors.Join(append([]error{cause}, cleanupErrs...)...)
+	}
+	if needsCilium {
+		createdCilium, err = createOrdinaryCiliumPrivateDeny(ctx, r.dynClient, ciliumPolicy, identity, attempt)
+		if err != nil {
+			return nil, cleanup(err, nil)
+		}
+	}
+	if err := ensureOrdinaryIdentityAvailable(ctx, r.client, r.namespace, identity); err != nil {
+		return nil, cleanup(err, nil)
+	}
+	createdPod, err := r.client.CoreV1().Pods(r.namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return nil, cleanup(fmt.Errorf("create pod: %w", err), nil)
+	}
+	if createdPod.UID == "" {
+		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod)
+	}
+	identity.runtimeUID = createdPod.UID
+	if err := bindOrdinaryNetworkPolicy(ctx, r.client, r.namespace, createdStandard.Name, identity, attempt); err != nil {
+		return nil, cleanup(err, createdPod)
+	}
+	if createdCilium != nil {
+		if err := bindOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt); err != nil {
+			return nil, cleanup(err, createdPod)
+		}
+	}
+	readyTimeout := r.readyTimeout
+	if readyTimeout <= 0 {
+		readyTimeout = defaultKubernetesControlTimeout
+	}
+	if err := waitForPodReady(ctx, r.client, r.namespace, createdPod.Name, readyTimeout); err != nil {
+		return nil, cleanup(fmt.Errorf("wait for pod: %w", err), createdPod)
 	}
 
 	return &runtime.SandboxInfo{
 		ID:         spec.ID,
-		RuntimeID:  pod.Name,
-		RuntimeUID: string(pod.UID),
+		RuntimeID:  createdPod.Name,
+		RuntimeUID: string(createdPod.UID),
 		State:      "running",
-		CreatedAt:  pod.CreationTimestamp.Time,
+		CreatedAt:  createdPod.CreationTimestamp.Time,
 	}, nil
 }
 
