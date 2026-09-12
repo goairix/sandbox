@@ -762,6 +762,54 @@ func resolveFUSEWhitelist(entries []string) ([]string, error) {
 
 const staleSandboxNetworkAge = 5 * time.Minute
 
+func cleanupStaleSandboxNetworkResources(ctx context.Context, cli dockerAPI, now time.Time) (int, error) {
+	if err := cleanupStaleOrphanGateways(ctx, cli, now); err != nil {
+		return 0, err
+	}
+	return cleanupStaleEmptySandboxNetworks(ctx, cli, now)
+}
+
+func cleanupStaleOrphanGateways(ctx context.Context, cli dockerAPI, now time.Time) error {
+	containers, err := cli.ContainerList(ctx, container.ListOptions{
+		All: true, Filters: filters.NewArgs(filters.Arg("label", "sandbox.managed=true")),
+	})
+	if err != nil {
+		return fmt.Errorf("list managed sandbox containers: %w", err)
+	}
+	activeRuntimeIDs := make(map[string]struct{}, len(containers))
+	for _, item := range containers {
+		if item.Labels["sandbox.role"] == "gateway" {
+			continue
+		}
+		for _, name := range item.Names {
+			if currentID := strings.TrimPrefix(name, "/"); currentID != "" {
+				activeRuntimeIDs[currentID] = struct{}{}
+			}
+		}
+		if item.Labels["sandbox.role"] == "fuse-runtime" {
+			if preparationID := item.Labels["sandbox.id"]; preparationID != "" {
+				activeRuntimeIDs[preparationID] = struct{}{}
+			}
+		}
+	}
+	for _, item := range containers {
+		if item.Labels["sandbox.role"] != "gateway" || item.Created <= 0 {
+			continue
+		}
+		preparationID := item.Labels["sandbox.id"]
+		if preparationID == "" || now.Sub(time.Unix(item.Created, 0)) < staleSandboxNetworkAge {
+			continue
+		}
+		if _, active := activeRuntimeIDs[preparationID]; active {
+			continue
+		}
+		if removeErr := cli.ContainerRemove(ctx, item.ID, container.RemoveOptions{Force: true}); removeErr != nil && !dockerclient.IsErrNotFound(removeErr) {
+			return fmt.Errorf("remove stale sandbox gateway %s: %w", item.ID, removeErr)
+		}
+	}
+	return nil
+}
+
 func cleanupStaleEmptySandboxNetworks(ctx context.Context, cli dockerAPI, now time.Time) (int, error) {
 	networks, err := cli.NetworkList(ctx, dnetwork.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "sandbox.managed=true"))})
 	if err != nil {
@@ -799,7 +847,7 @@ func createManagedPairNetwork(ctx context.Context, cli dockerAPI, name string, o
 	if err == nil || !isDockerAddressPoolExhausted(err) {
 		return response, err
 	}
-	if _, cleanupErr := cleanupStaleEmptySandboxNetworks(ctx, cli, now); cleanupErr != nil {
+	if _, cleanupErr := cleanupStaleSandboxNetworkResources(ctx, cli, now); cleanupErr != nil {
 		return dnetwork.CreateResponse{}, errors.Join(err, cleanupErr)
 	}
 	return cli.NetworkCreate(ctx, name, options)

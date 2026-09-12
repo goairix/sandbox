@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	dnetwork "github.com/docker/docker/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +47,61 @@ func TestCleanupStaleEmptySandboxNetworksOnlyRemovesOwnedEmptyNetworks(t *testin
 	_, staleExists := fake.networks["stale"]
 	assert.False(t, staleExists)
 	for _, id := range []string{"fresh", "attached", "unowned", "other"} {
+		_, exists := fake.networks[id]
+		assert.True(t, exists, "%s must be preserved", id)
+	}
+}
+
+func TestCleanupStaleSandboxNetworkResourcesRemovesOnlyOrphanGateways(t *testing.T) {
+	_, fake := newFakeDockerRuntime(t)
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+	fresh := now.Add(-time.Minute)
+	fake.containers = map[string]*fakeContainer{
+		"orphan-gateway": {
+			config: &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "orphan", "sandbox.role": "gateway"}},
+			name:   gatewayNamePrefix + "orphan", created: old.Unix(), running: true,
+		},
+		"active-gateway": {
+			config: &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "active", "sandbox.role": "gateway"}},
+			name:   gatewayNamePrefix + "active", created: old.Unix(), running: true,
+		},
+		"active-runtime": {
+			config: &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "sandbox-pool-old"}},
+			name:   "active", created: old.Unix(), running: false,
+		},
+		"fresh-gateway": {
+			config: &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "fresh", "sandbox.role": "gateway"}},
+			name:   gatewayNamePrefix + "fresh", created: fresh.Unix(), running: true,
+		},
+	}
+	fake.networks = map[string]dnetwork.Inspect{
+		"orphan-network": {
+			ID: "orphan-network", Name: pairNetworkPrefix + "orphan", Created: old,
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{"orphan-gateway": {}},
+		},
+		"active-network": {
+			ID: "active-network", Name: pairNetworkPrefix + "active", Created: old,
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{"active-gateway": {}, "active-runtime": {}},
+		},
+		"fresh-network": {
+			ID: "fresh-network", Name: pairNetworkPrefix + "fresh", Created: fresh,
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{"fresh-gateway": {}},
+		},
+	}
+
+	removed, err := cleanupStaleSandboxNetworkResources(context.Background(), fake, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	_, orphanGatewayExists := fake.containers["orphan-gateway"]
+	assert.False(t, orphanGatewayExists)
+	_, orphanNetworkExists := fake.networks["orphan-network"]
+	assert.False(t, orphanNetworkExists)
+	for _, id := range []string{"active-gateway", "active-runtime", "fresh-gateway"} {
+		_, exists := fake.containers[id]
+		assert.True(t, exists, "%s must be preserved", id)
+	}
+	for _, id := range []string{"active-network", "fresh-network"} {
 		_, exists := fake.networks[id]
 		assert.True(t, exists, "%s must be preserved", id)
 	}

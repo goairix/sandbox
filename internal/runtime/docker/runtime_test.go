@@ -758,6 +758,7 @@ type fakeContainer struct {
 	config   *container.Config
 	host     *container.HostConfig
 	name     string
+	created  int64
 	running  bool
 	networks map[string]*dnetwork.EndpointSettings
 }
@@ -894,7 +895,7 @@ func (f *fakeDockerAPI) ContainerCreate(_ context.Context, cfg *container.Config
 			attached[networkName] = &dnetwork.EndpointSettings{IPAddress: "172.20.0.2"}
 		}
 	}
-	f.containers[id] = &fakeContainer{config: cfg, host: host, name: name, networks: attached}
+	f.containers[id] = &fakeContainer{config: cfg, host: host, name: name, created: time.Now().Unix(), networks: attached}
 	if cfg.Labels["sandbox.role"] == "gateway" {
 		f.events = append(f.events, "gateway-create")
 	} else {
@@ -932,6 +933,10 @@ func (f *fakeDockerAPI) ContainerRemove(_ context.Context, id string, _ containe
 	f.containerRemoveRequested[id] = true
 	if f.inspectAfterRemoveErr == nil || f.containerRemoveDeletes {
 		delete(f.containers, id)
+		for networkID, item := range f.networks {
+			delete(item.Containers, id)
+			f.networks[networkID] = item
+		}
 	}
 	return f.containerRemoveErr
 }
@@ -968,7 +973,7 @@ func (f *fakeDockerAPI) ContainerList(_ context.Context, opts container.ListOpti
 		if !matches {
 			continue
 		}
-		result = append(result, types.Container{ID: id, Labels: c.config.Labels, State: map[bool]string{true: "running", false: "exited"}[c.running]})
+		result = append(result, types.Container{ID: id, Names: []string{"/" + c.name}, Created: c.created, Labels: c.config.Labels, State: map[bool]string{true: "running", false: "exited"}[c.running]})
 	}
 	return result, nil
 }

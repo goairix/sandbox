@@ -111,7 +111,7 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
-	if _, err := cleanupStaleEmptySandboxNetworks(ctx, cli, time.Now()); err != nil {
+	if _, err := cleanupStaleSandboxNetworkResources(ctx, cli, time.Now()); err != nil {
 		_ = cli.Close()
 		return nil, fmt.Errorf("cleanup stale sandbox networks: %w", err)
 	}
