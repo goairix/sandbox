@@ -2051,6 +2051,88 @@ func TestUpdateLabelsReturnsOldPolicyDeleteFailure(t *testing.T) {
 	require.ErrorIs(t, err, deleteErr)
 }
 
+func seedOrdinaryPodWithLogicalPolicy(t *testing.T, rt *Runtime, client *kubefake.Clientset, runtimeID, logicalID string) *corev1.Pod {
+	t.Helper()
+	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: runtimeID, Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": logicalID},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: pod.UID, logicalID: logicalID}
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, "seed-attempt", false, nil, false)
+	require.NoError(t, err)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+	require.NoError(t, err)
+	return pod
+}
+
+func TestUpdateNetworkUsesCurrentPodLogicalID(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	seedOrdinaryPodWithLogicalPolicy(t, rt, client, "sandbox-pool-a", "customer-a")
+
+	err := rt.UpdateNetwork(context.Background(), "sandbox-pool-a", true, []string{"192.0.2.10/32"}, false)
+	require.NoError(t, err)
+	policy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, policy.Spec.PodSelector.MatchLabels)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestUpdateNetworkRejectsForeignSameNamePolicy(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-a", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "customer-a"},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	foreign := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: "sandbox-customer-a", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "customer-a", ordinaryPolicyRoleLabel: ordinaryPolicyRole, ordinaryRuntimeIDLabel: pod.Name},
+		Annotations: map[string]string{ordinaryRuntimeUIDAnnotation: string(pod.UID)},
+	}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"sandbox.id": "someone-else"}}}}
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), foreign, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = rt.UpdateNetwork(context.Background(), "runtime-a", false, nil, false)
+	require.Error(t, err)
+	retained, getErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), foreign.Name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	assert.Equal(t, "someone-else", retained.Spec.PodSelector.MatchLabels["sandbox.id"])
+}
+
+func TestUpdateNetworkUpgradesExactLegacyOrdinaryPolicy(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-a", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "customer-a"},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	legacy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: "sandbox-customer-a", Namespace: "runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "customer-a"},
+	}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"sandbox.id": "customer-a"}}}}
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), legacy, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = rt.UpdateNetwork(context.Background(), "runtime-a", false, nil, false)
+	require.NoError(t, err)
+	upgraded, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, ordinaryPolicyRole, upgraded.Labels[ordinaryPolicyRoleLabel])
+	assert.Equal(t, "runtime-a", upgraded.Labels[ordinaryRuntimeIDLabel])
+	assert.Equal(t, string(pod.UID), upgraded.Annotations[ordinaryRuntimeUIDAnnotation])
+}
+
+func TestUpdateNetworkReportsPartialCiliumStateAsUncertain(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	rt.hasCilium = true
+	seedOrdinaryPodWithLogicalPolicy(t, rt, client, "runtime-a", "customer-a")
+	ciliumErr := errors.New("cilium unavailable")
+	rt.dynClient.(*fake.FakeDynamicClient).PrependReactor("create", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, ciliumErr
+	})
+
+	err := rt.UpdateNetwork(context.Background(), "runtime-a", true, nil, false)
+	require.ErrorIs(t, err, sandboxruntime.ErrNetworkStateUncertain)
+	require.ErrorIs(t, err, ciliumErr)
+}
+
 func TestRuntimeRefRejectsEmptyIdentity(t *testing.T) {
 	_, err := sandboxruntime.NewRuntimeRef("pod", "")
 	require.ErrorIs(t, err, sandboxruntime.ErrInvalidRuntimeRef)

@@ -2269,16 +2269,29 @@ func (r *Runtime) EditFileLines(ctx context.Context, id string, filePath string,
 }
 
 func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, whitelist []string, blockPrivate bool) error {
-	if err := updateNetworkPolicy(ctx, r.client, r.namespace, id, enabled, whitelist, blockPrivate); err != nil {
+	pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, id, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get ordinary Pod for network update: %w", err)
+	}
+	identity, err := ordinaryIdentityFromPod(pod, id)
+	if err != nil {
+		return err
+	}
+	if err := updateOrdinaryNetworkPolicy(ctx, r.client, r.namespace, identity, enabled, whitelist, blockPrivate); err != nil {
 		return err
 	}
 	if !r.hasCilium {
 		return nil
 	}
 	if enabled && len(whitelist) == 0 {
-		return applyCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
+		err = updateOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity)
+	} else {
+		err = deleteMutableOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity)
 	}
-	return deleteCiliumPrivateDeny(ctx, r.dynClient, r.namespace, id)
+	if err != nil {
+		return errors.Join(runtime.ErrNetworkStateUncertain, err)
+	}
+	return nil
 }
 
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {

@@ -35,6 +35,10 @@ var ErrInvalidRuntimeRef = errors.New("invalid exact runtime reference")
 // tear down the single-use runtime.
 var ErrFUSENetworkStateUncertain = errors.New("FUSE network policy state is uncertain")
 
+// ErrNetworkStateUncertain means an ordinary sandbox policy update partially
+// succeeded and the caller cannot safely infer the resulting network state.
+var ErrNetworkStateUncertain = errors.New("network policy state is uncertain")
+
 // RuntimeRef identifies one immutable runtime instance. ID alone is never
 // sufficient for a FUSE control operation because names may be reused.
 type RuntimeRef struct {
