@@ -381,3 +381,21 @@ func TestDeleteExactNetworkPolicyConfirmsPolicyObjectUID(t *testing.T) {
 		require.NoError(t, deleteExactNetworkPolicy(context.Background(), client, "runtime", "sandbox-fuse-system-instance-a", "instance-a", "system", "runtime-a", "", false))
 	})
 }
+
+func TestDeleteAttemptOrdinaryCiliumPrivateDenyRequiresUIDDisappearance(t *testing.T) {
+	dynClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
+		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+	})
+	identity := ordinaryNetworkIdentity{runtimeID: "runtime-a", logicalID: "customer-a"}
+	policy, err := buildOrdinaryCiliumPrivateDeny("runtime", identity, "attempt-a")
+	require.NoError(t, err)
+	policy.SetUID("policy-uid")
+	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+	require.NoError(t, err)
+	dynClient.PrependReactor("delete", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, nil
+	})
+
+	err = deleteAttemptOrdinaryCiliumPrivateDeny(context.Background(), dynClient, "runtime", policy.GetName(), identity, "attempt-a")
+	require.ErrorContains(t, err, "unconfirmed")
+}

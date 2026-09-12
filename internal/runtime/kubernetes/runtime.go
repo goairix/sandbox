@@ -277,17 +277,19 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		return nil, cleanup(err, nil, true)
 	}
 	createdPod, err := r.client.CoreV1().Pods(r.namespace).Create(ctx, pod, metav1.CreateOptions{})
+	allowScheduledNodeName := false
 	if err != nil {
 		verified, safePolicyCleanup, verifyErr := r.verifyAmbiguousOrdinaryPodCreate(ctx, pod, err)
 		if verified == nil {
 			return nil, cleanup(verifyErr, nil, safePolicyCleanup)
 		}
 		createdPod = verified
+		allowScheduledNodeName = true
 	}
 	if createdPod.UID == "" {
 		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod, true)
 	}
-	if !preparedPodIntentMatches(createdPod, pod, false) {
+	if !preparedPodIntentMatches(createdPod, pod, allowScheduledNodeName) {
 		return nil, cleanup(fmt.Errorf("created ordinary Pod does not match requested Pod intent"), createdPod, true)
 	}
 	identity.runtimeUID = createdPod.UID

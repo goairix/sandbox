@@ -243,8 +243,7 @@ func deleteMutableOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.
 	if err := validateMutableOrdinaryCiliumPolicy(current, identity); err != nil {
 		return err
 	}
-	uid := current.GetUID()
-	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if err := deleteCreatedCiliumPolicy(ctx, policies, current); err != nil {
 		return fmt.Errorf("delete ordinary CiliumNetworkPolicy: %w", err)
 	}
 	return nil
@@ -677,7 +676,7 @@ func bindOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface,
 		err = fmt.Errorf("bound ordinary NetworkPolicy does not match requested intent")
 	}
 	verified, getErr := policies.Get(ctx, name, metav1.GetOptions{})
-	if getErr == nil && validateOrdinaryNetworkPolicy(verified, identity, attempt) == nil {
+	if getErr == nil && validateOrdinaryNetworkPolicy(verified, identity, attempt) == nil && ordinaryNetworkPolicyIntentMatches(verified, current) {
 		return nil
 	}
 	return errors.Join(fmt.Errorf("bind ordinary NetworkPolicy: %w", err), getErr)
@@ -711,7 +710,7 @@ func bindOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface
 		err = fmt.Errorf("bound ordinary CiliumNetworkPolicy does not match requested intent")
 	}
 	verified, getErr := policies.Get(ctx, name, metav1.GetOptions{})
-	if getErr == nil && validateOrdinaryCiliumPolicy(verified, identity, attempt) == nil {
+	if getErr == nil && validateOrdinaryCiliumPolicy(verified, identity, attempt) == nil && ordinaryCiliumPolicyIntentMatches(verified, current) {
 		return nil
 	}
 	return errors.Join(fmt.Errorf("bind ordinary CiliumNetworkPolicy: %w", err), getErr)
@@ -735,8 +734,7 @@ func deleteAttemptOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.I
 	if boundUID != "" && identity.runtimeUID != "" && boundUID != string(identity.runtimeUID) {
 		return nil
 	}
-	uid := current.UID
-	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if err := deleteCreatedNetworkPolicy(ctx, policies, current); err != nil {
 		return fmt.Errorf("delete ordinary NetworkPolicy cleanup: %w", err)
 	}
 	return nil
@@ -760,8 +758,7 @@ func deleteAttemptOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.
 	if boundUID != "" && identity.runtimeUID != "" && boundUID != string(identity.runtimeUID) {
 		return nil
 	}
-	uid := current.GetUID()
-	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if err := deleteCreatedCiliumPolicy(ctx, policies, current); err != nil {
 		return fmt.Errorf("delete ordinary CiliumNetworkPolicy cleanup: %w", err)
 	}
 	return nil
