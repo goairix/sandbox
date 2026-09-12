@@ -151,6 +151,8 @@ local function validateRecord(record, deadlineValue)
         or type(record.maintainer_token) ~= 'string' or record.maintainer_token == ''
         or (record.reservation_token ~= nil and type(record.reservation_token) ~= 'string')
         or (record.cleanup_token ~= nil and type(record.cleanup_token) ~= 'string')
+        or (record.cleanup_phase ~= nil and type(record.cleanup_phase) ~= 'string')
+        or (record.termination_evidence ~= nil and type(record.termination_evidence) ~= 'table')
         or type(record.revision) ~= 'number' or record.revision < 1
         or record.revision ~= math.floor(record.revision)
         or record.revision > 99999999999999 then
@@ -171,10 +173,31 @@ local function validateRecord(record, deadlineValue)
 	if zeroPrepare or not prepareMillis or prepareMillis <= 0 then return false end
     if record.state == 'cleanup' then
 		if cleanup == '' or zeroCleanup or cleanupMillis == nil or cleanupMillis <= 0 then return false end
+		local phase = record.cleanup_phase or 'terminating'
+		if phase == 'terminating' then
+			if record.termination_evidence ~= nil then return false end
+		elseif phase == 'terminated' then
+			local evidence = record.termination_evidence
+			if type(evidence) ~= 'table'
+				or type(evidence.runtime_uid) ~= 'string'
+				or evidence.runtime_uid == ''
+				or evidence.runtime_uid ~= record.runtime_uid
+				or (evidence.node_name ~= nil and type(evidence.node_name) ~= 'string')
+				or (evidence.graceful_unmount ~= nil and type(evidence.graceful_unmount) ~= 'boolean')
+				or (evidence.process_exited ~= nil and type(evidence.process_exited) ~= 'boolean')
+				or (evidence.infrastructure_fenced ~= nil and type(evidence.infrastructure_fenced) ~= 'boolean') then
+				return false
+			end
+			local processExited = evidence.process_exited == true
+			local infrastructureFenced = evidence.infrastructure_fenced == true
+			if not processExited and not (infrastructureFenced and (evidence.node_name or '') ~= '') then return false end
+		else
+			return false
+		end
 		if reservation == '' then return zeroReserved and deadline == 0 end
 		return not zeroReserved and reservedMillis ~= nil and reservedMillis == deadline and deadline > 0
     end
-    if cleanup ~= '' or not zeroCleanup then return false end
+    if cleanup ~= '' or not zeroCleanup or record.cleanup_phase ~= nil or record.termination_evidence ~= nil then return false end
     if record.state == 'prepared' then
         return record.runtime_id ~= '' and record.runtime_uid ~= '' and reservation == '' and zeroReserved and deadline == 0
     end
@@ -577,6 +600,7 @@ if sameToken and not evidenceAdded then
 end
 record.state = 'cleanup'
 record.cleanup_token = ARGV[7]
+if record.cleanup_phase == nil then record.cleanup_phase = 'terminating' end
 if not sameToken then record.cleanup_until = formatRFC3339Millis(nowMillis + ttl) end
 record.updated_at = formatRFC3339Millis(nowMillis)
 record.revision = record.revision + 1
@@ -588,6 +612,58 @@ if oldState ~= 'cleanup' then
     setCount('fusepool:state-counts:' .. oldState, poolDigest, -1)
     setCount('fusepool:state-counts:cleanup', poolDigest, 1)
 end
+return {1, updated}
+`)
+
+var confirmCleanupTerminationScript = redisclient.NewScript(fusePoolLuaHelpers + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {-1} end
+local decoded, record = pcall(cjson.decode, raw)
+local deadline = redis.call('HGET', KEYS[2], ARGV[1])
+if not decoded or not validateMutableRecord(record, deadline) or record.preparation_id ~= ARGV[2] then return {-4} end
+if record.state ~= 'cleanup' then return {-3} end
+if (record.cleanup_token or '') ~= ARGV[3] then return {-6} end
+if record.runtime_id ~= ARGV[5] or record.runtime_uid ~= ARGV[6] then return {-3} end
+local poolDigest = redis.call('HGET', KEYS[3], ARGV[1])
+if not poolDigest or not validatePoolInventory(poolDigest, 'fusepool:index:', KEYS[4], 'fusepool:state:', 'fusepool:state-counts:')
+    or not recordIsInExactlyState(ARGV[1], poolDigest, 'cleanup', 'fusepool:state:') then return {-4} end
+if redis.call('HGET', KEYS[5], ARGV[7]) ~= ARGV[1]
+    or redis.call('HGET', KEYS[6], ARGV[1]) ~= ARGV[6]
+    or redis.call('HGET', KEYS[7], ARGV[1]) ~= record.pool_key then return {-4} end
+local evidenceDecoded, evidence = pcall(cjson.decode, ARGV[8])
+if not evidenceDecoded or type(evidence) ~= 'table'
+    or evidence.runtime_uid ~= ARGV[6]
+    or (evidence.node_name ~= nil and type(evidence.node_name) ~= 'string')
+    or (evidence.graceful_unmount ~= nil and type(evidence.graceful_unmount) ~= 'boolean')
+    or (evidence.process_exited ~= nil and type(evidence.process_exited) ~= 'boolean')
+    or (evidence.infrastructure_fenced ~= nil and type(evidence.infrastructure_fenced) ~= 'boolean') then return {-5} end
+local processExited = evidence.process_exited == true
+local infrastructureFenced = evidence.infrastructure_fenced == true
+if not processExited and not (infrastructureFenced and (evidence.node_name or '') ~= '') then return {-5} end
+local function sameEvidence(left, right)
+    return left.runtime_uid == right.runtime_uid
+        and (left.node_name or '') == (right.node_name or '')
+        and (left.graceful_unmount == true) == (right.graceful_unmount == true)
+        and (left.process_exited == true) == (right.process_exited == true)
+        and (left.infrastructure_fenced == true) == (right.infrastructure_fenced == true)
+end
+local phase = record.cleanup_phase or 'terminating'
+local expectedRevision = tonumber(ARGV[4])
+if phase == 'terminated' then
+    if not sameEvidence(record.termination_evidence, evidence) then return {-3} end
+    if record.revision == expectedRevision or record.revision == expectedRevision + 1 then return {1, raw} end
+    return {-2}
+end
+if phase ~= 'terminating' then return {-4} end
+if record.revision ~= expectedRevision then return {-2} end
+local redisTime = redis.call('TIME')
+local nowMillis = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+record.cleanup_phase = 'terminated'
+record.termination_evidence = evidence
+record.updated_at = formatRFC3339Millis(nowMillis)
+record.revision = record.revision + 1
+local updated = cjson.encode(record)
+redis.call('SET', KEYS[1], updated)
 return {1, updated}
 `)
 
@@ -980,6 +1056,37 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID str
 	return decodePoolRecord(payload)
 }
 
+func (r *FUSEPoolRepository) ConfirmCleanupTermination(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64, runtimeID, runtimeUID string, evidence state.FUSEPoolTerminationEvidence) (*state.FUSEPoolRecord, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fuse pool repository: nil store")
+	}
+	if !validOpaqueID(preparationID) || !validOpaqueID(runtimeID) || !validOpaqueID(runtimeUID) ||
+		cleanupToken == "" || !utf8.ValidString(cleanupToken) || expectedRevision == 0 ||
+		!validFUSEPoolTerminationEvidence(evidence, runtimeUID) {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	rawEvidence, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, state.ErrFUSEPoolInvalidRecord
+	}
+	member := fusePoolDigest(preparationID)
+	result, err := confirmCleanupTerminationScript.Run(ctx, r.store.client,
+		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolCounts, fusePoolRuntimeUIDOwners, fusePoolRecordUIDs, fusePoolPoolValues},
+		member, preparationID, cleanupToken, expectedRevision, runtimeID, runtimeUID, fusePoolDigest(runtimeUID), rawEvidence,
+	).Slice()
+	if err != nil {
+		return nil, err
+	}
+	code, payload, err := poolScriptResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if code != poolResultOK {
+		return nil, poolMutationError("confirm cleanup termination", code)
+	}
+	return decodePoolRecord(payload)
+}
+
 func (r *FUSEPoolRepository) ListPoolKeys(ctx context.Context) ([]string, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("fuse pool repository: nil store")
@@ -1326,6 +1433,12 @@ func validOpaqueID(value string) bool {
 	return value != "" && len(value) <= 1024 && utf8.ValidString(value)
 }
 
+func validFUSEPoolTerminationEvidence(evidence state.FUSEPoolTerminationEvidence, runtimeUID string) bool {
+	return validOpaqueID(evidence.RuntimeUID) && evidence.RuntimeUID == runtimeUID &&
+		len(evidence.NodeName) <= 1024 && utf8.ValidString(evidence.NodeName) &&
+		(evidence.ProcessExited || (evidence.InfrastructureFenced && evidence.NodeName != ""))
+}
+
 func validFUSEPoolState(value state.FUSEPoolState) bool {
 	switch value {
 	case state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup:
@@ -1431,7 +1544,25 @@ func decodePoolRecord(value any) (*state.FUSEPoolRecord, error) {
 		if record.CleanupToken == "" || record.CleanupUntil.IsZero() {
 			return nil, state.ErrFUSEPoolCorrupt
 		}
+		if record.CleanupPhase == "" {
+			record.CleanupPhase = state.FUSEPoolCleanupTerminating
+		}
+		switch record.CleanupPhase {
+		case state.FUSEPoolCleanupTerminating:
+			if record.TerminationEvidence != nil {
+				return nil, state.ErrFUSEPoolCorrupt
+			}
+		case state.FUSEPoolCleanupTerminated:
+			if record.TerminationEvidence == nil || !validFUSEPoolTerminationEvidence(*record.TerminationEvidence, record.RuntimeUID) {
+				return nil, state.ErrFUSEPoolCorrupt
+			}
+		default:
+			return nil, state.ErrFUSEPoolCorrupt
+		}
 	default:
+		return nil, state.ErrFUSEPoolCorrupt
+	}
+	if record.State != state.FUSEPoolCleanup && (record.CleanupPhase != "" || record.TerminationEvidence != nil) {
 		return nil, state.ErrFUSEPoolCorrupt
 	}
 	return &record, nil

@@ -284,6 +284,54 @@ func TestFUSEPoolCleanupClaimIsExclusiveRetryableAndRecoverable(t *testing.T) {
 	assert.True(t, deleted)
 }
 
+func TestFUSEPoolCleanupTerminationCheckpointIsDurableAndIdempotent(t *testing.T) {
+	skipIfNoRedis(t)
+	s := testStore(t)
+	repo := NewFUSEPoolRepository(s)
+	poolKey, id, runtimeUID := poolTestID("pool"), poolTestID("preparation"), poolTestID("runtime-uid")
+	cleanupFUSEPool(t, s, []string{poolKey}, []string{id, runtimeUID})
+	require.True(t, mustRefillLock(t, repo, poolKey, "controller", time.Second))
+	require.NoError(t, repo.CreatePreparingWithAdmission(context.Background(), preparingIntent(poolKey, id), "controller", 1, time.Second))
+	claimed, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolPreparing, "maintainer-a", "", 1, "runtime-a", runtimeUID, "cleaner-a", 80*time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanupTerminating, claimed.CleanupPhase)
+
+	evidence := state.FUSEPoolTerminationEvidence{RuntimeUID: runtimeUID, GracefulUnmount: true, ProcessExited: true}
+	_, err = repo.ConfirmCleanupTermination(context.Background(), id, "cleaner-a", claimed.Revision, "runtime-a", runtimeUID, state.FUSEPoolTerminationEvidence{RuntimeUID: runtimeUID})
+	require.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
+	terminated, err := repo.ConfirmCleanupTermination(context.Background(), id, "cleaner-a", claimed.Revision, "runtime-a", runtimeUID, evidence)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanupTerminated, terminated.CleanupPhase)
+	require.NotNil(t, terminated.TerminationEvidence)
+	require.Equal(t, evidence, *terminated.TerminationEvidence)
+	require.Equal(t, claimed.Revision+1, terminated.Revision)
+
+	replayed, err := repo.ConfirmCleanupTermination(context.Background(), id, "cleaner-a", claimed.Revision, "runtime-a", runtimeUID, evidence)
+	require.NoError(t, err, "a lost successful response must be replayable with the old revision")
+	require.Equal(t, terminated.Revision, replayed.Revision)
+
+	_, err = repo.ConfirmCleanupTermination(context.Background(), id, "cleaner-a", terminated.Revision, "runtime-a", "wrong-uid", evidence)
+	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	_, err = repo.ConfirmCleanupTermination(context.Background(), id, "wrong-token", terminated.Revision, "runtime-a", runtimeUID, evidence)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+
+	waitForRedisDeadline(t, s, claimed.CleanupUntil)
+	taken, err := repo.ClaimCleanup(context.Background(), id, state.FUSEPoolCleanup, "maintainer-a", "", terminated.Revision, "runtime-a", runtimeUID, "cleaner-b", time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanupTerminated, taken.CleanupPhase)
+	require.NotNil(t, taken.TerminationEvidence)
+	require.Equal(t, evidence, *taken.TerminationEvidence)
+
+	poolDigest, member := poolTestDigest(poolKey), poolTestDigest(id)
+	require.True(t, s.client.SIsMember(context.Background(), "fusepool:state:cleanup:"+poolDigest, member).Val())
+	require.Equal(t, "1", s.client.HGet(context.Background(), "fusepool:state-counts:cleanup", poolDigest).Val())
+	require.Equal(t, member, s.client.HGet(context.Background(), fusePoolRuntimeUIDOwners, poolTestDigest(runtimeUID)).Val())
+
+	deleted, err := repo.DeleteCleanup(context.Background(), id, "cleaner-b", taken.Revision)
+	require.NoError(t, err)
+	require.True(t, deleted)
+}
+
 func TestFUSEPoolLateCleanupEvidenceRemainsListableAndTakeoverDeletes(t *testing.T) {
 	skipIfNoRedis(t)
 	s := testStore(t)
