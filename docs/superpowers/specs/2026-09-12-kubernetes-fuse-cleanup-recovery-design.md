@@ -111,8 +111,8 @@ lifecycle 时也从 cleanup record 恢复 evidence，不能依赖旧进程的 ru
 
 ## Kubernetes finalizer 与终止确认
 
-FUSE Pod 使用固定 finalizer，例如
-`sandbox.huaxisy.com/fuse-runtime-cleanup`。新 Pod 在 Create 请求中直接携带 finalizer；
+FUSE Pod 使用固定 finalizer：
+`goairix.github.io/sandbox-fuse-runtime-cleanup`。新 Pod 在 Create 请求中直接携带 finalizer；
 领取、健康检查和删除路径把它作为受管 runtime 身份的一部分校验。
 
 对升级前已经存在且尚未删除的合法 FUSE Pod，termination 阶段先使用 UID 与
@@ -169,7 +169,7 @@ finalize 阶段只接受与 cleanup 记录完全匹配的持久化证据：
 ## Helm 协议升级
 
 Deployment Pod template 增加独立 annotation：
-`sandbox.huaxisy.com/cleanup-protocol: v2`。它描述 FUSE runtime cleanup/Redis schema
+`goairix.github.io/sandbox-cleanup-protocol: v2`。它描述 FUSE runtime cleanup/Redis schema
 兼容性，不复用现有 `drain-protocol`，后者继续表示 drain CLI 的调用兼容性。
 
 pre-upgrade hook 同时比较已安装和目标 backend fingerprint、cleanup protocol：
