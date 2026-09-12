@@ -28,21 +28,31 @@ import (
 
 // createPod creates a sandbox pod from the given spec.
 func createPod(ctx context.Context, client kubernetes.Interface, namespace string, spec runtime.SandboxSpec) (*corev1.Pod, error) {
+	var pod *corev1.Pod
+	var err error
 	if spec.WorkspaceFUSE != nil {
-		pod, err := buildPreparedFUSEPod(namespace, spec)
-		if err != nil {
-			return nil, err
-		}
-		created, err := client.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("create pod: %w", err)
-		}
-		return created, nil
+		pod, err = buildPreparedFUSEPod(namespace, spec)
+	} else {
+		pod, err = buildOrdinaryPod(namespace, spec)
 	}
+	if err != nil {
+		return nil, err
+	}
+	created, err := client.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("create pod: %w", err)
+	}
+	return created, nil
+}
 
+func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, error) {
+	logicalID, err := ordinaryLogicalID(spec)
+	if err != nil {
+		return nil, err
+	}
 	labels := map[string]string{
 		"app":             "sandbox",
-		"sandbox.id":      spec.ID,
+		"sandbox.id":      logicalID,
 		"sandbox.managed": "true",
 	}
 	for k, v := range spec.Labels {
@@ -200,11 +210,7 @@ func createPod(ctx context.Context, client kubernetes.Interface, namespace strin
 		},
 	}
 
-	created, err := client.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("create pod: %w", err)
-	}
-	return created, nil
+	return pod, nil
 }
 
 const (

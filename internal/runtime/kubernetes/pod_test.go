@@ -46,6 +46,21 @@ func TestCreatePodUsesConfiguredTmpDiskLimit(t *testing.T) {
 	t.Fatal("tmp volume not found")
 }
 
+func TestBuildOrdinaryPodIsPureAndUsesLogicalID(t *testing.T) {
+	pod, err := buildOrdinaryPod("runtime", runtime.SandboxSpec{
+		ID:     "sandbox-pool-a",
+		Image:  "sandbox:latest",
+		Labels: map[string]string{"sandbox.id": "customer-a", "sandbox.pool": "true"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-pool-a", pod.Name)
+	assert.Equal(t, "customer-a", pod.Labels["sandbox.id"])
+	assert.Equal(t, "true", pod.Labels["sandbox.managed"])
+	assert.Equal(t, "true", pod.Labels["sandbox.pool"])
+	assert.Empty(t, pod.UID)
+	assert.Empty(t, pod.ResourceVersion)
+}
+
 func TestCreatePodDefaultsTmpDiskLimitTo50Mi(t *testing.T) {
 	client := fake.NewSimpleClientset()
 

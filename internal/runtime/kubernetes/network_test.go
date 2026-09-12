@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -36,6 +37,68 @@ func TestBuildSystemEgressPolicyUsesImmutableInstanceSelectorAndExactRules(t *te
 	require.Len(t, policy.Spec.Egress[1].To, 1)
 	assert.Equal(t, "192.0.2.10/32", policy.Spec.Egress[1].To[0].IPBlock.CIDR)
 	require.Len(t, policy.Spec.Egress[1].Ports, 1)
+}
+
+func TestOrdinaryLogicalIDUsesExplicitSandboxLabel(t *testing.T) {
+	logicalID, err := ordinaryLogicalID(runtime.SandboxSpec{
+		ID:     "sandbox-pool-a",
+		Labels: map[string]string{"sandbox.id": "customer-a"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "customer-a", logicalID)
+}
+
+func TestOrdinaryLogicalIDFallsBackToRuntimeID(t *testing.T) {
+	logicalID, err := ordinaryLogicalID(runtime.SandboxSpec{ID: "sandbox-a"})
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-a", logicalID)
+}
+
+func TestOrdinaryLogicalIDRejectsInvalidOrFUSEIdentity(t *testing.T) {
+	_, err := ordinaryLogicalID(runtime.SandboxSpec{ID: "invalid/id"})
+	require.Error(t, err)
+
+	_, err = ordinaryIdentityFromPod(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-a",
+		Labels: map[string]string{
+			"sandbox.managed":        "true",
+			"sandbox.id":             "sandbox-a",
+			"sandbox.workspace.mode": "fuse",
+		},
+	}}, "runtime-a")
+	require.Error(t, err)
+}
+
+func TestBuildOrdinaryNetworkPolicyCarriesExactIdentity(t *testing.T) {
+	identity := ordinaryNetworkIdentity{runtimeID: "sandbox-pool-a", logicalID: "customer-a"}
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, "attempt-a", false, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-customer-a", policy.Name)
+	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, policy.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, "true", policy.Labels["sandbox.managed"])
+	assert.Equal(t, "customer-a", policy.Labels["sandbox.id"])
+	assert.Equal(t, ordinaryPolicyRole, policy.Labels[ordinaryPolicyRoleLabel])
+	assert.Equal(t, "sandbox-pool-a", policy.Labels[ordinaryRuntimeIDLabel])
+	assert.Equal(t, "attempt-a", policy.Annotations[ordinaryPolicyAttemptAnnotation])
+	assert.NotContains(t, policy.Annotations, ordinaryRuntimeUIDAnnotation)
+}
+
+func TestBuildOrdinaryCiliumPrivateDenyCarriesExactIdentity(t *testing.T) {
+	identity := ordinaryNetworkIdentity{runtimeID: "sandbox-pool-a", logicalID: "customer-a"}
+	policy, err := buildOrdinaryCiliumPrivateDeny("runtime", identity, "attempt-a")
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-private-deny-customer-a", policy.GetName())
+	assert.Equal(t, "runtime", policy.GetNamespace())
+	assert.Equal(t, "true", policy.GetLabels()["sandbox.managed"])
+	assert.Equal(t, "customer-a", policy.GetLabels()["sandbox.id"])
+	assert.Equal(t, ordinaryPrivateDenyPolicyRole, policy.GetLabels()[ordinaryPolicyRoleLabel])
+	assert.Equal(t, "sandbox-pool-a", policy.GetLabels()[ordinaryRuntimeIDLabel])
+	assert.Equal(t, "attempt-a", policy.GetAnnotations()[ordinaryPolicyAttemptAnnotation])
+	assert.NotContains(t, policy.GetAnnotations(), ordinaryRuntimeUIDAnnotation)
+	selector, found, err := unstructured.NestedStringMap(policy.Object, "spec", "endpointSelector", "matchLabels")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, selector)
 }
 
 func TestBuildSystemEgressPolicyRequiresOnlyDNSPort53(t *testing.T) {
