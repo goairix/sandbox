@@ -300,6 +300,27 @@ func main() {
 		DefaultMountMode:        sandbox.WorkspaceMountType(cfg.Workspace.DefaultMountMode),
 		EnabledMountModes:       make(map[sandbox.WorkspaceMountType]bool, len(cfg.Workspace.EnabledMountModes)),
 	}
+	if cfg.Runtime.Type == "kubernetes" {
+		if redisStore == nil {
+			log.Fatal("Kubernetes runtime requires Redis for stateless multi-replica sandbox state")
+		}
+		activeRepository, repositoryErr := redisstate.NewActiveSandboxRepository(redisStore, cfg.Runtime.Kubernetes.Namespace)
+		if repositoryErr != nil {
+			log.Fatalf("failed to create active sandbox repository: %v", repositoryErr)
+		}
+		instanceID := os.Getenv("POD_UID")
+		if instanceID == "" {
+			instanceID = os.Getenv("HOSTNAME")
+		}
+		if instanceID == "" {
+			instanceID, repositoryErr = newOwnershipToken()
+			if repositoryErr != nil {
+				log.Fatalf("failed to create API instance identity: %v", repositoryErr)
+			}
+		}
+		managerConfig.ActiveSandboxes = activeRepository
+		managerConfig.InstanceID = instanceID
+	}
 	if cfg.Runtime.Type == "kubernetes" && cfg.Pool.MinSize > 0 {
 		if redisStore == nil {
 			log.Fatal("Kubernetes ordinary pool requires Redis for shared multi-replica inventory")

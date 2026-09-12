@@ -121,6 +121,8 @@ type ManagerConfig struct {
 	PoolConfig              PoolConfig
 	PoolStateStore          state.AtomicStore
 	PoolScope               string
+	ActiveSandboxes         state.ActiveSandboxRepository
+	InstanceID              string
 	RuntimeType             string
 	DefaultMountMode        WorkspaceMountType
 	EnabledMountModes       map[WorkspaceMountType]bool
@@ -166,13 +168,14 @@ func (m *Manager) resolveWorkspaceMountMode(cfg SandboxConfig) (WorkspaceMountTy
 
 // Manager orchestrates sandbox lifecycle: creation, execution, destruction.
 type Manager struct {
-	runtime        runtime.Runtime
-	filesystem     fs.FileSystem
-	fsMeta         *storage.FileSystemMeta
-	config         ManagerConfig
-	sessions       *SessionStore // optional, for persistent sandboxes
-	ephemeral      *EphemeralLifecycleStore
-	multipartStore state.Store // optional, for multipart upload state
+	runtime         runtime.Runtime
+	filesystem      fs.FileSystem
+	fsMeta          *storage.FileSystemMeta
+	config          ManagerConfig
+	sessions        *SessionStore // optional, for persistent sandboxes
+	ephemeral       *EphemeralLifecycleStore
+	multipartStore  state.Store // optional, for multipart upload state
+	activeSandboxes state.ActiveSandboxRepository
 
 	pool           *Pool
 	fusePool       *FUSEPool
@@ -204,22 +207,23 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		pool.EnableShared(cfg.PoolStateStore, cfg.PoolScope)
 	}
 	m := &Manager{
-		runtime:        rt,
-		filesystem:     fsys,
-		fsMeta:         fsMeta,
-		config:         cfg,
-		pool:           pool,
-		fusePool:       cfg.FUSEPool,
-		sandboxes:      make(map[string]*Sandbox),
-		workspaces:     make(map[string]storage.ScopedFS),
-		operationGates: make(map[string]*operationGate),
-		fuseLifecycles: make(map[string]*fuseSandboxLifecycle),
-		syncLifecycles: make(map[string]*syncSandboxLifecycle),
-		fuseInFlight:   make(map[string]*fuseBindingClaim),
-		stopCh:         make(chan struct{}),
-		shutdownDone:   make(chan struct{}),
-		controlCtx:     controlCtx,
-		cancelControl:  cancelControl,
+		runtime:         rt,
+		filesystem:      fsys,
+		fsMeta:          fsMeta,
+		config:          cfg,
+		pool:            pool,
+		fusePool:        cfg.FUSEPool,
+		activeSandboxes: cfg.ActiveSandboxes,
+		sandboxes:       make(map[string]*Sandbox),
+		workspaces:      make(map[string]storage.ScopedFS),
+		operationGates:  make(map[string]*operationGate),
+		fuseLifecycles:  make(map[string]*fuseSandboxLifecycle),
+		syncLifecycles:  make(map[string]*syncSandboxLifecycle),
+		fuseInFlight:    make(map[string]*fuseBindingClaim),
+		stopCh:          make(chan struct{}),
+		shutdownDone:    make(chan struct{}),
+		controlCtx:      controlCtx,
+		cancelControl:   cancelControl,
 	}
 	if m.fusePool != nil {
 		m.fusePool.config.PristineGuard = m.guardFUSEPoolRecord
@@ -832,6 +836,19 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 			}
 			lifecycle.ephemeralRecord = record
 		}
+		if err := m.publishActiveSandbox(spanCtx, sb); err != nil {
+			_ = m.releasePreparedSyncWorkspace(lifecycle)
+			if cfg.Mode == ModePersistent && m.sessions != nil {
+				_ = m.sessions.RemoveExact(context.WithoutCancel(spanCtx), sb)
+			} else if lifecycle != nil && lifecycle.ephemeralRecord != nil {
+				_ = m.removeWorkspaceLifecycle(context.WithoutCancel(spanCtx), sb, lifecycle.ephemeralRecord)
+			}
+			_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+			if source == "pool" {
+				m.pool.NotifyRemoved()
+			}
+			return nil, fmt.Errorf("publish sandbox: %w", err)
+		}
 		m.mu.Lock()
 		if !publishSyncLifecycle(lifecycle) {
 			m.mu.Unlock()
@@ -852,6 +869,13 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		}
 		m.mu.Unlock()
 	} else {
+		if err := m.publishActiveSandbox(spanCtx, sb); err != nil {
+			_ = m.runtime.RemoveSandbox(context.WithoutCancel(spanCtx), info.RuntimeID)
+			if source == "pool" {
+				m.pool.NotifyRemoved()
+			}
+			return nil, fmt.Errorf("publish sandbox: %w", err)
+		}
 		m.mu.Lock()
 		m.sandboxes[id] = sb
 		m.operationGates[id] = gate
@@ -1092,6 +1116,11 @@ func (m *Manager) publishSandboxLifecycle(ctx context.Context, sb *Sandbox, gate
 	}
 	lifecycle.ephemeralRecord = ephemeralRecord
 	claim.ephemeralRecord = ephemeralRecord
+	if err := m.publishActiveSandbox(ctx, sb); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
+		defer cancel()
+		return errors.Join(fmt.Errorf("publish active FUSE sandbox: %w", err), m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
+	}
 	m.mu.Lock()
 	if ctx.Err() != nil || claim.lost {
 		m.mu.Unlock()
@@ -1701,6 +1730,9 @@ func (m *Manager) sandboxRuntimeID(sb *Sandbox) string {
 }
 
 func (m *Manager) acquireSandboxOperation(ctx context.Context, id string) (*Sandbox, func(), error) {
+	if m.distributedStateEnabled() {
+		return m.beginDistributedOperation(ctx, id, state.ActiveOperationData)
+	}
 	m.mu.RLock()
 	sb, ok := m.sandboxes[id]
 	gate := m.operationGates[id]
