@@ -158,17 +158,15 @@ func main() {
 				log.Printf("Kubernetes backend fingerprint and cleanup protocol are unchanged; release drain skipped")
 				return
 			}
-			if !backendMatches {
-				if *requiredDrainProtocol == "" {
-					log.Fatal("required Kubernetes drain protocol must be configured for a backend-changing upgrade")
-				}
-				protocolMatches, protocolErr := kubernetesDrainProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *requiredDrainProtocol)
-				if protocolErr != nil {
-					log.Fatalf("failed to verify Kubernetes drain protocol before drain: %v", protocolErr)
-				}
-				if !protocolMatches {
-					log.Fatal("backend-changing upgrade requires a prior same-backend Chart and sandbox-api protocol upgrade")
-				}
+			if *requiredDrainProtocol == "" {
+				log.Fatal("required Kubernetes drain protocol must be configured for an upgrade that requires release drain")
+			}
+			protocolMatches, protocolErr := kubernetesDrainProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *requiredDrainProtocol)
+			if protocolErr != nil {
+				log.Fatalf("failed to verify Kubernetes drain protocol before drain: %v", protocolErr)
+			}
+			if !protocolMatches {
+				log.Fatal("release-draining upgrade requires a prior same-backend Chart and sandbox-api drain protocol upgrade")
 			}
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
