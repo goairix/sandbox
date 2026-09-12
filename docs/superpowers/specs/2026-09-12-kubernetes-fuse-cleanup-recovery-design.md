@@ -124,7 +124,7 @@ termination 阶段执行：
 1. GET Pod 并验证名称、UID、managed/pool/FUSE 身份；
 2. 确保 finalizer 已绑定到该 exact Pod；
 3. 若 Pod 尚未终止，向 workspace-mounter 发送带 RuntimeUID 与 generation 的 shutdown
-   请求；
+   请求；进程内 generation 缺失时先从 exact mounter health 恢复，不能默认猜测活动代次；
 4. 校验响应中的 RuntimeUID、generation 和 graceful-unmount；
 5. 使用 UID precondition 删除 Pod，使其进入 terminating；若重试时容器已经全部终止但
    Pod 尚无 deletionTimestamp，仍先提交 exact UID 删除；
@@ -175,8 +175,9 @@ Deployment Pod template 增加独立 annotation：
 pre-upgrade hook 同时比较已安装和目标 backend fingerprint、cleanup protocol：
 
 - 两者都相同才跳过 release drain；
-- backend 相同但 cleanup protocol 不同时，使用目标 sandbox-api 镜像执行完整 drain；
-- backend 变化时继续执行现有 installed drain-protocol guard，然后完整 drain；
+- backend 相同但 cleanup protocol 不同时，验证 installed drain-protocol guard 后使用目标
+  sandbox-api 镜像执行完整 drain；
+- backend 变化时同样执行 installed drain-protocol guard，然后完整 drain；
 - drain 成功后由既有 post-upgrade resume Job 恢复副本；失败时保持 Deployment 为零，避免
   新旧协议并行写同一批记录。
 

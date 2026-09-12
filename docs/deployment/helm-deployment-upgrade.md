@@ -8,7 +8,7 @@
 - 服务器自己的配置单独放在 Chart 外，例如 `/opt/sandbox/env/values-prod.yaml`。
 - AK/SK 直接写在环境 values 的 `config.storage.filesystem.accessKey/secretKey`，不再创建 workspace credential Secret。
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
-- 普通升级执行一次 `helm upgrade`；backend、凭据或 FUSE 镜像变化时，Chart 会根据 backend fingerprint 先排空。
+- 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像或 cleanup protocol 变化时，Chart 会先排空。
 
 原有网络规则不能改：开放公网访问时仍禁止内网访问；确需访问其他内网服务时必须加明确白名单。FUSE 的 system egress 由 sandbox-api 自动解析，只开放对象存储 endpoint 的精确地址和端口。
 
@@ -135,7 +135,7 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 不要使用 `--reuse-values`，否则已经删除的 credential-file/Secret 字段可能被旧 release 带回来。
 
-只改 API tag、普通 runtime tag、副本或资源时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint，Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
+只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
 从不含 drain protocol 标记的旧 Chart 首次升级时，先保持 backend
 fingerprint 不变，只更新新版 Chart 和 `sandbox-api`。这一步会给 Deployment
@@ -145,9 +145,16 @@ rollback guard Hook 写入 release revision。确认这次同 backend 升级成�
 backend 切换混在第一次升级里，pre-upgrade Hook 会在缩容前拒绝，避免旧
 revision 缺少 resume Hook 时发生不安全的 atomic rollback。
 
+Kubernetes FUSE 崩溃恢复协议从 v1 升级到 v2 时，Deployment 会写入
+`sandbox.huaxisy.com/cleanup-protocol: v2`。即使 backend fingerprint 不变，
+pre-upgrade Hook 也会执行一次完整 drain。已安装 Deployment 必须先具有
+`sandbox.huaxisy.com/drain-protocol: v1`；缺少该标记时 Hook 会在缩容前拒绝，
+应先升级到包含 drain/resume guard 的过渡版本。v2 drain 会给仍在运行的旧 FUSE Pod
+补加 cleanup finalizer，并在 Redis 持久化终止证据后完成删除。
+
 启用 HPA 时，Deployment 始终省略 `spec.replicas`，普通升级不会改写 HPA
 当前容量。pre-upgrade Hook 会在运行时比较集群中的 backend fingerprint；
-只有 backend 确实变化时才排空并把 API 缩到 0。独立的
+只有 backend 或 cleanup protocol 确实变化时才排空并把 API 缩到 0。独立的
 post-upgrade/post-rollback resume Hook 始终存在，但只有实时副本为 0 时
 才恢复到 `autoscaling.minReplicas` 并等待可用，因此普通升级不会缩容。
 首次安装也会执行同样的就绪检查。
@@ -179,6 +186,11 @@ docker buildx build -f docker/images/sandbox-fuse/Dockerfile --platform "$PLATFO
 Kubernetes FUSE 必须构建 `sandbox-api`、`sandbox-runtime`、`sandbox-gateway` 和 `sandbox-fuse-mounter`。Docker FUSE 还需要 `sandbox-fuse-docker`。你可以按现有流程分别构建各架构，再用 `docker manifest` 合并同一个版本 tag。
 
 如果本次只升级 Docker multipart tmpfs、Docker pair network 自动回收或 Docker FUSE AppArmor 默认行为修复，只需重新构建 `sandbox-api`，并在环境 values 中更新 `image.tag`。其他项目镜像不需要因此重建，也不需要重启 Docker daemon。以 Kubernetes runtime 运行时，Docker pair network 回收逻辑不会参与 Pod 网络管理。
+
+如果本次只升级 Kubernetes FUSE cleanup protocol v2 修复，同样只需构建
+`sandbox-api` 并同步使用新版 Chart；`sandbox-runtime`、`sandbox-gateway`、
+`sandbox-fuse-mounter` 和 `sandbox-fuse-docker` 不需要重建。首次 v2 升级会执行一次 drain，
+正常情况下会短暂看到带 finalizer 的 Pod 处于 `Terminating`。
 
 ## 7. 升级后检查
 
