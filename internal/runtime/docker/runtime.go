@@ -789,15 +789,16 @@ func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
 		removeErr = nil
 	}
 
-	// Always attempt gateway/network cleanup regardless of container removal result
+	// Always attempt gateway/network cleanup regardless of container removal result.
+	var pairErr error
 	if sandboxID != "" {
-		_ = removeSandboxPair(ctx, r.cli, sandboxID)
+		pairErr = removeSandboxPair(ctx, r.cli, sandboxID)
 	}
 
 	if removeErr != nil {
-		return fmt.Errorf("remove container: %w", removeErr)
+		removeErr = fmt.Errorf("remove container: %w", removeErr)
 	}
-	return nil
+	return errors.Join(removeErr, pairErr)
 }
 
 func (r *Runtime) RemovePreparedSandbox(_ context.Context, runtimeID, runtimeUID string) error {

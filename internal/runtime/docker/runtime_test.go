@@ -335,6 +335,26 @@ func TestDockerPublicExecAttachClosesOnContextCancellation(t *testing.T) {
 	}
 }
 
+func TestDockerRemoveSandboxReportsPairNetworkCleanupFailure(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	fake.mu.Lock()
+	fake.containers["legacy-runtime"] = &fakeContainer{
+		config:  &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "sandbox-test"}},
+		name:    "sandbox-test",
+		running: true,
+	}
+	fake.networks["pair"] = dnetwork.Inspect{ID: "pair", Name: pairNetworkPrefix + "sandbox-test"}
+	fake.networkRemoveErr = errors.New("network remove failed")
+	fake.mu.Unlock()
+
+	err := rt.RemoveSandbox(context.Background(), "legacy-runtime")
+
+	require.ErrorContains(t, err, "network remove failed")
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.True(t, fake.containerRemoveRequested["legacy-runtime"])
+}
+
 func TestDockerPreparedRemovalRetainsResourcesUntilNotFound(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())
