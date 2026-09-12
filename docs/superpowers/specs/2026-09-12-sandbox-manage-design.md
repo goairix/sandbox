@@ -283,7 +283,7 @@ Owner 离线时命令保持 Pending，达到 Deadline 后转为 Expired。首期
 
 ### 10.1 密码
 
-密码使用 Argon2id 和每个密码独立生成的随机 Salt。哈希中保存算法版本和参数，便于未来升级。密码、初始密码和密码重置值不得写入日志或审计元数据。
+密码使用 `golang.org/x/crypto/bcrypt`。创建首个管理员、创建管理员和重置密码时统一调用 `bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)`；登录和修改密码前校验统一调用 `bcrypt.CompareHashAndPassword`。数据库只保存 bcrypt 哈希。密码、初始密码和密码重置值不得写入日志或审计元数据。
 
 ### 10.2 Access Token
 
@@ -545,7 +545,7 @@ admin:
 
 ### 19.1 后端单元测试
 
-- 密码哈希、验证和参数升级；
+- bcrypt 密码生成、正确/错误密码验证及超长密码错误处理；
 - JWT Claim、Issuer、Audience、过期和签名校验；
 - Refresh Token 轮换、重放和 Session 链撤销；
 - 登录失败计数、锁定、解锁和账号禁用；
