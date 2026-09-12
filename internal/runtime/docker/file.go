@@ -30,8 +30,7 @@ func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, size int6
 	if size < 0 {
 		return fmt.Errorf("%w: size must be non-negative", runtime.ErrInvalidUploadSize)
 	}
-	fuseContainer, err := r.isFUSEContainer(ctx, id)
-	if err != nil {
+	if _, err := r.isFUSEContainer(ctx, id); err != nil {
 		return err
 	}
 
@@ -55,12 +54,7 @@ func (r *Runtime) UploadFile(ctx context.Context, id, destPath string, size int6
 		_ = pw.CloseWithError(writeErr)
 		writeDone <- writeErr
 	}()
-	var consumeErr error
-	if fuseContainer {
-		consumeErr = r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", dir}, pr)
-	} else {
-		consumeErr = r.cli.CopyToContainer(ctx, id, dir, pr, container.CopyToContainerOptions{CopyUIDGID: true})
-	}
+	consumeErr := r.ExecPipe(ctx, id, []string{"tar", "xf", "-", "-C", dir}, pr)
 	_ = pr.CloseWithError(consumeErr)
 	writeErr := <-writeDone
 	if errors.Is(writeErr, runtime.ErrInvalidUploadSize) {

@@ -741,6 +741,8 @@ type fakeDockerAPI struct {
 	lastCopyToUID            int
 	lastCopyToGID            int
 	lastCopyToOptions        container.CopyToContainerOptions
+	lastExecPipeUID          int
+	lastExecPipeGID          int
 	networkCreateOptions     map[string]dnetwork.CreateOptions
 	rootGatewayCommands      []string
 	routeControls            []container.ExecOptions
@@ -1013,6 +1015,12 @@ func (f *fakeDockerAPI) execOutput(exec fakeExec, input []byte) []byte {
 			output = fuseprotocol.ControlAck{Version: 1, Accepted: true, RuntimeUID: exec.containerID, Generation: f.generation}
 		case "shutdown":
 			output = fuseprotocol.ShutdownAck{Version: 1, RuntimeUID: exec.containerID, Generation: f.generation, GracefulUnmount: true}
+		}
+	} else if len(argv) == 5 && argv[0] == "tar" && argv[1] == "xf" && argv[2] == "-" && argv[3] == "-C" {
+		tarReader := tar.NewReader(bytes.NewReader(input))
+		if header, err := tarReader.Next(); err == nil {
+			f.lastExecPipeUID = header.Uid
+			f.lastExecPipeGID = header.Gid
 		}
 	} else if len(argv) >= 2 && argv[0] == fuseprotocol.ProbeBinary {
 		f.lastProbeUser = exec.options.User

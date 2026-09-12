@@ -111,9 +111,9 @@ func TestLegacyUploadTemporaryFileBelongsToSandboxUser(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	assert.Equal(t, 1000, fake.lastCopyToUID)
-	assert.Equal(t, 1000, fake.lastCopyToGID)
-	assert.True(t, fake.lastCopyToOptions.CopyUIDGID)
+	assert.Zero(t, fake.copyToCalls, "uploads must enter the container mount namespace")
+	assert.Equal(t, 1000, fake.lastExecPipeUID)
+	assert.Equal(t, 1000, fake.lastExecPipeGID)
 }
 
 func TestUploadSizeErrorPreservesTypeAndReportsCleanupFailure(t *testing.T) {
