@@ -1650,8 +1650,11 @@ func TestPreparedSandboxTerminationSurvivesRuntimeRestartBeforeFinalize(t *testi
 	require.NotNil(t, retained.DeletionTimestamp)
 	require.Contains(t, retained.Finalizers, fuseRuntimeCleanupFinalizer)
 
-	restarted := *rt
-	restarted.workspaceStates = nil
+	restarted := &Runtime{
+		client: rt.client, dynClient: rt.dynClient, namespace: rt.namespace,
+		hasCilium: rt.hasCilium, controlExecutor: rt.controlExecutor,
+		pollInterval: rt.pollInterval, terminationTimeout: rt.terminationTimeout,
+	}
 	recovered, err := restarted.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
 	require.NoError(t, err)
 	require.True(t, recovered.ProcessExited)
