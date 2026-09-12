@@ -53,6 +53,19 @@ type fuseManagerRuntime struct {
 	legacyConfirmCalls  int
 }
 
+type releasePreparingFUSEOrphanRuntime struct {
+	*fuseManagerRuntime
+	orphanID string
+}
+
+func (r *releasePreparingFUSEOrphanRuntime) ReconcileOrphanedResources(ctx context.Context, protected map[string]struct{}) error {
+	r.mockRuntime.mu.Lock()
+	delete(r.mockRuntime.removeFailures, r.orphanID)
+	delete(r.mockRuntime.sandboxes, r.orphanID)
+	r.mockRuntime.mu.Unlock()
+	return r.fuseManagerRuntime.ReconcileOrphanedResources(ctx, protected)
+}
+
 func (r *fuseManagerRuntime) ReconcileOrphanedResources(_ context.Context, protected map[string]struct{}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -437,6 +450,39 @@ func TestManagerDrainReleaseRemovesForeignPreparingFUSEPoolRecord(t *testing.T) 
 	_, lockExists := repo.locks[foreign.PoolKey]
 	repo.mu.Unlock()
 	assert.False(t, lockExists)
+}
+
+func TestManagerDrainReleaseReconcilesUnboundPreparingFUSEOrphanBeforePoolDrain(t *testing.T) {
+	baseRuntime := newFUSEManagerRuntime()
+	orphanID := "sandbox-pool-unbound"
+	rt := &releasePreparingFUSEOrphanRuntime{fuseManagerRuntime: baseRuntime, orphanID: orphanID}
+	repo := newMemoryFUSEPoolRepository()
+	repo.seed(state.FUSEPoolRecord{
+		PreparationID:   orphanID,
+		PoolKey:         "pool-key",
+		State:           state.FUSEPoolPreparing,
+		MaintainerToken: "api-a",
+		PrepareUntil:    repo.now.Add(time.Minute),
+		UpdatedAt:       repo.now,
+		Revision:        1,
+	})
+	baseRuntime.mockRuntime.mu.Lock()
+	baseRuntime.mockRuntime.removeFailures[orphanID] = errors.New("Pod is a FUSE sandbox")
+	baseRuntime.mockRuntime.mu.Unlock()
+
+	store := newAtomicMemoryStore()
+	pool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		RuntimeType:          "kubernetes",
+		FUSEPool:             pool,
+		WorkspaceCoordinator: NewWorkspaceCoordinator(store, time.Minute, 10*time.Second),
+	})
+	mgr.SetSessionStore(NewSessionStore(store, time.Hour))
+
+	require.NoError(t, mgr.DrainRelease(context.Background()))
+	_, exists := repo.record(orphanID)
+	assert.False(t, exists)
+	assert.True(t, baseRuntime.wasRemoved(orphanID))
 }
 
 func TestManagerHybridRoutesDefaultSyncAndExplicitFUSE(t *testing.T) {

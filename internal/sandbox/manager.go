@@ -576,7 +576,12 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		drainErr = errors.Join(drainErr, m.finalizeEphemeralLifecycles(ctx))
 	}
 	if m.fusePool != nil {
+		// A stopped refill can leave a FUSE Pod behind before its RuntimeUID is
+		// bound into the preparing record. Remove those unprotected runtime
+		// orphans first so pool cleanup can retire the record in this pass.
+		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
 		drainErr = errors.Join(drainErr, m.fusePool.DrainRelease(ctx))
+		// Pool finalization may leave policy-only artifacts after Pods disappear.
 		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
 	}
 	m.pool.Drain(ctx)
