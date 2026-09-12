@@ -22,6 +22,10 @@ import (
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
+var partialUploadPodExec = execInPod
+
+var consumePodUpload = consumePodUploadStream
+
 // uploadFileToPod uploads a file into a pod via tar stream through exec.
 func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destPath string, size int64, reader io.Reader) error {
 	if size < 0 {
@@ -32,6 +36,29 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 	command := uploadFileCommand(tempPath, destPath)
 	// Extract into a same-directory temporary file and publish only after the
 	// exact-size tar stream closes successfully.
+	pr, pw := io.Pipe()
+	writeDone := make(chan error, 1)
+	go func() {
+		writeErr := writeSizedTar(pw, tarName, 0o644, 1000, 1000, size, reader)
+		_ = pw.CloseWithError(writeErr)
+		writeDone <- writeErr
+	}()
+	consumeErr := consumePodUpload(ctx, client, restConfig, namespace, podName, command, pr)
+	_ = pr.CloseWithError(consumeErr)
+	writeErr := <-writeDone
+	if errors.Is(writeErr, runtime.ErrInvalidUploadSize) {
+		return joinUploadCleanupError(writeErr, removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath))
+	}
+	if writeErr != nil {
+		return joinUploadCleanupError(writeErr, removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath))
+	}
+	if consumeErr != nil {
+		return joinUploadCleanupError(consumeErr, removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath))
+	}
+	return nil
+}
+
+func consumePodUploadStream(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, command string, input io.Reader) error {
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -44,39 +71,11 @@ func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfi
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
-
 	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
 	if err != nil {
 		return fmt.Errorf("create executor: %w", err)
 	}
-
-	pr, pw := io.Pipe()
-	writeDone := make(chan error, 1)
-	go func() {
-		writeErr := writeSizedTar(pw, tarName, 0o644, 1000, 1000, size, reader)
-		_ = pw.CloseWithError(writeErr)
-		writeDone <- writeErr
-	}()
-	consumeErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  pr,
-		Stdout: io.Discard,
-		Stderr: io.Discard,
-	})
-	_ = pr.CloseWithError(consumeErr)
-	writeErr := <-writeDone
-	if errors.Is(writeErr, runtime.ErrInvalidUploadSize) {
-		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
-		return writeErr
-	}
-	if writeErr != nil {
-		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
-		return writeErr
-	}
-	if consumeErr != nil {
-		removePartialPodUpload(ctx, client, restConfig, namespace, podName, tempPath)
-		return consumeErr
-	}
-	return nil
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdin: input, Stdout: io.Discard, Stderr: io.Discard})
 }
 
 func uploadFileCommand(tempPath, destPath string) string {
@@ -84,8 +83,25 @@ func uploadFileCommand(tempPath, destPath string) string {
 		shellEscape(filepath.Dir(destPath)), shellEscape(destPath), shellEscape(tempPath), shellEscape(destPath))
 }
 
-func removePartialPodUpload(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, tempPath string) {
-	_, _ = execInPod(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{Command: "rm -f -- " + shellEscape(tempPath)})
+func removePartialPodUpload(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, tempPath string) error {
+	result, err := partialUploadPodExec(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{Command: "rm -f -- " + shellEscape(tempPath)})
+	if err != nil {
+		return fmt.Errorf("exec cleanup: %w", err)
+	}
+	if result == nil {
+		return errors.New("exec cleanup returned no result")
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("exec cleanup exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+func joinUploadCleanupError(primary, cleanup error) error {
+	if cleanup == nil {
+		return primary
+	}
+	return errors.Join(primary, fmt.Errorf("cleanup partial upload: %w", cleanup))
 }
 
 func writeSizedTar(dst io.Writer, name string, mode int64, uid, gid int, size int64, reader io.Reader) error {
