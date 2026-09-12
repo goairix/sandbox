@@ -67,6 +67,8 @@ var (
 	SandboxWorkspacePoolAcquire         metric.Int64Counter
 	SandboxWorkspacePoolPrepareDuration metric.Float64Histogram
 	SandboxWorkspacePoolDiscard         metric.Int64Counter
+	SandboxWorkspacePoolCleanupTotal    metric.Int64Counter
+	SandboxWorkspacePoolCleanupDuration metric.Float64Histogram
 	SandboxWorkspaceFUSECacheBytes      metric.Int64Gauge
 	SandboxWorkspaceFUSEErrors          metric.Int64Counter
 
@@ -299,6 +301,14 @@ func initInstruments() (err error) {
 	if err != nil {
 		return fmt.Errorf("metrics: workspace pool discard total: %w", err)
 	}
+	SandboxWorkspacePoolCleanupTotal, err = meter.Int64Counter("sandbox.workspace.pool.cleanup.total")
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool cleanup total: %w", err)
+	}
+	SandboxWorkspacePoolCleanupDuration, err = meter.Float64Histogram("sandbox.workspace.pool.cleanup.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace pool cleanup duration: %w", err)
+	}
 	SandboxWorkspaceFUSECacheBytes, err = meter.Int64Gauge("sandbox.workspace.fuse.cache.bytes", metric.WithUnit("By"))
 	if err != nil {
 		return fmt.Errorf("metrics: workspace FUSE cache bytes: %w", err)
@@ -336,6 +346,8 @@ func InitNoop() error {
 func ResetForTest() {
 	SandboxWorkspacePoolSize = nil
 	SandboxWorkspacePoolAcquire = nil
+	SandboxWorkspacePoolCleanupTotal = nil
+	SandboxWorkspacePoolCleanupDuration = nil
 	SandboxWorkspaceMountDuration = nil
 	SandboxWorkspaceLeaseLost = nil
 }
@@ -489,6 +501,15 @@ func RecordWorkspacePoolPrepare(ctx context.Context, runtimeName, provider, resu
 
 func RecordWorkspacePoolDiscard(ctx context.Context, runtimeName, provider, reason string) {
 	SandboxWorkspacePoolDiscard.Add(ctx, 1, metric.WithAttributes(attribute.String("runtime", runtimeName), attribute.String("provider", provider), attribute.String("reason", reason)))
+}
+
+func RecordWorkspacePoolCleanup(ctx context.Context, runtimeName, provider, stage, result string, duration float64) {
+	attrs := []attribute.KeyValue{
+		attribute.String("runtime", runtimeName), attribute.String("provider", provider),
+		attribute.String("stage", stage), attribute.String("result", result),
+	}
+	SandboxWorkspacePoolCleanupTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	SandboxWorkspacePoolCleanupDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
 }
 
 func RecordWorkspaceFUSECache(ctx context.Context, runtimeName, provider string, cacheBytes int64) {

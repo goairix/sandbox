@@ -475,14 +475,18 @@ func (p *FUSEPool) RemoveClaimedRuntime(ctx context.Context, claimed state.FUSEP
 	if cleaner, ok := p.runtime.(runtime.PreparedSandboxCleanup); ok {
 		evidence, confirmed := poolTerminationEvidence(current)
 		if !confirmed {
+			started := time.Now()
 			observed, err := cleaner.ConfirmPreparedSandboxTermination(ctx, current.RuntimeID, current.RuntimeUID)
+			p.recordCleanupStage(ctx, "confirm-termination", started, err)
 			if err != nil {
-				return &current, fmt.Errorf("confirm claimed FUSE runtime termination: %w", err)
+				return &current, fmt.Errorf("confirm claimed FUSE runtime termination (%s): %w", cleanupRecordSummary(current), err)
 			}
+			started = time.Now()
 			persisted, err := p.repo.ConfirmCleanupTermination(ctx, current.PreparationID, current.CleanupToken, current.Revision,
 				current.RuntimeID, current.RuntimeUID, stateTerminationEvidence(observed))
+			p.recordCleanupStage(ctx, "checkpoint-termination", started, err)
 			if err != nil {
-				return &current, fmt.Errorf("checkpoint claimed FUSE runtime termination: %w", err)
+				return &current, fmt.Errorf("checkpoint claimed FUSE runtime termination (%s): %w", cleanupRecordSummary(current), err)
 			}
 			current = *persisted
 			evidence, confirmed = poolTerminationEvidence(current)
@@ -490,15 +494,34 @@ func (p *FUSEPool) RemoveClaimedRuntime(ctx context.Context, claimed state.FUSEP
 				return &current, state.ErrFUSEPoolInvalidRecord
 			}
 		}
+		started := time.Now()
 		if err := cleaner.FinalizePreparedSandboxRemoval(ctx, current.RuntimeID, current.RuntimeUID, evidence); err != nil {
-			return &current, fmt.Errorf("finalize claimed FUSE runtime removal: %w", err)
+			p.recordCleanupStage(ctx, "finalize-runtime", started, err)
+			return &current, fmt.Errorf("finalize claimed FUSE runtime removal (%s): %w", cleanupRecordSummary(current), err)
 		}
+		p.recordCleanupStage(ctx, "finalize-runtime", started, nil)
 		return &current, nil
 	}
 	if err := p.exactRemover().RemovePreparedSandbox(ctx, claimed.RuntimeID, claimed.RuntimeUID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return &current, fmt.Errorf("remove claimed FUSE runtime: %w", err)
 	}
 	return &current, nil
+}
+
+func cleanupRecordSummary(record state.FUSEPoolRecord) string {
+	return fmt.Sprintf("preparation_id=%q runtime_id=%q runtime_uid=%q cleanup_phase=%q revision=%d",
+		record.PreparationID, record.RuntimeID, record.RuntimeUID, record.CleanupPhase, record.Revision)
+}
+
+func (p *FUSEPool) recordCleanupStage(ctx context.Context, stage string, started time.Time, err error) {
+	if p.spec.WorkspaceFUSE == nil {
+		return
+	}
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.RecordWorkspacePoolCleanup(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, stage, result, time.Since(started).Seconds())
 }
 
 func stateTerminationEvidence(evidence runtime.TerminationEvidence) state.FUSEPoolTerminationEvidence {
@@ -527,7 +550,9 @@ func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUS
 	if claimed.PoolKey != p.poolKey || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" {
 		return state.ErrFUSEPoolInvalidRecord
 	}
+	started := time.Now()
 	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	p.recordCleanupStage(ctx, "delete-tombstone", started, err)
 	if err != nil || !deleted {
 		records, verifyErr := p.repo.ListByPoolKey(ctx, claimed.PoolKey)
 		if verifyErr != nil {
@@ -1074,7 +1099,9 @@ func (p *FUSEPool) claimAndDestroyWithRuntimeEvidence(record state.FUSEPoolRecor
 	if err != nil {
 		return err
 	}
+	started := time.Now()
 	_, err = p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	p.recordCleanupStage(ctx, "delete-tombstone", started, err)
 	return err
 }
 
@@ -1114,7 +1141,9 @@ func (p *FUSEPool) destroyClaimedCleanup(ctx context.Context, claimed state.FUSE
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return fmt.Errorf("remove claimed FUSE runtime: %w", err)
 	}
+	started := time.Now()
 	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
+	p.recordCleanupStage(ctx, "delete-tombstone", started, err)
 	if err != nil {
 		return fmt.Errorf("delete cleanup record: %w", err)
 	}

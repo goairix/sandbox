@@ -13,4 +13,6 @@ func TestFUSEMetricsInitialize(t *testing.T) {
 	require.NotNil(t, SandboxWorkspacePoolAcquire)
 	require.NotNil(t, SandboxWorkspaceMountDuration)
 	require.NotNil(t, SandboxWorkspaceLeaseLost)
+	require.NotNil(t, SandboxWorkspacePoolCleanupTotal)
+	require.NotNil(t, SandboxWorkspacePoolCleanupDuration)
 }
