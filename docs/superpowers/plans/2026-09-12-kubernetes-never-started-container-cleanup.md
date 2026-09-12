@@ -16,7 +16,7 @@
 - Modify: `internal/runtime/kubernetes/runtime_test.go`
 - Modify: `internal/runtime/kubernetes/runtime.go`
 
-- [ ] **Step 1: Add a failing reproduction test**
+- [x] **Step 1: Add a failing reproduction test**
 
 Add `TestPreparedPodContainersTerminatedAcceptsProvablyNeverStartedContainer` beside the existing status-coverage test. Build a Pod with:
 
@@ -45,7 +45,7 @@ require.True(t, preparedPodContainersTerminated(pod))
 
 Add table cases that each mutate one proof condition and require false: no deletion timestamp, non-terminal Pod phase, non-empty ContainerID, RestartCount > 0, Started=true, non-empty LastTerminationState, Running state, and missing status.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -55,7 +55,7 @@ go test ./internal/runtime/kubernetes -run TestPreparedPodContainersTerminatedAc
 
 Expected: FAIL because the current predicate rejects every non-Terminated status.
 
-- [ ] **Step 3: Implement strict quiescence validation**
+- [x] **Step 3: Implement strict quiescence validation**
 
 In `preparedPodContainersTerminated`, calculate:
 
@@ -80,7 +80,7 @@ func containerProvablyNeverStarted(status corev1.ContainerStatus) bool {
 
 Keep exact status-count, declared-name, and duplicate-name checks unchanged.
 
-- [ ] **Step 4: Run focused and package tests**
+- [x] **Step 4: Run focused and package tests**
 
 Run:
 
@@ -92,7 +92,7 @@ go test ./internal/runtime/kubernetes -count=1
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the runtime fix**
+- [x] **Step 5: Commit the runtime fix**
 
 ```bash
 git add internal/runtime/kubernetes/runtime.go internal/runtime/kubernetes/runtime_test.go
@@ -104,7 +104,7 @@ git commit -m "fix: recognize never-started pod containers during cleanup"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-12-kubernetes-never-started-container-cleanup.md`
 
-- [ ] **Step 1: Run full repository verification**
+- [x] **Step 1: Run full repository verification**
 
 Run:
 
@@ -119,17 +119,17 @@ bash scripts/test-helm-backend-switch.sh
 
 Expected: all commands exit 0; Helm lint reports `0 chart(s) failed`; both scripts print `PASS`.
 
-- [ ] **Step 2: Confirm only sandbox-api needs rebuilding**
+- [x] **Step 2: Confirm only sandbox-api needs rebuilding**
 
 Run:
 
 ```bash
-git diff --name-only HEAD~1
+git diff-tree --no-commit-id --name-only -r HEAD
 ```
 
 Expected: only Go API runtime/test files changed by the implementation commit; no sandbox runtime, gateway, or mounter source changed.
 
-- [ ] **Step 3: Commit the completed checklist**
+- [x] **Step 3: Commit the completed checklist**
 
 ```bash
 git add docs/superpowers/plans/2026-09-12-kubernetes-never-started-container-cleanup.md
