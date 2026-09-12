@@ -25,6 +25,9 @@
 
 ### 网络回收
 
+- 普通 Pool 容器被领取后会改名为逻辑 sandbox ID，但 Docker label 不可变。
+  动态建网与销毁都必须使用容器当前名称作为 pair network 身份，不能在销毁
+  时回退到旧 pool label，从源头避免遗留仍连接 gateway 的网络。
 - 普通 sandbox 销毁后，gateway/pair network 清理错误不再被静默忽略；
   容器删除错误与网络清理错误合并返回。
 - Docker runtime 初始化时，仅扫描 sandbox 自己管理的网络：

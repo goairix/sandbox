@@ -145,6 +145,10 @@ func TestDockerRemoveSandboxReportsPairNetworkCleanupFailure(t *testing.T)
 fake 返回 `networkRemoveErr = errors.New("network remove failed")`，断言
 `RemoveSandbox` 的错误包含该文本，同时确认 container remove 已被调用。
 
+同时新增 `TestDockerRemoveRenamedPoolSandboxUsesCurrentNameForPairCleanup`：容器
+当前名称为 `sandbox-live`，不可变 label 仍是 `sandbox-pool-old`，断言销毁会删除
+`sandbox-pair-sandbox-live` 及对应 gateway。
+
 - [ ] **Step 2: 运行测试并确认 RED**
 
 Run: `go test ./internal/runtime/docker -run TestDockerRemoveSandboxReportsPairNetworkCleanupFailure -count=1`
@@ -165,6 +169,9 @@ if removeErr != nil {
 }
 return errors.Join(removeErr, pairErr)
 ```
+
+普通 sandbox 的清理身份取 `strings.TrimPrefix(info.Name, "/")`，仅在名称为空时
+回退到 label；FUSE runtime 继续走现有精确 UID 的 prepared-runtime 清理路径。
 
 - [ ] **Step 4: 运行销毁测试并确认 GREEN**
 

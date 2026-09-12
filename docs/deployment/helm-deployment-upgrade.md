@@ -139,6 +139,8 @@ docker buildx build -f docker/images/sandbox-fuse/Dockerfile --platform "$PLATFO
 
 Kubernetes FUSE 必须构建 `sandbox-api`、`sandbox-runtime`、`sandbox-gateway` 和 `sandbox-fuse-mounter`。Docker FUSE 还需要 `sandbox-fuse-docker`。你可以按现有流程分别构建各架构，再用 `docker manifest` 合并同一个版本 tag。
 
+如果本次只升级 Docker multipart tmpfs、Docker pair network 自动回收或 Docker FUSE AppArmor 默认行为修复，只需重新构建 `sandbox-api`，并在环境 values 中更新 `image.tag`。其他项目镜像不需要因此重建，也不需要重启 Docker daemon。以 Kubernetes runtime 运行时，Docker pair network 回收逻辑不会参与 Pod 网络管理。
+
 ## 7. 升级后检查
 
 ```bash

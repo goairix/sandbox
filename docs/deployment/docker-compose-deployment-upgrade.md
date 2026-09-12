@@ -110,6 +110,8 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 如果只升级包含 Docker AppArmor 默认行为修复的版本，只需要更新 `SANDBOX_API_IMAGE` 并重新创建 `sandbox-api` 服务；`sandbox-fuse-docker`、`sandbox-fuse-mounter`、`sandbox-runtime` 和 `sandbox-gateway` 不需要因此重建。新版 sandbox-api 使用新的 FUSE Pool key，不会复用按旧 AppArmor 语义创建的 prepared runtime。
 
+如果升级版本包含 Docker multipart tmpfs 和 pair network 回收修复，也只需要重新构建并更新 `SANDBOX_API_IMAGE`，然后执行正常的 `docker compose up -d`。不需要更新其他四个项目镜像，也不要重启 Docker daemon。新版 sandbox-api 启动时只会自动删除带 `sandbox.managed=true`、创建超过五分钟且没有任何容器连接的空 `sandbox-pair-*` 网络；使用中的网络、共享网络和其他应用网络不会被处理。地址池已耗尽时会执行相同的安全回收并重试一次。
+
 ## 5. 什么时候要先排空
 
 以下变化发生时，如果还有必须保留的 active/persistent workspace，应在维护窗口使用旧 backend 配置先执行 release drain，再修改 `.env` 并 `up -d`：
@@ -147,3 +149,5 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 ```
 
 再通过 sandbox-api 分别验证 sync 和 FUSE 的创建、代码执行、文件读写、销毁和 Pool 回补。若 FUSE 失败，优先检查 `/dev/fuse`、LSM、sandbox-api 对 endpoint 的 DNS 解析和对象存储权限，不要重启 Docker daemon。
+
+包含 multipart 修复的版本还应验证 `upload/init`、`upload/chunk`、`upload/status`、`upload/complete` 和 `upload/cancel`；测试文件应使用唯一名称并在验证后删除。
