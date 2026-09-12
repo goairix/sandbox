@@ -190,6 +190,35 @@ func TestPreparedPodIntentTreatsEmptyAdmissionMetadataAsEquivalent(t *testing.T)
 	assert.True(t, preparedPodIntentMatches(current, desired, false))
 }
 
+func TestOrdinaryPodIntentAcceptsKubernetes133AdmissionDefaults(t *testing.T) {
+	desired, err := buildOrdinaryPod("runtime", sandboxruntime.SandboxSpec{
+		ID: "sandbox-pool-a", Image: "registry.example/sandbox:v0.3.4",
+		Memory: "512Mi", MemoryRequest: "128Mi", CPU: "500m", CPURequest: "100m",
+		Disk: "100Mi", TmpDisk: "50Mi", RunAsUser: 1000,
+		Labels: map[string]string{"sandbox.pool": "true"},
+	})
+	require.NoError(t, err)
+	desired.Annotations = map[string]string{ordinaryPolicyAttemptAnnotation: "attempt-a"}
+
+	current := desired.DeepCopy()
+	current.UID = "pod-uid-a"
+	defaultPriority := int32(0)
+	defaultPreemption := corev1.PreemptLowerPriority
+	current.Spec.Priority = &defaultPriority
+	current.Spec.PreemptionPolicy = &defaultPreemption
+	current.Spec.SchedulerName = corev1.DefaultSchedulerName
+	current.Spec.ServiceAccountName = "default"
+	current.Spec.DeprecatedServiceAccount = "default"
+	terminationGracePeriodSeconds := int64(30)
+	current.Spec.TerminationGracePeriodSeconds = &terminationGracePeriodSeconds
+	current.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+	current.Spec.Containers[0].TerminationMessagePath = corev1.TerminationMessagePathDefault
+	current.Spec.Containers[0].TerminationMessagePolicy = corev1.TerminationMessageReadFile
+
+	require.Truef(t, preparedPodIntentMatches(current, desired, false),
+		"admission mismatch: %s", preparedPodIntentMismatchReason(current, desired))
+}
+
 func (f podExecutorFunc) Exec(ctx context.Context, pod, container string, argv []string, stdin []byte) ([]byte, error) {
 	return f(ctx, pod, container, argv, stdin)
 }

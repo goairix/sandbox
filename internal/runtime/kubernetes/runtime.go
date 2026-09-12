@@ -294,7 +294,8 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod, true)
 	}
 	if !preparedPodIntentMatches(createdPod, pod, allowScheduledNodeName) {
-		return nil, cleanup(fmt.Errorf("created ordinary Pod does not match requested Pod intent"), createdPod, true)
+		reason := preparedPodIntentMismatchReason(createdPod, pod)
+		return nil, cleanup(fmt.Errorf("created ordinary Pod does not match requested Pod intent: %s", reason), createdPod, true)
 	}
 	identity.runtimeUID = createdPod.UID
 	if err := bindOrdinaryNetworkPolicy(ctx, r.client, r.namespace, createdStandard.Name, identity, attempt, standardPolicy); err != nil {
@@ -1864,13 +1865,14 @@ func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
 	typ := currentSpec.Type()
 	for index := 0; index < currentSpec.NumField(); index++ {
 		if !apiequality.Semantic.DeepEqual(currentSpec.Field(index).Interface(), desiredSpec.Field(index).Interface()) {
-			if typ.Field(index).Name == "InitContainers" && currentSpec.Field(index).Len() == desiredSpec.Field(index).Len() && currentSpec.Field(index).Len() > 0 {
+			if (typ.Field(index).Name == "Containers" || typ.Field(index).Name == "InitContainers") &&
+				currentSpec.Field(index).Len() == desiredSpec.Field(index).Len() && currentSpec.Field(index).Len() > 0 {
 				currentContainer := currentSpec.Field(index).Index(0)
 				desiredContainer := desiredSpec.Field(index).Index(0)
 				containerType := currentContainer.Type()
 				for field := 0; field < currentContainer.NumField(); field++ {
 					if !apiequality.Semantic.DeepEqual(currentContainer.Field(field).Interface(), desiredContainer.Field(field).Interface()) {
-						return "spec.InitContainers[0]." + containerType.Field(field).Name
+						return "spec." + typ.Field(index).Name + "[0]." + containerType.Field(field).Name
 					}
 				}
 			}

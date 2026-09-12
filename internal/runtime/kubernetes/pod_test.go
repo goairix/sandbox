@@ -111,13 +111,17 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 	require.NoError(t, err)
 	falseVal := false
 	defaultNoExecuteSeconds := int64(300)
+	terminationGracePeriodSeconds := int64(30)
 	tmpSize := resource.MustParse(runtime.DefaultTmpDisk)
 	expected := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "legacy-a", Namespace: "sandbox-runtime", Labels: map[string]string{
 			"app": "sandbox", "sandbox.id": "legacy-a", "sandbox.managed": "true", "custom": "value",
 		}},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &falseVal, EnableServiceLinks: &falseVal,
+			RestartPolicy: corev1.RestartPolicyNever, SchedulerName: corev1.DefaultSchedulerName,
+			ServiceAccountName: "default", DeprecatedServiceAccount: "default",
+			TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+			AutomountServiceAccountToken:  &falseVal, EnableServiceLinks: &falseVal,
 			Tolerations: []corev1.Toleration{
 				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
 				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
@@ -125,8 +129,9 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 			SecurityContext: &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 			DNSPolicy:       corev1.DNSNone, DNSConfig: &corev1.PodDNSConfig{Nameservers: []string{"8.8.8.8", "1.1.1.1"}},
 			Containers: []corev1.Container{{
-				Name: "sandbox", Image: "sandbox:legacy", Command: []string{"sleep", "infinity"}, WorkingDir: "/workspace",
-				Resources:       corev1.ResourceRequirements{},
+				Name: "sandbox", Image: "sandbox:legacy", ImagePullPolicy: corev1.PullIfNotPresent,
+				TerminationMessagePath: corev1.TerminationMessagePathDefault, TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+				Command: []string{"sleep", "infinity"}, WorkingDir: "/workspace", Resources: corev1.ResourceRequirements{},
 				SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: &falseVal, AllowPrivilegeEscalation: &falseVal},
 				Env: []corev1.EnvVar{
 					{Name: "KUBERNETES_SERVICE_HOST", Value: ""}, {Name: "KUBERNETES_SERVICE_PORT", Value: ""},

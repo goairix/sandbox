@@ -66,6 +66,7 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 
 	resources := corev1.ResourceRequirements{}
 	falseVal := false
+	terminationGracePeriodSeconds := int64(30)
 	if spec.Memory != "" || spec.CPU != "" {
 		resources.Limits = corev1.ResourceList{}
 		resources.Requests = corev1.ResourceList{}
@@ -147,8 +148,12 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Tolerations:   defaultNoExecuteTolerations(),
+			RestartPolicy:                 corev1.RestartPolicyNever,
+			SchedulerName:                 corev1.DefaultSchedulerName,
+			ServiceAccountName:            "default",
+			DeprecatedServiceAccount:      "default",
+			TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+			Tolerations:                   defaultNoExecuteTolerations(),
 			// Disable SA token mount and K8s service env injection to avoid
 			// leaking cluster topology and credentials into the sandbox.
 			AutomountServiceAccountToken: &falseVal,
@@ -167,12 +172,15 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 			},
 			Containers: []corev1.Container{
 				{
-					Name:            "sandbox",
-					Image:           spec.Image,
-					Command:         []string{"sleep", "infinity"},
-					WorkingDir:      "/workspace",
-					Resources:       resources,
-					SecurityContext: securityContext,
+					Name:                     "sandbox",
+					Image:                    spec.Image,
+					ImagePullPolicy:          corev1.PullIfNotPresent,
+					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+					Command:                  []string{"sleep", "infinity"},
+					WorkingDir:               "/workspace",
+					Resources:                resources,
+					SecurityContext:          securityContext,
 					// Override kubelet-injected KUBERNETES_* env vars to empty strings.
 					// enableServiceLinks=false suppresses other service vars but not these.
 					// The API server is unreachable anyway (no SA token + network policy),
