@@ -36,8 +36,10 @@
   container endpoint。共享网络、第三方网络、仍有 endpoint 的网络均不动。
 - 创建 pair network 遇到 Docker 默认地址池耗尽错误时，执行一次相同的
   空网络回收并只重试一次；其他错误不触发重试。
-- 不删除孤立但仍连接 gateway 的网络，避免在并发创建或状态不确定时误删
-  容器。此类资源需要后续通过明确的运行时身份恢复或人工审计处理。
+- 对创建超过五分钟的自有 gateway，只有在全部 managed container 中既找不到
+  同名普通 runtime，也找不到同 preparation ID 的 FUSE runtime 时，才判定为
+  孤立 gateway 并删除；随后空 pair network 由同一回收流程删除。stopped
+  runtime 同样算作存活身份，避免误删可恢复 Sandbox 的网络。
 - 不修改公网访问、内网禁止、永久禁止 metadata/loopback 等现有 iptables
   策略，也不新增环境变量、Docker daemon 配置或部署步骤。
 

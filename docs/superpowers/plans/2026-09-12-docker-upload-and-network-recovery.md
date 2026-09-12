@@ -84,6 +84,8 @@ func TestCreateManagedPairNetworkDoesNotRetryOtherErrors(t *testing.T)
 测试数据必须同时覆盖：超过五分钟的空 managed pair、未满五分钟的空 pair、
 仍有 endpoint 的 pair、无 managed 标签的同名网络、非 sandbox 网络。fake 增加
 `networkCreateErrors []error`、`networkCreateCalls int` 和 `networkRemoveErr error`。
+另加 `TestCleanupStaleSandboxNetworkResourcesRemovesOnlyOrphanGateways`，覆盖陈旧
+孤立 gateway 会被删除、存在 stopped runtime 的 gateway 会保留、新 gateway 会保留。
 
 - [ ] **Step 2: 运行测试并确认 RED**
 
@@ -98,6 +100,8 @@ Expected: FAIL，显示回收与重试 helper 尚不存在。
 ```go
 const staleSandboxNetworkAge = 5 * time.Minute
 
+func cleanupStaleSandboxNetworkResources(ctx context.Context, cli dockerAPI, now time.Time) (int, error)
+func cleanupStaleOrphanGateways(ctx context.Context, cli dockerAPI, now time.Time) error
 func cleanupStaleEmptySandboxNetworks(ctx context.Context, cli dockerAPI, now time.Time) (int, error)
 func createManagedPairNetwork(ctx context.Context, cli dockerAPI, name string, options dnetwork.CreateOptions, now time.Time) (dnetwork.CreateResponse, error)
 func isDockerAddressPoolExhausted(err error) bool
@@ -108,6 +112,10 @@ func isDockerAddressPoolExhausted(err error) bool
 确认 `len(Containers) == 0` 的网络。创建 helper 只对包含
 `could not find an available, non-overlapping IPv4 address pool` 的错误执行一次
 回收与一次重试。
+
+在删除空网络前，先扫描超过五分钟的 managed gateway；只有找不到同名普通
+runtime 或同 preparation ID FUSE runtime 时才删除 gateway。ContainerList 使用
+`All: true`，因此 stopped runtime 也会阻止回收。
 
 - [ ] **Step 4: 接入两类 pair network 和 runtime 启动**
 

@@ -110,7 +110,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 如果只升级包含 Docker AppArmor 默认行为修复的版本，只需要更新 `SANDBOX_API_IMAGE` 并重新创建 `sandbox-api` 服务；`sandbox-fuse-docker`、`sandbox-fuse-mounter`、`sandbox-runtime` 和 `sandbox-gateway` 不需要因此重建。新版 sandbox-api 使用新的 FUSE Pool key，不会复用按旧 AppArmor 语义创建的 prepared runtime。
 
-如果升级版本包含 Docker multipart tmpfs 和 pair network 回收修复，也只需要重新构建并更新 `SANDBOX_API_IMAGE`，然后执行正常的 `docker compose up -d`。不需要更新其他四个项目镜像，也不要重启 Docker daemon。新版 sandbox-api 启动时只会自动删除带 `sandbox.managed=true`、创建超过五分钟且没有任何容器连接的空 `sandbox-pair-*` 网络；使用中的网络、共享网络和其他应用网络不会被处理。地址池已耗尽时会执行相同的安全回收并重试一次。
+如果升级版本包含 Docker multipart tmpfs 和 pair network 回收修复，也只需要重新构建并更新 `SANDBOX_API_IMAGE`，然后执行正常的 `docker compose up -d`。不需要更新其他四个项目镜像，也不要重启 Docker daemon。新版 sandbox-api 启动时会回收创建超过五分钟、带 `sandbox.managed=true` 且找不到对应普通/FUSE runtime 的孤立 gateway，再删除已经没有任何容器连接的空 `sandbox-pair-*` 网络；使用中的网络、共享网络和其他应用网络不会被处理。地址池已耗尽时会执行相同的安全回收并重试一次。
 
 ## 5. 什么时候要先排空
 
