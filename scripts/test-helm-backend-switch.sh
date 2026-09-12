@@ -18,12 +18,23 @@ test "$base_fingerprint" = "$image_only_fingerprint"
 test "$base_fingerprint" != "$changed_fingerprint"
 
 rendered="$(helm template sandbox "$chart")"
-grep -Fq '"helm.sh/hook": pre-upgrade,pre-rollback' <<<"$rendered"
+grep -Fq '"helm.sh/hook": pre-upgrade' <<<"$rendered"
+grep -Fq '"helm.sh/hook": pre-rollback' <<<"$rendered"
+grep -Fq '"helm.sh/hook": post-install,post-upgrade,post-rollback' <<<"$rendered"
 grep -Fq -- '--drain-release' <<<"$rendered"
-grep -Fq 'lookup "v1" "ConfigMap"' "$chart/templates/pre-backend-change-drain.yaml"
+grep -Fq -- '--required-kubernetes-drain-protocol=v1' <<<"$rendered"
+grep -Fq -- '--kubernetes-backend-fingerprint-deployment=sandbox-api' <<<"$rendered"
+grep -Fq -- '--verify-kubernetes-backend-fingerprint' <<<"$rendered"
+grep -Fq -- '--resume-kubernetes-deployment=sandbox-api' <<<"$rendered"
+grep -Fq 'sandbox.huaxisy.com/drain-protocol: "v1"' <<<"$rendered"
+if helm template sandbox "$chart" --set autoscaling.enabled=true --show-only templates/deployment.yaml | grep -Eq '^  replicas:'; then
+  printf 'HPA-managed Deployment unexpectedly renders spec.replicas\n' >&2
+  exit 1
+fi
 grep -Fq 'lookup "apps/v1" "Deployment"' "$chart/templates/pre-backend-change-drain.yaml"
 
 if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
+	test_image_tag="${HELM_BACKEND_SWITCH_IMAGE_TAG:?set HELM_BACKEND_SWITCH_IMAGE_TAG to a sandbox-api image containing the drain protocol}"
   kube_context="${HELM_BACKEND_SWITCH_CONTEXT:-}"
   kubectl_args=()
   helm_args=()
@@ -52,62 +63,27 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
   helm "${helm_args[@]}" install "$release" "$chart" --namespace "$test_namespace" \
     --set replicaCount=0 \
     --set autoscaling.enabled=false \
-    --set redis.enabled=false \
-    --set redis.external.addr=redis.invalid:6379 >/dev/null
+    --set image.tag="$test_image_tag" >/dev/null
+  kubectl "${kubectl_args[@]}" --namespace "$test_namespace" \
+    wait --for=condition=Ready pod/"$release-redis-0" --timeout=120s >/dev/null
 
-  if ! helm upgrade --help | grep -Fq -- '--dry-run string'; then
-    helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
-      --set replicaCount=0 --set autoscaling.enabled=false \
-      --set redis.enabled=false --set redis.external.addr=redis.invalid:6379 \
-      --set image.tag=image-only-upgrade >/dev/null
-    if kubectl "${kubectl_args[@]}" --namespace "$test_namespace" \
-      get job sandbox-switch-backend-change-drain >/dev/null 2>&1; then
-      printf 'same backend fingerprint unexpectedly created a drain hook\n' >&2
-      exit 1
-    fi
-    upgrade_log="$(mktemp)"
-    helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
-      --set replicaCount=0 --set autoscaling.enabled=false \
-      --set redis.enabled=false --set redis.external.addr=redis.invalid:6379 \
-      --set image.tag=image-only-upgrade \
-      --set config.storage.filesystem.storageIdentity=another-physical-store >"$upgrade_log" 2>&1 &
-    upgrade_pid=$!
-    drain_created=false
-    for _ in $(seq 1 20); do
-      if kubectl "${kubectl_args[@]}" --namespace "$test_namespace" \
-        get job sandbox-switch-backend-change-drain >/dev/null 2>&1; then
-        drain_created=true
-        break
-      fi
-      sleep 0.5
-    done
-    if [[ "$drain_created" != "true" ]]; then
-      printf 'changed backend did not create the drain hook\n' >&2
-      exit 1
-    fi
-    kill "$upgrade_pid" >/dev/null 2>&1 || true
-    wait "$upgrade_pid" >/dev/null 2>&1 || true
-    upgrade_pid=""
-    printf 'cluster lookup check: PASS (Helm %s live-hook fallback)\n' "$(helm version --short)"
-    printf 'helm backend switch tests: PASS\n'
-    exit 0
-  fi
-
-  same_rendered="$(helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
-    --dry-run=server --set replicaCount=0 --set autoscaling.enabled=false \
-    --set redis.enabled=false --set redis.external.addr=redis.invalid:6379 \
-    --set image.tag=image-only-upgrade)"
-  if grep -Fq 'name: sandbox-switch-backend-change-drain' <<<"$same_rendered"; then
-    printf 'same backend fingerprint unexpectedly rendered a drain hook\n' >&2
+  kubectl "${kubectl_args[@]}" --namespace "$test_namespace" patch deployment "$release-api" --type=merge \
+    -p '{"spec":{"template":{"metadata":{"annotations":{"sandbox.huaxisy.com/drain-protocol":null}}}}}' >/dev/null
+  if helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \
+    --set config.storage.filesystem.storageIdentity=another-physical-store >/dev/null 2>&1; then
+    printf 'backend change unexpectedly bypassed missing drain protocol\n' >&2
     exit 1
   fi
 
-  changed_rendered="$(helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
-    --dry-run=server --set replicaCount=0 --set autoscaling.enabled=false \
-    --set redis.enabled=false --set redis.external.addr=redis.invalid:6379 \
-    --set config.storage.filesystem.storageIdentity=another-physical-store)"
-  grep -Fq 'name: sandbox-switch-backend-change-drain' <<<"$changed_rendered"
-  grep -Fq -- '--drain-release' <<<"$changed_rendered"
+  helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" >/dev/null
+  test "$(kubectl "${kubectl_args[@]}" --namespace "$test_namespace" get deployment "$release-api" \
+    -o jsonpath='{.spec.template.metadata.annotations.sandbox\.huaxisy\.com/drain-protocol}')" = "v1"
+
+  helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \
+    --set config.storage.filesystem.storageIdentity=another-physical-store >/dev/null
 fi
 
 printf 'helm backend switch tests: PASS\n'

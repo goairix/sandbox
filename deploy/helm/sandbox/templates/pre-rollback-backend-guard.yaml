@@ -1,0 +1,34 @@
+{{- $desiredFingerprint := include "sandbox.backend.fingerprint" . -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-rollback-backend-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-rollback-guard
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-rollback
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.preDeleteDrain.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-rollback-guard
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-api
+      restartPolicy: Never
+      containers:
+        - name: verify-backend
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--verify-kubernetes-backend-fingerprint"
+            - {{ printf "--kubernetes-backend-fingerprint-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--kubernetes-backend-fingerprint-deployment=%s-api" .Release.Name | quote }}
+            - {{ printf "--kubernetes-backend-fingerprint=%s" $desiredFingerprint | quote }}
+            - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}

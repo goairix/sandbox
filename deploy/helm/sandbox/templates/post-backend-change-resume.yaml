@@ -1,0 +1,34 @@
+{{- $desiredFingerprint := include "sandbox.backend.fingerprint" . -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-backend-change-resume
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-resume
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade,post-rollback
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    sandbox.huaxisy.com/backend-fingerprint: {{ $desiredFingerprint | quote }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.preDeleteDrain.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-resume
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-api
+      restartPolicy: Never
+      containers:
+        - name: resume
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ printf "--resume-kubernetes-deployment=%s-api" .Release.Name | quote }}
+            - {{ printf "--resume-kubernetes-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--resume-kubernetes-replicas=%d" (ternary (int .Values.autoscaling.minReplicas) (int .Values.replicaCount) .Values.autoscaling.enabled) | quote }}
+            - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}

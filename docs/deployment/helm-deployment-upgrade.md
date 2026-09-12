@@ -80,6 +80,22 @@ AK/SK 轮换时同时递增 `credentialGeneration`，例如从 `rotation-1` 改�
 
 因为 AK/SK 直接进入 values，它们也会出现在 Helm release 历史和 `sandbox-api` 环境中。环境 values 文件应限制为运维账号可读，集群 RBAC 也应限制读取 release Secret、Deployment 和 Pod 详情；排障时不要输出完整 values、渲染清单或容器环境。
 
+`lsmProfile` 是节点上已经加载的 AppArmor localhost profile 名称，Chart
+不会代替节点安装 profile。所有可能调度 FUSE Pod 的节点都必须加载同名
+profile；否则 containerd 会报
+`failed to generate apparmor spec opts: apparmor profile not found`。在仅用于
+验证、且明确接受 mounter 不受自定义 LSM 约束的集群中，可临时使用：
+
+```yaml
+config:
+  workspace:
+    allowMissingLSMForKind: true
+    lsmProfile: ""
+```
+
+生产环境不要使用这个兼容开关，应通过节点初始化或 Security Profiles
+Operator 把允许 FUSE mount 的受限 profile 加载到全部目标节点。
+
 ## 4. 全新部署
 
 ```bash
@@ -120,6 +136,29 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 不要使用 `--reuse-values`，否则已经删除的 credential-file/Secret 字段可能被旧 release 带回来。
 
 只改 API tag、普通 runtime tag、副本或资源时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint，Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
+
+从不含 drain protocol 标记的旧 Chart 首次升级时，先保持 backend
+fingerprint 不变，只更新新版 Chart 和 `sandbox-api`。这一步会给 Deployment
+写入 `sandbox.huaxisy.com/drain-protocol: v1`，并把安全的 upgrade/resume/
+rollback guard Hook 写入 release revision。确认这次同 backend 升级成功后，
+才能在下一次 `helm upgrade` 中修改 backend fingerprint。若把协议迁移和
+backend 切换混在第一次升级里，pre-upgrade Hook 会在缩容前拒绝，避免旧
+revision 缺少 resume Hook 时发生不安全的 atomic rollback。
+
+启用 HPA 时，Deployment 始终省略 `spec.replicas`，普通升级不会改写 HPA
+当前容量。pre-upgrade Hook 会在运行时比较集群中的 backend fingerprint；
+只有 backend 确实变化时才排空并把 API 缩到 0。独立的
+post-upgrade/post-rollback resume Hook 始终存在，但只有实时副本为 0 时
+才恢复到 `autoscaling.minReplicas` 并等待可用，因此普通升级不会缩容。
+首次安装也会执行同样的就绪检查。
+release drain 还会清理“NetworkPolicy 已创建但 Pod 尚未创建”的未绑定
+attempt 残留，不需要人工删除策略。
+
+不要使用 `helm rollback` 跨 backend fingerprint 回退；Chart 会在
+pre-rollback 阶段明确拒绝它，因为目标 revision 保存的环境无法安全排空
+当前 backend。需要切回旧 backend 时，把目标配置作为一次新的
+`helm upgrade` 执行，让运行时 fingerprint 检查和 release drain 正常完成。
+同 backend rollback 仍可正常执行。
 
 ## 6. 镜像怎么构建
 

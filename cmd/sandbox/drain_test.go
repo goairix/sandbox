@@ -96,3 +96,115 @@ func TestDrainKubernetesDeploymentHonorsCancellationWhilePodRemains(t *testing.T
 	err := drainKubernetesDeployment(ctx, client, "sandbox-fuse", "sandbox-api", "", time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+func TestResumeKubernetesDeploymentScalesAndWaitsForAvailability(t *testing.T) {
+	zero := int32(0)
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &zero,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "sandbox"}},
+		},
+	})
+	client.PrependReactor("update", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updated := action.(ktesting.UpdateAction).GetObject().(*appsv1.Deployment).DeepCopy()
+		require.Equal(t, int32(3), *updated.Spec.Replicas)
+		updated.Status.ObservedGeneration = updated.Generation
+		updated.Status.ReadyReplicas = 3
+		updated.Status.AvailableReplicas = 3
+		require.NoError(t, client.Tracker().Update(appsv1.SchemeGroupVersion.WithResource("deployments"), updated, "sandbox-fuse"))
+		return true, updated, nil
+	})
+
+	resumed, err := resumeKubernetesDeployment(context.Background(), client, "sandbox-fuse", "sandbox-api", 3, time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, resumed)
+	deployment, err := client.AppsV1().Deployments("sandbox-fuse").Get(context.Background(), "sandbox-api", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), *deployment.Spec.Replicas)
+	assert.Equal(t, int32(3), deployment.Status.AvailableReplicas)
+}
+
+func TestResumeKubernetesDeploymentDoesNotChangePositiveHPAReplicaCount(t *testing.T) {
+	seven := int32(7)
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &seven,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "sandbox"}},
+		},
+	})
+
+	resumed, err := resumeKubernetesDeployment(context.Background(), client, "sandbox-fuse", "sandbox-api", 3, time.Millisecond)
+	require.NoError(t, err)
+	assert.False(t, resumed)
+	deployment, err := client.AppsV1().Deployments("sandbox-fuse").Get(context.Background(), "sandbox-api", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int32(7), *deployment.Spec.Replicas)
+}
+
+func TestResumeKubernetesDeploymentTreatsZeroTargetAsNoOp(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+
+	resumed, err := resumeKubernetesDeployment(context.Background(), client, "sandbox-fuse", "sandbox-api", 0, time.Millisecond)
+	require.NoError(t, err)
+	assert.False(t, resumed)
+}
+
+func TestResumeKubernetesDeploymentHonorsCancellationWhileUnavailable(t *testing.T) {
+	zero := int32(0)
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &zero,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "sandbox"}},
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := resumeKubernetesDeployment(ctx, client, "sandbox-fuse", "sandbox-api", 3, time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestKubernetesBackendFingerprintMatchesCurrentDeployment(t *testing.T) {
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				backendFingerprintAnnotation: "fingerprint-a",
+			},
+		}}},
+	})
+
+	matches, err := kubernetesBackendFingerprintMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "fingerprint-a")
+	require.NoError(t, err)
+	assert.True(t, matches)
+	matches, err = kubernetesBackendFingerprintMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "fingerprint-b")
+	require.NoError(t, err)
+	assert.False(t, matches)
+}
+
+func TestKubernetesBackendFingerprintTreatsMissingDeploymentAsMismatch(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+
+	matches, err := kubernetesBackendFingerprintMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "fingerprint-a")
+	require.NoError(t, err)
+	assert.False(t, matches)
+}
+
+func TestKubernetesDrainProtocolMatchesDeploymentTemplate(t *testing.T) {
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{drainProtocolAnnotation: "v1"},
+		}}},
+	})
+
+	matches, err := kubernetesDrainProtocolMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "v1")
+	require.NoError(t, err)
+	assert.True(t, matches)
+	matches, err = kubernetesDrainProtocolMatches(context.Background(), client, "sandbox-fuse", "sandbox-api", "v2")
+	require.NoError(t, err)
+	assert.False(t, matches)
+}

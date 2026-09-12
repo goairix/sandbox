@@ -16,6 +16,11 @@ import (
 
 var drainCiliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}
 
+const (
+	backendFingerprintAnnotation = "sandbox.huaxisy.com/backend-fingerprint"
+	drainProtocolAnnotation      = "sandbox.huaxisy.com/drain-protocol"
+)
+
 func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName string, pollInterval time.Duration) error {
 	if client == nil || namespace == "" || deploymentName == "" || pollInterval <= 0 {
 		return fmt.Errorf("invalid Kubernetes deployment drain configuration")
@@ -71,6 +76,77 @@ func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface,
 		case <-ticker.C:
 		}
 	}
+}
+
+func resumeKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName string, replicas int32, pollInterval time.Duration) (bool, error) {
+	if client == nil || namespace == "" || deploymentName == "" || replicas < 0 || pollInterval <= 0 {
+		return false, fmt.Errorf("invalid Kubernetes deployment resume configuration")
+	}
+	if replicas == 0 {
+		return false, nil
+	}
+	resumed := false
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 0 {
+			return nil
+		}
+		deployment.Spec.Replicas = &replicas
+		_, err = client.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+		if err == nil {
+			resumed = true
+		}
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("scale Kubernetes API deployment after drain: %w", err)
+	}
+	if !resumed {
+		return false, nil
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return true, fmt.Errorf("read Kubernetes API deployment during resume: %w", err)
+		}
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas >= replicas &&
+			deployment.Status.ObservedGeneration >= deployment.Generation &&
+			deployment.Status.ReadyReplicas >= replicas && deployment.Status.AvailableReplicas >= replicas {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func kubernetesBackendFingerprintMatches(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, desired string) (bool, error) {
+	return kubernetesDeploymentTemplateAnnotationMatches(ctx, client, namespace, deploymentName, backendFingerprintAnnotation, desired)
+}
+
+func kubernetesDrainProtocolMatches(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, desired string) (bool, error) {
+	return kubernetesDeploymentTemplateAnnotationMatches(ctx, client, namespace, deploymentName, drainProtocolAnnotation, desired)
+}
+
+func kubernetesDeploymentTemplateAnnotationMatches(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, annotation, desired string) (bool, error) {
+	if client == nil || namespace == "" || deploymentName == "" || annotation == "" || desired == "" {
+		return false, fmt.Errorf("invalid Kubernetes backend fingerprint configuration")
+	}
+	deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read installed Kubernetes backend fingerprint: %w", err)
+	}
+	return deployment.Spec.Template.Annotations[annotation] == desired, nil
 }
 
 func auditKubernetesDrainedResources(ctx context.Context, client kubernetes.Interface, dynamicClient dynamic.Interface, namespace string) error {

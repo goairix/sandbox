@@ -53,9 +53,75 @@ func main() {
 	drainDeployment := flag.String("drain-kubernetes-deployment", "", "scale this in-cluster Deployment to zero and wait for its Pods")
 	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
 	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
-	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain")
+	resumeDeployment := flag.String("resume-kubernetes-deployment", "", "scale this in-cluster Deployment to a positive replica count and wait for availability")
+	resumeNamespace := flag.String("resume-kubernetes-namespace", "", "namespace containing the Deployment to resume")
+	resumeReplicas := flag.Int("resume-kubernetes-replicas", 0, "replica count used to resume an in-cluster Deployment")
+	backendFingerprintNamespace := flag.String("kubernetes-backend-fingerprint-namespace", "", "namespace containing the Deployment backend fingerprint")
+	backendFingerprintDeployment := flag.String("kubernetes-backend-fingerprint-deployment", "", "Deployment containing the installed backend fingerprint")
+	backendFingerprint := flag.String("kubernetes-backend-fingerprint", "", "desired backend fingerprint used by upgrade and rollback guards")
+	requiredDrainProtocol := flag.String("required-kubernetes-drain-protocol", "", "required installed drain protocol before a backend-changing upgrade")
+	verifyBackendFingerprint := flag.Bool("verify-kubernetes-backend-fingerprint", false, "fail unless the installed backend fingerprint matches the desired fingerprint")
+	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain or resume")
 	drainRelease := flag.Bool("drain-release", false, "finalize all sandbox state and verify a release-wide zero-state drain")
 	flag.Parse()
+	modeCount := 0
+	for _, enabled := range []bool{*drainDeployment != "", *resumeDeployment != "", *verifyBackendFingerprint} {
+		if enabled {
+			modeCount++
+		}
+	}
+	if modeCount > 1 {
+		log.Fatal("Kubernetes deployment drain, resume, and backend verification modes are mutually exclusive")
+	}
+	if *verifyBackendFingerprint {
+		if *backendFingerprintNamespace == "" || *backendFingerprintDeployment == "" || *backendFingerprint == "" || *drainTimeout <= 0 {
+			log.Fatal("backend fingerprint namespace, Deployment, desired value, and a positive drain-timeout are required")
+		}
+		restConfig, configErr := rest.InClusterConfig()
+		if configErr != nil {
+			log.Fatalf("failed to load in-cluster backend verification configuration: %v", configErr)
+		}
+		client, clientErr := kubernetes.NewForConfig(restConfig)
+		if clientErr != nil {
+			log.Fatalf("failed to create in-cluster backend verification client: %v", clientErr)
+		}
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), *drainTimeout)
+		defer verifyCancel()
+		matches, matchErr := kubernetesBackendFingerprintMatches(verifyCtx, client, *backendFingerprintNamespace, *backendFingerprintDeployment, *backendFingerprint)
+		if matchErr != nil {
+			log.Fatalf("failed to verify Kubernetes backend fingerprint: %v", matchErr)
+		}
+		if !matches {
+			log.Fatal("cross-backend Helm rollback is not supported; apply the target backend with helm upgrade so the current backend can be drained safely")
+		}
+		log.Printf("Kubernetes backend fingerprint matches; rollback does not require a release drain")
+		return
+	}
+	if *resumeDeployment != "" {
+		if *resumeNamespace == "" || *resumeReplicas < 0 || *drainTimeout <= 0 {
+			log.Fatal("resume-kubernetes-namespace, non-negative resume-kubernetes-replicas, and a positive drain-timeout are required")
+		}
+		restConfig, configErr := rest.InClusterConfig()
+		if configErr != nil {
+			log.Fatalf("failed to load in-cluster resume configuration: %v", configErr)
+		}
+		client, clientErr := kubernetes.NewForConfig(restConfig)
+		if clientErr != nil {
+			log.Fatalf("failed to create in-cluster resume client: %v", clientErr)
+		}
+		resumeCtx, resumeCancel := context.WithTimeout(context.Background(), *drainTimeout)
+		defer resumeCancel()
+		resumed, resumeErr := resumeKubernetesDeployment(resumeCtx, client, *resumeNamespace, *resumeDeployment, int32(*resumeReplicas), time.Second)
+		if resumeErr != nil {
+			log.Fatalf("failed to resume Kubernetes API deployment: %v", resumeErr)
+		}
+		if resumed {
+			log.Printf("Kubernetes API deployment %s/%s resumed at %d replicas", *resumeNamespace, *resumeDeployment, *resumeReplicas)
+		} else {
+			log.Printf("Kubernetes API deployment %s/%s already has positive replicas; resume skipped", *resumeNamespace, *resumeDeployment)
+		}
+		return
+	}
 	if *drainDeployment != "" {
 		if *drainNamespace == "" || *drainTimeout <= 0 {
 			log.Fatal("drain-kubernetes-namespace and a positive drain-timeout are required")
@@ -67,6 +133,33 @@ func main() {
 		client, clientErr := kubernetes.NewForConfig(restConfig)
 		if clientErr != nil {
 			log.Fatalf("failed to create in-cluster drain client: %v", clientErr)
+		}
+		fingerprintArgs := []string{*backendFingerprintNamespace, *backendFingerprintDeployment, *backendFingerprint}
+		fingerprintConfigured := fingerprintArgs[0] != "" || fingerprintArgs[1] != "" || fingerprintArgs[2] != ""
+		if fingerprintConfigured {
+			if fingerprintArgs[0] == "" || fingerprintArgs[1] == "" || fingerprintArgs[2] == "" {
+				log.Fatal("backend fingerprint namespace, Deployment, and desired value must be configured together")
+			}
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), *drainTimeout)
+			defer checkCancel()
+			matches, matchErr := kubernetesBackendFingerprintMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], fingerprintArgs[2])
+			if matchErr != nil {
+				log.Fatalf("failed to compare Kubernetes backend fingerprint before drain: %v", matchErr)
+			}
+			if matches {
+				log.Printf("Kubernetes backend fingerprint is unchanged; release drain skipped")
+				return
+			}
+			if *requiredDrainProtocol == "" {
+				log.Fatal("required Kubernetes drain protocol must be configured for a backend-changing upgrade")
+			}
+			protocolMatches, protocolErr := kubernetesDrainProtocolMatches(checkCtx, client, fingerprintArgs[0], fingerprintArgs[1], *requiredDrainProtocol)
+			if protocolErr != nil {
+				log.Fatalf("failed to verify Kubernetes drain protocol before drain: %v", protocolErr)
+			}
+			if !protocolMatches {
+				log.Fatal("backend-changing upgrade requires a prior same-backend Chart and sandbox-api protocol upgrade")
+			}
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
 		defer drainCancel()
