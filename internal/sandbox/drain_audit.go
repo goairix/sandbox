@@ -17,6 +17,7 @@ var blockingDrainPrefixes = []struct {
 	{name: "workspace lease", pattern: workspaceLeaseKeyPrefix + "*"},
 	{name: "workspace owner", pattern: workspaceOwnerKeyPrefix + "*"},
 	{name: "FUSE pool", pattern: "fusepool:*"},
+	{name: "ordinary pool", pattern: "ordinarypool:*"},
 }
 
 const fusePoolMembershipGenerationsKey = "fusepool:membership-generations"

@@ -382,6 +382,76 @@ func (m *mockRuntime) ListSandboxes(_ context.Context, labels map[string]string)
 
 func (m *mockRuntime) IsStateful() bool { return false }
 
+type sharedPoolRuntime struct{ *mockRuntime }
+
+func newSharedPoolRuntime() *sharedPoolRuntime {
+	return &sharedPoolRuntime{mockRuntime: newMockRuntime()}
+}
+
+func (m *sharedPoolRuntime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
+	info, err := m.mockRuntime.CreateSandbox(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	info.Labels = maps.Clone(spec.Labels)
+	m.mu.Unlock()
+	return info, nil
+}
+
+func (m *sharedPoolRuntime) UpdateLabels(_ context.Context, id string, labels map[string]*string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	info := m.sandboxes[id]
+	if info == nil {
+		return runtime.ErrNotFound
+	}
+	if info.Labels == nil {
+		info.Labels = make(map[string]string)
+	}
+	for key, value := range labels {
+		if value == nil {
+			delete(info.Labels, key)
+		} else {
+			info.Labels[key] = *value
+		}
+	}
+	return nil
+}
+
+func (m *sharedPoolRuntime) ListSandboxes(_ context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]runtime.SandboxInfo, 0)
+	for _, info := range m.sandboxes {
+		matches := true
+		for key, expected := range labels {
+			if info.Labels[key] != expected {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			copy := *info
+			copy.Labels = maps.Clone(info.Labels)
+			result = append(result, copy)
+		}
+	}
+	return result, nil
+}
+
+func (m *sharedPoolRuntime) IsStateful() bool { return true }
+
+func (m *sharedPoolRuntime) snapshotIDs() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[string]struct{}, len(m.sandboxes))
+	for id := range m.sandboxes {
+		result[id] = struct{}{}
+	}
+	return result
+}
+
 func (m *mockRuntime) ListFilesRecursive(_ context.Context, _, _ string, _ int, page, pageSize int) (*runtime.FileListResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -525,4 +595,129 @@ func TestPool_Release(t *testing.T) {
 	rt.mu.Lock()
 	assert.GreaterOrEqual(t, rt.removed, 1)
 	rt.mu.Unlock()
+}
+
+func TestSharedOrdinaryPoolWarmUpAndAcquireAreGlobalAcrossReplicas(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	cfg := PoolConfig{MinSize: 3, MaxSize: 3, Image: "sandbox:latest"}
+	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
+	poolA.EnableShared(store, "sandbox-system")
+	poolB.EnableShared(store, "sandbox-system")
+	t.Cleanup(func() {
+		poolA.Drain(context.Background())
+		poolB.Drain(context.Background())
+		_ = poolA.DrainRelease(context.Background())
+	})
+
+	require.NoError(t, poolA.WarmUp(context.Background()))
+	original := rt.snapshotIDs()
+	require.Len(t, original, 3)
+	require.NoError(t, poolB.WarmUp(context.Background()))
+	assert.Len(t, rt.snapshotIDs(), 3, "the second replica must not create a private pool")
+
+	info, err := poolB.Acquire(context.Background())
+	require.NoError(t, err)
+	_, reused := original[info.RuntimeID]
+	assert.True(t, reused, "a replica must claim a Pod prepared by another replica")
+	assert.NotContains(t, info.Labels, "sandbox.pool")
+}
+
+func TestSharedOrdinaryPoolConcurrentAcquireClaimsWarmRuntimeOnce(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	cfg := PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}
+	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
+	poolA.EnableShared(store, "sandbox-system")
+	poolB.EnableShared(store, "sandbox-system")
+	t.Cleanup(func() {
+		poolA.Drain(context.Background())
+		poolB.Drain(context.Background())
+		_ = poolA.DrainRelease(context.Background())
+	})
+	require.NoError(t, poolA.WarmUp(context.Background()))
+	var warmID string
+	for id := range rt.snapshotIDs() {
+		warmID = id
+	}
+
+	start := make(chan struct{})
+	results := make(chan *runtime.SandboxInfo, 2)
+	errs := make(chan error, 2)
+	for _, pool := range []*Pool{poolA, poolB} {
+		go func(pool *Pool) {
+			<-start
+			info, err := pool.Acquire(context.Background())
+			results <- info
+			errs <- err
+		}(pool)
+	}
+	close(start)
+	first, second := <-results, <-results
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+	assert.NotEqual(t, first.RuntimeID, second.RuntimeID)
+	warmClaims := 0
+	if first.RuntimeID == warmID {
+		warmClaims++
+	}
+	if second.RuntimeID == warmID {
+		warmClaims++
+	}
+	assert.Equal(t, 1, warmClaims, "CAS must grant the warm runtime to exactly one replica")
+}
+
+func TestSharedOrdinaryPoolNormalStopPreservesInventoryAndReleaseDrainDeletesIt(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	cfg := PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}
+	poolA, poolB := NewPool(rt, cfg), NewPool(rt, cfg)
+	poolA.EnableShared(store, "sandbox-system")
+	poolB.EnableShared(store, "sandbox-system")
+	require.NoError(t, poolA.WarmUp(context.Background()))
+	original := rt.snapshotIDs()
+	require.Len(t, original, 1)
+
+	poolA.Drain(context.Background())
+	assert.Len(t, rt.snapshotIDs(), 1, "rolling shutdown must leave global inventory intact")
+	info, err := poolB.Acquire(context.Background())
+	require.NoError(t, err)
+	_, reused := original[info.RuntimeID]
+	assert.True(t, reused)
+	poolB.Release(context.Background(), info.RuntimeID)
+	poolB.Drain(context.Background())
+
+	require.NoError(t, poolB.DrainRelease(context.Background()))
+	assert.Empty(t, rt.snapshotIDs())
+	keys, err := store.Keys(context.Background(), "ordinarypool:v1:*")
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestSharedOrdinaryPoolRollingFingerprintDoesNotDeleteOldReplicaInventory(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	oldPool := NewPool(rt, PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:v1"})
+	newPool := NewPool(rt, PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:v2"})
+	oldPool.EnableShared(store, "sandbox-system")
+	newPool.EnableShared(store, "sandbox-system")
+	t.Cleanup(func() {
+		oldPool.Drain(context.Background())
+		newPool.Drain(context.Background())
+		_ = newPool.DrainRelease(context.Background())
+	})
+
+	require.NoError(t, oldPool.WarmUp(context.Background()))
+	oldInventory := rt.snapshotIDs()
+	require.Len(t, oldInventory, 1)
+	require.NoError(t, newPool.WarmUp(context.Background()))
+	assert.Len(t, rt.snapshotIDs(), 2, "overlapping image versions must keep separate warm inventory")
+
+	info, err := oldPool.Acquire(context.Background())
+	require.NoError(t, err)
+	_, reused := oldInventory[info.RuntimeID]
+	assert.True(t, reused, "new replica startup must not invalidate an old replica's pool record")
+	oldPool.Release(context.Background(), info.RuntimeID)
 }

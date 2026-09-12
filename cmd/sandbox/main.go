@@ -300,6 +300,13 @@ func main() {
 		DefaultMountMode:        sandbox.WorkspaceMountType(cfg.Workspace.DefaultMountMode),
 		EnabledMountModes:       make(map[sandbox.WorkspaceMountType]bool, len(cfg.Workspace.EnabledMountModes)),
 	}
+	if cfg.Runtime.Type == "kubernetes" && cfg.Pool.MinSize > 0 {
+		if redisStore == nil {
+			log.Fatal("Kubernetes ordinary pool requires Redis for shared multi-replica inventory")
+		}
+		managerConfig.PoolStateStore = redisStore
+		managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
+	}
 	for _, mode := range cfg.Workspace.EnabledMountModes {
 		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
 	}

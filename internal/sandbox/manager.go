@@ -119,6 +119,8 @@ func multipartKey(sandboxID, uploadID string) string {
 // ManagerConfig configures the SandboxManager.
 type ManagerConfig struct {
 	PoolConfig              PoolConfig
+	PoolStateStore          state.AtomicStore
+	PoolScope               string
 	RuntimeType             string
 	DefaultMountMode        WorkspaceMountType
 	EnabledMountModes       map[WorkspaceMountType]bool
@@ -197,12 +199,16 @@ type Manager struct {
 // NewManager creates a new SandboxManager.
 func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSystemMeta, cfg ManagerConfig) *Manager {
 	controlCtx, cancelControl := context.WithCancel(context.Background())
+	pool := NewPool(rt, cfg.PoolConfig)
+	if cfg.RuntimeType == "kubernetes" {
+		pool.EnableShared(cfg.PoolStateStore, cfg.PoolScope)
+	}
 	m := &Manager{
 		runtime:        rt,
 		filesystem:     fsys,
 		fsMeta:         fsMeta,
 		config:         cfg,
-		pool:           NewPool(rt, cfg.PoolConfig),
+		pool:           pool,
 		fusePool:       cfg.FUSEPool,
 		sandboxes:      make(map[string]*Sandbox),
 		workspaces:     make(map[string]storage.ScopedFS),
@@ -308,6 +314,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	defer span.End()
 
 	fuseEnabled := m.config.EnabledMountModes[WorkspaceMountFUSE]
+	if m.config.RuntimeType == "kubernetes" && m.config.PoolConfig.MinSize > 0 && !m.pool.Shared() {
+		return errors.Join(ErrInvalidOrdinaryPoolConfig, errors.New("Kubernetes warm pool requires a shared state store and scope"))
+	}
 	if fuseEnabled {
 		if m.fusePool == nil {
 			return errors.Join(ErrInvalidFUSEPoolConfig, errors.New("FUSE mode requires a FUSE pool"))
@@ -331,8 +340,22 @@ func (m *Manager) Start(ctx context.Context) error {
 			return fmt.Errorf("reconcile FUSE runtime orphans: %w", err)
 		}
 	}
-	m.cleanupOrphanedPoolContainers(spanCtx)
-	m.pool.WarmUp(spanCtx)
+	if m.pool.Shared() {
+		activeRuntimeIDs := make(map[string]struct{})
+		m.mu.RLock()
+		for _, sb := range m.sandboxes {
+			activeRuntimeIDs[sb.RuntimeID] = struct{}{}
+		}
+		m.mu.RUnlock()
+		if err := m.pool.Reconcile(spanCtx, activeRuntimeIDs); err != nil {
+			return fmt.Errorf("reconcile shared ordinary pool: %w", err)
+		}
+	} else {
+		m.cleanupOrphanedPoolContainers(spanCtx)
+	}
+	if err := m.pool.WarmUp(spanCtx); err != nil {
+		return fmt.Errorf("warm ordinary pool: %w", err)
+	}
 	if fuseEnabled {
 		if err := m.fusePool.Start(spanCtx); err != nil {
 			m.pool.Drain(context.Background())
@@ -584,7 +607,7 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		// Pool finalization may leave policy-only artifacts after Pods disappear.
 		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
 	}
-	m.pool.Drain(ctx)
+	drainErr = errors.Join(drainErr, m.pool.DrainRelease(ctx))
 	if m.config.RuntimeType == "kubernetes" {
 		drainErr = errors.Join(drainErr, m.drainOrphanedOrdinaryPoolContainers(ctx))
 		if reconciler, ok := m.runtime.(runtime.ReleaseOrphanReconciler); ok {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage/state"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
@@ -28,6 +29,7 @@ type PoolConfig struct {
 type Pool struct {
 	runtime runtime.Runtime
 	config  PoolConfig
+	shared  *sharedOrdinaryPool
 
 	mu           sync.Mutex
 	available    []*runtime.SandboxInfo
@@ -54,8 +56,23 @@ func NewPool(rt runtime.Runtime, cfg PoolConfig) *Pool {
 	}
 }
 
+// EnableShared switches this pool to release-scoped durable inventory. It is
+// intended for multi-replica Kubernetes deployments whose Pods outlive an API
+// process. Local Docker/test pools keep the historical in-memory behavior.
+func (p *Pool) EnableShared(store state.AtomicStore, scope string) {
+	if store == nil || scope == "" {
+		return
+	}
+	p.shared = newSharedOrdinaryPool(p, store, scope)
+}
+
+func (p *Pool) Shared() bool { return p.shared != nil }
+
 // WarmUp fills the pool to MinSize.
-func (p *Pool) WarmUp(ctx context.Context) {
+func (p *Pool) WarmUp(ctx context.Context) error {
+	if p.shared != nil {
+		return p.shared.warmUp(ctx)
+	}
 	p.mu.Lock()
 	need := p.config.MinSize - len(p.available)
 	p.mu.Unlock()
@@ -69,6 +86,7 @@ func (p *Pool) WarmUp(ctx context.Context) {
 		p.available = append(p.available, info)
 		p.mu.Unlock()
 	}
+	return nil
 }
 
 // Acquire takes a warm container from the pool. If none available, creates one on-demand.
@@ -76,6 +94,9 @@ func (p *Pool) WarmUp(ctx context.Context) {
 // Records pool hit metrics: hit=true means a warm container was successfully reused;
 // hit=false means an on-demand container was created.
 func (p *Pool) Acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
+	if p.shared != nil {
+		return p.shared.acquire(ctx)
+	}
 	for {
 		p.mu.Lock()
 		if len(p.available) == 0 {
@@ -118,6 +139,9 @@ func (p *Pool) Release(ctx context.Context, id string) {
 
 // Size returns the number of available warm containers.
 func (p *Pool) Size() int {
+	if p.shared != nil {
+		return p.shared.size()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.available)
@@ -129,8 +153,22 @@ func (p *Pool) NotifyRemoved() {
 	p.scheduleRefill()
 }
 
+// Reconcile repairs shared durable inventory and removes only pool runtimes
+// that have no durable owner. Local pools keep the historical manager-owned
+// startup cleanup path.
+func (p *Pool) Reconcile(ctx context.Context, protectedRuntimeIDs map[string]struct{}) error {
+	if p.shared == nil {
+		return nil
+	}
+	return p.shared.reconcile(ctx, protectedRuntimeIDs)
+}
+
 // Drain destroys all warm containers in the pool.
 func (p *Pool) Drain(ctx context.Context) {
+	if p.shared != nil {
+		p.shared.stop()
+		return
+	}
 	p.mu.Lock()
 	if !p.stopping {
 		p.stopping = true
@@ -154,7 +192,21 @@ func (p *Pool) Drain(ctx context.Context) {
 	}
 }
 
+// DrainRelease removes release-wide shared inventory. It must only be called
+// after every serving API replica has been stopped.
+func (p *Pool) DrainRelease(ctx context.Context) error {
+	if p.shared != nil {
+		return p.shared.drainRelease(ctx)
+	}
+	p.Drain(ctx)
+	return nil
+}
+
 func (p *Pool) scheduleRefill() {
+	if p.shared != nil {
+		p.shared.scheduleRefill()
+		return
+	}
 	p.mu.Lock()
 	if p.stopping {
 		p.mu.Unlock()
@@ -171,14 +223,16 @@ func (p *Pool) scheduleRefill() {
 }
 
 func (p *Pool) createWarm(ctx context.Context) (*runtime.SandboxInfo, error) {
+	return p.createWarmWithLabels(ctx, map[string]string{"sandbox.pool": "true"})
+}
+
+func (p *Pool) createWarmWithLabels(ctx context.Context, labels map[string]string) (*runtime.SandboxInfo, error) {
 	id := fmt.Sprintf("sandbox-pool-%s", randSuffix(randSuffixLen))
 
 	spec := runtime.SandboxSpec{
-		ID:    id,
-		Image: p.config.Image,
-		Labels: map[string]string{
-			"sandbox.pool": "true",
-		},
+		ID:             id,
+		Image:          p.config.Image,
+		Labels:         labels,
 		ReadOnlyRootFS: false, // warm containers need writable FS for dependency install
 		RunAsUser:      1000,
 		PidLimit:       100,

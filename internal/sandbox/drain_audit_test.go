@@ -29,6 +29,13 @@ func TestDrainAuditAllowsFUSEPoolMembershipGenerationHistory(t *testing.T) {
 	require.ErrorContains(t, AuditDrainedState(context.Background(), store), "FUSE pool")
 }
 
+func TestDrainAuditRejectsOrdinaryPoolInventory(t *testing.T) {
+	store := newAtomicMemoryStore()
+	require.NoError(t, store.Set(context.Background(), "ordinarypool:v1:scope:key:record:item", []byte("{}"), 0))
+
+	require.ErrorContains(t, AuditDrainedState(context.Background(), store), "ordinary pool")
+}
+
 func TestManagerStopPreservesPersistentAndFinalizesEphemeral(t *testing.T) {
 	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
 	mgr.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))

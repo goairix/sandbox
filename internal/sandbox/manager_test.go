@@ -619,6 +619,42 @@ func TestManagerStartWarmsOnlyOrdinaryPoolWhenFUSEDisabled(t *testing.T) {
 	rt.mu.Unlock()
 }
 
+func TestManagerStartRejectsProcessLocalKubernetesWarmPool(t *testing.T) {
+	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{
+		RuntimeType: "kubernetes",
+		PoolConfig:  PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"},
+	})
+
+	err := mgr.Start(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOrdinaryPoolConfig)
+}
+
+func TestManagersShareKubernetesOrdinaryWarmPool(t *testing.T) {
+	rt := newSharedPoolRuntime()
+	store := newAtomicMemoryStore()
+	cfg := ManagerConfig{
+		RuntimeType:    "kubernetes",
+		PoolConfig:     PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"},
+		PoolStateStore: store,
+		PoolScope:      "sandbox-system",
+	}
+	first := NewManager(rt, nil, nil, cfg)
+	second := NewManager(rt, nil, nil, cfg)
+	require.NoError(t, first.Start(context.Background()))
+	require.NoError(t, second.Start(context.Background()))
+	t.Cleanup(func() {
+		first.Stop(context.Background())
+		second.Stop(context.Background())
+		_ = first.pool.DrainRelease(context.Background())
+	})
+
+	assert.Len(t, rt.snapshotIDs(), 1)
+	sandbox, err := second.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
+	require.NoError(t, err)
+	assert.NotEmpty(t, sandbox.RuntimeID)
+	require.NoError(t, second.Destroy(context.Background(), sandbox.ID))
+}
+
 func TestCleanupOrphanedOrdinaryPoolSkipsFUSEPoolRuntimes(t *testing.T) {
 	rt := newMockRuntime()
 	rt.listedSandboxes = []runtime.SandboxInfo{

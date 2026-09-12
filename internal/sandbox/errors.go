@@ -15,6 +15,10 @@ var (
 	// boundary failed and the runtime plus ownership state were retained.
 	ErrSandboxCleanupPending = errors.New("sandbox cleanup pending")
 
+	// ErrInvalidOrdinaryPoolConfig prevents a multi-replica Kubernetes pool
+	// from silently falling back to process-local inventory.
+	ErrInvalidOrdinaryPoolConfig = errors.New("invalid ordinary pool configuration")
+
 	// ErrWorkspaceAlreadyMounted is returned when a workspace is already
 	// mounted for a sandbox.
 	ErrWorkspaceAlreadyMounted = errors.New("workspace already mounted")
