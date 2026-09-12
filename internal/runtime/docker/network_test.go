@@ -2,14 +2,82 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	dnetwork "github.com/docker/docker/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
+
+func TestCleanupStaleEmptySandboxNetworksOnlyRemovesOwnedEmptyNetworks(t *testing.T) {
+	_, fake := newFakeDockerRuntime(t)
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	fake.networks = map[string]dnetwork.Inspect{
+		"stale": {
+			ID: "stale", Name: pairNetworkPrefix + "stale", Created: now.Add(-6 * time.Minute),
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{},
+		},
+		"fresh": {
+			ID: "fresh", Name: pairNetworkPrefix + "fresh", Created: now.Add(-time.Minute),
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{},
+		},
+		"attached": {
+			ID: "attached", Name: pairNetworkPrefix + "attached", Created: now.Add(-time.Hour),
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{"container": {}},
+		},
+		"unowned": {
+			ID: "unowned", Name: pairNetworkPrefix + "unowned", Created: now.Add(-time.Hour),
+			Containers: map[string]dnetwork.EndpointResource{},
+		},
+		"other": {
+			ID: "other", Name: "application-network", Created: now.Add(-time.Hour),
+			Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{},
+		},
+	}
+
+	removed, err := cleanupStaleEmptySandboxNetworks(context.Background(), fake, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	_, staleExists := fake.networks["stale"]
+	assert.False(t, staleExists)
+	for _, id := range []string{"fresh", "attached", "unowned", "other"} {
+		_, exists := fake.networks[id]
+		assert.True(t, exists, "%s must be preserved", id)
+	}
+}
+
+func TestCreateManagedPairNetworkRetriesOnceAfterAddressPoolExhaustion(t *testing.T) {
+	_, fake := newFakeDockerRuntime(t)
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	fake.networks["stale"] = dnetwork.Inspect{
+		ID: "stale", Name: pairNetworkPrefix + "stale", Created: now.Add(-time.Hour),
+		Labels: map[string]string{"sandbox.managed": "true"}, Containers: map[string]dnetwork.EndpointResource{},
+	}
+	fake.networkCreateErrors = []error{errors.New("could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network"), nil}
+
+	response, err := createManagedPairNetwork(context.Background(), fake, pairNetworkPrefix+"new", dnetwork.CreateOptions{
+		Driver: "bridge", Labels: map[string]string{"sandbox.managed": "true"},
+	}, now)
+	require.NoError(t, err)
+	assert.NotEmpty(t, response.ID)
+	assert.Equal(t, 2, fake.networkCreateCalls)
+	_, staleExists := fake.networks["stale"]
+	assert.False(t, staleExists)
+}
+
+func TestCreateManagedPairNetworkDoesNotRetryOtherErrors(t *testing.T) {
+	_, fake := newFakeDockerRuntime(t)
+	fake.networkCreateErrors = []error{errors.New("permission denied")}
+
+	_, err := createManagedPairNetwork(context.Background(), fake, pairNetworkPrefix+"new", dnetwork.CreateOptions{}, time.Now())
+	require.ErrorContains(t, err, "permission denied")
+	assert.Equal(t, 1, fake.networkCreateCalls)
+}
 
 func TestFUSEPairNetworkExplicitlyDisablesIPv6(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)

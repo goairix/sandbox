@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -40,10 +41,10 @@ func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNe
 	}
 	pairNetName := dockerFUSEPairNetworkName(sandboxID)
 	ipv6Disabled := false
-	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
+	netResp, err := createManagedPairNetwork(ctx, cli, pairNetName, dnetwork.CreateOptions{
 		Driver: "bridge", Attachable: true, EnableIPv6: &ipv6Disabled,
 		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID, "sandbox.role": "fuse-pair", dockerSecretRootLabel: secretRoot, dockerCASecretKeyLabel: caSecretKey},
-	})
+	}, time.Now())
 	if err != nil {
 		return "", "", "", fmt.Errorf("create FUSE pair network: %w", err)
 	}
@@ -366,14 +367,14 @@ func createSandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetwor
 	// Not marked as internal so Docker's embedded DNS (127.0.0.11) can resolve
 	// external domains. Network isolation is enforced by routing all traffic
 	// through the gateway via ip route replace.
-	netResp, err := cli.NetworkCreate(ctx, pairNetName, dnetwork.CreateOptions{
+	netResp, err := createManagedPairNetwork(ctx, cli, pairNetName, dnetwork.CreateOptions{
 		Driver:     "bridge",
 		Attachable: true,
 		Labels: map[string]string{
 			"sandbox.managed": "true",
 			"sandbox.id":      sandboxID,
 		},
-	})
+	}, time.Now())
 	if err != nil {
 		return "", "", "", fmt.Errorf("create pair network: %w", err)
 	}
@@ -759,43 +760,51 @@ func resolveFUSEWhitelist(entries []string) ([]string, error) {
 	return canonicalDockerStrings(resolved), nil
 }
 
-// cleanupOrphanedResources cleans up leftover gateway containers, pair networks,
-// and old networks from previous runs (crash recovery).
-func cleanupOrphanedResources(ctx context.Context, cli dockerAPI) error {
-	// Clean up orphaned gateway containers
-	gwContainers, err := cli.ContainerList(ctx, container.ListOptions{
-		All: true,
-		Filters: filters.NewArgs(
-			filters.Arg("label", "sandbox.role=gateway"),
-			filters.Arg("label", "sandbox.managed=true"),
-		),
-	})
-	if err == nil {
-		for _, gw := range gwContainers {
-			_ = cli.ContainerRemove(ctx, gw.ID, container.RemoveOptions{Force: true})
-		}
-	}
+const staleSandboxNetworkAge = 5 * time.Minute
 
-	// Clean up orphaned pair networks and old networks
-	networks, err := cli.NetworkList(ctx, dnetwork.ListOptions{})
+func cleanupStaleEmptySandboxNetworks(ctx context.Context, cli dockerAPI, now time.Time) (int, error) {
+	networks, err := cli.NetworkList(ctx, dnetwork.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "sandbox.managed=true"))})
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("list managed sandbox networks: %w", err)
 	}
+	removed := 0
 	for _, n := range networks {
-		shouldClean := strings.HasPrefix(n.Name, pairNetworkPrefix) ||
-			strings.HasPrefix(n.Name, "sandbox-net-") || // old per-sandbox networks
-			n.Name == "sandbox-network" // pre-refactoring network
-
-		if shouldClean {
-			inspect, inspectErr := cli.NetworkInspect(ctx, n.ID, dnetwork.InspectOptions{})
-			if inspectErr != nil {
+		if n.Labels["sandbox.managed"] != "true" || !isSandboxPairNetworkName(n.Name) {
+			continue
+		}
+		inspect, inspectErr := cli.NetworkInspect(ctx, n.ID, dnetwork.InspectOptions{})
+		if inspectErr != nil {
+			if dockerclient.IsErrNotFound(inspectErr) {
 				continue
 			}
-			if len(inspect.Containers) == 0 {
-				_ = cli.NetworkRemove(ctx, n.ID)
-			}
+			return removed, fmt.Errorf("inspect managed sandbox network %s: %w", n.Name, inspectErr)
 		}
+		if inspect.Labels["sandbox.managed"] != "true" || !isSandboxPairNetworkName(inspect.Name) || inspect.Created.IsZero() || now.Sub(inspect.Created) < staleSandboxNetworkAge || len(inspect.Containers) != 0 {
+			continue
+		}
+		if removeErr := cli.NetworkRemove(ctx, inspect.ID); removeErr != nil && !dockerclient.IsErrNotFound(removeErr) {
+			return removed, fmt.Errorf("remove stale sandbox network %s: %w", inspect.Name, removeErr)
+		}
+		removed++
 	}
+	return removed, nil
+}
 
-	return nil
+func isSandboxPairNetworkName(name string) bool {
+	return strings.HasPrefix(name, pairNetworkPrefix) || strings.HasPrefix(name, "sandbox-net-") || name == "sandbox-network"
+}
+
+func createManagedPairNetwork(ctx context.Context, cli dockerAPI, name string, options dnetwork.CreateOptions, now time.Time) (dnetwork.CreateResponse, error) {
+	response, err := cli.NetworkCreate(ctx, name, options)
+	if err == nil || !isDockerAddressPoolExhausted(err) {
+		return response, err
+	}
+	if _, cleanupErr := cleanupStaleEmptySandboxNetworks(ctx, cli, now); cleanupErr != nil {
+		return dnetwork.CreateResponse{}, errors.Join(err, cleanupErr)
+	}
+	return cli.NetworkCreate(ctx, name, options)
+}
+
+func isDockerAddressPoolExhausted(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "could not find an available, non-overlapping IPv4 address pool")
 }

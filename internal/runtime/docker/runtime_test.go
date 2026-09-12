@@ -744,6 +744,9 @@ type fakeDockerAPI struct {
 	lastExecPipeUID          int
 	lastExecPipeGID          int
 	networkCreateOptions     map[string]dnetwork.CreateOptions
+	networkCreateErrors      []error
+	networkCreateCalls       int
+	networkRemoveErr         error
 	rootGatewayCommands      []string
 	routeControls            []container.ExecOptions
 	materializedSecrets      []string
@@ -1092,9 +1095,17 @@ func (f *fakeDockerAPI) CopyToContainer(_ context.Context, _ string, _ string, r
 func (f *fakeDockerAPI) NetworkCreate(_ context.Context, name string, opts dnetwork.CreateOptions) (dnetwork.CreateResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.networkCreateCalls++
+	if len(f.networkCreateErrors) != 0 {
+		err := f.networkCreateErrors[0]
+		f.networkCreateErrors = f.networkCreateErrors[1:]
+		if err != nil {
+			return dnetwork.CreateResponse{}, err
+		}
+	}
 	id := "network-" + name
 	f.networks[id] = dnetwork.Inspect{
-		ID: id, Name: name, Labels: opts.Labels,
+		ID: id, Name: name, Created: time.Now(), Labels: opts.Labels,
 		IPAM: dnetwork.IPAM{Config: []dnetwork.IPAMConfig{{Subnet: "172.20.0.0/16", Gateway: "172.20.0.1"}}},
 	}
 	f.networkCreateOptions[name] = opts
@@ -1142,6 +1153,9 @@ func (f *fakeDockerAPI) NetworkDisconnect(context.Context, string, string, bool)
 func (f *fakeDockerAPI) NetworkRemove(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.networkRemoveErr != nil {
+		return f.networkRemoveErr
+	}
 	for key, item := range f.networks {
 		if key == id || item.Name == id {
 			delete(f.networks, key)
