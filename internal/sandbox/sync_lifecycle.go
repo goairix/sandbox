@@ -168,6 +168,14 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	}
 	lifecycle.finalizeMu.Lock()
 	defer lifecycle.finalizeMu.Unlock()
+	if lifecycle.controller != nil {
+		if err := lifecycle.controller.Fence(ctx); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+	}
+	if err := m.beginActiveCleanup(ctx, lifecycle.sandboxID); err != nil {
+		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain distributed sandbox operations: %w", err))
+	}
 	if err := lifecycle.gate.CloseAndWait(ctx); err != nil {
 		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain sync sandbox operations: %w", err))
 	}
@@ -207,6 +215,11 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		exclude = append([]string(nil), sb.Workspace.SyncExclude...)
 	}
 	if !lifecycle.finalSyncDone && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralFinalizing) {
+		if lifecycle.controller != nil {
+			if err := lifecycle.controller.Fence(ctx); err != nil {
+				return errors.Join(ErrSandboxCleanupPending, err)
+			}
+		}
 		if err := m.syncFromContainer(ctx, sb.ID, sb.RuntimeID, exclude); err != nil {
 			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("final sync from container: %w", err))
 		}
@@ -220,6 +233,11 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		lifecycle.ephemeralRecord = next
 	}
 	if !lifecycle.runtimeRemoved && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime) {
+		if lifecycle.controller != nil {
+			if err := lifecycle.controller.Fence(ctx); err != nil {
+				return errors.Join(ErrSandboxCleanupPending, err)
+			}
+		}
 		if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
 			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove sandbox: %w", err))
 		}
@@ -239,6 +257,11 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		lifecycle.renewal.Stop()
 	}
 	if lifecycle.lease != nil {
+		if lifecycle.controller != nil {
+			if err := lifecycle.controller.Fence(ctx); err != nil {
+				return errors.Join(ErrSandboxCleanupPending, err)
+			}
+		}
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, runtime.TerminationEvidence{}); err != nil {
 			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("release workspace lease: %w", err))
 		}
@@ -254,11 +277,26 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		delete(m.sandboxes, sb.ID)
 	}
 	m.mu.Unlock()
+	if lifecycle.controller != nil {
+		if err := lifecycle.controller.Fence(ctx); err != nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+	}
+	if err := m.completeActiveSandboxCleanup(ctx, sb.ID); err != nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	if lifecycle.controller != nil {
+		_ = lifecycle.controller.Stop(context.WithoutCancel(ctx))
+	}
 	m.pool.NotifyRemoved()
 	return nil
 }
 
 func (m *Manager) restoreSyncSandbox(ctx context.Context, sb *Sandbox) error {
+	return m.restoreSyncSandboxWithController(ctx, sb, nil)
+}
+
+func (m *Manager) restoreSyncSandboxWithController(ctx context.Context, sb *Sandbox, controller *activeController) error {
 	if sb == nil || sb.Workspace == nil || m.config.WorkspaceCoordinator == nil || m.fsMeta == nil {
 		return ErrSandboxNotReady
 	}
@@ -286,6 +324,17 @@ func (m *Manager) restoreSyncSandbox(ctx context.Context, sb *Sandbox) error {
 	}
 	gate := newOperationGate(true)
 	lifecycle := &syncSandboxLifecycle{sandboxID: sb.ID, gate: gate, lease: lease}
+	m.bindSyncController(lifecycle, controller)
+	if sb.Config.Mode == ModeEphemeral {
+		if m.ephemeral == nil {
+			return ErrSandboxNotReady
+		}
+		ephemeralRecord, loadErr := m.ephemeral.Load(ctx, sb.ID)
+		if loadErr != nil {
+			return fmt.Errorf("load ephemeral sync lifecycle: %w", loadErr)
+		}
+		lifecycle.ephemeralRecord = ephemeralRecord
+	}
 	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, func(lost error) {
 		m.markSyncLeaseLost(lifecycle, lost)
 	})

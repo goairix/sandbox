@@ -323,7 +323,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		if direction == "to_container" {
 			// A FUSE workspace is already the container's live workspace. Copying
 			// object storage into it would bypass the mount protocol.
-			_, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+			_, _, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 			if err != nil {
 				return err
 			}
@@ -333,10 +333,11 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 		return m.flushFUSEWorkspace(ctx, sandboxID)
 	}
 
-	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	sb, operationCtx, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
+	ctx = operationCtx
 	defer release()
 	m.mu.RLock()
 	runtimeID := sb.RuntimeID
@@ -515,7 +516,7 @@ func fuseWorkspaceGenerationMatches(sb *Sandbox, ref runtime.RuntimeRef, generat
 
 // GetWorkspaceInfo returns workspace info for a sandbox.
 func (m *Manager) GetWorkspaceInfo(ctx context.Context, sandboxID string) (*WorkspaceInfo, error) {
-	sb, release, err := m.acquireSandboxOperation(ctx, sandboxID)
+	sb, _, release, err := m.acquireSandboxOperation(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}

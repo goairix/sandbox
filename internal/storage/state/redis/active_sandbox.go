@@ -17,9 +17,19 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
-const activeSandboxKeyPrefix = "sandbox:active:v1:"
+const (
+	activeSandboxKeyPrefix = "sandbox:active:v1:"
+	activeSandboxBuckets   = 16
+)
 
 var activeSandboxIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+var publishActiveSandboxScript = redislib.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SADD', KEYS[2], ARGV[2])
+return 1
+`)
 
 var changeActiveRecordScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
@@ -96,7 +106,7 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
 local won = 0
-if record.phase == 'active' then
+if record.phase == 'active' or record.phase == 'publishing' then
   record.phase = 'destroying'
   record.revision = tonumber(record.revision) + 1
   record.updated_at = ARGV[1]
@@ -142,6 +152,7 @@ if tonumber(record.revision) ~= tonumber(ARGV[1]) or tonumber(record.generation)
 if record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending' then return 0 end
 if redis.call('ZCARD', KEYS[2]) ~= 0 then return 0 end
 redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
+redis.call('SREM', KEYS[5], ARGV[3])
 return 1
 `)
 
@@ -149,7 +160,7 @@ var acquireActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if (record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 local lease = cjson.decode(ARGV[1])
@@ -163,7 +174,7 @@ var renewActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if (record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local current = redis.call('GET', KEYS[2])
 if not current then return {2} end
 local lease = cjson.decode(current)
@@ -186,7 +197,7 @@ return 1
 `)
 
 type activeSandboxKeys struct {
-	record, operations, mutation, controller string
+	record, operations, mutation, controller, index string
 }
 
 type ActiveSandboxRepository struct {
@@ -203,9 +214,19 @@ func NewActiveSandboxRepository(store *Store, scope string) (*ActiveSandboxRepos
 }
 
 func (r *ActiveSandboxRepository) keys(id string) activeSandboxKeys {
-	tag := "{" + r.scopeDigest + ":" + id + "}"
-	base := activeSandboxKeyPrefix + tag
-	return activeSandboxKeys{record: base + ":record", operations: base + ":operations", mutation: base + ":mutation", controller: base + ":controller"}
+	bucket := activeSandboxBucket(id)
+	tag := fmt.Sprintf("{%s:%02x}", r.scopeDigest, bucket)
+	base := activeSandboxKeyPrefix + tag + ":" + id
+	return activeSandboxKeys{
+		record: base + ":record", operations: base + ":operations",
+		mutation: base + ":mutation", controller: base + ":controller",
+		index: activeSandboxKeyPrefix + tag + ":index",
+	}
+}
+
+func activeSandboxBucket(id string) uint8 {
+	sum := sha256.Sum256([]byte(id))
+	return sum[0] % activeSandboxBuckets
 }
 
 func (r *ActiveSandboxRepository) validateID(id string) error {
@@ -223,11 +244,12 @@ func (r *ActiveSandboxRepository) Publish(ctx context.Context, record state.Acti
 	if err != nil {
 		return err
 	}
-	ok, err := r.store.client.SetNX(ctx, r.keys(record.SandboxID).record, raw, 0).Result()
+	k := r.keys(record.SandboxID)
+	ok, err := publishActiveSandboxScript.Run(ctx, r.store.client, []string{k.record, k.index}, raw, record.SandboxID).Int64()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if ok != 1 {
 		return state.ErrActiveSandboxConflict
 	}
 	return r.store.acknowledgeSafetyWrite(ctx)
@@ -451,7 +473,7 @@ func (r *ActiveSandboxRepository) Delete(ctx context.Context, id string, revisio
 		return state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(id)
-	ok, err := deleteActiveSandboxScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation, k.controller}, revision, generation).Int64()
+	ok, err := deleteActiveSandboxScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation, k.controller, k.index}, revision, generation, id).Int64()
 	if err != nil {
 		return err
 	}
@@ -546,20 +568,33 @@ func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count
 	if count <= 0 || count > 1000 {
 		return state.ActiveSandboxPage{}, state.ErrActiveSandboxCorrupt
 	}
-	keys, next, err := r.store.client.Scan(ctx, cursor, activeSandboxKeyPrefix+"{"+r.scopeDigest+":*}:record", count).Result()
+	bucket, innerCursor, err := decodeActiveScanCursor(cursor)
 	if err != nil {
 		return state.ActiveSandboxPage{}, err
 	}
-	page := state.ActiveSandboxPage{Cursor: next, Records: make([]state.ActiveSandboxRecord, 0, len(keys))}
-	for _, key := range keys {
-		raw, getErr := r.store.client.Get(ctx, key).Bytes()
+	indexKey := activeSandboxKeyPrefix + fmt.Sprintf("{%s:%02x}:index", r.scopeDigest, bucket)
+	ids, next, err := r.store.client.SScan(ctx, indexKey, innerCursor, "*", count).Result()
+	if err != nil {
+		return state.ActiveSandboxPage{}, err
+	}
+	page := state.ActiveSandboxPage{Records: make([]state.ActiveSandboxRecord, 0, len(ids))}
+	if next != 0 {
+		page.Cursor = encodeActiveScanCursor(bucket, next)
+	} else if bucket+1 < activeSandboxBuckets {
+		page.Cursor = encodeActiveScanCursor(bucket+1, 0)
+	}
+	for _, id := range ids {
+		if r.validateID(id) != nil {
+			return state.ActiveSandboxPage{}, state.ErrActiveSandboxCorrupt
+		}
+		raw, getErr := r.store.client.Get(ctx, r.keys(id).record).Bytes()
 		if errors.Is(getErr, redislib.Nil) {
+			_ = r.store.client.SRem(ctx, indexKey, id).Err()
 			continue
 		}
 		if getErr != nil {
 			return state.ActiveSandboxPage{}, getErr
 		}
-		id := activeIDFromRecordKey(key)
 		record, decodeErr := decodeActiveRecord(raw, id)
 		if decodeErr != nil {
 			return state.ActiveSandboxPage{}, decodeErr
@@ -569,18 +604,19 @@ func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count
 	return page, nil
 }
 
-func activeIDFromRecordKey(key string) string {
-	start := strings.IndexByte(key, '{')
-	end := strings.IndexByte(key, '}')
-	if start < 0 || end <= start {
-		return ""
+func encodeActiveScanCursor(bucket uint8, cursor uint64) uint64 {
+	return cursor<<8 | uint64(bucket+1)
+}
+
+func decodeActiveScanCursor(encoded uint64) (uint8, uint64, error) {
+	if encoded == 0 {
+		return 0, 0, nil
 	}
-	tag := key[start+1 : end]
-	colon := strings.IndexByte(tag, ':')
-	if colon < 0 {
-		return ""
+	bucket := uint8(encoded&0xff) - 1
+	if bucket >= activeSandboxBuckets {
+		return 0, 0, state.ErrActiveSandboxCorrupt
 	}
-	return tag[colon+1:]
+	return bucket, encoded >> 8, nil
 }
 
 func (r *ActiveSandboxRepository) Ping(ctx context.Context) error {
@@ -589,7 +625,12 @@ func (r *ActiveSandboxRepository) Ping(ctx context.Context) error {
 
 func (r *ActiveSandboxRepository) forceDelete(ctx context.Context, id string) error {
 	k := r.keys(id)
-	return r.store.client.Del(ctx, k.record, k.operations, k.mutation, k.controller).Err()
+	_, err := r.store.client.TxPipelined(ctx, func(pipe redislib.Pipeliner) error {
+		pipe.Del(ctx, k.record, k.operations, k.mutation, k.controller)
+		pipe.SRem(ctx, k.index, id)
+		return nil
+	})
+	return err
 }
 
 func scriptInt(result []any, index int) (int64, error) {

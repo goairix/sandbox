@@ -1062,7 +1062,7 @@ func (r *FUSEPoolRepository) ConfirmCleanupTermination(ctx context.Context, prep
 	}
 	if !validOpaqueID(preparationID) || !validOpaqueID(runtimeID) || !validOpaqueID(runtimeUID) ||
 		cleanupToken == "" || !utf8.ValidString(cleanupToken) || expectedRevision == 0 ||
-		!validFUSEPoolTerminationEvidence(evidence, runtimeUID) {
+		!validFUSEPoolTerminationEvidence(evidence, evidence.RuntimeUID) {
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	rawEvidence, err := json.Marshal(evidence)

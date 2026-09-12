@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ type memoryActiveRepository struct {
 	records     map[string]state.ActiveSandboxRecord
 	ops         map[string]map[string]state.ActiveSandboxOperation
 	controllers map[string]state.ActiveSandboxControllerLease
+	renewals    int
+	renewErr    error
 }
 
 func newMemoryActiveRepository() *memoryActiveRepository {
@@ -99,12 +102,16 @@ func (r *memoryActiveRepository) BeginOperation(_ context.Context, id, token str
 func (r *memoryActiveRepository) RenewOperation(_ context.Context, op state.ActiveSandboxOperation, ttl time.Duration) (*state.ActiveSandboxOperation, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.renewErr != nil {
+		return nil, r.renewErr
+	}
 	current, ok := r.ops[op.SandboxID][op.Token]
 	if !ok || current.Generation != op.Generation {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
 	current.ExpiresAt = time.Now().Add(ttl)
 	r.ops[op.SandboxID][op.Token] = current
+	r.renewals++
 	return &current, nil
 }
 func (r *memoryActiveRepository) EndOperation(_ context.Context, op state.ActiveSandboxOperation) error {
@@ -191,7 +198,13 @@ func (r *memoryActiveRepository) ReleaseController(_ context.Context, lease stat
 	return nil
 }
 func (r *memoryActiveRepository) Scan(_ context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
-	return state.ActiveSandboxPage{}, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	records := make([]state.ActiveSandboxRecord, 0, len(r.records))
+	for _, record := range r.records {
+		records = append(records, record)
+	}
+	return state.ActiveSandboxPage{Records: records}, nil
 }
 func (r *memoryActiveRepository) Ping(context.Context) error { return nil }
 
@@ -242,4 +255,123 @@ func TestKubernetesDistributedDestroyRemovesOrdinarySandboxCreatedByPeer(t *test
 	info, err := rt.GetSandbox(context.Background(), sb.RuntimeID)
 	require.NoError(t, err)
 	assert.Nil(t, info)
+}
+
+func TestLifecycleControllerLeaseTransfersWithoutDuplicateOwner(t *testing.T) {
+	rt := newMockRuntime()
+	repository := newMemoryActiveRepository()
+	cfg := ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repository, InstanceID: "api-a", PoolConfig: PoolConfig{Image: "sandbox:latest"}, ControllerTTL: time.Second, ControllerRenewInterval: 100 * time.Millisecond}
+	first := NewManager(rt, nil, nil, cfg)
+	cfg.InstanceID = "api-b"
+	second := NewManager(rt, nil, nil, cfg)
+	sb, err := first.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, Network: NetworkConfig{Enabled: true}})
+	require.NoError(t, err)
+
+	firstController, acquired, err := first.acquireActiveController(context.Background(), sb)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	_, acquired, err = second.acquireActiveController(context.Background(), sb)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	require.NoError(t, firstController.Stop(context.Background()))
+	secondController, acquired, err := second.acquireActiveController(context.Background(), sb)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NoError(t, secondController.Fence(context.Background()))
+	require.NoError(t, secondController.Stop(context.Background()))
+}
+
+func TestDistributedOperationRenewsUntilReleased(t *testing.T) {
+	rt := newMockRuntime()
+	repository := newMemoryActiveRepository()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		RuntimeType: "kubernetes", ActiveSandboxes: repository, InstanceID: "api-a",
+		PoolConfig: PoolConfig{Image: "sandbox:latest"}, ActiveOperationTTL: 90 * time.Millisecond,
+		OperationRenewInterval: 20 * time.Millisecond,
+	})
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, Network: NetworkConfig{Enabled: true}})
+	require.NoError(t, err)
+
+	_, operationCtx, release, err := mgr.acquireSandboxOperation(context.Background(), sb.ID)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		repository.mu.Lock()
+		defer repository.mu.Unlock()
+		return repository.renewals >= 2
+	}, time.Second, 10*time.Millisecond)
+	release()
+	assert.ErrorIs(t, operationCtx.Err(), context.Canceled)
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	assert.Empty(t, repository.ops[sb.ID])
+}
+
+func TestDistributedOperationCancelsWhenRenewalCannotBeConfirmed(t *testing.T) {
+	rt := newMockRuntime()
+	repository := newMemoryActiveRepository()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{
+		RuntimeType: "kubernetes", ActiveSandboxes: repository, InstanceID: "api-a",
+		PoolConfig: PoolConfig{Image: "sandbox:latest"}, ActiveOperationTTL: 90 * time.Millisecond,
+		OperationRenewInterval: 20 * time.Millisecond,
+	})
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, Network: NetworkConfig{Enabled: true}})
+	require.NoError(t, err)
+	repository.mu.Lock()
+	repository.renewErr = errors.New("redis unavailable")
+	repository.mu.Unlock()
+
+	_, operationCtx, release, err := mgr.acquireSandboxOperation(context.Background(), sb.ID)
+	require.NoError(t, err)
+	defer release()
+	require.Eventually(t, func() bool { return operationCtx.Err() != nil }, time.Second, 10*time.Millisecond)
+	assert.ErrorIs(t, context.Cause(operationCtx), ErrSandboxNotReady)
+}
+
+func TestDistributedReleaseDrainRemovesOrdinarySandboxesOutsideLocalReplica(t *testing.T) {
+	rt := newMockRuntime()
+	repository := newMemoryActiveRepository()
+	cfg := ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repository, InstanceID: "api-a", PoolConfig: PoolConfig{Image: "sandbox:latest"}}
+	creator := NewManager(rt, nil, nil, cfg)
+	sb, err := creator.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, Network: NetworkConfig{Enabled: true}})
+	require.NoError(t, err)
+	cfg.InstanceID = "drain-job"
+	drainer := NewManager(rt, nil, nil, cfg)
+	require.NoError(t, drainer.DrainRelease(context.Background()))
+	record, err := repository.Load(context.Background(), sb.ID)
+	require.NoError(t, err)
+	assert.Nil(t, record)
+	info, err := rt.GetSandbox(context.Background(), sb.RuntimeID)
+	require.NoError(t, err)
+	assert.Nil(t, info)
+}
+
+func TestDistributedManagerStopDoesNotDestroySandboxLifecycles(t *testing.T) {
+	for _, mountType := range []WorkspaceMountType{WorkspaceMountSync, WorkspaceMountFUSE} {
+		t.Run(string(mountType), func(t *testing.T) {
+			rt := newMockRuntime()
+			info, err := rt.CreateSandbox(context.Background(), runtime.SandboxSpec{ID: "runtime-" + string(mountType)})
+			require.NoError(t, err)
+			mgr := NewManager(rt, nil, nil, ManagerConfig{
+				RuntimeType: "kubernetes", ActiveSandboxes: newMemoryActiveRepository(),
+				InstanceID: "api-a", PoolConfig: PoolConfig{Image: "sandbox:latest"},
+			})
+			sb := &Sandbox{ID: "sandbox-" + string(mountType), RuntimeID: info.RuntimeID, RuntimeUID: info.RuntimeUID,
+				Config: SandboxConfig{Mode: ModeEphemeral}, Workspace: &WorkspaceInfo{MountType: mountType}}
+			gate := newOperationGate(true)
+			mgr.sandboxes[sb.ID] = sb
+			mgr.operationGates[sb.ID] = gate
+			if mountType == WorkspaceMountSync {
+				mgr.syncLifecycles[sb.ID] = &syncSandboxLifecycle{sandboxID: sb.ID, gate: gate, ephemeralRecord: &EphemeralLifecycleRecord{}}
+			} else {
+				_, cancel := context.WithCancel(context.Background())
+				mgr.fuseLifecycles[sb.ID] = &fuseSandboxLifecycle{sandboxID: sb.ID, sandbox: sb, gate: gate, cancel: cancel, ephemeralRecord: &EphemeralLifecycleRecord{}}
+			}
+
+			require.NoError(t, mgr.Stop(context.Background()))
+			remaining, err := rt.GetSandbox(context.Background(), info.RuntimeID)
+			require.NoError(t, err)
+			require.NotNil(t, remaining)
+			_ = rt.RemoveSandbox(context.Background(), info.RuntimeID)
+		})
+	}
 }

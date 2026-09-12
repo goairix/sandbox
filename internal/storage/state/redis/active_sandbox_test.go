@@ -50,8 +50,8 @@ func TestActiveSandboxRepositoryPublishActivateAndKeySlot(t *testing.T) {
 	assert.Equal(t, uint64(2), active.Revision)
 
 	keys := repo.keys(record.SandboxID)
-	tag := "{" + repo.scopeDigest + ":" + record.SandboxID + "}"
-	for _, key := range []string{keys.record, keys.operations, keys.mutation, keys.controller} {
+	tag := fmt.Sprintf("{%s:%02x}", repo.scopeDigest, activeSandboxBucket(record.SandboxID))
+	for _, key := range []string{keys.record, keys.operations, keys.mutation, keys.controller, keys.index} {
 		assert.Contains(t, key, tag)
 	}
 }
@@ -93,6 +93,20 @@ func TestActiveSandboxRepositoryOperationAndDestroyFencing(t *testing.T) {
 	assert.Nil(t, loaded)
 }
 
+func TestActiveSandboxRepositoryCanFenceAbandonedPublishingRecord(t *testing.T) {
+	repo, _ := activeRepositoryForTest(t)
+	ctx := context.Background()
+	record := activeRecordForTest("sandbox-abandoned-publish")
+	require.NoError(t, repo.Publish(ctx, record))
+	t.Cleanup(func() { _ = repo.forceDelete(context.Background(), record.SandboxID) })
+
+	destroying, live, won, err := repo.BeginDestroy(ctx, record.SandboxID)
+	require.NoError(t, err)
+	assert.True(t, won)
+	assert.Zero(t, live)
+	assert.Equal(t, state.ActiveSandboxDestroying, destroying.Phase)
+}
+
 func TestActiveSandboxRepositoryExpiresOperationsAndFencesGeneration(t *testing.T) {
 	repo, _ := activeRepositoryForTest(t)
 	ctx := context.Background()
@@ -123,11 +137,18 @@ func TestActiveSandboxRepositoryControllerAndScan(t *testing.T) {
 	}
 	page, err := repo.Scan(ctx, 0, 2)
 	require.NoError(t, err)
-	for len(page.Records) == 0 && page.Cursor != 0 {
+	seen := make(map[string]bool)
+	for _, record := range page.Records {
+		seen[record.SandboxID] = true
+	}
+	for page.Cursor != 0 {
 		page, err = repo.Scan(ctx, page.Cursor, 2)
 		require.NoError(t, err)
+		for _, record := range page.Records {
+			seen[record.SandboxID] = true
+		}
 	}
-	assert.NotEmpty(t, page.Records)
+	assert.Len(t, seen, 3)
 
 	now := time.Now().UTC()
 	lease := state.ActiveSandboxControllerLease{SandboxID: "sandbox-scan-0", Token: "controller-a", InstanceID: "api-a", PodUID: "pod-a", Generation: 1, ExpiresAt: now.Add(time.Second)}

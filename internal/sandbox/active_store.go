@@ -16,13 +16,24 @@ import (
 
 const (
 	activeSandboxRecordVersion = 1
-	activeOperationTTL         = 30 * time.Second
+	defaultActiveOperationTTL  = 30 * time.Second
 	activeOperationEndTimeout  = 2 * time.Second
-	activeControllerTTL        = 15 * time.Second
 )
 
 func (m *Manager) distributedStateEnabled() bool {
 	return m.config.RuntimeType == "kubernetes" && m.activeSandboxes != nil
+}
+
+func (m *Manager) activeOperationDurations() (time.Duration, time.Duration) {
+	ttl := m.config.ActiveOperationTTL
+	if ttl <= 0 {
+		ttl = defaultActiveOperationTTL
+	}
+	interval := m.config.OperationRenewInterval
+	if interval <= 0 || interval >= ttl {
+		interval = ttl / 3
+	}
+	return ttl, interval
 }
 
 func marshalActiveSandbox(sb *Sandbox) ([]byte, error) {
@@ -59,12 +70,17 @@ func decodeActiveSandboxPhase(record *state.ActiveSandboxRecord, expectedID stri
 }
 
 func (m *Manager) publishActiveSandbox(ctx context.Context, sb *Sandbox) error {
+	_, err := m.publishActiveSandboxState(ctx, sb, false)
+	return err
+}
+
+func (m *Manager) publishActiveSandboxState(ctx context.Context, sb *Sandbox, claimController bool) (*activeController, error) {
 	if !m.distributedStateEnabled() {
-		return nil
+		return nil, nil
 	}
 	snapshot, err := marshalActiveSandbox(sb)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	now := time.Now().UTC()
 	record := state.ActiveSandboxRecord{
@@ -78,34 +94,52 @@ func (m *Manager) publishActiveSandbox(ctx context.Context, sb *Sandbox) error {
 		if loadErr != nil || current == nil || current.Phase != state.ActiveSandboxPublishing ||
 			current.Generation != record.Generation || current.RuntimeID != record.RuntimeID ||
 			current.RuntimeUID != record.RuntimeUID || !bytes.Equal(current.Snapshot, record.Snapshot) {
-			return errors.Join(fmt.Errorf("publish active sandbox: %w", err), loadErr)
+			return nil, errors.Join(fmt.Errorf("publish active sandbox: %w", err), loadErr)
 		}
 		record = *current
 	}
+	sb.activeRevision = record.Revision
+	sb.activeGeneration = record.Generation
+	var controller *activeController
+	if claimController {
+		var acquired bool
+		controller, acquired, err = m.acquireActiveController(ctx, sb)
+		if err != nil || !acquired {
+			return nil, errors.Join(ErrSandboxCleanupPending, err)
+		}
+	}
 	active, activateErr := m.activeSandboxes.Activate(ctx, sb.ID, record.Revision, snapshot)
 	if activateErr == nil && active != nil {
-		return nil
+		sb.activeRevision = active.Revision
+		sb.activeGeneration = active.Generation
+		return controller, nil
 	}
 	current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sb.ID)
 	if loadErr == nil && current != nil && current.Phase == state.ActiveSandboxActive &&
 		current.Generation == record.Generation && current.RuntimeID == record.RuntimeID &&
 		current.RuntimeUID == record.RuntimeUID && bytes.Equal(current.Snapshot, snapshot) {
-		return nil
+		sb.activeRevision = current.Revision
+		sb.activeGeneration = current.Generation
+		return controller, nil
 	}
-	return errors.Join(fmt.Errorf("activate sandbox state: %w", activateErr), loadErr)
+	if controller != nil {
+		_ = controller.Stop(context.WithoutCancel(ctx))
+	}
+	return nil, errors.Join(fmt.Errorf("activate sandbox state: %w", activateErr), loadErr)
 }
 
-func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind state.ActiveOperationKind) (*Sandbox, func(), error) {
+func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind state.ActiveOperationKind) (*Sandbox, context.Context, func(), error) {
 	token := uuid.NewString()
-	record, operation, err := m.activeSandboxes.BeginOperation(ctx, id, token, kind, activeOperationTTL)
+	ttl, renewInterval := m.activeOperationDurations()
+	record, operation, err := m.activeSandboxes.BeginOperation(ctx, id, token, kind, ttl)
 	if err != nil {
 		if errors.Is(err, state.ErrActiveSandboxAdmissionClosed) {
-			return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
+			return nil, nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotReady, id)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if record == nil || operation == nil {
-		return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+		return nil, nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	sb, err := decodeActiveSandbox(record, id)
 	if err == nil {
@@ -122,8 +156,39 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 		endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activeOperationEndTimeout)
 		_ = m.activeSandboxes.EndOperation(endCtx, *operation)
 		cancel()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	opCtx, cancelOperation := context.WithCancelCause(ctx)
+	renewCtx, stopRenewal := context.WithCancel(ctx)
+	done := make(chan struct{})
+	var operationMu sync.Mutex
+	currentOperation := *operation
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(renewInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				operationMu.Lock()
+				current := currentOperation
+				operationMu.Unlock()
+				renewed, renewErr := m.activeSandboxes.RenewOperation(renewCtx, current, ttl)
+				if renewErr != nil || renewed == nil {
+					if renewErr == nil {
+						renewErr = state.ErrActiveSandboxStaleToken
+					}
+					cancelOperation(errors.Join(ErrSandboxNotReady, renewErr))
+					return
+				}
+				operationMu.Lock()
+				currentOperation = *renewed
+				operationMu.Unlock()
+			}
+		}
+	}()
 	var released bool
 	var releaseMu sync.Mutex
 	release := func() {
@@ -133,14 +198,20 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 			return
 		}
 		released = true
+		stopRenewal()
+		<-done
+		cancelOperation(nil)
+		operationMu.Lock()
+		current := currentOperation
+		operationMu.Unlock()
 		endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activeOperationEndTimeout)
-		_ = m.activeSandboxes.EndOperation(endCtx, *operation)
+		_ = m.activeSandboxes.EndOperation(endCtx, current)
 		cancel()
 	}
-	return sb, release, nil
+	return sb, opCtx, release, nil
 }
 
-func (m *Manager) acquireSandboxMutation(ctx context.Context, id string) (*Sandbox, func(), error) {
+func (m *Manager) acquireSandboxMutation(ctx context.Context, id string) (*Sandbox, context.Context, func(), error) {
 	if m.distributedStateEnabled() {
 		return m.beginDistributedOperation(ctx, id, state.ActiveOperationMutation)
 	}
@@ -185,19 +256,6 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 	if err != nil {
 		return err
 	}
-	lease := state.ActiveSandboxControllerLease{
-		SandboxID: id, Token: uuid.NewString(), InstanceID: m.config.InstanceID,
-		Generation: record.Generation, ExpiresAt: time.Now().Add(activeControllerTTL),
-	}
-	held, acquired, err := m.activeSandboxes.AcquireController(ctx, lease, activeControllerTTL)
-	if err != nil {
-		return err
-	}
-	if !acquired || held == nil {
-		return fmt.Errorf("%w: cleanup already owned for %s", ErrSandboxCleanupPending, id)
-	}
-	defer func() { _ = m.activeSandboxes.ReleaseController(context.WithoutCancel(ctx), *held) }()
-
 	deadline := time.NewTicker(25 * time.Millisecond)
 	defer deadline.Stop()
 	for {
@@ -215,7 +273,18 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 		}
 	}
 	if sb.Workspace != nil && (sb.Workspace.MountType == WorkspaceMountFUSE || sb.Workspace.Owner.Generation > 0) {
-		return fmt.Errorf("%w: workspace cleanup requires lifecycle coordinator for %s", ErrSandboxCleanupPending, id)
+		return m.destroyDistributedWorkspace(ctx, sb)
+	}
+	controller, acquired, err := m.acquireActiveController(ctx, sb)
+	if err != nil {
+		return err
+	}
+	if !acquired || controller == nil {
+		return fmt.Errorf("%w: cleanup already owned for %s", ErrSandboxCleanupPending, id)
+	}
+	defer func() { _ = controller.Stop(context.WithoutCancel(ctx)) }()
+	if err := controller.Fence(ctx); err != nil {
+		return err
 	}
 	info, inspectErr := m.runtime.GetSandbox(ctx, sb.RuntimeID)
 	if inspectErr != nil || info == nil || info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID {
@@ -246,4 +315,248 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 	m.mu.Unlock()
 	m.pool.NotifyRemoved()
 	return nil
+}
+
+func (m *Manager) destroyDistributedWorkspace(ctx context.Context, sb *Sandbox) error {
+	m.mu.RLock()
+	fuseLifecycle := m.fuseLifecycles[sb.ID]
+	syncLifecycle := m.syncLifecycles[sb.ID]
+	m.mu.RUnlock()
+	if fuseLifecycle != nil {
+		m.runFUSETeardown(ctx, fuseLifecycle, ErrSandboxCleanupPending)
+		fuseLifecycle.teardownMu.Lock()
+		done := fuseLifecycle.teardownDone
+		fuseLifecycle.teardownMu.Unlock()
+		if done {
+			return nil
+		}
+		return ErrSandboxCleanupPending
+	}
+	if syncLifecycle != nil {
+		return m.destroySyncSandbox(ctx, syncLifecycle)
+	}
+
+	controller, acquired, err := m.acquireActiveController(ctx, sb)
+	if err != nil {
+		return err
+	}
+	if !acquired || controller == nil {
+		return m.waitForActiveCleanup(ctx, sb.ID)
+	}
+	keepController := false
+	defer func() {
+		if !keepController {
+			_ = controller.Stop(context.WithoutCancel(ctx))
+		}
+	}()
+	switch sb.Workspace.MountType {
+	case WorkspaceMountFUSE:
+		if err := m.restoreFUSESandboxWithController(ctx, sb, controller); err != nil {
+			return err
+		}
+		keepController = true
+		m.mu.RLock()
+		lifecycle := m.fuseLifecycles[sb.ID]
+		m.mu.RUnlock()
+		m.runFUSETeardown(ctx, lifecycle, ErrSandboxCleanupPending)
+		if lifecycle == nil {
+			return ErrSandboxCleanupPending
+		}
+		lifecycle.teardownMu.Lock()
+		done := lifecycle.teardownDone
+		lifecycle.teardownMu.Unlock()
+		if !done {
+			return ErrSandboxCleanupPending
+		}
+		return nil
+	case WorkspaceMountSync:
+		if err := m.restoreSyncSandboxWithController(ctx, sb, controller); err != nil {
+			return err
+		}
+		keepController = true
+		m.mu.RLock()
+		lifecycle := m.syncLifecycles[sb.ID]
+		m.mu.RUnlock()
+		return m.destroySyncSandbox(ctx, lifecycle)
+	default:
+		return ErrSandboxNotReady
+	}
+}
+
+func (m *Manager) waitForActiveCleanup(ctx context.Context, sandboxID string) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		record, err := m.activeSandboxes.Load(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrSandboxCleanupPending, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) beginActiveCleanup(ctx context.Context, sandboxID string) error {
+	if !m.distributedStateEnabled() {
+		return nil
+	}
+	record, _, _, err := m.activeSandboxes.BeginDestroy(ctx, sandboxID)
+	if err != nil {
+		current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sandboxID)
+		if loadErr != nil || current == nil ||
+			(current.Phase != state.ActiveSandboxDestroying && current.Phase != state.ActiveSandboxCleanupPending) {
+			return errors.Join(err, loadErr)
+		}
+		record = current
+	}
+	if record == nil {
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		live, countErr := m.activeSandboxes.LiveOperations(ctx, sandboxID)
+		if countErr != nil {
+			return countErr
+		}
+		if live == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID string) error {
+	if !m.distributedStateEnabled() {
+		return nil
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		record, err := m.activeSandboxes.Load(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return nil
+		}
+		checkpoint, err := m.activeSandboxes.Checkpoint(ctx, sandboxID, record.Revision, "cleanup_complete")
+		if errors.Is(err, state.ErrActiveSandboxConflict) {
+			continue
+		}
+		if err != nil || checkpoint == nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		if err := m.activeSandboxes.Delete(ctx, sandboxID, checkpoint.Revision, checkpoint.Generation); err != nil {
+			if errors.Is(err, state.ErrActiveSandboxConflict) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return state.ErrActiveSandboxConflict
+}
+
+// drainDistributedActiveSandboxes is used only after every API Deployment Pod
+// has been scaled to zero. It enumerates this release's exact state scope and
+// drives each record through the same fenced cleanup path as online destroy.
+func (m *Manager) drainDistributedActiveSandboxes(ctx context.Context) error {
+	var records []state.ActiveSandboxRecord
+	var cursor uint64
+	for {
+		page, err := m.activeSandboxes.Scan(ctx, cursor, activeLifecycleScanPageSize)
+		if err != nil {
+			return fmt.Errorf("scan active sandboxes for release drain: %w", err)
+		}
+		records = append(records, page.Records...)
+		if page.Cursor == 0 {
+			break
+		}
+		cursor = page.Cursor
+	}
+	var drainErr error
+	for i := range records {
+		record := &records[i]
+		sb, err := decodeActiveSandboxPhase(record, record.SandboxID,
+			state.ActiveSandboxPublishing, state.ActiveSandboxActive,
+			state.ActiveSandboxDestroying, state.ActiveSandboxCleanupPending)
+		if err != nil {
+			drainErr = errors.Join(drainErr, err)
+			continue
+		}
+		if sb.Workspace == nil || (sb.Workspace.MountType != WorkspaceMountFUSE && sb.Workspace.Owner.Generation <= 0) {
+			if err := m.destroyDistributedSandbox(ctx, sb.ID); err != nil {
+				drainErr = errors.Join(drainErr, err)
+			}
+			continue
+		}
+		controller, err := m.waitForActiveController(ctx, sb)
+		if err != nil {
+			drainErr = errors.Join(drainErr, err)
+			continue
+		}
+		var cleanupErr error
+		switch sb.Workspace.MountType {
+		case WorkspaceMountFUSE:
+			cleanupErr = m.restoreFUSESandboxWithController(ctx, sb, controller)
+			if cleanupErr == nil {
+				m.mu.RLock()
+				lifecycle := m.fuseLifecycles[sb.ID]
+				m.mu.RUnlock()
+				m.runFUSETeardown(ctx, lifecycle, ErrSandboxCleanupPending)
+				if lifecycle == nil {
+					cleanupErr = ErrSandboxCleanupPending
+				} else {
+					lifecycle.teardownMu.Lock()
+					if !lifecycle.teardownDone {
+						cleanupErr = ErrSandboxCleanupPending
+					}
+					lifecycle.teardownMu.Unlock()
+				}
+			}
+		case WorkspaceMountSync:
+			cleanupErr = m.restoreSyncSandboxWithController(ctx, sb, controller)
+			if cleanupErr == nil {
+				m.mu.RLock()
+				lifecycle := m.syncLifecycles[sb.ID]
+				m.mu.RUnlock()
+				cleanupErr = m.destroySyncSandbox(ctx, lifecycle)
+			}
+		default:
+			cleanupErr = ErrSandboxNotReady
+		}
+		if cleanupErr != nil {
+			_ = controller.Stop(context.WithoutCancel(ctx))
+			drainErr = errors.Join(drainErr, fmt.Errorf("drain active sandbox %s: %w", sb.ID, cleanupErr))
+		}
+	}
+	return drainErr
+}
+
+func (m *Manager) waitForActiveController(ctx context.Context, sb *Sandbox) (*activeController, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		controller, acquired, err := m.acquireActiveController(ctx, sb)
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			return controller, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
