@@ -148,6 +148,7 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			Tolerations:   defaultNoExecuteTolerations(),
 			// Disable SA token mount and K8s service env injection to avoid
 			// leaking cluster topology and credentials into the sandbox.
 			AutomountServiceAccountToken: &falseVal,
@@ -228,6 +229,14 @@ const (
 	preparedTerminationSecs = int64(90)
 )
 
+func defaultNoExecuteTolerations() []corev1.Toleration {
+	seconds := int64(300)
+	return []corev1.Toleration{
+		{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
+		{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
+	}
+}
+
 type preparedMounterBootstrap = fuseprotocol.BootstrapConfig
 
 type validatedPreparedFUSEPod struct {
@@ -280,7 +289,6 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 	deviceType := corev1.HostPathCharDev
 	secretMode := int32(0o400)
 	restartAlways := corev1.ContainerRestartPolicyAlways
-	defaultNoExecuteSeconds := int64(300)
 
 	mounterSecurity := &corev1.SecurityContext{
 		Privileged:             &trueVal,
@@ -325,10 +333,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 			SecurityContext: &corev1.PodSecurityContext{
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
-			Tolerations: []corev1.Toleration{
-				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
-				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
-			},
+			Tolerations: defaultNoExecuteTolerations(),
 			InitContainers: []corev1.Container{
 				{
 					Name:                     "workspace-mounter",

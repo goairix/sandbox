@@ -61,6 +61,21 @@ func TestBuildOrdinaryPodIsPureAndUsesLogicalID(t *testing.T) {
 	assert.Empty(t, pod.ResourceVersion)
 }
 
+func TestBuildOrdinaryPodDeclaresDefaultNoExecuteTolerations(t *testing.T) {
+	pod, err := buildOrdinaryPod("runtime", runtime.SandboxSpec{ID: "sandbox-a", Image: "sandbox:latest"})
+	require.NoError(t, err)
+
+	require.Len(t, pod.Spec.Tolerations, 2)
+	for index, key := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
+		toleration := pod.Spec.Tolerations[index]
+		assert.Equal(t, key, toleration.Key)
+		assert.Equal(t, corev1.TolerationOpExists, toleration.Operator)
+		assert.Equal(t, corev1.TaintEffectNoExecute, toleration.Effect)
+		require.NotNil(t, toleration.TolerationSeconds)
+		assert.Equal(t, int64(300), *toleration.TolerationSeconds)
+	}
+}
+
 func TestBuildOrdinaryPodRejectsManagedLabelOverride(t *testing.T) {
 	_, err := buildOrdinaryPod("runtime", runtime.SandboxSpec{
 		ID: "sandbox-a", Image: "sandbox:latest", Labels: map[string]string{"sandbox.managed": "false"},
@@ -95,6 +110,7 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 	pod, err := createPod(context.Background(), client, "sandbox-runtime", spec)
 	require.NoError(t, err)
 	falseVal := false
+	defaultNoExecuteSeconds := int64(300)
 	tmpSize := resource.MustParse(runtime.DefaultTmpDisk)
 	expected := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "legacy-a", Namespace: "sandbox-runtime", Labels: map[string]string{
@@ -102,6 +118,10 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 		}},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &falseVal, EnableServiceLinks: &falseVal,
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &defaultNoExecuteSeconds},
+			},
 			SecurityContext: &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 			DNSPolicy:       corev1.DNSNone, DNSConfig: &corev1.PodDNSConfig{Nameservers: []string{"8.8.8.8", "1.1.1.1"}},
 			Containers: []corev1.Container{{
