@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,6 +36,40 @@ type ordinaryNetworkIdentity struct {
 	runtimeID  string
 	runtimeUID types.UID
 	logicalID  string
+}
+
+func ordinaryNetworkPolicyIntentMatches(current, desired *networkingv1.NetworkPolicy) bool {
+	if current == nil || desired == nil || current.UID == "" || current.Name != desired.Name || current.Namespace != desired.Namespace {
+		return false
+	}
+	for key, value := range desired.Labels {
+		if current.Labels[key] != value {
+			return false
+		}
+	}
+	for key, value := range desired.Annotations {
+		if current.Annotations[key] != value {
+			return false
+		}
+	}
+	return apiequality.Semantic.DeepEqual(current.Spec, desired.Spec)
+}
+
+func ordinaryCiliumPolicyIntentMatches(current, desired *unstructured.Unstructured) bool {
+	if current == nil || desired == nil || current.GetUID() == "" || current.GetName() != desired.GetName() || current.GetNamespace() != desired.GetNamespace() {
+		return false
+	}
+	for key, value := range desired.GetLabels() {
+		if current.GetLabels()[key] != value {
+			return false
+		}
+	}
+	for key, value := range desired.GetAnnotations() {
+		if current.GetAnnotations()[key] != value {
+			return false
+		}
+	}
+	return reflect.DeepEqual(current.Object["spec"], desired.Object["spec"])
 }
 
 func validateOrdinaryNetworkPolicy(policy *networkingv1.NetworkPolicy, identity ordinaryNetworkIdentity, attempt string) error {
@@ -142,9 +178,17 @@ func updateOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interfac
 		return err
 	}
 	target.ResourceVersion = current.ResourceVersion
-	_, err = policies.Update(ctx, target, metav1.UpdateOptions{})
+	target.UID = current.UID
+	updated, err := policies.Update(ctx, target, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("update ordinary NetworkPolicy: %w", err)
+		verified, getErr := policies.Get(ctx, target.Name, metav1.GetOptions{})
+		if getErr == nil && ordinaryNetworkPolicyIntentMatches(verified, target) {
+			return nil
+		}
+		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("update ordinary NetworkPolicy: %w", err), getErr)
+	}
+	if !ordinaryNetworkPolicyIntentMatches(updated, target) {
+		return fmt.Errorf("updated ordinary NetworkPolicy does not match requested intent")
 	}
 	return nil
 }
@@ -171,9 +215,17 @@ func updateOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interfa
 		return err
 	}
 	target.SetResourceVersion(current.GetResourceVersion())
-	_, err = policies.Update(ctx, target, metav1.UpdateOptions{})
+	target.SetUID(current.GetUID())
+	updated, err := policies.Update(ctx, target, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("update ordinary CiliumNetworkPolicy: %w", err)
+		verified, getErr := policies.Get(ctx, target.GetName(), metav1.GetOptions{})
+		if getErr == nil && ordinaryCiliumPolicyIntentMatches(verified, target) {
+			return nil
+		}
+		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("update ordinary CiliumNetworkPolicy: %w", err), getErr)
+	}
+	if !ordinaryCiliumPolicyIntentMatches(updated, target) {
+		return fmt.Errorf("updated ordinary CiliumNetworkPolicy does not match requested intent")
 	}
 	return nil
 }
@@ -251,8 +303,7 @@ func deleteOwnedOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Int
 	if err != nil {
 		return false, err
 	}
-	uid := current.UID
-	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if err := deleteCreatedNetworkPolicy(ctx, policies, current); err != nil {
 		return true, fmt.Errorf("delete ordinary NetworkPolicy: %w", err)
 	}
 	return true, nil
@@ -276,8 +327,7 @@ func deleteOwnedOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.In
 	if err != nil {
 		return false, err
 	}
-	uid := current.GetUID()
-	if err := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if err := deleteCreatedCiliumPolicy(ctx, policies, current); err != nil {
 		return true, fmt.Errorf("delete ordinary CiliumNetworkPolicy: %w", err)
 	}
 	return true, nil
@@ -296,6 +346,10 @@ func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interfa
 			if identity.runtimeUID == "" || validateOrdinaryNetworkPolicy(policy, identity, "") != nil {
 				continue
 			}
+			if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, runtimeID); err != nil {
+				errs = append(errs, err)
+				continue
+			}
 			matched, deleteErr := deleteOwnedOrdinaryNetworkPolicy(ctx, client, namespace, identity, false)
 			found = found || matched
 			errs = append(errs, deleteErr)
@@ -312,6 +366,10 @@ func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interfa
 				if identity.runtimeUID == "" || validateOrdinaryCiliumPolicy(policy, identity, "") != nil {
 					continue
 				}
+				if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, runtimeID); err != nil {
+					errs = append(errs, err)
+					continue
+				}
 				matched, deleteErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, dynClient, namespace, identity, false)
 				found = found || matched
 				errs = append(errs, deleteErr)
@@ -319,6 +377,17 @@ func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interfa
 		}
 	}
 	return found, errors.Join(errs...)
+}
+
+func confirmOrdinaryRuntimePodAbsent(ctx context.Context, client kubernetes.Interface, namespace, runtimeID string) error {
+	_, err := client.CoreV1().Pods(namespace).Get(ctx, runtimeID, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("recheck ordinary runtime Pod before policy deletion: %w", err)
+	}
+	return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("ordinary runtime Pod %q reappeared before policy deletion", runtimeID))
 }
 
 func classifyOrdinaryNetworkPolicy(policy *networkingv1.NetworkPolicy) (ordinaryNetworkIdentity, bool) {
@@ -452,7 +521,7 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	if err != nil {
 		return fmt.Errorf("get pool NetworkPolicy: %w", err)
 	}
-	if err := validateOrdinaryNetworkPolicy(oldPolicy, oldIdentity, ""); err != nil {
+	if err := validateMutableOrdinaryNetworkPolicy(oldPolicy, oldIdentity); err != nil {
 		return fmt.Errorf("validate pool NetworkPolicy: %w", err)
 	}
 	attempt, err := newNetworkAttemptToken()
@@ -484,17 +553,43 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	if err != nil {
 		return fmt.Errorf("marshal pool identity patch: %w", err)
 	}
-	if _, err := r.client.CoreV1().Pods(r.namespace).Patch(ctx, pod.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
-		defer cancel()
-		cleanupErr := deleteAttemptOrdinaryNetworkPolicy(cleanupCtx, r.client, r.namespace, created.Name, newIdentity, attempt)
-		return errors.Join(fmt.Errorf("patch pool Pod identity: %w", err), cleanupErr)
+	patched, patchErr := r.client.CoreV1().Pods(r.namespace).Patch(ctx, pod.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if patchErr != nil {
+		verified, getErr := r.client.CoreV1().Pods(r.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if getErr == nil && ordinaryPoolPatchMatches(verified, pod.UID, newLogicalID, labels) {
+			patched = verified
+		} else if getErr == nil && verified.UID == pod.UID && verified.Labels["sandbox.id"] == oldIdentity.logicalID && verified.Labels["sandbox.pool"] == "true" {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
+			defer cancel()
+			cleanupErr := deleteAttemptOrdinaryNetworkPolicy(cleanupCtx, r.client, r.namespace, created.Name, newIdentity, attempt)
+			return errors.Join(fmt.Errorf("patch pool Pod identity: %w", patchErr), cleanupErr)
+		} else {
+			return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patch pool Pod identity: %w", patchErr), getErr)
+		}
 	}
-	uid := oldPolicy.UID
-	if err := oldPolicies.Delete(ctx, oldPolicy.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+	if !ordinaryPoolPatchMatches(patched, pod.UID, newLogicalID, labels) {
+		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patched pool Pod identity does not match requested labels"))
+	}
+	if err := deleteCreatedNetworkPolicy(ctx, oldPolicies, oldPolicy); err != nil {
 		return fmt.Errorf("delete old pool NetworkPolicy: %w", err)
 	}
 	return nil
+}
+
+func ordinaryPoolPatchMatches(pod *corev1.Pod, uid types.UID, newLogicalID string, labels map[string]*string) bool {
+	if pod == nil || pod.UID != uid || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.workspace.mode"] == "fuse" || pod.Labels["sandbox.id"] != newLogicalID {
+		return false
+	}
+	for key, value := range labels {
+		if value == nil {
+			if _, present := pod.Labels[key]; present {
+				return false
+			}
+		} else if pod.Labels[key] != *value {
+			return false
+		}
+	}
+	return true
 }
 
 func ensureOrdinaryIdentityAvailable(ctx context.Context, client kubernetes.Interface, namespace string, identity ordinaryNetworkIdentity) error {
@@ -518,11 +613,19 @@ func ensureOrdinaryIdentityAvailable(ctx context.Context, client kubernetes.Inte
 func createOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, policy *networkingv1.NetworkPolicy, identity ordinaryNetworkIdentity, attempt string) (*networkingv1.NetworkPolicy, error) {
 	created, err := client.NetworkingV1().NetworkPolicies(policy.Namespace).Create(ctx, policy, metav1.CreateOptions{})
 	if err == nil {
-		return created, nil
+		if ordinaryNetworkPolicyIntentMatches(created, policy) {
+			return created, nil
+		}
+		cleanupErr := deleteCreatedNetworkPolicy(ctx, client.NetworkingV1().NetworkPolicies(policy.Namespace), created)
+		return nil, errors.Join(fmt.Errorf("created ordinary NetworkPolicy does not match requested intent"), cleanupErr)
 	}
 	current, getErr := client.NetworkingV1().NetworkPolicies(policy.Namespace).Get(ctx, policy.Name, metav1.GetOptions{})
-	if getErr == nil && validateOrdinaryNetworkPolicy(current, identity, attempt) == nil {
+	if getErr == nil && validateOrdinaryNetworkPolicy(current, identity, attempt) == nil && ordinaryNetworkPolicyIntentMatches(current, policy) {
 		return current, nil
+	}
+	if getErr == nil && validateOrdinaryNetworkPolicy(current, identity, attempt) == nil && current.UID != "" {
+		cleanupErr := deleteCreatedNetworkPolicy(ctx, client.NetworkingV1().NetworkPolicies(policy.Namespace), current)
+		return nil, errors.Join(fmt.Errorf("create ordinary NetworkPolicy: %w", err), fmt.Errorf("created ordinary NetworkPolicy does not match requested intent"), cleanupErr)
 	}
 	return nil, fmt.Errorf("create ordinary NetworkPolicy: %w", err)
 }
@@ -531,16 +634,24 @@ func createOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interfa
 	policies := client.Resource(ciliumNetworkPolicyGVR).Namespace(policy.GetNamespace())
 	created, err := policies.Create(ctx, policy, metav1.CreateOptions{})
 	if err == nil {
-		return created, nil
+		if ordinaryCiliumPolicyIntentMatches(created, policy) {
+			return created, nil
+		}
+		cleanupErr := deleteCreatedCiliumPolicy(ctx, policies, created)
+		return nil, errors.Join(fmt.Errorf("created ordinary CiliumNetworkPolicy does not match requested intent"), cleanupErr)
 	}
 	current, getErr := policies.Get(ctx, policy.GetName(), metav1.GetOptions{})
-	if getErr == nil && validateOrdinaryCiliumPolicy(current, identity, attempt) == nil {
+	if getErr == nil && validateOrdinaryCiliumPolicy(current, identity, attempt) == nil && ordinaryCiliumPolicyIntentMatches(current, policy) {
 		return current, nil
+	}
+	if getErr == nil && validateOrdinaryCiliumPolicy(current, identity, attempt) == nil && current.GetUID() != "" {
+		cleanupErr := deleteCreatedCiliumPolicy(ctx, policies, current)
+		return nil, errors.Join(fmt.Errorf("create ordinary CiliumNetworkPolicy: %w", err), fmt.Errorf("created ordinary CiliumNetworkPolicy does not match requested intent"), cleanupErr)
 	}
 	return nil, fmt.Errorf("create ordinary CiliumNetworkPolicy: %w", err)
 }
 
-func bindOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, name string, identity ordinaryNetworkIdentity, attempt string) error {
+func bindOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, name string, identity ordinaryNetworkIdentity, attempt string, desired *networkingv1.NetworkPolicy) error {
 	policies := client.NetworkingV1().NetworkPolicies(namespace)
 	current, err := policies.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -551,13 +662,19 @@ func bindOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface,
 	if err := validateOrdinaryNetworkPolicy(current, unboundIdentity, attempt); err != nil {
 		return err
 	}
+	if !ordinaryNetworkPolicyIntentMatches(current, desired) {
+		return fmt.Errorf("ordinary NetworkPolicy changed before binding")
+	}
 	if current.Annotations == nil {
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[ordinaryRuntimeUIDAnnotation] = string(identity.runtimeUID)
-	_, err = policies.Update(ctx, current, metav1.UpdateOptions{})
-	if err == nil {
+	updated, err := policies.Update(ctx, current, metav1.UpdateOptions{})
+	if err == nil && ordinaryNetworkPolicyIntentMatches(updated, current) {
 		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("bound ordinary NetworkPolicy does not match requested intent")
 	}
 	verified, getErr := policies.Get(ctx, name, metav1.GetOptions{})
 	if getErr == nil && validateOrdinaryNetworkPolicy(verified, identity, attempt) == nil {
@@ -566,7 +683,7 @@ func bindOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface,
 	return errors.Join(fmt.Errorf("bind ordinary NetworkPolicy: %w", err), getErr)
 }
 
-func bindOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface, namespace, name string, identity ordinaryNetworkIdentity, attempt string) error {
+func bindOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface, namespace, name string, identity ordinaryNetworkIdentity, attempt string, desired *unstructured.Unstructured) error {
 	policies := client.Resource(ciliumNetworkPolicyGVR).Namespace(namespace)
 	current, err := policies.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -577,15 +694,21 @@ func bindOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface
 	if err := validateOrdinaryCiliumPolicy(current, unboundIdentity, attempt); err != nil {
 		return err
 	}
+	if !ordinaryCiliumPolicyIntentMatches(current, desired) {
+		return fmt.Errorf("ordinary CiliumNetworkPolicy changed before binding")
+	}
 	annotations := current.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
 	annotations[ordinaryRuntimeUIDAnnotation] = string(identity.runtimeUID)
 	current.SetAnnotations(annotations)
-	_, err = policies.Update(ctx, current, metav1.UpdateOptions{})
-	if err == nil {
+	updated, err := policies.Update(ctx, current, metav1.UpdateOptions{})
+	if err == nil && ordinaryCiliumPolicyIntentMatches(updated, current) {
 		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("bound ordinary CiliumNetworkPolicy does not match requested intent")
 	}
 	verified, getErr := policies.Get(ctx, name, metav1.GetOptions{})
 	if getErr == nil && validateOrdinaryCiliumPolicy(verified, identity, attempt) == nil {
@@ -647,6 +770,9 @@ func deleteAttemptOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.
 func ordinaryLogicalID(spec runtime.SandboxSpec) (string, error) {
 	if spec.WorkspaceFUSE != nil || spec.Labels["sandbox.workspace.mode"] == "fuse" {
 		return "", fmt.Errorf("FUSE sandbox cannot use ordinary network identity")
+	}
+	if managed, present := spec.Labels["sandbox.managed"]; present && managed != "true" {
+		return "", fmt.Errorf("sandbox.managed is controlled by the Kubernetes runtime")
 	}
 	logicalID := spec.ID
 	if labelled := spec.Labels["sandbox.id"]; labelled != "" {

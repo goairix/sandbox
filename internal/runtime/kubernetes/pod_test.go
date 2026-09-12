@@ -61,6 +61,13 @@ func TestBuildOrdinaryPodIsPureAndUsesLogicalID(t *testing.T) {
 	assert.Empty(t, pod.ResourceVersion)
 }
 
+func TestBuildOrdinaryPodRejectsManagedLabelOverride(t *testing.T) {
+	_, err := buildOrdinaryPod("runtime", runtime.SandboxSpec{
+		ID: "sandbox-a", Image: "sandbox:latest", Labels: map[string]string{"sandbox.managed": "false"},
+	})
+	require.Error(t, err)
+}
+
 func TestCreatePodDefaultsTmpDiskLimitTo50Mi(t *testing.T) {
 	client := fake.NewSimpleClientset()
 

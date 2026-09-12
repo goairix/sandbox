@@ -113,15 +113,18 @@ func TestReconcileOrdinaryPoliciesDeletesOnlyProvableOrphans(t *testing.T) {
 	orphanIdentity := ordinaryNetworkIdentity{runtimeID: "orphan-runtime", runtimeUID: types.UID("orphan-uid"), logicalID: "orphan"}
 	orphan, err := buildOrdinaryNetworkPolicy("runtime", orphanIdentity, "attempt-a", false, nil, false)
 	require.NoError(t, err)
+	orphan.UID = "orphan-policy-uid"
 	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), orphan, metav1.CreateOptions{})
 	require.NoError(t, err)
 	cilium, err := buildOrdinaryCiliumPrivateDeny("runtime", orphanIdentity, "attempt-a")
 	require.NoError(t, err)
+	cilium.SetUID("orphan-cilium-uid")
 	_, err = dynClient.Resource(ciliumNetworkPolicyGVR).Namespace("runtime").Create(context.Background(), cilium, metav1.CreateOptions{})
 	require.NoError(t, err)
 	liveIdentity := ordinaryNetworkIdentity{runtimeID: "live-runtime", runtimeUID: types.UID("live-uid"), logicalID: "live"}
 	live, err := buildOrdinaryNetworkPolicy("runtime", liveIdentity, "attempt-b", false, nil, false)
 	require.NoError(t, err)
+	live.UID = "live-policy-uid"
 	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), live, metav1.CreateOptions{})
 	require.NoError(t, err)
 	_, err = client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{

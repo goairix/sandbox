@@ -647,4 +647,3 @@ Do not create an empty commit when review requires no changes.
 Invoke `superpowers:finishing-a-development-branch` on the current normal
 checkout `feat/workspace-fuse-mount`. Do not create or switch to a git worktree.
 Present the skill's four integration choices only after verification is green.
-

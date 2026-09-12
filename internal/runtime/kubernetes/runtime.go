@@ -186,6 +186,29 @@ func (r *Runtime) initializeOrdinaryPolicyRecovery() error {
 	return reconcileOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
 }
 
+func (r *Runtime) verifyAmbiguousOrdinaryPodCreate(ctx context.Context, desired *corev1.Pod, createErr error) (*corev1.Pod, bool, error) {
+	if !mayVerifyAmbiguousCreate(createErr) {
+		return nil, true, fmt.Errorf("create ordinary Pod: %w", createErr)
+	}
+	cleanupCtx, cancel := r.newCleanupContext(ctx)
+	defer cancel()
+	current, err := r.client.CoreV1().Pods(r.namespace).Get(cleanupCtx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, true, fmt.Errorf("create ordinary Pod: %w", createErr)
+	}
+	if err != nil {
+		return nil, false, errors.Join(fmt.Errorf("create ordinary Pod: %w", createErr), fmt.Errorf("verify ordinary Pod creation: %w", err))
+	}
+	if preparedPodIntentMatches(current, desired, true) {
+		return current, false, nil
+	}
+	if current.UID != "" && current.Annotations[ordinaryPolicyAttemptAnnotation] == desired.Annotations[ordinaryPolicyAttemptAnnotation] {
+		deleteErr := deleteExactOrdinaryPod(cleanupCtx, r.client, r.namespace, current, r.pollInterval, r.terminationTimeout)
+		return nil, deleteErr == nil, errors.Join(fmt.Errorf("created ordinary Pod does not match requested Pod intent"), deleteErr)
+	}
+	return nil, false, fmt.Errorf("ordinary Pod create result is incompatible")
+}
+
 func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
 	if spec.WorkspaceFUSE != nil {
 		return nil, fmt.Errorf("FUSE sandboxes require the prepare/authorize/ready lifecycle")
@@ -224,15 +247,18 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		return nil, err
 	}
 	var createdCilium *unstructured.Unstructured
-	cleanup := func(cause error, createdPod *corev1.Pod) error {
+	cleanup := func(cause error, createdPod *corev1.Pod, policyCleanupAllowed bool) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
 		defer cancel()
-		var cleanupErrs []error
 		if createdPod != nil {
-			if deleteErr := deletePod(cleanupCtx, r.client, r.namespace, createdPod.Name); deleteErr != nil && !errors.Is(deleteErr, runtime.ErrNotFound) {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup ordinary Pod: %w", deleteErr))
+			if deleteErr := deleteExactOrdinaryPod(cleanupCtx, r.client, r.namespace, createdPod, r.pollInterval, r.terminationTimeout); deleteErr != nil {
+				return errors.Join(cause, fmt.Errorf("cleanup exact ordinary Pod: %w", deleteErr))
 			}
 		}
+		if !policyCleanupAllowed {
+			return cause
+		}
+		var cleanupErrs []error
 		if createdCilium != nil {
 			cleanupErrs = append(cleanupErrs, deleteAttemptOrdinaryCiliumPrivateDeny(cleanupCtx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt))
 		}
@@ -244,26 +270,33 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if needsCilium {
 		createdCilium, err = createOrdinaryCiliumPrivateDeny(ctx, r.dynClient, ciliumPolicy, identity, attempt)
 		if err != nil {
-			return nil, cleanup(err, nil)
+			return nil, cleanup(err, nil, true)
 		}
 	}
 	if err := ensureOrdinaryIdentityAvailable(ctx, r.client, r.namespace, identity); err != nil {
-		return nil, cleanup(err, nil)
+		return nil, cleanup(err, nil, true)
 	}
 	createdPod, err := r.client.CoreV1().Pods(r.namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		return nil, cleanup(fmt.Errorf("create pod: %w", err), nil)
+		verified, safePolicyCleanup, verifyErr := r.verifyAmbiguousOrdinaryPodCreate(ctx, pod, err)
+		if verified == nil {
+			return nil, cleanup(verifyErr, nil, safePolicyCleanup)
+		}
+		createdPod = verified
 	}
 	if createdPod.UID == "" {
-		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod)
+		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod, true)
+	}
+	if !preparedPodIntentMatches(createdPod, pod, false) {
+		return nil, cleanup(fmt.Errorf("created ordinary Pod does not match requested Pod intent"), createdPod, true)
 	}
 	identity.runtimeUID = createdPod.UID
-	if err := bindOrdinaryNetworkPolicy(ctx, r.client, r.namespace, createdStandard.Name, identity, attempt); err != nil {
-		return nil, cleanup(err, createdPod)
+	if err := bindOrdinaryNetworkPolicy(ctx, r.client, r.namespace, createdStandard.Name, identity, attempt, standardPolicy); err != nil {
+		return nil, cleanup(err, createdPod, true)
 	}
 	if createdCilium != nil {
-		if err := bindOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt); err != nil {
-			return nil, cleanup(err, createdPod)
+		if err := bindOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt, ciliumPolicy); err != nil {
+			return nil, cleanup(err, createdPod, true)
 		}
 	}
 	readyTimeout := r.readyTimeout
@@ -271,7 +304,7 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		readyTimeout = defaultKubernetesControlTimeout
 	}
 	if err := waitForPodReady(ctx, r.client, r.namespace, createdPod.Name, readyTimeout); err != nil {
-		return nil, cleanup(fmt.Errorf("wait for pod: %w", err), createdPod)
+		return nil, cleanup(fmt.Errorf("wait for pod: %w", err), createdPod, true)
 	}
 
 	return &runtime.SandboxInfo{
@@ -2236,12 +2269,16 @@ func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
 	cleanupErrs = append(cleanupErrs, standardErr)
 	if identity.logicalID != identity.runtimeID {
 		legacyIdentity := ordinaryNetworkIdentity{runtimeID: identity.runtimeID, runtimeUID: identity.runtimeUID, logicalID: identity.runtimeID}
-		if r.hasCilium {
-			_, legacyCiliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, legacyIdentity, false)
-			cleanupErrs = append(cleanupErrs, legacyCiliumErr)
+		legacyLive, legacyPodErr := hasManagedOrdinaryPodForLogicalID(ctx, r.client, r.namespace, legacyIdentity.logicalID)
+		cleanupErrs = append(cleanupErrs, legacyPodErr)
+		if legacyPodErr == nil && !legacyLive {
+			if r.hasCilium {
+				_, legacyCiliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, legacyIdentity, true)
+				cleanupErrs = append(cleanupErrs, legacyCiliumErr)
+			}
+			_, legacyStandardErr := deleteOwnedOrdinaryNetworkPolicy(ctx, r.client, r.namespace, legacyIdentity, true)
+			cleanupErrs = append(cleanupErrs, legacyStandardErr)
 		}
-		_, legacyStandardErr := deleteOwnedOrdinaryNetworkPolicy(ctx, r.client, r.namespace, legacyIdentity, false)
-		cleanupErrs = append(cleanupErrs, legacyStandardErr)
 	}
 	return errors.Join(cleanupErrs...)
 }
@@ -2356,7 +2393,6 @@ func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string
 			protected = true
 		}
 	}
-	var exactMetadata map[string]interface{}
 	if protected {
 		pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, id, metav1.GetOptions{})
 		if err != nil {
@@ -2371,9 +2407,16 @@ func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string
 			if !removesPool || poolValue != nil {
 				return fmt.Errorf("ordinary sandbox.id can change only while removing sandbox.pool")
 			}
+			for key := range labels {
+				switch key {
+				case "sandbox.id", "sandbox.pool":
+				case "sandbox.managed", "sandbox.pool.state", "sandbox.pool.key", "sandbox.pool.instance", "sandbox.workspace.mode", "sandbox.workspace.provider":
+					return fmt.Errorf("protected label %q cannot change during ordinary pool migration", key)
+				}
+			}
 			return r.migrateOrdinaryPoolIdentity(ctx, pod, *newLogicalID, labels)
 		}
-		exactMetadata = map[string]interface{}{"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion}
+		return fmt.Errorf("protected ordinary Pod labels can change only through pool identity migration")
 	}
 	// Build a merge-patch that only touches the labels we care about.
 	// Using Patch avoids the GET+PUT race (409 Conflict on resourceVersion mismatch)
@@ -2386,10 +2429,7 @@ func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string
 			labelMap[k] = *v
 		}
 	}
-	metadata := exactMetadata
-	if metadata == nil {
-		metadata = make(map[string]interface{})
-	}
+	metadata := make(map[string]interface{})
 	metadata["labels"] = labelMap
 	patch := map[string]interface{}{"metadata": metadata}
 	patchBytes, err := json.Marshal(patch)

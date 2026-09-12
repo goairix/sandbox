@@ -58,6 +58,8 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 	for k, v := range spec.Labels {
 		labels[k] = v
 	}
+	labels["sandbox.id"] = logicalID
+	labels["sandbox.managed"] = "true"
 
 	resources := corev1.ResourceRequirements{}
 	falseVal := false
