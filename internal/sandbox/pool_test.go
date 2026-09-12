@@ -55,6 +55,10 @@ type mockRuntime struct {
 	downloadDirErr    error
 	listedSandboxes   []runtime.SandboxInfo
 	listLabels        map[string]string
+	updateLabelsErr   error
+	updateLabelsID    string
+	updateLabelsCalls int
+	updatedLabels     map[string]*string
 }
 
 func newMockRuntime() *mockRuntime {
@@ -191,8 +195,13 @@ func (m *mockRuntime) ExecPipe(_ context.Context, _ string, _ []string, input io
 	return err
 }
 
-func (m *mockRuntime) UpdateLabels(context.Context, string, map[string]*string) error {
-	return nil
+func (m *mockRuntime) UpdateLabels(_ context.Context, id string, labels map[string]*string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateLabelsCalls++
+	m.updateLabelsID = id
+	m.updatedLabels = labels
+	return m.updateLabelsErr
 }
 
 func (m *mockRuntime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {

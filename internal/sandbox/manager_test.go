@@ -469,6 +469,38 @@ func TestManagerNoWorkspaceUsesOrdinaryPoolWithoutStorage(t *testing.T) {
 	assert.NotEmpty(t, sb.RuntimeID)
 }
 
+func TestManagerPoolAcquireRelabelFailureRemovesRuntimeAndNotifiesPool(t *testing.T) {
+	rt := newMockRuntime()
+	rt.updateLabelsErr = errors.New("relabel failed")
+	mgr := NewManager(rt, nil, nil, ManagerConfig{PoolConfig: PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}})
+	mgr.pool.WarmUp(context.Background())
+	require.Eventually(t, func() bool { return mgr.pool.Size() == 1 }, time.Second, 10*time.Millisecond)
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
+	require.ErrorContains(t, err, "relabel failed")
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, 1, rt.updateLabelsCalls)
+	assert.Equal(t, 1, rt.removedIDs[rt.updateLabelsID])
+}
+
+func TestManagerPoolAcquireRelabelFailureJoinsRemovalFailure(t *testing.T) {
+	rt := newMockRuntime()
+	rt.updateLabelsErr = errors.New("relabel failed")
+	mgr := NewManager(rt, nil, nil, ManagerConfig{PoolConfig: PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}})
+	mgr.pool.WarmUp(context.Background())
+	require.Eventually(t, func() bool { return mgr.pool.Size() == 1 }, time.Second, 10*time.Millisecond)
+	rt.mu.Lock()
+	for id := range rt.sandboxes {
+		rt.removeFailures[id] = errors.New("remove failed")
+	}
+	rt.mu.Unlock()
+
+	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
+	require.ErrorContains(t, err, "relabel failed")
+	require.ErrorContains(t, err, "remove failed")
+}
+
 func TestResolveWorkspaceMountModeRejectsDisabledOrWorkspaceLessSelection(t *testing.T) {
 	mgr := NewManager(newMockRuntime(), nil, nil, ManagerConfig{
 		DefaultMountMode:  WorkspaceMountSync,

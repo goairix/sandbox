@@ -2303,6 +2303,14 @@ func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string
 		if pod.Labels["sandbox.workspace.mode"] == "fuse" {
 			return fmt.Errorf("protected FUSE Pod labels cannot be changed through generic UpdateLabels")
 		}
+		newLogicalID, changesLogicalID := labels["sandbox.id"]
+		poolValue, removesPool := labels["sandbox.pool"]
+		if changesLogicalID && newLogicalID != nil && *newLogicalID != pod.Labels["sandbox.id"] {
+			if !removesPool || poolValue != nil {
+				return fmt.Errorf("ordinary sandbox.id can change only while removing sandbox.pool")
+			}
+			return r.migrateOrdinaryPoolIdentity(ctx, pod, *newLogicalID, labels)
+		}
 		exactMetadata = map[string]interface{}{"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion}
 	}
 	// Build a merge-patch that only touches the labels we care about.

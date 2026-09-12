@@ -1950,6 +1950,107 @@ func TestUpdateLabelsRejectsProtectedFUSELabels(t *testing.T) {
 	require.Error(t, err)
 }
 
+func seedOrdinaryPoolPodAndPolicy(t *testing.T, rt *Runtime, client *kubefake.Clientset, runtimeID, logicalID string) *corev1.Pod {
+	t.Helper()
+	pod, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: runtimeID,
+		Labels: map[string]string{
+			"sandbox.managed": "true",
+			"sandbox.pool":    "true",
+			"sandbox.id":      logicalID,
+		},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: pod.UID, logicalID: logicalID}
+	policy, err := buildOrdinaryNetworkPolicy("runtime", identity, "seed-attempt", false, nil, false)
+	require.NoError(t, err)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Create(context.Background(), policy, metav1.CreateOptions{})
+	require.NoError(t, err)
+	return pod
+}
+
+func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	var actions []string
+	client.PrependReactor("create", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		policy := action.(ktesting.CreateAction).GetObject().(*networkingv1.NetworkPolicy)
+		if policy.Name == "sandbox-customer-a" {
+			actions = append(actions, "create-new-policy")
+		}
+		return false, nil, nil
+	})
+	client.PrependReactor("patch", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		actions = append(actions, "patch-pod")
+		return false, nil, nil
+	})
+	client.PrependReactor("delete", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		if action.(ktesting.DeleteAction).GetName() == "sandbox-sandbox-pool-a" {
+			actions = append(actions, "delete-old-policy")
+		}
+		return false, nil, nil
+	})
+
+	nilValue := (*string)(nil)
+	newID := "customer-a"
+	err := rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"create-new-policy", "patch-pod", "delete-old-policy"}, actions)
+	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, newPolicy.Spec.PodSelector.MatchLabels)
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestUpdateLabelsRejectsLogicalIDAlreadyInUse(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	_, err := client.CoreV1().Pods("runtime").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "other-runtime", Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "customer-a"},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	nilValue := (*string)(nil)
+	newID := "customer-a"
+	err = rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
+	require.Error(t, err)
+}
+
+func TestUpdateLabelsMigrationPatchFailureRemovesOnlyNewAttemptPolicy(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	client.PrependReactor("patch", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("patch failed")
+	})
+	nilValue := (*string)(nil)
+	newID := "customer-a"
+	err := rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
+	require.ErrorContains(t, err, "patch failed")
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
+	require.NoError(t, err)
+	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), "sandbox-pool-a", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-pool-a", pod.Labels["sandbox.id"])
+}
+
+func TestUpdateLabelsReturnsOldPolicyDeleteFailure(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
+	deleteErr := errors.New("delete old policy failed")
+	client.PrependReactor("delete", "networkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		if action.(ktesting.DeleteAction).GetName() == "sandbox-sandbox-pool-a" {
+			return true, nil, deleteErr
+		}
+		return false, nil, nil
+	})
+	nilValue := (*string)(nil)
+	newID := "customer-a"
+	err := rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
+	require.ErrorIs(t, err, deleteErr)
+}
+
 func TestRuntimeRefRejectsEmptyIdentity(t *testing.T) {
 	_, err := sandboxruntime.NewRuntimeRef("pod", "")
 	require.ErrorIs(t, err, sandboxruntime.ErrInvalidRuntimeRef)

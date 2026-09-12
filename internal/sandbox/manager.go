@@ -681,10 +681,16 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 		// Remove pool label and update sandbox.id so the pod is correctly
 		// identified after being taken from the pool (effective on K8s).
 		nilVal := (*string)(nil)
-		_ = m.runtime.UpdateLabels(spanCtx, info.RuntimeID, map[string]*string{
+		if err := m.runtime.UpdateLabels(spanCtx, info.RuntimeID, map[string]*string{
 			"sandbox.pool": nilVal,
 			"sandbox.id":   &id,
-		})
+		}); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+			removeErr := m.runtime.RemoveSandbox(cleanupCtx, info.RuntimeID)
+			cancel()
+			m.pool.NotifyRemoved()
+			return nil, errors.Join(fmt.Errorf("claim pooled sandbox: %w", err), removeErr)
+		}
 	}
 	if err := spanCtx.Err(); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
