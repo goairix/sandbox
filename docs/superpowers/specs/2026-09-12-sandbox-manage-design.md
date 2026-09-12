@@ -75,9 +75,9 @@ React + Ant Design
 
 管理 API 加入现有 `sandbox` 进程，使用独立路由前缀 `/admin/api/v1`。它可以通过明确的 Facade 读取 Manager、Pool、Redis 和 Runtime 信息，但不得绕过 Manager 直接执行资源变更。
 
-整个管理模块受 `admin.enabled` 开关控制，默认值为 `false`。关闭时只解析该布尔值，不校验其他 Admin 配置，不创建数据库连接，不执行 Migration 或 Seed，不注册任何 `/admin/api/v1` 路由，不装配管理 Repository 和生命周期记录器，也不启动 Manager 心跳、Owner Worker、Admin Reconciler 或历史清理任务。关闭管理模块的服务不要求配置或访问 PostgreSQL，现有 `/api/v1` 和 Sandbox 生命周期行为保持不变。
+整个管理模块受 `manage.enabled` 开关控制，默认值为 `false`。关闭时只解析该布尔值，不校验其他 Manage 配置，不创建数据库连接，不执行 Migration 或 Seed，不注册任何 `/admin/api/v1` 路由，不装配管理 Repository 和生命周期记录器，也不启动 Manager 心跳、Owner Worker、Admin Reconciler 或历史清理任务。关闭管理模块的服务不要求配置或访问 PostgreSQL，现有 `/api/v1` 和 Sandbox 生命周期行为保持不变。
 
-只有 `admin.enabled=true` 时才校验 DSN、JWT、首管 Seed 等管理配置，并初始化本设计中的完整管理控制面。
+只有 `manage.enabled=true` 时才校验 DSN、JWT、首管 Seed 等管理配置，并初始化本设计中的完整管理控制面。
 
 现有 `/api/v1` 业务 API 的认证语义保持独立。Admin Token 不能调用业务 API，业务 API Key 也不能调用管理 API。
 
@@ -141,7 +141,7 @@ PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RE
 - 已进入主分支且可能在线上执行过的 Migration 禁止改写；变更必须追加新 Migration。
 - 每项迁移提供显式 `Migrate`；可安全回滚的迁移同时提供 `Rollback`。
 - 所有管理域建表迁移必须显式声明 `id uuid PRIMARY KEY DEFAULT uuid_generate_v7()`，不得退化为 UUIDv4、自增整数或无序字符串主键。
-- 仅当 `admin.enabled=true` 时，Migration 才在每次服务启动时由主进程自动检查并执行；不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
+- 仅当 `manage.enabled=true` 时，Migration 才在每次服务启动时由主进程自动检查并执行；不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
 - 多副本启动时，以 PostgreSQL Advisory Lock 串行执行迁移。未取得锁的副本在限定时间内等待，迁移完成前不得进入 Ready。
 - 启用管理模块后，Migration 失败会导致服务启动失败，不对外提供业务或管理流量。关闭管理模块时不得探测数据库或迁移状态。
 
@@ -494,7 +494,7 @@ TTL 调整和销毁只允许已申请且仍由有效 Owner 管理的业务 Sandb
 建议增加：
 
 ```yaml
-admin:
+manage:
   enabled: false
   database:
     dsn: ""
@@ -531,11 +531,11 @@ admin:
     grafana_url: ""
 ```
 
-环境变量继续使用 `SANDBOX_` 前缀和下划线展开嵌套配置，例如 `SANDBOX_ADMIN_ENABLED=true` 和 `SANDBOX_ADMIN_DATABASE_DSN`。敏感配置优先通过部署 Secret 注入环境变量。
+环境变量继续使用 `SANDBOX_` 前缀和下划线展开嵌套配置，例如 `SANDBOX_MANAGE_ENABLED=true` 和 `SANDBOX_MANAGE_DATABASE_DSN`。敏感配置优先通过部署 Secret 注入环境变量。
 
 ## 18. 部署与启动顺序
 
-`admin.enabled=true` 时的服务启动顺序：
+`manage.enabled=true` 时的服务启动顺序：
 
 1. 加载并校验配置；
 2. 初始化日志和 Telemetry；
@@ -548,7 +548,7 @@ admin:
 9. 启动 Manager 心跳与 Owner Worker；
 10. 对外进入 Ready。
 
-`admin.enabled=false` 时跳过上述第 3 至 5 步中的全部 Admin 数据库、迁移、Seed、Repository 和命令 Worker 初始化，也跳过实例投影、Admin Reconciler、Manager Admin 心跳及历史清理任务。服务按变更前的装配路径启动，PostgreSQL DSN 可以为空，数据库可以不存在或不可达。
+`manage.enabled=false` 时跳过上述第 3 至 5 步中的全部 Manage 数据库、迁移、Seed、Repository 和命令 Worker 初始化，也跳过实例投影、Admin Reconciler、Manager Admin 心跳及历史清理任务。服务按变更前的装配路径启动，PostgreSQL DSN 可以为空，数据库可以不存在或不可达。
 
 管理前端独立部署，通过环境构建配置或运行时配置获得管理 API Base URL。发布时前后端版本需满足明确的 API 兼容窗口。
 
@@ -556,8 +556,8 @@ admin:
 
 ### 19.1 后端单元测试
 
-- `admin.enabled=false` 时不校验 DSN、JWT 和 Seed 配置，不创建任何 Admin 依赖；
-- `admin.enabled=true` 时缺少必要配置会返回明确的启动错误；
+- `manage.enabled=false` 时不校验 DSN、JWT 和 Seed 配置，不创建任何 Manage 依赖；
+- `manage.enabled=true` 时缺少必要配置会返回明确的启动错误；
 - bcrypt 密码生成、正确/错误密码验证及超长密码错误处理；
 - JWT Claim、Issuer、Audience、过期和签名校验；
 - Refresh Token 轮换、重放和 Session 链撤销；
@@ -586,8 +586,8 @@ admin:
 
 ### 19.3 API 测试
 
-- `admin.enabled=false` 时所有 `/admin/api/v1` 路由均未注册，现有 `/api/v1` 行为不变；
-- `admin.enabled=true` 时管理路由完整注册；
+- `manage.enabled=false` 时所有 `/admin/api/v1` 路由均未注册，现有 `/api/v1` 行为不变；
+- `manage.enabled=true` 时管理路由完整注册；
 - 登录、刷新、退出和个人密码修改；
 - 401、403、409、423、429 和 503 映射；
 - 所有管理接口的 RBAC；
@@ -614,8 +614,8 @@ admin:
 1. PostgreSQL 空库可由 `gormigrate/v2` 完整迁移并创建首个超级管理员。
 2. 代码中不存在 `AutoMigrate` 调用，所有 DDL 均可定位到 Migration。
 3. 启用管理模块后，普通服务启动会自动执行所有待执行 Migration 与 Seed，系统不依赖任何 CLI、独立 Job 或 Init Container。
-4. `admin.enabled=false` 时不连接数据库、不执行 Migration/Seed、不注册管理路由、不启动管理后台任务，且 PostgreSQL 不可用不影响现有服务。
-5. `admin.enabled=true` 时才启用完整管理控制面并校验全部管理配置。
+4. `manage.enabled=false` 时不连接数据库、不执行 Migration/Seed、不注册管理路由、不启动管理后台任务，且 PostgreSQL 不可用不影响现有服务。
+5. `manage.enabled=true` 时才启用完整管理控制面并校验全部管理配置。
 6. 所有管理域自有表都使用 PostgreSQL 原生 `uuid` 主键，并由数据库 `uuid_generate_v7()` 默认生成 UUIDv7。
 7. 三种角色只能访问其允许的页面与 API。
 8. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
