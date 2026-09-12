@@ -139,6 +139,7 @@ func TestActiveSandboxRepositoryControllerAndScan(t *testing.T) {
 	_, ok, err = repo.AcquireController(ctx, other, time.Second)
 	require.NoError(t, err)
 	assert.False(t, ok)
+	time.Sleep(2 * time.Millisecond)
 	renewed, err := repo.RenewController(ctx, *acquired, time.Second)
 	require.NoError(t, err)
 	assert.True(t, renewed.ExpiresAt.After(acquired.ExpiresAt))
