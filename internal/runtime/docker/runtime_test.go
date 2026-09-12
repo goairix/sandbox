@@ -355,6 +355,34 @@ func TestDockerRemoveSandboxReportsPairNetworkCleanupFailure(t *testing.T) {
 	assert.True(t, fake.containerRemoveRequested["legacy-runtime"])
 }
 
+func TestDockerRemoveRenamedPoolSandboxUsesCurrentNameForPairCleanup(t *testing.T) {
+	rt, fake := newFakeDockerRuntime(t)
+	fake.mu.Lock()
+	fake.containers["pooled-runtime"] = &fakeContainer{
+		config:  &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "sandbox-pool-old"}},
+		name:    "sandbox-live",
+		running: true,
+	}
+	fake.containers["gateway"] = &fakeContainer{
+		config: &container.Config{Labels: map[string]string{
+			"sandbox.managed": "true", "sandbox.id": "sandbox-live", "sandbox.role": "gateway",
+		}},
+		name:    gatewayNamePrefix + "sandbox-live",
+		running: true,
+	}
+	fake.networks["pair"] = dnetwork.Inspect{ID: "pair", Name: pairNetworkPrefix + "sandbox-live"}
+	fake.mu.Unlock()
+
+	require.NoError(t, rt.RemoveSandbox(context.Background(), "pooled-runtime"))
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	_, gatewayExists := fake.containers["gateway"]
+	assert.False(t, gatewayExists, "gateway for the claimed sandbox must be removed")
+	_, pairExists := fake.networks["pair"]
+	assert.False(t, pairExists, "pair network for the claimed sandbox must be removed")
+}
+
 func TestDockerPreparedRemovalRetainsResourcesUntilNotFound(t *testing.T) {
 	rt, fake := newFakeDockerRuntime(t)
 	info, err := rt.PrepareSandbox(context.Background(), fuseDockerSpecForTest())

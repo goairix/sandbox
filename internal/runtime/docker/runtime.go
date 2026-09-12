@@ -772,11 +772,16 @@ func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
-	// Inspect container to find sandbox ID for gateway/network cleanup
+	// The container name is updated when an ordinary pool runtime is claimed,
+	// while Docker labels remain immutable and still contain the old pool ID.
+	// Network creation also uses the current name, so cleanup must use it too.
 	var sandboxID string
 	info, err := r.cli.ContainerInspect(ctx, id)
 	if err == nil && info.Config != nil && info.Config.Labels != nil {
-		sandboxID = info.Config.Labels["sandbox.id"]
+		sandboxID = strings.TrimPrefix(info.Name, "/")
+		if sandboxID == "" {
+			sandboxID = info.Config.Labels["sandbox.id"]
+		}
 	}
 
 	if info.Config != nil && info.Config.Labels["sandbox.role"] == "fuse-runtime" && info.ID != "" {
