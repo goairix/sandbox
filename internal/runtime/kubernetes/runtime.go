@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -47,7 +46,7 @@ const defaultKubernetesControlTimeout = 60 * time.Second
 
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
-const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v2"
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v3"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {
@@ -127,7 +126,9 @@ type Runtime struct {
 	dynClient              dynamic.Interface
 	restConfig             *rest.Config
 	namespace              string
-	hasCilium              bool // whether CiliumNetworkPolicy CRD is available on this cluster
+	hasCilium              bool // resolved policy provider, not just CRD presence after configuration
+	hasCiliumAPI           bool // resource availability retained for legacy cleanup/audits
+	networkPolicyProvider  string
 	networkPodCIDRs        []string
 	networkServiceCIDRs    []string
 	controlExecutor        podCommandExecutor
@@ -184,11 +185,6 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 	}
 
 	hasCilium := detectCilium(client)
-	if hasCilium {
-		logger.Info(context.Background(), "Cilium CNI detected: CiliumNetworkPolicy will be used for private range enforcement")
-	} else {
-		logger.Info(context.Background(), "Cilium CNI not detected: relying on standard NetworkPolicy only")
-	}
 	runtimeImpl := &Runtime{
 		client:             client,
 		dynClient:          dynClient,
@@ -211,6 +207,14 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 	if _, err := configuredNetworkRanges(runtimeImpl.networkPodCIDRs, runtimeImpl.networkServiceCIDRs); err != nil {
 		return nil, err
 	}
+	if err := runtimeImpl.configureNetworkPolicyProvider(); err != nil {
+		return nil, err
+	}
+	if runtimeImpl.hasCilium {
+		logger.Info(context.Background(), "Cilium policy provider selected; API availability is not proof of active CNI enforcement")
+	} else {
+		logger.Info(context.Background(), "using standard Kubernetes NetworkPolicy; the cluster CNI must enforce NetworkPolicy")
+	}
 	runtimeImpl.controlExecutor = &spdyPodCommandExecutor{client: client, restConfig: restConfig, namespace: namespace}
 	if err := runtimeImpl.initializeOrdinaryPolicyRecovery(); err != nil {
 		return nil, fmt.Errorf("reconcile ordinary network policies: %w", err)
@@ -231,11 +235,11 @@ func (r *Runtime) initializeOrdinaryPolicyRecovery() error {
 	if r.ordinaryPolicyRecovery != nil {
 		return r.ordinaryPolicyRecovery(ctx)
 	}
-	return reconcileOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
+	return reconcileOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.ciliumAPIAvailable())
 }
 
 func (r *Runtime) ReconcileReleaseOrphanedResources(ctx context.Context) error {
-	return reconcileReleaseOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.hasCilium)
+	return reconcileReleaseOrphanedOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, r.ciliumAPIAvailable())
 }
 
 func (r *Runtime) verifyAmbiguousOrdinaryPodCreate(ctx context.Context, desired *corev1.Pod, createErr error) (*corev1.Pod, bool, error) {
@@ -1543,7 +1547,7 @@ func (r *Runtime) reconcileOrphanedFUSEPolicies(ctx context.Context, protectedRu
 			}
 		}
 	}
-	if !r.hasCilium || r.dynClient == nil {
+	if !r.ciliumAPIAvailable() || r.dynClient == nil {
 		return result
 	}
 	cilium, err := r.dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true"})
@@ -2246,34 +2250,51 @@ func (r *Runtime) patchPreparedState(ctx context.Context, ref runtime.RuntimeRef
 	return nil, fmt.Errorf("patch prepared state: %w", patchErr)
 }
 
-// PublishOrdinaryPoolPrepared performs the exact preparing -> prepared label
-// transition for an ordinary warm Pod. Pool identity labels are protected from
+// PublishOrdinaryPoolPrepared publishes the UID-bound prepared annotation
+// for an ordinary warm Pod without changing its CNI identity. Labels are protected from
 // the generic UpdateLabels path because they participate in ownership.
 func (r *Runtime) PublishOrdinaryPoolPrepared(ctx context.Context, ref runtime.RuntimeRef, poolKey, preparationID string) error {
 	pod, err := r.getExactPod(ctx, ref)
 	if err != nil {
 		return err
 	}
-	if pod.ResourceVersion == "" || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.pool"] != "true" ||
+	if _, err := ordinaryPodLabels(pod); err != nil {
+		return err
+	}
+	if pod.ResourceVersion == "" || pod.Annotations[ordinaryClaimIDAnnotation] != "" || pod.Annotations[ordinaryClaimUIDAnnotation] != "" || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.pool"] != "true" ||
 		pod.Labels["sandbox.workspace.mode"] == "fuse" || pod.Labels["sandbox.pool.key"] != poolKey ||
 		pod.Labels["sandbox.pool.instance"] != preparationID || pod.Labels["sandbox.pool.state"] != "preparing" {
 		return fmt.Errorf("ordinary pool prepared-state precondition failed")
 	}
+	if err := r.waitNetworkIdentity(ctx, pod); err != nil {
+		return err
+	}
+	if r.hasCilium {
+		// Status updates while awaiting the endpoint can advance resourceVersion.
+		// Refresh it only after proving ownership and every CNI label unchanged.
+		current, err := r.getExactPod(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if !apiequality.Semantic.DeepEqual(current.Labels, pod.Labels) ||
+			!apiequality.Semantic.DeepEqual(current.Annotations, pod.Annotations) || current.ResourceVersion == "" {
+			return fmt.Errorf("ordinary pool identity changed during endpoint readiness")
+		}
+		pod = current
+	}
 	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{
 		"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion,
-		"labels": map[string]any{"sandbox.pool.state": "prepared"},
+		"annotations": map[string]any{ordinaryPreparedStateAnnotation: "prepared", ordinaryPreparedUIDAnnotation: string(pod.UID)},
 	}})
 	updated, patchErr := r.client.CoreV1().Pods(r.namespace).Patch(ctx, ref.ID, types.MergePatchType, patch, metav1.PatchOptions{})
 	if patchErr == nil {
-		if updated.UID != pod.UID || updated.Labels["sandbox.pool.key"] != poolKey ||
-			updated.Labels["sandbox.pool.instance"] != preparationID || updated.Labels["sandbox.pool.state"] != "prepared" {
+		if !ordinaryPreparedPatchMatches(updated, pod) {
 			return runtime.ErrInvalidRuntimeRef
 		}
 		return nil
 	}
 	current, getErr := r.getExactPod(ctx, ref)
-	if getErr == nil && current.Labels["sandbox.pool.key"] == poolKey &&
-		current.Labels["sandbox.pool.instance"] == preparationID && current.Labels["sandbox.pool.state"] == "prepared" {
+	if getErr == nil && ordinaryPreparedPatchMatches(current, pod) {
 		return nil
 	}
 	return fmt.Errorf("patch ordinary pool prepared state: %w", patchErr)
@@ -2686,7 +2707,7 @@ func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID str
 		if expectedUID != "" {
 			return runtime.ErrNotFound
 		}
-		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, r.hasCilium)
+		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, r.ciliumAPIAvailable())
 		if cleanupErr != nil {
 			return cleanupErr
 		}
@@ -2709,7 +2730,7 @@ func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID str
 		return err
 	}
 	var cleanupErrs []error
-	if r.hasCilium {
+	if r.ciliumAPIAvailable() {
 		_, ciliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity, true)
 		cleanupErrs = append(cleanupErrs, ciliumErr)
 	}
@@ -2720,7 +2741,7 @@ func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID str
 		legacyLive, legacyPodErr := hasManagedOrdinaryPodForLogicalID(ctx, r.client, r.namespace, legacyIdentity.logicalID)
 		cleanupErrs = append(cleanupErrs, legacyPodErr)
 		if legacyPodErr == nil && !legacyLive {
-			if r.hasCilium {
+			if r.ciliumAPIAvailable() {
 				_, legacyCiliumErr := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, legacyIdentity, true)
 				cleanupErrs = append(cleanupErrs, legacyCiliumErr)
 			}
@@ -2740,12 +2761,17 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 		return nil, err
 	}
 
+	view, err := ordinaryPodLabels(pod)
+	if err != nil {
+		return nil, err
+	}
 	return &runtime.SandboxInfo{
-		ID:         id,
+		ID:         view["sandbox.id"],
 		RuntimeID:  pod.Name,
 		RuntimeUID: string(pod.UID),
 		State:      podStateString(pod.Status.Phase),
 		CreatedAt:  pod.CreationTimestamp.Time,
+		Labels:     view,
 	}, nil
 }
 
@@ -2920,8 +2946,16 @@ func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string
 
 func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) ([]runtime.SandboxInfo, error) {
 	var parts []string
+	businessFilter := false
 	for k, v := range labels {
+		if ordinaryBusinessFilter(k) && (k == "sandbox.id" || k == "sandbox.pool.state" || (k == "sandbox.pool" && v != "true")) {
+			businessFilter = true
+			continue
+		}
 		parts = append(parts, k+"="+v)
+	}
+	if businessFilter && labels["sandbox.managed"] == "" {
+		parts = append(parts, "sandbox.managed=true")
 	}
 	selector := ""
 	if len(parts) > 0 {
@@ -2937,13 +2971,27 @@ func (r *Runtime) ListSandboxes(ctx context.Context, labels map[string]string) (
 
 	result := make([]runtime.SandboxInfo, 0, len(pods.Items))
 	for _, pod := range pods.Items {
+		view, err := ordinaryPodLabels(&pod)
+		if err != nil {
+			return nil, err
+		}
+		matches := true
+		for key, value := range labels {
+			if view[key] != value {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
 		result = append(result, runtime.SandboxInfo{
-			ID:         pod.Labels["sandbox.id"],
+			ID:         view["sandbox.id"],
 			RuntimeID:  pod.Name,
 			RuntimeUID: string(pod.UID),
 			State:      podStateString(pod.Status.Phase),
 			CreatedAt:  pod.CreationTimestamp.Time,
-			Labels:     maps.Clone(pod.Labels),
+			Labels:     view,
 		})
 	}
 	return result, nil

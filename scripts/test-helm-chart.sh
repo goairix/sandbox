@@ -12,9 +12,19 @@ grep -Fq 'resources: ["services"]' <<<"$network_inventory"
 grep -Fq 'resources: ["nodes"]' <<<"$network_inventory"
 grep -Fq 'resources: ["servicecidrs"]' <<<"$network_inventory"
 grep -Fq 'resources: ["ciliumnodes"]' <<<"$network_inventory"
+! grep -Fq 'resources: ["ciliumendpoints"]' <<<"$network_inventory"
+grep -A1 'resources: \["ciliumendpoints"\]' <<<"$runtime_role" | grep -Fq 'verbs: ["get"]'
+grep -Fq 'apiGroups: ["crd.projectcalico.org"]' <<<"$network_inventory"
+grep -Fq 'resources: ["ippools"]' <<<"$network_inventory"
 grep -Fq 'name: control-sandbox-network-inventory' <<<"$network_inventory"
 grep -Fq 'namespace: control' <<<"$network_inventory"
 ! grep -Eq 'verbs:.*"(create|update|patch|delete|watch)"' <<<"$network_inventory"
+standard_provider="$(helm template sandbox "$repo_root/deploy/helm/sandbox" --set config.runtime.kubernetes.networkPolicyProvider=standard)"
+grep -A1 'name: SANDBOX_RUNTIME_KUBERNETES_NETWORK_POLICY_PROVIDER' <<<"$standard_provider" | grep -Fq 'value: "standard"'
+if helm template sandbox "$repo_root/deploy/helm/sandbox" --set config.runtime.kubernetes.networkPolicyProvider=unsupported >/dev/null 2>&1; then
+  printf 'unsupported network policy provider unexpectedly rendered\n' >&2
+  exit 1
+fi
 configured_network="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
   --set 'config.runtime.kubernetes.podCIDRs={10.42.0.0/16,fd00:42::/64}' \
   --set 'config.runtime.kubernetes.serviceCIDRs={10.96.0.0/12,fd00:96::/112}')"

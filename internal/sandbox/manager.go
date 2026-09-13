@@ -796,21 +796,29 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 			metrics.RecordError(spanCtx, "create_failed")
 			return nil, fmt.Errorf("acquire container: %w", err)
 		}
-		// Remove pool label and update sandbox.id so the pod is correctly
-		// identified after being taken from the pool (effective on K8s).
-		nilVal := (*string)(nil)
-		if err := m.runtime.UpdateLabels(spanCtx, info.RuntimeID, map[string]*string{
-			"sandbox.pool": nilVal,
-			"sandbox.id":   &id,
-		}); err != nil {
+		// Publish business ownership. Kubernetes uses UID-bound annotations and
+		// an effective label view; physical CNI labels remain immutable on checkout.
+		ref := runtime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+		var claimErr error
+		if claimer, ok := m.runtime.(runtime.OrdinaryPoolClaimer); ok {
+			claimErr = claimer.ClaimOrdinaryPool(spanCtx, ref, id)
+		} else {
+			claimErr = m.runtime.UpdateLabels(spanCtx, info.RuntimeID, map[string]*string{"sandbox.pool": nil, "sandbox.id": &id})
+		}
+		if claimErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
-			removeErr := m.runtime.RemoveSandbox(cleanupCtx, info.RuntimeID)
+			var removeErr error
+			if remover, ok := m.runtime.(runtime.OrdinarySandboxRemover); ok {
+				removeErr = remover.RemoveOrdinarySandbox(cleanupCtx, ref)
+			} else {
+				removeErr = m.runtime.RemoveSandbox(cleanupCtx, info.RuntimeID)
+			}
 			if removeErr == nil {
 				_ = m.pool.ConfirmAcquired(cleanupCtx, info)
 			}
 			cancel()
 			m.pool.NotifyRemoved()
-			return nil, errors.Join(fmt.Errorf("claim pooled sandbox: %w", err), removeErr)
+			return nil, errors.Join(fmt.Errorf("claim pooled sandbox: %w", claimErr), removeErr)
 		}
 		if err := m.pool.ConfirmAcquired(spanCtx, info); err != nil {
 			// The Pod is already atomically de-pooled by the runtime identity

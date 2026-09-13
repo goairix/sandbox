@@ -1,4 +1,8 @@
 {{- define "sandbox.validateNetworkCIDRs" -}}
+{{- $provider := .Values.config.runtime.kubernetes.networkPolicyProvider | default "auto" -}}
+{{- if not (has $provider (list "auto" "standard" "cilium")) -}}
+{{- fail "config.runtime.kubernetes.networkPolicyProvider must be auto, standard or cilium" -}}
+{{- end -}}
 {{- $pods := .Values.config.runtime.kubernetes.podCIDRs | default (list) -}}
 {{- $services := .Values.config.runtime.kubernetes.serviceCIDRs | default (list) -}}
 {{- if ne (empty $pods) (empty $services) -}}

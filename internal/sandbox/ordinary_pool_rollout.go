@@ -34,6 +34,16 @@ func (p *sharedOrdinaryPool) retireObsolete(ctx context.Context, target int) err
 	if err != nil {
 		return err
 	}
+	hasObsolete := false
+	for _, entry := range entries {
+		if entry.record.PoolKey != p.poolKey && entry.record.State != ordinaryPoolClaimed {
+			hasObsolete = true
+			break
+		}
+	}
+	if !hasObsolete {
+		return nil
+	}
 	pods, err := p.pool.runtime.ListSandboxes(ctx, map[string]string{"sandbox.pool": "true"})
 	if err != nil {
 		return err

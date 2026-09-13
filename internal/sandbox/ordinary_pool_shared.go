@@ -356,8 +356,8 @@ func (p *sharedOrdinaryPool) acquire(ctx context.Context) (*runtime.SandboxInfo,
 	}
 
 	metrics.RecordPoolAcquire(ctx, false)
-	// Keep the transient pool marker so the Kubernetes runtime can perform its
-	// policy-first pool-to-sandbox identity migration. It deliberately has no
+	// Keep the transient pool marker so the Kubernetes runtime can publish its
+	// annotation-only business claim without changing CNI identity. It has no
 	// shared pool key and therefore cannot be adopted as warm inventory.
 	info, err := p.pool.createWarmWithLabels(ctx, map[string]string{"sandbox.pool": "true"})
 	if err != nil {
@@ -426,7 +426,7 @@ func (p *sharedOrdinaryPool) refill(ctx context.Context) error {
 	}
 	// Repair interrupted preparation/claim state before counting capacity. This
 	// keeps a crashed preparer from suppressing refill indefinitely.
-	if err := p.reconcile(ctx, nil); err != nil {
+	if err := p.reconcileInventory(ctx, nil, false); err != nil {
 		return err
 	}
 	return p.withLock(ctx, func(lockCtx context.Context) error {
@@ -664,6 +664,10 @@ func withPoolLock(ctx context.Context, store state.AtomicStore, lockKey string, 
 }
 
 func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs map[string]struct{}) error {
+	return p.reconcileInventory(ctx, protectedRuntimeIDs, true)
+}
+
+func (p *sharedOrdinaryPool) reconcileInventory(ctx context.Context, protectedRuntimeIDs map[string]struct{}, scanOrphans bool) error {
 	err := p.withLock(ctx, func(lockCtx context.Context) error {
 		keys, err := p.store.Keys(lockCtx, p.recordBase+"*")
 		if err != nil {
@@ -674,7 +678,7 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 		if err != nil {
 			return err
 		}
-		pods, err := p.pool.runtime.ListSandboxes(lockCtx, map[string]string{"sandbox.pool": "true"})
+		pods, err := p.recordedInventory(lockCtx, entries, scanOrphans)
 		if err != nil {
 			return err
 		}
@@ -700,6 +704,9 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 			switch record.State {
 			case ordinaryPoolPreparing:
 				if hasPod && pod.State == "running" && (record.RuntimeID == "" || sameRuntime) {
+					if err := p.ensurePreparedPublication(lockCtx, pod); err != nil {
+						return err
+					}
 					prepared := record
 					prepared.RuntimeID, prepared.RuntimeUID = pod.RuntimeID, pod.RuntimeUID
 					prepared.State = ordinaryPoolPrepared
@@ -798,6 +805,9 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 					continue
 				}
 				if pod.State == "running" {
+					if err := p.ensurePreparedPublication(lockCtx, pod); err != nil {
+						return err
+					}
 					record := ordinaryPoolRecord{PreparationID: instance, RuntimeID: pod.RuntimeID, RuntimeUID: pod.RuntimeUID,
 						PoolKey: p.poolKey, State: ordinaryPoolPrepared, UpdatedAt: now, Revision: 1}
 					raw, _ := json.Marshal(record)
@@ -829,6 +839,61 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 		return nil
 	}
 	return err
+}
+
+func (p *sharedOrdinaryPool) ensurePreparedPublication(ctx context.Context, pod runtime.SandboxInfo) error {
+	if pod.Labels["sandbox.pool.state"] == string(ordinaryPoolPrepared) {
+		return nil
+	}
+	if pod.Labels["sandbox.pool.state"] != string(ordinaryPoolPreparing) {
+		return errors.New("ordinary recovery runtime preparation state is invalid")
+	}
+	publisher, ok := p.pool.runtime.(runtime.OrdinaryPoolStatePublisher)
+	if !ok {
+		return errors.New("runtime does not support ordinary pool state publication")
+	}
+	ref, err := runtime.NewRuntimeRef(pod.RuntimeID, pod.RuntimeUID)
+	if err != nil {
+		return err
+	}
+	if err := publisher.PublishOrdinaryPoolPrepared(ctx, ref, p.poolKey, pod.Labels["sandbox.pool.instance"]); err != nil {
+		return fmt.Errorf("recover ordinary prepared publication: %w", err)
+	}
+	return nil
+}
+
+// Refill visits only the current pool's recorded runtimes. Full orphan scans
+// belong to startup/release reconciliation, not every checkout's refill.
+func (p *sharedOrdinaryPool) recordedInventory(ctx context.Context, entries []ordinaryPoolEntry, scanOrphans bool) ([]runtime.SandboxInfo, error) {
+	if scanOrphans {
+		return p.pool.runtime.ListSandboxes(ctx, map[string]string{"sandbox.pool": "true", "sandbox.pool.key": p.poolKey})
+	}
+	var pods []runtime.SandboxInfo
+	for _, entry := range entries {
+		r := entry.record
+		if r.PoolKey != p.poolKey {
+			continue
+		}
+		if r.RuntimeID == "" {
+			found, err := p.pool.runtime.ListSandboxes(ctx, map[string]string{"sandbox.pool": "true", "sandbox.pool.key": p.poolKey, "sandbox.pool.instance": r.PreparationID})
+			if err != nil {
+				return nil, err
+			}
+			pods = append(pods, found...)
+			continue
+		}
+		pod, err := p.pool.runtime.GetSandbox(ctx, r.RuntimeID)
+		if errors.Is(err, runtime.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if pod.Labels["sandbox.pool"] == "true" && pod.Labels["sandbox.pool.key"] == p.poolKey {
+			pods = append(pods, *pod)
+		}
+	}
+	return pods, nil
 }
 
 func (p *sharedOrdinaryPool) drainRelease(ctx context.Context) error {

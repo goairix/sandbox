@@ -27,13 +27,14 @@ type networkTargets struct {
 }
 
 type networkRangeOptions struct {
-	cilium         bool
-	dynamic        dynamic.Interface
-	pods, services []string
+	cilium               bool
+	requireAuthoritative bool
+	dynamic              dynamic.Interface
+	pods, services       []string
 }
 
 func (r *Runtime) resolveNetworkTargets(ctx context.Context, entries []string) (networkTargets, error) {
-	return resolveNetworkTargets(ctx, r.client, entries, networkRangeOptions{cilium: r.hasCilium, dynamic: r.dynClient, pods: r.networkPodCIDRs, services: r.networkServiceCIDRs})
+	return resolveNetworkTargets(ctx, r.client, entries, networkRangeOptions{cilium: r.hasCilium, requireAuthoritative: true, dynamic: r.dynClient, pods: r.networkPodCIDRs, services: r.networkServiceCIDRs})
 }
 
 // Resolve user targets before any policy mutation. Kubernetes destinations must
@@ -259,10 +260,16 @@ func clusterDestinationRanges(ctx context.Context, client kubernetes.Interface, 
 			}
 		}
 	}
-	if options.cilium && len(nodes) == 0 {
+	if (options.cilium || options.requireAuthoritative) && len(nodes) == 0 {
 		return nil, fmt.Errorf("authoritative Pod allocation inventory has no Nodes")
 	}
-	if options.cilium && len(missing) > 0 {
+	if options.cilium {
+		// Node PodCIDRs may be stale or unrelated to the active Cilium IPAM.
+		// Require Cilium allocation evidence for every Node, not just empty Nodes.
+		for _, node := range nodes {
+			missing[node.Name] = true
+			nodeFamilies[node.Name] = map[int]bool{}
+		}
 		if options.dynamic == nil {
 			return nil, fmt.Errorf("CiliumNode allocation inventory is unavailable")
 		}
@@ -311,6 +318,18 @@ func clusterDestinationRanges(ctx context.Context, client kubernetes.Interface, 
 			return nil, fmt.Errorf("authoritative PodCIDRs missing for %d Nodes; configure complete pod_cidrs and service_cidrs", len(missing))
 		}
 	}
+	if !options.cilium && options.requireAuthoritative && options.dynamic != nil {
+		families, err := calicoAllocationFamilies(ctx, options.dynamic, add)
+		if err != nil {
+			return nil, err
+		}
+		if families != nil {
+			for _, node := range nodes {
+				nodeFamilies[node.Name] = families
+				delete(missing, node.Name)
+			}
+		}
+	}
 	continuation = ""
 	serviceCount := 0
 	knownServiceRanges := 0
@@ -318,7 +337,7 @@ func clusterDestinationRanges(ctx context.Context, client kubernetes.Interface, 
 	for page := 0; page < networkInventoryMaxPages; page++ {
 		list, err := client.NetworkingV1().ServiceCIDRs().List(ctx, metav1.ListOptions{Limit: networkInventoryPageSize, Continue: continuation})
 		if err != nil {
-			if !options.cilium && (apierrors.IsNotFound(err) || apierrors.IsMethodNotSupported(err)) {
+			if !options.cilium && !options.requireAuthoritative && (apierrors.IsNotFound(err) || apierrors.IsMethodNotSupported(err)) {
 				break
 			}
 			return nil, fmt.Errorf("authoritative ServiceCIDR inventory unavailable; configure complete pod_cidrs and service_cidrs: %w", err)
@@ -348,10 +367,13 @@ func clusterDestinationRanges(ctx context.Context, client kubernetes.Interface, 
 			return nil, fmt.Errorf("ServiceCIDR inventory page limit exceeded")
 		}
 	}
-	if options.cilium && knownServiceRanges == 0 {
+	if (options.cilium || options.requireAuthoritative) && knownServiceRanges == 0 {
 		return nil, fmt.Errorf("authoritative ServiceCIDR inventory is empty; configure complete pod_cidrs and service_cidrs")
 	}
-	if options.cilium {
+	if options.requireAuthoritative && len(missing) > 0 {
+		return nil, fmt.Errorf("authoritative PodCIDRs missing for %d Nodes; configure complete pod_cidrs and service_cidrs", len(missing))
+	}
+	if options.cilium || options.requireAuthoritative {
 		for _, families := range nodeFamilies {
 			for family := range serviceFamilies {
 				if !families[family] {

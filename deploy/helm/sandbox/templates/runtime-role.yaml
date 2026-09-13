@@ -23,3 +23,6 @@ rules:
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumendpoints"]
+    verbs: ["get"]

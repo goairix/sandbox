@@ -94,10 +94,16 @@ type ReleaseOrphanReconciler interface {
 }
 
 // OrdinaryPoolStatePublisher performs the exact, protected preparing-to-
-// prepared label transition for an ordinary warm runtime. Generic label APIs
+// prepared publication for an ordinary warm runtime. Generic label APIs
 // deliberately cannot mutate pool identity labels.
 type OrdinaryPoolStatePublisher interface {
 	PublishOrdinaryPoolPrepared(ctx context.Context, ref RuntimeRef, poolKey, preparationID string) error
+}
+
+// OrdinaryPoolClaimer binds business ownership to the original acquired Pod
+// instance, not a replacement found later under the same runtime name.
+type OrdinaryPoolClaimer interface {
+	ClaimOrdinaryPool(ctx context.Context, ref RuntimeRef, sandboxID string) error
 }
 
 // WarmPoolContractProvider identifies a versioned runtime Pod/control template.

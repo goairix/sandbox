@@ -523,6 +523,9 @@ func reconcileOrdinaryPolicies(ctx context.Context, client kubernetes.Interface,
 		return nil
 	}
 	ciliumPolicies, err := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true"})
+	if apierrors.IsNotFound(err) {
+		return nil // API group can outlive this optional policy resource.
+	}
 	if err != nil {
 		return fmt.Errorf("list managed CiliumNetworkPolicies: %w", err)
 	}
@@ -564,9 +567,27 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	if pod.Labels["sandbox.pool"] != "true" {
 		return fmt.Errorf("only an unclaimed ordinary pool Pod can change sandbox.id")
 	}
+	if pod.UID == "" || pod.ResourceVersion == "" {
+		return runtime.ErrInvalidRuntimeRef
+	}
+	if _, err := ordinaryPodLabels(pod); err != nil {
+		return err
+	}
+	if existing := pod.Annotations[ordinaryClaimIDAnnotation]; existing != "" {
+		if existing == newLogicalID {
+			return nil
+		}
+		return fmt.Errorf("ordinary pool Pod is already claimed by another sandbox")
+	}
+	if len(labels) != 2 {
+		return fmt.Errorf("ordinary claim cannot change CNI labels")
+	}
 	if errs := kvalidation.IsDNS1123Subdomain(newLogicalID); len(errs) != 0 {
 		return fmt.Errorf("invalid new ordinary logical ID %q: %s", newLogicalID, errs[0])
 	}
+	// This catches legacy physical-name collisions only. Business ID uniqueness
+	// is fenced by the Manager's shared active-repository NX publication, not a
+	// label scan (claimed Pods intentionally retain their physical pool IDs).
 	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: "sandbox.managed=true,sandbox.id=" + newLogicalID})
 	if err != nil {
 		return fmt.Errorf("check new ordinary logical identity: %w", err)
@@ -584,38 +605,9 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	if err := validateMutableOrdinaryNetworkPolicy(oldPolicy, oldIdentity); err != nil {
 		return fmt.Errorf("validate pool NetworkPolicy: %w", err)
 	}
-	attempt, err := newNetworkAttemptToken()
-	if err != nil {
-		return fmt.Errorf("create pool migration attempt: %w", err)
-	}
-	newIdentity := ordinaryNetworkIdentity{runtimeID: pod.Name, runtimeUID: pod.UID, logicalID: newLogicalID}
-	newPolicy, err := buildOrdinaryNetworkPolicy(r.namespace, newIdentity, attempt, false, nil, false)
-	if err != nil {
-		return err
-	}
-	newPolicy.Spec.Egress = append([]networkingv1.NetworkPolicyEgressRule(nil), oldPolicy.Spec.Egress...)
-	newPolicy.Spec.PolicyTypes = append([]networkingv1.PolicyType(nil), oldPolicy.Spec.PolicyTypes...)
-	created, err := createOrdinaryNetworkPolicy(ctx, r.client, newPolicy, newIdentity, attempt)
-	if err != nil {
-		return err
-	}
-	migrationLabels := make(map[string]*string, len(labels)+3)
-	for key, value := range labels {
-		migrationLabels[key] = value
-	}
-	for _, key := range []string{"sandbox.pool.state", "sandbox.pool.key", "sandbox.pool.instance"} {
-		migrationLabels[key] = nil
-	}
-	labelMap := make(map[string]any, len(migrationLabels))
-	for key, value := range migrationLabels {
-		if value == nil {
-			labelMap[key] = nil
-		} else {
-			labelMap[key] = *value
-		}
-	}
 	patchBytes, err := json.Marshal(map[string]any{"metadata": map[string]any{
-		"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion, "labels": labelMap,
+		"uid": string(pod.UID), "resourceVersion": pod.ResourceVersion,
+		"annotations": map[string]any{ordinaryClaimIDAnnotation: newLogicalID, ordinaryClaimUIDAnnotation: string(pod.UID)},
 	}})
 	if err != nil {
 		return fmt.Errorf("marshal pool identity patch: %w", err)
@@ -623,40 +615,24 @@ func (r *Runtime) migrateOrdinaryPoolIdentity(ctx context.Context, pod *corev1.P
 	patched, patchErr := r.client.CoreV1().Pods(r.namespace).Patch(ctx, pod.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 	if patchErr != nil {
 		verified, getErr := r.client.CoreV1().Pods(r.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if getErr == nil && ordinaryPoolPatchMatches(verified, pod.UID, newLogicalID, migrationLabels) {
+		if getErr == nil && ordinaryPoolClaimMatches(verified, pod, newLogicalID) {
 			patched = verified
-		} else if getErr == nil && verified.UID == pod.UID && verified.Labels["sandbox.id"] == oldIdentity.logicalID && verified.Labels["sandbox.pool"] == "true" {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), r.terminationTimeout)
-			defer cancel()
-			cleanupErr := deleteAttemptOrdinaryNetworkPolicy(cleanupCtx, r.client, r.namespace, created.Name, newIdentity, attempt)
-			return errors.Join(fmt.Errorf("patch pool Pod identity: %w", patchErr), cleanupErr)
+		} else if getErr == nil && verified.UID == pod.UID && verified.Annotations[ordinaryClaimIDAnnotation] == "" && apiequality.Semantic.DeepEqual(verified.Labels, pod.Labels) {
+			return fmt.Errorf("patch pool Pod identity: %w", patchErr)
 		} else {
 			return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patch pool Pod identity: %w", patchErr), getErr)
 		}
 	}
-	if !ordinaryPoolPatchMatches(patched, pod.UID, newLogicalID, migrationLabels) {
+	if !ordinaryPoolClaimMatches(patched, pod, newLogicalID) {
 		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("patched pool Pod identity does not match requested labels"))
-	}
-	if err := deleteCreatedNetworkPolicy(ctx, oldPolicies, oldPolicy); err != nil {
-		return fmt.Errorf("delete old pool NetworkPolicy: %w", err)
 	}
 	return nil
 }
 
-func ordinaryPoolPatchMatches(pod *corev1.Pod, uid types.UID, newLogicalID string, labels map[string]*string) bool {
-	if pod == nil || pod.UID != uid || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.workspace.mode"] == "fuse" || pod.Labels["sandbox.id"] != newLogicalID {
-		return false
-	}
-	for key, value := range labels {
-		if value == nil {
-			if _, present := pod.Labels[key]; present {
-				return false
-			}
-		} else if pod.Labels[key] != *value {
-			return false
-		}
-	}
-	return true
+func ordinaryPoolClaimMatches(current, before *corev1.Pod, newLogicalID string) bool {
+	return current != nil && current.UID == before.UID && current.DeletionTimestamp == nil &&
+		apiequality.Semantic.DeepEqual(current.Labels, before.Labels) &&
+		current.Annotations[ordinaryClaimIDAnnotation] == newLogicalID && current.Annotations[ordinaryClaimUIDAnnotation] == string(before.UID)
 }
 
 func ensureOrdinaryIdentityAvailable(ctx context.Context, client kubernetes.Interface, namespace string, identity ordinaryNetworkIdentity) error {

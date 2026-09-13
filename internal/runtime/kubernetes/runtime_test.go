@@ -420,6 +420,8 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 	})
 	dynamicClient := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{
 		ciliumNetworkPolicyGVR: "CiliumNetworkPolicyList",
+		ciliumNodeGVR:          "CiliumNodeList",
+		calicoPoolGVR:          "IPPoolList",
 	})
 	dynamicClient.PrependReactor("create", "ciliumnetworkpolicies", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
 		policy := action.(ktesting.CreateAction).GetObject().(*unstructured.Unstructured)
@@ -447,6 +449,7 @@ func TestListSandboxesReturnsRuntimeLabels(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	labels := map[string]string{
 		"sandbox.id":             "sandbox-pool-fuse",
+		"sandbox.managed":        "true",
 		"sandbox.pool":           "true",
 		"sandbox.workspace.mode": "fuse",
 	}
@@ -1191,6 +1194,7 @@ func TestConcurrentFirstStandardFUSENetworkUpdatesNeverDeleteWinner(t *testing.T
 	require.NoError(t, err)
 	clientB := kubefake.NewSimpleClientset(pod.DeepCopy())
 	rtB := &Runtime{client: clientB, namespace: "runtime", controlExecutor: preparedScript()}
+	WithNetworkCIDRs(rtA.networkPodCIDRs, rtA.networkServiceCIDRs)(rtB)
 	shared := newSharedFirstNetworkPolicyStore(fuseUserPolicyPrefix + ref.ID)
 	client.PrependReactor("*", "networkpolicies", shared.react)
 	clientB.PrependReactor("*", "networkpolicies", shared.react)
@@ -1226,6 +1230,7 @@ func TestConcurrentFirstCiliumFUSENetworkUpdatesNeverDeleteWinner(t *testing.T) 
 	dynamicClientA := rtA.dynClient.(*fake.FakeDynamicClient)
 	dynamicClientB := fake.NewSimpleDynamicClient(k8sruntime.NewScheme())
 	rtB := &Runtime{client: clientB, dynClient: dynamicClientB, namespace: "runtime", hasCilium: true, controlExecutor: preparedScript()}
+	WithNetworkCIDRs(rtA.networkPodCIDRs, rtA.networkServiceCIDRs)(rtB)
 	WithNetworkCIDRs([]string{"10.42.0.0/16"}, []string{"10.96.0.0/12"})(rtB)
 	sharedDeny := newSharedFirstCiliumPolicyStore(fuseUserDenyPolicyPrefix + ref.ID)
 	dynamicClientA.PrependReactor("*", "ciliumnetworkpolicies", sharedDeny.react)
@@ -2166,6 +2171,7 @@ func TestRecoveredRuntimeCanUpdateExactFUSENetwork(t *testing.T) {
 	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
 
 	recovered := &Runtime{client: client, dynClient: rt.dynClient, namespace: "runtime", controlExecutor: preparedScript()}
+	WithNetworkCIDRs(rt.networkPodCIDRs, rt.networkServiceCIDRs)(recovered)
 	require.NoError(t, recovered.UpdateFUSENetwork(context.Background(), ref, true, []string{"192.0.2.10/32"}, false))
 	policy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), fuseUserPolicyPrefix+ref.ID, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -2543,7 +2549,8 @@ func TestPublishOrdinaryPoolPreparedUsesExactProtectedTransition(t *testing.T) {
 	require.NoError(t, rt.PublishOrdinaryPoolPrepared(context.Background(), ref, "pool-key-a", "preparation-a"))
 	updated, err := client.CoreV1().Pods("runtime").Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, "prepared", updated.Labels["sandbox.pool.state"])
+	assert.Equal(t, "preparing", updated.Labels["sandbox.pool.state"])
+	assert.Equal(t, "prepared", updated.Annotations[ordinaryPreparedStateAnnotation])
 
 	err = rt.PublishOrdinaryPoolPrepared(context.Background(), ref, "other-key", "preparation-a")
 	require.Error(t, err)
@@ -2568,7 +2575,7 @@ func seedOrdinaryPoolPodAndPolicy(t *testing.T, rt *Runtime, client *kubefake.Cl
 	return pod
 }
 
-func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
+func TestUpdateLabelsClaimsPoolWithoutChangingPolicyIdentity(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	pod := seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
 	pod.Labels["sandbox.pool.state"] = "prepared"
@@ -2599,17 +2606,14 @@ func TestUpdateLabelsMigratesPoolPolicyBeforePodIdentity(t *testing.T) {
 	newID := "customer-a"
 	err = rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"create-new-policy", "patch-pod", "delete-old-policy"}, actions)
-	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	assert.Equal(t, []string{"patch-pod"}, actions)
+	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"sandbox.id": "customer-a"}, newPolicy.Spec.PodSelector.MatchLabels)
-	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err))
+	assert.Equal(t, map[string]string{"sandbox.id": "sandbox-pool-a"}, newPolicy.Spec.PodSelector.MatchLabels)
 	updated, err := client.CoreV1().Pods("runtime").Get(context.Background(), "sandbox-pool-a", metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.NotContains(t, updated.Labels, "sandbox.pool.state")
-	assert.NotContains(t, updated.Labels, "sandbox.pool.key")
-	assert.NotContains(t, updated.Labels, "sandbox.pool.instance")
+	assert.Equal(t, pod.Labels, updated.Labels)
+	assert.Equal(t, newID, updated.Annotations[ordinaryClaimIDAnnotation])
 }
 
 func TestUpdateLabelsRejectsLogicalIDAlreadyInUse(t *testing.T) {
@@ -2651,8 +2655,11 @@ func TestUpdateLabelsAcceptsVerifiedPatchWriteAfterError(t *testing.T) {
 		tracked, getErr := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), "runtime", "sandbox-pool-a")
 		require.NoError(t, getErr)
 		pod := tracked.(*corev1.Pod).DeepCopy()
-		delete(pod.Labels, "sandbox.pool")
-		pod.Labels["sandbox.id"] = "customer-a"
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[ordinaryClaimIDAnnotation] = "customer-a"
+		pod.Annotations[ordinaryClaimUIDAnnotation] = string(pod.UID)
 		require.NoError(t, client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), pod, "runtime"))
 		return true, nil, errors.New("transport lost after patch")
 	})
@@ -2660,13 +2667,11 @@ func TestUpdateLabelsAcceptsVerifiedPatchWriteAfterError(t *testing.T) {
 	newID := "customer-a"
 
 	require.NoError(t, rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID}))
-	_, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	_, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
 	require.NoError(t, err)
-	_, err = client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err))
 }
 
-func TestUpdateLabelsRetainsBothPoliciesWhenPatchReadbackIsUnknown(t *testing.T) {
+func TestUpdateLabelsRetainsStablePolicyWhenPatchReadbackIsUnknown(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
 	patchAttempted := false
@@ -2688,7 +2693,7 @@ func TestUpdateLabelsRetainsBothPoliciesWhenPatchReadbackIsUnknown(t *testing.T)
 	_, oldErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
 	require.NoError(t, oldErr)
 	_, newErr := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
-	require.NoError(t, newErr)
+	require.True(t, apierrors.IsNotFound(newErr))
 }
 
 func TestUpdateLabelsRejectsStandaloneOrdinaryProtectedLabelChanges(t *testing.T) {
@@ -2703,7 +2708,7 @@ func TestUpdateLabelsRejectsStandaloneOrdinaryProtectedLabelChanges(t *testing.T
 	}
 }
 
-func TestUpdateLabelsReturnsOldPolicyDeleteFailure(t *testing.T) {
+func TestUpdateLabelsClaimDoesNotRequirePolicyDeletion(t *testing.T) {
 	rt, client := newFakeKubernetesRuntime(t, preparedScript())
 	seedOrdinaryPoolPodAndPolicy(t, rt, client, "sandbox-pool-a", "sandbox-pool-a")
 	deleteErr := errors.New("delete old policy failed")
@@ -2716,7 +2721,10 @@ func TestUpdateLabelsReturnsOldPolicyDeleteFailure(t *testing.T) {
 	nilValue := (*string)(nil)
 	newID := "customer-a"
 	err := rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID})
-	require.ErrorIs(t, err, deleteErr)
+	require.NoError(t, err)
+	for _, action := range client.Actions() {
+		require.NotEqual(t, "delete", action.GetVerb())
+	}
 }
 
 func TestUpdateLabelsMigratesExactLegacyPoolPolicy(t *testing.T) {
@@ -2734,9 +2742,9 @@ func TestUpdateLabelsMigratesExactLegacyPoolPolicy(t *testing.T) {
 	newID := "customer-a"
 
 	require.NoError(t, rt.UpdateLabels(context.Background(), "sandbox-pool-a", map[string]*string{"sandbox.pool": nilValue, "sandbox.id": &newID}))
-	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-customer-a", metav1.GetOptions{})
+	newPolicy, err := client.NetworkingV1().NetworkPolicies("runtime").Get(context.Background(), "sandbox-sandbox-pool-a", metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, ordinaryPolicyRole, newPolicy.Labels[ordinaryPolicyRoleLabel])
+	assert.Empty(t, newPolicy.Labels[ordinaryPolicyRoleLabel], "legacy policy is retained, not silently adopted or recreated")
 }
 
 func TestRemoveSandboxMissingPodRechecksBeforeDeletingBoundPolicy(t *testing.T) {

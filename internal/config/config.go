@@ -59,10 +59,11 @@ type DockerConfig struct {
 
 // KubernetesConfig holds Kubernetes-specific runtime settings.
 type KubernetesConfig struct {
-	Kubeconfig   string   `mapstructure:"kubeconfig"`
-	Namespace    string   `mapstructure:"namespace"`
-	PodCIDRs     []string `mapstructure:"pod_cidrs"`
-	ServiceCIDRs []string `mapstructure:"service_cidrs"`
+	Kubeconfig            string   `mapstructure:"kubeconfig"`
+	Namespace             string   `mapstructure:"namespace"`
+	NetworkPolicyProvider string   `mapstructure:"network_policy_provider"`
+	PodCIDRs              []string `mapstructure:"pod_cidrs"`
+	ServiceCIDRs          []string `mapstructure:"service_cidrs"`
 }
 
 // PoolConfig holds sandbox pool settings.
@@ -349,6 +350,11 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for invalid or missing values.
 func (c *Config) Validate() error {
+	switch c.Runtime.Kubernetes.NetworkPolicyProvider {
+	case "", "auto", "standard", "cilium":
+	default:
+		return fmt.Errorf("config: runtime.kubernetes.network_policy_provider must be auto, standard or cilium")
+	}
 	if (len(c.Runtime.Kubernetes.PodCIDRs) == 0) != (len(c.Runtime.Kubernetes.ServiceCIDRs) == 0) {
 		return fmt.Errorf("config: authoritative Kubernetes pod_cidrs and service_cidrs must both be configured or both empty")
 	}
@@ -901,6 +907,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("runtime.docker.workspace_secret_root", "/var/lib/sandbox/workspace-secrets")
 	v.SetDefault("runtime.kubernetes.kubeconfig", "")
 	v.SetDefault("runtime.kubernetes.namespace", "")
+	v.SetDefault("runtime.kubernetes.network_policy_provider", "auto")
 	v.SetDefault("runtime.kubernetes.pod_cidrs", []string{})
 	v.SetDefault("runtime.kubernetes.service_cidrs", []string{})
 

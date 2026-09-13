@@ -98,8 +98,15 @@ config:
     kubernetes:
       # 沙盒 Pod 所在命名空间，留空时使用 Helm release 的命名空间。
       namespace: ""
+      # 网络策略提供方：auto 按 Cilium API 可见性兼容发现，不保证它仍是实际 CNI。
+      # Calico/其它支持 NetworkPolicy 的插件或云 VPC 选 standard；Cilium 选 cilium。
+      # 集群遗留 Cilium CRD 时必须显式选 standard，避免等待不存在的 Cilium Endpoint。
+      networkPolicyProvider: auto
       # 可选的完整 Pod/Service 分配网段，须覆盖当前及未来分配范围。
       # 两项同时配置时不扫描分配资源；同时留空时进行有界自动发现。
+      # Cilium 使用 CiliumNode，Calico Kubernetes IPAM 使用全部 IPPool（含禁用池）。
+      # 所有插件都要求完整证据；其它插件的 Node PodCIDR 必须是真实分配来源。
+      # 云 VPC/外部 IPAM/额外地址池无法完整发现时须显式配置，且 CNI 必须支持 NetworkPolicy。
       podCIDRs: []
       serviceCIDRs: []
   pool:

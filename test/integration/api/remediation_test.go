@@ -159,7 +159,7 @@ func TestDeployedAPIRemediation(t *testing.T) {
 	if target := os.Getenv("SANDBOX_API_INTERNAL_TARGET"); target != "" {
 		internalURL := os.Getenv("SANDBOX_API_INTERNAL_URL")
 		require.NotEmpty(t, internalURL, "provide a known backend URL, preferably ServiceIP to avoid DNS dependency")
-		s.request(1, http.MethodPut, "/sandboxes/"+sb.ID+"/network", types.UpdateNetworkRequest{Enabled: true, Whitelist: []string{target}}, http.StatusOK)
+		s.request(1, http.MethodPut, "/sandboxes/"+sb.ID+"/network", types.UpdateNetworkRequest{Enabled: true, BlockPrivate: true, Whitelist: []string{target}}, http.StatusOK)
 		for i := range 3 {
 			s.exec(i, sb.ID, "python", fmt.Sprintf("import urllib.request; r=urllib.request.urlopen(%q, timeout=5); print(r.status)", internalURL), "")
 		}
@@ -167,6 +167,38 @@ func TestDeployedAPIRemediation(t *testing.T) {
 			result := s.exec(2, sb.ID, "python", fmt.Sprintf("import urllib.request\ntry:\n urllib.request.urlopen(%q,timeout=5)\n print('UNEXPECTED_ALLOWED')\nexcept Exception:\n print('BLOCKED')", deniedURL), "")
 			require.Contains(t, result.Stdout, "BLOCKED")
 			require.NotContains(t, result.Stdout, "UNEXPECTED_ALLOWED")
+		}
+		// Test fresh pool checkouts, not just a long-lived Pod whose old CNI
+		// identity may already have converged. Use a reachable backend as the
+		// denial control, so an unavailable endpoint cannot masquerade as denial.
+		parsed, err := url.Parse(internalURL)
+		require.NoError(t, err)
+		port := parsed.Port()
+		if port == "" {
+			port = "80"
+			if parsed.Scheme == "https" {
+				port = "443"
+			}
+		}
+		portNumber, err := strconv.Atoi(port)
+		require.NoError(t, err)
+		for i := range 3 {
+			fresh := s.create(types.CreateSandboxRequest{Mode: "ephemeral", Timeout: 300})
+			path := "/sandboxes/" + fresh.ID + "/network"
+			s.request(i, http.MethodPut, path, types.UpdateNetworkRequest{Enabled: true, BlockPrivate: true, Whitelist: []string{target}}, http.StatusOK)
+			probe := fmt.Sprintf("import socket,time\ndeadline=time.monotonic()+5\nwhile True:\n try:\n  c=socket.create_connection((%q,%d),timeout=1); c.close(); print('CONNECTED'); break\n except OSError:\n  if time.monotonic()>=deadline: raise\n  time.sleep(.1)", parsed.Hostname(), portNumber)
+			require.Contains(t, s.exec((i+1)%3, fresh.ID, "python", probe, "").Stdout, "CONNECTED")
+			if raw := os.Getenv("SANDBOX_API_CLUSTER_LITERAL_TARGETS"); raw != "" {
+				for _, literal := range strings.Split(raw, ",") {
+					body := s.request((i+2)%3, http.MethodPut, path, types.UpdateNetworkRequest{Enabled: true, BlockPrivate: true, Whitelist: []string{strings.TrimSpace(literal)}}, http.StatusBadRequest)
+					require.Contains(t, string(body), "NETWORK_TARGET_INVALID")
+				}
+			}
+			s.request((i+2)%3, http.MethodPut, path, types.UpdateNetworkRequest{Enabled: true, BlockPrivate: true}, http.StatusOK)
+			denyProbe := fmt.Sprintf("import socket,time\ndeadline=time.monotonic()+5\nwhile True:\n try:\n  c=socket.create_connection((%q,%d),timeout=1); c.close()\n except OSError:\n  print('BLOCKED'); break\n if time.monotonic()>=deadline: raise RuntimeError('removed Service remains allowed')\n time.sleep(.1)", parsed.Hostname(), portNumber)
+			require.Contains(t, s.exec(i, fresh.ID, "python", denyProbe, "").Stdout, "BLOCKED")
+			s.request(i, http.MethodPut, path, types.UpdateNetworkRequest{Enabled: true, BlockPrivate: true, Whitelist: []string{target}}, http.StatusOK)
+			require.Contains(t, s.exec((i+1)%3, fresh.ID, "python", probe, "").Stdout, "CONNECTED")
 		}
 	}
 	for i := range 3 {

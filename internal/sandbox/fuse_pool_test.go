@@ -611,6 +611,7 @@ type blockingAfterReturnRepository struct {
 	*memoryFUSEPoolRepository
 	entered chan struct{}
 	release chan struct{}
+	signal  sync.Once
 }
 
 func (r *blockingAfterReturnRepository) ReturnPreparedWithAdmission(ctx context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*state.FUSEPoolRecord, error) {
@@ -618,7 +619,7 @@ func (r *blockingAfterReturnRepository) ReturnPreparedWithAdmission(ctx context.
 	if err != nil {
 		return nil, err
 	}
-	close(r.entered)
+	r.signal.Do(func() { close(r.entered) })
 	<-r.release
 	return returned, nil
 }
@@ -627,6 +628,7 @@ type blockingAfterTransitionRepository struct {
 	*memoryFUSEPoolRepository
 	entered chan struct{}
 	release chan struct{}
+	signal  sync.Once
 }
 
 func (r *blockingAfterTransitionRepository) TransitionWithRefillLock(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*state.FUSEPoolRecord, error) {
@@ -634,7 +636,7 @@ func (r *blockingAfterTransitionRepository) TransitionWithRefillLock(ctx context
 	if err != nil {
 		return nil, err
 	}
-	close(r.entered)
+	r.signal.Do(func() { close(r.entered) })
 	<-r.release
 	return transitioned, nil
 }

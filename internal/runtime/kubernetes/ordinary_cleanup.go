@@ -27,7 +27,7 @@ func (r *Runtime) CleanupOrdinarySandboxPolicies(ctx context.Context, ref runtim
 		if _, err := deleteOwnedOrdinaryNetworkPolicy(ctx, r.client, r.namespace, identity, false); err != nil {
 			return err
 		}
-		if r.hasCilium {
+		if r.ciliumAPIAvailable() {
 			if _, err := deleteOwnedOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity, false); err != nil {
 				return err
 			}

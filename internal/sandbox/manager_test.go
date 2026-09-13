@@ -659,7 +659,11 @@ func TestManagersShareKubernetesOrdinaryWarmPool(t *testing.T) {
 	assert.NotContains(t, runtimeInfo.Labels, "sandbox.pool.key")
 	claimKeys, err := store.Keys(context.Background(), second.pool.shared.recordBase+"*")
 	require.NoError(t, err)
-	assert.Empty(t, claimKeys)
+	entries, err := second.pool.shared.loadRecords(context.Background(), claimKeys)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		assert.NotEqual(t, sandbox.RuntimeID, entry.record.RuntimeID, "acquired runtime's claim record must be retired; concurrent refill records are valid")
+	}
 	require.NoError(t, second.Destroy(context.Background(), sandbox.ID))
 }
 

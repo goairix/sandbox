@@ -18,7 +18,8 @@ import (
 func TestCiliumAllocatedRangesCoverEveryNodeAndFutureConfiguredAllocation(t *testing.T) {
 	client := kubefake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Spec: corev1.NodeSpec{PodCIDRs: []string{"10.42.0.0/24"}}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, &networkingv1.ServiceCIDR{ObjectMeta: metav1.ObjectMeta{Name: "kubernetes"}, Spec: networkingv1.ServiceCIDRSpec{CIDRs: []string{"10.96.0.0/12"}}})
 	ciliumNode := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "cilium.io/v2", "kind": "CiliumNode", "metadata": map[string]any{"name": "node-b"}, "spec": map[string]any{"ipam": map[string]any{"podCIDRs": []any{"10.43.0.0/24"}}}}}
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{ciliumNodeGVR: "CiliumNodeList"}, ciliumNode)
+	ciliumNodeA := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "cilium.io/v2", "kind": "CiliumNode", "metadata": map[string]any{"name": "node-a"}, "spec": map[string]any{"ipam": map[string]any{"podCIDRs": []any{"10.42.0.0/24"}}}}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), map[schema.GroupVersionResource]string{ciliumNodeGVR: "CiliumNodeList"}, ciliumNode, ciliumNodeA)
 	r := &Runtime{client: client, dynClient: dyn, hasCilium: true}
 	for _, raw := range []string{"10.42.0.8", "10.43.0.8", "10.100.0.8"} {
 		_, err := r.resolveNetworkTargets(context.Background(), []string{raw})

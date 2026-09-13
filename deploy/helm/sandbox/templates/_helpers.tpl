@@ -78,6 +78,8 @@
   value: {{ .Values.config.runtime.type | quote }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
   value: {{ $sandboxNs | quote }}
+- name: SANDBOX_RUNTIME_KUBERNETES_NETWORK_POLICY_PROVIDER
+  value: {{ .Values.config.runtime.kubernetes.networkPolicyProvider | default "auto" | quote }}
 - name: SANDBOX_IMAGES_SANDBOX
   value: {{ .Values.config.images.sandbox | quote }}
 - name: SANDBOX_IMAGES_GATEWAY

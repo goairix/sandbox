@@ -392,6 +392,18 @@ func newSharedPoolRuntime() *sharedPoolRuntime {
 	return &sharedPoolRuntime{mockRuntime: newMockRuntime()}
 }
 
+func (m *sharedPoolRuntime) GetSandbox(_ context.Context, id string) (*runtime.SandboxInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	info := m.sandboxes[id]
+	if info == nil {
+		return nil, runtime.ErrNotFound
+	}
+	copy := *info
+	copy.Labels = maps.Clone(info.Labels)
+	return &copy, nil
+}
+
 func (m *sharedPoolRuntime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (*runtime.SandboxInfo, error) {
 	info, err := m.mockRuntime.CreateSandbox(ctx, spec)
 	if err != nil {
