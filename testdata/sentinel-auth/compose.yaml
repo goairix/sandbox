@@ -1,0 +1,82 @@
+x-redis: &redis
+  image: redis:7-alpine
+  pull_policy: never
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - 'test -f /data/redis.conf || cp /templates/member.conf /data/redis.conf; chmod 600 /data/redis.conf; exec /usr/local/bin/docker-entrypoint.sh redis-server /data/redis.conf'
+x-sentinel: &sentinel
+  image: redis:7-alpine
+  pull_policy: never
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - 'test -f /data/sentinel.conf || cp /templates/member.conf /data/sentinel.conf; chmod 600 /data/sentinel.conf; exec /usr/local/bin/docker-entrypoint.sh redis-server /data/sentinel.conf --sentinel'
+x-go: &go
+  image: golang:1.25-alpine
+  pull_policy: never
+  working_dir: /repo
+  environment:
+    GOCACHE: /tmp/go-build
+    GOMODCACHE: /go/pkg/mod
+    GOPROXY: "off"
+    GOTOOLCHAIN: local
+    GOFLAGS: -mod=readonly
+  volumes:
+    - ${SENTINEL_AUTH_REPO_ROOT:?task repository path required}:/repo:ro
+    - ${SENTINEL_AUTH_GOMODCACHE:?read-only task module cache required}:/go/pkg/mod:ro
+  profiles: ["tools"]
+services:
+  redis-0:
+    <<: *redis
+    volumes:
+      - redis-0:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/redis-0.conf:/templates/member.conf:ro
+  redis-1:
+    <<: *redis
+    volumes:
+      - redis-1:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/redis-1.conf:/templates/member.conf:ro
+  redis-2:
+    <<: *redis
+    volumes:
+      - redis-2:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/redis-2.conf:/templates/member.conf:ro
+  sentinel-0:
+    <<: *sentinel
+    volumes:
+      - sentinel-0:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/sentinel-0.conf:/templates/member.conf:ro
+  sentinel-1:
+    <<: *sentinel
+    volumes:
+      - sentinel-1:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/sentinel-1.conf:/templates/member.conf:ro
+  sentinel-2:
+    <<: *sentinel
+    volumes:
+      - sentinel-2:/data
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}/sentinel-2.conf:/templates/member.conf:ro
+  config-generator:
+    <<: *go
+    network_mode: none
+    volumes:
+      - ${SENTINEL_AUTH_REPO_ROOT:?task repository path required}:/repo:ro
+      - ${SENTINEL_AUTH_GOMODCACHE:?read-only task module cache required}:/go/pkg/mod:ro
+      - ${SENTINEL_AUTH_CONFIG_DIR:?private task config directory required}:/output
+    command: ["go", "run", "./testdata/sentinel-auth/generate", "/output"]
+  test-runner:
+    <<: *go
+    environment:
+      GOCACHE: /tmp/go-build
+      GOMODCACHE: /go/pkg/mod
+      GOPROXY: "off"
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      TEST_REDIS_SENTINEL_AUTH_ADDRS: sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+    command: ["go", "test", "./internal/storage/state/redis", "-run", "^TestSentinelAuthIntegration$", "-count=1", "-timeout=120s", "-v"]
+volumes:
+  redis-0: {}
+  redis-1: {}
+  redis-2: {}
+  sentinel-0: {}
+  sentinel-1: {}
+  sentinel-2: {}

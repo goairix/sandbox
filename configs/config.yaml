@@ -59,6 +59,17 @@ runtime:
     # 详见 docs/kubernetes-network-targets.md；不要照抄示例网段。
     pod_cidrs: []
     service_cidrs: []
+    # 普通/FUSE Pod共用节点选择器；键和值必须是字符串，有效项最多64个。
+    # 使用显式映射，不在runtime/kubernetes/node_selector结构路径使用YAML merge。
+    # 启用加载器时自动合入Linux；原64项映射必须已包含Linux OS键。
+    # 环境变量 SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR 使用JSON对象，不是逗号列表。
+    node_selector: {}
+    # 可选AppArmor加载器：name非空才启用；namespace应为安装release所在命名空间。
+    # 启用要求FUSE、immutable sandbox-fuse摘要profile及关闭kind绕过。
+    apparmor_loader_name: ""
+    apparmor_loader_namespace: ""
+    # 启用时启动门禁总超时：1..600秒，默认180；不要求所有节点同时Ready。
+    apparmor_loader_timeout_seconds: 180
 
 # -----------------------------------------------------------------------------
 # Pool — pre-warmed sandbox pool settings
@@ -89,6 +100,9 @@ storage:
       username: ""
       # Redis authentication password. Leave empty for no authentication.
       password: ""
+      # Sentinel 独立认证；不会自动复用上面的数据节点用户名或密码。
+      sentinel_username: ""
+      sentinel_password: ""
       # Redis database index (0–15).
       db: 0
       # best_effort 是单实例默认；native 仅适用于提供同步提交保证的后端。

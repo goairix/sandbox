@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -50,7 +51,16 @@ const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v3"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {
-	return fmt.Sprintf("%s:control=%v:%s:cilium=%t", warmPoolTemplateVersion, controlWireVersion, r.namespace, r.hasCilium)
+	contract := fmt.Sprintf("%s:control=%v:%s:cilium=%t", warmPoolTemplateVersion, controlWireVersion, r.namespace, r.hasCilium)
+	if r.appArmorProfile != "" {
+		contract += ":apparmor=" + r.appArmorProfile
+	}
+	if len(r.nodeSelector) != 0 {
+		selectorJSON, _ := json.Marshal(r.nodeSelector) // map[string]string cannot fail; JSON sorts keys.
+		digest := sha256.Sum256(selectorJSON)
+		contract += ":node-selector=" + hex.EncodeToString(digest[:])
+	}
+	return contract
 }
 
 // InfrastructureFencer is an optional out-of-band authority that can prove an
@@ -91,6 +101,12 @@ func WithEndpointLookup(lookup runtime.LookupNetIPFunc) Option {
 	return func(r *Runtime) { r.endpointLookup = lookup }
 }
 
+// WithAppArmorEnforcement requires the immutable loader profile before FUSE
+// prepared publication and before private credential authorization.
+func WithAppArmorEnforcement(profile string) Option {
+	return func(r *Runtime) { r.appArmorProfile = profile }
+}
+
 // WithNetworkCIDRs supplies the operator's complete current and future Pod and
 // Service allocation ranges. Empty sets select bounded authoritative discovery.
 func WithNetworkCIDRs(pods, services []string) Option {
@@ -122,28 +138,33 @@ type workspaceRuntimeState struct {
 
 // Runtime implements runtime.Runtime using Kubernetes.
 type Runtime struct {
-	client                 kubernetes.Interface
-	dynClient              dynamic.Interface
-	restConfig             *rest.Config
-	namespace              string
-	hasCilium              bool // resolved policy provider, not just CRD presence after configuration
-	hasCiliumAPI           bool // resource availability retained for legacy cleanup/audits
-	networkPolicyProvider  string
-	networkPodCIDRs        []string
-	networkServiceCIDRs    []string
-	controlExecutor        podCommandExecutor
-	infraFencer            InfrastructureFencer
-	fuseCredentials        runtime.FUSECredentials
-	endpointLookup         runtime.LookupNetIPFunc
-	clusterDNSLookup       func() ([]netip.Addr, error)
-	pollInterval           time.Duration
-	prepareTimeout         time.Duration
-	readyTimeout           time.Duration
-	terminationTimeout     time.Duration
-	ordinaryPolicyRecovery func(context.Context) error
-	readOnlyInspection     bool
-	stateMu                sync.Mutex
-	workspaceStates        map[string]*workspaceRuntimeState
+	client                  kubernetes.Interface
+	dynClient               dynamic.Interface
+	restConfig              *rest.Config
+	namespace               string
+	hasCilium               bool // resolved policy provider, not just CRD presence after configuration
+	hasCiliumAPI            bool // resource availability retained for legacy cleanup/audits
+	networkPolicyProvider   string
+	networkPodCIDRs         []string
+	networkServiceCIDRs     []string
+	controlExecutor         podCommandExecutor
+	infraFencer             InfrastructureFencer
+	fuseCredentials         runtime.FUSECredentials
+	endpointLookup          runtime.LookupNetIPFunc
+	appArmorProfile         string
+	nodeSelector            map[string]string
+	appArmorLoaderName      string
+	appArmorLoaderNamespace string
+	appArmorLoaderTimeout   time.Duration
+	clusterDNSLookup        func() ([]netip.Addr, error)
+	pollInterval            time.Duration
+	prepareTimeout          time.Duration
+	readyTimeout            time.Duration
+	terminationTimeout      time.Duration
+	ordinaryPolicyRecovery  func(context.Context) error
+	readOnlyInspection      bool
+	stateMu                 sync.Mutex
+	workspaceStates         map[string]*workspaceRuntimeState
 }
 
 // Ping performs a bounded one-item Pod list for readiness. It uses the request
@@ -203,6 +224,12 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 		if option != nil {
 			option(runtimeImpl)
 		}
+	}
+	if err := runtimeImpl.validateAppArmorLoaderOptions(); err != nil {
+		return nil, err
+	}
+	if err := runtimeImpl.waitForAppArmorLoader(context.Background()); err != nil {
+		return nil, err
 	}
 	if _, err := configuredNetworkRanges(runtimeImpl.networkPodCIDRs, runtimeImpl.networkServiceCIDRs); err != nil {
 		return nil, err
@@ -273,6 +300,7 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if err != nil {
 		return nil, err
 	}
+	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
 	logicalID := pod.Labels["sandbox.id"]
 	identity := ordinaryNetworkIdentity{runtimeID: pod.Name, logicalID: logicalID}
 	attempt, err := newNetworkAttemptToken()
@@ -394,6 +422,9 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if spec.WorkspaceFUSE == nil {
 		return nil, runtime.ErrWorkspaceFUSEUnsupported
 	}
+	if r.appArmorProfile != "" && (!immutableAppArmorProfile.MatchString(r.appArmorProfile) || spec.WorkspaceFUSE.LSMProfile != r.appArmorProfile) {
+		return nil, fmt.Errorf("requested FUSE AppArmor profile does not match runtime contract")
+	}
 	if r.endpointLookup != nil {
 		resolved, err := runtime.ResolveFUSEEndpointPolicy(ctx, spec.WorkspaceFUSE, r.endpointLookup, runtime.EndpointIPv4AndIPv6)
 		if err != nil {
@@ -412,6 +443,7 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if err != nil {
 		return nil, err
 	}
+	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
 	policy, ciliumPolicy, err := r.buildPreparedSystemPolicy(spec)
 	if err != nil {
 		return nil, err
@@ -552,6 +584,9 @@ func (r *Runtime) AuthorizeWorkspaceMount(ctx context.Context, ref runtime.Runti
 	if _, err := r.getExactPod(ctx, ref); err != nil {
 		return err
 	}
+	if err := r.verifyMounterAppArmor(ctx, ref); err != nil {
+		return err
+	}
 	request := authorizeRequestWire{
 		Version: controlWireVersion, RuntimeUID: auth.RuntimeUID, PoolKey: auth.PoolKey,
 		WorkspaceHash: auth.WorkspaceHash, Prefix: auth.Prefix, LeaseGeneration: auth.LeaseGeneration, MountAttempt: auth.MountAttempt,
@@ -690,6 +725,9 @@ func (r *Runtime) PreparedSandboxHealth(ctx context.Context, ref runtime.Runtime
 		return fmt.Errorf("prepared Pod identity labels do not match")
 	}
 	if err := validatePreparedContainerState(pod); err != nil {
+		return err
+	}
+	if err := r.verifyMounterAppArmor(ctx, ref); err != nil {
 		return err
 	}
 	bootstrap, err := exactFUSEPodBootstrap(pod, ref)

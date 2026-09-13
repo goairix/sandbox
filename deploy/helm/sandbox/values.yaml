@@ -3,6 +3,29 @@ replicaCount: 3
 # 按需开启生产安全校验，生产配置示例见 values-production.yaml。
 productionSafetyChecks: false
 
+# 可选：在目标 Linux 节点加载 Chart 自带的不可变 FUSE AppArmor 策略。
+# 需要宿主机已启用 AppArmor，且 privileged mounter 的实际 profile 能生效。
+# 首次启用前须完成真实挂载/卸载及拒绝测试，不能只以 DaemonSet Ready 为准。
+apparmorLoader:
+  enabled: false
+  # 集群有 globalDefault PriorityClass 时须填写已存在的可信类，避免启动门禁误判。
+  # 不自动选择 system-node-critical，也不为加载器创建 PriorityClass。
+  priorityClassName: ""
+  image:
+    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  checkIntervalSeconds: 10
+  parserTimeoutSeconds: 10
+  startupTimeoutSeconds: 180
+
 # 优雅终止等待时间必须大于 HTTP 排空超时与滚动更新期间
 # 分布式操作、控制器租约交接窗口之和。
 terminationGracePeriodSeconds: 60
@@ -76,6 +99,10 @@ redis:
     masterName: ""
     username: ""
     password: ""
+    # 客户端连接 Sentinel 的独立认证；不复用 Redis 数据节点凭据。
+    sentinelUsername: ""
+    # 通过 Redis Secret 的 sentinel-password 键注入；两端密码互不回退。
+    sentinelPassword: ""
     db: 0
     # native 要求后端提供同步提交保证；普通 Redis 的异步复制
     # 应使用 replica_ack 进行副本确认。
@@ -98,6 +125,9 @@ config:
     kubernetes:
       # 沙盒 Pod 所在命名空间，留空时使用 Helm release 的命名空间。
       namespace: ""
+      # 普通/FUSE 沙盒共同使用；启用加载器时双方自动合入 Linux 选择器。
+      # 键和值必须为字符串；空配置保持原调度范围。
+      nodeSelector: {}
       # 网络策略提供方：auto 按 Cilium API 可见性兼容发现，不保证它仍是实际 CNI。
       # Calico/其它支持 NetworkPolicy 的插件或云 VPC 选 standard；Cilium 选 cilium。
       # 集群遗留 Cilium CRD 时必须显式选 standard，避免等待不存在的 Cilium Endpoint。

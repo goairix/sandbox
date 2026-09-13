@@ -120,6 +120,9 @@ func (r *Runtime) execControl(ctx context.Context, pod, container string, argv [
 	if !allowedMounterCommand(argv) {
 		return nil, ErrInvalidControlCommand
 	}
+	if isAppArmorReadCommand(argv) && len(stdin) != 0 {
+		return nil, ErrInvalidControlCommand
+	}
 	if len(stdin) > maxControlJSONBytes {
 		return nil, fmt.Errorf("workspace control input exceeds limit")
 	}
@@ -143,7 +146,11 @@ func (r *Runtime) execSandboxProbe(ctx context.Context, pod string, argv []strin
 }
 
 func allowedMounterCommand(argv []string) bool {
-	return fuseprotocol.AllowedMounterCommand(argv)
+	return isAppArmorReadCommand(argv) || fuseprotocol.AllowedMounterCommand(argv)
+}
+
+func isAppArmorReadCommand(argv []string) bool {
+	return len(argv) == 2 && argv[0] == "/bin/cat" && argv[1] == "/proc/1/attr/current"
 }
 
 func allowedProbeCommand(argv []string) bool {

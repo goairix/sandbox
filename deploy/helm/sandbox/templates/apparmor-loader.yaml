@@ -1,0 +1,136 @@
+{{- include "sandbox.validateAppArmorLoader" . }}
+{{- if .Values.apparmorLoader.enabled }}
+{{- $name := printf "%s-apparmor-loader" .Release.Name }}
+{{- $digest := include "sandbox.apparmor.digest" . }}
+{{- $profile := include "sandbox.effectiveLSMProfile" . }}
+{{- $selector := include "sandbox.effectiveNodeSelector" . | fromJson }}
+{{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    sandbox.apparmor.profile-digest: {{ $digest | quote }}
+data:
+  profile: |
+{{ .Files.Get "files/apparmor/workspace-mounter.profile" | replace "\r\n" "\n" | trim | replace "__SANDBOX_PROFILE_NAME__" $profile | indent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    sandbox.apparmor.profile-digest: {{ $digest | quote }}
+spec:
+  selector:
+    matchLabels:
+      app: sandbox-apparmor-loader
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-apparmor-loader
+        release: {{ .Release.Name }}
+        sandbox.apparmor.profile-digest: {{ trunc 63 $digest | quote }}
+      annotations:
+        sandbox.apparmor.profile-digest: {{ $digest | quote }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      {{- if .Values.apparmorLoader.priorityClassName }}
+      priorityClassName: {{ .Values.apparmorLoader.priorityClassName | quote }}
+      {{- end }}
+      nodeSelector:
+{{ toYaml $selector | indent 8 }}
+      containers:
+        - name: apparmor-loader
+          image: {{ printf "%s:%s" .Values.apparmorLoader.image.repository .Values.apparmorLoader.image.tag | quote }}
+          imagePullPolicy: {{ .Values.apparmorLoader.image.pullPolicy }}
+          command: ["/usr/local/bin/apparmor-loader"]
+          args:
+            - {{ printf "--profile-name=%s" $profile | quote }}
+            - {{ printf "--profile-digest=%s" $digest | quote }}
+            - {{ printf "--check-interval=%ds" (int .Values.apparmorLoader.checkIntervalSeconds) | quote }}
+            - {{ printf "--parser-timeout=%ds" (int .Values.apparmorLoader.parserTimeoutSeconds) | quote }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+          resources:
+{{ toYaml .Values.apparmorLoader.resources | indent 12 }}
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/apparmor-loader
+                - readiness
+                - --readiness-file=/run/apparmor-loader/ready
+                - {{ printf "--max-age=%ds" (mul 3 (int .Values.apparmorLoader.checkIntervalSeconds)) | quote }}
+            periodSeconds: {{ .Values.apparmorLoader.checkIntervalSeconds }}
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: securityfs
+              mountPath: /sys/kernel/security
+            - name: module-enabled
+              mountPath: /sys/module/apparmor/parameters/enabled
+              readOnly: true
+            - name: profile
+              mountPath: /etc/sandbox-apparmor
+              readOnly: true
+            - name: run
+              mountPath: /run/apparmor-loader
+      volumes:
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
+            type: Directory
+        - name: module-enabled
+          hostPath:
+            path: /sys/module/apparmor/parameters/enabled
+            type: File
+        - name: profile
+          configMap:
+            name: {{ $name }}
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-apparmor-reader
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get"]
+    resourceNames: [{{ $name | quote }}]
+{{- if ne $sandboxNs .Release.Namespace }}
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-apparmor-reader
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-apparmor-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-api
+    namespace: {{ .Release.Namespace }}
+{{- end }}

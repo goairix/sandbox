@@ -48,22 +48,24 @@ return 0
 `)
 
 type Options struct {
-	Mode         Mode
-	Addr         string
-	Addrs        []string
-	MasterName   string
-	Username     string
-	Password     string
-	DB           int
-	Durability   DurabilityMode
-	AckReplicas  int
-	AckTimeout   time.Duration
-	PoolSize     int
-	MinIdleConns int
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	MaxRetries   int
+	Mode             Mode
+	Addr             string
+	Addrs            []string
+	MasterName       string
+	Username         string
+	Password         string
+	SentinelUsername string
+	SentinelPassword string
+	DB               int
+	Durability       DurabilityMode
+	AckReplicas      int
+	AckTimeout       time.Duration
+	PoolSize         int
+	MinIdleConns     int
+	DialTimeout      time.Duration
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	MaxRetries       int
 }
 
 type Store struct {
@@ -89,7 +91,7 @@ const (
 	DurabilityReplicaAck DurabilityMode = "replica_ack"
 )
 
-func New(ctx context.Context, opts Options) (*Store, error) {
+func universalOptions(opts Options) (*redis.UniversalOptions, error) {
 	mode := opts.Mode
 	if mode == "" {
 		mode = ModeStandalone
@@ -117,13 +119,26 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	default:
 		return nil, fmt.Errorf("redis: unsupported mode %q", mode)
 	}
-	client := redis.NewUniversalClient(&redis.UniversalOptions{
-		Addrs: addrs, MasterName: opts.MasterName, Username: opts.Username,
-		Password: opts.Password, DB: opts.DB, PoolSize: opts.PoolSize,
+	if mode != ModeSentinel && opts.MasterName != "" {
+		return nil, errors.New("redis: master name is only valid in sentinel mode")
+	}
+	return &redis.UniversalOptions{
+		IsClusterMode: mode == ModeCluster,
+		Addrs:         addrs, MasterName: opts.MasterName, Username: opts.Username,
+		Password: opts.Password, SentinelUsername: opts.SentinelUsername,
+		SentinelPassword: opts.SentinelPassword, DB: opts.DB, PoolSize: opts.PoolSize,
 		MinIdleConns: opts.MinIdleConns, DialTimeout: opts.DialTimeout,
 		ReadTimeout: opts.ReadTimeout, WriteTimeout: opts.WriteTimeout,
 		MaxRetries: opts.MaxRetries,
-	})
+	}, nil
+}
+
+func New(ctx context.Context, opts Options) (*Store, error) {
+	clientOptions, err := universalOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	client := redis.NewUniversalClient(clientOptions)
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("redis: ping failed: %w", err)

@@ -59,11 +59,15 @@ type DockerConfig struct {
 
 // KubernetesConfig holds Kubernetes-specific runtime settings.
 type KubernetesConfig struct {
-	Kubeconfig            string   `mapstructure:"kubeconfig"`
-	Namespace             string   `mapstructure:"namespace"`
-	NetworkPolicyProvider string   `mapstructure:"network_policy_provider"`
-	PodCIDRs              []string `mapstructure:"pod_cidrs"`
-	ServiceCIDRs          []string `mapstructure:"service_cidrs"`
+	Kubeconfig                   string            `mapstructure:"kubeconfig"`
+	Namespace                    string            `mapstructure:"namespace"`
+	NetworkPolicyProvider        string            `mapstructure:"network_policy_provider"`
+	PodCIDRs                     []string          `mapstructure:"pod_cidrs"`
+	ServiceCIDRs                 []string          `mapstructure:"service_cidrs"`
+	NodeSelector                 map[string]string `mapstructure:"node_selector"`
+	AppArmorLoaderName           string            `mapstructure:"apparmor_loader_name"`
+	AppArmorLoaderNamespace      string            `mapstructure:"apparmor_loader_namespace"`
+	AppArmorLoaderTimeoutSeconds int               `mapstructure:"apparmor_loader_timeout_seconds"`
 }
 
 // PoolConfig holds sandbox pool settings.
@@ -92,23 +96,25 @@ type StateStorageConfig struct {
 
 // RedisConfig holds Redis connection settings.
 type RedisConfig struct {
-	Mode           string   `mapstructure:"mode"`
-	Addr           string   `mapstructure:"addr"`
-	Addrs          []string `mapstructure:"addrs"`
-	MasterName     string   `mapstructure:"master_name"`
-	Username       string   `mapstructure:"username"`
-	Password       string   `mapstructure:"password"`
-	DB             int      `mapstructure:"db"`
-	Durability     string   `mapstructure:"durability"`
-	RequireHA      bool     `mapstructure:"require_ha"`
-	AckReplicas    int      `mapstructure:"ack_replicas"`
-	AckTimeoutMS   int      `mapstructure:"ack_timeout_ms"`
-	PoolSize       int      `mapstructure:"pool_size"`
-	MinIdleConns   int      `mapstructure:"min_idle_conns"`
-	DialTimeoutMS  int      `mapstructure:"dial_timeout_ms"`
-	ReadTimeoutMS  int      `mapstructure:"read_timeout_ms"`
-	WriteTimeoutMS int      `mapstructure:"write_timeout_ms"`
-	MaxRetries     int      `mapstructure:"max_retries"`
+	Mode             string   `mapstructure:"mode"`
+	Addr             string   `mapstructure:"addr"`
+	Addrs            []string `mapstructure:"addrs"`
+	MasterName       string   `mapstructure:"master_name"`
+	Username         string   `mapstructure:"username"`
+	Password         string   `mapstructure:"password"`
+	SentinelUsername string   `mapstructure:"sentinel_username"`
+	SentinelPassword string   `mapstructure:"sentinel_password"`
+	DB               int      `mapstructure:"db"`
+	Durability       string   `mapstructure:"durability"`
+	RequireHA        bool     `mapstructure:"require_ha"`
+	AckReplicas      int      `mapstructure:"ack_replicas"`
+	AckTimeoutMS     int      `mapstructure:"ack_timeout_ms"`
+	PoolSize         int      `mapstructure:"pool_size"`
+	MinIdleConns     int      `mapstructure:"min_idle_conns"`
+	DialTimeoutMS    int      `mapstructure:"dial_timeout_ms"`
+	ReadTimeoutMS    int      `mapstructure:"read_timeout_ms"`
+	WriteTimeoutMS   int      `mapstructure:"write_timeout_ms"`
+	MaxRetries       int      `mapstructure:"max_retries"`
 }
 
 // FileSystemConfig holds filesystem storage settings.
@@ -336,10 +342,17 @@ func Load(path string) (*Config, error) {
 	}
 
 	// ------------------------------------------------------------ unmarshal
+	selector, err := readKubernetesNodeSelector(path, v)
+	if err != nil {
+		return nil, err
+	}
+	// Viper's case-insensitive map decoding must not change label key identity.
+	v.Set("runtime.kubernetes.node_selector", map[string]string{})
 	cfg := &Config{}
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.Runtime.Kubernetes.NodeSelector = selector
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -375,6 +388,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: authoritative Kubernetes pod_cidrs and service_cidrs must cover matching address families")
 	}
 	if err := c.normalizeWorkspaceSelection(); err != nil {
+		return err
+	}
+	if err := c.normalizeKubernetesAppArmor(); err != nil {
 		return err
 	}
 	c.normalizeFUSEProfile()
@@ -478,6 +494,9 @@ func validateRedisConfig(redis RedisConfig, required bool) error {
 		}
 	default:
 		return fmt.Errorf("config: storage.state.redis.mode must be standalone, sentinel, or cluster")
+	}
+	if mode != "sentinel" && redis.MasterName != "" {
+		return fmt.Errorf("config: storage.state.redis.master_name is only valid in sentinel mode")
 	}
 	switch durability {
 	case "best_effort", "native", "replica_ack":
@@ -910,6 +929,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("runtime.kubernetes.network_policy_provider", "auto")
 	v.SetDefault("runtime.kubernetes.pod_cidrs", []string{})
 	v.SetDefault("runtime.kubernetes.service_cidrs", []string{})
+	v.SetDefault("runtime.kubernetes.node_selector", map[string]string{})
+	v.SetDefault("runtime.kubernetes.apparmor_loader_name", "")
+	v.SetDefault("runtime.kubernetes.apparmor_loader_namespace", "")
+	v.SetDefault("runtime.kubernetes.apparmor_loader_timeout_seconds", 180)
 
 	// Pool
 	v.SetDefault("pool.min_size", 3)
@@ -927,6 +950,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.state.redis.master_name", "")
 	v.SetDefault("storage.state.redis.username", "")
 	v.SetDefault("storage.state.redis.password", "")
+	v.SetDefault("storage.state.redis.sentinel_username", "")
+	v.SetDefault("storage.state.redis.sentinel_password", "")
 	v.SetDefault("storage.state.redis.db", 0)
 	v.SetDefault("storage.state.redis.durability", "best_effort")
 	v.SetDefault("storage.state.redis.require_ha", false)

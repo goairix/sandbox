@@ -20,18 +20,63 @@
 {{- if has "fuse" .Values.config.workspace.enabledMountModes -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{- define "sandbox.apparmor.digest" -}}
+{{- $template := .Files.Get "files/apparmor/workspace-mounter.profile" | replace "\r\n" "\n" | trim -}}
+{{- if empty $template -}}{{ fail "AppArmor profile template is missing" }}{{- end -}}
+{{- printf "%s\n" $template | sha256sum -}}
+{{- end -}}
+
+{{- define "sandbox.effectiveLSMProfile" -}}
+{{- if .Values.apparmorLoader.enabled -}}
+{{- printf "sandbox-fuse-%s" (include "sandbox.apparmor.digest" .) -}}
+{{- else -}}{{ .Values.config.workspace.lsmProfile | default "" }}{{- end -}}
+{{- end -}}
+
+{{- define "sandbox.effectiveNodeSelector" -}}
+{{- $selector := .Values.config.runtime.kubernetes.nodeSelector | default dict -}}
+{{- if not (kindIs "map" $selector) -}}{{ fail "config.runtime.kubernetes.nodeSelector must be a string map" }}{{- end -}}
+{{- $selector = deepCopy $selector -}}
+{{- range $key, $value := $selector -}}
+{{- if not (kindIs "string" $value) -}}{{ fail "config.runtime.kubernetes.nodeSelector values must be strings" }}{{- end -}}
+{{- end -}}
+{{- if .Values.apparmorLoader.enabled -}}
+{{- if and (hasKey $selector "kubernetes.io/os") (ne (get $selector "kubernetes.io/os") "linux") -}}
+{{- fail "AppArmor loader requires kubernetes.io/os=linux" -}}
+{{- end -}}
+{{- $_ := set $selector "kubernetes.io/os" "linux" -}}
+{{- end -}}
+{{- if gt (len $selector) 64 -}}{{ fail "effective Kubernetes nodeSelector exceeds 64 entries" }}{{- end -}}
+{{- $selector | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.validateAppArmorLoader" -}}
+{{- $_ := include "sandbox.effectiveNodeSelector" . -}}
+{{- if .Values.apparmorLoader.enabled -}}
+{{- if ne .Values.config.runtime.type "kubernetes" -}}{{ fail "AppArmor loader requires Kubernetes runtime" }}{{- end -}}
+{{- if ne (include "sandbox.fuseEnabled" .) "true" -}}{{ fail "AppArmor loader requires FUSE" }}{{- end -}}
+{{- if .Values.config.workspace.allowMissingLSMForKind -}}{{ fail "AppArmor loader forbids allowMissingLSMForKind" }}{{- end -}}
+{{- if or (empty .Values.apparmorLoader.image.repository) (empty .Values.apparmorLoader.image.tag) -}}{{ fail "AppArmor loader image is required" }}{{- end -}}
+{{- range $name, $value := dict "checkIntervalSeconds" .Values.apparmorLoader.checkIntervalSeconds "parserTimeoutSeconds" .Values.apparmorLoader.parserTimeoutSeconds "startupTimeoutSeconds" .Values.apparmorLoader.startupTimeoutSeconds -}}
+{{- if or (lt (int $value) 1) (gt (int $value) 600) -}}{{ fail (printf "apparmorLoader.%s must be between 1 and 600" $name) }}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sandbox.validateRedis" -}}
 {{- if .Values.productionSafetyChecks -}}
   {{- if .Values.redis.enabled -}}{{- fail "productionSafetyChecks requires external HA Redis" -}}{{- end -}}
   {{- if not .Values.redis.external.requireHA -}}{{- fail "productionSafetyChecks requires redis.external.requireHA" -}}{{- end -}}
   {{- if .Values.config.workspace.allowMissingLSMForKind -}}{{- fail "productionSafetyChecks forbids allowMissingLSMForKind" -}}{{- end -}}
-  {{- $lsm := lower (trim (.Values.config.workspace.lsmProfile | default "")) -}}
+  {{- $lsm := lower (trim (include "sandbox.effectiveLSMProfile" .)) -}}
   {{- if or (empty $lsm) (eq $lsm "unconfined") (eq $lsm "label=disable") -}}
     {{- fail "productionSafetyChecks requires a confined config.workspace.lsmProfile" -}}
   {{- end -}}
 {{- end -}}
 {{- if not .Values.redis.enabled -}}
   {{- $mode := .Values.redis.external.mode | default "standalone" -}}
+  {{- if and (ne $mode "sentinel") (not (empty .Values.redis.external.masterName)) -}}
+    {{- fail "redis.external.masterName is only valid in sentinel mode" -}}
+  {{- end -}}
   {{- if and (eq $mode "cluster") (ne (int .Values.redis.external.db) 0) -}}
     {{- fail "redis.external.db must be 0 in cluster mode" -}}
   {{- end -}}
@@ -60,6 +105,8 @@
   "credentialGeneration" $filesystem.credentialGeneration
   "mounterImage" .Values.config.workspace.fuseImages.mounter
   "dockerImage" .Values.config.workspace.fuseImages.docker
+  "lsmProfile" (include "sandbox.effectiveLSMProfile" .)
+  "nodeSelector" (include "sandbox.effectiveNodeSelector" . | fromJson)
 -}}
 {{- $contract | toJson | sha256sum -}}
 {{- end -}}
@@ -78,6 +125,11 @@
   value: {{ .Values.config.runtime.type | quote }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
   value: {{ $sandboxNs | quote }}
+{{- $nodeSelector := include "sandbox.effectiveNodeSelector" . }}
+{{- if ne $nodeSelector "{}" }}
+- name: SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR
+  value: {{ $nodeSelector | quote }}
+{{- end }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NETWORK_POLICY_PROVIDER
   value: {{ .Values.config.runtime.kubernetes.networkPolicyProvider | default "auto" | quote }}
 - name: SANDBOX_IMAGES_SANDBOX
@@ -106,6 +158,17 @@
     secretKeyRef:
       name: {{ printf "%s-redis" .Release.Name }}
       key: password
+{{- end }}
+{{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelUsername }}
+- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_USERNAME
+  value: {{ .Values.redis.external.sentinelUsername | quote }}
+{{- end }}
+{{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelPassword }}
+- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ printf "%s-redis" .Release.Name }}
+      key: sentinel-password
 {{- end }}
 - name: SANDBOX_STORAGE_STATE_REDIS_DB
   value: {{ ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled | quote }}
@@ -154,7 +217,7 @@
 - name: SANDBOX_WORKSPACE_BACKEND_CREDENTIAL_GENERATION
   value: {{ .Values.config.storage.filesystem.credentialGeneration | quote }}
 - name: SANDBOX_WORKSPACE_BACKEND_LSM_PROFILE
-  value: {{ .Values.config.workspace.lsmProfile | quote }}
+  value: {{ include "sandbox.effectiveLSMProfile" . | quote }}
 {{- if or .Values.config.security.apiKey .Values.config.security.apiKeySecretName }}
 - name: SANDBOX_SECURITY_API_KEY
   valueFrom:

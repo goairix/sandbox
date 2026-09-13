@@ -244,6 +244,7 @@ func main() {
 		}
 		options = append(options, k8sruntime.WithNetworkCIDRs(cfg.Runtime.Kubernetes.PodCIDRs, cfg.Runtime.Kubernetes.ServiceCIDRs))
 		options = append(options, k8sruntime.WithNetworkPolicyProvider(cfg.Runtime.Kubernetes.NetworkPolicyProvider))
+		options = append(options, kubernetesAppArmorOptions(cfg.Runtime.Kubernetes, cfg.Workspace.Backend.LSMProfile, inspectOwners, *drainRelease)...)
 		if fuseEnabled {
 			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))
 		}
@@ -260,19 +261,7 @@ func main() {
 	// the only broader capability the coordinator/session code relies on.
 	var redisStore *redisstate.Store
 	if cfg.Storage.State.Redis.Addr != "" || len(cfg.Storage.State.Redis.Addrs) > 0 {
-		redisStore, err = redisstate.New(ctx, redisstate.Options{
-			Mode: redisstate.Mode(cfg.Storage.State.Redis.Mode), Addr: cfg.Storage.State.Redis.Addr,
-			Addrs: cfg.Storage.State.Redis.Addrs, MasterName: cfg.Storage.State.Redis.MasterName,
-			Username: cfg.Storage.State.Redis.Username, Password: cfg.Storage.State.Redis.Password,
-			DB: cfg.Storage.State.Redis.DB, Durability: redisstate.DurabilityMode(cfg.Storage.State.Redis.Durability),
-			AckReplicas: cfg.Storage.State.Redis.AckReplicas,
-			AckTimeout:  time.Duration(cfg.Storage.State.Redis.AckTimeoutMS) * time.Millisecond,
-			PoolSize:    cfg.Storage.State.Redis.PoolSize, MinIdleConns: cfg.Storage.State.Redis.MinIdleConns,
-			DialTimeout:  time.Duration(cfg.Storage.State.Redis.DialTimeoutMS) * time.Millisecond,
-			ReadTimeout:  time.Duration(cfg.Storage.State.Redis.ReadTimeoutMS) * time.Millisecond,
-			WriteTimeout: time.Duration(cfg.Storage.State.Redis.WriteTimeoutMS) * time.Millisecond,
-			MaxRetries:   cfg.Storage.State.Redis.MaxRetries,
-		})
+		redisStore, err = redisstate.New(ctx, redisOptionsFromConfig(cfg.Storage.State.Redis))
 		if err != nil {
 			log.Fatalf("failed to create redis state store: %v", err)
 		}
