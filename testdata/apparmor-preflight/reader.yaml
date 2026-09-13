@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-apparmor-preflight-b1b4696
+  labels:
+    sandbox-test-purpose: apparmor-readonly-preflight
+    sandbox-test-run: b1b4696
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: node-security-reader
+  namespace: sandbox-apparmor-preflight-b1b4696
+  labels:
+    sandbox-test-purpose: apparmor-readonly-preflight
+    sandbox-test-run: b1b4696
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 180
+  terminationGracePeriodSeconds: 5
+  nodeSelector:
+    kubernetes.io/hostname: ds-ai-worker-2
+    kubernetes.io/os: linux
+  containers:
+    - name: reader
+      image: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.4
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          uname -a
+          cat /sys/module/apparmor/parameters/enabled
+          cat /node-security/lsm
+          wc -l /node-security/apparmor/profiles
+          grep -F 'cri-containerd.apparmor.d' /node-security/apparmor/profiles
+          cat /proc/1/attr/current
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      volumeMounts:
+        - name: securityfs
+          mountPath: /node-security
+          readOnly: true
+  volumes:
+    - name: securityfs
+      hostPath:
+        path: /sys/kernel/security
+        type: Directory

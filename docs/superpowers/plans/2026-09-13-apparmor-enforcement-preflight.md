@@ -14,7 +14,8 @@
 
 - 依据：`docs/superpowers/specs/2026-09-13-optional-apparmor-loader-design.md`。
 - 不修改节点内核参数、现有策略或业务 Pod；不通过当前生产 namespace 临时加载安全策略。
-- 仅创建 `docs/testing/2026-09-13-apparmor-environment-preflight.md`。
+- 创建 `docs/testing/2026-09-13-apparmor-environment-preflight.md` 及只读预检夹具 `testdata/apparmor-preflight/reader.yaml`。
+- 用户已允许选择现有节点。使用 ds-ai-research 的 ds-ai-worker-2，独立 namespace `sandbox-apparmor-preflight-b1b4696`；只读 privileged 诊断 Pod 只挂载 securityfs，不挂载宿主机根/运行时 socket、不使用 hostPID/hostNetwork/API token。此处权限只用于读取内核策略元数据，不执行 parser、不加载或卸载策略。
 - 本计划不代替受限 profile、trusted private reader、准备/授权门禁、调度契约及 Chart 的生产实施计划。
 
 ### Task 1: 本地环境预检
@@ -33,7 +34,16 @@ command -v apparmor_parser
 
 ### Task 2: 独立 Linux 环境的只读预检
 
-- [ ] 获得明确隔离环境目标后，在该 Linux 宿主机读取以下信息，失败项记录原始错误；不自行扩大到生产集群节点。
+- [x] 在明确节点上创建只读诊断 Pod，读取内核启用状态、LSM 和已有默认 enforce 策略。创建前核对 namespace 不存在，以 create 而非 apply 避免覆盖；预检后按 UID 前置条件删除本轮 Pod/namespace。Kubernetes nodeInfo 提供 runtime 版本；节点 parser 的版本未从这条受限路径取得，明确留作加载器镜像实验，不新增宿主机根挂载。实际节点 AppArmor=Y、默认 profile=enforce、Pod exit=0；结果见预检报告。
+
+```bash
+kubectl --context ds-ai-research get namespace sandbox-apparmor-preflight-b1b4696 --ignore-not-found -o name
+kubectl --context ds-ai-research create -f testdata/apparmor-preflight/reader.yaml
+kubectl --context ds-ai-research -n sandbox-apparmor-preflight-b1b4696 get pod node-security-reader -o wide
+kubectl --context ds-ai-research -n sandbox-apparmor-preflight-b1b4696 logs node-security-reader
+```
+
+- [ ] 直接宿主机读取路径保留为复现参考，本轮以独立只读 Pod/nodeInfo 验证内核/LSM/runtime，未直接登录宿主机或执行宿主机 parser。
 
 ```bash
 uname -a
@@ -56,7 +66,7 @@ sudo -n cat /sys/kernel/security/apparmor/profiles
 
 ### Task 3: 环境结论和后续门槛
 
-- [x] 用 apply_patch 写预检报告，准确区分本地证据、已提供隔离目标与尚缺权限。见 `docs/testing/2026-09-13-apparmor-environment-preflight.md`，独立 Linux 目标尚未提供。
+- [x] 用 apply_patch 写预检报告，准确区分本地证据、已验证 Linux 节点与尚未执行的策略实验。见 `docs/testing/2026-09-13-apparmor-environment-preflight.md`，已确认 ds-ai-worker-2 可作为下阶段实验目标。
 - [ ] 只有隔离环境可用后才制定策略及加载器实施计划。必须包含 parser 语法、镜像固定路径、FUSE mount/flush/unmount、实际 mounter/子进程 exact profile、拒绝负例，以及 runtime 忽略 Localhost 时拒绝授权。
 - [ ] 真实约束实验失败则保持功能不可按生产验收，不删除 privileged 挂载传播契约，不以 allow-all profile 或 unconfined 回退制造通过。
 - [x] 读回报告、执行 `git diff --check` 后提交本轮预检记录；不部署、不卸载、不构建发布镜像。
