@@ -4,6 +4,8 @@
 
 本次针对 v0.3.19 线上验证发现的两个问题整改：真实 Cilium 分配范围被旧 Node PodCIDR 掩盖，以及普通池领取修改标签触发网络身份重算。实现同时覆盖标准 NetworkPolicy、Calico Kubernetes datastore/IPAM 与显式云 VPC 分配范围，不把其它 CNI 绑定到 Cilium CRD。
 
+后续用户部署了 v0.3.20，真实环境验收记录见 [v0.3.20 部署验证](2026-09-13-ds-ai-research-v0.3.20-validation.md)。本文的待部署说明描述整改完成当时的状态；新部署核心修复已验证，但历史孤儿策略清理仍有缺口，Calico/双华云及故障切换尚未验收。
+
 此前线上现象和样本保留在 `2026-09-13-ds-ai-research-v0.3.19-validation.md`。该旧镜像报告不是新实现已在线通过的证据。
 
 ## 实现
