@@ -97,6 +97,7 @@ type syncSandboxLifecycle struct {
 	published       bool
 	ephemeralRecord *EphemeralLifecycleRecord
 	finalizeMu      sync.Mutex
+	finalizeDone    bool
 	finalSyncDone   bool
 	runtimeRemoved  bool
 	controller      *activeController

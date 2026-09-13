@@ -321,8 +321,7 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 		(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed") {
 		// Final output was durably checkpointed before deletion. Cleanup must
 		// not require a running runtime or replay a completed output sync.
-		sb.WorkspaceTransition = workspaceUnmountSynced
-		return m.cleanupInterruptedSyncWorkspace(ctx, sb)
+		return m.cleanupCheckpointedSyncWorkspace(ctx, sb, true)
 	}
 	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync && sb.WorkspaceTransition != "" {
 		return m.cleanupInterruptedSyncWorkspace(ctx, sb)
@@ -442,7 +441,7 @@ func (m *Manager) waitForActiveCleanup(ctx context.Context, sandboxID string) er
 			return err
 		}
 		if record == nil {
-			return nil
+			return m.confirmActiveCleanupAbsence(ctx, sandboxID)
 		}
 		select {
 		case <-ctx.Done():
@@ -496,12 +495,7 @@ func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID st
 			return err
 		}
 		if record == nil {
-			if repo, ok := m.activeSandboxes.(interface {
-				ConfirmRecordAbsence(context.Context, string) error
-			}); ok {
-				return repo.ConfirmRecordAbsence(ctx, sandboxID)
-			}
-			return nil
+			return m.confirmActiveCleanupAbsence(ctx, sandboxID)
 		}
 		// Preserve the last recovery capability if deletion fails or the
 		// controller expires. A generic completion checkpoint would erase
@@ -515,6 +509,15 @@ func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID st
 		return nil
 	}
 	return state.ErrActiveSandboxConflict
+}
+
+func (m *Manager) confirmActiveCleanupAbsence(ctx context.Context, sandboxID string) error {
+	if repo, ok := m.activeSandboxes.(interface {
+		ConfirmRecordAbsence(context.Context, string) error
+	}); ok {
+		return repo.ConfirmRecordAbsence(ctx, sandboxID)
+	}
+	return nil
 }
 
 // drainDistributedActiveSandboxes is used only after every API Deployment Pod

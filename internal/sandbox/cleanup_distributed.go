@@ -93,7 +93,35 @@ func (m *Manager) checkpointSyncCleanup(ctx context.Context, sb *Sandbox, contro
 	return err
 }
 
+// Only a durable finalizer checkpoint, not a genuine unmount transition,
+// permits reuse of the locally tracked finalizer.
+func (m *Manager) cleanupCheckpointedSyncWorkspace(ctx context.Context, sb *Sandbox, waitForOwner bool) error {
+	m.mu.RLock()
+	lifecycle := m.syncLifecycles[sb.ID]
+	local := m.sandboxes[sb.ID]
+	resumeFinalizer := sb.WorkspaceTransition == "" && lifecycle != nil &&
+		local != nil && local.WorkspaceTransition == "" && local.RuntimeUID == sb.RuntimeUID &&
+		local.RuntimeID == sb.RuntimeID && local.activeGeneration == sb.activeGeneration
+	m.mu.RUnlock()
+	if resumeFinalizer {
+		// A final-output checkpoint is also published by a live finalizer.
+		// Reuse its serialized capability instead of treating it as a crash.
+		if !waitForOwner {
+			m.scheduleSyncFinalization(lifecycle, ErrSandboxCleanupPending)
+			return nil
+		}
+		return m.destroySyncSandbox(ctx, lifecycle)
+	}
+	sb.WorkspaceTransition = workspaceUnmountSynced
+	return m.cleanupInterruptedSyncWorkspaceWithWait(ctx, sb, waitForOwner)
+}
+
 func (m *Manager) cleanupInterruptedSyncWorkspace(ctx context.Context, sb *Sandbox) error {
+	return m.cleanupInterruptedSyncWorkspaceWithWait(ctx, sb, true)
+}
+
+// Background scans skip a live owner; request cleanup waits for its result.
+func (m *Manager) cleanupInterruptedSyncWorkspaceWithWait(ctx context.Context, sb *Sandbox, waitForOwner bool) error {
 	m.mu.RLock()
 	lifecycle := m.syncLifecycles[sb.ID]
 	m.mu.RUnlock()
@@ -106,8 +134,26 @@ func (m *Manager) cleanupInterruptedSyncWorkspace(ctx context.Context, sb *Sandb
 		}
 	}
 	controller, acquired, err := m.acquireActiveController(ctx, sb)
-	if err != nil || !acquired {
+	if err != nil {
+		// The holder can finish between our cleanup snapshot and acquisition.
+		// Only durable record absence proves completion; a present record
+		// (including a replaced generation/UID) must still reject stale tokens.
+		if errors.Is(err, state.ErrActiveSandboxStaleToken) {
+			record, loadErr := m.activeSandboxes.Load(ctx, sb.ID)
+			if loadErr != nil {
+				return errors.Join(ErrSandboxCleanupPending, err, loadErr)
+			}
+			if record == nil {
+				return m.confirmActiveCleanupAbsence(ctx, sb.ID)
+			}
+		}
 		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	if !acquired {
+		if !waitForOwner {
+			return nil
+		}
+		return m.waitForActiveCleanup(ctx, sb.ID)
 	}
 	defer func() { _ = controller.Stop(context.WithoutCancel(ctx)) }()
 	ctx, cancel := context.WithCancelCause(ctx)

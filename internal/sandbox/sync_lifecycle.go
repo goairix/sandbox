@@ -180,8 +180,26 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if lifecycle == nil {
 		return ErrSandboxNotReady
 	}
-	lifecycle.finalizeMu.Lock()
+	// Keep the uncontended path lock-only, but do not let a duplicate DELETE
+	// outlive its request while another worker waits for runtime termination.
+	if !lifecycle.finalizeMu.TryLock() {
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return errors.Join(ErrSandboxCleanupPending, ctx.Err())
+			case <-ticker.C:
+			}
+			if lifecycle.finalizeMu.TryLock() {
+				break
+			}
+		}
+	}
 	defer lifecycle.finalizeMu.Unlock()
+	if lifecycle.finalizeDone {
+		return nil
+	}
 	if lifecycle.controller != nil {
 		if err := lifecycle.controller.Fence(ctx); err != nil {
 			return errors.Join(ErrSandboxCleanupPending, err)
@@ -310,6 +328,7 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if err := m.completeActiveSandboxCleanup(ctx, sb.ID, lifecycle.controller); err != nil {
 		return errors.Join(ErrSandboxCleanupPending, err)
 	}
+	lifecycle.finalizeDone = true
 	m.mu.Lock()
 	if m.syncLifecycles[sb.ID] == lifecycle {
 		delete(m.syncLifecycles, sb.ID)

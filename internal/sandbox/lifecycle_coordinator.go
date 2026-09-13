@@ -277,9 +277,33 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	if err != nil {
 		return err
 	}
-	if sb.WorkspaceTransition != "" || sb.Workspace == nil ||
-		(sb.Workspace.MountType == WorkspaceMountSync &&
-			(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed")) {
+	// A live local sync worker may already have checkpointed final output
+	// while waiting for Pod termination. Schedule it before crash recovery,
+	// which must never release that worker's controller capability.
+	if sb.WorkspaceTransition == "" && sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync {
+		m.mu.RLock()
+		syncLifecycle := m.syncLifecycles[sb.ID]
+		m.mu.RUnlock()
+		if syncLifecycle != nil {
+			if m.supersededSyncController(syncLifecycle) {
+				return nil
+			}
+			if record.Phase != state.ActiveSandboxActive {
+				m.scheduleSyncFinalization(syncLifecycle, ErrSandboxCleanupPending)
+			}
+			return nil
+		}
+	}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync &&
+		(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed") {
+		if record.Phase == state.ActiveSandboxActive {
+			return nil
+		}
+		cleanupCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		return m.cleanupCheckpointedSyncWorkspace(cleanupCtx, sb, false)
+	}
+	if sb.WorkspaceTransition != "" || sb.Workspace == nil {
 		if record.Phase != state.ActiveSandboxActive {
 			cleanupCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()

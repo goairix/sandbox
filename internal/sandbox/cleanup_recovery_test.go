@@ -201,6 +201,8 @@ func TestDistributedSyncFinalDeleteFailurePreservesPeerRecoveryProof(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "sync_runtime_removed", record.CleanupCheckpoint, "failed deletion must not erase recovery proof")
 	require.NotNil(t, managers[0].syncLifecycles[sb.ID], "failed final CAS must retain the locally tracked controller")
+	require.False(t, managers[0].syncLifecycles[sb.ID].finalizeDone, "failed final CAS must not acknowledge successful cleanup")
+	require.ErrorContains(t, managers[0].Destroy(ctx, sb.ID), "final delete unavailable", "a duplicate must still retry and surface the final CAS failure")
 	require.NoError(t, managers[0].Stop(ctx), "shutdown must relinquish the failed finalizer's capability")
 	require.NoError(t, managers[2].Destroy(ctx, sb.ID))
 	record, err = base.Load(ctx, sb.ID)
