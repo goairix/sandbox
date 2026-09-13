@@ -4,6 +4,36 @@ set -euo pipefail
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox")"
 runtime_role="$(helm template sandbox "$repo_root/deploy/helm/sandbox" --show-only templates/runtime-role.yaml)"
+network_inventory="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
+  --namespace control --set config.runtime.kubernetes.namespace=runtime \
+  --show-only templates/runtime-network-inventory.yaml)"
+grep -Fq 'kind: ClusterRole' <<<"$network_inventory"
+grep -Fq 'resources: ["services"]' <<<"$network_inventory"
+grep -Fq 'resources: ["nodes"]' <<<"$network_inventory"
+grep -Fq 'resources: ["servicecidrs"]' <<<"$network_inventory"
+grep -Fq 'resources: ["ciliumnodes"]' <<<"$network_inventory"
+grep -Fq 'name: control-sandbox-network-inventory' <<<"$network_inventory"
+grep -Fq 'namespace: control' <<<"$network_inventory"
+! grep -Eq 'verbs:.*"(create|update|patch|delete|watch)"' <<<"$network_inventory"
+configured_network="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
+  --set 'config.runtime.kubernetes.podCIDRs={10.42.0.0/16,fd00:42::/64}' \
+  --set 'config.runtime.kubernetes.serviceCIDRs={10.96.0.0/12,fd00:96::/112}')"
+grep -A1 'name: SANDBOX_RUNTIME_KUBERNETES_POD_CIDRS' <<<"$configured_network" \
+  | grep -Fq 'value: "10.42.0.0/16,fd00:42::/64"'
+grep -A1 'name: SANDBOX_RUNTIME_KUBERNETES_SERVICE_CIDRS' <<<"$configured_network" \
+  | grep -Fq 'value: "10.96.0.0/12,fd00:96::/112"'
+if helm template sandbox "$repo_root/deploy/helm/sandbox" \
+  --set 'config.runtime.kubernetes.podCIDRs={10.42.0.0/16}' \
+  --set 'config.runtime.kubernetes.serviceCIDRs={10.96.0.0/12,fd00:96::/112}' >/dev/null 2>&1; then
+  printf 'incomplete Pod address families unexpectedly rendered\n' >&2
+  exit 1
+fi
+if helm template sandbox "$repo_root/deploy/helm/sandbox" \
+  --set 'config.runtime.kubernetes.podCIDRs={10.42.0.0/16,fd00:42::/64}' \
+  --set 'config.runtime.kubernetes.serviceCIDRs={10.96.0.0/12}' >/dev/null 2>&1; then
+  printf 'incomplete Service address families unexpectedly rendered\n' >&2
+  exit 1
+fi
 
 grep -A1 'resources: \["pods"\]' <<<"$runtime_role" \
   | head -2 \

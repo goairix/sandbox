@@ -100,6 +100,16 @@ const (
 
 // New creates a new Docker runtime.
 func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
+	return newRuntime(ctx, host, gatewayImage, false)
+}
+
+// NewForInspection creates a client without stale-resource cleanup or network
+// creation. Owner audit/recovery needs only passive runtime inspection.
+func NewForInspection(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
+	return newRuntime(ctx, host, gatewayImage, true)
+}
+
+func newRuntime(ctx context.Context, host, gatewayImage string, readOnlyInspection bool) (*Runtime, error) {
 	opts := []dockerclient.Opt{
 		dockerclient.WithAPIVersionNegotiation(),
 	}
@@ -111,14 +121,17 @@ func New(ctx context.Context, host, gatewayImage string) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
-	if _, err := cleanupStaleSandboxNetworkResources(ctx, cli, time.Now()); err != nil {
-		_ = cli.Close()
-		return nil, fmt.Errorf("cleanup stale sandbox networks: %w", err)
-	}
-
-	isolatedID, openID, err := ensureNetworks(ctx, cli)
-	if err != nil {
-		return nil, err
+	var isolatedID, openID string
+	if !readOnlyInspection {
+		if _, err := cleanupStaleSandboxNetworkResources(ctx, cli, time.Now()); err != nil {
+			_ = cli.Close()
+			return nil, fmt.Errorf("cleanup stale sandbox networks: %w", err)
+		}
+		isolatedID, openID, err = ensureNetworks(ctx, cli)
+		if err != nil {
+			_ = cli.Close()
+			return nil, err
+		}
 	}
 
 	if gatewayImage == "" {

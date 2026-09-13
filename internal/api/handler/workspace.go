@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
@@ -26,7 +27,15 @@ func (h *Handler) MountWorkspace(c *gin.Context) {
 		return
 	}
 
-	info, _ := h.manager.GetWorkspaceInfo(spanCtx, id)
+	info, err := h.manager.GetWorkspaceInfo(spanCtx, id)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	if info == nil {
+		internalError(c, sandbox.ErrSandboxNotReady)
+		return
+	}
 	c.JSON(http.StatusOK, types.MountWorkspaceResponse{
 		RootPath:  info.RootPath,
 		MountedAt: info.MountedAt,

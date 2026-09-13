@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -58,8 +59,10 @@ type DockerConfig struct {
 
 // KubernetesConfig holds Kubernetes-specific runtime settings.
 type KubernetesConfig struct {
-	Kubeconfig string `mapstructure:"kubeconfig"`
-	Namespace  string `mapstructure:"namespace"`
+	Kubeconfig   string   `mapstructure:"kubeconfig"`
+	Namespace    string   `mapstructure:"namespace"`
+	PodCIDRs     []string `mapstructure:"pod_cidrs"`
+	ServiceCIDRs []string `mapstructure:"service_cidrs"`
 }
 
 // PoolConfig holds sandbox pool settings.
@@ -346,6 +349,25 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for invalid or missing values.
 func (c *Config) Validate() error {
+	if (len(c.Runtime.Kubernetes.PodCIDRs) == 0) != (len(c.Runtime.Kubernetes.ServiceCIDRs) == 0) {
+		return fmt.Errorf("config: authoritative Kubernetes pod_cidrs and service_cidrs must both be configured or both empty")
+	}
+	families := [2]map[int]bool{{}, {}}
+	for index, set := range [][]string{c.Runtime.Kubernetes.PodCIDRs, c.Runtime.Kubernetes.ServiceCIDRs} {
+		if len(set) > 256 {
+			return fmt.Errorf("config: authoritative Kubernetes CIDR set exceeds 256 entries")
+		}
+		for _, raw := range set {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil || prefix.Addr().Is4In6() || prefix.Masked().String() != raw {
+				return fmt.Errorf("config: authoritative Kubernetes CIDRs must be canonical network prefixes")
+			}
+			families[index][prefix.Addr().BitLen()] = true
+		}
+	}
+	if families[0][32] != families[1][32] || families[0][128] != families[1][128] {
+		return fmt.Errorf("config: authoritative Kubernetes pod_cidrs and service_cidrs must cover matching address families")
+	}
 	if err := c.normalizeWorkspaceSelection(); err != nil {
 		return err
 	}
@@ -879,6 +901,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("runtime.docker.workspace_secret_root", "/var/lib/sandbox/workspace-secrets")
 	v.SetDefault("runtime.kubernetes.kubeconfig", "")
 	v.SetDefault("runtime.kubernetes.namespace", "")
+	v.SetDefault("runtime.kubernetes.pod_cidrs", []string{})
+	v.SetDefault("runtime.kubernetes.service_cidrs", []string{})
 
 	// Pool
 	v.SetDefault("pool.min_size", 3)

@@ -41,6 +41,8 @@ var fusePoolStates = [...]state.FUSEPoolState{
 	state.FUSEPoolCleanup,
 }
 
+var drainRefillLockScript = redisclient.NewScript(`return redis.call('DEL', KEYS[1])`)
+
 const (
 	poolResultNone     int64 = 0
 	poolResultOK       int64 = 1
@@ -749,7 +751,7 @@ return {1, count}
 
 var deleteCleanupScript = redisclient.NewScript(fusePoolLuaHelpers + `
 local raw = redis.call('GET', KEYS[1])
-if not raw then return -1 end
+if not raw then return 1 end
 local decoded, record = pcall(cjson.decode, raw)
 local deadline = redis.call('HGET', KEYS[3], ARGV[1])
 if not decoded or not validateRecord(record, deadline) or record.preparation_id ~= ARGV[2] then return -4 end
@@ -861,7 +863,7 @@ func (r *FUSEPoolRepository) createPreparing(ctx context.Context, record state.F
 	if err != nil {
 		return state.ErrFUSEPoolInvalidRecord
 	}
-	result, err := createPreparingScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, createPreparingScript,
 		[]string{
 			fusePoolRecordPrefix + preparationDigest,
 			fusePoolIndexPrefix + poolDigest,
@@ -877,11 +879,15 @@ func (r *FUSEPoolRepository) createPreparing(ctx context.Context, record state.F
 			fusePoolRuntimeUIDOwners,
 		},
 		preparationDigest, poolDigest, raw, ttlMillis, record.PreparationID, record.PoolKey, refillToken, maxSize, fusePoolDigest(record.RuntimeUID), prepareTTLMillis,
-	).Int64()
+	)
+	result, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
-	return poolMutationError("create preparing record", result)
+	if err := poolMutationError("create preparing record", result); err != nil {
+		return err
+	}
+	return durabilityErr
 }
 
 func (r *FUSEPoolRepository) BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
@@ -892,10 +898,11 @@ func (r *FUSEPoolRepository) BindPreparingRuntime(ctx context.Context, preparati
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	member := fusePoolDigest(preparationID)
-	result, err := bindPreparingRuntimeScript.Run(ctx, r.store.client, []string{
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, bindPreparingRuntimeScript, []string{
 		fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs,
 		fusePoolPoolValues, fusePoolCounts, fusePoolRuntimeUIDOwners,
-	}, member, preparationID, runtimeID, runtimeUID, refillToken, expectedRevision, fusePoolDigest(runtimeUID)).Slice()
+	}, member, preparationID, runtimeID, runtimeUID, refillToken, expectedRevision, fusePoolDigest(runtimeUID))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -906,7 +913,8 @@ func (r *FUSEPoolRepository) BindPreparingRuntime(ctx context.Context, preparati
 	if code != poolResultOK {
 		return nil, poolMutationError("bind preparing runtime", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token string, ttl time.Duration) (*state.FUSEPoolRecord, error) {
@@ -921,10 +929,11 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 	if err != nil {
 		return nil, err
 	}
-	result, err := reservePreparedScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, reservePreparedScript,
 		fusePoolInventoryKeys(poolDigest),
 		poolDigest, poolKey, token, ttlMillis, fusePoolRecordPrefix, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts,
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -938,7 +947,8 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 	if code != poolResultOK {
 		return nil, poolMutationError("reserve prepared record", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) Transition(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
@@ -949,10 +959,11 @@ func (r *FUSEPoolRepository) Transition(ctx context.Context, preparationID strin
 		return nil, state.ErrFUSEPoolInvalidTransition
 	}
 	uidDigest := fusePoolDigest(preparationID)
-	result, err := transitionScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, transitionScript,
 		[]string{fusePoolRecordPrefix + uidDigest, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		preparationID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", uidDigest, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, "", 0, "",
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -963,7 +974,8 @@ func (r *FUSEPoolRepository) Transition(ctx context.Context, preparationID strin
 	if code != poolResultOK {
 		return nil, poolMutationError("transition record", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) ReturnPreparedWithAdmission(ctx context.Context, preparationID, reservationToken string, expectedRevision uint64, maxSize int) (*state.FUSEPoolRecord, error) {
@@ -974,10 +986,11 @@ func (r *FUSEPoolRepository) ReturnPreparedWithAdmission(ctx context.Context, pr
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	member := fusePoolDigest(preparationID)
-	result, err := transitionScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, transitionScript,
 		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		preparationID, string(state.FUSEPoolReserved), string(state.FUSEPoolPrepared), reservationToken, strconv.FormatUint(expectedRevision, 10), "", "", member, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, "", 0, maxSize,
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -988,7 +1001,8 @@ func (r *FUSEPoolRepository) ReturnPreparedWithAdmission(ctx context.Context, pr
 	if code != poolResultOK {
 		return nil, poolMutationError("return prepared with admission", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) TransitionWithRefillLock(ctx context.Context, preparationID string, from, to state.FUSEPoolState, token, refillToken string, expectedRevision uint64, reservationTTL time.Duration) (*state.FUSEPoolRecord, error) {
@@ -1010,10 +1024,11 @@ func (r *FUSEPoolRepository) TransitionWithRefillLock(ctx context.Context, prepa
 		}
 	}
 	member := fusePoolDigest(preparationID)
-	result, err := transitionScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, transitionScript,
 		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolRecordUIDs, fusePoolPoolValues, fusePoolCounts},
 		preparationID, string(from), string(to), token, strconv.FormatUint(expectedRevision, 10), "", "", member, fusePoolIndexPrefix, fusePoolStatePrefix, fusePoolStateCounts, refillToken, reserveMillis, "",
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -1024,7 +1039,8 @@ func (r *FUSEPoolRepository) TransitionWithRefillLock(ctx context.Context, prepa
 	if code != poolResultOK {
 		return nil, poolMutationError("publish preparing record", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID string, from state.FUSEPoolState, maintainerToken, reservationToken string, expectedRevision uint64, runtimeID, runtimeUID, cleanupToken string, ttl time.Duration) (*state.FUSEPoolRecord, error) {
@@ -1039,10 +1055,11 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID str
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	member := fusePoolDigest(preparationID)
-	result, err := claimCleanupScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, claimCleanupScript,
 		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolCounts, fusePoolRuntimeUIDOwners, fusePoolRecordUIDs, fusePoolPoolValues},
 		member, preparationID, string(from), maintainerToken, reservationToken, expectedRevision, cleanupToken, ttlMillis, runtimeID, runtimeUID, fusePoolDigest(runtimeUID),
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -1053,7 +1070,8 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, preparationID str
 	if code != poolResultOK {
 		return nil, poolMutationError("claim cleanup", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) ConfirmCleanupTermination(ctx context.Context, preparationID, cleanupToken string, expectedRevision uint64, runtimeID, runtimeUID string, evidence state.FUSEPoolTerminationEvidence) (*state.FUSEPoolRecord, error) {
@@ -1070,10 +1088,11 @@ func (r *FUSEPoolRepository) ConfirmCleanupTermination(ctx context.Context, prep
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	member := fusePoolDigest(preparationID)
-	result, err := confirmCleanupTerminationScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, confirmCleanupTerminationScript,
 		[]string{fusePoolRecordPrefix + member, fusePoolDeadlines, fusePoolRecordPools, fusePoolCounts, fusePoolRuntimeUIDOwners, fusePoolRecordUIDs, fusePoolPoolValues},
 		member, preparationID, cleanupToken, expectedRevision, runtimeID, runtimeUID, fusePoolDigest(runtimeUID), rawEvidence,
-	).Slice()
+	)
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -1084,7 +1103,8 @@ func (r *FUSEPoolRepository) ConfirmCleanupTermination(ctx context.Context, prep
 	if code != poolResultOK {
 		return nil, poolMutationError("confirm cleanup termination", code)
 	}
-	return decodePoolRecord(payload)
+	record, err := decodePoolRecord(payload)
+	return record, errors.Join(err, durabilityErr)
 }
 
 func (r *FUSEPoolRepository) ListPoolKeys(ctx context.Context) ([]string, error) {
@@ -1145,7 +1165,19 @@ func (r *FUSEPoolRepository) DrainRefillLocks(ctx context.Context) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	return r.store.client.Del(ctx, keys...).Err()
+	if r.store.durability != DurabilityReplicaAck {
+		return r.store.client.Del(ctx, keys...).Err()
+	}
+	for _, key := range keys {
+		cmd, durabilityErr := r.store.runSafetyScript(ctx, drainRefillLockScript, []string{key})
+		if err := cmd.Err(); err != nil {
+			return err
+		}
+		if durabilityErr != nil {
+			return durabilityErr
+		}
+	}
+	return nil
 }
 
 func (r *FUSEPoolRepository) ListByPoolKey(ctx context.Context, poolKey string) ([]state.FUSEPoolRecord, error) {
@@ -1281,24 +1313,25 @@ func (r *FUSEPoolRepository) DeleteCleanup(ctx context.Context, preparationID, c
 	// Runtime UID is evidence for exact runtime deletion and its uniqueness
 	// index is only released with the cleanup tombstone.
 	raw, err := r.store.client.Get(ctx, fusePoolRecordPrefix+member).Bytes()
-	if err != nil {
+	if err != nil && !errors.Is(err, redisclient.Nil) {
 		return false, err
 	}
 	var record state.FUSEPoolRecord
-	if json.Unmarshal(raw, &record) != nil {
+	if len(raw) > 0 && json.Unmarshal(raw, &record) != nil {
 		return false, state.ErrFUSEPoolCorrupt
 	}
-	result, err := deleteCleanupScript.Run(ctx, r.store.client, []string{
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, deleteCleanupScript, []string{
 		fusePoolRecordPrefix + member, fusePoolRecordPools, fusePoolDeadlines, fusePoolRecordUIDs,
 		fusePoolPoolValues, fusePoolCounts, fusePoolMembershipGenerations, fusePoolRuntimeUIDOwners,
-	}, member, preparationID, cleanupToken, expectedRevision, fusePoolDigest(record.RuntimeUID)).Int64()
+	}, member, preparationID, cleanupToken, expectedRevision, fusePoolDigest(record.RuntimeUID))
+	result, err := cmd.Int64()
 	if err != nil {
 		return false, err
 	}
 	if result != poolResultOK {
 		return false, poolMutationError("delete cleanup record", result)
 	}
-	return true, nil
+	return true, durabilityErr
 }
 
 func (r *FUSEPoolRepository) ServerTime(ctx context.Context) (time.Time, error) {
@@ -1319,13 +1352,17 @@ func (r *FUSEPoolRepository) TryRefillLock(ctx context.Context, poolKey, token s
 	if err != nil {
 		return false, err
 	}
-	result, err := tryRefillLockScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, tryRefillLockScript,
 		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token, ttlMillis,
-	).Int64()
+	)
+	result, err := cmd.Int64()
 	if err != nil {
 		return false, err
 	}
-	return result == poolResultOK, nil
+	if result != poolResultOK {
+		return false, nil
+	}
+	return true, durabilityErr
 }
 
 func (r *FUSEPoolRepository) RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error) {
@@ -1339,12 +1376,16 @@ func (r *FUSEPoolRepository) RenewRefillLock(ctx context.Context, poolKey, token
 	if err != nil {
 		return false, err
 	}
-	result, err := renewRefillLockScript.Run(ctx, r.store.client,
-		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token, ttlMillis).Int64()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, renewRefillLockScript,
+		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token, ttlMillis)
+	result, err := cmd.Int64()
 	if err != nil {
 		return false, err
 	}
-	return result == poolResultOK, nil
+	if result != poolResultOK {
+		return false, nil
+	}
+	return true, durabilityErr
 }
 
 func (r *FUSEPoolRepository) UnlockRefill(ctx context.Context, poolKey, token string) error {
@@ -1354,13 +1395,17 @@ func (r *FUSEPoolRepository) UnlockRefill(ctx context.Context, poolKey, token st
 	if poolKey == "" || token == "" {
 		return state.ErrFUSEPoolInvalidRecord
 	}
-	result, err := unlockRefillScript.Run(ctx, r.store.client,
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, unlockRefillScript,
 		[]string{fusePoolLockPrefix + fusePoolDigest(poolKey)}, token,
-	).Int64()
+	)
+	result, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
-	return poolMutationError("unlock refill", result)
+	if err := poolMutationError("unlock refill", result); err != nil {
+		return err
+	}
+	return durabilityErr
 }
 
 func fusePoolDigest(value string) string {

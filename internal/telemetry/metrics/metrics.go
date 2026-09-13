@@ -54,6 +54,7 @@ var (
 	// FUSE workspace instruments. Attribute keys are intentionally bounded to
 	// runtime/provider/pool_key/state/result/reason/operation.
 	SandboxWorkspaceMountDuration       metric.Float64Histogram
+	SandboxWorkspaceStageDuration       metric.Float64Histogram
 	SandboxWorkspaceMountTotal          metric.Int64Counter
 	SandboxWorkspaceUnmountTotal        metric.Int64Counter
 	SandboxWorkspaceFlushDuration       metric.Float64Histogram
@@ -249,6 +250,10 @@ func initInstruments() (err error) {
 	if err != nil {
 		return fmt.Errorf("metrics: workspace mount duration: %w", err)
 	}
+	SandboxWorkspaceStageDuration, err = meter.Float64Histogram("sandbox.workspace.stage.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: workspace stage duration: %w", err)
+	}
 	SandboxWorkspaceMountTotal, err = meter.Int64Counter("sandbox.workspace.mount.total")
 	if err != nil {
 		return fmt.Errorf("metrics: workspace mount total: %w", err)
@@ -349,7 +354,19 @@ func ResetForTest() {
 	SandboxWorkspacePoolCleanupTotal = nil
 	SandboxWorkspacePoolCleanupDuration = nil
 	SandboxWorkspaceMountDuration = nil
+	SandboxWorkspaceStageDuration = nil
 	SandboxWorkspaceLeaseLost = nil
+}
+
+// RecordWorkspaceStage uses fixed stage names, never sandbox IDs, prefixes or
+// lease tokens. It exposes latency inside creation without weakening readiness.
+func RecordWorkspaceStage(ctx context.Context, runtimeName, provider, stage, result string, duration float64) {
+	if SandboxWorkspaceStageDuration == nil {
+		return
+	}
+	SandboxWorkspaceStageDuration.Record(ctx, duration, metric.WithAttributes(
+		attribute.String("runtime", runtimeName), attribute.String("provider", provider),
+		attribute.String("stage", stage), attribute.String("result", result)))
 }
 
 // RecordHTTP records HTTP request count and duration.

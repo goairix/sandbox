@@ -434,7 +434,12 @@ func (c *WorkspaceCoordinator) Restore(ctx context.Context, expected WorkspaceOw
 		}
 		created, setErr := c.store.SetNX(ctx, keys.lease, append([]byte(nil), leaseRaw...), c.leaseTTL)
 		if setErr != nil {
-			current, verifyErr := c.store.Get(context.WithoutCancel(ctx), keys.lease)
+			if errors.Is(setErr, state.ErrDurabilityUnconfirmed) {
+				return nil, errors.Join(ErrWorkspaceLeaseLost, fmt.Errorf("restore expired workspace lease: %w", setErr))
+			}
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
+			current, verifyErr := c.store.Get(checkCtx, keys.lease)
+			cancel()
 			if verifyErr != nil || !bytes.Equal(current, leaseRaw) {
 				return nil, errors.Join(ErrWorkspaceLeaseLost, fmt.Errorf("restore expired workspace lease: %w", setErr), verifyErr)
 			}
@@ -510,6 +515,9 @@ func (c *WorkspaceCoordinator) BindRuntime(ctx context.Context, lease *Workspace
 	}
 	swapped, err := c.store.CompareAndSwap(ctx, lease.ownerKey, ownerRaw, nextOwnerRaw, 0)
 	if err != nil {
+		if errors.Is(err, state.ErrDurabilityUnconfirmed) {
+			return fmt.Errorf("bind workspace runtime: %w", err)
+		}
 		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
 		current, verifyErr := c.store.Get(checkCtx, lease.ownerKey)
 		cancel()
@@ -665,6 +673,9 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 		}
 		deleted, deleteErr := c.store.CompareAndDelete(ctx, lease.ownerKey, exactRaw)
 		if deleteErr != nil || !deleted {
+			if errors.Is(deleteErr, state.ErrDurabilityUnconfirmed) {
+				return fmt.Errorf("release workspace owner: %w", deleteErr)
+			}
 			current, verifyErr := c.store.Get(ctx, lease.ownerKey)
 			if verifyErr != nil {
 				return errors.Join(fmt.Errorf("release workspace owner: %w", deleteErr), fmt.Errorf("verify workspace owner release: %w", verifyErr))
@@ -678,6 +689,21 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 				}
 				return ErrWorkspaceOwnerLost
 			}
+			absent, err := confirmStateAbsence(ctx, c.store, lease.ownerKey)
+			if err != nil {
+				return fmt.Errorf("confirm workspace owner release: %w", err)
+			}
+			if !absent {
+				return ErrWorkspaceOwnerLost
+			}
+		}
+	} else {
+		absent, err := confirmStateAbsence(ctx, c.store, lease.ownerKey)
+		if err != nil {
+			return fmt.Errorf("confirm workspace owner absence: %w", err)
+		}
+		if !absent {
+			return ErrWorkspaceOwnerLost
 		}
 	}
 
@@ -688,6 +714,13 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 		return fmt.Errorf("get workspace lease after owner release: %w", err)
 	}
 	if currentLease == nil {
+		absent, err := confirmStateAbsence(ctx, c.store, lease.Key)
+		if err != nil {
+			return fmt.Errorf("confirm workspace lease absence: %w", err)
+		}
+		if !absent {
+			return ErrWorkspaceLeaseLost
+		}
 		return nil
 	}
 	if !bytes.Equal(currentLease, lease.Value) {
@@ -695,11 +728,21 @@ func (c *WorkspaceCoordinator) Release(ctx context.Context, lease *WorkspaceLeas
 	}
 	deleted, deleteErr := c.store.CompareAndDelete(ctx, lease.Key, append([]byte(nil), lease.Value...))
 	if deleteErr != nil || !deleted {
+		if errors.Is(deleteErr, state.ErrDurabilityUnconfirmed) {
+			return fmt.Errorf("release workspace lease: %w", deleteErr)
+		}
 		current, verifyErr := c.store.Get(ctx, lease.Key)
 		if verifyErr != nil {
 			return errors.Join(fmt.Errorf("release workspace lease: %w", deleteErr), fmt.Errorf("verify workspace lease release: %w", verifyErr))
 		}
 		if current == nil {
+			absent, err := confirmStateAbsence(ctx, c.store, lease.Key)
+			if err != nil {
+				return fmt.Errorf("confirm workspace lease release: %w", err)
+			}
+			if !absent {
+				return ErrWorkspaceLeaseLost
+			}
 			return nil
 		}
 		if !bytes.Equal(current, lease.Value) {

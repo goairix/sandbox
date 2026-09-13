@@ -134,6 +134,7 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 				Command: []string{"sleep", "infinity"}, WorkingDir: "/workspace", Resources: corev1.ResourceRequirements{},
 				SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: &falseVal, AllowPrivilegeEscalation: &falseVal},
 				Env: []corev1.EnvVar{
+					{Name: "SANDBOX_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
 					{Name: "KUBERNETES_SERVICE_HOST", Value: ""}, {Name: "KUBERNETES_SERVICE_PORT", Value: ""},
 					{Name: "KUBERNETES_SERVICE_PORT_HTTPS", Value: ""}, {Name: "KUBERNETES_PORT", Value: ""},
 					{Name: "KUBERNETES_PORT_443_TCP", Value: ""}, {Name: "KUBERNETES_PORT_443_TCP_PROTO", Value: ""},

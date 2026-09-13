@@ -43,6 +43,9 @@ func ordinaryNetworkPolicyIntentMatches(current, desired *networkingv1.NetworkPo
 	if current == nil || desired == nil || current.UID == "" || current.Name != desired.Name || current.Namespace != desired.Namespace {
 		return false
 	}
+	if desired.UID != "" && current.UID != desired.UID {
+		return false
+	}
 	for key, value := range desired.Labels {
 		if current.Labels[key] != value {
 			return false
@@ -58,6 +61,9 @@ func ordinaryNetworkPolicyIntentMatches(current, desired *networkingv1.NetworkPo
 
 func ordinaryCiliumPolicyIntentMatches(current, desired *unstructured.Unstructured) bool {
 	if current == nil || desired == nil || current.GetUID() == "" || current.GetName() != desired.GetName() || current.GetNamespace() != desired.GetNamespace() {
+		return false
+	}
+	if desired.GetUID() != "" && current.GetUID() != desired.GetUID() {
 		return false
 	}
 	for key, value := range desired.GetLabels() {
@@ -157,19 +163,37 @@ func validateMutableOrdinaryCiliumPolicy(policy *unstructured.Unstructured, iden
 	return nil
 }
 
-func updateOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, identity ordinaryNetworkIdentity, enabled bool, whitelist []string, blockPrivate bool) error {
+func updateOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, identity ordinaryNetworkIdentity, enabled bool, whitelist []string, blockPrivate bool, compiled ...networkTargets) error {
 	attempt, err := newNetworkAttemptToken()
 	if err != nil {
 		return err
 	}
-	target, err := buildOrdinaryNetworkPolicy(namespace, identity, attempt, enabled, whitelist, blockPrivate)
+	var targets networkTargets
+	if len(compiled) != 0 {
+		targets = compiled[0]
+	} else {
+		targets, err = resolveNetworkTargets(ctx, client, whitelist)
+		if err != nil {
+			return err
+		}
+	}
+	target, err := buildOrdinaryNetworkPolicy(namespace, identity, attempt, enabled, targets.cidrs, blockPrivate, targets.peers)
 	if err != nil {
 		return err
 	}
+	return updateOrdinaryNetworkPolicyIntent(ctx, client, target, identity, attempt)
+}
+
+func updateOrdinaryNetworkPolicyIntent(ctx context.Context, client kubernetes.Interface, target *networkingv1.NetworkPolicy, identity ordinaryNetworkIdentity, attempt string) error {
+	namespace := target.Namespace
 	policies := client.NetworkingV1().NetworkPolicies(namespace)
 	current, err := policies.Get(ctx, target.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = createOrdinaryNetworkPolicy(ctx, client, target, identity, attempt)
+		var created *networkingv1.NetworkPolicy
+		created, err = createOrdinaryNetworkPolicy(ctx, client, target, identity, attempt)
+		if err == nil {
+			target.UID = created.UID
+		}
 		return err
 	}
 	if err != nil {
@@ -189,24 +213,21 @@ func updateOrdinaryNetworkPolicy(ctx context.Context, client kubernetes.Interfac
 		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("update ordinary NetworkPolicy: %w", err), getErr)
 	}
 	if !ordinaryNetworkPolicyIntentMatches(updated, target) {
-		return fmt.Errorf("updated ordinary NetworkPolicy does not match requested intent")
+		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("updated ordinary NetworkPolicy does not match requested intent"))
 	}
 	return nil
 }
 
-func updateOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interface, namespace string, identity ordinaryNetworkIdentity) error {
-	attempt, err := newNetworkAttemptToken()
-	if err != nil {
-		return err
-	}
-	target, err := buildOrdinaryCiliumPrivateDeny(namespace, identity, attempt)
-	if err != nil {
-		return err
-	}
+func updateOrdinaryCiliumPolicyIntent(ctx context.Context, client dynamic.Interface, target *unstructured.Unstructured, identity ordinaryNetworkIdentity, attempt string) error {
+	namespace := target.GetNamespace()
 	policies := client.Resource(ciliumNetworkPolicyGVR).Namespace(namespace)
 	current, err := policies.Get(ctx, target.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = createOrdinaryCiliumPrivateDeny(ctx, client, target, identity, attempt)
+		var created *unstructured.Unstructured
+		created, err = createOrdinaryCiliumPrivateDeny(ctx, client, target, identity, attempt)
+		if err == nil {
+			target.SetUID(created.GetUID())
+		}
 		return err
 	}
 	if err != nil {
@@ -226,7 +247,7 @@ func updateOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.Interfa
 		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("update ordinary CiliumNetworkPolicy: %w", err), getErr)
 	}
 	if !ordinaryCiliumPolicyIntentMatches(updated, target) {
-		return fmt.Errorf("updated ordinary CiliumNetworkPolicy does not match requested intent")
+		return errors.Join(runtime.ErrNetworkStateUncertain, fmt.Errorf("updated ordinary CiliumNetworkPolicy does not match requested intent"))
 	}
 	return nil
 }
@@ -868,7 +889,7 @@ func ordinaryPolicyMetadata(namespace string, identity ordinaryNetworkIdentity, 
 	return metav1.ObjectMeta{Namespace: namespace, Labels: labels, Annotations: annotations}
 }
 
-func buildOrdinaryNetworkPolicy(namespace string, identity ordinaryNetworkIdentity, attempt string, enabled bool, whitelist []string, blockPrivate bool) (*networkingv1.NetworkPolicy, error) {
+func buildOrdinaryNetworkPolicy(namespace string, identity ordinaryNetworkIdentity, attempt string, enabled bool, whitelist []string, blockPrivate bool, servicePeers ...[]networkingv1.NetworkPolicyPeer) (*networkingv1.NetworkPolicy, error) {
 	if errs := kvalidation.IsDNS1123Subdomain(identity.runtimeID); len(errs) != 0 {
 		return nil, fmt.Errorf("invalid ordinary runtime ID %q: %s", identity.runtimeID, errs[0])
 	}
@@ -885,12 +906,12 @@ func buildOrdinaryNetworkPolicy(namespace string, identity ordinaryNetworkIdenti
 		{Protocol: &tcp, Port: &intstr.IntOrString{IntVal: 53}},
 	}}}
 	switch {
-	case enabled && !blockPrivate && len(resolvedCIDRs) == 0:
+	case enabled && !blockPrivate && len(resolvedCIDRs) == 0 && !hasServiceTargetPeers(servicePeers):
 		egress = append(egress,
 			networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{"169.254.0.0/16"}}}}},
 			networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: []string{"fe80::/10", "fc00::/7", "::1/128"}}}}},
 		)
-	case blockPrivate:
+	case enabled && blockPrivate:
 		for _, cidr := range resolvedCIDRs {
 			egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: cidr}}}})
 		}
@@ -898,11 +919,12 @@ func buildOrdinaryNetworkPolicy(namespace string, identity ordinaryNetworkIdenti
 			networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"}}}}},
 			networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: []string{"fc00::/7", "::1/128", "fe80::/10"}}}}},
 		)
-	case len(resolvedCIDRs) != 0:
+	case enabled && len(resolvedCIDRs) != 0:
 		for _, cidr := range resolvedCIDRs {
 			egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: cidr}}}})
 		}
 	}
+	egress = appendServiceTargetRules(egress, enabled, servicePeers)
 	metadata := ordinaryPolicyMetadata(namespace, identity, ordinaryPolicyRole, attempt)
 	metadata.Name = "sandbox-" + identity.logicalID
 	return &networkingv1.NetworkPolicy{
@@ -915,7 +937,7 @@ func buildOrdinaryNetworkPolicy(namespace string, identity ordinaryNetworkIdenti
 	}, nil
 }
 
-func buildOrdinaryCiliumPrivateDeny(namespace string, identity ordinaryNetworkIdentity, attempt string) (*unstructured.Unstructured, error) {
+func buildOrdinaryCiliumPrivateDeny(namespace string, identity ordinaryNetworkIdentity, attempt string, privateExceptions ...[]string) (*unstructured.Unstructured, error) {
 	if errs := kvalidation.IsDNS1123Subdomain(identity.runtimeID); len(errs) != 0 {
 		return nil, fmt.Errorf("invalid ordinary runtime ID %q: %s", identity.runtimeID, errs[0])
 	}
@@ -930,6 +952,31 @@ func buildOrdinaryCiliumPrivateDeny(namespace string, identity ordinaryNetworkId
 		map[string]any{"cidr": "169.254.0.0/16"}, map[string]any{"cidr": "fc00::/7"},
 		map[string]any{"cidr": "::1/128"}, map[string]any{"cidr": "fe80::/10"},
 	}
+	var allowed []string
+	for _, set := range privateExceptions {
+		allowed = append(allowed, set...)
+	}
+	exceptions, err := canonicalFUSEUserCIDRs(allowed)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]any, 0, len(toCIDRSet))
+	for _, raw := range toCIDRSet {
+		rule := raw.(map[string]any)
+		cidr := rule["cidr"].(string)
+		isPrivate := false
+		for _, private := range privateCIDRs {
+			isPrivate = isPrivate || cidr == private
+		}
+		if !isPrivate {
+			filtered = append(filtered, rule)
+			continue
+		}
+		if rule, keep := ciliumPrivateCIDRDenyRule(cidr, exceptions); keep {
+			filtered = append(filtered, rule)
+		}
+	}
+	toCIDRSet = filtered
 	policy := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "cilium.io/v2",
 		"kind":       "CiliumNetworkPolicy",

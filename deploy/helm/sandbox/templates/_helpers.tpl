@@ -21,6 +21,15 @@
 {{- end -}}
 
 {{- define "sandbox.validateRedis" -}}
+{{- if .Values.productionSafetyChecks -}}
+  {{- if .Values.redis.enabled -}}{{- fail "productionSafetyChecks requires external HA Redis" -}}{{- end -}}
+  {{- if not .Values.redis.external.requireHA -}}{{- fail "productionSafetyChecks requires redis.external.requireHA" -}}{{- end -}}
+  {{- if .Values.config.workspace.allowMissingLSMForKind -}}{{- fail "productionSafetyChecks forbids allowMissingLSMForKind" -}}{{- end -}}
+  {{- $lsm := lower (trim (.Values.config.workspace.lsmProfile | default "")) -}}
+  {{- if or (empty $lsm) (eq $lsm "unconfined") (eq $lsm "label=disable") -}}
+    {{- fail "productionSafetyChecks requires a confined config.workspace.lsmProfile" -}}
+  {{- end -}}
+{{- end -}}
 {{- if not .Values.redis.enabled -}}
   {{- $mode := .Values.redis.external.mode | default "standalone" -}}
   {{- if and (eq $mode "cluster") (ne (int .Values.redis.external.db) 0) -}}

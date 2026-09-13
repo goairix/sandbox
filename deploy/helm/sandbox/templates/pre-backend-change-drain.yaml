@@ -6,6 +6,12 @@
 {{- if gt (len $installedContainers) 0 -}}
 {{- $installedContainer = index $installedContainers 0 -}}
 {{- end -}}
+{{- $hasInstalledScope := false -}}
+{{- range (get $installedContainer "env" | default (list)) -}}
+{{- if eq (get . "name") "SANDBOX_STATE_SCOPE" -}}
+{{- $hasInstalledScope = true -}}
+{{- end -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -46,8 +52,10 @@ spec:
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
             - "--drain-release"
           env:
+          {{- if not $hasInstalledScope }}
             - name: SANDBOX_STATE_SCOPE
               value: {{ printf "%s/%s" (.Values.config.runtime.kubernetes.namespace | default .Release.Namespace) .Release.Name | quote }}
+          {{- end }}
           {{- if hasKey $installedContainer "env" }}
 {{ toYaml (get $installedContainer "env") | nindent 12 }}
           {{- else }}

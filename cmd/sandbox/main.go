@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -64,7 +65,12 @@ func main() {
 	verifyBackendFingerprint := flag.Bool("verify-kubernetes-backend-fingerprint", false, "fail unless the installed backend fingerprint matches the desired fingerprint")
 	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "maximum time to wait for a Kubernetes Deployment drain or resume")
 	drainRelease := flag.Bool("drain-release", false, "finalize all sandbox state and verify a release-wide zero-state drain")
+	auditOwners := flag.Bool("audit-workspace-owners", false, "read-only audit of workspace owners; does not start pools or API")
+	recoverOwnerHash := flag.String("recover-workspace-owner", "", "recover only this audited workspace hash after exact runtime/state/lease checks; does not start API")
 	flag.Parse()
+	if (*auditOwners || *recoverOwnerHash != "") && (*drainRelease || *drainDeployment != "" || *resumeDeployment != "" || *verifyBackendFingerprint) {
+		log.Fatal("workspace owner audit/recovery cannot be combined with deployment drain/resume/verification")
+	}
 	modeCount := 0
 	for _, enabled := range []bool{*drainDeployment != "", *resumeDeployment != "", *verifyBackendFingerprint} {
 		if enabled {
@@ -218,9 +224,12 @@ func main() {
 	// Initialize the runtime with its own in-memory credential copy. Prepared
 	// containers and Pods remain credential-free until one-shot authorization.
 	var rt runtime.Runtime
+	inspectOwners := *auditOwners || *recoverOwnerHash != ""
 	switch cfg.Runtime.Type {
 	case "docker":
-		if fuseEnabled {
+		if inspectOwners {
+			rt, err = docker.NewForInspection(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
+		} else if fuseEnabled {
 			rt, err = docker.NewWithFUSECredentials(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway, fuseCredentials)
 		} else {
 			rt, err = docker.New(ctx, cfg.Runtime.Docker.Host, cfg.Images.Gateway)
@@ -230,6 +239,10 @@ func main() {
 		}
 	case "kubernetes":
 		var options []k8sruntime.Option
+		if inspectOwners {
+			options = append(options, k8sruntime.WithReadOnlyInspection())
+		}
+		options = append(options, k8sruntime.WithNetworkCIDRs(cfg.Runtime.Kubernetes.PodCIDRs, cfg.Runtime.Kubernetes.ServiceCIDRs))
 		if fuseEnabled {
 			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))
 		}
@@ -270,11 +283,11 @@ func main() {
 	var fsMeta *storage.FileSystemMeta
 	var objectClient storage.WorkspaceObjectClient
 	selected := cfg.Workspace.Backend
-	fsys, fsMeta, err = storage.NewFileSystemFromConfiguredCredentials(cfg.Storage.FileSystem, selected.StorageIdentity)
+	fsys, fsMeta, err = newFilesystemForMode(cfg.Storage.FileSystem, selected.StorageIdentity, inspectOwners)
 	if err != nil {
 		log.Fatalf("failed to create filesystem: %v", err)
 	}
-	if fuseEnabled {
+	if fuseEnabled && !inspectOwners {
 		objectClient, err = storage.NewWorkspaceObjectClient(cfg.Storage.FileSystem, storage.FileSystemCredentials{
 			AccessKey: fuseCredentials.AccessKey, SecretKey: fuseCredentials.SecretKey,
 		})
@@ -414,6 +427,32 @@ func main() {
 		mgr.SetEphemeralLifecycleStore(sandbox.NewEphemeralLifecycleStore(redisStore))
 		mgr.SetMultipartStore(redisStore)
 		log.Printf("session store connected to redis mode=%s endpoints=%d", cfg.Storage.State.Redis.Mode, max(1, len(cfg.Storage.State.Redis.Addrs)))
+	}
+	if *auditOwners || *recoverOwnerHash != "" {
+		auditCtx, cancelAudit := context.WithTimeout(ctx, 45*time.Second)
+		defer cancelAudit()
+		owners, err := mgr.AuditWorkspaceOwners(auditCtx)
+		if err != nil {
+			log.Fatalf("workspace owner audit failed: %v", err)
+		}
+		if *recoverOwnerHash != "" {
+			matched := false
+			for _, entry := range owners {
+				if entry.Owner.WorkspaceHash == *recoverOwnerHash {
+					matched = true
+					if err := mgr.RecoverWorkspaceOwner(auditCtx, entry.Owner); err != nil {
+						log.Fatalf("workspace owner recovery refused: %v", err)
+					}
+				}
+			}
+			if !matched {
+				log.Fatal("workspace hash not found in current owner audit")
+			}
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(owners); err != nil {
+			log.Fatalf("write owner audit: %v", err)
+		}
+		return
 	}
 	if *drainRelease {
 		drainCtx, drainCancel := context.WithTimeout(ctx, *drainTimeout)

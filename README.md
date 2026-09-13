@@ -84,6 +84,8 @@ curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/ttl \
 
 **网络模式配置：**
 
+Kubernetes 集群内白名单请使用 `k8s-service://namespace/name`；不要用 PodIP/ServiceIP CIDR 代替 endpoint selector。支持范围、RBAC 与迁移说明见 [Kubernetes 网络目标](docs/kubernetes-network-targets.md)。
+
 ```bash
 # 模式一：隔离（默认）— 禁止所有出站流量（仅允许 DNS）
 curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
@@ -103,11 +105,17 @@ curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
   -H "Content-Type: application/json" \
   -d '{"enabled":true,"block_private":true,"whitelist":["api.openai.com","8.8.8.8"]}'
 
-# 屏蔽内网 + 允许特定内网地址（如内部 API 服务）
+# Docker 或 Kubernetes 集群外私网：允许特定私网地址
 curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"enabled":true,"block_private":true,"whitelist":["10.0.1.5","192.168.100.0/24"]}'
+
+# Kubernetes 集群内 Service：精确 namespace + Service backend selector
+curl -X PUT http://localhost:8080/api/v1/sandboxes/<id>/network \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"block_private":true,"whitelist":["k8s-service://payments/ledger"]}'
 
 # 创建沙箱时直接指定网络模式
 curl -X POST http://localhost:8080/api/v1/sandboxes \

@@ -20,6 +20,8 @@ const (
 	activeOperationEndTimeout  = 2 * time.Second
 )
 
+type activeOperationContextKey struct{}
+
 func (m *Manager) distributedStateEnabled() bool {
 	return m.config.RuntimeType == "kubernetes" && m.activeSandboxes != nil
 }
@@ -90,6 +92,9 @@ func (m *Manager) publishActiveSandboxState(ctx context.Context, sb *Sandbox, cl
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := m.activeSandboxes.Publish(ctx, record); err != nil {
+		if errors.Is(err, state.ErrDurabilityUnconfirmed) {
+			return nil, err
+		}
 		current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sb.ID)
 		if loadErr != nil || current == nil || current.Phase != state.ActiveSandboxPublishing ||
 			current.Generation != record.Generation || current.RuntimeID != record.RuntimeID ||
@@ -114,13 +119,25 @@ func (m *Manager) publishActiveSandboxState(ctx context.Context, sb *Sandbox, cl
 		sb.activeGeneration = active.Generation
 		return controller, nil
 	}
+	if errors.Is(activateErr, state.ErrDurabilityUnconfirmed) {
+		if controller != nil {
+			_ = controller.Stop(context.WithoutCancel(ctx))
+		}
+		return nil, activateErr
+	}
 	current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sb.ID)
 	if loadErr == nil && current != nil && current.Phase == state.ActiveSandboxActive &&
 		current.Generation == record.Generation && current.RuntimeID == record.RuntimeID &&
 		current.RuntimeUID == record.RuntimeUID && bytes.Equal(current.Snapshot, snapshot) {
-		sb.activeRevision = current.Revision
-		sb.activeGeneration = current.Generation
-		return controller, nil
+		// A leader read is not a durability acknowledgement. Re-CAS only
+		// this identical snapshot and require the repository write ACK.
+		confirmed, confirmErr := m.activeSandboxes.Update(ctx, sb.ID, current.Revision, snapshot)
+		if confirmErr == nil && confirmed != nil {
+			sb.activeRevision = confirmed.Revision
+			sb.activeGeneration = confirmed.Generation
+			return controller, nil
+		}
+		activateErr = errors.Join(activateErr, confirmErr)
 	}
 	if controller != nil {
 		_ = controller.Stop(context.WithoutCancel(ctx))
@@ -141,7 +158,15 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 	if record == nil || operation == nil {
 		return nil, nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
-	sb, err := decodeActiveSandbox(record, id)
+	var sb *Sandbox
+	if kind == state.ActiveOperationExclusive {
+		sb, err = decodeActiveSandboxPhase(record, id, state.ActiveSandboxExclusive)
+	} else {
+		sb, err = decodeActiveSandbox(record, id)
+	}
+	if err == nil && sb.WorkspaceTransition != "" {
+		err = fmt.Errorf("%w: workspace transition pending for %s", ErrSandboxNotReady, id)
+	}
 	if err == nil {
 		var infoRuntimeUID string
 		info, inspectErr := m.runtime.GetSandbox(ctx, sb.RuntimeID)
@@ -158,7 +183,7 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 		cancel()
 		return nil, nil, nil, err
 	}
-	opCtx, cancelOperation := context.WithCancelCause(ctx)
+	opCtx, cancelOperation := context.WithCancelCause(context.WithValue(ctx, activeOperationContextKey{}, *operation))
 	renewCtx, stopRenewal := context.WithCancel(ctx)
 	done := make(chan struct{})
 	var operationMu sync.Mutex
@@ -226,16 +251,36 @@ func (m *Manager) persistActiveSandboxUpdate(ctx context.Context, sb *Sandbox) e
 	if err != nil {
 		return err
 	}
-	updated, updateErr := m.activeSandboxes.Update(ctx, sb.ID, sb.activeRevision, snapshot)
+	var updated *state.ActiveSandboxRecord
+	var updateErr error
+	if operation, ok := ctx.Value(activeOperationContextKey{}).(state.ActiveSandboxOperation); ok {
+		repository, supported := m.activeSandboxes.(state.ActiveSandboxOperationRepository)
+		if !supported {
+			return state.ErrActiveSandboxCorrupt
+		}
+		updated, updateErr = repository.UpdateOperation(ctx, operation, sb.activeRevision, snapshot)
+	} else {
+		updated, updateErr = m.activeSandboxes.Update(ctx, sb.ID, sb.activeRevision, snapshot)
+	}
 	if updateErr == nil && updated != nil {
 		sb.activeRevision = updated.Revision
 		return nil
 	}
+	if errors.Is(updateErr, state.ErrDurabilityUnconfirmed) {
+		return updateErr
+	}
 	current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sb.ID)
-	if loadErr == nil && current != nil && current.Phase == state.ActiveSandboxActive &&
+	if loadErr == nil && current != nil && (current.Phase == state.ActiveSandboxActive || current.Phase == state.ActiveSandboxExclusive) &&
 		current.Generation == sb.activeGeneration && bytes.Equal(current.Snapshot, snapshot) {
-		sb.activeRevision = current.Revision
-		return nil
+		if operation, ok := ctx.Value(activeOperationContextKey{}).(state.ActiveSandboxOperation); ok {
+			updated, updateErr = m.activeSandboxes.(state.ActiveSandboxOperationRepository).UpdateOperation(ctx, operation, current.Revision, snapshot)
+		} else {
+			updated, updateErr = m.activeSandboxes.Update(ctx, sb.ID, current.Revision, snapshot)
+		}
+		if updateErr == nil && updated != nil {
+			sb.activeRevision = updated.Revision
+			return nil
+		}
 	}
 	return errors.Join(updateErr, loadErr, state.ErrActiveSandboxConflict)
 }
@@ -272,6 +317,16 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 		case <-deadline.C:
 		}
 	}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync &&
+		(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed") {
+		// Final output was durably checkpointed before deletion. Cleanup must
+		// not require a running runtime or replay a completed output sync.
+		sb.WorkspaceTransition = workspaceUnmountSynced
+		return m.cleanupInterruptedSyncWorkspace(ctx, sb)
+	}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync && sb.WorkspaceTransition != "" {
+		return m.cleanupInterruptedSyncWorkspace(ctx, sb)
+	}
 	if sb.Workspace != nil && (sb.Workspace.MountType == WorkspaceMountFUSE || sb.Workspace.Owner.Generation > 0) {
 		return m.destroyDistributedWorkspace(ctx, sb)
 	}
@@ -286,26 +341,21 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 	if err := controller.Fence(ctx); err != nil {
 		return err
 	}
-	info, inspectErr := m.runtime.GetSandbox(ctx, sb.RuntimeID)
-	if inspectErr != nil || info == nil || info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID {
-		checkpoint, checkpointErr := m.activeSandboxes.Checkpoint(context.WithoutCancel(ctx), id, record.Revision, "runtime_identity_unconfirmed")
+	if removeErr := m.removeExactOrdinaryRuntime(ctx, sb); removeErr != nil {
+		checkpoint, checkpointErr := controller.checkpoint(ctx, record.Revision, "runtime_identity_unconfirmed")
 		_ = checkpoint
-		return errors.Join(fmt.Errorf("%w: runtime identity unconfirmed", ErrSandboxCleanupPending), inspectErr, checkpointErr)
+		return errors.Join(ErrSandboxCleanupPending, removeErr, checkpointErr)
 	}
-	if err := m.runtime.RemoveSandbox(ctx, sb.RuntimeID); err != nil {
-		_, checkpointErr := m.activeSandboxes.Checkpoint(context.WithoutCancel(ctx), id, record.Revision, "runtime_remove_pending")
-		return errors.Join(fmt.Errorf("%w: remove runtime: %v", ErrSandboxCleanupPending, err), checkpointErr)
-	}
-	checkpoint, err := m.activeSandboxes.Checkpoint(context.WithoutCancel(ctx), id, record.Revision, "runtime_removed")
+	checkpoint, err := controller.checkpoint(ctx, record.Revision, "runtime_removed")
 	if err != nil || checkpoint == nil {
 		return errors.Join(ErrSandboxCleanupPending, err)
 	}
 	if m.sessions != nil && sb.Config.Mode == ModePersistent {
-		if err := m.sessions.Remove(context.WithoutCancel(ctx), id); err != nil {
+		if err := m.sessions.RemoveMatchingRuntime(ctx, sb); err != nil {
 			return errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
-	if err := m.activeSandboxes.Delete(context.WithoutCancel(ctx), id, checkpoint.Revision, checkpoint.Generation); err != nil {
+	if err := controller.deleteRecord(ctx, checkpoint.Revision); err != nil {
 		return errors.Join(ErrSandboxCleanupPending, err)
 	}
 	m.mu.Lock()
@@ -351,7 +401,7 @@ func (m *Manager) destroyDistributedWorkspace(ctx context.Context, sb *Sandbox) 
 	}()
 	switch sb.Workspace.MountType {
 	case WorkspaceMountFUSE:
-		if err := m.restoreFUSESandboxWithController(ctx, sb, controller); err != nil {
+		if err := m.restoreFUSECleanupWithController(ctx, sb, controller); err != nil {
 			return err
 		}
 		keepController = true
@@ -436,7 +486,7 @@ func (m *Manager) beginActiveCleanup(ctx context.Context, sandboxID string) erro
 	}
 }
 
-func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID string) error {
+func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID string, controller *activeController) error {
 	if !m.distributedStateEnabled() {
 		return nil
 	}
@@ -446,16 +496,17 @@ func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID st
 			return err
 		}
 		if record == nil {
+			if repo, ok := m.activeSandboxes.(interface {
+				ConfirmRecordAbsence(context.Context, string) error
+			}); ok {
+				return repo.ConfirmRecordAbsence(ctx, sandboxID)
+			}
 			return nil
 		}
-		checkpoint, err := m.activeSandboxes.Checkpoint(ctx, sandboxID, record.Revision, "cleanup_complete")
-		if errors.Is(err, state.ErrActiveSandboxConflict) {
-			continue
-		}
-		if err != nil || checkpoint == nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
-		}
-		if err := m.activeSandboxes.Delete(ctx, sandboxID, checkpoint.Revision, checkpoint.Generation); err != nil {
+		// Preserve the last recovery capability if deletion fails or the
+		// controller expires. A generic completion checkpoint would erase
+		// post-runtime/pool cleanup proof before the record is actually gone.
+		if err := controller.deleteRecord(ctx, record.Revision); err != nil {
 			if errors.Is(err, state.ErrActiveSandboxConflict) {
 				continue
 			}

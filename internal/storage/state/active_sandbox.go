@@ -20,8 +20,10 @@ var (
 type ActiveSandboxPhase string
 
 const (
-	ActiveSandboxPublishing     ActiveSandboxPhase = "publishing"
-	ActiveSandboxActive         ActiveSandboxPhase = "active"
+	ActiveSandboxPublishing ActiveSandboxPhase = "publishing"
+	ActiveSandboxActive     ActiveSandboxPhase = "active"
+	// ActiveSandboxExclusive closes legacy and new data admission alike.
+	ActiveSandboxExclusive      ActiveSandboxPhase = "workspace_exclusive"
 	ActiveSandboxDestroying     ActiveSandboxPhase = "destroying"
 	ActiveSandboxCleanupPending ActiveSandboxPhase = "cleanup_pending"
 )
@@ -31,6 +33,8 @@ type ActiveOperationKind string
 const (
 	ActiveOperationData     ActiveOperationKind = "data"
 	ActiveOperationMutation ActiveOperationKind = "mutation"
+	// ActiveOperationExclusive closes data admission while existing operations drain.
+	ActiveOperationExclusive ActiveOperationKind = "exclusive"
 )
 
 // ActiveSandboxRecord is the authoritative Kubernetes lifecycle record. The
@@ -57,7 +61,7 @@ func (r ActiveSandboxRecord) Validate() error {
 		return ErrActiveSandboxCorrupt
 	}
 	switch r.Phase {
-	case ActiveSandboxPublishing, ActiveSandboxActive, ActiveSandboxDestroying, ActiveSandboxCleanupPending:
+	case ActiveSandboxPublishing, ActiveSandboxActive, ActiveSandboxExclusive, ActiveSandboxDestroying, ActiveSandboxCleanupPending:
 		return nil
 	default:
 		return ErrActiveSandboxCorrupt
@@ -76,13 +80,19 @@ func (o ActiveSandboxOperation) Validate(now time.Time) error {
 	if o.SandboxID == "" || o.Token == "" || o.Generation <= 0 || o.ExpiresAt.IsZero() {
 		return ErrActiveSandboxCorrupt
 	}
-	if o.Kind != ActiveOperationData && o.Kind != ActiveOperationMutation {
+	if o.Kind != ActiveOperationData && o.Kind != ActiveOperationMutation && o.Kind != ActiveOperationExclusive {
 		return ErrActiveSandboxCorrupt
 	}
 	if !o.ExpiresAt.After(now) {
 		return ErrActiveSandboxLeaseExpired
 	}
 	return nil
+}
+
+// ActiveSandboxOperationRepository fences snapshot writes with a live operation.
+// Exclusive writes also require all other operations to have drained.
+type ActiveSandboxOperationRepository interface {
+	UpdateOperation(ctx context.Context, operation ActiveSandboxOperation, expectedRevision uint64, snapshot json.RawMessage) (*ActiveSandboxRecord, error)
 }
 
 type ActiveSandboxControllerLease struct {
@@ -107,6 +117,13 @@ func (l ActiveSandboxControllerLease) Validate(now time.Time) error {
 type ActiveSandboxPage struct {
 	Records []ActiveSandboxRecord
 	Cursor  uint64
+}
+
+// ActiveSandboxCheckpointRepository atomically fences durable cleanup progress
+// with the current controller capability, not merely a previously read revision.
+type ActiveSandboxCheckpointRepository interface {
+	CheckpointController(ctx context.Context, lease ActiveSandboxControllerLease, expectedRevision uint64, checkpoint string) (*ActiveSandboxRecord, error)
+	DeleteController(ctx context.Context, lease ActiveSandboxControllerLease, expectedRevision uint64) error
 }
 
 // ActiveSandboxRepository supplies the atomic coordination required by a

@@ -1,6 +1,12 @@
 package runtime
 
-import "net/netip"
+import (
+	"errors"
+	"net/netip"
+)
+
+// ErrInvalidNetworkTarget identifies an unsupported or unsafe user whitelist target.
+var ErrInvalidNetworkTarget = errors.New("invalid network target")
 
 var nonPublicDNSPrefixes = mustParseDNSPrefixes(
 	"0.0.0.0/8",

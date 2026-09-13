@@ -435,7 +435,7 @@ func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (
 			return true, ErrFUSEPoolReturnFenced
 		}
 		if current.State == state.FUSEPoolPrepared && current.Revision == original.Revision+1 && current.ReservationToken == "" {
-			return true, nil
+			return true, p.confirmReturnPreparedTerminal(ctx, original.PreparationID, &current)
 		}
 		if current.State == state.FUSEPoolCleanup {
 			return false, nil
@@ -445,7 +445,16 @@ func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (
 		}
 		return false, nil
 	}
-	return true, nil
+	return true, p.confirmReturnPreparedTerminal(ctx, original.PreparationID, nil)
+}
+
+func (p *FUSEPool) confirmReturnPreparedTerminal(ctx context.Context, id string, expected *state.FUSEPoolRecord) error {
+	if repo, ok := p.repo.(interface {
+		ConfirmReturnPreparedTerminal(context.Context, string, *state.FUSEPoolRecord) error
+	}); ok {
+		return repo.ConfirmReturnPreparedTerminal(ctx, id, expected)
+	}
+	return nil
 }
 
 // ReleaseConsumed removes the exact runtime before deleting its inventory
@@ -566,6 +575,9 @@ func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUS
 	started := time.Now()
 	deleted, err := p.repo.DeleteCleanup(ctx, claimed.PreparationID, claimed.CleanupToken, claimed.Revision)
 	p.recordCleanupStage(ctx, "delete-tombstone", started, err)
+	if errors.Is(err, state.ErrDurabilityUnconfirmed) {
+		return fmt.Errorf("delete cleanup record: %w", err)
+	}
 	if err != nil || !deleted {
 		records, verifyErr := p.repo.ListByPoolKey(ctx, claimed.PoolKey)
 		if verifyErr != nil {
@@ -588,7 +600,10 @@ func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUS
 			return state.ErrFUSEPoolConflict
 		}
 		// An uncertain reply after the exact delete is success. Absence is also
-		// success for a retry of the same claimed cleanup capability.
+		// success for a retry only after the current master confirms durability.
+		if confirmErr := p.confirmReturnPreparedTerminal(ctx, claimed.PreparationID, nil); confirmErr != nil {
+			return fmt.Errorf("confirm cleanup record absence: %w", confirmErr)
+		}
 		p.scheduleRefill()
 		return nil
 	}

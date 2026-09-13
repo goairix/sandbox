@@ -26,6 +26,8 @@ var partialUploadPodExec = execInPod
 
 var consumePodUpload = consumePodUploadStream
 
+var probePodFile = execInPod
+
 // uploadFileToPod uploads a file into a pod via tar stream through exec.
 func uploadFileToPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, destPath string, size int64, reader io.Reader) error {
 	if size < 0 {
@@ -131,6 +133,9 @@ func writeSizedTar(dst io.Writer, name string, mode int64, uid, gid int, size in
 
 // downloadFileFromPod downloads a file from a pod via tar stream.
 func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, srcPath string) (io.ReadCloser, error) {
+	if err := fileExistsInPod(ctx, client, restConfig, namespace, podName, srcPath); err != nil {
+		return nil, err
+	}
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -168,29 +173,26 @@ func (r *Runtime) FileExists(ctx context.Context, id string, filePath string) er
 }
 
 func fileExistsInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, filePath string) error {
-	execReq := client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: "sandbox",
-			Command:   []string{"test", "-f", filePath},
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
-	if err != nil {
-		return fmt.Errorf("create executor: %w", err)
-	}
-
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: io.Discard,
-		Stderr: io.Discard,
+	result, err := probePodFile(ctx, client, restConfig, namespace, podName, runtime.ExecRequest{
+		Command: "LC_ALL=C stat -L -c '%F' -- " + shellEscape(filePath),
+		WorkDir: "/",
 	})
 	if err != nil {
-		return runtime.ErrFileNotFound
+		return fmt.Errorf("stat file: %w", err)
+	}
+	if result == nil {
+		return fmt.Errorf("stat file returned no result")
+	}
+	if result.ExitCode != 0 {
+		// Only a confirmed stat ENOENT is a missing file. test -f alone
+		// conflates missing paths with inaccessible parent directories.
+		if result.ExitCode == 1 && strings.HasSuffix(strings.TrimSpace(result.Stderr), ": No such file or directory") {
+			return runtime.ErrFileNotFound
+		}
+		return fmt.Errorf("stat file exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	if strings.TrimSpace(result.Stdout) != "regular file" && strings.TrimSpace(result.Stdout) != "regular empty file" {
+		return fmt.Errorf("path is not a regular file")
 	}
 	return nil
 }
@@ -360,6 +362,10 @@ func uploadArchiveToPod(ctx context.Context, client kubernetes.Interface, restCo
 
 // downloadDirFromPod downloads an entire directory from a pod as a tar archive.
 func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName, dirPath string) (io.ReadCloser, error) {
+	command, err := exactPodCommand(ctx, podName, []string{"tar", "cf", "-", "-C", "/", strings.TrimPrefix(dirPath, "/")})
+	if err != nil {
+		return nil, err
+	}
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -367,7 +373,7 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"tar", "cf", "-", "-C", "/", strings.TrimPrefix(dirPath, "/")},
+			Command:   command,
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -416,6 +422,10 @@ func (p *pipeReadCloser) Close() error {
 
 // execPipeInPod executes a command in a pod with an io.Reader connected to stdin.
 func execPipeInPod(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, podName string, cmd []string, stdin io.Reader) error {
+	cmd, err := exactPodCommand(ctx, podName, cmd)
+	if err != nil {
+		return err
+	}
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).

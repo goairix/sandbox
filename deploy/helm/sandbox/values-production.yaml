@@ -1,0 +1,24 @@
+# Example overlay only: replace addresses/master name and configure credentials
+# through your existing secure deployment mechanism before installing.
+productionSafetyChecks: true
+replicaCount: 3
+autoscaling:
+  minReplicas: 3
+podDisruptionBudget:
+  minAvailable: 2
+redis:
+  enabled: false
+  external:
+    mode: sentinel
+    addrs:
+      - redis-sentinel-0.example.internal:26379
+      - redis-sentinel-1.example.internal:26379
+      - redis-sentinel-2.example.internal:26379
+    masterName: sandbox-master
+    requireHA: true
+    durability: replica_ack
+    ackReplicas: 1
+    ackTimeoutMs: 500
+config:
+  workspace:
+    allowMissingLSMForKind: false

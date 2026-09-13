@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -31,6 +33,18 @@ if not current or current ~= ARGV[1] then
 end
 redis.call('DEL', KEYS[1])
 return 1
+`)
+
+var compareAndDeleteIfAbsentScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[1])
+return 1
+`)
+
+var confirmAbsenceScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return 1 end
+return 0
 `)
 
 type Options struct {
@@ -129,22 +143,11 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	return &Store{client: client, durability: durability, ackReplicas: ackReplicas, ackTimeout: ackTimeout}, nil
 }
 
-func (s *Store) acknowledgeSafetyWrite(ctx context.Context) error {
-	if s.durability != DurabilityReplicaAck {
-		return nil
-	}
-	acknowledged, err := s.client.Do(ctx, "WAIT", s.ackReplicas, s.ackTimeout.Milliseconds()).Int64()
-	if err != nil {
-		return errors.Join(state.ErrDurabilityUnconfirmed, err)
-	}
-	if acknowledged < int64(s.ackReplicas) {
-		return state.ErrDurabilityUnconfirmed
-	}
-	return nil
-}
-
 func (s *Store) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
-	return s.client.Set(ctx, key, value, ttl).Err()
+	cmd, durabilityErr := s.runSafetyCommand(ctx, key, func(client redis.Cmdable) redis.Cmder {
+		return client.Set(ctx, key, value, ttl)
+	})
+	return errors.Join(cmd.Err(), durabilityErr)
 }
 
 func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
@@ -159,7 +162,10 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {
-	return s.client.Del(ctx, key).Err()
+	cmd, durabilityErr := s.runSafetyCommand(ctx, key, func(client redis.Cmdable) redis.Cmder {
+		return client.Del(ctx, key)
+	})
+	return errors.Join(cmd.Err(), durabilityErr)
 }
 
 func (s *Store) Exists(ctx context.Context, key string) (bool, error) {
@@ -171,10 +177,45 @@ func (s *Store) Exists(ctx context.Context, key string) (bool, error) {
 }
 
 func (s *Store) SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
-	return s.client.SetNX(ctx, key, value, ttl).Result()
+	cmd, durabilityErr := s.runSafetyCommand(ctx, key, func(client redis.Cmdable) redis.Cmder {
+		return client.SetNX(ctx, key, value, ttl)
+	})
+	if cmd.Err() != nil {
+		return false, cmd.Err()
+	}
+	created, err := cmd.(*redis.BoolCmd).Result()
+	if err != nil {
+		return created, err
+	}
+	if durabilityErr != nil {
+		return false, durabilityErr
+	}
+	return created, nil
 }
 
 func (s *Store) Keys(ctx context.Context, pattern string) ([]string, error) {
+	if cluster, ok := s.client.(*redis.ClusterClient); ok {
+		var mu sync.Mutex
+		seen := make(map[string]struct{})
+		err := cluster.ForEachMaster(ctx, func(ctx context.Context, master *redis.Client) error {
+			iter := master.Scan(ctx, 0, pattern, 0).Iterator()
+			for iter.Next(ctx) {
+				mu.Lock()
+				seen[iter.Val()] = struct{}{}
+				mu.Unlock()
+			}
+			return iter.Err()
+		})
+		if err != nil {
+			return nil, s.pendingSafetyFailure(ctx, err)
+		}
+		keys := make([]string, 0, len(seen))
+		for key := range seen {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		return keys, nil
+	}
 	var keys []string
 	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
 	for iter.Next(ctx) {
@@ -186,32 +227,75 @@ func (s *Store) Keys(ctx context.Context, pattern string) ([]string, error) {
 	return keys, nil
 }
 
+// ConfirmAbsence never deletes an empty/corrupt value. In replica_ack mode the
+// read-only predicate is followed by a real same-slot replication barrier.
+func (s *Store) ConfirmAbsence(ctx context.Context, key string) (bool, error) {
+	cmd, durabilityErr := s.runSafetyScript(ctx, confirmAbsenceScript, []string{key})
+	result, err := cmd.Int64()
+	if err != nil {
+		return false, err
+	}
+	if durabilityErr != nil {
+		return false, durabilityErr
+	}
+	return result == 1, nil
+}
+
 func (s *Store) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte, ttl time.Duration) (bool, error) {
 	ttlMillis, err := redisTTLMilliseconds(ttl)
 	if err != nil {
 		return false, err
 	}
-	result, err := compareAndSwapScript.Run(ctx, s.client, []string{key}, oldValue, newValue, ttlMillis).Int64()
+	cmd, durabilityErr := s.runSafetyScript(ctx, compareAndSwapScript, []string{key}, oldValue, newValue, ttlMillis)
+	result, err := cmd.Int64()
 	if err != nil {
 		return false, err
+	}
+	if durabilityErr != nil {
+		return false, durabilityErr
 	}
 	return result == 1, nil
 }
 
 func (s *Store) CompareAndDelete(ctx context.Context, key string, expected []byte) (bool, error) {
-	result, err := compareAndDeleteScript.Run(ctx, s.client, []string{key}, expected).Int64()
+	cmd, durabilityErr := s.runSafetyScript(ctx, compareAndDeleteScript, []string{key}, expected)
+	result, err := cmd.Int64()
 	if err != nil {
 		return false, err
+	}
+	if durabilityErr != nil {
+		return false, durabilityErr
+	}
+	return result == 1, nil
+}
+
+// CompareAndDeleteIfAbsent atomically fences owner recovery against a renewed
+// lease. Both keys must share a Redis Cluster hash tag.
+func (s *Store) CompareAndDeleteIfAbsent(ctx context.Context, key string, expected []byte, absentKey string) (bool, error) {
+	cmd, durabilityErr := s.runSafetyScript(ctx, compareAndDeleteIfAbsentScript, []string{key, absentKey}, expected)
+	result, err := cmd.Int64()
+	if err != nil {
+		return false, err
+	}
+	if durabilityErr != nil {
+		return false, durabilityErr
 	}
 	return result == 1, nil
 }
 
 func (s *Store) Increment(ctx context.Context, key string) (int64, error) {
-	value, err := s.client.Incr(ctx, key).Result()
+	cmd, durabilityErr := s.runSafetyCommand(ctx, key, func(client redis.Cmdable) redis.Cmder {
+		return client.Incr(ctx, key)
+	})
+	err := cmd.Err()
 	if redis.HasErrorPrefix(err, "increment or decrement would overflow") {
 		return 0, state.ErrIncrementOverflow
 	}
-	return value, err
+	if err != nil {
+		return 0, err
+	}
+	value, err := cmd.(*redis.IntCmd).Result()
+	return value, errors.Join(err, durabilityErr)
 }
 
 func redisTTLMilliseconds(ttl time.Duration) (int64, error) {

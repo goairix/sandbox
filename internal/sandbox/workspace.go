@@ -82,6 +82,9 @@ func isExcluded(path string, exclude []string) bool {
 // MountWorkspace creates a ScopedFS for the given rootPath, syncs files into the container.
 // exclude is an optional list of path prefixes to skip during all subsequent syncs.
 func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string, exclude []string) error {
+	if m.distributedStateEnabled() {
+		return m.mountDistributedWorkspace(ctx, sandboxID, rootPath, exclude)
+	}
 	m.mu.Lock()
 	sb := m.sandboxes[sandboxID]
 	if sb == nil {
@@ -202,6 +205,9 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 
 // UnmountWorkspace syncs files back from container to storage, then detaches.
 func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error {
+	if m.distributedStateEnabled() {
+		return m.unmountDistributedWorkspace(ctx, sandboxID)
+	}
 	m.mu.RLock()
 	sb := m.sandboxes[sandboxID]
 	gate := m.operationGates[sandboxID]
@@ -312,6 +318,9 @@ func (m *Manager) UnmountWorkspace(ctx context.Context, sandboxID string) error 
 func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string, exclude []string) error {
 	if direction != "to_container" && direction != "from_container" {
 		return fmt.Errorf("invalid sync direction: %s", direction)
+	}
+	if m.distributedStateEnabled() {
+		return m.syncDistributedWorkspace(ctx, sandboxID, direction, exclude)
 	}
 
 	m.mu.RLock()
@@ -725,27 +734,39 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
 	sb := m.sandboxes[sandboxID]
-	bindMounted := sb != nil && sb.Workspace != nil && sb.Workspace.BindMounted
-	var lastSyncedAt time.Time
-	if sb != nil && sb.Workspace != nil {
-		lastSyncedAt = sb.Workspace.LastSyncedAt
+	var snapshot Sandbox
+	if sb != nil {
+		snapshot = cloneSandbox(sb)
 	}
 	m.mu.RUnlock()
 	if !ok {
-		logger.Debug(ctx, "syncFromContainer: no workspace found",
-			logger.AddField("sandbox_id", sandboxID),
-		)
 		return fmt.Errorf("%w: %s", ErrNoWorkspaceMounted, sandboxID)
 	}
-
-	// Skip sync if the sandbox is gone from the map — it has already been
-	// fully destroyed and the pod is likely deleted.
 	if sb == nil {
-		logger.Debug(ctx, "syncFromContainer: sandbox nil, skipping",
-			logger.AddField("sandbox_id", sandboxID),
-		)
 		return nil
 	}
+	if err := m.syncFromContainerSnapshot(ctx, &snapshot, scoped, exclude); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.sandboxes[sandboxID] == sb && sb.Workspace != nil && snapshot.Workspace != nil {
+		sb.Workspace.LastSyncedAt = snapshot.Workspace.LastSyncedAt
+		sb.UpdatedAt = snapshot.UpdatedAt
+	}
+	m.mu.Unlock()
+	m.saveSessionIfAlive(ctx, sandboxID, sb)
+	return nil
+}
+
+// syncFromContainerSnapshot copies from an explicit authoritative snapshot.
+// It never obtains workspace identity from a process-local map.
+func (m *Manager) syncFromContainerSnapshot(ctx context.Context, sb *Sandbox, scoped storage.ScopedFS, exclude []string) error {
+	if sb == nil || sb.Workspace == nil || scoped == nil {
+		return ErrNoWorkspaceMounted
+	}
+	sandboxID, runtimeID := sb.ID, sb.RuntimeID
+	bindMounted := sb.Workspace.BindMounted
+	lastSyncedAt := sb.Workspace.LastSyncedAt
 
 	// Bind-mounted workspaces share the host filesystem directly — no sync needed.
 	if bindMounted {
@@ -784,7 +805,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			return err
 		}
 		m.setLastSyncedAt(sb, syncStartedAt)
-		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -799,7 +819,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 			return err
 		}
 		m.setLastSyncedAt(sb, syncStartedAt)
-		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -841,7 +860,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	// Nothing to do
 	if len(changedSet) == 0 && len(deletedFiles) == 0 {
 		m.setLastSyncedAt(sb, syncStartedAt)
-		m.saveSessionIfAlive(ctx, sandboxID, sb)
 		return nil
 	}
 
@@ -868,7 +886,9 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 
 	// Remove deleted files from storage
 	for _, path := range deletedFiles {
-		_ = scoped.Remove(ctx, path)
+		if err := scoped.Remove(ctx, path); err != nil {
+			return fmt.Errorf("remove deleted workspace object: %w", err)
+		}
 	}
 
 	logger.Info(ctx, "syncFromContainer: completed",
@@ -878,7 +898,6 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	)
 
 	m.setLastSyncedAt(sb, syncStartedAt)
-	m.saveSessionIfAlive(ctx, sandboxID, sb)
 	return nil
 }
 

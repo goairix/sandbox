@@ -186,6 +186,7 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 					// The API server is unreachable anyway (no SA token + network policy),
 					// but clearing them avoids information leakage in security audits.
 					Env: []corev1.EnvVar{
+						{Name: "SANDBOX_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
 						{Name: "KUBERNETES_SERVICE_HOST", Value: ""},
 						{Name: "KUBERNETES_SERVICE_PORT", Value: ""},
 						{Name: "KUBERNETES_SERVICE_PORT_HTTPS", Value: ""},

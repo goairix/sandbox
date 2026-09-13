@@ -66,8 +66,7 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		internalError(c, err)
 		return
 	}
-	// Use context.WithoutCancel so Destroy completes even if client disconnects
-	defer func() { _ = h.manager.Destroy(context.WithoutCancel(ctx), sb.ID) }()
+	defer func() { _ = h.scheduleOneShotCleanup(ctx, sb.ID) }()
 
 	// Build command from language and code
 	command, err := buildCommand(sandbox.Language(req.Language), req.Code)
@@ -96,6 +95,10 @@ func (h *Handler) ExecuteOneShot(c *gin.Context) {
 		return
 	}
 
+	if err := h.scheduleOneShotCleanup(ctx, sb.ID); err != nil {
+		internalError(c, errors.Join(sandbox.ErrSandboxCleanupPending, err))
+		return
+	}
 	c.JSON(http.StatusOK, types.ExecResponse{
 		ExitCode: result.ExitCode,
 		Stdout:   result.Stdout,
@@ -138,8 +141,7 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 		internalError(c, err)
 		return
 	}
-	// Use context.WithoutCancel so Destroy completes even if client disconnects
-	defer h.manager.Destroy(context.WithoutCancel(ctx), sb.ID)
+	defer func() { _ = h.scheduleOneShotCleanup(ctx, sb.ID) }()
 
 	// Build command from language and code
 	command2, err := buildCommand(sandbox.Language(req.Language), req.Code)
@@ -175,6 +177,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 	start := time.Now()
 	flusher, _ := c.Writer.(http.Flusher)
 	rc := http.NewResponseController(c.Writer)
+	// net/http writes the final chunk after this handler returns. A deadline
+	// used for heartbeats must not leak into HTTP stream finalization.
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 
 	// Heartbeat ticker to prevent timeout during silent periods
 	heartbeatInterval := 10 * time.Second
@@ -230,6 +235,10 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 					ExitCode: exitCode,
 					Elapsed:  time.Since(start).Seconds(),
 				}
+				if cleanupErr := h.scheduleOneShotCleanup(ctx, sb.ID); cleanupErr != nil {
+					eventType = "error"
+					data = types.SSEErrorData{Error: "cleanup_pending", Message: "execution finished but durable cleanup could not be confirmed"}
+				}
 			case runtime.StreamError:
 				eventType = "error"
 				data = streamErrorData(event.Content)
@@ -258,6 +267,19 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 			if flusher != nil {
 				flusher.Flush()
 			}
+			if event.Type == runtime.StreamDone || event.Type == runtime.StreamError {
+				return
+			}
 		}
 	}
+}
+
+func (h *Handler) scheduleOneShotCleanup(ctx context.Context, id string) error {
+	cleanupCtx := context.WithoutCancel(ctx)
+	if err := h.manager.ScheduleDestroy(cleanupCtx, id); err != nil {
+		logger.Error(cleanupCtx, "one-shot cleanup could not be scheduled",
+			logger.AddField("sandbox_id", id), logger.ErrorField(err))
+		return err
+	}
+	return nil
 }

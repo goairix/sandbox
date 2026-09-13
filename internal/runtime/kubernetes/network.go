@@ -309,7 +309,7 @@ func ciliumTCPPorts(ports []int32) []any {
 	return result
 }
 
-func buildFUSEUserNetworkPolicy(namespace, instance, runtimeUID string, enabled bool, whitelist []string, blockPrivate bool, dnsCIDRs []string) (*networkingv1.NetworkPolicy, error) {
+func buildFUSEUserNetworkPolicy(namespace, instance, runtimeUID string, enabled bool, whitelist []string, blockPrivate bool, dnsCIDRs []string, servicePeers ...[]networkingv1.NetworkPolicyPeer) (*networkingv1.NetworkPolicy, error) {
 	if errs := validation.IsValidLabelValue(instance); len(errs) != 0 || instance == "" ||
 		len(validation.IsDNS1123Subdomain(instance)) != 0 || len(validation.IsDNS1123Subdomain(fuseUserPolicyPrefix+instance)) != 0 {
 		return nil, fmt.Errorf("FUSE pool instance is invalid")
@@ -354,7 +354,7 @@ func buildFUSEUserNetworkPolicy(namespace, instance, runtimeUID string, enabled 
 				networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{ipv4}},
 				networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{ipv6}},
 			)
-		case len(resolvedCIDRs) > 0:
+		case len(resolvedCIDRs) > 0 || hasServiceTargetPeers(servicePeers):
 			for _, cidr := range resolvedCIDRs {
 				egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: cidrPeers([]string{cidr})})
 			}
@@ -365,6 +365,7 @@ func buildFUSEUserNetworkPolicy(namespace, instance, runtimeUID string, enabled 
 			)
 		}
 	}
+	egress = appendServiceTargetRules(egress, enabled, servicePeers)
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fuseUserPolicyPrefix + instance, Namespace: namespace,
@@ -400,6 +401,29 @@ func prefixesOverlap(left, right netip.Prefix) bool {
 	return left.Addr().BitLen() == right.Addr().BitLen() && (left.Contains(right.Addr()) || right.Contains(left.Addr()))
 }
 
+// CIDR intersections are either disjoint or one canonical prefix contains the
+// other. A parent/equal allowance covers the entire deny, so omit that private
+// deny rule; only narrower intersections belong in Cilium's except list.
+func ciliumPrivateCIDRDenyRule(deniedRaw string, exceptions []string) (map[string]any, bool) {
+	denied, _ := netip.ParsePrefix(deniedRaw)
+	except := make([]any, 0)
+	for _, allowedRaw := range exceptions {
+		allowed, _ := netip.ParsePrefix(allowedRaw)
+		if !prefixesOverlap(denied, allowed) {
+			continue
+		}
+		if allowed.Bits() <= denied.Bits() {
+			return nil, false
+		}
+		except = append(except, allowedRaw)
+	}
+	rule := map[string]any{"cidr": deniedRaw}
+	if len(except) != 0 {
+		rule["except"] = except
+	}
+	return rule, true
+}
+
 func buildFUSECiliumUserDenyPolicy(namespace, instance, runtimeUID string, blockPrivate bool, privateExceptions []string) (*unstructured.Unstructured, error) {
 	if instance == "" || len(validation.IsDNS1123Subdomain(fuseUserDenyPolicyPrefix+instance)) != 0 || runtimeUID == "" || len(runtimeUID) > 1024 {
 		return nil, fmt.Errorf("FUSE Cilium user deny identity is invalid")
@@ -414,19 +438,9 @@ func buildFUSECiliumUserDenyPolicy(namespace, instance, runtimeUID string, block
 	}
 	if blockPrivate {
 		for _, deniedRaw := range privateCIDRs {
-			denied, _ := netip.ParsePrefix(deniedRaw)
-			except := make([]any, 0)
-			for _, allowedRaw := range exceptions {
-				allowed, _ := netip.ParsePrefix(allowedRaw)
-				if allowed.Bits() >= denied.Bits() && denied.Contains(allowed.Addr()) {
-					except = append(except, allowedRaw)
-				}
+			if rule, keep := ciliumPrivateCIDRDenyRule(deniedRaw, exceptions); keep {
+				denyRules = append(denyRules, rule)
 			}
-			rule := map[string]any{"cidr": deniedRaw}
-			if len(except) != 0 {
-				rule["except"] = except
-			}
-			denyRules = append(denyRules, rule)
 		}
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
@@ -725,10 +739,9 @@ func detectCilium(client kubernetes.Interface) bool {
 // ciliumNetworkPolicyGVR is the GroupVersionResource for CiliumNetworkPolicy CRD.
 var ciliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}
 
-// applyCiliumPrivateDeny creates/updates a CiliumNetworkPolicy with egressDeny for all
-// RFC1918 and link-local ranges. Standard K8s NetworkPolicy IPBlock/Except can be bypassed
-// in Cilium when the destination IP falls back to the "world" identity before the CIDR
-// label is assigned; an explicit eBPF-level deny is the only reliable fix.
+// applyCiliumPrivateDeny creates/updates explicit external RFC1918/link-local
+// egress deny rules. CIDR rules do not select Cilium-managed Pod endpoints;
+// managed cluster destinations require namespace-scoped endpoint selectors.
 func applyCiliumPrivateDeny(ctx context.Context, dynClient dynamic.Interface, namespace, sandboxID string) error {
 	name := "sandbox-private-deny-" + sandboxID
 	toCIDRSet := []any{

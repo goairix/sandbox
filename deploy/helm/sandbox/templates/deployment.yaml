@@ -1,4 +1,5 @@
 {{- include "sandbox.validateRedis" . }}
+{{- include "sandbox.validateNetworkCIDRs" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled }}
 {{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled }}
@@ -85,6 +86,10 @@ spec:
               value: "{{ .Values.config.runtime.type }}"
             - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
               value: "{{ $sandboxNs }}"
+            - name: SANDBOX_RUNTIME_KUBERNETES_POD_CIDRS
+              value: {{ join "," .Values.config.runtime.kubernetes.podCIDRs | quote }}
+            - name: SANDBOX_RUNTIME_KUBERNETES_SERVICE_CIDRS
+              value: {{ join "," .Values.config.runtime.kubernetes.serviceCIDRs | quote }}
             - name: SANDBOX_STATE_SCOPE
               value: {{ printf "%s/%s" $sandboxNs .Release.Name | quote }}
             - name: SANDBOX_POOL_MIN_SIZE

@@ -40,13 +40,14 @@ import (
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 const defaultKubernetesControlTimeout = 60 * time.Second
 
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
-const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v1"
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v2"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {
@@ -61,6 +62,12 @@ type InfrastructureFencer interface {
 
 // Option configures optional Kubernetes runtime integrations.
 type Option func(*Runtime)
+
+// WithReadOnlyInspection suppresses startup reconciliation for offline audit
+// tools. Normal API construction retains its orphan-policy recovery.
+func WithReadOnlyInspection() Option {
+	return func(r *Runtime) { r.readOnlyInspection = true }
+}
 
 // WithInfrastructureFencer installs the only permitted fallback when the
 // Kubernetes control path cannot prove an exact Pod process has exited.
@@ -83,6 +90,15 @@ func WithFUSECredentials(credentials runtime.FUSECredentials) Option {
 // process resolver; this option exists for deterministic runtime tests.
 func WithEndpointLookup(lookup runtime.LookupNetIPFunc) Option {
 	return func(r *Runtime) { r.endpointLookup = lookup }
+}
+
+// WithNetworkCIDRs supplies the operator's complete current and future Pod and
+// Service allocation ranges. Empty sets select bounded authoritative discovery.
+func WithNetworkCIDRs(pods, services []string) Option {
+	return func(r *Runtime) {
+		r.networkPodCIDRs = append([]string(nil), pods...)
+		r.networkServiceCIDRs = append([]string(nil), services...)
+	}
 }
 
 type workspaceRuntimeState struct {
@@ -112,6 +128,8 @@ type Runtime struct {
 	restConfig             *rest.Config
 	namespace              string
 	hasCilium              bool // whether CiliumNetworkPolicy CRD is available on this cluster
+	networkPodCIDRs        []string
+	networkServiceCIDRs    []string
 	controlExecutor        podCommandExecutor
 	infraFencer            InfrastructureFencer
 	fuseCredentials        runtime.FUSECredentials
@@ -122,6 +140,7 @@ type Runtime struct {
 	readyTimeout           time.Duration
 	terminationTimeout     time.Duration
 	ordinaryPolicyRecovery func(context.Context) error
+	readOnlyInspection     bool
 	stateMu                sync.Mutex
 	workspaceStates        map[string]*workspaceRuntimeState
 }
@@ -189,6 +208,9 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 			option(runtimeImpl)
 		}
 	}
+	if _, err := configuredNetworkRanges(runtimeImpl.networkPodCIDRs, runtimeImpl.networkServiceCIDRs); err != nil {
+		return nil, err
+	}
 	runtimeImpl.controlExecutor = &spdyPodCommandExecutor{client: client, restConfig: restConfig, namespace: namespace}
 	if err := runtimeImpl.initializeOrdinaryPolicyRecovery(); err != nil {
 		return nil, fmt.Errorf("reconcile ordinary network policies: %w", err)
@@ -197,6 +219,9 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 }
 
 func (r *Runtime) initializeOrdinaryPolicyRecovery() error {
+	if r.readOnlyInspection {
+		return nil
+	}
 	timeout := r.prepareTimeout
 	if timeout <= 0 {
 		timeout = defaultKubernetesControlTimeout
@@ -254,14 +279,18 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[ordinaryPolicyAttemptAnnotation] = attempt
-	standardPolicy, err := buildOrdinaryNetworkPolicy(r.namespace, identity, attempt, spec.NetworkEnabled, spec.NetworkWhitelist, spec.NetworkBlockPrivate)
+	targets, err := r.resolveNetworkTargets(ctx, spec.NetworkWhitelist)
 	if err != nil {
 		return nil, err
 	}
-	needsCilium := r.hasCilium && spec.NetworkEnabled && len(spec.NetworkWhitelist) == 0
+	standardPolicy, err := buildOrdinaryNetworkPolicy(r.namespace, identity, attempt, spec.NetworkEnabled, targets.cidrs, spec.NetworkBlockPrivate, targets.peers)
+	if err != nil {
+		return nil, err
+	}
+	needsCilium := r.hasCilium && spec.NetworkEnabled && (spec.NetworkBlockPrivate || len(spec.NetworkWhitelist) == 0)
 	var ciliumPolicy *unstructured.Unstructured
 	if needsCilium {
-		ciliumPolicy, err = buildOrdinaryCiliumPrivateDeny(r.namespace, identity, attempt)
+		ciliumPolicy, err = buildOrdinaryCiliumPrivateDeny(r.namespace, identity, attempt, targets.cidrs)
 		if err != nil {
 			return nil, err
 		}
@@ -328,6 +357,17 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 		if err := bindOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, createdCilium.GetName(), identity, attempt, ciliumPolicy); err != nil {
 			return nil, cleanup(err, createdPod, true)
 		}
+	}
+	standardPolicy.UID = createdStandard.UID
+	standardPolicy.Annotations[ordinaryRuntimeUIDAnnotation] = string(identity.runtimeUID)
+	if createdCilium != nil {
+		ciliumPolicy.SetUID(createdCilium.GetUID())
+		annotations := ciliumPolicy.GetAnnotations()
+		annotations[ordinaryRuntimeUIDAnnotation] = string(identity.runtimeUID)
+		ciliumPolicy.SetAnnotations(annotations)
+	}
+	if err := r.verifyOrdinaryNetworkIntent(ctx, identity, attempt, standardPolicy, ciliumPolicy); err != nil {
+		return nil, cleanup(err, createdPod, true)
 	}
 	readyTimeout := r.readyTimeout
 	if readyTimeout <= 0 {
@@ -550,11 +590,23 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 	if generation != expectedGeneration {
 		return nil, fmt.Errorf("workspace authorization is unavailable")
 	}
+	started := time.Now()
 	pod, err := r.waitReadyPod(ctx, ref)
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "pod_ready", result, time.Since(started).Seconds())
 	if err != nil {
 		return nil, err
 	}
+	started = time.Now()
 	health, err := r.readMounterStatus(ctx, ref, "ready")
+	result = "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "mounter_status", result, time.Since(started).Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("read workspace ready status: %w", err)
 	}
@@ -566,7 +618,13 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 		return nil, fmt.Errorf("workspace ready status mismatch: %s", strings.Join(mismatches, ","))
 	}
 	argv := probeArgv("write-read-delete", ref, generation, false)
+	started = time.Now()
 	raw, err := r.execSandboxProbe(ctx, ref.ID, argv, nil)
+	result = "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "propagation_probe", result, time.Since(started).Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -853,15 +911,12 @@ func (r *Runtime) UpdateFUSENetwork(ctx context.Context, ref runtime.RuntimeRef,
 	if err != nil {
 		return err
 	}
-	resolvedCIDRs, err := resolveToCIDRs(whitelist)
+	targets, err := r.resolveNetworkTargets(ctx, whitelist)
 	if err != nil {
 		return err
 	}
-	resolvedCIDRs, err = canonicalFUSEUserCIDRs(resolvedCIDRs)
-	if err != nil {
-		return err
-	}
-	policy, err := buildFUSEUserNetworkPolicy(r.namespace, ref.ID, ref.UID, enabled, resolvedCIDRs, blockPrivate, dnsCIDRs)
+	resolvedCIDRs := targets.cidrs
+	policy, err := buildFUSEUserNetworkPolicy(r.namespace, ref.ID, ref.UID, enabled, resolvedCIDRs, blockPrivate, dnsCIDRs, targets.peers)
 	if err != nil {
 		return err
 	}
@@ -2679,6 +2734,9 @@ func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID str
 func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxInfo, error) {
 	pod, err := getPod(ctx, r.client, r.namespace, id)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("get sandbox pod: %w", runtime.ErrNotFound)
+		}
 		return nil, err
 	}
 
@@ -2756,21 +2814,45 @@ func (r *Runtime) UpdateNetwork(ctx context.Context, id string, enabled bool, wh
 	if err != nil {
 		return err
 	}
-	if err := updateOrdinaryNetworkPolicy(ctx, r.client, r.namespace, identity, enabled, whitelist, blockPrivate); err != nil {
+	targets, err := r.resolveNetworkTargets(ctx, whitelist)
+	if err != nil {
+		return err
+	}
+	attempt, err := newNetworkAttemptToken()
+	if err != nil {
+		return err
+	}
+	allow, err := buildOrdinaryNetworkPolicy(r.namespace, identity, attempt, enabled, targets.cidrs, blockPrivate, targets.peers)
+	if err != nil {
+		return err
+	}
+	var deny *unstructured.Unstructured
+	if r.hasCilium {
+		if r.dynClient == nil {
+			return fmt.Errorf("cilium user egress enforcement is unavailable")
+		}
+		if enabled && (blockPrivate || len(whitelist) == 0) {
+			deny, err = buildOrdinaryCiliumPrivateDeny(r.namespace, identity, attempt, targets.cidrs)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := updateOrdinaryNetworkPolicyIntent(ctx, r.client, allow, identity, attempt); err != nil {
 		return err
 	}
 	if !r.hasCilium {
-		return nil
+		return r.verifyOrdinaryNetworkIntent(ctx, identity, attempt, allow, nil)
 	}
-	if enabled && len(whitelist) == 0 {
-		err = updateOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity)
+	if deny != nil {
+		err = updateOrdinaryCiliumPolicyIntent(ctx, r.dynClient, deny, identity, attempt)
 	} else {
 		err = deleteMutableOrdinaryCiliumPrivateDeny(ctx, r.dynClient, r.namespace, identity)
 	}
 	if err != nil {
 		return errors.Join(runtime.ErrNetworkStateUncertain, err)
 	}
-	return nil
+	return r.verifyOrdinaryNetworkIntent(ctx, identity, attempt, allow, deny)
 }
 
 func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {

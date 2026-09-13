@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -227,12 +228,16 @@ func sandboxToResponse(sb *sandbox.Sandbox) types.SandboxResponse {
 func buildCommand(lang sandbox.Language, code string) (string, error) {
 	switch lang {
 	case sandbox.LangPython:
-		return fmt.Sprintf("python3 <<'SANDBOX_EOF'\n%s\nSANDBOX_EOF", code), nil
+		return "python3 -c " + quoteShellArgument(code), nil
 	case sandbox.LangNodeJS:
-		return fmt.Sprintf("node <<'SANDBOX_EOF'\n%s\nSANDBOX_EOF", code), nil
+		return "node -e " + quoteShellArgument(code), nil
 	case sandbox.LangBash:
 		return code, nil
 	default:
 		return "", fmt.Errorf("unsupported language: %s", lang)
 	}
+}
+
+func quoteShellArgument(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

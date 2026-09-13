@@ -134,6 +134,10 @@ type Sandbox struct {
 	RuntimeUID string         `json:"runtime_uid,omitempty"`
 	Timeout    time.Duration  `json:"timeout"` // max sandbox lifetime
 	Workspace  *WorkspaceInfo `json:"workspace,omitempty"`
+	// WorkspaceTransition journals an incomplete control operation for recovery.
+	// Public admission stays closed until the transition is committed or cleaned.
+	WorkspaceTransition        string   `json:"workspace_transition,omitempty"`
+	WorkspaceTransitionExclude []string `json:"workspace_transition_exclude,omitempty"`
 	// activeRevision and activeGeneration are request-local fencing metadata
 	// returned by the Kubernetes active-state repository. They are never part
 	// of the public or persisted Sandbox JSON snapshot.

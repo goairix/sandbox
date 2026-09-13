@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/google/uuid"
 
@@ -138,10 +139,16 @@ func (r *Runtime) DownloadFile(ctx context.Context, id string, srcPath string) (
 		return nil, err
 	}
 	if fuseContainer {
+		if err := r.preflightDownloadFile(ctx, id, srcPath); err != nil {
+			return nil, err
+		}
 		return r.downloadFile(ctx, id, srcPath)
 	}
 	tarReader, _, err := r.cli.CopyFromContainer(ctx, id, srcPath)
 	if err != nil {
+		if errdefs.IsNotFound(err) && strings.HasSuffix(err.Error(), "Could not find the file "+srcPath+" in container "+id) {
+			return nil, fmt.Errorf("download file: %w", runtime.ErrFileNotFound)
+		}
 		return nil, err
 	}
 	return tarReader, nil
@@ -706,7 +713,7 @@ func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (
 	if err != nil {
 		return nil, err
 	}
-	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          []string{"tar", "cf", "-", srcPath},
 		User:         user,
 		AttachStdout: true,
@@ -716,7 +723,7 @@ func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (
 		return nil, fmt.Errorf("create exec: %w", err)
 	}
 
-	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("attach exec: %w", err)
 	}
@@ -725,12 +732,44 @@ func (r *Runtime) downloadFile(ctx context.Context, id string, srcPath string) (
 	stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
 	go func() {
 		defer stopWatch()
-		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
+		stderr := &limitedControlBuffer{limit: 4 << 10}
+		_, err := stdcopy.StdCopy(pw, stderr, attachResp.Reader)
 		attachResp.Close()
-		pw.CloseWithError(err)
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			if inspectErr := waitExecDone(ctx, r.cli, execResp.ID); inspectErr != nil {
+				err = fmt.Errorf("download tar: %w: %s", inspectErr, strings.TrimSpace(stderr.String()))
+			}
+		}
+		_ = pw.CloseWithError(err)
 	}()
 
 	return pr, nil
+}
+
+func (r *Runtime) preflightDownloadFile(ctx context.Context, id, srcPath string) error {
+	result, err := r.Exec(ctx, id, runtime.ExecRequest{
+		Command: "LC_ALL=C stat -L -c '%F' -- " + shellEscape(srcPath),
+		WorkDir: "/",
+	})
+	if err != nil {
+		return fmt.Errorf("stat download file: %w", err)
+	}
+	if result == nil {
+		return fmt.Errorf("stat download file returned no result")
+	}
+	if result.ExitCode != 0 {
+		if result.ExitCode == 1 && strings.HasSuffix(strings.TrimSpace(result.Stderr), ": No such file or directory") {
+			return runtime.ErrFileNotFound
+		}
+		return fmt.Errorf("stat download file exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	if strings.TrimSpace(result.Stdout) != "regular file" && strings.TrimSpace(result.Stdout) != "regular empty file" {
+		return fmt.Errorf("download path is not a regular file")
+	}
+	return nil
 }
 
 func (r *Runtime) isFUSEContainer(ctx context.Context, id string) (bool, error) {

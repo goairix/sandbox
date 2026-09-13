@@ -46,6 +46,9 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, runtime.ErrInvalidNetworkTarget):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "NETWORK_TARGET_INVALID", Message: err.Error()})
+		return
 	case errors.Is(err, sandbox.ErrSandboxCleanupPending):
 		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{
 			Code:    "SANDBOX_CLEANUP_PENDING",

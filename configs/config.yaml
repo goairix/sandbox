@@ -45,6 +45,14 @@ runtime:
     kubeconfig: ""
     # Kubernetes namespace where sandbox pods are created.
     namespace: ""
+    # Pod/Service 完整分配网段：两项同时留空时自动发现，不是关闭网络隔离。
+    # Cilium 模式下若分配资源缺失、权限不足或发现超时，会拒绝 IP/CIDR/域名白名单操作。
+    # 手动配置时必须同时填写完整的当前及未来分配范围，IPv4/IPv6 地址族须匹配。
+    # 仅使用 k8s-service://namespace/name 的白名单不需要发现分配网段。
+    # 对应 Helm values：config.runtime.kubernetes.podCIDRs / serviceCIDRs。
+    # 详见 docs/kubernetes-network-targets.md；不要照抄示例网段。
+    pod_cidrs: []
+    service_cidrs: []
 
 # -----------------------------------------------------------------------------
 # Pool — pre-warmed sandbox pool settings
@@ -64,8 +72,8 @@ storage:
   # State storage (sandbox lifecycle tracking)
   state:
     redis:
-      # standalone, sentinel, or cluster. Production Kubernetes deployments
-      # should use sentinel/cluster through an external Redis service.
+      # standalone、sentinel 或 cluster。standalone 支持 API 多副本，但 Redis 仍是单点。
+      # FUSE pool 的既有多 key Lua 不支持 Redis Cluster；生产 HA 使用外部 Sentinel。
       mode: "standalone"
       # Redis server address in host:port format.
       addr: "localhost:6379"
@@ -77,8 +85,9 @@ storage:
       password: ""
       # Redis database index (0–15).
       db: 0
-      # native means the provider synchronously commits acknowledged writes;
-      # replica_ack issues WAIT after safety-boundary Lua scripts.
+      # best_effort 是单实例默认；native 仅适用于提供同步提交保证的后端。
+      # replica_ack 将安全写、同 slot 临时屏障和 WAIT 绑定同一主节点连接。
+      # 没有副本时不要使用 replica_ack；standalone 必须保持 require_ha=false。
       durability: "best_effort"
       require_ha: false
       ack_replicas: 1
@@ -204,10 +213,11 @@ security:
   max_upload_bytes: 2147483648
   # Whether outbound network access is allowed inside the sandbox.
   network_enabled: false
-  # CIDR ranges the sandbox is allowed to reach when network_enabled = true.
+  # network_enabled=true 时允许访问的外部域名、IP/CIDR 或 Kubernetes Service。
+  # 集群内目标使用 k8s-service://namespace/name，不要填写 ServiceIP、PodIP 或覆盖集群网段的 CIDR。
   # network_whitelist:
-  #   - "10.0.0.0/8"
-  #   - "192.168.0.0/16"
+  #   - "api.example.com"
+  #   - "k8s-service://backend/catalog" # 仅 Kubernetes runtime；Service 须有非空 selector。
   network_whitelist: []
   # Path to a custom seccomp profile JSON file.
   # Leave empty to use the container runtime default profile.

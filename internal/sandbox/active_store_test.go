@@ -72,7 +72,7 @@ func (r *memoryActiveRepository) Update(_ context.Context, id string, revision u
 	if !ok {
 		return nil, nil
 	}
-	if record.Revision != revision || record.Phase != state.ActiveSandboxActive {
+	if record.Revision != revision || (record.Phase != state.ActiveSandboxActive && record.Phase != state.ActiveSandboxExclusive) {
 		return nil, state.ErrActiveSandboxConflict
 	}
 	record.Revision++
@@ -88,11 +88,41 @@ func (r *memoryActiveRepository) BeginOperation(_ context.Context, id, token str
 	if !ok {
 		return nil, nil, nil
 	}
+	if r.ops[id] == nil {
+		r.ops[id] = map[string]state.ActiveSandboxOperation{}
+	}
+	for token, current := range r.ops[id] {
+		if !current.ExpiresAt.After(time.Now()) {
+			delete(r.ops[id], token)
+		}
+	}
+	if record.Phase == state.ActiveSandboxExclusive && len(r.ops[id]) == 0 {
+		var snapshot Sandbox
+		_ = json.Unmarshal(record.Snapshot, &snapshot)
+		if snapshot.WorkspaceTransition != "" {
+			record.Phase = state.ActiveSandboxCleanupPending
+		} else {
+			record.Phase = state.ActiveSandboxActive
+		}
+		record.Revision++
+		r.records[id] = record
+	}
 	if record.Phase != state.ActiveSandboxActive {
 		return nil, nil, state.ErrActiveSandboxAdmissionClosed
 	}
-	if r.ops[id] == nil {
-		r.ops[id] = map[string]state.ActiveSandboxOperation{}
+	for token, current := range r.ops[id] {
+		if !current.ExpiresAt.After(time.Now()) {
+			delete(r.ops[id], token)
+			continue
+		}
+		if current.Kind == state.ActiveOperationExclusive || (kind != state.ActiveOperationData && current.Kind != state.ActiveOperationData) {
+			return nil, nil, state.ErrActiveSandboxConflict
+		}
+	}
+	if kind == state.ActiveOperationExclusive {
+		record.Phase = state.ActiveSandboxExclusive
+		record.Revision++
+		r.records[id] = record
 	}
 	op := state.ActiveSandboxOperation{SandboxID: id, Token: token, Generation: record.Generation, Kind: kind, ExpiresAt: time.Now().Add(ttl)}
 	r.ops[id][token] = op
@@ -106,7 +136,7 @@ func (r *memoryActiveRepository) RenewOperation(_ context.Context, op state.Acti
 		return nil, r.renewErr
 	}
 	current, ok := r.ops[op.SandboxID][op.Token]
-	if !ok || current.Generation != op.Generation {
+	if !ok || current.Generation != op.Generation || !current.ExpiresAt.After(time.Now()) {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
 	current.ExpiresAt = time.Now().Add(ttl)
@@ -114,10 +144,50 @@ func (r *memoryActiveRepository) RenewOperation(_ context.Context, op state.Acti
 	r.renewals++
 	return &current, nil
 }
+
+func (r *memoryActiveRepository) UpdateOperation(ctx context.Context, op state.ActiveSandboxOperation, revision uint64, snapshot json.RawMessage) (*state.ActiveSandboxRecord, error) {
+	r.mu.Lock()
+	current, ok := r.ops[op.SandboxID][op.Token]
+	record := r.records[op.SandboxID]
+	if !ok || current.Generation != op.Generation || record.Generation != op.Generation || !current.ExpiresAt.After(time.Now()) || (current.Kind != state.ActiveOperationMutation && current.Kind != state.ActiveOperationExclusive) {
+		r.mu.Unlock()
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	if current.Kind == state.ActiveOperationExclusive && len(r.ops[op.SandboxID]) != 1 {
+		r.mu.Unlock()
+		return nil, state.ErrActiveSandboxConflict
+	}
+	r.mu.Unlock()
+	updated, err := r.Update(ctx, op.SandboxID, revision, snapshot)
+	if err == nil {
+		var sb Sandbox
+		if json.Unmarshal(snapshot, &sb) == nil && (sb.Workspace == nil || sb.WorkspaceTransition == workspaceUnmountSynced || sb.WorkspaceTransition == workspaceUnmountReleasing) {
+			r.mu.Lock()
+			delete(r.controllers, op.SandboxID)
+			r.mu.Unlock()
+		}
+	}
+	return updated, err
+}
 func (r *memoryActiveRepository) EndOperation(_ context.Context, op state.ActiveSandboxOperation) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	current, ok := r.ops[op.SandboxID][op.Token]
 	delete(r.ops[op.SandboxID], op.Token)
+	if ok && current.Kind == state.ActiveOperationExclusive {
+		record := r.records[op.SandboxID]
+		if record.Phase == state.ActiveSandboxExclusive {
+			var snapshot Sandbox
+			_ = json.Unmarshal(record.Snapshot, &snapshot)
+			if snapshot.WorkspaceTransition != "" {
+				record.Phase = state.ActiveSandboxCleanupPending
+			} else {
+				record.Phase = state.ActiveSandboxActive
+			}
+			record.Revision++
+			r.records[op.SandboxID] = record
+		}
+	}
 	return nil
 }
 func (r *memoryActiveRepository) BeginDestroy(_ context.Context, id string) (*state.ActiveSandboxRecord, int64, bool, error) {
@@ -127,7 +197,7 @@ func (r *memoryActiveRepository) BeginDestroy(_ context.Context, id string) (*st
 	if !ok {
 		return nil, 0, false, nil
 	}
-	won := record.Phase == state.ActiveSandboxActive
+	won := record.Phase == state.ActiveSandboxActive || record.Phase == state.ActiveSandboxExclusive
 	if won {
 		record.Phase = state.ActiveSandboxDestroying
 		record.Revision++
@@ -140,11 +210,31 @@ func (r *memoryActiveRepository) BeginDestroy(_ context.Context, id string) (*st
 func (r *memoryActiveRepository) LiveOperations(_ context.Context, id string) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for token, op := range r.ops[id] {
+		if !op.ExpiresAt.After(time.Now()) {
+			delete(r.ops[id], token)
+		}
+	}
 	return int64(len(r.ops[id])), nil
 }
 func (r *memoryActiveRepository) Checkpoint(_ context.Context, id string, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.checkpointLocked(id, revision, checkpoint)
+}
+
+func (r *memoryActiveRepository) CheckpointController(_ context.Context, lease state.ActiveSandboxControllerLease, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.controllers[lease.SandboxID]
+	record := r.records[lease.SandboxID]
+	if !ok || current.Token != lease.Token || current.Generation != lease.Generation || record.Generation != lease.Generation || !current.ExpiresAt.After(time.Now()) {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	return r.checkpointLocked(lease.SandboxID, revision, checkpoint)
+}
+
+func (r *memoryActiveRepository) checkpointLocked(id string, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
 	record, ok := r.records[id]
 	if !ok {
 		return nil, nil
@@ -164,6 +254,32 @@ func (r *memoryActiveRepository) Delete(_ context.Context, id string, revision u
 	defer r.mu.Unlock()
 	delete(r.records, id)
 	delete(r.ops, id)
+	return nil
+}
+
+func (r *memoryActiveRepository) DeleteController(_ context.Context, lease state.ActiveSandboxControllerLease, revision uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, exists := r.records[lease.SandboxID]
+	if !exists {
+		return nil
+	}
+	current, ok := r.controllers[lease.SandboxID]
+	if !ok || current.Token != lease.Token || current.Generation != lease.Generation || !current.ExpiresAt.After(time.Now()) {
+		return state.ErrActiveSandboxStaleToken
+	}
+	if record.Revision != revision || record.Generation != lease.Generation ||
+		(record.Phase != state.ActiveSandboxDestroying && record.Phase != state.ActiveSandboxCleanupPending) {
+		return state.ErrActiveSandboxConflict
+	}
+	for _, operation := range r.ops[lease.SandboxID] {
+		if operation.ExpiresAt.After(time.Now()) {
+			return state.ErrActiveSandboxConflict
+		}
+	}
+	delete(r.records, lease.SandboxID)
+	delete(r.ops, lease.SandboxID)
+	delete(r.controllers, lease.SandboxID)
 	return nil
 }
 func (r *memoryActiveRepository) AcquireController(_ context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, bool, error) {

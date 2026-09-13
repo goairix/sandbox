@@ -57,6 +57,10 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 		cmd = []string{"sh", "-c", envPrefix + fmt.Sprintf("cd %s && %s", shellEscape(workDir), req.Command)}
 	}
 
+	cmd, err := exactPodCommand(ctx, podName, cmd)
+	if err != nil {
+		return nil, err
+	}
 	execReq := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).

@@ -336,7 +336,7 @@ func (m *Manager) verifyWorkspaceLifecycle(ctx context.Context, sb *Sandbox) err
 	if err != nil {
 		return err
 	}
-	if record.RuntimeID != sb.RuntimeID || record.RuntimeUID != sb.RuntimeUID || record.MountType != sb.Workspace.MountType ||
+	if record == nil || record.RuntimeID != sb.RuntimeID || record.RuntimeUID != sb.RuntimeUID || record.MountType != sb.Workspace.MountType ||
 		record.Owner.Generation != sb.Workspace.Owner.Generation {
 		return ErrEphemeralLifecycleConflict
 	}
@@ -354,7 +354,7 @@ func (m *Manager) removeWorkspaceLifecycle(ctx context.Context, sb *Sandbox, eph
 		if sb.Workspace.MountType == WorkspaceMountFUSE {
 			return m.sessions.RemoveMatchingFUSESession(ctx, sb.ID, sb.RuntimeID, sb.RuntimeUID, sb.Workspace.FUSEPreparationID, sb.Workspace.LeaseGeneration)
 		}
-		return m.sessions.Remove(ctx, sb.ID)
+		return m.sessions.RemoveMatchingRuntime(ctx, sb)
 	}
 	if m.ephemeral == nil {
 		return ErrEphemeralLifecycleInvalid

@@ -1,5 +1,8 @@
 replicaCount: 2
 
+# Opt-in production safety checks. See values-production.yaml.
+productionSafetyChecks: false
+
 # Must exceed the HTTP drain timeout plus the distributed operation/controller
 # lease handoff window during rolling updates.
 terminationGracePeriodSeconds: 60
@@ -95,6 +98,10 @@ config:
     kubernetes:
       # Namespace for sandbox pods. Defaults to the Helm release namespace if empty.
       namespace: ""
+      # Optional complete current + future Pod/Service allocation ranges.
+      # Both configured = zero inventory List calls; both empty = bounded autodiscovery.
+      podCIDRs: []
+      serviceCIDRs: []
   pool:
     minSize: 3
     maxSize: 20

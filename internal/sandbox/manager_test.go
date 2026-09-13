@@ -1609,7 +1609,7 @@ func TestFUSEOrphanReconcileProtectsSessionOwnerAndPoolRuntimeUIDs(t *testing.T)
 	}
 }
 
-func TestManagerStopWaitsForScheduledFUSETeardownRetry(t *testing.T) {
+func TestManagerStopCancelsScheduledFUSETeardownAndRetainsRecoveryAnchors(t *testing.T) {
 	rt := newFUSEManagerRuntime()
 	mgr, _, _, _ := newFUSETestManager(t, rt)
 	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
@@ -1624,24 +1624,20 @@ func TestManagerStopWaitsForScheduledFUSETeardownRetry(t *testing.T) {
 		return errors.Is(err, ErrSandboxNotReady)
 	}, time.Second, time.Millisecond)
 
-	stopDone := make(chan struct{})
-	go func() {
-		mgr.Stop(context.Background())
-		close(stopDone)
-	}()
-	select {
-	case <-stopDone:
-		t.Fatal("Stop returned while the scheduled exact cleanup was incomplete")
-	case <-time.After(30 * time.Millisecond):
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, mgr.Stop(ctx), "stopping must cancel failed background cleanup")
+	assert.False(t, rt.wasRemoved(sb.RuntimeID))
+	saved, err := mgr.sessions.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.Equal(t, sb.RuntimeUID, saved.RuntimeUID)
+	records, err := mgr.fusePool.repo.ListByPoolKey(ctx, lifecycle.record.PoolKey)
+	require.NoError(t, err)
+	found := false
+	for _, record := range records {
+		found = found || record.RuntimeUID == sb.RuntimeUID
 	}
-
-	rt.failRemove(sb.RuntimeID, nil)
-	select {
-	case <-stopDone:
-	case <-time.After(time.Second):
-		t.Fatal("Stop did not wait for the scheduled exact cleanup retry")
-	}
-	assert.True(t, rt.wasRemoved(sb.RuntimeID))
+	require.True(t, found, "failed cleanup must retain the exact pool recovery anchor")
 }
 
 func TestManagerFUSETeardownUsesPublishedSessionRevisionAfterExecMutation(t *testing.T) {

@@ -50,14 +50,35 @@ var beginActiveOperationScript = redislib.NewScript(`
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', nowms)
+for i = 3, 4 do
+  local holder = redis.call('GET', KEYS[i])
+  if holder and not redis.call('ZSCORE', KEYS[2], holder) then redis.call('DEL', KEYS[i]) end
+end
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
+if record.phase == 'workspace_exclusive' and redis.call('EXISTS', KEYS[4]) == 0 then
+  if record.snapshot.workspace_transition and record.snapshot.workspace_transition ~= '' then
+    record.phase = 'cleanup_pending'
+    record.cleanup_checkpoint = 'workspace_transition_abandoned'
+  else record.phase = 'active' end
+  record.revision = tonumber(record.revision) + 1
+  raw = cjson.encode(record)
+  redis.call('SET', KEYS[1], raw)
+end
 if record.phase ~= 'active' then return {2, raw} end
-if ARGV[3] == 'mutation' then
+if redis.call('EXISTS', KEYS[4]) == 1 then return {3, raw} end
+if ARGV[3] == 'mutation' or ARGV[3] == 'exclusive' then
   local holder = redis.call('GET', KEYS[3])
   if holder then return {3, raw} end
   redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
+end
+if ARGV[3] == 'exclusive' then
+  redis.call('SET', KEYS[4], ARGV[1], 'PX', ARGV[2])
+  record.phase = 'workspace_exclusive'
+  record.revision = tonumber(record.revision) + 1
+  raw = cjson.encode(record)
+  redis.call('SET', KEYS[1], raw)
 end
 local expires = nowms + tonumber(ARGV[2])
 redis.call('ZADD', KEYS[2], expires, ARGV[1])
@@ -71,20 +92,23 @@ local record = cjson.decode(raw)
 if tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
 if not score then return {2} end
-if ARGV[4] == 'mutation' then
+if ARGV[4] == 'mutation' or ARGV[4] == 'exclusive' then
   local holder = redis.call('GET', KEYS[3])
   if holder ~= ARGV[1] then return {2} end
 end
+if ARGV[4] == 'exclusive' and redis.call('GET', KEYS[4]) ~= ARGV[1] then return {2} end
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 if tonumber(score) <= nowms then
   redis.call('ZREM', KEYS[2], ARGV[1])
-  if ARGV[4] == 'mutation' and redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('DEL', KEYS[3]) end
+  if redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('DEL', KEYS[3]) end
+  if redis.call('GET', KEYS[4]) == ARGV[1] then redis.call('DEL', KEYS[4]) end
   return {2}
 end
 local expires = nowms + tonumber(ARGV[3])
 redis.call('ZADD', KEYS[2], expires, ARGV[1])
-if ARGV[4] == 'mutation' then redis.call('PEXPIRE', KEYS[3], ARGV[3]) end
+if ARGV[4] == 'mutation' or ARGV[4] == 'exclusive' then redis.call('PEXPIRE', KEYS[3], ARGV[3]) end
+if ARGV[4] == 'exclusive' then redis.call('PEXPIRE', KEYS[4], ARGV[3]) end
 return {1, tostring(expires)}
 `)
 
@@ -94,8 +118,48 @@ if not raw then return 0 end
 local record = cjson.decode(raw)
 if tonumber(record.generation) ~= tonumber(ARGV[2]) then return 0 end
 redis.call('ZREM', KEYS[2], ARGV[1])
-if ARGV[3] == 'mutation' and redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('DEL', KEYS[3]) end
+if ARGV[3] == 'exclusive' and redis.call('GET', KEYS[4]) == ARGV[1] and record.phase == 'workspace_exclusive' then
+  if record.snapshot.workspace_transition and record.snapshot.workspace_transition ~= '' then
+    record.phase = 'cleanup_pending'; record.cleanup_checkpoint = 'workspace_transition_incomplete'
+  else record.phase = 'active' end
+  record.revision = tonumber(record.revision) + 1
+  redis.call('SET', KEYS[1], cjson.encode(record))
+end
+if redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('DEL', KEYS[3]) end
+if redis.call('GET', KEYS[4]) == ARGV[1] then redis.call('DEL', KEYS[4]) end
 return 1
+`)
+
+var updateActiveOperationScript = redislib.NewScript(`
+local now = redis.call('TIME')
+local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', nowms)
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {0} end
+local record = cjson.decode(raw)
+local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if not score or tonumber(score) <= nowms or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {4} end
+if ARGV[3] ~= 'mutation' and ARGV[3] ~= 'exclusive' then return {4} end
+if redis.call('GET', KEYS[3]) ~= ARGV[1] then return {4} end
+if ARGV[3] == 'exclusive' then
+  if redis.call('GET', KEYS[4]) ~= ARGV[1] then return {4} end
+  if redis.call('ZCARD', KEYS[2]) ~= 1 then return {2} end
+end
+local expectedPhase = 'active'
+if ARGV[3] == 'exclusive' then expectedPhase = 'workspace_exclusive' end
+if record.phase ~= expectedPhase or tonumber(record.revision) ~= tonumber(ARGV[4]) then return {2} end
+record.revision = tonumber(record.revision) + 1
+record.snapshot = cjson.decode(ARGV[5])
+-- Detaching the workspace revokes the previous background controller in the
+-- same atomic write. It may not keep fencing side effects against old local
+-- metadata or block a subsequent ordinary cleanup/remount.
+if record.snapshot.workspace == nil or record.snapshot.workspace == cjson.null or record.snapshot.workspace_transition == 'unmount_synced' or record.snapshot.workspace_transition == 'unmount_releasing' then
+  redis.call('DEL', KEYS[5])
+end
+record.updated_at = ARGV[6]
+local updated = cjson.encode(record)
+redis.call('SET', KEYS[1], updated)
+return {1, updated}
 `)
 
 var beginActiveDestroyScript = redislib.NewScript(`
@@ -106,7 +170,7 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
 local won = 0
-if record.phase == 'active' or record.phase == 'publishing' then
+if record.phase == 'active' or record.phase == 'publishing' or record.phase == 'workspace_exclusive' then
   record.phase = 'destroying'
   record.revision = tonumber(record.revision) + 1
   record.updated_at = ARGV[1]
@@ -141,6 +205,27 @@ redis.call('SET', KEYS[1], updated)
 return {1, updated}
 `)
 
+var checkpointActiveControllerScript = redislib.NewScript(`
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {0} end
+local record = cjson.decode(raw)
+local current = redis.call('GET', KEYS[2])
+if not current then return {4} end
+local lease = cjson.decode(current)
+local now = redis.call('TIME')
+local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if lease.token ~= ARGV[1] or tonumber(lease.generation) ~= tonumber(ARGV[2]) or tonumber(record.generation) ~= tonumber(ARGV[2]) or tonumber(lease.expires_at_unix_ms) <= nowms then return {4} end
+if tonumber(record.revision) ~= tonumber(ARGV[3]) then return {2} end
+if record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending' then return {3} end
+record.phase = 'cleanup_pending'
+record.revision = tonumber(record.revision) + 1
+record.cleanup_checkpoint = ARGV[4]
+record.updated_at = ARGV[5]
+local updated = cjson.encode(record)
+redis.call('SET', KEYS[1], updated)
+return {1, updated}
+`)
+
 var deleteActiveSandboxScript = redislib.NewScript(`
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
@@ -151,7 +236,26 @@ local record = cjson.decode(raw)
 if tonumber(record.revision) ~= tonumber(ARGV[1]) or tonumber(record.generation) ~= tonumber(ARGV[2]) then return 0 end
 if record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending' then return 0 end
 if redis.call('ZCARD', KEYS[2]) ~= 0 then return 0 end
-redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[6])
+redis.call('SREM', KEYS[5], ARGV[3])
+return 1
+`)
+
+var deleteActiveControllerScript = redislib.NewScript(`
+local now = redis.call('TIME')
+local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', nowms)
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 1 end
+local record = cjson.decode(raw)
+local current = redis.call('GET', KEYS[4])
+if not current then return 4 end
+local lease = cjson.decode(current)
+if lease.token ~= ARGV[4] or tonumber(lease.generation) ~= tonumber(ARGV[2]) or tonumber(lease.expires_at_unix_ms) <= nowms then return 4 end
+if tonumber(record.revision) ~= tonumber(ARGV[1]) or tonumber(record.generation) ~= tonumber(ARGV[2]) then return 0 end
+if record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending' then return 0 end
+if redis.call('ZCARD', KEYS[2]) ~= 0 then return 0 end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[6])
 redis.call('SREM', KEYS[5], ARGV[3])
 return 1
 `)
@@ -160,7 +264,7 @@ var acquireActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'workspace_exclusive' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 local lease = cjson.decode(ARGV[1])
@@ -174,7 +278,7 @@ var renewActiveControllerScript = redislib.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
+if (record.phase ~= 'publishing' and record.phase ~= 'active' and record.phase ~= 'workspace_exclusive' and record.phase ~= 'destroying' and record.phase ~= 'cleanup_pending') or tonumber(record.generation) ~= tonumber(ARGV[2]) then return {2} end
 local current = redis.call('GET', KEYS[2])
 if not current then return {2} end
 local lease = cjson.decode(current)
@@ -197,7 +301,7 @@ return 1
 `)
 
 type activeSandboxKeys struct {
-	record, operations, mutation, controller, index string
+	record, operations, mutation, controller, index, exclusive string
 }
 
 type ActiveSandboxRepository struct {
@@ -220,7 +324,8 @@ func (r *ActiveSandboxRepository) keys(id string) activeSandboxKeys {
 	return activeSandboxKeys{
 		record: base + ":record", operations: base + ":operations",
 		mutation: base + ":mutation", controller: base + ":controller",
-		index: activeSandboxKeyPrefix + tag + ":index",
+		exclusive: base + ":exclusive",
+		index:     activeSandboxKeyPrefix + tag + ":index",
 	}
 }
 
@@ -245,14 +350,15 @@ func (r *ActiveSandboxRepository) Publish(ctx context.Context, record state.Acti
 		return err
 	}
 	k := r.keys(record.SandboxID)
-	ok, err := publishActiveSandboxScript.Run(ctx, r.store.client, []string{k.record, k.index}, raw, record.SandboxID).Int64()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, publishActiveSandboxScript, []string{k.record, k.index}, raw, record.SandboxID)
+	ok, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
 	if ok != 1 {
 		return state.ErrActiveSandboxConflict
 	}
-	return r.store.acknowledgeSafetyWrite(ctx)
+	return durabilityErr
 }
 
 func (r *ActiveSandboxRepository) Load(ctx context.Context, id string) (*state.ActiveSandboxRecord, error) {
@@ -289,7 +395,8 @@ func (r *ActiveSandboxRepository) changeRecord(ctx context.Context, id string, r
 	if r.validateID(id) != nil || revision == 0 || !json.Valid(snapshot) {
 		return nil, state.ErrActiveSandboxCorrupt
 	}
-	result, err := changeActiveRecordScript.Run(ctx, r.store.client, []string{r.keys(id).record}, revision, string(from), string(to), string(snapshot), time.Now().UTC().Format(time.RFC3339Nano)).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, changeActiveRecordScript, []string{r.keys(id).record}, revision, string(from), string(to), string(snapshot), time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -307,18 +414,16 @@ func (r *ActiveSandboxRepository) changeRecord(ctx context.Context, id string, r
 	if err != nil {
 		return nil, err
 	}
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return record, err
-	}
-	return record, nil
+	return record, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token string, kind state.ActiveOperationKind, ttl time.Duration) (*state.ActiveSandboxRecord, *state.ActiveSandboxOperation, error) {
-	if r.validateID(id) != nil || token == "" || (kind != state.ActiveOperationData && kind != state.ActiveOperationMutation) || state.ValidateActiveSandboxTTL(ttl) != nil {
+	if r.validateID(id) != nil || token == "" || (kind != state.ActiveOperationData && kind != state.ActiveOperationMutation && kind != state.ActiveOperationExclusive) || state.ValidateActiveSandboxTTL(ttl) != nil {
 		return nil, nil, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(id)
-	result, err := beginActiveOperationScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation}, token, ttl.Milliseconds(), string(kind)).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, beginActiveOperationScript, []string{k.record, k.operations, k.mutation, k.exclusive}, token, ttl.Milliseconds(), string(kind))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -346,10 +451,35 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 		return nil, nil, err
 	}
 	op := &state.ActiveSandboxOperation{SandboxID: id, Token: token, Generation: record.Generation, Kind: kind, ExpiresAt: time.UnixMilli(expires)}
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return record, op, err
+	return record, op, durabilityErr
+}
+
+// UpdateOperation publishes a snapshot only while the exact mutation is live.
+func (r *ActiveSandboxRepository) UpdateOperation(ctx context.Context, op state.ActiveSandboxOperation, revision uint64, snapshot json.RawMessage) (*state.ActiveSandboxRecord, error) {
+	if r.validateID(op.SandboxID) != nil || op.Token == "" || op.Generation <= 0 || revision == 0 || !json.Valid(snapshot) || len(snapshot) > 1<<20 {
+		return nil, state.ErrActiveSandboxCorrupt
 	}
-	return record, op, nil
+	k := r.keys(op.SandboxID)
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, updateActiveOperationScript, []string{k.record, k.operations, k.mutation, k.exclusive, k.controller}, op.Token, op.Generation, string(op.Kind), revision, string(snapshot), time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := cmd.Slice()
+	if err != nil {
+		return nil, err
+	}
+	status, err := scriptInt(result, 0)
+	if err != nil {
+		return nil, err
+	}
+	if status == 4 || status == 0 {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	if status != 1 {
+		return nil, state.ErrActiveSandboxConflict
+	}
+	record, err := decodeActiveRecord([]byte(result[1].(string)), op.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return record, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) RenewOperation(ctx context.Context, op state.ActiveSandboxOperation, ttl time.Duration) (*state.ActiveSandboxOperation, error) {
@@ -357,7 +487,8 @@ func (r *ActiveSandboxRepository) RenewOperation(ctx context.Context, op state.A
 		return nil, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(op.SandboxID)
-	result, err := renewActiveOperationScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation}, op.Token, op.Generation, ttl.Milliseconds(), string(op.Kind)).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, renewActiveOperationScript, []string{k.record, k.operations, k.mutation, k.exclusive}, op.Token, op.Generation, ttl.Milliseconds(), string(op.Kind))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -373,10 +504,7 @@ func (r *ActiveSandboxRepository) RenewOperation(ctx context.Context, op state.A
 		return nil, err
 	}
 	op.ExpiresAt = time.UnixMilli(expires)
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return &op, err
-	}
-	return &op, nil
+	return &op, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, op state.ActiveSandboxOperation) error {
@@ -384,14 +512,15 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, op state.Act
 		return state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(op.SandboxID)
-	ok, err := endActiveOperationScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation}, op.Token, op.Generation, string(op.Kind)).Int64()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, endActiveOperationScript, []string{k.record, k.operations, k.mutation, k.exclusive}, op.Token, op.Generation, string(op.Kind))
+	ok, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
 	if ok != 1 {
 		return state.ErrActiveSandboxStaleToken
 	}
-	return nil
+	return durabilityErr
 }
 
 func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (*state.ActiveSandboxRecord, int64, bool, error) {
@@ -399,7 +528,8 @@ func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (
 		return nil, 0, false, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(id)
-	result, err := beginActiveDestroyScript.Run(ctx, r.store.client, []string{k.record, k.operations}, time.Now().UTC().Format(time.RFC3339Nano)).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, beginActiveDestroyScript, []string{k.record, k.operations}, time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -408,7 +538,7 @@ func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (
 		return nil, 0, false, err
 	}
 	if status == 0 {
-		return nil, 0, false, nil
+		return nil, 0, false, durabilityErr
 	}
 	if status != 1 {
 		return nil, 0, false, state.ErrActiveSandboxConflict
@@ -425,12 +555,7 @@ func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (
 	if err != nil {
 		return nil, 0, false, err
 	}
-	if won == 1 {
-		if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-			return record, live, true, err
-		}
-	}
-	return record, live, won == 1, nil
+	return record, live, won == 1, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) LiveOperations(ctx context.Context, id string) (int64, error) {
@@ -444,7 +569,8 @@ func (r *ActiveSandboxRepository) Checkpoint(ctx context.Context, id string, rev
 	if r.validateID(id) != nil || revision == 0 || checkpoint == "" {
 		return nil, state.ErrActiveSandboxCorrupt
 	}
-	result, err := checkpointActiveSandboxScript.Run(ctx, r.store.client, []string{r.keys(id).record}, revision, checkpoint, time.Now().UTC().Format(time.RFC3339Nano)).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, checkpointActiveSandboxScript, []string{r.keys(id).record}, revision, checkpoint, time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -462,10 +588,34 @@ func (r *ActiveSandboxRepository) Checkpoint(ctx context.Context, id string, rev
 	if err != nil {
 		return nil, err
 	}
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return record, err
+	return record, durabilityErr
+}
+
+func (r *ActiveSandboxRepository) CheckpointController(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
+	if r.validateID(lease.SandboxID) != nil || lease.Token == "" || lease.Generation <= 0 || revision == 0 || checkpoint == "" || len(checkpoint) > 1<<20 {
+		return nil, state.ErrActiveSandboxCorrupt
 	}
-	return record, nil
+	k := r.keys(lease.SandboxID)
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, checkpointActiveControllerScript, []string{k.record, k.controller}, lease.Token, lease.Generation, revision, checkpoint, time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := cmd.Slice()
+	if err != nil {
+		return nil, err
+	}
+	status, err := scriptInt(result, 0)
+	if err != nil {
+		return nil, err
+	}
+	if status == 4 {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	if status != 1 {
+		return nil, state.ErrActiveSandboxConflict
+	}
+	record, err := decodeActiveRecord([]byte(result[1].(string)), lease.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return record, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) Delete(ctx context.Context, id string, revision uint64, generation int64) error {
@@ -473,14 +623,34 @@ func (r *ActiveSandboxRepository) Delete(ctx context.Context, id string, revisio
 		return state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(id)
-	ok, err := deleteActiveSandboxScript.Run(ctx, r.store.client, []string{k.record, k.operations, k.mutation, k.controller, k.index}, revision, generation, id).Int64()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, deleteActiveSandboxScript, []string{k.record, k.operations, k.mutation, k.controller, k.index, k.exclusive}, revision, generation, id)
+	ok, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
 	if ok != 1 {
 		return state.ErrActiveSandboxConflict
 	}
-	return nil
+	return durabilityErr
+}
+
+func (r *ActiveSandboxRepository) DeleteController(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64) error {
+	if r.validateID(lease.SandboxID) != nil || lease.Token == "" || lease.Generation <= 0 || revision == 0 {
+		return state.ErrActiveSandboxCorrupt
+	}
+	k := r.keys(lease.SandboxID)
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, deleteActiveControllerScript, []string{k.record, k.operations, k.mutation, k.controller, k.index, k.exclusive}, revision, lease.Generation, lease.SandboxID, lease.Token)
+	status, err := cmd.Int64()
+	if err != nil {
+		return err
+	}
+	if status == 4 {
+		return state.ErrActiveSandboxStaleToken
+	}
+	if status != 1 {
+		return state.ErrActiveSandboxConflict
+	}
+	return durabilityErr
 }
 
 type redisControllerLease struct {
@@ -498,7 +668,8 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 	}
 	payload, _ := json.Marshal(redisControllerLease{SandboxID: lease.SandboxID, Token: lease.Token, InstanceID: lease.InstanceID, PodUID: lease.PodUID, Generation: lease.Generation})
 	k := r.keys(lease.SandboxID)
-	result, err := acquireActiveControllerScript.Run(ctx, r.store.client, []string{k.record, k.controller}, string(payload), lease.Generation, ttl.Milliseconds()).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, acquireActiveControllerScript, []string{k.record, k.controller}, string(payload), lease.Generation, ttl.Milliseconds())
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, false, err
 	}
@@ -517,10 +688,7 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 		return nil, false, err
 	}
 	lease.ExpiresAt = time.UnixMilli(expires)
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return &lease, true, err
-	}
-	return &lease, true, nil
+	return &lease, true, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, error) {
@@ -528,7 +696,8 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 		return nil, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(lease.SandboxID)
-	result, err := renewActiveControllerScript.Run(ctx, r.store.client, []string{k.record, k.controller}, lease.Token, lease.Generation, ttl.Milliseconds()).Slice()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, renewActiveControllerScript, []string{k.record, k.controller}, lease.Token, lease.Generation, ttl.Milliseconds())
+	result, err := cmd.Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -544,24 +713,22 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 		return nil, err
 	}
 	lease.ExpiresAt = time.UnixMilli(expires)
-	if err := r.store.acknowledgeSafetyWrite(ctx); err != nil {
-		return &lease, err
-	}
-	return &lease, nil
+	return &lease, durabilityErr
 }
 
 func (r *ActiveSandboxRepository) ReleaseController(ctx context.Context, lease state.ActiveSandboxControllerLease) error {
 	if r.validateID(lease.SandboxID) != nil || lease.Token == "" || lease.Generation <= 0 {
 		return state.ErrActiveSandboxCorrupt
 	}
-	ok, err := releaseActiveControllerScript.Run(ctx, r.store.client, []string{r.keys(lease.SandboxID).controller}, lease.Token, lease.Generation).Int64()
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, releaseActiveControllerScript, []string{r.keys(lease.SandboxID).controller}, lease.Token, lease.Generation)
+	ok, err := cmd.Int64()
 	if err != nil {
 		return err
 	}
 	if ok != 1 {
 		return state.ErrActiveSandboxStaleToken
 	}
-	return nil
+	return durabilityErr
 }
 
 func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
@@ -626,7 +793,7 @@ func (r *ActiveSandboxRepository) Ping(ctx context.Context) error {
 func (r *ActiveSandboxRepository) forceDelete(ctx context.Context, id string) error {
 	k := r.keys(id)
 	_, err := r.store.client.TxPipelined(ctx, func(pipe redislib.Pipeliner) error {
-		pipe.Del(ctx, k.record, k.operations, k.mutation, k.controller)
+		pipe.Del(ctx, k.record, k.operations, k.mutation, k.controller, k.exclusive)
 		pipe.SRem(ctx, k.index, id)
 		return nil
 	})

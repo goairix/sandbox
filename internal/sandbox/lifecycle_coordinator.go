@@ -162,6 +162,34 @@ func (c *activeController) Stop(ctx context.Context) error {
 	return releaseErr
 }
 
+func (c *activeController) checkpoint(ctx context.Context, revision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
+	if err := c.Fence(ctx); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	lease := c.lease
+	c.mu.Unlock()
+	repository, ok := c.repository.(state.ActiveSandboxCheckpointRepository)
+	if !ok {
+		return nil, state.ErrActiveSandboxCorrupt
+	}
+	return repository.CheckpointController(ctx, lease, revision, checkpoint)
+}
+
+func (c *activeController) deleteRecord(ctx context.Context, revision uint64) error {
+	if err := c.Fence(ctx); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	lease := c.lease
+	c.mu.Unlock()
+	repository, ok := c.repository.(state.ActiveSandboxCheckpointRepository)
+	if !ok {
+		return state.ErrActiveSandboxCorrupt
+	}
+	return repository.DeleteController(ctx, lease, revision)
+}
+
 // runActiveLifecycleCoordinator discovers durable workspace lifecycles. The
 // scan is deliberately off the request path and jittered per replica; the
 // controller lease remains the final single-writer arbitration mechanism.
@@ -180,6 +208,8 @@ func (m *Manager) runActiveLifecycleCoordinator() {
 				// independently, so a transient scan failure does not interrupt them.
 			}
 			timer.Reset(activeLifecycleScanInterval + lifecycleScanDelay(m.config.InstanceID))
+		case <-m.cleanupWake:
+			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)
 		}
 	}
 }
@@ -216,6 +246,22 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	if record == nil {
 		return nil
 	}
+	if record.Phase == state.ActiveSandboxExclusive {
+		// BeginOperation atomically recovers an expired exclusive gate. A live
+		// holder rejects admission; no background controller races its effects.
+		_, operation, err := m.activeSandboxes.BeginOperation(ctx, record.SandboxID, uuid.NewString(), state.ActiveOperationData, defaultActiveOperationTTL)
+		if operation != nil {
+			_ = m.activeSandboxes.EndOperation(ctx, *operation)
+		}
+		if err != nil && !errors.Is(err, state.ErrActiveSandboxAdmissionClosed) && !errors.Is(err, state.ErrActiveSandboxConflict) {
+			return err
+		}
+		current, err := m.activeSandboxes.Load(ctx, record.SandboxID)
+		if err != nil || current == nil || current.Phase == state.ActiveSandboxExclusive {
+			return err
+		}
+		record = current
+	}
 	if record.Phase == state.ActiveSandboxPublishing {
 		if time.Since(record.UpdatedAt) < activePublishingRecoveryGrace {
 			return nil
@@ -228,8 +274,20 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	}
 	sb, err := decodeActiveSandboxPhase(record, record.SandboxID,
 		state.ActiveSandboxActive, state.ActiveSandboxDestroying, state.ActiveSandboxCleanupPending)
-	if err != nil || sb.Workspace == nil ||
-		(sb.Workspace.MountType != WorkspaceMountFUSE && sb.Workspace.Owner.Generation <= 0) {
+	if err != nil {
+		return err
+	}
+	if sb.WorkspaceTransition != "" || sb.Workspace == nil ||
+		(sb.Workspace.MountType == WorkspaceMountSync &&
+			(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed")) {
+		if record.Phase != state.ActiveSandboxActive {
+			cleanupCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			return m.destroyDistributedSandbox(cleanupCtx, sb.ID)
+		}
+		return nil
+	}
+	if sb.Workspace.MountType != WorkspaceMountFUSE && sb.Workspace.Owner.Generation <= 0 {
 		return err
 	}
 
@@ -238,6 +296,9 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	syncLifecycle := m.syncLifecycles[sb.ID]
 	m.mu.RUnlock()
 	if fuseLifecycle != nil || syncLifecycle != nil {
+		if syncLifecycle != nil && m.supersededSyncController(syncLifecycle) {
+			return nil
+		}
 		if record.Phase != state.ActiveSandboxActive {
 			if fuseLifecycle != nil {
 				m.scheduleFUSETeardown(fuseLifecycle, ErrSandboxCleanupPending)
@@ -261,7 +322,11 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 
 	switch sb.Workspace.MountType {
 	case WorkspaceMountFUSE:
-		err = m.restoreFUSESandboxWithController(ctx, sb, controller)
+		if record.Phase == state.ActiveSandboxActive {
+			err = m.restoreFUSESandboxWithController(ctx, sb, controller)
+		} else {
+			err = m.restoreFUSECleanupWithController(ctx, sb, controller)
+		}
 	case WorkspaceMountSync:
 		err = m.restoreSyncSandboxWithController(ctx, sb, controller)
 	default:

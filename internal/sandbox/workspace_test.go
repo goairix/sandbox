@@ -778,6 +778,24 @@ func (m *mockScopedFS) Rename(context.Context, string, string, ...fs.Option) err
 func (m *mockScopedFS) Stat(context.Context, string, ...fs.Option) (fs.FileInfo, error) {
 	return nil, nil
 }
+
+type failingObjectRemoval struct {
+	*mockScopedFS
+	err error
+}
+
+func (s failingObjectRemoval) Remove(context.Context, string, ...fs.Option) error { return s.err }
+
+func TestSyncFromSnapshotRetainsTimestampWhenObjectRemovalFails(t *testing.T) {
+	rt := newMockRuntime()
+	mgr := NewManager(rt, nil, nil, ManagerConfig{})
+	cutoff := time.Unix(100, 0)
+	sb := &Sandbox{ID: "sandbox-a", RuntimeID: "runtime-a", Workspace: &WorkspaceInfo{MountType: WorkspaceMountSync, LastSyncedAt: cutoff}}
+	failed := errors.New("object delete unavailable")
+	scoped := failingObjectRemoval{mockScopedFS: &mockScopedFS{dirs: map[string][]fs.FileInfo{".": {mockFileInfo{name: "deleted.txt", size: 1}}}}, err: failed}
+	require.ErrorIs(t, mgr.syncFromContainerSnapshot(context.Background(), sb, scoped, nil), failed)
+	require.Equal(t, cutoff, sb.Workspace.LastSyncedAt)
+}
 func (m *mockScopedFS) Exists(context.Context, string, ...fs.Option) (bool, error) { return false, nil }
 func (m *mockScopedFS) IsDir(context.Context, string, ...fs.Option) (bool, error)  { return false, nil }
 func (m *mockScopedFS) IsFile(context.Context, string, ...fs.Option) (bool, error) { return false, nil }

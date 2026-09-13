@@ -437,6 +437,9 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 		terminationTimeout: 100 * time.Millisecond,
 		fuseCredentials:    sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
 	}
+	// The fake cluster has no allocation API controller. Supply its complete
+	// synthetic Pod/Service allocation ranges instead of silently skipping it.
+	WithNetworkCIDRs([]string{"10.42.0.0/16"}, []string{"10.96.0.0/12"})(rt)
 	return rt, client
 }
 
@@ -664,6 +667,18 @@ func TestInitializeOrdinaryPolicyRecoveryUsesBoundedContext(t *testing.T) {
 	err := rt.initializeOrdinaryPolicyRecovery()
 	require.ErrorIs(t, err, listErr)
 	assert.True(t, seenDeadline)
+}
+
+func TestInspectionSkipsStartupPolicyRecovery(t *testing.T) {
+	rt, _ := newFakeKubernetesRuntime(t, preparedScript())
+	WithReadOnlyInspection()(rt)
+	called := false
+	rt.ordinaryPolicyRecovery = func(context.Context) error {
+		called = true
+		return nil
+	}
+	require.NoError(t, rt.initializeOrdinaryPolicyRecovery())
+	require.False(t, called, "inspection must never reconcile or delete policies")
 }
 
 func TestCreateSandboxCreatesStandardPolicyBeforePod(t *testing.T) {
@@ -1211,6 +1226,7 @@ func TestConcurrentFirstCiliumFUSENetworkUpdatesNeverDeleteWinner(t *testing.T) 
 	dynamicClientA := rtA.dynClient.(*fake.FakeDynamicClient)
 	dynamicClientB := fake.NewSimpleDynamicClient(k8sruntime.NewScheme())
 	rtB := &Runtime{client: clientB, dynClient: dynamicClientB, namespace: "runtime", hasCilium: true, controlExecutor: preparedScript()}
+	WithNetworkCIDRs([]string{"10.42.0.0/16"}, []string{"10.96.0.0/12"})(rtB)
 	sharedDeny := newSharedFirstCiliumPolicyStore(fuseUserDenyPolicyPrefix + ref.ID)
 	dynamicClientA.PrependReactor("*", "ciliumnetworkpolicies", sharedDeny.react)
 	dynamicClientB.PrependReactor("*", "ciliumnetworkpolicies", sharedDeny.react)

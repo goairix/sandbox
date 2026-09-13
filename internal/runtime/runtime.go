@@ -111,6 +111,12 @@ type OrdinarySandboxRemover interface {
 	RemoveOrdinarySandbox(ctx context.Context, ref RuntimeRef) error
 }
 
+// OrdinarySandboxPolicyCleaner recovers the Pod-delete/policy-delete crash gap
+// without touching resources belonging to a same-name replacement runtime.
+type OrdinarySandboxPolicyCleaner interface {
+	CleanupOrdinarySandboxPolicies(ctx context.Context, ref RuntimeRef, logicalID string) error
+}
+
 // PreparedSandboxResolver recovers immutable identity after a creator crashed
 // before publishing RuntimeUID. Implementations must verify preparation ID
 // and pool contract, not merely return any runtime with the same name.
