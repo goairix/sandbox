@@ -1,10 +1,10 @@
 replicaCount: 2
 
-# Opt-in production safety checks. See values-production.yaml.
+# 按需开启生产安全校验，生产配置示例见 values-production.yaml。
 productionSafetyChecks: false
 
-# Must exceed the HTTP drain timeout plus the distributed operation/controller
-# lease handoff window during rolling updates.
+# 优雅终止等待时间必须大于 HTTP 排空超时与滚动更新期间
+# 分布式操作、控制器租约交接窗口之和。
 terminationGracePeriodSeconds: 60
 
 podDisruptionBudget:
@@ -28,16 +28,16 @@ resources:
     cpu: "1"
     memory: 512Mi
 
-# sandbox-api initializes and reconciles its runtime pools before opening the
-# HTTP listener. Keep liveness disabled during that bounded initialization.
+# sandbox-api 在启动 HTTP 监听前初始化并协调运行时池。
+# 该有界初始化阶段应由启动探针屏蔽存活探针检查。
 startupProbe:
   enabled: true
   periodSeconds: 5
   timeoutSeconds: 1
   failureThreshold: 120
 
-# Before Helm deletes Redis, scale the API Deployment to zero, finalize all
-# persistent and ephemeral workspaces, drain both pools, and audit zero state.
+# Helm 删除 Redis 前，先将 API Deployment 缩容至零，完成所有
+# 持久和临时工作区的清理，排空普通池、FUSE 池，并审计确认无遗留状态。
 preDeleteDrain:
   enabled: true
   timeoutSeconds: 600
@@ -48,9 +48,9 @@ autoscaling:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
-# Redis configuration
+# Redis 配置
 redis:
-  # Use the built-in Redis deployment (set to false to use an external Redis)
+  # 使用 Chart 内置 Redis；设为 false 时使用外部 Redis。
   enabled: true
   image:
     repository: redis
@@ -68,7 +68,7 @@ redis:
     storageClass: ""
     size: 1Gi
   password: ""
-  # External Redis (used when redis.enabled is false)
+  # 外部 Redis 配置，仅在 redis.enabled=false 时生效。
   external:
     mode: standalone
     addr: ""
@@ -77,8 +77,8 @@ redis:
     username: ""
     password: ""
     db: 0
-    # native requires a provider with synchronous commit semantics. Use
-    # replica_ack for ordinary asynchronous Redis replication.
+    # native 要求后端提供同步提交保证；普通 Redis 的异步复制
+    # 应使用 replica_ack 进行副本确认。
     durability: best_effort
     requireHA: false
     ackReplicas: 1
@@ -96,10 +96,10 @@ config:
   runtime:
     type: kubernetes
     kubernetes:
-      # Namespace for sandbox pods. Defaults to the Helm release namespace if empty.
+      # 沙盒 Pod 所在命名空间，留空时使用 Helm release 的命名空间。
       namespace: ""
-      # Optional complete current + future Pod/Service allocation ranges.
-      # Both configured = zero inventory List calls; both empty = bounded autodiscovery.
+      # 可选的完整 Pod/Service 分配网段，须覆盖当前及未来分配范围。
+      # 两项同时配置时不扫描分配资源；同时留空时进行有界自动发现。
       podCIDRs: []
       serviceCIDRs: []
   pool:
@@ -110,15 +110,15 @@ config:
     gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12"
   storage:
     filesystem:
-      # Exactly one release-wide backend preset is selected. The preset fixes
-      # the provider/profile pair; API requests cannot override it.
+      # 整个 release 只选择一个后端预设，预设固定存储提供商及协议配置，
+      # API 请求不能覆盖该选择。
       preset: minio
       bucket: sandbox-storage
-      # Optional. MinIO defaults to us-east-1; standard Huawei OBS endpoints derive it.
+      # 可选。MinIO 默认为 us-east-1；华为 OBS 标准端点可自动推导区域。
       region: ""
       endpoint: minio.example.com
-      # AK/SK are read directly by sandbox-api. They are delivered to the
-      # mounter only through the private one-shot authorize stdin channel.
+      # AK/SK 由 sandbox-api 直接读取，仅通过私有、一次性的
+      # authorize 标准输入通道传给挂载器。
       accessKey: ""
       secretKey: ""
       storageIdentity: production-object-store
@@ -133,8 +133,8 @@ config:
     fuseImages:
       mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
       docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
-    # Local kind on Docker Desktop only. Production must keep this false and
-    # configure a real AppArmor/SELinux profile.
+    # 仅用于 Docker Desktop 上的本地 kind 集群。生产环境必须保持 false，
+    # 并配置真实的 AppArmor/SELinux 安全策略。
     allowMissingLSMForKind: false
     autoSyncIntervalSeconds: 0
     cacheSize: 2Gi
@@ -160,9 +160,8 @@ config:
       prepareTimeoutSeconds: 120
     lsmProfile: sandbox-fuse
   security:
-    # Prefer apiKeySecretName in real deployments so Helm upgrades do not need
-    # the API key on the command line or in a values file. The referenced
-    # Secret must contain the key `api-key`.
+    # 实际部署优先使用 apiKeySecretName，避免在 Helm 升级命令行或
+    # values 文件中直接填写 API 密钥。引用的 Secret 必须包含 api-key 键。
     apiKeySecretName: ""
     apiKey: ""
     rateLimit: 100
