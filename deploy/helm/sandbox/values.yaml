@@ -1,4 +1,4 @@
-replicaCount: 2
+replicaCount: 3
 
 # 按需开启生产安全校验，生产配置示例见 values-production.yaml。
 productionSafetyChecks: false
