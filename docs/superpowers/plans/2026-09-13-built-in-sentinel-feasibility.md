@@ -8,6 +8,8 @@
 
 **Tech Stack:** Docker Compose、现有本地 `redis:7-alpine`、Redis CLI、中文实验报告。
 
+**本轮执行结果:** 基础实验已执行，使用无冲突 project `sandbox-sentinel-review-20260913-839f51f`；结果见 `docs/testing/2026-09-13-sentinel-feasibility-results.md`。这不是生产功能完成声明，后续协议与异常状态验证仍单独推进。
+
 ---
 
 ## 范围、前提与文件边界
@@ -23,14 +25,14 @@
 
 **Files:** Create: `testdata/sentinel-feasibility/{compose.yaml,redis-0.conf,redis-1.conf,redis-2.conf,sentinel.conf}`。
 
-- [ ] 确认 Compose 可用并记录 Redis 实际版本，失败则不启动实验。
+- [x] 确认 Compose 可用并记录 Redis 实际版本，失败则不启动实验。
 
 ```bash
 docker compose version
 docker run --rm --pull=never redis:7-alpine redis-server --version
 ```
 
-- [ ] 用 apply_patch 创建 `compose.yaml`，完整内容如下。Redis 和 Sentinel 各自保持 PID 1 的 exec 服务，持久配置只在首次不存在时复制。
+- [x] 用 apply_patch 创建 `compose.yaml`，完整内容如下。Redis 和 Sentinel 各自保持 PID 1 的 exec 服务，持久配置只在首次不存在时复制。
 
 ```yaml
 x-redis: &redis
@@ -85,7 +87,7 @@ volumes:
   sentinel-2: {}
 ```
 
-- [ ] 用 apply_patch 创建 `redis-0.conf`：
+- [x] 用 apply_patch 创建 `redis-0.conf`：
 
 ```text
 bind 0.0.0.0
@@ -102,7 +104,7 @@ replica-announce-ip redis-0
 replica-announce-port 6379
 ```
 
-- [ ] 用 apply_patch 创建 `redis-1.conf`：
+- [x] 用 apply_patch 创建 `redis-1.conf`：
 
 ```text
 bind 0.0.0.0
@@ -120,7 +122,7 @@ replica-announce-port 6379
 replicaof redis-0 6379
 ```
 
-- [ ] 用 apply_patch 创建 `redis-2.conf`：
+- [x] 用 apply_patch 创建 `redis-2.conf`：
 
 ```text
 bind 0.0.0.0
@@ -138,7 +140,7 @@ replica-announce-port 6379
 replicaof redis-0 6379
 ```
 
-- [ ] 用 apply_patch 创建 `sentinel.conf`。Sentinel 的固定公告名按实例另行验证，此阶段先检验 Redis 稳定 DNS 被持久化及返回的行为，不声称已覆盖生产 Pod 公告地址配置。
+- [x] 用 apply_patch 创建 `sentinel.conf`。Sentinel 的固定公告名按实例另行验证，此阶段先检验 Redis 稳定 DNS 被持久化及返回的行为，不声称已覆盖生产 Pod 公告地址配置。
 
 ```text
 bind 0.0.0.0
@@ -156,7 +158,7 @@ sentinel failover-timeout review-master 15000
 sentinel parallel-syncs review-master 1
 ```
 
-- [ ] 验证 YAML，然后设置当前终端唯一 project；保留此变量直到清理完成，所有 Compose 操作必须同时带 `-p` 与 `-f`。
+- [x] 验证 YAML，然后设置当前终端唯一 project；保留此变量直到清理完成，所有 Compose 操作必须同时带 `-p` 与 `-f`。
 
 ```bash
 task_project="sandbox-sentinel-review-$(date +%Y%m%d%H%M%S)-$$"
@@ -171,7 +173,7 @@ docker volume ls --filter "label=com.docker.compose.project=$task_project"
 
 ### Task 2: 首次引导、认证及实际副本确认
 
-- [ ] 先只启动三个 Redis，验证主/从复制无需 Sentinel 预先 Ready；再启动三个 Sentinel。
+- [x] 先只启动三个 Redis，验证主/从复制无需 Sentinel 预先 Ready；再启动三个 Sentinel。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" up -d redis-0 redis-1 redis-2
@@ -183,14 +185,14 @@ docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$
 
 预期：主报告两个 online slave；Sentinel 在 60 秒总预算内报告足够 quorum/majority 和两个其它 Sentinel。瞬时未收敛按 1 秒间隔重新读取，超时记 FAIL；执行等待工具单次不超过 10 秒，并持续提供进度。
 
-- [ ] 无凭据 Redis PING 和 Sentinel PING 均返回 NOAUTH；注意 redis-cli 可能仍返回进程码 0，必须检查响应正文。
+- [x] 无凭据 Redis PING 和 Sentinel PING 均返回 NOAUTH；注意 redis-cli 可能仍返回进程码 0，必须检查响应正文。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" exec -T redis-0 redis-cli PING
 docker compose -p "$task_project" -f "$task_compose" exec -T sentinel-0 redis-cli -p 26379 PING
 ```
 
-- [ ] 同一 CLI 连接先写后 WAIT，不能拆成两次 redis-cli 调用。
+- [x] 同一 CLI 连接先写后 WAIT，不能拆成两次 redis-cli 调用。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$task_auth" redis-0 redis-cli --raw <<'REDIS'
@@ -203,7 +205,7 @@ REDIS
 
 ### Task 3: 晋升、旧主重返及非 0 号冷恢复
 
-- [ ] 停止原主，60 秒预算内读取全部三个 Sentinel 的 MASTER 与 get-master-addr-by-name；只观察 Sentinel 晋升，不手动 REPLICAOF NO ONE。
+- [x] 停止原主，60 秒预算内读取全部三个 Sentinel 的 MASTER 与 get-master-addr-by-name；只观察 Sentinel 晋升，不手动 REPLICAOF NO ONE。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" stop redis-0
@@ -214,7 +216,7 @@ docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$
 
 预期：新主为 redis-1 或 redis-2；取得地址只是发现证据，必须另读其 INFO replication，确认 master/健康副本并在其同连接完成 SET/WAIT。
 
-- [ ] 将返回的服务名精确验证为 redis-1 或 redis-2 后设 `task_master`，再验证晋升后的写入和复制。
+- [x] 将返回的服务名精确验证为 redis-1 或 redis-2 后设 `task_master`，再验证晋升后的写入和复制。
 
 ```bash
 task_master="$(docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$task_auth" sentinel-0 redis-cli --raw -p 26379 SENTINEL get-master-addr-by-name review-master | tr -d '\r' | head -n 1)"
@@ -230,7 +232,7 @@ docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$
 
 预期：原主最终为从且 master_host 指向新主；不能把旧主短暂启动状态或异步数据一致性写成零中断/强一致。
 
-- [ ] 收敛后读取每个 Redis 的 `/data/redis.conf` 和 Sentinel 的 `/data/sentinel.conf`，核对角色重写、myid/config-epoch/current-epoch，并记录是否仍存旧 IP。随后停止全组、保留卷重启。
+- [x] 收敛后读取每个 Redis 的 `/data/redis.conf` 和 Sentinel 的 `/data/sentinel.conf`，核对角色重写、myid/config-epoch/current-epoch，并记录是否仍存旧 IP。随后停止全组、保留卷重启。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" exec -T redis-0 cat /data/redis.conf
@@ -249,7 +251,7 @@ docker compose -p "$task_project" -f "$task_compose" up -d
 
 **Files:** Create: `docs/testing/2026-09-13-sentinel-feasibility-results.md`。
 
-- [ ] 停止除 `task_master` 外的两个 Redis，向剩余主执行 SET，预期返回 NOREPLICAS；其本地 PING 应仍可成功。此实验不删除任何卷。
+- [x] 停止除 `task_master` 外的两个 Redis，向剩余主执行 SET，预期返回 NOREPLICAS；其本地 PING 应仍可成功。此实验不删除任何卷。
 
 ```bash
 case "$task_master" in
@@ -260,8 +262,8 @@ esac
 docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$task_auth" "$task_master" redis-cli SET review:must-reject isolated
 docker compose -p "$task_project" -f "$task_compose" exec -T -e "REDISCLI_AUTH=$task_auth" "$task_master" redis-cli PING
 ```
-- [ ] 以 apply_patch 记录 Redis 实际版本、唯一 project、所有命令结果、收敛时间、持久角色/epoch、FAIL 与尚未测试项；不把未测试的 Pod IP 换代、特殊密码、初始化身份、防重放、状态丢失、Kubernetes 节点故障标为通过。
-- [ ] 清理前核对 project 的六个容器、六个卷和独立网络标签。仅在确认全部为本次新建实验资源后，用同一 project/file 删除实验资源；不碰其它容器、缓存镜像或卷。
+- [x] 以 apply_patch 记录 Redis 实际版本、唯一 project、所有命令结果、收敛时间、持久角色/epoch、FAIL 与尚未测试项；不把未测试的 Pod IP 换代、特殊密码、初始化身份、防重放、状态丢失、Kubernetes 节点故障标为通过。
+- [x] 清理前核对 project 的六个容器、六个卷和独立网络标签。仅在确认全部为本次新建实验资源后，用同一 project/file 删除实验资源；不碰其它容器、缓存镜像或卷。
 
 ```bash
 docker compose -p "$task_project" -f "$task_compose" ps -a
@@ -273,5 +275,5 @@ docker volume ls --filter "label=com.docker.compose.project=$task_project"
 git diff --check
 ```
 
-- [ ] 按实际结果决定生产计划：成功只解除基础切换/正常冷恢复门槛；初始化身份协议、部分引导续跑和丢失状态门槛仍必须另做确定性及真实实验。
-- [ ] 完整读回夹具和报告并核对检查结果后，只提交上述实验文件，不推送、不修改 release。
+- [x] 按实际结果决定生产计划：成功只解除基础切换/正常冷恢复门槛；初始化身份协议、部分引导续跑和丢失状态门槛仍必须另做确定性及真实实验。
+- [x] 完整读回夹具和报告并核对检查结果后，只提交上述实验文件，不推送、不修改 release。

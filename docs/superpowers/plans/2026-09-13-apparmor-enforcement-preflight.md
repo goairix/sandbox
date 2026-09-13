@@ -56,7 +56,7 @@ sudo -n cat /sys/kernel/security/apparmor/profiles
 
 ### Task 3: 环境结论和后续门槛
 
-- [ ] 用 apply_patch 写预检报告，准确区分本地证据、已提供隔离目标与尚缺权限。
+- [x] 用 apply_patch 写预检报告，准确区分本地证据、已提供隔离目标与尚缺权限。见 `docs/testing/2026-09-13-apparmor-environment-preflight.md`，独立 Linux 目标尚未提供。
 - [ ] 只有隔离环境可用后才制定策略及加载器实施计划。必须包含 parser 语法、镜像固定路径、FUSE mount/flush/unmount、实际 mounter/子进程 exact profile、拒绝负例，以及 runtime 忽略 Localhost 时拒绝授权。
 - [ ] 真实约束实验失败则保持功能不可按生产验收，不删除 privileged 挂载传播契约，不以 allow-all profile 或 unconfined 回退制造通过。
-- [ ] 读回报告、执行 `git diff --check` 后提交本轮预检记录；不部署、不卸载、不构建发布镜像。
+- [x] 读回报告、执行 `git diff --check` 后提交本轮预检记录；不部署、不卸载、不构建发布镜像。

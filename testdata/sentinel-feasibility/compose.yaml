@@ -1,0 +1,50 @@
+x-redis: &redis
+  image: redis:7-alpine
+  pull_policy: never
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - 'test -f /data/redis.conf || cp /templates/redis.conf /data/redis.conf; exec redis-server /data/redis.conf'
+x-sentinel: &sentinel
+  image: redis:7-alpine
+  pull_policy: never
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - 'test -f /data/sentinel.conf || cp /templates/sentinel.conf /data/sentinel.conf; exec redis-server /data/sentinel.conf --sentinel'
+services:
+  redis-0:
+    <<: *redis
+    volumes:
+      - redis-0:/data
+      - ./redis-0.conf:/templates/redis.conf:ro
+  redis-1:
+    <<: *redis
+    volumes:
+      - redis-1:/data
+      - ./redis-1.conf:/templates/redis.conf:ro
+  redis-2:
+    <<: *redis
+    volumes:
+      - redis-2:/data
+      - ./redis-2.conf:/templates/redis.conf:ro
+  sentinel-0:
+    <<: *sentinel
+    volumes:
+      - sentinel-0:/data
+      - ./sentinel.conf:/templates/sentinel.conf:ro
+  sentinel-1:
+    <<: *sentinel
+    volumes:
+      - sentinel-1:/data
+      - ./sentinel.conf:/templates/sentinel.conf:ro
+  sentinel-2:
+    <<: *sentinel
+    volumes:
+      - sentinel-2:/data
+      - ./sentinel.conf:/templates/sentinel.conf:ro
+volumes:
+  redis-0: {}
+  redis-1: {}
+  redis-2: {}
+  sentinel-0: {}
+  sentinel-1: {}
+  sentinel-2: {}
