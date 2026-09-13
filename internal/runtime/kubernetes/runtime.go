@@ -2704,10 +2704,7 @@ func (r *Runtime) RemoveOrdinarySandbox(ctx context.Context, ref runtime.Runtime
 func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID string) error {
 	pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, id, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		if expectedUID != "" {
-			return runtime.ErrNotFound
-		}
-		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, r.ciliumAPIAvailable())
+		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, expectedUID, r.ciliumAPIAvailable())
 		if cleanupErr != nil {
 			return cleanupErr
 		}

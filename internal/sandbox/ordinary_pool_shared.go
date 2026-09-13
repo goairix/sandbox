@@ -459,7 +459,12 @@ func (p *sharedOrdinaryPool) refill(ctx context.Context) error {
 		retireCtx, cancel := context.WithTimeout(lockCtx, fusePoolCleanupTimeout)
 		defer cancel()
 		if err := p.retireObsolete(retireCtx, target); err != nil {
-			logger.Error(lockCtx, "obsolete ordinary pool retirement will retry", logger.ErrorField(err))
+			if errors.Is(err, runtime.ErrTerminationUnconfirmed) &&
+				(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+				logger.Warn(lockCtx, "obsolete ordinary pool termination pending; retirement will retry", logger.ErrorField(err))
+			} else {
+				logger.Error(lockCtx, "obsolete ordinary pool retirement will retry", logger.ErrorField(err))
+			}
 		}
 		return nil
 	})
@@ -604,11 +609,24 @@ func (p *sharedOrdinaryPool) cleanupRecord(ctx context.Context, entry ordinaryPo
 		if record.RuntimeID != pod.RuntimeID || record.RuntimeUID != pod.RuntimeUID {
 			return errors.New("ordinary pool cleanup runtime identity changed")
 		}
+	}
+	// A missing inventory Pod is not proof that its bound policies were removed.
+	// Retry the persisted exact identity before retiring the cleanup evidence.
+	if record.RuntimeID != "" {
 		remover, ok := p.pool.runtime.(runtime.OrdinarySandboxRemover)
 		if !ok {
 			return errors.New("shared ordinary pool requires exact runtime removal")
 		}
-		if err := remover.RemoveOrdinarySandbox(ctx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		ref := runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}
+		err := remover.RemoveOrdinarySandbox(ctx, ref)
+		if errors.Is(err, runtime.ErrNotFound) {
+			cleaner, ok := p.pool.runtime.(runtime.OrdinarySandboxPolicyCleaner)
+			if !ok {
+				return errors.New("ordinary pool policy cleanup capability is unavailable")
+			}
+			err = cleaner.CleanupOrdinarySandboxPolicies(ctx, ref, record.RuntimeID)
+		}
+		if err != nil {
 			return err
 		}
 	}

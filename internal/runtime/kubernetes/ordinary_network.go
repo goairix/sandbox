@@ -278,6 +278,9 @@ func deleteExactOrdinaryPod(ctx context.Context, client kubernetes.Interface, na
 	uid := pod.UID
 	err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
 	if err != nil && !apierrors.IsNotFound(err) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return errors.Join(runtime.ErrTerminationUnconfirmed, fmt.Errorf("delete exact ordinary Pod: %w", err))
+		}
 		return fmt.Errorf("delete exact ordinary Pod: %w", err)
 	}
 	if pollInterval <= 0 {
@@ -296,11 +299,14 @@ func deleteExactOrdinaryPod(ctx context.Context, client kubernetes.Interface, na
 			return nil
 		}
 		if getErr != nil {
+			if errors.Is(getErr, context.DeadlineExceeded) || errors.Is(getErr, context.Canceled) {
+				return errors.Join(runtime.ErrTerminationUnconfirmed, fmt.Errorf("verify exact ordinary Pod deletion: %w", getErr))
+			}
 			return fmt.Errorf("verify exact ordinary Pod deletion: %w", getErr)
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("exact ordinary Pod deletion is unconfirmed: %w", waitCtx.Err())
+			return errors.Join(runtime.ErrTerminationUnconfirmed, fmt.Errorf("exact ordinary Pod deletion is unconfirmed: %w", waitCtx.Err()))
 		case <-ticker.C:
 		}
 	}
@@ -354,7 +360,7 @@ func deleteOwnedOrdinaryCiliumPrivateDeny(ctx context.Context, client dynamic.In
 	return true, nil
 }
 
-func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace, runtimeID string, hasCilium bool) (bool, error) {
+func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, namespace, runtimeID, expectedUID string, hasCilium bool) (bool, error) {
 	found := false
 	var errs []error
 	policies, err := client.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{LabelSelector: ordinaryRuntimeIDLabel + "=" + runtimeID})
@@ -364,7 +370,16 @@ func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interfa
 		for index := range policies.Items {
 			policy := &policies.Items[index]
 			identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: types.UID(policy.Annotations[ordinaryRuntimeUIDAnnotation]), logicalID: policy.Labels["sandbox.id"]}
-			if identity.runtimeUID == "" || validateOrdinaryNetworkPolicy(policy, identity, "") != nil {
+			if expectedUID != "" && identity.runtimeUID != types.UID(expectedUID) {
+				continue
+			}
+			if identity.runtimeUID == "" {
+				continue
+			}
+			if validationErr := validateOrdinaryNetworkPolicy(policy, identity, ""); validationErr != nil {
+				if expectedUID != "" {
+					errs = append(errs, errors.Join(runtime.ErrNetworkStateUncertain, validationErr))
+				}
 				continue
 			}
 			if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, runtimeID); err != nil {
@@ -379,12 +394,24 @@ func cleanupBoundOrdinaryPolicies(ctx context.Context, client kubernetes.Interfa
 	if hasCilium {
 		list, listErr := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).List(ctx, metav1.ListOptions{LabelSelector: ordinaryRuntimeIDLabel + "=" + runtimeID})
 		if listErr != nil {
-			errs = append(errs, fmt.Errorf("list runtime-bound CiliumNetworkPolicies: %w", listErr))
+			// The API group can remain discoverable after the optional resource is removed.
+			if !apierrors.IsNotFound(listErr) {
+				errs = append(errs, fmt.Errorf("list runtime-bound CiliumNetworkPolicies: %w", listErr))
+			}
 		} else {
 			for index := range list.Items {
 				policy := &list.Items[index]
 				identity := ordinaryNetworkIdentity{runtimeID: runtimeID, runtimeUID: types.UID(policy.GetAnnotations()[ordinaryRuntimeUIDAnnotation]), logicalID: policy.GetLabels()["sandbox.id"]}
-				if identity.runtimeUID == "" || validateOrdinaryCiliumPolicy(policy, identity, "") != nil {
+				if expectedUID != "" && identity.runtimeUID != types.UID(expectedUID) {
+					continue
+				}
+				if identity.runtimeUID == "" {
+					continue
+				}
+				if validationErr := validateOrdinaryCiliumPolicy(policy, identity, ""); validationErr != nil {
+					if expectedUID != "" {
+						errs = append(errs, errors.Join(runtime.ErrNetworkStateUncertain, validationErr))
+					}
 					continue
 				}
 				if err := confirmOrdinaryRuntimePodAbsent(ctx, client, namespace, runtimeID); err != nil {

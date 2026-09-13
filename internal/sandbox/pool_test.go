@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -386,6 +387,13 @@ type sharedPoolRuntime struct{ *mockRuntime }
 
 func (m *sharedPoolRuntime) RemoveOrdinarySandbox(ctx context.Context, ref runtime.RuntimeRef) error {
 	return m.RemovePreparedSandbox(ctx, ref.ID, ref.UID)
+}
+
+func (m *sharedPoolRuntime) CleanupOrdinarySandboxPolicies(ctx context.Context, ref runtime.RuntimeRef, _ string) error {
+	if _, err := m.GetSandbox(ctx, ref.ID); !errors.Is(err, runtime.ErrNotFound) {
+		return errors.Join(runtime.ErrTerminationUnconfirmed, err)
+	}
+	return nil
 }
 
 func newSharedPoolRuntime() *sharedPoolRuntime {
