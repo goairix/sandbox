@@ -3,6 +3,7 @@ module github.com/goairix/sandbox
 go 1.25.0
 
 require (
+	filippo.io/edwards25519 v1.2.0
 	github.com/distribution/reference v0.6.0
 	github.com/docker/docker v27.5.1+incompatible
 	github.com/gin-gonic/gin v1.12.0

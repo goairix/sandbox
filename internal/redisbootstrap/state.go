@@ -1,5 +1,5 @@
 // Package redisbootstrap supplies conservative bootstrap safety primitives.
-// It is not an election protocol, bootstrap coordinator or attestation transport.
+// Its identity transport is not an election or complete bootstrap coordinator.
 package redisbootstrap
 
 import (
