@@ -44,6 +44,15 @@ import (
 
 const defaultKubernetesControlTimeout = 60 * time.Second
 
+// Bump this when Pod construction or the runtime control/security contract
+// changes incompatibly. Ordinary and FUSE pool identities both include it.
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v1"
+
+// WarmPoolContract identifies the versioned Pod/control/network template.
+func (r *Runtime) WarmPoolContract() string {
+	return fmt.Sprintf("%s:control=%v:%s:cilium=%t", warmPoolTemplateVersion, controlWireVersion, r.namespace, r.hasCilium)
+}
+
 // InfrastructureFencer is an optional out-of-band authority that can prove an
 // exact Pod UID/node can no longer access its workspace.
 type InfrastructureFencer interface {
@@ -1064,6 +1073,24 @@ func (r *Runtime) RemovePreparedSandbox(ctx context.Context, runtimeID, runtimeU
 		return err
 	}
 	return r.FinalizePreparedSandboxRemoval(ctx, runtimeID, runtimeUID, evidence)
+}
+
+// ResolvePreparedSandbox proves exact preparation identity before recovering
+// a creator's unpublished runtime UID.
+func (r *Runtime) ResolvePreparedSandbox(ctx context.Context, preparationID, poolKey string) (runtime.RuntimeRef, error) {
+	pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, preparationID, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return runtime.RuntimeRef{}, runtime.ErrNotFound
+	}
+	if err != nil {
+		return runtime.RuntimeRef{}, err
+	}
+	ref := runtime.RuntimeRef{ID: preparationID, UID: string(pod.UID)}
+	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
+	if err != nil || bootstrap.PoolKey != poolKey {
+		return runtime.RuntimeRef{}, runtime.ErrInvalidRuntimeRef
+	}
+	return ref, nil
 }
 
 func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtimeID, runtimeUID string) (runtime.TerminationEvidence, error) {
@@ -2587,8 +2614,23 @@ func (r *Runtime) StopSandbox(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
+	return r.removeOrdinarySandbox(ctx, id, "")
+}
+
+// RemoveOrdinarySandbox cannot delete a replacement Pod reusing the same name.
+func (r *Runtime) RemoveOrdinarySandbox(ctx context.Context, ref runtime.RuntimeRef) error {
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	return r.removeOrdinarySandbox(ctx, ref.ID, ref.UID)
+}
+
+func (r *Runtime) removeOrdinarySandbox(ctx context.Context, id, expectedUID string) error {
 	pod, err := r.client.CoreV1().Pods(r.namespace).Get(ctx, id, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if expectedUID != "" {
+			return runtime.ErrNotFound
+		}
 		found, cleanupErr := cleanupBoundOrdinaryPolicies(ctx, r.client, r.dynClient, r.namespace, id, r.hasCilium)
 		if cleanupErr != nil {
 			return cleanupErr
@@ -2600,6 +2642,9 @@ func (r *Runtime) RemoveSandbox(ctx context.Context, id string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("get ordinary Pod for removal: %w", err)
+	}
+	if expectedUID != "" && string(pod.UID) != expectedUID {
+		return runtime.ErrNotFound
 	}
 	identity, err := ordinaryIdentityFromPod(pod, id)
 	if err != nil {

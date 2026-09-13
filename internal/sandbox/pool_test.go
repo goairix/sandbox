@@ -384,6 +384,10 @@ func (m *mockRuntime) IsStateful() bool { return false }
 
 type sharedPoolRuntime struct{ *mockRuntime }
 
+func (m *sharedPoolRuntime) RemoveOrdinarySandbox(ctx context.Context, ref runtime.RuntimeRef) error {
+	return m.RemovePreparedSandbox(ctx, ref.ID, ref.UID)
+}
+
 func newSharedPoolRuntime() *sharedPoolRuntime {
 	return &sharedPoolRuntime{mockRuntime: newMockRuntime()}
 }
@@ -716,7 +720,8 @@ func TestSharedOrdinaryPoolNormalStopPreservesInventoryAndReleaseDrainDeletesIt(
 	assert.True(t, reused)
 	poolB.Release(context.Background(), info.RuntimeID)
 	poolB.Drain(context.Background())
-	assert.Empty(t, rt.snapshotIDs(), "the last owner must retire its fingerprint inventory")
+	// A full API restart must also preserve any compatible refill inventory.
+	// Only the explicit release drain below is destructive.
 
 	require.NoError(t, poolB.DrainRelease(context.Background()))
 	assert.Empty(t, rt.snapshotIDs())

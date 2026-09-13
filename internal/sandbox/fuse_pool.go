@@ -60,16 +60,20 @@ type FUSEPoolConfig struct {
 	ReservationTTL  time.Duration
 	MaintainerToken string
 	PristineGuard   PristineGuardFunc
+	// Shared Kubernetes inventory outlives individual API processes.
+	InventoryStore state.AtomicStore
+	InventoryScope string
 }
 
-// FUSEPool maintains prefix-free runtime shells. Redis is the shared inventory
-// and lock; this process remains the only active controller.
+// FUSEPool maintains prefix-free runtime shells. Redis owns shared inventory;
+// distributed refill leases elect one controller per contract at a time.
 type FUSEPool struct {
 	runtime runtime.Runtime
 	repo    state.FUSEPoolRepository
 	config  FUSEPoolConfig
 	spec    runtime.SandboxSpec
 	poolKey string
+	shared  *sharedFUSEPool
 
 	lifecycleMu  sync.Mutex
 	starting     bool
@@ -94,7 +98,7 @@ func NewFUSEPool(rt runtime.Runtime, repo state.FUSEPoolRepository, cfg FUSEPool
 		poolKey = spec.WorkspaceFUSE.PoolKey
 	}
 	controlCtx, cancel := context.WithCancel(context.Background())
-	return &FUSEPool{
+	pool := &FUSEPool{
 		runtime:  rt,
 		repo:     repo,
 		config:   cfg,
@@ -104,6 +108,10 @@ func NewFUSEPool(rt runtime.Runtime, repo state.FUSEPoolRepository, cfg FUSEPool
 		cancel:   cancel,
 		stopDone: make(chan struct{}),
 	}
+	if cfg.InventoryStore != nil && cfg.InventoryScope != "" {
+		pool.shared = newSharedFUSEPool(pool)
+	}
+	return pool
 }
 
 // Start performs the fail-closed initial reconciliation before starting the
@@ -180,6 +188,11 @@ func (p *FUSEPool) waitInitialReconcile(ctx context.Context) error {
 	linked, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(p.loopCtx, cancel)
 	defer func() { stop(); cancel() }()
+	if p.shared != nil {
+		if err := p.shared.start(linked); err != nil {
+			return fmt.Errorf("register FUSE pool generation: %w", err)
+		}
+	}
 	for {
 		ran, err := p.reconcileOnce(linked)
 		if err != nil {
@@ -213,7 +226,7 @@ func (p *FUSEPool) waitInitialReconcile(ctx context.Context) error {
 func (p *FUSEPool) Running() bool {
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
-	return p.running && !p.stopping && !p.stopped
+	return p.running && !p.stopping && !p.stopped && p.loopCtx.Err() == nil
 }
 
 // WarmUp synchronously reconciles inventory to its configured minimum.
@@ -438,7 +451,7 @@ func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (
 // ReleaseConsumed removes the exact runtime before deleting its inventory
 // record. A failed removal leaves the record intact and retryable.
 func (p *FUSEPool) ReleaseConsumed(ctx context.Context, record state.FUSEPoolRecord) error {
-	if record.PoolKey != p.poolKey || (record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed) {
+	if record.PoolKey == "" || (record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed) {
 		return state.ErrFUSEPoolInvalidRecord
 	}
 	claimed, err := p.ClaimSingleUseCleanup(ctx, record)
@@ -461,7 +474,7 @@ func (p *FUSEPool) ReleaseConsumed(ctx context.Context, record state.FUSEPoolRec
 // to retain a recovery anchor until runtime evidence and owner/session cleanup
 // have completed.
 func (p *FUSEPool) ClaimSingleUseCleanup(ctx context.Context, record state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
-	if record.PoolKey != p.poolKey || (record.State != state.FUSEPoolReserved && record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed && record.State != state.FUSEPoolCleanup) {
+	if record.PoolKey == "" || (record.State != state.FUSEPoolReserved && record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed && record.State != state.FUSEPoolCleanup) {
 		return nil, state.ErrFUSEPoolInvalidRecord
 	}
 	return p.claimCleanup(ctx, record)
@@ -547,7 +560,7 @@ func poolTerminationEvidence(record state.FUSEPoolRecord) (runtime.TerminationEv
 }
 
 func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUSEPoolRecord) error {
-	if claimed.PoolKey != p.poolKey || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" {
+	if claimed.PoolKey == "" || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" {
 		return state.ErrFUSEPoolInvalidRecord
 	}
 	started := time.Now()
@@ -614,6 +627,9 @@ func (p *FUSEPool) Reconcile(ctx context.Context) (returnErr error) {
 }
 
 func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error) {
+	if p.shared != nil && !p.shared.healthy.Load() {
+		return false, errors.New("FUSE pool owner lease is unavailable")
+	}
 	lockToken := p.config.MaintainerToken + ":" + uuid.NewString()
 	locked, err := p.repo.TryRefillLock(ctx, p.poolKey, lockToken, p.refillLockTTL())
 	if err != nil {
@@ -743,6 +759,13 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		activeCount++
 		prepared++
 	}
+	if p.shared != nil && inspectionErr == nil {
+		retireCtx, cancel := context.WithTimeout(ctx, fusePoolCleanupTimeout)
+		defer cancel()
+		if err := p.shared.retire(retireCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error(ctx, "obsolete FUSE pool retirement will retry", logger.ErrorField(err))
+		}
+	}
 	return true, inspectionErr
 }
 
@@ -861,11 +884,14 @@ func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 		}
 	}
 	result = errors.Join(result, p.repo.DrainRefillLocks(ctx))
+	if result == nil && p.shared != nil {
+		result = p.shared.drainState(ctx)
+	}
 	return result
 }
 
-// Stop terminates all controller goroutines and removes only preparing or
-// prepared shells owned by this API instance. It is idempotent.
+// Stop joins controllers and operations. Shared Kubernetes shells survive the
+// API process; local Docker pools retain owner-scoped cleanup. It is idempotent.
 func (p *FUSEPool) Stop(ctx context.Context) error {
 	p.lifecycleMu.Lock()
 	if !p.stopStarted {
@@ -888,7 +914,11 @@ func (p *FUSEPool) finishStop(ctx context.Context) {
 	p.controllerWG.Wait()
 	p.opWG.Wait()
 	cleanupCtx, cancel := context.WithTimeout(ctx, fusePoolStopCleanupTimeout)
-	p.stopErr = p.drainOwned(cleanupCtx)
+	if p.shared != nil {
+		p.stopErr = p.shared.stop(cleanupCtx)
+	} else {
+		p.stopErr = p.drainOwned(cleanupCtx)
+	}
 	cancel()
 	p.lifecycleMu.Lock()
 	p.running, p.stopping, p.stopped = false, false, true
@@ -1157,6 +1187,20 @@ func (p *FUSEPool) destroyClaimedCleanup(ctx context.Context, claimed state.FUSE
 }
 
 func (p *FUSEPool) claimCleanup(ctx context.Context, record state.FUSEPoolRecord) (*state.FUSEPoolRecord, error) {
+	if record.RuntimeID == "" {
+		if resolver, ok := p.runtime.(runtime.PreparedSandboxResolver); ok {
+			ref, err := resolver.ResolvePreparedSandbox(ctx, record.PreparationID, record.PoolKey)
+			if err == nil {
+				if err := ref.Validate(); err != nil {
+					return nil, err
+				}
+				return p.claimCleanupWithEvidence(ctx, record, ref.ID, ref.UID)
+			}
+			if !errors.Is(err, runtime.ErrNotFound) {
+				return nil, fmt.Errorf("resolve unbound FUSE preparation: %w", err)
+			}
+		}
+	}
 	return p.claimCleanupWithEvidence(ctx, record, record.RuntimeID, record.RuntimeUID)
 }
 
@@ -1217,9 +1261,13 @@ func (l *refillLease) stop() { l.cancel(); <-l.done }
 
 func (p *FUSEPool) beginOperation(parent context.Context) (context.Context, func(), error) {
 	p.lifecycleMu.Lock()
-	if p.stopping || p.stopped {
+	if p.stopping || p.stopped || p.loopCtx.Err() != nil {
 		p.lifecycleMu.Unlock()
 		return nil, nil, ErrFUSEPoolStopped
+	}
+	if p.shared != nil && !p.shared.healthy.Load() {
+		p.lifecycleMu.Unlock()
+		return nil, nil, errors.New("FUSE pool owner lease is unavailable")
 	}
 	p.opWG.Add(1)
 	control := p.loopCtx
@@ -1286,6 +1334,7 @@ func isStalePoolMutation(err error) bool {
 
 type fusePoolKeyProjection struct {
 	Version              string                      `json:"version"`
+	RuntimeContract      string                      `json:"runtime_contract,omitempty"`
 	RuntimeType          string                      `json:"runtime_type"`
 	Image                string                      `json:"image"`
 	Memory               string                      `json:"memory"`
@@ -1336,7 +1385,8 @@ func ComputeFUSEPoolKey(spec runtime.SandboxSpec) (string, error) {
 	fuse := spec.WorkspaceFUSE
 	projection := fusePoolKeyProjection{
 		Version: fusePoolKeyVersion, RuntimeType: fuse.RuntimeType,
-		Image: spec.Image, Memory: spec.Memory, MemoryRequest: spec.MemoryRequest,
+		RuntimeContract: spec.PoolContract,
+		Image:           spec.Image, Memory: spec.Memory, MemoryRequest: spec.MemoryRequest,
 		CPU: spec.CPU, CPURequest: spec.CPURequest, Disk: spec.Disk, TmpDisk: spec.TmpDisk,
 		PidLimit: spec.PidLimit, ReadOnlyRootFS: spec.ReadOnlyRootFS, RunAsUser: spec.RunAsUser, SeccompProfile: spec.SeccompProfile,
 		Provider: fuse.Provider, Driver: fuse.Driver, Profile: fuse.Profile, StorageIdentity: fuse.StorageIdentity,

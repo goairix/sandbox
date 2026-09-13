@@ -100,6 +100,24 @@ type OrdinaryPoolStatePublisher interface {
 	PublishOrdinaryPoolPrepared(ctx context.Context, ref RuntimeRef, poolKey, preparationID string) error
 }
 
+// WarmPoolContractProvider identifies a versioned runtime Pod/control template.
+// Change it only for incompatible template/protocol changes, never API releases.
+type WarmPoolContractProvider interface {
+	WarmPoolContract() string
+}
+
+// OrdinarySandboxRemover deletes only the immutable ordinary Pod instance.
+type OrdinarySandboxRemover interface {
+	RemoveOrdinarySandbox(ctx context.Context, ref RuntimeRef) error
+}
+
+// PreparedSandboxResolver recovers immutable identity after a creator crashed
+// before publishing RuntimeUID. Implementations must verify preparation ID
+// and pool contract, not merely return any runtime with the same name.
+type PreparedSandboxResolver interface {
+	ResolvePreparedSandbox(ctx context.Context, preparationID, poolKey string) (RuntimeRef, error)
+}
+
 // ReservedFileCounter counts exact reserved FUSE probe basenames within the
 // same scope as a public recursive or glob listing. An empty globPattern means
 // the recursive listing semantics (files and directories); otherwise it means

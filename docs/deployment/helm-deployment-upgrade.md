@@ -137,6 +137,19 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
+普通滚动升级不等于重建所有沙盒。Kubernetes 普通池和 FUSE 池按固定运行契约维护：
+
+- 只改 API tag、日志或 API 副本数时，健康兼容的预热 Pod 保留；即使所有 API 暂时退出，也不会清空共享池。
+- runtime 镜像、资源、安全属性、Pod 模板或控制协议契约改变时，先补齐新契约预热容量，再退掉无活跃 API 租约的旧契约空闲库存。运行模板版本由代码维护，不需要在 values 中新增配置。release scope 参与池身份，不能让两个 release 登记并领取同一个 Pod。
+- 已领取、挂载中、业务使用中的沙盒不会因换池重启；旧 FUSE 业务实例按原持久化记录、不可变 UID、workspace owner 和运行健康证明接管，并在业务正常结束时清理。存储后端变化仍走上面说明的显式排空，不属于兼容换池。
+- 普通池周期清理不会仅凭领取超时或副本租约丢失删除已领取 Pod，这些条件不能证明正在进行的申请已停止。无法确认的遗弃 claim 保守保留，交由受控 release drain 清理。
+- API 租约无法确认时暂停领取和退旧，恢复后自动重新登记；旧库存状态损坏或删除未确认时保留记录并重试，不阻断健康新池。退旧单轮有清理时间预算，避免异常旧 Pod 长期拖住启动。
+- `helm uninstall` 的 release drain 才负责清空库存和池代登记状态；不能把普通 API Stop 当作 uninstall。
+
+首次引入这套契约指纹会更新预热库存一次。早期 FUSE 记录没有 release-scoped 池代登记，无法可靠确认其所属 release 及是否仍有旧 API 使用时，不自动删除；这类存量由受控 release drain/uninstall 清理，不能靠清空 Redis 或强删业务 Pod 处理。后续已登记的旧代可自动退役。
+
+**排空边界：** 当前 release drain 的历史孤儿扫描覆盖整个 sandbox namespace 和 FUSE Redis 库。部署时必须让该 namespace 和 Redis logical DB 专用于当前 release，并在排空前停止这一范围内所有 API。运行期的池指纹 scope 隔离不代表已支持共享 namespace/Redis DB 的多 release 独立卸载；不要在这种共享部署中直接执行单个 release 的 drain/uninstall。
+
 从不含 drain protocol 标记的旧 Chart 首次升级时，先保持 backend
 fingerprint 不变，只更新新版 Chart 和 `sandbox-api`。这一步会给 Deployment
 写入 `goairix.github.io/sandbox-drain-protocol: v1`，并把安全的 upgrade/resume/

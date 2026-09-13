@@ -63,18 +63,23 @@ type sharedOrdinaryPool struct {
 	ownerKey    string
 	ownerToken  []byte
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	stopping bool
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	stopping      bool
+	refilling     bool
+	refillPending bool
 
-	knownSize atomic.Int64
+	knownSize    atomic.Int64
+	ownerHealthy atomic.Bool
 }
 
 func newSharedOrdinaryPool(pool *Pool, store state.AtomicStore, scope string) *sharedOrdinaryPool {
 	scopeDigest := shortDigest([]byte(scope), 16)
-	poolKey := ordinaryPoolFingerprint(pool.config)
+	identity := pool.config
+	identity.RuntimeContract += ":scope:" + scopeDigest
+	poolKey := ordinaryPoolFingerprint(identity)
 	ctx, cancel := context.WithCancel(context.Background())
 	base := "ordinarypool:v1:" + scopeDigest + ":"
 	return &sharedOrdinaryPool{
@@ -91,6 +96,22 @@ func newSharedOrdinaryPool(pool *Pool, store state.AtomicStore, scope string) *s
 }
 
 func (p *sharedOrdinaryPool) start(ctx context.Context) error {
+	for {
+		err := p.withLock(ctx, p.registerOwner)
+		if !errors.Is(err, errOrdinaryPoolLockBusy) {
+			return err
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (p *sharedOrdinaryPool) registerOwner(ctx context.Context) error {
 	p.mu.Lock()
 	if p.ownerKey != "" {
 		p.mu.Unlock()
@@ -107,12 +128,13 @@ func (p *sharedOrdinaryPool) start(ctx context.Context) error {
 		return errors.New("shared ordinary pool owner token collision")
 	}
 	p.mu.Lock()
-	if p.stopping {
+	if p.stopping || p.ctx.Err() != nil {
 		p.mu.Unlock()
 		_, _ = p.store.CompareAndDelete(context.WithoutCancel(ctx), key, token)
 		return context.Canceled
 	}
 	p.ownerKey, p.ownerToken = key, token
+	p.ownerHealthy.Store(true)
 	p.wg.Add(1)
 	ownerCtx := p.ctx
 	p.mu.Unlock()
@@ -125,11 +147,13 @@ func (p *sharedOrdinaryPool) start(ctx context.Context) error {
 			case <-ownerCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, renewErr := p.store.CompareAndSwap(ownerCtx, key, token, token, ordinaryPoolLockTTL)
-				if renewErr != nil || !renewed {
+				if renewErr := p.refreshOwner(ownerCtx); renewErr != nil {
 					logger.Error(context.Background(), "shared ordinary pool owner renewal failed", logger.ErrorField(renewErr))
-					return
+					continue
 				}
+				// Periodic refill also retires obsolete generations after their
+				// final owner exits or crashes, without waiting for traffic.
+				p.scheduleRefill()
 			}
 		}
 	}()
@@ -137,17 +161,33 @@ func (p *sharedOrdinaryPool) start(ctx context.Context) error {
 }
 
 func ordinaryPoolFingerprint(cfg PoolConfig) string {
+	pidLimit := cfg.PidLimit
+	if pidLimit <= 0 {
+		pidLimit = 100
+	}
 	identity := struct {
-		Image         string `json:"image"`
-		Memory        string `json:"memory"`
-		MemoryRequest string `json:"memory_request"`
-		CPU           string `json:"cpu"`
-		CPURequest    string `json:"cpu_request"`
-		Disk          string `json:"disk"`
-		TmpDisk       string `json:"tmp_disk"`
-	}{cfg.Image, cfg.Memory, cfg.MemoryRequest, cfg.CPU, cfg.CPURequest, cfg.Disk, cfg.TmpDisk}
+		Version         string `json:"version"`
+		RuntimeContract string `json:"runtime_contract"`
+		Image           string `json:"image"`
+		Memory          string `json:"memory"`
+		MemoryRequest   string `json:"memory_request"`
+		CPU             string `json:"cpu"`
+		CPURequest      string `json:"cpu_request"`
+		Disk            string `json:"disk"`
+		TmpDisk         string `json:"tmp_disk"`
+		PidLimit        int    `json:"pid_limit"`
+		RunAsUser       int64  `json:"run_as_user"`
+		ReadOnlyRootFS  bool   `json:"read_only_root_fs"`
+		SeccompProfile  string `json:"seccomp_profile"`
+	}{"ordinary-pool/v2", cfg.RuntimeContract, cfg.Image, cfg.Memory, cfg.MemoryRequest, cfg.CPU, cfg.CPURequest, cfg.Disk, cfg.TmpDisk, pidLimit, 1000, false, cfg.SeccompProfile}
 	raw, _ := json.Marshal(identity)
 	return shortDigest(raw, 32)
+}
+
+func (p *sharedOrdinaryPool) refreshOwner(ctx context.Context) error {
+	err := refreshPoolOwner(ctx, p.store, p.ownerKey, p.ownerToken, p.lockKey, "", p.poolKey)
+	p.ownerHealthy.Store(err == nil)
+	return err
 }
 
 func shortDigest(raw []byte, chars int) string {
@@ -209,50 +249,35 @@ func (p *sharedOrdinaryPool) stop() {
 		logger.Error(cleanupCtx, "failed to unregister shared ordinary pool owner", logger.ErrorField(err))
 		return
 	}
-	if err := p.cleanupIfLastOwner(cleanupCtx); err != nil {
-		logger.Error(cleanupCtx, "failed to clean last-owner ordinary pool inventory", logger.ErrorField(err))
-	}
-}
-
-func (p *sharedOrdinaryPool) cleanupIfLastOwner(ctx context.Context) error {
-	return p.withLock(ctx, func(lockCtx context.Context) error {
-		owners, err := p.store.Keys(lockCtx, p.ownerBase+"*")
-		if err != nil || len(owners) != 0 {
-			return err
-		}
-		pods, err := p.pool.runtime.ListSandboxes(lockCtx, map[string]string{"sandbox.pool": "true", "sandbox.pool.key": p.poolKey})
-		if err != nil {
-			return err
-		}
-		var cleanupErr error
-		for _, pod := range pods {
-			if pod.Labels["sandbox.workspace.mode"] == string(WorkspaceMountFUSE) {
-				continue
-			}
-			cleanupErr = errors.Join(cleanupErr, p.pool.runtime.RemoveSandbox(lockCtx, pod.RuntimeID))
-		}
-		keys, err := p.store.Keys(lockCtx, p.recordBase+"*")
-		if err != nil {
-			return errors.Join(cleanupErr, err)
-		}
-		for _, key := range keys {
-			cleanupErr = errors.Join(cleanupErr, p.store.Delete(lockCtx, key))
-		}
-		return cleanupErr
-	})
 }
 
 func (p *sharedOrdinaryPool) scheduleRefill() {
 	p.mu.Lock()
-	if p.stopping {
+	if p.stopping || p.ctx.Err() != nil || !p.ownerHealthy.Load() {
+		p.mu.Unlock()
+		return
+	}
+	if p.refilling {
+		p.refillPending = true
 		p.mu.Unlock()
 		return
 	}
 	p.wg.Add(1)
+	p.refilling = true
+	p.refillPending = false
 	ctx := p.ctx
 	p.mu.Unlock()
 	go func() {
 		defer p.wg.Done()
+		defer func() {
+			p.mu.Lock()
+			pending := p.refillPending
+			p.refilling, p.refillPending = false, false
+			p.mu.Unlock()
+			if pending {
+				p.scheduleRefill()
+			}
+		}()
 		var err error
 		for attempt := 0; attempt < maxRefillRetries; attempt++ {
 			err = p.refill(ctx)
@@ -277,6 +302,16 @@ func (p *sharedOrdinaryPool) scheduleRefill() {
 }
 
 func (p *sharedOrdinaryPool) acquire(ctx context.Context) (*runtime.SandboxInfo, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !p.ownerHealthy.Load() {
+		return nil, errors.New("ordinary pool owner lease is unavailable")
+	}
+	linked, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.ctx, cancel)
+	defer func() { stop(); cancel() }()
+	ctx = linked
 	entries, err := p.listCurrentRecords(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list shared ordinary pool: %w", err)
@@ -386,6 +421,9 @@ func (p *sharedOrdinaryPool) decrementKnownSize() {
 }
 
 func (p *sharedOrdinaryPool) refill(ctx context.Context) error {
+	if !p.ownerHealthy.Load() {
+		return errors.New("ordinary pool owner lease is unavailable")
+	}
 	// Repair interrupted preparation/claim state before counting capacity. This
 	// keeps a crashed preparer from suppressing refill indefinitely.
 	if err := p.reconcile(ctx, nil); err != nil {
@@ -417,6 +455,11 @@ func (p *sharedOrdinaryPool) refill(ctx context.Context) error {
 			inventory++
 			p.knownSize.Store(int64(inventory))
 			metrics.SandboxPoolSize.Add(context.Background(), 1)
+		}
+		retireCtx, cancel := context.WithTimeout(lockCtx, fusePoolCleanupTimeout)
+		defer cancel()
+		if err := p.retireObsolete(retireCtx, target); err != nil {
+			logger.Error(lockCtx, "obsolete ordinary pool retirement will retry", logger.ErrorField(err))
 		}
 		return nil
 	})
@@ -561,7 +604,11 @@ func (p *sharedOrdinaryPool) cleanupRecord(ctx context.Context, entry ordinaryPo
 		if record.RuntimeID != pod.RuntimeID || record.RuntimeUID != pod.RuntimeUID {
 			return errors.New("ordinary pool cleanup runtime identity changed")
 		}
-		if err := p.pool.runtime.RemoveSandbox(ctx, record.RuntimeID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		remover, ok := p.pool.runtime.(runtime.OrdinarySandboxRemover)
+		if !ok {
+			return errors.New("shared ordinary pool requires exact runtime removal")
+		}
+		if err := remover.RemoveOrdinarySandbox(ctx, runtime.RuntimeRef{ID: record.RuntimeID, UID: record.RuntimeUID}); err != nil && !errors.Is(err, runtime.ErrNotFound) {
 			return err
 		}
 	}
@@ -576,8 +623,12 @@ func (p *sharedOrdinaryPool) cleanupRecord(ctx context.Context, entry ordinaryPo
 }
 
 func (p *sharedOrdinaryPool) withLock(ctx context.Context, fn func(context.Context) error) error {
+	return withPoolLock(ctx, p.store, p.lockKey, fn)
+}
+
+func withPoolLock(ctx context.Context, store state.AtomicStore, lockKey string, fn func(context.Context) error) error {
 	token := []byte(randSuffix(24))
-	locked, err := p.store.SetNX(ctx, p.lockKey, token, ordinaryPoolLockTTL)
+	locked, err := store.SetNX(ctx, lockKey, token, ordinaryPoolLockTTL)
 	if err != nil {
 		return fmt.Errorf("lock shared ordinary pool: %w", err)
 	}
@@ -595,7 +646,7 @@ func (p *sharedOrdinaryPool) withLock(ctx context.Context, fn func(context.Conte
 			case <-lockCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, renewErr := p.store.CompareAndSwap(lockCtx, p.lockKey, token, token, ordinaryPoolLockTTL)
+				renewed, renewErr := store.CompareAndSwap(lockCtx, lockKey, token, token, ordinaryPoolLockTTL)
 				if renewErr != nil || !renewed {
 					cancel()
 					return
@@ -606,13 +657,15 @@ func (p *sharedOrdinaryPool) withLock(ctx context.Context, fn func(context.Conte
 	runErr := fn(lockCtx)
 	cancel()
 	<-done
-	_, unlockErr := p.store.CompareAndDelete(context.WithoutCancel(ctx), p.lockKey, token)
+	unlockCtx, unlockCancel := context.WithTimeout(context.WithoutCancel(ctx), fusePoolCleanupTimeout)
+	defer unlockCancel()
+	_, unlockErr := store.CompareAndDelete(unlockCtx, lockKey, token)
 	return errors.Join(runErr, unlockErr)
 }
 
 func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs map[string]struct{}) error {
 	err := p.withLock(ctx, func(lockCtx context.Context) error {
-		keys, err := p.store.Keys(lockCtx, p.scopePattern())
+		keys, err := p.store.Keys(lockCtx, p.recordBase+"*")
 		if err != nil {
 			return err
 		}
@@ -697,6 +750,10 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 					}
 				}
 			case ordinaryPoolClaimed:
+				// Neither an elapsed claim deadline nor missing API membership
+				// fences an in-flight Kubernetes identity migration. Normal
+				// reconciliation never physically removes claimed runtimes;
+				// explicit release-exclusive drain handles abandoned claims.
 				if !hasPod || pod.Labels["sandbox.pool"] != "true" {
 					deleted, deleteErr := p.store.CompareAndDelete(lockCtx, entry.key, entry.raw)
 					if deleteErr != nil {
@@ -704,11 +761,6 @@ func (p *sharedOrdinaryPool) reconcile(ctx context.Context, protectedRuntimeIDs 
 					}
 					if !deleted {
 						return errors.New("claimed ordinary record changed during retirement")
-					}
-					delete(recordByInstance, record.PreparationID)
-				} else if !record.ClaimUntil.After(now) {
-					if err := p.cleanupRecord(lockCtx, entry, &pod); err != nil {
-						return fmt.Errorf("clean abandoned ordinary claim: %w", err)
 					}
 					delete(recordByInstance, record.PreparationID)
 				}

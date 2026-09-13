@@ -91,6 +91,9 @@ type SandboxSpec struct {
 	Disk          string // /workspace, e.g. "100Mi"
 	TmpDisk       string // /tmp, e.g. "50Mi"; defaults to DefaultTmpDisk
 	PidLimit      int
+	// PoolContract identifies the fixed runtime template and deployment scope,
+	// never an API release version. It is compatibility metadata only.
+	PoolContract string
 	// Network
 	NetworkEnabled      bool
 	NetworkWhitelist    []string

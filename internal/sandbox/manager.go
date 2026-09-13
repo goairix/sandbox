@@ -326,6 +326,12 @@ func (m *Manager) Ready(ctx context.Context) error {
 	if stopping {
 		return errors.New("sandbox manager is stopping")
 	}
+	if m.pool.shared != nil && (m.pool.shared.ctx.Err() != nil || !m.pool.shared.ownerHealthy.Load()) {
+		return errors.New("ordinary pool owner lease lost")
+	}
+	if m.fusePool != nil && m.fusePool.shared != nil && (m.fusePool.loopCtx.Err() != nil || !m.fusePool.shared.healthy.Load()) {
+		return errors.New("FUSE pool owner lease lost")
+	}
 	if m.distributedStateEnabled() {
 		if err := m.activeSandboxes.Ping(ctx); err != nil {
 			return fmt.Errorf("active sandbox state: %w", err)
@@ -425,6 +431,16 @@ func (m *Manager) Start(ctx context.Context) error {
 // ownership; any unreadable source aborts cleanup rather than supplying an
 // incomplete allow-delete set.
 func (m *Manager) reconcileFUSEOrphans(ctx context.Context) error {
+	return m.reconcileFUSEOrphansWithExclusivity(ctx, false)
+}
+
+func (m *Manager) reconcileFUSEOrphansWithExclusivity(ctx context.Context, releaseExclusive bool) error {
+	// Namespace-wide snapshot cleanup cannot fence concurrent preparations or
+	// registrations. Shared controllers own normal cleanup through exact CAS;
+	// this legacy orphan sweep is permitted only after every replica is drained.
+	if m.fusePool != nil && m.fusePool.shared != nil && !releaseExclusive {
+		return nil
+	}
 	reconciler, ok := m.runtime.(runtime.OrphanReconciler)
 	if !ok {
 		return nil
@@ -483,7 +499,8 @@ func (m *Manager) reconcileFUSEOrphans(ctx context.Context) error {
 	return reconciler.ReconcileOrphanedResources(ctx, protected)
 }
 
-// Stop drains the pool and cleans up.
+// Stop shuts down process-local controllers. Shared Kubernetes inventory and
+// business runtimes survive; DrainRelease is the explicit destructive path.
 func (m *Manager) Stop(ctx context.Context) error {
 	_, span := telemetry.Tracer().Start(ctx, "sandbox.Manager.Stop")
 	defer span.End()
@@ -678,10 +695,10 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		// A stopped refill can leave a FUSE Pod behind before its RuntimeUID is
 		// bound into the preparing record. Remove those unprotected runtime
 		// orphans first so pool cleanup can retire the record in this pass.
-		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
+		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphansWithExclusivity(ctx, true))
 		drainErr = errors.Join(drainErr, m.fusePool.DrainRelease(ctx))
 		// Pool finalization may leave policy-only artifacts after Pods disappear.
-		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphans(ctx))
+		drainErr = errors.Join(drainErr, m.reconcileFUSEOrphansWithExclusivity(ctx, true))
 	}
 	drainErr = errors.Join(drainErr, m.pool.DrainRelease(ctx))
 	if m.config.RuntimeType == "kubernetes" {
@@ -3158,7 +3175,7 @@ func (m *Manager) restoreFUSESandboxWithController(ctx context.Context, sb *Sand
 		owner.Provider != spec.Provider || owner.StorageIdentityHash != storageIdentityHash(spec.StorageIdentity) ||
 		owner.Bucket != spec.Bucket || owner.Prefix != expectedPrefix || owner.Runtime != spec.RuntimeType ||
 		workspace.MountState != WorkspaceMountReady || workspace.FUSEPreparationID == "" ||
-		workspace.FUSEPoolKey != m.fusePool.poolKey || workspace.FUSEReservationToken == "" || workspace.FUSERecordRevision == 0 {
+		workspace.FUSEPoolKey == "" || workspace.FUSEReservationToken == "" || workspace.FUSERecordRevision == 0 {
 		return ErrSandboxNotReady
 	}
 
@@ -3463,7 +3480,8 @@ func (m *Manager) buildSpec(id string, cfg SandboxConfig) runtime.SandboxSpec {
 		NetworkBlockPrivate: cfg.Network.BlockPrivate,
 		ReadOnlyRootFS:      false,
 		RunAsUser:           1000,
-		PidLimit:            100,
+		PidLimit:            m.pool.config.PidLimit,
+		SeccompProfile:      m.pool.config.SeccompProfile,
 		Labels: map[string]string{
 			"sandbox.id": id,
 		},

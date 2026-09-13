@@ -293,15 +293,17 @@ func main() {
 	managerConfig := sandbox.ManagerConfig{
 		RuntimeType: cfg.Runtime.Type,
 		PoolConfig: sandbox.PoolConfig{
-			MinSize:       cfg.Pool.MinSize,
-			MaxSize:       cfg.Pool.MaxSize,
-			Image:         sandboxImage,
-			Memory:        cfg.Security.MaxMemory,
-			MemoryRequest: cfg.Security.MaxMemoryRequest,
-			CPU:           cfg.Security.MaxCPU,
-			CPURequest:    cfg.Security.MaxCPURequest,
-			Disk:          cfg.Security.MaxDisk,
-			TmpDisk:       cfg.Security.MaxTmpDisk,
+			MinSize:        cfg.Pool.MinSize,
+			MaxSize:        cfg.Pool.MaxSize,
+			Image:          sandboxImage,
+			Memory:         cfg.Security.MaxMemory,
+			MemoryRequest:  cfg.Security.MaxMemoryRequest,
+			CPU:            cfg.Security.MaxCPU,
+			CPURequest:     cfg.Security.MaxCPURequest,
+			Disk:           cfg.Security.MaxDisk,
+			TmpDisk:        cfg.Security.MaxTmpDisk,
+			PidLimit:       cfg.Security.MaxPids,
+			SeccompProfile: cfg.Security.SeccompProfile,
 		},
 		DefaultTimeout:          cfg.Security.SandboxTimeoutSeconds,
 		ExecTimeoutSeconds:      cfg.Security.ExecTimeoutSeconds,
@@ -365,6 +367,22 @@ func main() {
 		if specErr != nil {
 			log.Fatalf("failed to build FUSE pool spec: %v", specErr)
 		}
+		var fuseInventoryStore state.AtomicStore
+		var fuseInventoryScope string
+		if cfg.Runtime.Type == "kubernetes" {
+			fuseInventoryStore = redisStore
+			fuseInventoryScope = os.Getenv("SANDBOX_STATE_SCOPE")
+			if fuseInventoryScope == "" {
+				fuseInventoryScope = cfg.Runtime.Kubernetes.Namespace
+			}
+			if provider, ok := rt.(runtime.WarmPoolContractProvider); ok {
+				fuseSpec.PoolContract = provider.WarmPoolContract() + ":scope:" + fuseInventoryScope
+			}
+			fuseSpec.WorkspaceFUSE.PoolKey, specErr = sandbox.ComputeFUSEPoolKey(fuseSpec)
+			if specErr != nil {
+				log.Fatalf("failed to compute FUSE runtime contract: %v", specErr)
+			}
+		}
 		ownershipToken, tokenErr := newOwnershipToken()
 		if tokenErr != nil {
 			log.Fatalf("failed to create FUSE pool ownership token: %v", tokenErr)
@@ -376,6 +394,8 @@ func main() {
 			PrepareTimeout:  time.Duration(cfg.Workspace.FUSEPool.PrepareTimeoutSeconds) * time.Second,
 			ReservationTTL:  time.Duration(cfg.Workspace.LeaseTTLSeconds) * time.Second,
 			MaintainerToken: ownershipToken,
+			InventoryStore:  fuseInventoryStore,
+			InventoryScope:  fuseInventoryScope,
 		}, fuseSpec)
 		managerConfig.WorkspaceObjectClient = objectClient
 		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Backend.Profile)

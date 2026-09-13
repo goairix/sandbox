@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -136,13 +137,9 @@ func (s *atomicMemoryStore) Keys(_ context.Context, pattern string) ([]string, e
 	if err := s.takeFailure("Keys"); err != nil {
 		return nil, err
 	}
-	prefix := pattern
-	if len(prefix) > 0 && prefix[len(prefix)-1] == '*' {
-		prefix = prefix[:len(prefix)-1]
-	}
 	keys := make([]string, 0)
 	for key := range s.entries {
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+		if matched, _ := path.Match(pattern, key); matched {
 			if _, ok := s.getLocked(key); ok {
 				keys = append(keys, key)
 			}

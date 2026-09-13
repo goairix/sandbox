@@ -14,15 +14,18 @@ import (
 
 // PoolConfig configures the container pool.
 type PoolConfig struct {
-	MinSize       int
-	MaxSize       int
-	Image         string
-	Memory        string
-	MemoryRequest string
-	CPU           string
-	CPURequest    string
-	Disk          string
-	TmpDisk       string
+	MinSize         int
+	MaxSize         int
+	Image           string
+	Memory          string
+	MemoryRequest   string
+	CPU             string
+	CPURequest      string
+	Disk            string
+	TmpDisk         string
+	PidLimit        int
+	SeccompProfile  string
+	RuntimeContract string
 }
 
 // Pool manages a pool of warm containers.
@@ -47,6 +50,14 @@ const (
 
 // NewPool creates a new container pool.
 func NewPool(rt runtime.Runtime, cfg PoolConfig) *Pool {
+	if cfg.PidLimit <= 0 {
+		cfg.PidLimit = 100
+	}
+	if cfg.RuntimeContract == "" {
+		if provider, ok := rt.(runtime.WarmPoolContractProvider); ok {
+			cfg.RuntimeContract = provider.WarmPoolContract()
+		}
+	}
 	refillCtx, refillCancel := context.WithCancel(context.Background())
 	return &Pool{
 		runtime:      rt,
@@ -69,8 +80,7 @@ func (p *Pool) EnableShared(store state.AtomicStore, scope string) {
 func (p *Pool) Shared() bool { return p.shared != nil }
 
 // Start registers this API replica as an owner of its shared pool
-// fingerprint. The last gracefully stopping owner retires that fingerprint's
-// warm inventory after a rolling upgrade.
+// fingerprint. Compatible inventory survives even a full API restart.
 func (p *Pool) Start(ctx context.Context) error {
 	if p.shared == nil {
 		return nil
@@ -182,7 +192,9 @@ func (p *Pool) Reconcile(ctx context.Context, protectedRuntimeIDs map[string]str
 	return p.shared.reconcile(ctx, protectedRuntimeIDs)
 }
 
-// Drain destroys all warm containers in the pool.
+// Drain stops this API's pool controller. Local warm containers are destroyed;
+// shared Kubernetes inventory is preserved until contract retirement or an
+// explicit DrainRelease.
 func (p *Pool) Drain(ctx context.Context) {
 	if p.shared != nil {
 		p.shared.stop()
@@ -254,7 +266,8 @@ func (p *Pool) createWarmWithLabels(ctx context.Context, labels map[string]strin
 		Labels:         labels,
 		ReadOnlyRootFS: false, // warm containers need writable FS for dependency install
 		RunAsUser:      1000,
-		PidLimit:       100,
+		PidLimit:       p.config.PidLimit,
+		SeccompProfile: p.config.SeccompProfile,
 		Memory:         p.config.Memory,
 		MemoryRequest:  p.config.MemoryRequest,
 		CPU:            p.config.CPU,
