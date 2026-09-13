@@ -42,4 +42,4 @@
 
 - [x] 写中文根因、RED/GREEN、全量结果和未完成的线上验收条件。此次仅 API 代码变更，无 chart/config 变更。
 - 交付方式：按用户既有要求将本批已验证文件提交为 `fix(sandbox): preserve sync finalizer ownership during cleanup`，保留当前分支，不推送。
-- [ ] 不构建发布镜像、不 Helm upgrade、不回滚；用户部署新 API 镜像后执行上一份报告的完整线上测试，未部署不能宣称线上通过。
+- [x] 不构建发布镜像、不 Helm upgrade、不回滚；用户部署 v0.3.22 后完成部署 API 套件、完整工作区矩阵、单独 sync 回归和 9 个 UID/27 个并发 DELETE 补测，执行场景通过。现场证据见 `docs/testing/2026-09-13-ds-ai-research-v0.3.22-validation.md`，未执行故障/CNI/生产配置验收仍明确保留。
