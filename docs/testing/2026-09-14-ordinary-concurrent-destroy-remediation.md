@@ -54,3 +54,7 @@ go test ./test/integration/api -run '^TestDeployedOrdinaryConcurrentDestroy$' -v
 该用例为每种普通模式创建一个隔离沙盒，同时向三个副本 DELETE，要求每份响应为 200 且有有效的 `sandbox destroyed` JSON，不把空 200 当成功；之后所有副本 GET 均 404。清理独立于测试 context，所有 worker 汇合后再断言。
 
 本地测试不等同于新镜像已在线验收。无需新增线上 values 项；仅需重建、更新 `sandbox-api` 镜像版本，AppArmor 加载器、普通 runtime、FUSE mounter 镜像及 Helm templates 无需因本修复重建或修改。不需要 uninstall、清空 Redis 或重建 PVC。
+
+## 后续线上验收
+
+2026-09-14 用户部署 `v0.3.25` 后，跨副本并发 DELETE 连续 3 轮共 18/18 成功，同副本补测 6/6 成功，综合 API 回归及有界 FUSE 压力专项通过；最终普通/FUSE 池各 3 个 prepared，没有测试运行时或策略遗留。部署身份、完整证据、两条尚待专项整改的普通池状态冲突日志及验收边界见 [v0.3.25 线上验收记录](2026-09-14-v0.3.25-concurrent-destroy-validation.md)。上面的本地证据和旧版本失败记录保留为历史过程。
