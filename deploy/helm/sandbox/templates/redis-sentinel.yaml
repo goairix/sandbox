@@ -1,8 +1,7 @@
 {{- if eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- include "sandbox.validateRedis" . }}
 {{- $name := include "sandbox.sentinelName" . }}
-{{- $members := include "sandbox.sentinelMembers" . | fromJsonArray }}
-{{- $retained := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-state" $name) }}
+{{- $state := include "sandbox.sentinelState" . | fromJson }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,18 +13,7 @@ metadata:
     app: sandbox-redis-bootstrap
     release: {{ .Release.Name }}
 data:
-  {{- if $retained }}
-  {{- if or (empty $retained.data) (empty (index $retained.data "cluster.json")) }}
-  {{- fail "retained Sentinel state is missing cluster.json; do not reset existing PVC identity" }}
-  {{- end }}
-  {{- $cluster := index $retained.data "cluster.json" | fromJson }}
-  {{- if ne (toJson $cluster.members) (toJson $members) }}
-  {{- fail "retained Sentinel membership differs; do not reuse PVC identity under new DNS names" }}
-  {{- end }}
-  {{- toYaml $retained.data | nindent 2 }}
-  {{- else }}
-  cluster.json: {{ dict "clusterID" (randAlphaNum 32) "members" $members "phase" "Pending" | toJson | quote }}
-  {{- end }}
+  {{- toYaml $state.data | nindent 2 }}
 ---
 apiVersion: v1
 kind: Service
@@ -232,11 +220,11 @@ spec:
             name: {{ $name }}-state
         - name: identity-source
           secret:
-            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            secretName: {{ include "sandbox.sentinelIdentitySecretName" . | quote }}
             defaultMode: 256
         - name: identity-public
           secret:
-            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            secretName: {{ include "sandbox.sentinelIdentitySecretName" . | quote }}
             items:
               - key: public-keys.json
                 path: public-keys.json
@@ -247,6 +235,10 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: data
+        {{- with $state.claimAnnotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       spec:
         accessModes: [ReadWriteOnce]
         {{- if .Values.redis.persistence.storageClass }}
@@ -351,7 +343,7 @@ spec:
       volumes:
         - name: identity-public
           secret:
-            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            secretName: {{ include "sandbox.sentinelIdentitySecretName" . | quote }}
             items:
               - key: public-keys.json
                 path: public-keys.json

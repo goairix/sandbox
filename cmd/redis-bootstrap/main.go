@@ -28,12 +28,29 @@ func main() {
 		output = os.Stdout
 	}
 	if err := run(ctx, os.Args[1:], output); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintln(os.Stderr, "redis-bootstrap failed")
+		if len(os.Args) > 1 && os.Args[1] == "ensure-identity" {
+			// Only locally generated static categories; never server messages.
+			switch {
+			case errors.Is(err, redisbootstrap.ErrIdentityMissing):
+				fmt.Fprintln(os.Stderr, redisbootstrap.ErrIdentityMissing.Error())
+			case errors.Is(err, redisbootstrap.ErrIdentityInvalid):
+				fmt.Fprintln(os.Stderr, redisbootstrap.ErrIdentityInvalid.Error())
+			case errors.Is(err, context.DeadlineExceeded):
+				fmt.Fprintln(os.Stderr, "Redis identity verification timed out; inspect identity Job RBAC and retained bootstrap resources")
+			default:
+				fmt.Fprintln(os.Stderr, "Redis identity verification failed")
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "redis-bootstrap failed")
+		}
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "ensure-identity" {
+		return runEnsureIdentity(ctx, args[1:], output)
+	}
 	// Helm rollback replays historical manifests without lookup and can erase
 	// the one-time grant. Deny before credentials, files or API access.
 	if len(args) > 0 && args[0] == "deny-rollback" {

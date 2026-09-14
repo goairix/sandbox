@@ -1,0 +1,105 @@
+{{- if eq (include "sandbox.builtinSentinel" .) "true" }}
+{{- include "sandbox.validateRedis" . }}
+{{- $name := include "sandbox.sentinelName" . }}
+{{- $state := include "sandbox.sentinelState" . | fromJson }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-identity
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-identity
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ include "sandbox.sentinelIdentitySecretName" . | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-state" $name | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    resourceNames:
+      {{- range $ordinal := until 3 }}
+      - {{ printf "data-%s-%d" $name $ordinal | quote }}
+      {{- end }}
+    verbs: [get]
+  {{- if empty .Values.redis.sentinel.identitySecretName }}
+  # Kubernetes 无法用 resourceNames 限制 CREATE；程序只允许创建固定身份 Secret。
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-identity
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-identity
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-identity
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sandbox.sentinelIdentityJobName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-redis-identity
+    release: {{ .Release.Name }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: sandbox-redis-identity
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ $name }}-identity
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: ensure-identity
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/app/redis-bootstrap]
+          args:
+            - ensure-identity
+            - -namespace
+            - {{ .Release.Namespace | quote }}
+            - -statefulset
+            - {{ $name | quote }}
+            - -secret
+            - {{ include "sandbox.sentinelIdentitySecretName" . | quote }}
+            - -state-configmap
+            - {{ printf "%s-state" $name | quote }}
+            - -members-json
+            - {{ include "sandbox.sentinelMembers" . | quote }}
+            {{- if not (empty $state.freshClusterID) }}
+            - -fresh-cluster-id
+            - {{ $state.freshClusterID | quote }}
+            {{- end }}
+            - -timeout
+            - 2m
+          securityContext:
+            {{- include "sandbox.sentinelProcessSecurity" . | nindent 12 }}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+{{- end }}

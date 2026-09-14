@@ -247,15 +247,47 @@ func TestSentinelRuntimeThreeMembers(t *testing.T) {
 	checkSentinelFixtureOwner(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
-	secret, err := GenerateIdentitySecret("isolated", "redis")
+	cluster := ClusterState{ClusterID: "isolated-real-three-members", Members: [3]string{"redis-0", "redis-1", "redis-2"}, Phase: Pending}
+	clusterJSON, err := json.Marshal(cluster)
 	if err != nil {
 		t.Fatal(err)
+	}
+	cm := &api.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "isolated", Name: "state", UID: "isolated-fixture-uid", ResourceVersion: "1"}, Data: map[string]string{"cluster.json": string(clusterJSON)}}
+	client := fake.NewSimpleClientset(cm)
+	client.PrependReactor("create", "secrets", func(action ktesting.Action) (bool, runtime.Object, error) {
+		accepted := action.(ktesting.CreateAction).GetObject().(*api.Secret).DeepCopy()
+		accepted.UID = "isolated-identity-uid"
+		accepted.ResourceVersion = "1"
+		if err := client.Tracker().Create(api.SchemeGroupVersion.WithResource("secrets"), accepted, "isolated"); err != nil {
+			return true, nil, err
+		}
+		return true, accepted, nil
+	})
+	identityOptions := IdentitySecretOptions{Namespace: "isolated", StatefulSetName: "redis", SecretName: "redis-identity", StateConfigMap: "state", Members: cluster.Members, FreshClusterID: cluster.ClusterID}
+	if err := EnsureIdentitySecret(ctx, client.CoreV1(), identityOptions); err != nil {
+		t.Fatal("automatic fixture identity creation failed", err)
+	}
+	secret, err := client.CoreV1().Secrets("isolated").Get(ctx, "redis-identity", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityOptions.FreshClusterID = ""
+	if err := EnsureIdentitySecret(ctx, client.CoreV1(), identityOptions); err != nil {
+		t.Fatal("automatic identity reuse failed", err)
+	}
+	creates := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "create" && action.GetResource().Resource == "secrets" {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatal("fixture identity was regenerated")
 	}
 	keys, err := ParseMemberPublicKeys(secret.Data["public-keys.json"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	cluster := ClusterState{ClusterID: "isolated-real-three-members", Members: [3]string{"redis-0", "redis-1", "redis-2"}, Phase: Pending}
 	write := func(path string, data []byte) {
 		t.Helper()
 		if err := os.WriteFile(path, data, 0644); err != nil {
@@ -266,13 +298,7 @@ func TestSentinelRuntimeThreeMembers(t *testing.T) {
 	for i := range 3 {
 		write(fmt.Sprintf("/fixture-state/node-%d/seed", i), secret.Data[fmt.Sprintf("redis-%d", i)])
 	}
-	clusterJSON, err := json.Marshal(cluster)
-	if err != nil {
-		t.Fatal(err)
-	}
 	write("/fixture-state/control/cluster.json", clusterJSON)
-	cm := &api.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "isolated", Name: "state", UID: "isolated-fixture-uid", ResourceVersion: "1"}, Data: map[string]string{"cluster.json": string(clusterJSON)}}
-	client := fake.NewSimpleClientset(cm)
 	var cmMu sync.Mutex
 	grantPublished := make(chan struct{})
 	var grantOnce sync.Once

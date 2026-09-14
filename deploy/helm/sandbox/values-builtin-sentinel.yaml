@@ -1,16 +1,26 @@
-# 内置 Sentinel 的环境覆盖示例；先创建身份/认证 Secret，替换镜像和 StorageClass。
+# 内置 Sentinel 的环境覆盖示例；身份和认证 Secret 自动创建，无需手工建 Secret。
+# 替换当前 API 镜像、StorageClass 和以下两个不同的 32~256 位随机安全 token。
+# 演示 token 不是生产凭据；inline 密码会进入 Helm release 历史。
 # 部署说明：docs/deployment/built-in-redis-sentinel.md。
+image:
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
+  tag: REPLACE_WITH_NEW_SANDBOX_API_TAG # 必须包含本轮 ensure-identity 子命令，不能用旧 API 镜像。
+startupProbe:
+  enabled: true # Sentinel 初始化期间必须启用，Chart 自动补足等待预算。
 redis:
   enabled: true
   mode: sentinel
+  password: REPLACE_WITH_RANDOM_DATA_TOKEN_0123456789
   persistence:
     enabled: true
     storageClass: ""
     size: 10Gi
   sentinel:
-    identitySecretName: sandbox-fuse-redis-sentinel-identity
-    existingSecret: sandbox-redis-auth
+    identitySecretName: "" # 留空启用自动身份；填写名称则只读引用外部 Secret。
+    existingSecret: "" # 留空使用下方两个不同的 inline 密码创建认证 Secret。
+    password: REPLACE_WITH_RANDOM_SENTINEL_TOKEN_0123456789
     dataPasswordKey: password
     sentinelPasswordKey: sentinel-password
+apparmorLoader:
+  enabled: false # 本次部署关闭加载器，不表示已完成真实内核 LSM 验收。
 # productionSafetyChecks 要在受限 LSM 已验收后启用，不能用空/未加载 profile。
-# AppArmor 加载器的真实节点验收及开关见 docs/deployment/apparmor-loader.md。

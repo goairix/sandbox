@@ -62,3 +62,17 @@
 ## 自审
 
 边界已明确：只自动生成真正新安装身份；保留与全新安装分离；普通Job无启动依赖循环；create RBAC限制不夸大；不记录密钥；不递归删数据；外部引用只读；不改main；不构建发布镜像。本文件为实施设计，不是完成或生产验收声明。
+
+## 实施兼容性补充（2026-09-14）
+
+Kubernetes 1.33 不允许修改既有 StatefulSet 的 volumeClaimTemplates，包括模板 metadata 注释，因此首次部署需要的 CID 注释不能强行补到旧 StatefulSet。[官方更新验证](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/apis/apps/validation/validation.go)
+
+- Helm 渲染增加一次固定 StatefulSet GET，与原 CM/Secret/三个 PVC 读取一起缓存，总计六次固定 GET；不 list。该查询由 Helm 身份执行，身份 Job 的 Role 不增加 StatefulSet 权限。
+- 新 StatefulSet 仍添加本次 CID 注释。旧固定 data 模板没有 CID 时保留原注释映射，不补写；已有 CID 必须等于状态 CM 的 CID，保留所有现有注释。形状或 CID 异常拒绝渲染，不复制/改写其他 PVC spec 或 metadata。
+- 有旧 StatefulSet 时不授予新身份创建许可；继续只读验证已有 Secret。旧 PVC 缺 CM、保留状态缺原 Secret 的拒绝规则不变。
+- runtime 后续 GET 可重试但实际 POST 必须 MaxRetries(0)，防止 SDK 对提交结果未知的请求重放。请求 WarningHandler 使用 NoWarnings，防止 API/admission Warning 绕过固定错误分类泄露内容。
+- 创建后已观察到的 PVC 必须继续存在且 UID 不变；允许正常绑定推进 resourceVersion。新安装许可下匹配 CID 的新 PVC 可以先于普通 CM 被观察到，但不会据此提前创建身份，仍须等真实 CM 与两轮检查。
+
+此补充是范围内的升级兼容、安全和有界重试整改，不扩展业务集群操作权限；不承诺跨资源原子事务或对管理员完整替换控制面身份的防御。
+
+中断首次安装也可能留下未生成身份的 CM/PVC。缺身份保护同样拒绝直接 upgrade，不因“看起来是 Pending”重新授权；只有已生成原 Secret 才可新 revision 只读重试。未生成时需管理员核验失败初装范围与无登记/业务状态后精确处理，程序不自动清理或换钥匙。正常首次安装不要求手工建资源。

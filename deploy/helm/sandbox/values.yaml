@@ -97,8 +97,9 @@ redis:
   sentinel:
     masterName: sandbox
     clusterDomain: cluster.local
-    # 必填：通过 redis-bootstrap identity-secret 手动创建的不可变身份 Secret。
-    # 不要重新生成/覆盖；它与保留的 PVC、状态 ConfigMap 属于同一套安装身份。
+    # 空值：一次性普通 Job 为真正的新安装自动创建 <StatefulSet>-identity 不可变身份 Secret。
+    # 非空：只读引用外部身份 Secret（即使填写同一个默认名字），不会自动创建。
+    # 已有身份只复用不旋转；缺失旧 Secret/状态时应恢复原对象，不要覆盖保留 PVC 的身份。
     identitySecretName: ""
     # 推荐引用现有认证 Secret；数据节点和 Sentinel 必须使用不同的密码键。
     existingSecret: ""

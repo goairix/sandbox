@@ -299,7 +299,7 @@ spec:
             name: {{ include "sandbox.sentinelName" . }}-state
         - name: redis-public
           secret:
-            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            secretName: {{ include "sandbox.sentinelIdentitySecretName" . | quote }}
             items:
               - key: public-keys.json
                 path: public-keys.json

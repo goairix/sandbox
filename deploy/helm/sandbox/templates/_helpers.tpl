@@ -76,7 +76,6 @@
 {{- if not .Values.redis.persistence.enabled -}}{{ fail "built-in Sentinel requires persistence" }}{{- end -}}
 {{- if gt (len .Release.Name) 39 -}}{{ fail "built-in Sentinel release name must not exceed 39 characters" }}{{- end -}}
 {{- if not (semverCompare ">=1.33.0-0" .Capabilities.KubeVersion.Version) -}}{{ fail "built-in Sentinel requires Kubernetes >=1.33" }}{{- end -}}
-{{- if empty .Values.redis.sentinel.identitySecretName -}}{{ fail "redis.sentinel.identitySecretName is required; create an immutable identity Secret first" }}{{- end -}}
 {{- if empty .Values.redis.sentinel.existingSecret -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.password) -}}{{ fail "built-in Sentinel data password must be a 32-256 character safe token" }}{{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.sentinel.password) -}}{{ fail "built-in Sentinel password must be a 32-256 character safe token" }}{{- end -}}
@@ -112,6 +111,79 @@
 {{- end -}}
 
 {{- define "sandbox.sentinelName" -}}{{ printf "%s-redis-sentinel" .Release.Name }}{{- end -}}
+{{- define "sandbox.sentinelIdentitySecretName" -}}
+{{- .Values.redis.sentinel.identitySecretName | default (printf "%s-identity" (include "sandbox.sentinelName" .)) -}}
+{{- end -}}
+
+{{- /* 只缓存到 Helm ROOT context，不使用用户可伪造的 Values。 */ -}}
+{{- define "sandbox.sentinelState" -}}
+{{- if not (hasKey . "_sandboxSentinelState") -}}
+{{- $name := include "sandbox.sentinelName" . -}}
+{{- $members := include "sandbox.sentinelMembers" . | fromJsonArray -}}
+{{- $retained := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-state" $name) -}}
+{{- $identity := lookup "v1" "Secret" .Release.Namespace (include "sandbox.sentinelIdentitySecretName" .) -}}
+{{- $installedSTS := lookup "apps/v1" "StatefulSet" .Release.Namespace $name -}}
+{{- $hasPVC := false -}}
+{{- range $ordinal := until 3 -}}
+{{- if lookup "v1" "PersistentVolumeClaim" $.Release.Namespace (printf "data-%s-%d" $name $ordinal) -}}
+{{- $hasPVC = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and $hasPVC (not $retained) -}}
+{{- fail "retained Sentinel PVCs are missing the state ConfigMap; restore the original state and identity Secret, do not generate a new state" -}}
+{{- end -}}
+{{- if and (or $retained $hasPVC) (not $identity) -}}
+{{- fail "retained Sentinel state/PVCs are missing the identity Secret; restore the original identity Secret, do not regenerate retained identity" -}}
+{{- end -}}
+{{- $data := dict -}}
+{{- $clusterID := "" -}}
+{{- $freshClusterID := "" -}}
+{{- if $retained -}}
+{{- if or (empty $retained.data) (empty (index $retained.data "cluster.json")) -}}
+{{- fail "retained Sentinel state is missing cluster.json; do not reset existing PVC identity" -}}
+{{- end -}}
+{{- $cluster := index $retained.data "cluster.json" | fromJson -}}
+{{- if ne (toJson $cluster.members) (toJson $members) -}}
+{{- fail "retained Sentinel membership differs; do not reuse PVC identity under new DNS names" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{1,128}$" (default "" $cluster.clusterID)) -}}
+{{- fail "retained Sentinel state has an invalid clusterID; restore the original state" -}}
+{{- end -}}
+{{- $data = $retained.data -}}
+{{- $clusterID = $cluster.clusterID -}}
+{{- else -}}
+{{- $clusterID = randAlphaNum 32 -}}
+{{- $data = dict "cluster.json" (dict "clusterID" $clusterID "members" $members "phase" "Pending" | toJson) -}}
+{{- if and (empty .Values.redis.sentinel.identitySecretName) (not $identity) (not $installedSTS) -}}
+{{- $freshClusterID = $clusterID -}}
+{{- end -}}
+{{- end -}}
+{{- $claimAnnotations := dict "sandbox/redis-cluster-id" $clusterID -}}
+{{- if $installedSTS -}}
+{{- $claims := $installedSTS.spec.volumeClaimTemplates | default list -}}
+{{- if or (ne (len $claims) 1) (ne (index $claims 0).metadata.name "data") -}}
+{{- fail "retained Sentinel StatefulSet PVC template is not the fixed data claim; do not rewrite existing PVC metadata" -}}
+{{- end -}}
+{{- /* VCT 不可升级变更：旧模板无标记不补写，仅保留现有 annotations。 */ -}}
+{{- $claimAnnotations = (index $claims 0).metadata.annotations | default dict -}}
+{{- if and (hasKey $claimAnnotations "sandbox/redis-cluster-id") (ne (get $claimAnnotations "sandbox/redis-cluster-id") $clusterID) -}}
+{{- fail "retained Sentinel StatefulSet PVC template clusterID differs from state; restore the original objects, do not rewrite identity" -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set . "_sandboxSentinelState" (dict "data" $data "clusterID" $clusterID "freshClusterID" $freshClusterID "claimAnnotations" $claimAnnotations) -}}
+{{- end -}}
+{{- get . "_sandboxSentinelState" | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.sentinelIdentityJobName" -}}
+{{- $memberName := include "sandbox.sentinelName" . -}}
+{{- $revision := printf "%d" (int .Release.Revision) -}}
+{{- $full := printf "%s-identity-%s" $memberName $revision -}}
+{{- if le (len $full) 63 -}}{{ $full }}
+{{- else -}}
+{{- printf "%s-redis-id-%s-%s" (.Release.Name | trunc 20 | trimSuffix "-") ($memberName | sha256sum | trunc 10) $revision -}}
+{{- end -}}
+{{- end -}}
 {{- define "sandbox.apiStartupFailureThreshold" -}}
 {{- $threshold := int .Values.startupProbe.failureThreshold -}}
 {{- if eq (include "sandbox.builtinSentinel" .) "true" -}}
@@ -135,7 +207,9 @@
 {{- $name := include "sandbox.sentinelName" . -}}
 {{- $members := list -}}
 {{- range $ordinal := until 3 -}}
-{{- $members = append $members (printf "%s-%d.%s-headless.%s.svc.%s" $name $ordinal $name $.Release.Namespace $.Values.redis.sentinel.clusterDomain) -}}
+{{- $member := printf "%s-%d.%s-headless.%s.svc.%s" $name $ordinal $name $.Release.Namespace $.Values.redis.sentinel.clusterDomain -}}
+{{- if gt (len $member) 253 -}}{{ fail "built-in Sentinel member DNS must not exceed 253 characters" }}{{- end -}}
+{{- $members = append $members $member -}}
 {{- end -}}
 {{- $members | toJson -}}
 {{- end -}}
