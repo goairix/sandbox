@@ -292,7 +292,7 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 
 // Requests share the live owner's confirmed result; background scans skip it
 // so a slow runtime deletion cannot hold up recovery of unrelated sandboxes.
-// The boolean suppresses ordinary destruction metrics for successful waiters.
+// Only the worker that actually completes cleanup records destruction metrics.
 func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id string, waitForOwner bool) (bool, error) {
 	record, _, _, err := m.activeSandboxes.BeginDestroy(ctx, id)
 	if err != nil {
@@ -329,13 +329,13 @@ func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id stri
 		(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed") {
 		// Final output was durably checkpointed before deletion. Cleanup must
 		// not require a running runtime or replay a completed output sync.
-		return true, m.cleanupCheckpointedSyncWorkspace(ctx, sb, true)
+		return m.cleanupCheckpointedSyncWorkspaceWithResult(ctx, sb, waitForOwner)
 	}
 	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync && sb.WorkspaceTransition != "" {
-		return true, m.cleanupInterruptedSyncWorkspace(ctx, sb)
+		return m.cleanupInterruptedSyncWorkspaceWithResult(ctx, sb, waitForOwner)
 	}
 	if sb.Workspace != nil && (sb.Workspace.MountType == WorkspaceMountFUSE || sb.Workspace.Owner.Generation > 0) {
-		return true, m.destroyDistributedWorkspace(ctx, sb)
+		return m.destroyDistributedWorkspaceWithResult(ctx, sb, waitForOwner)
 	}
 	controller, acquired, err := m.acquireActiveController(ctx, sb)
 	if err != nil {
@@ -377,7 +377,8 @@ func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id stri
 			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
-	if err := controller.deleteRecord(ctx, checkpoint.Revision); err != nil {
+	completed, err := controller.deleteRecordWithResult(ctx, checkpoint.Revision)
+	if err != nil {
 		return false, errors.Join(ErrSandboxCleanupPending, err)
 	}
 	m.mu.Lock()
@@ -386,34 +387,39 @@ func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id stri
 	delete(m.workspaces, id)
 	m.mu.Unlock()
 	m.pool.NotifyRemoved()
-	return true, nil
+	return completed, nil
 }
 
-func (m *Manager) destroyDistributedWorkspace(ctx context.Context, sb *Sandbox) error {
+func (m *Manager) destroyDistributedWorkspaceWithResult(ctx context.Context, sb *Sandbox, waitForOwner bool) (bool, error) {
 	m.mu.RLock()
 	fuseLifecycle := m.fuseLifecycles[sb.ID]
 	syncLifecycle := m.syncLifecycles[sb.ID]
 	m.mu.RUnlock()
 	if fuseLifecycle != nil {
-		m.runFUSETeardown(ctx, fuseLifecycle, ErrSandboxCleanupPending)
-		fuseLifecycle.teardownMu.Lock()
-		done := fuseLifecycle.teardownDone
-		fuseLifecycle.teardownMu.Unlock()
-		if done {
-			return nil
-		}
-		return ErrSandboxCleanupPending
+		return m.runFUSETeardownWithResult(ctx, fuseLifecycle, ErrSandboxCleanupPending)
 	}
 	if syncLifecycle != nil {
-		return m.destroySyncSandbox(ctx, syncLifecycle)
+		return m.destroySyncSandboxWithResult(ctx, syncLifecycle)
 	}
 
 	controller, acquired, err := m.acquireActiveController(ctx, sb)
 	if err != nil {
-		return err
+		if errors.Is(err, state.ErrActiveSandboxStaleToken) {
+			record, loadErr := m.activeSandboxes.Load(ctx, sb.ID)
+			if loadErr != nil {
+				return false, errors.Join(ErrSandboxCleanupPending, err, loadErr)
+			}
+			if record == nil {
+				return false, m.confirmActiveCleanupAbsence(ctx, sb.ID)
+			}
+		}
+		return false, err
 	}
 	if !acquired || controller == nil {
-		return m.waitForActiveCleanup(ctx, sb.ID)
+		if !waitForOwner {
+			return false, nil
+		}
+		return false, m.waitForActiveCleanup(ctx, sb.ID)
 	}
 	keepController := false
 	defer func() {
@@ -424,34 +430,24 @@ func (m *Manager) destroyDistributedWorkspace(ctx context.Context, sb *Sandbox) 
 	switch sb.Workspace.MountType {
 	case WorkspaceMountFUSE:
 		if err := m.restoreFUSECleanupWithController(ctx, sb, controller); err != nil {
-			return err
+			return false, err
 		}
 		keepController = true
 		m.mu.RLock()
 		lifecycle := m.fuseLifecycles[sb.ID]
 		m.mu.RUnlock()
-		m.runFUSETeardown(ctx, lifecycle, ErrSandboxCleanupPending)
-		if lifecycle == nil {
-			return ErrSandboxCleanupPending
-		}
-		lifecycle.teardownMu.Lock()
-		done := lifecycle.teardownDone
-		lifecycle.teardownMu.Unlock()
-		if !done {
-			return ErrSandboxCleanupPending
-		}
-		return nil
+		return m.runFUSETeardownWithResult(ctx, lifecycle, ErrSandboxCleanupPending)
 	case WorkspaceMountSync:
 		if err := m.restoreSyncSandboxWithController(ctx, sb, controller); err != nil {
-			return err
+			return false, err
 		}
 		keepController = true
 		m.mu.RLock()
 		lifecycle := m.syncLifecycles[sb.ID]
 		m.mu.RUnlock()
-		return m.destroySyncSandbox(ctx, lifecycle)
+		return m.destroySyncSandboxWithResult(ctx, lifecycle)
 	default:
-		return ErrSandboxNotReady
+		return false, ErrSandboxNotReady
 	}
 }
 
@@ -509,29 +505,36 @@ func (m *Manager) beginActiveCleanup(ctx context.Context, sandboxID string) erro
 }
 
 func (m *Manager) completeActiveSandboxCleanup(ctx context.Context, sandboxID string, controller *activeController) error {
+	_, err := m.completeActiveSandboxCleanupWithResult(ctx, sandboxID, controller)
+	return err
+}
+
+// Successful observation of historical absence is not a new completion.
+func (m *Manager) completeActiveSandboxCleanupWithResult(ctx context.Context, sandboxID string, controller *activeController) (bool, error) {
 	if !m.distributedStateEnabled() {
-		return nil
+		return true, nil
 	}
 	for attempts := 0; attempts < 3; attempts++ {
 		record, err := m.activeSandboxes.Load(ctx, sandboxID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if record == nil {
-			return m.confirmActiveCleanupAbsence(ctx, sandboxID)
+			return false, m.confirmActiveCleanupAbsence(ctx, sandboxID)
 		}
 		// Preserve the last recovery capability if deletion fails or the
 		// controller expires. A generic completion checkpoint would erase
 		// post-runtime/pool cleanup proof before the record is actually gone.
-		if err := controller.deleteRecord(ctx, record.Revision); err != nil {
+		completed, err := controller.deleteRecordWithResult(ctx, record.Revision)
+		if err != nil {
 			if errors.Is(err, state.ErrActiveSandboxConflict) {
 				continue
 			}
-			return err
+			return false, err
 		}
-		return nil
+		return completed, nil
 	}
-	return state.ErrActiveSandboxConflict
+	return false, state.ErrActiveSandboxConflict
 }
 
 func (m *Manager) confirmActiveCleanupAbsence(ctx context.Context, sandboxID string) error {

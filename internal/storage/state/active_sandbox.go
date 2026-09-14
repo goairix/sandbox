@@ -126,6 +126,15 @@ type ActiveSandboxCheckpointRepository interface {
 	DeleteController(ctx context.Context, lease ActiveSandboxControllerLease, expectedRevision uint64) error
 }
 
+// ActiveSandboxCleanupCompletionRepository distinguishes an atomic deletion
+// from idempotent historical absence without a separate read. A true result
+// requires both the deletion and its durability acknowledgement to succeed.
+// Repositories exposing only DeleteController remain usable for cleanup, but
+// cannot prove a new completion for best-effort destruction metrics.
+type ActiveSandboxCleanupCompletionRepository interface {
+	DeleteControllerWithResult(ctx context.Context, lease ActiveSandboxControllerLease, expectedRevision uint64) (bool, error)
+}
+
 // ActiveSandboxRepository supplies the atomic coordination required by a
 // stateless Kubernetes manager. Implementations must use store/server time for
 // lease expiry and fence every token with the immutable sandbox generation.

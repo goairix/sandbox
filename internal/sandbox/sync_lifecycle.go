@@ -177,8 +177,13 @@ func (m *Manager) restartSyncRenewal(lifecycle *syncSandboxLifecycle) error {
 }
 
 func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandboxLifecycle) error {
+	_, err := m.destroySyncSandboxWithResult(ctx, lifecycle)
+	return err
+}
+
+func (m *Manager) destroySyncSandboxWithResult(ctx context.Context, lifecycle *syncSandboxLifecycle) (bool, error) {
 	if lifecycle == nil {
-		return ErrSandboxNotReady
+		return false, ErrSandboxNotReady
 	}
 	// Keep the uncontended path lock-only, but do not let a duplicate DELETE
 	// outlive its request while another worker waits for runtime termination.
@@ -188,7 +193,7 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		for {
 			select {
 			case <-ctx.Done():
-				return errors.Join(ErrSandboxCleanupPending, ctx.Err())
+				return false, errors.Join(ErrSandboxCleanupPending, ctx.Err())
 			case <-ticker.C:
 			}
 			if lifecycle.finalizeMu.TryLock() {
@@ -198,24 +203,24 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	}
 	defer lifecycle.finalizeMu.Unlock()
 	if lifecycle.finalizeDone {
-		return nil
+		return false, nil
 	}
 	if lifecycle.controller != nil {
 		if err := lifecycle.controller.Fence(ctx); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
 	if err := m.beginActiveCleanup(ctx, lifecycle.sandboxID); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain distributed sandbox operations: %w", err))
+		return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain distributed sandbox operations: %w", err))
 	}
 	if err := lifecycle.gate.CloseAndWait(ctx); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain sync sandbox operations: %w", err))
+		return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("drain sync sandbox operations: %w", err))
 	}
 	m.mu.RLock()
 	sb := m.sandboxes[lifecycle.sandboxID]
 	m.mu.RUnlock()
 	if sb == nil {
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, lifecycle.sandboxID)
+		return false, fmt.Errorf("%w: %s", ErrSandboxNotFound, lifecycle.sandboxID)
 	}
 	if m.distributedStateEnabled() {
 		ctx = runtime.WithExactRuntimeRef(ctx, runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID})
@@ -226,15 +231,15 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		snapshot.UpdatedAt = time.Now()
 		if sb.Config.Mode == ModePersistent {
 			if m.sessions == nil {
-				return errors.Join(ErrSandboxCleanupPending, ErrSandboxNotReady)
+				return false, errors.Join(ErrSandboxCleanupPending, ErrSandboxNotReady)
 			}
 			if err := m.sessions.Save(ctx, &snapshot); err != nil {
-				return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist destroying sandbox: %w", err))
+				return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist destroying sandbox: %w", err))
 			}
 		} else if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralActive {
 			next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralFinalizing)
 			if err != nil {
-				return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist sync finalization: %w", err))
+				return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist sync finalization: %w", err))
 			}
 			lifecycle.ephemeralRecord = next
 		}
@@ -252,30 +257,30 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if !lifecycle.finalSyncDone && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralFinalizing) {
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
-				return errors.Join(ErrSandboxCleanupPending, err)
+				return false, errors.Join(ErrSandboxCleanupPending, err)
 			}
 		}
 		if err := m.syncFromContainer(ctx, sb.ID, sb.RuntimeID, exclude); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("final sync from container: %w", err))
+			return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("final sync from container: %w", err))
 		}
 		lifecycle.finalSyncDone = true
 	}
 	if lifecycle.finalSyncDone {
 		if err := m.checkpointSyncCleanup(ctx, sb, lifecycle.controller, "sync_final_output_done"); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
 	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralFinalizing {
 		next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralRemovingRuntime)
 		if err != nil {
-			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist completed final sync: %w", err))
+			return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist completed final sync: %w", err))
 		}
 		lifecycle.ephemeralRecord = next
 	}
 	if !lifecycle.runtimeRemoved && (lifecycle.ephemeralRecord == nil || lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime) {
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
-				return errors.Join(ErrSandboxCleanupPending, err)
+				return false, errors.Join(ErrSandboxCleanupPending, err)
 			}
 		}
 		var removeErr error
@@ -285,24 +290,24 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 			removeErr = m.runtime.RemoveSandbox(ctx, sb.RuntimeID)
 		}
 		if removeErr != nil {
-			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove sandbox: %w", removeErr))
+			return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove sandbox: %w", removeErr))
 		}
 		lifecycle.runtimeRemoved = true
 	}
 	if lifecycle.runtimeRemoved {
 		if err := m.checkpointSyncCleanup(ctx, sb, lifecycle.controller, "sync_runtime_removed"); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
 	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime {
 		next, err := m.ephemeral.Transition(ctx, sb.ID, lifecycle.ephemeralRecord.Revision, EphemeralReleasingLease)
 		if err != nil {
-			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist removed runtime: %w", err))
+			return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("persist removed runtime: %w", err))
 		}
 		lifecycle.ephemeralRecord = next
 	}
 	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State != EphemeralReleasingLease {
-		return errors.Join(ErrSandboxCleanupPending, ErrEphemeralLifecycleConflict)
+		return false, errors.Join(ErrSandboxCleanupPending, ErrEphemeralLifecycleConflict)
 	}
 	if lifecycle.renewal != nil {
 		lifecycle.renewal.Stop()
@@ -310,23 +315,24 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 	if lifecycle.lease != nil {
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
-				return errors.Join(ErrSandboxCleanupPending, err)
+				return false, errors.Join(ErrSandboxCleanupPending, err)
 			}
 		}
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, runtime.TerminationEvidence{}); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("release workspace lease: %w", err))
+			return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("release workspace lease: %w", err))
 		}
 	}
 	if err := m.removeWorkspaceLifecycle(ctx, sb, lifecycle.ephemeralRecord); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove workspace lifecycle: %w", err))
+		return false, errors.Join(ErrSandboxCleanupPending, fmt.Errorf("remove workspace lifecycle: %w", err))
 	}
 	if lifecycle.controller != nil {
 		if err := lifecycle.controller.Fence(ctx); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
-	if err := m.completeActiveSandboxCleanup(ctx, sb.ID, lifecycle.controller); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, err)
+	completed, err := m.completeActiveSandboxCleanupWithResult(ctx, sb.ID, lifecycle.controller)
+	if err != nil {
+		return false, errors.Join(ErrSandboxCleanupPending, err)
 	}
 	lifecycle.finalizeDone = true
 	m.mu.Lock()
@@ -341,7 +347,7 @@ func (m *Manager) destroySyncSandbox(ctx context.Context, lifecycle *syncSandbox
 		_ = lifecycle.controller.Stop(context.WithoutCancel(ctx))
 	}
 	m.pool.NotifyRemoved()
-	return nil
+	return completed, nil
 }
 
 func (m *Manager) restoreSyncSandbox(ctx context.Context, sb *Sandbox) error {

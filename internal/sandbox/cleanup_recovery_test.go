@@ -23,6 +23,10 @@ func (r failedFinalDeleteRepository) DeleteController(context.Context, state.Act
 	return errors.New("final delete unavailable")
 }
 
+func (r failedFinalDeleteRepository) DeleteControllerWithResult(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64) (bool, error) {
+	return false, r.DeleteController(ctx, lease, revision)
+}
+
 func (r *disappearingOrdinaryRuntime) GetSandbox(context.Context, string) (*runtime.SandboxInfo, error) {
 	r.getCalls++
 	if r.getCalls == 1 {

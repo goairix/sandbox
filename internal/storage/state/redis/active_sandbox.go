@@ -246,7 +246,7 @@ local now = redis.call('TIME')
 local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', nowms)
 local raw = redis.call('GET', KEYS[1])
-if not raw then return 1 end
+if not raw then return 2 end
 local record = cjson.decode(raw)
 local current = redis.call('GET', KEYS[4])
 if not current then return 4 end
@@ -635,22 +635,32 @@ func (r *ActiveSandboxRepository) Delete(ctx context.Context, id string, revisio
 }
 
 func (r *ActiveSandboxRepository) DeleteController(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64) error {
+	_, err := r.DeleteControllerWithResult(ctx, lease, revision)
+	return err
+}
+
+// DeleteControllerWithResult reports only an acknowledged atomic deletion as
+// new completion; historical absence remains an idempotent success.
+func (r *ActiveSandboxRepository) DeleteControllerWithResult(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64) (bool, error) {
 	if r.validateID(lease.SandboxID) != nil || lease.Token == "" || lease.Generation <= 0 || revision == 0 {
-		return state.ErrActiveSandboxCorrupt
+		return false, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(lease.SandboxID)
 	cmd, durabilityErr := r.store.runSafetyScript(ctx, deleteActiveControllerScript, []string{k.record, k.operations, k.mutation, k.controller, k.index, k.exclusive}, revision, lease.Generation, lease.SandboxID, lease.Token)
 	status, err := cmd.Int64()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if status == 4 {
-		return state.ErrActiveSandboxStaleToken
+		return false, state.ErrActiveSandboxStaleToken
 	}
-	if status != 1 {
-		return state.ErrActiveSandboxConflict
+	if status != 1 && status != 2 {
+		return false, state.ErrActiveSandboxConflict
 	}
-	return durabilityErr
+	if durabilityErr != nil {
+		return false, durabilityErr
+	}
+	return status == 1, nil
 }
 
 type redisControllerLease struct {

@@ -176,18 +176,23 @@ func (c *activeController) checkpoint(ctx context.Context, revision uint64, chec
 	return repository.CheckpointController(ctx, lease, revision, checkpoint)
 }
 
-func (c *activeController) deleteRecord(ctx context.Context, revision uint64) error {
+func (c *activeController) deleteRecordWithResult(ctx context.Context, revision uint64) (bool, error) {
 	if err := c.Fence(ctx); err != nil {
-		return err
+		return false, err
 	}
 	c.mu.Lock()
 	lease := c.lease
 	c.mu.Unlock()
+	if repository, ok := c.repository.(state.ActiveSandboxCleanupCompletionRepository); ok {
+		return repository.DeleteControllerWithResult(ctx, lease, revision)
+	}
 	repository, ok := c.repository.(state.ActiveSandboxCheckpointRepository)
 	if !ok {
-		return state.ErrActiveSandboxCorrupt
+		return false, state.ErrActiveSandboxCorrupt
 	}
-	return repository.DeleteController(ctx, lease, revision)
+	// Legacy repositories can confirm successful cleanup but do not distinguish
+	// actual deletion from historical absence. Do not charge guessed metrics.
+	return false, repository.DeleteController(ctx, lease, revision)
 }
 
 // runActiveLifecycleCoordinator discovers durable workspace lifecycles. The

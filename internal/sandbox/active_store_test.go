@@ -257,30 +257,35 @@ func (r *memoryActiveRepository) Delete(_ context.Context, id string, revision u
 	return nil
 }
 
-func (r *memoryActiveRepository) DeleteController(_ context.Context, lease state.ActiveSandboxControllerLease, revision uint64) error {
+func (r *memoryActiveRepository) DeleteController(ctx context.Context, lease state.ActiveSandboxControllerLease, revision uint64) error {
+	_, err := r.DeleteControllerWithResult(ctx, lease, revision)
+	return err
+}
+
+func (r *memoryActiveRepository) DeleteControllerWithResult(_ context.Context, lease state.ActiveSandboxControllerLease, revision uint64) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record, exists := r.records[lease.SandboxID]
 	if !exists {
-		return nil
+		return false, nil
 	}
 	current, ok := r.controllers[lease.SandboxID]
 	if !ok || current.Token != lease.Token || current.Generation != lease.Generation || !current.ExpiresAt.After(time.Now()) {
-		return state.ErrActiveSandboxStaleToken
+		return false, state.ErrActiveSandboxStaleToken
 	}
 	if record.Revision != revision || record.Generation != lease.Generation ||
 		(record.Phase != state.ActiveSandboxDestroying && record.Phase != state.ActiveSandboxCleanupPending) {
-		return state.ErrActiveSandboxConflict
+		return false, state.ErrActiveSandboxConflict
 	}
 	for _, operation := range r.ops[lease.SandboxID] {
 		if operation.ExpiresAt.After(time.Now()) {
-			return state.ErrActiveSandboxConflict
+			return false, state.ErrActiveSandboxConflict
 		}
 	}
 	delete(r.records, lease.SandboxID)
 	delete(r.ops, lease.SandboxID)
 	delete(r.controllers, lease.SandboxID)
-	return nil
+	return true, nil
 }
 func (r *memoryActiveRepository) AcquireController(_ context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, bool, error) {
 	r.mu.Lock()

@@ -741,7 +741,11 @@ func (m *Manager) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, erro
 	spanCtx, span := telemetry.Tracer().Start(createCtx, "sandbox.Manager.Create")
 	defer span.End()
 	if workspaceMountMode == WorkspaceMountFUSE {
-		return m.createFUSESandbox(spanCtx, cfg)
+		sb, err := m.createFUSESandbox(spanCtx, cfg)
+		if err == nil {
+			metrics.SandboxActiveGauge.Add(spanCtx, 1)
+		}
+		return sb, err
 	}
 
 	createStart := time.Now()
@@ -1525,13 +1529,17 @@ func (m *Manager) teardownFUSESandbox(lifecycle *fuseSandboxLifecycle, cause err
 }
 
 func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle *fuseSandboxLifecycle, cause error) {
+	m.teardownFUSESandboxWithResult(ctx, lifecycle, cause)
+}
+
+func (m *Manager) teardownFUSESandboxWithResult(ctx context.Context, lifecycle *fuseSandboxLifecycle, cause error) bool {
 	if lifecycle == nil {
-		return
+		return false
 	}
 	lifecycle.teardownMu.Lock()
 	if lifecycle.teardownRunning || lifecycle.teardownDone {
 		lifecycle.teardownMu.Unlock()
-		return
+		return false
 	}
 	lifecycle.teardownRunning = true
 	lifecycle.teardownMu.Unlock()
@@ -1546,17 +1554,17 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 	if lifecycle.controller != nil {
 		if err := lifecycle.controller.Fence(ctx); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "controller-fence", err)
-			return
+			return false
 		}
 	}
 	if err := m.beginActiveCleanup(ctx, lifecycle.sandboxID); err != nil {
 		m.logFUSETeardownFailure(lifecycle, "drain-distributed-operations", err)
-		return
+		return false
 	}
 	if !lifecycle.gateClosed {
 		if err := lifecycle.gate.CloseAndWait(ctx); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "close-operation-gate", err)
-			return
+			return false
 		}
 		lifecycle.gateClosed = true
 	}
@@ -1570,20 +1578,20 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		m.mu.RUnlock()
 		if sb == nil || sb.Workspace == nil {
 			m.logFUSETeardownFailure(lifecycle, "load-lifecycle", ErrSandboxNotReady)
-			return
+			return false
 		}
 		snapshot.State = StateDestroying
 		snapshot.UpdatedAt = time.Now()
 		if snapshot.Config.Mode == ModePersistent {
 			if m.sessions == nil || m.sessions.Save(ctx, &snapshot) != nil {
 				m.logFUSETeardownFailure(lifecycle, "persist-finalizing", ErrSessionPublicationConflict)
-				return
+				return false
 			}
 		} else if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralActive {
 			next, err := m.ephemeral.Transition(ctx, lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralFinalizing)
 			if err != nil {
 				m.logFUSETeardownFailure(lifecycle, "persist-finalizing", err)
-				return
+				return false
 			}
 			lifecycle.ephemeralRecord = next
 		}
@@ -1607,7 +1615,7 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-quiesce", err)
-				return
+				return false
 			}
 		}
 		token, err := m.runtime.QuiesceWorkspace(ctx, ref, generation)
@@ -1619,14 +1627,14 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 				err = errors.New("invalid generation-bound quiesce token")
 			}
 			m.logFUSETeardownFailure(lifecycle, "quiesce", err)
-			return
+			return false
 		}
 	}
 	if lifecycle.quiesced && !lifecycle.flushAttempted {
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-flush", err)
-				return
+				return false
 			}
 		}
 		started := time.Now()
@@ -1642,7 +1650,7 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		}
 		if flushErr != nil {
 			m.logFUSETeardownFailure(lifecycle, "durable-flush", flushErr)
-			return
+			return false
 		}
 		lifecycle.flushAttempted = true
 	}
@@ -1650,37 +1658,37 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		next, err := m.ephemeral.Transition(ctx, lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralRemovingRuntime)
 		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "persist-durable-flush", err)
-			return
+			return false
 		}
 		lifecycle.ephemeralRecord = next
 	}
 	if lifecycle.claimed == nil {
 		if err := m.checkpointFUSECleanup(ctx, lifecycle); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "checkpoint-durable-flush", err)
-			return
+			return false
 		}
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-pool-claim", err)
-				return
+				return false
 			}
 		}
 		claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, lifecycle.record)
 		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "claim-pool-cleanup", err)
-			return
+			return false
 		}
 		lifecycle.claimed = claimed
 	}
 	if err := m.checkpointFUSECleanup(ctx, lifecycle); err != nil {
 		m.logFUSETeardownFailure(lifecycle, "checkpoint-cleanup-claim", err)
-		return
+		return false
 	}
 	if !lifecycle.runtimeRemoved {
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-runtime-remove", err)
-				return
+				return false
 			}
 		}
 		updatedClaimed, err := m.fusePool.RemoveClaimedRuntime(ctx, *lifecycle.claimed)
@@ -1689,25 +1697,25 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		}
 		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "remove-runtime", err)
-			return
+			return false
 		}
 		lifecycle.runtimeRemoved = true
 	}
 	if err := m.checkpointFUSECleanup(ctx, lifecycle); err != nil {
 		m.logFUSETeardownFailure(lifecycle, "checkpoint-runtime-termination", err)
-		return
+		return false
 	}
 	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State == EphemeralRemovingRuntime {
 		next, err := m.ephemeral.Transition(ctx, lifecycle.sandboxID, lifecycle.ephemeralRecord.Revision, EphemeralReleasingLease)
 		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "persist-runtime-removed", err)
-			return
+			return false
 		}
 		lifecycle.ephemeralRecord = next
 	}
 	if lifecycle.ephemeralRecord != nil && lifecycle.ephemeralRecord.State != EphemeralReleasingLease {
 		m.logFUSETeardownFailure(lifecycle, "invalid-finalization-state", ErrEphemeralLifecycleConflict)
-		return
+		return false
 	}
 	if lifecycle.evidence.RuntimeUID == "" {
 		if evidence, persisted := poolTerminationEvidence(*lifecycle.claimed); persisted {
@@ -1716,12 +1724,12 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 			fencer, ok := m.runtime.(runtime.RuntimeFencer)
 			if !ok {
 				m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", errors.New("runtime has no termination fencer"))
-				return
+				return false
 			}
 			evidence, err := fencer.ConfirmTerminated(ctx, lifecycle.record.RuntimeID, lifecycle.record.RuntimeUID)
 			if err != nil {
 				m.logFUSETeardownFailure(lifecycle, "confirm-runtime-termination", err)
-				return
+				return false
 			}
 			lifecycle.evidence = evidence
 		}
@@ -1734,18 +1742,18 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-probe-remove", err)
-				return
+				return false
 			}
 		}
 		probeName, err := fuseprotocol.DeriveProbeObjectName(lifecycle.record.RuntimeUID, generation)
 		if err != nil {
 			m.logFUSETeardownFailure(lifecycle, "derive-probe-object", err)
-			return
+			return false
 		}
 		probeKey := lifecycle.lease.OwnerSnapshot().Prefix + probeName
 		if err := m.config.WorkspaceObjectClient.DeleteObject(ctx, probeKey); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "delete-probe-object", err)
-			return
+			return false
 		}
 		exists, err := m.config.WorkspaceObjectClient.HeadObject(ctx, probeKey)
 		if err != nil || exists {
@@ -1753,7 +1761,7 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 				err = errors.New("probe object still exists after deletion")
 			}
 			m.logFUSETeardownFailure(lifecycle, "verify-probe-object-deletion", err)
-			return
+			return false
 		}
 		lifecycle.probeRemoved = true
 	}
@@ -1761,29 +1769,29 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-owner-release", err)
-				return
+				return false
 			}
 		}
 		if err := m.config.WorkspaceCoordinator.Release(ctx, lifecycle.lease, lifecycle.evidence); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "release-workspace-lease", err)
-			return
+			return false
 		}
 		lifecycle.leaseReleased = true
 	}
 	if !lifecycle.poolRemoved {
 		if err := m.checkpointFUSECleanup(ctx, lifecycle); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "checkpoint-pool-deletion", err)
-			return
+			return false
 		}
 		if lifecycle.controller != nil {
 			if err := lifecycle.controller.Fence(ctx); err != nil {
 				m.logFUSETeardownFailure(lifecycle, "controller-fence-pool-complete", err)
-				return
+				return false
 			}
 		}
 		if err := m.fusePool.CompleteClaimedCleanup(ctx, *lifecycle.claimed); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "complete-pool-cleanup", err)
-			return
+			return false
 		}
 		lifecycle.poolRemoved = true
 	}
@@ -1797,19 +1805,20 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 		m.mu.RUnlock()
 		if err := m.removeWorkspaceLifecycle(ctx, &sb, lifecycle.ephemeralRecord); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "remove-session", err)
-			return
+			return false
 		}
 		lifecycle.sessionRemoved = true
 	}
 	if lifecycle.controller != nil {
 		if err := lifecycle.controller.Fence(ctx); err != nil {
 			m.logFUSETeardownFailure(lifecycle, "controller-fence-active-state", err)
-			return
+			return false
 		}
 	}
-	if err := m.completeActiveSandboxCleanup(ctx, lifecycle.sandboxID, lifecycle.controller); err != nil {
+	completed, err := m.completeActiveSandboxCleanupWithResult(ctx, lifecycle.sandboxID, lifecycle.controller)
+	if err != nil {
 		m.logFUSETeardownFailure(lifecycle, "complete-active-state", err)
-		return
+		return false
 	}
 	m.mu.Lock()
 	delete(m.sandboxes, lifecycle.sandboxID)
@@ -1822,6 +1831,7 @@ func (m *Manager) teardownFUSESandboxWithContext(ctx context.Context, lifecycle 
 	lifecycle.teardownMu.Lock()
 	lifecycle.teardownDone = true
 	lifecycle.teardownMu.Unlock()
+	return completed
 }
 
 func (m *Manager) logFUSETeardownFailure(lifecycle *fuseSandboxLifecycle, stage string, err error) {
@@ -1906,22 +1916,29 @@ func (m *Manager) scheduleFUSETeardown(lifecycle *fuseSandboxLifecycle, cause er
 }
 
 func (m *Manager) runFUSETeardown(ctx context.Context, lifecycle *fuseSandboxLifecycle, cause error) {
+	_, _ = m.runFUSETeardownWithResult(ctx, lifecycle, cause)
+}
+
+func (m *Manager) runFUSETeardownWithResult(ctx context.Context, lifecycle *fuseSandboxLifecycle, cause error) (bool, error) {
+	if lifecycle == nil {
+		return false, ErrSandboxCleanupPending
+	}
 	ctx, cancel := context.WithTimeout(ctx, m.fuseTeardownTimeout())
 	defer cancel()
 	for {
 		if ctx.Err() != nil {
-			return
+			return false, errors.Join(ErrSandboxCleanupPending, ctx.Err())
 		}
-		m.teardownFUSESandboxWithContext(ctx, lifecycle, cause)
+		completed := m.teardownFUSESandboxWithResult(ctx, lifecycle, cause)
 		lifecycle.teardownMu.Lock()
 		done := lifecycle.teardownDone
 		lifecycle.teardownMu.Unlock()
 		if done {
-			return
+			return completed, nil
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false, errors.Join(ErrSandboxCleanupPending, ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -2111,7 +2128,9 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 	syncLifecycle := m.syncLifecycles[id]
 	m.mu.RUnlock()
 	if fuseLifecycle != nil {
-		m.teardownFUSESandbox(fuseLifecycle, fmt.Errorf("sandbox destroy: %s", reason))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), m.fuseTeardownTimeout())
+		defer cancel()
+		completed := m.teardownFUSESandboxWithResult(cleanupCtx, fuseLifecycle, fmt.Errorf("sandbox destroy: %s", reason))
 		fuseLifecycle.teardownMu.Lock()
 		done := fuseLifecycle.teardownDone
 		fuseLifecycle.teardownMu.Unlock()
@@ -2119,18 +2138,24 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 			m.scheduleFUSETeardown(fuseLifecycle, fmt.Errorf("sandbox destroy retry: %s", reason))
 			return fmt.Errorf("%w: destroy FUSE sandbox", ErrSandboxCleanupPending)
 		}
-		metrics.RecordSandboxDestroy(ctx, reason)
+		if completed {
+			metrics.SandboxActiveGauge.Add(ctx, -1)
+			metrics.RecordSandboxDestroy(ctx, reason)
+		}
 		return nil
 	}
 	if syncLifecycle != nil {
-		if err := m.destroySyncSandbox(ctx, syncLifecycle); err != nil {
+		completed, err := m.destroySyncSandboxWithResult(ctx, syncLifecycle)
+		if err != nil {
 			if errors.Is(err, ErrSandboxCleanupPending) {
 				m.scheduleSyncFinalization(syncLifecycle, err)
 			}
 			return err
 		}
-		metrics.SandboxActiveGauge.Add(ctx, -1)
-		metrics.RecordSandboxDestroy(ctx, reason)
+		if completed {
+			metrics.SandboxActiveGauge.Add(ctx, -1)
+			metrics.RecordSandboxDestroy(ctx, reason)
+		}
 		return nil
 	}
 

@@ -96,6 +96,11 @@ func (m *Manager) checkpointSyncCleanup(ctx context.Context, sb *Sandbox, contro
 // Only a durable finalizer checkpoint, not a genuine unmount transition,
 // permits reuse of the locally tracked finalizer.
 func (m *Manager) cleanupCheckpointedSyncWorkspace(ctx context.Context, sb *Sandbox, waitForOwner bool) error {
+	_, err := m.cleanupCheckpointedSyncWorkspaceWithResult(ctx, sb, waitForOwner)
+	return err
+}
+
+func (m *Manager) cleanupCheckpointedSyncWorkspaceWithResult(ctx context.Context, sb *Sandbox, waitForOwner bool) (bool, error) {
 	m.mu.RLock()
 	lifecycle := m.syncLifecycles[sb.ID]
 	local := m.sandboxes[sb.ID]
@@ -108,20 +113,16 @@ func (m *Manager) cleanupCheckpointedSyncWorkspace(ctx context.Context, sb *Sand
 		// Reuse its serialized capability instead of treating it as a crash.
 		if !waitForOwner {
 			m.scheduleSyncFinalization(lifecycle, ErrSandboxCleanupPending)
-			return nil
+			return false, nil
 		}
-		return m.destroySyncSandbox(ctx, lifecycle)
+		return m.destroySyncSandboxWithResult(ctx, lifecycle)
 	}
 	sb.WorkspaceTransition = workspaceUnmountSynced
-	return m.cleanupInterruptedSyncWorkspaceWithWait(ctx, sb, waitForOwner)
-}
-
-func (m *Manager) cleanupInterruptedSyncWorkspace(ctx context.Context, sb *Sandbox) error {
-	return m.cleanupInterruptedSyncWorkspaceWithWait(ctx, sb, true)
+	return m.cleanupInterruptedSyncWorkspaceWithResult(ctx, sb, waitForOwner)
 }
 
 // Background scans skip a live owner; request cleanup waits for its result.
-func (m *Manager) cleanupInterruptedSyncWorkspaceWithWait(ctx context.Context, sb *Sandbox, waitForOwner bool) error {
+func (m *Manager) cleanupInterruptedSyncWorkspaceWithResult(ctx context.Context, sb *Sandbox, waitForOwner bool) (bool, error) {
 	m.mu.RLock()
 	lifecycle := m.syncLifecycles[sb.ID]
 	m.mu.RUnlock()
@@ -130,7 +131,7 @@ func (m *Manager) cleanupInterruptedSyncWorkspaceWithWait(ctx context.Context, s
 		// capability. Another replica cannot do this without the exact token.
 		m.retireLocalSyncController(sb)
 		if err := lifecycle.controller.Stop(ctx); err != nil {
-			return err
+			return false, err
 		}
 	}
 	controller, acquired, err := m.acquireActiveController(ctx, sb)
@@ -141,83 +142,84 @@ func (m *Manager) cleanupInterruptedSyncWorkspaceWithWait(ctx context.Context, s
 		if errors.Is(err, state.ErrActiveSandboxStaleToken) {
 			record, loadErr := m.activeSandboxes.Load(ctx, sb.ID)
 			if loadErr != nil {
-				return errors.Join(ErrSandboxCleanupPending, err, loadErr)
+				return false, errors.Join(ErrSandboxCleanupPending, err, loadErr)
 			}
 			if record == nil {
-				return m.confirmActiveCleanupAbsence(ctx, sb.ID)
+				return false, m.confirmActiveCleanupAbsence(ctx, sb.ID)
 			}
 		}
-		return errors.Join(ErrSandboxCleanupPending, err)
+		return false, errors.Join(ErrSandboxCleanupPending, err)
 	}
 	if !acquired {
 		if !waitForOwner {
-			return nil
+			return false, nil
 		}
-		return m.waitForActiveCleanup(ctx, sb.ID)
+		return false, m.waitForActiveCleanup(ctx, sb.ID)
 	}
 	defer func() { _ = controller.Stop(context.WithoutCancel(ctx)) }()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	controller.SetOnLost(cancel)
 	if err := controller.Fence(ctx); err != nil {
-		return err
+		return false, err
 	}
 	if sb.WorkspaceTransition == workspaceSyncFromPending {
 		ctx = runtime.WithExactRuntimeRef(ctx, runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID})
 		scoped, err := storage.NewScopedFS(m.filesystem, sb.Workspace.RootPath)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if err := m.syncFromContainerSnapshot(ctx, sb, scoped, sb.WorkspaceTransitionExclude); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 		if err := m.checkpointSyncCleanup(ctx, sb, controller, "sync_final_output_done"); err != nil {
-			return errors.Join(ErrSandboxCleanupPending, err)
+			return false, errors.Join(ErrSandboxCleanupPending, err)
 		}
 	}
 	if err := m.removeExactOrdinaryRuntime(ctx, sb); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, err)
+		return false, errors.Join(ErrSandboxCleanupPending, err)
 	}
 	// Incomplete mount input must never be treated as authoritative output.
 	// Unmount stages already checkpointed the final output before release.
 	req, err := m.workspaceLeaseRequest(sb, sb.Workspace.RootPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := controller.Fence(ctx); err != nil {
-		return err
+		return false, err
 	}
 	if err := m.config.WorkspaceCoordinator.releaseInterruptedSync(ctx, req, sb.Workspace.Owner); err != nil {
-		return errors.Join(ErrSandboxCleanupPending, err)
+		return false, errors.Join(ErrSandboxCleanupPending, err)
 	}
 	if sb.Config.Mode == ModePersistent && m.sessions != nil {
 		if err := m.sessions.RemoveMatchingRuntime(ctx, sb); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if sb.Config.Mode == ModeEphemeral && m.ephemeral != nil {
 		record, err := m.ephemeral.Load(ctx, sb.ID)
 		if err != nil {
 			if !errors.Is(err, ErrSandboxNotFound) {
-				return err
+				return false, err
 			}
 		}
 		if record != nil {
 			if record.RuntimeUID != sb.RuntimeUID || record.RuntimeID != sb.RuntimeID {
-				return ErrEphemeralLifecycleConflict
+				return false, ErrEphemeralLifecycleConflict
 			}
 			if err := m.ephemeral.RemoveExact(ctx, *record); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
 	if err := controller.Fence(ctx); err != nil {
-		return err
+		return false, err
 	}
-	if err := m.completeActiveSandboxCleanup(ctx, sb.ID, controller); err != nil {
-		return err
+	completed, err := m.completeActiveSandboxCleanupWithResult(ctx, sb.ID, controller)
+	if err != nil {
+		return false, err
 	}
 	m.retireLocalSyncController(sb)
 	m.pool.NotifyRemoved()
-	return nil
+	return completed, nil
 }
