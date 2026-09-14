@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -483,9 +484,32 @@ git -C /workspace/git-source add tracked
 	destroyed = true
 }
 
-func uploadSized(ctx context.Context, c *apiClient, sandboxID, path string, size int64) error {
+func uploadSized(ctx context.Context, c *apiClient, sandboxID, path string, size int64) (uploadErr error) {
+	if size < 0 {
+		return errors.New("large upload requires a nonnegative size")
+	}
 	reader, writer := io.Pipe()
 	multipartWriter := multipart.NewWriter(writer)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/sandboxes/"+sandboxID+"/files/upload?path="+url.QueryEscape(path), reader)
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return sizedUploadFailure("create request", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	req.Header.Set("X-Sandbox-File-Size", strconv.FormatInt(size, 10))
+	produced := make(chan error, 1)
+	stopCancel := context.AfterFunc(ctx, func() { _ = reader.CloseWithError(ctx.Err()) })
+	defer func() {
+		stopCancel()
+		// An early response or transport failure must release the blocked
+		// streaming writer before joining it. Never retain a producer beyond
+		// this helper, even when the transport did not consume the request.
+		if producerErr := closeSizedUpload(reader, produced); uploadErr == nil && producerErr != nil {
+			uploadErr = sizedUploadFailure("stream", producerErr)
+		}
+	}()
 	go func() {
 		part, err := multipartWriter.CreateFormFile("file", "large.bin")
 		if err == nil {
@@ -495,24 +519,60 @@ func uploadSized(ctx context.Context, c *apiClient, sandboxID, path string, size
 			err = closeErr
 		}
 		_ = writer.CloseWithError(err)
+		produced <- err
 	}()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/sandboxes/"+sandboxID+"/files/upload?path="+url.QueryEscape(path), reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
-	req.Header.Set("X-Sandbox-File-Size", strconv.FormatInt(size, 10))
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return sizedUploadFailure("request", errors.Join(err, ctx.Err()))
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("large upload status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			uploadErr = errors.Join(uploadErr, sizedUploadFailure("close response", err))
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("large upload status=%d", resp.StatusCode)
+	}
+	const maxACKBytes = 64 << 10
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxACKBytes+1))
+	if err != nil {
+		return sizedUploadFailure("read acknowledgement", err)
+	}
+	if len(body) > maxACKBytes {
+		return errors.New("large upload acknowledgement exceeds size limit")
+	}
+	var ack struct {
+		Path *string `json:"path"`
+		Size *int64  `json:"size"`
+	}
+	// Unmarshal requires exactly one complete value, including a clean body
+	// read above. Pointer fields distinguish absent/null from a valid zero.
+	if err := json.Unmarshal(body, &ack); err != nil {
+		return sizedUploadFailure("validate acknowledgement", err)
+	}
+	if ack.Path == nil || ack.Size == nil || *ack.Path != path || *ack.Size != size {
+		return errors.New("large upload acknowledgement path or size does not match request")
 	}
 	return nil
+}
+
+func closeSizedUpload(reader *io.PipeReader, produced <-chan error) error {
+	_ = reader.Close()
+	return <-produced
+}
+
+// HTTP parsing/GOAWAY and JSON conversion errors may contain remote response
+// data. Keep their structured identity without displaying that data in logs.
+type sizedUploadError struct {
+	stage string
+	cause error
+}
+
+func (e *sizedUploadError) Error() string { return "large upload " + e.stage + " failed" }
+func (e *sizedUploadError) Unwrap() error { return e.cause }
+
+func sizedUploadFailure(stage string, cause error) error {
+	return &sizedUploadError{stage: stage, cause: cause}
 }
 
 type zeroReader struct{}
