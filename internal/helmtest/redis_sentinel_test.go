@@ -43,6 +43,9 @@ func renderChart(t *testing.T, chart string, overrides ...string) []map[string]a
 	}
 	data, err := exec.Command("helm", args...).Output()
 	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("chart failed to render: %v: %s", err, exitErr.Stderr)
+		}
 		t.Fatalf("chart failed to render: %v", err)
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))

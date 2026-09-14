@@ -6,6 +6,7 @@ productionSafetyChecks: false
 # 可选：在目标 Linux 节点加载 Chart 自带的不可变 FUSE AppArmor 策略。
 # 需要宿主机已启用 AppArmor，且 privileged mounter 的实际 profile 能生效。
 # 首次启用前须完成真实挂载/卸载及拒绝测试，不能只以 DaemonSet Ready 为准。
+# 保留自定义 values.yaml 时可只写 enabled: false；缺失/null 默认项由模板补齐。
 apparmorLoader:
   enabled: false
   # 集群有 globalDefault PriorityClass 时须填写已存在的可信类，避免启动门禁误判。

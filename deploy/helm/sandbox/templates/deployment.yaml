@@ -4,6 +4,7 @@
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- $startupProbe := include "sandbox.apiStartupProbe" . | fromJson }}
+{{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
 {{- $provider := include "sandbox.backend.provider" . }}
 apiVersion: apps/v1
@@ -89,13 +90,13 @@ spec:
             - name: SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR
               value: {{ $nodeSelector | quote }}
             {{- end }}
-            {{- if .Values.apparmorLoader.enabled }}
+            {{- if $apparmorConfig.enabled }}
             - name: SANDBOX_RUNTIME_KUBERNETES_APPARMOR_LOADER_NAME
               value: {{ printf "%s-apparmor-loader" .Release.Name | quote }}
             - name: SANDBOX_RUNTIME_KUBERNETES_APPARMOR_LOADER_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SANDBOX_RUNTIME_KUBERNETES_APPARMOR_LOADER_TIMEOUT_SECONDS
-              value: {{ .Values.apparmorLoader.startupTimeoutSeconds | quote }}
+              value: {{ int $apparmorConfig.startupTimeoutSeconds | quote }}
             {{- end }}
             - name: SANDBOX_RUNTIME_KUBERNETES_NETWORK_POLICY_PROVIDER
               value: {{ .Values.config.runtime.kubernetes.networkPolicyProvider | default "auto" | quote }}

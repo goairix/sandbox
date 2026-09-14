@@ -1,5 +1,6 @@
 {{- include "sandbox.validateAppArmorLoader" . }}
-{{- if .Values.apparmorLoader.enabled }}
+{{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson }}
+{{- if $apparmorConfig.enabled }}
 {{- $name := printf "%s-apparmor-loader" .Release.Name }}
 {{- $digest := include "sandbox.apparmor.digest" . }}
 {{- $profile := include "sandbox.effectiveLSMProfile" . }}
@@ -46,35 +47,35 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: false
-      {{- if .Values.apparmorLoader.priorityClassName }}
-      priorityClassName: {{ .Values.apparmorLoader.priorityClassName | quote }}
+      {{- if $apparmorConfig.priorityClassName }}
+      priorityClassName: {{ $apparmorConfig.priorityClassName | quote }}
       {{- end }}
       nodeSelector:
 {{ toYaml $selector | indent 8 }}
       containers:
         - name: apparmor-loader
-          image: {{ printf "%s:%s" .Values.apparmorLoader.image.repository .Values.apparmorLoader.image.tag | quote }}
-          imagePullPolicy: {{ .Values.apparmorLoader.image.pullPolicy }}
+          image: {{ printf "%s:%s" $apparmorConfig.image.repository $apparmorConfig.image.tag | quote }}
+          imagePullPolicy: {{ $apparmorConfig.image.pullPolicy }}
           command: ["/usr/local/bin/apparmor-loader"]
           args:
             - {{ printf "--profile-name=%s" $profile | quote }}
             - {{ printf "--profile-digest=%s" $digest | quote }}
-            - {{ printf "--check-interval=%ds" (int .Values.apparmorLoader.checkIntervalSeconds) | quote }}
-            - {{ printf "--parser-timeout=%ds" (int .Values.apparmorLoader.parserTimeoutSeconds) | quote }}
+            - {{ printf "--check-interval=%ds" (int $apparmorConfig.checkIntervalSeconds) | quote }}
+            - {{ printf "--parser-timeout=%ds" (int $apparmorConfig.parserTimeoutSeconds) | quote }}
           securityContext:
             privileged: true
             runAsUser: 0
             readOnlyRootFilesystem: true
           resources:
-{{ toYaml .Values.apparmorLoader.resources | indent 12 }}
+{{ toYaml $apparmorConfig.resources | indent 12 }}
           readinessProbe:
             exec:
               command:
                 - /usr/local/bin/apparmor-loader
                 - readiness
                 - --readiness-file=/run/apparmor-loader/ready
-                - {{ printf "--max-age=%ds" (mul 3 (int .Values.apparmorLoader.checkIntervalSeconds)) | quote }}
-            periodSeconds: {{ .Values.apparmorLoader.checkIntervalSeconds }}
+                - {{ printf "--max-age=%ds" (mul 3 (int $apparmorConfig.checkIntervalSeconds)) | quote }}
+            periodSeconds: {{ int $apparmorConfig.checkIntervalSeconds }}
             timeoutSeconds: 2
           volumeMounts:
             - name: securityfs

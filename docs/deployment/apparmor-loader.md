@@ -20,6 +20,15 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## values 配置
 
+保留自定义 `values.yaml` 的部署不必补齐未启用组件的全部字段。关闭加载器只需：
+
+```yaml
+apparmorLoader:
+  enabled: false
+```
+
+省略整个配置也默认关闭。模板会为缺失或 `null` 的字段补齐 Chart 默认值：检查周期 10 秒、parser 超时 10 秒、API 等待超时 180 秒；资源请求为 `25m/32Mi`，上限为 `250m/128Mi`。默认镜像与 Chart 的 `values.yaml` 一致，启用前仍应显式填写自己已构建、推送的可信镜像仓库和版本。显式配置不会被默认值覆盖；非法类型、0 超时、空镜像名称仍会在渲染阶段拒绝。同步更新时须同时同步 `templates/` 和 `values.schema.json`，无需用仓库的 `values.yaml` 覆盖线上密码及其它配置。
+
 ```yaml
 apparmorLoader:
   enabled: false # 隔离验收通过后再设为 true

@@ -20,6 +20,45 @@
 {{- if has "fuse" .Values.config.workspace.enabledMountModes -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{/* 与 Sentinel 一致，仅缺失/null 补默认值；不依赖部署者替换自己的 values.yaml。 */}}
+{{- define "sandbox.apparmorLoaderConfig" -}}
+{{- $input := .Values.apparmorLoader -}}
+{{- if kindIs "invalid" $input -}}{{- $input = dict -}}{{- end -}}
+{{- if not (kindIs "map" $input) -}}{{ fail "apparmorLoader 必须是配置映射" }}{{- end -}}
+{{- $config := dict "enabled" false "priorityClassName" ""
+  "checkIntervalSeconds" 10 "parserTimeoutSeconds" 10 "startupTimeoutSeconds" 180
+  "resources" (dict "requests" (dict "cpu" "25m" "memory" "32Mi") "limits" (dict "cpu" "250m" "memory" "128Mi")) -}}
+{{- range $key, $value := $input -}}
+{{- if and (ne $key "image") (not (kindIs "invalid" $value)) -}}{{- $_ := set $config $key $value -}}{{- end -}}
+{{- end -}}
+{{- $imageInput := get $input "image" -}}
+{{- if or (not (hasKey $input "image")) (kindIs "invalid" $imageInput) -}}{{- $imageInput = dict -}}{{- end -}}
+{{- if not (kindIs "map" $imageInput) -}}{{ fail "apparmorLoader.image 必须是配置映射" }}{{- end -}}
+{{- $image := dict "repository" "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader" "tag" "v0.1.0" "pullPolicy" "IfNotPresent" -}}
+{{- range $key, $value := $imageInput -}}
+{{- if not (kindIs "invalid" $value) -}}{{- $_ := set $image $key $value -}}{{- end -}}
+{{- end -}}
+{{- $_ := set $config "image" $image -}}
+{{- if not (kindIs "bool" $config.enabled) -}}{{ fail "apparmorLoader.enabled 必须是布尔值" }}{{- end -}}
+{{- if not (kindIs "string" $config.priorityClassName) -}}{{ fail "apparmorLoader.priorityClassName 必须是字符串" }}{{- end -}}
+{{- if and (ne $config.priorityClassName "") (or (gt (len $config.priorityClassName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" $config.priorityClassName))) -}}
+{{- fail "apparmorLoader.priorityClassName 必须为空或有效 DNS 名称" -}}
+{{- end -}}
+{{- range $key := list "repository" "tag" "pullPolicy" -}}
+{{- if not (kindIs "string" (get $image $key)) -}}{{ fail (printf "apparmorLoader.image.%s 必须是字符串" $key) }}{{- end -}}
+{{- if empty (get $image $key) -}}{{ fail (printf "apparmorLoader.image.%s 不得为空" $key) }}{{- end -}}
+{{- end -}}
+{{- if not (has $image.pullPolicy (list "Always" "IfNotPresent" "Never")) -}}{{ fail "apparmorLoader.image.pullPolicy 必须是 Always、IfNotPresent 或 Never" }}{{- end -}}
+{{- range $key := list "checkIntervalSeconds" "parserTimeoutSeconds" "startupTimeoutSeconds" -}}
+{{- $value := get $config $key -}}
+{{- if or (kindIs "string" $value) (not (regexMatch "^[0-9]+$" (printf "%v" $value))) (lt (int64 $value) 1) (gt (int64 $value) 600) -}}
+{{- fail (printf "apparmorLoader.%s 必须是 1~600 范围内的整数" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "map" $config.resources) -}}{{ fail "apparmorLoader.resources 必须是资源配置映射" }}{{- end -}}
+{{- $config | toJson -}}
+{{- end -}}
+
 {{- define "sandbox.apparmor.digest" -}}
 {{- $template := .Files.Get "files/apparmor/workspace-mounter.profile" | replace "\r\n" "\n" | trim -}}
 {{- if empty $template -}}{{ fail "AppArmor profile template is missing" }}{{- end -}}
@@ -27,7 +66,8 @@
 {{- end -}}
 
 {{- define "sandbox.effectiveLSMProfile" -}}
-{{- if .Values.apparmorLoader.enabled -}}
+{{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson -}}
+{{- if $apparmorConfig.enabled -}}
 {{- printf "sandbox-fuse-%s" (include "sandbox.apparmor.digest" .) -}}
 {{- else -}}{{ .Values.config.workspace.lsmProfile | default "" }}{{- end -}}
 {{- end -}}
@@ -39,7 +79,8 @@
 {{- range $key, $value := $selector -}}
 {{- if not (kindIs "string" $value) -}}{{ fail "config.runtime.kubernetes.nodeSelector values must be strings" }}{{- end -}}
 {{- end -}}
-{{- if .Values.apparmorLoader.enabled -}}
+{{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson -}}
+{{- if $apparmorConfig.enabled -}}
 {{- if and (hasKey $selector "kubernetes.io/os") (ne (get $selector "kubernetes.io/os") "linux") -}}
 {{- fail "AppArmor loader requires kubernetes.io/os=linux" -}}
 {{- end -}}
@@ -51,14 +92,11 @@
 
 {{- define "sandbox.validateAppArmorLoader" -}}
 {{- $_ := include "sandbox.effectiveNodeSelector" . -}}
-{{- if .Values.apparmorLoader.enabled -}}
+{{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson -}}
+{{- if $apparmorConfig.enabled -}}
 {{- if ne .Values.config.runtime.type "kubernetes" -}}{{ fail "AppArmor loader requires Kubernetes runtime" }}{{- end -}}
 {{- if ne (include "sandbox.fuseEnabled" .) "true" -}}{{ fail "AppArmor loader requires FUSE" }}{{- end -}}
 {{- if .Values.config.workspace.allowMissingLSMForKind -}}{{ fail "AppArmor loader forbids allowMissingLSMForKind" }}{{- end -}}
-{{- if or (empty .Values.apparmorLoader.image.repository) (empty .Values.apparmorLoader.image.tag) -}}{{ fail "AppArmor loader image is required" }}{{- end -}}
-{{- range $name, $value := dict "checkIntervalSeconds" .Values.apparmorLoader.checkIntervalSeconds "parserTimeoutSeconds" .Values.apparmorLoader.parserTimeoutSeconds "startupTimeoutSeconds" .Values.apparmorLoader.startupTimeoutSeconds -}}
-{{- if or (lt (int $value) 1) (gt (int $value) 600) -}}{{ fail (printf "apparmorLoader.%s must be between 1 and 600" $name) }}{{- end -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 
