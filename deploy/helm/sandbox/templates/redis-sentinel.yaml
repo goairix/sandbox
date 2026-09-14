@@ -1,0 +1,406 @@
+{{- if eq (include "sandbox.builtinSentinel" .) "true" }}
+{{- include "sandbox.validateRedis" . }}
+{{- $name := include "sandbox.sentinelName" . }}
+{{- $members := include "sandbox.sentinelMembers" . | fromJsonArray }}
+{{- $retained := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-state" $name) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-state
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app: sandbox-redis-bootstrap
+    release: {{ .Release.Name }}
+data:
+  {{- if $retained }}
+  {{- if or (empty $retained.data) (empty (index $retained.data "cluster.json")) }}
+  {{- fail "retained Sentinel state is missing cluster.json; do not reset existing PVC identity" }}
+  {{- end }}
+  {{- $cluster := index $retained.data "cluster.json" | fromJson }}
+  {{- if ne (toJson $cluster.members) (toJson $members) }}
+  {{- fail "retained Sentinel membership differs; do not reuse PVC identity under new DNS names" }}
+  {{- end }}
+  {{- toYaml $retained.data | nindent 2 }}
+  {{- else }}
+  cluster.json: {{ dict "clusterID" (randAlphaNum 32) "members" $members "phase" "Pending" | toJson | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: sandbox-redis-sentinel
+    release: {{ .Release.Name }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+    - name: sentinel
+      port: 26379
+      targetPort: sentinel
+    - name: identity
+      port: 18080
+      targetPort: identity
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  serviceName: {{ $name }}-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: sandbox-redis-sentinel
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-redis-sentinel
+        release: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        kubernetes.io/os: linux
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: sandbox-redis-sentinel
+                  release: {{ .Release.Name }}
+      initContainers:
+        - name: prepare
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/app/redis-bootstrap]
+          args: [prepare-pod]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER, DAC_OVERRIDE]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: POD_ORDINAL
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: identity-source
+              mountPath: /identity-source/seed
+              subPathExpr: $(POD_NAME)
+              readOnly: true
+            - name: identity-public
+              mountPath: /identity-public
+              readOnly: true
+            - name: identity-private
+              mountPath: /identity-private
+            - name: redis-tools
+              mountPath: /redis-tools
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+        - name: identity
+          restartPolicy: Always
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/app/redis-bootstrap]
+          args:
+            - attestor
+            - {{ printf "-master-name=%s" .Values.redis.sentinel.masterName | quote }}
+          securityContext:
+            {{- include "sandbox.sentinelProcessSecurity" . | nindent 12 }}
+          env:
+            {{- include "sandbox.sentinelIdentityEnv" . | nindent 12 }}
+          ports:
+            - name: identity
+              containerPort: 18080
+          startupProbe:
+            httpGet: {path: /healthz, port: identity}
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: identity}
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: bootstrap
+              mountPath: /bootstrap
+              readOnly: true
+            - name: identity-public
+              mountPath: /identity-public
+              readOnly: true
+            - name: identity-private
+              mountPath: /identity-private
+              readOnly: true
+          resources:
+            {{- toYaml .Values.redis.sentinel.identityResources | nindent 12 }}
+      containers:
+        {{- range $process := list "redis" "sentinel" }}
+        - name: {{ $process }}
+          image: "{{ $.Values.redis.image.repository }}:{{ $.Values.redis.image.tag }}"
+          imagePullPolicy: {{ $.Values.redis.image.pullPolicy }}
+          command: [/redis-tools/redis-bootstrap]
+          args:
+            - {{ $process }}
+            - {{ printf "-master-name=%s" $.Values.redis.sentinel.masterName | quote }}
+            - {{ printf "-timeout=%ds" (int $.Values.redis.sentinel.startupTimeoutSeconds) | quote }}
+            - {{ printf "-down-after-milliseconds=%d" (int $.Values.redis.sentinel.downAfterMilliseconds) | quote }}
+            - {{ printf "-failover-timeout-milliseconds=%d" (int $.Values.redis.sentinel.failoverTimeoutMilliseconds) | quote }}
+            - {{ printf "-parallel-syncs=%d" (int $.Values.redis.sentinel.parallelSyncs) | quote }}
+          securityContext:
+            {{- include "sandbox.sentinelProcessSecurity" $ | nindent 12 }}
+          env:
+            {{- include "sandbox.sentinelProcessEnv" $ | nindent 12 }}
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.redis.sentinel.existingSecret | default (printf "%s-redis" $.Release.Name) | quote }}
+                  key: {{ ternary $.Values.redis.sentinel.dataPasswordKey $.Values.redis.sentinel.sentinelPasswordKey (eq $process "redis") | quote }}
+            - name: MASTER_NAME
+              value: {{ $.Values.redis.sentinel.masterName | quote }}
+          ports:
+            - name: {{ $process }}
+              containerPort: {{ ternary 6379 26379 (eq $process "redis") }}
+          startupProbe:
+            exec:
+              command: [redis-cli, -p, {{ ternary "6379" "26379" (eq $process "redis") | quote }}, ping]
+            periodSeconds: 2
+            failureThreshold: {{ add (div (int $.Values.redis.sentinel.startupTimeoutSeconds) 2) 30 }}
+          livenessProbe:
+            exec:
+              command: [redis-cli, -p, {{ ternary "6379" "26379" (eq $process "redis") | quote }}, ping]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                {{- if eq $process "redis" }}
+                - 'info=$(redis-cli --raw info replication | tr -d "\r"); if printf "%s\n" "$info" | grep -qx "role:master"; then printf "%s\n" "$info" | grep -Eq "^connected_slaves:[12]$"; else printf "%s\n" "$info" | grep -qx "role:slave" && printf "%s\n" "$info" | grep -qx "master_link_status:up" && printf "%s\n" "$info" | grep -qx "master_sync_in_progress:0"; fi'
+                {{- else }}
+                - 'redis-cli --raw -p 26379 sentinel ckquorum "$MASTER_NAME" | grep -q "^OK"'
+                {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: bootstrap
+              mountPath: /bootstrap
+              readOnly: true
+            - name: identity-public
+              mountPath: /identity-public
+              readOnly: true
+            - name: redis-tools
+              mountPath: /redis-tools
+              readOnly: true
+          resources:
+            {{- toYaml (ternary $.Values.redis.resources $.Values.redis.sentinel.resources (eq $process "redis")) | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: {{ $name }}-state
+        - name: identity-source
+          secret:
+            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            defaultMode: 256
+        - name: identity-public
+          secret:
+            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            items:
+              - key: public-keys.json
+                path: public-keys.json
+        - name: identity-private
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: redis-tools
+          emptyDir: {sizeLimit: 64Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.redis.persistence.storageClass }}
+        storageClassName: {{ .Values.redis.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: sandbox-redis-sentinel
+      release: {{ .Release.Name }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-initialize
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-initialize
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-state" $name | quote }}]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-initialize
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-initialize
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-initialize
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sandbox.sentinelJobName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-redis-bootstrap
+    release: {{ .Release.Name }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int .Values.redis.sentinel.initializeTimeoutSeconds) 30 }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: sandbox-redis-bootstrap
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ $name }}-initialize
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: initialize
+          image: {{ include "sandbox.apiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/app/redis-bootstrap]
+          args:
+            - initialize
+            - {{ printf "-state-configmap=%s-state" $name | quote }}
+            - {{ printf "-master-name=%s" .Values.redis.sentinel.masterName | quote }}
+            - {{ printf "-timeout=%ds" (int .Values.redis.sentinel.initializeTimeoutSeconds) | quote }}
+            - {{ printf "-ack-timeout=%dms" (int .Values.redis.sentinel.ackTimeoutMs) | quote }}
+          securityContext:
+            {{- include "sandbox.sentinelProcessSecurity" . | nindent 12 }}
+          env:
+            {{- include "sandbox.sentinelAuthEnv" . | nindent 12 }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: identity-public
+              mountPath: /identity-public
+              readOnly: true
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+      volumes:
+        - name: identity-public
+          secret:
+            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            items:
+              - key: public-keys.json
+                path: public-keys.json
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-redis-sentinel
+      release: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              release: {{ .Release.Name }}
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [sandbox, sandbox-drain, sandbox-redis-sentinel, sandbox-redis-bootstrap]
+      ports:
+        - {protocol: TCP, port: 6379}
+        - {protocol: TCP, port: 26379}
+    - from:
+        - podSelector:
+            matchLabels:
+              release: {{ .Release.Name }}
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [sandbox-redis-sentinel, sandbox-redis-bootstrap]
+      ports:
+        - {protocol: TCP, port: 18080}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: sandbox-redis-sentinel
+              release: {{ .Release.Name }}
+      ports:
+        - {protocol: TCP, port: 6379}
+        - {protocol: TCP, port: 26379}
+        - {protocol: TCP, port: 18080}
+    # DNS 允许集群 DNS/NodeLocal/云 VPC DNS，不绑定某一种 CNI 或 kube-system 标签。
+    - ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}

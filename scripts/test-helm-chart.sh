@@ -180,3 +180,4 @@ if helm lint "$repo_root/deploy/helm/sandbox" \
 fi
 helm lint "$repo_root/deploy/helm/sandbox"
 printf 'helm chart tests: PASS\n'
+go test -tags helmtests ./internal/helmtest -count=1

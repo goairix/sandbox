@@ -1,4 +1,4 @@
-{{- if .Values.redis.enabled }}
+{{- if and .Values.redis.enabled (ne .Values.redis.mode "sentinel") }}
 apiVersion: v1
 kind: Service
 metadata:

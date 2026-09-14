@@ -2,11 +2,7 @@
 {{- include "sandbox.validateAppArmorLoader" . }}
 {{- include "sandbox.validateNetworkCIDRs" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
-{{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled }}
-{{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled }}
-{{- $redisDB := ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled }}
-{{- $redisMode := ternary "standalone" .Values.redis.external.mode .Values.redis.enabled }}
-{{- $redisDurability := ternary "best_effort" .Values.redis.external.durability .Values.redis.enabled }}
+{{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
 {{- $provider := include "sandbox.backend.provider" . }}
 apiVersion: apps/v1
@@ -42,7 +38,7 @@ spec:
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       serviceAccountName: {{ .Release.Name }}-api
-      {{- if .Values.redis.enabled }}
+      {{- if and .Values.redis.enabled (not $builtinSentinel) }}
       initContainers:
         - name: wait-for-redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
@@ -116,50 +112,7 @@ spec:
               value: "{{ .Values.config.images.sandbox }}"
             - name: SANDBOX_IMAGES_GATEWAY
               value: "{{ .Values.config.images.gateway }}"
-            - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
-              value: "{{ $redisAddr }}"
-            - name: SANDBOX_STORAGE_STATE_REDIS_MODE
-              value: {{ $redisMode | quote }}
-            {{- if and (not .Values.redis.enabled) .Values.redis.external.addrs }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
-              value: {{ join "," .Values.redis.external.addrs | quote }}
-            {{- end }}
-            {{- if and (not .Values.redis.enabled) .Values.redis.external.masterName }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
-              value: {{ .Values.redis.external.masterName | quote }}
-            {{- end }}
-            {{- if and (not .Values.redis.enabled) .Values.redis.external.username }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_USERNAME
-              value: {{ .Values.redis.external.username | quote }}
-            {{- end }}
-            {{- if $redisPassword }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ printf "%s-redis" .Release.Name }}
-                  key: password
-            {{- end }}
-            {{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelUsername }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_USERNAME
-              value: {{ .Values.redis.external.sentinelUsername | quote }}
-            {{- end }}
-            {{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelPassword }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ printf "%s-redis" .Release.Name }}
-                  key: sentinel-password
-            {{- end }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_DB
-              value: "{{ $redisDB }}"
-            - name: SANDBOX_STORAGE_STATE_REDIS_DURABILITY
-              value: {{ $redisDurability | quote }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA
-              value: {{ ternary false .Values.redis.external.requireHA .Values.redis.enabled | quote }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
-              value: {{ ternary 1 (.Values.redis.external.ackReplicas | int) .Values.redis.enabled | quote }}
-            - name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
-              value: {{ ternary 100 (.Values.redis.external.ackTimeoutMs | int) .Values.redis.enabled | quote }}
+{{ include "sandbox.redisEnv" . | nindent 12 }}
             - name: SANDBOX_STORAGE_STATE_REDIS_POOL_SIZE
               value: {{ ternary 0 (.Values.redis.external.poolSize | int) .Values.redis.enabled | quote }}
             - name: SANDBOX_STORAGE_STATE_REDIS_MIN_IDLE_CONNS
@@ -307,6 +260,15 @@ spec:
             - name: SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT
               value: "{{ .Values.config.telemetry.log.otlpEndpoint }}"
             {{- end }}
+          {{- if $builtinSentinel }}
+          volumeMounts:
+            - name: redis-bootstrap
+              mountPath: /bootstrap
+              readOnly: true
+            - name: redis-public
+              mountPath: /identity-public
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if .Values.startupProbe.enabled }}
@@ -316,7 +278,7 @@ spec:
               port: {{ .Values.config.server.port }}
             periodSeconds: {{ .Values.startupProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
-            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            failureThreshold: {{ include "sandbox.apiStartupFailureThreshold" . }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -330,3 +292,15 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
+      {{- if $builtinSentinel }}
+      volumes:
+        - name: redis-bootstrap
+          configMap:
+            name: {{ include "sandbox.sentinelName" . }}-state
+        - name: redis-public
+          secret:
+            secretName: {{ .Values.redis.sentinel.identitySecretName | quote }}
+            items:
+              - key: public-keys.json
+                path: public-keys.json
+      {{- end }}

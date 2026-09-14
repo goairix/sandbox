@@ -213,6 +213,9 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if err := waitForRedisBootstrap(ctx, cfg.Storage.State.Redis, *drainRelease || *auditOwners || *recoverOwnerHash != ""); err != nil {
+		log.Fatalf("Redis initialization gate failed: %v", err)
+	}
 
 	fuseEnabled := cfg.Workspace.MountModeEnabled("fuse")
 	fuseCredentials, err := loadRuntimeFUSECredentials(cfg)
@@ -265,7 +268,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to create redis state store: %v", err)
 		}
-		defer redisStore.Close()
+		defer func() {
+			if closeErr := redisStore.Close(); closeErr != nil {
+				log.Print("Redis state store cleanup failed")
+			}
+		}()
 		var _ state.AtomicStore = redisStore
 	}
 

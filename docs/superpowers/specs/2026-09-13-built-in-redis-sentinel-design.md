@@ -25,6 +25,7 @@
 - 配置 Sentinel requirepass/sentinel-pass（客户端及 Sentinel 相互认证）和 auth-pass（访问 Redis），以及 Redis requirepass/masterauth；四条链路均验证，不只给 API 加一个密码。引用 Secret 时同一引用传给 API、初始化、Redis/Sentinel 和 drain；外部 Redis/Sentinel 允许使用不同密码，Secret 各键明确区分。
 - 探针/初始化用 REDISCLI_AUTH 或私有配置文件传递凭据，不把密码放 redis-cli 命令参数或日志；私有配置文件只允许服务用户读取。配置生成必须按 Redis 配置语法转义引号、反斜杠和空白，拒绝 NUL/控制字符，测试带特殊字符的真实认证，不拼接不可信 shell。
 - 上述转义不能修复 Redis 自身后续重写的缺陷：Redis 7.4 及 8.2 的 [Sentinel rewrite](https://github.com/redis/redis/blob/7.4/src/sentinel.c) 对 auth-pass/sentinel-pass 使用未引用的原值。内置模式先保守限定管理/数据密码为至少 32 字节的 ASCII 安全 token（字母、数字、`_`、`-`），不接受空格或引号等会在重写后改变解析的值，不悄悄变换用户密码。外部客户端的特殊字符密码支持不变；已有真实 fixture 的首次认证成功不能证明 Sentinel 重写后的冷恢复，必须额外运行持久配置重启验收。不能将手工引用的测试字符串冒充 Redis 真实 rewrite 输出。
+- 实现验收补充：内置模式两密码必须为不同值，长度均为32~256字节，已有认证 Secret 也在进程启动时验证。否则交叉认证不能被拒绝，无法证明认证链路独立。仍允许同一个 Secret 的不同键；不更改外部 Redis 的既有兼容行为。
 - 启用 resolve-hostnames/announce-hostnames，并显式配置各 Redis 的 replica-announce-ip 和 Sentinel 的 announce-ip 为稳定 Pod DNS；所有成员统一使用 DNS，不仅在 Service 上设置一个名称。测试 client hostname 兼容及 Pod IP 变化，不能继续持久化旧 Pod IP。
 
 ## 首次启动及重启恢复
@@ -65,6 +66,7 @@
 
 - 抽取有效 Redis 连接配置供 API deployment、API 等待 Redis、pre-delete drain 和离线 pre-upgrade drain 共用；mode/addrs/masterName/认证/HA/ACK 必须一致且 env 名称唯一。
 - pre-upgrade 已安装 deployment lookup 的环境保留逻辑继续使用旧实际配置，不强行切到尚未创建的新拓扑；新用户本次采用重装，不据此删除原有升级安全 hook。
+- 内置 Sentinel 的 pre-rollback 静态拒绝历史状态重放：Helm rollback 不重新 lookup，会用首版 Pending manifest覆盖Initialized登记。需要应用版本变化只能 forward upgrade，不使用 `--atomic`；standalone/external 的既有同backend rollback行为不变。本次不执行线上回滚。
 - productionSafetyChecks 接受满足约束的内置 Sentinel，继续拒绝内置 standalone、best_effort 和缺失必要认证/持久化条件；外部 HA 检查保持有效。
 - standalone 默认渲染不产生 Sentinel、额外 PVC 或拓扑变化；external 模式不产生内置服务。新增配置注释、示例和 native config 同步，避免只在 Chart 增加字段。
 

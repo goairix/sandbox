@@ -2,6 +2,35 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "redis": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "mode": {"enum": ["standalone", "sentinel"]},
+        "sentinel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["masterName", "clusterDomain", "identitySecretName", "existingSecret", "dataPasswordKey", "sentinelPasswordKey", "password", "startupTimeoutSeconds", "initializeTimeoutSeconds", "ackTimeoutMs", "downAfterMilliseconds", "failoverTimeoutMilliseconds", "parallelSyncs", "resources", "identityResources"],
+          "properties": {
+            "masterName": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+            "clusterDomain": {"type": "string", "maxLength": 128, "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"},
+            "identitySecretName": {"type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"},
+            "existingSecret": {"type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"},
+            "dataPasswordKey": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9_.-]+$"},
+            "sentinelPasswordKey": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9_.-]+$"},
+            "password": {"type": "string"},
+            "startupTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
+            "initializeTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 720},
+            "ackTimeoutMs": {"type": "integer", "minimum": 1000, "maximum": 10000},
+            "downAfterMilliseconds": {"type": "integer", "minimum": 1000, "maximum": 60000},
+            "failoverTimeoutMilliseconds": {"type": "integer", "minimum": 2000, "maximum": 600000},
+            "parallelSyncs": {"type": "integer", "minimum": 1, "maximum": 2},
+            "resources": {"type": "object"},
+            "identityResources": {"type": "object"}
+          }
+        }
+      }
+    },
     "apparmorLoader": {
       "type": "object",
       "additionalProperties": false,

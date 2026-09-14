@@ -96,25 +96,27 @@ type StateStorageConfig struct {
 
 // RedisConfig holds Redis connection settings.
 type RedisConfig struct {
-	Mode             string   `mapstructure:"mode"`
-	Addr             string   `mapstructure:"addr"`
-	Addrs            []string `mapstructure:"addrs"`
-	MasterName       string   `mapstructure:"master_name"`
-	Username         string   `mapstructure:"username"`
-	Password         string   `mapstructure:"password"`
-	SentinelUsername string   `mapstructure:"sentinel_username"`
-	SentinelPassword string   `mapstructure:"sentinel_password"`
-	DB               int      `mapstructure:"db"`
-	Durability       string   `mapstructure:"durability"`
-	RequireHA        bool     `mapstructure:"require_ha"`
-	AckReplicas      int      `mapstructure:"ack_replicas"`
-	AckTimeoutMS     int      `mapstructure:"ack_timeout_ms"`
-	PoolSize         int      `mapstructure:"pool_size"`
-	MinIdleConns     int      `mapstructure:"min_idle_conns"`
-	DialTimeoutMS    int      `mapstructure:"dial_timeout_ms"`
-	ReadTimeoutMS    int      `mapstructure:"read_timeout_ms"`
-	WriteTimeoutMS   int      `mapstructure:"write_timeout_ms"`
-	MaxRetries       int      `mapstructure:"max_retries"`
+	Mode                    string   `mapstructure:"mode"`
+	Addr                    string   `mapstructure:"addr"`
+	Addrs                   []string `mapstructure:"addrs"`
+	MasterName              string   `mapstructure:"master_name"`
+	Username                string   `mapstructure:"username"`
+	Password                string   `mapstructure:"password"`
+	SentinelUsername        string   `mapstructure:"sentinel_username"`
+	SentinelPassword        string   `mapstructure:"sentinel_password"`
+	BootstrapStateDirectory string   `mapstructure:"bootstrap_state_directory"`
+	BootstrapPublicKeysFile string   `mapstructure:"bootstrap_public_keys_file"`
+	DB                      int      `mapstructure:"db"`
+	Durability              string   `mapstructure:"durability"`
+	RequireHA               bool     `mapstructure:"require_ha"`
+	AckReplicas             int      `mapstructure:"ack_replicas"`
+	AckTimeoutMS            int      `mapstructure:"ack_timeout_ms"`
+	PoolSize                int      `mapstructure:"pool_size"`
+	MinIdleConns            int      `mapstructure:"min_idle_conns"`
+	DialTimeoutMS           int      `mapstructure:"dial_timeout_ms"`
+	ReadTimeoutMS           int      `mapstructure:"read_timeout_ms"`
+	WriteTimeoutMS          int      `mapstructure:"write_timeout_ms"`
+	MaxRetries              int      `mapstructure:"max_retries"`
 }
 
 // FileSystemConfig holds filesystem storage settings.
@@ -514,6 +516,16 @@ func validateRedisConfig(redis RedisConfig, required bool) error {
 	if redis.AckReplicas < 0 || redis.AckTimeoutMS < 0 || redis.PoolSize < 0 || redis.MinIdleConns < 0 || redis.MaxRetries < 0 ||
 		redis.DialTimeoutMS < 0 || redis.ReadTimeoutMS < 0 || redis.WriteTimeoutMS < 0 {
 		return fmt.Errorf("config: storage.state.redis timeout, pool, retry, and acknowledgement values are invalid")
+	}
+	if redis.BootstrapStateDirectory != "" || redis.BootstrapPublicKeysFile != "" {
+		for _, path := range []string{redis.BootstrapStateDirectory, redis.BootstrapPublicKeysFile} {
+			if !filepath.IsAbs(path) || filepath.Clean(path) == string(filepath.Separator) {
+				return fmt.Errorf("config: Redis bootstrap gate requires explicit state directory and public key file")
+			}
+		}
+		if mode != "sentinel" || durability != "replica_ack" || !redis.RequireHA || redis.AckReplicas != 1 || len(addresses) != 3 {
+			return fmt.Errorf("config: Redis bootstrap gate requires three Sentinel members, require_ha and replica_ack with ack_replicas=1")
+		}
 	}
 	return nil
 }
@@ -952,6 +964,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.state.redis.password", "")
 	v.SetDefault("storage.state.redis.sentinel_username", "")
 	v.SetDefault("storage.state.redis.sentinel_password", "")
+	v.SetDefault("storage.state.redis.bootstrap_state_directory", "")
+	v.SetDefault("storage.state.redis.bootstrap_public_keys_file", "")
 	v.SetDefault("storage.state.redis.db", 0)
 	v.SetDefault("storage.state.redis.durability", "best_effort")
 	v.SetDefault("storage.state.redis.require_ha", false)

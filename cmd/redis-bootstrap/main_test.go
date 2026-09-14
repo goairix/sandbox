@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,6 +21,18 @@ func TestAttestorHelp(t *testing.T) {
 	var output bytes.Buffer
 	if err := run(context.Background(), []string{"attestor", "--help"}, &output); err != nil || output.Len() == 0 {
 		t.Fatalf("missing safe help: %v", err)
+	}
+}
+
+func TestBuiltinSentinelRollbackGuardIsStaticAndAlwaysDenied(t *testing.T) {
+	t.Setenv("REDIS_PASSWORD", "secret_environment_do_not_echo")
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"deny-rollback"}, &output); err == nil || !strings.Contains(output.String(), "use helm upgrade") || strings.Contains(output.String(), "secret_environment") {
+		t.Fatal("rollback must be denied with static forward-upgrade guidance, without environment or state access")
+	}
+	output.Reset()
+	if err := run(context.Background(), []string{"deny-rollback", "secret_argument_do_not_echo"}, &output); err == nil || output.Len() != 0 {
+		t.Fatal("rollback guard must reject and not echo extra arguments")
 	}
 }
 
@@ -315,5 +328,49 @@ func TestAttestorReadsRealMemberFiles(t *testing.T) {
 	})
 	if err != nil || !called || output.Len() != 0 {
 		t.Fatalf("fixed member runtime not started: %v", err)
+	}
+}
+
+func TestAttestorOrdinalEnvironmentFallbackAndExplicitOverride(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(strconv.FormatBool(explicit), func(t *testing.T) {
+			args, c, _ := attestorFiles(t)
+			if explicit {
+				t.Setenv("POD_ORDINAL", "2")
+			} else {
+				t.Setenv("POD_ORDINAL", "1")
+				filtered := []string{args[0]}
+				for i := 1; i < len(args); i += 2 {
+					if args[i] != "-ordinal" {
+						filtered = append(filtered, args[i], args[i+1])
+					}
+				}
+				args = filtered
+			}
+			called := false
+			err := runWithServer(context.Background(), args, &bytes.Buffer{}, func(ctx context.Context, o redisbootstrap.IdentityServerOptions) error {
+				called = true
+				if o.Observer.Member.Ordinal != 1 || o.Observer.Member.DNS != c.Members[1] {
+					t.Fatal("ordinal fallback/override selected wrong fixed member")
+				}
+				return nil
+			})
+			if err != nil || !called {
+				t.Fatal("backward-compatible attestor ordinal failed", err)
+			}
+		})
+	}
+}
+
+func TestAttestorRejectsMalformedOrdinalEnvironment(t *testing.T) {
+	for _, value := range []string{"", "01", "+1", "3", "-1", "1\n"} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			t.Setenv("POD_ORDINAL", value)
+			called := false
+			var output bytes.Buffer
+			if err := runWithServer(context.Background(), []string{"attestor", "-data-dir", "/missing-test-PVC", "-private-seed-file", "/missing-test-seed"}, &output, func(context.Context, redisbootstrap.IdentityServerOptions) error { called = true; return nil }); !errors.Is(err, errArguments) || called || output.Len() != 0 {
+				t.Fatal("malformed ordinal env reached file loading/server", err)
+			}
+		})
 	}
 }

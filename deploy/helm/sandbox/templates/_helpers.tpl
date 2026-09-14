@@ -63,33 +63,193 @@
 {{- end -}}
 
 {{- define "sandbox.validateRedis" -}}
+{{- if .Values.redis.enabled -}}
+{{- if not (has .Values.redis.mode (list "standalone" "sentinel")) -}}{{ fail "redis.mode must be standalone or sentinel" }}{{- end -}}
+{{- if eq .Values.redis.mode "sentinel" -}}
+{{- if or (not (kindIs "bool" .Values.startupProbe.enabled)) (not .Values.startupProbe.enabled) -}}{{ fail "built-in Sentinel requires the API startup probe" }}{{- end -}}
+{{- range $key := list "periodSeconds" "timeoutSeconds" "failureThreshold" -}}
+{{- $value := index $.Values.startupProbe $key -}}
+{{- $maximum := ternary 2147483647 60 (eq $key "failureThreshold") -}}
+{{- if or (not (regexMatch "^[0-9]+$" (printf "%v" $value))) (lt (int64 $value) 1) (gt (int64 $value) (int64 $maximum)) -}}{{ fail "built-in Sentinel API startup probe requires bounded positive integers" }}{{- end -}}
+{{- end -}}
+{{- if lt (int .Values.redis.sentinel.failoverTimeoutMilliseconds) (mul 2 (int .Values.redis.sentinel.downAfterMilliseconds)) -}}{{ fail "Sentinel failover timeout must be at least twice down-after threshold" }}{{- end -}}
+{{- if not .Values.redis.persistence.enabled -}}{{ fail "built-in Sentinel requires persistence" }}{{- end -}}
+{{- if gt (len .Release.Name) 39 -}}{{ fail "built-in Sentinel release name must not exceed 39 characters" }}{{- end -}}
+{{- if not (semverCompare ">=1.33.0-0" .Capabilities.KubeVersion.Version) -}}{{ fail "built-in Sentinel requires Kubernetes >=1.33" }}{{- end -}}
+{{- if empty .Values.redis.sentinel.identitySecretName -}}{{ fail "redis.sentinel.identitySecretName is required; create an immutable identity Secret first" }}{{- end -}}
+{{- if empty .Values.redis.sentinel.existingSecret -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.password) -}}{{ fail "built-in Sentinel data password must be a 32-256 character safe token" }}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.sentinel.password) -}}{{ fail "built-in Sentinel password must be a 32-256 character safe token" }}{{- end -}}
+{{- if eq .Values.redis.password .Values.redis.sentinel.password -}}{{ fail "built-in Sentinel requires separate data and Sentinel passwords" }}{{- end -}}
+{{- end -}}
+{{- if eq .Values.redis.sentinel.dataPasswordKey .Values.redis.sentinel.sentinelPasswordKey -}}{{ fail "built-in Sentinel authentication Secret keys must differ" }}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.productionSafetyChecks -}}
-  {{- if .Values.redis.enabled -}}{{- fail "productionSafetyChecks requires external HA Redis" -}}{{- end -}}
-  {{- if not .Values.redis.external.requireHA -}}{{- fail "productionSafetyChecks requires redis.external.requireHA" -}}{{- end -}}
+  {{- if and .Values.redis.enabled (ne .Values.redis.mode "sentinel") -}}{{- fail "productionSafetyChecks requires external HA Redis or built-in Sentinel" -}}{{- end -}}
+  {{- if and (not .Values.redis.enabled) (not .Values.redis.external.requireHA) -}}{{- fail "productionSafetyChecks requires redis.external.requireHA" -}}{{- end -}}
   {{- if .Values.config.workspace.allowMissingLSMForKind -}}{{- fail "productionSafetyChecks forbids allowMissingLSMForKind" -}}{{- end -}}
   {{- $lsm := lower (trim (include "sandbox.effectiveLSMProfile" .)) -}}
   {{- if or (empty $lsm) (eq $lsm "unconfined") (eq $lsm "label=disable") -}}
     {{- fail "productionSafetyChecks requires a confined config.workspace.lsmProfile" -}}
   {{- end -}}
 {{- end -}}
+
 {{- if not .Values.redis.enabled -}}
-  {{- $mode := .Values.redis.external.mode | default "standalone" -}}
-  {{- if and (ne $mode "sentinel") (not (empty .Values.redis.external.masterName)) -}}
-    {{- fail "redis.external.masterName is only valid in sentinel mode" -}}
-  {{- end -}}
-  {{- if and (eq $mode "cluster") (ne (int .Values.redis.external.db) 0) -}}
-    {{- fail "redis.external.db must be 0 in cluster mode" -}}
-  {{- end -}}
-  {{- if and (eq $mode "sentinel") (empty .Values.redis.external.masterName) -}}
-    {{- fail "redis.external.masterName is required in sentinel mode" -}}
-  {{- end -}}
-  {{- if .Values.redis.external.requireHA -}}
-    {{- if eq $mode "standalone" -}}{{- fail "redis.external.requireHA rejects standalone mode" -}}{{- end -}}
-    {{- if eq (.Values.redis.external.durability | default "best_effort") "best_effort" -}}{{- fail "redis.external.requireHA rejects best_effort durability" -}}{{- end -}}
-  {{- end -}}
+{{- $mode := .Values.redis.external.mode | default "standalone" -}}
+{{- if and (ne $mode "sentinel") (not (empty .Values.redis.external.masterName)) -}}{{ fail "redis.external.masterName is only valid in sentinel mode" }}{{- end -}}
+{{- if and (eq $mode "cluster") (ne (int .Values.redis.external.db) 0) -}}{{ fail "redis.external.db must be 0 in cluster mode" }}{{- end -}}
+{{- if and (eq $mode "sentinel") (empty .Values.redis.external.masterName) -}}{{ fail "redis.external.masterName is required in sentinel mode" }}{{- end -}}
+{{- if .Values.redis.external.requireHA -}}
+{{- if eq $mode "standalone" -}}{{ fail "redis.external.requireHA rejects standalone mode" }}{{- end -}}
+{{- if eq (.Values.redis.external.durability | default "best_effort") "best_effort" -}}{{ fail "redis.external.requireHA rejects best_effort durability" }}{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
+{{- define "sandbox.builtinSentinel" -}}
+{{- if and .Values.redis.enabled (eq .Values.redis.mode "sentinel") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "sandbox.sentinelName" -}}{{ printf "%s-redis-sentinel" .Release.Name }}{{- end -}}
+{{- define "sandbox.apiStartupFailureThreshold" -}}
+{{- $threshold := int .Values.startupProbe.failureThreshold -}}
+{{- if eq (include "sandbox.builtinSentinel" .) "true" -}}
+{{- $period := int .Values.startupProbe.periodSeconds -}}
+{{- $budget := add (max 600 (int .Values.redis.sentinel.initializeTimeoutSeconds)) 180 -}}
+{{- /* Extra one probe accounts for the first failure occurring immediately. */ -}}
+{{- $threshold = max $threshold (add 1 (div (add $budget (sub $period 1)) $period)) -}}
+{{- end -}}
+{{- $threshold -}}
+{{- end -}}
+{{- define "sandbox.sentinelJobName" -}}
+{{- $memberName := include "sandbox.sentinelName" . -}}
+{{- $revision := printf "%d" (int .Release.Revision) -}}
+{{- $full := printf "%s-initialize-%s" $memberName $revision -}}
+{{- if le (len $full) 63 -}}{{ $full }}
+{{- else -}}
+{{- printf "%s-redis-init-%s-%s" (.Release.Name | trunc 20 | trimSuffix "-") ($memberName | sha256sum | trunc 10) $revision -}}
+{{- end -}}
+{{- end -}}
+{{- define "sandbox.sentinelMembers" -}}
+{{- $name := include "sandbox.sentinelName" . -}}
+{{- $members := list -}}
+{{- range $ordinal := until 3 -}}
+{{- $members = append $members (printf "%s-%d.%s-headless.%s.svc.%s" $name $ordinal $name $.Release.Namespace $.Values.redis.sentinel.clusterDomain) -}}
+{{- end -}}
+{{- $members | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.redisEnv" -}}
+{{- $sentinel := eq (include "sandbox.builtinSentinel" .) "true" -}}
+{{- $ext := .Values.redis.external -}}
+{{- $authSecret := printf "%s-redis" .Release.Name -}}
+{{- if $sentinel -}}{{- $authSecret = .Values.redis.sentinel.existingSecret | default $authSecret -}}{{- end -}}
+- name: SANDBOX_STORAGE_STATE_REDIS_ADDR
+  value: {{ ternary "" (ternary (printf "%s-redis:6379" .Release.Name) $ext.addr .Values.redis.enabled) $sentinel | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_MODE
+  value: {{ ternary "sentinel" (ternary "standalone" $ext.mode .Values.redis.enabled) $sentinel | quote }}
+{{- if $sentinel }}
+{{- $addrs := list }}
+{{- range $member := include "sandbox.sentinelMembers" . | fromJsonArray }}
+{{- $addrs = append $addrs (printf "%s:26379" $member) }}
+{{- end }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
+  value: {{ join "," $addrs | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
+  value: {{ .Values.redis.sentinel.masterName | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_BOOTSTRAP_STATE_DIRECTORY
+  value: /bootstrap
+- name: SANDBOX_STORAGE_STATE_REDIS_BOOTSTRAP_PUBLIC_KEYS_FILE
+  value: /identity-public/public-keys.json
+{{- else if not .Values.redis.enabled }}
+{{- if $ext.addrs }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
+  value: {{ join "," $ext.addrs | quote }}
+{{- end }}
+{{- if $ext.masterName }}
+- name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
+  value: {{ $ext.masterName | quote }}
+{{- end }}
+{{- if $ext.username }}
+- name: SANDBOX_STORAGE_STATE_REDIS_USERNAME
+  value: {{ $ext.username | quote }}
+{{- end }}
+{{- if $ext.sentinelUsername }}
+- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_USERNAME
+  value: {{ $ext.sentinelUsername | quote }}
+{{- end }}
+{{- end }}
+{{- if or $sentinel (ternary .Values.redis.password $ext.password .Values.redis.enabled) }}
+- name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $authSecret | quote }}
+      key: {{ ternary .Values.redis.sentinel.dataPasswordKey "password" $sentinel | quote }}
+{{- end }}
+{{- if or $sentinel (and (not .Values.redis.enabled) $ext.sentinelPassword) }}
+- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $authSecret | quote }}
+      key: {{ ternary .Values.redis.sentinel.sentinelPasswordKey "sentinel-password" $sentinel | quote }}
+{{- end }}
+- name: SANDBOX_STORAGE_STATE_REDIS_DB
+  value: {{ ternary 0 (int $ext.db) .Values.redis.enabled | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_DURABILITY
+  value: {{ ternary "replica_ack" (ternary "best_effort" $ext.durability .Values.redis.enabled) $sentinel | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA
+  value: {{ ternary true (ternary false $ext.requireHA .Values.redis.enabled) $sentinel | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
+  value: {{ ternary 1 (int $ext.ackReplicas) .Values.redis.enabled | quote }}
+- name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
+  value: {{ ternary (int .Values.redis.sentinel.ackTimeoutMs) (ternary 100 (int $ext.ackTimeoutMs) .Values.redis.enabled) $sentinel | quote }}
+{{- end -}}
+
+{{- define "sandbox.sentinelProcessEnv" -}}
+- name: POD_ORDINAL
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{ include "sandbox.sentinelAuthEnv" . }}
+{{- end -}}
+
+{{- define "sandbox.sentinelAuthEnv" -}}
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ .Values.redis.sentinel.dataPasswordKey | quote }}
+- name: REDIS_SENTINEL_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ .Values.redis.sentinel.sentinelPasswordKey | quote }}
+{{- end -}}
+
+{{- define "sandbox.sentinelIdentityEnv" -}}
+- name: POD_ORDINAL
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ .Values.redis.sentinel.dataPasswordKey | quote }}
+{{- end -}}
+
+{{- define "sandbox.sentinelProcessSecurity" -}}
+runAsUser: 999
+runAsGroup: 999
+runAsNonRoot: true
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities:
+  drop: [ALL]
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}
 {{- define "sandbox.backend.fingerprint" -}}
 {{- $filesystem := .Values.config.storage.filesystem -}}
 {{- $contract := dict
@@ -117,10 +277,6 @@
 
 {{- define "sandbox.drainEnv" -}}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace -}}
-{{- $redisAddr := ternary (printf "%s-redis:6379" .Release.Name) .Values.redis.external.addr .Values.redis.enabled -}}
-{{- $redisPassword := ternary .Values.redis.password .Values.redis.external.password .Values.redis.enabled -}}
-{{- $redisMode := ternary "standalone" .Values.redis.external.mode .Values.redis.enabled -}}
-{{- $redisDurability := ternary "best_effort" .Values.redis.external.durability .Values.redis.enabled -}}
 - name: SANDBOX_RUNTIME_TYPE
   value: {{ .Values.config.runtime.type | quote }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
@@ -136,50 +292,7 @@
   value: {{ .Values.config.images.sandbox | quote }}
 - name: SANDBOX_IMAGES_GATEWAY
   value: {{ .Values.config.images.gateway | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_ADDR
-  value: {{ $redisAddr | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_MODE
-  value: {{ $redisMode | quote }}
-{{- if and (not .Values.redis.enabled) .Values.redis.external.addrs }}
-- name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
-  value: {{ join "," .Values.redis.external.addrs | quote }}
-{{- end }}
-{{- if and (not .Values.redis.enabled) .Values.redis.external.masterName }}
-- name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
-  value: {{ .Values.redis.external.masterName | quote }}
-{{- end }}
-{{- if and (not .Values.redis.enabled) .Values.redis.external.username }}
-- name: SANDBOX_STORAGE_STATE_REDIS_USERNAME
-  value: {{ .Values.redis.external.username | quote }}
-{{- end }}
-{{- if $redisPassword }}
-- name: SANDBOX_STORAGE_STATE_REDIS_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: {{ printf "%s-redis" .Release.Name }}
-      key: password
-{{- end }}
-{{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelUsername }}
-- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_USERNAME
-  value: {{ .Values.redis.external.sentinelUsername | quote }}
-{{- end }}
-{{- if and (not .Values.redis.enabled) .Values.redis.external.sentinelPassword }}
-- name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: {{ printf "%s-redis" .Release.Name }}
-      key: sentinel-password
-{{- end }}
-- name: SANDBOX_STORAGE_STATE_REDIS_DB
-  value: {{ ternary 0 (.Values.redis.external.db | int) .Values.redis.enabled | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_DURABILITY
-  value: {{ $redisDurability | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_REQUIRE_HA
-  value: {{ ternary false .Values.redis.external.requireHA .Values.redis.enabled | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
-  value: {{ ternary 1 (.Values.redis.external.ackReplicas | int) .Values.redis.enabled | quote }}
-- name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
-  value: {{ ternary 100 (.Values.redis.external.ackTimeoutMs | int) .Values.redis.enabled | quote }}
+{{ include "sandbox.redisEnv" . }}
 - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
   value: {{ include "sandbox.backend.provider" . | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET

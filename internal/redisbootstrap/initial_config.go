@@ -26,7 +26,7 @@ var errInitialConfig = errors.New("invalid initial Redis and Sentinel configurat
 // callers must validate and durably complete the local configuration transaction.
 // Configured identities and Initialized installations must never use this path.
 func RenderInitialMemberConfigs(r BootstrapRegistration, keys [3]ed25519.PublicKey, identity VolumeIdentity, o InitialConfigOptions) ([]byte, []byte, error) {
-	if r.Validate() != nil || r.Cluster.Phase != Pending || identity.Validate(r.Cluster) != nil || identity.InitialConfig != Reserved {
+	if r.Validate() != nil || r.Cluster.Phase != Pending || identity.Validate(r.Cluster) != nil || identity.InitialConfig != Reserved || o.DataPassword == o.SentinelPassword {
 		return nil, nil, errInitialConfig
 	}
 	digest, err := PublicKeySetDigest(keys)

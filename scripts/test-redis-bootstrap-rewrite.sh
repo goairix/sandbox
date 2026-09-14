@@ -46,4 +46,4 @@ docker run --rm --pull never --init --name "$project" --hostname "$project" \
   --mount "type=bind,src=$fixture_dir/redis-bootstrap,dst=/fixture/redis-bootstrap,readonly" \
   --env "TEST_REDIS_BOOTSTRAP_REWRITE_OWNER=$project" \
   --entrypoint /fixture/redisbootstrap.test redis:7-alpine \
-  -test.run '^TestPersistentRealRewriteIntegration$' -test.count=1 -test.timeout=60s -test.v
+  -test.run '^(TestPersistentRealRewriteIntegration|TestPreparePodLinuxRoot.*|TestPrepared.*)$' -test.count=1 -test.timeout=60s -test.v

@@ -1,5 +1,7 @@
 # Sentinel 身份核验运行时阶段验收
 
+本文保留2026-09-13身份核验阶段的历史证据。随后补齐的启动、初始化和 Chart 接线及最新验收范围见 [2026-09-14完整启动验收](2026-09-14-built-in-sentinel-production-startup-results.md)，以下“尚缺”不代表最新实现状态。
+
 ## 状态与边界
 
 本阶段完成本地 PVC 检查、真实持久配置解释、三成员独立密钥、随机挑战签名、固定端点 HTTP 传输、namespace 身份登记 CAS、本地认证 INFO 和可执行 attestor。API 镜像 Dockerfile 额外包含 `/app/redis-bootstrap`，默认 API 入口不变。镜像未构建或推送，线上未升级；默认 Chart 仍是 standalone，**内置 Sentinel 尚未达到部署完成条件**。

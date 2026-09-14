@@ -103,6 +103,10 @@ storage:
       # Sentinel 独立认证；不会自动复用上面的数据节点用户名或密码。
       sentinel_username: ""
       sentinel_password: ""
+      # 内置 Sentinel 首次初始化 gate；由 Helm 自动设置，默认留空禁用。
+      # 只读状态目录包含 cluster.json / registration.json；不挂载任何私钥。
+      bootstrap_state_directory: ""
+      bootstrap_public_keys_file: ""
       # Redis database index (0–15).
       db: 0
       # best_effort 是单实例默认；native 仅适用于提供同步提交保证的后端。

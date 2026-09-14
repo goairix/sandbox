@@ -16,19 +16,47 @@ import (
 
 var errArguments = errors.New("invalid redis-bootstrap arguments")
 var errControlFiles = errors.New("invalid Redis bootstrap identity files")
+var errBootstrapRollback = errors.New("built-in Redis Sentinel rollback is disabled")
 
 const usage = "usage: redis-bootstrap attestor [-ordinal 0|1|2] [local file options]\npassword: REDIS_PASSWORD environment only; identity service port: 18080\n"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil && !errors.Is(err, context.Canceled) {
+	var output io.Writer = os.Stderr
+	if len(os.Args) > 1 && os.Args[1] == "identity-secret" {
+		output = os.Stdout
+	}
+	if err := run(ctx, os.Args[1:], output); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "redis-bootstrap failed")
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	// Helm rollback replays historical manifests without lookup and can erase
+	// the one-time grant. Deny before credentials, files or API access.
+	if len(args) > 0 && args[0] == "deny-rollback" {
+		if ctx == nil || output == nil || len(args) != 1 {
+			return errArguments
+		}
+		if _, err := io.WriteString(output, "built-in Redis Sentinel rollback is disabled; use helm upgrade to preserve initialized state\n"); err != nil {
+			return errArguments
+		}
+		return errBootstrapRollback
+	}
+	if len(args) > 0 && args[0] == "initialize" {
+		return runInitialize(ctx, args[1:], output)
+	}
+	if len(args) > 0 && args[0] == "prepare-pod" {
+		return runPrepare(ctx, args[1:], output)
+	}
+	if len(args) > 0 && (args[0] == "redis" || args[0] == "sentinel") {
+		return runMember(ctx, args, output)
+	}
+	if len(args) > 0 && args[0] == "identity-secret" {
+		return runIdentitySecret(ctx, args[1:], output)
+	}
 	return runWithServer(ctx, args, output, redisbootstrap.RunIdentityServer)
 }
 
@@ -61,6 +89,19 @@ func runWithServer(ctx context.Context, args []string, output io.Writer, serve f
 			return err
 		}
 		return errArguments
+	}
+	explicitOrdinal := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "ordinal" {
+			explicitOrdinal = true
+		}
+	})
+	if !explicitOrdinal {
+		value, err := podOrdinal()
+		if err != nil {
+			return errArguments
+		}
+		*ordinal = value
 	}
 	if flags.NArg() != 0 || *ordinal < 0 || *ordinal > 2 {
 		return errArguments

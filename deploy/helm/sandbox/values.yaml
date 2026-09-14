@@ -54,6 +54,7 @@ resources:
 # sandbox-api 在启动 HTTP 监听前初始化并协调运行时池。
 # 该有界初始化阶段应由启动探针屏蔽存活探针检查。
 startupProbe:
+  # 内置 Sentinel 模式必须启用，等待预算自动补足初始化门禁及运行时启动余量。
   enabled: true
   periodSeconds: 5
   timeoutSeconds: 1
@@ -91,6 +92,41 @@ redis:
     storageClass: ""
     size: 1Gi
   password: ""
+  # 内置模式：standalone 保持原单节点行为；sentinel 固定为三个独立 PVC 节点。
+  mode: standalone
+  sentinel:
+    masterName: sandbox
+    clusterDomain: cluster.local
+    # 必填：通过 redis-bootstrap identity-secret 手动创建的不可变身份 Secret。
+    # 不要重新生成/覆盖；它与保留的 PVC、状态 ConfigMap 属于同一套安装身份。
+    identitySecretName: ""
+    # 推荐引用现有认证 Secret；数据节点和 Sentinel 必须使用不同的密码键。
+    existingSecret: ""
+    dataPasswordKey: password
+    sentinelPasswordKey: sentinel-password
+    # 不引用认证 Secret 时配置此项和 redis.password；仅允许 32~256 位字母、数字、_、-。
+    password: ""
+    downAfterMilliseconds: 10000
+    failoverTimeoutMilliseconds: 60000
+    parallelSyncs: 1
+    # 启动只做有界恢复，绝不自行选主；实际选主由 Redis Sentinel 完成。
+    startupTimeoutSeconds: 600
+    initializeTimeoutSeconds: 720
+    ackTimeoutMs: 1000
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+    identityResources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
   # 外部 Redis 配置，仅在 redis.enabled=false 时生效。
   external:
     mode: standalone

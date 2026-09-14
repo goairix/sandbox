@@ -29,22 +29,32 @@ type PersistentConfigSnapshot struct {
 // ParsePersistentConfigs interprets caller-validated private Configured PVC bytes.
 // It does not validate file ownership, identity, coherent reads or remote origin.
 func ParsePersistentConfigs(c ClusterState, local Member, masterName string, redisConfig, sentinelConfig []byte) (PersistentConfigSnapshot, error) {
-	var out PersistentConfigSnapshot
+	state, err := parsePersistentRedis(c, local, redisConfig)
+	if err != nil {
+		return PersistentConfigSnapshot{}, err
+	}
+	out, err := parsePersistentSentinel(c, local, masterName, sentinelConfig)
+	if err != nil {
+		return PersistentConfigSnapshot{}, err
+	}
+	primary := out.State.PrimaryDNS
+	if (state.Role == Primary && primary != local.DNS) || (state.Role == Replica && state.PrimaryDNS != primary) {
+		return PersistentConfigSnapshot{}, errors.New("persisted Redis role conflicts with Sentinel monitor")
+	}
+	out.State.Role = state.Role
+	return out, nil
+}
+
+func parsePersistentRedis(c ClusterState, local Member, redisConfig []byte) (PersistedState, error) {
+	var out PersistedState
 	if err := local.Validate(c); err != nil {
 		return out, err
-	}
-	if len(masterName) == 0 || len(masterName) > 128 || !persistentValueSafe(masterName) {
-		return out, errors.New("invalid persistent master name")
 	}
 	r, err := persistentLines(redisConfig, "Redis")
 	if err != nil {
 		return out, err
 	}
-	s, err := persistentLines(sentinelConfig, "Sentinel")
-	if err != nil {
-		return out, err
-	}
-	if persistentDefaultACL(r) != nil || persistentDefaultACL(s) != nil {
+	if persistentDefaultACL(r) != nil {
 		return out, errors.New("unsupported or inconsistent persistent default ACL")
 	}
 	state := PersistedState{Member: local, Role: Primary}
@@ -85,6 +95,25 @@ func ParsePersistentConfigs(c ClusterState, local Member, masterName string, red
 	if !seenRedis["port"] {
 		return out, errors.New("incomplete persisted Redis configuration")
 	}
+	return state, nil
+}
+
+func parsePersistentSentinel(c ClusterState, local Member, masterName string, sentinelConfig []byte) (PersistentConfigSnapshot, error) {
+	var out PersistentConfigSnapshot
+	if err := local.Validate(c); err != nil {
+		return out, err
+	}
+	if len(masterName) == 0 || len(masterName) > 128 || !persistentValueSafe(masterName) {
+		return out, errors.New("invalid persistent master name")
+	}
+	s, err := persistentLines(sentinelConfig, "Sentinel")
+	if err != nil {
+		return out, err
+	}
+	if persistentDefaultACL(s) != nil {
+		return out, errors.New("unsupported or inconsistent persistent default ACL")
+	}
+	state := PersistedState{Member: local}
 	seen := map[string]bool{}
 	var primary, id string
 	var configEpoch, currentEpoch uint64
@@ -204,9 +233,6 @@ func ParsePersistentConfigs(c ClusterState, local Member, masterName string, red
 	}
 	if !seen["monitor"] || !seen["config-epoch"] || !seen["current-epoch"] || !seen["myid"] || currentEpoch < configEpoch || knownIDs[id] {
 		return out, errors.New("incomplete or inconsistent persisted Sentinel configuration")
-	}
-	if (state.Role == Primary && primary != local.DNS) || (state.Role == Replica && state.PrimaryDNS != primary) {
-		return out, errors.New("persisted Redis role conflicts with Sentinel monitor")
 	}
 	state.PrimaryDNS, state.SentinelEpoch = primary, configEpoch
 	return PersistentConfigSnapshot{State: state, SentinelID: id, CurrentEpoch: currentEpoch}, nil

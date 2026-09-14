@@ -80,8 +80,8 @@ AK/SK 轮换时同时递增 `credentialGeneration`，例如从 `rotation-1` 改�
 
 因为 AK/SK 直接进入 values，它们也会出现在 Helm release 历史和 `sandbox-api` 环境中。环境 values 文件应限制为运维账号可读，集群 RBAC 也应限制读取 release Secret、Deployment 和 Pod 详情；排障时不要输出完整 values、渲染清单或容器环境。
 
-`lsmProfile` 是节点上已经加载的 AppArmor localhost profile 名称，Chart
-不会代替节点安装 profile。所有可能调度 FUSE Pod 的节点都必须加载同名
+未启用可选加载器时，`lsmProfile` 是节点上已经加载的 AppArmor localhost profile 名称，Chart
+不会代替节点安装 profile。可选自动加载方案见 [AppArmor 加载器](apparmor-loader.md)。所有可能调度 FUSE Pod 的节点都必须加载同名
 profile；否则 containerd 会报
 `failed to generate apparmor spec opts: apparmor profile not found`。在仅用于
 验证、且明确接受 mounter 不受自定义 LSM 约束的集群中，可临时使用：
@@ -97,6 +97,8 @@ config:
 Operator 把允许 FUSE mount 的受限 profile 加载到全部目标节点。
 
 ## 4. 全新部署
+
+内置 Redis 高可用的身份准备、三节点/PVC 要求和完整配置见 [内置 Redis Sentinel](built-in-redis-sentinel.md)。默认 standalone 不会自动升级为 Sentinel。
 
 ```bash
 CTX=ds-ai-research
@@ -178,7 +180,9 @@ attempt 残留，不需要人工删除策略。
 pre-rollback 阶段明确拒绝它，因为目标 revision 保存的环境无法安全排空
 当前 backend。需要切回旧 backend 时，把目标配置作为一次新的
 `helm upgrade` 执行，让运行时 fingerprint 检查和 release drain 正常完成。
-同 backend rollback 仍可正常执行。
+standalone/external 的同 backend rollback 仍可正常执行；内置 Sentinel
+例外，pre-rollback Hook 明确拒绝历史状态重放，也不要使用 `--atomic`。
+需要更换应用版本时使用新的 `helm upgrade` 保留当前初始化状态和卷组。
 
 ## 6. 镜像怎么构建
 

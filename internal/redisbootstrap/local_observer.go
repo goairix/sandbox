@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -121,11 +122,17 @@ func readLocalRedisRunIDWithDialer(ctx context.Context, address, password string
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	var attempted atomic.Bool
 	client := redis.NewClient(&redis.Options{
 		Addr: address, Password: password, Protocol: 2, DisableIdentity: true,
-		MaxRetries: -1, PoolSize: 1, ContextTimeoutEnabled: true,
+		MaxRetries: -1, DialerRetries: 1, DialerRetryTimeout: time.Nanosecond, PoolSize: 1, ContextTimeoutEnabled: true,
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
 		Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// Pool dial retries/background probes are independent of command
+			// MaxRetries. No later invocation may perform actual socket I/O.
+			if !attempted.CompareAndSwap(false, true) || ctx.Err() != nil {
+				return nil, errLocalObservation
+			}
 			connection, err := dial(ctx, network, address)
 			if err != nil {
 				return nil, errLocalObservation

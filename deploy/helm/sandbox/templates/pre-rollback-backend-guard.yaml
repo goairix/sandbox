@@ -1,4 +1,5 @@
 {{- $desiredFingerprint := include "sandbox.backend.fingerprint" . -}}
+{{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,14 +22,22 @@ spec:
         release: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Release.Name }}-api
+      {{- if $builtinSentinel }}
+      automountServiceAccountToken: false
+      {{- end }}
       restartPolicy: Never
       containers:
         - name: verify-backend
           image: {{ include "sandbox.apiImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if $builtinSentinel }}
+          command: ["/app/redis-bootstrap"]
+          args: ["deny-rollback"]
+          {{- else }}
           args:
             - "--verify-kubernetes-backend-fingerprint"
             - {{ printf "--kubernetes-backend-fingerprint-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--kubernetes-backend-fingerprint-deployment=%s-api" .Release.Name | quote }}
             - {{ printf "--kubernetes-backend-fingerprint=%s" $desiredFingerprint | quote }}
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
+          {{- end }}

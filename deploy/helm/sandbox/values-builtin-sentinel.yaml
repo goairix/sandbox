@@ -1,0 +1,16 @@
+# 内置 Sentinel 的环境覆盖示例；先创建身份/认证 Secret，替换镜像和 StorageClass。
+# 部署说明：docs/deployment/built-in-redis-sentinel.md。
+redis:
+  enabled: true
+  mode: sentinel
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  sentinel:
+    identitySecretName: sandbox-fuse-redis-sentinel-identity
+    existingSecret: sandbox-redis-auth
+    dataPasswordKey: password
+    sentinelPasswordKey: sentinel-password
+# productionSafetyChecks 要在受限 LSM 已验收后启用，不能用空/未加载 profile。
+# AppArmor 加载器的真实节点验收及开关见 docs/deployment/apparmor-loader.md。

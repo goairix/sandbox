@@ -109,6 +109,7 @@ func TestInitialMemberConfigsRejectUnsafeInputs(t *testing.T) {
 		"space master":           func(v *input) { v.options.MasterName = "sandbox name" },
 		"unicode master":         func(v *input) { v.options.MasterName = "沙盒" },
 		"short data password":    func(v *input) { v.options.DataPassword = strings.Repeat("d", 31) },
+		"same passwords":         func(v *input) { v.options.SentinelPassword = v.options.DataPassword },
 		"long sentinel password": func(v *input) { v.options.SentinelPassword = strings.Repeat("s", 257) },
 		"quote password":         func(v *input) { v.options.DataPassword = strings.Repeat("d", 32) + "\"" },
 		"space password":         func(v *input) { v.options.SentinelPassword = strings.Repeat("s", 32) + " " },

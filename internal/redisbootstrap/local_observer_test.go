@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,6 +88,34 @@ func TestLocalObserverLiveUsesAuthenticatedActualRESP(t *testing.T) {
 	_, err = readLocalRedisRunID(context.Background(), address, strings.Repeat("b", 32))
 	if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "WRONGPASS") {
 		t.Fatalf("wrong auth must fail redacted: %v", err)
+	}
+}
+
+func TestLocalObserverFailedDialIsOneShot(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var attempts atomic.Int64
+	id, err := readLocalRedisRunIDWithDialer(context.Background(), address, strings.Repeat("a", 32), func(ctx context.Context, network, address string) (net.Conn, error) {
+		attempts.Add(1)
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, address)
+	})
+	if err == nil || id != "" {
+		t.Fatal("actual refused TCP dial must not confirm a process")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("one local observation must issue one actual dial, got %d", got)
+	}
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("closed observer issued detached actual dial: %d", got)
 	}
 }
 
