@@ -62,26 +62,87 @@
 {{- end -}}
 {{- end -}}
 
+{{/* 默认值在模板中统一解析，不依赖部署者完整复制新版 values.yaml/schema。
+     仅缺失或 null 使用默认值；显式的 false、0、空名称等非法值不能被 default 掩盖。 */}}
+{{- define "sandbox.sentinelConfig" -}}
+{{- $input := .Values.redis.sentinel -}}
+{{- if kindIs "invalid" $input -}}{{- $input = dict -}}{{- end -}}
+{{- if not (kindIs "map" $input) -}}{{ fail "redis.sentinel 必须是配置映射" }}{{- end -}}
+{{- $config := dict
+  "masterName" "sandbox" "clusterDomain" "cluster.local"
+  "identitySecretName" "" "existingSecret" ""
+  "dataPasswordKey" "password" "sentinelPasswordKey" "sentinel-password" "password" ""
+  "downAfterMilliseconds" 10000 "failoverTimeoutMilliseconds" 60000 "parallelSyncs" 1
+  "startupTimeoutSeconds" 600 "initializeTimeoutSeconds" 720 "ackTimeoutMs" 1000
+  "resources" (dict "requests" (dict "cpu" "50m" "memory" "64Mi") "limits" (dict "cpu" "250m" "memory" "128Mi"))
+  "identityResources" (dict "requests" (dict "cpu" "10m" "memory" "64Mi") "limits" (dict "cpu" "200m" "memory" "256Mi")) -}}
+{{- range $key, $value := $input -}}
+{{- if not (kindIs "invalid" $value) -}}{{- $_ := set $config $key $value -}}{{- end -}}
+{{- end -}}
+{{- $dnsPattern := "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" -}}
+{{- range $key := list "masterName" "clusterDomain" "identitySecretName" "existingSecret" "dataPasswordKey" "sentinelPasswordKey" "password" -}}
+{{- if not (kindIs "string" (get $config $key)) -}}{{ fail (printf "redis.sentinel.%s 必须是字符串" $key) }}{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{1,64}$" $config.masterName) -}}{{ fail "redis.sentinel.masterName 必须是 1~64 位字母、数字、_ 或 -" }}{{- end -}}
+{{- if or (gt (len $config.clusterDomain) 128) (not (regexMatch $dnsPattern $config.clusterDomain)) -}}{{ fail "redis.sentinel.clusterDomain 必须是有效 DNS 后缀，且不超过 128 字符" }}{{- end -}}
+{{- range $key := list "identitySecretName" "existingSecret" -}}
+{{- $value := get $config $key -}}
+{{- if and (ne $value "") (or (gt (len $value) 253) (not (regexMatch $dnsPattern $value))) -}}{{ fail (printf "redis.sentinel.%s 必须为空或有效 Secret 名称" $key) }}{{- end -}}
+{{- end -}}
+{{- range $key := list "dataPasswordKey" "sentinelPasswordKey" -}}
+{{- $value := get $config $key -}}
+{{- if or (gt (len $value) 253) (not (regexMatch "^[A-Za-z0-9_.-]+$" $value)) -}}{{ fail (printf "redis.sentinel.%s 必须是有效且非空的 Secret 键名" $key) }}{{- end -}}
+{{- end -}}
+{{- $bounds := dict "startupTimeoutSeconds" (list 1 600) "initializeTimeoutSeconds" (list 1 720)
+  "ackTimeoutMs" (list 1000 10000) "downAfterMilliseconds" (list 1000 60000)
+  "failoverTimeoutMilliseconds" (list 2000 600000) "parallelSyncs" (list 1 2) -}}
+{{- range $key, $range := $bounds -}}
+{{- $value := get $config $key -}}
+{{- if or (kindIs "string" $value) (not (regexMatch "^[0-9]+$" (printf "%v" $value))) (lt (int64 $value) (int64 (index $range 0))) (gt (int64 $value) (int64 (index $range 1))) -}}
+{{- fail (printf "redis.sentinel.%s 必须是 %d~%d 范围内的整数" $key (index $range 0) (index $range 1)) -}}
+{{- end -}}
+{{- end -}}
+{{- if lt (int64 $config.failoverTimeoutMilliseconds) (mul 2 (int64 $config.downAfterMilliseconds)) -}}{{ fail "redis.sentinel.failoverTimeoutMilliseconds 必须至少为 downAfterMilliseconds 的两倍" }}{{- end -}}
+{{- range $key := list "resources" "identityResources" -}}
+{{- if not (kindIs "map" (get $config $key)) -}}{{ fail (printf "redis.sentinel.%s 必须是资源配置映射" $key) }}{{- end -}}
+{{- end -}}
+{{- $config | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.apiStartupProbe" -}}
+{{- $input := .Values.startupProbe -}}
+{{- if kindIs "invalid" $input -}}{{- $input = dict -}}{{- end -}}
+{{- if not (kindIs "map" $input) -}}{{ fail "startupProbe 必须是配置映射" }}{{- end -}}
+{{- $probe := dict "enabled" true "periodSeconds" 5 "timeoutSeconds" 1 "failureThreshold" 120 -}}
+{{- range $key, $value := $input -}}
+{{- if not (kindIs "invalid" $value) -}}{{- $_ := set $probe $key $value -}}{{- end -}}
+{{- end -}}
+{{- if eq (include "sandbox.builtinSentinel" .) "true" -}}
+{{- if or (not (kindIs "bool" $probe.enabled)) (not $probe.enabled) -}}{{ fail "built-in Sentinel requires the API startup probe (startupProbe.enabled 必须为 true)" }}{{- end -}}
+{{- range $key := list "periodSeconds" "timeoutSeconds" "failureThreshold" -}}
+{{- $value := get $probe $key -}}
+{{- $maximum := ternary 2147483647 60 (eq $key "failureThreshold") -}}
+{{- if or (kindIs "string" $value) (not (regexMatch "^[0-9]+$" (printf "%v" $value))) (lt (int64 $value) 1) (gt (int64 $value) (int64 $maximum)) -}}{{ fail (printf "startupProbe.%s 必须是 1~%d 范围内的整数" $key $maximum) }}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $probe | toJson -}}
+{{- end -}}
+
 {{- define "sandbox.validateRedis" -}}
 {{- if .Values.redis.enabled -}}
 {{- if not (has .Values.redis.mode (list "standalone" "sentinel")) -}}{{ fail "redis.mode must be standalone or sentinel" }}{{- end -}}
 {{- if eq .Values.redis.mode "sentinel" -}}
-{{- if or (not (kindIs "bool" .Values.startupProbe.enabled)) (not .Values.startupProbe.enabled) -}}{{ fail "built-in Sentinel requires the API startup probe" }}{{- end -}}
-{{- range $key := list "periodSeconds" "timeoutSeconds" "failureThreshold" -}}
-{{- $value := index $.Values.startupProbe $key -}}
-{{- $maximum := ternary 2147483647 60 (eq $key "failureThreshold") -}}
-{{- if or (not (regexMatch "^[0-9]+$" (printf "%v" $value))) (lt (int64 $value) 1) (gt (int64 $value) (int64 $maximum)) -}}{{ fail "built-in Sentinel API startup probe requires bounded positive integers" }}{{- end -}}
-{{- end -}}
-{{- if lt (int .Values.redis.sentinel.failoverTimeoutMilliseconds) (mul 2 (int .Values.redis.sentinel.downAfterMilliseconds)) -}}{{ fail "Sentinel failover timeout must be at least twice down-after threshold" }}{{- end -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
+{{- $_ := include "sandbox.apiStartupProbe" . -}}
 {{- if not .Values.redis.persistence.enabled -}}{{ fail "built-in Sentinel requires persistence" }}{{- end -}}
 {{- if gt (len .Release.Name) 39 -}}{{ fail "built-in Sentinel release name must not exceed 39 characters" }}{{- end -}}
 {{- if not (semverCompare ">=1.33.0-0" .Capabilities.KubeVersion.Version) -}}{{ fail "built-in Sentinel requires Kubernetes >=1.33" }}{{- end -}}
-{{- if empty .Values.redis.sentinel.existingSecret -}}
+{{- if empty $sentinelConfig.existingSecret -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.password) -}}{{ fail "built-in Sentinel data password must be a 32-256 character safe token" }}{{- end -}}
-{{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.sentinel.password) -}}{{ fail "built-in Sentinel password must be a 32-256 character safe token" }}{{- end -}}
-{{- if eq .Values.redis.password .Values.redis.sentinel.password -}}{{ fail "built-in Sentinel requires separate data and Sentinel passwords" }}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" $sentinelConfig.password) -}}{{ fail "built-in Sentinel password must be a 32-256 character safe token" }}{{- end -}}
+{{- if eq .Values.redis.password $sentinelConfig.password -}}{{ fail "built-in Sentinel requires separate data and Sentinel passwords" }}{{- end -}}
 {{- end -}}
-{{- if eq .Values.redis.sentinel.dataPasswordKey .Values.redis.sentinel.sentinelPasswordKey -}}{{ fail "built-in Sentinel authentication Secret keys must differ" }}{{- end -}}
+{{- if eq $sentinelConfig.dataPasswordKey $sentinelConfig.sentinelPasswordKey -}}{{ fail "built-in Sentinel authentication Secret keys must differ" }}{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.productionSafetyChecks -}}
@@ -112,13 +173,15 @@
 
 {{- define "sandbox.sentinelName" -}}{{ printf "%s-redis-sentinel" .Release.Name }}{{- end -}}
 {{- define "sandbox.sentinelIdentitySecretName" -}}
-{{- .Values.redis.sentinel.identitySecretName | default (printf "%s-identity" (include "sandbox.sentinelName" .)) -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
+{{- $sentinelConfig.identitySecretName | default (printf "%s-identity" (include "sandbox.sentinelName" .)) -}}
 {{- end -}}
 
 {{- /* 只缓存到 Helm ROOT context，不使用用户可伪造的 Values。 */ -}}
 {{- define "sandbox.sentinelState" -}}
 {{- if not (hasKey . "_sandboxSentinelState") -}}
 {{- $name := include "sandbox.sentinelName" . -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
 {{- $members := include "sandbox.sentinelMembers" . | fromJsonArray -}}
 {{- $retained := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-state" $name) -}}
 {{- $identity := lookup "v1" "Secret" .Release.Namespace (include "sandbox.sentinelIdentitySecretName" .) -}}
@@ -154,7 +217,7 @@
 {{- else -}}
 {{- $clusterID = randAlphaNum 32 -}}
 {{- $data = dict "cluster.json" (dict "clusterID" $clusterID "members" $members "phase" "Pending" | toJson) -}}
-{{- if and (empty .Values.redis.sentinel.identitySecretName) (not $identity) (not $installedSTS) -}}
+{{- if and (empty $sentinelConfig.identitySecretName) (not $identity) (not $installedSTS) -}}
 {{- $freshClusterID = $clusterID -}}
 {{- end -}}
 {{- end -}}
@@ -185,10 +248,12 @@
 {{- end -}}
 {{- end -}}
 {{- define "sandbox.apiStartupFailureThreshold" -}}
-{{- $threshold := int .Values.startupProbe.failureThreshold -}}
+{{- $probe := include "sandbox.apiStartupProbe" . | fromJson -}}
+{{- $threshold := int $probe.failureThreshold -}}
 {{- if eq (include "sandbox.builtinSentinel" .) "true" -}}
-{{- $period := int .Values.startupProbe.periodSeconds -}}
-{{- $budget := add (max 600 (int .Values.redis.sentinel.initializeTimeoutSeconds)) 180 -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
+{{- $period := int $probe.periodSeconds -}}
+{{- $budget := add (max 600 (int $sentinelConfig.initializeTimeoutSeconds)) 180 -}}
 {{- /* Extra one probe accounts for the first failure occurring immediately. */ -}}
 {{- $threshold = max $threshold (add 1 (div (add $budget (sub $period 1)) $period)) -}}
 {{- end -}}
@@ -205,9 +270,10 @@
 {{- end -}}
 {{- define "sandbox.sentinelMembers" -}}
 {{- $name := include "sandbox.sentinelName" . -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
 {{- $members := list -}}
 {{- range $ordinal := until 3 -}}
-{{- $member := printf "%s-%d.%s-headless.%s.svc.%s" $name $ordinal $name $.Release.Namespace $.Values.redis.sentinel.clusterDomain -}}
+{{- $member := printf "%s-%d.%s-headless.%s.svc.%s" $name $ordinal $name $.Release.Namespace $sentinelConfig.clusterDomain -}}
 {{- if gt (len $member) 253 -}}{{ fail "built-in Sentinel member DNS must not exceed 253 characters" }}{{- end -}}
 {{- $members = append $members $member -}}
 {{- end -}}
@@ -216,9 +282,11 @@
 
 {{- define "sandbox.redisEnv" -}}
 {{- $sentinel := eq (include "sandbox.builtinSentinel" .) "true" -}}
+{{- $sentinelConfig := dict -}}
+{{- if $sentinel -}}{{- $sentinelConfig = include "sandbox.sentinelConfig" . | fromJson -}}{{- end -}}
 {{- $ext := .Values.redis.external -}}
 {{- $authSecret := printf "%s-redis" .Release.Name -}}
-{{- if $sentinel -}}{{- $authSecret = .Values.redis.sentinel.existingSecret | default $authSecret -}}{{- end -}}
+{{- if $sentinel -}}{{- $authSecret = $sentinelConfig.existingSecret | default $authSecret -}}{{- end -}}
 - name: SANDBOX_STORAGE_STATE_REDIS_ADDR
   value: {{ ternary "" (ternary (printf "%s-redis:6379" .Release.Name) $ext.addr .Values.redis.enabled) $sentinel | quote }}
 - name: SANDBOX_STORAGE_STATE_REDIS_MODE
@@ -231,7 +299,7 @@
 - name: SANDBOX_STORAGE_STATE_REDIS_ADDRS
   value: {{ join "," $addrs | quote }}
 - name: SANDBOX_STORAGE_STATE_REDIS_MASTER_NAME
-  value: {{ .Values.redis.sentinel.masterName | quote }}
+  value: {{ $sentinelConfig.masterName | quote }}
 - name: SANDBOX_STORAGE_STATE_REDIS_BOOTSTRAP_STATE_DIRECTORY
   value: /bootstrap
 - name: SANDBOX_STORAGE_STATE_REDIS_BOOTSTRAP_PUBLIC_KEYS_FILE
@@ -259,14 +327,14 @@
   valueFrom:
     secretKeyRef:
       name: {{ $authSecret | quote }}
-      key: {{ ternary .Values.redis.sentinel.dataPasswordKey "password" $sentinel | quote }}
+      key: {{ ternary $sentinelConfig.dataPasswordKey "password" $sentinel | quote }}
 {{- end }}
 {{- if or $sentinel (and (not .Values.redis.enabled) $ext.sentinelPassword) }}
 - name: SANDBOX_STORAGE_STATE_REDIS_SENTINEL_PASSWORD
   valueFrom:
     secretKeyRef:
       name: {{ $authSecret | quote }}
-      key: {{ ternary .Values.redis.sentinel.sentinelPasswordKey "sentinel-password" $sentinel | quote }}
+      key: {{ ternary $sentinelConfig.sentinelPasswordKey "sentinel-password" $sentinel | quote }}
 {{- end }}
 - name: SANDBOX_STORAGE_STATE_REDIS_DB
   value: {{ ternary 0 (int $ext.db) .Values.redis.enabled | quote }}
@@ -277,7 +345,7 @@
 - name: SANDBOX_STORAGE_STATE_REDIS_ACK_REPLICAS
   value: {{ ternary 1 (int $ext.ackReplicas) .Values.redis.enabled | quote }}
 - name: SANDBOX_STORAGE_STATE_REDIS_ACK_TIMEOUT_MS
-  value: {{ ternary (int .Values.redis.sentinel.ackTimeoutMs) (ternary 100 (int $ext.ackTimeoutMs) .Values.redis.enabled) $sentinel | quote }}
+  value: {{ ternary (int $sentinelConfig.ackTimeoutMs) (ternary 100 (int $ext.ackTimeoutMs) .Values.redis.enabled) $sentinel | quote }}
 {{- end -}}
 
 {{- define "sandbox.sentinelProcessEnv" -}}
@@ -289,19 +357,21 @@
 {{- end -}}
 
 {{- define "sandbox.sentinelAuthEnv" -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
 - name: REDIS_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
-      key: {{ .Values.redis.sentinel.dataPasswordKey | quote }}
+      name: {{ $sentinelConfig.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ $sentinelConfig.dataPasswordKey | quote }}
 - name: REDIS_SENTINEL_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
-      key: {{ .Values.redis.sentinel.sentinelPasswordKey | quote }}
+      name: {{ $sentinelConfig.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ $sentinelConfig.sentinelPasswordKey | quote }}
 {{- end -}}
 
 {{- define "sandbox.sentinelIdentityEnv" -}}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
 - name: POD_ORDINAL
   valueFrom:
     fieldRef:
@@ -309,8 +379,8 @@
 - name: REDIS_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.redis.sentinel.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
-      key: {{ .Values.redis.sentinel.dataPasswordKey | quote }}
+      name: {{ $sentinelConfig.existingSecret | default (printf "%s-redis" .Release.Name) | quote }}
+      key: {{ $sentinelConfig.dataPasswordKey | quote }}
 {{- end -}}
 
 {{- define "sandbox.sentinelProcessSecurity" -}}

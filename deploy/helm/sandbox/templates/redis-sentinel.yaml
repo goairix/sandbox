@@ -1,5 +1,6 @@
 {{- if eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- include "sandbox.validateRedis" . }}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson }}
 {{- $name := include "sandbox.sentinelName" . }}
 {{- $state := include "sandbox.sentinelState" . | fromJson }}
 apiVersion: v1
@@ -121,7 +122,7 @@ spec:
           command: [/app/redis-bootstrap]
           args:
             - attestor
-            - {{ printf "-master-name=%s" .Values.redis.sentinel.masterName | quote }}
+            - {{ printf "-master-name=%s" $sentinelConfig.masterName | quote }}
           securityContext:
             {{- include "sandbox.sentinelProcessSecurity" . | nindent 12 }}
           env:
@@ -149,7 +150,7 @@ spec:
               mountPath: /identity-private
               readOnly: true
           resources:
-            {{- toYaml .Values.redis.sentinel.identityResources | nindent 12 }}
+            {{- toYaml $sentinelConfig.identityResources | nindent 12 }}
       containers:
         {{- range $process := list "redis" "sentinel" }}
         - name: {{ $process }}
@@ -158,11 +159,11 @@ spec:
           command: [/redis-tools/redis-bootstrap]
           args:
             - {{ $process }}
-            - {{ printf "-master-name=%s" $.Values.redis.sentinel.masterName | quote }}
-            - {{ printf "-timeout=%ds" (int $.Values.redis.sentinel.startupTimeoutSeconds) | quote }}
-            - {{ printf "-down-after-milliseconds=%d" (int $.Values.redis.sentinel.downAfterMilliseconds) | quote }}
-            - {{ printf "-failover-timeout-milliseconds=%d" (int $.Values.redis.sentinel.failoverTimeoutMilliseconds) | quote }}
-            - {{ printf "-parallel-syncs=%d" (int $.Values.redis.sentinel.parallelSyncs) | quote }}
+            - {{ printf "-master-name=%s" $sentinelConfig.masterName | quote }}
+            - {{ printf "-timeout=%ds" (int $sentinelConfig.startupTimeoutSeconds) | quote }}
+            - {{ printf "-down-after-milliseconds=%d" (int $sentinelConfig.downAfterMilliseconds) | quote }}
+            - {{ printf "-failover-timeout-milliseconds=%d" (int $sentinelConfig.failoverTimeoutMilliseconds) | quote }}
+            - {{ printf "-parallel-syncs=%d" (int $sentinelConfig.parallelSyncs) | quote }}
           securityContext:
             {{- include "sandbox.sentinelProcessSecurity" $ | nindent 12 }}
           env:
@@ -170,10 +171,10 @@ spec:
             - name: REDISCLI_AUTH
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.redis.sentinel.existingSecret | default (printf "%s-redis" $.Release.Name) | quote }}
-                  key: {{ ternary $.Values.redis.sentinel.dataPasswordKey $.Values.redis.sentinel.sentinelPasswordKey (eq $process "redis") | quote }}
+                  name: {{ $sentinelConfig.existingSecret | default (printf "%s-redis" $.Release.Name) | quote }}
+                  key: {{ ternary $sentinelConfig.dataPasswordKey $sentinelConfig.sentinelPasswordKey (eq $process "redis") | quote }}
             - name: MASTER_NAME
-              value: {{ $.Values.redis.sentinel.masterName | quote }}
+              value: {{ $sentinelConfig.masterName | quote }}
           ports:
             - name: {{ $process }}
               containerPort: {{ ternary 6379 26379 (eq $process "redis") }}
@@ -181,7 +182,7 @@ spec:
             exec:
               command: [redis-cli, -p, {{ ternary "6379" "26379" (eq $process "redis") | quote }}, ping]
             periodSeconds: 2
-            failureThreshold: {{ add (div (int $.Values.redis.sentinel.startupTimeoutSeconds) 2) 30 }}
+            failureThreshold: {{ add (div (int $sentinelConfig.startupTimeoutSeconds) 2) 30 }}
           livenessProbe:
             exec:
               command: [redis-cli, -p, {{ ternary "6379" "26379" (eq $process "redis") | quote }}, ping]
@@ -212,7 +213,7 @@ spec:
               mountPath: /redis-tools
               readOnly: true
           resources:
-            {{- toYaml (ternary $.Values.redis.resources $.Values.redis.sentinel.resources (eq $process "redis")) | nindent 12 }}
+            {{- toYaml (ternary $.Values.redis.resources $sentinelConfig.resources (eq $process "redis")) | nindent 12 }}
         {{- end }}
       volumes:
         - name: bootstrap
@@ -302,7 +303,7 @@ metadata:
     release: {{ .Release.Name }}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: {{ add (int .Values.redis.sentinel.initializeTimeoutSeconds) 30 }}
+  activeDeadlineSeconds: {{ add (int $sentinelConfig.initializeTimeoutSeconds) 30 }}
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -322,9 +323,9 @@ spec:
           args:
             - initialize
             - {{ printf "-state-configmap=%s-state" $name | quote }}
-            - {{ printf "-master-name=%s" .Values.redis.sentinel.masterName | quote }}
-            - {{ printf "-timeout=%ds" (int .Values.redis.sentinel.initializeTimeoutSeconds) | quote }}
-            - {{ printf "-ack-timeout=%dms" (int .Values.redis.sentinel.ackTimeoutMs) | quote }}
+            - {{ printf "-master-name=%s" $sentinelConfig.masterName | quote }}
+            - {{ printf "-timeout=%ds" (int $sentinelConfig.initializeTimeoutSeconds) | quote }}
+            - {{ printf "-ack-timeout=%dms" (int $sentinelConfig.ackTimeoutMs) | quote }}
           securityContext:
             {{- include "sandbox.sentinelProcessSecurity" . | nindent 12 }}
           env:

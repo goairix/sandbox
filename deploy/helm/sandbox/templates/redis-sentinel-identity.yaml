@@ -1,5 +1,6 @@
 {{- if eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- include "sandbox.validateRedis" . }}
+{{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson }}
 {{- $name := include "sandbox.sentinelName" . }}
 {{- $state := include "sandbox.sentinelState" . | fromJson }}
 apiVersion: v1
@@ -30,7 +31,7 @@ rules:
       - {{ printf "data-%s-%d" $name $ordinal | quote }}
       {{- end }}
     verbs: [get]
-  {{- if empty .Values.redis.sentinel.identitySecretName }}
+  {{- if empty $sentinelConfig.identitySecretName }}
   # Kubernetes 无法用 resourceNames 限制 CREATE；程序只允许创建固定身份 Secret。
   - apiGroups: [""]
     resources: [secrets]

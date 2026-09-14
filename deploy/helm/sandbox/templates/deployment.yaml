@@ -3,6 +3,7 @@
 {{- include "sandbox.validateNetworkCIDRs" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" }}
+{{- $startupProbe := include "sandbox.apiStartupProbe" . | fromJson }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
 {{- $provider := include "sandbox.backend.provider" . }}
 apiVersion: apps/v1
@@ -271,13 +272,13 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.startupProbe.enabled }}
+          {{- if $startupProbe.enabled }}
           startupProbe:
             httpGet:
               path: /health
               port: {{ .Values.config.server.port }}
-            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
-            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            periodSeconds: {{ $startupProbe.periodSeconds }}
+            timeoutSeconds: {{ $startupProbe.timeoutSeconds }}
             failureThreshold: {{ include "sandbox.apiStartupFailureThreshold" . }}
           {{- end }}
           livenessProbe:

@@ -27,6 +27,11 @@ func render(t *testing.T, overrides ...string) []map[string]any {
 		t.Fatal("test location unavailable")
 	}
 	chart := filepath.Join(filepath.Dir(filename), "..", "..", "deploy", "helm", "sandbox")
+	return renderChart(t, chart, overrides...)
+}
+
+func renderChart(t *testing.T, chart string, overrides ...string) []map[string]any {
+	t.Helper()
 	args := []string{"template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", "1.33.0"}
 	for _, override := range overrides {
 		option := "--set"

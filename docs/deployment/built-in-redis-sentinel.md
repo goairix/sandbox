@@ -23,6 +23,14 @@ Chart 只对固定状态 ConfigMap、实际身份 Secret、固定 StatefulSet �
 
 填写非空 `identitySecretName` 则只读引用外部身份 Secret；即使填写自动模式的同名 Secret，也不会授予创建权限。该路径保留用于现有人工管理身份，不需要默认安装者执行手工生成命令。
 
+## 线上保留 values.yaml 时的模板默认值
+
+线上可以保留自己的 `values.yaml`，但应同步完整新版 `templates/` 与 `values.schema.json`。模板统一补齐缺失的 Sentinel DNS 后缀（`cluster.local`）、主名称（`sandbox`）、选主参数、启动/初始化/ACK 超时、认证键名及辅助容器资源配置；API 启动探针缺失时也使用默认配置。所有消费者使用同一套有效值，不会再渲染 `<nil>` DNS 或 `0s` 超时。
+
+显式填写的配置会保留；错误类型、非法 DNS/键名、零值或越界超时在创建资源前拒绝渲染，即使部署目录没有 schema 也会检查。显式关闭 API 启动探针仍会拒绝启用内置 Sentinel。认证密码仍需配置，身份和 PVC 的恢复保护不因默认值补齐而放宽。
+
+若此前缺失配置导致首次安装失败，且已创建状态 ConfigMap/PVC、但身份 Secret 从未生成，仅同步模板并重试 upgrade 仍会被缺身份保护拦截。必须先核验并处理本次失败首装的精确资源范围，再重新安装；不得删除其他 release 的资源或旧 standalone 数据卷，也不得盲目为保留卷生成新身份。
+
 ## 既有 Sentinel 的升级兼容
 
 StatefulSet 的 `volumeClaimTemplates`（包括模板 annotations）不可升级变更，Kubernetes 会比较允许变更字段之外的完整 spec。见 [Kubernetes 1.33 StatefulSet 更新验证](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/apis/apps/validation/validation.go) 中的 `ValidateStatefulSetUpdate`。因此旧版 Sentinel 的 `data` 模板没有 clusterID 注解时，Chart 继续保留无标记状态，不在升级时补写；身份 Job 只读验证和复用原 Secret，不获得全新创建授权。原模板已有标记时，必须等于原状态 CM 的 clusterID，并保留现有注解；不一致会拒绝渲染，不能通过改写注解修复。兼容逻辑只处理现有 annotations，不复制 PVC 模板的其他业务字段。
