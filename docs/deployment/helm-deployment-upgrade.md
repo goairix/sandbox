@@ -4,11 +4,12 @@
 
 ## 1. 先记住结论
 
-- 新版 `Chart.yaml`、`templates/`、`values.schema.json` 和 Chart 自带的 `values.yaml` 必须整套使用，不能新旧混搭。
+- 新版 `Chart.yaml`、`templates/`、`files/` 和 `values.schema.json` 必须整套同步，不能新旧混搭；推荐保留新版默认 `values.yaml`，用外部环境 values 覆盖。
 - 服务器自己的配置单独放在 Chart 外，例如 `/opt/sandbox/env/values-prod.yaml`。
 - AK/SK 直接写在环境 values 的 `config.storage.filesystem.accessKey/secretKey`，不再创建 workspace credential Secret。
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
-- 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像或 cleanup protocol 变化时，Chart 会先排空。
+- 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像、有效 LSM/nodeSelector 或 cleanup protocol 变化时，Chart 会先排空。
+- AppArmor 加载器需要单独构建、推送镜像，默认关闭；真实隔离验收通过前不能直接开启线上开关。
 
 原有网络规则不能改：开放公网访问时仍禁止内网访问；确需访问其他内网服务时必须加明确白名单。FUSE 的 system egress 由 sandbox-api 自动解析，只开放对象存储 endpoint 的精确地址和端口。
 
@@ -30,9 +31,9 @@
 1. 备份旧 Chart 和旧 `values.yaml`。
 2. 用新版 `deploy/helm/sandbox` 覆盖整个旧 Chart，包含新版 `values.yaml`。
 3. 把旧环境值逐项迁移到新版字段，最好保存成 Chart 外的 `values-prod.yaml`。
-4. 不要把旧 `values.yaml` 原封不动放回新版 Chart，也不要只覆盖 `templates/`。
+4. 对照新版 schema 迁移旧环境值，不要只覆盖 `templates/`；启用 AppArmor 时还必须有 `files/apparmor/workspace-mounter.profile`。
 
-也就是说，不能采用“保留旧 `values.yaml`，只覆盖其他文件”的方式。旧 values 只能作为迁移参考。
+推荐使用新版 Chart 默认值加外部环境覆盖。如果继续维护 Chart 内的自定义 `values.yaml`，也可以保留，但须核对新版字段/schema，并完整同步其余 Chart 文件；不能保留已删除字段或混用旧模板。可选 AppArmor 配置缺失时默认关闭，不需要为了未启用的组件手动补齐所有默认项。
 
 迁移旧环境 values 时，删除 `caSecretKey`、`endpointHostIPs`、`systemEgressMode`、`dnsCIDRs`、`systemEgressCIDRs`、`endpointPorts`、workspace `proxyURL`，以及根级 `workspaceCA`。这些值现在全部由程序自动处理或已不再支持；保留在 `filesystem` 中会被新版 schema 明确拒绝，避免旧配置悄悄生效。
 
@@ -93,12 +94,61 @@ config:
     lsmProfile: ""
 ```
 
-生产环境不要使用这个兼容开关，应通过节点初始化或 Security Profiles
-Operator 把允许 FUSE mount 的受限 profile 加载到全部目标节点。
+生产环境不要使用这个兼容开关。可选择本 Chart 的可选 AppArmor 加载器，或通过节点初始化/Security Profiles Operator 加载受限 profile；无论哪种方式，全部目标节点和实际 mounter/子进程的约束都须验收。
+
+### 本次 AppArmor 构建后需要增加什么配置
+
+先按第 6 节构建并推送加载器。将下面字段合并到已有环境 values，重复的顶层块须合并，不要直接覆盖整份配置：
+
+```yaml
+apparmorLoader:
+  enabled: false # 构建后先准备配置，尚不启用线上加载器
+  image:
+    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader
+    tag: v0.1.0 # 必须与实际推送版本一致
+    pullPolicy: IfNotPresent
+```
+
+如果 API 本轮也重建了，再更新已有的 `image.repository/tag`；如果当前 API 已包含加载器门禁和私有 enforce 检查，可以复用，不用重新打包。此准备阶段保留现有 workspace、Redis、网络和节点选择器配置，不要在加载器仍关闭时提前关闭测试绕过开关或换成未加载的手工 LSM 名称。
+
+下面片段只用于获准的隔离环境，不能构建完就直接合到线上启用。隔离环境自己的对象存储、Secret、网络与 namespace 须另行配置，不能指向业务环境：
+
+```yaml
+apparmorLoader:
+  enabled: true
+  priorityClassName: "" # 有 globalDefault 时填写管理员确认的既有可信类
+  image:
+    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+  checkIntervalSeconds: 10
+  parserTimeoutSeconds: 10
+  startupTimeoutSeconds: 180
+
+startupProbe:
+  enabled: true
+
+config:
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: "" # 跟随隔离 release 命名空间，不填写线上 namespace
+      nodeSelector:
+        kubernetes.io/hostname: ds-ai-worker-2 # 测试节点示例；加载策略须另获授权，不是线上配置
+  workspace:
+    enabledMountModes: [sync, fuse]
+    allowMissingLSMForKind: false
+```
+
+检查周期、超时和资源可以省略以使用 Chart 默认值。启用后 Helm 自动创建 profile ConfigMap、DaemonSet、专用 ServiceAccount 和 API 只读 Role/RoleBinding；无需手工创建这些资源或在节点安装 parser。`lsmProfile` 自动使用摘要命名策略，原手工名称不再覆盖它。节点须已启用 AppArmor，准入须允许这个可信 privileged/hostPath 组件；Helm 不改变内核开关。
+
+隔离环境完成实际 profile/enforce、mount/flush/unmount、越权拒绝和重载验证后，再安排生产维护窗口启用。生产 nodeSelector 应使用全部已验收节点的共同标签，不照抄单个测试 hostname；选择器同时影响普通池、FUSE 池和加载器。完整配置、权限及验收边界见 [AppArmor 加载器](apparmor-loader.md)。
 
 ## 4. 全新部署
 
 内置 Redis 高可用的身份准备、三节点/PVC 要求和完整配置见 [内置 Redis Sentinel](built-in-redis-sentinel.md)。默认 standalone 不会自动升级为 Sentinel。
+
+以下安装/升级命令中的 `--atomic` 仅适用于 standalone/external；内置 Sentinel 必须去掉 `--atomic`，失败时保留当前身份状态，通过新的 upgrade 修复，不自动 rollback。AppArmor 未完成隔离验收时继续保持关闭。
 
 ```bash
 CTX=ds-ai-research
@@ -137,7 +187,7 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 不要使用 `--reuse-values`，否则已经删除的 credential-file/Secret 字段可能被旧 release 带回来。
 
-只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration` 或 FUSE 镜像时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
+只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration`、FUSE 镜像、有效 LSM 或 nodeSelector 时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。首次开启 AppArmor 加载器会改变有效 LSM，须安排排空维护窗口。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
 普通滚动升级不等于重建所有沙盒。Kubernetes 普通池和 FUSE 池按固定运行契约维护：
 
@@ -186,21 +236,77 @@ standalone/external 的同 backend rollback 仍可正常执行；内置 Sentinel
 
 ## 6. 镜像怎么构建
 
-所有镜像使用版本 tag，不要求手工填写 SHA256，也不需要设置 `GO_BUILDER_IMAGE` 或 `SANDBOX_BASE_IMAGE`；Dockerfile 已有默认基础镜像。下面命令都在仓库根目录执行：
+所有镜像使用新版本 tag，不覆盖已发布版本，不要求手工填写 SHA256，也不需要设置 `GO_BUILDER_IMAGE` 或 `SANDBOX_BASE_IMAGE`；Dockerfile 已有默认基础镜像。下面命令都在包含本次实现的仓库根目录执行，不从尚未合入功能的旧 main 打包。构建及推送由部署者执行，本文不是镜像发布成功记录。
+
+### 构建环境及首次完整镜像准备
+
+以下为完整镜像准备清单，不表示每次升级都要全部重建；已有兼容镜像可以复用。仅处理 AppArmor 时跳到下一小节的两类镜像要求。
 
 ```bash
-VERSION=v0.2.13
-REGISTRY=registry.i.huaxisy.com/library/ai-infra
-PLATFORM=linux/arm64
+cd "$(git rev-parse --show-toplevel)"
+docker login registry.i.huaxisy.com
+docker buildx version
 
-docker buildx build -f docker/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-api:$VERSION" .
-docker buildx build -f docker/images/sandbox/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-runtime:$VERSION" .
-docker buildx build -f docker/images/gateway/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-gateway:$VERSION" docker/images/gateway
-docker buildx build -f docker/images/workspace-mounter/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" .
-docker buildx build -f docker/images/sandbox-fuse/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-docker:$VERSION" .
+# 首次创建；同名 builder 已存在时跳过 create，不要删除已有 builder
+docker buildx create --name sandbox-apparmor-build --driver docker-container
+docker buildx inspect sandbox-apparmor-build --bootstrap
+
+SANDBOX_BUILD_VERSION=v0.3.24-apparmor.1 # 示例，按自己的新发布版本替换
+SANDBOX_BUILD_REGISTRY=registry.i.huaxisy.com/library/ai-infra
+SANDBOX_BUILD_PLATFORMS=linux/amd64,linux/arm64
 ```
 
-Kubernetes FUSE 必须构建 `sandbox-api`、`sandbox-runtime`、`sandbox-gateway` 和 `sandbox-fuse-mounter`。Docker FUSE 还需要 `sandbox-fuse-docker`。你可以按现有流程分别构建各架构，再用 `docker manifest` 合并同一个版本 tag。
+只处理 AppArmor 时，执行以上准备后直接进入“本次 AppArmor 加载器”小节，不执行下面的完整镜像构建清单：
+
+```bash
+docker buildx build --builder sandbox-apparmor-build -f docker/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_BUILD_VERSION" --push .
+docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-runtime:$SANDBOX_BUILD_VERSION" --push .
+docker buildx build --builder sandbox-apparmor-build -f docker/images/gateway/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-gateway:$SANDBOX_BUILD_VERSION" --push docker/images/gateway
+docker buildx build --builder sandbox-apparmor-build -f docker/images/workspace-mounter/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-fuse-mounter:$SANDBOX_BUILD_VERSION" --push .
+docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox-fuse/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-fuse-docker:$SANDBOX_BUILD_VERSION" --push .
+```
+
+`ds-ai-research` 当前节点为 arm64，镜像必须包含 `linux/arm64`。只部署这个架构时可将变量改为 `linux/arm64`；其它 amd64 集群需要 amd64 镜像。先核对 builder 支持所选架构，不在业务节点临时安装 privileged 模拟器。`--push` 直接推送目标架构清单和镜像，无需再执行 `docker push`；不能省略输出选项并假设构建结果已经可被集群拉取。多架构发布方式见 [Docker 官方说明](https://docs.docker.com/build/building/multi-platform/)。
+
+Kubernetes FUSE 需要已有兼容的 API/runtime/mounter 镜像，Docker FUSE 还需要 `sandbox-fuse-docker`；按实际部署使用的镜像构建，不因只升级 API 就统一改所有 tag。你也可以沿用现有流程分别构建各架构，再用 `docker manifest` 合并同一个新版本 tag。
+
+### 本次 AppArmor 加载器
+
+需要新增加载器镜像。API 必须包含加载器启动门禁和私有 enforce 检查：当前 API 已从包含这些实现的新版代码构建时可复用；否则同时重建 API。mounter/probe/runtime/gateway/Redis 镜像不需要因本功能重建。
+
+在同一个 shell 中使用上面的 registry/platform 变量及 builder，先构建加载器：
+
+```bash
+SANDBOX_APPARMOR_TAG=v0.1.0 # 首次版本示例，后续变更使用新 tag
+
+docker buildx build \
+  --builder sandbox-apparmor-build \
+  --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --file docker/images/apparmor-loader/Dockerfile \
+  --tag "$SANDBOX_BUILD_REGISTRY/sandbox-apparmor-loader:$SANDBOX_APPARMOR_TAG" \
+  --push .
+
+docker buildx imagetools inspect \
+  "$SANDBOX_BUILD_REGISTRY/sandbox-apparmor-loader:$SANDBOX_APPARMOR_TAG"
+```
+
+若需重建 API，单独执行，不用执行上面的完整镜像清单：
+
+```bash
+SANDBOX_API_TAG=v0.3.24-apparmor.1 # 示例，按自己的新发布版本替换
+
+docker buildx build \
+  --builder sandbox-apparmor-build \
+  --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --file docker/Dockerfile \
+  --tag "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_API_TAG" \
+  --push .
+
+docker buildx imagetools inspect \
+  "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_API_TAG"
+```
+
+双架构清单应包含 `linux/amd64` 和 `linux/arm64`；单架构应包含所选目标。YAML 不展开 shell 变量，构建完成后按第 3 节把实际 repository/tag 合并到 values。节点还须具备仓库拉取权限，构建机的 `docker login` 不会替它自动配置凭据。完整分步骤说明见 [AppArmor 加载器](apparmor-loader.md)。
 
 如果本次只升级 Docker multipart tmpfs、Docker pair network 自动回收或 Docker FUSE AppArmor 默认行为修复，只需重新构建 `sandbox-api`，并在环境 values 中更新 `image.tag`。其他项目镜像不需要因此重建，也不需要重启 Docker daemon。以 Kubernetes runtime 运行时，Docker pair network 回收逻辑不会参与 Pod 网络管理。
 
@@ -218,3 +324,13 @@ kubectl --context "$CTX" -n "$NS" logs deploy/"$RELEASE-api" --tail=200
 ```
 
 然后通过 sandbox-api 分别创建 sync 和 FUSE sandbox，验证创建、执行、文件读写、销毁以及 FUSE Pool 回补。不要为了排查存储连通性放开内网默认拒绝策略。
+
+AppArmor 加载器已启用时，再检查本 release 的 DaemonSet 和全部目标节点实例：
+
+```bash
+kubectl --context "$CTX" -n "$NS" get daemonset "$RELEASE-apparmor-loader"
+kubectl --context "$CTX" -n "$NS" get pods \
+  -l "app=sandbox-apparmor-loader,release=$RELEASE" -o wide
+```
+
+API 启动门禁只要求至少一个当前策略实例 Ready，不等于全部目标节点已覆盖；DaemonSet Ready 也不代替实际 mounter/s3fs profile 和越权拒绝验收。加载器关闭时没有 DaemonSet 属于正常行为。退出/升级/uninstall 不自动卸载内核 profile，旧策略清理由节点管理员另行审计。

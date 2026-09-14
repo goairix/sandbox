@@ -1,10 +1,29 @@
 # 可信 AppArmor 节点加载器
 
-从仓库根目录构建两种 Linux 架构（本次实现没有构建或推送镜像）：
+从仓库根目录构建并推送两种 Linux 架构（以下为部署者执行的命令，不是已构建/推送记录）：
 
 ```sh
-docker buildx build --platform linux/amd64,linux/arm64 -f docker/images/apparmor-loader/Dockerfile -t REGISTRY/sandbox-apparmor-loader:VERSION .
+cd "$(git rev-parse --show-toplevel)"
+docker login registry.i.huaxisy.com
+
+# 首次创建；同名 builder 已存在时跳过 create
+docker buildx create --name sandbox-apparmor-build --driver docker-container
+docker buildx inspect sandbox-apparmor-build --bootstrap
+
+docker buildx build \
+  --builder sandbox-apparmor-build \
+  --platform linux/amd64,linux/arm64 \
+  --file docker/images/apparmor-loader/Dockerfile \
+  --tag registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0 \
+  --push .
+
+docker buildx imagetools inspect \
+  registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0
 ```
+
+首次镜像版本示例为 `v0.1.0`；后续变更使用新 tag，不覆盖已发布版本。builder 必须支持所选目标架构，单 arm64 部署可将 `--platform` 改为 `linux/arm64`。`--push` 直接推送，不需要再执行 `docker push`，也不要把多架构构建改成 `--load`。构建上下文的 `.` 必须是仓库根目录，不能是本 Dockerfile 的目录。
+
+构建后在 values 中设置 `apparmorLoader.image.repository`、`tag` 和 `pullPolicy`；先保持 `apparmorLoader.enabled: false`，获准的隔离节点真实验收通过后才启用线上。API 镜像要求、完整构建步骤、分阶段 values 配置、调度范围和 Helm 自动创建资源说明见[部署文档](../../../docs/deployment/apparmor-loader.md)。
 
 独立镜像包含 Go 加载器和 Debian `apparmor_parser`。它不是租户沙盒，也不访问 Kubernetes API。部署需可信 privileged 管理容器、`/sys/kernel/security` securityfs 的读写挂载、内核参数文件 `/sys/module/apparmor/parameters/enabled` 的只读挂载、只读 profile ConfigMap 和 `/run/apparmor-loader` 私有可写临时目录。不得挂载宿主根目录、宿主 `/proc`、containerd socket、业务 workspace 或密钥；不得启用 hostPID/hostNetwork；ServiceAccount 不挂载 API token、无集群写权限。Pod Security Admission 必须允许该专用管理组件的 privileged/hostPath。
 
