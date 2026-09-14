@@ -2,7 +2,7 @@
 
 日期：2026-09-12
 修订日期：2026-09-14
-状态：原设计已批准；无状态多副本与旁路隔离修订待书面复核
+状态：独立 Manage 进程与 HTTP 内部控制接口方案已批准；修订文档待书面复核
 
 ## 1. 背景
 
@@ -15,7 +15,7 @@ Sandbox 当前是基于 Go 和 Gin 的代码执行服务，支持 Docker、Kuber
 - 以受控方式执行 TTL 调整和销毁；
 - 管理后台账号、角色、登录会话和审计记录。
 
-本设计在现有 Sandbox 服务中增加模块化的管理后端，并建设独立部署的 React 管理前端。产品名称统一为 **SANDBOX MANAGE**。
+本设计在同一仓库新增 `cmd/manage/main.go` 作为独立管理后端入口，并建设独立部署的 React 管理前端。产品名称统一为 **SANDBOX MANAGE**。`cmd/sandbox` 与 `cmd/manage` 分别构建为 `sandbox` 和 `manage` 二进制，独立进程、独立部署、独立升级。
 
 本次修订基于当前 Kubernetes 后端：Redis 是活跃 Sandbox 生命周期的权威状态，API 副本无状态；普通池与 FUSE 池使用共享库存，操作门禁、控制器租约和清理恢复由核心后端负责。创建请求所在的 API 副本不是 Sandbox 的固定 Owner。Docker 保持现有进程内管理能力，不据此承诺跨进程操作。
 
@@ -54,14 +54,14 @@ Sandbox 当前是基于 Go 和 Gin 的代码执行服务，支持 Docker、Kuber
 
 ## 4. 总体架构
 
-采用“模块化单体管理后端 + 独立前端”方案。
+采用“独立 Manage 后端 + HTTP 内部控制接口 + 独立前端”方案。
 
 ```text
 React + Ant Design
         |
         | Bearer Token / JSON
         v
-/admin/api/v1
+manage 进程：/admin/api/v1
         |
         +-- Auth / RBAC
         +-- Admin Application Services
@@ -74,28 +74,44 @@ React + Ant Design
         |       v
         |   GORM PostgreSQL Adapter
         |
-        +-- Manager Public Operations (TTL / ScheduleDestroy)
-        +-- Redis Active / Shared Pool Read Facades
-        +-- Runtime Identity / Health Read Facade
+        +-- Sandbox Control HTTP Client
+        |       |
+        |       | 独立服务凭证 / 私网 HTTP(S)
+        |       v
+        |   sandbox 进程：/internal/api/v1
+        |       +-- 有界、脱敏的库存与健康只读 Facade
+        |       +-- Manager Operations (TTL / ScheduleDestroy)
+        |               +-- 既有 Redis / Pool / Runtime
         +-- OpenTelemetry / External Grafana
 ```
 
-管理 API 加入现有 `sandbox` 进程，使用独立路由前缀 `/admin/api/v1`。它可以通过明确的 Facade 读取 Manager、Pool、Redis 和 Runtime 信息，但不得绕过 Manager 直接执行资源变更。
+管理 API 只由 `manage` 进程提供，前缀 `/admin/api/v1`。Manage 通过独立 HTTP Client 调用 Sandbox 内部控制接口，不创建本地 Manager、Pool、Runtime 或 Workspace Coordinator，不运行核心控制器，不直连核心 Redis、Docker Socket 或 Kubernetes API，也不得绕过 Manager 写核心状态。
 
-整个管理模块受 `manage.enabled` 开关控制，默认值为 `false`。关闭时只解析该布尔值，不校验其他 Manage 配置，不创建数据库连接，不执行 Migration 或 Seed，不注册任何 `/admin/api/v1` 路由，不装配管理 Repository 和历史观察器，也不启动管理投影、操作结果对账或历史清理任务。关闭管理模块的服务不要求配置或访问 PostgreSQL，现有 `/api/v1` 和 Sandbox 生命周期行为保持不变。核心 Redis 控制器、共享池维护、工作空间协调和 readiness 不属于 Manage，不能被此开关关闭。
+`manage.enabled` 默认值为 `false`，仅由 `cmd/manage` 读取。关闭时该进程只解析开关，记录未启用并正常退出，不监听端口、不校验其他 Manage 配置、不创建数据库或 HTTP Client、不执行 Migration/Seed、不注册路由、不启动任务。`cmd/sandbox` 完全忽略管理配置，不加载 Manage 模块，无论开关值如何均不访问管理 PostgreSQL。核心 Redis 控制器、共享池维护、工作空间协调和 readiness 不属于 Manage。
 
-只有 `manage.enabled=true` 时才在独立的 Manage 初始化流程中校验 DSN、JWT、首管 Seed 等管理配置。失败只标记 Manage 为不可用，不向核心启动流程返回致命错误，不退出进程，不阻断核心 Ready。Manage 使用独立状态 `initializing`、`ready`、`unavailable`、`stopping`；启用但尚未就绪时管理路由返回脱敏的 `503 MANAGE_UNAVAILABLE`，不得绕过认证放行。
+只有 `manage.enabled=true` 时才由 Manage 校验 DSN、JWT、首管 Seed 等管理配置并初始化。配置、数据库、Migration 或 Seed 失败可以使 Manage 自身启动失败，但不能传播到 Sandbox 启动或 Ready。运行中依赖故障时 Manage 降级，管理路由 fail closed，返回脱敏 `503 MANAGE_UNAVAILABLE`，不得绕过认证放行。
 
 ### 4.1 故障与资源隔离
 
-- 核心 Manager、Pool、Runtime 和 Redis Repository 不导入管理 Repository，也不等待管理数据库事务、迁移、审计或历史消费。
-- Manage 独立拥有数据库连接池、任务 Context、并发额度、请求限流和熔断；只允许管理 Context 派生自进程 Context，不得由 Manage 取消核心 Context。
-- 管理初始化在核心服务可正常启动的前提下异步进行。管理配置解析错误在管理域内报告；不能因为管理字段无效导致整体配置加载失败。
-- 管理查询、对账和历史清理使用有界分页、超时、退避和速率限制；不得执行无界 `KEYS`、高频全量 Pod 扫描、长持锁操作或无界重试。管理读连接独立预算，不能修改核心 Redis 的 HA、持久性 ACK 或租约配置。
-- 管理请求的认证、限流、CORS 和健康中间件只挂载到管理路由组，不改变业务 API 的中间件和认证语义。
-- 管理任务故障只停止或降级相应管理功能；禁止调用进程退出、核心 Stop，或为了补审计重新执行已经受理的核心操作。
-- `/health` 和 `/ready` 继续描述核心 Sandbox；管理可用性在管理健康接口单独表达，不得影响 Kubernetes 核心 readiness。
-- 同进程方案只能提供上述依赖和有界资源隔离，无法承诺 OOM、进程崩溃或所有 CPU 竞争的物理隔离；若要求这类故障也完全不波及核心，必须另行批准 Manage 独立进程部署，不能声称同进程方案具有硬隔离。
+- 核心不导入 Manage 模块，不访问管理 PostgreSQL，不等待管理事务、迁移、审计、心跳或历史消费；也不向 Manage 发起回调或探活。
+- Manage 独立拥有监听端口、数据库连接池、任务 Context、并发额度、请求限流和熔断，进程信号与停止逻辑不涉及 Sandbox。
+- 两个入口分别加载并校验各自配置。管理字段无效不得导致 `cmd/sandbox` 配置解析或核心启动失败；内部控制配置错误只禁用内部控制监听，不阻断业务监听。
+- 管理查询、对账和历史清理使用有界分页、超时、退避和速率限制。核心内部控制接口独立限制并发、速率、响应大小和查询成本；不得执行无界 `KEYS`、高频全量 Pod 扫描或长持锁聚合。
+- Sandbox 内部控制接口使用独立 HTTP Server、监听端口和私网 Service；认证和限流不挂载到 `/api/v1`。核心既有 Redis HA、持久性 ACK、Controller 与 Workspace 租约语义保持不变。
+- 管理故障只影响 Manage；不能通过部署脚本、探针、依赖启动条件或优雅停止顺序级联停止或重启 Sandbox。补审计不能重新执行已受理的核心操作。
+- 两个进程各有 `/health` 与 `/ready`。Sandbox readiness 不包含 Manage 或 PG；Manage readiness 包含管理数据库等自身依赖，不强制依赖 Sandbox 在线，核心不可达时保留账号、审计功能并让相关查询和操作降级。
+- Kubernetes 使用独立 Deployment、Service、ServiceAccount 和 CPU/内存 requests/limits；不作为 Sandbox Pod 的 sidecar。Docker 使用独立容器和资源限额，不共用退出或重启策略。
+- 独立容器资源限额隔离 Manage 的进程崩溃、容器 OOM 和重启，但共享节点、网络和核心内部接口仍有资源竞争风险，必须限流并验证核心性能预算；需要进一步隔离时使用节点调度与资源预留，不能承诺共享基础设施下绝对零影响。
+
+### 4.2 HTTP 内部控制边界
+
+内部控制接口是 Sandbox 自有的薄控制能力，由独立 `control.enabled` 开关控制，默认关闭；它与 `manage.enabled` 无关，不要求 Manage 或 PG 存在。关闭、配置错误或内部端口监听失败只使该接口不可用，不影响业务监听与核心健康。启用后复用核心已经初始化的 Manager 和只读 Facade，不启动第二套池维护或生命周期控制器。
+
+接口前缀 `/internal/api/v1`，仅内网访问，不经公开业务 Ingress 暴露。使用独立高强度服务凭证 `Authorization: Bearer <service-token>`，与 Admin JWT、Refresh Token 和业务 API Key 隔离；只授权库存、健康、TTL、销毁，不授权代码执行、文件访问或网络修改。凭证来自部署 Secret，不接受空值，也不下发浏览器；跨不可信网络必须启用 TLS。
+
+核心只验证服务凭证与资源条件，不查询 Manage 账号、Session、RBAC 或审计。Manage 负责用户权限和审计；请求中的操作者、Request ID、Operation ID 仅为脱敏日志关联，不能充当核心授权依据。HTTP Client 不进行非幂等写请求自动重试。
+
+HTTP Client 的目标来自可信部署配置，禁止浏览器指定任意核心 URL，默认不跟随重定向，避免服务凭证发送到其他主机。连接、读取和响应体大小均有上限；核心版本不兼容时明确拒绝相关功能，不能退回使用权限更大的业务 API Key 调用。
 
 现有 `/api/v1` 业务 API 的认证语义保持独立。Admin Token 不能调用业务 API，业务 API Key 也不能调用管理 API。
 
@@ -106,17 +122,23 @@ React + Ant Design
 建议新增以下模块：
 
 ```text
-internal/admin/
+cmd/manage/main.go             独立管理进程入口，只装配 Manage
+internal/manage/
   domain/          管理员、角色、会话、实例投影、操作、审计实体
   repository/      数据访问接口和事务边界
   service/         认证、账号、总览、实例、命令、审计用例
-  inventory/       Manager、Pool、Redis、Runtime 的只读聚合
+  inventory/       核心 HTTP 库存与 SQL 历史只读聚合
   operation/       管理操作、幂等记录和只读结果对账
   projection/      有界历史观察、实例投影和保留期清理
   auth/            密码、JWT、Refresh Token、RBAC
   migration/       gormigrate 迁移和 Seed
   adapter/gorm/    PostgreSQL Repository 实现
   handler/         Gin Handler 和 DTO
+  client/          Sandbox 内部控制 HTTP Adapter
+  config/          Manage 专用配置加载与校验
+
+internal/control/             Sandbox 自有内部控制 Handler、鉴权和只读 Facade
+pkg/types/control/            两端共享的脱敏 HTTP 契约，不依赖 Manage 领域实体
 ```
 
 边界规则：
@@ -126,7 +148,7 @@ internal/admin/
 - Repository 接口不暴露 GORM、SQL 语句或 PostgreSQL 专有类型。
 - GORM Adapter 负责查询、事务、锁、分页和数据库错误翻译。
 - Inventory Facade 只负责读取并合并实时信息，不执行资源变更。
-- Operation Service 只能通过 Manager 的公开管理能力修改 Sandbox；不建立固定 Owner 路由或第二套生命周期控制器。
+- Operation Service 依赖控制 Client 接口，不直接依赖 Manager；核心 Control Handler 只通过现有 Manager 能力修改 Sandbox，不建立固定 Owner 路由或第二套生命周期控制器。
 - 管理结果对账只读取核心状态和证据，不接管工作空间、不修改控制器租约、不驱动核心清理。
 - 管理模块不得读取或持久化工作空间访问密钥、代码内容和 Token 明文。
 - Handler 使用显式字段白名单 DTO，不直接序列化内部 Snapshot、池记录、租约对象或 reservation token。
@@ -162,13 +184,13 @@ PostgreSQL Adapter 插入新实体时默认让数据库生成 ID，并通过 `RE
 - 已进入主分支且可能在线上执行过的 Migration 禁止改写；变更必须追加新 Migration。
 - 每项迁移提供显式 `Migrate`；可安全回滚的迁移同时提供 `Rollback`。
 - 所有管理域建表迁移必须显式声明 `id uuid PRIMARY KEY DEFAULT uuid_generate_v7()`，不得退化为 UUIDv4、自增整数或无序字符串主键。
-- 仅当 `manage.enabled=true` 时，Migration 才在每次服务启动时由主进程自动检查并执行；不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
+- 仅当 `manage.enabled=true` 时，Migration 才在每次 Manage 服务启动时由 `cmd/manage` 自动检查并执行；`cmd/sandbox` 永不执行管理迁移。不新增迁移 CLI、Seed CLI、初始化 CLI、独立 Job 或 Init Container。
 - 多副本启动时，以 PostgreSQL Advisory Lock 串行执行迁移。未取得锁的副本只在 Manage 初始化任务中限定时间等待；迁移完成前 Manage 不进入 Ready，但核心服务照常 Ready。
 - Migration、Seed 或 UUIDv7 能力检测失败只使 Manage 初始化失败，业务流量与核心生命周期不受影响。关闭管理模块时不得探测数据库或迁移状态。
 
 ### 6.3 Seed
 
-Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在服务启动的迁移阶段自动执行。已经成功记录的 Seed Migration 后续启动不会重复执行，不存在独立 Seed 命令。首期 Seed 包括：
+Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在 Manage 启动的迁移阶段自动执行。已经成功记录的 Seed Migration 后续启动不会重复执行，不存在独立 Seed 命令。首期 Seed 包括：
 
 1. 稳定权限码；
 2. `super_admin`、`operator`、`auditor` 三种内置角色；
@@ -242,7 +264,7 @@ Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在�
 `admin_commands` 保存：
 
 - 命令 ID、幂等键、命令类型；
-- 发起请求的 API Instance ID（仅诊断，不是目标 Owner）；
+- 发起请求的 Manage Instance ID 和响应的 Sandbox API Instance ID（仅诊断，不是目标 Owner）；
 - 业务 Sandbox ID、Runtime ID 和不可变 Runtime UID；
 - 脱敏后的命令参数；
 - `pending`、`running`、`accepted`、`succeeded`、`failed`、`unknown`、`expired` 状态；
@@ -262,15 +284,14 @@ Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在�
 
 ## 8. 实例库存与申请状态
 
-管理端“沙箱”页面实际是统一运行实例总表。Kubernetes 模式下合并：
+管理端“沙箱”页面实际是统一运行实例总表。Manage 通过核心内部控制接口获取以下数据的脱敏结果，再与 PostgreSQL 历史投影合并；不直接访问核心存储。Kubernetes 模式下核心只读 Facade 合并：
 
 - `Runtime.ListSandboxes` 返回的全局物理实例；
 - Redis 活跃 Sandbox 权威记录；
 - 普通共享 Pool 当前库存，按 Scope 和 Contract Fingerprint 区分；
 - Redis 中的 FUSE Pool Repository 记录；
-- PostgreSQL 中的历史投影。
 
-申请状态和生命周期以 Redis 控制记录为依据，物理运行状态以 Runtime 为依据，两者以不可变 Runtime UID 关联并分别展示。SQL 只补充历史，不能覆盖实时事实。不能累加各 API 副本缓存的共享池大小作为全局库存，也不能只凭 Pod 标签判断是否已申请。Docker 使用现有进程内只读 Facade，并明确显示查询范围。
+申请状态和生命周期以 Redis 控制记录为依据，物理运行状态以 Runtime 为依据，两者以不可变 Runtime UID 关联并分别展示。SQL 只补充历史，不能覆盖实时事实。不能累加各 API 副本缓存的共享池大小作为全局库存，也不能只凭 Pod 标签判断是否已申请。Docker 数据由目标 Sandbox 进程的本地 Facade 导出；首期只连接一个 Docker Sandbox 服务，不把负载均衡后的多个独立 Docker 进程误认为共享库存。
 
 归一化申请状态：
 
@@ -298,23 +319,44 @@ Seed 作为具名 Migration 注册到同一 `gormigrate` 迁移序列，并在�
 
 ## 9. 多副本管理操作
 
-PostgreSQL 只保存管理操作与审计，不负责 Sandbox 请求路由、核心操作门禁或生命周期接管。Kubernetes 的任意 API 副本均通过现有 Manager 和 Redis fencing 执行操作，无需 HTTP 转发、固定 Owner 或 PostgreSQL Owner Worker。
+PostgreSQL 只保存管理操作与审计，不负责 Sandbox 请求路由、核心操作门禁或生命周期接管。Manage 调用 Sandbox 内部 Service；Kubernetes 任意 Sandbox API 副本收到请求都通过现有 Manager 和 Redis fencing 执行操作，不再转发给创建副本，无需固定 Owner 或 PostgreSQL Owner Worker。
 
 管理操作流程：
 
 1. Admin API 完成认证、权限校验和请求验证。
-2. 服务写入审计意图；写入失败则拒绝执行。
-3. 服务使用客户端幂等键创建 `admin_command`，与审计意图在同一管理事务中提交。
-4. 服务读取实时目标身份，绑定 Sandbox ID 和不可变 Runtime UID；SQL 投影不能作为执行依据。
-5. 当前副本调用 Manager 的 `UpdateTTL` 或 `ScheduleDestroy`，目标身份校验必须与核心操作门禁组合，避免先查后改竞态。
-6. Manager 使用现有操作租约、版本检查和控制器 fencing；管理层不另行改变其持久性和清理语义。
-7. 服务保存受理或执行结果；数据库结果补写失败不回滚核心状态、不停止清理、不盲目重放。
-8. 管理结果对账只读取权威状态和清理证据，补全操作与审计结果。
+2. Manage 在同一 PG 事务中保存审计意图与 `admin_command`；以调用主体、动作、目标和客户端幂等键建立唯一约束，并校验参数摘要。写入失败则拒绝该管理请求。
+3. Manage 原子将操作从 `pending` 改为 `running`，只有一个执行者获准提交 HTTP 请求；其他副本返回已有 Operation，不重复执行。
+4. 服务通过控制 Client 获取实时目标身份，绑定 Sandbox ID 和不可变 Runtime UID；SQL 投影不能作为执行依据。
+5. Manage 携带 `expected_runtime_uid` 和 Operation ID 调用核心 TTL 或销毁接口。核心收到后将身份校验与现有操作门禁组合，避免先查后改竞态；不能只在 Manage 侧查询后校验。
+6. 核心 Control Handler 调用 Manager 的 `UpdateTTL` 或 `ScheduleDestroy`，遵循既有操作租约、版本检查和控制器 fencing，不访问管理数据库。
+7. Manage 保存受理或执行结果；数据库结果补写失败不回滚核心状态、不停止清理、不盲目重放。
+8. Manage 结果对账只通过只读控制接口获取状态与清理证据，补全操作与审计结果。
 9. 前端使用 Operation ID 查询状态。
 
 TTL 在限定时间内完成可直接返回结果；销毁受理后返回 `202 Accepted` 与 Operation ID。`accepted` 只表示核心持久化了销毁请求，既有核心控制器负责后续清理和跨副本恢复。不能仅凭 Pod 消失或活跃记录缺失宣称全部清理成功；缺少足够终态证据时结果为 `unknown`，不阻碍核心删除其记录。
 
 操作响应丢失、Redis 持久性未确认或执行副本崩溃后，不能因 Deadline 到期就自动重新执行 TTL 或判定执行失败。TTL 的重放可能再次延长过期时间。相同幂等键返回原操作；只有确认未进入核心执行的请求可标为 `expired`，不确定结果进入只读对账。Docker 操作限于现有本地 Manager 能力，不能套用 Kubernetes 跨副本承诺。
+
+核心不建立以 Manage Operation 为生命周期权威的持久命令表。Operation ID 在核心只作日志关联，不提供跨请求去重承诺；Manage 的 HTTP Client、网关和代理均不得自动重放写请求。执行者在发送前后崩溃都可能留下 `running`，恢复时保守标记 `unknown` 并只读对账，禁止通过 PG Lease 到期自动重领执行。
+
+### 9.1 Sandbox 内部控制 API
+
+统一前缀 `/internal/api/v1`，运行于独立内部监听器：
+
+| 方法与路径 | 能力 |
+|---|---|
+| `GET /instances` | 有界游标库存，包含来源、Scope、池合同、采集时间与部分结果标记 |
+| `GET /instances/:runtime_uid` | 按不可变物理身份查询详情和可取得的清理证据 |
+| `GET /sandboxes/:id` | 脱敏业务状态、Runtime UID、TTL 和过期时间 |
+| `GET /pools` | 共享池库存、合同版本和健康，未知不能展示为零 |
+| `GET /system/health` | 脱敏核心依赖诊断，不包含任何 Manage 或 PG 检查 |
+| `GET /manager-nodes` | 可取得的 API 节点诊断与数据来源，不作为请求 Owner 表 |
+| `PUT /sandboxes/:id/ttl` | `timeout`、`expected_runtime_uid` 条件 TTL 更新 |
+| `POST /sandboxes/:id/destroy` | `expected_runtime_uid` 条件销毁受理 |
+
+这些是待新增的核心 HTTP 契约，不能将现有业务 API 当作已经具备 UID 条件更新和异步受理语义。保持 `/api/v1` 的现有行为不变。UID 校验必须在核心具备原子或租约保护的操作入口执行，异步销毁在核心接受持久性确认后才返回 `202`。Docker 沿用本地销毁语义，完成后返回 `200`，不能伪造分布式异步受理。
+
+内部游标由核心封装，不暴露 Redis Key、Token 或控制能力。库存采集跨多个数据源不是事务快照，必须去重、报告更新时间和不确定性；查询不可用时不以历史投影执行写操作。节点列表没有足够权限或证据时返回未知，不为诊断扩大为集群管理员权限。
 
 ## 10. 认证与 Token
 
@@ -404,7 +446,7 @@ API 校验权限码，不在 Handler 中硬编码角色名。前端按权限码�
 
 TTL 调整只允许核心 Manager 判定可变更的已申请 Sandbox；销毁允许提交或查询已进入清理的目标。两者都必须绑定不可变 Runtime UID，并遵循核心状态机。未申请的预热实例首期只读。
 
-`GET /system/health` 单独返回 Manage 初始化、数据库和投影状态，以及经过脱敏的核心依赖诊断：Redis 模式及持久性状态、生命周期与清理阶段、共享池合同版本、Runtime、网络提供方和 AppArmor 门禁。只展示已取得的证据，未知状态不能伪装成健康。Manage 不可用时此接口只返回不含敏感信息的 `503`，不开放其他未认证诊断；核心健康接口不依赖它。
+`GET /system/health` 单独返回 Manage 数据库、投影、核心连接状态，以及从内部控制接口取得的脱敏依赖诊断：Redis 模式及持久性状态、生命周期与清理阶段、共享池合同版本、Runtime、网络提供方和 AppArmor 门禁。只展示已取得的证据，未知状态不能伪装成健康。Manage 自身认证依赖不可用时返回 `503`，不开放未认证诊断；核心不可达但 Manage 自身健康时返回带降级标记的诊断结果。核心健康接口不依赖此接口。
 
 ### 12.4 管理员
 
@@ -480,7 +522,7 @@ TTL 调整只允许核心 Manager 判定可变更的已申请 Sandbox；销毁�
 - `409`：幂等键冲突、状态变化或 Runtime UID 不匹配；
 - `423`：账号临时锁定；
 - `429`：登录或管理 API 限流；
-- `503`：Manage 尚未就绪，或管理请求依赖的 PostgreSQL、Redis、Runtime 暂不可用。仅影响管理接口，不能由此改变核心健康状态。
+- `503`：Manage 尚未就绪、PG 不可用、内部控制服务不可达，或所查询的核心依赖暂不可用。仅影响该管理请求，不能由此改变核心健康状态。
 
 内部错误记录结构化日志和 Trace，响应不得泄露 SQL、DSN、密码哈希、Token、Runtime 凭据或内部堆栈。
 
@@ -496,9 +538,9 @@ Kubernetes 核心生命周期由现有 Redis 记录、操作门禁、控制器�
 
 ### 15.2 历史观察与允许缺口
 
-历史属于旁路观察数据，而非核心事务承诺。首期以限速游标扫描、Runtime 身份对账和有界非阻塞观察通知建立投影。通知消费、入库或缓存失败只计数并标记管理历史缺口；队列满时允许丢弃，不反压核心，不无限积压内存，不向核心调用方返回错误。
+历史属于旁路观察数据，而非核心事务承诺。首期由 Manage 限速轮询内部控制库存、对账 Runtime 身份并记录管理操作结果，建立 SQL 投影。核心不推送通知、不连接 Manage、不等待消费者。Manage 内部处理队列必须有界，队列满或入库失败只计数并标记已知历史缺口，不通过增加核心扫描频率追赶、不无限积压内存。
 
-不得为 Manage 在核心 Redis Lua 中增加强制事件写入，不得将 Manage 消费 ACK、历史落库成功或管理保留期作为核心状态推进和删除的前提。关闭 Manage 时不启动这些观察器。
+不得为 Manage 在核心 Redis Lua 中增加强制事件写入，不得将 Manage 消费 ACK、历史落库成功或管理保留期作为核心状态推进和删除的前提。Manage 关闭时没有轮询或投影任务，核心不需要切换观察器或任务状态。
 
 扫描不能保证捕获短生命周期实例或精确终态，进程重启、PG 故障和队列溢出均可能造成历史缺失。列表、趋势和事件详情必须表达观察来源、最后采集时间、已知中断窗口和缺口计数；不能承诺所有缺失事件都可识别或恢复，也不能把缺口解释为没有业务发生。以实体身份、版本和事件来源构建唯一键去重，允许重复观察。
 
@@ -533,14 +575,21 @@ Kubernetes 核心生命周期由现有 Redis 记录、操作门禁、控制器�
 
 ## 17. 配置
 
-建议增加：
+Manage 使用独立配置加载器，建议文件为 `configs/manage.yaml`。不调用要求 Runtime、Storage、Workspace 和业务 API Key 的核心配置校验。建议内容：
 
 ```yaml
 manage:
   enabled: false
-  initialization:
-    timeout_seconds: 150
-    retry_interval_seconds: 30
+  server:
+    host: "0.0.0.0"
+    port: 8081
+    read_timeout_seconds: 10
+    write_timeout_seconds: 15
+  sandbox:
+    base_url: "" # Kubernetes 内部控制 Service URL；Docker 指向唯一核心服务
+    service_token: ""
+    request_timeout_seconds: 10
+    max_concurrent_requests: 2
   database:
     dsn: ""
     max_open_conns: 20
@@ -585,28 +634,58 @@ manage:
 
 环境变量继续使用 `SANDBOX_` 前缀和下划线展开嵌套配置，例如 `SANDBOX_MANAGE_ENABLED=true` 和 `SANDBOX_MANAGE_DATABASE_DSN`。敏感配置优先通过部署 Secret 注入环境变量。
 
+Sandbox 自有内部控制配置置于核心配置文件，不属于 Manage 配置：
+
+```yaml
+control:
+  enabled: false
+  host: "0.0.0.0"
+  port: 9091
+  service_token: ""
+  request_timeout_seconds: 10
+  rate_limit: 10
+  max_concurrent_requests: 2
+  max_page_size: 100
+  max_response_bytes: 1048576
+```
+
+环境变量示例为 `SANDBOX_CONTROL_ENABLED`、`SANDBOX_CONTROL_SERVICE_TOKEN`。内部凭证与 `SANDBOX_MANAGE_SANDBOX_SERVICE_TOKEN` 由同一部署 Secret 的独立挂载或注入提供，不通过数据库传播。两个开关默认关闭；`cmd/sandbox` 不解析 Manage 子树，`cmd/manage` 不校验核心子树。YAML 文件本身语法损坏仍是读取该文件的进程配置错误，因此部署必须使用分开的配置文件和 ConfigMap，不能依靠共享整份配置实现隔离。
+
 ## 18. 部署与启动顺序
 
 核心服务启动顺序不由 Manage 改变：
 
-1. 加载并校验核心配置；仅解析 `manage.enabled`，其他管理配置错误留在管理域处理；
+1. `cmd/sandbox` 加载并校验核心配置，忽略 Manage 配置；
 2. 初始化日志和 Telemetry；
 3. 按现有路径初始化 Runtime、Redis、Storage 和 Manager，以及核心恢复和共享池维护；
 4. 按核心已有条件对外进入 Ready，不等待 PostgreSQL、迁移、Seed 或实例投影。
 
-`manage.enabled=true` 时在同一主进程的独立有界初始化任务中自动执行：
+`control.enabled=true` 时核心以独立监听器装配内部控制 Handler，复用已经存在的 Manager；内部初始化或监听错误仅记录脱敏错误并禁用该能力，业务 API 和核心 `/ready` 不受影响。关闭控制监听器不停止核心 Manager。
 
-1. 设置 Manage 为 `initializing`，管理路由通过状态门禁返回 `503`；
-2. 校验管理配置，连接独立 PostgreSQL 连接池，并调用 `uuid_generate_v7()` 校验能力；
+Manage 由 `cmd/manage` 单独启动：
+
+1. 加载 Manage 配置；`manage.enabled=false` 时正常退出，不创建其他依赖；
+2. 启用时校验管理配置并初始化自身日志和 Telemetry，连接 PostgreSQL，调用 `uuid_generate_v7()` 校验能力；
 3. 获取迁移锁，执行全部待执行 Migration 与 Seed；
-4. 初始化管理 Repository、认证服务、只读库存和操作服务；
-5. 设置 Manage 为 `ready`，启动有界历史观察、操作结果对账和保留期清理。初次全量投影不是核心或管理认证 Ready 的前置条件，未采集数据明确展示未知。
+4. 初始化管理 Repository、认证服务、控制 HTTP Client、库存和操作服务；
+5. 启动管理 HTTP Server，提供管理路由及 Manage 自身 `/health`、`/ready`；启动有界库存轮询、操作结果对账和保留期清理。
 
-任一步失败只设置 Manage 为 `unavailable`，关闭本次失败初始化产生的管理资源，记录脱敏错误并按限定间隔重试。初始化不得无限等待或累积多个重试任务，核心服务不重启。运行时 PG 故障使管理请求 fail closed，核心服务继续；数据库恢复后管理初始化或查询在有界重试下恢复。
+启动初始化使用超时；失败则释放 Manage 自身资源并返回非零退出码，由其独立部署重启策略处理，不自动重启 Sandbox。Migration/Seed 仍在 Manage 正常启动时执行，没有任何迁移或 Seed CLI。运行时 PG 故障使 Manage `/ready` 返回 `503` 并拒绝依赖认证和数据库的请求；数据库恢复后通过有界依赖检查恢复。核心不可达不阻止 Manage 启动，初次库存采集也不是 Manage Ready 的前置条件；相应页面显示连接不可用或待采集，账号、审计功能仍可工作。
 
-`manage.enabled=false` 时不注册管理路由，不启动上述管理初始化、投影、观察和清理任务。PostgreSQL DSN 可以为空，数据库可以不存在或不可达；核心 Redis 与 Kubernetes 所需依赖仍按原有条件初始化。
+Manage 自身 `/health` 只返回轻量进程存活状态，`/ready` 只报告管理域就绪，不暴露 DSN、凭证或内部依赖详情；详细诊断仍要求管理员认证。Sandbox 自身健康检查与 Manage 完全独立。
 
-关闭进程时取消管理任务，并独立、有界地释放其资源；核心停止和清理不等待管理数据库关闭或历史队列清空。管理资源回收不得串行阻塞核心停止流程。
+两个进程分别处理信号、请求停止和资源关闭，没有跨进程 Stop 调用。Manage 停止时取消轮询、清理并关闭数据库和 HTTP Client，不停止核心已受理的销毁；历史未落库允许缺口。
+
+### 18.1 独立构建与部署
+
+- 构建目标分别是 `go build -o sandbox ./cmd/sandbox` 和 `go build -o manage ./cmd/manage`；入口共享仓库中的通用基础设施和 HTTP 契约，不互相装配。
+- Manage 使用独立镜像构建目标或 Dockerfile，不为运行管理服务携带 Docker Socket、Runtime 创建权限或工作空间凭证。
+- Kubernetes 为 Manage 新增独立 Deployment、Service、ConfigMap、Secret 挂载和资源限额；ServiceAccount 不拥有 Sandbox Pod、NetworkPolicy、Redis 或工作空间修改权限。
+- 建议提供 `deploy/helm/manage` 独立 Chart 和 Release，不将管理数据库必填校验或 Manage 迁移绑定到 Sandbox Helm Release；Manage 发布失败不阻断核心安装或升级。`manage.enabled=false` 时管理 Chart 不创建 Manage 工作负载，避免部署一个正常退出后被反复拉起的进程。
+- 核心内部控制端口通过独立私网 Service 暴露；NetworkPolicy 仅允许 Manage 工作负载访问，不加入公开业务 Ingress。业务 API、管理 API、内部控制 API 三者路由与凭证分离。
+- Manage 的部署、升级和重启不作为 Sandbox rollout 或启动的依赖，不使用相同的整份配置 checksum 触发双方一起 rollout。共享服务凭证轮换需要单独的兼容窗口和部署步骤，不能因此强制重启正在运行的核心生命周期。
+- 构建与发布任务分别执行两个明确的入口目标，不能因 Manage 构建或前端发布失败取消 Sandbox 的独立发布；共同核心契约的变更仍须验证兼容性。
+- Docker Compose 同样使用独立容器、配置和资源限额；不得通过 `depends_on: manage` 或共享 restart 脚本让核心依赖管理服务。即使不部署 Manage，Sandbox 也可单独运行。
 
 管理前端独立部署，通过环境构建配置或运行时配置获得管理 API Base URL。发布时前后端版本需满足明确的 API 兼容窗口。
 
@@ -615,7 +694,7 @@ manage:
 ### 19.1 后端单元测试
 
 - `manage.enabled=false` 时不校验 DSN、JWT 和 Seed 配置，不创建任何 Manage 依赖；
-- `manage.enabled=true` 时缺少必要配置只返回明确的管理初始化错误，不退出核心进程；
+- `cmd/manage` 启用但配置错误时只使 Manage 启动失败；`cmd/sandbox` 不加载或校验管理配置；
 - bcrypt 密码生成、正确/错误密码验证及超长密码错误处理；
 - JWT Claim、Issuer、Audience、过期和签名校验；
 - Refresh Token 轮换、重放和 Session 链撤销；
@@ -625,7 +704,10 @@ manage:
 - 申请状态归一化；
 - 命令状态机、幂等键和 Runtime UID fencing；
 - Service 不依赖 GORM 的 Repository Mock 测试；
-- 管理任务取消、错误和通知队列溢出不会取消核心 Context、返回核心错误或阻塞核心执行；
+- Manage 只装配管理服务和控制 HTTP Client，不构造 Manager、Pool、Runtime、核心 Redis Client 或 Workspace Coordinator；
+- 内部控制配置错误和监听失败不影响业务 Server；独立 Context、限流和响应预算生效；
+- HTTP Client 禁止写请求自动重试；服务凭证不会被 Admin JWT、Refresh Token 或业务 API Key 替代；
+- 管理任务取消、错误和处理队列溢出不会发起核心 Stop 或写状态恢复；
 - 观察历史使用独立原始创建时间，不被 TTL 重置覆盖。
 
 ### 19.2 PostgreSQL 集成测试
@@ -646,8 +728,9 @@ manage:
 
 ### 19.3 API 测试
 
-- `manage.enabled=false` 时所有 `/admin/api/v1` 路由均未注册，现有 `/api/v1` 行为不变；
-- `manage.enabled=true` 时管理路由注册，但初始化或依赖不可用时返回管理 `503`；
+- `cmd/sandbox` 始终不注册 `/admin/api/v1`；`cmd/manage` 未启用时不监听 HTTP；
+- `control.enabled=false` 时不注册内部控制接口，核心 `/api/v1` 行为不变；
+- `manage.enabled=true` 且初始化成功后管理路由注册；运行时管理依赖不可用返回 `503`，启动初始化失败只导致 Manage 自身退出；
 - 登录、刷新、退出和个人密码修改；
 - 401、403、409、423、429 和 503 映射；
 - 所有管理接口的 RBAC；
@@ -655,13 +738,26 @@ manage:
 - TTL 同步结果、销毁 202、轮询及幂等行为；
 - 审计意图写入失败时拒绝操作；
 - 响应和日志不泄露敏感字段；
+- 内部控制空凭证、Admin JWT、业务 Key 及越权路径均被拒绝；只允许私网暴露；
+- 核心内部 TTL、销毁接口的 UID 原子条件校验、异步受理与结果未知行为；
 - 启用 Manage 但 PG 不可用时，核心 `/health`、`/ready` 和 `/api/v1` 行为与未启用时一致；
 - 库存数据源失败返回未知或部分数据标记，不展示零库存或默认未申请；
 - 任意 Kubernetes API 副本均可执行管理操作；销毁与活跃流式操作并发时遵循现有门禁；
 - 管理查询、轮询、历史队列溢出和后台任务并发压力下，核心服务仍满足既有延迟与吞吐预算；
 - 结果未确认时不宣称已销毁，不基于瞬时 Controller Owner 拒绝请求。
 
-### 19.4 前端测试
+### 19.4 进程与部署隔离测试
+
+- Sandbox 可不部署 Manage、不提供 PG 或管理配置单独启动，核心健康与业务测试正常；
+- 两个二进制独立构建，核心依赖图不引入 `internal/manage` 或管理数据库 Adapter；
+- Manage 退出、SIGKILL、容器 OOM、数据库断连、迁移失败和滚动升级均不触发 Sandbox 重启、Ready 降级或生命周期停止；
+- Manage 无 Redis、Kubernetes、Docker 和工作空间凭证仍可通过 HTTP 完成查询与授权操作；
+- Manage 过载时控制接口限流生效，核心业务符合既有性能预算；不能只测试 Manage 自身限流；
+- 私网 Service 和 NetworkPolicy 阻止未授权工作负载访问控制端口，业务 Ingress 不暴露该端口；
+- Manage 启动或核心控制接口关闭时，账号和审计仍可用，核心相关页面明确降级；
+- 已受理销毁不依赖 Manage 存活，任意核心副本可以按现有 Controller 机制继续清理。
+
+### 19.5 前端测试
 
 - 登录、Refresh 并发合并和退出；
 - 权限路由与按钮可见性；
@@ -678,20 +774,22 @@ manage:
 
 1. PostgreSQL 空库可由 `gormigrate/v2` 完整迁移并创建首个超级管理员。
 2. 代码中不存在 `AutoMigrate` 调用，所有 DDL 均可定位到 Migration。
-3. 启用管理模块后，普通服务启动会自动执行所有待执行 Migration 与 Seed，系统不依赖任何 CLI、独立 Job 或 Init Container。
-4. `manage.enabled=false` 时不连接数据库、不执行 Migration/Seed、不注册管理路由、不启动管理后台任务，且 PostgreSQL 不可用不影响现有服务。
-5. `manage.enabled=true` 时独立初始化管理模块；配置、PG、UUIDv7 能力、Migration 或 Seed 失败均只使 Manage 不可用，核心服务正常启动和 Ready。
+3. 启用 Manage 后，`cmd/manage` 正常启动自动执行待执行 Migration 与 Seed，不依赖迁移/Seed CLI、独立 Job 或 Init Container；`cmd/sandbox` 永不执行管理迁移。
+4. `manage.enabled=false` 时 Manage 正常退出，不监听、不连接数据库或核心服务、不执行 Migration/Seed、不启动后台任务；核心忽略管理配置。
+5. 配置、PG、UUIDv7 能力、Migration 或 Seed 失败均只使 Manage 不可用或自身启动失败，Sandbox 正常启动和 Ready。
 6. 所有管理域自有表都使用 PostgreSQL 原生 `uuid` 主键，并由数据库 `uuid_generate_v7()` 默认生成 UUIDv7。
 7. 三种角色只能访问其允许的页面与 API。
 8. Access Token、Refresh 轮换、退出、禁用和密码重置符合本设计。
 9. 多副本下可以全局查看普通池、FUSE 池、直接创建实例和历史实例。
 10. 每个实例展示有证据支持的未申请、申请中、已申请或待核实状态；保留原始池状态、生命周期及清理阶段，不累加各副本的共享库存缓存。
-11. 任意 Kubernetes 副本收到 TTL 或销毁请求都直接通过现有 Manager 门禁执行；Runtime UID 不匹配安全拒绝，不建立固定 Owner 路由。
+11. Manage 通过私网 HTTP 调用核心控制接口，任意 Kubernetes 核心副本均使用现有 Manager 门禁执行；Runtime UID 不匹配安全拒绝，不建立固定 Owner 路由。
 12. 所有管理写操作先保存脱敏审计意图；结果可检索或明确标记未知，补写失败不阻碍已受理的核心操作。
 13. 管理依赖不可用只影响管理请求；核心创建、申请、TTL、销毁、到期清理、共享池与工作空间恢复不依赖管理 SQL、审计或历史。
 14. Go 测试、PostgreSQL Migration 集成测试、前端测试和生产构建全部通过。
 15. 核心 Redis 状态和 Runtime 身份为实时依据，SQL 只作旁路投影；历史缺口、来源与观察时间如实展示，不承诺无损历史。
-16. Manage 使用独立资源预算和有界任务；关闭、初始化失败、慢查询、通知丢弃与重试均不引入核心等待、错误传播或健康降级。
+16. Manage 使用独立资源预算和有界任务；关闭、初始化失败、慢查询、处理队列丢弃与重试均不引入核心等待、错误传播或健康降级。
+17. `cmd/manage/main.go` 为独立入口，独立二进制、容器和 Deployment；核心不加载 Manage，Manage 不启动核心池或控制器。
+18. 内部控制监听、配置、服务凭证与限流独立于业务 API；未部署 Manage 或关闭控制接口时核心仍正常运行。
 
 ## 21. 后续演进
 
@@ -704,4 +802,4 @@ Repository 边界允许未来新增 MySQL Adapter。届时必须：
 - 使用真实 MySQL 增加完整 Repository、迁移和并发测试；
 - 保持 Handler、Service、领域模型和前端 API 不变。
 
-未来还可以独立评估自定义 RBAC、SSO、在线 Pool 调整、内嵌日志与 Trace、管理后端拆分为独立服务等能力；这些不属于本次实现计划。
+未来还可以独立评估自定义 RBAC、SSO、在线 Pool 调整、内嵌日志与 Trace、可靠核心事件源与更强的基础设施隔离等能力；这些不属于本次实现计划。
