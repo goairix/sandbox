@@ -37,7 +37,8 @@ pip install --no-cache-dir \
   reportlab \
   openpyxl \
   python-docx \
-  playwright
+  playwright \
+  firecrawl-anydoc
 
 export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 playwright install-deps chromium
