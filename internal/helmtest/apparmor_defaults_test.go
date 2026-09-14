@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+func TestAppArmorLoaderDisablesServiceLinks(t *testing.T) {
+	for _, priorityClass := range []string{"", "trusted-loader"} {
+		t.Run("priority-class="+priorityClass, func(t *testing.T) {
+			ds := object(t, render(t, "apparmorLoader.enabled=true", "apparmorLoader.priorityClassName="+priorityClass), "DaemonSet", "sandbox-apparmor-loader")
+			pod := mapping(t, mapping(t, mapping(t, ds["spec"])["template"])["spec"])
+			if pod["enableServiceLinks"] != false {
+				t.Fatal("loader must explicitly disable service links to match the startup gate contract")
+			}
+		})
+	}
+}
+
 func TestAppArmorTemplatesSupplyMissingDefaults(t *testing.T) {
 	reference := object(t, render(t, "apparmorLoader.enabled=true"), "DaemonSet", "sandbox-apparmor-loader")
 	cases := []struct {
@@ -54,6 +66,9 @@ func TestAppArmorTemplatesSupplyMissingDefaults(t *testing.T) {
 					t.Fatal("template defaults must produce the same complete DaemonSet as chart values.yaml defaults")
 				}
 				pod := mapping(t, mapping(t, mapping(t, ds["spec"])["template"])["spec"])
+				if pod["enableServiceLinks"] != false {
+					t.Fatal("loader must explicitly disable service links to match the startup gate contract")
+				}
 				c := container(t, pod, "containers", "apparmor-loader")
 				wantImage := "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0"
 				if tc.name == "partial-image" {

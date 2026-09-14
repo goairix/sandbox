@@ -336,3 +336,14 @@ kubectl --context "$CTX" -n "$NS" get pods \
 ```
 
 API 启动门禁只要求至少一个当前策略实例 Ready，不等于全部目标节点已覆盖；DaemonSet Ready 也不代替实际 mounter/s3fs profile 和越权拒绝验收。加载器关闭时没有 DaemonSet 属于正常行为。退出/升级/uninstall 不自动卸载内核 profile，旧策略清理由节点管理员另行审计。
+
+若加载器全部 Ready、API 仍报 `AppArmor loader startup gate incomplete`，检查 DS 模板与实际 Pod 的 `enableServiceLinks` 是否一致。旧版未在模板指定此字段，Kubernetes 1.33 给 Pod 默认补入 true，触发严格模板比较失败；修复后的 `templates/apparmor-loader.yaml` 显式指定 false。仅更新这一模板即可修复该差异，无需新增 values 项或重建 API/加载器/mounter 镜像。保留自己的镜像 tag、Redis 身份 Secret/PVC 和其它配置，重新执行 upgrade；内置 Sentinel 不使用 `--atomic` 或 rollback。升级后仍须确认 API 可用并完成普通/FUSE API 测试，不能用 DS Ready 代替，见 [门禁修复记录](../testing/2026-09-14-apparmor-loader-startup-gate-results.md)。
+
+```bash
+# 更新后的模板及当前模板 Pod 应均输出 false；空值表示模板未显式配置。
+kubectl --context "$CTX" -n "$NS" get daemonset "$RELEASE-apparmor-loader" \
+  -o jsonpath='{.spec.template.spec.enableServiceLinks}{"\n"}'
+kubectl --context "$CTX" -n "$NS" get pods \
+  -l "app=sandbox-apparmor-loader,release=$RELEASE" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.enableServiceLinks}{"\n"}{end}'
+```

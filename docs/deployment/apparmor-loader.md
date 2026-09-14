@@ -6,7 +6,7 @@
 
 启用前必须在隔离目标节点完成：加载器 enforce、mounter/PID 1 及 s3fs 子进程实际 profile、对象存储挂载、写入/flush/卸载、拒绝写入非允许路径、拒绝任意 mount、重启重载及最终清理。未完成这些步骤时不要直接打开生产开关。
 
-2026-09-14，`v0.3.24-arm64` 已在 `ds-ai-worker-2` 通过上述加载、MinIO TLS 挂载链路、拒绝测试及加载器 Pod 重建恢复，见 [真实验收记录](../testing/2026-09-14-apparmor-live-prepared-results.md)。线上 release 未启用；此结果不覆盖业务节点重启、其它节点/运行时、其它存储及启用后的公共 API/跨副本集成。现有加载器、API、mounter 镜像无需因这次测试记录重新构建。
+2026-09-14，`v0.3.24-arm64` 已在 `ds-ai-worker-2` 通过上述加载、MinIO TLS 挂载链路、拒绝测试及加载器 Pod 重建恢复，见 [真实验收记录](../testing/2026-09-14-apparmor-live-prepared-results.md)。该组件测试结束时线上 release 尚未启用；此结果不覆盖业务节点重启、其它节点/运行时、其它存储及启用后的公共 API/跨副本集成。现有加载器、API、mounter 镜像无需因这次测试记录重新构建。后续线上启用发现的启动门禁兼容问题另见 [门禁修复记录](../testing/2026-09-14-apparmor-loader-startup-gate-results.md)。
 
 ## 构建及推送镜像
 
@@ -162,6 +162,8 @@ config:
 API 新增本 release 指定 DaemonSet 的 namespace get；跨运行时命名空间时，为核验 loader Pod 另增加 release namespace Pod get/list。加载器本身没有 Role。API 门禁核验 exact UID、当前 generation/模板和至少一个当前策略 Ready 实例，不依赖全节点都 Ready。所有目标节点覆盖仍须单独验收。
 
 集群若配置了 globalDefault PriorityClass，必须显式设置 `apparmorLoader.priorityClassName` 为管理员确认的已存在类。默认空配置不会自动信任 admission 注入的其它类，也不自动授予 system-critical 优先级；否则严格模板门禁会超时。显式类仅允许 admission 补入其 priority/preemption 值，类名漂移和模板中已指定值的漂移仍被拒绝。
+
+若加载器已 Ready，但 API 报 `AppArmor loader startup gate incomplete`，须同时检查加载器 DaemonSet 模板与所属 Pod，而不是只看 Ready 数。旧模板未设置 `enableServiceLinks`，Kubernetes 1.33 给实际 Pod 默认补入 `true`，会被严格模板比较判为不匹配。新版模板固定 `enableServiceLinks: false`，生成的 Pod 也保持 false；无需新增 values 配置或重建现有兼容镜像，只需同步新版 Chart 后重新 upgrade。不要为此关闭安全校验、回滚 release 或删除内置 Sentinel 的身份 Secret/PVC。字段被准入组件改写等其它不匹配仍会被拒绝。
 
 运行时在 prepared 入池及授权前增加一次私有 Kubernetes Exec，读取固定 `/proc/1/attr/current`，联合复核 UID、零重启及安全设置；有独立 5 秒上限，无凭据输入，不向租户 Exec 开放。该开销需要实际压测，不承诺零成本。
 

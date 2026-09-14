@@ -63,6 +63,7 @@ for namespace in ['', 'runtime-ns']:
     selector = {'node.example/pool': 'sandbox', 'kubernetes.io/os': 'linux'}
     assert spec['nodeSelector'] == selector
     assert spec['automountServiceAccountToken'] is False
+    assert spec.get('enableServiceLinks') is False, 'loader must explicitly disable service links to match the startup gate contract'
     assert not any(spec.get(key, False) for key in ['hostPID', 'hostIPC', 'hostNetwork'])
     container = spec['containers'][0]
     assert container['name'] == 'apparmor-loader'

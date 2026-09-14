@@ -47,6 +47,8 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: false
+      # 显式关闭，避免 Pod 默认值与模板不同导致严格启动门禁误判。
+      enableServiceLinks: false
       {{- if $apparmorConfig.priorityClassName }}
       priorityClassName: {{ $apparmorConfig.priorityClassName | quote }}
       {{- end }}

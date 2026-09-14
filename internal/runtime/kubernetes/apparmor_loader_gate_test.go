@@ -82,6 +82,35 @@ func TestAppArmorLoaderGateCurrentTemplate(t *testing.T) {
 	}
 }
 
+func TestAppArmorLoaderGateServiceLinksContract(t *testing.T) {
+	enabled, disabled := true, false
+	cases := []struct {
+		name     string
+		template *bool
+		pod      *bool
+		ready    bool
+	}{
+		{name: "implicit template with server-defaulted pod", pod: &enabled},
+		{name: "explicitly disabled in both", template: &disabled, pod: &disabled, ready: true},
+		{name: "enabled pod drifts from disabled template", template: &disabled, pod: &enabled},
+		{name: "pod omits pinned disabled value", template: &disabled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ds, pod, profile := loaderGateFixture()
+			ds.Spec.Template.Spec.EnableServiceLinks = tc.template
+			pod.Spec.EnableServiceLinks = tc.pod
+			ready, err := appArmorLoaderObservationReady(ds, []corev1.Pod{*pod}, profile, map[string]string{"kubernetes.io/os": "linux"})
+			require.Equal(t, tc.ready, ready)
+			if tc.ready {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "no current-template owned AppArmor loader Pod is Ready")
+			}
+		})
+	}
+}
+
 func TestAppArmorLoaderGateTimeoutIdentityAndSelector(t *testing.T) {
 	ds, pod, profile := loaderGateFixture()
 	client := kubefake.NewSimpleClientset(ds, pod)
