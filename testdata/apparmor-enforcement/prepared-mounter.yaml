@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prepared-mounter
+  namespace: sandbox-apparmor-enforcement-20260914-a18c24
+  labels:
+    sandbox-test-purpose: apparmor-live-prepared
+    sandbox-test-run: a18c24
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: ds-ai-worker-2
+    kubernetes.io/os: linux
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  shareProcessNamespace: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 300
+  terminationGracePeriodSeconds: 20
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    - name: workspace-mounter
+      image: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.4
+      imagePullPolicy: IfNotPresent
+      command: [/usr/local/bin/workspace-mounter, supervise]
+      workingDir: /
+      restartPolicy: Always
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        readOnlyRootFilesystem: true
+        appArmorProfile:
+          type: Localhost
+          localhostProfile: __APPARMOR_PROFILE__
+      env:
+        - name: SANDBOX_RUNTIME_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: SANDBOX_MOUNTER_BOOTSTRAP
+          value: '{"version":1,"provider":"minio","bucket":"apparmor-isolated-test","endpoint":"https://isolated-test.invalid","region":"us-east-1","profile":"minio-sigv4-path-style-v1","passwd_file":"/run/s3fs/passwd-s3fs","cache_dir":"/var/cache/s3fs","cache_limit_bytes":67108864,"mount_path":"/workspace","pool_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mount_timeout_seconds":30,"flush_timeout_seconds":30,"unmount_timeout_seconds":15}'
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
+      startupProbe:
+        exec:
+          command: [/usr/local/bin/workspace-mounter, health, prepared]
+        periodSeconds: 2
+        timeoutSeconds: 1
+        failureThreshold: 10
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          mountPropagation: Bidirectional
+        - name: fuse-cache
+          mountPath: /var/cache/s3fs
+        - name: dev-fuse
+          mountPath: /dev/fuse
+        - name: mounter-run
+          mountPath: /run/s3fs
+  containers:
+    - name: sandbox
+      image: registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.3.4
+      command: [/usr/local/bin/workspace-probe, self-check]
+      workingDir: /workspace
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      env:
+        - name: WORKSPACE_PROBE_INTERNAL_PID1_V1
+          value: serve
+        - name: SANDBOX_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          mountPropagation: HostToContainer
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: workspace
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
+    - name: fuse-cache
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: dev-fuse
+      hostPath:
+        path: /dev/fuse
+        type: CharDevice
+    - name: mounter-run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 32Mi

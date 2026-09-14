@@ -6,6 +6,8 @@
 
 启用前必须在隔离目标节点完成：加载器 enforce、mounter/PID 1 及 s3fs 子进程实际 profile、对象存储挂载、写入/flush/卸载、拒绝写入非允许路径、拒绝任意 mount、重启重载及最终清理。未完成这些步骤时不要直接打开生产开关。
 
+2026-09-14，`v0.3.24-arm64` 已在 `ds-ai-worker-2` 通过上述加载、MinIO TLS 挂载链路、拒绝测试及加载器 Pod 重建恢复，见 [真实验收记录](../testing/2026-09-14-apparmor-live-prepared-results.md)。线上 release 未启用；此结果不覆盖业务节点重启、其它节点/运行时、其它存储及启用后的公共 API/跨副本集成。现有加载器、API、mounter 镜像无需因这次测试记录重新构建。
+
 ## 构建及推送镜像
 
 本功能新增 `sandbox-apparmor-loader` 镜像，并要求 `sandbox-api` 包含加载器启动门禁和私有 enforce 检查。如果已部署的 API 就是从包含这些实现的新版代码构建的，可以复用，不必再构建一次；否则按下面命令同时重建 API。mounter/probe 不因为这项功能重建，Redis 镜像也不用更换。

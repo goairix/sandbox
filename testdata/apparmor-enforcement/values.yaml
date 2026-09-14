@@ -1,0 +1,17 @@
+# 本轮隔离验收；不是线上 values，也不直接安装整个 Chart。
+apparmorLoader:
+  enabled: true
+  image:
+    repository: registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader
+    tag: v0.3.24-arm64@sha256:5a984dcb978f6634acee4446bb2f1ae5d2aca918ee53b189372deb688bcf908c
+    pullPolicy: IfNotPresent
+config:
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: ""
+      nodeSelector:
+        kubernetes.io/hostname: ds-ai-worker-2
+  workspace:
+    enabledMountModes: [sync, fuse]
+    allowMissingLSMForKind: false
