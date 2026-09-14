@@ -40,7 +40,8 @@ RUN pip install --no-cache-dir \
     reportlab \
     openpyxl \
     python-docx \
-    playwright
+    playwright \
+    firecrawl-anydoc
 
 # Playwright Chromium 及系统依赖
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
