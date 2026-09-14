@@ -266,7 +266,8 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 		if time.Since(record.UpdatedAt) < activePublishingRecoveryGrace {
 			return nil
 		}
-		return m.destroyDistributedSandbox(ctx, record.SandboxID)
+		_, err := m.destroyDistributedSandboxWithWait(ctx, record.SandboxID, false)
+		return err
 	}
 	if record.Phase != state.ActiveSandboxActive &&
 		record.Phase != state.ActiveSandboxDestroying && record.Phase != state.ActiveSandboxCleanupPending {
@@ -307,7 +308,8 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 		if record.Phase != state.ActiveSandboxActive {
 			cleanupCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()
-			return m.destroyDistributedSandbox(cleanupCtx, sb.ID)
+			_, err := m.destroyDistributedSandboxWithWait(cleanupCtx, sb.ID, false)
+			return err
 		}
 		return nil
 	}

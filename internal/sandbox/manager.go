@@ -2095,12 +2095,15 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 	)
 	defer span.End()
 	if m.distributedStateEnabled() {
-		if err := m.destroyDistributedSandbox(ctx, id); err != nil {
+		recordDestroy, err := m.destroyDistributedSandboxWithWait(ctx, id, true)
+		if err != nil {
 			telemetry.Error(err, span)
 			return err
 		}
-		metrics.SandboxActiveGauge.Add(ctx, -1)
-		metrics.RecordSandboxDestroy(ctx, reason)
+		if recordDestroy {
+			metrics.SandboxActiveGauge.Add(ctx, -1)
+			metrics.RecordSandboxDestroy(ctx, reason)
+		}
 		return nil
 	}
 	m.mu.RLock()
