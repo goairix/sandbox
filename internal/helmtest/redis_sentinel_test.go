@@ -160,6 +160,23 @@ func TestSentinelBootstrapImageIsIndependentFromAPI(t *testing.T) {
 			t.Fatalf("%s image = %v", pair[1], c["image"])
 		}
 	}
+
+	changed := render(t, append(append([]string{}, base...), "redis.sentinel.bootstrapImage.tag=v0.1.1")...)
+	changedTemplate := mapping(t, mapping(t, object(t, changed, "StatefulSet", "sandbox-redis-sentinel")["spec"])["template"])
+	changedPod := mapping(t, changedTemplate["spec"])
+	wantChanged := "registry.example.com/sandbox-redis-bootstrap:v0.1.1"
+	for _, c := range []map[string]any{
+		container(t, changedPod, "initContainers", "prepare"),
+		container(t, changedPod, "initContainers", "identity"),
+	} {
+		if c["image"] != wantChanged {
+			t.Fatalf("changed Sentinel helper image = %v", c["image"])
+		}
+		c["image"] = want
+	}
+	if !reflect.DeepEqual(aTemplate, changedTemplate) {
+		t.Fatal("bootstrap image tag changed fields outside Sentinel helper images")
+	}
 }
 
 func TestSentinelBootstrapImageRejectsInvalidValues(t *testing.T) {
@@ -211,7 +228,7 @@ func TestSentinelAutomaticIdentityUsesOneFreshClusterID(t *testing.T) {
 	}
 	want := map[string]string{"-namespace": "release-ns", "-statefulset": "sandbox-redis-sentinel", "-secret": "sandbox-redis-sentinel-identity", "-state-configmap": "sandbox-redis-sentinel-state", "-fresh-cluster-id": cid, "-timeout": "2m"}
 	if args[0] != "ensure-identity" || sequence(t, c["command"])[0] != "/app/redis-bootstrap" {
-		t.Fatal("identity Job must use the current API bootstrap binary")
+		t.Fatal("identity Job must use the independent bootstrap binary")
 	}
 	membersPresent := false
 	for i := 1; i < len(args); i += 2 {
