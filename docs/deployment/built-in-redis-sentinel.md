@@ -93,12 +93,25 @@ RELEASE=YOUR_RELEASE
 # 离线结构检查不会执行现有对象 lookup；丢弃渲染结果，避免 inline Secret 写入终端/日志。
 helm template "$RELEASE" ./deploy/helm/sandbox --namespace "$NS" \
   --kube-version 1.33.0 -f /opt/sandbox/env/values-prod.yaml >/dev/null
+test "$(helm show chart ./deploy/helm/sandbox | awk '$1 == "version:" { print $2 }')" = "0.3.0"
 helm --kube-context "$CTX" upgrade --install "$RELEASE" ./deploy/helm/sandbox \
   --namespace "$NS" -f /opt/sandbox/env/values-prod.yaml \
   --wait --wait-for-jobs --timeout 20m
 ```
 
-不要新旧 Chart 混用。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖 hook 等待顺序，避免 Helm 等 API Ready、API 又等 Job 的死锁。两个 Job 名均含 release revision 且不超过 63 字符；初始化 Job 仍仅有指定状态 CM 的 get/update 权限。身份 Job 预算 120 秒，只 GET 固定 Secret/CM/三个 PVC；自动模式额外授予所在 namespace 的 Secret CREATE，外部身份模式没有 CREATE。Kubernetes RBAC 不能用 resourceNames 约束 CREATE，因此该权限可创建 namespace 内任意名字的 Secret，固定名字与新安装授权由程序检查；没有 list/update/patch/delete 或 ClusterRole 权限。身份 Job 不挂 seed、公钥、认证或 PVC，不接收密码参数/ENV，仅专用 ServiceAccount 自动投影必要 API token；Job、SA、Role 和 RoleBinding 随 release 正常卸载。
+不要新旧 Chart 混用。Chart `0.3.0` 仅是 Helm 包版本，当前 `appVersion` 和镜像
+tag 不随之改变。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖
+hook 等待顺序，避免 Helm 等 API Ready、API 又等 Job 的死锁。身份 Secret 不存在时
+才渲染 identity Job；state phase 为 `Pending` 时才渲染 initialize Job。已是
+`Initialized` 且身份完整的普通 upgrade 不再创建两个 Job/RBAC，第一次迁移会由 Helm
+删除上一 revision 的 Completed Job/Pod。中断在 Pending 的安装仍能用新 revision Job
+恢复。两个 Job 名均含 release revision 且不超过 63 字符；初始化 Job 仍仅有指定状态
+CM 的 get/update 权限。身份 Job 预算 120 秒，只 GET 固定 Secret/CM/三个 PVC；自动
+模式额外授予所在 namespace 的 Secret CREATE，外部身份模式没有 CREATE。Kubernetes
+RBAC 不能用 resourceNames 约束 CREATE，因此该权限可创建 namespace 内任意名字的
+Secret，固定名字与新安装授权由程序检查；没有 list/update/patch/delete 或 ClusterRole
+权限。身份 Job 不挂 seed、公钥、认证或 PVC，不接收密码参数/ENV，仅专用
+ServiceAccount 自动投影必要 API token。
 
 身份 Job 的 120 秒是总预算，调度和镜像拉取也计入；程序的 `-timeout 2m` 是运行上限，不额外延长 Job deadline。先确认独立 bootstrap 镜像可拉取，避免首次身份生成之前就超时。
 
@@ -114,6 +127,71 @@ PodTemplate 的镜像字段会改变，因此预期发生一次 OrderedReady 三
 通过门禁时继续服务。完成这次迁移后，只改 `image.tag` 不再改变 Redis StatefulSet，
 三个 Redis Pod 的 UID、restartCount 与 currentRevision 都应保持不变。只有
 `redis.image` 或 `redis.sentinel.bootstrapImage` 改变时才应再次滚动 Redis。
+
+使用以下命令生成并比较严格 API-only 升级证据：
+
+```bash
+scripts/verify-sentinel-api-only-upgrade.sh snapshot \
+  --context "$CTX" --namespace "$NS" --release "$RELEASE" \
+  --output /tmp/sandbox-sentinel-before.json
+
+# 手工执行只改变 image.tag 的 helm upgrade。
+
+scripts/verify-sentinel-api-only-upgrade.sh verify \
+  --context "$CTX" --namespace "$NS" --release "$RELEASE" \
+  --snapshot /tmp/sandbox-sentinel-before.json
+```
+
+脚本不会执行 Helm upgrade，也不会读取 Secret。它要求 API 完整 rollout，同时 Redis
+StatefulSet revision、PodTemplate、三个 Pod 的 UID/restartCount/imageID 完全不变，
+并拒绝任何新增 identity/initialize Job。
+
+### FUSE refill lease 接管验收
+
+这个测试会占用测试 release 的真实 FUSE refill lease 45 秒，并创建一个 FUSE 沙盒；
+只允许在隔离测试环境执行。先确认目标池为空闲满容量，再找到当前 Redis master，并把
+API 和 master 转发到本机：
+
+```bash
+MASTER_POD="$(
+  kubectl --context "$CTX" -n "$NS" get pod \
+    -l "app=sandbox-redis-sentinel,release=$RELEASE" -o name |
+  while read -r pod; do
+    if kubectl --context "$CTX" -n "$NS" exec "$pod" -c redis -- \
+      redis-cli --raw info replication | tr -d '\r' | grep -q '^role:master$'; then
+      printf '%s\n' "${pod#pod/}"
+    fi
+  done
+)"
+test -n "$MASTER_POD"
+kubectl --context "$CTX" -n "$NS" port-forward "pod/$MASTER_POD" 16379:6379
+```
+
+在另一个终端启动 API 转发并运行测试。认证 Secret 名称和数据 key 必须使用线上 values
+中的实际配置；下面的 `AUTH_SECRET`/`DATA_PASSWORD_KEY` 不是固定值：
+
+```bash
+kubectl --context "$CTX" -n "$NS" port-forward "service/${RELEASE}-api" 18081:8080
+
+export SANDBOX_REFILL_LEASE_TEST=1
+export SANDBOX_REFILL_TEST_API_URL=http://127.0.0.1:18081
+export SANDBOX_REFILL_TEST_API_KEY='使用测试环境 API key'
+export SANDBOX_REFILL_TEST_REDIS_ADDR=127.0.0.1:16379
+AUTH_SECRET=sandbox-fuse-redis # 改成线上 values 使用的实际认证 Secret
+DATA_PASSWORD_KEY=password    # 改成 redis.sentinel.dataPasswordKey 的实际值
+export SANDBOX_REFILL_TEST_REDIS_PASSWORD="$(
+  kubectl --context "$CTX" -n "$NS" get secret "$AUTH_SECRET" \
+    -o "go-template={{ index .data \"$DATA_PASSWORD_KEY\" | base64decode }}"
+)"
+go test ./test/integration/fuserefillelease \
+  -run TestDeployedFUSERefillLeaseTakeover -count=1 -v
+unset SANDBOX_REFILL_TEST_API_KEY SANDBOX_REFILL_TEST_REDIS_PASSWORD
+```
+
+测试会从真实 Redis 自动选择唯一一个“全部为 prepared 且容量为 3”的 FUSE pool；若
+不存在或有多个候选，它会在创建沙盒前停止。多池环境可显式设置
+`SANDBOX_REFILL_TEST_POOL_KEY`。测试异常退出后不要手工删除 Redis key，旧 lease 会按
+45 秒 TTL 自动失效；测试不会删除 PVC、身份 Secret 或 Sentinel state。
 
 内置 Sentinel 禁止 `helm rollback`，也不要使用会自动回滚的 `--atomic`：Helm 会重放历史 Pending 状态，而不是重新执行 lookup，可能丢失初始化登记。pre-rollback Hook 会在改写资源前明确拒绝。需要部署旧应用版本时，将目标镜像和配置作为新的 `helm upgrade`，保留当前卷组、认证、身份及状态；这不是数据库回滚。
 

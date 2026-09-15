@@ -160,6 +160,7 @@ CHART=/opt/sandbox/charts/sandbox-new
 VALUES=/opt/sandbox/env/values-prod.yaml
 
 kubectl --context "$CTX" create namespace "$NS" 2>/dev/null || true
+test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.3.0"
 helm lint "$CHART" -f "$VALUES"
 helm --kube-context "$CTX" upgrade --install "$RELEASE" "$CHART" \
   --namespace "$NS" \
@@ -173,6 +174,7 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" "$CHART" \
 先渲染检查，再升级：
 
 ```bash
+test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.3.0"
 helm lint "$CHART" -f "$VALUES"
 helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
   --namespace "$NS" \
@@ -187,6 +189,10 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
   --atomic --wait --timeout 15m
 ```
 
+Chart `0.3.0` 是本轮 Helm 包版本，不代表镜像已经统一发布为 `v0.3.0`；当前
+`appVersion` 和 values 中各镜像 tag 仍按各自实际构建版本维护。后续统一清空并重建
+镜像时，再一次性更新这些 tag。不要仅凭 Chart 版本推断容器版本。
+
 不要使用 `--reuse-values`，否则已经删除的 credential-file/Secret 字段可能被旧 release 带回来。
 
 只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration`、FUSE 镜像、有效 LSM 或 nodeSelector 时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。首次开启 AppArmor 加载器会改变有效 LSM，须安排排空维护窗口。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
@@ -199,13 +205,32 @@ bootstrap 镜像 tag 只在 `cmd/redis-bootstrap` 本身改变时更新；没有
 滚动，须按 Sentinel 维护窗口观察 quorum。相关根因和验收边界见
 [API 升级触发内置 Redis Sentinel 重启记录](../testing/2026-09-15-sentinel-api-upgrade-restart-incident.md)。
 
-每个 release revision 会创建一次
-`sandbox-fuse-redis-sentinel-identity-<revision>` 和
-`sandbox-fuse-redis-sentinel-initialize-<revision>` Job。成功后 Pod 显示
-`Succeeded/Completed`，不再参与 Redis 服务；Chart 设置 86400 秒 TTL，约 24 小时
-后自动回收。需要提前清理时，先确认 Job 为 `Complete`，再按精确旧名称执行
-`kubectl delete job <旧 Job 名> -n <namespace>`，让 Job 与其 Pod 一起删除。保留当前
-revision 的完成记录到 TTL 到期，不要按模糊标签批量删除正在运行或失败待查的 Job。
+Sentinel 的两个一次性 Job 只在确有工作时渲染：身份 Secret 不存在时创建
+`*-redis-sentinel-identity-<revision>`，state phase 为 `Pending` 时创建
+`*-redis-sentinel-initialize-<revision>`。身份完整且 state 已是 `Initialized` 的普通
+upgrade 不会再次创建这两个 Job或对应 RBAC。第一次升级到这套条件渲染时，Helm 会
+删除上一 revision 留下的 Completed Job/Pod；不需要手工批量清理。保留 state/PVC
+但身份 Secret 缺失、或 state phase 非法时仍会在模板阶段拒绝升级，不能通过重新生成
+身份绕过。
+
+严格 API-only 升级使用仓库脚本留证。先在健康基线执行 snapshot，再手工执行只改变
+`image.tag` 的 upgrade，最后 verify：
+
+```bash
+scripts/verify-sentinel-api-only-upgrade.sh snapshot \
+  --context "$CTX" --namespace "$NS" --release "$RELEASE" \
+  --output /tmp/sandbox-sentinel-before.json
+
+# 此处手工执行只改变 image.tag 的 helm upgrade。
+
+scripts/verify-sentinel-api-only-upgrade.sh verify \
+  --context "$CTX" --namespace "$NS" --release "$RELEASE" \
+  --snapshot /tmp/sandbox-sentinel-before.json
+```
+
+脚本不执行 upgrade、不读取 Secret，只比较 API rollout、Redis StatefulSet revision 和
+PodTemplate、三个 Redis Pod 的 UID/restartCount/imageID 以及一次性 Job 集合。任一
+Redis Pod 被替换、重启或出现新 Job 都会返回失败。
 
 普通滚动升级不等于重建所有沙盒。Kubernetes 普通池和 FUSE 池按固定运行契约维护：
 
