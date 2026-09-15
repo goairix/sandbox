@@ -3,6 +3,23 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox")"
+sentinel_args=(
+  --kube-version 1.33.0
+  --set redis.mode=sentinel
+  --set redis.sentinel.identitySecretName=sandbox-redis-sentinel-identity
+  --set redis.sentinel.existingSecret=sandbox-redis-auth
+)
+sentinel_api_a="$(helm template sandbox "$repo_root/deploy/helm/sandbox" "${sentinel_args[@]}" --set image.tag=v1.0.0)"
+sentinel_api_b="$(helm template sandbox "$repo_root/deploy/helm/sandbox" "${sentinel_args[@]}" --set image.tag=v1.0.1)"
+extract_sentinel_pod_template() {
+  awk '
+    /^kind: StatefulSet$/ { statefulset = 1 }
+    statefulset && /^  template:$/ { template = 1 }
+    statefulset && /^  volumeClaimTemplates:$/ { exit }
+    template { print }
+  '
+}
+test "$(extract_sentinel_pod_template <<<"$sentinel_api_a")" = "$(extract_sentinel_pod_template <<<"$sentinel_api_b")"
 runtime_role="$(helm template sandbox "$repo_root/deploy/helm/sandbox" --show-only templates/runtime-role.yaml)"
 network_inventory="$(helm template sandbox "$repo_root/deploy/helm/sandbox" \
   --namespace control --set config.runtime.kubernetes.namespace=runtime \
@@ -163,6 +180,10 @@ grep -A4 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
   | grep -Fq 'repository: redis'
 grep -A5 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
   | grep -Fq 'tag: "7-alpine"'
+grep -A9 '^  sentinel:' "$repo_root/deploy/helm/sandbox/values.yaml" \
+  | grep -Fq 'repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap'
+grep -A9 '^  sentinel:' "$repo_root/deploy/helm/sandbox/values.yaml" \
+  | grep -Fq 'tag: v0.1.0'
 
 if helm lint "$repo_root/deploy/helm/sandbox" --set config.storage.filesystem.preset=unknown >/dev/null 2>&1; then
   printf 'helm lint unexpectedly accepted an unknown backend preset\n' >&2

@@ -1,6 +1,7 @@
 {{- if eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- include "sandbox.validateRedis" . }}
 {{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson }}
+{{- $bootstrapImage := include "sandbox.sentinelBootstrapImageConfig" . | fromJson }}
 {{- $name := include "sandbox.sentinelName" . }}
 {{- $state := include "sandbox.sentinelState" . | fromJson }}
 apiVersion: v1
@@ -74,8 +75,8 @@ spec:
                   release: {{ .Release.Name }}
       initContainers:
         - name: prepare
-          image: {{ include "sandbox.apiImage" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "sandbox.sentinelBootstrapImage" . | quote }}
+          imagePullPolicy: {{ $bootstrapImage.pullPolicy }}
           command: [/app/redis-bootstrap]
           args: [prepare-pod]
           securityContext:
@@ -117,8 +118,8 @@ spec:
             limits: {cpu: 200m, memory: 256Mi}
         - name: identity
           restartPolicy: Always
-          image: {{ include "sandbox.apiImage" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "sandbox.sentinelBootstrapImage" . | quote }}
+          imagePullPolicy: {{ $bootstrapImage.pullPolicy }}
           command: [/app/redis-bootstrap]
           args:
             - attestor
@@ -317,8 +318,8 @@ spec:
         kubernetes.io/os: linux
       containers:
         - name: initialize
-          image: {{ include "sandbox.apiImage" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "sandbox.sentinelBootstrapImage" . | quote }}
+          imagePullPolicy: {{ $bootstrapImage.pullPolicy }}
           command: [/app/redis-bootstrap]
           args:
             - initialize

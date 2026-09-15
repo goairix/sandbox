@@ -115,7 +115,7 @@
   "resources" (dict "requests" (dict "cpu" "50m" "memory" "64Mi") "limits" (dict "cpu" "250m" "memory" "128Mi"))
   "identityResources" (dict "requests" (dict "cpu" "10m" "memory" "64Mi") "limits" (dict "cpu" "200m" "memory" "256Mi")) -}}
 {{- range $key, $value := $input -}}
-{{- if not (kindIs "invalid" $value) -}}{{- $_ := set $config $key $value -}}{{- end -}}
+{{- if and (ne $key "bootstrapImage") (not (kindIs "invalid" $value)) -}}{{- $_ := set $config $key $value -}}{{- end -}}
 {{- end -}}
 {{- $dnsPattern := "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" -}}
 {{- range $key := list "masterName" "clusterDomain" "identitySecretName" "existingSecret" "dataPasswordKey" "sentinelPasswordKey" "password" -}}
@@ -147,6 +147,27 @@
 {{- $config | toJson -}}
 {{- end -}}
 
+{{- define "sandbox.sentinelBootstrapImageConfig" -}}
+{{- $sentinel := .Values.redis.sentinel -}}
+{{- if not (kindIs "map" $sentinel) -}}{{ fail "redis.sentinel 必须是配置映射" }}{{- end -}}
+{{- $input := get $sentinel "bootstrapImage" -}}
+{{- if or (kindIs "invalid" $input) (not (kindIs "map" $input)) -}}{{ fail "redis.sentinel.bootstrapImage 必须是配置映射" }}{{- end -}}
+{{- $image := dict -}}
+{{- range $key := list "repository" "tag" "pullPolicy" -}}
+{{- $value := get $input $key -}}
+{{- if not (kindIs "string" $value) -}}{{ fail (printf "redis.sentinel.bootstrapImage.%s 必须是字符串" $key) }}{{- end -}}
+{{- if empty $value -}}{{ fail (printf "redis.sentinel.bootstrapImage.%s 不得为空" $key) }}{{- end -}}
+{{- $_ := set $image $key $value -}}
+{{- end -}}
+{{- if not (has $image.pullPolicy (list "Always" "IfNotPresent" "Never")) -}}{{ fail "redis.sentinel.bootstrapImage.pullPolicy 必须是 Always、IfNotPresent 或 Never" }}{{- end -}}
+{{- $image | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.sentinelBootstrapImage" -}}
+{{- $image := include "sandbox.sentinelBootstrapImageConfig" . | fromJson -}}
+{{- printf "%s:%s" $image.repository $image.tag -}}
+{{- end -}}
+
 {{- define "sandbox.apiStartupProbe" -}}
 {{- $input := .Values.startupProbe -}}
 {{- if kindIs "invalid" $input -}}{{- $input = dict -}}{{- end -}}
@@ -171,6 +192,7 @@
 {{- if not (has .Values.redis.mode (list "standalone" "sentinel")) -}}{{ fail "redis.mode must be standalone or sentinel" }}{{- end -}}
 {{- if eq .Values.redis.mode "sentinel" -}}
 {{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
+{{- $_ := include "sandbox.sentinelBootstrapImageConfig" . -}}
 {{- $_ := include "sandbox.apiStartupProbe" . -}}
 {{- if not .Values.redis.persistence.enabled -}}{{ fail "built-in Sentinel requires persistence" }}{{- end -}}
 {{- if gt (len .Release.Name) 39 -}}{{ fail "built-in Sentinel release name must not exceed 39 characters" }}{{- end -}}
@@ -291,7 +313,7 @@
 {{- if eq (include "sandbox.builtinSentinel" .) "true" -}}
 {{- $sentinelConfig := include "sandbox.sentinelConfig" . | fromJson -}}
 {{- $period := int $probe.periodSeconds -}}
-{{- $budget := add (max 600 (int $sentinelConfig.initializeTimeoutSeconds)) 180 -}}
+{{- $budget := add (max 600 (int $sentinelConfig.initializeTimeoutSeconds)) 225 -}}
 {{- /* Extra one probe accounts for the first failure occurring immediately. */ -}}
 {{- $threshold = max $threshold (add 1 (div (add $budget (sub $period 1)) $period)) -}}
 {{- end -}}

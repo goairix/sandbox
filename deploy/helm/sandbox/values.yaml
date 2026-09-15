@@ -96,6 +96,12 @@ redis:
   # 内置模式：standalone 保持原单节点行为；sentinel 固定为三个独立 PVC 节点。
   mode: standalone
   sentinel:
+    # Redis/Sentinel 身份与初始化专用最小镜像；只在 bootstrap 程序变化时升级。
+    # 不与 sandbox-api tag 绑定，也不会回退使用 API 镜像。
+    bootstrapImage:
+      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
+      tag: v0.1.0
+      pullPolicy: IfNotPresent
     masterName: sandbox
     clusterDomain: cluster.local
     # 空值：一次性普通 Job 为真正的新安装自动创建 <StatefulSet>-identity 不可变身份 Secret。

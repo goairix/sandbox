@@ -4,7 +4,7 @@
 # 部署说明：docs/deployment/built-in-redis-sentinel.md。
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
-  tag: REPLACE_WITH_NEW_SANDBOX_API_TAG # 必须包含本轮 ensure-identity 子命令，不能用旧 API 镜像。
+  tag: REPLACE_WITH_NEW_SANDBOX_API_TAG
 startupProbe:
   enabled: true # Sentinel 初始化期间必须启用，Chart 自动补足等待预算。
 redis:
@@ -16,6 +16,10 @@ redis:
     storageClass: ""
     size: 10Gi
   sentinel:
+    bootstrapImage:
+      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
+      tag: v0.1.0 # 独立固定；仅 cmd/redis-bootstrap 变化时升级。
+      pullPolicy: IfNotPresent
     identitySecretName: "" # 留空启用自动身份；填写名称则只读引用外部 Secret。
     existingSecret: "" # 留空使用下方两个不同的 inline 密码创建认证 Secret。
     password: REPLACE_WITH_RANDOM_SENTINEL_TOKEN_0123456789

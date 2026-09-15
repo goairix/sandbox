@@ -60,6 +60,10 @@ func partialSentinelChart(t *testing.T, schema bool, configure func(map[string]a
 		"password":           "fixture_sentinel_012345678901234567890123456789",
 		"identitySecretName": "", "existingSecret": "",
 		"dataPasswordKey": "password", "sentinelPasswordKey": "sentinel-password",
+		"bootstrapImage": map[string]any{
+			"repository": "registry.example.com/sandbox-redis-bootstrap",
+			"tag":        "v0.1.0", "pullPolicy": "IfNotPresent",
+		},
 	}
 	if configure != nil {
 		configure(values)
@@ -68,6 +72,16 @@ func partialSentinelChart(t *testing.T, schema bool, configure func(map[string]a
 		t.Fatal(err)
 	}
 	return dest
+}
+
+func TestSentinelTemplatesRejectMissingBootstrapImageWithoutSchema(t *testing.T) {
+	chart := partialSentinelChart(t, false, func(v map[string]any) {
+		delete(mapping(t, mapping(t, v["redis"])["sentinel"]), "bootstrapImage")
+	})
+	output, err := exec.Command("helm", "template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", "1.33.0").CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "redis.sentinel.bootstrapImage") {
+		t.Fatalf("missing bootstrap image must fail without API fallback; got %v: %s", err, output)
+	}
 }
 
 func TestSentinelTemplatesSupplyMissingDefaults(t *testing.T) {
@@ -116,7 +130,7 @@ func assertSentinelDefaults(t *testing.T, docs []map[string]any) {
 	ap := mapping(t, mapping(t, mapping(t, d["spec"])["template"])["spec"])
 	c := container(t, ap, "containers", "sandbox")
 	probe := mapping(t, c["startupProbe"])
-	if probe["periodSeconds"] != 5 || probe["timeoutSeconds"] != 1 || probe["failureThreshold"] != 181 {
+	if probe["periodSeconds"] != 5 || probe["timeoutSeconds"] != 1 || probe["failureThreshold"] != 190 {
 		t.Fatalf("API startup defaults must cover initialization: %v", probe)
 	}
 	e := env(t, c)
@@ -240,7 +254,7 @@ func TestSentinelTemplatesDefaultNullAndMinimalConfig(t *testing.T) {
 				cfg := mapping(t, mapping(t, v["redis"])["sentinel"])
 				if minimal {
 					for key := range cfg {
-						if key != "password" {
+						if key != "password" && key != "bootstrapImage" {
 							delete(cfg, key)
 						}
 					}

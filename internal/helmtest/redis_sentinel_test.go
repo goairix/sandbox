@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -124,6 +125,65 @@ func sentinelOverrides() []string {
 
 func autoSentinelOverrides() []string {
 	return []string{"redis.mode=sentinel", "redis.password=fixture_data_012345678901234567890123456789", "redis.sentinel.password=fixture_sentinel_012345678901234567890123456789"}
+}
+
+func TestSentinelBootstrapImageIsIndependentFromAPI(t *testing.T) {
+	base := append(sentinelOverrides(),
+		"redis.sentinel.bootstrapImage.repository=registry.example.com/sandbox-redis-bootstrap",
+		"redis.sentinel.bootstrapImage.tag=v0.1.0",
+		"redis.sentinel.bootstrapImage.pullPolicy=IfNotPresent",
+	)
+	a := render(t, append(append([]string{}, base...), "image.tag=v1.0.0")...)
+	b := render(t, append(append([]string{}, base...), "image.tag=v1.0.1")...)
+	aTemplate := mapping(t, mapping(t, object(t, a, "StatefulSet", "sandbox-redis-sentinel")["spec"])["template"])
+	bTemplate := mapping(t, mapping(t, object(t, b, "StatefulSet", "sandbox-redis-sentinel")["spec"])["template"])
+	if !reflect.DeepEqual(aTemplate, bTemplate) {
+		t.Fatal("API-only tag change altered Redis StatefulSet PodTemplate")
+	}
+	want := "registry.example.com/sandbox-redis-bootstrap:v0.1.0"
+	pod := mapping(t, aTemplate["spec"])
+	for _, c := range []map[string]any{
+		container(t, pod, "initContainers", "prepare"),
+		container(t, pod, "initContainers", "identity"),
+	} {
+		if c["image"] != want || c["imagePullPolicy"] != "IfNotPresent" {
+			t.Fatalf("Sentinel helper image mismatch: %#v", c)
+		}
+	}
+	for _, pair := range [][3]string{
+		{"Job", "sandbox-redis-sentinel-identity-1", "ensure-identity"},
+		{"Job", "sandbox-redis-sentinel-initialize-1", "initialize"},
+		{"Job", "sandbox-rollback-backend-guard", "verify-backend"},
+	} {
+		jobPod := mapping(t, mapping(t, mapping(t, object(t, a, pair[0], pair[1])["spec"])["template"])["spec"])
+		if c := container(t, jobPod, "containers", pair[2]); c["image"] != want {
+			t.Fatalf("%s image = %v", pair[1], c["image"])
+		}
+	}
+}
+
+func TestSentinelBootstrapImageRejectsInvalidValues(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	chart := filepath.Join(filepath.Dir(file), "..", "..", "deploy", "helm", "sandbox")
+	for _, invalid := range []string{
+		"string:redis.sentinel.bootstrapImage.repository=",
+		"string:redis.sentinel.bootstrapImage.tag=",
+		"redis.sentinel.bootstrapImage.pullPolicy=Sometimes",
+	} {
+		t.Run(strings.ReplaceAll(invalid, "/", "_"), func(t *testing.T) {
+			args := []string{"template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", "1.33.0"}
+			for _, value := range append(sentinelOverrides(), invalid) {
+				flag := "--set"
+				if strings.HasPrefix(value, "string:") {
+					flag, value = "--set-string", strings.TrimPrefix(value, "string:")
+				}
+				args = append(args, flag, value)
+			}
+			if output, err := exec.Command("helm", args...).CombinedOutput(); err == nil || !strings.Contains(string(output), "bootstrapImage") {
+				t.Fatalf("invalid bootstrap image accepted: %s", output)
+			}
+		})
+	}
 }
 
 func TestSentinelAutomaticIdentityUsesOneFreshClusterID(t *testing.T) {
@@ -375,7 +435,7 @@ func TestSentinelAPIStartupProbeCoversGateAndRuntimeMargin(t *testing.T) {
 	pod := mapping(t, mapping(t, mapping(t, d["spec"])["template"])["spec"])
 	p := mapping(t, container(t, pod, "containers", "sandbox")["startupProbe"])
 	period, failures := p["periodSeconds"].(int), p["failureThreshold"].(int)
-	if (failures-1)*period < 780 {
+	if (failures-1)*period < 825 {
 		t.Fatal("API startup probe must cover gate budget plus runtime startup margin")
 	}
 	o = append(sentinelOverrides(), "startupProbe.failureThreshold=1000")
