@@ -1452,6 +1452,147 @@ func TestWaitReadyChecksGenerationAndRunsFixedExactUIDProbe(t *testing.T) {
 	assert.Equal(t, []string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", ref.UID, "--generation", "7"}, last.argv)
 }
 
+func TestWaitReadyUsesMounterProofWithoutBlockingOnPodReady(t *testing.T) {
+	script := preparedScript()
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	rt.readyTimeout = 20 * time.Millisecond
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{
+		RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey,
+		WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1,
+	}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+
+	ready, err := rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.NoError(t, err)
+	assert.Equal(t, ref.UID, ready.RuntimeUID)
+	last := script.commands[len(script.commands)-1]
+	assert.Equal(t, sandboxContainer, last.container)
+	assert.Equal(t, []string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", ref.UID, "--generation", "7"}, last.argv)
+}
+
+func TestWaitReadyRetriesTransientMounterControlFailure(t *testing.T) {
+	base := preparedScript()
+	var readyCalls atomic.Int32
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "ready"}) && readyCalls.Add(1) == 1 {
+			return nil, errors.New("transient control failure")
+		}
+		return base.handler(command)
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	rt.readyTimeout = 50 * time.Millisecond
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{
+		RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey,
+		WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1,
+	}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), readyCalls.Load())
+}
+
+func TestWaitReadyRetriesExactMountingStatus(t *testing.T) {
+	base := preparedScript()
+	var readyCalls atomic.Int32
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if fmt.Sprint(command.argv) == fmt.Sprint([]string{mounterBinary, "health", "ready"}) && readyCalls.Add(1) == 1 {
+			return []byte(`{"version":1,"state":"mounting","runtime_uid":"pod-uid-a","pool_key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","mount_type":"","generation":7,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":2147483648,"cache_exceeded":false}`), nil
+		}
+		return base.handler(command)
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	rt.readyTimeout = 50 * time.Millisecond
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{
+		RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey,
+		WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1,
+	}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), readyCalls.Load())
+}
+
+func TestWaitReadyBoundsPersistentMounterControlFailure(t *testing.T) {
+	base := preparedScript()
+	var propagationCalls atomic.Int32
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		switch fmt.Sprint(command.argv) {
+		case fmt.Sprint([]string{mounterBinary, "health", "ready"}):
+			return nil, errors.New("persistent control failure")
+		case fmt.Sprint([]string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", "pod-uid-a", "--generation", "7"}):
+			propagationCalls.Add(1)
+		}
+		return base.handler(command)
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	rt.readyTimeout = 20 * time.Millisecond
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{
+		RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey,
+		WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1,
+	}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "wait for workspace mounter ready")
+	assert.ErrorContains(t, err, "context deadline exceeded")
+	assert.Zero(t, propagationCalls.Load())
+}
+
+func TestWaitReadyRejectsSandboxExitBeforeRetry(t *testing.T) {
+	base := preparedScript()
+	var client *kubefake.Clientset
+	var readyCalls atomic.Int32
+	var propagationCalls atomic.Int32
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		switch fmt.Sprint(command.argv) {
+		case fmt.Sprint([]string{mounterBinary, "health", "ready"}):
+			if readyCalls.Add(1) == 1 {
+				pod, getErr := client.CoreV1().Pods("runtime").Get(context.Background(), "prepared-shell-a", metav1.GetOptions{})
+				require.NoError(t, getErr)
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+				_, updateErr := client.CoreV1().Pods("runtime").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+				require.NoError(t, updateErr)
+				return nil, errors.New("transient control failure")
+			}
+		case fmt.Sprint([]string{workspaceProbeBinary, "write-read-delete", "--runtime-uid", "pod-uid-a", "--generation", "7"}):
+			propagationCalls.Add(1)
+		}
+		return base.handler(command)
+	}}
+	rt, createdClient := newFakeKubernetesRuntime(t, script)
+	client = createdClient
+	rt.readyTimeout = 50 * time.Millisecond
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{
+		RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey,
+		WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1,
+	}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+
+	_, err = rt.WaitSandboxReady(context.Background(), ref, 7)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "prepared Pod containers are not healthy")
+	assert.Equal(t, int32(1), readyCalls.Load())
+	assert.Zero(t, propagationCalls.Load())
+}
+
 func TestWaitReadyPreservesKubernetesMounterStatusError(t *testing.T) {
 	base := preparedScript()
 	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
