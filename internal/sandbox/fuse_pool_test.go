@@ -697,6 +697,38 @@ func fusePoolConfig() FUSEPoolConfig {
 	}
 }
 
+func TestFUSEPoolRefillLeaseIsBoundedIndependentlyOfPoolSize(t *testing.T) {
+	cfg := fusePoolConfig()
+	cfg.MaxSize = 20
+	cfg.PrepareTimeout = 120 * time.Second
+	cfg.RefillInterval = time.Minute
+	pool := NewFUSEPool(newFUSEMockRuntime(), newMemoryFUSEPoolRepository(), cfg, fixedFUSESpec("pool-key"))
+	assert.Equal(t, 45*time.Second, pool.refillLockTTL())
+	assert.Equal(t, 15*time.Second, pool.refillLockRenewInterval())
+}
+
+func TestFUSEPoolRefillLeaseRenewsFromRepositoryTime(t *testing.T) {
+	repo := newMemoryFUSEPoolRepository()
+	pool := NewFUSEPool(newFUSEMockRuntime(), repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	const token = "api-a:renewal"
+	locked, err := repo.TryRefillLock(context.Background(), "pool-key", token, pool.refillLockTTL())
+	require.NoError(t, err)
+	require.True(t, locked)
+	repo.mu.Lock()
+	repo.now = repo.now.Add(10 * time.Second)
+	want := repo.now.Add(45 * time.Second)
+	repo.mu.Unlock()
+	ticks := make(chan time.Time, 1)
+	lease := pool.startRefillLeaseWithTicks(context.Background(), token, ticks, func() {})
+	ticks <- time.Now()
+	require.Eventually(t, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return repo.locks["pool-key"].until.Equal(want)
+	}, time.Second, time.Millisecond)
+	lease.stop()
+}
+
 func TestFUSEPoolKeyUsesAppArmorDefaultV2(t *testing.T) {
 	assert.Equal(t, "workspace-fuse-pool/v2", fusePoolKeyVersion)
 }
@@ -1061,17 +1093,25 @@ func TestFUSEPoolLostRefillLockCancelsPreparationAndLeavesNoReservation(t *testi
 	rt := newFUSEMockRuntime()
 	entered, _ := rt.blockPrepare()
 	repo := newMemoryFUSEPoolRepository()
-	repo.failNext("RenewRefillLock", errors.New("lost lock"))
 	cfg := fusePoolConfig()
 	cfg.MinSize, cfg.MaxSize, cfg.PrepareTimeout = 0, 1, 60*time.Millisecond
 	pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+	lockToken := "api-a:manual-refill"
+	locked, err := repo.TryRefillLock(context.Background(), "pool-key", lockToken, pool.refillLockTTL())
+	require.NoError(t, err)
+	require.True(t, locked)
+	ticks := make(chan time.Time, 1)
+	lease := pool.startRefillLeaseWithTicks(context.Background(), lockToken, ticks, func() {})
+	defer lease.stop()
 	result := make(chan error, 1)
-	go func() { _, err := pool.Acquire(context.Background(), "pool-key"); result <- err }()
+	go func() { _, err := pool.prepareOne(lease.ctx, "reservation", lockToken); result <- err }()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("prepare did not start")
 	}
+	repo.failNext("RenewRefillLock", errors.New("lost lock"))
+	ticks <- time.Now()
 	select {
 	case err := <-result:
 		require.Error(t, err)

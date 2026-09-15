@@ -955,6 +955,9 @@ func TestFUSEPoolRefillLockOwnershipAndExpiry(t *testing.T) {
 		ok, lockErr := repoB.TryRefillLock(context.Background(), poolKey, "owner-b", time.Second)
 		return lockErr == nil && ok
 	}, time.Second, 10*time.Millisecond)
+	renewed, err := repoA.RenewRefillLock(context.Background(), poolKey, "owner-a", time.Second)
+	require.NoError(t, err)
+	assert.False(t, renewed, "expired owner must remain fenced after a new owner acquires the lease")
 	require.NoError(t, repoB.UnlockRefill(context.Background(), poolKey, "owner-b"))
 }
 

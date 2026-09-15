@@ -25,6 +25,8 @@ const (
 	fusePoolCleanupTimeout       = 5 * time.Second
 	fusePoolStopCleanupTimeout   = 25 * time.Second
 	fusePoolAcquireRetryInterval = 50 * time.Millisecond
+	fusePoolRefillLeaseTTL       = 45 * time.Second
+	fusePoolRefillRenewInterval  = 15 * time.Second
 )
 
 var (
@@ -1246,19 +1248,19 @@ type refillLease struct {
 }
 
 func (p *FUSEPool) startRefillLease(parent context.Context, token string) *refillLease {
+	ticker := time.NewTicker(p.refillLockRenewInterval())
+	return p.startRefillLeaseWithTicks(parent, token, ticker.C, ticker.Stop)
+}
+
+func (p *FUSEPool) startRefillLeaseWithTicks(parent context.Context, token string, ticks <-chan time.Time, stopTicks func()) *refillLease {
 	ctx, cancel := context.WithCancel(parent)
 	lease := &refillLease{ctx: ctx, cancel: cancel, done: make(chan struct{})}
-	interval := p.refillLockTTL() / 3
-	if interval < time.Millisecond {
-		interval = time.Millisecond
-	}
 	go func() {
 		defer close(lease.done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		defer stopTicks()
 		for {
 			select {
-			case <-ticker.C:
+			case <-ticks:
 				ok, err := p.repo.RenewRefillLock(ctx, p.poolKey, token, p.refillLockTTL())
 				if err != nil || !ok {
 					cancel()
@@ -1324,23 +1326,11 @@ func (p *FUSEPool) validate() error {
 }
 
 func (p *FUSEPool) refillLockTTL() time.Duration {
-	// One lock covers a full worst-case fill plus inventory work.
-	const maxDuration = time.Duration(1<<63 - 1)
-	multiplier := p.config.MaxSize + 1
-	if multiplier < 1 || uint64(multiplier) > uint64(maxDuration/p.config.PrepareTimeout) {
-		return maxDuration
-	}
-	ttl := p.config.PrepareTimeout * time.Duration(multiplier)
-	minimumTTL := p.config.RefillInterval
-	if minimumTTL > maxDuration/2 {
-		minimumTTL = maxDuration
-	} else {
-		minimumTTL *= 2
-	}
-	if ttl < minimumTTL {
-		ttl = minimumTTL
-	}
-	return ttl
+	return fusePoolRefillLeaseTTL
+}
+
+func (p *FUSEPool) refillLockRenewInterval() time.Duration {
+	return fusePoolRefillRenewInterval
 }
 
 func isStalePoolMutation(err error) bool {
