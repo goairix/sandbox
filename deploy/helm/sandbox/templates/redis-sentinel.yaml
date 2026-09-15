@@ -261,6 +261,7 @@ spec:
     matchLabels:
       app: sandbox-redis-sentinel
       release: {{ .Release.Name }}
+{{- if eq $state.phase "Pending" }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -349,6 +350,7 @@ spec:
             items:
               - key: public-keys.json
                 path: public-keys.json
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

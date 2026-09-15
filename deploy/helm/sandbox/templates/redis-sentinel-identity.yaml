@@ -4,6 +4,7 @@
 {{- $bootstrapImage := include "sandbox.sentinelBootstrapImageConfig" . | fromJson }}
 {{- $name := include "sandbox.sentinelName" . }}
 {{- $state := include "sandbox.sentinelState" . | fromJson }}
+{{- if not $state.identityExists }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -104,4 +105,5 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 32Mi}
             limits: {cpu: 200m, memory: 128Mi}
+{{- end }}
 {{- end }}

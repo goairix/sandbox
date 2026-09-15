@@ -261,6 +261,7 @@
 {{- $data := dict -}}
 {{- $clusterID := "" -}}
 {{- $freshClusterID := "" -}}
+{{- $phase := "Pending" -}}
 {{- if $retained -}}
 {{- if or (empty $retained.data) (empty (index $retained.data "cluster.json")) -}}
 {{- fail "retained Sentinel state is missing cluster.json; do not reset existing PVC identity" -}}
@@ -271,6 +272,10 @@
 {{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{1,128}$" (default "" $cluster.clusterID)) -}}
 {{- fail "retained Sentinel state has an invalid clusterID; restore the original state" -}}
+{{- end -}}
+{{- $phase = default "" $cluster.phase -}}
+{{- if not (has $phase (list "Pending" "Initialized")) -}}
+{{- fail "retained Sentinel state has an invalid phase; restore the original state" -}}
 {{- end -}}
 {{- $data = $retained.data -}}
 {{- $clusterID = $cluster.clusterID -}}
@@ -293,7 +298,7 @@
 {{- fail "retained Sentinel StatefulSet PVC template clusterID differs from state; restore the original objects, do not rewrite identity" -}}
 {{- end -}}
 {{- end -}}
-{{- $_ := set . "_sandboxSentinelState" (dict "data" $data "clusterID" $clusterID "freshClusterID" $freshClusterID "claimAnnotations" $claimAnnotations) -}}
+{{- $_ := set . "_sandboxSentinelState" (dict "data" $data "clusterID" $clusterID "freshClusterID" $freshClusterID "claimAnnotations" $claimAnnotations "identityExists" (not (empty $identity)) "phase" $phase) -}}
 {{- end -}}
 {{- get . "_sandboxSentinelState" | toJson -}}
 {{- end -}}
