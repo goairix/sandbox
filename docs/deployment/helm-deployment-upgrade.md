@@ -208,10 +208,11 @@ bootstrap 镜像 tag 只在 `cmd/redis-bootstrap` 本身改变时更新；没有
 Sentinel 的两个一次性 Job 只在确有工作时渲染：身份 Secret 不存在时创建
 `*-redis-sentinel-identity-<revision>`，state phase 为 `Pending` 时创建
 `*-redis-sentinel-initialize-<revision>`。身份完整且 state 已是 `Initialized` 的普通
-upgrade 不会再次创建这两个 Job或对应 RBAC。第一次升级到这套条件渲染时，Helm 会
-删除上一 revision 留下的 Completed Job/Pod；不需要手工批量清理。保留 state/PVC
-但身份 Secret 缺失、或 state phase 非法时仍会在模板阶段拒绝升级，不能通过重新生成
-身份绕过。
+upgrade 不会再次创建这两个 Job或对应 RBAC。Helm 只会处理当前 release manifest 仍在
+跟踪的旧资源；更早 revision 已经遗留成孤儿的 Completed Job/Pod 不保证被后续 upgrade
+回收。旧 Job 自带 `ttlSecondsAfterFinished: 86400`，由集群 TTL controller 到期清理；
+新 revision 不再继续产生这类资源。保留 state/PVC 但身份 Secret 缺失、或 state phase
+非法时仍会在模板阶段拒绝升级，不能通过重新生成身份绕过。
 
 严格 API-only 升级使用仓库脚本留证。先在健康基线执行 snapshot，再手工执行只改变
 `image.tag` 的 upgrade，最后 verify：

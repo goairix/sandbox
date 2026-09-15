@@ -103,9 +103,11 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" ./deploy/helm/sandbox \
 tag 不随之改变。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖
 hook 等待顺序，避免 Helm 等 API Ready、API 又等 Job 的死锁。身份 Secret 不存在时
 才渲染 identity Job；state phase 为 `Pending` 时才渲染 initialize Job。已是
-`Initialized` 且身份完整的普通 upgrade 不再创建两个 Job/RBAC，第一次迁移会由 Helm
-删除上一 revision 的 Completed Job/Pod。中断在 Pending 的安装仍能用新 revision Job
-恢复。两个 Job 名均含 release revision 且不超过 63 字符；初始化 Job 仍仅有指定状态
+`Initialized` 且身份完整的普通 upgrade 不再创建两个 Job/RBAC。Helm 只会处理当前
+release manifest 仍在跟踪的旧资源；更早 revision 已经遗留成孤儿的 Completed Job/Pod
+不保证被后续 upgrade 回收，仍由其 `ttlSecondsAfterFinished: 86400` 到期清理。中断在
+Pending 的安装仍能用新 revision Job 恢复。两个 Job 名均含 release revision 且不超过
+63 字符；初始化 Job 仍仅有指定状态
 CM 的 get/update 权限。身份 Job 预算 120 秒，只 GET 固定 Secret/CM/三个 PVC；自动
 模式额外授予所在 namespace 的 Secret CREATE，外部身份模式没有 CREATE。Kubernetes
 RBAC 不能用 resourceNames 约束 CREATE，因此该权限可创建 namespace 内任意名字的
