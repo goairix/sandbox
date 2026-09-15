@@ -191,6 +191,21 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration`、FUSE 镜像、有效 LSM 或 nodeSelector 时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。首次开启 AppArmor 加载器会改变有效 LSM，须安排排空维护窗口。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
+当前内置 Sentinel 的 `prepare` 和 `identity` 辅助容器仍复用
+`image.repository/image.tag` 对应的 sandbox-api 镜像。因此只更新 API tag 也会改变
+Redis StatefulSet 的 PodTemplate，并触发三个 Redis/Sentinel Pod 滚动重启；这不是
+Redis 镜像或数据发生了变化。上线前须按 Sentinel 维护窗口对待。后续将把辅助镜像
+独立固定，相关事故、孤儿 refill 锁恢复边界和验收要求见
+[API 升级触发内置 Redis Sentinel 重启记录](../testing/2026-09-15-sentinel-api-upgrade-restart-incident.md)。
+
+每个 release revision 会创建一次
+`sandbox-fuse-redis-sentinel-identity-<revision>` 和
+`sandbox-fuse-redis-sentinel-initialize-<revision>` Job。成功后 Pod 显示
+`Succeeded/Completed`，不再参与 Redis 服务；Chart 设置 86400 秒 TTL，约 24 小时
+后自动回收。需要提前清理时，先确认 Job 为 `Complete`，再按精确旧名称执行
+`kubectl delete job <旧 Job 名> -n <namespace>`，让 Job 与其 Pod 一起删除。保留当前
+revision 的完成记录到 TTL 到期，不要按模糊标签批量删除正在运行或失败待查的 Job。
+
 普通滚动升级不等于重建所有沙盒。Kubernetes 普通池和 FUSE 池按固定运行契约维护：
 
 - 只改 API tag、日志或 API 副本数时，健康兼容的预热 Pod 保留；即使所有 API 暂时退出，也不会清空共享池。
