@@ -707,8 +707,8 @@ func TestSentinelPrivateKeyMountAndNetworkIsolation(t *testing.T) {
 		t.Fatal("identity access must bind release")
 	}
 	values := sequence(t, mapping(t, sequence(t, selector["matchExpressions"])[0])["values"])
-	if len(values) != 2 || values[0] != "sandbox-redis-sentinel" || values[1] != "sandbox-redis-bootstrap" {
-		t.Fatal("API/drain must not call identity service")
+	if len(values) != 3 || values[0] != "sandbox" || values[1] != "sandbox-redis-sentinel" || values[2] != "sandbox-redis-bootstrap" {
+		t.Fatal("identity ingress must allow the API topology gate and bootstrap members")
 	}
 	dns := mapping(t, sequence(t, np["egress"])[1])
 	if dns["to"] != nil || len(sequence(t, dns["ports"])) != 2 {

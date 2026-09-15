@@ -380,7 +380,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [sandbox-redis-sentinel, sandbox-redis-bootstrap]
+                values: [sandbox, sandbox-redis-sentinel, sandbox-redis-bootstrap]
       ports:
         - {protocol: TCP, port: 18080}
   egress:
