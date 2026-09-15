@@ -90,7 +90,8 @@ storage:
   state:
     redis:
       # standalone、sentinel 或 cluster。standalone 支持 API 多副本，但 Redis 仍是单点。
-      # FUSE pool 的既有多 key Lua 不支持 Redis Cluster；生产 HA 使用外部 Sentinel。
+      # FUSE pool 的既有多 key Lua 不支持 Redis Cluster；生产 HA 使用 Sentinel。
+      # Kubernetes 可由 Helm 部署内置三成员 Sentinel，也可连接外部 Sentinel。
       mode: "standalone"
       # Redis server address in host:port format.
       addr: "localhost:6379"
@@ -105,6 +106,7 @@ storage:
       sentinel_password: ""
       # 内置 Sentinel 首次初始化 gate；由 Helm 自动设置，默认留空禁用。
       # 只读状态目录包含 cluster.json / registration.json；不挂载任何私钥。
+      # API 启动时会用该身份实时验证固定三成员、唯一主节点、复制链路和副本 ACK。
       bootstrap_state_directory: ""
       bootstrap_public_keys_file: ""
       # Redis database index (0–15).
@@ -115,6 +117,7 @@ storage:
       durability: "best_effort"
       require_ha: false
       ack_replicas: 1
+      # replica_ack 生产配置至少 1000ms；Helm 内置 Sentinel 默认注入 1000ms。
       ack_timeout_ms: 100
       pool_size: 0
       min_idle_conns: 2

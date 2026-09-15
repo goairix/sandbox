@@ -120,6 +120,7 @@ redis:
     # 启动只做有界恢复，绝不自行选主；实际选主由 Redis Sentinel 完成。
     startupTimeoutSeconds: 600
     initializeTimeoutSeconds: 720
+    # API 启动拓扑门禁与安全写共用的 replica ACK 超时，生产最小值为 1000ms。
     ackTimeoutMs: 1000
     resources:
       requests:

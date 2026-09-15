@@ -25,6 +25,8 @@ redis:
     password: REPLACE_WITH_RANDOM_SENTINEL_TOKEN_0123456789
     dataPasswordKey: password
     sentinelPasswordKey: sentinel-password
+    # API 启动拓扑门禁与安全写共用的 replica ACK 超时。
+    ackTimeoutMs: 1000
 apparmorLoader:
   enabled: false # 本次部署关闭加载器，不表示已完成真实内核 LSM 验收。
 # productionSafetyChecks 要在受限 LSM 已验收后启用，不能用空/未加载 profile。
