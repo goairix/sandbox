@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+chart_metadata="$(helm show chart "$repo_root/deploy/helm/sandbox")"
+test "$(awk '$1 == "version:" { print $2 }' <<<"$chart_metadata")" = "0.3.0"
+test "$(awk '$1 == "appVersion:" { print $2 }' <<<"$chart_metadata")" = "0.2.0"
 rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox")"
 sentinel_args=(
   --kube-version 1.33.0
