@@ -630,31 +630,14 @@ func (r *Runtime) WaitSandboxReady(ctx context.Context, ref runtime.RuntimeRef, 
 		return nil, fmt.Errorf("workspace authorization is unavailable")
 	}
 	started := time.Now()
-	pod, err := r.waitReadyPod(ctx, ref)
+	pod, err := r.waitMounterReady(ctx, ref, poolKey, generation)
 	result := "success"
 	if err != nil {
 		result = "error"
 	}
-	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "pod_ready", result, time.Since(started).Seconds())
+	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "mounter_ready_wait", result, time.Since(started).Seconds())
 	if err != nil {
 		return nil, err
-	}
-	started = time.Now()
-	health, err := r.readMounterStatus(ctx, ref, "ready")
-	result = "success"
-	if err != nil {
-		result = "error"
-	}
-	metrics.RecordWorkspaceStage(ctx, "kubernetes", "", "mounter_status", result, time.Since(started).Seconds())
-	if err != nil {
-		return nil, fmt.Errorf("read workspace ready status: %w", err)
-	}
-	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
-	if err != nil {
-		return nil, err
-	}
-	if mismatches := kubernetesReadyStatusMismatches(health, ref.UID, poolKey, generation, bootstrap.CacheLimitBytes); len(mismatches) != 0 {
-		return nil, fmt.Errorf("workspace ready status mismatch: %s", strings.Join(mismatches, ","))
 	}
 	argv := probeArgv("write-read-delete", ref, generation, false)
 	started = time.Now()
@@ -2232,34 +2215,63 @@ func hasFatalPreparedState(pod *corev1.Pod) bool {
 	return false
 }
 
-func (r *Runtime) waitReadyPod(ctx context.Context, ref runtime.RuntimeRef) (*corev1.Pod, error) {
-	deadline := r.readyTimeout
-	if deadline <= 0 {
-		deadline = defaultKubernetesControlTimeout
+func (r *Runtime) waitMounterReady(ctx context.Context, ref runtime.RuntimeRef, poolKey string, generation int64) (*corev1.Pod, error) {
+	timeout := r.readyTimeout
+	if timeout <= 0 {
+		timeout = defaultKubernetesControlTimeout
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, deadline)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var lastErr error
 	for {
-		pod, err := r.getExactPod(waitCtx, ref)
-		if err != nil {
+		if _, _, err := r.exactHealthyFUSEPod(waitCtx, ref, poolKey); err != nil {
 			return nil, err
 		}
-		if err := validateExactFUSEPodIdentity(pod, ref); err != nil || pod.Labels["sandbox.pool.state"] != "prepared" {
-			return nil, fmt.Errorf("FUSE Pod identity labels changed")
-		}
-		restartCount, restartErr := mounterRestartCount(pod)
-		if restartErr != nil || restartCount != 0 || pod.DeletionTimestamp != nil {
-			return nil, fmt.Errorf("workspace mounter restarted or disappeared")
-		}
-		for _, condition := range pod.Status.Conditions {
-			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+		health, err := r.readMounterStatus(waitCtx, ref, "ready")
+		if err == nil {
+			pod, bootstrap, podErr := r.exactHealthyFUSEPod(waitCtx, ref, poolKey)
+			if podErr != nil {
+				return nil, podErr
+			}
+			mismatches := kubernetesReadyStatusMismatches(health, ref.UID, poolKey, generation, bootstrap.CacheLimitBytes)
+			if len(mismatches) == 0 {
 				return pod, nil
 			}
+			if !kubernetesMounterStatusPending(health, ref.UID, poolKey, generation, bootstrap.CacheLimitBytes) {
+				return nil, fmt.Errorf("workspace ready status mismatch: %s", strings.Join(mismatches, ","))
+			}
+			lastErr = errors.New("workspace mounter is mounting")
+		} else {
+			if errors.Is(err, runtime.ErrInvalidRuntimeRef) {
+				return nil, err
+			}
+			lastErr = fmt.Errorf("read workspace ready status: %w", err)
 		}
-		if err := waitPoll(waitCtx, r.pollInterval); err != nil {
-			return nil, fmt.Errorf("wait for FUSE Pod Ready: %w", err)
+		if pollErr := waitPoll(waitCtx, r.pollInterval); pollErr != nil {
+			return nil, fmt.Errorf("wait for workspace mounter ready: %w", errors.Join(lastErr, pollErr))
 		}
 	}
+}
+
+func (r *Runtime) exactHealthyFUSEPod(ctx context.Context, ref runtime.RuntimeRef, poolKey string) (*corev1.Pod, preparedMounterBootstrap, error) {
+	pod, err := r.getExactPod(ctx, ref)
+	if err != nil {
+		return nil, preparedMounterBootstrap{}, err
+	}
+	bootstrap, err := exactFUSEPodBootstrap(pod, ref)
+	if err != nil || pod.Labels["sandbox.pool.state"] != "prepared" || bootstrap.PoolKey != poolKey {
+		return nil, preparedMounterBootstrap{}, fmt.Errorf("FUSE Pod identity labels changed")
+	}
+	if err := validatePreparedContainerState(pod); err != nil {
+		return nil, preparedMounterBootstrap{}, err
+	}
+	return pod, bootstrap, nil
+}
+
+func kubernetesMounterStatusPending(status mounterStatusWire, runtimeUID, poolKey string, generation, cacheLimit int64) bool {
+	return status.State == "mounting" && status.RuntimeUID == runtimeUID && status.PoolKey == poolKey && status.MountType == "" &&
+		status.Generation == generation && !status.RestartDetected && status.CacheBytes >= 0 && status.CacheBytes < status.CacheLimitBytes &&
+		status.CacheLimitBytes == cacheLimit && !status.CacheExceeded
 }
 
 func (r *Runtime) patchPreparedState(ctx context.Context, ref runtime.RuntimeRef) (*corev1.Pod, error) {
