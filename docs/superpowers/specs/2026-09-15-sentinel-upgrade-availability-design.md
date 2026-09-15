@@ -21,13 +21,13 @@ reconciliation 中持续等待，最终只能通过核对并删除精确孤儿�
 
 ## 方案选择
 
-### 采用：独立配置、复用现有 sandbox-api 镜像内容
+### 采用：独立构建 sandbox-redis-bootstrap 镜像
 
 新增 `redis.sentinel.bootstrapImage`，包含必填的 `repository`、`tag` 和
-`pullPolicy`。镜像仍可指向现有 sandbox-api 仓库，因为其中已经包含
-`/app/redis-bootstrap`；但 tag 独立固定，只在 redis-bootstrap 程序本身需要升级时
-修改。首次升级应填写当前 Redis PodTemplate 已使用的 sandbox-api 镜像版本，避免
-因为引入新字段而产生一次无意义 Redis 滚动。
+`pullPolicy`。新增 `docker/images/redis-bootstrap/Dockerfile`，单独编译
+`./cmd/redis-bootstrap`，运行时镜像只包含 `/app/redis-bootstrap` 和 CA 证书，不包含
+`/app/sandbox`、docker-cli、API 配置或其它运行时工具。bootstrapImage 使用独立仓库
+和版本，仅在 redis-bootstrap 程序本身需要升级时修改。
 
 所有直接从镜像执行 `/app/redis-bootstrap` 的资源使用 bootstrapImage：
 
@@ -42,25 +42,30 @@ Redis 和 Sentinel 主进程仍使用 `redis.image`，它们从 `prepare` 写入
 `image`。修改 API tag 必须只改变 API Deployment；修改 bootstrapImage 或
 `redis.image` 才允许改变 Redis StatefulSet。
 
-未采用单独构建精简 bootstrap 镜像，因为当前没有降低镜像体积或独立供应链的硬性
-需求，引入第三种构建产物会增加发布和多架构维护成本。未来可在不改变 values 契约的
-前提下替换 repository。
+`docker/Dockerfile` 不再构建或复制 redis-bootstrap，sandbox-api 镜像只发布
+`/app/sandbox`。API 主程序仍可链接 `internal/redisbootstrap` 包完成启动拓扑门禁；
+这不等于在 API 镜像中保留独立命令。独立镜像减少以 UID 0 执行的 `prepare` 容器所
+携带的程序和工具，也使 API 与 Redis bootstrap 的发布、审计和回滚边界分离。
+
+代价是增加一种很小的多架构镜像。该成本由更清晰的最小权限边界和升级稳定性抵消；
+构建文档必须把它列为首次启用或 bootstrap 代码变更时的必构建产物，而不是每次 API
+升级都重建。
 
 未采用 Helm hook 串行控制所有工作负载。Hook 无法代替进程对 Redis 身份、拓扑和
 写入 ACK 的证明，失败/重试还会增加 release 状态和保留资源的复杂度。
 
 ## bootstrapImage 配置契约
 
-默认 values 提供完整结构，但 repository/tag 为空；standalone 和 external Redis
-忽略该配置，built-in Sentinel 模式必须显式填写非空合法值。空值不回退到全局 API
-镜像，避免后续 API tag 变化重新引入隐式耦合。
+默认 values 提供完整、独立的内部镜像地址和初始版本；standalone 和 external Redis
+忽略该配置。built-in Sentinel 模式要求 repository/tag/pullPolicy 均为非空合法值，
+空值不回退到全局 API 镜像，避免后续 API tag 变化重新引入隐式耦合。
 
 ```yaml
 redis:
   sentinel:
     bootstrapImage:
-      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
-      tag: v0.3.26
+      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
+      tag: v0.1.0
       pullPolicy: IfNotPresent
 ```
 
@@ -70,6 +75,11 @@ Kubernetes 支持的 `Always`、`IfNotPresent`、`Never`。
 
 Helm schema、模板验证、默认 values 中文注释和部署文档必须同步。缺失或类型错误在
 创建 Kubernetes 资源前失败，错误信息不得暗示回退到 API 镜像。
+
+首次从复用 API 镜像迁移到独立镜像时，StatefulSet PodTemplate 的镜像字符串必然
+变化，因此会发生一次有意的 OrderedReady Redis 滚动。不能声称这次迁移保持 Redis
+Pod UID/restartCount 不变；本批的短 lease 和 API 真实拓扑门禁必须先随新 API 生效，
+并在受控升级中验证这次唯一的迁移滚动。完成迁移后，API-only 升级不再触发 Redis。
 
 ## FUSE refill lease
 
@@ -180,6 +190,8 @@ initialize Job 仍在每个 Helm revision 对当前三成员拓扑进行独立�
   行为保持不变。
 - Deployment 保持 `maxUnavailable=0`、`maxSurge=1`，startupProbe 默认预算满足上述
   下限。
+- sandbox-api 最终镜像不包含 `/app/redis-bootstrap`，独立 bootstrap 镜像不包含
+  `/app/sandbox` 或 docker-cli；两者均支持 `linux/amd64` 和 `linux/arm64`。
 
 ### refill lease
 
@@ -205,9 +217,14 @@ initialize Job 仍在每个 Helm revision 对当前三成员拓扑进行独立�
 
 ### 部署后
 
-首次线上 values 将 bootstrapImage 固定为升级前 Redis StatefulSet 已使用的
-`sandbox-api:v0.3.26`，新 API 使用新 tag。升级前后核对 Redis StatefulSet
-`updateRevision/currentRevision`、Pod UID 和 restartCount 均不变；API 逐副本 Ready。
+先构建并推送独立 `sandbox-redis-bootstrap:v0.1.0` 和包含本批门禁/lease 修复的新
+sandbox-api 镜像，再同步新 Chart 与 values。首次迁移预期 Redis StatefulSet
+`updateRevision` 改变并逐成员滚动；核对每一步只有一个成员不可用、其余成员维持
+quorum，最终 currentRevision 等于 updateRevision、3/3 Ready，API 逐副本 Ready。
+
+首次迁移完成后，再做一次只改变 sandbox-api tag 的 Helm 渲染和现场 upgrade；Redis
+StatefulSet currentRevision、Pod UID 和 restartCount 必须保持不变，只有 API Deployment
+逐副本替换。这一轮才是“API-only 不重启 Redis”的最终验收。
 
 再在隔离维护窗口做一次受控 Sentinel 单成员故障/切主：旧 API 持续提供健康与已有
 业务访问，新 API 在拓扑未恢复三成员前不初始化池，恢复后自动 Ready；人为制造持锁
