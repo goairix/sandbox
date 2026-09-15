@@ -26,20 +26,27 @@ replica ACK 和后续解锁未得到确认。锁的当前 TTL 按
 持锁 reconciliation 已退出，锁不再续租，但新 API 的初始 reconciliation 会等待
 该锁，而 startupProbe 的单次启动预算更短，于是容器被探针反复重启。
 
-## 后续优化候选
+## 已实施整改
 
-以下只记录问题与验收边界，尚未形成批准的实现规格：
+本地实现已完成以下整改，线上仍需使用新镜像和 Chart 做首次迁移及 API-only 二次升级
+验收：
 
-1. 将 Redis bootstrap/identity 辅助镜像从 sandbox-api 镜像配置中解耦，单独固定
-   repository、tag 和 pullPolicy。只升级 API 时 Redis StatefulSet revision 必须不变；
-   只有辅助程序本身改变时才允许按维护流程滚动 Redis。
-2. 重新设计可续租 refill 锁的首个续租周期和孤儿恢复上限。Redis 故障后不应等待
-   约 42 分钟，也不能靠人工删除 Redis key；缩短恢复窗口时仍须保留 token、CAS、
-   RuntimeUID 和所有发布操作的 fencing，不能产生两个有效 refill writer。
-3. 明确内置 Sentinel 与 API 的升级编排：Redis 未恢复三节点 Ready、Sentinel quorum
-   和可写 master 前，不启动新的 API 池初始化；同时保留旧 API 的服务可用性。
-4. 增加真实 Sentinel 滚动/切主测试，覆盖“锁写入成功但 ACK/解锁未确认”、API
-   startupProbe 预算和自动恢复，验收目标是不需要手工修改 Redis 状态。
+1. `7e1fc82` 新增独立最小 `sandbox-redis-bootstrap` 镜像，并从 API 镜像删除 helper
+   命令；`6da6e9f` 让所有 built-in Sentinel helper 使用独立 repository/tag/pullPolicy。
+   迁移完成后 API-only tag 变化不再改变 Redis PodTemplate。
+2. `0204bba` 将 refill 锁改为固定 45 秒 lease、15 秒续租；续租失败取消本轮，原有
+   token、revision、RuntimeUID 和发布 fencing 保持不变。持锁进程消失后不再需要人工
+   DEL，旧 lease 最迟约 45 秒到期。
+3. `6b5511e` 在 API 创建 store、池和 HTTP 服务前调用真实三成员拓扑验证，固定身份
+   公钥，证明唯一 master、Sentinel quorum、复制 lineage 和 `WAIT 1` ACK；验证后
+   projection 改变会 fail closed。Deployment 保持 `maxUnavailable: 0`、`maxSurge: 1`。
+4. 本地真实 Sentinel fixture 已覆盖初始化、主节点终止、非零成员接管、旧主恢复为
+   replica、冷恢复、三成员 IP replacement、复制和 ACK，测试资源最终清理为零。
+
+首次采用独立 helper 镜像会有一次预期 Redis OrderedReady 滚动；不能把这次迁移误报
+为“Redis 完全不动”。迁移完成后还须执行一次只改变 API tag 的现场 upgrade，确认
+StatefulSet revision、三个 Redis Pod UID 和 restartCount 均保持不变，并受控验证孤儿
+refill lease 在 45 秒边界内自动接管。
 
 ## 一次性 Job 与 Completed Pod
 

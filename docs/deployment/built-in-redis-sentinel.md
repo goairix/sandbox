@@ -11,7 +11,7 @@
 - 可用的 RWO StorageClass，三个独立 PVC；不得复用原 standalone 的 PVC。
 - release 名不超过 39 字符；release、namespace 与 clusterDomain 拼出的完整成员 DNS 不超过 253 字符。
 - CNI 必须执行标准 NetworkPolicy；规则兼容 Cilium、Calico 和支持该能力的云 VPC，不依赖 Cilium CRD。
-- 用户构建当前 `sandbox-api` 镜像，其中包含 `/app/redis-bootstrap`；Redis 使用配置的 Redis 7 镜像，无需重建项目 runtime/gateway/mounter 镜像。
+- 用户分别构建当前 `sandbox-api` 和独立的 `sandbox-redis-bootstrap` 镜像；后者只包含 `/app/redis-bootstrap` 与 CA 证书，不包含 API、docker-cli 或业务配置。Redis 主进程继续使用配置的 Redis 7 镜像，无需重建项目 runtime/gateway/mounter 镜像。
 
 ## 自动创建与复用身份
 
@@ -26,6 +26,12 @@ Chart 只对固定状态 ConfigMap、实际身份 Secret、固定 StatefulSet �
 ## 线上保留 values.yaml 时的模板默认值
 
 线上可以保留自己的 `values.yaml`，但应同步完整新版 `templates/` 与 `values.schema.json`。模板统一补齐缺失的 Sentinel DNS 后缀（`cluster.local`）、主名称（`sandbox`）、选主参数、启动/初始化/ACK 超时、认证键名及辅助容器资源配置；API 启动探针缺失时也使用默认配置。所有消费者使用同一套有效值，不会再渲染 `<nil>` DNS 或 `0s` 超时。
+
+独立辅助镜像是例外：启用 built-in Sentinel 时必须提供完整的
+`redis.sentinel.bootstrapImage.repository/tag/pullPolicy`，空值或缺失会直接拒绝
+渲染，不会回退到 sandbox-api。新版 Chart 默认 values 已提供完整初始值；线上维护
+自己的 Chart 内 `values.yaml` 时必须同步这三项。standalone 和 external Redis 不使用
+该镜像配置。
 
 显式填写的配置会保留；错误类型、非法 DNS/键名、零值或越界超时在创建资源前拒绝渲染，即使部署目录没有 schema 也会检查。显式关闭 API 启动探针仍会拒绝启用内置 Sentinel。认证密码仍需配置，身份和 PVC 的恢复保护不因默认值补齐而放宽。
 
@@ -56,6 +62,11 @@ redis:
     storageClass: "YOUR_RWO_STORAGE_CLASS"
     size: 10Gi
   sentinel:
+    # 独立最小镜像；只在 cmd/redis-bootstrap 改变时使用新的不可变 tag。
+    bootstrapImage:
+      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
+      tag: v0.1.0
+      pullPolicy: IfNotPresent
     identitySecretName: "" # 默认自动创建/复用安装身份
     existingSecret: "" # 空值使用两个 inline 密码自动创建认证 Secret
     password: REPLACE_WITH_RANDOM_SENTINEL_TOKEN_0123456789
@@ -89,19 +100,26 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" ./deploy/helm/sandbox \
 
 不要新旧 Chart 混用。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖 hook 等待顺序，避免 Helm 等 API Ready、API 又等 Job 的死锁。两个 Job 名均含 release revision 且不超过 63 字符；初始化 Job 仍仅有指定状态 CM 的 get/update 权限。身份 Job 预算 120 秒，只 GET 固定 Secret/CM/三个 PVC；自动模式额外授予所在 namespace 的 Secret CREATE，外部身份模式没有 CREATE。Kubernetes RBAC 不能用 resourceNames 约束 CREATE，因此该权限可创建 namespace 内任意名字的 Secret，固定名字与新安装授权由程序检查；没有 list/update/patch/delete 或 ClusterRole 权限。身份 Job 不挂 seed、公钥、认证或 PVC，不接收密码参数/ENV，仅专用 ServiceAccount 自动投影必要 API token；Job、SA、Role 和 RoleBinding 随 release 正常卸载。
 
-身份 Job 的 120 秒是总预算，调度和镜像拉取也计入；程序的 `-timeout 2m` 是运行上限，不额外延长 Job deadline。先确认新 API 镜像可拉取，避免首次身份生成之前就超时。
+身份 Job 的 120 秒是总预算，调度和镜像拉取也计入；程序的 `-timeout 2m` 是运行上限，不额外延长 Job deadline。先确认独立 bootstrap 镜像可拉取，避免首次身份生成之前就超时。
 
 若原身份 Secret 已生成，解决调度/镜像问题后可以新 upgrade revision 只读验证重试，不能删除保留身份。若首次安装中断、身份尚未生成，而普通 CM/PVC 已出现，缺身份保护会拒绝直接 upgrade，**不会自动重新授权或清理旧对象**。此时须由管理员核验是否确为未产生身份、无登记、无业务的失败首次安装，备份并确认精确资源处理范围后再开始新安装；不能把此情况当作已存在数据库的换钥匙许可，也不应盲目尝试恢复一个从未生成的 Secret。此限制是保留身份安全与跨资源非原子创建的明确边界。
 
 Redis Pods 不携带 API token，不使用 Pod fsGroup；一次性 root init 只准备本 Pod 的挂载权限，长驻进程及身份 Job 均为 UID/GID999、drop ALL、只读根文件系统、RuntimeDefault seccomp。prepare 只挂自己的 seed 文件，Redis/Sentinel/API/初始化 Job 只能挂公钥。
 
-内置 Sentinel 必须启用 API startupProbe；Chart 自动补足等待预算（默认至少15分钟），并保留用户更长的预算，避免初始化期间 liveness 重启风暴。API 门禁单次等待上限10分钟；超时会明确退出，由 Kubernetes 重试，不开放尚未初始化的 API。慢存储或较大的池子应相应延长 Helm timeout。
+内置 Sentinel 必须启用 API startupProbe；Chart 自动补足等待预算，默认配置为 945 秒，并保留用户更长的预算，避免初始化期间 liveness 重启风暴。API 门禁在同一个 10 分钟上下文中先读取固定身份，再实时验证三个成员、唯一 master、Sentinel quorum、复制 lineage 和 `WAIT 1` ACK；验证后身份 projection 发生变化也会拒绝启动。门禁超时会明确退出，由 Kubernetes 重试，不开放尚未初始化的 API；随后 FUSE 初始池检查另有最多 45 秒失效 refill lease 恢复窗口。慢存储或较大的池子应相应延长 Helm timeout。
+
+首次从旧版“helper 复用 API 镜像”迁移到独立 bootstrap 镜像时，StatefulSet
+PodTemplate 的镜像字段会改变，因此预期发生一次 OrderedReady 三成员滚动。升级期间
+每次只允许一个成员不可用，另外两个须维持 Sentinel quorum；旧 API 在新 API 尚未
+通过门禁时继续服务。完成这次迁移后，只改 `image.tag` 不再改变 Redis StatefulSet，
+三个 Redis Pod 的 UID、restartCount 与 currentRevision 都应保持不变。只有
+`redis.image` 或 `redis.sentinel.bootstrapImage` 改变时才应再次滚动 Redis。
 
 内置 Sentinel 禁止 `helm rollback`，也不要使用会自动回滚的 `--atomic`：Helm 会重放历史 Pending 状态，而不是重新执行 lookup，可能丢失初始化登记。pre-rollback Hook 会在改写资源前明确拒绝。需要部署旧应用版本时，将目标镜像和配置作为新的 `helm upgrade`，保留当前卷组、认证、身份及状态；这不是数据库回滚。
 
 ## 可用性与保留状态
 
-单成员故障时，两个存活成员可由 Sentinel 自动切换；API 不经过核验器转发。普通 readiness 只读状态、不反复写 ACK。启动恢复有明确预算，无法证明既有主身份时拒绝启动，不自动 seed、清空数据或降级 best_effort。
+单成员故障时，两个存活成员可由 Sentinel 自动切换，已经 Ready 的 API 继续通过 Sentinel 客户端处理正常切主，不经过 API 间转发。此时新启动的 API 要等待三个固定身份成员恢复并通过实时拓扑门禁后才 Ready，从而由 `maxUnavailable: 0`、`maxSurge: 1` 保留旧副本服务。普通 readiness 只读状态、不反复写 ACK。启动恢复有明确预算，无法证明既有主身份时拒绝启动，不自动 seed、清空数据或降级 best_effort。
 
 `WAIT 1` 是复制确认，不是共识、磁盘同步提交或零数据丢失保证。AOF everysec 也不是同步刷盘；仍需可靠存储、备份和故障演练。
 

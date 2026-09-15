@@ -191,11 +191,12 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
 
 只改 API tag、普通 runtime tag、副本或资源，且 cleanup protocol 未变化时是普通滚动升级。修改 preset、endpoint、bucket、AK/SK、`credentialGeneration`、FUSE 镜像、有效 LSM 或 nodeSelector 时，会改变 backend fingerprint；cleanup protocol 版本变化也会独立触发排空。首次开启 AppArmor 加载器会改变有效 LSM，须安排排空维护窗口。Chart 的 pre-upgrade hook 会先执行 release drain。DNS 地址变化只会淘汰旧的未绑定空壳，不需要修改 values。
 
-当前内置 Sentinel 的 `prepare` 和 `identity` 辅助容器仍复用
-`image.repository/image.tag` 对应的 sandbox-api 镜像。因此只更新 API tag 也会改变
-Redis StatefulSet 的 PodTemplate，并触发三个 Redis/Sentinel Pod 滚动重启；这不是
-Redis 镜像或数据发生了变化。上线前须按 Sentinel 维护窗口对待。后续将把辅助镜像
-独立固定，相关事故、孤儿 refill 锁恢复边界和验收要求见
+内置 Sentinel 的 `prepare`、`identity`、身份/初始化 Job 和 rollback guard 使用
+`redis.sentinel.bootstrapImage`，不再复用 `image.repository/image.tag`。完成首次迁移
+后，只更新 API tag 不会改变 Redis StatefulSet PodTemplate，也不应重启 Redis。
+bootstrap 镜像 tag 只在 `cmd/redis-bootstrap` 本身改变时更新；没有隐式 API fallback。
+首次从旧 Chart 迁移会因为 helper 镜像字段改变而执行一次预期的 OrderedReady Redis
+滚动，须按 Sentinel 维护窗口观察 quorum。相关根因和验收边界见
 [API 升级触发内置 Redis Sentinel 重启记录](../testing/2026-09-15-sentinel-api-upgrade-restart-incident.md)。
 
 每个 release revision 会创建一次
@@ -277,6 +278,7 @@ SANDBOX_BUILD_PLATFORMS=linux/amd64,linux/arm64
 
 ```bash
 docker buildx build --builder sandbox-apparmor-build -f docker/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_BUILD_VERSION" --push .
+docker buildx build --builder sandbox-apparmor-build -f docker/images/redis-bootstrap/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-redis-bootstrap:v0.1.0" --push .
 docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-runtime:$SANDBOX_BUILD_VERSION" --push .
 docker buildx build --builder sandbox-apparmor-build -f docker/images/gateway/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-gateway:$SANDBOX_BUILD_VERSION" --push docker/images/gateway
 docker buildx build --builder sandbox-apparmor-build -f docker/images/workspace-mounter/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" -t "$SANDBOX_BUILD_REGISTRY/sandbox-fuse-mounter:$SANDBOX_BUILD_VERSION" --push .
@@ -286,6 +288,43 @@ docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox-fu
 `ds-ai-research` 当前节点为 arm64，镜像必须包含 `linux/arm64`。只部署这个架构时可将变量改为 `linux/arm64`；其它 amd64 集群需要 amd64 镜像。先核对 builder 支持所选架构，不在业务节点临时安装 privileged 模拟器。`--push` 直接推送目标架构清单和镜像，无需再执行 `docker push`；不能省略输出选项并假设构建结果已经可被集群拉取。多架构发布方式见 [Docker 官方说明](https://docs.docker.com/build/building/multi-platform/)。
 
 Kubernetes FUSE 需要已有兼容的 API/runtime/mounter 镜像，Docker FUSE 还需要 `sandbox-fuse-docker`；按实际部署使用的镜像构建，不因只升级 API 就统一改所有 tag。你也可以沿用现有流程分别构建各架构，再用 `docker manifest` 合并同一个新版本 tag。
+
+### 本次 Redis bootstrap 独立镜像
+
+首次使用新版 Sentinel Chart 时必须构建并推送这个最小镜像。它与 API 独立发版，
+初始 tag 为 `v0.1.0`；以后只在 `cmd/redis-bootstrap` 或其依赖行为改变时使用新 tag。
+普通 API Go 修复、API 资源调整或 `image.tag` 更新不需要重建它。
+若已经执行上面的全量多架构构建清单，则无需重复执行下面的构建命令；这里单列用于只发布
+bootstrap 镜像的场景。
+
+```bash
+SANDBOX_BOOTSTRAP_VERSION=v0.1.0
+
+docker buildx build \
+  --builder sandbox-apparmor-build \
+  --file docker/images/redis-bootstrap/Dockerfile \
+  --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --tag "$SANDBOX_BUILD_REGISTRY/sandbox-redis-bootstrap:$SANDBOX_BOOTSTRAP_VERSION" \
+  --push .
+
+docker buildx imagetools inspect \
+  "$SANDBOX_BUILD_REGISTRY/sandbox-redis-bootstrap:$SANDBOX_BOOTSTRAP_VERSION"
+```
+
+将实际 repository/tag 写入环境 values：
+
+```yaml
+redis:
+  sentinel:
+    bootstrapImage:
+      repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
+      tag: v0.1.0
+      pullPolicy: IfNotPresent
+```
+
+首次迁移预期 Redis StatefulSet 逐成员滚动一次。完成后保存 StatefulSet
+currentRevision、三个 Pod UID 和 restartCount，再执行一次只改变 API tag 的 upgrade；
+这些 Redis 值必须完全不变，只有 API Deployment 逐副本替换。
 
 ### 本次 AppArmor 加载器
 
