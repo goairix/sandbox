@@ -663,12 +663,11 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 	lease := p.startRefillLease(ctx, lockToken)
 	defer lease.stop()
 	ctx = lease.ctx
-	now, err := p.repo.ServerTime(ctx)
-	if err != nil {
+	if _, err := p.repo.ServerTime(ctx); err != nil {
 		return true, fmt.Errorf("read Redis server time: %w", err)
 	}
 	inspectionErr := p.inspectPrepared(ctx)
-	now, err = p.repo.ServerTime(ctx)
+	now, err := p.repo.ServerTime(ctx)
 	if err != nil {
 		return true, errors.Join(inspectionErr, fmt.Errorf("refresh Redis server time: %w", err))
 	}
