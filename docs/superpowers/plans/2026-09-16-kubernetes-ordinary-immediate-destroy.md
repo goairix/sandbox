@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remove the useless 30-second Kubernetes grace wait from API-managed ordinary sandbox deletion without weakening exact identity, distributed fencing, workspace finalization, or network-policy cleanup.
+**Goal:** Replace the useless 30-second Kubernetes grace wait with the minimum non-forced one-second termination for API-managed ordinary sandboxes without weakening exact identity, distributed fencing, workspace finalization, kubelet termination confirmation, or network-policy cleanup.
 
-**Architecture:** Keep the ordinary Pod template's existing grace period so external/manual deletion semantics do not change. Only `deleteExactOrdinaryPod`, which runs after Manager fencing and final sync, sends `gracePeriodSeconds: 0` together with the existing immutable UID precondition, then continues waiting for the original Pod identity to disappear before cleaning policies. FUSE termination remains on its separate flush/unmount/finalizer path.
+**Architecture:** Keep the ordinary Pod template's existing grace period so external/manual deletion semantics do not change. Only `deleteExactOrdinaryPod`, which runs after Manager fencing and final sync, sends `gracePeriodSeconds: 1` together with the existing immutable UID precondition, then continues waiting for kubelet-confirmed removal of the original Pod identity before cleaning policies. Zero is forbidden because Kubernetes force deletion removes the API object without waiting for node termination confirmation; FUSE remains on its separate flush/unmount/finalizer path.
 
 **Tech Stack:** Go, Kubernetes client-go fake client, `testify`, Go race detector, Git
 
@@ -12,13 +12,13 @@
 
 ## File structure
 
-- Modify `internal/runtime/kubernetes/ordinary_cleanup_test.go`: add the focused RED/GREEN contract for an immediate delete that is still bound to the exact Pod UID.
+- Modify `internal/runtime/kubernetes/ordinary_cleanup_test.go`: add the focused RED/GREEN contract for the minimum non-forced delete that remains bound to the exact Pod UID.
 - Modify `internal/runtime/kubernetes/ordinary_network.go`: add only the zero grace period to the existing exact ordinary Pod DELETE options.
 - Create `docs/testing/2026-09-16-kubernetes-ordinary-destroy-remediation.md`: record the live root-cause evidence, safety reasoning, TDD evidence, deployment scope, and the still-pending post-deployment acceptance.
 
 No Pod template, FUSE runtime, API protocol, Redis model, Helm values, or runtime image file changes are planned.
 
-### Task 1: Capture the immediate exact-delete contract
+### Task 1: Capture the minimum graceful exact-delete contract
 
 **Files:**
 - Modify: `internal/runtime/kubernetes/ordinary_cleanup_test.go:198-206`
@@ -28,7 +28,7 @@ No Pod template, FUSE runtime, API protocol, Redis model, Helm values, or runtim
 Add this test before the existing timeout tests:
 
 ```go
-func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
+func TestOrdinaryDeletionRequestsMinimumGracefulExactUID(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", UID: "old-uid"}}
 	client := fake.NewSimpleClientset(pod)
 
@@ -47,7 +47,7 @@ func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
 	require.NotNil(t, options.Preconditions.UID)
 	require.Equal(t, pod.UID, *options.Preconditions.UID)
 	require.NotNil(t, options.GracePeriodSeconds)
-	require.Zero(t, *options.GracePeriodSeconds)
+	require.Equal(t, int64(1), *options.GracePeriodSeconds, "zero would force-delete the API object before kubelet termination confirmation")
 }
 ```
 
@@ -56,7 +56,7 @@ func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
 Run:
 
 ```bash
-go test ./internal/runtime/kubernetes -run '^TestOrdinaryDeletionRequestsImmediateExactUID$' -count=1
+go test ./internal/runtime/kubernetes -run '^TestOrdinaryDeletionRequestsMinimumGracefulExactUID$' -count=1
 ```
 
 Expected: FAIL at `require.NotNil(t, options.GracePeriodSeconds)` because the current DELETE options contain only the UID precondition.
@@ -68,7 +68,7 @@ git add internal/runtime/kubernetes/ordinary_cleanup_test.go
 git commit -m "test: expose ordinary pod grace delay"
 ```
 
-### Task 2: Make fenced ordinary deletion immediate
+### Task 2: Apply the minimum non-forced ordinary deletion grace
 
 **Files:**
 - Modify: `internal/runtime/kubernetes/ordinary_network.go:274-284`
@@ -79,9 +79,9 @@ Replace the current Pod delete call with:
 
 ```go
 	uid := pod.UID
-	zeroGracePeriod := int64(0)
+	minimumGracePeriod := int64(1)
 	err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-		GracePeriodSeconds: &zeroGracePeriod,
+		GracePeriodSeconds: &minimumGracePeriod,
 		Preconditions:      &metav1.Preconditions{UID: &uid},
 	})
 ```
@@ -93,7 +93,7 @@ Do not change the subsequent polling loop, replacement-UID success condition, te
 Run:
 
 ```bash
-go test ./internal/runtime/kubernetes -run '^TestOrdinaryDeletionRequestsImmediateExactUID$' -count=1
+go test ./internal/runtime/kubernetes -run '^TestOrdinaryDeletionRequestsMinimumGracefulExactUID$' -count=1
 ```
 
 Expected: PASS.
@@ -183,7 +183,7 @@ Create `docs/testing/2026-09-16-kubernetes-ordinary-destroy-remediation.md` with
 
 ## 实现与安全边界
 
-说明只有 exact ordinary DELETE 增加 `gracePeriodSeconds: 0`；UID precondition、fencing、live operations、sync finalization、NotFound/replacement UID 确认和 Pod 后策略清理均保留。明确 FUSE 终止路径未修改。
+说明只有 exact ordinary DELETE 增加 `gracePeriodSeconds: 1`；零值因 force deletion 语义被禁止。UID precondition、fencing、live operations、sync finalization、NotFound/replacement UID 确认和 Pod 后策略清理均保留。明确 FUSE 终止路径未修改。
 
 ## 本地验证
 
@@ -202,7 +202,8 @@ Create `docs/testing/2026-09-16-kubernetes-ordinary-destroy-remediation.md` with
 
 Re-read `docs/superpowers/specs/2026-09-16-kubernetes-ordinary-immediate-destroy-design.md` and verify:
 
-- only the exact ordinary helper sets zero grace;
+- only the exact ordinary helper sets the minimum non-zero grace of one second;
+- no Pod delete path added `gracePeriodSeconds: 0`;
 - UID precondition is present in the same DELETE options object;
 - the helper still waits for NotFound or a different UID;
 - network policy deletion still happens only after the helper succeeds;
