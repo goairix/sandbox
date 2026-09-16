@@ -200,7 +200,7 @@ func TestExactOrdinaryRemovalAllowsMissingOptionalCiliumResource(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(err))
 }
 
-func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
+func TestOrdinaryDeletionRequestsMinimumGracefulExactUID(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", UID: "old-uid"}}
 	client := fake.NewSimpleClientset(pod)
 
@@ -219,7 +219,7 @@ func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
 	require.NotNil(t, options.Preconditions.UID)
 	require.Equal(t, pod.UID, *options.Preconditions.UID)
 	require.NotNil(t, options.GracePeriodSeconds)
-	require.Zero(t, *options.GracePeriodSeconds)
+	require.Equal(t, int64(1), *options.GracePeriodSeconds, "zero would force-delete the API object before kubelet termination confirmation")
 }
 
 func TestOrdinaryDeletionTimeoutPreservesPendingClassification(t *testing.T) {

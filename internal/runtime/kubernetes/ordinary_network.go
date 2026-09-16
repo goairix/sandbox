@@ -276,9 +276,9 @@ func deleteExactOrdinaryPod(ctx context.Context, client kubernetes.Interface, na
 		return fmt.Errorf("ordinary Pod has no immutable UID")
 	}
 	uid := pod.UID
-	zeroGracePeriod := int64(0)
+	minimumGracePeriod := int64(1)
 	err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-		GracePeriodSeconds: &zeroGracePeriod,
+		GracePeriodSeconds: &minimumGracePeriod,
 		Preconditions:      &metav1.Preconditions{UID: &uid},
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
