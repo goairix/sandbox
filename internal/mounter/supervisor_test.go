@@ -346,7 +346,9 @@ func TestStrongShutdownWaitsForChildExitAndEffectiveUnmount(t *testing.T) {
 	second, err := s.Shutdown(context.Background(), &request)
 	require.NoError(t, err)
 	assert.True(t, second.GracefulUnmount)
-	assert.Len(t, runner.runs, 3)
+	require.Len(t, runner.runs, 2)
+	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[0][0])
+	assert.Equal(t, "/usr/bin/fusermount3", runner.runs[1][0])
 }
 
 func TestStrongShutdownLetsS3FSPerformGracefulUnmountAfterFlush(t *testing.T) {
@@ -768,8 +770,8 @@ func TestStrongShutdownFlushFailureDoesNotAttemptUnmount(t *testing.T) {
 	assert.False(t, ack.GracefulUnmount)
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	require.Len(t, runner.runs, 2)
-	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[1][0])
+	require.Len(t, runner.runs, 1)
+	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[0][0])
 }
 
 func TestStrongShutdownFlushesBeforeUnmount(t *testing.T) {
@@ -788,9 +790,9 @@ func TestStrongShutdownFlushesBeforeUnmount(t *testing.T) {
 	ack, err := s.Shutdown(context.Background(), &request)
 	require.NoError(t, err)
 	assert.True(t, ack.GracefulUnmount)
-	require.GreaterOrEqual(t, len(runner.runs), 3)
-	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[len(runner.runs)-2][0])
-	assert.Equal(t, "/usr/bin/fusermount3", runner.runs[len(runner.runs)-1][0])
+	require.Len(t, runner.runs, 2)
+	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[0][0])
+	assert.Equal(t, "/usr/bin/fusermount3", runner.runs[1][0])
 }
 
 func TestCanceledShutdownQueuedBehindFlushHasNoSideEffect(t *testing.T) {
@@ -820,9 +822,10 @@ func TestCanceledShutdownQueuedBehindFlushHasNoSideEffect(t *testing.T) {
 	require.NoError(t, <-flushDone)
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	assert.Len(t, runner.runs, 2)
+	require.Len(t, runner.runs, 1)
+	assert.Equal(t, "/usr/bin/verified-flush", runner.runs[0][0])
 }
 
-func TestImageContractIncludesBoundedRemoteReadBinary(t *testing.T) {
+func TestImageContractRetainsLSBinaryCompatibility(t *testing.T) {
 	assert.Contains(t, requiredImageBinaries, "/bin/ls")
 }
