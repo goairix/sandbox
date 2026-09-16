@@ -144,7 +144,7 @@ config:
 
 隔离环境完成实际 profile/enforce、mount/flush/unmount、越权拒绝和重载验证后，再安排生产维护窗口启用。生产 nodeSelector 应使用全部已验收节点的共同标签，不照抄单个测试 hostname；选择器同时影响普通池、FUSE 池和加载器。完整配置、权限及验收边界见 [AppArmor 加载器](apparmor-loader.md)。
 
-`sandbox-apparmor-loader:v0.3.24-arm64` 已在 `ds-ai-worker-2` 完成组件级真实验收，见 [2026-09-14 结果](../testing/2026-09-14-apparmor-live-prepared-results.md)。本轮未修改线上 release，也未改生产代码/策略，不需要为测试记录重新构建镜像；启用后的普通/FUSE API、跨副本生命周期及全部目标节点覆盖仍须继续验证。
+`sandbox-apparmor-loader:v0.3.24-arm64` 在 worker-2 的组件级验收见 [2026-09-14 结果](../testing/2026-09-14-apparmor-live-prepared-results.md)。[2026-09-16 最新公共 API 验收](../testing/2026-09-16-all-node-apparmor-api-results.md) 中，worker-1/2/3 完整通过；worker-4 镜像拉取/未启动 runtime 终止阻塞，临时环境清理未确认，worker-5 已停止。没有升级业务 release 或改策略，不需要为测试记录重建镜像；不能把五节点 loader Ready 当作全部目标节点业务通过。
 
 ## 4. 全新部署
 

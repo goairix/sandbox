@@ -8,6 +8,8 @@
 
 2026-09-14，`v0.3.24-arm64` 已在 `ds-ai-worker-2` 通过上述加载、MinIO TLS 挂载链路、拒绝测试及加载器 Pod 重建恢复，见 [真实验收记录](../testing/2026-09-14-apparmor-live-prepared-results.md)。该组件测试结束时线上 release 尚未启用；此结果不覆盖业务节点重启、其它节点/运行时、其它存储及启用后的公共 API/跨副本集成。现有加载器、API、mounter 镜像无需因这次测试记录重新构建。后续线上启用发现的启动门禁兼容问题另见 [门禁修复记录](../testing/2026-09-14-apparmor-loader-startup-gate-results.md)。
 
+2026-09-16 最新公共 API 隔离验收：worker-1/2/3 的普通/FUSE、真实 s3fs enforce、四类内核拒绝及自己的 loader Pod 重建通过；worker-4 的镜像拉取/未启动 runtime 终止链路阻塞，第二轮清理未确认，worker-5 按设计停止。见 [逐节点结果与保留现场](../testing/2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release 或策略，不能把 loader 五节点 Ready 扩展为五节点业务验收已通过。
+
 ## 构建及推送镜像
 
 本功能新增 `sandbox-apparmor-loader` 镜像，并要求 `sandbox-api` 包含加载器启动门禁和私有 enforce 检查。如果已部署的 API 就是从包含这些实现的新版代码构建的，可以复用，不必再构建一次；否则按下面命令同时重建 API。mounter/probe 不因为这项功能重建，Redis 镜像也不用更换。
@@ -65,7 +67,7 @@ docker buildx build \
   --push .
 ```
 
-此 Dockerfile 同时打包 `/app/sandbox` 和 `/app/redis-bootstrap`，不要改用只含旧 API 二进制的镜像。复用 API 时，下面 values 中的 `image.tag` 保留该已验证镜像的版本，不填写示例新 tag。
+当前此 Dockerfile 只打包 `/app/sandbox`；Redis helper 已拆到 `docker/images/redis-bootstrap/Dockerfile`，内置 Sentinel 应在 `redis.sentinel.bootstrapImage` 配置独立镜像，不再引用 API 镜像。复用 API 时，下面 values 中的 `image.tag` 保留该已验证镜像的版本，不填写示例新 tag。
 
 ### 4. 核对仓库中的镜像
 
