@@ -43,31 +43,31 @@ Files: 继续 `all-node-api.js`；不修改 Chart/profile/生产 values。
 
 ## Task 3：每节点真实生命周期
 
-- [ ] 只转发自己 API 的精确 Pod，本地随机端口绑定 127.0.0.1；每请求总预算 45 秒，响应上限 2 MiB；只输出 status/阶段，不输出凭据或错误 body。
-- [ ] 读取自己的 pristine 普通/FUSE pool Pod UID/nodeName/零重启，API 返回 runtime_id 必须匹配 pristine 身份。
-- [ ] `POST /api/v1/sandboxes {mode:ephemeral,timeout:300}`；`POST .../:id/exec` 执行 Python/Node/bash 固定 hello、写读 fsync、读取 uid=1000/NoNewPrivs=1/Seccomp=2/默认 enforce。`DELETE` 后精确原 UID 不存在、对应策略无残留，prepared Pool 恢复。
-- [ ] `POST /api/v1/sandboxes {mode:persistent,timeout:300,workspace_path:api-workspace,workspace_mount_mode:fuse}`，用真实 sandbox Python 写/fsync/读回、覆盖、追加、rename、unlink。`POST .../:id/workspace/sync {direction:from_container}` 后 `GET workspace/info` 要求 mounted/mount_type=fuse/flushed。
-- [ ] 独立 SigV4+验证 TLS 的对象 GET 必须匹配 final 文件内容。读取 `/proc/1/attr/current`、真实 s3fs PID/ppid/startTime/profile 与 mountinfo mount ID。用只读观测组合 exact UID/generation1/零重启，不用 shell profile 冒充 s3fs。
+- [x] 只转发自己 API 的精确 Pod，本地随机端口绑定 127.0.0.1；每请求总预算 45 秒，响应上限 2 MiB；只输出 status/阶段，不输出凭据或错误 body。
+- [x] 读取自己的 pristine 普通/FUSE pool Pod UID/nodeName/零重启，API 返回 runtime_id 必须匹配 pristine 身份。
+- [x] `POST /api/v1/sandboxes {mode:ephemeral,timeout:300}`；`POST .../:id/exec` 执行 Python/Node/bash 固定 hello、写读 fsync、读取 uid=1000/NoNewPrivs=1/Seccomp=2/默认 enforce。`DELETE` 后精确原 UID 不存在、对应策略无残留，prepared Pool 恢复。
+- [x] `POST /api/v1/sandboxes {mode:persistent,timeout:300,workspace_path:api-workspace,workspace_mount_mode:fuse}`，用真实 sandbox Python 写/fsync/读回、覆盖、追加、rename、unlink。`POST .../:id/workspace/sync {direction:from_container}` 后 `GET workspace/info` 要求 mounted/mount_type=fuse/flushed。
+- [x] 独立 SigV4+验证 TLS 的对象 GET 必须匹配 final 文件内容。读取 `/proc/1/attr/current`、真实 s3fs PID/ppid/startTime/profile 与 mountinfo mount ID。用只读观测组合 exact UID/generation1/零重启，不用 shell profile 冒充 s3fs。
 
 ## Task 4：拒绝审计与允许对照
 
-- [ ] 仅自己的 loader 做 unconfined 允许对照：shadow 可读但读取重定向 /dev/null；/dev/shm 写删除；/run/apparmor-loader/<run> 内 tmpfs mount/umount/rmdir，所有命令必须返回 0。
-- [ ] 仅自己的 mounter：`cat /etc/hosts >/dev/null`、写 `/run/s3fs/<run>-allowed` 成功；读取 shadow、写自己 /dev/shm 路径、已受限 shell `exec /bin/sh -c true`、初始 `/bin/mount -t tmpfs ...` mount 自己 cache 子目录必须拒绝。stderr/stdout 只在内存，非预期成功固定失败消息，不打印 shadow 内容。
-- [ ] 用同一 exec PID 的唯一 /dev/shm 拒绝 marker 与 `exec` 子命令关联 kernel PID；mount 用唯一 cache 目录关联。自己的 loader 读取 dmesg 后在内存筛选 exact profile+唯一 marker/PID+测试新时间窗，只报告 DENIED 规则/计数。
-- [ ] 要求各负例有对应 operation=open/mknod(or open create)/exec/mount 的 kernel DENIED；utility 缺失、只读 FS、测试身份错或控制读失败不能算 AppArmor 通过。
-- [ ] 重新核验真实 s3fs、API 固定读回和 flush 仍正常；删除实验业务文件再 flush，对象 GET 404；正常 DELETE 确认原 Pod 与策略收尾，Pool 恢复。
-- [ ] 仅用 UID 前置条件 DELETE 自己 loader Pod，等待同节点新 UID Ready/零重启，exact profile 仍 enforce。禁止策略卸载、业务 loader 删除或节点 reboot。
+- [x] 仅自己的 loader 做 unconfined 允许对照：shadow 可读但读取重定向 /dev/null；/dev/shm 写删除；/run/apparmor-loader/<run> 内 tmpfs mount/umount/rmdir，所有命令必须返回 0。
+- [x] 仅自己的 mounter：`cat /etc/hosts >/dev/null`、写 `/run/s3fs/<run>-allowed` 成功；读取 shadow、写自己 /dev/shm 路径、已受限 shell `exec /bin/sh -c true`、初始 `/bin/mount -t tmpfs ...` mount 自己 cache 子目录必须拒绝。stderr/stdout 只在内存，非预期成功固定失败消息，不打印 shadow 内容。
+- [x] 用同一 exec PID 的唯一 /dev/shm 拒绝 marker 与 `exec` 子命令关联 kernel PID；mount 用唯一 cache 目录关联。自己的 loader 读取 dmesg 后在内存筛选 exact profile+唯一 marker/PID+测试新时间窗，只报告 DENIED 规则/计数。
+- [x] 要求各负例有对应 operation=open/mknod(or open create)/exec/mount 的 kernel DENIED；utility 缺失、只读 FS、测试身份错或控制读失败不能算 AppArmor 通过。
+- [x] 重新核验真实 s3fs、API 固定读回和 flush 仍正常；删除实验业务文件再 flush，对象 GET 404；正常 DELETE 确认原 Pod 与策略收尾，Pool 恢复。
+- [x] 仅用 UID 前置条件 DELETE 自己 loader Pod，等待同节点新 UID Ready/零重启，exact profile 仍 enforce。禁止策略卸载、业务 loader 删除或节点 reboot。
 
 ## Task 5：精确清理与证据
 
-- [ ] render/create 同 Chart `pre-delete-drain.yaml` 为自己 Job，先缩自己 API 至零、release-wide drain，require Job Complete、managed sandbox Pods/policies=0；不使用 Helm uninstall 业务 release。
-- [ ] UID 前置条件 `kubectl delete --raw /api/v1/namespaces/<ns> -f -`，DeleteOptions 内 exact Namespace UID，不 force 或移除 finalizer。inventory ClusterRole/Binding ownerReference 与 UID 逐项验证收尾。
-- [ ] 停止自己的端口转发、移除自己精确临时凭据文件；保留非敏感 report。失败时先安全清理正常 API sandbox/drain；若清理未确认保留 namespace UID 和阶段并停止下一节点，不裸删状态。
-- [ ] 每节点完成后核对业务三对象 UID/template/images/Ready 不变；顺序执行 1–5，各自 report 包含运行版本/身份/阶段 PASS。最终全局检查 test namespace/RBAC 无残留。
-- [ ] 新增 `docs/testing/2026-09-16-all-node-apparmor-api-results.md`，逐节点成功/失败/未执行，不扩展为节点冷启动、Redis HA 或其它 CNI 验收；更新最新后续清单 SEC-01 覆盖边界。
-- [x] 无网络驱动安全测试、`bash scripts/test-helm-apparmor-loader.sh`、diff 检查、自审后提交驱动和当前阻塞记录（不代表五节点现场完成）。用户待提供环境再测第 3 项，FUSE 性能继续暂缓。
+- [x] render/create 同 Chart `pre-delete-drain.yaml` 为自己 Job，先缩自己 API 至零、release-wide drain，require Job Complete、managed sandbox Pods/policies=0；不使用 Helm uninstall 业务 release。
+- [x] UID 前置条件 `kubectl delete --raw /api/v1/namespaces/<ns> -f -`，DeleteOptions 内 exact Namespace UID，不 force 或移除 finalizer。inventory ClusterRole/Binding ownerReference 与 UID 逐项验证收尾。
+- [x] 停止自己的端口转发、移除自己精确临时凭据文件；保留非敏感 report。失败时先安全清理正常 API sandbox/drain；若清理未确认保留 namespace UID 和阶段并停止下一节点，不裸删状态。
+- [x] 每节点完成后核对业务三对象 UID/template/images/Ready 不变；顺序执行 1–5，各自 report 包含运行版本/身份/阶段 PASS。最终全局检查 test namespace/RBAC 无残留。
+- [x] 新增 `docs/testing/2026-09-16-all-node-apparmor-api-results.md`，逐节点成功/失败/未执行，不扩展为节点冷启动、Redis HA 或其它 CNI 验收；更新最新后续清单 SEC-01 覆盖边界。
+- [x] 无网络驱动安全测试、`bash scripts/test-helm-apparmor-loader.sh`、diff 检查和自审通过，提交驱动及五节点最终结果；保留失败轮次和冷准备未解决边界。用户待提供环境再测第 3 项，FUSE 性能继续暂缓。
 
-## 2026-09-16 18:19 进度 / 阻塞
+## 2026-09-16 18:19 历史进度 / 阻塞
 
 驱动、无网络安全回归和 Chart实验搭建已完成；worker-1/2/3完整生命周期、四类内核拒绝、
 自己loader Pod重建、drain和精确清理全部通过。审计夹具的uptime时间域偏移与kauditd printk
@@ -78,6 +78,21 @@ worker-4首次API镜像拉取期间超时，但清理确认。第二轮API启动
 `sandbox-aa-api-17eaec31-4` / UID `d3010735-8934-44df-8e42-269750fb0589`，停止worker-5。
 没有force、手工去finalizer、裸删状态或业务/节点重启。自己的私有本地values已移除，report保留。
 
-任务3–5的五节点汇总仍未完成，不能将本计划标为完成。现有Node日志查询未启用，SSH主机名
+当时任务3–5的五节点汇总仍未完成，不能将本计划标为完成。现有Node日志查询未启用，SSH主机名
 不可解析，需要节点访问入口或脱敏kubelet/containerd日志；先定位节点、正常收尾保留run，再测4/5。
 详细身份/证据见 [验收报告](../../testing/2026-09-16-all-node-apparmor-api-results.md)。
+
+## 2026-09-17 00:43 续测完成
+
+恢复连接后，原 Namespace UID一致、原 runtime已正常消失、自己的API仍缩零。核验失败
+drain Job身份和终态，使用原同源模板创建唯一恢复Job；正常drain确认零managed状态后，
+才按Namespace UID删除并确认inventory RBAC GC。没有force、清finalizer、裸删状态或改业务。
+
+worker-4新增一轮因mounter冷准备导致API重启而严格拒绝，随后正常收尾；独立run
+`e8416437`零重启完整通过。确认其清理后才执行worker-5，run `0f8a8482`完整通过，
+缺失mount审计经一轮有界重试取得。五节点必要阶段全部通过，实验namespace、inventory
+RBAC和自己的端口转发均为0，业务API/Sentinel/loader为3/3、3/3、5/5且各轮基线未变。
+
+本计划任务已完成；冷拉取长尾根因没有取得节点日志，保留COLD-01，不声称已修复。
+继续的依据是正常终止/drain/精确清理已恢复，不是节点根因已查明。没有延长测试预算、
+重启节点、改安全策略或构建镜像。节点冷启动/策略丢失、HA、其它CNI和性能SLO不在本次关闭范围。

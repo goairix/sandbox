@@ -2,13 +2,13 @@
 
 ## 当前发布边界
 
-加载器核心、Chart、API 启动门禁与 FUSE 私有约束检查已接入，默认关闭。随 Chart 分发的策略仍是待真实挂载验收的候选；单测、Helm 渲染和 parser 不加载内核的语法检查不能代替生产验收。其它容器运行时可能忽略 privileged 容器的 profile，本项目会拒绝将这类 mounter 入池或授权，不自动降级为 unconfined。
+加载器核心、Chart、API 启动门禁与 FUSE 私有约束检查已接入，默认关闭。随 Chart 分发的策略已在下述 `ds-ai-research` 版本组合完成五节点真实验收；其它组合仍须单独验收，单测、Helm 渲染和 parser 不加载内核的语法检查不能代替生产验收。其它容器运行时可能忽略 privileged 容器的 profile，本项目会拒绝将这类 mounter 入池或授权，不自动降级为 unconfined。
 
-启用前必须在隔离目标节点完成：加载器 enforce、mounter/PID 1 及 s3fs 子进程实际 profile、对象存储挂载、写入/flush/卸载、拒绝写入非允许路径、拒绝任意 mount、重启重载及最终清理。未完成这些步骤时不要直接打开生产开关。
+启用前必须在隔离目标节点完成：加载器 enforce、mounter/PID 1 及 s3fs 子进程实际 profile、对象存储挂载、写入/flush/卸载、拒绝写入非允许路径、拒绝任意 mount、loader Pod 重建恢复及最终清理。未完成这些步骤时不要直接打开生产开关；节点冷启动或策略丢失后的恢复须另外验收，不能用 Pod 重建代替。
 
 2026-09-14，`v0.3.24-arm64` 已在 `ds-ai-worker-2` 通过上述加载、MinIO TLS 挂载链路、拒绝测试及加载器 Pod 重建恢复，见 [真实验收记录](../testing/2026-09-14-apparmor-live-prepared-results.md)。该组件测试结束时线上 release 尚未启用；此结果不覆盖业务节点重启、其它节点/运行时、其它存储及启用后的公共 API/跨副本集成。现有加载器、API、mounter 镜像无需因这次测试记录重新构建。后续线上启用发现的启动门禁兼容问题另见 [门禁修复记录](../testing/2026-09-14-apparmor-loader-startup-gate-results.md)。
 
-2026-09-16 最新公共 API 隔离验收：worker-1/2/3 的普通/FUSE、真实 s3fs enforce、四类内核拒绝及自己的 loader Pod 重建通过；worker-4 的镜像拉取/未启动 runtime 终止链路阻塞，第二轮清理未确认，worker-5 按设计停止。见 [逐节点结果与保留现场](../testing/2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release 或策略，不能把 loader 五节点 Ready 扩展为五节点业务验收已通过。
+2026-09-17 续测完成：worker-1 至 worker-5 的普通/FUSE 公共 API、真实 s3fs enforce、四类内核拒绝、自己的 loader Pod 重建及正常 drain / 精确清理全部通过。worker-4 历史失败实验已正常清理，业务基线未变，见 [逐节点结果与续测记录](../testing/2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release 或策略，本次文档更新不要求重新构建镜像或升级 Chart。冷拉取/准备长尾仍未解决；结果不覆盖其它版本组合、节点冷启动、Redis HA 故障或其它 CNI。
 
 ## 构建及推送镜像
 

@@ -2,9 +2,10 @@
 
 ## 范围与最新基线
 
-最新追加：QUALITY-01 已整改并提交；SEC-01 隔离验收 worker-1/2/3通过，worker-4镜像拉取/
-未启动 runtime终止链路阻塞，清理未确认，worker-5按设计停止。具体保留身份和继续条件见
-[五节点 API 验收](2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release/Redis/节点设置。
+最新追加（2026-09-17）：QUALITY-01 已整改并提交；SEC-01 本集群五节点隔离公共 API验收
+全部通过，失败实验均已正常清理，业务 API/Sentinel/loader仍为3/3、3/3、5/5且基线未变。
+见 [五节点 API 验收](2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release/Redis/节点设置。
+worker-4冷拉取/准备长尾根因尚未查明，新增 COLD-01；不把验收通过写成该问题已经修复。
 
 以下16:45–16:47内容是本文件最初的只读快照。按用户要求，将剩余 FUSE 创建性能优化暂缓，后续另做专项。最初只更新记录、复核当前代码与
 已有验收证据，并只读检查 `ds-ai-research / aiadp-sandbox-fuse`。没有修改运行逻辑、values、
@@ -50,14 +51,20 @@ FUSE flush/unmount 门槛。
 | --- | --- | --- |
 | HA/FAULT-01 | 内置 Sentinel 已部署，quorum/复制及正常 API 回归通过；本地真实三成员 fixture 已覆盖多类故障，45 秒 refill lease 接管已在部署集群验证。但没有完成目标 Kubernetes/CSI 上的实际 Redis 切主、API/节点故障、网络分区、全组保留卷冷恢复，以及旧池跨代退休预算中断的完整现场故障矩阵。 | 在明确授权的隔离窗口执行有界故障驱动，验证唯一 writer、ACK 不确定时 fail closed、失效 owner 接管、精确 UID/策略收尾、身份保留和服务恢复；同时完成备份恢复演练。不能以 Ready 或 WAIT 1 代表零数据丢失。 |
 | NET-01 | 可移植网络发现/策略代码及当前 Cilium Service 放行、撤销、私网/metadata 拒绝已有通过记录；Calico 和双华云/VPC 的真实环境仍未完成验收。 | 两个双华云测试环境就绪后，验证实际 Pod/Service 分配范围、白名单撤销/恢复、metadata、跨 namespace、双栈及云网络策略执行；在各环境验证实际对象存储后端挂载/flush/恢复，不能用 Cilium/MinIO 结果替代。 |
-| SEC-01 | AppArmor Loader 五节点 Ready，缺失 LSM 豁免 false。最新隔离真实 API验收 worker-1/2/3完整通过：普通/FUSE池领取、读写/flush、真实s3fs exact enforce、四类内核拒绝和自己的loader Pod重建。worker-4两轮启动失败，第二轮 Pending runtime删除未确认，保留临时namespace；worker-5未执行。 | 先取得worker-4节点日志/访问入口，定位拉取和终止不完成，确认原UID正常退出并通过release drain/精确清理，再完成worker-4/5验收。不能裸删状态、force或改安全门槛；不把当前三节点结果扩展成其它内核/运行时/存储组合或冷启动通过。 |
+| COLD-01 | worker-4在冷拉取/准备阶段曾超过现有预算，出现API启动失败/重启及runtime终止暂未确认；原Pod现已正常退出，所有失败实验经正常drain和精确清理收尾，同版本新实验零重启完整通过。但没有取得节点kubelet/containerd日志，根因未查明。worker-5单轮冷拉取runtime为56.717秒且启动成功，不能代表长尾SLO。 | 取得worker-4节点日志/访问入口，区分注册表请求、下载/解包、串行等待与kubelet删除阶段；验证冷准备/超时恢复/精确收尾的有界矩阵，再决定优化。不能为通过而延长测试预算、force、裸删状态或放宽安全门槛，也不能把正常准备后的结果扩展为节点冷启动/策略丢失恢复通过。 |
 | OBS-01 | tracer/metrics/log OTLP 当前均已启用，不再属于“exporter 未配置”。但本轮没有从 collector/后端取得固定阶段分布和可关联的请求追踪，也未验证遥测丢失率与开销。 | 核对 collector 实际接收与存储，取得慢请求的固定阶段证据，检查低基数、脱敏、采样及开销；作为后续 PERF-02 专项的输入。 |
 | LOAD/EDGE-01 | 当前已通过有界功能矩阵、256 小文件/16 MiB 压力，以及普通/FUSE 的多副本回归；尚无持续大负载的吞吐/错误率/p95/p99 SLO，也没有完整外部 Ingress/TLS 链路和对象存储全前缀审计。 | 在容量可控环境验证持续并发、池耗尽与补池、慢后端、FUSE 创建及 flush/unmount 长尾、资源开销和最终清理；补外部认证/Ingress/TLS 测试及精确测试前缀对象审计。不能把单次健康结果或目录标记当作全局零遗留证明。 |
 
-QUALITY-01 已按用户后续选择完成本地整改，见下方关闭记录；HA/FAULT-01 需要单独的隔离环境或明确故障窗口，不在本次只读复核中
+QUALITY-01 和 SEC-01 已按用户后续选择完成相应范围，见下方关闭记录；HA/FAULT-01 需要单独的隔离环境或明确故障窗口，不在本次只读复核中
 直接执行。PERF-02 按本次用户要求暂缓。
 
 ## 已关闭或不再作为当前故障的事项
+
+- SEC-01：9月16日worker-1/2/3、9月17日worker-4/5逐节点真实公共API全部通过，包含普通/
+  FUSE池领取、读写/fsync/flush、独立认证TLS对象读回、真实s3fs exact enforce、四类内核拒绝、
+  自己loader Pod重建及正常drain/精确清理。所有实验namespace、inventory RBAC和自己的转发
+  均为0，缺失LSM豁免仍为false，业务基线未变。只关闭当前版本/内核/运行时/MinIO组合的
+  五节点验收范围；其它组合、节点冷启动/策略丢失恢复仍须另行验收，冷准备长尾保留COLD-01。
 
 - QUALITY-01：取消输出上限后的宿主基线实际为 197 项，Linux-only 额外一项也已整改。两个目标
   无上限 lint 均为 0，新增解析/SSE/reactor/安全配置回归、全仓 test/build/vet、目标 race 与

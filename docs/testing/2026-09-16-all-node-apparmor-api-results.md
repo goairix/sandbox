@@ -2,8 +2,13 @@
 
 ## 结论与边界
 
-本轮未全部通过：worker-1/2/3 的完整验收通过；worker-4 两轮启动失败，第二轮清理未确认，
-已按设计停止 worker-5。SEC-01 仍未关闭，不把 loader 五节点 Ready 当成五节点业务通过。
+2026-09-17 续测完成：worker-1/2/3 于9月16日通过，worker-4/5 于9月17日完整通过，
+五节点普通/FUSE 公共 API、真实 s3fs enforce、四类内核拒绝、自己的 loader Pod 重建和
+正常 drain / 精确清理全部通过。SEC-01 的本集群五节点验收范围已关闭，不以 loader Ready 代替业务测试。
+
+worker-4 此前保留的 runtime 已正常退出；续测先通过正常 drain、Namespace UID 删除和
+inventory RBAC GC，再创建新实验。期间另有一轮因冷准备触发 API 重启而严格判失败，
+失败轮次不计入通过结果。冷拉取/准备长尾的根因仍未查明，单列 COLD-01，不声称已经修复。
 
 使用 `ds-ai-research` 五个 worker 的独立临时 namespace，逐节点启动同源 Chart API、自己的
 standalone Redis/emptyDir 和 loader；普通/FUSE 池各 min1/max2，固定实际 nodeName。
@@ -13,6 +18,9 @@ standalone Redis/emptyDir 和 loader；普通/FUSE 池各 min1/max2，固定实�
 本轮测试当前已部署镜像，不是尚未构建的本地 lint/SSE 修复上线证明。不覆盖节点冷启动、
 策略丢失后的加载、Redis/Sentinel 故障恢复、其它内核/运行时/后端、Calico/双华云/VPC，
 也不将单节点单 API 实验扩展成多副本或持续负载验收。FUSE 性能优化按用户要求暂缓。
+
+续测只读核验五节点均为 arm64、Linux `6.12.57+deb13-arm64`、containerd `2.2.0` 且 Ready；
+业务 API/runtime/mounter/loader 与下表同版本。没有放宽零重启、UID、profile、持久化或清理门槛。
 
 ## 已核验镜像与策略
 
@@ -39,14 +47,24 @@ sandbox-fuse-37d5cf8ed9c5decd5c13aa61c97d0c91183cbb0214d61769c8430dfd0090724d
 | worker-1 | `e98d1ffb` / `e1a55c29-0e68-4043-80ff-70911e09688a` | PASS | PASS | PASS（2 轮缺失证据重试） | PASS | PASS |
 | worker-2 | `c912a5c8` / `55e3f848-4677-4017-999e-661479c17f9e` | PASS | PASS | PASS | PASS | PASS |
 | worker-3 | `58ebb6a0` / `d729ffaa-ce46-40ad-9a82-eaffa25908bd` | PASS | PASS | PASS（1轮缺失证据重试） | PASS | PASS |
-| worker-4 | `17eaec31` / `d3010735-8934-44df-8e42-269750fb0589` | 启动失败，未进入 API | 未执行 | 未执行 | 未执行 | 未确认，保留现场 |
-| worker-5 | 因 worker-4 清理未确认而停止 | 未执行 | 未执行 | 未执行 | 未执行 | 未创建资源 |
+| worker-4 | `e8416437` / `ba86f4f9-38dd-4996-9d10-fea389dbb3df` | PASS | PASS | PASS | PASS | PASS |
+| worker-5 | `0f8a8482` / `1f644ac7-5c1b-4892-8f5e-661662f3761a` | PASS | PASS | PASS（1轮缺失 mount 证据重试） | PASS | PASS |
 
 | 节点 | 普通 Runtime UID | FUSE Runtime UID | 实际 s3fs PID / startTime / mount ID / generation |
 | --- | --- | --- | --- |
 | worker-1 | `45425f88-e70b-4a7e-b97e-3215caa27f38` | `2ab4c2c4-a530-4a04-99f3-03d621d79eac` | `203 / 494830297 / 5540 / 1` |
 | worker-2 | `21fd3a21-e01a-48c8-b770-2b2fad9d9273` | `07bff2c0-17ca-4b14-84cd-b662724a7ade` | `217 / 2350321597 / 3076 / 1` |
 | worker-3 | `467e9dc6-19cf-4eaa-a38e-f51032e785c7` | `0a9f2a41-4483-42ec-83bc-4e12accae43d` | `243 / 494851242 / 4791 / 1` |
+| worker-4 | `a5f57485-1c92-4d27-afdb-6c36afa57159` | `173dfb32-ab7a-41a6-bba7-d1210ade2e1e` | `265 / 2352580178 / 4363 / 1` |
+| worker-5 | `dec1ab0e-39ed-4120-828d-8b67bb8d43da` | `a6ef4eb2-837e-4059-814f-443a67135fcf` | `203 / 2188548347 / 2466 / 1` |
+
+worker-4 在9月17日00:38:54、worker-5 在00:42:44（北京时间）完成全部阶段。
+两轮自己的 loader 原/替代 UID 分别为：
+
+| 节点 | 原 loader UID | 同节点替代 UID |
+| --- | --- | --- |
+| worker-4 | `92d5f478-8b92-4ac8-b187-83b03a8ecdbb` | `b655f6ab-e52e-4bbd-bd29-3d1d094489ab` |
+| worker-5 | `7672505f-85ae-445f-8764-03766abf8c73` | `05ab48c2-118d-419a-b27c-3e92b5afc6f3` |
 
 namespace 格式为 `sandbox-aa-api-<run>-<节点序号>`，所有 Pod UID、实际目标节点、零重启都在
 每次操作前后核验。API 返回 runtime_id 必须为此前 pristine Pod 的名字，且 UID 不变。
@@ -95,15 +113,21 @@ generation0、空缓存。实际领取后要求 health ready/fuse/generation1，
   drain Job 在 worker-3 运行，自己 API 缩零并退出；该 Job 在18:19以 BackoffLimitExceeded失败。
   普通 runtime Pod 已在18:14:12进入删除，18:19:36仍 Pending，UID仍为
   `ded0c286-e1d0-47fa-bef0-e372d8a1368b`。因此无法确认 runtime终止，不能裸删状态或 namespace。
+- worker-4 的 `af9f8f5f`（9月17日续测）：普通 runtime 已就绪，mounter 在00:30:07开始拉取，
+  后续观察仍为 PodInitializing、没有 imageID。API 上一轮日志匹配启动失败、超时和
+  termination unconfirmed；未匹配 security contract 或 loader gate 失败。API 后来 Ready，
+  但 restartCount=1，因此驱动于00:33:24以 `lab Pod identity mismatch` 拒绝进入验收。
+  00:34:08正常 drain、namespace/RBAC 清理和业务基线不变全部确认。随后独立 run
+  `e8416437` 零重启完整通过，没有重用失败 Pod 或延长准备/启动预算。
 
 前四个夹具失败和 worker-4 的首次失败 namespace 均经正常 release drain、exact Namespace UID 删除与 inventory RBAC GC
 确认清理；两个失败 FUSE run 的固定三份测试文件在各自随机前缀内独立 DELETE，并认证 GET404。
 只清理本轮固定测试文件，不声称完成业务存储全前缀对象审计；目录 marker 也不当成泄漏证明。
 间隔重试能取得本次四类拒绝证据，但不证明生产集中审计零丢失，dmesg 不是完整审计输送渠道。
 
-### 当前保留现场与继续条件
+### 历史保留现场与续测收尾
 
-当前只保留 `sandbox-aa-api-17eaec31-4`，Namespace UID
+9月16日失败时只保留 `sandbox-aa-api-17eaec31-4`，Namespace UID
 `d3010735-8934-44df-8e42-269750fb0589`。自己的 API Deployment 已缩零；一个尚未确认终止的
 普通 runtime、自己的 Redis/emptyDir、loader、失败 drain Job 和 inventory RBAC 保留。
 没有创建 FUSE sandbox 或租户测试文件。私有本地 values已移除，端口转发未启动；报告不含凭据。
@@ -111,17 +135,46 @@ generation0、空缓存。实际领取后要求 health ready/fuse/generation1，
 只读核对 worker-4 的 kubelet configz：serializeImagePulls=true，enableSystemLogHandler=true、
 enableSystemLogQuery=false。现有日志接口不能查询系统 unit日志；没有启用节点日志查询或新增
 nodes/proxy权限。使用严格 host key校验/BatchMode尝试已有 SSH 主机名，因主机名无法解析未连接。
-需要用户提供节点 SSH入口或脱敏 kubelet/containerd日志，进一步确定拉取与删除不完成的根因。
+进一步确定拉取与删除不完成的根因仍需要节点 SSH入口或脱敏 kubelet/containerd日志。
 本轮事件和应用日志只证明卡在未启动 runtime的拉取/终止链路，不推断为 DNS、磁盘或 AppArmor故障。
 
 最终追加只读核验时，本机 kubectl连接集群入口 `172.16.20.15:443` 已发生 i/o timeout，10秒请求/
 15秒进程预算的检查也失败。业务 UID/template/imageID/restart/Ready不变的最后确认来自18:19:12
 该轮 baseline比对，不声称网络中断后的即时健康或资源状态。自己的超时只读查询已停止。
-继续还须恢复本机到集群入口的网络，再重新核对保留现场；没有因连接失败去改集群或本机网络设置。
+当时须恢复本机到集群入口的网络，再重新核对保留现场；没有因连接失败去改集群或本机网络设置。
 
-继续时先确认相同 Node/Namespace/Pod UID，排查节点；原 Pod正常退出后，重跑同源 drain验证
-零 managed runtime/策略/Redis生命周期，再按 Namespace UID 删除和核对 RBAC GC。清理不确认
-不得测下一节点；不 force、手工清 finalizer、删状态或重启业务组件来制造通过。
+9月17日00:26重新连接成功，核验 Namespace UID 仍一致、worker-4 Ready、原 runtime Pod
+已不存在、自己的 API replicas=0。失败 drain Job 的 UID 为
+`744616a9-d126-432e-ac9b-bcda9617ce45`，确认终态且无 active 实例后，使用其同源模板
+创建唯一恢复 Job `aa-api-17eaec31-api-drain-resume-faf29e`，核验自己的 namespace、
+Deployment、ServiceAccount、state scope 和无重复 env；没有覆盖/删除旧 Job 或改镜像。
+恢复 Job Complete、managed runtime/两类策略均为0后，才按原 Namespace UID 删除。
+00:27:23确认 namespace 与 inventory RBAC 均消失，业务 UID/template/imageID/restart/Ready 不变。
+
+使用读回的 worker-4 InternalIP 和现有 SSH 用户配置，只读查询 kubelet/containerd日志仍因
+SSH连接超时失败；没有更换账号、跳过 host key、修改节点或扩大日志访问权限。继续验收的依据
+是原 Pod 正常退出及 drain/精确清理恢复，不是节点冷拉取根因已修复。该根因保留为 COLD-01。
+
+worker-5 本轮冷拉取事件记录：API 1.903秒、runtime 56.717秒、mounter 4.68秒；API 零重启。
+这些单轮事件不构成长尾 SLO，也不能反推 worker-4 的 DNS、磁盘或注册表网络根因。
+
+### 最终全局核验（9月17日00:43:40）
+
+- 五份完成报告均包含全部必要 PASS 阶段、四类 exact profile 内核拒绝，且 cleaned=true；
+  各成功轮次自己的私有 values 文件均已移除，报告不含凭据。
+- `sandbox-aa-api-*` namespace 为0，对应 network-inventory ClusterRole/Binding 为0，
+  自己的 kubectl port-forward 为0。失败轮次也已正常收尾，没有遗留实验 namespace。
+- 业务 API 3/3、Sentinel 3/3、loader 5/5 Ready，所有容器 restartCount=0；各轮实际基线比对
+  均确认 UID/template/imageID/restart/Ready 不变。最终业务对象 UID 如下：
+
+| 业务对象 | UID |
+| --- | --- |
+| API Deployment | `845af585-f245-400f-9ebb-9ff307894eea` |
+| Redis Sentinel StatefulSet | `374b274b-52ee-44fa-bb2a-bdd8f0e39693` |
+| AppArmor loader DaemonSet | `8a87e7d5-b494-4772-b93e-ae1bc0e5fcd8` |
+
+没有 force、手工清 finalizer、裸删状态、节点/业务重启或策略卸载。固定实验文件删除及独立
+认证 GET404 均已确认，内核 profile 按设计保留。其它 CNI、HA 故障和 FUSE性能仍是独立未完成事项。
 
 ## 驱动与安全回归
 
@@ -148,4 +201,5 @@ node testdata/apparmor-enforcement/all-node-api.js --execute --context ds-ai-res
 安全回归先观察 RED，再 GREEN：错误 Namespace UID/run/purpose/业务命名空间、replacement Pod UID、
 目标 nodeName 不符、越界 kind/delete URI 均在实际 create/exec/delete 入口拒绝，stub 下零副作用。
 另验证 TLS/随机前缀、init sidecar digest、错误 profile/旧时间/不相关 PID、只读 open 不能算写拒绝、
-内核日志水位和 S3 方法/path 越界拒绝。以上本地命令通过；不把它们当成 worker-4/5通过。
+内核日志水位和 S3 方法/path 越界拒绝。9月17日重新运行这些本地命令通过；现场通过依据为
+上述逐节点真实 API、进程/挂载身份、持久化及内核证据，不以本地测试代替。
