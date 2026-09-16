@@ -253,6 +253,29 @@ p95 得到实质改善，也仍未达到不高于 3 秒的目标。远端 `/bin/
 但当前主要长尾位于 s3fs 启动挂载或 mandatory `write-read-delete` 强传播探针；下一轮优化必须
 先补充这两段的逐请求分段观测，不再删减安全校验猜测提速。
 
+### 补充分段观测
+
+随后在同一部署上做了五次隔离请求，测试前均用 `health prepared` 确认三个 pristine FUSE 库存，
+请求期间并行观测三个候选 mounter 的 `health ready`，并核对成功返回的 RuntimeID 与观测到的 Pod
+完全一致。三个保留完整时间戳的样本如下：
+
+| 样本 | API 创建总耗时 | 请求开始到观测 mounter ready | ready 后到 API 返回 | FUSE 销毁 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1.262 秒 | 0.565 秒 | 0.697 秒 | 3.394 秒 |
+| 2 | 4.235 秒 | 2.738 秒 | 1.497 秒 | 4.045 秒 |
+| 3 | 3.435 秒 | 2.398 秒 | 1.037 秒 | 3.827 秒 |
+
+另两个请求也成功创建并完成销毁；测试后 API 查询均为 NotFound，集群恢复三个普通和三个 FUSE
+Pool Pod，没有 deleting managed Pod。它们的逐段 stdout 未完整保留，因此不把这两个请求补写成
+虚构的精确耗时。
+
+该观测边界不是 runtime 内部的纯 `mounter_ready_wait`：ready 前还包含 pool/lease、root marker
+PUT+HEAD、runtime binding、authorization 和与挂载并行的网络策略更新；ready 后包含 sandbox 内
+`write-read-delete` 强传播探针以及状态发布。结果证明剩余长尾同时存在于真实挂载前链路和强传播
+后的交付链路，不再存在可直接删除的 kubelet PodReady 周期等待。若要继续做代码级优化，必须从
+已导出的 `sandbox.workspace.stage.duration` OTLP 指标取得各固定阶段的线上分位数；在没有该证据
+前，不删 fsync、读回、删除补偿、UID/generation、租约或网络收敛门槛。
+
 普通沙盒三次并发销毁分别为 32.187、31.958、32.183 秒，仍复现此前记录的约 30 秒历史
 问题；它不属于本次 mounter 变更，也没有因本次升级恶化。
 
