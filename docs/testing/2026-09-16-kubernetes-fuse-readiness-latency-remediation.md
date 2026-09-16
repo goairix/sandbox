@@ -2,12 +2,15 @@
 
 ## 结论
 
-本次整改移除了 FUSE 热池创建对 Kubernetes `PodReady` condition 的串行等待。API 现在直接
+第一阶段移除了 FUSE 热池创建对 Kubernetes `PodReady` condition 的串行等待。API 现在直接
 等待真实 mounter ready 证明，随后执行原有 sandbox 侧 `write-read-delete` 传播探测；Pod
-readinessProbe 仍保留用于 Kubernetes 运维状态，不再阻塞请求返回。
+readinessProbe 仍保留用于 Kubernetes 运维状态，不再阻塞请求返回。第一阶段上线后，旧的
+10 秒周期长尾已消失，但 30 次创建的 p95 仍高于 3 秒目标。
 
-本地实现与回归已完成。线上 30 次热池基准必须等用户构建并部署新的 sandbox-api 镜像后
-执行，本记录不把本地测试写成线上 p95 已达标。
+第二阶段进一步移除 `workspace-mounter health ready` 中与强传播探针重复的远端 `/bin/ls`，
+保留进程、真实挂载、exact mount ID 和 cache 安全检查。第二阶段本地实现与回归已完成，必须
+等用户构建并部署新的 `sandbox-fuse-mounter` 镜像后再执行线上基准；本记录不把本地测试写成
+线上 p95 已达标。
 
 ## 根因证据
 
@@ -86,7 +89,7 @@ git diff --check
 Helm 和 workspace FUSE 测试包，命令退出码为 0。未配置外部环境而由测试自身跳过的场景不
 视为真实集群验收。
 
-## 变更范围
+## 第一阶段变更范围
 
 本次没有修改：
 
@@ -101,9 +104,98 @@ Helm 和 workspace FUSE 测试包，命令退出码为 0。未配置外部环境
 因此只需要重新构建和部署 `sandbox-api` 镜像，其他镜像和线上 values 不需要因本次优化
 变更。
 
-## 部署后验收
+## 第一阶段线上验收结果
 
-用户部署新 sandbox-api 镜像后执行以下验收：
+用户部署 `sandbox-api:v0.3.30` 后，在 `ds-ai-research`、`aiadp-sandbox-fuse` 完成以下验证：
+
+- 三个 API 副本 `/ready` 均返回正常，副本零重启；
+- 完整 deployed API remediation suite 通过，30 次 FUSE 创建全部成功，p50 为 3.879 秒、
+  p95 为 5.652 秒、p99 为 6.685 秒；
+- 另行执行的 30 次轻量跨副本创建、写入和销毁全部成功，p50 为 0.854 秒、p95 为
+  3.695 秒、p99 为 4.066 秒，最小 0.645 秒、最大 4.066 秒，其中 27/30 小于 3 秒；
+- 同请求观测中，mounter-ready 约为 0.598～2.150 秒，API 随后的强传播探针及其它收尾约为
+  0.381～1.074 秒；
+- 验收结束后普通 Pool 和 FUSE Pool 均恢复 3 个 prepared Pod，没有 active 非池 sandbox、
+  deleting managed Pod 或 Redis session/lease/owner 残留，三个 API 副本无关键错误日志。
+
+这些数据证明 PodReady 的 10 秒周期等待已被消除，但也证明热池 p95 不高于 3 秒的目标尚未
+达到，因此继续进行第二阶段。
+
+## 第二阶段：mounter 远端 I/O 去重
+
+分段观测和代码检查确认，`workspace-mounter health ready` 在持有 Supervisor 互斥锁时执行
+远端 `/bin/ls -U -- <mount>`，API 随即又在 sandbox 内执行更强的
+`workspace-probe write-read-delete`。后者实际创建、写入、`fsync`、重新打开、读取并删除
+探针对象，并绑定 exact RuntimeUID 和 Generation；前一个目录读取既没有增加交付证明，也会
+引入对象存储延迟以及 kubelet readinessProbe 与 API 之间的锁竞争。
+
+第二阶段实现已删除 `ReadyStatus` 中的 `/bin/ls` 及其专用 deadline context。以下保护保持
+不变：
+
+- 受监管 s3fs 进程早退检测；
+- 在原 mount deadline 内等待真实 `fuse.s3fs` mount；
+- exact mount ID 的记录、复检和替换检测；
+- cache 扫描、soft-limit 检查及超限时的 fail-closed 终止；
+- Kubernetes 与 Docker runtime 在 mounter ready 后执行的 mandatory
+  `workspace-probe write-read-delete`，传播失败时仍不交付 sandbox。
+
+Kubernetes readinessProbe 因此只表达本地挂载组件健康，runtime 强传播探针表达客户可用。
+受管 runtime Pod 不是面向流量的 Service endpoint，API 也不使用 PodReady 作为交付授权，
+所以不存在绕过传播探针的交付路径。
+
+### 第二阶段 TDD 与回归证据
+
+先新增回归并在旧实现上执行：
+
+```text
+go test ./internal/mounter -run '^TestReadyPollsStartupMountWithoutRemoteReadAndRecordsExactMountID$' -count=1
+```
+
+用例按预期失败，唯一行为失败为 `runner.runs` 包含：
+
+```text
+[/bin/ls -U -- <temporary-workspace-path>]
+```
+
+删除远端读取后，定向用例、10 轮 mounter race、Kubernetes 和 Docker runtime 的交付门测试
+均通过。全量回归最初发现 4 个 shutdown 测试把旧 `/bin/ls` 计入固定命令下标；实际 flush、
+unmount、取消和幂等行为均正确。断言改为直接验证 `verified-flush → fusermount3` 语义序列后，
+完整 mounter 包和 race 通过。并行启动多个全仓命令时 sandbox 的一个 5 秒时序用例单次失败，
+该用例独立连续 5 次通过，最终非并行全仓测试也通过，因此没有修改 sandbox 业务代码。
+
+最终执行并通过：
+
+```text
+go test ./internal/mounter -run 'Test(Ready|SupervisorReady|FlushRejectsMountIdentity|Cache)' -count=1
+go test -race ./internal/mounter -run 'Test(Ready|SupervisorReady|FlushRejectsMountIdentity|Cache)' -count=10
+go test ./internal/runtime/kubernetes -run 'TestWaitReady' -count=5
+go test ./internal/runtime/docker -run 'Test(DockerPoolHitAuthorizesSameContainer|WaitReady|DockerFUSEFixedControlExecs)' -count=5
+go test ./internal/mounter ./cmd/workspace-mounter ./internal/runtime/kubernetes ./internal/runtime/docker
+go test -race ./internal/mounter ./internal/runtime/kubernetes ./internal/runtime/docker
+go vet ./internal/mounter ./cmd/workspace-mounter ./internal/runtime/kubernetes ./internal/runtime/docker
+go vet ./...
+go test ./...
+git diff --check
+```
+
+第二阶段提交记录：
+
+- `12c2971 docs: design mounter readiness io deduplication`
+- `b6bfdb5 docs: plan mounter readiness io deduplication`
+- `fa2aceb test: expose duplicate mounter readiness io`
+- `0b26900 perf: deduplicate mounter readiness io`
+- `3b68158 test: align shutdown assertions with local readiness`
+
+### 第二阶段部署范围
+
+本阶段只需重新构建 `sandbox-fuse-mounter` 镜像，并在 Helm values 中更新 mounter 镜像 tag。
+不需要因本阶段重新构建 sandbox-api、普通 sandbox、AppArmor loader、Redis/Sentinel 或 Chat
+镜像，也没有新增 values 配置。mounter 镜像变化会进入 FUSE Pool key/backend fingerprint，
+现有 drain 与重建流程应替换旧 FUSE Pool，不影响普通 sandbox Pool。
+
+## 第二阶段部署后验收
+
+用户部署新的 `sandbox-fuse-mounter` 镜像并完成 FUSE Pool 替换后执行以下验收：
 
 1. 连续创建不少于 30 个热池 FUSE sandbox；
 2. 成功率 100%，热池创建 p95 不高于 3 秒；
@@ -115,4 +207,3 @@ Helm 和 workspace FUSE 测试包，命令退出码为 0。未配置外部环境
 如果后端存储本身偶发超过 3 秒，将通过 `mounter_ready_wait` 和
 `propagation_probe` 分阶段数据继续区分挂载、传播和 API 其它耗时，不再与 PodReady
 周期混淆。
-
