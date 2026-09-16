@@ -550,7 +550,7 @@ func TestPool_Acquire(t *testing.T) {
 	ctx := context.Background()
 
 	// Warm up pool
-	pool.WarmUp(ctx)
+	require.NoError(t, pool.WarmUp(ctx))
 	time.Sleep(100 * time.Millisecond) // let async creation finish
 
 	assert.Equal(t, 2, pool.Size())
@@ -627,7 +627,7 @@ func TestPool_Release(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	pool.WarmUp(ctx)
+	require.NoError(t, pool.WarmUp(ctx))
 	time.Sleep(100 * time.Millisecond)
 
 	info, err := pool.Acquire(ctx)

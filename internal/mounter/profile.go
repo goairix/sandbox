@@ -145,10 +145,10 @@ func huaweiPublicOptions(config fuseprotocol.BootstrapConfig) ([]string, error) 
 		return nil, err
 	}
 	if config.Provider != "" && config.Provider != "obs" {
-		return nil, fmt.Errorf("Huawei OBS profile provider mismatch")
+		return nil, fmt.Errorf("huawei OBS profile provider mismatch")
 	}
 	if !canonicalRegion.MatchString(config.Region) {
-		return nil, fmt.Errorf("Huawei OBS public profile requires a region endpoint value")
+		return nil, fmt.Errorf("huawei OBS public profile requires a region endpoint value")
 	}
 	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "sigv2"}, nil
 }
@@ -158,10 +158,10 @@ func huaweiPrivate2023Options(config fuseprotocol.BootstrapConfig) ([]string, er
 		return nil, err
 	}
 	if config.Provider != "" && config.Provider != "obs" {
-		return nil, fmt.Errorf("Huawei OBS private profile provider mismatch")
+		return nil, fmt.Errorf("huawei OBS private profile provider mismatch")
 	}
 	if !canonicalRegion.MatchString(config.Region) {
-		return nil, fmt.Errorf("Huawei OBS private profile requires a canonical region endpoint value")
+		return nil, fmt.Errorf("huawei OBS private profile requires a canonical region endpoint value")
 	}
 	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "sigv2", "-o", "compat_dir"}, nil
 }

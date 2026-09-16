@@ -72,7 +72,7 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) handle(serverContext context.Context, connection *net.UnixConn) {
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	timeout := s.IOTimeout
 	if timeout <= 0 || timeout > time.Minute {
 		timeout = defaultIOTimeout
@@ -288,7 +288,7 @@ func (c Client) Do(ctx context.Context, command string, input []byte) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("connect to mounter supervisor")
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	timeout := c.IOTimeout
 	if timeout <= 0 || timeout > time.Minute {
 		timeout = defaultIOTimeout

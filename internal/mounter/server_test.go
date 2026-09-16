@@ -97,8 +97,8 @@ func TestServerRejectsNonRootPeerBeforeDispatch(t *testing.T) {
 
 func TestReadFrameRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { require.NoError(t, server.Close()) }()
+	defer func() { require.NoError(t, client.Close()) }()
 	go func() {
 		_, _ = client.Write([]byte{0, 1, 0, 1})
 	}()

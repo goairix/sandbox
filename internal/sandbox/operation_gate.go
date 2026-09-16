@@ -94,7 +94,7 @@ func (g *operationGate) closeAdmission() <-chan struct{} {
 	// current side effect completes before teardown removes the runtime/session.
 	// Admission only takes mu, so new requests still fail immediately.
 	g.exclusiveUse.Lock()
-	g.exclusiveUse.Unlock()
+	defer g.exclusiveUse.Unlock()
 	return drained
 }
 

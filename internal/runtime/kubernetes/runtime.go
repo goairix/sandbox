@@ -550,7 +550,7 @@ func systemResolverAddresses() ([]netip.Addr, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var result []netip.Addr
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -954,7 +954,7 @@ func (r *Runtime) UpdateFUSENetwork(ctx context.Context, ref runtime.RuntimeRef,
 	var denyToDelete *unstructured.Unstructured
 	if r.hasCilium && enabled {
 		if r.dynClient == nil {
-			return fmt.Errorf("Cilium user egress enforcement is unavailable")
+			return fmt.Errorf("cilium user egress enforcement is unavailable")
 		}
 		exceptions := append([]string(nil), resolvedCIDRs...)
 		if blockPrivate {
@@ -976,7 +976,7 @@ func (r *Runtime) UpdateFUSENetwork(ctx context.Context, ref runtime.RuntimeRef,
 		}
 	} else if r.hasCilium {
 		if r.dynClient == nil {
-			return fmt.Errorf("Cilium user egress enforcement is unavailable")
+			return fmt.Errorf("cilium user egress enforcement is unavailable")
 		}
 		denyToDelete, err = r.readExactCiliumUserPolicyForNetworkUpdate(ctx, ref)
 		if err != nil {
@@ -985,7 +985,7 @@ func (r *Runtime) UpdateFUSENetwork(ctx context.Context, ref runtime.RuntimeRef,
 	}
 	if err := upsertExactNetworkPolicy(ctx, r.client, policy); err != nil {
 		if denyPolicy != nil {
-			return errors.Join(runtime.ErrFUSENetworkStateUncertain, fmt.Errorf("Cilium deny policy changed before user allow policy failed: %w", err))
+			return errors.Join(runtime.ErrFUSENetworkStateUncertain, fmt.Errorf("cilium deny policy changed before user allow policy failed: %w", err))
 		}
 		return err
 	}
@@ -1098,31 +1098,31 @@ func (r *Runtime) approvedSystemPrivateCIDRs(ctx context.Context, ref runtime.Ru
 	var values []string
 	var approvedEndpointCIDRs []string
 	if err := json.Unmarshal([]byte(cilium.GetAnnotations()[fuseEndpointCIDRsAnnotation]), &approvedEndpointCIDRs); err != nil {
-		return nil, fmt.Errorf("Cilium system policy approved endpoint CIDRs are invalid")
+		return nil, fmt.Errorf("cilium system policy approved endpoint CIDRs are invalid")
 	}
 	canonicalApproved, err := canonicalEndpointCIDRs(approvedEndpointCIDRs)
 	if err != nil || !reflect.DeepEqual(canonicalApproved, approvedEndpointCIDRs) {
-		return nil, fmt.Errorf("Cilium system policy approved endpoint CIDRs are not canonical")
+		return nil, fmt.Errorf("cilium system policy approved endpoint CIDRs are not canonical")
 	}
 	values = append(values, approvedEndpointCIDRs...)
 	egress, found, nestedErr := unstructured.NestedSlice(cilium.Object, "spec", "egress")
 	if nestedErr != nil || !found {
-		return nil, fmt.Errorf("Cilium system policy egress is invalid")
+		return nil, fmt.Errorf("cilium system policy egress is invalid")
 	}
 	for _, rawRule := range egress {
 		rule, ok := rawRule.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("Cilium system policy egress rule is invalid")
+			return nil, fmt.Errorf("cilium system policy egress rule is invalid")
 		}
 		cidrSet, _, err := unstructured.NestedSlice(rule, "toCIDRSet")
 		if err != nil {
-			return nil, fmt.Errorf("Cilium system policy CIDR set is invalid")
+			return nil, fmt.Errorf("cilium system policy CIDR set is invalid")
 		}
 		for _, rawCIDR := range cidrSet {
 			cidrRule, ok := rawCIDR.(map[string]any)
 			cidr, _ := cidrRule["cidr"].(string)
 			if !ok || cidr == "" {
-				return nil, fmt.Errorf("Cilium system policy CIDR rule is invalid")
+				return nil, fmt.Errorf("cilium system policy CIDR rule is invalid")
 			}
 			values = append(values, cidr)
 		}
@@ -1442,7 +1442,7 @@ func namedContainersTerminated(names map[string]struct{}, statuses []corev1.Cont
 	seen := make(map[string]struct{}, len(statuses))
 	for _, status := range statuses {
 		if _, declared := names[status.Name]; !declared ||
-			(status.State.Terminated == nil && !(allowNeverStarted && containerProvablyNeverStarted(status))) {
+			(status.State.Terminated == nil && (!allowNeverStarted || !containerProvablyNeverStarted(status))) {
 			return false
 		}
 		if _, duplicate := seen[status.Name]; duplicate {
@@ -1660,7 +1660,7 @@ func (r *Runtime) buildPreparedSystemPolicy(spec runtime.SandboxSpec) (*networki
 		return policy, nil, err
 	}
 	if !r.hasCilium || r.dynClient == nil {
-		return nil, nil, fmt.Errorf("Cilium FQDN system egress is unavailable")
+		return nil, nil, fmt.Errorf("cilium FQDN system egress is unavailable")
 	}
 	policy, err := buildCiliumSystemEgressPolicy(r.namespace, spec.ID, spec.WorkspaceFUSE.SystemEgress, spec.WorkspaceFUSE.EndpointHostIPs)
 	return nil, policy, err
@@ -1778,7 +1778,7 @@ func (r *Runtime) bindPreparedSystemPolicy(ctx context.Context, ref runtime.Runt
 
 func (r *Runtime) bindPreparedCiliumSystemPolicy(ctx context.Context, ref runtime.RuntimeRef, desired *unstructured.Unstructured) error {
 	if r.dynClient == nil {
-		return fmt.Errorf("Cilium system policy client is unavailable")
+		return fmt.Errorf("cilium system policy client is unavailable")
 	}
 	if desired == nil {
 		return fmt.Errorf("prepared Cilium system policy intent is missing")
@@ -2580,30 +2580,6 @@ func waitPoll(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-func (r *Runtime) waitExactPodGone(ctx context.Context, ref runtime.RuntimeRef) error {
-	timeout := r.terminationTimeout
-	if timeout <= 0 {
-		timeout = defaultKubernetesControlTimeout
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	for {
-		pod, err := r.client.CoreV1().Pods(r.namespace).Get(waitCtx, ref.ID, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("observe exact Pod termination: %w", err)
-		}
-		if string(pod.UID) != ref.UID {
-			return runtime.ErrInvalidRuntimeRef
-		}
-		if err := waitPoll(waitCtx, r.pollInterval); err != nil {
-			return fmt.Errorf("observe exact Pod termination: %w", err)
-		}
-	}
-}
-
 func (r *Runtime) waitPreparedPodGoneOrReplaced(ctx context.Context, ref runtime.RuntimeRef) error {
 	timeout := r.terminationTimeout
 	if timeout <= 0 {
@@ -2652,7 +2628,7 @@ func (r *Runtime) deleteExactCiliumUserPolicy(ctx context.Context, ref runtime.R
 		return runtime.ErrInvalidRuntimeRef
 	}
 	if current.GetUID() == "" {
-		return fmt.Errorf("Cilium user deny policy has no immutable UID")
+		return fmt.Errorf("cilium user deny policy has no immutable UID")
 	}
 	originalUID := current.GetUID()
 	deleteErr := policies.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &originalUID}})
@@ -2696,17 +2672,17 @@ func (r *Runtime) deleteExactCiliumSystemPolicy(ctx context.Context, instance, r
 		return fmt.Errorf("get exact Cilium system policy for deletion: %w", err)
 	}
 	if !ciliumSystemPolicyOwnershipMatches(current, instance) {
-		return fmt.Errorf("Cilium system policy ownership does not match")
+		return fmt.Errorf("cilium system policy ownership does not match")
 	}
 	boundUID := current.GetAnnotations()[fuseRuntimeUIDAnnotation]
-	if boundUID != runtimeUID && !(allowUnbound && boundUID == "") {
+	if boundUID != runtimeUID && (!allowUnbound || boundUID != "") {
 		return runtime.ErrInvalidRuntimeRef
 	}
 	if prepareAttempt != "" && current.GetAnnotations()[fusePrepareAttemptAnnotation] != prepareAttempt {
 		return runtime.ErrInvalidRuntimeRef
 	}
 	if current.GetUID() == "" {
-		return fmt.Errorf("Cilium system policy has no immutable UID")
+		return fmt.Errorf("cilium system policy has no immutable UID")
 	}
 	originalUID := current.GetUID()
 	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &originalUID}}

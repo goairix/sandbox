@@ -358,7 +358,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	fuseEnabled := m.config.EnabledMountModes[WorkspaceMountFUSE]
 	if m.config.RuntimeType == "kubernetes" && m.config.PoolConfig.MinSize > 0 && !m.pool.Shared() {
-		return errors.Join(ErrInvalidOrdinaryPoolConfig, errors.New("Kubernetes warm pool requires a shared state store and scope"))
+		return errors.Join(ErrInvalidOrdinaryPoolConfig, errors.New("kubernetes warm pool requires a shared state store and scope"))
 	}
 	if fuseEnabled {
 		if m.fusePool == nil {
@@ -1206,7 +1206,6 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	nextStage("publish")
 	if err = m.publishSandboxLifecycle(txnCtx, sb, gate, lifecycle, claim); err != nil {
 		cancelLifecycle()
-		lifecycle = nil
 		return nil, err
 	}
 	published = true

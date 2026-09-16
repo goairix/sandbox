@@ -16,7 +16,7 @@ import (
 	"github.com/goairix/sandbox/internal/storage"
 )
 
-func newCoordinatedSyncManager(t *testing.T, leaseTTL, renewInterval time.Duration) (*Manager, *atomicMemoryStore, *mockRuntime) {
+func newCoordinatedSyncManager(t *testing.T, leaseTTL, renewInterval time.Duration, expectedStopError ...error) (*Manager, *atomicMemoryStore, *mockRuntime) {
 	t.Helper()
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "team", "a"), 0o755))
@@ -34,7 +34,14 @@ func newCoordinatedSyncManager(t *testing.T, leaseTTL, renewInterval time.Durati
 		PoolConfig:           PoolConfig{Image: "sandbox:sync"},
 	})
 	mgr.SetSessionStore(NewSessionStore(store, time.Hour))
-	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	t.Cleanup(func() {
+		err := mgr.Stop(context.Background())
+		if len(expectedStopError) == 0 {
+			require.NoError(t, err)
+		} else {
+			require.ErrorIs(t, err, expectedStopError[0])
+		}
+	})
 	return mgr, store, rt
 }
 
@@ -129,7 +136,7 @@ func TestSyncRestoreRepublishesExpiredLeaseForExactRuntimeOwner(t *testing.T) {
 		PoolConfig:           PoolConfig{Image: "sandbox:sync"},
 	})
 	restored.SetSessionStore(NewSessionStore(store, time.Hour))
-	t.Cleanup(func() { restored.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, restored.Stop(context.Background())) })
 	require.NoError(t, restored.restorePersistentSandboxes(context.Background()))
 
 	got, err := restored.Get(context.Background(), sb.ID)
@@ -145,7 +152,7 @@ func TestSyncRestoreRepublishesExpiredLeaseForExactRuntimeOwner(t *testing.T) {
 }
 
 func TestDestroyEphemeralSyncRetainsRuntimeAndLeaseWhenFinalSyncFails(t *testing.T) {
-	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second)
+	mgr, store, rt := newCoordinatedSyncManager(t, time.Minute, 10*time.Second, ErrSandboxCleanupPending)
 	ephemeral := NewEphemeralLifecycleStore(store)
 	mgr.SetEphemeralLifecycleStore(ephemeral)
 	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral, WorkspacePath: "team/a"})

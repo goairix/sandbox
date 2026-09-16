@@ -15,7 +15,7 @@ import (
 func TestTimedOutOSIOHelperIsKilledAndReaped(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	require.NoError(t, err)
-	defer devNull.Close()
+	defer func() { require.NoError(t, devNull.Close()) }()
 	process, err := os.StartProcess("/bin/sleep", []string{"sleep", "30"}, &os.ProcAttr{
 		Dir: "/", Files: []*os.File{devNull, devNull, devNull},
 	})

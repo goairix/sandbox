@@ -145,13 +145,13 @@ func startWorkspaceIOHelper(operation, runtimeUID string, generation int64, prob
 	if err != nil {
 		return nil, err
 	}
-	defer stateReader.Close()
-	defer stateWriter.Close()
+	defer func() { _ = stateReader.Close() }()
+	defer func() { _ = stateWriter.Close() }()
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer devNull.Close()
+	defer func() { _ = devNull.Close() }()
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -202,7 +202,7 @@ func MaybeRunIOHelper() (bool, int) {
 	if stateFile == nil {
 		return true, 1
 	}
-	defer stateFile.Close()
+	defer func() { _ = stateFile.Close() }()
 	var launch ioHelperLaunch
 	if err := decodeLimitedJSON(stateFile, &launch); err != nil ||
 		!validIOHelperInvocation(os.Geteuid(), os.Getegid(), os.Getenv(ioHelperEnvironmentName), os.Args, launch) {

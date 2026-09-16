@@ -60,8 +60,8 @@ type releasePreparingFUSEOrphanRuntime struct {
 
 func (r *releasePreparingFUSEOrphanRuntime) ReconcileOrphanedResources(ctx context.Context, protected map[string]struct{}) error {
 	r.mockRuntime.mu.Lock()
-	delete(r.mockRuntime.removeFailures, r.orphanID)
-	delete(r.mockRuntime.sandboxes, r.orphanID)
+	delete(r.removeFailures, r.orphanID)
+	delete(r.sandboxes, r.orphanID)
 	r.mockRuntime.mu.Unlock()
 	return r.fuseManagerRuntime.ReconcileOrphanedResources(ctx, protected)
 }
@@ -467,7 +467,7 @@ func TestManagerDrainReleaseReconcilesUnboundPreparingFUSEOrphanBeforePoolDrain(
 		Revision:        1,
 	})
 	baseRuntime.mockRuntime.mu.Lock()
-	baseRuntime.mockRuntime.removeFailures[orphanID] = errors.New("Pod is a FUSE sandbox")
+	baseRuntime.removeFailures[orphanID] = errors.New("Pod is a FUSE sandbox")
 	baseRuntime.mockRuntime.mu.Unlock()
 
 	store := newAtomicMemoryStore()
@@ -535,7 +535,7 @@ func TestManagerPoolAcquireRelabelFailureRemovesRuntimeAndNotifiesPool(t *testin
 	rt := newMockRuntime()
 	rt.updateLabelsErr = errors.New("relabel failed")
 	mgr := NewManager(rt, nil, nil, ManagerConfig{PoolConfig: PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}})
-	mgr.pool.WarmUp(context.Background())
+	require.NoError(t, mgr.pool.WarmUp(context.Background()))
 	require.Eventually(t, func() bool { return mgr.pool.Size() == 1 }, time.Second, 10*time.Millisecond)
 
 	_, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
@@ -550,7 +550,7 @@ func TestManagerPoolAcquireRelabelFailureJoinsRemovalFailure(t *testing.T) {
 	rt := newMockRuntime()
 	rt.updateLabelsErr = errors.New("relabel failed")
 	mgr := NewManager(rt, nil, nil, ManagerConfig{PoolConfig: PoolConfig{MinSize: 1, MaxSize: 1, Image: "sandbox:latest"}})
-	mgr.pool.WarmUp(context.Background())
+	require.NoError(t, mgr.pool.WarmUp(context.Background()))
 	require.Eventually(t, func() bool { return mgr.pool.Size() == 1 }, time.Second, 10*time.Millisecond)
 	rt.mu.Lock()
 	for id := range rt.sandboxes {
@@ -593,7 +593,7 @@ func TestManagerStartWarmsBothPoolsWhenFUSEEnabled(t *testing.T) {
 	})
 	mgr.SetSessionStore(NewSessionStore(store, time.Hour))
 	require.NoError(t, mgr.Start(context.Background()))
-	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, mgr.Stop(context.Background())) })
 
 	assert.Equal(t, 1, mgr.pool.Size(), "ordinary Pool must always warm")
 	assert.Equal(t, 1, repo.countState("pool-key", state.FUSEPoolPrepared), "enabled FUSE Pool must warm")
@@ -610,7 +610,7 @@ func TestManagerStartWarmsOnlyOrdinaryPoolWhenFUSEDisabled(t *testing.T) {
 		FUSEPool:          pool,
 	})
 	require.NoError(t, mgr.Start(context.Background()))
-	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, mgr.Stop(context.Background())) })
 
 	assert.Equal(t, 1, mgr.pool.Size())
 	assert.Zero(t, repo.countState("pool-key", state.FUSEPoolPrepared))
@@ -643,8 +643,8 @@ func TestManagersShareKubernetesOrdinaryWarmPool(t *testing.T) {
 	require.NoError(t, first.Start(context.Background()))
 	require.NoError(t, second.Start(context.Background()))
 	t.Cleanup(func() {
-		first.Stop(context.Background())
-		second.Stop(context.Background())
+		require.NoError(t, first.Stop(context.Background()))
+		require.NoError(t, second.Stop(context.Background()))
 		_ = first.pool.DrainRelease(context.Background())
 	})
 
@@ -675,7 +675,7 @@ func TestManagerMigratesSharedPoolOnDemandRuntimeIdentity(t *testing.T) {
 		PoolStateStore: store, PoolScope: "sandbox-system",
 	})
 	require.NoError(t, mgr.Start(context.Background()))
-	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, mgr.Stop(context.Background())) })
 
 	sandbox, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModeEphemeral})
 	require.NoError(t, err)
@@ -799,7 +799,7 @@ func TestManagerStopCancelsAndWaitsForInFlightFUSECreate(t *testing.T) {
 
 	stopDone := make(chan struct{})
 	go func() {
-		mgr.Stop(context.Background())
+		assert.NoError(t, mgr.Stop(context.Background()))
 		close(stopDone)
 	}()
 
@@ -832,7 +832,7 @@ func TestManagerStopHonorsDeadlineWhileLegacyCreateIsBlocked(t *testing.T) {
 	defer cancel()
 	stopDone := make(chan struct{})
 	go func() {
-		mgr.Stop(ctx)
+		assert.ErrorIs(t, mgr.Stop(ctx), context.DeadlineExceeded)
 		close(stopDone)
 	}()
 	select {
@@ -844,7 +844,7 @@ func TestManagerStopHonorsDeadlineWhileLegacyCreateIsBlocked(t *testing.T) {
 	}
 	close(rt.release)
 	require.Error(t, <-createDone)
-	mgr.Stop(context.Background())
+	require.NoError(t, mgr.Stop(context.Background()))
 }
 
 func TestManagerStopPreservesPersistentFUSERuntimeUnderReader(t *testing.T) {
@@ -860,7 +860,7 @@ func TestManagerStopPreservesPersistentFUSERuntimeUnderReader(t *testing.T) {
 	defer cancel()
 	stopDone := make(chan struct{})
 	go func() {
-		mgr.Stop(ctx)
+		assert.NoError(t, mgr.Stop(ctx), "persistent shutdown preserves the live runtime rather than draining its reader")
 		close(stopDone)
 	}()
 	select {
@@ -872,7 +872,7 @@ func TestManagerStopPreservesPersistentFUSERuntimeUnderReader(t *testing.T) {
 	}
 	assert.False(t, rt.wasRemoved(sb.RuntimeID), "deadline return must not remove a runtime with a live gate reference")
 	require.NoError(t, rc.Close())
-	mgr.Stop(context.Background())
+	require.NoError(t, mgr.Stop(context.Background()))
 	assert.False(t, rt.wasRemoved(sb.RuntimeID), "rolling shutdown preserves persistent FUSE runtimes")
 	exists, err := mgr.sessions.Exists(context.Background(), sb.ID)
 	require.NoError(t, err)
@@ -2476,8 +2476,8 @@ func TestManager_CreateEphemeralSandbox(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	mgr.Start(ctx)
-	defer mgr.Stop(ctx)
+	require.NoError(t, mgr.Start(ctx))
+	defer func() { require.NoError(t, mgr.Stop(ctx)) }()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -2498,8 +2498,8 @@ func TestManager_CreatePersistentSandbox(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	mgr.Start(ctx)
-	defer mgr.Stop(ctx)
+	require.NoError(t, mgr.Start(ctx))
+	defer func() { require.NoError(t, mgr.Stop(ctx)) }()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -2525,8 +2525,8 @@ func TestManager_Destroy(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	mgr.Start(ctx)
-	defer mgr.Stop(ctx)
+	require.NoError(t, mgr.Start(ctx))
+	defer func() { require.NoError(t, mgr.Stop(ctx)) }()
 
 	time.Sleep(100 * time.Millisecond)
 

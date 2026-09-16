@@ -100,6 +100,62 @@ type failingDestroyRepository struct {
 
 type disconnectStreamRuntime struct{ slowCleanupRuntime }
 
+type failedSSEWriter struct{ *httptest.ResponseRecorder }
+
+func (w *failedSSEWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestOneShotStreamWriteFailurePersistsCleanupWithoutWaiting(t *testing.T) {
+	addr := os.Getenv("TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("requires TEST_REDIS_ADDR")
+	}
+	initFileHandlerMetrics.Do(func() { require.NoError(t, metrics.InitNoop()) })
+	store, err := redisstate.New(context.Background(), redisstate.Options{Addr: addr})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	base, err := redisstate.NewActiveSandboxRepository(store, "oneshot-write-"+uuid.NewString())
+	require.NoError(t, err)
+	repo := &observedDestroyRepository{ActiveSandboxRepository: base, observed: make(chan *state.ActiveSandboxRecord, 1)}
+	mgr := sandbox.NewManager(&disconnectStreamRuntime{}, nil, nil, sandbox.ManagerConfig{RuntimeType: "kubernetes", InstanceID: "test", ActiveSandboxes: repo})
+	router := gin.New()
+	router.POST("/execute/stream", handler.NewHandler(mgr).ExecuteOneShotStream)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/execute/stream", strings.NewReader(`{"language":"bash","code":"sleep 30"}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(&failedSSEWriter{httptest.NewRecorder()}, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("failed stream handler ignored cancellation")
+		}
+		t.Fatal("failed stream write must stop the handler before request cancellation")
+	}
+	// A real net/http server cancels this context after ServeHTTP returns. Do
+	// the same before draining operations in this direct-router test.
+	cancel()
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelCleanup()
+	select {
+	case record := <-repo.observed:
+		require.NotNil(t, record)
+		require.Equal(t, state.ActiveSandboxDestroying, record.Phase)
+		require.False(t, repo.canceled.Load())
+		require.NoError(t, mgr.Destroy(cleanupCtx, record.SandboxID))
+	default:
+		t.Fatal("failed stream write did not persist cleanup")
+	}
+	require.NoError(t, mgr.Stop(cleanupCtx))
+}
+
 func (r *disconnectStreamRuntime) ExecStream(ctx context.Context, _ string, _ runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
 	ch := make(chan runtime.StreamEvent, 1)
 	ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: "started"}

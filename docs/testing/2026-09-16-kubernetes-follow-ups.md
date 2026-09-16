@@ -44,17 +44,20 @@ FUSE flush/unmount 门槛。
 
 | 编号 | 当前状态及证据 | 后续关闭条件 |
 | --- | --- | --- |
-| QUALITY-01 | 已确认代码质量欠账：本次全仓 golangci-lint 退出 1，共 81 项：errcheck 50、ineffassign 2、staticcheck 20、unused 9。并非 81 个已复现的线上故障，也不全是排版建议。 | 按类别复核并整改，保留错误传播、资源释放和安全状态机语义，补对应回归，最后全仓 lint 通过。增量 lint 通过不能替代。 |
 | HA/FAULT-01 | 内置 Sentinel 已部署，quorum/复制及正常 API 回归通过；本地真实三成员 fixture 已覆盖多类故障，45 秒 refill lease 接管已在部署集群验证。但没有完成目标 Kubernetes/CSI 上的实际 Redis 切主、API/节点故障、网络分区、全组保留卷冷恢复，以及旧池跨代退休预算中断的完整现场故障矩阵。 | 在明确授权的隔离窗口执行有界故障驱动，验证唯一 writer、ACK 不确定时 fail closed、失效 owner 接管、精确 UID/策略收尾、身份保留和服务恢复；同时完成备份恢复演练。不能以 Ready 或 WAIT 1 代表零数据丢失。 |
 | NET-01 | 可移植网络发现/策略代码及当前 Cilium Service 放行、撤销、私网/metadata 拒绝已有通过记录；Calico 和双华云/VPC 的真实环境仍未完成验收。 | 两个双华云测试环境就绪后，验证实际 Pod/Service 分配范围、白名单撤销/恢复、metadata、跨 namespace、双栈及云网络策略执行；在各环境验证实际对象存储后端挂载/flush/恢复，不能用 Cilium/MinIO 结果替代。 |
 | SEC-01 | AppArmor Loader 五节点 Ready，生产缺失 LSM 豁免为 false；worker-2 组件级挂载/拒绝/重载测试，以及线上已有节点的 API FUSE 链路通过。未完成五个节点各自的端到端 API 挂载和完整拒绝规则覆盖，也未覆盖其它内核、运行时和存储组合。 | 在目标调度范围逐节点验证 mounter 与 s3fs 子进程 exact enforce profile、真实读写/flush/unmount、越权负例和重建恢复。节点加载成功不等于该节点完整业务验收。 |
 | OBS-01 | tracer/metrics/log OTLP 当前均已启用，不再属于“exporter 未配置”。但本轮没有从 collector/后端取得固定阶段分布和可关联的请求追踪，也未验证遥测丢失率与开销。 | 核对 collector 实际接收与存储，取得慢请求的固定阶段证据，检查低基数、脱敏、采样及开销；作为后续 PERF-02 专项的输入。 |
 | LOAD/EDGE-01 | 当前已通过有界功能矩阵、256 小文件/16 MiB 压力，以及普通/FUSE 的多副本回归；尚无持续大负载的吞吐/错误率/p95/p99 SLO，也没有完整外部 Ingress/TLS 链路和对象存储全前缀审计。 | 在容量可控环境验证持续并发、池耗尽与补池、慢后端、FUSE 创建及 flush/unmount 长尾、资源开销和最终清理；补外部认证/Ingress/TLS 测试及精确测试前缀对象审计。不能把单次健康结果或目录标记当作全局零遗留证明。 |
 
-QUALITY-01 可先做本地整改；HA/FAULT-01 需要单独的隔离环境或明确故障窗口，不在本次只读复核中
+QUALITY-01 已按用户后续选择完成本地整改，见下方关闭记录；HA/FAULT-01 需要单独的隔离环境或明确故障窗口，不在本次只读复核中
 直接执行。PERF-02 按本次用户要求暂缓。
 
 ## 已关闭或不再作为当前故障的事项
+
+- QUALITY-01：取消输出上限后的宿主基线实际为 197 项，Linux-only 额外一项也已整改。两个目标
+  无上限 lint 均为 0，新增解析/SSE/reactor/安全配置回归、全仓 test/build/vet、目标 race 与
+  Helm 回归通过；没有全局关闭 lint 或放宽安全校验。见 [完整整改验收](2026-09-16-full-lint-remediation.md)。
 
 - 普通沙盒约 32 秒销毁：最短非零优雅期与 exact UID 终止确认已部署；10/10 热池样本成功，
   p50 3.415 秒、p95/max 3.891 秒，达到 5 秒验收线。原有 30 秒 Pod spec 无需主动重建。

@@ -61,7 +61,7 @@ func (b *pid1Broker) protectedProcess() (*processIdentity, bool, error) {
 	if err != nil {
 		return nil, false, nil
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	pid, uid, err := unixPeerIdentity(connection)
 	if err != nil || pid != 1 || uid != requiredUID {
 		return nil, false, fmt.Errorf("unexpected pid 1 broker peer")
@@ -87,7 +87,7 @@ func (b *pid1Broker) start(state brokerState) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pid 1 broker disappeared")
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 	request := pid1Request{
 		Version: fuseprotocol.Version, Command: "register", RuntimeUID: state.RuntimeUID,
@@ -123,7 +123,7 @@ func (b *pid1Broker) resume(request resumeRequest) error {
 	if err != nil {
 		return ErrInvalidToken
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 	wire := pid1Request{
 		Version: fuseprotocol.Version, Command: "resume", RuntimeUID: request.RuntimeUID,
@@ -167,7 +167,7 @@ func MaybeRunPID1() (bool, int) {
 	if err != nil {
 		return true, 1
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	startChildReaper()
 	ledger := &pid1Ledger{runtimeUID: runtimeUID}
 	for {

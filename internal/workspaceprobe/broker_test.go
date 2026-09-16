@@ -103,7 +103,7 @@ func TestDockerReaperHandshakeReplacesSignalDispositionFallback(t *testing.T) {
 	client.dial = func() (net.Conn, error) {
 		server, caller := net.Pipe()
 		go func() {
-			defer server.Close()
+			defer func() { assert.NoError(t, server.Close()) }()
 			var request fuseprotocol.DockerReaperRequest
 			if readBrokerFrame(server, &request) != nil {
 				return

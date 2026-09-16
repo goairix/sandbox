@@ -68,12 +68,12 @@ func dockerBridgeGatewayIPv4(network dnetwork.Inspect) (string, error) {
 			continue
 		}
 		if result != "" {
-			return "", fmt.Errorf("Docker FUSE pair network has multiple IPv4 gateways")
+			return "", fmt.Errorf("docker FUSE pair network has multiple IPv4 gateways")
 		}
 		result = item.Gateway
 	}
 	if result == "" {
-		return "", fmt.Errorf("Docker FUSE pair network has no canonical IPv4 gateway")
+		return "", fmt.Errorf("docker FUSE pair network has no canonical IPv4 gateway")
 	}
 	return result, nil
 }
@@ -136,7 +136,7 @@ func (r *Runtime) execFixed(ctx context.Context, containerID, user string, argv 
 		return nil, err
 	}
 	if stdout.overflow || stderr.overflow {
-		return nil, fmt.Errorf("Docker workspace control output exceeds limit")
+		return nil, fmt.Errorf("docker workspace control output exceeds limit")
 	}
 	inspect, err := r.cli.ContainerExecInspect(ctx, execResponse.ID)
 	if err != nil {
@@ -150,9 +150,9 @@ func (r *Runtime) execFixed(ctx context.Context, containerID, user string, argv 
 
 func dockerControlExecError(stderr []byte) error {
 	if code, ok := mounter.ParseDiagnosticToken(stderr); ok {
-		return fmt.Errorf("Docker workspace control command failed: %s", code)
+		return fmt.Errorf("docker workspace control command failed: %s", code)
 	}
-	return fmt.Errorf("Docker workspace control command failed")
+	return fmt.Errorf("docker workspace control command failed")
 }
 
 func watchDockerAttachContext(ctx context.Context, closeAttach func()) func() {
@@ -210,14 +210,6 @@ func decodeProbeStatus(raw []byte) (fuseprotocol.ProbeStatus, error) {
 	var value fuseprotocol.ProbeStatus
 	if err := fuseprotocol.DecodeExact(raw, &value); err != nil || value.Version != fuseprotocol.Version {
 		return fuseprotocol.ProbeStatus{}, fmt.Errorf("invalid Docker workspace probe status")
-	}
-	return value, nil
-}
-
-func decodeShutdownAck(raw []byte) (fuseprotocol.ShutdownAck, error) {
-	var value fuseprotocol.ShutdownAck
-	if err := fuseprotocol.DecodeExact(raw, &value); err != nil || value.Version != fuseprotocol.Version {
-		return fuseprotocol.ShutdownAck{}, fmt.Errorf("invalid Docker shutdown acknowledgement")
 	}
 	return value, nil
 }

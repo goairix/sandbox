@@ -864,10 +864,10 @@ func ordinaryIdentityFromPod(pod *corev1.Pod, expectedRuntimeID string) (ordinar
 		return ordinaryNetworkIdentity{}, fmt.Errorf("ordinary Pod runtime identity does not match %q", expectedRuntimeID)
 	}
 	if pod.Labels["sandbox.managed"] != "true" {
-		return ordinaryNetworkIdentity{}, fmt.Errorf("Pod %q is not a managed sandbox", pod.Name)
+		return ordinaryNetworkIdentity{}, fmt.Errorf("pod %q is not a managed sandbox", pod.Name)
 	}
 	if pod.Labels["sandbox.workspace.mode"] == "fuse" {
-		return ordinaryNetworkIdentity{}, fmt.Errorf("Pod %q is a FUSE sandbox", pod.Name)
+		return ordinaryNetworkIdentity{}, fmt.Errorf("pod %q is a FUSE sandbox", pod.Name)
 	}
 	logicalID := pod.Labels["sandbox.id"]
 	if errs := kvalidation.IsDNS1123Subdomain(pod.Name); len(errs) != 0 {

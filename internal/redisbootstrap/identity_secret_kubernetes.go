@@ -17,10 +17,10 @@ const identityRetry = 250 * time.Millisecond
 
 var (
 	// ErrIdentityInvalid never embeds private data or Kubernetes response bodies.
-	ErrIdentityInvalid = errors.New("Redis bootstrap identity or installation is invalid")
+	ErrIdentityInvalid = errors.New("redis bootstrap identity or installation is invalid")
 	// ErrIdentityMissing requires restoration, not replacement key generation.
 	ErrIdentityMissing = errors.New("retained Redis identity is missing; restore the original identity Secret")
-	ErrIdentityAPI     = errors.New("Redis identity Kubernetes API request failed")
+	ErrIdentityAPI     = errors.New("redis identity Kubernetes API request failed")
 )
 
 // IdentitySecretOptions scopes an install-only identity operation.

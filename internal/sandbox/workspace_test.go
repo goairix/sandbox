@@ -63,7 +63,7 @@ func readyFUSEManagerWithRuntime(t *testing.T) (*Manager, *Sandbox, *mockRuntime
 	mgr, _, _, _ := newFUSETestManager(t, rt)
 	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 	require.NoError(t, err)
-	t.Cleanup(func() { mgr.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, mgr.Stop(context.Background())) })
 	return mgr, sb, rt.mockRuntime
 }
 

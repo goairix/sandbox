@@ -29,7 +29,7 @@ func dockerReaperPeerIdentity(connection net.Conn) (int, int, error) {
 		credentials, socketErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	})
 	if err != nil || socketErr != nil || credentials == nil {
-		return 0, 0, fmt.Errorf("Docker reaper peer credentials unavailable")
+		return 0, 0, fmt.Errorf("docker reaper peer credentials unavailable")
 	}
 	return int(credentials.Pid), int(credentials.Uid), nil
 }

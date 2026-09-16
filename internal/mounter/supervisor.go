@@ -885,7 +885,7 @@ func readBoundedFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open persisted supervisor state")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, fuseprotocol.MaxJSONBytes+1))
 	if err != nil || len(raw) == 0 || len(raw) > fuseprotocol.MaxJSONBytes {
 		return nil, fmt.Errorf("persisted supervisor state has invalid size")
@@ -925,7 +925,7 @@ func atomicPublish(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tempPath := temp.Name()
-	defer os.Remove(tempPath)
+	defer func() { _ = os.Remove(tempPath) }()
 	if err := temp.Chmod(mode); err != nil {
 		_ = temp.Close()
 		return err
@@ -968,6 +968,6 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	return dir.Sync()
 }

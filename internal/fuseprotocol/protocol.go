@@ -69,7 +69,7 @@ func IsReservedProbeObjectName(name string) bool {
 		return false
 	}
 	for _, char := range name[len(ProbeObjectBasenamePrefix):] {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}

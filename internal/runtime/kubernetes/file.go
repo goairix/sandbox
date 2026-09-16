@@ -471,14 +471,11 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 		isDir := parts[2] == "d"
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		fullPath := dirPath + "/" + parts[0]
 
@@ -487,7 +484,7 @@ func listFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -512,8 +509,10 @@ func listFilesRecursiveInPod(ctx context.Context, client kubernetes.Interface, r
 	if err != nil {
 		return nil, err
 	}
-	var totalCount int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+	totalCount, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	listCmd := fmt.Sprintf(
 		"find %s -mindepth 1 %s\\( -type f -o -type d \\) -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
@@ -542,14 +541,11 @@ func listFilesRecursiveInPod(ctx context.Context, client kubernetes.Interface, r
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 		isDir := parts[2] == "d"
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		name := filepath.Base(parts[0])
 		fullPath := dirPath + "/" + parts[0]
@@ -559,7 +555,7 @@ func listFilesRecursiveInPod(ctx context.Context, client kubernetes.Interface, r
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -591,8 +587,10 @@ func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 	if err != nil {
 		return nil, err
 	}
-	var totalCount int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+	totalCount, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	listCmd := fmt.Sprintf(
 		"find %s -mindepth 1 %s%s -type f -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
@@ -621,13 +619,10 @@ func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 
 		name := filepath.Base(parts[0])
 		fullPath := baseDir + "/" + parts[0]
@@ -637,7 +632,7 @@ func globFilesInPod(ctx context.Context, client kubernetes.Interface, restConfig
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   false,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -667,9 +662,9 @@ func countReservedFilesInPod(ctx context.Context, client kubernetes.Interface, r
 		}
 		return 0, fmt.Errorf("count reserved FUSE files: %s", detail)
 	}
-	var count int
-	if scanned, scanErr := fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &count); scanErr != nil || scanned != 1 || count < 0 {
-		return 0, fmt.Errorf("count reserved FUSE files: invalid count %q", strings.TrimSpace(result.Stdout))
+	count, err := runtime.ParseFileCount(result.Stdout)
+	if err != nil {
+		return 0, fmt.Errorf("count reserved FUSE files: %w", err)
 	}
 	return count, nil
 }
@@ -716,8 +711,10 @@ func readFileLinesInPod(ctx context.Context, client kubernetes.Interface, restCo
 	if err != nil {
 		return nil, err
 	}
-	var totalLines int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalLines)
+	totalLines, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	var sedRange string
 	if endLine <= 0 || endLine > totalLines {

@@ -177,7 +177,7 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 		go func() {
 			defer cancel()
 			defer close(ch)
-			defer stdoutPR.Close()
+			defer func() { _ = stdoutPR.Close() }()
 
 			execDone := make(chan error, 1)
 			go func() {
@@ -185,7 +185,7 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 					Stdout: stdoutPW,
 					Tty:    true,
 				})
-				stdoutPW.Close()
+				_ = stdoutPW.Close()
 			}()
 
 			buf := make([]byte, 4096)
@@ -214,8 +214,8 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 		go func() {
 			defer cancel()
 			defer close(ch)
-			defer stdoutPR.Close()
-			defer stderrPR.Close()
+			defer func() { _ = stdoutPR.Close() }()
+			defer func() { _ = stderrPR.Close() }()
 
 			execDone := make(chan error, 1)
 			go func() {
@@ -223,8 +223,8 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 					Stdout: stdoutPW,
 					Stderr: stderrPW,
 				})
-				stdoutPW.Close()
-				stderrPW.Close()
+				_ = stdoutPW.Close()
+				_ = stderrPW.Close()
 			}()
 
 			done := make(chan struct{})

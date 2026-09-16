@@ -208,10 +208,9 @@ func (m *Manager) runActiveLifecycleCoordinator() {
 		case <-m.controlCtx.Done():
 			return
 		case <-timer.C:
-			if err := m.reconcileActiveLifecycleControllers(m.controlCtx); err != nil && !errors.Is(err, context.Canceled) {
-				// The next bounded pass retries. Existing controllers keep renewing
-				// independently, so a transient scan failure does not interrupt them.
-			}
+			// The next bounded pass retries. Existing controllers keep renewing
+			// independently, so a transient scan failure does not interrupt them.
+			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)
 			timer.Reset(activeLifecycleScanInterval + lifecycleScanDelay(m.config.InstanceID))
 		case <-m.cleanupWake:
 			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)

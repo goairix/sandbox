@@ -27,13 +27,13 @@ import (
 // gateway address before any workspace authorization or public exec.
 func createFUSESandboxPair(ctx context.Context, cli dockerAPI, sandboxID, openNetworkID, gatewayImage, secretRoot, caSecretKey string, system runtime.SystemEgressSpec) (pairNetworkID, gatewayID, gatewayIP string, err error) {
 	if system.Mode != runtime.SystemEgressCIDR {
-		return "", "", "", fmt.Errorf("Docker workspace FUSE supports only CIDR system egress")
+		return "", "", "", fmt.Errorf("docker workspace FUSE supports only CIDR system egress")
 	}
 	if !imageref.IsRelease(gatewayImage) {
-		return "", "", "", fmt.Errorf("Docker gateway image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
+		return "", "", "", fmt.Errorf("docker gateway image must use a vMAJOR.MINOR.PATCH tag or valid sha256 digest")
 	}
 	if !validDockerWorkspaceSecretRoot(secretRoot) {
-		return "", "", "", fmt.Errorf("Docker workspace FUSE secret root is invalid")
+		return "", "", "", fmt.Errorf("docker workspace FUSE secret root is invalid")
 	}
 	command, err := buildFUSEGatewayIptablesCmd(system, false, nil, false)
 	if err != nil {
@@ -127,7 +127,7 @@ func buildFUSEGatewayIptablesCmd(system runtime.SystemEgressSpec, userEnabled bo
 	if len(system.Hosts) == 0 {
 		dnsPorts, err := canonicalDockerPorts(system.DNSPorts)
 		if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-			return "", fmt.Errorf("Docker FUSE DNS ports must be exactly 53")
+			return "", fmt.Errorf("docker FUSE DNS ports must be exactly 53")
 		}
 		dnsCIDRs, err = canonicalDockerDNSCIDRs(system.DNSCIDRs)
 		if err != nil {
@@ -232,7 +232,7 @@ func canonicalDockerIPv4CIDRs(values []string, rejectPermanent bool) ([]string, 
 			for _, deniedRaw := range permanentlyDeniedDockerIPv4 {
 				denied, _ := netip.ParsePrefix(deniedRaw)
 				if prefix.Overlaps(denied) {
-					return nil, fmt.Errorf("Docker FUSE system egress overlaps a permanently denied CIDR")
+					return nil, fmt.Errorf("docker FUSE system egress overlaps a permanently denied CIDR")
 				}
 			}
 		}
@@ -249,12 +249,12 @@ func canonicalDockerIPv4CIDRs(values []string, rejectPermanent bool) ([]string, 
 func canonicalDockerDNSCIDRs(values []string) ([]string, error) {
 	result, err := canonicalDockerIPv4CIDRs(values, false)
 	if err != nil || len(result) < 1 || len(result) > 3 {
-		return nil, fmt.Errorf("Docker FUSE must configure between one and three public IPv4 DNS resolvers")
+		return nil, fmt.Errorf("docker FUSE must configure between one and three public IPv4 DNS resolvers")
 	}
 	for _, raw := range result {
 		prefix, _ := netip.ParsePrefix(raw)
 		if prefix.Bits() != prefix.Addr().BitLen() || !runtime.IsPublicDNSAddress(prefix.Addr()) {
-			return nil, fmt.Errorf("Docker FUSE DNS resolver must be a public IPv4 host prefix")
+			return nil, fmt.Errorf("docker FUSE DNS resolver must be a public IPv4 host prefix")
 		}
 	}
 	return result, nil
@@ -731,14 +731,14 @@ func resolveFUSEWhitelist(entries []string) ([]string, error) {
 	for _, entry := range entries {
 		if address, err := netip.ParseAddr(entry); err == nil {
 			if !address.Is4() || address.Is4In6() || address.String() != entry {
-				return nil, fmt.Errorf("Docker FUSE user network supports IPv4 only")
+				return nil, fmt.Errorf("docker FUSE user network supports IPv4 only")
 			}
 			resolved = append(resolved, entry+"/32")
 			continue
 		}
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
 			if !prefix.Addr().Is4() || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" || prefix.String() != entry || prefix != prefix.Masked() {
-				return nil, fmt.Errorf("Docker FUSE user network supports canonical IPv4 CIDRs only")
+				return nil, fmt.Errorf("docker FUSE user network supports canonical IPv4 CIDRs only")
 			}
 			resolved = append(resolved, entry)
 			continue
@@ -754,7 +754,7 @@ func resolveFUSEWhitelist(entries []string) ([]string, error) {
 			}
 		}
 		if len(resolved) == before {
-			return nil, fmt.Errorf("Docker FUSE whitelist domain %q has no IPv4 address", entry)
+			return nil, fmt.Errorf("docker FUSE whitelist domain %q has no IPv4 address", entry)
 		}
 	}
 	return canonicalDockerStrings(resolved), nil

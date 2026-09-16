@@ -119,10 +119,8 @@ func (b *localBroker) start(state brokerState) (string, error) {
 			return "", fmt.Errorf("sandbox pid 1 cannot reap quiesce broker: %w", err)
 		}
 	}
-	if len(state.Processes) == 0 {
-		// A broker is still required: it binds the token to the live quiesce
-		// generation and provides replay protection even in an idle sandbox.
-	}
+	// A broker is still required: it binds the token to the live quiesce
+	// generation and provides replay protection even in an idle sandbox.
 	socketBytes := make([]byte, 16)
 	secretBytes := make([]byte, 32)
 	if _, err := io.ReadFull(b.random, socketBytes); err != nil {
@@ -148,14 +146,14 @@ func (b *localBroker) start(state brokerState) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer stateReader.Close()
-	defer stateWriter.Close()
+	defer func() { _ = stateReader.Close() }()
+	defer func() { _ = stateWriter.Close() }()
 	readyReader, readyWriter, err := os.Pipe()
 	if err != nil {
 		return "", err
 	}
-	defer readyReader.Close()
-	defer readyWriter.Close()
+	defer func() { _ = readyReader.Close() }()
+	defer func() { _ = readyWriter.Close() }()
 	executable, err := b.executable()
 	if err != nil {
 		return "", err
@@ -220,7 +218,7 @@ func (c *dockerReaperClient) protectedProcess() (*processIdentity, bool, error) 
 	if err != nil {
 		return nil, false, nil
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	peer := c.peer
 	if peer == nil {
 		peer = unixPeerIdentity
@@ -236,11 +234,11 @@ func (c *dockerReaperClient) protectedProcess() (*processIdentity, bool, error) 
 	}
 	var response fuseprotocol.DockerReaperResponse
 	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version || !response.Accepted || response.ErrorCode != "" {
-		return nil, false, fmt.Errorf("Docker pid 1 reaper ping failed")
+		return nil, false, fmt.Errorf("docker pid 1 reaper ping failed")
 	}
 	identity, err := c.processes.identity(1)
 	if err != nil || identity.PID != 1 || identity.UID != 0 || identity.StartTime == 0 {
-		return nil, false, fmt.Errorf("Docker pid 1 identity cannot be verified")
+		return nil, false, fmt.Errorf("docker pid 1 identity cannot be verified")
 	}
 	return &identity, true, nil
 }
@@ -250,7 +248,7 @@ func (c *dockerReaperClient) register(identity processIdentity) error {
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	peer := c.peer
 	if peer == nil {
 		peer = unixPeerIdentity
@@ -266,7 +264,7 @@ func (c *dockerReaperClient) register(identity processIdentity) error {
 	}
 	var response fuseprotocol.DockerReaperResponse
 	if err := readBrokerFrame(connection, &response); err != nil || response.Version != fuseprotocol.Version || !response.Accepted || response.ErrorCode != "" {
-		return fmt.Errorf("Docker pid 1 rejected broker registration")
+		return fmt.Errorf("docker pid 1 rejected broker registration")
 	}
 	return nil
 }
@@ -286,7 +284,7 @@ func (b *localBroker) resume(request resumeRequest) error {
 	if err != nil {
 		return ErrInvalidToken
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 	wire := brokerResumeWire{Version: fuseprotocol.Version, RuntimeUID: request.RuntimeUID, Generation: request.Generation, Secret: secret}
 	if err := writeBrokerFrame(connection, wire); err != nil {
@@ -314,8 +312,8 @@ func MaybeRunBroker() (bool, int) {
 	if stateFile == nil || readyFile == nil {
 		return true, 1
 	}
-	defer stateFile.Close()
-	defer readyFile.Close()
+	defer func() { _ = stateFile.Close() }()
+	defer func() { _ = readyFile.Close() }()
 	var launch brokerLaunch
 	if err := decodeLimitedJSON(stateFile, &launch); err != nil || validateBrokerLaunch(launch) != nil {
 		return true, 1
@@ -330,7 +328,7 @@ func MaybeRunBroker() (bool, int) {
 	if err != nil {
 		return true, 1
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	if _, err := readyFile.Write([]byte{1}); err != nil {
 		return true, 1
 	}

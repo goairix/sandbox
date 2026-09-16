@@ -149,7 +149,7 @@ func TestDestroyEphemeralFUSERetainsRuntimeAndLeaseWhenFlushFails(t *testing.T) 
 	rt.mockRuntime.mu.Lock()
 	rt.flushErr = nil
 	rt.mockRuntime.mu.Unlock()
-	mgr.Stop(context.Background())
+	require.NoError(t, mgr.Stop(context.Background()))
 }
 
 func TestStartupFinalizesEphemeralFUSEWithoutRestoringUserSession(t *testing.T) {
@@ -180,7 +180,7 @@ func TestStartupFinalizesEphemeralFUSEWithoutRestoringUserSession(t *testing.T) 
 	restored.SetSessionStore(NewSessionStore(store, time.Hour))
 	restored.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
 	require.NoError(t, restored.Start(context.Background()))
-	t.Cleanup(func() { restored.Stop(context.Background()) })
+	t.Cleanup(func() { require.NoError(t, restored.Stop(context.Background())) })
 
 	_, err = restored.Get(context.Background(), sb.ID)
 	require.ErrorIs(t, err, ErrSandboxNotFound)

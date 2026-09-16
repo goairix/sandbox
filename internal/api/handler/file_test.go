@@ -242,7 +242,7 @@ func TestReadFileLines_InvalidPath(t *testing.T) {
 		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 	var resp types.ErrorResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	if resp.Message == "" {
 		t.Error("expected non-empty error message")
 	}

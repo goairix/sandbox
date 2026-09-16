@@ -42,7 +42,7 @@ type spdyPodCommandExecutor struct {
 
 func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string, argv []string, stdin []byte) ([]byte, error) {
 	if e.client == nil || e.restConfig == nil {
-		return nil, fmt.Errorf("Kubernetes control executor is not configured")
+		return nil, fmt.Errorf("kubernetes control executor is not configured")
 	}
 	request := e.client.CoreV1().RESTClient().Post().
 		Resource("pods").Name(pod).Namespace(e.namespace).SubResource("exec").
@@ -63,7 +63,7 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 		return nil, kubernetesControlExecError(err, stderr.Bytes())
 	}
 	if stdout.overflow || stderr.overflow {
-		return nil, fmt.Errorf("Kubernetes control output exceeds limit")
+		return nil, fmt.Errorf("kubernetes control output exceeds limit")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
 }
@@ -155,10 +155,6 @@ func isAppArmorReadCommand(argv []string) bool {
 
 func allowedProbeCommand(argv []string) bool {
 	return fuseprotocol.AllowedProbeCommand(argv)
-}
-
-func validControlIdentity(value string) bool {
-	return fuseprotocol.ValidIdentity(value)
 }
 
 func decodeMounterStatus(raw []byte) (mounterStatusWire, error) {

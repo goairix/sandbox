@@ -26,7 +26,7 @@ func (CommandRunner) Start(_ context.Context, argv, environment []string) (Proce
 	if err != nil {
 		return nil, fmt.Errorf("open child null device: %w", err)
 	}
-	defer null.Close()
+	defer func() { _ = null.Close() }()
 	diagnostic := newDiagnosticBuffer()
 	command.Stdin, command.Stdout, command.Stderr = null, null, diagnostic
 	if err := command.Start(); err != nil {
@@ -47,7 +47,7 @@ func (CommandRunner) Run(ctx context.Context, argv []string) error {
 	if err != nil {
 		return fmt.Errorf("open command null device: %w", err)
 	}
-	defer null.Close()
+	defer func() { _ = null.Close() }()
 	command.Stdin, command.Stdout, command.Stderr = null, null, null
 	if err := command.Start(); err != nil {
 		return err

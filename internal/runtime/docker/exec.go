@@ -240,13 +240,13 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			// Non-TTY mode: use stdcopy to demux stdout/stderr.
 			stdoutPR, stdoutPW := io.Pipe()
 			stderrPR, stderrPW := io.Pipe()
-			defer stdoutPR.Close()
-			defer stderrPR.Close()
+			defer func() { _ = stdoutPR.Close() }()
+			defer func() { _ = stderrPR.Close() }()
 
 			go func() {
 				_, _ = stdcopy.StdCopy(stdoutPW, stderrPW, attachResp.Reader)
-				stdoutPW.Close()
-				stderrPW.Close()
+				_ = stdoutPW.Close()
+				_ = stderrPW.Close()
 			}()
 
 			done := make(chan struct{})

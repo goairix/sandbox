@@ -56,13 +56,13 @@ func NewWithFUSECredentialsAndCAAtRoot(ctx context.Context, host, gatewayImage s
 	}
 	if len(credentials.AccessKey) == 0 || len(credentials.SecretKey) == 0 {
 		_ = runtimeImpl.Close()
-		return nil, fmt.Errorf("Docker workspace FUSE credentials are required")
+		return nil, fmt.Errorf("docker workspace FUSE credentials are required")
 	}
 	runtimeImpl.fuseCredentials = credentials.Clone()
 	if materializer != nil {
 		if !validDockerWorkspaceSecretRoot(secretRoot) {
 			_ = runtimeImpl.Close()
-			return nil, fmt.Errorf("Docker workspace FUSE CA root is invalid")
+			return nil, fmt.Errorf("docker workspace FUSE CA root is invalid")
 		}
 		runtimeImpl.secretRoot = secretRoot
 		runtimeImpl.secretMaterializer = materializer
@@ -232,10 +232,10 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	}
 	fuse := spec.WorkspaceFUSE
 	if fuse.SystemEgress.Mode != runtime.SystemEgressCIDR {
-		return nil, fmt.Errorf("Docker workspace FUSE supports only CIDR system egress")
+		return nil, fmt.Errorf("docker workspace FUSE supports only CIDR system egress")
 	}
 	if fuse.CASecretKey != "" && r.secretMaterializer == nil {
-		return nil, fmt.Errorf("Docker workspace FUSE secret materializer is unavailable")
+		return nil, fmt.Errorf("docker workspace FUSE secret materializer is unavailable")
 	}
 	preparationID, err := newDockerPreparationID()
 	if err != nil {
@@ -387,17 +387,17 @@ func encodeDockerSystemEgress(spec runtime.SystemEgressSpec) (string, runtime.Sy
 func decodeDockerSystemEgress(encoded string) (runtime.SystemEgressSpec, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil || len(raw) == 0 {
-		return runtime.SystemEgressSpec{}, fmt.Errorf("Docker system egress recovery contract is invalid")
+		return runtime.SystemEgressSpec{}, fmt.Errorf("docker system egress recovery contract is invalid")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	var spec runtime.SystemEgressSpec
 	if err := decoder.Decode(&spec); err != nil || decoder.Decode(&struct{}{}) != io.EOF || spec.Mode != runtime.SystemEgressCIDR {
-		return runtime.SystemEgressSpec{}, fmt.Errorf("Docker system egress recovery contract is invalid")
+		return runtime.SystemEgressSpec{}, fmt.Errorf("docker system egress recovery contract is invalid")
 	}
 	canonical, _, err := encodeDockerSystemEgress(spec)
 	if err != nil || canonical != encoded {
-		return runtime.SystemEgressSpec{}, fmt.Errorf("Docker system egress recovery contract is not canonical")
+		return runtime.SystemEgressSpec{}, fmt.Errorf("docker system egress recovery contract is not canonical")
 	}
 	return spec, nil
 }
@@ -726,7 +726,7 @@ func dockerWorkspaceStateFromLabels(runtimeUID string, labels map[string]string)
 	secretRoot := labels[dockerSecretRootLabel]
 	caSecretKey := labels[dockerCASecretKeyLabel]
 	if runtimeUID == "" || !validDockerPreparationID(preparationID) || labels["sandbox.id"] != preparationID || logicalID == "" || poolKey == "" || cacheBytes <= 0 || err != nil || !validDockerWorkspaceSecretRoot(secretRoot) || !validDockerCASecretKey(caSecretKey) {
-		return nil, fmt.Errorf("Docker workspace recovery identity is invalid")
+		return nil, fmt.Errorf("docker workspace recovery identity is invalid")
 	}
 	systemEgress, err := decodeDockerSystemEgress(labels[dockerSystemEgressLabel])
 	if err != nil {
@@ -743,7 +743,7 @@ func (r *Runtime) requireCurrentWorkspaceSecretRoot(state *dockerWorkspaceState)
 		return nil
 	}
 	if state == nil || !validDockerWorkspaceSecretRoot(state.secretRoot) || state.secretRoot != r.effectiveSecretRoot() {
-		return fmt.Errorf("Docker workspace secret root changed while managed FUSE resources still exist")
+		return fmt.Errorf("docker workspace secret root changed while managed FUSE resources still exist")
 	}
 	return nil
 }
@@ -1182,7 +1182,7 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 		return nil, err
 	}
 
-	state := "unknown"
+	var state string
 	if info.State.Running {
 		state = "running"
 	} else if info.State.Paused {

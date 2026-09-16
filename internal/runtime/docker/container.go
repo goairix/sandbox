@@ -213,7 +213,7 @@ func dockerFUSEHostResolution(fuse *runtime.WorkspaceFUSESpec) ([]string, []stri
 	if len(fuse.SystemEgress.Hosts) == 0 {
 		dnsPorts, err := canonicalDockerPorts(fuse.SystemEgress.DNSPorts)
 		if err != nil || len(dnsPorts) != 1 || dnsPorts[0] != 53 {
-			return nil, nil, fmt.Errorf("Docker workspace FUSE DNS ports must be exactly 53")
+			return nil, nil, fmt.Errorf("docker workspace FUSE DNS ports must be exactly 53")
 		}
 		dnsCIDRs, err := canonicalDockerDNSCIDRs(fuse.SystemEgress.DNSCIDRs)
 		if err != nil {

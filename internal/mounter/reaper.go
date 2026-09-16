@@ -36,13 +36,13 @@ type DockerReaperServer struct {
 
 func (s *DockerReaperServer) Serve(ctx context.Context) error {
 	if os.Getpid() != 1 {
-		return fmt.Errorf("Docker reaper server must be PID 1")
+		return fmt.Errorf("docker reaper server must be PID 1")
 	}
 	listener, err := net.Listen("unix", fuseprotocol.DockerReaperSocket)
 	if err != nil {
 		return fmt.Errorf("listen for Docker reaper handshake: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	go func() { <-ctx.Done(); _ = listener.Close() }()
 	for {
 		connection, err := listener.Accept()
@@ -52,7 +52,7 @@ func (s *DockerReaperServer) Serve(ctx context.Context) error {
 			}
 			return err
 		}
-		go func() { defer connection.Close(); s.handle(ctx, connection) }()
+		go func() { defer func() { _ = connection.Close() }(); s.handle(ctx, connection) }()
 	}
 }
 

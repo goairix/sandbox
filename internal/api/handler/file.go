@@ -59,8 +59,8 @@ func validateSandboxPath(p string) error {
 	if strings.Contains(cleaned, "..") {
 		return fmt.Errorf("path must not contain '..'")
 	}
-	if !(cleaned == "/workspace" || strings.HasPrefix(cleaned, "/workspace/")) &&
-		!(cleaned == "/tmp" || strings.HasPrefix(cleaned, "/tmp/")) {
+	if cleaned != "/workspace" && !strings.HasPrefix(cleaned, "/workspace/") &&
+		cleaned != "/tmp" && !strings.HasPrefix(cleaned, "/tmp/") {
 		return fmt.Errorf("path must start with /workspace/ or /tmp/")
 	}
 	return nil

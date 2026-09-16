@@ -230,13 +230,13 @@ func loadCredentialFilesAttempt(files config.FileSystemCredentialFileConfig, hoo
 	if err != nil {
 		return FileSystemCredentials{}, false, fmt.Errorf("storage: open access key credential file: %w", err)
 	}
-	defer accessFile.Close()
+	defer func() { _ = accessFile.Close() }()
 
 	secretFile, err := os.Open(files.SecretKeyFile)
 	if err != nil {
 		return FileSystemCredentials{}, false, fmt.Errorf("storage: open secret key credential file: %w", err)
 	}
-	defer secretFile.Close()
+	defer func() { _ = secretFile.Close() }()
 
 	if hooks.afterOpen != nil {
 		hooks.afterOpen(attempt)

@@ -101,7 +101,7 @@ func copySecretFile(source, target string) error {
 	if err != nil {
 		return fmt.Errorf("open workspace secret source: %w", err)
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	after, err := in.Stat()
 	if err != nil || !os.SameFile(before, after) {
 		return fmt.Errorf("workspace secret source changed")

@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -163,7 +162,7 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 	if err != nil {
 		return nil, err
 	}
-	execResp, err := r.cli.ContainerExecCreate(ctx, id, types.ExecConfig{
+	execResp, err := r.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          []string{"cat", srcPath},
 		User:         user,
 		AttachStdout: true,
@@ -173,7 +172,7 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 		return nil, fmt.Errorf("create exec: %w", err)
 	}
 
-	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	attachResp, err := r.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("attach exec: %w", err)
 	}
@@ -248,14 +247,11 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 		isDir := parts[2] == "d"
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		fullPath := dirPath + "/" + parts[0]
 
@@ -264,7 +260,7 @@ func (r *Runtime) ListFiles(ctx context.Context, id string, dirPath string) ([]r
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -291,8 +287,10 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 	if err != nil {
 		return nil, err
 	}
-	var totalCount int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+	totalCount, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build paginated listing command (exclude root dir with -mindepth 1)
 	listCmd := fmt.Sprintf(
@@ -322,14 +320,11 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 		isDir := parts[2] == "d"
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
 
 		name := filepath.Base(parts[0])
 		fullPath := dirPath + "/" + parts[0]
@@ -339,7 +334,7 @@ func (r *Runtime) ListFilesRecursive(ctx context.Context, id string, dirPath str
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   isDir,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -370,8 +365,10 @@ func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, patt
 	if err != nil {
 		return nil, err
 	}
-	var totalCount int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalCount)
+	totalCount, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	listCmd := fmt.Sprintf(
 		"find %s -mindepth 1 %s%s -type f -printf '%%P\\t%%s\\t%%Y\\t%%T@\\n'",
@@ -400,13 +397,10 @@ func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, patt
 			continue
 		}
 
-		var size int64
-		fmt.Sscanf(parts[1], "%d", &size)
-
-		var modTimeFloat float64
-		fmt.Sscanf(parts[3], "%f", &modTimeFloat)
-		sec := int64(modTimeFloat)
-		nsec := int64((modTimeFloat - float64(sec)) * 1e9)
+		size, modTime, err := runtime.ParseFileMetadata(parts[1], parts[3])
+		if err != nil {
+			return nil, err
+		}
 
 		name := filepath.Base(parts[0])
 		fullPath := baseDir + "/" + parts[0]
@@ -416,7 +410,7 @@ func (r *Runtime) GlobFiles(ctx context.Context, id string, baseDir string, patt
 			Path:    fullPath,
 			Size:    size,
 			IsDir:   false,
-			ModTime: time.Unix(sec, nsec),
+			ModTime: modTime,
 		})
 	}
 
@@ -437,9 +431,9 @@ func (r *Runtime) CountReservedFiles(ctx context.Context, id, baseDir string, ma
 	if err := uploadExecResult("count reserved FUSE files", result, err); err != nil {
 		return 0, err
 	}
-	var count int
-	if scanned, scanErr := fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &count); scanErr != nil || scanned != 1 || count < 0 {
-		return 0, fmt.Errorf("count reserved FUSE files: invalid count %q", strings.TrimSpace(result.Stdout))
+	count, err := runtime.ParseFileCount(result.Stdout)
+	if err != nil {
+		return 0, fmt.Errorf("count reserved FUSE files: %w", err)
 	}
 	return count, nil
 }
@@ -486,8 +480,10 @@ func (r *Runtime) ReadFileLines(ctx context.Context, id string, filePath string,
 	if err != nil {
 		return nil, err
 	}
-	var totalLines int
-	fmt.Sscanf(strings.TrimSpace(countResult.Stdout), "%d", &totalLines)
+	totalLines, err := runtime.ParseFileCount(countResult.Stdout)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build sed range: endLine 0 means read to end of file
 	var sedRange string

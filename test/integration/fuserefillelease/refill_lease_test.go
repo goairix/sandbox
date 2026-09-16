@@ -139,7 +139,7 @@ func selectPoolKey(t *testing.T, ctx context.Context, repository *redisstate.FUS
 	return candidates[0]
 }
 
-func (c *sandboxClient) request(ctx context.Context, method, path string, input, output any) (int, error) {
+func (c *sandboxClient) request(ctx context.Context, method, path string, input, output any) (status int, err error) {
 	var body io.Reader
 	if input != nil {
 		data, err := json.Marshal(input)
@@ -162,7 +162,7 @@ func (c *sandboxClient) request(ctx context.Context, method, path string, input,
 	if err != nil {
 		return 0, err
 	}
-	defer response.Body.Close()
+	defer func() { err = errors.Join(err, response.Body.Close()) }()
 	data, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	if err != nil {
 		return response.StatusCode, err

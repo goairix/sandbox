@@ -947,7 +947,7 @@ func (m *Manager) fullSyncFromContainer(ctx context.Context, scoped storage.Scop
 		)
 		return fmt.Errorf("download workspace: %w", err)
 	}
-	defer tarReader.Close()
+	defer func() { _ = tarReader.Close() }()
 
 	tr := tar.NewReader(tarReader)
 	for {
@@ -1020,7 +1020,7 @@ func (m *Manager) downloadChangedFiles(ctx context.Context, scoped storage.Scope
 		)
 		return fmt.Errorf("download workspace: %w", err)
 	}
-	defer tarReader.Close()
+	defer func() { _ = tarReader.Close() }()
 
 	tr := tar.NewReader(tarReader)
 	for {

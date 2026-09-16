@@ -21,7 +21,7 @@ func (p procMountInfo) requireS3FSMount(path string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return requireEffectiveS3FS(file, path, mountID)
 }
 

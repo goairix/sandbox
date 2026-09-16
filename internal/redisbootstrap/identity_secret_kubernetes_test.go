@@ -416,7 +416,7 @@ func TestEnsureIdentityInvalidScopeNeverAccessesAPI(t *testing.T) {
 		})
 	}
 	c, o := identityFixture(t)
-	if err := EnsureIdentitySecret(nil, c.CoreV1(), o); !errors.Is(err, ErrIdentityInvalid) {
+	if err := EnsureIdentitySecret(nil, c.CoreV1(), o); !errors.Is(err, ErrIdentityInvalid) { //nolint:staticcheck // SA1012: intentionally exercises nil-context rejection.
 		t.Fatal(err)
 	}
 	if err := EnsureIdentitySecret(context.Background(), nil, o); !errors.Is(err, ErrIdentityInvalid) {

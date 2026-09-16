@@ -130,8 +130,13 @@ func TestDockerPoolHitAuthorizesSameContainer(t *testing.T) {
 	assert.Equal(t, []byte("do-not-persist-access"), fake.authorize.Credentials.AccessKey)
 	assert.Equal(t, []byte("do-not-persist-secret"), fake.authorize.Credentials.SecretKey)
 	assert.Empty(t, fake.materializedSecrets)
-	preparedJSON, err := json.Marshal(fake.containers[info.RuntimeID])
+	preparedJSON, err := json.Marshal(struct {
+		Config     *container.Config
+		HostConfig *container.HostConfig
+	}{fake.containers[info.RuntimeID].config, fake.containers[info.RuntimeID].host})
 	require.NoError(t, err)
+	require.Contains(t, string(preparedJSON), `"Image":`)
+	require.Contains(t, string(preparedJSON), `"sandbox.managed":"true"`)
 	assert.NotContains(t, string(preparedJSON), "do-not-persist-access")
 	assert.NotContains(t, string(preparedJSON), "do-not-persist-secret")
 	bootstrapJSON, err := json.Marshal(fake.bootstrap)

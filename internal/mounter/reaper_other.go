@@ -9,11 +9,11 @@ import (
 )
 
 func dockerReaperPeerIdentity(net.Conn) (int, int, error) {
-	return 0, 0, fmt.Errorf("Docker reaper requires Linux")
+	return 0, 0, fmt.Errorf("docker reaper requires Linux")
 }
 func dockerReaperProcessIdentity(int) (reaperProcessIdentity, error) {
-	return reaperProcessIdentity{}, fmt.Errorf("Docker reaper requires Linux")
+	return reaperProcessIdentity{}, fmt.Errorf("docker reaper requires Linux")
 }
 func dockerWaitExactChild(context.Context, reaperProcessIdentity) error {
-	return fmt.Errorf("Docker reaper requires Linux")
+	return fmt.Errorf("docker reaper requires Linux")
 }

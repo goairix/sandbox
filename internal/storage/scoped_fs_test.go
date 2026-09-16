@@ -111,7 +111,7 @@ func TestScopedFS_CreateAndOpen(t *testing.T) {
 	// Open and read it back
 	r, err := sfs.Open(ctx, "hello.txt")
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { require.NoError(t, r.Close()) }()
 
 	data, err := io.ReadAll(r)
 	require.NoError(t, err)

@@ -162,11 +162,7 @@ func (h *Handler) UpdateNetwork(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, types.UpdateNetworkResponse{
-		Enabled:      req.Enabled,
-		Whitelist:    req.Whitelist,
-		BlockPrivate: req.BlockPrivate,
-	})
+	c.JSON(http.StatusOK, types.UpdateNetworkResponse(req))
 }
 
 // UpdateTTL dynamically updates the TTL for a running sandbox.

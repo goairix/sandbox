@@ -201,7 +201,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 			// Send heartbeat ping event
 			pingData := types.SSEPingData{Timestamp: time.Now().Unix()}
 			jsonData, _ := json.Marshal(pingData)
-			fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData)
+			if _, err := fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData); err != nil {
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -263,7 +265,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 				jsonData, _ = json.Marshal(errData)
 				eventType = "error"
 			}
-			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
+			if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData); err != nil {
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}

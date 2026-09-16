@@ -599,7 +599,7 @@ func (r *advancingAfterReturnRepository) ReturnPreparedWithAdmission(ctx context
 	if err != nil {
 		return nil, err
 	}
-	advanced, reserveErr := r.memoryFUSEPoolRepository.ReservePrepared(ctx, returned.PoolKey, "next-owner", time.Minute)
+	advanced, reserveErr := r.ReservePrepared(ctx, returned.PoolKey, "next-owner", time.Minute)
 	if reserveErr != nil {
 		return nil, reserveErr
 	}
@@ -880,7 +880,7 @@ func TestFUSEPoolWarmAcquireAndRefill(t *testing.T) {
 	assert.Equal(t, state.FUSEPoolReserved, got.State)
 	require.Eventually(t, func() bool { return repo.countState("pool-key", state.FUSEPoolPrepared) == 2 }, time.Second, 5*time.Millisecond)
 	assert.LessOrEqual(t, repo.countPreparingAndPrepared("pool-key"), 3)
-	pool.Stop(context.Background())
+	require.NoError(t, pool.Stop(context.Background()))
 }
 
 func TestFUSEPoolUsesSyncCompatibleConciseRuntimeName(t *testing.T) {
@@ -893,7 +893,7 @@ func TestFUSEPoolUsesSyncCompatibleConciseRuntimeName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Regexp(t, `^sandbox-pool-[a-z0-9]{10}$`, rt.lastCreatedSpec().ID)
 	assert.Equal(t, rt.lastCreatedSpec().ID, record.PreparationID)
-	pool.Stop(context.Background())
+	require.NoError(t, pool.Stop(context.Background()))
 }
 
 func TestFUSEPoolColdAcquireNeverPublishesPrepared(t *testing.T) {
@@ -942,7 +942,7 @@ func TestFUSEPoolAcquireWaitsForConcurrentRefill(t *testing.T) {
 	assert.Equal(t, record.RuntimeUID, got.RuntimeUID)
 	assert.Equal(t, state.FUSEPoolReserved, got.State)
 	<-published
-	pool.Stop(context.Background())
+	require.NoError(t, pool.Stop(context.Background()))
 }
 
 func TestFUSEPoolAcquireRefillWaitHonorsCallerCancellation(t *testing.T) {
@@ -956,7 +956,7 @@ func TestFUSEPoolAcquireRefillWaitHonorsCallerCancellation(t *testing.T) {
 
 	_, err := pool.Acquire(ctx, "pool-key")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	pool.Stop(context.Background())
+	require.NoError(t, pool.Stop(context.Background()))
 }
 
 func TestFUSEPoolColdAcquireHonorsMaxAcrossReplicas(t *testing.T) {

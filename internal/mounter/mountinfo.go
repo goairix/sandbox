@@ -98,7 +98,7 @@ func ReadEffectiveMount(path string) (Mount, error) {
 	if err != nil {
 		return Mount{}, fmt.Errorf("open mountinfo: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return EffectiveMount(file, path, kernelMountID)
 }
 

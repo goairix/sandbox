@@ -46,7 +46,7 @@ func integrationClient(t *testing.T) *apiClient {
 	return &apiClient{baseURL: baseURL, apiKey: apiKey, client: &http.Client{Timeout: 45 * time.Minute}}
 }
 
-func (c *apiClient) request(ctx context.Context, method, path string, input, output any) (int, error) {
+func (c *apiClient) request(ctx context.Context, method, path string, input, output any) (status int, err error) {
 	var body io.Reader
 	if input != nil {
 		raw, err := json.Marshal(input)
@@ -67,7 +67,7 @@ func (c *apiClient) request(ctx context.Context, method, path string, input, out
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = errors.Join(err, resp.Body.Close()) }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return resp.StatusCode, fmt.Errorf("%s %s: status=%d body=%s", method, path, resp.StatusCode, strings.TrimSpace(string(limited)))

@@ -254,8 +254,9 @@ func (s *sharedFirstNetworkPolicyStore) react(action ktesting.Action) (bool, k8s
 	if action.GetResource().Resource != "networkpolicies" {
 		return false, nil, nil
 	}
-	switch typed := action.(type) {
-	case ktesting.GetAction:
+	switch action.GetVerb() {
+	case "get":
+		typed := action.(ktesting.GetAction)
 		if typed.GetName() != s.name {
 			return false, nil, nil
 		}
@@ -273,7 +274,8 @@ func (s *sharedFirstNetworkPolicyStore) react(action ktesting.Action) (bool, k8s
 		s.mu.Unlock()
 		<-release
 		return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "networking.k8s.io", Resource: "networkpolicies"}, s.name)
-	case ktesting.CreateAction:
+	case "create":
+		typed := action.(ktesting.CreateAction)
 		candidate := typed.GetObject().(*networkingv1.NetworkPolicy).DeepCopy()
 		if candidate.Name != s.name {
 			return false, nil, nil
@@ -287,7 +289,8 @@ func (s *sharedFirstNetworkPolicyStore) react(action ktesting.Action) (bool, k8s
 		candidate.ResourceVersion = "1"
 		s.policy = candidate
 		return true, candidate.DeepCopy(), nil
-	case ktesting.DeleteAction:
+	case "delete":
+		typed := action.(ktesting.DeleteAction)
 		if typed.GetName() != s.name {
 			return false, nil, nil
 		}
@@ -320,8 +323,9 @@ func newSharedFirstCiliumPolicyStore(name string) *sharedFirstCiliumPolicyStore 
 }
 
 func (s *sharedFirstCiliumPolicyStore) react(action ktesting.Action) (bool, k8sruntime.Object, error) {
-	switch typed := action.(type) {
-	case ktesting.GetAction:
+	switch action.GetVerb() {
+	case "get":
+		typed := action.(ktesting.GetAction)
 		if typed.GetName() != s.name {
 			return false, nil, nil
 		}
@@ -339,7 +343,8 @@ func (s *sharedFirstCiliumPolicyStore) react(action ktesting.Action) (bool, k8sr
 		s.mu.Unlock()
 		<-release
 		return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "cilium.io", Resource: "ciliumnetworkpolicies"}, s.name)
-	case ktesting.CreateAction:
+	case "create":
+		typed := action.(ktesting.CreateAction)
 		candidate := typed.GetObject().(*unstructured.Unstructured).DeepCopy()
 		if candidate.GetName() != s.name {
 			return false, nil, nil
@@ -353,7 +358,8 @@ func (s *sharedFirstCiliumPolicyStore) react(action ktesting.Action) (bool, k8sr
 		candidate.SetResourceVersion("1")
 		s.policy = candidate
 		return true, candidate.DeepCopy(), nil
-	case ktesting.DeleteAction:
+	case "delete":
+		typed := action.(ktesting.DeleteAction)
 		if typed.GetName() != s.name {
 			return false, nil, nil
 		}
@@ -2237,7 +2243,7 @@ func TestExactFUSEMethodsRejectNameReuseWithoutMutation(t *testing.T) {
 	pod, err := client.CoreV1().Pods("runtime").Get(context.Background(), info.RuntimeID, metav1.GetOptions{})
 	require.NoError(t, err)
 	pod.UID = types.UID("replacement-uid")
-	client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "runtime", info.RuntimeID)
+	require.NoError(t, client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "runtime", info.RuntimeID))
 	require.NoError(t, client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), pod, "runtime"))
 	beforeCommands := len(script.commands)
 	beforeActions := len(client.Actions())

@@ -24,7 +24,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	typednetworkingv1 "k8s.io/client-go/kubernetes/typed/networking/v1"
 
-	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 )
 
@@ -101,7 +100,7 @@ func buildCiliumSystemEgressPolicy(namespace, instance string, spec runtime.Syst
 		return nil, fmt.Errorf("CiliumNetworkPolicy requires FQDN system egress")
 	}
 	if len(endpointFQDNs) == 0 {
-		return nil, fmt.Errorf("Cilium FQDN system egress requires endpoint FQDNs")
+		return nil, fmt.Errorf("cilium FQDN system egress requires endpoint FQDNs")
 	}
 	encodedEndpointCIDRs, err := json.Marshal(endpointCIDRs)
 	if err != nil {
@@ -116,14 +115,14 @@ func buildCiliumSystemEgressPolicy(namespace, instance string, spec runtime.Syst
 	for _, raw := range canonicalStringSet(hostIPs) {
 		addr, parseErr := netip.ParseAddr(raw)
 		if parseErr != nil || addr.Is4In6() || addr.Zone() != "" || addr.String() != raw {
-			return nil, fmt.Errorf("Cilium endpoint host alias must be a canonical literal IP")
+			return nil, fmt.Errorf("cilium endpoint host alias must be a canonical literal IP")
 		}
 		allowed := false
 		for _, prefix := range approved {
 			allowed = allowed || prefix.Contains(addr)
 		}
 		if !allowed {
-			return nil, fmt.Errorf("Cilium endpoint host alias is outside approved endpoint CIDRs")
+			return nil, fmt.Errorf("cilium endpoint host alias is outside approved endpoint CIDRs")
 		}
 		aliasPrefixes = append(aliasPrefixes, netip.PrefixFrom(addr, addr.BitLen()).String())
 	}
@@ -521,7 +520,7 @@ func upsertExactCiliumUserPolicy(ctx context.Context, policies dynamic.ResourceI
 		return fmt.Errorf("get Cilium user deny policy: %w", err)
 	}
 	if current.GetUID() == "" {
-		return fmt.Errorf("Cilium user deny policy has no immutable UID")
+		return fmt.Errorf("cilium user deny policy has no immutable UID")
 	}
 	if !ciliumUserPolicyIntentMatches(current, desired) &&
 		(current.GetLabels()["sandbox.managed"] != "true" || current.GetLabels()["sandbox.pool.instance"] != desired.GetLabels()["sandbox.pool.instance"] ||
@@ -668,7 +667,7 @@ func deleteCiliumPolicyForNetworkAttempt(ctx context.Context, policies dynamic.R
 	if verifyErr != nil {
 		return fmt.Errorf("verify Cilium network update attempt cleanup: %w", verifyErr)
 	}
-	return fmt.Errorf("Cilium network update attempt cleanup is unconfirmed")
+	return fmt.Errorf("cilium network update attempt cleanup is unconfirmed")
 }
 
 func networkPolicyIntentMatches(current, desired *networkingv1.NetworkPolicy) bool {
@@ -696,7 +695,7 @@ func deleteExactNetworkPolicy(ctx context.Context, client kubernetes.Interface, 
 		return fmt.Errorf("network policy ownership does not match")
 	}
 	boundUID := current.Annotations[fuseRuntimeUIDAnnotation]
-	if boundUID != runtimeUID && !(allowUnbound && boundUID == "") {
+	if boundUID != runtimeUID && (!allowUnbound || boundUID != "") {
 		return runtime.ErrInvalidRuntimeRef
 	}
 	if prepareAttempt != "" && current.Annotations[fusePrepareAttemptAnnotation] != prepareAttempt {
@@ -739,197 +738,6 @@ func detectCilium(client kubernetes.Interface) bool {
 // ciliumNetworkPolicyGVR is the GroupVersionResource for CiliumNetworkPolicy CRD.
 var ciliumNetworkPolicyGVR = schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}
 
-// applyCiliumPrivateDeny creates/updates explicit external RFC1918/link-local
-// egress deny rules. CIDR rules do not select Cilium-managed Pod endpoints;
-// managed cluster destinations require namespace-scoped endpoint selectors.
-func applyCiliumPrivateDeny(ctx context.Context, dynClient dynamic.Interface, namespace, sandboxID string) error {
-	name := "sandbox-private-deny-" + sandboxID
-	toCIDRSet := []any{
-		map[string]any{"cidr": "10.0.0.0/8"},
-		map[string]any{"cidr": "172.16.0.0/12"},
-		map[string]any{"cidr": "192.168.0.0/16"},
-		map[string]any{"cidr": "127.0.0.0/8"},
-		map[string]any{"cidr": "169.254.0.0/16"},
-		map[string]any{"cidr": "fc00::/7"},
-		map[string]any{"cidr": "::1/128"},
-		map[string]any{"cidr": "fe80::/10"},
-	}
-	obj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "cilium.io/v2",
-		"kind":       "CiliumNetworkPolicy",
-		"metadata": map[string]any{
-			"name": name, "namespace": namespace,
-			"labels": map[string]any{"sandbox.managed": "true", "sandbox.id": sandboxID},
-		},
-		"spec": map[string]any{
-			"endpointSelector": map[string]any{
-				"matchLabels": map[string]any{"sandbox.id": sandboxID},
-			},
-			"egressDeny": []any{
-				map[string]any{"toCIDRSet": toCIDRSet},
-			},
-		},
-	}}
-	existing, getErr := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if getErr == nil {
-		obj.SetResourceVersion(existing.GetResourceVersion())
-		_, err := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
-		if err != nil {
-			logger.Error(ctx, "failed to update CiliumNetworkPolicy private deny",
-				logger.AddField("sandbox_id", sandboxID), logger.ErrorField(err))
-		}
-		return err
-	}
-	if !errors.IsNotFound(getErr) {
-		logger.Error(ctx, "failed to get CiliumNetworkPolicy private deny",
-			logger.AddField("sandbox_id", sandboxID), logger.ErrorField(getErr))
-		return getErr
-	}
-	logger.Info(ctx, "applying CiliumNetworkPolicy private deny", logger.AddField("sandbox_id", sandboxID))
-	_, err := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
-	if err != nil {
-		logger.Error(ctx, "failed to create CiliumNetworkPolicy private deny",
-			logger.AddField("sandbox_id", sandboxID), logger.ErrorField(err))
-	}
-	return err
-}
-
-// deleteCiliumPrivateDeny removes the CiliumNetworkPolicy created by applyCiliumPrivateDeny.
-func deleteCiliumPrivateDeny(ctx context.Context, dynClient dynamic.Interface, namespace, sandboxID string) error {
-	err := dynClient.Resource(ciliumNetworkPolicyGVR).Namespace(namespace).Delete(ctx, "sandbox-private-deny-"+sandboxID, metav1.DeleteOptions{})
-	if errors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		logger.Error(ctx, "failed to delete CiliumNetworkPolicy private deny",
-			logger.AddField("sandbox_id", sandboxID), logger.ErrorField(err))
-	}
-	return err
-}
-
-// applyNetworkPolicy builds and upserts the NetworkPolicy for a sandbox.
-//
-// Mode selection (evaluated in order):
-//  1. blockPrivate=true: allow external, block RFC1918/ULA; whitelist = internal allowlist
-//  2. len(whitelist)>0: whitelist-only egress
-//  3. default: isolation — deny all egress except DNS
-func applyNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace string, sandboxID string, whitelist []string, blockPrivate bool) error {
-	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
-
-	resolvedCIDRs, err := resolveToCIDRs(whitelist)
-	if err != nil {
-		return err
-	}
-
-	udp := corev1.ProtocolUDP
-	tcp := corev1.ProtocolTCP
-	var egressRules []networkingv1.NetworkPolicyEgressRule
-
-	// Always allow DNS
-	egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-		Ports: []networkingv1.NetworkPolicyPort{
-			{Protocol: &udp, Port: &intstr.IntOrString{IntVal: 53}},
-			{Protocol: &tcp, Port: &intstr.IntOrString{IntVal: 53}},
-		},
-	})
-
-	switch {
-	case blockPrivate:
-		// Allow whitelisted internal addresses individually (before the block rules)
-		for _, cidr := range resolvedCIDRs {
-			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-				To: []networkingv1.NetworkPolicyPeer{
-					{IPBlock: &networkingv1.IPBlock{CIDR: cidr}},
-				},
-			})
-		}
-		// Allow all external IPv4 traffic, excluding RFC1918 private ranges.
-		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR: "0.0.0.0/0",
-						Except: []string{
-							"10.0.0.0/8",
-							"172.16.0.0/12",
-							"192.168.0.0/16",
-							"127.0.0.0/8",
-							"169.254.0.0/16",
-						},
-					},
-				},
-			},
-		})
-		// Allow all external IPv6 traffic, excluding private/ULA ranges.
-		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR: "::/0",
-						Except: []string{
-							"fc00::/7",  // ULA
-							"::1/128",   // loopback
-							"fe80::/10", // link-local
-						},
-					},
-				},
-			},
-		})
-
-	case len(resolvedCIDRs) > 0:
-		// Whitelist-only mode: allow only specified destinations
-		for _, cidr := range resolvedCIDRs {
-			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-				To: []networkingv1.NetworkPolicyPeer{
-					{IPBlock: &networkingv1.IPBlock{CIDR: cidr}},
-				},
-			})
-		}
-
-	default:
-		// Isolation mode: only DNS is allowed (the rule added above).
-		// PolicyTypeEgress with no additional To rules means deny-all except
-		// what is explicitly listed — in this case, DNS only.
-	}
-
-	policy := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      policyName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"sandbox.managed": "true",
-				"sandbox.id":      sandboxID,
-			},
-		},
-		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"sandbox.id": sandboxID},
-			},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
-			Egress:      egressRules,
-		},
-	}
-
-	// Upsert: update if exists, create otherwise.
-	existing, getErr := client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
-	if getErr == nil {
-		policy.ResourceVersion = existing.ResourceVersion
-		_, err = client.NetworkingV1().NetworkPolicies(namespace).Update(ctx, policy, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("update network policy: %w", err)
-		}
-		return nil
-	}
-	if !errors.IsNotFound(getErr) {
-		return fmt.Errorf("get network policy: %w", getErr)
-	}
-	_, err = client.NetworkingV1().NetworkPolicies(namespace).Create(ctx, policy, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("create network policy: %w", err)
-	}
-	return nil
-}
-
 // resolveToCIDRs converts a list of IPs, CIDRs, or domain names to CIDR strings.
 func resolveToCIDRs(entries []string) ([]string, error) {
 	var cidrs []string
@@ -957,77 +765,4 @@ func resolveToCIDRs(entries []string) ([]string, error) {
 		}
 	}
 	return cidrs, nil
-}
-
-// deleteNetworkPolicy removes the sandbox network policy. Ignores not-found errors.
-func deleteNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string) error {
-	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
-	err := client.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, policyName, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete network policy: %w", err)
-	}
-	return nil
-}
-
-// applyOpenNetworkPolicy creates a NetworkPolicy that allows all egress except the
-// cloud metadata endpoint (169.254.0.0/16) and IPv6 link-local/ULA ranges.
-// Used for open mode — metadata must always be blocked regardless of other settings.
-func applyOpenNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string) error {
-	policyName := fmt.Sprintf("sandbox-%s", sandboxID)
-	udp := corev1.ProtocolUDP
-	tcp := corev1.ProtocolTCP
-	policy := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      policyName,
-			Namespace: namespace,
-			Labels:    map[string]string{"sandbox.managed": "true", "sandbox.id": sandboxID},
-		},
-		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"sandbox.id": sandboxID},
-			},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				{Ports: []networkingv1.NetworkPolicyPort{
-					{Protocol: &udp, Port: &intstr.IntOrString{IntVal: 53}},
-					{Protocol: &tcp, Port: &intstr.IntOrString{IntVal: 53}},
-				}},
-				{To: []networkingv1.NetworkPolicyPeer{
-					{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{"169.254.0.0/16"}}},
-				}},
-				{To: []networkingv1.NetworkPolicyPeer{
-					{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: []string{"fe80::/10", "fc00::/7", "::1/128"}}},
-				}},
-			},
-		},
-	}
-	existing, getErr := client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
-	if getErr == nil {
-		policy.ResourceVersion = existing.ResourceVersion
-		_, err := client.NetworkingV1().NetworkPolicies(namespace).Update(ctx, policy, metav1.UpdateOptions{})
-		return err
-	}
-	if !errors.IsNotFound(getErr) {
-		return getErr
-	}
-	_, err := client.NetworkingV1().NetworkPolicies(namespace).Create(ctx, policy, metav1.CreateOptions{})
-	return err
-}
-
-// updateNetworkPolicy upserts or removes the NetworkPolicy for a sandbox.
-//
-//   - enabled=false: isolation mode — deny all egress except DNS
-//   - enabled=true, blockPrivate=false, whitelist=[]: open mode — allow all except metadata endpoint
-//   - enabled=true, whitelist=[...]: whitelist-only egress
-//   - enabled=true, blockPrivate=true: allow external, block RFC1918/ULA; whitelist = internal allowlist
-func updateNetworkPolicy(ctx context.Context, client kubernetes.Interface, namespace, sandboxID string, enabled bool, whitelist []string, blockPrivate bool) error {
-	if !enabled {
-		// Isolation: deny-all except DNS
-		return applyNetworkPolicy(ctx, client, namespace, sandboxID, nil, false)
-	}
-	if !blockPrivate && len(whitelist) == 0 {
-		// Open mode: allow all egress but always block cloud metadata endpoint.
-		return applyOpenNetworkPolicy(ctx, client, namespace, sandboxID)
-	}
-	return applyNetworkPolicy(ctx, client, namespace, sandboxID, whitelist, blockPrivate)
 }
