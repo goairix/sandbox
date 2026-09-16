@@ -207,3 +207,64 @@ git diff --check
 如果后端存储本身偶发超过 3 秒，将通过 `mounter_ready_wait` 和
 `propagation_probe` 分阶段数据继续区分挂载、传播和 API 其它耗时，不再与 PodReady
 周期混淆。
+
+## 第二阶段 ds-ai-research 现场验收结果
+
+用户部署 `sandbox-fuse-mounter:v0.3.30` 后，于 2026-09-16 在
+`ds-ai-research`、`aiadp-sandbox-fuse` 完成现场验收。三个 prepared FUSE Pool Pod 实际
+运行同一镜像 digest `sha256:56db3a0e82c36259ff5325cf5294a5c3b876c085b8ccde147c41c76bca2e8931`，
+均为零重启。
+
+升级期间 Helm 先进入 `pending-upgrade`，pre-upgrade drain 按设计把 API 缩到 0 并清理旧
+Pool；drain 完成后 resume hook 恢复 API 和 Pool，最终 release revision 12 为 `deployed`，
+API 3/3 Ready。prepared FUSE Pool Pod 显示 `1/2` 且产生 mounter readiness warning 是当前
+状态机的预期表现：`health prepared` 返回完整 prepared 状态，未领取前 `health ready` 必须
+失败。该现象会造成 Dashboard 噪声，但不等于 FUSE 创建失败。
+
+### 功能与并发
+
+完整 deployed API remediation suite 执行 479.17 秒并通过，覆盖三副本直连、普通沙盒、
+资源限额、动态 workspace、网络策略正负例、流式接口，以及 30 轮 FUSE 创建、跨副本 exec、
+sync、三副本 flush 状态一致性、拒绝动态卸载和销毁。
+
+另外同时领取三个 prepared FUSE Pool Pod，三次创建分别为 0.770、0.795、2.077 秒；跨副本
+exec 和销毁全部成功，没有重复领取。三个普通沙盒并发创建分别为 0.200、0.198、0.183 秒，
+跨副本 exec 全部成功。本次 mounter 变更未影响普通 Pool。
+
+### 性能结果
+
+完整套件的 30 次连续 FUSE 创建全部成功：
+
+- p50：3.835 秒；
+- p95：6.013 秒；
+- p99：6.972 秒。
+
+该循环在销毁返回后立即开始下一次创建，可能把异步补池竞争和冷创建混入样本，因此又执行
+隔离热池基准：每轮开始前都确认三个 FUSE prepared Pod 已补齐，然后创建、跨副本写读删除
+测试文件、销毁，再等待下一轮库存恢复。30 次全部成功：
+
+- min：0.653 秒；
+- p50：1.238 秒；
+- p95：3.770 秒；
+- p99/max：3.791 秒。
+
+升级前轻量基准为 p50 0.854 秒、p95 3.695 秒。考虑样本量和对象存储波动，第二阶段没有证明
+p95 得到实质改善，也仍未达到不高于 3 秒的目标。远端 `/bin/ls` 已确认不再是交付必需步骤，
+但当前主要长尾位于 s3fs 启动挂载或 mandatory `write-read-delete` 强传播探针；下一轮优化必须
+先补充这两段的逐请求分段观测，不再删减安全校验猜测提速。
+
+普通沙盒三次并发销毁分别为 32.187、31.958、32.183 秒，仍复现此前记录的约 30 秒历史
+问题；它不属于本次 mounter 变更，也没有因本次升级恶化。
+
+### 最终清理与健康状态
+
+- Helm revision 12 为 `deployed`，API 3/3 Ready；
+- 普通 Pool 3 个、FUSE Pool 3 个，active non-pool 和 deleting managed Pod 均为 0；
+- managed NetworkPolicy 6 个，managed CiliumNetworkPolicy 0 个，符合当前关闭用户网络的池
+  基线；
+- Redis session v2、ephemeral lifecycle、workspace lease 和 workspace owner 扫描均为 0；
+- pre/post hook Job 已按策略删除；
+- 三个 API 副本自升级后的关键错误日志计数均为 0；
+- 本地三个 port-forward 已停止。
+
+现场结论是：功能、跨副本一致性、并发和清理验收通过；FUSE 热池创建 p95 性能验收未通过。
