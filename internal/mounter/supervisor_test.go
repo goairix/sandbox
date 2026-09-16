@@ -648,7 +648,7 @@ func newTestSupervisorWithRunner(t *testing.T, runner Runner) (*Supervisor, fuse
 	return s, bootstrap
 }
 
-func TestReadyPollsStartupMountAndRecordsExactMountID(t *testing.T) {
+func TestReadyPollsStartupMountWithoutRemoteReadAndRecordsExactMountID(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
 	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
@@ -665,8 +665,8 @@ func TestReadyPollsStartupMountAndRecordsExactMountID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateReady, s.State())
 	assert.Equal(t, int64(1), status.Generation)
-	require.NotEmpty(t, runner.runs)
-	assert.Equal(t, []string{"/bin/ls", "-U", "--", bootstrap.MountPath}, runner.runs[len(runner.runs)-1])
+	assert.Equal(t, uint64(42), s.mountID)
+	assert.Empty(t, runner.runs, "mounter readiness must not duplicate sandbox propagation I/O")
 }
 
 func TestReadyCallerCancellationDoesNotPoisonOrExtendMountDeadline(t *testing.T) {
