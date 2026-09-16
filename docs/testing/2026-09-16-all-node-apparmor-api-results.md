@@ -114,6 +114,11 @@ nodes/proxy权限。使用严格 host key校验/BatchMode尝试已有 SSH 主机
 需要用户提供节点 SSH入口或脱敏 kubelet/containerd日志，进一步确定拉取与删除不完成的根因。
 本轮事件和应用日志只证明卡在未启动 runtime的拉取/终止链路，不推断为 DNS、磁盘或 AppArmor故障。
 
+最终追加只读核验时，本机 kubectl连接集群入口 `172.16.20.15:443` 已发生 i/o timeout，10秒请求/
+15秒进程预算的检查也失败。业务 UID/template/imageID/restart/Ready不变的最后确认来自18:19:12
+该轮 baseline比对，不声称网络中断后的即时健康或资源状态。自己的超时只读查询已停止。
+继续还须恢复本机到集群入口的网络，再重新核对保留现场；没有因连接失败去改集群或本机网络设置。
+
 继续时先确认相同 Node/Namespace/Pod UID，排查节点；原 Pod正常退出后，重跑同源 drain验证
 零 managed runtime/策略/Redis生命周期，再按 Namespace UID 删除和核对 RBAC GC。清理不确认
 不得测下一节点；不 force、手工清 finalizer、删状态或重启业务组件来制造通过。
