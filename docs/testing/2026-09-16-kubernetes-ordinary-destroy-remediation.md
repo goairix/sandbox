@@ -108,12 +108,43 @@ git diff --check
 
 ## 线上验收
 
-当前仍是待部署状态，不宣称线上销毁延迟已改善。用户部署新 `sandbox-api` 后执行：
+2026-09-16 在 `ds-ai-research / aiadp-sandbox-fuse` 完成部署后验收。Helm release revision 13
+状态为 `deployed`；三个 API 副本均使用
+`registry.i.huaxisy.com/library/ai-infra/sandbox-api:v0.3.31`，镜像 digest 均为
+`sha256:1e8e95347f805417998d4555d6d107d37e0895929bed8d095b33eda79f15cd4a`，全程 3/3
+Ready、零重启。
 
-1. 确认三个 API 副本 Ready 且使用新镜像 digest；
-2. 领取至少一个部署前已经存在、Pod spec 仍为 30 秒 grace 的普通 Pool Pod并销毁；
-3. 完成 10 次普通热池创建、跨副本 exec、销毁，要求成功率 100%，销毁 p95 不高于 5 秒；
-4. 连续三轮执行三副本同时 DELETE 的 ephemeral/persistent 回归；
-5. 执行一个 FUSE 真实写读、flush、销毁冒烟，证明普通快速删除没有进入 FUSE 路径；
-6. 最终确认普通 Pool 和 FUSE Pool 各恢复目标容量，没有 active 非池 Pod、Terminating managed
-   Pod、测试策略或 Redis active/session/controller/lease 残留。
+### 普通沙盒销毁性能与安全
+
+通过三个 Pod 直连端点轮转完成 10 次热池领取、跨副本 Python exec、跨副本 DELETE，并在每次销毁后
+从三个副本确认 GET 404。10/10 成功，销毁耗时为：
+
+```text
+2649ms 2767ms 3143ms 3234ms 3415ms 3434ms 3491ms 3522ms 3726ms 3891ms
+min=2649ms p50=3415ms p95=3891ms p99=3891ms max=3891ms avg=3327ms
+```
+
+按 nearest-rank 计算，小样本的 p95/p99 均等于最大值 3.891 秒，低于 5 秒验收线。被领取 Pod 的
+spec 仍为 30 秒；首个样本在 DELETE 后 218ms 观察到 `deletionTimestamp`，此时容器仍为 Running，
+3389ms 后原 UID 才 NotFound，API 总耗时 3522ms。该时间线证明它经过了非零优雅终止和节点侧
+终止确认，不是零宽限 force deletion。
+
+`TestDeployedOrdinaryConcurrentDestroy` 连续执行三轮；ephemeral/persistent 各一例、每例由三个 API
+副本同时 DELETE，共 18/18 个 DELETE 返回 HTTP 200 及有效 `sandbox destroyed` ACK，随后三个
+副本查询均为 404，包总耗时 34.519 秒。
+
+### 回归与收尾
+
+`TestDeployedAPIRemediation` 通过，覆盖跨副本 Python/Node exec、缺失与空文件、动态 sync 工作区
+挂载/同步/卸载、真实 cgroup v2 内存与 CPU 限额、one-shot SSE，以及 FUSE 写入、flush、三副本
+共享状态和销毁。FUSE 单个创建样本为 6.625 秒；功能隔离通过，但该样本仍高于 3 秒性能目标，
+不能据此关闭 FUSE 创建延迟优化项。
+
+最终现场恢复为三个普通 prepared Pool Pod 和三个 FUSE prepared Pool Pod，没有 active 非池或
+Terminating managed Pod；NetworkPolicy 恢复为三条基础策略和六条当前 Pool 策略，没有
+CiliumNetworkPolicy。Redis 只读扫描结果为：active record 0、active controller 0、session v2 0、
+ephemeral lifecycle 0、workspace owner 0、workspace lease 0。三个 API 副本仍为 3/3 Ready、零重启，
+最近 30 分钟日志未匹配 ERROR、panic、termination unconfirmed、timeout 或 refill failed。
+
+本轮通过 Pod port-forward 验收 API，不代表外部 Ingress/TLS 链路、Redis Sentinel 故障切换、网络
+分区、其它 CNI 或持续容量压测已经完成。
