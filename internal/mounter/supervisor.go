@@ -386,7 +386,6 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 		return status, fmt.Errorf("supervisor is not mounted")
 	}
 	var mount Mount
-	wasMounting := s.state == StateMounting
 	if s.state == StateReady {
 		if err := s.verifyActiveMountLocked(s.mountID); err != nil {
 			s.state = StateUnhealthy
@@ -402,20 +401,6 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 			}
 			return s.statusLocked(), err
 		}
-	}
-	var readCtx context.Context
-	var cancel context.CancelFunc
-	if wasMounting {
-		readCtx, cancel = context.WithDeadline(ctx, s.mountDeadline)
-	} else {
-		readCtx, cancel = context.WithTimeout(ctx, time.Duration(s.bootstrap.MountTimeoutSeconds)*time.Second)
-	}
-	defer cancel()
-	if err := s.runner.Run(readCtx, []string{"/bin/ls", "-U", "--", s.bootstrap.MountPath}); err != nil {
-		if ctx.Err() == nil {
-			s.state = StateUnhealthy
-		}
-		return s.statusLocked(), fmt.Errorf("bounded workspace read failed: %w", err)
 	}
 	if err := s.verifyActiveMountLocked(mount.ID); err != nil {
 		s.state = StateUnhealthy
