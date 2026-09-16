@@ -200,6 +200,28 @@ func TestExactOrdinaryRemovalAllowsMissingOptionalCiliumResource(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(err))
 }
 
+func TestOrdinaryDeletionRequestsImmediateExactUID(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", UID: "old-uid"}}
+	client := fake.NewSimpleClientset(pod)
+
+	require.NoError(t, deleteExactOrdinaryPod(context.Background(), client, "", pod, time.Millisecond, time.Second))
+
+	var deletion ktesting.DeleteAction
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "pods" {
+			deletion = action.(ktesting.DeleteAction)
+			break
+		}
+	}
+	require.NotNil(t, deletion)
+	options := deletion.GetDeleteOptions()
+	require.NotNil(t, options.Preconditions)
+	require.NotNil(t, options.Preconditions.UID)
+	require.Equal(t, pod.UID, *options.Preconditions.UID)
+	require.NotNil(t, options.GracePeriodSeconds)
+	require.Zero(t, *options.GracePeriodSeconds)
+}
+
 func TestOrdinaryDeletionTimeoutPreservesPendingClassification(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", UID: "old-uid"}}
 	client := fake.NewSimpleClientset(pod)
