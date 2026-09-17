@@ -2,6 +2,12 @@
 
 ## 状态与范围
 
+后续追加（2026-09-17 15:34）：已收到未启用DataPlane V2的单节点测试集群和私有values，
+只读预检发现Kubernetes 1.31、无默认StorageClass、ENI-only且无可自动发现的完整CIDR、
+AppArmor内核已启用。用户随后提供Pod `10.0.0.0/16`、Service `10.247.0.0/16`，地址库存
+交叉核对一致；原values被Sentinel持久化/版本及生产HA门禁阻止。当前仍是MinIO，不是OBS，
+没有安装或修改测试资源。见[首个集群预检](2026-09-17-shuanghua-no-dpv2-preflight.md)。
+
 2026-09-17 已完成当前 `ds-ai-research` 的
 [API v0.3.32 回归](2026-09-17-ds-ai-research-v0.3.32-validation.md)。本文记录新环境的已查证
 前提、候选测试范围和待提供输入，不是已批准的执行设计或双华云通过报告。尚未在双华云创建
