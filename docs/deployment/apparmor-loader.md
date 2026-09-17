@@ -174,6 +174,8 @@ CCE 现场曾在 loader Ready 后由 CRI 拒绝创建 mounter，见 [v0.3.33 现
 
 2026-09-17 代码整改修复了身份 PVC 绑定竞态和未启动 FUSE Pod 的正常清理流程，但未解决 CCE 的 CRI 前提。本轮需重建 API 与 Redis bootstrap，加载器/mounter 可沿用，详见 [构建与部署说明](helm-deployment-upgrade.md#本次-cce-身份绑定与未启动-fuse-清理整改)。
 
+用户提供 API `v0.3.34` 与 bootstrap `v0.3.1` 后，隔离现场确认首次身份/初始化和正常卸载通过，但已加载 enforce profile 的节点仍被 CRI 以 `apparmor is not supported` 拒绝创建真实 FUSE 容器；测试资源已清理。见 [最新现场报告](../testing/2026-09-17-cce-v034-live-validation.md)。这不是完整 API/AppArmor 验收通过，也不要求新增 Helm values。
+
 ## 权限与可用性
 
 节点须已启用 AppArmor 并可访问 securityfs。加载器无权改变内核启动参数，不假设所有 Linux 节点都有可用 AppArmor。DaemonSet 是可信节点管理组件，使用 privileged 和两个必要 hostPath：securityfs（策略加载需写入）及只读 enabled 文件；不挂载主机根目录、运行时 socket 或业务目录，不使用 hostPID/hostNetwork，不携带 Kubernetes API token。命名空间的 Pod Security Admission 必须由管理员允许该可信组件，不能因此扩大租户沙盒权限。

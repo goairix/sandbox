@@ -10,7 +10,7 @@
 - 清理：已调度但未启动容器的 exact FUSE Pod 可以进入正常 UID 删除，再等待 kubelet 终止证明；不执行无法运行的 shutdown，也不绕过证明。
 - AppArmor：修正“无需宿主机 parser”的无条件说明，区分镜像 parser、内核和 CRI 能力。
 
-本轮没有集群写入、云卷创建、节点配置修改或镜像构建/推送。没有切换/检查分支、创建 worktree、回滚或委派。本地验证不等于 CCE 全量验收；现场历史结果仍见 [v0.3.33 报告](2026-09-17-cce-v033-live-validation.md)。
+代码实施阶段没有集群写入、云卷创建、节点配置修改或镜像构建/推送。没有切换/检查分支、创建 worktree、回滚或委派。本地验证不等于 CCE 全量验收；现场历史结果仍见 [v0.3.33 报告](2026-09-17-cce-v033-live-validation.md)。用户提供新镜像后的隔离现场验证见 [v0.3.34 / bootstrap v0.3.1 报告](2026-09-17-cce-v034-live-validation.md)：首次初始化与正常卸载通过，CRI AppArmor 前提仍阻塞完整 API/FUSE 验收。
 
 ## 实现与安全边界
 
@@ -73,3 +73,5 @@ FUSE 覆盖正常删除、等待中启动后再终止、删除响应丢失、已
 CCE 的 CRI 拒绝 AppArmor 尚未解决。loader Ready 不代替 CRI 能力与真实 enforce 验收；平台只读核查、能力缓存和维护窗口边界见 [节点前提](../deployment/apparmor-loader.md#节点前提loader-ready-不等于-cri-支持)。不能关闭 LSM 或盲目重启 CRI 来宣称通过。
 
 新镜像和节点前提就绪后，再单独执行 CCE 隔离安装/升级、Sentinel 身份/初始化、普通/FUSE API、真实 enforce、正常 drain/uninstall 和精确资源清理；网络隔离、最低 1.29 生命周期、DataPlane V2、OBS 与节点 HA 保持未验收项，不因本地回归通过而勾选。
+
+2026-09-17 22:52–22:55 已用用户构建的 API `v0.3.34` 与 bootstrap `v0.3.1` 完成一次原范围隔离验证，最多三块 1Gi 测试卷。首个身份 Job 和初始化 Job 均成功，三个 Sentinel 成员 Ready/零重启；CRI 拒绝启动的 FUSE Pod 随正常 Helm uninstall 清理，无人工补救。三块原 PV 与命名空间已清理，并独立复核无遗留。完整 API/FUSE、升级和网络/存储验收仍待 CRI 前提解决，不能将这些现场结果标成全量通过。
