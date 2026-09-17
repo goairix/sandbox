@@ -93,7 +93,8 @@ redis:
     storageClass: ""
     size: 1Gi
   password: ""
-  # 内置模式：standalone 保持原单节点行为；sentinel 固定为三个独立 PVC 节点。
+  # 内置模式：standalone 保持原单节点行为；sentinel 固定三个独立 PVC 成员，生产按节点强制分散。
+  # Sentinel 最低 Kubernetes 1.29；须实际启用原生 sidecar（SidecarContainers）及 PodIndexLabel。
   mode: standalone
   sentinel:
     # Redis/Sentinel 身份与初始化专用最小镜像；只在 bootstrap 程序变化时升级。

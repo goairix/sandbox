@@ -6,12 +6,29 @@
 
 ## 部署前提
 
-- Linux，Kubernetes 1.33 或更高版本；须启用原生 sidecar 和 StatefulSet pod-index 功能。
+- Linux，Kubernetes 1.29 或更高版本；`SidecarContainers` 和 `PodIndexLabel` 必须实际启用。
 - 至少三个可调度 Linux 节点：强制按主机分散，不能在两个节点上凑三个成员。
 - 可用的 RWO StorageClass，三个独立 PVC；不得复用原 standalone 的 PVC。
 - release 名不超过 39 字符；release、namespace 与 clusterDomain 拼出的完整成员 DNS 不超过 253 字符。
 - CNI 必须执行标准 NetworkPolicy；规则兼容 Cilium、Calico 和支持该能力的云 VPC，不依赖 Cilium CRD。
 - 用户分别构建当前 `sandbox-api` 和独立的 `sandbox-redis-bootstrap` 镜像；后者只包含 `/app/redis-bootstrap` 与 CA 证书，不包含 API、docker-cli 或业务配置。Redis 主进程继续使用配置的 Redis 7 镜像，无需重建项目 runtime/gateway/mounter 镜像。
+
+原生 sidecar 从 1.29 起 Beta 且默认启用，1.33 才正式稳定；PodIndexLabel 从 1.28 起
+Beta 且默认启用，1.32 正式稳定。过去 Chart 把稳定时间错误地用作最低版本，现恢复
+1.29 下限；这不意味着所有托管集群的功能开关都必然启用。依据
+[Kubernetes sidecar 说明](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/)及
+[功能开关状态表](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)。
+
+须核对实际 StatefulSet Pod 的 `apps.kubernetes.io/pod-index`、四个入口的 `POD_ORDINAL`、
+identity 的 `restartPolicy: Always` 和本地 startupProbe。服务端 dry-run 只能验证准入，
+不能代替真实启动顺序、身份核验和恢复测试。缺少 label 时不得默认为 0 号；功能关闭时由
+集群管理员恢复支持，不通过 values 模拟、普通 sidecar 或关闭身份门禁绕过。
+
+单节点测试可使用隔离 release 的测试专用反亲和覆盖运行三个独立 PVC 成员，验证部署及
+功能；这不是节点级高可用验收，生产默认仍强制分散。测试工具位于
+`testdata/sentinel-kubernetes-compatibility/post-renderer.rb`，只接受统一的 `sandbox-fuse`
+release 和随机 `sandbox-cce-sentinel-test-<12位十六进制>` namespace，不作为生产部署配置。
+仅版本门禁修复无需重新构建任何镜像，镜像 tag 和 Chart 版本保持不变。
 
 ## 自动创建与复用身份
 
@@ -90,9 +107,11 @@ inline 密码和认证 Secret 数据会进入 Helm release 历史，能读取 He
 CTX=YOUR_KUBE_CONTEXT
 NS=YOUR_NAMESPACE
 RELEASE=YOUR_RELEASE
+# 使用服务器真实版本，不能为了通过渲染伪装成 1.33。
+KUBE_VERSION="$(kubectl --context "$CTX" get --raw /version | jq -r '.gitVersion')"
 # 离线结构检查不会执行现有对象 lookup；丢弃渲染结果，避免 inline Secret 写入终端/日志。
 helm template "$RELEASE" ./deploy/helm/sandbox --namespace "$NS" \
-  --kube-version 1.33.0 -f /opt/sandbox/env/values-prod.yaml >/dev/null
+  --kube-version "$KUBE_VERSION" -f /opt/sandbox/env/values-prod.yaml >/dev/null
 test "$(helm show chart ./deploy/helm/sandbox | awk '$1 == "version:" { print $2 }')" = "0.3.0"
 helm --kube-context "$CTX" upgrade --install "$RELEASE" ./deploy/helm/sandbox \
   --namespace "$NS" -f /opt/sandbox/env/values-prod.yaml \

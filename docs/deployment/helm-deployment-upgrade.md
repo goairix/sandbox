@@ -150,6 +150,12 @@ config:
 
 内置 Redis 高可用的身份准备、三节点/PVC 要求和完整配置见 [内置 Redis Sentinel](built-in-redis-sentinel.md)。默认 standalone 不会自动升级为 Sentinel。
 
+内置 Sentinel 的最低 Kubernetes 版本为 1.29，不再把原生 sidecar 的 1.33 正式稳定时间
+当作支持下限；1.31 生产集群可按实际功能验收。`SidecarContainers` 和 `PodIndexLabel`
+必须启用，Helm 渲染或服务端 dry-run 不能替代真实启动/身份/恢复验证。生产仍要求三个
+不同节点和三个独立 PVC；同节点三成员只可用于隔离部署功能测试，不代表节点级 HA。
+本次版本门禁整改只需同步 Chart，未新增生产 values 配置，也不需要重建镜像。
+
 以下安装/升级命令中的 `--atomic` 仅适用于 standalone/external；内置 Sentinel 必须去掉 `--atomic`，失败时保留当前身份状态，通过新的 upgrade 修复，不自动 rollback。AppArmor 未完成隔离验收时继续保持关闭。
 
 ```bash

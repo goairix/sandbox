@@ -33,7 +33,12 @@ func render(t *testing.T, overrides ...string) []map[string]any {
 
 func renderChart(t *testing.T, chart string, overrides ...string) []map[string]any {
 	t.Helper()
-	args := []string{"template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", "1.33.0"}
+	return renderChartForKubeVersion(t, chart, "1.33.0", overrides...)
+}
+
+func renderChartForKubeVersion(t *testing.T, chart, version string, overrides ...string) []map[string]any {
+	t.Helper()
+	args := []string{"template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", version}
 	for _, override := range overrides {
 		option := "--set"
 		if strings.HasPrefix(override, "string:") {
@@ -357,6 +362,11 @@ func TestSentinelIdentityJobAndLeastPrivilegeRBAC(t *testing.T) {
 
 func TestSentinelNativeTopologyAndPermissions(t *testing.T) {
 	docs := render(t, sentinelOverrides()...)
+	assertSentinelNativeTopologyAndPermissions(t, docs)
+}
+
+func assertSentinelNativeTopologyAndPermissions(t *testing.T, docs []map[string]any) {
+	t.Helper()
 	sts := object(t, docs, "StatefulSet", "sandbox-redis-sentinel")
 	spec := mapping(t, sts["spec"])
 	if spec["replicas"] != 3 || spec["podManagementPolicy"] != "Parallel" {
@@ -653,6 +663,11 @@ func mounts(t *testing.T, c map[string]any) map[string]map[string]any {
 
 func TestSentinelPrivateKeyMountAndNetworkIsolation(t *testing.T) {
 	docs := render(t, sentinelOverrides()...)
+	assertSentinelPrivateKeyMountAndNetworkIsolation(t, docs)
+}
+
+func assertSentinelPrivateKeyMountAndNetworkIsolation(t *testing.T, docs []map[string]any) {
+	t.Helper()
 	sts := object(t, docs, "StatefulSet", "sandbox-redis-sentinel")
 	pod := mapping(t, mapping(t, mapping(t, sts["spec"])["template"])["spec"])
 	prepare := mounts(t, container(t, pod, "initContainers", "prepare"))
@@ -716,16 +731,7 @@ func TestSentinelPrivateKeyMountAndNetworkIsolation(t *testing.T) {
 	}
 }
 
-func TestSentinelRequiresKubernetes133AndIdentityMemoryBudget(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	chart := filepath.Join(filepath.Dir(file), "..", "..", "deploy", "helm", "sandbox")
-	args := []string{"template", "sandbox", chart, "--namespace", "release-ns", "--kube-version", "1.29.0"}
-	for _, o := range sentinelOverrides() {
-		args = append(args, "--set", o)
-	}
-	if exec.Command("helm", args...).Run() == nil {
-		t.Fatal("native identity design requires stable Kubernetes1.33 contract")
-	}
+func TestSentinelIdentityMemoryBudget(t *testing.T) {
 	sts := object(t, render(t, sentinelOverrides()...), "StatefulSet", "sandbox-redis-sentinel")
 	pod := mapping(t, mapping(t, mapping(t, sts["spec"])["template"])["spec"])
 	resources := mapping(t, container(t, pod, "initContainers", "identity")["resources"])

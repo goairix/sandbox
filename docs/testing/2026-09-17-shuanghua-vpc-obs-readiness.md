@@ -2,6 +2,18 @@
 
 ## 状态与范围
 
+最新追加（2026-09-17 16:28）：内置 Sentinel 已恢复 1.29 版本下限，在单节点 CCE 1.31
+隔离环境验证了三个独立 PVC 成员的初始化、鉴权、quorum、ACK 和单容器恢复，测试资源
+已回收。完整 API 仍受 AppArmor loader/DNS 准入契约阻塞；网络策略、MinIO/FUSE 和 OBS
+矩阵未执行，不把 Sentinel 通过写成云网络/存储通过。
+见[本轮兼容整改报告](2026-09-17-sentinel-kubernetes-129-compatibility.md)。下文较早的
+预检/准备状态作为历史记录保留。
+
+新增第二节点后系统组件已全部就绪。仅禁用隔离 namespace 的 NodeLocal 注入不能消除
+额外 DNS options 默认化；测试 DS 显式补齐 options 后，API 越过 loader 门禁但普通池
+意图比较仍拒绝，错误诊断的正规化也不一致。此次测试资源已清理。后续兼容配置不得
+改变此前集群的默认行为；网络/MinIO/FUSE/OBS 尚未验收，测试资源前缀统一 `sandbox-fuse`。
+
 后续追加（2026-09-17 15:34）：已收到未启用DataPlane V2的单节点测试集群和私有values，
 只读预检发现Kubernetes 1.31、无默认StorageClass、ENI-only且无可自动发现的完整CIDR、
 AppArmor内核已启用。用户随后提供Pod `10.0.0.0/16`、Service `10.247.0.0/16`，地址库存

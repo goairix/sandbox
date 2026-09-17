@@ -196,7 +196,7 @@
 {{- $_ := include "sandbox.apiStartupProbe" . -}}
 {{- if not .Values.redis.persistence.enabled -}}{{ fail "built-in Sentinel requires persistence" }}{{- end -}}
 {{- if gt (len .Release.Name) 39 -}}{{ fail "built-in Sentinel release name must not exceed 39 characters" }}{{- end -}}
-{{- if not (semverCompare ">=1.33.0-0" .Capabilities.KubeVersion.Version) -}}{{ fail "built-in Sentinel requires Kubernetes >=1.33" }}{{- end -}}
+{{- if not (semverCompare ">=1.29.0-0" .Capabilities.KubeVersion.Version) -}}{{ fail "built-in Sentinel requires Kubernetes >=1.29 with SidecarContainers and PodIndexLabel enabled" }}{{- end -}}
 {{- if empty $sentinelConfig.existingSecret -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" .Values.redis.password) -}}{{ fail "built-in Sentinel data password must be a 32-256 character safe token" }}{{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]{32,256}$" $sentinelConfig.password) -}}{{ fail "built-in Sentinel password must be a 32-256 character safe token" }}{{- end -}}
