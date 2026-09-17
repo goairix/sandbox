@@ -60,3 +60,21 @@
 本次只读授权已执行完毕。尚未安装软件、修改配置、重启 containerd/kubelet、变更节点 OS、构建镜像或修改业务代码/Chart。生产仍以 EulerOS 2.0 为目标。
 
 后续须先确认双华云厂商对该 EulerOS/CRI 组合的支持，准备可信且兼容的宿主机 parser 与依赖；不直接套用仅列 Ubuntu 的公有云安装命令。节点变更只在另获授权后，按平台维护方式先选一个测试节点验证：安装真实 parser、启用有效 CRI AppArmor，并评估能力缓存及受控服务重启的影响。静态配置、CRI 有效配置、实际 mounter/PID 1 与 s3fs enforce、内核拒绝、挂载/存储、正常清理均取得证据后，再覆盖另一测试节点及完整 API/网络测试。不能将授权只读诊断理解为生产节点写入或服务重启许可。
+
+## 续查：单节点维护获准，兼容包尚未确认
+
+用户随后批准：仅测试节点 `172.16.30.166`，在确认兼容包后安装真实 parser、启用 CRI AppArmor，并按维护流程受控重启 containerd；暂不操作生产。本授权不覆盖第二节点、`ds-ai-research`、更换操作系统、关闭 LSM 或其它服务重启；原只读诊断的时间与权限记录不变。
+
+安装前重新只读核验原集群和目标节点 UID：节点 Ready、未 cordon，仍为 HCE 2.0 amd64/containerd 1.7.29 厂商版本。目标节点只有 8 个 kube-system Pod，全部非终态且 Ready，其中 4 个由 DaemonSet 管理；无引用 PVC 的 Pod。集群 3 个 PDB 的 disruptionsAllowed 均大于零，均无 pending disruptions；没有 `sandbox-cce-` 临时 namespace。这只是当时的维护基线，不是已经 drain、重启或复测成功；实际变更前仍须按 PDB selector、资源容量和平台流程重新评估。
+
+补查以下官方 openEuler 包目录，HTTPS 校验开启、HTTP 200，解析 RPM 链接后名称匹配 apparmor 为零：
+
+| 目录 | RPM 链接数 | apparmor 名称匹配 |
+| --- | --- | --- |
+| [22.03 LTS everything x86_64](https://repo.openeuler.org/openEuler-22.03-LTS/everything/x86_64/Packages/) | 16818 | 0 |
+| [22.03 LTS EPOL main x86_64](https://repo.openeuler.org/openEuler-22.03-LTS/EPOL/main/x86_64/Packages/) | 2134 | 0 |
+| [22.03 LTS SP4 everything x86_64](https://repo.openeuler.org/openEuler-22.03-LTS-SP4/everything/x86_64/Packages/) | 17052 | 0 |
+
+[openEuler 打包源码](https://gitee.com/src-openeuler/apparmor/blob/master/apparmor.spec) 存在，但查到的 spec 为 2.13.4，不能据此断言当前 HCE 节点可安全安装，也未将旧源码构建当成获验证的供应商包。[华为 HCE 软件兼容性说明](https://www.huaweicloud.com/guide/productsdesc-bms_9c3cf594304ac0f9f895256f13f12db6support0_H) 的通用 openEuler 22.03 兼容说明，不等于双华云对该 AppArmor/CRI 组合的支持确认。这些目录检查不涵盖节点配置的私有源或所有发行版仓库，也不证明厂商无法提供包。
+
+**当前阻点是可信兼容 parser 包/来源尚未确认，不是缺少单节点维护授权。** 本次没有创建新诊断 Pod、cordon/drain、安装软件、修改 CRI 配置或重启服务，没有构建/推送镜像、修改业务代码或 Chart。下一步需要双华云提供适配当前 EulerOS 2.0/CRI 的真实 AppArmor RPM、受支持仓库或安装说明；若没有现成包，应另行确认可审计的官方源码构建与维护路线，不能静默引入自维护主机组件。通过来源、签名/校验和、架构、ABI/依赖及默认策略编译检查后，才继续已获准的单节点整改。
