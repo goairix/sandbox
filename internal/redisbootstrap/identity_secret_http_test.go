@@ -26,6 +26,12 @@ func (w *identityWarningCounter) HandleWarningHeaderWithContext(context.Context,
 
 // Exercises the real REST decoder/transport. This is not Kubernetes RBAC or CSI.
 func TestEnsureIdentityHTTPCommittedServerFailure(t *testing.T) {
+	t.Run("stable", func(t *testing.T) { testIdentityHTTPCommittedServerFailure(t, false) })
+	t.Run("PVC binding", func(t *testing.T) { testIdentityHTTPCommittedServerFailure(t, true) })
+}
+
+func testIdentityHTTPCommittedServerFailure(t *testing.T, binding bool) {
+	t.Helper()
 	const admissionWarning = "299 kube \"PRIVATE-ADMISSION-WARNING\""
 	o := IdentitySecretOptions{Namespace: "isolated", StatefulSetName: "redis", SecretName: "redis-identity", StateConfigMap: "state", Members: [3]string{"redis-0", "redis-1", "redis-2"}, FreshClusterID: "http-install", Timeout: 2 * time.Second}
 	data, _ := json.Marshal(ClusterState{ClusterID: o.FreshClusterID, Members: o.Members, Phase: Pending})
@@ -34,6 +40,7 @@ func TestEnsureIdentityHTTPCommittedServerFailure(t *testing.T) {
 	var warnings identityWarningCounter
 	var stored *api.Secret
 	creates := 0
+	pvcReads := 0
 	forbidden := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -44,6 +51,16 @@ func TestEnsureIdentityHTTPCommittedServerFailure(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/isolated/configmaps/state":
 			_ = json.NewEncoder(w).Encode(cm)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/isolated/persistentvolumeclaims/data-redis-"):
+			if binding && r.URL.Path == "/api/v1/namespaces/isolated/persistentvolumeclaims/data-redis-0" {
+				pvcReads++
+				pvc := bindingPVC(o, "1")
+				pvc.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"}
+				if pvcReads > 1 {
+					pvc.ResourceVersion = "2"
+				}
+				_ = json.NewEncoder(w).Encode(pvc)
+				return
+			}
 			w.WriteHeader(404)
 			_ = json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: "Failure", Reason: metav1.StatusReasonNotFound, Code: 404})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/isolated/secrets/redis-identity":
@@ -105,6 +122,9 @@ func TestEnsureIdentityHTTPCommittedServerFailure(t *testing.T) {
 	defer mu.Unlock()
 	if creates != 1 || forbidden || !reflect.DeepEqual(original, stored) {
 		t.Fatal("unexpected API access or identity mutation")
+	}
+	if binding && pvcReads != 5 {
+		t.Fatal("binding fixture did not traverse pre-create retry and post-check")
 	}
 	if warnings.seen.Load() != 0 {
 		t.Fatal("admission warning escaped into caller's logging handler")

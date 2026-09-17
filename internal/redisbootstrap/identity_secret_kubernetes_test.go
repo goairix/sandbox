@@ -192,44 +192,65 @@ func TestEnsureIdentityExistingValidation(t *testing.T) {
 func TestEnsureIdentityConcurrentAndUncertainCreate(t *testing.T) {
 	for _, scenario := range []string{"already exists", "committed timeout", "uncommitted timeout"} {
 		t.Run(scenario, func(t *testing.T) {
-			c, o := identityFixture(t)
-			o.Timeout = 300 * time.Millisecond
-			var server *api.Secret
-			c.PrependReactor("create", "secrets", func(a kt.Action) (bool, runtime.Object, error) {
-				if scenario != "uncommitted timeout" {
-					server = installExistingIdentity(t, c, o)
-				}
-				if scenario == "already exists" {
-					return true, nil, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, o.SecretName)
-				}
-				return true, nil, errors.New("PRIVATE-API-REJECTED-BODY")
-			})
-			err := EnsureIdentitySecret(context.Background(), c.CoreV1(), o)
-			if (err == nil) != (scenario != "uncommitted timeout") {
-				t.Fatal("uncertain create incorrectly resolved", err)
-			}
-			if err != nil && strings.Contains(err.Error(), "PRIVATE") {
-				t.Fatal("API body leaked")
-			}
-			creates := 0
-			for _, a := range c.Actions() {
-				if a.GetVerb() == "create" {
-					creates++
-				}
-				if a.GetVerb() != "get" && a.GetVerb() != "create" {
-					t.Fatal("forbidden mutation")
-				}
-			}
-			if creates != 1 {
-				t.Fatal("retried generation/create", creates)
-			}
-			if server != nil {
-				got, _ := c.CoreV1().Secrets(o.Namespace).Get(context.Background(), o.SecretName, metav1.GetOptions{})
-				if !reflect.DeepEqual(server, got) {
-					t.Fatal("concurrent original overwritten")
-				}
-			}
+			t.Run("stable", func(t *testing.T) { testIdentityUncertainCreate(t, scenario, false) })
+			t.Run("PVC binding", func(t *testing.T) { testIdentityUncertainCreate(t, scenario, true) })
 		})
+	}
+}
+
+func testIdentityUncertainCreate(t *testing.T, scenario string, binding bool) {
+	t.Helper()
+	c, o := identityFixture(t)
+	o.Timeout = 300 * time.Millisecond
+	if binding {
+		o.Timeout = 500 * time.Millisecond
+		reads := 0
+		c.PrependReactor("get", "persistentvolumeclaims", func(a kt.Action) (bool, runtime.Object, error) {
+			if a.(kt.GetAction).GetName() != "data-redis-0" {
+				return false, nil, nil
+			}
+			reads++
+			version := "1"
+			if reads > 1 {
+				version = "2"
+			}
+			return true, bindingPVC(o, version), nil
+		})
+	}
+	var server *api.Secret
+	c.PrependReactor("create", "secrets", func(a kt.Action) (bool, runtime.Object, error) {
+		if scenario != "uncommitted timeout" {
+			server = installExistingIdentity(t, c, o)
+		}
+		if scenario == "already exists" {
+			return true, nil, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, o.SecretName)
+		}
+		return true, nil, errors.New("PRIVATE-API-REJECTED-BODY")
+	})
+	err := EnsureIdentitySecret(context.Background(), c.CoreV1(), o)
+	if (err == nil) != (scenario != "uncommitted timeout") {
+		t.Fatal("uncertain create incorrectly resolved", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "PRIVATE") {
+		t.Fatal("API body leaked")
+	}
+	creates := 0
+	for _, a := range c.Actions() {
+		if a.GetVerb() == "create" {
+			creates++
+		}
+		if a.GetVerb() != "get" && a.GetVerb() != "create" {
+			t.Fatal("forbidden mutation")
+		}
+	}
+	if creates != 1 {
+		t.Fatal("retried generation/create", creates)
+	}
+	if server != nil {
+		got, _ := c.CoreV1().Secrets(o.Namespace).Get(context.Background(), o.SecretName, metav1.GetOptions{})
+		if !reflect.DeepEqual(server, got) {
+			t.Fatal("concurrent original overwritten")
+		}
 	}
 }
 

@@ -180,27 +180,9 @@ func readFreshPVCs(ctx context.Context, c corev1.CoreV1Interface, o IdentitySecr
 }
 
 func createFreshIdentity(ctx context.Context, c corev1.CoreV1Interface, o IdentitySecretOptions, state NamespaceBootstrap) error {
-	first, err := readFreshPVCs(ctx, c, o)
+	second, err := stableFreshPVCs(ctx, c, o, state)
 	if err != nil {
 		return err
-	}
-	secondState, err := readIdentityState(ctx, c, o)
-	if err != nil {
-		return err
-	}
-	if !sameIdentityInstallation(state, secondState) || state.ResourceVersion != secondState.ResourceVersion || secondState.Cluster.Phase != Pending || secondState.Registration != nil {
-		return ErrIdentityInvalid
-	}
-	second, err := readFreshPVCs(ctx, c, o)
-	if err != nil {
-		return err
-	}
-	for i := range 3 {
-		// New PVC appearance is normal under a Parallel StatefulSet. Previously
-		// observed objects must not disappear, change identity or change version.
-		if first[i].Present && first[i] != second[i] {
-			return ErrIdentityInvalid
-		}
 	}
 	s, err := readServerIdentity(ctx, c, o)
 	if err == nil {

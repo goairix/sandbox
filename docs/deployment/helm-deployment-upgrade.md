@@ -141,7 +141,7 @@ config:
     allowMissingLSMForKind: false
 ```
 
-检查周期、超时和资源可以省略以使用 Chart 默认值。启用后 Helm 自动创建 profile ConfigMap、DaemonSet、专用 ServiceAccount 和 API 只读 Role/RoleBinding；无需手工创建这些资源或在节点安装 parser。`lsmProfile` 自动使用摘要命名策略，原手工名称不再覆盖它。节点须已启用 AppArmor，准入须允许这个可信 privileged/hostPath 组件；Helm 不改变内核开关。
+检查周期、超时和资源可以省略以使用 Chart 默认值。启用后 Helm 自动创建 profile ConfigMap、DaemonSet、专用 ServiceAccount 和 API 只读 Role/RoleBinding，无需手工创建项目资源。`lsmProfile` 自动使用摘要命名策略，原手工名称不再覆盖它。加载器使用镜像内 parser，不安装宿主机 parser、不修改 CRI；节点内核和 CRI 均须支持 AppArmor，准入须允许这个可信 privileged/hostPath 组件。loader Ready 不能证明 CRI 支持，平台只读核查与真实验收要求见 [节点前提](apparmor-loader.md#节点前提loader-ready-不等于-cri-支持)。
 
 隔离环境完成实际 profile/enforce、mount/flush/unmount、越权拒绝和重载验证后，再安排生产维护窗口启用。生产 nodeSelector 应使用全部已验收节点的共同标签，不照抄单个测试 hostname；选择器同时影响普通池、FUSE 池和加载器。完整配置、权限及验收边界见 [AppArmor 加载器](apparmor-loader.md)。
 
@@ -207,7 +207,7 @@ Chart `0.3.0` 是本轮 Helm 包版本，不代表镜像已经统一发布为 `v
 内置 Sentinel 的 `prepare`、`identity`、身份/初始化 Job 和 rollback guard 使用
 `redis.sentinel.bootstrapImage`，不再复用 `image.repository/image.tag`。完成首次迁移
 后，只更新 API tag 不会改变 Redis StatefulSet PodTemplate，也不应重启 Redis。
-bootstrap 镜像 tag 只在 `cmd/redis-bootstrap` 本身改变时更新；没有隐式 API fallback。
+bootstrap 镜像 tag 只在 `cmd/redis-bootstrap` 或其依赖行为改变时更新；没有隐式 API fallback。
 首次从旧 Chart 迁移会因为 helper 镜像字段改变而执行一次预期的 OrderedReady Redis
 滚动，须按 Sentinel 维护窗口观察 quorum。相关根因和验收边界见
 [API 升级触发内置 Redis Sentinel 重启记录](../testing/2026-09-15-sentinel-api-upgrade-restart-incident.md)。
@@ -358,6 +358,43 @@ redis:
 首次迁移预期 Redis StatefulSet 逐成员滚动一次。完成后保存 StatefulSet
 currentRevision、三个 Pod UID 和 restartCount，再执行一次只改变 API tag 的 upgrade；
 这些 Redis 值必须完全不变，只有 API Deployment 逐副本替换。
+
+### 本次 CCE 身份绑定与未启动 FUSE 清理整改
+
+这次修改 API 的 Kubernetes 清理流程及 Redis bootstrap 的身份校验依赖，需要分别重建 `sandbox-api` 和 `sandbox-redis-bootstrap`。已有兼容的 loader、mounter、runtime、gateway 和 Redis 服务镜像无需因这两个修复重建。Chart 版本仍为 `0.3.0`，没有新增 values/schema/RBAC 或 cleanup protocol 配置。
+
+先按本节“构建环境”准备 registry/platform/builder；下面两个 tag 是新的示例版本，不覆盖已发布 tag，也不表示已经发布这些镜像。CCE amd64 必须包含 `linux/amd64`，同时发布原 arm64 环境时保留双架构：
+
+```bash
+SANDBOX_API_TAG=v0.3.34 # 示例，替换为本次实际新版本
+SANDBOX_BOOTSTRAP_TAG=v0.1.1 # 独立版本示例，替换为本次实际新版本
+
+docker buildx build --builder sandbox-apparmor-build \
+  --file docker/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --tag "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_API_TAG" --push .
+
+docker buildx build --builder sandbox-apparmor-build \
+  --file docker/images/redis-bootstrap/Dockerfile --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --tag "$SANDBOX_BUILD_REGISTRY/sandbox-redis-bootstrap:$SANDBOX_BOOTSTRAP_TAG" --push .
+
+docker buildx imagetools inspect "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_API_TAG"
+docker buildx imagetools inspect "$SANDBOX_BUILD_REGISTRY/sandbox-redis-bootstrap:$SANDBOX_BOOTSTRAP_TAG"
+```
+
+把自己实际推送的版本合并到环境 values 中已有的块；YAML 不展开上面的变量：
+
+```yaml
+image:
+  tag: v0.3.34 # 实际 API 新版本
+redis:
+  sentinel:
+    bootstrapImage:
+      tag: v0.1.1 # 实际 bootstrap 新版本
+```
+
+其它配置保持原样，不手工创建项目资源，不删除保留的身份 Secret/PVC。bootstrap tag 更新会改变内置 Sentinel StatefulSet helper 镜像，须按维护窗口观察 quorum 和滚动；这不等于只改 API tag 导致 Redis 无关重启。没有改变协议/指纹，不通过强制排空或 rollback 规避旧资源。
+
+这两个修复不解决节点 CRI 拒绝 AppArmor 的问题。平台前提满足后再进行隔离 install/upgrade、普通/FUSE API、真实 enforce、正常 drain/uninstall 的完整现场验收；本地测试不等于 CCE 已全部通过，见 [本轮整改记录](../testing/2026-09-17-cce-identity-fuse-recovery-remediation.md)。
 
 ### 本次 AppArmor 加载器
 

@@ -147,7 +147,7 @@ config:
     allowMissingLSMForKind: false # 加载器启用时必须为 false
 ```
 
-同时保留 API `startupProbe.enabled: true`（内置 Sentinel 本身也要求它）。不用手工安装节点 parser，也不用自己创建 profile ConfigMap、加载器 ServiceAccount/DaemonSet 或 API 读取 Role/RoleBinding：启用后均由 Helm 自动创建，profile 名称由 Chart 计算，不需要手填 `lsmProfile`。内核必须已启用 AppArmor，命名空间准入须允许这个可信 privileged/hostPath 组件；Helm 不会替你改变这些集群安全前提。
+同时保留 API `startupProbe.enabled: true`（内置 Sentinel 本身也要求它）。profile ConfigMap、加载器 ServiceAccount/DaemonSet 和 API 读取 Role/RoleBinding 均由 Helm 自动创建，profile 名称由 Chart 计算，不需要手填 `lsmProfile` 或手工创建项目资源。加载器使用**镜像内**的 parser 加载策略，不安装宿主机软件，也不修改节点 CRI 配置。内核启用、CRI 支持及命名空间准入是另外的集群前提，具体检查见下一节。
 
 真实验收完成后，生产 values 才合并相同启用配置，并将 nodeSelector 改成生产中全部已验收节点的共同标签；不要将单个测试节点 hostname 原样复制上线，也不要仅为部署成功临时清空选择器扩到未验收节点。该 selector 同时约束普通池、FUSE 池和加载器，而不是只限制加载器。
 
@@ -156,6 +156,23 @@ config:
 启用时自动合入 `kubernetes.io/os: linux`，显式 windows 冲突报错。选择器键和值须为字符串；YAML 的数字或布尔值必须加引号才能作为标签值。原生 `runtime.kubernetes.node_selector` 使用相同配置，环境变量 `SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR` 使用 JSON 字符串对象。
 
 启用时 `config.workspace.lsmProfile` 的手工名称不再生效，使用 `sandbox-fuse-<策略摘要>`。完整摘要留在 annotation；label 使用前 63 位并同时核验完整 annotation，不把截断标签当作完整身份。策略或有效选择器改变会改变 backend fingerprint/池契约，沿用既有精确身份和排空流程。关闭时仍沿用手工 profile。
+
+## 节点前提：loader Ready 不等于 CRI 支持
+
+[Kubernetes 官方前提](https://kubernetes.io/docs/tutorials/security/apparmor/) 分别要求内核启用 AppArmor、容器运行时支持以及目标 profile 已加载。最低 Kubernetes 1.29 的注解兼容不改变这些节点前提；不能因为内核版本较新或 loader Ready 就判断真实 FUSE 已可用。
+
+上游 [containerd 1.7.29 CRI 检查](https://github.com/containerd/containerd/blob/v1.7.29/pkg/cri/server/helpers_linux.go) 还检查 `DisableApparmor` 配置与 host 支持；[host 检查实现](https://github.com/containerd/containerd/blob/v1.7.29/pkg/apparmor/apparmor_linux.go) 检查宿主机 parser 路径、securityfs、enabled 状态等，并缓存首次结果。因此镜像内 parser 能成功加载内核策略，不代表宿主机 `/sbin/apparmor_parser` 已满足 CRI 的检查；这也不能直接证明 CCE 厂商补丁版本具体是哪一项失败。
+
+平台管理员先只读核查：
+
+- 节点内核 AppArmor 启用状态和 securityfs 是否可访问。
+- 实际 CRI 版本、有效配置中的 AppArmor 禁用项，以及该版本要求的宿主机 parser 路径是否存在。
+- kubelet/CRI 的能力或错误记录；Kubernetes feature gate、loader Ready 都不能代替 CRI 能力证明。
+- profile 已加载并为 enforce；随后在获准隔离环境验证真实 mounter/PID 1 与 s3fs 子进程 profile、挂载、拒绝测试和清理。
+
+CCE 现场曾在 loader Ready 后由 CRI 拒绝创建 mounter，见 [v0.3.33 现场报告](../testing/2026-09-17-cce-v033-live-validation.md)。这种节点前提缺口不是增加 Helm values 可以修复的。本项目不会安装宿主机 parser、修改 containerd 或自动重启节点服务；若涉及运行时能力缓存，须由平台方评估维护窗口，不要直接重启业务 CRI，也不要临时挂载 runtime socket/主机根目录或关闭 LSM 绕过验证。
+
+2026-09-17 代码整改修复了身份 PVC 绑定竞态和未启动 FUSE Pod 的正常清理流程，但未解决 CCE 的 CRI 前提。本轮需重建 API 与 Redis bootstrap，加载器/mounter 可沿用，详见 [构建与部署说明](helm-deployment-upgrade.md#本次-cce-身份绑定与未启动-fuse-清理整改)。
 
 ## 权限与可用性
 

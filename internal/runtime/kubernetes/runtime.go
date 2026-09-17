@@ -1231,7 +1231,9 @@ func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtime
 					return runtime.TerminationEvidence{}, deleteErr
 				}
 			}
-			proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, ProcessExited: true}
+			proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, NodeName: nodeName, ProcessExited: true}
+		} else if preparedPodCanRequestNormalDeletion(pod) {
+			proof = r.confirmUnstartedPodTermination(ctx, ref, pod)
 		} else {
 			if generation == 0 {
 				status, statusErr := r.readMounterStatus(ctx, ref, "ready")
@@ -1445,6 +1447,9 @@ func preparedPodContainersTerminated(pod *corev1.Pod) bool {
 func declaredContainersTerminated(containers []corev1.Container, statuses []corev1.ContainerStatus, allowNeverStarted bool) bool {
 	names := make(map[string]struct{}, len(containers))
 	for _, container := range containers {
+		if _, duplicate := names[container.Name]; duplicate || container.Name == "" {
+			return false
+		}
 		names[container.Name] = struct{}{}
 	}
 	return namedContainersTerminated(names, statuses, allowNeverStarted)
@@ -1453,6 +1458,9 @@ func declaredContainersTerminated(containers []corev1.Container, statuses []core
 func declaredEphemeralContainersTerminated(containers []corev1.EphemeralContainer, statuses []corev1.ContainerStatus, allowNeverStarted bool) bool {
 	names := make(map[string]struct{}, len(containers))
 	for _, container := range containers {
+		if _, duplicate := names[container.Name]; duplicate || container.Name == "" {
+			return false
+		}
 		names[container.Name] = struct{}{}
 	}
 	return namedContainersTerminated(names, statuses, allowNeverStarted)
@@ -1465,7 +1473,7 @@ func namedContainersTerminated(names map[string]struct{}, statuses []corev1.Cont
 	seen := make(map[string]struct{}, len(statuses))
 	for _, status := range statuses {
 		if _, declared := names[status.Name]; !declared ||
-			(status.State.Terminated == nil && (!allowNeverStarted || !containerProvablyNeverStarted(status))) {
+			(!containerStateTerminated(status) && (!allowNeverStarted || !containerProvablyNeverStarted(status))) {
 			return false
 		}
 		if _, duplicate := seen[status.Name]; duplicate {
@@ -1478,6 +1486,7 @@ func namedContainersTerminated(names map[string]struct{}, statuses []corev1.Cont
 
 func containerProvablyNeverStarted(status corev1.ContainerStatus) bool {
 	return status.State.Waiting != nil &&
+		status.State.Running == nil && status.State.Terminated == nil &&
 		status.ContainerID == "" &&
 		status.RestartCount == 0 &&
 		(status.Started == nil || !*status.Started) &&
