@@ -12,6 +12,10 @@
 
 本地实施及新鲜门禁已完成，证据见 [实施报告](../../testing/2026-09-17-kubernetes-dns-admission-compatibility.md)。现场验收尚未完成。
 
+v0.3.33 已在隔离 CCE namespace 运行；本轮被 CRI AppArmor 不支持等不同问题阻塞，
+普通池观察到 Ready，完整 API/FUSE 未通过。测试资源已正常收尾，见
+[现场报告](../../testing/2026-09-17-cce-v033-live-validation.md)。不得将诊断重试作为首次安装通过。
+
 ## 1. 冻结默认基线并复现诊断错误
 
 文件：新增 `internal/runtime/kubernetes/dns_admission_test.go`、`pod_intent_benchmark_test.go`、`internal/helmtest/dns_admission_test.go`。
@@ -144,4 +148,4 @@ git diff --check
 
 - [x] 报告 RED/GREEN、基线摘要、默认/显式 bench、race、完整门禁；真实部署/真实1.29/DPV2隔离/OBS/节点HA未验收明确单列。仅 sandbox-api Go 行为变化，loader/Redis/bootstrap/mounter 二进制无需重建。
 - [x] 精确 stage 文件、cached diff/check、提交本地代码及报告，不检查分支或创建 PR。
-- [ ] **外部现场验收待用户新镜像：**更新镜像后再验原 ds-ai-research 和随机 CCE namespace（release 固定 sandbox-fuse），最多三个 1Gi 云卷，正常 hooks uninstall 和 UID 清理，收尾验证另记，不能提前宣称部署通过。
+- [ ] **外部完整现场验收未完成：**CCE v0.3.33 已实际运行但受 CRI AppArmor 等不同阻塞影响，随机 namespace/三个 1Gi 云卷已清理；原 ds-ai-research 仍为 v0.3.32、仅只读查看。先处理新阻塞，再验普通/FUSE API、原环境默认路径及其它单列边界，不能提前宣称部署通过。

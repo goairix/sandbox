@@ -12,6 +12,10 @@
 [实测报告](2026-09-17-sentinel-kubernetes-129-compatibility.md)；本地验证不能替代现场。
 配置与发布步骤见 [DNS 兼容部署说明](../deployment/kubernetes-dns-admission.md)。
 
+后续 v0.3.33 真实 CCE 验证见 [现场报告](2026-09-17-cce-v033-live-validation.md)：
+普通池已观察到 Ready，FUSE 被 CRI AppArmor 不支持阻塞，完整 API 验收仍未通过，
+测试资源已清理。本报告中的本地门禁不替代该现场结果。
+
 ## 实施内容
 
 - config/runtime 共用最多两项的严格选项校验；类型、名称、重复、值及原文泄露负例保留。
