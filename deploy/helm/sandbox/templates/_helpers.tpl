@@ -459,6 +459,53 @@ capabilities:
 seccompProfile:
   type: RuntimeDefault
 {{- end -}}
+{{- define "sandbox.dnsAdmissionConfig" -}}
+{{- $k := .Values.config.runtime.kubernetes | default dict -}}
+{{- if not (kindIs "map" $k) -}}{{ fail "config.runtime.kubernetes DNS admission settings require an object" }}{{- end -}}
+{{- $disable := false -}}
+{{- if hasKey $k "disableNodeLocalDNSInjection" -}}
+{{- if not (kindIs "bool" $k.disableNodeLocalDNSInjection) -}}{{ fail "config.runtime.kubernetes.disableNodeLocalDNSInjection must be a boolean" }}{{- end -}}
+{{- $disable = $k.disableNodeLocalDNSInjection -}}
+{{- end -}}
+{{- $options := list -}}
+{{- if hasKey $k "dnsOptions" -}}
+{{- if not (kindIs "slice" $k.dnsOptions) -}}{{ fail "config.runtime.kubernetes.dnsOptions must be an array" }}{{- end -}}
+{{- $options = $k.dnsOptions -}}
+{{- end -}}
+{{- if gt (len $options) 2 -}}{{ fail "config.runtime.kubernetes.dnsOptions exceeds two entries" }}{{- end -}}
+{{- $byName := dict -}}
+{{- range $option := $options -}}
+{{- if not (kindIs "map" $option) -}}{{ fail "config.runtime.kubernetes.dnsOptions entries must be objects" }}{{- end -}}
+{{- if or (ne (len $option) 2) (not (hasKey $option "name")) (not (hasKey $option "value")) -}}{{ fail "config.runtime.kubernetes.dnsOptions entries require only name and value" }}{{- end -}}
+{{- if or (not (kindIs "string" $option.name)) (not (kindIs "string" $option.value)) -}}{{ fail "config.runtime.kubernetes.dnsOptions name and value must be strings" }}{{- end -}}
+{{- if hasKey $byName $option.name -}}{{ fail "config.runtime.kubernetes.dnsOptions contains duplicate names" }}{{- end -}}
+{{- if eq $option.name "single-request-reopen" -}}
+{{- if ne $option.value "" -}}{{ fail "config.runtime.kubernetes.dnsOptions switch value must be empty" }}{{- end -}}
+{{- else if eq $option.name "timeout" -}}
+{{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $option.value) -}}{{ fail "config.runtime.kubernetes.dnsOptions timeout must be a canonical integer from 1 to 30" }}{{- end -}}
+{{- else -}}{{ fail "config.runtime.kubernetes.dnsOptions contains an unsupported name" }}{{- end -}}
+{{- $_ := set $byName $option.name $option.value -}}
+{{- end -}}
+{{- $sorted := list -}}
+{{- range $name := keys $byName | sortAlpha -}}
+{{- $sorted = append $sorted (dict "name" $name "value" (get $byName $name)) -}}
+{{- end -}}
+{{- if and (or $disable (gt (len $sorted) 0)) (ne .Values.config.runtime.type "kubernetes") -}}{{ fail "config.runtime.kubernetes DNS admission settings require runtime.type kubernetes" }}{{- end -}}
+{{- dict "disableNodeLocalDNSInjection" $disable "dnsOptions" $sorted | toJson -}}
+{{- end -}}
+
+{{- define "sandbox.dnsAdmissionEnv" -}}
+{{- $dns := include "sandbox.dnsAdmissionConfig" . | fromJson -}}
+{{- if $dns.disableNodeLocalDNSInjection }}
+- name: SANDBOX_RUNTIME_KUBERNETES_DISABLE_NODE_LOCAL_DNS_INJECTION
+  value: "true"
+{{- end }}
+{{- if gt (len $dns.dnsOptions) 0 }}
+- name: SANDBOX_RUNTIME_KUBERNETES_DNS_OPTIONS
+  value: {{ $dns.dnsOptions | toJson | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "sandbox.backend.fingerprint" -}}
 {{- $filesystem := .Values.config.storage.filesystem -}}
 {{- $contract := dict
@@ -477,6 +524,10 @@ seccompProfile:
   "lsmProfile" (include "sandbox.effectiveLSMProfile" .)
   "nodeSelector" (include "sandbox.effectiveNodeSelector" . | fromJson)
 -}}
+{{- $dns := include "sandbox.dnsAdmissionConfig" . | fromJson -}}
+{{- if or $dns.disableNodeLocalDNSInjection (gt (len $dns.dnsOptions) 0) -}}
+{{- $_ := set $contract "dnsAdmission" $dns -}}
+{{- end -}}
 {{- $contract | toJson | sha256sum -}}
 {{- end -}}
 
@@ -486,6 +537,7 @@ seccompProfile:
 
 {{- define "sandbox.drainEnv" -}}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace -}}
+{{ include "sandbox.dnsAdmissionEnv" . }}
 - name: SANDBOX_RUNTIME_TYPE
   value: {{ .Values.config.runtime.type | quote }}
 - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE

@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/kubecontract"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
@@ -59,6 +60,9 @@ func (r *Runtime) WarmPoolContract() string {
 		selectorJSON, _ := json.Marshal(r.nodeSelector) // map[string]string cannot fail; JSON sorts keys.
 		digest := sha256.Sum256(selectorJSON)
 		contract += ":node-selector=" + hex.EncodeToString(digest[:])
+	}
+	if r.dnsAdmissionContract != "" {
+		contract += ":dns-admission=" + r.dnsAdmissionContract
 	}
 	return contract
 }
@@ -138,33 +142,37 @@ type workspaceRuntimeState struct {
 
 // Runtime implements runtime.Runtime using Kubernetes.
 type Runtime struct {
-	client                  kubernetes.Interface
-	dynClient               dynamic.Interface
-	restConfig              *rest.Config
-	namespace               string
-	hasCilium               bool // resolved policy provider, not just CRD presence after configuration
-	hasCiliumAPI            bool // resource availability retained for legacy cleanup/audits
-	networkPolicyProvider   string
-	networkPodCIDRs         []string
-	networkServiceCIDRs     []string
-	controlExecutor         podCommandExecutor
-	infraFencer             InfrastructureFencer
-	fuseCredentials         runtime.FUSECredentials
-	endpointLookup          runtime.LookupNetIPFunc
-	appArmorProfile         string
-	nodeSelector            map[string]string
-	appArmorLoaderName      string
-	appArmorLoaderNamespace string
-	appArmorLoaderTimeout   time.Duration
-	clusterDNSLookup        func() ([]netip.Addr, error)
-	pollInterval            time.Duration
-	prepareTimeout          time.Duration
-	readyTimeout            time.Duration
-	terminationTimeout      time.Duration
-	ordinaryPolicyRecovery  func(context.Context) error
-	readOnlyInspection      bool
-	stateMu                 sync.Mutex
-	workspaceStates         map[string]*workspaceRuntimeState
+	client                       kubernetes.Interface
+	dynClient                    dynamic.Interface
+	restConfig                   *rest.Config
+	namespace                    string
+	hasCilium                    bool // resolved policy provider, not just CRD presence after configuration
+	hasCiliumAPI                 bool // resource availability retained for legacy cleanup/audits
+	networkPolicyProvider        string
+	networkPodCIDRs              []string
+	networkServiceCIDRs          []string
+	controlExecutor              podCommandExecutor
+	infraFencer                  InfrastructureFencer
+	fuseCredentials              runtime.FUSECredentials
+	endpointLookup               runtime.LookupNetIPFunc
+	appArmorProfile              string
+	nodeSelector                 map[string]string
+	disableNodeLocalDNSInjection bool
+	dnsOptions                   []kubecontract.DNSOption
+	dnsAdmissionError            error
+	dnsAdmissionContract         string
+	appArmorLoaderName           string
+	appArmorLoaderNamespace      string
+	appArmorLoaderTimeout        time.Duration
+	clusterDNSLookup             func() ([]netip.Addr, error)
+	pollInterval                 time.Duration
+	prepareTimeout               time.Duration
+	readyTimeout                 time.Duration
+	terminationTimeout           time.Duration
+	ordinaryPolicyRecovery       func(context.Context) error
+	readOnlyInspection           bool
+	stateMu                      sync.Mutex
+	workspaceStates              map[string]*workspaceRuntimeState
 }
 
 // Ping performs a bounded one-item Pod list for readiness. It uses the request
@@ -225,6 +233,9 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 			option(runtimeImpl)
 		}
 	}
+	if runtimeImpl.dnsAdmissionError != nil {
+		return nil, runtimeImpl.dnsAdmissionError
+	}
 	if err := runtimeImpl.validateAppArmorLoaderOptions(); err != nil {
 		return nil, err
 	}
@@ -282,7 +293,7 @@ func (r *Runtime) verifyAmbiguousOrdinaryPodCreate(ctx context.Context, desired 
 	if err != nil {
 		return nil, false, errors.Join(fmt.Errorf("create ordinary Pod: %w", createErr), fmt.Errorf("verify ordinary Pod creation: %w", err))
 	}
-	if preparedPodIntentMatches(current, desired, true) {
+	if r.podIntentMatches(current, desired, true) {
 		return current, false, nil
 	}
 	if current.UID != "" && current.Annotations[ordinaryPolicyAttemptAnnotation] == desired.Annotations[ordinaryPolicyAttemptAnnotation] {
@@ -296,11 +307,17 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if spec.WorkspaceFUSE != nil {
 		return nil, fmt.Errorf("FUSE sandboxes require the prepare/authorize/ready lifecycle")
 	}
+	if err := r.validateDNSAdmissionLabels(spec.Labels); err != nil {
+		return nil, err
+	}
 	pod, err := buildOrdinaryPod(r.namespace, spec)
 	if err != nil {
 		return nil, err
 	}
 	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
+	if err := r.applyDNSAdmission(pod, spec.Labels); err != nil {
+		return nil, err
+	}
 	logicalID := pod.Labels["sandbox.id"]
 	identity := ordinaryNetworkIdentity{runtimeID: pod.Name, logicalID: logicalID}
 	attempt, err := newNetworkAttemptToken()
@@ -377,8 +394,8 @@ func (r *Runtime) CreateSandbox(ctx context.Context, spec runtime.SandboxSpec) (
 	if createdPod.UID == "" {
 		return nil, cleanup(fmt.Errorf("created ordinary Pod has no immutable UID"), createdPod, true)
 	}
-	if !preparedPodIntentMatches(createdPod, pod, allowScheduledNodeName) {
-		reason := preparedPodIntentMismatchReason(createdPod, pod)
+	if !r.podIntentMatches(createdPod, pod, allowScheduledNodeName) {
+		reason := r.podIntentMismatchReason(createdPod, pod, allowScheduledNodeName)
 		return nil, cleanup(fmt.Errorf("created ordinary Pod does not match requested Pod intent: %s", reason), createdPod, true)
 	}
 	identity.runtimeUID = createdPod.UID
@@ -422,6 +439,9 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if spec.WorkspaceFUSE == nil {
 		return nil, runtime.ErrWorkspaceFUSEUnsupported
 	}
+	if err := r.validateDNSAdmissionLabels(spec.Labels); err != nil {
+		return nil, err
+	}
 	if r.appArmorProfile != "" && (!immutableAppArmorProfile.MatchString(r.appArmorProfile) || spec.WorkspaceFUSE.LSMProfile != r.appArmorProfile) {
 		return nil, fmt.Errorf("requested FUSE AppArmor profile does not match runtime contract")
 	}
@@ -444,6 +464,9 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 		return nil, err
 	}
 	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
+	if err := r.applyDNSAdmission(pod, spec.Labels); err != nil {
+		return nil, err
+	}
 	policy, ciliumPolicy, err := r.buildPreparedSystemPolicy(spec)
 	if err != nil {
 		return nil, err
@@ -491,8 +514,8 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if created.UID == "" {
 		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, fmt.Errorf("prepared Pod has no immutable UID"))
 	}
-	if !preparedPodIntentMatches(created, pod, false) {
-		reason := preparedPodIntentMismatchReason(created, pod)
+	if !r.podIntentMatches(created, pod, false) {
+		reason := r.podIntentMismatchReason(created, pod, false)
 		return nil, r.compensatePreparedFailure(ctx, created, spec.WorkspaceFUSE.SystemEgress.Mode, prepareAttempt, fmt.Errorf("created prepared Pod does not match the requested security contract: %s", reason))
 	}
 	ref := runtime.RuntimeRef{ID: created.Name, UID: string(created.UID)}
@@ -1895,7 +1918,7 @@ func (r *Runtime) verifyAmbiguousPodCreate(ctx context.Context, desired *corev1.
 	if err != nil {
 		return nil, false, errors.Join(fmt.Errorf("create prepared Pod: %w", createErr), fmt.Errorf("verify prepared Pod creation: %w", err))
 	}
-	if !preparedPodIntentMatches(current, desired, true) {
+	if !r.podIntentMatches(current, desired, true) {
 		// This invocation created (or exactly adopted) only the unbound system
 		// policy. An incompatible Pod must be left untouched, while removing that
 		// unbound policy prevents it from inheriting this operation's egress.
@@ -1910,6 +1933,10 @@ func (r *Runtime) verifyAmbiguousPodCreate(ctx context.Context, desired *corev1.
 }
 
 func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeName bool) bool {
+	return preparedPodIntentMatchesWithDNS(current, desired, allowScheduledNodeName, nil)
+}
+
+func preparedPodIntentMatchesWithDNS(current, desired *corev1.Pod, allowScheduledNodeName bool, dnsOptions []kubecontract.DNSOption) bool {
 	if current == nil || desired == nil || current.UID == "" || current.Name != desired.Name || current.Namespace != desired.Namespace {
 		return false
 	}
@@ -1926,8 +1953,17 @@ func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeNa
 			return false
 		}
 	}
-	currentCopy := current.DeepCopy()
-	desiredCopy := desired.DeepCopy()
+	currentCopy, desiredCopy := normalizedPodIntentCopies(current, desired, allowScheduledNodeName)
+	if !normalizePinnedDNSOptions(currentCopy, desiredCopy, dnsOptions) {
+		return false
+	}
+	return reflect.DeepEqual(currentCopy.Labels, desiredCopy.Labels) &&
+		reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) &&
+		apiequality.Semantic.DeepEqual(currentCopy.Spec, desiredCopy.Spec)
+}
+
+func normalizedPodIntentCopies(current, desired *corev1.Pod, allowScheduledNodeName bool) (*corev1.Pod, *corev1.Pod) {
+	currentCopy, desiredCopy := current.DeepCopy(), desired.DeepCopy()
 	// Apply the same registered Kubernetes defaults to both sides. A scheduler
 	// may bind a Pod while an ambiguous create response is being verified, but a
 	// successful Create response has not passed through the scheduler and must
@@ -1957,30 +1993,29 @@ func preparedPodIntentMatches(current, desired *corev1.Pod, allowScheduledNodeNa
 	if desiredCopy.Spec.PriorityClassName == "" && desiredCopy.Spec.PreemptionPolicy == nil && currentCopy.Spec.PreemptionPolicy != nil && *currentCopy.Spec.PreemptionPolicy == corev1.PreemptLowerPriority {
 		currentCopy.Spec.PreemptionPolicy = nil
 	}
-	return reflect.DeepEqual(currentCopy.Labels, desiredCopy.Labels) &&
-		reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) &&
-		apiequality.Semantic.DeepEqual(currentCopy.Spec, desiredCopy.Spec)
+	return currentCopy, desiredCopy
 }
 
 func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
-	if current == nil || desired == nil {
+	return preparedPodIntentMismatchReasonWithDNS(current, desired, false, nil)
+}
+
+func preparedPodIntentMismatchReasonWithDNS(current, desired *corev1.Pod, allowScheduledNodeName bool, dnsOptions []kubecontract.DNSOption) string {
+	if current == nil || desired == nil || current.UID == "" || current.Name != desired.Name || current.Namespace != desired.Namespace {
 		return "identity"
 	}
-	currentCopy, desiredCopy := current.DeepCopy(), desired.DeepCopy()
-	kubescheme.Scheme.Default(currentCopy)
-	kubescheme.Scheme.Default(desiredCopy)
-	normalizeAppArmorAdmission(currentCopy, desiredCopy)
-	if len(currentCopy.Annotations) == 0 && len(desiredCopy.Annotations) == 0 {
-		currentCopy.Annotations, desiredCopy.Annotations = nil, nil
+	if !reflect.DeepEqual(current.Finalizers, desired.Finalizers) {
+		return "finalizers"
 	}
+	currentCopy, desiredCopy := normalizedPodIntentCopies(current, desired, allowScheduledNodeName)
 	if !reflect.DeepEqual(currentCopy.Labels, desiredCopy.Labels) {
 		return "labels"
 	}
 	if !reflect.DeepEqual(currentCopy.Annotations, desiredCopy.Annotations) {
 		return "annotations"
 	}
-	if !reflect.DeepEqual(currentCopy.Finalizers, desiredCopy.Finalizers) {
-		return "finalizers"
+	if !normalizePinnedDNSOptions(currentCopy, desiredCopy, dnsOptions) {
+		return "spec.DNSConfig"
 	}
 	currentSpec, desiredSpec := reflect.ValueOf(currentCopy.Spec), reflect.ValueOf(desiredCopy.Spec)
 	typ := currentSpec.Type()
@@ -2000,7 +2035,7 @@ func preparedPodIntentMismatchReason(current, desired *corev1.Pod) string {
 			return "spec." + typ.Field(index).Name
 		}
 	}
-	return "identity"
+	return ""
 }
 
 func normalizeAppArmorAdmission(current, desired *corev1.Pod) {
@@ -2910,6 +2945,11 @@ func (r *Runtime) RenameSandbox(_ context.Context, _ string, _ string) error {
 }
 
 func (r *Runtime) UpdateLabels(ctx context.Context, id string, labels map[string]*string) error {
+	if r.disableNodeLocalDNSInjection {
+		if value, present := labels[kubecontract.NodeLocalDNSInjectionLabel]; present && (value == nil || *value != "disabled") {
+			return fmt.Errorf("NodeLocal DNS opt-out label is controlled by the Kubernetes runtime")
+		}
+	}
 	protected := false
 	for key := range labels {
 		switch key {

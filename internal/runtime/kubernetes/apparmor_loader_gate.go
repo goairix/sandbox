@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -134,7 +136,7 @@ func validLoaderDaemonSet(ds *appsv1.DaemonSet, profile string, selector map[str
 	return nil
 }
 
-func loaderPodTemplateSpecMatches(pod *corev1.Pod, template corev1.PodTemplateSpec) bool {
+func loaderPodTemplateSpecMatchesWithDNS(pod *corev1.Pod, template corev1.PodTemplateSpec, dnsOptions []kubecontract.DNSOption) bool {
 	current := pod.DeepCopy()
 	desired := &corev1.Pod{Spec: *template.Spec.DeepCopy()}
 	kubescheme.Scheme.Default(current)
@@ -167,7 +169,7 @@ func loaderPodTemplateSpecMatches(pod *corev1.Pod, template corev1.PodTemplateSp
 	if desired.Spec.PriorityClassName == "" && desired.Spec.PreemptionPolicy == nil && current.Spec.PreemptionPolicy != nil && *current.Spec.PreemptionPolicy == corev1.PreemptLowerPriority {
 		current.Spec.PreemptionPolicy = nil
 	}
-	return apiequality.Semantic.DeepEqual(current.Spec, desired.Spec)
+	return normalizePinnedDNSOptions(current, desired, dnsOptions) && apiequality.Semantic.DeepEqual(current.Spec, desired.Spec)
 }
 
 // The DaemonSet controller replaces required node affinity with the assigned
@@ -226,12 +228,36 @@ func normalizeLoaderDaemonSetScheduling(current, desired *corev1.Pod) bool {
 }
 
 func appArmorLoaderObservationReady(ds *appsv1.DaemonSet, pods []corev1.Pod, profile string, selector map[string]string) (bool, error) {
+	return appArmorLoaderObservationReadyWithDNS(ds, pods, profile, selector, false, nil)
+}
+
+func validLoaderDaemonSetWithDNS(ds *appsv1.DaemonSet, profile string, selector map[string]string, disable bool, dnsOptions []kubecontract.DNSOption) error {
 	if err := validLoaderDaemonSet(ds, profile, selector); err != nil {
+		return err
+	}
+	if !disable && len(dnsOptions) == 0 {
+		return nil
+	}
+	if disable && ds.Spec.Template.Labels[kubecontract.NodeLocalDNSInjectionLabel] != "disabled" {
+		return errors.New("AppArmor loader NodeLocal opt-out differs from administrator configuration")
+	}
+	var actual []corev1.PodDNSConfigOption
+	if ds.Spec.Template.Spec.DNSConfig != nil {
+		actual = ds.Spec.Template.Spec.DNSConfig.Options
+	}
+	if !dnsOptionsMatch(actual, dnsOptions) {
+		return errors.New("AppArmor loader DNS options differ from administrator configuration")
+	}
+	return nil
+}
+
+func appArmorLoaderObservationReadyWithDNS(ds *appsv1.DaemonSet, pods []corev1.Pod, profile string, selector map[string]string, disable bool, dnsOptions []kubecontract.DNSOption) (bool, error) {
+	if err := validLoaderDaemonSetWithDNS(ds, profile, selector, disable, dnsOptions); err != nil {
 		return false, err
 	}
 	digest := strings.TrimPrefix(profile, "sandbox-fuse-")
 	for _, pod := range pods {
-		if pod.Namespace != ds.Namespace || pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Labels[appArmorDigestKey] != digest[:63] || pod.Annotations[appArmorDigestKey] != digest || !loaderPodTemplateSpecMatches(&pod, ds.Spec.Template) {
+		if pod.Namespace != ds.Namespace || pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Labels[appArmorDigestKey] != digest[:63] || pod.Annotations[appArmorDigestKey] != digest || !loaderPodTemplateSpecMatchesWithDNS(&pod, ds.Spec.Template, dnsOptions) {
 			continue
 		}
 		owned := false
@@ -303,7 +329,7 @@ func (r *Runtime) waitForAppArmorLoader(ctx context.Context) error {
 				}
 				expectedUID = ds.UID
 			}
-			err = validLoaderDaemonSet(ds, r.appArmorProfile, r.nodeSelector)
+			err = validLoaderDaemonSetWithDNS(ds, r.appArmorProfile, r.nodeSelector, r.disableNodeLocalDNSInjection, r.dnsOptions)
 			if err == nil {
 				selector, selectorErr := metav1.LabelSelectorAsSelector(ds.Spec.Selector)
 				if selectorErr != nil {
@@ -312,7 +338,7 @@ func (r *Runtime) waitForAppArmorLoader(ctx context.Context) error {
 				pods, listErr := r.client.CoreV1().Pods(r.appArmorLoaderNamespace).List(bounded, metav1.ListOptions{LabelSelector: selector.String()})
 				err = listErr
 				if err == nil {
-					ready, observationErr := appArmorLoaderObservationReady(ds, pods.Items, r.appArmorProfile, r.nodeSelector)
+					ready, observationErr := appArmorLoaderObservationReadyWithDNS(ds, pods.Items, r.appArmorProfile, r.nodeSelector, r.disableNodeLocalDNSInjection, r.dnsOptions)
 					err = observationErr
 					if ready {
 						current, getErr := r.client.AppsV1().DaemonSets(r.appArmorLoaderNamespace).Get(bounded, r.appArmorLoaderName, metav1.GetOptions{})
@@ -322,7 +348,7 @@ func (r *Runtime) waitForAppArmorLoader(ctx context.Context) error {
 								return errors.New("AppArmor loader DaemonSet identity changed during startup")
 							}
 							if current.Generation == ds.Generation && reflect.DeepEqual(current.Spec.Template, ds.Spec.Template) && reflect.DeepEqual(current.Spec.Selector, ds.Spec.Selector) {
-								if err := validLoaderDaemonSet(current, r.appArmorProfile, r.nodeSelector); err == nil {
+								if err := validLoaderDaemonSetWithDNS(current, r.appArmorProfile, r.nodeSelector, r.disableNodeLocalDNSInjection, r.dnsOptions); err == nil {
 									return bounded.Err()
 								} else {
 									getErr = err

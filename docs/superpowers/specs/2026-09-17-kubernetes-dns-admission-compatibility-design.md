@@ -3,7 +3,9 @@
 ## 状态与目标
 
 2026-09-17：用户已同意“管理员显式配置、默认行为不变、保留严格安全校验”的方向。
-本文细化配置与验收边界，等待书面设计确认；不是修复已实现或集群测试通过的声明。
+用户理解说明后已确认继续，本地实施及证据见
+[实施报告](../../testing/2026-09-17-kubernetes-dns-admission-compatibility.md)。
+现场验收等待用户发布新 API 镜像；不是集群测试通过的声明。
 
 目标是解除当前双华云 CCE 1.31 的 DNS 准入契约阻塞，同时不改变此前
 ds-ai-research 已验收的默认运行时功能。最低支持 Kubernetes 1.29，不提高版本下限。
@@ -57,7 +59,8 @@ ds-ai-research 已验收的默认运行时功能。最低支持 Kubernetes 1.29�
 可能仅有 options 准入，不需要 NodeLocal opt-out。启用非默认值要求 runtime 为 kubernetes。
 本轮不增加任意 DNSPolicy、nameserver、search 或任意 Pod 标签的配置接口。
 
-当前 CCE 的预期覆盖值如下，确认实现和测试后才能作为部署配置发布：
+当前 CCE 的显式配置如下，部署步骤见
+[DNS 兼容部署说明](../../deployment/kubernetes-dns-admission.md)：
 
 ```yaml
 config:
@@ -153,6 +156,8 @@ fingerprint 和 FUSE pool key；Helm backend fingerprint 使用相同的规范�
 options 改变顺序不能产生新代际。不要新建一个无条件参与指纹的版本字段。
 
 API 与 drain/audit 的配置环境使用同一条件渲染 helper，非默认时才输出新 env，避免重复。
+已有 Deployment 的 pre-upgrade hook 保留原来的 installed env 复用规则：使用旧配置
+清理旧资源、用新 fingerprint 判断变更，不混用新旧 DNS 环境。
 inspection/drain 不启用 loader 启动等待，但保留 DNS 配置语义与指纹一致性。
 旧 Pod 的 UID 精确终止和资源审计不依赖新 DNS 意图匹配，不能因此无法卸载旧代际。
 

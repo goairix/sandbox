@@ -64,6 +64,15 @@ runtime:
     # 启用加载器时自动合入Linux；原64项映射必须已包含Linux OS键。
     # 环境变量 SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR 使用JSON对象，不是逗号列表。
     node_selector: {}
+    # 可选 DNS 准入兼容；默认不改变普通/FUSE Pod、loader 模板或池指纹。
+    # 只给沙盒物理 Pod/loader 添加 NodeLocal opt-out，不改变 API/Redis 自身 DNS。
+    # 对应 Helm：config.runtime.kubernetes.disableNodeLocalDNSInjection / dnsOptions。
+    disable_node_local_dns_injection: false
+    # 管理员声明的 options，最多两项、名称不能重复：
+    # single-request-reopen 的 value 必须为 ""；timeout 的 value 为 "1".."30"。
+    # SANDBOX_RUNTIME_KUBERNETES_DNS_OPTIONS 必须是 JSON 数组（最多1024字节），不是逗号列表。
+    # 双华云当前测试环境显式使用上述开关和 timeout="2"，其它环境不要照抄。
+    dns_options: []
     # 可选AppArmor加载器：name非空才启用；namespace应为安装release所在命名空间。
     # 启用要求FUSE、immutable sandbox-fuse摘要profile及关闭kind绕过。
     apparmor_loader_name: ""

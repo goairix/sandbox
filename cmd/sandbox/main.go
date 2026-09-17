@@ -247,6 +247,7 @@ func main() {
 		}
 		options = append(options, k8sruntime.WithNetworkCIDRs(cfg.Runtime.Kubernetes.PodCIDRs, cfg.Runtime.Kubernetes.ServiceCIDRs))
 		options = append(options, k8sruntime.WithNetworkPolicyProvider(cfg.Runtime.Kubernetes.NetworkPolicyProvider))
+		options = append(options, kubernetesDNSOptions(cfg.Runtime.Kubernetes)...)
 		options = append(options, kubernetesAppArmorOptions(cfg.Runtime.Kubernetes, cfg.Workspace.Backend.LSMProfile, inspectOwners, *drainRelease)...)
 		if fuseEnabled {
 			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))

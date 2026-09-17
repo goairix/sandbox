@@ -71,7 +71,19 @@
             "kubernetes": {
               "type": "object",
               "properties": {
-                "nodeSelector": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": "string"}}
+                "nodeSelector": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": "string"}},
+                "disableNodeLocalDNSInjection": {"type": "boolean"},
+                "dnsOptions": {
+                  "type": "array", "maxItems": 2,
+                  "items": {
+                    "type": "object", "additionalProperties": false, "required": ["name", "value"],
+                    "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
+                    "oneOf": [
+                      {"properties": {"name": {"const": "single-request-reopen"}, "value": {"const": ""}}},
+                      {"properties": {"name": {"const": "timeout"}, "value": {"pattern": "^([1-9]|[12][0-9]|30)$"}}}
+                    ]
+                  }
+                }
               }
             }
           }

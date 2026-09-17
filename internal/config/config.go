@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/goairix/sandbox/internal/imageref"
+	"github.com/goairix/sandbox/internal/kubecontract"
 	"github.com/goairix/sandbox/internal/mounter"
 )
 
@@ -59,15 +60,17 @@ type DockerConfig struct {
 
 // KubernetesConfig holds Kubernetes-specific runtime settings.
 type KubernetesConfig struct {
-	Kubeconfig                   string            `mapstructure:"kubeconfig"`
-	Namespace                    string            `mapstructure:"namespace"`
-	NetworkPolicyProvider        string            `mapstructure:"network_policy_provider"`
-	PodCIDRs                     []string          `mapstructure:"pod_cidrs"`
-	ServiceCIDRs                 []string          `mapstructure:"service_cidrs"`
-	NodeSelector                 map[string]string `mapstructure:"node_selector"`
-	AppArmorLoaderName           string            `mapstructure:"apparmor_loader_name"`
-	AppArmorLoaderNamespace      string            `mapstructure:"apparmor_loader_namespace"`
-	AppArmorLoaderTimeoutSeconds int               `mapstructure:"apparmor_loader_timeout_seconds"`
+	Kubeconfig                   string                   `mapstructure:"kubeconfig"`
+	Namespace                    string                   `mapstructure:"namespace"`
+	NetworkPolicyProvider        string                   `mapstructure:"network_policy_provider"`
+	PodCIDRs                     []string                 `mapstructure:"pod_cidrs"`
+	ServiceCIDRs                 []string                 `mapstructure:"service_cidrs"`
+	NodeSelector                 map[string]string        `mapstructure:"node_selector"`
+	DisableNodeLocalDNSInjection bool                     `mapstructure:"disable_node_local_dns_injection"`
+	DNSOptions                   []kubecontract.DNSOption `mapstructure:"dns_options"`
+	AppArmorLoaderName           string                   `mapstructure:"apparmor_loader_name"`
+	AppArmorLoaderNamespace      string                   `mapstructure:"apparmor_loader_namespace"`
+	AppArmorLoaderTimeoutSeconds int                      `mapstructure:"apparmor_loader_timeout_seconds"`
 }
 
 // PoolConfig holds sandbox pool settings.
@@ -348,6 +351,12 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	disableDNSInjection, dnsOptions, err := readKubernetesDNSAdmission(path, v)
+	if err != nil {
+		return nil, err
+	}
+	v.Set("runtime.kubernetes.disable_node_local_dns_injection", false)
+	v.Set("runtime.kubernetes.dns_options", []kubecontract.DNSOption{})
 	// Viper's case-insensitive map decoding must not change label key identity.
 	v.Set("runtime.kubernetes.node_selector", map[string]string{})
 	cfg := &Config{}
@@ -355,6 +364,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 	cfg.Runtime.Kubernetes.NodeSelector = selector
+	cfg.Runtime.Kubernetes.DisableNodeLocalDNSInjection = disableDNSInjection
+	cfg.Runtime.Kubernetes.DNSOptions = dnsOptions
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -365,6 +376,9 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for invalid or missing values.
 func (c *Config) Validate() error {
+	if err := c.normalizeKubernetesDNSAdmission(); err != nil {
+		return err
+	}
 	switch c.Runtime.Kubernetes.NetworkPolicyProvider {
 	case "", "auto", "standard", "cilium":
 	default:
@@ -942,6 +956,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("runtime.kubernetes.pod_cidrs", []string{})
 	v.SetDefault("runtime.kubernetes.service_cidrs", []string{})
 	v.SetDefault("runtime.kubernetes.node_selector", map[string]string{})
+	v.SetDefault("runtime.kubernetes.disable_node_local_dns_injection", false)
+	v.SetDefault("runtime.kubernetes.dns_options", []kubecontract.DNSOption{})
 	v.SetDefault("runtime.kubernetes.apparmor_loader_name", "")
 	v.SetDefault("runtime.kubernetes.apparmor_loader_namespace", "")
 	v.SetDefault("runtime.kubernetes.apparmor_loader_timeout_seconds", 180)

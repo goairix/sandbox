@@ -6,6 +6,7 @@
 {{- $profile := include "sandbox.effectiveLSMProfile" . }}
 {{- $selector := include "sandbox.effectiveNodeSelector" . | fromJson }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
+{{- $dns := include "sandbox.dnsAdmissionConfig" . | fromJson }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -42,6 +43,9 @@ spec:
         app: sandbox-apparmor-loader
         release: {{ .Release.Name }}
         sandbox.apparmor.profile-digest: {{ trunc 63 $digest | quote }}
+        {{- if $dns.disableNodeLocalDNSInjection }}
+        node-local-dns-injection: disabled
+        {{- end }}
       annotations:
         sandbox.apparmor.profile-digest: {{ $digest | quote }}
     spec:
@@ -49,6 +53,11 @@ spec:
       automountServiceAccountToken: false
       # 显式关闭，避免 Pod 默认值与模板不同导致严格启动门禁误判。
       enableServiceLinks: false
+      {{- if gt (len $dns.dnsOptions) 0 }}
+      dnsConfig:
+        options:
+{{ toYaml $dns.dnsOptions | indent 10 }}
+      {{- end }}
       {{- if $apparmorConfig.priorityClassName }}
       priorityClassName: {{ $apparmorConfig.priorityClassName | quote }}
       {{- end }}

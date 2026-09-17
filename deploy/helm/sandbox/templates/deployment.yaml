@@ -85,6 +85,7 @@ spec:
               value: "{{ .Values.config.runtime.type }}"
             - name: SANDBOX_RUNTIME_KUBERNETES_NAMESPACE
               value: "{{ $sandboxNs }}"
+{{ include "sandbox.dnsAdmissionEnv" . | nindent 12 }}
             {{- $nodeSelector := include "sandbox.effectiveNodeSelector" . }}
             {{- if ne $nodeSelector "{}" }}
             - name: SANDBOX_RUNTIME_KUBERNETES_NODE_SELECTOR

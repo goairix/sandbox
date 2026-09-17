@@ -8,8 +8,9 @@
 - 服务器自己的配置单独放在 Chart 外，例如 `/opt/sandbox/env/values-prod.yaml`。
 - AK/SK 直接写在环境 values 的 `config.storage.filesystem.accessKey/secretKey`，不再创建 workspace credential Secret。
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
-- 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像、有效 LSM/nodeSelector 或 cleanup protocol 变化时，Chart 会先排空。
+- 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像、有效 LSM/nodeSelector、显式 DNS 准入配置或 cleanup protocol 变化时，Chart 会先排空。
 - AppArmor 加载器需要单独构建、推送镜像，默认关闭；真实隔离验收通过前不能直接开启线上开关。
+- 双华云 DNS 准入兼容是独立可选项：未配置时保持原模板和指纹；新增字段不要求原集群补齐。详见 [DNS 准入兼容部署说明](kubernetes-dns-admission.md)。
 
 原有网络规则不能改：开放公网访问时仍禁止内网访问；确需访问其他内网服务时必须加明确白名单。FUSE 的 system egress 由 sandbox-api 自动解析，只开放对象存储 endpoint 的精确地址和端口。
 
