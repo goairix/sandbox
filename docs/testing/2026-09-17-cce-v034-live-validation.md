@@ -69,3 +69,13 @@
 平台确认并解决 CRI AppArmor 支持后，在获准隔离环境继续三副本 API、普通/FUSE 池命中、跨 API exec/TTL/文件操作、真实挂载与持久化、PID 1/s3fs enforce 和内核拒绝证据、业务销毁、升级及正常卸载验证。
 
 标准 NetworkPolicy 的实际拦截、DNS 完整业务路径、最低 1.29 生命周期、DataPlane V2、OBS、Sentinel 冷恢复/节点 HA 仍未验收。本轮原始报告、私有配置、凭据、Secret、Pod env 与原始日志均不入提交。
+
+## 后续只读排查：节点 OS 与平台支持范围
+
+2026-09-17 23:15–23:17 再次核验同一集群 UID，两个原节点 UID 未变：均为 `Huawei Cloud EulerOS 2.0 (x86_64)`，内核 `5.10.0-182.0.0.95.r3450_282.hce2.x86_64`，kubelet `v1.31.14-r20-31.0.31.7`，CRI `containerd://1.7.29-14-g6d1d1601f`；均 Ready。四个 Everest 组件 Pod 使用 `everest:2.5.28` 且全部 Ready；没有 `sandbox-cce-` 测试命名空间、RuntimeClass 或名称匹配 containerd/runtime/node-config/node-manager 的 kube-system ConfigMap。
+
+[华为公有云 CCE 的 AppArmor 文档](https://support.huaweicloud.com/usermanual-cce/cce_10_1006.html) 要求 Ubuntu 节点、集群 v1.31.6-r0 及以上、Everest 2.4.158 及以上。当前 Everest 满足该文档插件门槛，但实际 OS 不是 Ubuntu。**这是需要平台确认的支持范围差异，不是已经确认 EulerOS 内核不支持，也不能直接套用为双华云私有发行版的定论。** 本项目最低支持仍为 Kubernetes 1.29，不提高版本门槛、不硬编码厂商 OS、不改其它集群已验证功能。
+
+上游 [containerd 1.7.29 的拒绝分支](https://github.com/containerd/containerd/blob/v1.7.29/pkg/cri/server/container_create_linux.go) 在 AppArmor 能力为 false 且请求非 Unconfined profile 时返回该错误；与 profile 不存在的错误是不同分支。现场拒绝与该能力分支一致，但缺少厂商二进制/运行中 CRI 配置证据，尚不能确认是禁用配置、宿主机 parser 缺失、首次能力缓存或其它 host 检查。没有把字段/注解兼容、扩大重试或再次部署当作节点前提修复。
+
+当前 Kubernetes API 证据不足以读取运行中 CRI 的有效配置。未新建测试资源、执行宿主机读取、扩大 hostPath、安装软件、改配置或重启服务；宿主机诊断与后续变更须另外确认范围。平台只读检查与隐私要求见 [CCE 节点前提](../deployment/apparmor-loader.md#cce-发行版与节点操作系统另行核实不能套用通用内核结论)。

@@ -176,6 +176,25 @@ CCE 现场曾在 loader Ready 后由 CRI 拒绝创建 mounter，见 [v0.3.33 现
 
 用户提供 API `v0.3.34` 与 bootstrap `v0.3.1` 后，隔离现场确认首次身份/初始化和正常卸载通过，但已加载 enforce profile 的节点仍被 CRI 以 `apparmor is not supported` 拒绝创建真实 FUSE 容器；测试资源已清理。见 [最新现场报告](../testing/2026-09-17-cce-v034-live-validation.md)。这不是完整 API/AppArmor 验收通过，也不要求新增 Helm values。
 
+### CCE 发行版与节点操作系统：另行核实，不能套用通用内核结论
+
+截至 2026-09-17 查阅的 [华为公有云 CCE AppArmor 文档](https://support.huaweicloud.com/usermanual-cce/cce_10_1006.html) 将支持范围限定为集群 v1.31.6-r0 及以上、Ubuntu 节点，并要求 Everest 2.4.158 及以上；还要求在节点和容器运行时分别启用 AppArmor。该平台限制不改变本项目 Kubernetes 1.29 的最低支持，也不意味着通用 Kubernetes 1.29 不能使用 AppArmor。
+
+当前双华云 CCE 测试节点实际为 Huawei Cloud EulerOS 2.0，Everest 镜像为 2.5.28。不能因 Kubernetes/插件版本达到上述门槛就忽略节点 OS，也不能未经私有云平台确认就把公有云支持范围等同于双华云发行版。项目不按 OS 名称自动关闭 LSM、切换 SELinux 或加入 Ubuntu 硬编码白名单；保持现有安全契约与其它已验证集群行为。
+
+下一步是由平台确认该发行版/节点 OS 的支持范围，并读取**正在运行的 CRI** 的 AppArmor 禁用配置、宿主机 parser 和 host 检测前提。Kubelet configz 不包含 containerd 的有效配置，loader 镜像内的 parser 也不是宿主机 parser。不要只凭静态 config.toml 或 `containerd config dump` 推断运行中 CRI 已采用该值；导入配置、启动配置路径与能力缓存均可能影响结果。
+
+若平台管理员已有节点访问方式、`crictl` 与 `jq`，可先在目标节点做以下只读检查；不要发送完整 `crictl info`、配置文件、环境或日志，其中可能包含私有连接信息。命令或字段不可用表示证据不足，不按 false/通过处理，也不要为诊断自行安装软件：
+
+```bash
+sudo crictl info | jq -e 'if (.config.disableApparmor | type) == "boolean" then {disableApparmor: .config.disableApparmor} else error("CRI AppArmor config unavailable") end'
+test -e /sbin/apparmor_parser && printf 'host-parser-present\n' || printf 'host-parser-missing\n'
+test -x /sbin/apparmor_parser && printf 'host-parser-executable\n' || printf 'host-parser-not-executable\n'
+cat /sys/module/apparmor/parameters/enabled
+```
+
+项目当前获准诊断不包括增加主机目录挂载、注入节点诊断 Pod、安装宿主机软件或重启服务。若需临时只读诊断 Pod，必须先确认精确节点与挂载范围；不挂载主机根目录或 runtime socket，不扩大已有 loader 权限。若需更换节点 OS、改变 CRI 配置或重启，另行获得平台支持与维护窗口授权后再实施，之后仍需真实 FUSE enforce/拒绝及正常清理验收。
+
 ## 权限与可用性
 
 节点须已启用 AppArmor 并可访问 securityfs。加载器无权改变内核启动参数，不假设所有 Linux 节点都有可用 AppArmor。DaemonSet 是可信节点管理组件，使用 privileged 和两个必要 hostPath：securityfs（策略加载需写入）及只读 enabled 文件；不挂载主机根目录、运行时 socket 或业务目录，不使用 hostPID/hostNetwork，不携带 Kubernetes API token。命名空间的 Pod Security Admission 必须由管理员允许该可信组件，不能因此扩大租户沙盒权限。
