@@ -2,6 +2,14 @@
 
 ## 范围与最新基线
 
+最新追加（2026-09-17 15:02–15:08，北京时间）：用户更新后 API `v0.3.32` 三副本公共 API
+回归通过，普通 ephemeral/persistent 三轮并发销毁共18/18成功。最终普通/FUSE池各三条
+prepared，活动/会话/owner/lease扫描为零，API/Sentinel/loader仍为3/3、3/3、5/5且零重启。
+本轮FUSE创建n=3，p50为3.670秒、max为5.338秒，不关闭PERF-02。网络可选矩阵未执行；
+双华云VPC/OBS尚待目标环境和隔离范围确认，准备核对见
+[双华云环境准备](2026-09-17-shuanghua-vpc-obs-readiness.md)，本轮证据见
+[v0.3.32回归](2026-09-17-ds-ai-research-v0.3.32-validation.md)。
+
 最新追加（2026-09-17）：QUALITY-01 已整改并提交；SEC-01 本集群五节点隔离公共 API验收
 全部通过，失败实验均已正常清理，业务 API/Sentinel/loader仍为3/3、3/3、5/5且基线未变。
 见 [五节点 API 验收](2026-09-16-all-node-apparmor-api-results.md)。没有修改业务 release/Redis/节点设置。
