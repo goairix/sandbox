@@ -193,7 +193,9 @@ test -x /sbin/apparmor_parser && printf 'host-parser-executable\n' || printf 'ho
 cat /sys/module/apparmor/parameters/enabled
 ```
 
-项目当前获准诊断不包括增加主机目录挂载、注入节点诊断 Pod、安装宿主机软件或重启服务。若需临时只读诊断 Pod，必须先确认精确节点与挂载范围；不挂载主机根目录或 runtime socket，不扩大已有 loader 权限。若需更换节点 OS、改变 CRI 配置或重启，另行获得平台支持与维护窗口授权后再实施，之后仍需真实 FUSE enforce/拒绝及正常清理验收。
+2026-09-17 用户确认生产目标仍为 EulerOS 2.0，另行批准了两个非 privileged 临时只读诊断 Pod；已在两原测试节点核实：内核 enabled=Y、profile enforce，但宿主机 parser 缺失、静态 containerd 配置显式禁用 AppArmor。诊断资源已清理；运行中 CRI 的有效配置尚未查询。详细权限边界、实测与后续要求见 [宿主机诊断报告](../testing/2026-09-17-cce-euleros-apparmor-host-diagnostics.md)。不要求改为 Ubuntu，也不扩大已有 loader 权限。
+
+该只读授权不包括安装宿主机软件、修改 CRI 配置或重启服务。临时诊断仅在获准的精确节点/挂载范围执行，不挂载主机根目录或 runtime socket；不能创建伪 parser 文件骗过检测，也不能直接把 Debian loader 镜像的 parser 复制到 EulerOS 上。EulerOS 包来源与 ABI/依赖兼容、私有云发行版支持和维护窗口须先确认，另获节点变更授权后才实施；之后仍需真实 FUSE enforce/拒绝及正常清理验收，不把静态配置或 loader Ready 当作通过。
 
 ## 权限与可用性
 

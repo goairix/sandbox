@@ -79,3 +79,5 @@
 上游 [containerd 1.7.29 的拒绝分支](https://github.com/containerd/containerd/blob/v1.7.29/pkg/cri/server/container_create_linux.go) 在 AppArmor 能力为 false 且请求非 Unconfined profile 时返回该错误；与 profile 不存在的错误是不同分支。现场拒绝与该能力分支一致，但缺少厂商二进制/运行中 CRI 配置证据，尚不能确认是禁用配置、宿主机 parser 缺失、首次能力缓存或其它 host 检查。没有把字段/注解兼容、扩大重试或再次部署当作节点前提修复。
 
 当前 Kubernetes API 证据不足以读取运行中 CRI 的有效配置。未新建测试资源、执行宿主机读取、扩大 hostPath、安装软件、改配置或重启服务；宿主机诊断与后续变更须另外确认范围。平台只读检查与隐私要求见 [CCE 节点前提](../deployment/apparmor-loader.md#cce-发行版与节点操作系统另行核实不能套用通用内核结论)。
+
+23:27 用户另行批准两个临时非 privileged 只读诊断 Pod，并确认生产也是 EulerOS 2.0。后续两节点均发现宿主机 `/sbin/apparmor_parser` 缺失、静态 `disable_apparmor=true`；内核 enabled=Y、预期 profile enforce。诊断资源已清理，无节点写入或服务重启。运行中 CRI 配置仍未查询、完整 API/FUSE 未通过，见 [宿主机诊断报告](2026-09-17-cce-euleros-apparmor-host-diagnostics.md)。这条补充不改写本轮此前的权限边界或测试结果。
