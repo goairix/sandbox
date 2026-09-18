@@ -2,10 +2,11 @@
 from pathlib import Path
 import re
 from source_policy import sha256
+from profile_policy import CHART_INPUTS, PROFILE_FILES
 
-HELPERS = {"source_policy.py", "elf_audit.py", "rpm_audit.py", "artifact_set.py", "workflow.py", "hce_stage.py", "cpio_audit.py", "parser_checks.py"}
+HELPERS = {"source_policy.py", "elf_audit.py", "rpm_audit.py", "artifact_set.py", "workflow.py", "hce_stage.py", "cpio_audit.py", "parser_checks.py", "profile_policy.py"}
 INPUTS = {"build.sh", "verify.sh", "Containerfile", "Verify.Containerfile", "check-sbin-layout.sh",
-          "rpm/sandbox-apparmor-parser.spec"} | {"lib/" + name for name in HELPERS}
+          "rpm/sandbox-apparmor-parser.spec"} | {"lib/" + name for name in HELPERS} | CHART_INPUTS
 
 
 def rpm_filename(arch):
@@ -16,7 +17,7 @@ def expected_files(arch):
     return {rpm_filename(arch), "sandbox-apparmor-parser-4.1.7-1.src.rpm", "apparmor_parser",
             "source/apparmor-v4.1.7.tar.gz", "source/apparmor-v4.1.7.tar.gz.asc", "source/trusted-public.gpg",
             "source/source.lock", "provenance.json", "audit.json", "build-packages.txt", "runtime-packages.txt",
-            "build-tests.log", "abi.txt", "dependency-closure.txt", "parser-version.txt", "SHA256SUMS"} | {"inputs/" + name for name in INPUTS}
+            "build-tests.log", "abi.txt", "dependency-closure.txt", "parser-version.txt", "parser-version.stderr", "SHA256SUMS"} | {"inputs/" + name for name in INPUTS} | PROFILE_FILES
 
 
 def check_file_set(root, arch, include_hashes=True):

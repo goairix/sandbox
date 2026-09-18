@@ -16,6 +16,7 @@ from cpio_audit import read_payload
 from elf_audit import inspect_elf
 from rpm_audit import audit_rpm, command, PACKAGE
 from source_policy import read_lock, audit_archive, verify_sha256, verify_signature, sha256
+from profile_policy import RENDER_FILES, validate_render, extract_feature_fixture, validate_feature_fixture
 
 OUT = Path("/out")
 KEY = Path("/run/secrets/apparmor_trusted_keyring")
@@ -83,6 +84,13 @@ def build(arch, image, environment):
         target = OUT / "inputs" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(Path("/work") / name, target)
+    for name in RENDER_FILES:
+        target = OUT / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path("/work") / name, target)
+    profile = validate_render(OUT)
+    extract_feature_fixture(source / "apparmor-v4.1.7.tar.gz", OUT)
+    feature_fixture = validate_feature_fixture(source / "apparmor-v4.1.7.tar.gz", OUT)
     top = Path("/tmp/apparmor-rpmbuild")
     top.mkdir()
     for folder in ("SOURCES", "SPECS", "BUILD", "BUILDROOT", "RPMS", "SRPMS"):
@@ -100,16 +108,21 @@ def build(arch, image, environment):
     tools = {name: run([name, "--version"]).splitlines()[0] for name in ("gcc", "g++", "make", "rpmbuild", "autoconf", "automake", "bison", "flex", "gpg", "python3")}
     write_json(OUT / "provenance.json", {"arch": arch, "builder_image": image, "source": lock,
                "archive_signature": identity, "source_revision_trust": "unverified metadata; archive trust is SHA256 plus detached signature",
-               "tool_versions": tools, "environment": environment, "signature_status": "unsigned-testing-only"})
+               "tool_versions": tools, "environment": environment, "signature_status": "unsigned-testing-only",
+               "workspace_profile": profile, "compile_features": feature_fixture})
 
 
 def audit(arch, image, environment, repeat=False):
     if repeat:
         check_hashes(OUT, arch)
     lock, identity = trust_source(OUT / "source")
+    profile = validate_render(OUT)
+    feature_fixture = validate_feature_fixture(OUT / "source/apparmor-v4.1.7.tar.gz", OUT)
     provenance = json.loads((OUT / "provenance.json").read_text())
     if provenance.get("builder_image") != image or provenance.get("arch") != arch or provenance.get("source") != lock:
         raise ValueError("artifact provenance does not match current verification environment")
+    if provenance.get("workspace_profile") != profile or provenance.get("compile_features") != feature_fixture:
+        raise ValueError("artifact profile/features provenance does not match audited source")
     binary = OUT / rpm_filename(arch)
     srpm = OUT / (PACKAGE + "-4.1.7-1.src.rpm")
     packages = []

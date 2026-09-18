@@ -12,8 +12,14 @@ import tempfile
 from artifact_set import INPUTS, check_hashes
 from elf_audit import inspect_elf
 from source_policy import read_lock, check_keyring, verify_signature, verify_sha256, audit_archive
+from profile_policy import render_profile, validate_render, validate_feature_fixture
+from parser_checks import validate_compilation
 
 ROOT = Path(__file__).resolve().parents[1]
+CHART = ROOT.parents[1] / "deploy/helm/sandbox"
+CHART_SOURCES = {"profile-source/workspace-mounter.profile": CHART / "files/apparmor/workspace-mounter.profile",
+                 "profile-source/_helpers.tpl": CHART / "templates/_helpers.tpl",
+                 "profile-source/apparmor-loader.yaml": CHART / "templates/apparmor-loader.yaml"}
 
 
 class QuietParser(argparse.ArgumentParser):
@@ -52,7 +58,7 @@ def parse(mode, argv):
 
 def copy_inputs(context):
     for name in sorted(INPUTS):
-        source = ROOT / name
+        source = CHART_SOURCES.get(name, ROOT / name)
         if source.is_symlink() or not source.is_file():
             raise ValueError("build input is missing or is a symbolic link")
         target = context / name
@@ -87,9 +93,14 @@ def structural_verify(root, config):
                      lock["trusted_public_key_fingerprint"], lock["trusted_signing_key_fingerprint"])
     check_keyring(root / "source/trusted-public.gpg", lock["trusted_public_key_fingerprint"], lock["trusted_signing_key_fingerprint"])
     audit_archive(archive)
+    validate_render(root, expected_template=CHART_SOURCES["profile-source/workspace-mounter.profile"].read_bytes())
+    validate_feature_fixture(archive, root)
     inspect_elf(root / "apparmor_parser", config.arch)
     provenance = json.loads((root / "provenance.json").read_text())
     audit = json.loads((root / "audit.json").read_text())
+    compiled = validate_compilation(root)
+    if audit.get("parser_checks", {}).get("workspace_profile") != compiled:
+        raise ValueError("artifact audit does not describe the full profile compilation report")
     if (provenance.get("builder_image") != config.builder_image or provenance.get("arch") != config.arch
             or audit.get("signature_status") != "unsigned-testing-only"
             or audit.get("native_live_hce_verified") is not False):
@@ -119,6 +130,8 @@ def main(mode, argv=None):
             if mode == "verify":
                 shutil.copytree(config.output, context / "artifacts")
                 structural_verify(context / "artifacts", config)
+            else:
+                render_profile(context)
             docker_build(config, context, staged, verify=mode == "verify")
             structural_verify(staged, config)
             if mode == "build":

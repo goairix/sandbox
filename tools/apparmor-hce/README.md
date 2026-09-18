@@ -11,7 +11,7 @@ acceptance remain environment-dependent validation gates.
 
 ## Inputs and invocation
 
-Host requirements: Bash, Python 3.8+, GnuPG, Docker with an existing buildx
+Host requirements: Bash, Python 3.8+, GnuPG, Helm 3, Docker with an existing buildx
 builder. Supply a real HCE 2.0 image pinned by digest, with DNF repositories
 configured for its architecture. No builder image is guessed or provided here.
 
@@ -33,8 +33,9 @@ The output directory must be absent or empty, its parent must already exist,
 and its path must be absolute without commas/control characters. Lock and
 keyring validation happens before Docker, network calls, or output-directory
 creation. Build context files come from the exact `artifact_set.INPUTS`
-allowlist; no repository-wide context, private values, credentials, kubeconfig,
-or trusted keyring is copied into it. The keyring enters through a BuildKit
+allowlist, including only the public workspace profile and its existing Chart
+helper/loader templates. No repository-wide context, private values, credentials,
+user kubeconfig, or trusted keyring is copied into it. The keyring enters through a BuildKit
 secret. Its validated **public** contents are intentionally retained in the
 export as source provenance.
 
@@ -88,9 +89,32 @@ A fresh stage starts from the same pinned HCE base, resolves actual RPM
 requirements using its repositories, then performs `rpm --test -i`, `rpm -i`,
 and `rpm -V`. No dependency/signature/force bypass flags are used. Installed
 parser bytes must match the audited RPM. That actual installed binary runs
-`--version` and a separate compile smoke check using `-Q -K` with no kernel load
-or cache access. `parser_checks.compile_profile` is the Task 4 integration hook;
-workspace-profile, feature-set, and expected-failure checks remain Task 4 work.
+`--version` and compiles the **complete Helm-generated workspace profile** using
+`-Q -K --Werror --warn=all` with no kernel load or cache access. Both commands
+record stdout/stderr hashes and exit status. Compile stdout or stderr, nonzero
+exit status, timeout, or missing/empty output fails the gate. Reverification
+requires a freshly generated binary; stale output is never accepted.
+
+Before Docker, Helm renders a narrow temporary chart using the existing
+`sandbox.apparmor.digest` and `sandbox.effectiveLSMProfile` helpers and the
+loader's exact replacement expression. It receives a fixed enabled flag and an
+empty task-owned kubeconfig; it reads no values files, user kubeconfig, Helm
+plugins, or cluster state. The expected normalization is CRLF to LF, trim, then
+one final LF; the pre-substitution SHA256 determines `sandbox-fuse-<digest>`.
+The renderer checks this binding, retains hashes of the three original Chart
+inputs and full rendered policy, and refuses changed loader rendering rules.
+Host verification also compares with the current complete Chart policy, so
+removed FUSE/mount constraints or extra wildcard grants fail equality checks.
+
+Pure userspace compilation uses exactly
+`apparmor-v4.1.7/parser/tst/features_files/features.all` from the already verified
+source archive via `--kernel-features`. Its complete bytes, member path, SHA256,
+and source-archive hash are retained and rechecked. This is explicitly an
+**upstream test fixture**, not a target kernel snapshot or kernel-compatibility
+claim. The policy ABI is never overridden and warnings are never suppressed.
+`parser_checks.compile_profile` remains the Task 4 hook for an explicitly
+validated target-kernel snapshot; target origin/architecture/hash gates remain
+separate from this userspace test.
 
 `uname` and target-platform agreement establish the execution architecture,
 **not native execution**. BuildKit may be emulating it. Every report explicitly
@@ -115,7 +139,8 @@ runtime or RPM checks.
 The exact export set includes the binary RPM, source RPM, parser, source archive,
 signature, public key, lock, all build/audit inputs, tool/package versions,
 build/test log, installed dependency providers, ELF ABI inventory, parser
-version, provenance, and audit report. `SHA256SUMS` covers every other required
+version, full rendered profile, compiled policy, feature fixture/provenance,
+compile diagnostics/report, provenance, and audit report. `SHA256SUMS` covers every other required
 file, including the reports and input scripts. Missing, additional, linked,
 duplicated-manifest, or modified artifacts fail verification. Hashes bind this
 inventory; they are not an artifact-signing scheme.
@@ -128,6 +153,7 @@ claim is made by this workflow.
 
 Run local tests with `tools/apparmor-hce/tests/contract.sh`. They exercise the
 real validators and CLI, ephemeral GPG fixtures, synthetic ELF/CPIO structure,
-and a substituted Docker boundary for orchestration. They do not establish a
+real Helm equivalence with the production Chart, and substituted Docker/parser
+boundaries for orchestration and strict diagnostic handling. They do not establish a
 successful HCE build, runtime compatibility, native execution, or real profile
 acceptance.

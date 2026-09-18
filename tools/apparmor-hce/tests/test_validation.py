@@ -178,7 +178,7 @@ class Validators(unittest.TestCase):
 
     def test_parser_runtime_hook_does_not_accept_a_different_version(self):
         checks = module("parser_checks")
-        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"AppArmor parser version 4.1.70\n")):
+        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"AppArmor parser version 4.1.70\n", stderr=b"")):
             with self.assertRaisesRegex(ValueError, "version"):
                 checks.runtime_checks(Path("/usr/sbin/apparmor_parser"), self.root)
 
@@ -186,12 +186,14 @@ class Validators(unittest.TestCase):
         checks = module("parser_checks")
         profile, output = self.root / "test.profile", self.root / "test.bin"
         profile.write_text("fixture")
-        output.write_bytes(b"fixture; not a real profile result")
-        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+        def compiled(*args, **kwargs):
+            output.write_bytes(b"fixture; not a real profile result")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with patch.object(checks.subprocess, "run", side_effect=compiled) as run:
             checks.compile_profile("/usr/sbin/apparmor_parser", profile, output)
             command = run.call_args.args[0]
             self.assertEqual(command[:3], ["/usr/sbin/apparmor_parser", "-Q", "-K"])
-        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
+        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"", stderr=b"")):
             with self.assertRaises(ValueError):
                 checks.compile_profile("/usr/sbin/apparmor_parser", profile, output)
 
@@ -254,6 +256,7 @@ class Signatures(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.verify_signature(source, signature, self.keyring, self.fingerprint, self.fingerprint)
 
+    @unittest.skipUnless(shutil.which("helm"), "Helm required for positive build orchestration fixture")
     def test_orchestration_reaches_docker_with_narrow_context_and_cleans_failure(self):
         workflow = module("workflow")
         artifacts = module("artifact_set")
@@ -267,7 +270,8 @@ class Signatures(unittest.TestCase):
         def docker_failure(config, context, output, verify=False):
             observed.append(context)
             files = {path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()}
-            self.assertEqual(files, artifacts.INPUTS | {"source.lock"})
+            from profile_policy import RENDER_FILES
+            self.assertEqual(files, artifacts.INPUTS | {"source.lock"} | RENDER_FILES)
             self.assertNotIn("trusted-public.gpg", files)
             raise ValueError("intentional Docker boundary fixture")
 
@@ -283,13 +287,14 @@ class Signatures(unittest.TestCase):
             docker.assert_not_called()
         self.assertEqual((destination / "user-data").read_text(), "preserve")
 
+    @unittest.skipUnless(shutil.which("helm"), "Helm required to reach the Docker boundary")
     def test_real_cli_without_docker_fails_after_valid_trust_without_publishing(self):
         import os
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             binaries = root / "bin"
             binaries.mkdir()
-            for name in ("bash", "dirname", "python3", "gpg"):
+            for name in ("bash", "dirname", "python3", "gpg", "helm"):
                 (binaries / name).symlink_to(shutil.which(name))
             lock = root / "source.lock"
             lock.write_text(lock_text(self.fingerprint))
