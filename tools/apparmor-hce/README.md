@@ -33,3 +33,19 @@ No network download or build stage is performed by the current validation-only
 stub. No secrets may be passed in arguments, environment variables, or output;
 do not put tokens, passwords, kubeconfigs, or private registry credentials in
 this directory or its logs.
+
+When an administrator enables the Containerfile build, the HCE builder must
+provide a read-only GPG keyring containing the authoritative AppArmor release
+signing key and pass its path as the `APPARMOR_TRUSTED_KEYRING` build argument.
+The build downloads the locked `.asc` signature and verifies its machine-
+readable signer fingerprint with that keyring before extracting the archive;
+it never imports keys or uses the host's default keyring.
+
+The `trusted_public_key_fingerprint` lock value must be the exact signing-key
+fingerprint emitted by GPG's `VALIDSIG` status for the locked release; it is
+not an unverified primary-key alias. No key material is stored in this repo.
+
+The early builder gate also requires `/sbin` to be a symlink resolving exactly
+to `/usr/sbin`. This HCE usr-merge layout makes the packaged real binary at
+`%{_sbindir}/apparmor_parser` reachable as `/sbin/apparmor_parser` without a
+wrapper or host mutation.
