@@ -1,8 +1,10 @@
-# AppArmor source contract. Values marked UNVERIFIED intentionally fail closed
-# until an administrator records evidence from the official upstream release.
+# Canonical upstream archive and detached signature, independently GPG-verified.
+# Revision is tag metadata only; this pipeline does not verify signed git tags.
 version=4.1.7
-release_archive_url=https://github.com/apparmor/apparmor/releases/download/v4.1.7/apparmor-4.1.7.tar.gz
-archive_sha256=UNVERIFIED_REQUIRED_FROM_OFFICIAL_RELEASE
-signature_url=https://github.com/apparmor/apparmor/releases/download/v4.1.7/apparmor-4.1.7.tar.gz.asc
-trusted_public_key_fingerprint=UNVERIFIED_REQUIRED_FROM_UPSTREAM_KEYRING
-source_revision=UNVERIFIED_REQUIRED_FROM_SIGNED_RELEASE
+release_archive_url=https://gitlab.com/apparmor/apparmor/-/archive/v4.1.7/apparmor-v4.1.7.tar.gz
+archive_sha256=ded4cd419b8a05002a108a0912208e2098695752664c6a59464d2dda418e0452
+signature_url=https://gitlab.com/api/v4/projects/4484878/packages/generic/signatures/4.1.7/apparmor-v4.1.7.tar.gz.asc
+trusted_public_key_fingerprint=3ECDCBA5FB34D254961CC53F6689E64E3D3664BB
+trusted_signing_key_fingerprint=3ECDCBA5FB34D254961CC53F6689E64E3D3664BB
+source_revision=9676b7aa934408748de2aaebad8680e69d7c3912
+source_revision_verification=unverified

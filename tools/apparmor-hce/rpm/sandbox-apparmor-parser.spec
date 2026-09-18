@@ -1,39 +1,62 @@
+%global debug_package %{nil}
+%global _build_id_links none
+%global _licensedir /usr/share/licenses
 Name:           sandbox-apparmor-parser
 Version:        4.1.7
-Release:        1%{?dist}
+Release:        1
 Summary:        AppArmor policy parser for sandbox workloads
-License:        GPL-2.0-or-later
+License:        GPL-2.0-only AND LGPL-2.1-or-later
 URL:            https://apparmor.net/
-Source0:        apparmor-%{version}.tar.gz
+Source0:        apparmor-v%{version}.tar.gz
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  rpm-build
 BuildRequires:  gcc
+BuildRequires:  gcc-c++
+BuildRequires:  libstdc++-static
 BuildRequires:  make
 BuildRequires:  bison
 BuildRequires:  flex
-BuildRequires:  pcre2-devel
+BuildRequires:  autoconf
+BuildRequires:  automake
+BuildRequires:  libtool
+BuildRequires:  autoconf-archive
+BuildRequires:  pkgconfig
+BuildRequires:  dejagnu
+BuildRequires:  perl
+BuildRequires:  perl-Test-Simple
+BuildRequires:  perl-Pod-Checker
+BuildRequires:  perl-podlators
+BuildRequires:  python3
 
 %description
-The AppArmor parser used to compile and validate sandbox policy supplied by
-the workload runtime.  This package contains no host policy and does not
-configure a service or runtime daemon.
+The AppArmor parser used to compile sandbox policy in userspace. This package
+contains no policy, service configuration, or lifecycle scriptlets. Local build
+artifacts are unsigned testing artifacts and require a production signing gate.
 
 %prep
-%autosetup -n apparmor-%{version}
+%autosetup -n apparmor-v%{version}
 
 %build
-make -C libraries/libapparmor
+cd libraries/libapparmor
+sh ./autogen.sh
+%configure --disable-man-pages --without-python --without-perl --without-ruby
+make %{?_smp_mflags}
+cd ../..
+# Upstream links libapparmor and libstdc++ statically into the parser.
+make -C parser %{?_smp_mflags} apparmor_parser
+
+%check
 make -C libraries/libapparmor check
-make -C parser
+make -C parser check
 
 %install
-rm -rf %{buildroot}
 install -D -m 0755 parser/apparmor_parser %{buildroot}%{_sbindir}/apparmor_parser
 
 %files
-%license LICENSE
+%defattr(-,root,root,-)
+%license parser/COPYING.GPL libraries/libapparmor/COPYING.LGPL
 %{_sbindir}/apparmor_parser
 
 %changelog
 * Thu Jan 01 1970 HCE Build Service <noreply@example.invalid> - 4.1.7-1
-- Package the AppArmor parser for sandbox policy compilation.
+- Package only the parser and its licenses, with library/parser checks.
