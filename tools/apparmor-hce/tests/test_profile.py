@@ -81,17 +81,40 @@ class Profile(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.validate_feature_fixture(archive, self.root)
 
+    def test_default_abi_is_extracted_from_signed_source_and_bound_separately(self):
+        policy = module("profile_policy")
+        archive = self.root / "source.tar.gz"
+        source = b'''const char *default_features_abi =
+"query {label {multi_transaction {yes\\\n}\\\n}}\\\n";
+'''
+        with tarfile.open(archive, "w:gz") as tar:
+            item = tarfile.TarInfo(policy.DEFAULT_MEMBER)
+            item.size = len(source)
+            tar.addfile(item, io.BytesIO(source))
+        policy.extract_default_abi(archive, self.root)
+        report = policy.validate_default_abi(archive, self.root)
+        self.assertEqual(report["kind"], "source-default-policy-abi")
+        self.assertFalse(report["target_kernel_compatibility"])
+        self.assertEqual((self.root / "profile/policy-features.default").read_bytes(), b"query {label {multi_transaction {yes}}}")
+        self.assertEqual(report["sha256"], hashlib.sha256((self.root / "profile/policy-features.default").read_bytes()).hexdigest())
+        (self.root / "profile/policy-features.default").write_bytes(b"query {label {multi_transaction {no}}}\n")
+        with self.assertRaises(ValueError):
+            policy.validate_default_abi(archive, self.root)
+
     def test_compile_rejects_stdout_stderr_nonzero_and_records_audit(self):
         checks = module("parser_checks")
         profile, output, features = self.root / "workspace.profile", self.root / "workspace.bin", self.root / "features"
+        policy_features = self.root / "policy-features"
         profile.write_text("fixture")
         features.write_text("fixture")
+        policy_features.write_text("default ABI fixture")
         for code, stdout, stderr in [(0, b"", b"Warning: unsupported features"),
                                      (0, b"Warning: ABI mismatch", b""), (1, b"", b"compile failed")]:
             output.write_bytes(b"fixture output")
             with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr)):
                 with self.assertRaises(ValueError):
-                    checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features)
+                    checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features,
+                                           policy_features=policy_features)
             report = json.loads((self.root / "compile.json").read_text())
             self.assertFalse(report["passed"])
             self.assertEqual(report["exit_status"], code)
@@ -101,17 +124,21 @@ class Profile(unittest.TestCase):
     def test_compile_enables_werror_and_never_overrides_policy_abi(self):
         checks = module("parser_checks")
         profile, output, features = self.root / "workspace.profile", self.root / "workspace.bin", self.root / "features"
+        policy_features = self.root / "policy-features"
         profile.write_text("fixture")
         features.write_text("fixture")
+        policy_features.write_text("default ABI fixture")
         def compiled(*args, **kwargs):
             output.write_bytes(b"fixture output")
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         with patch.object(checks.subprocess, "run", side_effect=compiled) as run:
-            result = checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features)
+            result = checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features,
+                                           policy_features=policy_features)
         args = run.call_args.args[0]
         self.assertIn("--Werror", args)
         self.assertIn("--kernel-features", args)
-        for forbidden in ("--policy-features", "--override-policy-abi", "-M", "-m", "--quiet", "-q", "-d"):
+        self.assertIn("--policy-features", args)
+        for forbidden in ("--override-policy-abi", "-M", "-m", "--quiet", "-q", "-d"):
             self.assertNotIn(forbidden, args)
         self.assertTrue(result["passed"])
 
@@ -135,13 +162,16 @@ class Profile(unittest.TestCase):
         target = self.root / "profile"
         target.mkdir()
         profile, features, output = target / "workspace.profile", target / "kernel-features.fixture", target / "workspace.bin"
+        policy_features = target / "policy-features.default"
         profile.write_text("fixture")
         features.write_text("source fixture")
+        policy_features.write_text("default ABI fixture")
         def compiled(*args, **kwargs):
             output.write_bytes(b"subprocess boundary fixture, not AppArmor binary")
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         with patch.object(checks.subprocess, "run", side_effect=compiled):
-            checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features)
+            checks.compile_profile("/usr/sbin/apparmor_parser", profile, output, features=features,
+                                  policy_features=policy_features)
         self.assertTrue(checks.validate_compilation(self.root)["passed"])
         (target / "compile.stderr").write_bytes(b"warning")
         with self.assertRaises(ValueError):
@@ -155,11 +185,16 @@ class Profile(unittest.TestCase):
         (self.root / "source").mkdir()
         archive = self.root / "source/apparmor-v4.1.7.tar.gz"
         fixture = b"file {mask {read write\n}\n}\n"
+        default_source = b'''const char *default_features_abi =\n"query {label {multi_transaction {yes\\\n}\\\n}}\\\n";\n'''
         with tarfile.open(archive, "w:gz") as tar:
             item = tarfile.TarInfo(policy.FEATURE_MEMBER)
             item.size = len(fixture)
             tar.addfile(item, io.BytesIO(fixture))
+            item = tarfile.TarInfo(policy.DEFAULT_MEMBER)
+            item.size = len(default_source)
+            tar.addfile(item, io.BytesIO(default_source))
         policy.extract_feature_fixture(archive, self.root)
+        policy.extract_default_abi(archive, self.root)
         def parser(args, **kwargs):
             if args[-1] == "--version":
                 return SimpleNamespace(returncode=0, stdout=b"AppArmor parser version 4.1.7\n", stderr=b"")

@@ -12,7 +12,7 @@ import tempfile
 from artifact_set import INPUTS, check_hashes
 from elf_audit import inspect_elf
 from source_policy import read_lock, check_keyring, verify_signature, verify_sha256, audit_archive
-from profile_policy import render_profile, validate_render, validate_feature_fixture
+from profile_policy import render_profile, validate_render, validate_feature_fixture, validate_default_abi
 from parser_checks import validate_compilation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +95,7 @@ def structural_verify(root, config):
     audit_archive(archive)
     validate_render(root, expected_template=CHART_SOURCES["profile-source/workspace-mounter.profile"].read_bytes())
     validate_feature_fixture(archive, root)
+    validate_default_abi(archive, root)
     inspect_elf(root / "apparmor_parser", config.arch)
     provenance = json.loads((root / "provenance.json").read_text())
     audit = json.loads((root / "audit.json").read_text())

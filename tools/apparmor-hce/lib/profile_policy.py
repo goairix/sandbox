@@ -1,4 +1,5 @@
 """Render the immutable Chart profile and bind offline features to signed source."""
+import ast
 import hashlib
 import json
 import os
@@ -11,11 +12,15 @@ import tempfile
 from source_policy import sha256
 
 MARKER = "__SANDBOX_PROFILE_NAME__"
+# This immutable upstream test feature file is retained as a userspace fixture;
+# it is never a claim about the target node kernel.
 FEATURE_MEMBER = "apparmor-v4.1.7/parser/tst/features_files/features.all"
+DEFAULT_MEMBER = "apparmor-v4.1.7/parser/default_features.c"
 CHART_INPUTS = {"profile-source/workspace-mounter.profile", "profile-source/_helpers.tpl", "profile-source/apparmor-loader.yaml"}
 RENDER_FILES = {"profile/workspace.profile", "profile/render.json"}
 PROFILE_FILES = RENDER_FILES | {"profile/kernel-features.fixture", "profile/features.json", "profile/workspace.bin",
-                                "profile/compile.json", "profile/compile.stdout", "profile/compile.stderr"}
+                                "profile/compile.json", "profile/compile.stdout", "profile/compile.stderr",
+                                "profile/policy-features.default", "profile/policy-features.json"}
 BODY_EXPRESSION = '.Files.Get "files/apparmor/workspace-mounter.profile" | replace "\\r\\n" "\\n" | trim | replace "__SANDBOX_PROFILE_NAME__" $profile'
 
 
@@ -131,4 +136,70 @@ def validate_feature_fixture(archive, root):
     metadata = json.loads((target / "features.json").read_text())
     if (target / "kernel-features.fixture").read_bytes() != data or metadata != fixture_metadata(archive, data):
         raise ValueError("offline features fixture differs from its signed upstream source member")
+    return metadata
+
+
+def default_abi_bytes(archive):
+    with tarfile.open(archive, "r:gz") as source:
+        member = source.getmember(DEFAULT_MEMBER)
+        if not member.isfile() or not 0 < member.size < 1024 * 1024:
+            raise ValueError("default policy ABI source member is not a bounded regular file")
+        text = source.extractfile(member).read().decode("utf-8")
+    marker = "const char *default_features_abi"
+    start = text.find(marker)
+    if start < 0:
+        raise ValueError("signed source has no default_features_abi definition")
+    end = text.find(";", start)
+    if end < 0:
+        raise ValueError("default_features_abi definition is unterminated")
+    fragment, literals, index = text[start:end], [], 0
+    while index < len(fragment):
+        if fragment[index] != '"':
+            index += 1
+            continue
+        escaped, quote, cursor = False, [], index + 1
+        while cursor < len(fragment):
+            char = fragment[cursor]
+            if not escaped and char == '"':
+                break
+            quote.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            cursor += 1
+        if cursor >= len(fragment):
+            raise ValueError("default_features_abi has an unterminated C string")
+        source_literal = '"' + ''.join(quote).replace("\\\n", "") + '"'
+        try:
+            literals.append(ast.literal_eval(source_literal))
+        except (SyntaxError, ValueError):
+            raise ValueError("default_features_abi contains an unsupported C escape") from None
+        index = cursor + 1
+    if len(literals) != 1 or not literals[0] or len(literals[0]) > 65536:
+        raise ValueError("default_features_abi source definition is ambiguous or oversized")
+    return literals[0].encode("utf-8")
+
+
+def default_abi_metadata(archive, data):
+    return {"kind": "source-default-policy-abi", "source_member": DEFAULT_MEMBER,
+            "source_archive_sha256": sha256(archive), "sha256": hashlib.sha256(data).hexdigest(),
+            "target_kernel_compatibility": False,
+            "scope": "exact parser default policy ABI; explicitly supplied, never overridden"}
+
+
+def extract_default_abi(archive, root):
+    data = default_abi_bytes(archive)
+    target = Path(root) / "profile"
+    target.mkdir(exist_ok=True)
+    (target / "policy-features.default").write_bytes(data)
+    (target / "policy-features.json").write_text(json.dumps(default_abi_metadata(archive, data), indent=2, sort_keys=True) + "\n")
+
+
+def validate_default_abi(archive, root):
+    data = default_abi_bytes(archive)
+    target = Path(root) / "profile"
+    metadata = json.loads((target / "policy-features.json").read_text())
+    if (target / "policy-features.default").read_bytes() != data or metadata != default_abi_metadata(archive, data):
+        raise ValueError("policy ABI fixture differs from its signed upstream source member")
     return metadata

@@ -6,7 +6,7 @@ import re
 import subprocess
 
 from source_policy import sha256
-from profile_policy import validate_render, validate_feature_fixture
+from profile_policy import validate_render, validate_feature_fixture, validate_default_abi
 
 COMPILE_FLAGS = ["-Q", "-K", "--config-file=/dev/null", "--Werror", "--warn=all"]
 
@@ -26,7 +26,7 @@ def result_record(status, stdout, stderr, failure=None):
             "stderr_sha256": hashlib.sha256(stderr).hexdigest(), "execution_failure": failure}
 
 
-def compile_profile(parser, profile, output, features=None):
+def compile_profile(parser, profile, output, features=None, policy_features=None):
     """Reusable Task 4 hook: strict diagnostics; never override the policy ABI."""
     output = Path(output)
     if output.is_symlink() or (output.exists() and not output.is_file()):
@@ -35,13 +35,17 @@ def compile_profile(parser, profile, output, features=None):
     if output.exists():
         output.unlink()
     args = [str(parser)] + COMPILE_FLAGS + ["-o", str(output)]
+    if policy_features is not None:
+        args += ["--policy-features", str(policy_features)]
     if features is not None:
         args += ["--kernel-features", str(features)]
     args.append(str(profile))
     status, stdout, stderr, failure = capture(args, 120)
     report = result_record(status, stdout, stderr, failure)
     report.update({"profile_sha256": sha256(profile), "features_sha256": sha256(features) if features else None,
+                   "policy_features_sha256": sha256(policy_features) if policy_features else None,
                    "flags": COMPILE_FLAGS, "features_option": "--kernel-features" if features else None,
+                   "policy_features_option": "--policy-features" if policy_features else None,
                    "policy_abi_overridden": False, "kernel_load": False})
     # --Werror covers compiler warnings; reject every diagnostic stream too,
     # including warnings/errors that older parser paths emit with status 0.
@@ -59,9 +63,11 @@ def validate_compilation(root):
     target = Path(root) / "profile"
     report = json.loads((target / "compile.json").read_text())
     files = {"profile_sha256": "workspace.profile", "features_sha256": "kernel-features.fixture",
+             "policy_features_sha256": "policy-features.default",
              "compiled_sha256": "workspace.bin", "stdout_sha256": "compile.stdout", "stderr_sha256": "compile.stderr"}
     if (report.get("passed") is not True or report.get("exit_status") != 0 or report.get("execution_failure") is not None
             or report.get("flags") != COMPILE_FLAGS or report.get("features_option") != "--kernel-features"
+            or report.get("policy_features_option") != "--policy-features"
             or report.get("policy_abi_overridden") is not False or report.get("kernel_load") is not False
             or any(report.get(key) != sha256(target / path) for key, path in files.items())
             or (target / "compile.stdout").stat().st_size or (target / "compile.stderr").stat().st_size
@@ -79,8 +85,12 @@ def runtime_checks(parser, output):
         raise ValueError("installed parser version check failed")
     render = validate_render(output)
     fixture = validate_feature_fixture(output / "source/apparmor-v4.1.7.tar.gz", output)
+    policy_abi = validate_default_abi(output / "source/apparmor-v4.1.7.tar.gz", output)
     profile = output / "profile/workspace.profile"
-    compiled = compile_profile(parser, profile, output / "profile/workspace.bin", features=output / "profile/kernel-features.fixture")
+    compiled = compile_profile(parser, profile, output / "profile/workspace.bin",
+                               features=output / "profile/kernel-features.fixture",
+                               policy_features=output / "profile/policy-features.default")
     return {"version": "4.1.7", "version_command": version, "workspace_profile": compiled,
-            "profile_render": render, "compile_features": fixture, "kernel_compatibility": "not verified; upstream userspace test fixture only",
+            "profile_render": render, "compile_features": fixture, "policy_features": policy_abi,
+            "kernel_compatibility": "not verified; upstream userspace test fixture only",
             "host_kernel_policy_load": "not performed"}

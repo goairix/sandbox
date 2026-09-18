@@ -106,7 +106,7 @@ inputs and full rendered policy, and refuses changed loader rendering rules.
 Host verification also compares with the current complete Chart policy, so
 removed FUSE/mount constraints or extra wildcard grants fail equality checks.
 
-Pure userspace compilation uses exactly
+Pure userspace compilation uses exactly the signed source member
 `apparmor-v4.1.7/parser/tst/features_files/features.all` from the already verified
 source archive via `--kernel-features`. Its complete bytes, member path, SHA256,
 and source-archive hash are retained and rechecked. This is explicitly an
@@ -115,6 +115,13 @@ claim. The policy ABI is never overridden and warnings are never suppressed.
 `parser_checks.compile_profile` remains the Task 4 hook for an explicitly
 validated target-kernel snapshot; target origin/architecture/hash gates remain
 separate from this userspace test.
+
+The checked local non-HCE parser 4.1.0 regression still reports a strict
+`network rules not enforced` warning for this complete profile after the exact
+default ABI is supplied. That result is retained as a failed diagnostic gate;
+it is not filtered or reclassified as success. HCE 2.0 with the exact 4.1.7
+parser and a real target-kernel feature snapshot must be run before claiming
+profile compilation or production compatibility.
 
 `uname` and target-platform agreement establish the execution architecture,
 **not native execution**. BuildKit may be emulating it. Every report explicitly
