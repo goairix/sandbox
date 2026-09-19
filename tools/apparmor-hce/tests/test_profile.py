@@ -201,6 +201,10 @@ class Profile(unittest.TestCase):
                 self.assertEqual(args[-2:], ["--config-file=/dev/null", "--version"])
                 return SimpleNamespace(returncode=0, stdout=b"AppArmor parser version 4.1.7\n", stderr=b"")
             self.assertEqual(Path(args[-1]), self.root / "profile/workspace.profile")
+            self.assertEqual(Path(args[args.index("--policy-features") + 1]),
+                             self.root / "profile/kernel-features.fixture")
+            self.assertEqual(Path(args[args.index("--kernel-features") + 1]),
+                             self.root / "profile/kernel-features.fixture")
             self.assertEqual(hashlib.sha256(Path(args[-1]).read_bytes()).hexdigest(), metadata["profile_sha256"])
             self.assertIn("mount fstype=fuse.s3fs", Path(args[-1]).read_text())
             Path(args[args.index("-o") + 1]).write_bytes(b"subprocess fixture; no real parser execution")

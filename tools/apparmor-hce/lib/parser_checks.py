@@ -42,8 +42,10 @@ def compile_profile(parser, profile, output, features=None, policy_features=None
     args.append(str(profile))
     status, stdout, stderr, failure = capture(args, 120)
     report = result_record(status, stdout, stderr, failure)
+    policy_features_file = policy_features.name if policy_features else None
     report.update({"profile_sha256": sha256(profile), "features_sha256": sha256(features) if features else None,
                    "policy_features_sha256": sha256(policy_features) if policy_features else None,
+                   "policy_features_file": policy_features_file,
                    "flags": COMPILE_FLAGS, "features_option": "--kernel-features" if features else None,
                    "policy_features_option": "--policy-features" if policy_features else None,
                    "policy_abi_overridden": False, "kernel_load": False})
@@ -62,8 +64,11 @@ def compile_profile(parser, profile, output, features=None, policy_features=None
 def validate_compilation(root):
     target = Path(root) / "profile"
     report = json.loads((target / "compile.json").read_text())
+    policy_features_file = report.get("policy_features_file")
+    if policy_features_file not in {"kernel-features.fixture", "policy-features.default"}:
+        raise ValueError("profile compile report names an unsupported policy feature input")
     files = {"profile_sha256": "workspace.profile", "features_sha256": "kernel-features.fixture",
-             "policy_features_sha256": "policy-features.default",
+             "policy_features_sha256": policy_features_file,
              "compiled_sha256": "workspace.bin", "stdout_sha256": "compile.stdout", "stderr_sha256": "compile.stderr"}
     if (report.get("passed") is not True or report.get("exit_status") != 0 or report.get("execution_failure") is not None
             or report.get("flags") != COMPILE_FLAGS or report.get("features_option") != "--kernel-features"
@@ -90,9 +95,9 @@ def runtime_checks(parser, output):
     fixture = validate_feature_fixture(output / "source/apparmor-v4.1.7.tar.gz", output)
     policy_abi = validate_default_abi(output / "source/apparmor-v4.1.7.tar.gz", output)
     profile = output / "profile/workspace.profile"
+    fixture_path = output / "profile/kernel-features.fixture"
     compiled = compile_profile(parser, profile, output / "profile/workspace.bin",
-                               features=output / "profile/kernel-features.fixture",
-                               policy_features=output / "profile/policy-features.default")
+                               features=fixture_path, policy_features=fixture_path)
     return {"version": "4.1.7", "version_command": version, "workspace_profile": compiled,
             "profile_render": render, "compile_features": fixture, "policy_features": policy_abi,
             "kernel_compatibility": "not verified; upstream userspace test fixture only",

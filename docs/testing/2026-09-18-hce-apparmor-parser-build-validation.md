@@ -45,7 +45,7 @@ go test ./internal/apparmorloader ./cmd/apparmor-loader -count=1
 
 最小修复从已验签源码的 `parser/default_features.c` 提取 `default_features_abi`，通过 `--policy-features` 显式提供同一默认值，并分别记录策略 ABI 与模拟内核能力的来源和摘要。完整策略保持不变、所有告警仍失败，没有使用 quiet、删除约束、较弱的 ABI 或 `--override-policy-abi`。该本地诊断不是 HCE 兼容性、4.1.7 实际构建或节点 enforce 证据。
 
-进一步在同一现有 parser 4.1.0 上显式提供源码中相同的默认策略 ABI，严格检查仍报 `network rules not enforced`。单独将模拟内核能力替换为已签名源码的 `profiles/apparmor.d/abi/4.0` 后仍复现，因此不能把问题简单归结为旧测试能力文件。该替换仅存在于临时诊断进程，没有修改仓库中的能力文件选择或任何部署资源。
+进一步在同一现有 parser 4.1.0 上显式提供源码中相同的默认策略 ABI，严格检查仍报 `network rules not enforced`。单独将模拟内核能力替换为已签名源码的 `profiles/apparmor.d/abi/4.0` 后仍复现，因此不能把问题简单归结为旧测试能力文件。该结论属于历史诊断；当前 4.1.7 用户态门禁已改用该已验签 ABI fixture，并仍将真实目标内核能力作为独立门禁。
 
 诊断用的原默认编译调用（非严格告警模式）虽然能生成二进制，但**不作为验收通过证据**。4.1.7 源码同时存在 network v8 规则生成和旧网络规则序列化路径；本地告警不能单独证明已部署节点上的网络约束失效。后续在真正候选 parser 和目标内核能力下查出的具体差异见下文；不得过滤告警或放宽现有 Chart 来获得绿色结果。
 
@@ -84,7 +84,7 @@ HCE base/updates 软件源没有 `apparmor` 或 `autoconf-archive` 包。管理�
 
 使用解包后的真实 4.1.7 ELF，对未改动的完整 Chart profile 执行 `-Q -K --config-file=/dev/null --Werror --warn=all`，只输出测试二进制，不加载或更新内核策略：
 
-1. `--policy-features` 为已验签源码的默认策略 ABI、`--kernel-features` 为目标内核快照：退出码 1，`network rules not enforced`。默认 ABI 只有旧 `network {af_unix ...}`，目标内核只有 `network_v8/af_mask`，4.1.7 `parser_main.c` 使用两者交集判断支持，因此两条路径都不满足。
+1. `--policy-features` 为已验签源码的默认策略 ABI、`--kernel-features` 为目标内核快照：退出码 1，`network rules not enforced`。默认 ABI 只有旧 `network {af_unix ...}`，目标内核只有 `network_v8/af_mask`，4.1.7 `parser_main.c` 使用两者交集判断支持，因此两条路径都不满足。当前用户态 fixture 已切换为 `profiles/apparmor.d/abi/4.0`，不影响这条真实目标内核诊断。
 2. 仅作定位，把策略 ABI 也设为目标内核快照；其余参数与 profile 不变：退出码 1，`downgrading extended network unix socket rule to generic network rule`。目标内核有 `network_v8`，但没有 `network/af_unix`；`parser_yacc.y` 会为 `network unix stream` 合成 `unix_rule`，`af_unix.cc` 因扩展 AF_UNIX 能力缺失而发出降级告警。
 3. 进一步的隔离诊断通过进程替换从输入流排除 `network unix stream`，不修改 Chart 或节点策略：严格编译退出码 0、stderr 0 字节。此步骤只定位告警来源；删除该限制会改变安全边界，**不是修复方案**。
 4. 保留完整 profile 和目标 ABI、仅临时取消 `--Werror` 时，可生成 9681 字节二进制，但仍输出上述降级告警。该二进制**不能作为验收通过产物**，没有加载到内核。
