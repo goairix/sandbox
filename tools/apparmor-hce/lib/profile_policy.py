@@ -12,9 +12,10 @@ import tempfile
 from source_policy import sha256
 
 MARKER = "__SANDBOX_PROFILE_NAME__"
-# This immutable upstream test feature file is retained as a userspace fixture;
-# it is never a claim about the target node kernel.
-FEATURE_MEMBER = "apparmor-v4.1.7/parser/tst/features_files/features.all"
+# This immutable upstream ABI file is retained as a userspace fixture. It is
+# compatible with the profile's extended network rules, but never a claim
+# about the target node kernel.
+FEATURE_MEMBER = "apparmor-v4.1.7/profiles/apparmor.d/abi/4.0"
 DEFAULT_MEMBER = "apparmor-v4.1.7/parser/default_features.c"
 CHART_INPUTS = {"profile-source/workspace-mounter.profile", "profile-source/_helpers.tpl", "profile-source/apparmor-loader.yaml"}
 RENDER_FILES = {"profile/workspace.profile", "profile/render.json"}
@@ -117,7 +118,7 @@ def feature_bytes(archive):
 
 
 def fixture_metadata(archive, data):
-    return {"kind": "upstream-test-fixture", "source_member": FEATURE_MEMBER,
+    return {"kind": "upstream-policy-abi-fixture", "source_member": FEATURE_MEMBER,
             "source_archive_sha256": sha256(archive), "sha256": hashlib.sha256(data).hexdigest(),
             "target_kernel_compatibility": False, "scope": "userspace compilation only; not a node kernel snapshot"}
 

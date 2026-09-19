@@ -120,11 +120,12 @@ Host verification also compares with the current complete Chart policy, so
 removed FUSE/mount constraints or extra wildcard grants fail equality checks.
 
 Pure userspace compilation uses exactly the signed source member
-`apparmor-v4.1.7/parser/tst/features_files/features.all` from the already verified
-source archive via `--kernel-features`. Its complete bytes, member path, SHA256,
-and source-archive hash are retained and rechecked. This is explicitly an
-**upstream test fixture**, not a target kernel snapshot or kernel-compatibility
-claim. The policy ABI is never overridden and warnings are never suppressed.
+`apparmor-v4.1.7/profiles/apparmor.d/abi/4.0` from the already verified source
+archive via `--kernel-features` and the same bytes as `--policy-features`. Its
+complete bytes, member path, SHA256, and source-archive hash are retained and
+rechecked. This is explicitly an **upstream policy-ABI fixture**, not a target
+kernel snapshot or kernel-compatibility claim. The policy ABI is never
+overridden and warnings are never suppressed.
 `parser_checks.compile_profile` remains the Task 4 hook for an explicitly
 validated target-kernel snapshot; target origin/architecture/hash gates remain
 separate from this userspace test.
@@ -140,14 +141,12 @@ strict compilation on a downgraded `network unix stream` rule. No warning was
 suppressed and no resulting binary was loaded into the kernel. Therefore this
 node's full-profile compilation and production compatibility are not accepted.
 
-The same native parser also fails the current isolated workflow's exact
-`features.all` plus source-default-ABI inputs with `network rules not enforced`;
-the `build.sh` full pipeline is not expected to pass until that separate
-userspace fixture mismatch is addressed. A diagnostic using the signed source's
-official `profiles/apparmor.d/abi/4.0` as both simulated kernel features and
-policy ABI compiled the complete profile with zero diagnostics. This does not
-change the checked-in workflow and does not establish compatibility with the
-target HCE kernel.
+The current isolated workflow uses the signed source's official
+`profiles/apparmor.d/abi/4.0` as both simulated kernel features and policy ABI;
+this keeps the userspace compilation gate aligned with the profile's extended
+network rules. It does not establish compatibility with a target HCE kernel:
+that remains a separate gate using a kernel feature snapshot and must reject
+unsupported or downgraded rules.
 
 `uname` and target-platform agreement establish the execution architecture,
 **not native execution**. BuildKit may be emulating it. Every report explicitly

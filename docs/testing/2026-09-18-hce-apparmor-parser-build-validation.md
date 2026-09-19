@@ -41,7 +41,7 @@ go test ./internal/apparmorloader ./cmd/apparmor-loader -count=1
 
 除单元测试外，使用已有 loader 镜像内的真实 parser 4.1.0，以无网络、只读根文件系统、drop ALL capabilities 的临时容器检查完整 Helm 策略。没有加载内核策略。
 
-采用 `-Q -K --config-file=/dev/null --Werror --warn=all` 和已验签源码中的 `features.all` 时，parser 因策略没有显式 ABI 声明而拒绝编译。AppArmor 4.1.7 的 `parser/parser_yacc.y` 同样在回退到 `default_features_abi` 时产生该告警，因此不能仅凭模拟测试通过就宣称构建可用。
+历史上采用 `-Q -K --config-file=/dev/null --Werror --warn=all` 和已验签源码中的 `features.all` 时，parser 因策略没有显式 ABI 声明而拒绝编译。AppArmor 4.1.7 的 `parser/parser_yacc.y` 同样在回退到 `default_features_abi` 时产生该告警，因此不能仅凭旧模拟测试通过就宣称构建可用。
 
 最小修复从已验签源码的 `parser/default_features.c` 提取 `default_features_abi`，通过 `--policy-features` 显式提供同一默认值，并分别记录策略 ABI 与模拟内核能力的来源和摘要。完整策略保持不变、所有告警仍失败，没有使用 quiet、删除约束、较弱的 ABI 或 `--override-policy-abi`。该本地诊断不是 HCE 兼容性、4.1.7 实际构建或节点 enforce 证据。
 
@@ -89,7 +89,7 @@ HCE base/updates 软件源没有 `apparmor` 或 `autoconf-archive` 包。管理�
 3. 进一步的隔离诊断通过进程替换从输入流排除 `network unix stream`，不修改 Chart 或节点策略：严格编译退出码 0、stderr 0 字节。此步骤只定位告警来源；删除该限制会改变安全边界，**不是修复方案**。
 4. 保留完整 profile 和目标 ABI、仅临时取消 `--Werror` 时，可生成 9681 字节二进制，但仍输出上述降级告警。该二进制**不能作为验收通过产物**，没有加载到内核。
 
-另用同一原生 4.1.7 parser 验证当前隔离构建流程的用户态编译输入：已签名归档中的 `parser/tst/features_files/features.all`（SHA-256 `8b78b11f29d8f166b8a8f7217caae7d5c1ddbb9ef017287fdc34e1ff54ef3863`）配合源码默认策略 ABI，严格编译同样退出 1，报 `network rules not enforced`。这意味着当前 BuildKit 用户态编译门禁也会失败，不能把节点 RPM 构建成功外推为 `build.sh` 全流程通过。仅作对照，把同一已验签源码里的正式 `profiles/apparmor.d/abi/4.0`（SHA-256 `e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`）同时提供给策略 ABI 和模拟内核特性，完整策略严格编译退出 0、stdout/stderr 均为 0 字节，生成 11137 字节二进制。这证明候选 parser 在具备所需特性的用户态 ABI 下可编译；该对照**不是**目标 HCE 内核兼容证据，现有构建工具尚未改用此 ABI。
+已修复隔离构建流程的用户态编译输入：现在使用已验签归档中的正式 `profiles/apparmor.d/abi/4.0`（SHA-256 `e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`）同时作为策略 ABI 和模拟内核特性。现场同一原生 4.1.7 parser 对完整策略严格编译退出 0，stdout/stderr 均为 0 字节，生成 11137 字节二进制。该门禁只证明候选 parser 在固定用户态 ABI 下可编译，**不是**目标 HCE 内核兼容证据；目标内核仍需单独使用 feature 快照验收。
 
 当前结论是 parser 包构建和本机运行已经验证，但这台 HCE 内核的 AppArmor feature 集合与当前严格策略验收要求不匹配。不能通过静默告警、删除 `network unix stream` 或任意伪造 ABI 宣称完成。后续需对“仅 family/type 的 generic network_v8 回退”进行明确安全设计和受控拒绝测试，或取得具有所需扩展 AF_UNIX 能力的内核；在此之前，AppArmor 的目标节点 enforce 验收保持阻断。
 

@@ -65,6 +65,7 @@ class Profile(unittest.TestCase):
 
     def test_features_fixture_is_exact_source_member_and_not_target_kernel(self):
         policy = module("profile_policy")
+        self.assertEqual(policy.FEATURE_MEMBER, "apparmor-v4.1.7/profiles/apparmor.d/abi/4.0")
         archive = self.root / "source.tar.gz"
         fixture = b"mount {mask {mount umount\n}\n}\n"
         with tarfile.open(archive, "w:gz") as tar:
@@ -73,7 +74,7 @@ class Profile(unittest.TestCase):
             tar.addfile(item, io.BytesIO(fixture))
         policy.extract_feature_fixture(archive, self.root)
         report = policy.validate_feature_fixture(archive, self.root)
-        self.assertEqual(report["kind"], "upstream-test-fixture")
+        self.assertEqual(report["kind"], "upstream-policy-abi-fixture")
         self.assertFalse(report["target_kernel_compatibility"])
         self.assertEqual(report["sha256"], hashlib.sha256(fixture).hexdigest())
         self.assertEqual(report["source_archive_sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
