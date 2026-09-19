@@ -4,10 +4,13 @@
 userspace, and exports local artifacts. It never pushes an image, creates a
 global buildx builder, registers an emulator, or changes a cluster/node.
 
-The workflow implementation has local structural/crypto/CLI tests. **It has
-not yet been executed against an administrator-supplied HCE builder.** Package
-availability, both real architecture builds, RPM integration, and native HCE
-acceptance remain environment-dependent validation gates.
+The workflow implementation has local structural/crypto/CLI tests. A native
+`x86_64` RPM and SRPM were built on an authorized HCE 2.0 test node on
+2026-09-19. **The isolated BuildKit workflow itself has not yet been executed
+against an administrator-supplied HCE builder image.** Its complete artifact
+audit, the `aarch64` build, RPM installation, target-kernel policy compilation,
+and live FUSE enforcement remain separate validation gates. See the
+[node build record](../../docs/testing/2026-09-18-hce-apparmor-parser-build-validation.md).
 
 ## Inputs and invocation
 
@@ -72,10 +75,18 @@ detached signature; `git ls-remote` is not used as cryptographic evidence.
 
 The spec follows the release README: libapparmor `autogen.sh`, `configure`,
 build, `make check`, then parser build and `make check`. Build dependencies
-include the C++ compiler/static C++ library, autoconf-archive, DejaGNU, Perl test
-and POD tooling. The upstream parser statically links libapparmor; the RPM
-contains only the parser and GPL/LGPL license files. `rpmbuild -ba` produces both
-RPMs. No upstream full install target is used.
+include the C++ compiler/static C++ library, HCE's `binutils-extra` linker,
+DejaGNU, Perl test and POD tooling.
+HCE 2.0 base/updates does not publish an `autoconf-archive` RPM, so the only
+macro required by libapparmor, `AX_CHECK_COMPILE_FLAG`, is retained as an exact
+build input from autoconf-archive tag `v2023.02.20` commit
+`4cd9fa38f0f6cd6998a8d25d25824a0d59ee4fea`; its SHA256 is
+`629dc6835eb1e2bd586fd842a4db66541bc442bcc2b13d6f24907631c5a688b0`.
+The spec installs that input into the unpacked source tree before `autogen.sh`,
+and the SRPM/audit inventory contains and verifies the same bytes. The upstream
+parser statically links libapparmor; the RPM contains only the parser and
+GPL/LGPL license files. `rpmbuild -ba` produces both RPMs. No upstream full
+install target is used.
 
 Before installation, the audit checks RPM identity/architecture, all scriptlet
 and trigger families, actual CPIO entries against RPM header entries, exact

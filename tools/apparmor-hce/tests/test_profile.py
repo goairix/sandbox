@@ -197,6 +197,7 @@ class Profile(unittest.TestCase):
         policy.extract_default_abi(archive, self.root)
         def parser(args, **kwargs):
             if args[-1] == "--version":
+                self.assertEqual(args[-2:], ["--config-file=/dev/null", "--version"])
                 return SimpleNamespace(returncode=0, stdout=b"AppArmor parser version 4.1.7\n", stderr=b"")
             self.assertEqual(Path(args[-1]), self.root / "profile/workspace.profile")
             self.assertEqual(hashlib.sha256(Path(args[-1]).read_bytes()).hexdigest(), metadata["profile_sha256"])

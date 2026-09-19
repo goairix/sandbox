@@ -99,6 +99,7 @@ def build(arch, image, environment):
     for folder in ("SOURCES", "SPECS", "BUILD", "BUILDROOT", "RPMS", "SRPMS"):
         (top / folder).mkdir()
     shutil.copyfile(source / "apparmor-v4.1.7.tar.gz", top / "SOURCES/apparmor-v4.1.7.tar.gz")
+    shutil.copyfile("/work/vendor/ax_check_compile_flag.m4", top / "SOURCES/ax_check_compile_flag.m4")
     shutil.copyfile("/work/rpm/sandbox-apparmor-parser.spec", top / "SPECS/sandbox-apparmor-parser.spec")
     with (OUT / "build-tests.log").open("wb") as log:
         run(["rpmbuild", "-ba", "--define", "_topdir " + str(top), str(top / "SPECS/sandbox-apparmor-parser.spec")], log=log, timeout=5400)
@@ -138,7 +139,8 @@ def audit(arch, image, environment, repeat=False):
         packages.append(metadata)
         if is_source:
             if (payload["apparmor-v4.1.7.tar.gz"] != (OUT / "source/apparmor-v4.1.7.tar.gz").read_bytes()
-                    or payload["sandbox-apparmor-parser.spec"] != (OUT / "inputs/rpm/sandbox-apparmor-parser.spec").read_bytes()):
+                    or payload["sandbox-apparmor-parser.spec"] != (OUT / "inputs/rpm/sandbox-apparmor-parser.spec").read_bytes()
+                    or payload["ax_check_compile_flag.m4"] != (OUT / "inputs/vendor/ax_check_compile_flag.m4").read_bytes()):
                 raise ValueError("source RPM contents differ from retained build inputs")
         else:
             parser_bytes = payload["usr/sbin/apparmor_parser"]

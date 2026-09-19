@@ -1,5 +1,6 @@
 """Local validator tests only: synthetic ELF is not executable/HCE evidence."""
 import importlib.util
+import hashlib
 import io
 from pathlib import Path
 import shutil
@@ -175,6 +176,19 @@ class Validators(unittest.TestCase):
         for bad in [good + " (RPATH) Library rpath: [/tmp]\n", good + " (NEEDED) Shared library: [libapparmor.so.1]\n"]:
             with self.assertRaises(ValueError):
                 stage.audit_dynamic(bad)
+
+    def test_hce_build_vendors_the_only_missing_autoconf_archive_macro(self):
+        artifacts = module("artifact_set")
+        macro = ROOT / "vendor/ax_check_compile_flag.m4"
+        self.assertEqual(hashlib.sha256(macro.read_bytes()).hexdigest(),
+                         "629dc6835eb1e2bd586fd842a4db66541bc442bcc2b13d6f24907631c5a688b0")
+        self.assertIn("vendor/ax_check_compile_flag.m4", artifacts.INPUTS)
+        containerfile = (ROOT / "Containerfile").read_text()
+        spec = (ROOT / "rpm/sandbox-apparmor-parser.spec").read_text()
+        self.assertNotIn("autoconf-archive", containerfile)
+        self.assertNotIn("BuildRequires:  autoconf-archive", spec)
+        self.assertIn("Source1:        ax_check_compile_flag.m4", spec)
+        self.assertIn("libraries/libapparmor/m4/ax_check_compile_flag.m4", spec)
 
     def test_parser_runtime_hook_does_not_accept_a_different_version(self):
         checks = module("parser_checks")

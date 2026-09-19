@@ -8,6 +8,7 @@ Summary:        AppArmor policy parser for sandbox workloads
 License:        GPL-2.0-only AND LGPL-2.1-or-later
 URL:            https://apparmor.net/
 Source0:        apparmor-v%{version}.tar.gz
+Source1:        ax_check_compile_flag.m4
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  rpm-build
 BuildRequires:  gcc
@@ -19,7 +20,6 @@ BuildRequires:  flex
 BuildRequires:  autoconf
 BuildRequires:  automake
 BuildRequires:  libtool
-BuildRequires:  autoconf-archive
 BuildRequires:  pkgconfig
 BuildRequires:  dejagnu
 BuildRequires:  perl
@@ -27,6 +27,7 @@ BuildRequires:  perl-Test-Simple
 BuildRequires:  perl-Pod-Checker
 BuildRequires:  perl-podlators
 BuildRequires:  python3
+BuildRequires:  binutils-extra
 
 %description
 The AppArmor parser used to compile sandbox policy in userspace. This package
@@ -35,10 +36,11 @@ artifacts are unsigned testing artifacts and require a production signing gate.
 
 %prep
 %autosetup -n apparmor-v%{version}
+install -D -m 0644 %{SOURCE1} libraries/libapparmor/m4/ax_check_compile_flag.m4
 
 %build
 cd libraries/libapparmor
-sh ./autogen.sh
+ACLOCAL_PATH="$PWD/m4${ACLOCAL_PATH:+:$ACLOCAL_PATH}" sh ./autogen.sh
 %configure --disable-man-pages --without-python --without-perl --without-ruby
 make %{?_smp_mflags}
 cd ../..
@@ -58,5 +60,5 @@ install -D -m 0755 parser/apparmor_parser %{buildroot}%{_sbindir}/apparmor_parse
 %{_sbindir}/apparmor_parser
 
 %changelog
-* Thu Jan 01 1970 HCE Build Service <noreply@example.invalid> - 4.1.7-1
+* Sat Sep 19 2026 HCE Build Service <noreply@example.invalid> - 4.1.7-1
 - Package only the parser and its licenses, with library/parser checks.

@@ -13,9 +13,9 @@ RUN set -eu; . /etc/os-release; \
     test "$(uname -m)" = "$expected"
 RUN dnf install -y --setopt=install_weak_deps=False \
       bash python3 rpm-build gcc gcc-c++ libstdc++-static make bison flex \
-      autoconf automake libtool autoconf-archive pkgconfig \
+      autoconf automake libtool pkgconfig \
       dejagnu perl perl-Test-Simple perl-Pod-Checker perl-podlators \
-      pcre2-devel curl ca-certificates gnupg2 binutils tar gzip \
+      pcre2-devel curl ca-certificates gnupg2 binutils binutils-extra tar gzip \
     && dnf clean all
 RUN bash /work/check-sbin-layout.sh /
 RUN --mount=type=secret,id=apparmor_trusted_keyring,required=true \

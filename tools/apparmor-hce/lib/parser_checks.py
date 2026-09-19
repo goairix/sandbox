@@ -77,7 +77,10 @@ def validate_compilation(root):
 
 
 def runtime_checks(parser, output):
-    status, stdout, stderr, failure = capture([str(parser), "--version"], 30)
+    # Keep the version probe independent of a host-installed parser.conf. HCE
+    # nodes intentionally only receive this parser RPM, so an implicit global
+    # config would turn a valid binary check into a diagnostic failure.
+    status, stdout, stderr, failure = capture([str(parser), "--config-file=/dev/null", "--version"], 30)
     (output / "parser-version.txt").write_bytes(stdout)
     (output / "parser-version.stderr").write_bytes(stderr)
     version = result_record(status, stdout, stderr, failure)

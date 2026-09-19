@@ -88,8 +88,8 @@ def audit_rpm(path, arch, source=False):
         payload.append(dict(path=name, mode=int(mode), user=user, group=group,
                             link=link if link != "(none)" else "", caps=caps if caps != "(none)" else ""))
     if source:
-        expected = {"apparmor-v4.1.7.tar.gz", "sandbox-apparmor-parser.spec"}
-        if {item["path"] for item in payload} != expected or len(payload) != 2:
+        expected = {"apparmor-v4.1.7.tar.gz", "sandbox-apparmor-parser.spec", "ax_check_compile_flag.m4"}
+        if {item["path"] for item in payload} != expected or len(payload) != len(expected):
             raise ValueError("source RPM contains unexpected or duplicate inputs")
         if any(item["mode"] != 0o100644 or item["user"] != "root" or item["group"] != "root"
                or item["link"] or item["caps"] for item in payload):
