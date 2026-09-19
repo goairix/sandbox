@@ -12,7 +12,7 @@
 | 本地构建工具契约 | 已运行 | HCE 宏与 spec 兼容修复后，25 项测试、shell 语法及差异格式检查通过 |
 | 最小 ABI 修复的最终独立复审 | 未完成 | 最终复审服务不可用；本地测试及源码检查不能代替该复审 |
 | 原有 Helm AppArmor 回归 | 已运行 | `scripts/test-helm-apparmor-loader.sh` 通过，未修改业务 Chart 策略 |
-| 完整策略严格编译 | 未通过验收 | 真正候选 parser 4.1.7 在目标 HCE 内核 feature 下复现：默认策略 ABI 无 `network_v8`，改用目标 ABI 后，`network unix stream` 因内核缺少扩展 AF_UNIX 能力触发降级告警；未放宽严格告警门禁 |
+| 完整策略严格编译 | 未通过验收 | 真正候选 parser 4.1.7 使用正确逐文件读取的目标 HCE 内核 feature 快照后复现：默认策略 ABI 无 `network_v8`；使用目标 ABI 后，`network unix stream` 因内核缺少扩展 AF_UNIX 能力触发降级告警；未放宽严格告警门禁 |
 | amd64 HCE 原生节点构建 | RPM/SRPM 已生成 | 获准测试节点 HCE 2.0 x86_64 上构建，AppArmor 4.1.7 上游 `%check` 完成；产物哈希已记录，仍需独立容器审计 |
 | 隔离 BuildKit HCE 构建与审计 | 未执行 | 尚无固定摘要的 HCE builder 镜像；原生节点构建不能替代独立容器审计 |
 | amd64 节点 parser / CRI / FUSE enforce | 部分验证 | RPM 解包后的 parser 在目标 HCE 上报告 4.1.7、零诊断；完整策略严格编译失败。未安装 RPM、未修改 containerd、未做 FUSE enforce 测试 |
@@ -78,16 +78,18 @@ HCE base/updates 软件源没有 `apparmor` 或 `autoconf-archive` 包。管理�
 | `sandbox-apparmor-parser-4.1.7-1.src.rpm` | `6092bc2c56f80956049862101a14e2500ddb86905c6559288599fd0764554c8a` |
 | 完整 Chart profile | `962a729d73297c06ea9599b0766326f2ceb182f2707661960bf2a264c5dd5fcc` |
 
-`rpmbuild.status` 为 0。目标 kernel feature 快照来自 `/sys/kernel/security/apparmor/features`，在复制后的 `features/` 目录中按相对路径排序，对各文件执行 `sha256sum` 后再汇总 `sha256sum`，所得摘要为 `f3f022275edb31107e7aa97267ba4f9aa544b1e0f6cd40fc8fe3a4ac5c977c8c`。这不是单一原始文件的哈希，复核时必须使用相同算法。
+`rpmbuild.status` 为 0。首次使用 `tar` 复制 securityfs 虚拟文件时得到空文件，旧快照已废弃；改为逐文件 `cp` 后重新读取 `/sys/kernel/security/apparmor/features`，29 个文件均非空。按相对路径排序，对各文件执行 `sha256sum` 后再汇总 `sha256sum`，修正后的摘要为 `f9f3b39143717cf56d8ab1fe81535b4d741999932c0b15602ee39644a9a80378`；旧空文件摘要 `f3f022275edb31107e7aa97267ba4f9aa544b1e0f6cd40fc8fe3a4ac5c977c8c` 不再作为证据。这不是单一原始文件的哈希，复核时必须使用相同算法。
 
 ### 目标 HCE 能力下的严格编译诊断
 
-使用解包后的真实 4.1.7 ELF，对未改动的完整 Chart profile 执行 `-Q -K --config-file=/dev/null --Werror --warn=all`，只输出测试二进制，不加载或更新内核策略：
+使用解包后的真实 4.1.7 ELF，对未改动的完整 Chart profile 执行 `-Q -K --config-file=/dev/null --Werror --warn=all`，只输出测试二进制，不加载或更新内核策略。第一次使用空文件快照的结果已作废，以下结果均使用修正后的逐文件快照：
 
 1. `--policy-features` 为已验签源码的默认策略 ABI、`--kernel-features` 为目标内核快照：退出码 1，`network rules not enforced`。默认 ABI 只有旧 `network {af_unix ...}`，目标内核只有 `network_v8/af_mask`，4.1.7 `parser_main.c` 使用两者交集判断支持，因此两条路径都不满足。当前用户态 fixture 已切换为 `profiles/apparmor.d/abi/4.0`，不影响这条真实目标内核诊断。
 2. 仅作定位，把策略 ABI 也设为目标内核快照；其余参数与 profile 不变：退出码 1，`downgrading extended network unix socket rule to generic network rule`。目标内核有 `network_v8`，但没有 `network/af_unix`；`parser_yacc.y` 会为 `network unix stream` 合成 `unix_rule`，`af_unix.cc` 因扩展 AF_UNIX 能力缺失而发出降级告警。
 3. 进一步的隔离诊断通过进程替换从输入流排除 `network unix stream`，不修改 Chart 或节点策略：严格编译退出码 0、stderr 0 字节。此步骤只定位告警来源；删除该限制会改变安全边界，**不是修复方案**。
 4. 保留完整 profile 和目标 ABI、仅临时取消 `--Werror` 时，可生成 9681 字节二进制，但仍输出上述降级告警。该二进制**不能作为验收通过产物**，没有加载到内核。
+
+5. 仅删除一整行 `network unix stream,` 的隔离候选 profile，保留其它规则不变：使用修正后的目标 feature 快照严格编译退出码 0，stdout/stderr 均为 0 字节，生成 9673 字节二进制。此为离线编译证据，不是已加载到内核或真实 FUSE 工作负载通过证据。
 
 已修复隔离构建流程的用户态编译输入：现在使用已验签归档中的正式 `profiles/apparmor.d/abi/4.0`（SHA-256 `e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`）同时作为策略 ABI 和模拟内核特性。现场同一原生 4.1.7 parser 对完整策略严格编译退出 0，stdout/stderr 均为 0 字节，生成 11137 字节二进制。该门禁只证明候选 parser 在固定用户态 ABI 下可编译，**不是**目标 HCE 内核兼容证据；目标内核仍需单独使用 feature 快照验收。
 
