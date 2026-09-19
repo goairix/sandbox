@@ -8,8 +8,10 @@ The workflow implementation has local structural/crypto/CLI tests. A native
 `x86_64` RPM and SRPM were built on an authorized HCE 2.0 test node on
 2026-09-19. **The isolated BuildKit workflow itself has not yet been executed
 against an administrator-supplied HCE builder image.** Its complete artifact
-audit, the `aarch64` build, RPM installation, target-kernel policy compilation,
-and live FUSE enforcement remain separate validation gates. See the
+audit, the `aarch64` build, RPM installation, and live FUSE enforcement remain
+separate validation gates. Strict compilation of the complete profile against
+that HCE node's actual kernel features was attempted and failed on network
+feature incompatibility; see the
 [node build record](../../docs/testing/2026-09-18-hce-apparmor-parser-build-validation.md).
 
 ## Inputs and invocation
@@ -130,9 +132,13 @@ separate from this userspace test.
 The checked local non-HCE parser 4.1.0 regression still reports a strict
 `network rules not enforced` warning for this complete profile after the exact
 default ABI is supplied. That result is retained as a failed diagnostic gate;
-it is not filtered or reclassified as success. HCE 2.0 with the exact 4.1.7
-parser and a real target-kernel feature snapshot must be run before claiming
-profile compilation or production compatibility.
+it is not filtered or reclassified as success. The native HCE 2.0 parser 4.1.7
+and actual target-kernel feature snapshot have now been tested: the source
+default policy ABI lacks `network_v8`, while the target kernel lacks extended
+AF_UNIX support. Using the actual target features as policy ABI still fails
+strict compilation on a downgraded `network unix stream` rule. No warning was
+suppressed and no resulting binary was loaded into the kernel. Therefore this
+node's full-profile compilation and production compatibility are not accepted.
 
 `uname` and target-platform agreement establish the execution architecture,
 **not native execution**. BuildKit may be emulating it. Every report explicitly
