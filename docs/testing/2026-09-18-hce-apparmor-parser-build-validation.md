@@ -97,6 +97,12 @@ HCE base/updates 软件源没有 `apparmor` 或 `autoconf-archive` 包。管理�
 
 截至此记录，RPM 尚未安装到宿主机，containerd 未改变，真实 FUSE enforce/拒绝测试未执行。节点 `/sys/kernel/security/apparmor/profiles` 中已存在同名 `sandbox-fuse-*` enforce profile，其来源不属于本轮操作，本轮未加载、替换或移除任何策略，也不能据此推断本次候选 RPM 通过测试。原生节点构建产物尚未完成完整 `hce_stage.audit` 审计，更不能用于生产发布。
 
+### 2026-09-20 现场维护前置检查
+
+使用新的 JumpServer 临时令牌只读连接同一授权节点，确认主机仍为 `cce-sandbox-fuse-05598-1batu`、HCE 2.0 x86_64、AppArmor 内核参数为 `Y`。修正后的真实 feature 快照重新严格编译：完整原 profile 退出码 1，唯一诊断为 `downgrading extended network unix socket rule to generic network rule`；只删除 `network unix stream,` 的隔离候选 profile 退出码 0，stdout/stderr 均为 0 字节，产物 9673 字节。
+
+现场 CRI 只读检查结果为 `crictl info.config.disableApparmor=true`，`/etc/containerd/config.toml` 同样设置 `disable_apparmor = true`；宿主机 `/sbin/apparmor_parser` 不存在。内核虽已启用 AppArmor，且 securityfs 中有一个既存 `sandbox-fuse-* (enforce)` profile，但 CRI 前置条件未满足，不能进行真实 Pod/FUSE/拒绝测试。本轮没有安装 RPM、修改 containerd、重启服务、加载候选 profile 或操作 Kubernetes 资源；正式 Chart 保持不变。后续必须由平台管理员提供维护窗口和恢复方案，先完成受控 CRI/parser 整改，再重新执行隔离现场验收。
+
 ## 维护入口检查（原记录）
 
 通过私有 kubeconfig 的显式 `internal` context，只读确认目标仍为 `172.16.30.166`，节点 UID 为 `69a79f2b-4f61-44c7-b46a-c46230c3530c`，HCE 2.0、amd64。只读取了地址、身份和 OS/架构字段；没有修改 kubeconfig。
