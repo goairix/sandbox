@@ -140,6 +140,15 @@ strict compilation on a downgraded `network unix stream` rule. No warning was
 suppressed and no resulting binary was loaded into the kernel. Therefore this
 node's full-profile compilation and production compatibility are not accepted.
 
+The same native parser also fails the current isolated workflow's exact
+`features.all` plus source-default-ABI inputs with `network rules not enforced`;
+the `build.sh` full pipeline is not expected to pass until that separate
+userspace fixture mismatch is addressed. A diagnostic using the signed source's
+official `profiles/apparmor.d/abi/4.0` as both simulated kernel features and
+policy ABI compiled the complete profile with zero diagnostics. This does not
+change the checked-in workflow and does not establish compatibility with the
+target HCE kernel.
+
 `uname` and target-platform agreement establish the execution architecture,
 **not native execution**. BuildKit may be emulating it. Every report explicitly
 records execution mode as unknown and `native_live_hce_verified=false`.

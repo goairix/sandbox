@@ -89,6 +89,8 @@ HCE base/updates 软件源没有 `apparmor` 或 `autoconf-archive` 包。管理�
 3. 进一步的隔离诊断通过进程替换从输入流排除 `network unix stream`，不修改 Chart 或节点策略：严格编译退出码 0、stderr 0 字节。此步骤只定位告警来源；删除该限制会改变安全边界，**不是修复方案**。
 4. 保留完整 profile 和目标 ABI、仅临时取消 `--Werror` 时，可生成 9681 字节二进制，但仍输出上述降级告警。该二进制**不能作为验收通过产物**，没有加载到内核。
 
+另用同一原生 4.1.7 parser 验证当前隔离构建流程的用户态编译输入：已签名归档中的 `parser/tst/features_files/features.all`（SHA-256 `8b78b11f29d8f166b8a8f7217caae7d5c1ddbb9ef017287fdc34e1ff54ef3863`）配合源码默认策略 ABI，严格编译同样退出 1，报 `network rules not enforced`。这意味着当前 BuildKit 用户态编译门禁也会失败，不能把节点 RPM 构建成功外推为 `build.sh` 全流程通过。仅作对照，把同一已验签源码里的正式 `profiles/apparmor.d/abi/4.0`（SHA-256 `e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`）同时提供给策略 ABI 和模拟内核特性，完整策略严格编译退出 0、stdout/stderr 均为 0 字节，生成 11137 字节二进制。这证明候选 parser 在具备所需特性的用户态 ABI 下可编译；该对照**不是**目标 HCE 内核兼容证据，现有构建工具尚未改用此 ABI。
+
 当前结论是 parser 包构建和本机运行已经验证，但这台 HCE 内核的 AppArmor feature 集合与当前严格策略验收要求不匹配。不能通过静默告警、删除 `network unix stream` 或任意伪造 ABI 宣称完成。后续需对“仅 family/type 的 generic network_v8 回退”进行明确安全设计和受控拒绝测试，或取得具有所需扩展 AF_UNIX 能力的内核；在此之前，AppArmor 的目标节点 enforce 验收保持阻断。
 
 截至此记录，RPM 尚未安装到宿主机，containerd 未改变，真实 FUSE enforce/拒绝测试未执行。节点 `/sys/kernel/security/apparmor/profiles` 中已存在同名 `sandbox-fuse-*` enforce profile，其来源不属于本轮操作，本轮未加载、替换或移除任何策略，也不能据此推断本次候选 RPM 通过测试。原生节点构建产物尚未完成完整 `hce_stage.audit` 审计，更不能用于生产发布。
