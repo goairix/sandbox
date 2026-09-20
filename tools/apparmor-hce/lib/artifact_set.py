@@ -6,6 +6,7 @@ from profile_policy import CHART_INPUTS, PROFILE_FILES
 
 HELPERS = {"source_policy.py", "elf_audit.py", "rpm_audit.py", "artifact_set.py", "workflow.py", "hce_stage.py", "cpio_audit.py", "parser_checks.py", "profile_policy.py"}
 INPUTS = {"build.sh", "verify.sh", "Containerfile", "Verify.Containerfile", "check-sbin-layout.sh",
+          "check-node-prerequisites.sh",
           "rpm/sandbox-apparmor-parser.spec", "vendor/ax_check_compile_flag.m4"} | {"lib/" + name for name in HELPERS} | CHART_INPUTS
 
 

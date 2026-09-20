@@ -130,6 +130,24 @@ rpm -qp --qf 'name=%{NAME} version=%{VERSION}-%{RELEASE} arch=%{ARCH}\n' "$rpm_f
 
 对所有将运行 API、普通池或 FUSE 池的 Linux 节点逐台执行。先维护一个节点，再处理下一个节点；生产必须先排空并确认 PDB、容量和业务窗口。
 
+### 3.0 一键只读检查（安装前和安装后都执行）
+
+先把本目录复制到节点，然后执行：
+
+```bash
+sudo ./apparmor-hce/check-node-prerequisites.sh
+```
+
+脚本只读检查以下项目：节点架构、内核 AppArmor、securityfs、宿主机 `/sbin/apparmor_parser`、parser 可执行性、containerd 服务、containerd 配置文件，以及**运行中 CRI** 的 `config.disableApparmor`。它不会安装软件、修改配置、加载 profile 或重启服务。
+
+安装前预期可能是 `parser missing` 或 `disableApparmor=true`；这是待整改项。安装和重启 containerd 后必须再次执行，最终看到：
+
+```text
+RESULT: PASS
+```
+
+任何 `[FAIL]` 都必须先处理，不能用 Helm values 绕过。脚本退出码为 0 表示全部通过，退出码为 1 表示节点不满足条件，退出码为 2 表示命令参数错误，适合纳入节点批量巡检。
+
 ### 3.1 安装前检查
 
 ```bash
