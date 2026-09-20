@@ -1,5 +1,7 @@
 # AppArmor 4.1.7 for HCE 2.0
 
+运维交付入口见 [deploy-runbook.md](deploy-runbook.md)。它按“只提供本目录、Helm chart 发布包和镜像”的方式编写，覆盖 RPM 构建、节点安装、containerd 配置、Helm 部署、API 验收和回退。
+
 `build.sh` builds a parser RPM and source RPM, audits them in isolated HCE
 userspace, and exports local artifacts. It never pushes an image, creates a
 global buildx builder, registers an emulator, or changes a cluster/node.
