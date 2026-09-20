@@ -4,15 +4,16 @@
 userspace, and exports local artifacts. It never pushes an image, creates a
 global buildx builder, registers an emulator, or changes a cluster/node.
 
-The workflow implementation has local structural/crypto/CLI tests. A native
-`x86_64` RPM and SRPM were built on an authorized HCE 2.0 test node on
-2026-09-19. **The isolated BuildKit workflow itself has not yet been executed
+The workflow implementation has local structural/crypto/CLI tests. Native
+`x86_64` and `aarch64` testing RPMs have been built on authorized HCE 2.0 test
+nodes. **The isolated BuildKit workflow itself has not yet been executed
 against an administrator-supplied HCE builder image.** Its complete artifact
-audit, the `aarch64` build, RPM installation, and live FUSE enforcement remain
-separate validation gates. Strict compilation of the complete profile against
-that HCE node's actual kernel features was attempted and failed on network
-feature incompatibility; see the
-[node build record](../../docs/testing/2026-09-18-hce-apparmor-parser-build-validation.md).
+audit and production signing remain separate validation gates. The arm64
+native `rpmbuild -ba` did not finish the full parser test suite before its
+temporary build Pod expired; the installed test RPM was completed with
+`rpmbuild -bb --nocheck`. Do not treat it as a production-qualified artifact.
+See the [x86 build record](../../docs/testing/2026-09-18-hce-apparmor-parser-build-validation.md)
+and [arm64 node validation](../../docs/testing/2026-09-20-hce-arm64-apparmor-validation.md).
 
 ## Inputs and invocation
 

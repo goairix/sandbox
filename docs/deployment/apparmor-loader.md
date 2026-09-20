@@ -199,7 +199,7 @@ cat /sys/module/apparmor/parameters/enabled
 
 ### EulerOS 2.0 测试节点的受控整改步骤
 
-下面是给平台管理员执行的**单节点测试 runbook**，不是 Helm 操作，也不是生产授权。当前 HCE amd64 包是未签名的测试产物，只能用于已获准的测试节点；生产必须由平台方重新审计依赖、用内部签名密钥签名，并通过双华云对 EulerOS 2.0/CRI 组合的支持确认。arm64 必须使用单独构建并审计的 `aarch64` RPM，不能把 amd64 包复制过去。
+下面是给平台管理员执行的**单节点测试 runbook**，不是 Helm 操作，也不是生产授权。现有 HCE amd64/arm64 包均是未签名的测试产物，只能用于已获准的测试节点；生产必须由平台方重新审计依赖、完成全部测试、用内部签名密钥签名，并通过双华云对 EulerOS 2.0/CRI 组合的支持确认。arm64 必须使用单独构建并审计的 `aarch64` RPM，不能把 amd64 包复制过去。arm64 节点原生构建与真实 API 验证见[现场记录](../testing/2026-09-20-hce-arm64-apparmor-validation.md)。
 
 #### 1. 安装前检查和包校验
 
@@ -207,18 +207,18 @@ cat /sys/module/apparmor/parameters/enabled
 
 ```bash
 set -euo pipefail
-pkg=/var/tmp/sandbox-apparmor-parser-4.1.7-1.x86_64.rpm
+pkg=/var/tmp/sandbox-apparmor-parser-4.1.7-1.$(uname -m).rpm
 test -f "$pkg"
 
 # 测试构建产物的摘要；生产应替换为签名制品的批准摘要
 sha256sum "$pkg"
-# 当前测试包（仅供核对）：
-# 766cb1ac45bd13e5643c2dd380c326ca2c6a111275bdd2937d2550baefa58ee3
+# 当前 x86_64 测试包：766cb1ac45bd13e5643c2dd380c326ca2c6a111275bdd2937d2550baefa58ee3
+# 当前 aarch64 测试包：7ca6f7fa127d424a2e3a2089bf00da7cd60a49806b6e7744ed3608466301d912
 
 rpm -K "$pkg"
 rpm -qp --qf 'name=%{NAME} version=%{VERSION}-%{RELEASE} arch=%{ARCH}\n' "$pkg"
 rpm -qp --requires "$pkg"
-test "$(uname -m)" = x86_64
+test "$(rpm -qp --qf '%{ARCH}' "$pkg")" = "$(uname -m)"
 ```
 
 `rpm -K` 必须显示内部签名校验通过后才能进入生产；当前测试包只具备完整性摘要，不是生产签名包。依赖须先由平台管理员按 RPM 输出审核并从受信任 HCE 源解决。
