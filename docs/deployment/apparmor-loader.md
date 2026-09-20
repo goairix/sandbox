@@ -197,6 +197,101 @@ cat /sys/module/apparmor/parameters/enabled
 
 该只读授权不包括安装宿主机软件、修改 CRI 配置或重启服务。临时诊断仅在获准的精确节点/挂载范围执行，不挂载主机根目录或 runtime socket；不能创建伪 parser 文件骗过检测，也不能直接把 Debian loader 镜像的 parser 复制到 EulerOS 上。EulerOS 包来源与 ABI/依赖兼容、私有云发行版支持和维护窗口须先确认，另获节点变更授权后才实施；之后仍需真实 FUSE enforce/拒绝及正常清理验收，不把静态配置或 loader Ready 当作通过。
 
+### EulerOS 2.0 测试节点的受控整改步骤
+
+下面是给平台管理员执行的**单节点测试 runbook**，不是 Helm 操作，也不是生产授权。当前 HCE amd64 包是未签名的测试产物，只能用于已获准的测试节点；生产必须由平台方重新审计依赖、用内部签名密钥签名，并通过双华云对 EulerOS 2.0/CRI 组合的支持确认。arm64 必须使用单独构建并审计的 `aarch64` RPM，不能把 amd64 包复制过去。
+
+#### 1. 安装前检查和包校验
+
+将经过制品库/签名流程发布的 RPM 放到节点临时目录。不要从其它节点直接复制已安装文件，也不要用 `--force`、`--nodeps` 或伪造 `/sbin/apparmor_parser`。
+
+```bash
+set -euo pipefail
+pkg=/var/tmp/sandbox-apparmor-parser-4.1.7-1.x86_64.rpm
+test -f "$pkg"
+
+# 测试构建产物的摘要；生产应替换为签名制品的批准摘要
+sha256sum "$pkg"
+# 当前测试包（仅供核对）：
+# 766cb1ac45bd13e5643c2dd380c326ca2c6a111275bdd2937d2550baefa58ee3
+
+rpm -K "$pkg"
+rpm -qp --qf 'name=%{NAME} version=%{VERSION}-%{RELEASE} arch=%{ARCH}\n' "$pkg"
+rpm -qp --requires "$pkg"
+test "$(uname -m)" = x86_64
+```
+
+`rpm -K` 必须显示内部签名校验通过后才能进入生产；当前测试包只具备完整性摘要，不是生产签名包。依赖须先由平台管理员按 RPM 输出审核并从受信任 HCE 源解决。
+
+#### 2. 安装真实宿主机 parser
+
+```bash
+sudo rpm --test -i "$pkg"
+sudo rpm -i "$pkg"
+sudo rpm -V sandbox-apparmor-parser
+sudo test -x /usr/sbin/apparmor_parser
+sudo /usr/sbin/apparmor_parser --config-file=/dev/null --version
+test -L /sbin && readlink -f /sbin/apparmor_parser
+```
+
+该包只提供 `/usr/sbin/apparmor_parser` 和许可证文件；HCE 节点的 `/sbin` 应解析到 `/usr/sbin`。如果已有同名发行版包、路径不是该 RPM 提供的 ELF、`rpm -V` 不通过或版本命令失败，立即停止，不覆盖现有包。
+
+#### 3. 备份并修改 containerd 的有效配置
+
+先确认双华云节点配置是否由节点模板/配置管理系统托管。若是，必须在那个持久化入口修改；只改 `/etc/containerd/config.toml` 可能会被平台回写。
+
+```bash
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+backup="/var/tmp/containerd-config.toml.$stamp.bak"
+sudo cp -a /etc/containerd/config.toml "$backup"
+sudo sha256sum /etc/containerd/config.toml "$backup"
+sudo vi /etc/containerd/config.toml
+```
+
+在 `[plugins."io.containerd.grpc.v1.cri"]` 段中，将唯一的配置项改为：
+
+```toml
+disable_apparmor = false
+```
+
+不要修改其它 CRI、CNI、sandbox image、registry、cgroup 或 snapshotter 配置。保存后先做语法检查（命令不可用或失败就停止）：
+
+```bash
+sudo containerd config dump --config /etc/containerd/config.toml >/dev/null
+```
+
+#### 4. 受控重启和运行态验证
+
+containerd 重启会影响该节点上的容器创建/重启；生产必须先走节点维护、容量、PDB、排空和业务通知流程。单节点测试集群不要盲目执行 `kubectl drain`，先确认测试工作负载可以停机。
+
+```bash
+sudo systemctl restart containerd
+sudo systemctl is-active --quiet containerd
+
+# 必须看运行中的 CRI，不用静态文件或 containerd dump 代替
+sudo crictl info | jq -e '.config.disableApparmor == false'
+test "$(cat /sys/module/apparmor/parameters/enabled)" = Y
+test -x /sbin/apparmor_parser
+kubectl get node <目标节点> -o wide
+```
+
+containerd 的 AppArmor 能力检查在启动后缓存，因此只改配置而不重启不能作为通过。`crictl` 仍为 `true`、字段缺失、节点不 Ready、parser 路径失效或 kubelet/CRI 报错时，停止现场验收，执行回退。
+
+#### 5. 回退
+
+```bash
+sudo cp -a "$backup" /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl is-active --quiet containerd
+sudo crictl info | jq -e '.config.disableApparmor == true'
+```
+
+回退只恢复 containerd 配置，不自动卸载 RPM；parser 保留不会改变业务 profile。确认没有其它组件依赖该测试包后，平台管理员才可另行执行 `sudo rpm -e sandbox-apparmor-parser`，并再次确认 `/sbin/apparmor_parser` 的状态。若节点模板会重写配置，必须同步恢复模板，否则下次节点重启会再次改变结果。
+
+#### 6. 通过前的真实验证
+
+上述步骤只证明 CRI 前置条件具备，仍不能证明 FUSE 可用。之后必须在独立临时 namespace、固定测试节点和唯一 profile 名称下验证：profile enforce 身份、FUSE 挂载/读写/flush/卸载、预期 AF_UNIX 拒绝、普通和 FUSE 沙盒销毁，以及无 Pod/NetworkPolicy/PVC/挂载遗留。任一项失败，正式 Helm profile 和生产节点保持不变。
+
 ## 权限与可用性
 
 节点须已启用 AppArmor 并可访问 securityfs。加载器无权改变内核启动参数，不假设所有 Linux 节点都有可用 AppArmor。DaemonSet 是可信节点管理组件，使用 privileged 和两个必要 hostPath：securityfs（策略加载需写入）及只读 enabled 文件；不挂载主机根目录、运行时 socket 或业务目录，不使用 hostPID/hostNetwork，不携带 Kubernetes API token。命名空间的 Pod Security Admission 必须由管理员允许该可信组件，不能因此扩大租户沙盒权限。
