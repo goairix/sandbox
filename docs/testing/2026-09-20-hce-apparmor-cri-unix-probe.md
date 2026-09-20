@@ -22,7 +22,9 @@
 
 准备使用测试 values 指向的 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.30` 启动真实 prepared mounter，但 Pod 在执行程序前即 `Init:StartError`：`/usr/local/bin/workspace-mounter: no such file or directory`。随后构建的 `v0.3.34` 也重复了同一问题：节点成功拉取 manifest digest `sha256:29986641fde8570df196aeacc8e1afdb4298bdba0fd6ec6c31b3f85e22eb2f4c`，但镜像内容只有 `/app/sandbox`，`/usr/local/bin` 为空。独立用两个 tag 启动诊断容器均确认该文件不存在；CRI 镜像元数据的入口是 `/app/sandbox --config /etc/sandbox/config.yaml`，属于 API 镜像入口，而非仓库 `docker/images/workspace-mounter/Dockerfile` 定义的 mounter 入口。
 
-随后使用 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.35-amd64` 重建并推送。该 tag digest 为 `sha256:04df77497bcc6fc3d748aa421fab1d4c1b30cc4c02c6842557ee670846c17125`，本地和 CCE 节点均确认存在 `/usr/local/bin/workspace-mounter`、`/usr/bin/s3fs` 及 profile bundle；`health prepared --release-check-image` 返回 0，镜像自检 Pod 在目标节点 Completed、零重启。该 tag 现在可以进入真实 prepared/FUSE 验收，但尚未替换正式 values。
+随后使用 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.35-amd64` 重建并推送。该 tag digest 为 `sha256:04df77497bcc6fc3d748aa421fab1d4c1b30cc4c02c6842557ee670846c17125`，本地和 CCE 节点均确认存在 `/usr/local/bin/workspace-mounter`、`/usr/bin/s3fs` 及 profile bundle；`health prepared --release-check-image` 返回 0，镜像自检 Pod 在目标节点 Completed、零重启。
+
+随后将该 tag 用于候选 profile 的真实 prepared Pod。镜像成功拉取，但候选 profile 下 mounter 反复 `Init:Error`，容器日志为 `workspace-mounter: request failed`；节点 audit 明确记录同一 profile 的 `apparmor="DENIED" operation="create" family="unix" sock_type="stream"`。mounter 的 supervisor 必须创建自己的 `/run/s3fs/control.sock` AF_UNIX stream 控制 socket，因此删除 `network unix stream,` 会在 FUSE 访问存储前就破坏控制面。该候选策略不通过，正式 Chart 必须保留原 Unix stream 规则；不能把离线严格编译或负向拒绝通过当作可上线结论。
 
 因此**候选策略的真实 mounter/FUSE 正向链路尚未通过**，不能把 AF_UNIX 拒绝通过解释为 FUSE 可用，也不能修改正式 Chart 删除该规则。下一步须用正确 Dockerfile 构建新的不可变 mounter tag，在同架构环境对最终镜像执行 `/usr/local/bin/workspace-mounter health prepared --release-check-image`；更新测试 values 后重新做 prepared、实际 MinIO 挂载/读写/flush/卸载、子进程 enforce 和正常清理。不能复用错误的 `v0.3.30` tag 并声称已重新构建。
 
