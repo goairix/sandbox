@@ -26,7 +26,19 @@
 
 随后将该 tag 用于候选 profile 的真实 prepared Pod。镜像成功拉取，但候选 profile 下 mounter 反复 `Init:Error`，容器日志为 `workspace-mounter: request failed`；节点 audit 明确记录同一 profile 的 `apparmor="DENIED" operation="create" family="unix" sock_type="stream"`。mounter 的 supervisor 必须创建自己的 `/run/s3fs/control.sock` AF_UNIX stream 控制 socket，因此删除 `network unix stream,` 会在 FUSE 访问存储前就破坏控制面。该候选策略不通过，正式 Chart 必须保留原 Unix stream 规则；不能把离线严格编译或负向拒绝通过当作可上线结论。
 
-因此**候选策略的真实 mounter/FUSE 正向链路尚未通过**，不能把 AF_UNIX 拒绝通过解释为 FUSE 可用，也不能修改正式 Chart 删除该规则。下一步须用正确 Dockerfile 构建新的不可变 mounter tag，在同架构环境对最终镜像执行 `/usr/local/bin/workspace-mounter health prepared --release-check-image`；更新测试 values 后重新做 prepared、实际 MinIO 挂载/读写/flush/卸载、子进程 enforce 和正常清理。不能复用错误的 `v0.3.30` tag 并声称已重新构建。
+因此**候选策略的真实 mounter/FUSE 正向链路尚未通过**，不能把 AF_UNIX 拒绝通过解释为 FUSE 可用，也不能修改正式 Chart 删除该规则。随后用正确的不可变镜像 `v0.3.35-amd64` 重做了最终镜像自检和正式 profile 的真实启动：prepared/bootstrap/authorize 协议均可运行，正确的授权请求必须把 AK/SK 作为协议要求的 base64 字符串传入；错误的原始字符串会被拒绝，不能据此判断存储故障。
+
+在正确编码授权后，真实 mounter 进入 `s3fs`。复核发现第一次诊断脚本把 YAML 引号也编码进了 AK/SK，导致此前的 `HTTP 403 InvalidAccessKeyId` 是测试脚本错误，不能归因于 values。修正为 YAML 实际字符串后，节点到 `minio.huaxisy.com:443` 的 DNS、TCP、TLS、SigV4 和凭据校验均成功；未预先创建工作区根 marker 时，服务返回 `HTTP 404 NoSuchKey`，这是 s3fs 对不存在 canonical prefix 的预期失败。
+
+随后发现诊断阶段手工写入的零字节 marker 没有设置 `Content-Type: application/x-directory`。MinIO 的根列表将该对象显示为普通文件，s3fs 挂载该子前缀后对 `/workspace` 返回 `EIO`；这不是 mounter、AppArmor 或凭据故障。代码中的 `PrepareWorkspacePrefix` 已按 provider profile 固定设置 `application/x-directory`，因此用正式 marker 重新测试：
+
+- 正式 AppArmor profile 下的真实 `workspace-mounter` 成功完成 `prepared -> authorize -> ready`，`mount_type=fuse`，generation 为 1；
+- 非特权 sandbox 容器可对 `/workspace` 完成写入、读取和删除；
+- `workspace-mounter flush` 返回 accepted，flush 后 readiness 仍保持 ready；
+- `workspace-mounter shutdown` 返回 `graceful_unmount=true`，随后健康检查明确返回 `workspace-mounter-error:s3fs-exited`，FUSE 挂载已消失；
+- AppArmor 只记录了非致命的 `/etc/host.conf`、`/usr/share/zoneinfo/Etc/UTC` 读取拒绝，没有网络或 FUSE 访问拒绝。
+
+结论：x86_64 HCE 上的 CRI AppArmor、RuntimeDefault、正式 profile 加载、mounter 镜像内容、Unix 控制 socket、FUSE 设备权限、MinIO 凭据、正确目录 marker、真实 mount、读写、flush、优雅卸载和清理闭环均已通过。代码无需为本次 EIO 现象放宽安全策略或修改 readiness；线上必须由控制面使用 `PrepareWorkspacePrefix` 生成带 `application/x-directory` 的根 marker，不能用普通零字节 PUT 代替。候选 profile 仍保持删除 Unix stream 规则的负向测试结果，不得上线。
 
 ## 收尾
 
