@@ -20,7 +20,7 @@
 
 ## 真实 mounter 测试阻塞
 
-准备使用测试 values 指向的 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.30` 启动真实 prepared mounter，但 Pod 在执行程序前即 `Init:StartError`：`/usr/local/bin/workspace-mounter: no such file or directory`。独立用该镜像启动诊断容器确认该文件确实不存在；CRI 镜像元数据的入口是 `/app/sandbox --config /etc/sandbox/config.yaml`，属于 API 镜像入口，而非仓库 `docker/images/workspace-mounter/Dockerfile` 定义的 mounter 入口。
+准备使用测试 values 指向的 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.3.30` 启动真实 prepared mounter，但 Pod 在执行程序前即 `Init:StartError`：`/usr/local/bin/workspace-mounter: no such file or directory`。随后构建的 `v0.3.34` 也重复了同一问题：节点成功拉取 manifest digest `sha256:29986641fde8570df196aeacc8e1afdb4298bdba0fd6ec6c31b3f85e22eb2f4c`，但镜像内容只有 `/app/sandbox`，`/usr/local/bin` 为空。独立用两个 tag 启动诊断容器均确认该文件不存在；CRI 镜像元数据的入口是 `/app/sandbox --config /etc/sandbox/config.yaml`，属于 API 镜像入口，而非仓库 `docker/images/workspace-mounter/Dockerfile` 定义的 mounter 入口。
 
 因此**候选策略的真实 mounter/FUSE 正向链路尚未通过**，不能把 AF_UNIX 拒绝通过解释为 FUSE 可用，也不能修改正式 Chart 删除该规则。下一步须用正确 Dockerfile 构建新的不可变 mounter tag，在同架构环境对最终镜像执行 `/usr/local/bin/workspace-mounter health prepared --release-check-image`；更新测试 values 后重新做 prepared、实际 MinIO 挂载/读写/flush/卸载、子进程 enforce 和正常清理。不能复用错误的 `v0.3.30` tag 并声称已重新构建。
 
