@@ -2,7 +2,7 @@
 
 运维交付入口见 [deploy-runbook.md](deploy-runbook.md)。它按“只提供本目录、Helm chart 发布包和镜像”的方式编写，覆盖 RPM 构建、节点安装、containerd 配置、Helm 部署、API 验收和回退。
 
-节点前置条件可直接执行 `./check-node-prerequisites.sh`；该脚本只读检查内核、securityfs、宿主机 parser、containerd 和运行中 CRI，不会安装、修改或重启任何东西。
+节点前置条件应在构建 RPM 前先执行 `./check-node-prerequisites.sh`；如果目标节点已输出 `RESULT: PASS`，无需重复构建或安装 parser。该脚本只读检查内核、securityfs、宿主机 parser、containerd 和运行中 CRI，不会安装、修改或重启任何东西。
 
 `build.sh` builds a parser RPM and source RPM, audits them in isolated HCE
 userspace, and exports local artifacts. It never pushes an image, creates a

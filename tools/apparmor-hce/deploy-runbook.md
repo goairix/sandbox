@@ -44,7 +44,34 @@ command -v jq
 
 如果构建节点没有 `rpmbuild`，按第 2 节安装依赖。`uname -m` 必须与要构建的 RPM 架构一致：`x86_64` 构建 amd64，`aarch64` 构建 arm64。不要用 amd64 RPM 安装到 arm64 节点，反之亦然。
 
+## 1.1 构建前先检查目标节点
+
+**不要先构建 RPM。** 先把本目录复制到每个计划运行 API、普通池或 FUSE 池的目标节点，执行只读检查：
+
+```bash
+sudo ./apparmor-hce/check-node-prerequisites.sh
+```
+
+如果输出：
+
+```text
+RESULT: PASS
+```
+
+说明这个节点已经满足宿主机 AppArmor、parser、containerd 和运行中 CRI 的基础条件，**不需要在该节点重复构建或安装 AppArmor parser RPM**。记录节点名、架构、检查输出摘要，然后直接进入第 4 节准备 values 和第 5 节 Helm 部署；部署后仍必须做真实 FUSE/API 验收。
+
+如果输出 `RESULT: FAIL`，先按失败项分类：
+
+- `host AppArmor parser is missing`、`parser cannot run`：需要为该节点架构构建并安装 RPM，见第 2 节和第 3.2 节。
+- `disableApparmor=true`：需要平台管理员修改持久化 containerd 配置并重启 containerd，见第 3.3 节；单独构建 RPM 不能解决这个问题。
+- `kernel AppArmor is not enabled` 或 `securityfs is not mounted`：构建 RPM 不能解决内核/挂载问题，应由平台管理员处理节点内核和 securityfs。
+- `crictl info failed`、containerd 未 active 或节点架构不支持：先修复运行时或节点，不要继续 Helm 部署。
+
+修复后必须重新执行脚本并看到 `RESULT: PASS`。脚本通过只代表**节点前置条件**通过，不代表 Helm loader、项目 profile、FUSE 挂载和 API 链路已经验收。
+
 ## 2. 原生构建 AppArmor parser RPM
+
+只有至少一个目标节点因宿主机 parser 缺失/不可执行而失败时，才执行本节。按目标节点架构分别原生构建；已有通过节点不需要重复安装。
 
 ### 2.1 安装构建依赖
 
@@ -130,7 +157,7 @@ rpm -qp --qf 'name=%{NAME} version=%{VERSION}-%{RELEASE} arch=%{ARCH}\n' "$rpm_f
 
 对所有将运行 API、普通池或 FUSE 池的 Linux 节点逐台执行。先维护一个节点，再处理下一个节点；生产必须先排空并确认 PDB、容量和业务窗口。
 
-### 3.0 一键只读检查（安装前和安装后都执行）
+### 3.0 一键只读检查（修复后和安装后都执行）
 
 先把本目录复制到节点，然后执行：
 
@@ -140,7 +167,7 @@ sudo ./apparmor-hce/check-node-prerequisites.sh
 
 脚本只读检查以下项目：节点架构、内核 AppArmor、securityfs、宿主机 `/sbin/apparmor_parser`、parser 可执行性、containerd 服务、containerd 配置文件，以及**运行中 CRI** 的 `config.disableApparmor`。它不会安装软件、修改配置、加载 profile 或重启服务。
 
-安装前预期可能是 `parser missing` 或 `disableApparmor=true`；这是待整改项。安装和重启 containerd 后必须再次执行，最终看到：
+在第 1.1 节中已经检查过的节点，只有在执行了 parser 安装或 containerd 修改后才需要重复检查；如果第 1.1 节已经 `RESULT: PASS`，无需为了“再检查一次”重复构建 RPM。整改完成后必须再次执行，最终看到：
 
 ```text
 RESULT: PASS
