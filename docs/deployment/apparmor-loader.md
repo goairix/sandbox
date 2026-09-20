@@ -257,7 +257,7 @@ disable_apparmor = false
 不要修改其它 CRI、CNI、sandbox image、registry、cgroup 或 snapshotter 配置。保存后先做语法检查（命令不可用或失败就停止）：
 
 ```bash
-sudo containerd config dump --config /etc/containerd/config.toml >/dev/null
+sudo containerd --config /etc/containerd/config.toml config dump >/dev/null
 ```
 
 #### 4. 受控重启和运行态验证

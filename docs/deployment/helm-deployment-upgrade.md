@@ -322,6 +322,17 @@ docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox-fu
 
 Kubernetes FUSE 需要已有兼容的 API/runtime/mounter 镜像，Docker FUSE 还需要 `sandbox-fuse-docker`；按实际部署使用的镜像构建，不因只升级 API 就统一改所有 tag。你也可以沿用现有流程分别构建各架构，再用 `docker manifest` 合并同一个新版本 tag。
 
+推送 mounter 后，必须在对应架构可运行容器的构建机上检查**最终仓库 tag**，不能只看 `imagetools inspect` 的架构清单。2026-09-20 CCE 测试发现错误的 `sandbox-fuse-mounter:v0.3.30` tag 实际具有 API 入口 `/app/sandbox`，且没有 mounter 二进制，详见 [现场记录](../testing/2026-09-20-hce-apparmor-cri-unix-probe.md)。使用新的不可变 tag 构建，不覆盖该错误 tag：
+
+```bash
+SANDBOX_MOUNTER_IMAGE="$SANDBOX_BUILD_REGISTRY/sandbox-fuse-mounter:$SANDBOX_BUILD_VERSION"
+docker run --rm --platform linux/amd64 \
+  --entrypoint /usr/local/bin/workspace-mounter \
+  "$SANDBOX_MOUNTER_IMAGE" health prepared --release-check-image
+```
+
+arm64 镜像须在 arm64 主机或已确认可用的多架构 builder 上同样执行一次，并把 `--platform` 改为 `linux/arm64`。该自检必须返回 0；否则不要把 tag 写入测试或生产 values。
+
 ### 本次 Redis bootstrap 独立镜像
 
 首次使用新版 Sentinel Chart 时必须构建并推送这个最小镜像。它与 API 独立发版，
