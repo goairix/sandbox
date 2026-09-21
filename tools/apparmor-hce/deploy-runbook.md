@@ -13,6 +13,7 @@
 | 本目录 `tools/apparmor-hce/` | 构建规格、源码锁定信息、校验工具和本手册 |
 | Helm chart 包（例如 `sandbox-fuse-0.3.x.tgz`，或 chart 目录） | 执行 Helm 部署；本目录不包含项目 chart |
 | `sandbox-api`、`sandbox-runtime`、`sandbox-fuse-mounter`、`sandbox-apparmor-loader` 镜像 | API、普通池、FUSE 池和 AppArmor loader |
+| `sandbox-sdk-smoke-linux-amd64`、`sandbox-sdk-smoke-linux-arm64` 及 SHA256 | 通过公开 Go SDK 做普通/FUSE 真实验收；按节点架构选择 |
 | 对象存储参数、Redis 参数、API key Secret、镜像仓库拉取权限 | 业务配置；不要写进命令历史或日志 |
 | 经过签名的生产 RPM | 生产节点安装；本文自行构建的 RPM 只能用于测试 |
 
@@ -370,7 +371,41 @@ curl --fail --silent --show-error -X DELETE \
   "http://127.0.0.1:18080/api/v1/sandboxes/$SANDBOX_ID"
 ```
 
-生产上线验收不能只做 `/health`；至少要完成一次普通沙盒和一次 FUSE 沙盒的创建、exec 读写、workspace sync、优雅销毁，并确认对应 Pod、NetworkPolicy、挂载和 Redis 状态没有遗留。测试失败时保留 API、mounter、loader 和 kubelet/containerd 日志，不要先删除现场。
+### 6.3 使用 Go SDK 做真实验收
+
+发布方应在 `sdk/go` 模块构建与项目版本匹配的静态验收工具，并把两个架构的二进制和 SHA256 一起放入交付物；只拿到 `tools/apparmor-hce/` 的运维人员不需要拿项目源码。构建命令如下：
+
+```bash
+cd sdk/go
+go test ./... -count=1
+
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags='-s -w' \
+  -o /tmp/sandbox-sdk-smoke-linux-amd64 ./cmd/sandbox-sdk-smoke
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+  go build -trimpath -ldflags='-s -w' \
+  -o /tmp/sandbox-sdk-smoke-linux-arm64 ./cmd/sandbox-sdk-smoke
+sha256sum /tmp/sandbox-sdk-smoke-linux-amd64 /tmp/sandbox-sdk-smoke-linux-arm64
+file /tmp/sandbox-sdk-smoke-linux-amd64 /tmp/sandbox-sdk-smoke-linux-arm64
+```
+
+在管理机选择与目标节点架构一致的已验收二进制。工具只通过公开 SDK 接口创建一个普通沙盒和一个 FUSE 沙盒，执行命令、同步 workspace、验证 FUSE `mounted/mount_type/mount_state/flushed`，然后用独立 30 秒上下文销毁；它不会打印 API key：
+
+```bash
+SDK_SMOKE=/secure/path/sandbox-sdk-smoke-linux-arm64  # amd64 节点改用 amd64
+chmod 0755 "$SDK_SMOKE"
+export SANDBOX_API_URL=http://127.0.0.1:18080
+export SANDBOX_API_KEY="$(kubectl -n "$NAMESPACE" get secret sandbox-api \
+  -o jsonpath='{.data.api-key}' | base64 -d)"
+export SANDBOX_TEST_PREFIX="ops-sdk-$(date -u +%Y%m%dT%H%M%SZ)"
+"$SDK_SMOKE" | tee /var/tmp/sandbox-sdk-smoke.log
+grep -F 'SDK smoke test: ordinary PASS' /var/tmp/sandbox-sdk-smoke.log
+grep -F 'SDK smoke test: fuse PASS' /var/tmp/sandbox-sdk-smoke.log
+```
+
+验收失败时先保存 `/var/tmp/sandbox-sdk-smoke.log`、API/mounter/loader 和节点 kubelet/containerd 日志；API key 只存在当前进程环境，不要把环境变量或 Secret 内容写进日志。
+
+生产上线验收不能只做 `/health`；至少要完成一次普通沙盒和一次 FUSE 沙盒的创建、exec 读写、workspace sync、优雅销毁，并确认对应 Pod、NetworkPolicy、挂载和 Redis 状态没有遗留。测试失败时保留现场，不要先删除现场。
 
 ## 7. 常见故障处理
 

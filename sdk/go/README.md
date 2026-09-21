@@ -168,6 +168,21 @@ info, err := sb.WorkspaceInfo(ctx)
 err = sb.UnmountWorkspace(ctx)
 ```
 
+### Deployment acceptance smoke test
+
+仓库内置的 `cmd/sandbox-sdk-smoke` 是交付验收工具，不是业务 SDK 的必需依赖。它只使用上面展示的公开 SDK 方法，依次验证普通和 FUSE 沙盒的创建、`bash` 执行、workspace sync、FUSE 挂载状态和销毁；FUSE 验收要求 `mounted=true`、`mount_type=fuse`、`mount_state=ready`、`flushed=true`。
+
+发布方可为 Linux 节点构建静态工具：
+
+```bash
+cd sdk/go
+go test ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o sandbox-sdk-smoke-linux-amd64 ./cmd/sandbox-sdk-smoke
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o sandbox-sdk-smoke-linux-arm64 ./cmd/sandbox-sdk-smoke
+```
+
+运行时通过 `SANDBOX_API_URL`、`SANDBOX_API_KEY` 和可选的 `SANDBOX_TEST_PREFIX` 传入配置。API key 只放在进程环境中，不要写入命令行参数或日志。空闲 FUSE 池的 mounter 在未被授权/认领时可能是 Kubernetes `1/2`，这是预期状态；只有真实创建 FUSE 沙盒并完成上述 workspace 状态检查后才算通过。
+
 ### Network
 
 四种网络模式：

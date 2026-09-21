@@ -173,7 +173,7 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" "$CHART" \
   --namespace "$NS" \
   -f "$VALUES" \
   --reset-values \
-  --atomic --wait --timeout 15m
+  --wait --timeout 15m
 ```
 
 ## 5. 升级已有 release
@@ -193,7 +193,7 @@ helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
   --namespace "$NS" \
   -f "$VALUES" \
   --reset-values \
-  --atomic --wait --timeout 15m
+  --wait --timeout 15m
 ```
 
 Chart `0.3.0` 是本轮 Helm 包版本，不代表镜像已经统一发布为 `v0.3.0`；当前
