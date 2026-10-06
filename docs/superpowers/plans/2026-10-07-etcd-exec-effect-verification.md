@@ -335,3 +335,7 @@ Task1 initialindependentC0I1M0 corrected test-onlye9d5151 and scopedI1ADDRESSED/
 ## 最终集成审查结论
 
 PASS / C0I0M0；3696/3696新 delta 行全部覆盖，复用已永久认证 baseline，未声称本轮重新读取整个历史分支。无最终 fix wave；全部52边界与18项裁决见本单元 final-review。实际容量/p99/真实 Pod/FUSE、物理执行和生产 Redis 移除仍未交付。当前 owned manualfixture cleanup 尚待完成，后续追加实际结果。
+
+## 实际 fixture cleanup
+
+所有本单元实现者/审查者已结束，新的 fault hooks 为同步 RPC，没有遗留测试 worker。Root 对 exact owned manual project sandbox-etcd-state-test-39276-1791311554058871000 执行 compose --env-file /dev/null down --volumes --remove-orphans；session82116实际 exit0。随后的 exact label inventory：containers0、volumes0、networks0。fresh script project54929已由trap清理并独立核对label0。所有这些 loopback endpoint 都是历史端口，不可用于下一单元。没有清理其他项目、实际配置、凭证或 ignored var/tmp。
