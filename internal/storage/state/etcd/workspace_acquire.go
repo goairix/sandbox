@@ -206,6 +206,11 @@ func (b *Backend) AcquireIntent(ctx context.Context, input AcquireIntentInput) (
 	}
 	stage, err := b.BeginStage(ctx, input.Workspace.Partition(), input.RequestID, "acquire", mutation, 30*time.Second)
 	if err != nil {
+		var failure *stageBeginFailure
+		if errors.As(err, &failure) {
+			result.GuardCleanupError = failure.cleanup
+			return result, failure.cause
+		}
 		return result, err
 	}
 	result.Reference = stage.Reference()

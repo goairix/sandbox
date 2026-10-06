@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -114,6 +115,11 @@ func (b *Backend) DeclareRuntimeDispatch(ctx context.Context, c *CreationClaim, 
 		return mutation, nil
 	})
 	if err != nil {
+		var failure *stageBeginFailure
+		if errors.As(err, &failure) {
+			result.GuardCleanupError = failure.cleanup
+			return result, failure.cause
+		}
 		return result, err
 	}
 	defer func() { result.GuardCleanupError = b.ReleaseStage(context.Background(), stage) }()
