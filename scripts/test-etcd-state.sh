@@ -30,6 +30,7 @@ done
 TEST_ETCD_ENDPOINTS=$(IFS=,; printf '%s' "${endpoints[*]}")
 TEST_ETCD_CONTAINERS=$(IFS=,; printf '%s' "${containers[*]}")
 TEST_ETCD_FOREIGN_ENDPOINT="http://$("${compose[@]}" port foreign 2379)"
-export TEST_ETCD_ENDPOINTS TEST_ETCD_CONTAINERS TEST_ETCD_FOREIGN_ENDPOINT
+TEST_ETCD_FIXTURE_PROJECT="$fixture_project"
+export TEST_ETCD_ENDPOINTS TEST_ETCD_CONTAINERS TEST_ETCD_FOREIGN_ENDPOINT TEST_ETCD_FIXTURE_PROJECT
 cd "$repo_root"
 go test -race -count=1 "$@" ./internal/storage/state/etcd

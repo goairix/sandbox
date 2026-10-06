@@ -1,6 +1,6 @@
 # etcd 原生状态基础实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 在新功能分支交付独立可测试的etcd基础包：稳定命名空间、failclosed身份校验、专用Lease guard、持久stage attempt回执与真实三成员协议测试。
 
@@ -98,21 +98,23 @@ Task 2及resolver审查与验收：[事务验收](../reports/2026-10-06-etcd-sta
 
 ## Task 3：事务结果仲裁与真实迟到请求
 
-- [ ] 写同attempt commit/abort竞争测试，以及absent只返回unknown/pending、CAS明确失败返回conflict的测试。
+- [x] 写同attempt commit/abort竞争测试，以及absent只返回unknown/pending、CAS明确失败返回conflict的测试。
 - [x] 实现ResolveStage：base guard加receipt不存在时写持久aborted marker；否则同一Txn读取已有receipt/restore/identity。resolver不依赖旧guard继续存活，旧commit因marker或guard缺失永久失败。
 - [x] 已aborted的logical stage合法重试用新attempt；原receipt不覆盖。metadata receipt不同于target执行receipt，本批不提供“撤回外部效果”接口。
 - [x] transport timeout、NOSPACE或resolver写失败保留ErrOutcomeUnknown，不能猜测未提交；回执格式/digest错误failclosed。
-- [ ] 在真实client中用可控KV wrapper在服务器收到之前暂扣完整Txn：先Resolve写abort，再放行原Txn，确认业务key没写入。另用wrapper在真实commit后丢响应，确认Resolve读committed而不重做业务写。
-- [ ] guard创建丢响应测试确认不返回可提交能力；原guard受Lease约束。Lease自然到期后持久receipt仍在，旧Stage不复活；leader单节点暂停并触发新选举后，剩余两成员仍可仲裁。
-- [ ] spec review通过后做质量review，运行race并提交。
+- [x] 在真实client中用可控KV wrapper在服务器收到之前暂扣完整Txn：先Resolve写abort，再放行原Txn，确认业务key没写入。另用wrapper在真实commit后丢响应，确认Resolve读committed而不重做业务写。
+- [x] guard创建丢响应测试确认不返回可提交能力；原guard受Lease约束。Lease自然到期后持久receipt仍在，旧Stage不复活；leader单节点暂停并触发新选举后，剩余两成员仍可仲裁。
+- [x] spec review通过后做质量review，运行race并提交。
 
 ## Task 4：可重复三成员fixture与第一批验收
 
-- [ ] compose定义三个独立成员，peer静态名称、临时独立volume、localhost动态client端口；不读取项目.env或现有etcd配置。
-- [ ] 脚本使用独立project，up后轮询endpoint健康，trap down --volumes清理，仅清理该project。image用server3.6.15固定digest；不宣称同主机三成员抵抗主机故障。
-- [ ] 设置TEST_ETCD_ENDPOINTS运行`go test -race ./internal/storage/state/etcd -count=1`，集成测试显式报告连接的member/version/cluster ID并确认三个member，不把跳过当作集成通过。
-- [ ] 运行`go test ./...`、新包race、`go vet ./internal/storage/state/etcd`、`git diff --check`；检查未提交Sentinel文档未被暂存。
-- [ ] 最终独立review完整首批diff，修复阻断项并复测；保存实际测试结果与剩余阶段清单，提交本批基础实现。
+- [x] compose定义三个独立成员，peer静态名称、临时独立volume、localhost动态client端口；不读取项目.env或现有etcd配置。
+- [x] 脚本使用独立project，up后轮询endpoint健康，trap down --volumes清理，仅清理该project。image用server3.6.15固定digest；不宣称同主机三成员抵抗主机故障。
+- [x] 设置TEST_ETCD_ENDPOINTS运行`go test -race ./internal/storage/state/etcd -count=1`，集成测试显式报告连接的member/version/cluster ID并确认三个member，不把跳过当作集成通过。
+- [x] 运行`go test ./...`、新包race、`go vet ./internal/storage/state/etcd`、`git diff --check`；检查未提交Sentinel文档未被暂存。
+- [x] 最终独立review完整首批diff，修复阻断项并复测；保存实际测试结果与剩余阶段清单，分批提交客户端、事务协议、故障测试。
+
+第一批最终验收：[验证记录](../reports/2026-10-06-etcd-foundation-verification.md)。客户端`9bb3c1a`、事务协议`efffc2a`，故障测试独立提交。
 
 ## 后续阶段衔接
 
