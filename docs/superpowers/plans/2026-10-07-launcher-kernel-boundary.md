@@ -57,7 +57,7 @@ Task2 gate：2c5389c/118dbfc/7ba4d27；独立原BASE42b5b9d..7ba4d27审查 C0/I1
 
 ## Final controller gate
 
-- [ ] controller fullhostpkg/race、actualcanonicalLinux、新repo test/vet/build/scopeddiff及一次fullNEWdelta+namedaffectedintegration review；ONEgroupedfinalfix/scoped复核如必要，永久保存全部裁定/代价/证据再清自己workspace。继续完整认证target/monitor后代排空与整体phases1–5，不能停在kernel前置层。
+- [x] controller fullhostpkg/race、actualcanonicalLinux、新repo test/vet/build/scopeddiff及一次fullNEWdelta+namedaffectedintegration review；ONEgroupedfinalfix/scoped复核如必要，永久保存全部裁定/代价/证据再清自己workspace。继续完整认证target/monitor后代排空与整体phases1–5，不能停在kernel前置层。
 
 ## 自审
 
@@ -68,3 +68,5 @@ Task2 gate：2c5389c/118dbfc/7ba4d27；独立原BASE42b5b9d..7ba4d27审查 C0/I1
 | Task2 | 真实非零用户exec与worker清理→直接proc/syscall/FD/Fatal反例；不新增未授权生产raw-start入口。 |
 
 两个独立task分别允许reject实际kernel初始化或其user隔离验收。瞬时SETPCAP与NNP前置、错误无法回滚、FUSE后续拓扑、platform/native/race/resource成本已明确，无未定义Task2接口（必须Task1报告实际testdriver）、无用户审批/外部部署动作。
+
+Controller final gate：原BASE7c79d6a..aeee91a完整2229line/96410B独立newdelta与命名currentintegration审查PASS/C0I0M0；未重读旧1.9MB基线或重复未变化suite。完整report/15ordered裁定+代价/64继承与28逐项边界、248文件原始证据archive已在a934a40提交并逐文件SHA核对。整个etcd迁移仍未完成；继续monitor confinement/drain与认证target接线。
