@@ -41,14 +41,6 @@ func (f *journalFiles) walkPage(ctx context.Context, dir *os.File, visit func(st
 	}
 }
 
-func (j *Journal) recordBinding(r ExecJournalRecord) error {
-	c := r.Context
-	i := j.gate.Identity
-	if c.Namespace != i.Namespace || c.AuthorityID != i.AuthorityID || c.Target != i.Target || c.RestoreEpoch != i.RestoreEpoch || c.SandboxID != i.SandboxID || c.WorkspaceHash != i.WorkspaceHash || c.Generation != i.Generation || c.Runtime != i.Runtime || c.DataGateEpoch != j.gate.DataGateEpoch {
-		return ErrIdentityMismatch
-	}
-	return nil
-}
 func journalBucket(name string) bool {
 	return len(name) == 2 && strings.ContainsRune("0123456789abcdef", rune(name[0])) && strings.ContainsRune("0123456789abcdef", rune(name[1]))
 }
