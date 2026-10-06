@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -143,6 +146,198 @@ func TestBeginOperationCannotDeliverCancelledOrRevoked(t *testing.T) {
 			}
 			require.Equal(t, int64(1), lease.revokes.Load())
 			require.NoError(t, result.GuardCleanupError)
+		})
+	}
+}
+
+// A transport response's nested headers must not be able to contradict the
+// top-level cluster/revision while still yielding a usable capability.
+func TestBeginOperationMalformedReplies(t *testing.T) {
+	for _, phase := range []string{"guard", "admit", "live", "failed admit"} {
+		for _, defect := range []string{"nested cluster", "nested revision", "nil response", "count", "type", "top revision"} {
+			t.Run(phase+" "+defect, func(t *testing.T) {
+				b, raw, in, keys := operationControlFixture(t, "plain")
+				if phase == "failed admit" {
+					b.client.Lease = &creationFaultLease{Lease: b.client.Lease, grant: func(r *clientv3.LeaseGrantResponse, e error) (*clientv3.LeaseGrantResponse, error) {
+						require.NoError(t, e)
+						operationChangePoint(t, raw, keys[1], "phase", PhaseDestroying)
+						return r, e
+					}}
+				}
+				b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+					if phase == "live" {
+						return len(ops) == 5 && ops[0].IsGet() && string(ops[0].KeyBytes()) == b.identityKey
+					}
+					return len(ops) > 0 && ops[0].IsPut() && ((phase == "guard" && len(ops) == 1) || (phase != "guard" && len(ops) > 1))
+				}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+					require.NoError(t, e)
+					switch defect {
+					case "nested cluster", "nested revision":
+						header := *r.Header
+						if defect == "nested cluster" {
+							header.ClusterId++
+						} else {
+							header.Revision++
+						}
+						if put := r.Responses[0].GetResponsePut(); put != nil {
+							put.Header = &header
+						} else {
+							r.Responses[0].GetResponseRange().Header = &header
+						}
+					case "nil response":
+						r.Responses[0] = nil
+					case "count":
+						r.Responses = append(r.Responses, r.Responses[0])
+					case "type":
+						r.Responses[0] = &pb.ResponseOp{}
+					case "top revision":
+						r.Header.Revision = 0
+					}
+					return r, e
+				}}
+				result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "malformed", Kind: OperationData})
+				require.Error(t, err)
+				require.Nil(t, result.Capability)
+				if phase == "live" {
+					require.Equal(t, OperationCommitted, result.Outcome)
+				}
+				if phase == "failed admit" {
+					require.NotErrorIs(t, err, ErrConflict, "malformed failure evidence is not a validated CAS rejection")
+				}
+			})
+		}
+	}
+}
+
+func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
+	b, raw, in, _ := operationControlFixture(t, "plain")
+	var ref OperationReference
+	b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+		if len(ops) != 2 || !ops[0].IsPut() {
+			return false
+		}
+		var record OperationRecord
+		require.NoError(t, json.Unmarshal(ops[0].ValueBytes(), &record))
+		ref = record.Reference
+		return true
+	}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+		require.NoError(t, e)
+		require.True(t, r.Succeeded)
+		token, guard, receipt, _, e := b.namespace.operationKeys(ref)
+		require.NoError(t, e)
+		evidence, e := raw.Txn(context.Background()).Then(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(receipt), clientv3.OpGet(guard), clientv3.OpGet(token)).Commit()
+		require.NoError(t, e)
+		evidence.Succeeded = false
+		kv := evidence.Responses[2].GetResponseRange().Kvs[0]
+		kv.CreateRevision--
+		kv.ModRevision--
+		return evidence, nil
+	}}
+	result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "failure-envelope", Kind: OperationData})
+	require.ErrorIs(t, err, ErrCorruptReceipt)
+	require.Nil(t, result.Capability)
+}
+
+func TestBeginOperationSendDeadline(t *testing.T) {
+	for _, phase := range []string{"grant", "guard", "admit"} {
+		t.Run(phase, func(t *testing.T) {
+			b, _, in, _ := operationControlFixture(t, "plain")
+			b.client.Lease = &creationFaultLease{Lease: b.client.Lease, grant: func(r *clientv3.LeaseGrantResponse, e error) (*clientv3.LeaseGrantResponse, error) {
+				require.NoError(t, e)
+				// A shorter positive server response TTL makes the deadline fault cheap;
+				// the real native Lease was still granted with the required 30-second RPC.
+				r.TTL = 1
+				if phase == "grant" {
+					time.Sleep(1100 * time.Millisecond)
+				}
+				return r, e
+			}}
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+				return len(ops) > 0 && ops[0].IsPut() && (phase == "guard" && len(ops) == 1 || phase == "admit" && len(ops) == 2)
+			}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+				require.NoError(t, e)
+				time.Sleep(1100 * time.Millisecond)
+				return r, e
+			}}
+			result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "late-reply", Kind: OperationData})
+			require.ErrorIs(t, err, ErrGuardExpired)
+			require.Nil(t, result.Capability)
+			if phase == "admit" {
+				require.Equal(t, OperationCommitted, result.Outcome)
+			}
+		})
+	}
+}
+
+func TestBeginOperationDelayedDispatchRemainsUnknown(t *testing.T) {
+	for _, phase := range []string{"guard", "admit"} {
+		t.Run(phase, func(t *testing.T) {
+			b, raw, in, _ := operationControlFixture(t, "plain")
+			reached, release := make(chan OperationReference, 1), make(chan struct{})
+			var once sync.Once
+			unlock := func() { once.Do(func() { close(release) }) }
+			defer unlock()
+			var ref OperationReference
+			lease := &creationFaultLease{Lease: b.client.Lease, revoke: func(context.Context, clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+				return nil, errors.New("retain original Lease for delayed dispatch evidence")
+			}}
+			b.client.Lease = lease
+			defer func() { b.client.Lease = lease.Lease }()
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+				match := len(ops) > 0 && ops[0].IsPut() && (phase == "guard" && len(ops) == 1 || phase == "admit" && len(ops) == 2)
+				if match {
+					var record OperationRecord
+					require.NoError(t, json.Unmarshal(ops[0].ValueBytes(), &record))
+					ref = record.Reference
+				}
+				return match
+			}, before: func() { reached <- ref; <-release }, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+				require.NoError(t, e)
+				require.True(t, r.Succeeded)
+				return nil, context.DeadlineExceeded
+			}}
+			type answer struct {
+				result BeginOperationResult
+				err    error
+			}
+			done := make(chan answer, 1)
+			go func() {
+				r, e := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "delayed", Kind: OperationData})
+				done <- answer{r, e}
+			}()
+			select {
+			case ref = <-reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("dispatch not intercepted")
+			}
+			token, guard, receipt, _, err := b.namespace.operationKeys(ref)
+			require.NoError(t, err)
+			for _, key := range []string{token, receipt} {
+				got, e := raw.Get(context.Background(), key)
+				require.NoError(t, e)
+				require.Empty(t, got.Kvs)
+			}
+			unlock()
+			select {
+			case a := <-done:
+				require.ErrorIs(t, a.err, ErrOutcomeUnknown)
+				require.Equal(t, OperationUnknown, a.result.Outcome)
+				require.Nil(t, a.result.Capability)
+				require.Equal(t, ref, a.result.Reference)
+				require.Error(t, a.result.GuardCleanupError)
+			case <-time.After(5 * time.Second):
+				t.Fatal("delayed dispatch did not finish")
+			}
+			got, err := raw.Get(context.Background(), guard)
+			require.NoError(t, err)
+			require.Len(t, got.Kvs, 1)
+			if phase == "admit" {
+				got, err := b.readDomain(context.Background(), token, receipt)
+				require.NoError(t, err)
+				require.NoError(t, validateOperationCompletion(got[0], got[1]))
+			}
+			_, err = raw.Revoke(context.Background(), clientv3.LeaseID(ref.LeaseID))
+			require.NoError(t, err)
 		})
 	}
 }

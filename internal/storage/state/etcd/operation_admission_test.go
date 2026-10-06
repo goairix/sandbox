@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 func TestBeginOperationAtomicAdmission(t *testing.T) {
 	ctx := context.Background()
 	b, raw, in, keys := operationControlFixture(t, "plain")
+
 	before, err := b.readDomain(ctx, keys...)
 	require.NoError(t, err)
 	lease := &creationFaultLease{Lease: b.client.Lease}
@@ -34,6 +36,7 @@ func TestBeginOperationAtomicAdmission(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, validateOperationCompletion(got[0], got[2]))
 		require.Less(t, got[1].CreateRevision, got[0].CreateRevision)
+		require.Equal(t, got[0].CreateRevision, result.Capability.admitRevision, "preserve original admission first revision for later renewal")
 		for _, kv := range got[:3] {
 			require.Equal(t, result.Reference.LeaseID, kv.Lease)
 		}
@@ -222,6 +225,69 @@ func TestBeginOperationOriginalFences(t *testing.T) {
 				require.NoError(t, e)
 				require.Empty(t, got.Kvs)
 			}
+		})
+	}
+}
+
+func TestBeginOperationConcurrentMutation(t *testing.T) {
+	b, raw, in, _ := operationControlFixture(t, "plain")
+	ctx := context.Background()
+	type answer struct {
+		result BeginOperationResult
+		err    error
+	}
+	results := make(chan answer, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			r, e := b.BeginOperation(ctx, BeginOperationInput{SandboxID: in.SandboxID, RequestID: "race-mutation", Kind: OperationMutation})
+			results <- answer{r, e}
+		}()
+	}
+	successes := 0
+	for i := 0; i < 8; i++ {
+		got := <-results
+		if got.err == nil {
+			successes++
+			require.Equal(t, OperationCommitted, got.result.Outcome)
+			require.NotNil(t, got.result.Capability)
+			id := clientv3.LeaseID(got.result.Reference.LeaseID)
+			t.Cleanup(func() { _, _ = raw.Revoke(ctx, id) })
+		} else {
+			require.ErrorIs(t, got.err, ErrConflict)
+			require.Nil(t, got.result.Capability)
+			require.Equal(t, OperationAborted, got.result.Outcome)
+			ttl, e := raw.TimeToLive(ctx, clientv3.LeaseID(got.result.Reference.LeaseID))
+			require.NoError(t, e)
+			require.Equal(t, int64(-1), ttl.TTL)
+		}
+	}
+	require.Equal(t, 1, successes, "one original mutation lock wins all competing atomic transactions")
+}
+
+func TestOperationAdmissionDefensiveBudget(t *testing.T) {
+	b, raw, in, _ := operationControlFixture(t, "plain")
+	result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "budget", Kind: OperationData})
+	require.NoError(t, err)
+	defer func() { _, _ = raw.Revoke(context.Background(), clientv3.LeaseID(result.Reference.LeaseID)) }()
+	original := result.Capability
+	for _, fault := range []string{"operations", "bytes", "key", "record"} {
+		t.Run(fault, func(t *testing.T) {
+			c := &OperationCapability{record: original.record, fences: append([]operationAdmissionFence(nil), original.fences...), tokenKey: original.tokenKey, guardKey: original.guardKey, receiptKey: original.receiptKey, mutationKey: original.mutationKey, guardRevision: math.MaxInt64}
+			c.record.Reference.LeaseID = math.MaxInt64
+			descriptor := []byte("valid small descriptor")
+			switch fault {
+			case "operations":
+				for i := 0; i < 64; i++ {
+					c.fences = append(c.fences, c.fences[0])
+				}
+			case "bytes":
+				descriptor = make([]byte, 256*1024)
+			case "key":
+				c.guardKey += strings.Repeat("x", 1024)
+			case "record":
+				c.fences[0].Value = make([]byte, 64*1024+1)
+			}
+			require.ErrorIs(t, b.preflightOperation(c, descriptor), ErrInvalidMutation)
 		})
 	}
 }

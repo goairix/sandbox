@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -27,6 +28,7 @@ type OperationCapability struct {
 	tokenKey, guardKey, receiptKey, mutationKey string
 	value                                       string
 	guardRevision                               int64
+	admitRevision                               int64
 	mu                                          sync.Mutex
 	deadline                                    time.Time
 	lost                                        bool
@@ -220,6 +222,7 @@ func (b *Backend) BeginOperation(ctx context.Context, in BeginOperationInput) (r
 		return result, ErrOutcomeUnknown
 	}
 	result.Outcome = OperationCommitted
+	c.admitRevision = response.Header.Revision
 	if err = c.admissionLive(); err != nil {
 		return result, err
 	}
@@ -235,7 +238,7 @@ func (b *Backend) BeginOperation(ctx context.Context, in BeginOperationInput) (r
 	if err != nil {
 		return result, err
 	}
-	if err = c.validateLiveEvidence(evidence, response.Header.Revision); err != nil {
+	if err = c.validateLiveEvidence(evidence, c.admitRevision); err != nil {
 		return result, err
 	}
 	if err = c.admissionLive(); err != nil {
@@ -335,11 +338,18 @@ func operationPutResponses(response *clientv3.TxnResponse, count int) bool {
 		return false
 	}
 	for _, op := range response.Responses {
-		if op == nil || op.GetResponsePut() == nil || op.GetResponsePut().PrevKv != nil {
+		if op == nil || op.GetResponsePut() == nil || op.GetResponsePut().PrevKv != nil || !operationNestedHeader(op.GetResponsePut().Header, response.Header) {
 			return false
 		}
 	}
 	return true
+}
+
+// Native etcd may omit per-operation headers inside a Txn. If present, they
+// may omit cluster identity (zero), but any identity must match and the
+// revision must describe this transaction.
+func operationNestedHeader(nested, outer *pb.ResponseHeader) bool {
+	return nested == nil || (nested.ClusterId == 0 || nested.ClusterId == outer.ClusterId) && nested.Revision == outer.Revision
 }
 
 // All evidence uses the fixed identity/restore/receipt/guard/token order. Absence
@@ -358,7 +368,7 @@ func (b *Backend) operationEvidence(response *clientv3.TxnResponse, c *Operation
 			return nil, ErrCorruptRecord
 		}
 		point := response.Responses[i].GetResponseRange()
-		if point == nil || point.More || point.Count != int64(len(point.Kvs)) || len(point.Kvs) > 1 {
+		if point == nil || point.More || point.Count != int64(len(point.Kvs)) || len(point.Kvs) > 1 || !operationNestedHeader(point.Header, response.Header) {
 			return nil, ErrCorruptRecord
 		}
 		if len(point.Kvs) == 0 {
@@ -400,6 +410,14 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 		}
 		if record != c.record {
 			return ErrCorruptRecord
+		}
+	}
+	if values[2] != nil {
+		if values[0] == nil {
+			return ErrCorruptReceipt
+		}
+		if err = validateOperationCompletion(values[2], values[0]); err != nil {
+			return err
 		}
 	}
 	if result.Outcome == OperationUnknown {
