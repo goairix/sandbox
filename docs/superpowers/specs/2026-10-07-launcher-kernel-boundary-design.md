@@ -63,7 +63,7 @@ AllThreadsSyscall 用于setters，唯一GET例外是上述期望全线程一致0
 
 ## Linux fixture与当前边界
 
-Controller owns Docker生命周期；worker只编译CGO0 binary并请求freeze后的真实执行。reuse已经本地pinned `gcr.io/etcd-development/etcd:v3.6.15@sha256:5ed4e32061aa061f970d6500629213e8579ef17571dcf9789074966acb9afad1`，实际inspect Linux/arm64或amd64；不pull、不运行etcd。fresh `sandbox-launcher-kernel-test-<pid>-<time>`、exactproject/fixturelabels、networknone、独立默认PID namespace、UID0、read-only root/binary、test-ownedtmpvolume、dropALL只加四项、NNP、无privileged/hostPID/hostsocket/hostwritable配置mount。测试limit memory64MiB、pids128、CPU0.5、GOMAXPROCS=2，不改变生产用户quota。
+Controller owns Docker生命周期；worker只编译CGO0 binary并请求freeze后的真实执行。reuse已经本地pinned `gcr.io/etcd-development/etcd:v3.6.15@sha256:5ed4e32061aa061f970d6500629213e8579ef17571dcf9789074966acb9afad1`，实际inspect Linux/arm64或amd64；不pull、不运行etcd。fresh `sandbox-launcher-kernel-test-<pid>-<time>`；labels 为 `sandbox.test.project=<本次唯一prefix>`、`sandbox.test.fixture=launcher-kernel-boundary`，mode资源可同run prefix但名字唯一；仅exactname与两label验证后清理，inventory仅按唯一project筛选。networknone、独立默认PID namespace、UID0、read-only root/binary、test-ownedtmpvolume、dropALL只加四项、NNP、无privileged/hostPID/hostsocket/hostwritable配置mount。测试limit memory64MiB、pids128、CPU0.5、GOMAXPROCS=2，不改变生产用户quota。
 
 Native positive必须作为实际PID1执行，full新package0FAIL0SKIP；需要不同初始NNP/cap集的negative额外使用精确ownedfreshcontainer，不以普通子进程伪装PID1。NNP缺失/缺cap/多cap/线程不一致/角色不符均拒绝，修改失败不产生boundary的证明使用实际子进程与实际内核状态；不替换内核返回值为fake成功。stdout必须明确“kernel boundary verified”，不得伪称runtime ready/physical terminal。脚本捕获actual exited/Runningfalse/processExit与attach/script exit，trap只清exactowned资源、独立inventory观察空；不声称best-effort rm必定成功。
 
