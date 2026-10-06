@@ -83,6 +83,12 @@ func TestPrepareExecEffectUnknown(t *testing.T) {
 			} else {
 				require.Empty(t, original.Kvs)
 			}
+			if first.Outcome == OutcomeUnknown && fault != "commit reply lost" {
+				history, e := b.LoadExecEffect(context.Background(), first.Reference)
+				require.NoError(t, e)
+				require.Nil(t, history)
+				require.Equal(t, OutcomeUnknown, f.cap.execDraft.outcome, "absent history cannot decide an unknown attempt")
+			}
 			b.client.KV = originalKV
 			lease.grant = nil
 			if fault == "resolve reply lost" {
