@@ -59,7 +59,7 @@
 - [x] 写TestJournalExecPersistenceFaults：actualwrite/fsync/rename/dirfsync迟到cancel/error保留possiblecommit、poison拒绝再写、Lookupstrict可查；coldreopen仍closed/unknown且sameID不覆盖/延长；query/Close/Status并发与真实workerboundedFatal regression（若同步hooks0workers则明确不适用，无需虚假新增goroutine）。
 - [x] TestJournalCapacity/FixedPointCost：真实64KiB预算靠validrecords达到70/85/硬限，sameIDretry/query/close仍可用，newrecord拒绝且不删unknown；filecountlimit与boundedpaged统计。0/1000synthetichistory下aftercoldsetup reset实际pointIOcounter，准确read/write/fsync/rename/dirscancounts及recordbytes；no actuallargeN/QPS/p99claim。
 - [x] 编译behaviorRED→各slicefocusGREEN/race/pkgvet/gofmt/diff/selfreview即smallcommit；Root脚本shellsyntax检查+实际LinuxRoot全package run。report保留所有真实错误/skip与源冻结证据，独立spec+qualitygate。
-- [ ] controller最终host全package/race、LinuxRoot全package0SKIP、全仓test/vet/build/scoped diff及一次fullNEWdelta+affectedintegrationreview；ONEfinalfixwave/scoped复核若必要，全部残留/rulings/permanent证据先保存。完成中间journal后继续认证target/实际PID1执行/双drain/tasks/scheduler/collector/GC/nativewiring/完整Redis移除，不停在前置层。
+- [x] controller最终host全package/race、LinuxRoot全package0SKIP、全仓test/vet/build/scoped diff及一次fullNEWdelta+affectedintegrationreview；ONEfinalfixwave/scoped复核若必要，全部残留/rulings/permanent证据先保存。完成中间journal后继续认证target/实际PID1执行/双drain/tasks/scheduler/collector/GC/nativewiring/完整Redis移除，不停在前置层。
 
 ## 自审
 
