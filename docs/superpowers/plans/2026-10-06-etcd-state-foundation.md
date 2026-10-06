@@ -28,7 +28,7 @@
 
 ## Task 1：命名空间与原生客户端身份
 
-- [ ] 写拒绝空scope、cell、非规范绝对prefix、路径segment逃逸的表驱动测试，并运行观察RED。
+- [x] 写拒绝空scope、cell、非规范绝对prefix、路径segment逃逸的表驱动测试，并运行观察RED。
 
 ```go
 func TestNamespaceRejectsPathEscape(t *testing.T) {
@@ -44,22 +44,26 @@ func TestNamespaceRejectsPathEscape(t *testing.T) {
 }
 ```
 
-- [ ] 实现NewNamespace/Root/Key/Partition（固定256、SHA256首byte），Key不接受客户端原始完整路径。
-- [ ] 定义Identity，绑定SchemaVersion、AuthorityID、Cell、ClusterID、StorageID、RuntimeID、RestoreEpoch；Options显式Endpoints、Namespace、Identity、DialTimeout、RequestTimeout、TLS。
-- [ ] 写Open在空backend、任一身份字段错误、任一endpoint异集群时拒绝的真实测试。默认TLS；测试仅通过显式AllowInsecureLoopback使用localhost HTTP；不接受跨网络plain endpoint。
-- [ ] 实现New仅线性读取operator预置identity/restore_epoch并验证所有endpoint cluster ID；保存原identity value做Txn compare。不开初始化/reset入口。
+- [x] 实现NewNamespace/Root/Key/Partition（固定256、SHA256首byte），Key不接受客户端原始完整路径。
+- [x] 定义Identity，绑定SchemaVersion、AuthorityID、Cell、ClusterID、StorageID、RuntimeID、RestoreEpoch；Options显式Endpoints、Namespace、Identity、DialTimeout、RequestTimeout、TLS。
+- [x] 写Open在空backend、任一身份字段错误、任一endpoint异集群时拒绝的真实测试。默认TLS；测试仅通过显式AllowInsecureLoopback使用localhost HTTP；不接受跨网络plain endpoint。
+- [x] 实现New仅线性读取operator预置identity/restore_epoch并验证所有endpoint cluster ID；保存原identity value做Txn compare。不开初始化/reset入口。
 
 ```go
 // 每个危险Txn的共同前置条件，后续所有stage必须追加。
 func (b *Backend) baseComparisons() []clientv3.Cmp {
     return []clientv3.Cmp{
         clientv3.Compare(clientv3.Value(b.identityKey), "=", b.identityValue),
+        clientv3.Compare(clientv3.LeaseValue(b.identityKey), "=", 0),
         clientv3.Compare(clientv3.Value(b.restoreKey), "=", b.restoreEpoch),
+        clientv3.Compare(clientv3.LeaseValue(b.restoreKey), "=", 0),
     }
 }
 ```
 
-- [ ] 运行unit与真实fixture身份测试；验证空backend未被写入；spec review通过后做质量review并提交。
+- [x] 运行unit与真实fixture身份测试；验证空backend未被写入；spec review通过后做质量review并提交。
+
+Task 1审查及验证记录：[客户端验收](../reports/2026-10-06-etcd-client-verification.md)。root≤512 bytes、key≤1024、component及storage/runtime/restore≤128、原始identity JSON≤4096。TLS配置持有独立可变数据副本，共享signer和CA证书对象遵守不可变契约。
 
 ## Task 2：持久stage attempt与专用Lease guard
 
