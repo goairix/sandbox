@@ -16,7 +16,7 @@
 - 证据只能由预先配置的 authority roots 认证；Publish 参数不能提供自己的 root/verifier 或 caller bool。issuer private key 仅在未来可信签发方，runtime 仅获其独立委托私钥，用户进程不得访问；本批提供签名协议，不伪称可信 launcher 已实现。
 - namespace/authority/target/restore、workspace/intent/sandbox/generation、原 dispatch operation/input digest、snapshot/expiry、exact ID/UID/BootID 都要绑定。ready 回执还绑定当前 claim UUID/CreateRevision/LeaseID 与 data gate epoch；旧 claim/boot/gate/restore 证据拒绝。
 - 业务到期采用受控 UTC，Δ=1秒；clock未知、误差+取样耗时超过1秒、`now+Δ>=expires_at` 均拒绝。事务前重检，本批不承诺客户端检查与服务端 wall time 原子等价；真正执行还必须由 target 重新检查期限。
-- 证书最大4096 bytes、完整 ready proof最大8192 bytes、持久 proof record最大16384 bytes；其他记录4096。严格UTF8/字段/重复/null/trailing JSON与正数/UUID/hash/UTC，拒绝 malformed key/signature 长度导致panic。复制所有输入、root/key/wire/输出切片。
+- 证书最大4096 bytes、完整 ready proof最大8192 bytes、持久 proof record最大16384 bytes、binding certificate record最大8192 bytes；其他新记录4096。严格UTF8/字段/重复/null/trailing JSON与正数/UUID/hash/UTC，拒绝 malformed key/signature 长度导致panic。复制所有输入、root/key/wire/输出切片。
 - 所有域记录永久Lease0、namespace key<=1024、root<=512。原claim24cmp不变，Stage预留14与总64不放宽。仅固定point keys，不按N scan，不新增perN goroutine/Lease。unknown靠exact receipt仲裁，不以missing判断target失败。
 - Signed ready/gate/mount 断言成立依赖后续可信 producer 从实际durable target状态生成；不能把通过密码学测试表述为物理gate/mount已验证。FUSE mount须在实际发送前消费一次持久attempt，后续实现不得从本批Publish跳过这一准备步骤。
 
@@ -88,9 +88,9 @@ typed schema规范化再签/验，codec严格拒绝nested unknown/duplicate/null
 
 证书CertificateContext字段与expected精确匹配，certRuntime三字段有效opaque<=128；certificate不绑定当前claim，允许新claim查询旧runtime。NotBefore<NotAfter<=ExpiresAt且均UTC，VerifyCertificate要求`now-1s>=NotBefore`与`now+1s<NotAfter`及业务到期。ready还必须绑定expected.Runtime和CertificateDigest，当前claim/gate精确匹配；mount只能0或1，0必须无MountOperationID且mode=plain，1必须canonicalUUID且mode=fuse，必须等于expected消费的attempt/op。cert.NotBefore<=ObservedAt<ValidUntil<=cert.NotAfter且窗口<=5s。Verify要求ObservedAt不晚于`now+2s`、`now+2s-ObservedAt<=5s`、`now+1s<ValidUntil`和业务expiry检查；保守边界拒绝，不延长旧证明。Historical仍验证全部签名/schema/context与证书内部/ready窗口，忽略当前时间的新授权检查，只返回只读证据。
 
-- [ ] 编写真实签名assertion RED→GREEN：登记root及delegate有效，篡改/另root/越界context/旧claim/gate/错摘要/ref/expiry拒绝；证书和proof时间边界、expired历史只读可读而Verify拒绝。
-- [ ] 覆盖nested unknown/duplicate/null/missing、UTF8/trailing、wire上限、错误key/sign长度无panic、root/priv/certificate/wire/output mutation隔离，区别签名认证与物理断言来源。
-- [ ] 定向race/vet/gofmt/diff、自审后立即提交，再spec→quality独立审查。
+- [x] 编写真实签名assertion RED→GREEN：登记root及delegate有效，篡改/另root/越界context/旧claim/gate/错摘要/ref/expiry拒绝；证书和proof时间边界、expired历史只读可读而Verify拒绝。
+- [x] 覆盖nested unknown/duplicate/null/missing、UTF8/trailing、wire上限、错误key/sign长度无panic、root/priv/certificate/wire/output mutation隔离，区别签名认证与物理断言来源。
+- [x] 定向race/vet/gofmt/diff、自审后立即提交，再spec→quality独立审查。
 
 ## Task 2：先固定 exact runtime 与一次 mount intent
 
