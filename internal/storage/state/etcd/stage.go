@@ -54,14 +54,28 @@ func (s *Stage) Reference() StageReference { return s.reference }
 // BeginStage validates and copies the mutation before allocating a dedicated
 // Lease. Guard creation with an unknown result never returns a capability.
 func (b *Backend) BeginStage(ctx context.Context, partition uint8, requestID, stageID string, input Mutation, ttl time.Duration) (*Stage, error) {
-	if ctx == nil || !validSegment(requestID) || !validSegment(stageID) || len(requestID) > 128 || len(stageID) > 128 || ttl <= 0 || ttl > 24*time.Hour {
+	return b.beginStageWithBuilder(ctx, partition, requestID, stageID, ttl, func(StageAttemptLocator) (Mutation, error) { return input, nil })
+}
+
+// beginStageWithBuilder invokes build once, before any RPC, with a fresh
+// attempt. The resulting mutation is validated and copied before Lease grant.
+func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, requestID, stageID string, ttl time.Duration, build func(StageAttemptLocator) (Mutation, error)) (*Stage, error) {
+	if ctx == nil || build == nil || ttl <= 0 || ttl > 24*time.Hour {
 		return nil, fmt.Errorf("%w: invalid stage identity, context or lease TTL", ErrInvalidMutation)
+	}
+	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: partition, RequestID: requestID, StageID: stageID, AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
+	if err := locator.Validate(); err != nil {
+		return nil, err
+	}
+	input, err := build(locator)
+	if err != nil {
+		return nil, err
 	}
 	mutation, digest, err := prepareMutation(b.namespace, input)
 	if err != nil {
 		return nil, err
 	}
-	ref := StageReference{Namespace: b.namespace.Root(), Partition: partition, RequestID: requestID, StageID: stageID, AttemptID: uuid.NewString(), Digest: digest, RestoreEpoch: b.restoreEpoch}
+	ref := locator.reference(digest)
 	guardKey, receiptKey, err := b.stageKeys(ref)
 	if err != nil {
 		return nil, err
