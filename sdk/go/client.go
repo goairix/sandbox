@@ -121,10 +121,21 @@ func (c *Client) sandboxBase(id string) string {
 
 // CreateSandbox creates a sandbox, or reuses the existing usable sandbox when
 // WorkspacePath is set. Existing configuration and TTL are retained.
+// The required Reused field reports the server's outcome for this request.
 // POST /api/v1/sandboxes
 func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxResponse, error) {
-	var resp SandboxResponse
-	return resp, c.do(ctx, http.MethodPost, "/api/v1/sandboxes", req, &resp)
+	var resp struct {
+		SandboxResponse
+		Reused *bool `json:"reused"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/v1/sandboxes", req, &resp); err != nil {
+		return SandboxResponse{}, err
+	}
+	if resp.Reused == nil {
+		return SandboxResponse{}, fmt.Errorf("sandbox: create response missing required boolean field reused")
+	}
+	resp.SandboxResponse.Reused = *resp.Reused
+	return resp.SandboxResponse, nil
 }
 
 // GetSandbox retrieves sandbox details. GET /api/v1/sandboxes/:id

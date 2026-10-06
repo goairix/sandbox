@@ -106,13 +106,13 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	cfg.WorkspaceMountMode = sandbox.WorkspaceMountMode(req.WorkspaceMountMode)
 	cfg.WorkspaceSyncExclude = req.WorkspaceSyncExclude
 
-	sb, err := h.manager.GetOrCreate(spanCtx, cfg)
+	sb, reused, err := h.manager.GetOrCreate(spanCtx, cfg)
 	if err != nil {
 		internalError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, sandboxToResponse(sb))
+	c.JSON(http.StatusCreated, types.CreateSandboxResponse{SandboxResponse: sandboxToResponse(sb), Reused: reused})
 }
 
 func (h *Handler) GetSandbox(c *gin.Context) {

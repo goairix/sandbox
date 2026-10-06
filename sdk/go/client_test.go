@@ -58,6 +58,40 @@ func TestClientCreateSandbox(t *testing.T) {
 	}
 }
 
+func TestClientCreateSandboxExposesServerReuseOutcome(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "created", true: "reused"}[reused], func(t *testing.T) {
+			_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "same-id-with-no-client-cache", "reused": reused})
+			})
+			response, err := client.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{Mode: sandbox.ModePersistent, WorkspacePath: "team/a"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Reused != reused {
+				t.Fatalf("Reused = %v, want server value %v", response.Reused, reused)
+			}
+		})
+	}
+}
+
+func TestClientCreateSandboxRequiresReuseOutcome(t *testing.T) {
+	for _, body := range []string{`{"id":"sb","state":"ready"}`, `{"id":"sb","reused":null}`} {
+		t.Run(body, func(t *testing.T) {
+			_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			})
+			_, err := client.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{Mode: sandbox.ModePersistent})
+			if err == nil || !strings.Contains(err.Error(), "reused") {
+				t.Fatalf("missing reuse outcome must be rejected, got %v", err)
+			}
+		})
+	}
+}
+
 func TestClientUploadFileSizedSendsExactDeclaredSize(t *testing.T) {
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Sandbox-File-Size"); got != "5" {

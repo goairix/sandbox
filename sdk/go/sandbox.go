@@ -21,12 +21,16 @@ type SandboxOptions struct {
 type Sandbox struct {
 	client *Client
 	id     string
+	reused bool
 }
 
 // ID returns the sandbox identifier.
 func (s *Sandbox) ID() string { return s.id }
 
-// NewSandbox creates a new sandbox and returns a high-level Sandbox handle.
+// Reused reports whether NewSandbox reused an existing sandbox for that request.
+func (s *Sandbox) Reused() bool { return s.reused }
+
+// NewSandbox creates or reuses a sandbox and returns a high-level handle.
 // If opts.Mode is empty, ModeEphemeral is used.
 func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox, error) {
 	mode := opts.Mode
@@ -47,7 +51,7 @@ func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox,
 	if err != nil {
 		return nil, err
 	}
-	return &Sandbox{client: c, id: resp.ID}, nil
+	return &Sandbox{client: c, id: resp.ID, reused: resp.Reused}, nil
 }
 
 // Close destroys the sandbox. Suitable for use with defer.

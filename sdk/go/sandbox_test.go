@@ -42,6 +42,24 @@ func TestNewSandbox(t *testing.T) {
 	}
 }
 
+func TestNewSandboxExposesServerReuseOutcome(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "created", true: "reused"}[reused], func(t *testing.T) {
+			_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "same-id-with-no-client-cache", "reused": reused})
+			})
+			sb, err := client.NewSandbox(context.Background(), sandbox.SandboxOptions{WorkspacePath: "team/a"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sb.Reused() != reused {
+				t.Fatalf("NewSandbox must expose the server reuse outcome %v", reused)
+			}
+		})
+	}
+}
+
 func TestNewSandboxPassesWorkspaceMountMode(t *testing.T) {
 	var request sandbox.CreateSandboxRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

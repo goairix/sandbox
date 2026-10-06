@@ -54,6 +54,13 @@ type SandboxResponse struct {
 	WorkspaceMountMode string     `json:"workspace_mount_mode,omitempty"`
 }
 
+// CreateSandboxResponse reports the outcome of this create request. Reused is
+// always present, including when a new logical sandbox was created.
+type CreateSandboxResponse struct {
+	SandboxResponse
+	Reused bool `json:"reused"`
+}
+
 type ErrorResponse struct {
 	Code      string `json:"code,omitempty"`
 	Message   string `json:"message"`

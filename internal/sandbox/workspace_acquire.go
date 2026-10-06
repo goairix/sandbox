@@ -57,23 +57,25 @@ func (m *Manager) lockWorkspaceRequest(ctx context.Context, root string) (func()
 
 // GetOrCreate returns the workspace's existing usable sandbox or creates it
 // once. Creation settings apply only to a new sandbox. Existing configuration
-// and TTL are retained. Normal publication and lease contention are handled
-// within the request; an ownership conflict never authorizes sandbox deletion.
-func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
+// and TTL are retained. The boolean reports reuse for this request. Normal
+// publication and lease contention are handled within the request; an ownership
+// conflict never authorizes sandbox deletion.
+func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox, bool, error) {
 	if cfg.WorkspacePath == "" {
-		return m.Create(ctx, cfg)
+		sb, err := m.Create(ctx, cfg)
+		return sb, false, err
 	}
 	cfg = cloneSandboxConfig(cfg)
 	if _, err := storage.BuildWorkspacePrefix("", cfg.WorkspacePath); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if _, err := m.resolveWorkspaceMountMode(cfg); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	m.lifecycleMu.Lock()
 	if m.stopping {
 		m.lifecycleMu.Unlock()
-		return nil, ErrSandboxNotReady
+		return nil, false, ErrSandboxNotReady
 	}
 	m.createWG.Add(1)
 	m.lifecycleMu.Unlock()
@@ -86,13 +88,14 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 	defer cancelLockWait()
 	unlock, err := m.lockWorkspaceRequest(lockWaitCtx, cfg.WorkspacePath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: waiting for workspace request: %w", ErrWorkspaceLookupUnavailable, err)
+		return nil, false, fmt.Errorf("%w: waiting for workspace request: %w", ErrWorkspaceLookupUnavailable, err)
 	}
 	defer unlock()
 	var result *Sandbox
+	var reused bool
 	request := func(ctx context.Context) error {
 		var err error
-		result, err = m.getOrCreateWorkspace(ctx, cfg)
+		result, reused, err = m.getOrCreateWorkspace(ctx, cfg)
 		return err
 	}
 	coordinator := m.config.WorkspaceCoordinator
@@ -101,14 +104,14 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 	} else {
 		prefix, prefixErr := storage.BuildWorkspacePrefix(m.fsMeta.SubPath, cfg.WorkspacePath)
 		if prefixErr != nil {
-			return nil, prefixErr
+			return nil, false, prefixErr
 		}
 		keys, keyErr := workspaceStateKeys(WorkspaceLeaseRequest{Provider: string(m.fsMeta.Provider), StorageIdentity: m.fsMeta.StorageIdentity, Bucket: m.fsMeta.Bucket, Prefix: prefix})
 		if keyErr != nil {
-			return nil, lookupUnavailable(keyErr)
+			return nil, false, lookupUnavailable(keyErr)
 		}
 		if coordinator.configErr != nil || coordinator.store == nil {
-			return nil, ErrWorkspaceLookupUnavailable
+			return nil, false, ErrWorkspaceLookupUnavailable
 		}
 		for {
 			err = withPoolLock(requestCtx, coordinator.store, "sandbox:workspace:request:"+keys.workspaceHash, request)
@@ -128,9 +131,9 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 			fields = append(fields, logger.AddField("reason", conflict.Reason), logger.AddField("sandbox_id", conflict.SandboxID))
 		}
 		logger.Warn(ctx, "workspace sandbox request failed", fields...)
-		return nil, err
+		return nil, false, err
 	}
-	return result, nil
+	return result, reused, nil
 }
 
 func waitWorkspaceRequest(ctx context.Context) error {
@@ -144,37 +147,37 @@ func waitWorkspaceRequest(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
+func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (*Sandbox, bool, error) {
 	waitCtx, cancelWait := context.WithTimeout(ctx, workspaceRequestWait)
 	defer cancelWait()
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, lookupUnavailable(err)
+			return nil, false, lookupUnavailable(err)
 		}
 		sb, err := m.GetByWorkspace(ctx, cfg.WorkspacePath)
 		if err == nil {
 			if err = m.prepareWorkspaceReuse(ctx, &sb); err == nil {
-				return &sb, nil
+				return &sb, true, nil
 			}
 			if !errors.Is(err, ErrSandboxNotReady) && !errors.Is(err, ErrWorkspaceLeased) && !errors.Is(err, ErrWorkspaceLeaseLost) {
-				return nil, lookupUnavailable(err)
+				return nil, false, lookupUnavailable(err)
 			}
 		} else if errors.Is(err, ErrSandboxNotFound) {
 			created, createErr := m.Create(ctx, cfg)
 			if createErr == nil {
-				return created, nil
+				return created, false, nil
 			}
 			if !errors.Is(createErr, ErrWorkspaceLeased) && !errors.Is(createErr, ErrWorkspaceOwned) {
-				return nil, createErr
+				return nil, false, createErr
 			}
 			err = createErr
 		} else {
 			var conflict *WorkspaceLookupConflict
 			if !errors.As(err, &conflict) {
 				if errors.Is(err, ErrWorkspaceLookupAmbiguous) {
-					return nil, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
+					return nil, false, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
 				}
-				return nil, err
+				return nil, false, err
 			}
 			switch conflict.Reason {
 			case "sandbox_expired", "sandbox_phase_destroying", "sandbox_phase_cleanup_pending", "sandbox_state_destroying":
@@ -183,11 +186,11 @@ func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (
 				if cleanupErr := m.cleanupRequestedWorkspace(ctx, cfg.WorkspacePath, conflict.SandboxID); cleanupErr != nil {
 					if errors.Is(cleanupErr, state.ErrActiveSandboxConflict) || errors.Is(cleanupErr, ErrSandboxNotReady) {
 						if waitErr := waitWorkspaceRequest(waitCtx); waitErr != nil {
-							return nil, lookupUnavailable(errors.Join(cleanupErr, waitErr))
+							return nil, false, lookupUnavailable(errors.Join(cleanupErr, waitErr))
 						}
 						continue
 					}
-					return nil, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, cleanupErr)
+					return nil, false, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, cleanupErr)
 				}
 				continue
 			case "sandbox_phase_publishing", "sandbox_phase_workspace_exclusive", "sandbox_changed_during_lookup", "ownership_changed_during_lookup", "lease_without_owner", "lease_provisional", "sandbox_admission_closed", "workspace_transition_in_progress":
@@ -196,14 +199,14 @@ func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (
 				// A fresh owner precedes publication. An old owner without lifecycle
 				// evidence needs server recovery rather than a speculative replacement.
 				if !m.workspaceOwnerPublishing(ctx, cfg.WorkspacePath) {
-					return nil, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
+					return nil, false, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
 				}
 			default:
-				return nil, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
+				return nil, false, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
 			}
 		}
 		if waitErr := waitWorkspaceRequest(waitCtx); waitErr != nil {
-			return nil, lookupUnavailable(errors.Join(err, waitErr))
+			return nil, false, lookupUnavailable(errors.Join(err, waitErr))
 		}
 	}
 }

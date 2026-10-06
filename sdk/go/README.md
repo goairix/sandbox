@@ -189,6 +189,28 @@ result, err := client.Exec(ctx, existing.ID, sandbox.ExecRequest{
 
 `CreateSandbox` / `NewSandbox` 传入相同 `WorkspacePath` 时，服务端直接复用已有可用环境；调用方无需先查询，也无需捕获租约冲突后重试。已有配置和 TTL 保留，创建参数只用于首次创建。状态损坏无法自动恢复时返回明确的 `WORKSPACE_RECOVERY_REQUIRED`（503）。
 
+创建响应的必填布尔字段 `reused` 由服务端给出本次申请结果：`false` 表示新建逻辑实例，`true` 表示返回已有实例（包括租约恢复后复用）。SDK 通过 `CreateSandbox` 返回值的 `Reused` 字段及 `NewSandbox` 句柄的 `Reused()` 方法暴露该结果，调用方无需依赖本地缓存或比较 ID。
+
+```go
+resp, err := client.CreateSandbox(ctx, sandbox.CreateSandboxRequest{
+    Mode: sandbox.ModePersistent, WorkspacePath: "users/user-a",
+})
+if err != nil {
+    return err
+}
+fmt.Printf("id=%s reused=%t\n", resp.ID, resp.Reused)
+
+sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
+    Mode: sandbox.ModePersistent, WorkspacePath: "users/user-a",
+})
+if err != nil {
+    return err
+}
+fmt.Printf("id=%s reused=%t\n", sb.ID(), sb.Reused())
+```
+
+先部署包含 `reused` 的服务端更新，再升级 SDK。SDK 会拒绝创建响应中缺失或为 `null` 的 `reused`，避免将未知结果错误判定为新建。GET 响应中的 `Reused` 零值没有申请结果语义。
+
 `GetSandboxByWorkspace` 不创建沙箱、不更新配置、不续租/TTL、不迁移 session，也不销毁沙箱。创建遇到 `WORKSPACE_LEASED` / `WORKSPACE_OWNED` 时再次查回；租约冲突不能成为删除已有沙箱的理由。
 
 `SandboxError.Reason` 提供具体拒绝原因，`SandboxError.SandboxID` 提供已知候选 ID；错误文本也包含这些信息，便于现有调用方日志定位。TTL 租约缺失不会提前拒绝健康且归属一致的旧实例，实际使用仍经过正常生命周期恢复与准入检查。

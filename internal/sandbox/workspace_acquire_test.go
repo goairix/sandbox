@@ -21,12 +21,15 @@ import (
 func TestWorkspaceRequestReturnsExistingAcrossReplicas(t *testing.T) {
 	managers, _, rt := distributedSyncManagers(t)
 	cfg := SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a", Timeout: 120}
-	first, err := managers[0].GetOrCreate(context.Background(), cfg)
+	first, reused, err := managers[0].GetOrCreate(context.Background(), cfg)
 	require.NoError(t, err)
+	require.False(t, reused)
 	before := first.Timeout
 	cfg.Timeout = 300
-	second, err := managers[1].GetOrCreate(context.Background(), cfg)
+	require.Empty(t, managers[1].sandboxes, "the other replica has no local sandbox cache")
+	second, reused, err := managers[1].GetOrCreate(context.Background(), cfg)
 	require.NoError(t, err)
+	require.True(t, reused)
 	require.Equal(t, first.ID, second.ID)
 	require.Equal(t, before, second.Timeout)
 	require.True(t, first.CreatedAt.Equal(second.CreatedAt))
@@ -44,6 +47,7 @@ func TestWorkspaceRequestConcurrentAcrossReplicas(t *testing.T) {
 	var wg sync.WaitGroup
 	ids := make([]string, requests)
 	errs := make([]error, requests)
+	reused := make([]bool, requests)
 	start := make(chan struct{})
 	for i := range requests {
 		wg.Add(1)
@@ -52,8 +56,9 @@ func TestWorkspaceRequestConcurrentAcrossReplicas(t *testing.T) {
 			<-start
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			sb, err := managers[i%len(managers)].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+			sb, didReuse, err := managers[i%len(managers)].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 			errs[i] = err
+			reused[i] = didReuse
 			if sb != nil {
 				ids[i] = sb.ID
 			}
@@ -61,10 +66,15 @@ func TestWorkspaceRequestConcurrentAcrossReplicas(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
+	created := 0
 	for i := range requests {
 		require.NoError(t, errs[i])
 		require.Equal(t, ids[0], ids[i])
+		if !reused[i] {
+			created++
+		}
 	}
+	require.Equal(t, 1, created)
 	require.NotEmpty(t, ids[0])
 	rt.mu.Lock()
 	require.Equal(t, 1, rt.created)
@@ -77,15 +87,18 @@ func TestWorkspaceRequestFUSEIsReusedAndExecutable(t *testing.T) {
 	m, _, _, _ := newFUSETestManager(t, rt)
 	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
 	cfg := SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"}
-	first, err := m.GetOrCreate(context.Background(), cfg)
+	first, reused, err := m.GetOrCreate(context.Background(), cfg)
 	require.NoError(t, err)
-	second, err := m.GetOrCreate(context.Background(), cfg)
+	require.False(t, reused)
+	second, reused, err := m.GetOrCreate(context.Background(), cfg)
 	require.NoError(t, err)
+	require.True(t, reused)
 	require.Equal(t, first.ID, second.ID)
 	_, err = m.Exec(context.Background(), second.ID, runtime.ExecRequest{Command: "true"})
 	require.NoError(t, err)
-	third, err := m.GetOrCreate(context.Background(), cfg)
+	third, reused, err := m.GetOrCreate(context.Background(), cfg)
 	require.NoError(t, err)
+	require.True(t, reused)
 	require.Equal(t, first.ID, third.ID)
 	rt.mockRuntime.mu.Lock()
 	require.Zero(t, rt.removed)
@@ -110,8 +123,9 @@ func TestWorkspaceRequestRestoresExpiredLeaseAfterControllerLoss(t *testing.T) {
 	keys, err := workspaceStateKeysFromOwner(first.Workspace.Owner)
 	require.NoError(t, err)
 	store.expireKey(keys.lease)
-	second, err := managers[1].GetOrCreate(context.Background(), first.Config)
+	second, reused, err := managers[1].GetOrCreate(context.Background(), first.Config)
 	require.NoError(t, err)
+	require.True(t, reused, "restoring the lease still reuses the existing sandbox")
 	require.Equal(t, first.ID, second.ID)
 	raw, err := store.Get(context.Background(), keys.lease)
 	require.NoError(t, err)
@@ -139,7 +153,10 @@ func TestWorkspaceRequestWaitsForPublishingAndExclusiveOperations(t *testing.T) 
 			done := make(chan struct{})
 			var second *Sandbox
 			var requestErr error
-			go func() { second, requestErr = managers[1].GetOrCreate(context.Background(), first.Config); close(done) }()
+			go func() {
+				second, _, requestErr = managers[1].GetOrCreate(context.Background(), first.Config)
+				close(done)
+			}()
 			select {
 			case <-done:
 				t.Fatal("request returned before publication completed")
@@ -171,7 +188,7 @@ func TestWorkspaceRequestCancellationDoesNotCreate(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = managers[0].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	_, _, err = managers[0].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	unlock()
 	require.Empty(t, managers[0].workspaceRequests)
@@ -183,7 +200,7 @@ func TestWorkspaceRequestCancellationDoesNotCreate(t *testing.T) {
 func TestWorkspaceRequestDependencyFailureDoesNotCreate(t *testing.T) {
 	managers, store, rt := distributedSyncManagers(t)
 	store.failMethods["Get"] = errors.New("redis unavailable")
-	_, err := managers[0].GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	_, _, err := managers[0].GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 	require.ErrorIs(t, err, ErrWorkspaceLookupUnavailable)
 	store.failMethods["Get"] = nil
 	rt.mu.Lock()
@@ -201,6 +218,7 @@ func TestWorkspaceRequestLocalBindIsReusedConcurrently(t *testing.T) {
 	const count = 8
 	ids := make([]string, count)
 	errs := make([]error, count)
+	reused := make([]bool, count)
 	var wg sync.WaitGroup
 	// The mock records the same writable bind mount that Docker inspection
 	// returns. Serialize its metadata update with the mock runtime lock.
@@ -217,18 +235,24 @@ func TestWorkspaceRequestLocalBindIsReusedConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sb, err := m.GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+			sb, didReuse, err := m.GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 			errs[i] = err
+			reused[i] = didReuse
 			if sb != nil {
 				ids[i] = sb.ID
 			}
 		}()
 	}
 	wg.Wait()
+	created := 0
 	for i := range count {
 		require.NoError(t, errs[i])
 		require.Equal(t, ids[0], ids[i])
+		if !reused[i] {
+			created++
+		}
 	}
+	require.Equal(t, 1, created)
 	rt.mu.Lock()
 	require.Equal(t, 1, rt.created)
 	require.Zero(t, rt.removed)
@@ -246,7 +270,7 @@ func TestWorkspaceRequestOldResidualOwnerRequiresServerRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Set(context.Background(), lease.ownerKey, raw, 0))
 	store.expireKey(lease.Key)
-	_, err = managers[1].GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	_, _, err = managers[1].GetOrCreate(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
 	require.ErrorIs(t, err, ErrWorkspaceRecoveryRequired)
 	require.Contains(t, err.Error(), "sandbox_record_missing")
 	after, err := store.Get(context.Background(), lease.ownerKey)
@@ -280,24 +304,33 @@ func TestWorkspaceRequestRealRedisConcurrency(t *testing.T) {
 	const count = 12
 	ids := make([]string, count)
 	errs := make([]error, count)
+	reused := make([]bool, count)
 	for i := range count {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			sb, err := managers[i%len(managers)].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: root})
+			sb, didReuse, err := managers[i%len(managers)].GetOrCreate(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: root})
 			errs[i] = err
+			reused[i] = didReuse
 			if sb != nil {
 				ids[i] = sb.ID
 			}
 		}()
 	}
 	wg.Wait()
+	created := 0
+	createdBy := 0
 	for i := range count {
 		require.NoError(t, errs[i])
 		require.Equal(t, ids[0], ids[i])
+		if !reused[i] {
+			created++
+			createdBy = i % len(managers)
+		}
 	}
+	require.Equal(t, 1, created)
 	require.NotEmpty(t, ids[0])
 	_, err = managers[1].Exec(context.Background(), ids[0], runtime.ExecRequest{Command: "true"})
 	require.NoError(t, err)
@@ -305,7 +338,13 @@ func TestWorkspaceRequestRealRedisConcurrency(t *testing.T) {
 	require.Equal(t, 1, rt.created)
 	require.Zero(t, rt.removed)
 	rt.mu.Unlock()
-	t.Cleanup(func() { require.NoError(t, managers[0].Destroy(context.Background(), ids[0])) })
+	// This fixture has no background cleanup coordinator, so destroy on the
+	// manager that owns the lifecycle rather than waiting for a remote manager.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, managers[createdBy].Destroy(ctx, ids[0]))
+	})
 }
 
 func TestWorkspaceRequestCleanupRejectsCorruptOwnership(t *testing.T) {
@@ -342,7 +381,7 @@ func TestWorkspaceRequestCleanupRejectsCorruptOwnership(t *testing.T) {
 				repo.mu.Lock()
 				repo.records[first.ID] = record
 				repo.mu.Unlock()
-				_, err = managers[1].GetOrCreate(context.Background(), first.Config)
+				_, _, err = managers[1].GetOrCreate(context.Background(), first.Config)
 				require.ErrorIs(t, err, ErrWorkspaceRecoveryRequired)
 				rt.mu.Lock()
 				require.Equal(t, 1, rt.created)
@@ -365,7 +404,7 @@ func TestWorkspaceRequestWaitsForLocalExclusiveGate(t *testing.T) {
 	done := make(chan struct{})
 	var second *Sandbox
 	var requestErr error
-	go func() { second, requestErr = m.GetOrCreate(context.Background(), first.Config); close(done) }()
+	go func() { second, _, requestErr = m.GetOrCreate(context.Background(), first.Config); close(done) }()
 	select {
 	case <-done:
 		t.Fatal("returned while workspace gate was exclusive")
@@ -415,8 +454,9 @@ func TestWorkspaceRequestExpiredLifecycleIsCleanedBeforeNewCreation(t *testing.T
 	repo.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	second, err := managers[1].GetOrCreate(ctx, first.Config)
+	second, reused, err := managers[1].GetOrCreate(ctx, first.Config)
 	require.NoError(t, err)
+	require.False(t, reused, "replacement after expired lifecycle cleanup is a new sandbox")
 	require.NotEqual(t, first.ID, second.ID)
 	_, err = managers[1].Exec(context.Background(), second.ID, runtime.ExecRequest{Command: "true"})
 	require.NoError(t, err)
@@ -444,7 +484,10 @@ func TestWorkspaceRequestWaitsForProvisionalLease(t *testing.T) {
 	done := make(chan struct{})
 	var second *Sandbox
 	var requestErr error
-	go func() { second, requestErr = managers[1].GetOrCreate(context.Background(), first.Config); close(done) }()
+	go func() {
+		second, _, requestErr = managers[1].GetOrCreate(context.Background(), first.Config)
+		close(done)
+	}()
 	select {
 	case <-done:
 		t.Fatal("returned while the lease was provisional")

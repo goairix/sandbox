@@ -69,6 +69,7 @@ type CreateSandboxRequest struct {
 // SandboxResponse is returned by sandbox lifecycle endpoints.
 type SandboxResponse struct {
 	ID                 string             `json:"id"`
+	Reused             bool               `json:"reused"` // outcome of CreateSandbox; not meaningful for GET responses
 	Mode               Mode               `json:"mode"`
 	State              string             `json:"state"`
 	RuntimeID          string             `json:"runtime_id"`

@@ -42,6 +42,12 @@ curl -X POST http://localhost:8080/api/v1/execute \
 
 直接调用 `POST /api/v1/sandboxes` 并传入 `workspace_path`。已有健康环境时返回相同 ID；没有实例时创建。正常的并发创建、发布及独占操作在服务端等待，租约恢复完成后再返回。调用方无需处理 `WORKSPACE_LEASED/OWNED` 后自行拼接重试流程。复用保留已有配置和 TTL；资源、网络、依赖、挂载模式等创建参数只用于首次创建，后续修改使用对应更新接口。
 
+创建响应始终包含布尔字段 `reused`：新建逻辑实例为 `false`（包括使用预热池），返回已有实例或恢复后复用为 `true`。同 workspace 并发首次申请时，实际创建的请求返回 `false`，其余请求返回 `true`。这个字段描述本次申请的结果，调用方直接读取服务端返回值；GET 查询响应不包含该字段。
+
+```json
+{"id":"sandbox-xxx","reused":true}
+```
+
 `GET /api/v1/sandboxes/by-workspace` 仍是只读查询。发生无法自动恢复的状态损坏时，申请返回 `WORKSPACE_RECOVERY_REQUIRED`（503）以及 `reason`、`sandbox_id`；服务端记录 workspace 和 trace 便于修复，不能将其当作正常争用或资源不存在。
 
 **按工作空间查回已有沙箱：**
