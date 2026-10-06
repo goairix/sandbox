@@ -172,9 +172,9 @@ journal=`intentKey/runtime-publication`、proof=`intentKey/publication-proof`，
 
 Loader与dispatch同类两point定位+三point同Txn重验的immutable journal/proof/receipt。三者永久同首次revision，attempt.namespace/p/request/stage/restore精确匹配、receipt committed与合法digest；错receipt error分类沿用key-attributed reader。丢失/半套/改写/corrupt分类与dispatch保持一致；全部消失可nil，不证明target状态。此loader仅恢复metadata，不授予执行权限；签名历史核验由配置authority的Task4方法补充，不让未配置trust的读构造Publish权限。index不作为历史entry必需项，因为后续安全cleanup可删除当前index。
 
-- [ ] model/codec/key与真实co-revision recovery RED→GREEN，覆盖context/lease/rewrite/receipt错误、别boot相同UID相同key、8192 bytes proof wire/16KiB完整proof record预算与copy。
-- [ ] 新Backend可从永久receipt恢复ref，expired历史metadata仍只读，不用missing确认外部失败，不scan/N常驻资源。
-- [ ] 定向race/vet/gofmt/diff、自审即独立提交，再spec→quality审查。
+- [x] model/codec/key与真实co-revision recovery RED→GREEN，覆盖context/lease/rewrite/receipt错误、别boot相同UID相同key、8192 bytes proof wire/16KiB完整proof record预算与copy。
+- [x] 新Backend可从永久receipt恢复ref，expired历史metadata仍只读，不用missing确认外部失败，不scan/N常驻资源。
+- [x] 定向race/vet/gofmt/diff、自审即独立提交，再spec→quality审查。
 
 ## Task 4：已绑定与已消费mount的组合Publish
 
