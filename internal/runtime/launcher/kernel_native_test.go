@@ -30,6 +30,18 @@ func TestMain(m *testing.M) {
 	switch mode {
 	case "", "positive":
 		os.Exit(m.Run())
+	case "monitor-user":
+		if err := nativeUserMonitor(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	case "user":
+		if err := nativeUser(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "monitor":
 		if err := nativeMonitor(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -135,7 +147,22 @@ func holdNativeThreads(n int, change func() error) (func() error, error) {
 	return stop, nil
 }
 
-func TestKernelNative(t *testing.T) {
+var nativeBootstrapOnce sync.Once
+var nativeBoundary *KernelBoundary
+
+func requireNativeBoundary(t *testing.T) *KernelBoundary {
+	t.Helper()
+	if os.Getenv(nativeModeEnv) != "positive" {
+		t.Skip("requires controller-owned CGO0 native PID1 fixture")
+	}
+	nativeBootstrapOnce.Do(func() { initializeNativeBoundary(t) })
+	if nativeBoundary == nil {
+		t.Fatal("native bootstrap did not establish a boundary")
+	}
+	return nativeBoundary
+}
+
+func initializeNativeBoundary(t *testing.T) {
 	if os.Getenv(nativeModeEnv) != "positive" {
 		t.Skip("requires controller-owned CGO0 native PID1 fixture")
 	}
@@ -183,6 +210,11 @@ func TestKernelNative(t *testing.T) {
 	if err := b.ValidateCurrent(); err != nil {
 		t.Fatal(err)
 	}
+	nativeBoundary = b
+}
+
+func TestKernelNative(t *testing.T) {
+	requireNativeBoundary(t)
 	for _, mode := range []string{"monitor", "reject-nonpid1"} {
 		out, err := runNativeChild(mode)
 		t.Logf("child %s: %s", mode, out)
