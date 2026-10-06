@@ -47,9 +47,9 @@ BootstrapPID1 只允许真实 getpid()==1；每个已观察线程 P/E/B 必须�
 
 PrepareMonitor 只允许真实PID>1、四种UID/GID全零，初始P/E/I=0xe0、A/B=0、NNP=1、securebits=0。exec可能重置dumpable，初始可0或1；subreaper不能假定fork继承。全线程清I/A，保留P/E=0xe0，设置dumpable=0与subreaper=1，再重新检查后返回。最终P/E=0xe0、I/A/B=0，其余与父相同。直接从未经Bootstrap的进程调用、重复调用或错误角色均拒绝，不自动修补缺少的权限。
 
-NNP与所有capability集合按线程检查；dumpable/subreaper按真实prctl读取。使用实际 `/proc/self/task`，页128、线程上限4096，每个status最多64KiB；不保留全量线程map。枚举过程中线程退出允许完整重新检查最多3次；仍不稳定返回不可用，不用缓存补齐。PID/UID/GID、五集合、NNP、securebits、cap_last_cap、thread计数解析必须有明确边界，重复/缺失/非法数字拒绝。实际线程创建/退出带来的count变化不当作固定值漂移；角色安全属性必须一致。
+NNP与所有capability集合按线程检查；dumpable/subreaper是process属性，按真实当前prctl读取。securebits是线程属性且proc不暴露；仅此getter允许CGO0 AllThreadsSyscall6(PR_GET_SECUREBITS)验证Go runtime全部线程返回值一致且为0，不使用共享输出指针。统一非零值拒绝，线程间返回不同会触发Go runtime fatal，此时进程结束且无boundary；不把当前线程单独GET声称为全线程证据。初始化与ValidateCurrent都执行这个只读检查。管理进程必须是无外部手工线程的可信CGO0 Go程序，foreign/native线程不属于此库的支持契约。使用实际 `/proc/self/task`，页128、线程上限4096，每个status最多64KiB；不保留全量线程map。枚举过程中线程退出允许完整重新检查最多3次；仍不稳定返回不可用，不用缓存补齐。PID/UID/GID、五集合、NNP、securebits、cap_last_cap、thread计数解析必须有明确边界，重复/缺失/非法数字拒绝。实际线程创建/退出带来的count变化不当作固定值漂移；角色安全属性必须一致。
 
-AllThreadsSyscall 只用于 setters，不用依赖相同返回值的全线程GET。capset pointer稳定与runtime.KeepAlive必须正确；现有Go runtime可在全线程syscall发生不一致错误时fatal，故bootstrap不承诺可回滚/总返回error。任一失败不得返回boundary、恢复原权限、开放gate、监听或启动用户代码；真正caller必须结束该管理进程并保持外部unknown/closed。对CGO或不支持syscall返回明确错误，不提供单线程降级。未支持平台BootstrapPID1/PrepareMonitor返回ErrUnsupported；ValidateCurrent对nil/zero先返回ErrKernelUnavailable，对非零handle返回ErrUnsupported。
+AllThreadsSyscall 用于setters，唯一GET例外是上述期望全线程一致0的securebits检查；其他getter不用此方式。capset pointer稳定与runtime.KeepAlive必须正确；现有Go runtime可在全线程syscall发生不一致错误时fatal，故bootstrap不承诺可回滚/总返回error。任一失败不得返回boundary、恢复原权限、开放gate、监听或启动用户代码；真正caller必须结束该管理进程并保持外部unknown/closed。对CGO或不支持syscall返回明确错误，不提供单线程降级。未支持平台BootstrapPID1/PrepareMonitor返回ErrUnsupported；ValidateCurrent对nil/zero先返回ErrKernelUnavailable，对非零handle返回ErrUnsupported。
 
 ## 实际用户exec验收
 
