@@ -1,6 +1,6 @@
 # etcd authenticated runtime publication 实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 只有来自登记 runtime authority 的、绑定原 dispatch 和当前 claim 的 target 证据，才可原子发布 exact runtime 为 active。
 
@@ -196,7 +196,11 @@ existing publication合法且原runtime/op/digest/snapshot/expiry/gate/claim及P
 
 absent时与已认证entry一致的永久dispatch三record、binding四record、mount两record每条比较ModRevision+Lease0（不可改写且ModRevision固定已锁住其值，不放宽原claim24）。组合mutation追加journal/proof两absence，写owner.runtime/mount、control.active/runtime/mount、request.completed、intent.published、journal、proof；已预留runtime index保持原值并被比较。owner/control/request/intent新值从claim原24 cmp保存的raw永久值或private原context解码，不能丢未知字段/overwrite别的owner；request/control已有副本，owner/intent可从原comparison按exactkey提取或固定point读取并比较原版本。预算24+6+8+4+2 cmp、6writes、14预留=64，恰好上限，不得加未预算比较；Stage固定30s，内部builder的locator只存不含digest。Begin后重检ctx/live并重新clock/Verify，CommitStage；只有committed返回Entry，其余exactReference/nilEntry并单独bounded stageCleanup。不释放owner/claim，发布改变原四domain记录使原claim服务器能力自然失效。
 
-- [ ] 真实有效签名发布RED→GREEN，六写+receipt同Txn，原fence/placement/snapshot/claim和已预留index不改，owner/control exactUIDBoot/requestintent/index一致。
-- [ ] 并发Publish一次；确认Bind阶段两个workspace争同UID不同Boot仅一个预留；Publish拒绝缺失/错误/同值重建index；合法重放不Grant、不延长TTL，caller自签/未知root/过期/旧claim/gate/错operation/input/snapshot/runtime证据拒绝且不Grant。
-- [ ] lost real reply→exact committed recovery；delayed完整Txn resolver先abort无半发布；原claim丢失/同值重建/control/restore与index篡改或重建失败；postBegin取消/clockunknown/expired拒绝；cleanup failure与known outcome独立；root/proof/output copy和wire/operation预算。
-- [ ] 定向race、fresh owned全fixture、全仓/vet/build/gofmt/diff，自审即独立提交；spec→quality与whole-branchfinal，保存验证报告。实际helper来源与mount调用、配置/wiring仍未交付，不宣称切换完成。
+- [x] 真实有效签名发布RED→GREEN，六写+receipt同Txn，原fence/placement/snapshot/claim和已预留index不改，owner/control exactUIDBoot/requestintent/index一致。
+- [x] 并发Publish一次；确认Bind阶段两个workspace争同UID不同Boot仅一个预留；Publish拒绝缺失/错误/同值重建index；合法重放不Grant、不延长TTL，caller自签/未知root/过期/旧claim/gate/错operation/input/snapshot/runtime证据拒绝且不Grant。
+- [x] lost real reply→exact committed recovery；delayed完整Txn resolver先abort无半发布；原claim丢失/同值重建/control/restore与index篡改或重建失败；postBegin取消/clockunknown/expired拒绝；cleanup failure与known outcome独立；root/proof/output copy和wire/operation预算。
+- [x] 定向race、fresh owned全fixture、全仓/vet/build/gofmt/diff，自审即独立提交；spec→quality与whole-branchfinal，保存验证报告。实际helper来源与mount调用、配置/wiring仍未交付，不宣称切换完成。
+
+## 本批退出记录
+
+任务1–4及独立review完成；whole-branch I1两个sibling清理诊断已独立修复并复审，遗留Minor仅通用copy测试加强。最终source `a4412e0` fresh owned189PASS0SKIP0FAIL-race33.982s，全仓test/vet/build/diff通过。容量和完整裁定见runtime-publication-verification，完整review及修复收敛见runtime-publication-final-review。整体phases1–5继续，本批未切生产或移除Redis。
