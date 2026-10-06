@@ -20,7 +20,8 @@
 | internal/storage/state/etcd/client.go、client_test.go | Options、Backend、TLS/timeout、全部endpoint身份校验、Close；Open不初始化 |
 | internal/storage/state/etcd/identity.go | 明确authority/schema/cluster/storage/runtime/restore契约、线性读取和精确值guard |
 | internal/storage/state/etcd/errors.go | 配置/身份/冲突/失租/unknown分类，可errors.Is检查 |
-| internal/storage/state/etcd/stage.go、stage_test.go | immutable专用Lease guard、复制并验证mutation、原子提交/仲裁持久receipt |
+| internal/storage/state/etcd/mutation.go、stage.go、receipt.go、stage_test.go | 有界不可变mutation、专用Lease guard、持久receipt与重启仲裁 |
+| internal/storage/state/etcd/stage_fault_test.go、fixture_test.go | 真实迟到/丢响应/expiry/race/NOSPACE/leader故障；全局故障限定owned fixture |
 | internal/storage/state/etcd/integration_test.go | 真实三成员测试helper、并发与Lease/leader/restore/lateTxn用例 |
 | testdata/etcd-state/compose.yaml、README.md | 独立三成员、临时卷、localhost随机端口、版本契约 |
 | scripts/test-etcd-state.sh | 创建独立fixture、等待健康、设置测试endpoints、运行race、无论成功失败清理 |
@@ -67,10 +68,10 @@ Task 1审查及验证记录：[客户端验收](../reports/2026-10-06-etcd-clien
 
 ## Task 2：持久stage attempt与专用Lease guard
 
-- [ ] 定义Mutation为有限Comparisons与单keyWrites，Write仅Put/Delete持久业务key；不接受任意嵌套Txn或范围Delete。Stage保存mutation副本，创建后不能换payload。
-- [ ] 写重复key、跨namespace、保留meta/attempt/receipt路径、超64操作/比较预算、单记录64KiB及总256KiB字节预算被拒绝的测试，运行RED。
-- [ ] 实现BeginStage：request/logicalStage合法segment、生成不可复用attempt UUID、计算mutation摘要，Grant独立Lease后Txn写guard。guard value包含ID/Lease/restore/digest，附原Lease；创建unknown不能返回可提交的Stage，也不能重建同ID。
-- [ ] CommitStage追加baseComparisons、guard精确Value/Lease/CreateRevision、receipt不存在以及业务Comparisons；写业务状态与committed receipt同Txn。receipt不附Lease；永久业务Write也不附Lease。
+- [x] 定义Mutation为有限Comparisons与单keyWrites（RangeEnd也在复制前限制1024 bytes），Write仅Put/Delete持久业务key；不接受任意嵌套Txn或范围Delete。Stage保存mutation副本，创建后不能换payload。
+- [x] 写重复key、跨namespace、保留meta/attempt/receipt路径、超64操作/比较预算、单记录64KiB及总256KiB字节预算被拒绝的测试，运行RED。
+- [x] 实现BeginStage：request/logicalStage合法segment、生成不可复用attempt UUID、计算mutation摘要，Grant前编码并检查receipt，Grant独立Lease后Txn写guard。guard value包含ID/Lease/restore/digest，附原Lease；创建unknown不能返回可提交的Stage，也不能重建同ID。
+- [x] CommitStage追加baseComparisons、guard精确Value/Lease/CreateRevision、receipt不存在以及业务Comparisons；写业务状态与committed receipt同Txn。receipt不附Lease；永久业务Write也不附Lease。
 
 ```go
 compares := append(b.baseComparisons(),
@@ -79,7 +80,7 @@ compares := append(b.baseComparisons(),
     clientv3.Compare(clientv3.CreateRevision(stage.guardKey), "=", stage.guardRevision),
     clientv3.Compare(clientv3.CreateRevision(stage.receiptKey), "=", 0),
 )
-compares = append(compares, stage.comparisons...)
+compares = append(compares, stage.mutation.Comparisons...)
 ops := append(stage.businessOperations(), clientv3.OpPut(stage.receiptKey, stage.committedValue))
 response, err := b.client.Txn(ctx).If(compares...).Then(ops...).Else(
     clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey),
@@ -89,18 +90,20 @@ response, err := b.client.Txn(ctx).If(compares...).Then(ops...).Else(
 // restore/identity改变、guard失效与业务冲突。没有receipt不等于aborted。
 ```
 
-- [ ] 写正常原子提交、并发CAS同owner只有一个赢家、业务状态与receipt永久性、错误restore epoch、原Lease撤销后迟到commit拒绝等测试。
-- [ ] 实现Commit重试读取既有同digest receipt，重复不重写业务状态；Revoke仅回收guard，不删除持久receipt；bounded请求context。
-- [ ] spec review通过后做质量review，运行race并提交。
+- [x] 写正常原子提交、并发CAS同owner只有一个赢家、业务状态与receipt永久性、错误restore epoch、原Lease撤销后迟到commit拒绝等测试。
+- [x] 实现Commit重试读取既有同digest receipt，重复不重写业务状态；Revoke仅回收guard，不删除持久receipt；bounded请求context。
+- [x] spec review通过后做质量review，运行race并提交。
+
+Task 2及resolver审查与验收：[事务验收](../reports/2026-10-06-etcd-stage-verification.md)。
 
 ## Task 3：事务结果仲裁与真实迟到请求
 
 - [ ] 写同attempt commit/abort竞争测试，以及absent只返回unknown/pending、CAS明确失败返回conflict的测试。
-- [ ] 实现ResolveStage：base guard加receipt不存在时写持久aborted marker；否则同一Txn读取已有receipt/restore/identity。resolver不依赖旧guard继续存活，旧commit因marker或guard缺失永久失败。
-- [ ] 已aborted的logical stage合法重试用新attempt；原receipt不覆盖。metadata receipt不同于target执行receipt，本批不提供“撤回外部效果”接口。
-- [ ] transport timeout、NOSPACE或resolver写失败保留ErrOutcomeUnknown，不能猜测未提交；回执格式/digest错误failclosed。
+- [x] 实现ResolveStage：base guard加receipt不存在时写持久aborted marker；否则同一Txn读取已有receipt/restore/identity。resolver不依赖旧guard继续存活，旧commit因marker或guard缺失永久失败。
+- [x] 已aborted的logical stage合法重试用新attempt；原receipt不覆盖。metadata receipt不同于target执行receipt，本批不提供“撤回外部效果”接口。
+- [x] transport timeout、NOSPACE或resolver写失败保留ErrOutcomeUnknown，不能猜测未提交；回执格式/digest错误failclosed。
 - [ ] 在真实client中用可控KV wrapper在服务器收到之前暂扣完整Txn：先Resolve写abort，再放行原Txn，确认业务key没写入。另用wrapper在真实commit后丢响应，确认Resolve读committed而不重做业务写。
-- [ ] guard创建丢响应测试确认不返回可提交能力；原guard受Lease约束。Lease自然到期后持久receipt仍在，旧Stage不复活；leader单节点停止后剩余两成员仍可仲裁。
+- [ ] guard创建丢响应测试确认不返回可提交能力；原guard受Lease约束。Lease自然到期后持久receipt仍在，旧Stage不复活；leader单节点暂停并触发新选举后，剩余两成员仍可仲裁。
 - [ ] spec review通过后做质量review，运行race并提交。
 
 ## Task 4：可重复三成员fixture与第一批验收
