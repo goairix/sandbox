@@ -188,10 +188,12 @@ func (r CreationRequestRecord) Validate() error {
 }
 func domainRecordLimit(record interface{ Validate() error }) int {
 	switch record.(type) {
-	case RuntimeBindingRecord, *RuntimeBindingRecord, RuntimeIndexRecord, *RuntimeIndexRecord, RuntimeMountIntentRecord, *RuntimeMountIntentRecord, RuntimeDispatchRecord, *RuntimeDispatchRecord, SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
+	case RuntimePublicationRecord, *RuntimePublicationRecord, RuntimeBindingRecord, *RuntimeBindingRecord, RuntimeIndexRecord, *RuntimeIndexRecord, RuntimeMountIntentRecord, *RuntimeMountIntentRecord, RuntimeDispatchRecord, *RuntimeDispatchRecord, SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
 		return 4096
 	case RuntimeBindingCertificateRecord, *RuntimeBindingCertificateRecord:
 		return 8192
+	case RuntimePublicationProofRecord, *RuntimePublicationProofRecord:
+		return 16384
 	case WorkspaceFenceRecord, *WorkspaceFenceRecord:
 		return 1024
 	case RuntimeDispatchInputRecord, *RuntimeDispatchInputRecord, SandboxSnapshotRecord, *SandboxSnapshotRecord:
@@ -202,6 +204,10 @@ func domainRecordLimit(record interface{ Validate() error }) int {
 }
 func nilDomainRecord(record interface{ Validate() error }) bool {
 	switch r := record.(type) {
+	case *RuntimePublicationRecord:
+		return r == nil
+	case *RuntimePublicationProofRecord:
+		return r == nil
 	case *RuntimeBindingRecord:
 		return r == nil
 	case *RuntimeBindingCertificateRecord:
@@ -240,6 +246,13 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 	// Own dispatch payload bytes before validation and encoding, preserving their
 	// representation without retaining the caller's RawMessage backing array.
 	switch r := record.(type) {
+	case RuntimePublicationProofRecord:
+		r.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = r
+	case *RuntimePublicationProofRecord:
+		owned := *r
+		owned.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = owned
 	case RuntimeBindingCertificateRecord:
 		r.Payload = append(json.RawMessage(nil), r.Payload...)
 		record = r
@@ -273,6 +286,10 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 }
 func decodeDomainRecord(kv *mvccpb.KeyValue, record interface{ Validate() error }) error {
 	switch destination := record.(type) {
+	case *RuntimePublicationRecord:
+		return decodePreparationDomain(kv, destination, 4096)
+	case *RuntimePublicationProofRecord:
+		return decodePreparationDomain(kv, destination, 16384)
 	case *RuntimeBindingRecord:
 		return decodePreparationDomain(kv, destination, 4096)
 	case *RuntimeBindingCertificateRecord:

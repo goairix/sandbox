@@ -3,7 +3,6 @@ package etcd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -126,12 +125,8 @@ func (b *Backend) loadRuntimePreparation(ctx context.Context, w WorkspaceIdentit
 		receiptIndexes[mrindex] = true
 		keys = append(keys, rk)
 	}
-	values, err := b.readDomain(ctx, keys...)
+	values, err := b.readRuntimeDomain(ctx, keys, receiptIndexes)
 	if err != nil {
-		var point *domainPointReadError
-		if errors.As(err, &point) && receiptIndexes[point.index] && point.index < len(keys) && point.key == keys[point.index] {
-			return nil, ErrCorruptReceipt
-		}
 		return nil, err
 	}
 	for i := range receiptIndexes {

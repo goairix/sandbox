@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"unicode/utf8"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -44,12 +45,8 @@ func (b *Backend) LoadRuntimeDispatch(ctx context.Context, w WorkspaceIdentity, 
 	if err != nil {
 		return nil, err
 	}
-	values, err := b.readDomain(ctx, dk, ik, rk)
+	values, err := b.readRuntimeDomain(ctx, []string{dk, ik, rk}, map[int]bool{2: true})
 	if err != nil {
-		var point *domainPointReadError
-		if errors.As(err, &point) && point.index == 2 && point.key == rk {
-			return nil, ErrCorruptReceipt
-		}
 		return nil, err
 	}
 	return b.decodeRuntimeDispatchEntry(values, w, intentID, dk, ik, rk, record.Attempt)
@@ -143,6 +140,9 @@ func decodeRuntimeDispatchReceipt(kv *mvccpb.KeyValue, l StageAttemptLocator) (S
 		return StageReference{}, ErrCorruptReceipt
 	}
 	var receipt stageReceipt
+	if strictPreparationMetadata(kv.Value, reflect.TypeOf(receipt)) != nil {
+		return StageReference{}, ErrCorruptReceipt
+	}
 	decoder := json.NewDecoder(bytes.NewReader(kv.Value))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&receipt) != nil ||
@@ -154,4 +154,16 @@ func decodeRuntimeDispatchReceipt(kv *mvccpb.KeyValue, l StageAttemptLocator) (S
 		return StageReference{}, ErrCorruptReceipt
 	}
 	return receipt.StageReference, nil
+}
+
+// readRuntimeDomain preserves exact point attribution for receipt envelopes.
+func (b *Backend) readRuntimeDomain(ctx context.Context, keys []string, receipts map[int]bool) ([]*mvccpb.KeyValue, error) {
+	values, err := b.readDomain(ctx, keys...)
+	if err != nil {
+		var point *domainPointReadError
+		if errors.As(err, &point) && point.index >= 0 && point.index < len(keys) && receipts[point.index] && point.key == keys[point.index] {
+			return nil, ErrCorruptReceipt
+		}
+	}
+	return values, err
 }
