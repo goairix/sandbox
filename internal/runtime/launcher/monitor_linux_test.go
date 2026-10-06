@@ -89,6 +89,11 @@ func TestMonitorSeccompCounts(t *testing.T) {
 const monitorMountFixture = "31 22 0:28 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n"
 
 func TestMonitorMounts(t *testing.T) {
+	var manyLines strings.Builder
+	for id := 1; id <= 4096; id++ {
+		fmt.Fprintf(&manyLines, "%d 99999 0:20 / / rw - overlay overlay rw\n", id)
+	}
+	manyLines.WriteString("4097 99999 0:28 / /sys/fs/cgroup ro - cgroup2 cgroup rw\n")
 	for _, text := range []string{monitorMountFixture, strings.Replace(monitorMountFixture, "cgroup2", "cgroup", 1), "22 1 0:20 / / rw,relatime shared:1 - overlay overlay rw\n" + monitorMountFixture} {
 		if err := validateCgroupMounts([]byte(text)); err != nil {
 			t.Fatalf("valid %q: %v", text, err)
@@ -110,7 +115,7 @@ func TestMonitorMounts(t *testing.T) {
 		"fake ro":           strings.Replace(monitorMountFixture, "ro,nosuid", "xro,nosuid", 1),
 		"truncated":         strings.TrimSuffix(monitorMountFixture, " rw\n") + "\n",
 		"long line":         strings.Repeat("x", (16<<10)+1) + "\n",
-		"too many lines":    strings.Repeat("22 1 0:20 / / rw - overlay overlay rw\n", 4097),
+		"too many lines":    manyLines.String(),
 		"too many bytes":    strings.Repeat("x", (1<<20)+1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -228,5 +233,25 @@ func TestMonitorPolicy(t *testing.T) {
 	}
 	if _, err := monitorPolicy("386"); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
+	}
+}
+
+func TestMonitorMountStrictFields(t *testing.T) {
+	for name, data := range map[string]string{
+		"raw NUL":                       strings.Replace(monitorMountFixture, "/sys/fs/cgroup", "/sys/fs/cg\x00roup", 1),
+		"bad escape":                    strings.Replace(monitorMountFixture, "/sys/fs/cgroup", "/sys/fs/cg\\777roup", 1),
+		"missing record newline":        strings.TrimSuffix(monitorMountFixture, "\n"),
+		"missing mount access mode":     "22 1 0:20 / / relatime - overlay overlay rw\n" + monitorMountFixture,
+		"conflicting mount access mode": "22 1 0:20 / / ro,rw - overlay overlay rw\n" + monitorMountFixture,
+		"trailing space":                strings.TrimSuffix(monitorMountFixture, "\n") + " \n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateCgroupMounts([]byte(data)); !errors.Is(err, ErrUnsafeKernel) {
+				t.Fatalf("malformed mountinfo accepted: %v", err)
+			}
+		})
+	}
+	if err := validateCgroupMounts([]byte(strings.Replace(monitorMountFixture, "/sys/fs/cgroup", "/escaped\\040space\\011tab\\012newline\\134slash", 1))); err != nil {
+		t.Fatalf("valid proc escapes: %v", err)
 	}
 }

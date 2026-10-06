@@ -148,8 +148,32 @@ func mountOptions(value string) (map[string]bool, error) {
 	}
 	return options, nil
 }
+
+// mountinfo escapes these four bytes in its mandatory path fields. Reject
+// truncated or unknown escapes instead of interpreting an ambiguous mountpoint.
+func validMountPath(field string) bool {
+	if !strings.HasPrefix(field, "/") {
+		return false
+	}
+	for i := 0; i < len(field); i++ {
+		if field[i] != '\\' {
+			continue
+		}
+		if i+3 >= len(field) {
+			return false
+		}
+		switch field[i+1 : i+4] {
+		case "040", "011", "012", "134":
+		default:
+			return false
+		}
+		i += 3
+	}
+	return true
+}
+
 func validateCgroupMounts(data []byte) error {
-	if len(data) == 0 || len(data) > maxMountBytes {
+	if len(data) == 0 || len(data) > maxMountBytes || data[len(data)-1] != '\n' {
 		return unsafeMount("byte bound")
 	}
 	scan := bufio.NewScanner(bytes.NewReader(data))
@@ -162,7 +186,17 @@ func validateCgroupMounts(data []byte) error {
 		if count > maxMountLines || len(line) > maxMountLineBytes {
 			return unsafeMount("line bound")
 		}
-		f := strings.Fields(line)
+		for i := 0; i < len(line); i++ {
+			if line[i] < 0x20 || line[i] == 0x7f {
+				return unsafeMount("raw control byte")
+			}
+		}
+		f := strings.Split(line, " ")
+		for _, field := range f {
+			if field == "" {
+				return unsafeMount("empty field")
+			}
+		}
 		if len(f) < 10 {
 			return unsafeMount("missing mandatory fields")
 		}
@@ -196,12 +230,15 @@ func validateCgroupMounts(data []byte) error {
 		if _, err := parseUnsigned(minor, 10, 32); err != nil {
 			return unsafeMount("invalid minor")
 		}
-		if !strings.HasPrefix(f[3], "/") || !strings.HasPrefix(f[4], "/") {
-			return unsafeMount("nonabsolute root/mountpoint")
+		if !validMountPath(f[3]) || !validMountPath(f[4]) {
+			return unsafeMount("invalid root/mountpoint")
 		}
 		opts, err := mountOptions(f[5])
 		if err != nil {
 			return err
+		}
+		if opts["ro"] == opts["rw"] {
+			return unsafeMount("missing/conflicting per-mount access mode")
 		}
 		if _, err := mountOptions(f[sep+3]); err != nil {
 			return err
