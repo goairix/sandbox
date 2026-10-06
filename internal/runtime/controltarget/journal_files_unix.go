@@ -325,3 +325,89 @@ func (j *Journal) persistClosedGateLocked(ctx context.Context) error {
 	j.gate = gate
 	return nil
 }
+
+// readCommandLocked is a fixed-depth, verified disk read, including when
+// poisoned. Its caller holds mu. Absence is nil,nil; it returns an owned value.
+func (j *Journal) readCommandLocked(ctx context.Context, id string) (*ExecJournalRecord, error) {
+	if err := j.checkLocked(ctx, false); err != nil {
+		return nil, err
+	}
+	if !journalUUID(id) {
+		return nil, ErrInvalidRecord
+	}
+	bucket, err := j.files.openChild(j.commands, id[:2], true)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer bucket.Close()
+	b, err := j.files.readFile(ctx, bucket, id+".json")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var r ExecJournalRecord
+	if err = decodeExecJournalRecord(b, &r); err != nil {
+		return nil, err
+	}
+	if r.Context.CommandID != id {
+		return nil, ErrInvalidRecord
+	}
+	if err = j.recordBinding(r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// persistNewCommandLocked never replaces an existing command. The evidence
+// consumer handles canonical same-record retries before invoking this helper.
+// Its caller holds mu. Any uncertainty after directory/file mutation poisons.
+func (j *Journal) persistNewCommandLocked(ctx context.Context, r ExecJournalRecord) error {
+	if err := j.checkLocked(ctx, true); err != nil {
+		return err
+	}
+	b, err := encodeExecJournalRecord(r)
+	if err != nil {
+		return err
+	}
+	if err = j.recordBinding(r); err != nil {
+		return err
+	}
+	existing, err := j.readCommandLocked(ctx, r.Context.CommandID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return ErrConflict
+	}
+	if !j.accountingKnown {
+		return ErrJournalUnavailable
+	}
+	if (j.logicalBytes+int64(len(b)))*100 >= j.maxBytes*85 || 1+j.records+j.temporaryFiles+1 >= maxJournalContentFiles {
+		return ErrCapacity
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	bucket, err := j.files.openChild(j.commands, r.Context.CommandID[:2], true)
+	if errors.Is(err, os.ErrNotExist) {
+		bucket, err = j.files.makeDir(ctx, j.commands, r.Context.CommandID[:2])
+		if err != nil {
+			return j.poison(err)
+		}
+	} else if err != nil {
+		return err
+	}
+	defer bucket.Close()
+	if err = j.files.persistFile(ctx, bucket, r.Context.CommandID+".json", "."+r.Context.CommandID+"."+nonce+".tmp", b); err != nil {
+		return j.poison(err)
+	}
+	j.records++
+	j.logicalBytes += int64(len(b))
+	return nil
+}

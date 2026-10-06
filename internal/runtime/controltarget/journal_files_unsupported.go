@@ -8,3 +8,10 @@ func openJournalPlatform(context.Context, JournalOptions, bool, journalIOHook) (
 	return nil, ErrInvalidConfiguration
 }
 func (j *Journal) persistClosedGateLocked(context.Context) error { return ErrInvalidConfiguration }
+
+func (j *Journal) readCommandLocked(context.Context, string) (*ExecJournalRecord, error) {
+	return nil, ErrInvalidConfiguration
+}
+func (j *Journal) persistNewCommandLocked(context.Context, ExecJournalRecord) error {
+	return ErrInvalidConfiguration
+}

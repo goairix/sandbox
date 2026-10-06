@@ -3,12 +3,14 @@
 package controltarget
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -184,13 +186,236 @@ func TestJournalPagedAccounting(t *testing.T) {
 		id := fmt.Sprintf("22000000-0000-4000-8000-%012x", n+1)
 		want += writeHistoryFixture(t, o, id, false)
 	}
-	j, err := OpenClosedJournal(context.Background(), o)
+	pages := 0
+	hook := func(op, name string, after bool) error {
+		if op == "read-page" && after {
+			pages++
+		}
+		return nil
+	}
+	j, err := newJournal(context.Background(), o, false, hook)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer j.Close()
+	if pages != 13 {
+		t.Fatalf("page128 expected 2 root + 2 commands + 9 bucket pages, got %d", pages)
+	}
 	s := j.Status()
 	if s.Records != 1000 || s.TemporaryFiles != 0 || s.LogicalBytes != want || !s.AccountingKnown {
 		t.Fatalf("1000 files status %+v want bytes %d", s, want)
+	}
+}
+
+// These are private point primitives for the next evidence consumer. Public
+// same-record retry and evidence verification are deliberately not added here.
+func TestJournalCommandPrimitives(t *testing.T) {
+	j, o := createJournalFixture(t)
+	r := journalRecordFixture()
+	j.mu.Lock()
+	err := j.persistNewCommandLocked(context.Background(), r)
+	j.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.mu.Lock()
+	got, err := j.readCommandLocked(context.Background(), r.Context.CommandID)
+	j.mu.Unlock()
+	if err != nil || got == nil || *got != r {
+		t.Fatalf("point read %+v %v", got, err)
+	}
+	b, err := os.ReadFile(filepath.Join(o.Directory, "commands", "22", r.Context.CommandID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := j.Status(); s.Records != 1 || s.LogicalBytes != sizedGate(t, o)+int64(len(b)) {
+		t.Fatalf("point accounting %+v", s)
+	}
+	changed := r
+	changed.TicketDigest = strings.Repeat("f", 64)
+	j.mu.Lock()
+	err = j.persistNewCommandLocked(context.Background(), changed)
+	j.mu.Unlock()
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("overwritten record: %v", err)
+	}
+	gotBytes, err := os.ReadFile(filepath.Join(o.Directory, "commands", "22", r.Context.CommandID+".json"))
+	if err != nil || !bytes.Equal(b, gotBytes) {
+		t.Fatal("immutable bytes changed", err)
+	}
+	j.mu.Lock()
+	_, err = j.readCommandLocked(context.Background(), "../gate.json")
+	j.mu.Unlock()
+	if !errors.Is(err, ErrInvalidRecord) {
+		t.Fatal(err)
+	}
+	r.Context.Runtime.BootID = "wrong"
+	j.mu.Lock()
+	err = j.persistNewCommandLocked(context.Background(), r)
+	j.mu.Unlock()
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatal(err)
+	}
+	j.mu.Lock()
+	missing, err := j.readCommandLocked(context.Background(), "33000000-0000-4000-8000-000000000001")
+	j.mu.Unlock()
+	if err != nil || missing != nil {
+		t.Fatalf("absent %+v %v", missing, err)
+	}
+}
+func sizedGate(t *testing.T, o JournalOptions) int64 {
+	t.Helper()
+	st, err := os.Stat(filepath.Join(o.Directory, "gate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Size()
+}
+
+func TestJournalCommandCapacity(t *testing.T) {
+	o := journalOptionsFixture(t)
+	o.MaxBytes = 65536
+	j, err := CreateClosedJournal(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var warned bool
+	var count int
+	for ; count < 100; count++ {
+		r := journalRecordFixture()
+		r.Context.CommandID = fmt.Sprintf("22000000-0000-4000-8000-%012x", count+1)
+		wire, _ := encodeExecJournalRecord(r)
+		before := j.Status()
+		j.mu.Lock()
+		err = j.persistNewCommandLocked(context.Background(), r)
+		j.mu.Unlock()
+		if (before.LogicalBytes+int64(len(wire)))*100 >= 65536*85 {
+			if !errors.Is(err, ErrCapacity) {
+				t.Fatalf("85%% admitted: %v", err)
+			}
+			if j.Status() != before {
+				t.Fatal("capacity denial changed status")
+			}
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := j.Status()
+		if s.Warning != (s.LogicalBytes*100 >= 65536*70) {
+			t.Fatal("70% warning")
+		}
+		warned = warned || s.Warning
+	}
+	if !warned || count == 100 {
+		t.Fatalf("warned %t records %d", warned, count)
+	}
+	if _, err = j.CloseGate(context.Background(), 2); err != nil {
+		t.Fatalf("soft limit blocked close: %v", err)
+	}
+}
+
+func TestJournalRecoveryHardBudget(t *testing.T) {
+	o := journalOptionsFixture(t)
+	o.MaxBytes = 65536
+	j, err := CreateClosedJournal(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := j.Status().Gate
+	base := j.Status().LogicalBytes
+	j.Close()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := int64(65536) - base
+	for n := 1; remaining > 0; n++ {
+		size := int64(8192)
+		if remaining < size {
+			size = remaining
+		}
+		if size < int64(len(b)) {
+			t.Fatal("fixture remainder too short")
+		}
+		padded := append(append([]byte(nil), b...), bytes.Repeat([]byte(" "), int(size)-len(b))...)
+		mustWrite(t, filepath.Join(o.Directory, fmt.Sprintf(".gate.00000000-0000-4000-8000-%012x.tmp", n)), padded)
+		remaining -= size
+	}
+	before := treeBytes(t, o.Directory)
+	if before != 65536 {
+		t.Fatalf("fixture bytes %d", before)
+	}
+	if j, err = OpenClosedJournal(context.Background(), o); !errors.Is(err, ErrCapacity) || j != nil {
+		if j != nil {
+			j.Close()
+		}
+		t.Fatalf("hard budget close %v", err)
+	}
+	if treeBytes(t, o.Directory) != before {
+		t.Fatal("failed close changed bytes")
+	}
+}
+
+func TestJournalCommandPersistenceFaults(t *testing.T) {
+	for _, op := range []string{"write", "file-sync", "rename", "dir-sync"} {
+		for _, after := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/after=%t", op, after), func(t *testing.T) {
+				j, o := createJournalFixture(t)
+				r := journalRecordFixture()
+				if err := os.Mkdir(filepath.Join(o.Directory, "commands", "22"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				injected := errors.New("command syscall failure")
+				j.files.hook = func(got, name string, done bool) error {
+					if got == op && done == after {
+						return injected
+					}
+					return nil
+				}
+				j.mu.Lock()
+				err := j.persistNewCommandLocked(context.Background(), r)
+				j.mu.Unlock()
+				if !errors.Is(err, injected) {
+					t.Fatal(err)
+				}
+				if s := j.Status(); !s.Poisoned || s.AccountingKnown || s.Records != 0 {
+					t.Fatalf("uncertain command %+v", s)
+				}
+				j.mu.Lock()
+				got, readErr := j.readCommandLocked(context.Background(), r.Context.CommandID)
+				j.mu.Unlock()
+				committed := (op == "rename" && after) || op == "dir-sync"
+				if readErr != nil || (got != nil) != committed {
+					t.Fatalf("poisoned history read %+v %v committed=%t", got, readErr, committed)
+				}
+				if got != nil && *got != r {
+					t.Fatal("committed bytes mismatch")
+				}
+				j.Close()
+				reopened, err := OpenClosedJournal(context.Background(), o)
+				incomplete := op == "write" && !after
+				if incomplete {
+					if err == nil {
+						reopened.Close()
+						t.Fatal("incomplete command temp accepted")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				s := reopened.Status()
+				if committed {
+					if s.Records != 1 || s.TemporaryFiles != 0 {
+						t.Fatalf("committed recovery %+v", s)
+					}
+				} else if s.Records != 0 || s.TemporaryFiles != 1 {
+					t.Fatalf("retained temp %+v", s)
+				}
+			})
+		}
 	}
 }

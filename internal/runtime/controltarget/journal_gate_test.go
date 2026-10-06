@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -315,4 +316,139 @@ func TestJournalPersistenceFaults(t *testing.T) {
 			t.Fatal("missing manifest rebuilt from complete temp")
 		}
 	})
+}
+
+// blockJournalSync registers release/cancel/join before a caller can Fatal.
+// Hooks and descriptors are restored/closed only after the worker has joined.
+func blockJournalSync(t *testing.T, j *Journal) (release func(), cancel context.CancelFunc, done <-chan struct{}, result <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	finished := make(chan struct{})
+	errorsOut := make(chan error, 1)
+	var once sync.Once
+	release = func() { once.Do(func() { close(unblock) }) }
+	previous := j.files.hook
+	j.files.hook = func(op, name string, after bool) error {
+		if op == "file-sync" && !after {
+			close(entered)
+			<-unblock
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		cancel()
+		release()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("journal worker failed to join within 5s")
+			return
+		}
+		j.files.hook = previous
+	})
+	go func() { defer close(finished); _, err := j.CloseGate(ctx, 2); errorsOut <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not reach actual file fsync boundary")
+	}
+	return release, cancel, finished, errorsOut
+}
+func TestJournalPersistenceFaultsWorker(t *testing.T) {
+	t.Run("cancel-blocked-worker", func(t *testing.T) {
+		j, _ := createJournalFixture(t)
+		release, cancel, done, result := blockJournalSync(t, j)
+		cancel()
+		release()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker join")
+		}
+		if err := <-result; !errors.Is(err, context.Canceled) || !j.Status().Poisoned {
+			t.Fatalf("cancelled worker: %v %+v", err, j.Status())
+		}
+	})
+	t.Run("fatal-cleanup-regression", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestJournalFatalCleanupHelper$")
+		cmd.WaitDelay = time.Second
+		cmd.Env = append(os.Environ(), "JOURNAL_TEST_FATAL=1")
+		b, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(b), "intentional Fatal exercises release/cancel/join") || !strings.Contains(string(b), "WORKER_JOINED_AND_LOCK_RELEASED") {
+			t.Fatalf("Fatal cleanup regression: %v\n%s", err, b)
+		}
+	})
+}
+func TestJournalFatalCleanupHelper(t *testing.T) {
+	if os.Getenv("JOURNAL_TEST_FATAL") == "" {
+		return
+	}
+	j, o := createJournalFixture(t)
+	// Registered before worker cleanup: executes after join/hook restoration.
+	t.Cleanup(func() {
+		if err := j.Close(); err != nil {
+			t.Error(err)
+		}
+		if !j.Status().Poisoned {
+			t.Error("cancel did not poison")
+		}
+		entries, err := os.ReadDir(o.Directory)
+		if err != nil {
+			t.Error(err)
+		}
+		found := false
+		for _, e := range entries {
+			found = found || strings.HasPrefix(e.Name(), ".gate.")
+		}
+		if !found {
+			t.Error("uncertain evidence removed")
+		}
+		reopened, err := OpenClosedJournal(context.Background(), o)
+		if err != nil {
+			t.Error("lock not released or retained bytes invalid", err)
+		} else {
+			reopened.Close()
+		}
+		fmt.Println("WORKER_JOINED_AND_LOCK_RELEASED")
+	})
+	blockJournalSync(t, j)
+	t.Fatal("intentional Fatal exercises release/cancel/join")
+}
+
+func TestJournalPersistenceFaultsDirectoryChain(t *testing.T) {
+	injected := errors.New("directory durability failure")
+	for nth := 1; nth <= 6; nth++ {
+		for _, after := range []bool{false, true} {
+			t.Run(fmt.Sprintf("sync-%d/after=%t", nth, after), func(t *testing.T) {
+				o := journalOptionsFixture(t)
+				seen := 0
+				hook := func(op, name string, done bool) error {
+					if op == "dir-sync" {
+						if !done {
+							seen++
+						}
+						if seen == nth && done == after {
+							return injected
+						}
+					}
+					return nil
+				}
+				j, err := newJournal(context.Background(), o, true, hook)
+				if j != nil || !errors.Is(err, injected) {
+					t.Fatalf("false create receipt %v %v", j, err)
+				}
+				if _, err = os.Stat(o.Directory); err != nil {
+					t.Fatalf("created root removed: %v", err)
+				}
+				if _, err = CreateClosedJournal(context.Background(), o); err == nil {
+					t.Fatal("partial create overwritten")
+				}
+			})
+		}
+	}
 }

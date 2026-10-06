@@ -126,3 +126,94 @@ func TestJournalProtectedFiles(t *testing.T) {
 		}
 	})
 }
+
+func TestJournalProtectedFilesLayout(t *testing.T) {
+	for _, part := range []string{"root", "commands", "bucket", "gate", "lock", "record"} {
+		t.Run(part+"-symlink", func(t *testing.T) {
+			j, o := createJournalFixture(t)
+			j.Close()
+			writeHistoryFixture(t, o, "22222222-2222-4222-8222-222222222222", false)
+			path := protectedLayoutPath(o, part)
+			saved := path + ".saved"
+			if err := os.Rename(path, saved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(saved, path); err != nil {
+				t.Fatal(err)
+			}
+			if j, err := OpenClosedJournal(context.Background(), o); err == nil {
+				j.Close()
+				t.Fatal("symlink accepted")
+			}
+		})
+		t.Run(part+"-unsafe-mode", func(t *testing.T) {
+			j, o := createJournalFixture(t)
+			j.Close()
+			writeHistoryFixture(t, o, "22222222-2222-4222-8222-222222222222", false)
+			path := protectedLayoutPath(o, part)
+			if err := os.Chmod(path, 0770); err != nil {
+				t.Fatal(err)
+			}
+			if j, err := OpenClosedJournal(context.Background(), o); err == nil {
+				j.Close()
+				t.Fatal("unsafe mode accepted")
+			}
+		})
+	}
+	for _, part := range []string{"gate", "lock", "record"} {
+		t.Run(part+"-hardlink", func(t *testing.T) {
+			j, o := createJournalFixture(t)
+			j.Close()
+			writeHistoryFixture(t, o, "22222222-2222-4222-8222-222222222222", false)
+			path := protectedLayoutPath(o, part)
+			if err := os.Link(path, filepath.Join(filepath.Dir(o.Directory), "otherlink")); err != nil {
+				t.Fatal(err)
+			}
+			if j, err := OpenClosedJournal(context.Background(), o); err == nil {
+				j.Close()
+				t.Fatal("hardlinked journal accepted")
+			}
+		})
+	}
+	t.Run("actual-layout-wrong-owner", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("requires UID0 for actual chown; controller Linux fixture runs this")
+		}
+		for _, part := range []string{"root", "commands", "bucket", "gate", "lock", "record"} {
+			t.Run(part, func(t *testing.T) {
+				j, o := createJournalFixture(t)
+				j.Close()
+				writeHistoryFixture(t, o, "22222222-2222-4222-8222-222222222222", false)
+				path := protectedLayoutPath(o, part)
+				if err := os.Chown(path, 12345, -1); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := os.Chown(path, 0, -1); err != nil {
+						t.Errorf("restore owner: %v", err)
+					}
+				}()
+				if j, err := OpenClosedJournal(context.Background(), o); err == nil {
+					j.Close()
+					t.Fatal("wrong owner accepted")
+				}
+			})
+		}
+	})
+}
+func protectedLayoutPath(o JournalOptions, part string) string {
+	switch part {
+	case "root":
+		return o.Directory
+	case "commands":
+		return filepath.Join(o.Directory, "commands")
+	case "bucket":
+		return filepath.Join(o.Directory, "commands", "22")
+	case "gate":
+		return filepath.Join(o.Directory, "gate.json")
+	case "lock":
+		return filepath.Join(o.Directory, "lock")
+	default:
+		return filepath.Join(o.Directory, "commands", "22", "22222222-2222-4222-8222-222222222222.json")
+	}
+}
