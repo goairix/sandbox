@@ -43,6 +43,8 @@ Ruling: 逐项保留以下 mandatory 验收，不把 narrow identity gate 当整
 | 30 | dependency/image 当前漏洞与 provenance 认证 | 尚未验证；版本/digest pin 不代表无漏洞，本 review 未运行在线审计。 |
 | 31 | 无关 Sentinel 与冻结范围外 controller checkbox | 排除且保留；controller 自行记录当前 checkbox 完成证据，无关 Sentinel 编辑不被 staging。 |
 
+Ruling: preserve all31 dispositions and prior rulings in Git before advancing; retain workspace until overall user report — prevents decisions/history dying in scratch — costifwrong is additional docs/recovery footprint, no change in production authority.
+
 ## Verification
 
 两个小提交 `e12e6e2` / `39a669b` 已各自行为 RED、GREEN、自审并通过独立 spec+quality review。Task2 完整 controlprotocol race 2.413s（执行报告证据）。Controller 冻结源码后 `TEST_ETCD_ENDPOINTS= TEST_ETCD_FIXTURE_PROJECT= TEST_ETCD_CONTAINERS= go test ./...` exit0，实际 controlprotocol 3.125s、etcd 3.230s，其余通过/缓存；未配置 fixture，相关 native integration 跳过，非新 native fault 验收。`go vet ./...` 与 `go build ./...` exit0、空输出；`git diff --check` 通过。
