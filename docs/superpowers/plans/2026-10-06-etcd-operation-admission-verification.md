@@ -26,7 +26,7 @@
 
 完整本地日志：`/tmp/etcd-operation-fixed-owned.log`、`/tmp/etcd-operation-fixed-repo.log`、`/tmp/etcd-operation-fixed-vet.log`、`/tmp/etcd-operation-fixed-build.log`。
 
-fresh fault fixture为脚本独占project `sandbox-etcd-state-test-11594-1791299125`，三成员及foreign server固定3.6.15镜像；涵盖原foundation leader/restore/foreign/compaction/NOSPACE与新增Operation真实unknown/lateTxn/lease等用例。脚本trap清理后，controller分别按精确compose label检查container/volume/network均0。开发fixture `sandbox-etcd-state-dispatch-codex-20261006-a70c18d2` 仍由controller持有，仅namespace局部测试；不暂停/停止/灌满它，后续native单元可继续复用，最终负责清理。
+fresh fault fixture为脚本独占project `sandbox-etcd-state-test-11594-1791299125`，三成员及foreign server固定3.6.15镜像；涵盖原foundation leader/restore/foreign/compaction/NOSPACE与新增Operation真实unknown/lateTxn/lease等用例。脚本trap清理后，controller分别按精确compose label检查container/volume/network均0。开发fixture `sandbox-etcd-state-dispatch-codex-20261006-a70c18d2` 曾仅用于namespace局部测试；Operation gate完成后，controller以精确compose project执行down --volumes --remove-orphans并确认container/volume/network均0。后续纯协议测试不需要fixture；下次native实现须重新建立独占fixture，旧endpoint已失效。
 
 owned日志43 WARN：38 LeaseNotFound、3 Canceled、2 NOSPACE，来自故障/幂等路径；不宣称零warning或旧golangci baseline clean。M1 child测试故意触发parent/worker Fatal，父测试检查退出、hook顺序与completion；不是未解释的最终失败。
 
