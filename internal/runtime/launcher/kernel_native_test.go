@@ -54,6 +54,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "confinement-monitor", "confinement-user", "confinement-leaf", "confinement-hold", "confinement-child-live", "confinement-child-zombie", "confinement-invalid-uid", "confinement-invalid-gid", "confinement-large-uid", "confinement-large-gid", "confinement-nonuniform", "confinement-setter":
+		if _, err := nativeConfinementMode(mode); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "reject-nnp", "reject-missing-cap", "reject-extra-cap", "reject-role", "reject-nonpid1", "reject-thread", "reject-securebits", "reject-setter", "reject-partial":
 		if err := nativeReject(mode); err != nil {
 			fmt.Fprintln(os.Stderr, err)

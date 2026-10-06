@@ -6,7 +6,11 @@ digest='gcr.io/etcd-development/etcd@sha256:5ed4e32061aa061f970d6500629213e8579e
 project="sandbox-launcher-kernel-test-$$-$(date +%s)"
 fixture='launcher-kernel-boundary'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-evidence=${1:-"$repo/.superpowers/sdd/2026-10-07-launcher-kernel-boundary/$project"}
+if [[ $# != 1 || -z "$1" ]]; then
+  echo 'usage: test-launcher-kernel.sh EVIDENCE_DIRECTORY' >&2
+  exit 2
+fi
+evidence=$1
 mkdir -p "$evidence"
 evidence=$(cd "$evidence" && pwd)
 containers=()
@@ -142,6 +146,8 @@ for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role 
  elif [[ "$mode" == positive ]]; then
    grep -Fq 'kernel boundary verified: user isolation' "$evidence/$mode.log"
    grep -Fq 'kernel boundary verified: worker cleanup' "$evidence/$mode.log"
+   grep -Fq 'monitor confinement verified: inherited policy and user exec' "$evidence/$mode.log"
+   grep -Fq 'monitor confinement verified: confinement-setter rejected without boundary' "$evidence/$mode.log"
    grep -Fxq PASS "$evidence/$mode.log"
    counts=$(awk '/^[[:space:]]*--- PASS:/ {p++} /^[[:space:]]*--- FAIL:/ {f++} /^[[:space:]]*--- SKIP:/ {s++} END {printf "PASS=%d FAIL=%d SKIP=%d",p,f,s}' "$evidence/$mode.log")
    echo "$counts" | tee "$evidence/positive-counts.txt"
