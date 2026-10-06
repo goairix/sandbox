@@ -185,15 +185,17 @@ type Manager struct {
 	multipartStore  state.Store // optional, for multipart upload state
 	activeSandboxes state.ActiveSandboxRepository
 
-	pool           *Pool
-	fusePool       *FUSEPool
-	sandboxes      map[string]*Sandbox
-	workspaces     map[string]storage.ScopedFS // sandbox ID -> ScopedFS
-	operationGates map[string]*operationGate
-	fuseLifecycles map[string]*fuseSandboxLifecycle
-	syncLifecycles map[string]*syncSandboxLifecycle
-	fuseInFlight   map[string]*fuseBindingClaim
-	mu             sync.RWMutex
+	pool                *Pool
+	fusePool            *FUSEPool
+	sandboxes           map[string]*Sandbox
+	workspaces          map[string]storage.ScopedFS // sandbox ID -> ScopedFS
+	operationGates      map[string]*operationGate
+	fuseLifecycles      map[string]*fuseSandboxLifecycle
+	syncLifecycles      map[string]*syncSandboxLifecycle
+	fuseInFlight        map[string]*fuseBindingClaim
+	mu                  sync.RWMutex
+	workspaceRequestsMu sync.Mutex
+	workspaceRequests   map[string]*workspaceRequestLock
 
 	stopCh        chan struct{}
 	stopOnce      sync.Once

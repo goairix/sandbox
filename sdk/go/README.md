@@ -187,6 +187,8 @@ result, err := client.Exec(ctx, existing.ID, sandbox.ExecRequest{
 })
 ```
 
+`CreateSandbox` / `NewSandbox` 传入相同 `WorkspacePath` 时，服务端直接复用已有可用环境；调用方无需先查询，也无需捕获租约冲突后重试。已有配置和 TTL 保留，创建参数只用于首次创建。状态损坏无法自动恢复时返回明确的 `WORKSPACE_RECOVERY_REQUIRED`（503）。
+
 `GetSandboxByWorkspace` 不创建沙箱、不更新配置、不续租/TTL、不迁移 session，也不销毁沙箱。创建遇到 `WORKSPACE_LEASED` / `WORKSPACE_OWNED` 时再次查回；租约冲突不能成为删除已有沙箱的理由。
 
 `SandboxError.Reason` 提供具体拒绝原因，`SandboxError.SandboxID` 提供已知候选 ID；错误文本也包含这些信息，便于现有调用方日志定位。TTL 租约缺失不会提前拒绝健康且归属一致的旧实例，实际使用仍经过正常生命周期恢复与准入检查。

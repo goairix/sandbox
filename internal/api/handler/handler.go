@@ -47,6 +47,14 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, sandbox.ErrWorkspaceRecoveryRequired):
+		response := types.ErrorResponse{Code: "WORKSPACE_RECOVERY_REQUIRED", Message: err.Error()}
+		var conflict *sandbox.WorkspaceLookupConflict
+		if errors.As(err, &conflict) {
+			response.Reason, response.SandboxID = conflict.Reason, conflict.SandboxID
+		}
+		c.JSON(http.StatusServiceUnavailable, response)
+		return
 	case errors.Is(err, sandbox.ErrWorkspaceLookupUnavailable):
 		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{Code: "WORKSPACE_LOOKUP_UNAVAILABLE", Message: err.Error()})
 		return

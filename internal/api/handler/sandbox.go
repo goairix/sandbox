@@ -106,7 +106,7 @@ func (h *Handler) CreateSandbox(c *gin.Context) {
 	cfg.WorkspaceMountMode = sandbox.WorkspaceMountMode(req.WorkspaceMountMode)
 	cfg.WorkspaceSyncExclude = req.WorkspaceSyncExclude
 
-	sb, err := h.manager.Create(spanCtx, cfg)
+	sb, err := h.manager.GetOrCreate(spanCtx, cfg)
 	if err != nil {
 		internalError(c, err)
 		return

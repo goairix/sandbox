@@ -93,6 +93,15 @@ func (m *Manager) GetByWorkspace(ctx context.Context, root string) (Sandbox, err
 			if leaseRaw != nil {
 				lease, leaseErr := parseActiveWorkspaceLeaseRecord(leaseRaw)
 				if leaseErr != nil {
+					var provisional workspaceLeaseRecord
+					if strictDecodeFlatJSONObject(leaseRaw, &provisional) == nil && provisional.Phase == workspaceLeasePhaseProvisional && provisional.Generation == 0 {
+						provisional.Phase, provisional.Generation = workspaceLeasePhaseActive, stored.Generation
+						normalized, marshalErr := json.Marshal(provisional)
+						checked, validationErr := parseActiveWorkspaceLeaseRecord(normalized)
+						if marshalErr == nil && validationErr == nil && lookupLeaseMatchesOwner(checked, stored) {
+							return Sandbox{}, lookupConflict("lease_provisional", stored.SandboxID)
+						}
+					}
 					return Sandbox{}, lookupConflict("lease_invalid", stored.SandboxID)
 				}
 				if !lookupLeaseMatchesOwner(lease, stored) {

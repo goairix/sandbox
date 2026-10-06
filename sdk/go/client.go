@@ -119,7 +119,9 @@ func (c *Client) sandboxBase(id string) string {
 	return "/api/v1/sandboxes/" + url.PathEscape(id)
 }
 
-// CreateSandbox creates a new sandbox. POST /api/v1/sandboxes
+// CreateSandbox creates a sandbox, or reuses the existing usable sandbox when
+// WorkspacePath is set. Existing configuration and TTL are retained.
+// POST /api/v1/sandboxes
 func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxResponse, error) {
 	var resp SandboxResponse
 	return resp, c.do(ctx, http.MethodPost, "/api/v1/sandboxes", req, &resp)

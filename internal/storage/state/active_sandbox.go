@@ -157,6 +157,12 @@ type ActiveSandboxRepository interface {
 	Ping(ctx context.Context) error
 }
 
+// ActiveSandboxConditionalDestroyRepository closes admission only for the
+// exact lifecycle snapshot whose workspace ownership was checked.
+type ActiveSandboxConditionalDestroyRepository interface {
+	BeginDestroyExpected(ctx context.Context, expected ActiveSandboxRecord) (*ActiveSandboxRecord, error)
+}
+
 func ValidateActiveSandboxTTL(ttl time.Duration) error {
 	if ttl <= 0 {
 		return fmt.Errorf("%w: lease TTL must be positive", ErrActiveSandboxCorrupt)

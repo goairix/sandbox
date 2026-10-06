@@ -305,6 +305,11 @@ func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id stri
 	if record == nil {
 		return false, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
+	return m.finishDistributedSandboxCleanup(ctx, record, waitForOwner)
+}
+
+func (m *Manager) finishDistributedSandboxCleanup(ctx context.Context, record *state.ActiveSandboxRecord, waitForOwner bool) (bool, error) {
+	id := record.SandboxID
 	sb, err := decodeActiveSandboxPhase(record, id, state.ActiveSandboxDestroying, state.ActiveSandboxCleanupPending)
 	if err != nil {
 		return false, err

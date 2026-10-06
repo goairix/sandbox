@@ -186,3 +186,25 @@ func TestActiveSandboxRepositoryReportsUnconfirmedReplicaAck(t *testing.T) {
 	require.NotNil(t, loaded, "an unconfirmed reply is ambiguous, not proof that the write failed")
 	t.Cleanup(func() { _ = repo.forceDelete(context.Background(), record.SandboxID) })
 }
+
+func TestActiveSandboxConditionalDestroyRejectsChangedProof(t *testing.T) {
+	repo, _ := activeRepositoryForTest(t)
+	ctx := context.Background()
+	record := activeRecordForTest("sandbox-conditional-destroy")
+	require.NoError(t, repo.Publish(ctx, record))
+	active, err := repo.Activate(ctx, record.SandboxID, record.Revision, record.Snapshot)
+	require.NoError(t, err)
+	changedSnapshot, err := json.Marshal(map[string]any{"id": record.SandboxID, "runtime_id": record.RuntimeID, "runtime_uid": record.RuntimeUID, "changed": true})
+	require.NoError(t, err)
+	changed, err := repo.Update(ctx, record.SandboxID, active.Revision, changedSnapshot)
+	require.NoError(t, err)
+	_, err = repo.BeginDestroyExpected(ctx, *active)
+	require.ErrorIs(t, err, state.ErrActiveSandboxConflict)
+	current, err := repo.Load(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxActive, current.Phase)
+	destroying, err := repo.BeginDestroyExpected(ctx, *changed)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxDestroying, destroying.Phase)
+	require.Equal(t, changed.RuntimeUID, destroying.RuntimeUID)
+}

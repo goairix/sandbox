@@ -170,6 +170,7 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
 local won = 0
+if ARGV[2] and (tonumber(record.revision) ~= tonumber(ARGV[2]) or tonumber(record.generation) ~= tonumber(ARGV[3]) or record.runtime_id ~= ARGV[4] or record.runtime_uid ~= ARGV[5] or record.phase ~= ARGV[7] or cjson.encode(record.snapshot) ~= cjson.encode(cjson.decode(ARGV[6]))) then return {2, raw} end
 if record.phase == 'active' or record.phase == 'publishing' or record.phase == 'workspace_exclusive' then
   record.phase = 'destroying'
   record.revision = tonumber(record.revision) + 1
@@ -524,11 +525,25 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, op state.Act
 }
 
 func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (*state.ActiveSandboxRecord, int64, bool, error) {
+	return r.beginDestroy(ctx, id)
+}
+
+// BeginDestroyExpected atomically rejects a lifecycle changed after inspection.
+func (r *ActiveSandboxRepository) BeginDestroyExpected(ctx context.Context, expected state.ActiveSandboxRecord) (*state.ActiveSandboxRecord, error) {
+	if expected.Validate() != nil {
+		return nil, state.ErrActiveSandboxCorrupt
+	}
+	record, _, _, err := r.beginDestroy(ctx, expected.SandboxID, expected.Revision, expected.Generation, expected.RuntimeID, expected.RuntimeUID, string(expected.Snapshot), string(expected.Phase))
+	return record, err
+}
+
+func (r *ActiveSandboxRepository) beginDestroy(ctx context.Context, id string, expected ...any) (*state.ActiveSandboxRecord, int64, bool, error) {
 	if r.validateID(id) != nil {
 		return nil, 0, false, state.ErrActiveSandboxCorrupt
 	}
 	k := r.keys(id)
-	cmd, durabilityErr := r.store.runSafetyScript(ctx, beginActiveDestroyScript, []string{k.record, k.operations}, time.Now().UTC().Format(time.RFC3339Nano))
+	args := append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, expected...)
+	cmd, durabilityErr := r.store.runSafetyScript(ctx, beginActiveDestroyScript, []string{k.record, k.operations}, args...)
 	result, err := cmd.Slice()
 	if err != nil {
 		return nil, 0, false, err

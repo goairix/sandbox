@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -495,4 +496,23 @@ func TestDistributedManagerStopDoesNotDestroySandboxLifecycles(t *testing.T) {
 			_ = rt.RemoveSandbox(context.Background(), info.RuntimeID)
 		})
 	}
+}
+
+func (r *memoryActiveRepository) BeginDestroyExpected(_ context.Context, expected state.ActiveSandboxRecord) (*state.ActiveSandboxRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[expected.SandboxID]
+	if !ok {
+		return nil, nil
+	}
+	if record.Revision != expected.Revision || record.Generation != expected.Generation || record.RuntimeID != expected.RuntimeID || record.RuntimeUID != expected.RuntimeUID || record.Phase != expected.Phase || !bytes.Equal(record.Snapshot, expected.Snapshot) {
+		return nil, state.ErrActiveSandboxConflict
+	}
+	if record.Phase == state.ActiveSandboxActive {
+		record.Phase = state.ActiveSandboxDestroying
+		record.Revision++
+		r.records[record.SandboxID] = record
+	}
+	copy := record
+	return &copy, nil
 }
