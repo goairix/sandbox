@@ -80,3 +80,7 @@ etcd当前preGC creation/publication示例20KV、12769/16847/20945 rawvalue byte
 ## 自审结论
 
 类型和公开API无未定义producer；闭门/unknown只作被动证据，不产生physical authority。strict codec、真实filesystem/ownership/persist failure、counter/bounded replay各有独立任务及测试。已决定create/fsync parent链、poison/AccountingKnown、Close/status同步、canonical parent、平台build和LinuxRoot实际ownership gate。首次closed安装、历史open先close、身份不匹配不重建，与整体安全协议一致。未来activate/accepted/terminal/GC/realPID1不是本单元接口，必须由紧接的合法target协议完成，不能因基础层通过而停止整体迁移。
+
+编解码producer补充：encodeGateManifest仅接受closed；GateManifest.Validate/decode仍接受合法历史open/closed。Task2用typed json.Marshal明确构造历史open输入，随后验证实际durableclose。以后合法reopen协议需单独修改并验证producer边界。NewRecordsStopped只指被动新record写入被capacity/poison/closed handle阻止，不是物理准入许可。
+
+Journal handle补充：ctxnil返回ErrInvalidConfiguration；对nil/zero未初始化Journal，非nilctx读写返回ErrJournalUnavailable且不panic，Close幂等nil；Status返回zeroGate、Closed=true、NewRecordsStopped=true、AccountingKnown=false，表示handle不可用，绝非物理closed回执。此规则由Task2实现，Task1没有Journal receiver。
