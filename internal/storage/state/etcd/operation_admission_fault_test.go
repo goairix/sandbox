@@ -211,32 +211,54 @@ func TestBeginOperationMalformedReplies(t *testing.T) {
 }
 
 func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
-	b, raw, in, _ := operationControlFixture(t, "plain")
-	var ref OperationReference
-	b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
-		if len(ops) != 2 || !ops[0].IsPut() {
-			return false
-		}
-		var record OperationRecord
-		require.NoError(t, json.Unmarshal(ops[0].ValueBytes(), &record))
-		ref = record.Reference
-		return true
-	}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
-		require.NoError(t, e)
-		require.True(t, r.Succeeded)
-		token, guard, receipt, _, e := b.namespace.operationKeys(ref)
-		require.NoError(t, e)
-		evidence, e := raw.Txn(context.Background()).Then(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(receipt), clientv3.OpGet(guard), clientv3.OpGet(token)).Commit()
-		require.NoError(t, e)
-		evidence.Succeeded = false
-		kv := evidence.Responses[2].GetResponseRange().Kvs[0]
-		kv.CreateRevision--
-		kv.ModRevision--
-		return evidence, nil
-	}}
-	result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "failure-envelope", Kind: OperationData})
-	require.ErrorIs(t, err, ErrCorruptReceipt)
-	require.Nil(t, result.Capability)
+	for _, defect := range []string{"completion revision", "guard body", "token lease", "valid historical"} {
+		t.Run(defect, func(t *testing.T) {
+			b, raw, in, _ := operationControlFixture(t, "plain")
+			var ref OperationReference
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+				if len(ops) != 2 || !ops[0].IsPut() {
+					return false
+				}
+				var record OperationRecord
+				require.NoError(t, json.Unmarshal(ops[0].ValueBytes(), &record))
+				ref = record.Reference
+				return true
+			}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+				require.NoError(t, e)
+				require.True(t, r.Succeeded)
+				token, guard, receipt, _, e := b.namespace.operationKeys(ref)
+				require.NoError(t, e)
+				evidence, e := raw.Txn(context.Background()).Then(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(receipt), clientv3.OpGet(guard), clientv3.OpGet(token)).Commit()
+				require.NoError(t, e)
+				evidence.Succeeded = false
+				switch defect {
+				case "completion revision":
+					kv := evidence.Responses[2].GetResponseRange().Kvs[0]
+					kv.CreateRevision--
+					kv.ModRevision--
+				case "guard body":
+					evidence.Responses[3].GetResponseRange().Kvs[0].Value = []byte("null")
+				case "token lease":
+					evidence.Responses[4].GetResponseRange().Kvs[0].Lease++
+				}
+				return evidence, nil
+			}}
+			result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "failure-envelope", Kind: OperationData})
+			want := ErrCorruptRecord
+			if defect == "completion revision" {
+				want = ErrCorruptReceipt
+			} else if defect == "valid historical" {
+				want = ErrConflict
+			}
+			require.ErrorIs(t, err, want)
+			require.Nil(t, result.Capability)
+			if defect == "valid historical" {
+				require.Equal(t, OperationCommitted, result.Outcome, "complete validated failure evidence may retain a historical commit")
+			} else {
+				require.Equal(t, OperationUnknown, result.Outcome, "partially validated failure evidence cannot publish a historical outcome")
+			}
+		})
+	}
 }
 
 func TestBeginOperationSendDeadline(t *testing.T) {

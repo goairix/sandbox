@@ -392,6 +392,7 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 	if err != nil {
 		return err
 	}
+	candidate := OperationUnknown
 	if values[0] != nil {
 		var receipt operationReceipt
 		if err = decodeOperationReceipt(values[0], &receipt); err != nil {
@@ -400,7 +401,7 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 		if receipt.Reference != c.record.Reference {
 			return ErrCorruptReceipt
 		}
-		result.Outcome = receipt.Outcome
+		candidate = receipt.Outcome
 	}
 	for _, kv := range values[1:] {
 		if kv == nil {
@@ -422,9 +423,11 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 			return err
 		}
 	}
-	if result.Outcome == OperationUnknown {
-		result.Outcome = OperationAborted
+	if candidate == OperationUnknown {
+		candidate = OperationAborted
 	}
+	// Publish an outcome only after the complete failure evidence is valid.
+	result.Outcome = candidate
 	return ErrConflict
 }
 func (c *OperationCapability) validateLiveEvidence(values []*mvccpb.KeyValue, admitRevision int64) error {
