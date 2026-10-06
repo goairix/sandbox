@@ -34,7 +34,7 @@ func publicationVerifier(o Options) (*controlprotocol.PublicationVerifier, error
 	}
 	value := reflect.ValueOf(o.Clock)
 	switch value.Kind() {
-	case reflect.Pointer, reflect.Func, reflect.Interface, reflect.Map, reflect.Slice:
+	case reflect.Chan, reflect.Pointer, reflect.Func, reflect.Interface, reflect.Map, reflect.Slice:
 		if value.IsNil() {
 			return nil, fmt.Errorf("%w: nil publication clock", ErrInvalidConfiguration)
 		}

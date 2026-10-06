@@ -28,7 +28,7 @@ func TestExecCommandAuthorityConfiguration(t *testing.T) {
 		require.Nil(t, v)
 		require.NoError(t, validateOptions(o))
 	})
-	for _, fault := range []string{"typed nil", "no trust", "no trust or clock", "no clock", "typed nil clock", "wrong authority", "empty roots", "three roots", "short root", "bad target", "bad epoch", "bad namespace"} {
+	for _, fault := range []string{"typed nil", "no trust", "no trust or clock", "no clock", "typed nil clock", "nil channel clock", "wrong authority", "empty roots", "three roots", "short root", "bad target", "bad epoch", "bad namespace"} {
 		t.Run(fault, func(t *testing.T) {
 			o := validOptions(t)
 			o.ExecIssuer = &unusedExecIssuer{}
@@ -46,6 +46,8 @@ func TestExecCommandAuthorityConfiguration(t *testing.T) {
 				o.Clock = nil
 			case "typed nil clock":
 				o.Clock = testAuthorityClock(nil)
+			case "nil channel clock":
+				o.Clock = nilChannelAuthorityClock(nil)
 			case "wrong authority":
 				o.PublicationTrust.AuthorityID = "other"
 			case "empty roots":

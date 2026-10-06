@@ -13,6 +13,26 @@ import (
 type testAuthorityClock func(context.Context) (ClockObservation, error)
 
 func (f testAuthorityClock) Observe(ctx context.Context) (ClockObservation, error) { return f(ctx) }
+
+type nilChannelAuthorityClock chan struct{}
+
+func (nilChannelAuthorityClock) Observe(context.Context) (ClockObservation, error) {
+	panic("configuration observed nil channel clock")
+}
+
+func TestPublicationRejectsNilChannelAuthorityClock(t *testing.T) {
+	o := validOptions(t)
+	o.PublicationTrust = &RuntimePublicationTrust{AuthorityID: o.Identity.RuntimeID, Target: "kubernetes", Roots: []ed25519.PublicKey{make([]byte, 32)}}
+	o.Clock = nilChannelAuthorityClock(nil)
+	v, err := publicationVerifier(o)
+	require.ErrorIs(t, err, ErrInvalidConfiguration)
+	require.Nil(t, v)
+	require.ErrorIs(t, validateOptions(o), ErrInvalidConfiguration)
+	b, err := New(context.Background(), o)
+	require.ErrorIs(t, err, ErrInvalidConfiguration)
+	require.Nil(t, b)
+}
+
 func goodAuthorityClock() AuthorityClock {
 	return testAuthorityClock(func(context.Context) (ClockObservation, error) { return ClockObservation{UTC: time.Now().UTC()}, nil })
 }
