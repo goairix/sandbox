@@ -211,9 +211,13 @@ func TestBeginOperationMalformedReplies(t *testing.T) {
 }
 
 func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
-	for _, defect := range []string{"completion revision", "guard body", "token lease", "valid historical"} {
+	for _, defect := range []string{"completion revision", "guard body", "token lease", "missing guard", "missing token", "missing receipt", "receipt only", "aborted without guard", "guard recreated", "guard recreated before completion", "completion before guard", "aborted wrong order", "aborted with token", "guard noncanonical copy", "token noncanonical copy", "valid historical", "valid aborted historical"} {
 		t.Run(defect, func(t *testing.T) {
 			b, raw, in, _ := operationControlFixture(t, "plain")
+			ctx := context.Background()
+			lease := &creationFaultLease{Lease: b.client.Lease}
+			b.client.Lease = lease
+			t.Cleanup(func() { b.client.Lease = lease.Lease })
 			var ref OperationReference
 			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
 				if len(ops) != 2 || !ops[0].IsPut() {
@@ -228,7 +232,47 @@ func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
 				require.True(t, r.Succeeded)
 				token, guard, receipt, _, e := b.namespace.operationKeys(ref)
 				require.NoError(t, e)
-				evidence, e := raw.Txn(context.Background()).Then(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(receipt), clientv3.OpGet(guard), clientv3.OpGet(token)).Commit()
+				if defect == "missing receipt" {
+					_, e = raw.Delete(ctx, receipt)
+					require.NoError(t, e)
+				}
+				if strings.Contains(defect, "aborted") {
+					_, e = raw.Delete(ctx, receipt)
+					require.NoError(t, e)
+					value, e := encodeOperationReceipt(operationReceipt{Version: 1, Reference: ref, Outcome: OperationAborted})
+					require.NoError(t, e)
+					_, e = raw.Put(ctx, receipt, value, clientv3.WithLease(clientv3.LeaseID(ref.LeaseID)))
+					require.NoError(t, e)
+					if defect != "aborted with token" {
+						_, e = raw.Delete(ctx, token)
+						require.NoError(t, e)
+					}
+				}
+				if defect == "missing guard" || defect == "receipt only" || defect == "aborted without guard" {
+					_, e = raw.Delete(ctx, guard)
+					require.NoError(t, e)
+				}
+				if defect == "missing token" || defect == "receipt only" {
+					_, e = raw.Delete(ctx, token)
+					require.NoError(t, e)
+				}
+				if strings.HasPrefix(defect, "guard recreated") {
+					original, e := raw.Get(ctx, guard)
+					require.NoError(t, e)
+					_, e = raw.Delete(ctx, guard)
+					require.NoError(t, e)
+					_, e = raw.Put(ctx, guard, string(original.Kvs[0].Value), clientv3.WithLease(clientv3.LeaseID(ref.LeaseID)))
+					require.NoError(t, e)
+					if defect == "guard recreated before completion" {
+						completion, e := raw.Get(ctx, receipt)
+						require.NoError(t, e)
+						_, e = raw.Txn(ctx).Then(clientv3.OpDelete(token), clientv3.OpDelete(receipt)).Commit()
+						require.NoError(t, e)
+						_, e = raw.Txn(ctx).Then(clientv3.OpPut(token, string(original.Kvs[0].Value), clientv3.WithLease(clientv3.LeaseID(ref.LeaseID))), clientv3.OpPut(receipt, string(completion.Kvs[0].Value), clientv3.WithLease(clientv3.LeaseID(ref.LeaseID)))).Commit()
+						require.NoError(t, e)
+					}
+				}
+				evidence, e := raw.Txn(ctx).Then(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(receipt), clientv3.OpGet(guard), clientv3.OpGet(token)).Commit()
 				require.NoError(t, e)
 				evidence.Succeeded = false
 				switch defect {
@@ -238,6 +282,20 @@ func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
 					kv.ModRevision--
 				case "guard body":
 					evidence.Responses[3].GetResponseRange().Kvs[0].Value = []byte("null")
+				case "completion before guard", "aborted wrong order":
+					guardRevision := evidence.Responses[3].GetResponseRange().Kvs[0].CreateRevision
+					for _, i := range []int{2, 4} {
+						for _, kv := range evidence.Responses[i].GetResponseRange().Kvs {
+							kv.CreateRevision = guardRevision - 1
+							kv.ModRevision = guardRevision - 1
+						}
+					}
+				case "guard noncanonical copy":
+					kv := evidence.Responses[3].GetResponseRange().Kvs[0]
+					kv.Value = append(kv.Value, ' ')
+				case "token noncanonical copy":
+					kv := evidence.Responses[4].GetResponseRange().Kvs[0]
+					kv.Value = append(kv.Value, ' ')
 				case "token lease":
 					evidence.Responses[4].GetResponseRange().Kvs[0].Lease++
 				}
@@ -245,18 +303,26 @@ func TestBeginOperationFailureCompletionEnvelope(t *testing.T) {
 			}}
 			result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "failure-envelope", Kind: OperationData})
 			want := ErrCorruptRecord
-			if defect == "completion revision" {
+			if defect == "completion revision" || defect == "aborted wrong order" || defect == "missing receipt" {
 				want = ErrCorruptReceipt
-			} else if defect == "valid historical" {
+			} else if defect == "valid historical" || defect == "valid aborted historical" {
 				want = ErrConflict
 			}
 			require.ErrorIs(t, err, want)
 			require.Nil(t, result.Capability)
 			if defect == "valid historical" {
 				require.Equal(t, OperationCommitted, result.Outcome, "complete validated failure evidence may retain a historical commit")
+			} else if defect == "valid aborted historical" {
+				require.Equal(t, OperationAborted, result.Outcome)
 			} else {
 				require.Equal(t, OperationUnknown, result.Outcome, "partially validated failure evidence cannot publish a historical outcome")
 			}
+			require.Equal(t, ref, result.Reference)
+			require.Equal(t, int64(1), lease.revokes.Load())
+			require.NoError(t, result.GuardCleanupError)
+			ttl, e := raw.TimeToLive(ctx, clientv3.LeaseID(ref.LeaseID))
+			require.NoError(t, e)
+			require.Equal(t, int64(-1), ttl.TTL, "cleanup revokes the original Lease")
 		})
 	}
 }

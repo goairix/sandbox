@@ -392,18 +392,8 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 	if err != nil {
 		return err
 	}
-	candidate := OperationUnknown
-	if values[0] != nil {
-		var receipt operationReceipt
-		if err = decodeOperationReceipt(values[0], &receipt); err != nil {
-			return err
-		}
-		if receipt.Reference != c.record.Reference {
-			return ErrCorruptReceipt
-		}
-		candidate = receipt.Outcome
-	}
-	for _, kv := range values[1:] {
+	receiptKV, guard, token := values[0], values[1], values[2]
+	for _, kv := range []*mvccpb.KeyValue{guard, token} {
 		if kv == nil {
 			continue
 		}
@@ -411,23 +401,47 @@ func (b *Backend) operationAdmissionFailure(response *clientv3.TxnResponse, c *O
 		if err = decodeOperationRecord(kv, &record); err != nil {
 			return err
 		}
-		if record != c.record {
+		if record != c.record || string(kv.Value) != c.value {
 			return ErrCorruptRecord
 		}
 	}
-	if values[2] != nil {
-		if values[0] == nil {
+	if receiptKV == nil {
+		if token != nil {
 			return ErrCorruptReceipt
 		}
-		if err = validateOperationCompletion(values[2], values[0]); err != nil {
-			return err
+		// Neither completion record exists, and this Txn is known not to have
+		// written. This also covers guard-init rejection before guardRevision
+		// is known and ordinary admission rejection after an original fence loss.
+		result.Outcome = OperationAborted
+		return ErrConflict
+	}
+	var receipt operationReceipt
+	if err = decodeOperationReceipt(receiptKV, &receipt); err != nil {
+		return err
+	}
+	if receipt.Reference != c.record.Reference {
+		return ErrCorruptReceipt
+	}
+	// A receipt-backed historical result needs this attempt's original guard,
+	// not merely a matching body in a missing or reconstructed envelope.
+	if guard == nil || c.guardRevision <= 0 || guard.CreateRevision != c.guardRevision {
+		return ErrCorruptRecord
+	}
+	if token != nil && token.CreateRevision <= guard.CreateRevision {
+		return ErrCorruptRecord
+	}
+	if receiptKV.CreateRevision <= guard.CreateRevision {
+		return ErrCorruptReceipt
+	}
+	if receipt.Outcome == OperationAborted {
+		if token != nil {
+			return ErrCorruptRecord
 		}
+	} else if err = validateOperationCompletion(token, receiptKV); err != nil {
+		return err
 	}
-	if candidate == OperationUnknown {
-		candidate = OperationAborted
-	}
-	// Publish an outcome only after the complete failure evidence is valid.
-	result.Outcome = candidate
+	// Publish a historical outcome only after its entire evidence shape passes.
+	result.Outcome = receipt.Outcome
 	return ErrConflict
 }
 func (c *OperationCapability) validateLiveEvidence(values []*mvccpb.KeyValue, admitRevision int64) error {
