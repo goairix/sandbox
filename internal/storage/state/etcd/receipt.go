@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -29,8 +31,12 @@ func encodeReceipt(ref StageReference, outcome Outcome) (string, error) {
 }
 
 func decodeReceipt(kv *mvccpb.KeyValue, ref StageReference) (Outcome, error) {
-	if kv == nil || kv.Lease != 0 || len(kv.Value) > maxRecordBytes {
+	expectedKey := fmt.Sprintf("%sp/%02x/stages/%s/%s/%s/receipt", ref.Namespace, ref.Partition, ref.RequestID, ref.StageID, ref.AttemptID)
+	if !immutableDispatchKV(kv) || string(kv.Key) != expectedKey || len(kv.Value) > maxRecordBytes || !utf8.Valid(kv.Value) {
 		return OutcomeUnknown, ErrCorruptReceipt
+	}
+	if err := strictPreparationMetadata(kv.Value, reflect.TypeOf(stageReceipt{})); err != nil {
+		return OutcomeUnknown, fmt.Errorf("%w: %v", ErrCorruptReceipt, err)
 	}
 	var receipt stageReceipt
 	decoder := json.NewDecoder(bytes.NewReader(kv.Value))
