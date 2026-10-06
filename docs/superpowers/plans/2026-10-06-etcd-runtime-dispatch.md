@@ -1,6 +1,6 @@
 # etcd runtime dispatch 持久声明实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 让 pending 创建 intent 的 runtime 调用身份和输入可持久恢复，禁止未知结果时换 operation 再创建。
 
@@ -46,9 +46,9 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context,partition uint8,requ
 
 Locator使用显式snake_case JSON。Validate验证canonical namespace root（可从末尾scope/cell复原NewNamespace）、合法ID/restore与canonicalUUID，不保存digest。builder为private package API，attemptID由内部新UUID选定，不接受caller指定旧attempt。标准BeginStage用返回原input的闭包复用核心，其签名、预算、guard与receipt语义保持一致。输入/locator validation、builder error、prepareMutation全部在任何Grant之前；build仅调用一次、在任何RPC之前，mutation随后深拷贝和计算digest。locator.reference补入此digest，StageReference/receipt包含完整身份。
 
-- [ ] 写真实 `TestStageAttemptBuilderAtomicLocator`：mutation保存locator，receipt.ref的namespace/p/request/stage/attempt/restore匹配，digest非空且commit同revision；先stub产生真实assertion RED。
-- [ ] 写builder调用次数1、nil/error/invalid输出不Grant；caller修改返回mutation、重复调用各产生新attempt，resolver先abort与迟到完整Txn不写。
-- [ ] 实现private builder；标准Stage回归和新定向race GREEN；spec→quality审查后独立提交。
+- [x] 写真实 `TestStageAttemptBuilderAtomicLocator`：mutation保存locator，receipt.ref的namespace/p/request/stage/attempt/restore匹配，digest非空且commit同revision；先stub产生真实assertion RED。
+- [x] 写builder调用次数1、nil/error/invalid输出不Grant；caller修改返回mutation、重复调用各产生新attempt，resolver先abort与迟到完整Txn不写。
+- [x] 实现private builder；标准Stage回归和新定向race GREEN；自审达到要求即独立提交，再做spec→quality独立审查，修复另作小提交。
 
 ## Task 2：dispatch record、固定key与可恢复线性读取
 
@@ -82,9 +82,9 @@ func (b *Backend) LoadRuntimeDispatch(ctx context.Context,w WorkspaceIdentity,in
 
 Loader先线性读两个固定key，both missing返回nil而非外部失败证据，half missing拒绝。定位receipt后再同一线性Txn读declaration/input/exactreceipt（三个point keys），重新验证整个entry。三key的CreateRevision=ModRevision>0且彼此相同，receipt永久、严格JSON/UTF8/unknown/trailing、schema1、outcome committed、locator全部字段相同、digest lowercase64hex；从该实际receipt取得完整StageReference，仅可仲裁而不可提交。receipt存在但声明缺失不自动查询；声明存在却receipt缺失/aborted/错位为corrupt而不Resolve。stored restore错返回IdentityMismatch；损坏receipt返回CorruptReceipt，其余损坏CorruptRecord。若首次存在而第二次三个都消失，返回nil，供后续合法GC竞态使用；不推断target状态。
 
-- [ ] 写model/codec与真实loader RED，测试正确永久同revision三key可从新Backend恢复ref；wrong value/key/lease/epoch/digest/locator、half missing、receipt aborted或wrong ref拒绝。
-- [ ] 实现closed codec扩展、keys、bounded point loader；保留精度及HTML/Unicode/原JSON顺序、输入输出复制及完整wire预算测试。
-- [ ] 定向race/vet GREEN，spec→quality审查后独立提交。
+- [x] 写model/codec与真实loader RED，测试正确永久同revision三key可从新Backend恢复ref；wrong value/key/lease/epoch/digest/locator、half missing、receipt aborted或wrong ref拒绝。
+- [x] 实现closed codec扩展、keys、bounded point loader；保留精度及HTML/Unicode/原JSON顺序、输入输出复制及完整wire预算测试。
+- [x] 定向race/vet GREEN，自审达到要求即独立提交，再做spec→quality独立审查，修复另作小提交。
 
 ## Task 3：原 creation claim 下的原子声明
 
@@ -106,10 +106,10 @@ ClaimCreation保存原immutable workspace identity，并从已验证bundle保存
 
 不存在时内部生成新operationUUID；使用Task1 builder生成新的metadata attempt，构造两个immutable records，其归属均来自private claim上下文，snapshot/expiry不从caller覆盖。mutation包含原24cmp及declaration/input CreateRevision0，两个永久writes；总42项含14stage预留，原预算不放宽。Begin stage30s后重检ctx/local claim，CommitStage；失败/unknown返回exactReference且Entry=nil，不能伪称declared。只有knownCommitted返回declared entry；background bounded Release原stage记录cleanup错误，不能降低known outcome，也不释放creation claim或owner。
 
-- [ ] 写真实声明/重放与graph不变RED；declaration/input/receipt同revision、永久Lease0，原domain和claim不改。
-- [ ] 写16并发声明一个originaloperation、同输入重放保留originalID/ref/expiry，不同kind/target/payload冲突且不Grant；重新领取claim/新Backend只读原声明，拒绝另operation。
-- [ ] 写lost real commit reply→ResolveCommitted→新Backend Load原operation，delayed完整Txn先aborted后不写；claim失租/同值重建、restore/control变化、callerpayload mutation、invalid/wire budget beforeGrant、cleanup failure与Outcome分开。
-- [ ] 实现atomic声明；真实定向race、全fixture、全仓/vet/build/gofmt/diff验证；spec→quality及本批跨模块final review，保存报告并独立提交。
+- [x] 写真实声明/重放与graph不变RED；declaration/input/receipt同revision、永久Lease0，原domain和claim不改。
+- [x] 写16并发声明一个originaloperation、同输入重放保留originalID/ref/expiry，不同kind/target/payload冲突且不Grant；重新领取claim/新Backend只读原声明，拒绝另operation。
+- [x] 写lost real commit reply→ResolveCommitted→新Backend Load原operation，delayed完整Txn先aborted后不写；claim失租/同值重建、restore/control变化、callerpayload mutation、invalid/wire budget beforeGrant、cleanup failure与Outcome分开。
+- [x] 实现atomic声明；真实定向race、全仓/vet/build/gofmt/diff验证及自审后即独立提交；随后执行全fixture、spec→quality及本批跨模块final review，保存报告，修复另作小提交。
 
 ## 紧接的发布单元
 
