@@ -77,14 +77,25 @@ docker container create \
 set +e
 docker container start --attach "$container" 2>&1 | tee "$output"
 start_result=${PIPESTATUS[0]}
-actual_result="$(docker container inspect --format '{{.State.ExitCode}}' "$container")"
+test_state="$(docker container inspect --format '{{.State.Status}} {{.State.Running}} {{.State.ExitCode}}' "$container")"
 inspect_result=$?
 set -e
 if [[ "$inspect_result" != 0 ]]; then
   echo "Unable to observe actual test exit; attach result=$start_result" >&2
   exit "$inspect_result"
 fi
-echo "Linux native test actual_exit=$actual_result attach_exit=$start_result"
+# ExitCode can be a default zero before termination; accept only a complete
+# terminal-state inspection with a valid process exit code.
+if [[ ! "$test_state" =~ ^exited\ false\ (0|[1-9][0-9]{0,2})$ ]]; then
+  echo "Unable to observe completed test; state=$test_state attach result=$start_result" >&2
+  exit 2
+fi
+actual_result=${BASH_REMATCH[1]}
+if (( actual_result > 255 )); then
+  echo "Invalid actual test exit: $actual_result; attach result=$start_result" >&2
+  exit 2
+fi
+echo "Linux native test state=exited running=false actual_exit=$actual_result attach_exit=$start_result"
 awk '/^--- FAIL:/ { failures++ } /^[[:space:]]*--- SKIP:/ { skips++ } END { printf "Linux native top-level failures=%d skips=%d (host race is separate)\n", failures, skips }' "$output"
 if [[ "$actual_result" == 0 && "$start_result" != 0 ]]; then
   exit "$start_result"
