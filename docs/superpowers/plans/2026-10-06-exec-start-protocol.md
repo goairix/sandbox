@@ -51,11 +51,11 @@
 
 Context的所有字段有requiredsnakecase tag，作为claims.context nested固定schema，Runtime沿用runtimeSchema；Claims fixed version/purpose/context/descriptor_digest/not_before/not_after。envelope onlyclaims/signature。同instant UTC时间比较不凭Time.location指针identity。Signer不能修改context/derive时间；验证suppliedverifiedissuer非零、私钥匹配、issuerID/digest与interval，key复制 consistency。Verifier重新fresh验证issuerwire，不信历史identity，先检查expectedbinding==verifier.pinnedbinding，再strictclaim/context并对全部expectedcontext比较、actualdescriptor.digest，后实际Ed25519Verify固定domain；保守nowwindow。evidence规范copiedwire/digest/context/descriptorDigest/times，错误zero。
 
-- [ ] 写 `TestExecStartTicket`真实root->issuer->delegate->ticket roundtrip，payload/context/时间getters和wire复制并发；输出issuer/ticket/metadataactualsize，不存stdout/stdin。`TestExecStartTicketRejects`逐一expected字段差异与payload选项差异、nil/zero/privatekeymalformed/不匹配、fresh cert过期/ removedroot、Δ等号/非UTC/业务E/30s/issuerinterval、overwire/strictJSON malformed 与无partial evidence。
-- [ ] `TestExecStartRoleSeparation` 独立root/delegate重新签合法或非法claims，crossdomain/certificate roles/相同certID不同key/digest/startpurpose伪renew拒绝；另以原真实issuer签ticket+expected同时改四种合法binding，仍拒绝；不是仅依赖signer prevalidation来测试verifier。所有ReviewFocus在本task明确落test。
-- [ ] `go test ./internal/runtime/controlprotocol -run 'TestExecStart' -count=1` 观察behaviorRED，最小实现后focusedGREEN。
-- [ ] 一次完整 `go test -race ./internal/runtime/controlprotocol -count=1`、packagevet/gofmt/diffcheck，自审即stage本task3文件commit `feat(controlprotocol): authenticate bounded operation exec starts`；独立spec+qualityreview。
-- [ ] controller冻结head，全仓test（无fixtureexplicit）/vet/build必要并行checks；etcd源未变不重复nativefaultsuite，保留216PASS实际native证据。完整branchrangefinalreview、一次发现fixwave+scoped复核，逐项保留rulings/declined/未完overall要求；然后继续effect intent接线。
+- [x] 写 `TestExecStartTicket`真实root->issuer->delegate->ticket roundtrip，payload/context/时间getters和wire复制并发；输出issuer/ticket/metadataactualsize，不存stdout/stdin。`TestExecStartTicketRejects`逐一expected字段差异与payload选项差异、nil/zero/privatekeymalformed/不匹配、fresh cert过期/ removedroot、Δ等号/非UTC/业务E/30s/issuerinterval、overwire/strictJSON malformed 与无partial evidence。
+- [x] `TestExecStartRoleSeparation` 独立root/delegate重新签合法或非法claims，crossdomain/certificate roles/相同certID不同key/digest/startpurpose伪renew拒绝；另以原真实issuer签ticket+expected同时改四种合法binding，仍拒绝；不是仅依赖signer prevalidation来测试verifier。所有ReviewFocus在本task明确落test。
+- [x] `go test ./internal/runtime/controlprotocol -run 'TestExecStart' -count=1` 观察behaviorRED，最小实现后focusedGREEN。
+- [x] 一次完整 `go test -race ./internal/runtime/controlprotocol -count=1`、packagevet/gofmt/diffcheck，自审即stage本task3文件commit `feat(controlprotocol): authenticate bounded operation exec starts`；独立spec+qualityreview。
+- [x] controller冻结head，全仓test（无fixtureexplicit）/vet/build必要并行checks；etcd源未变不重复nativefaultsuite，保留216PASS实际native证据。完整branchrangefinalreview、一次发现fixwave+scoped复核，逐项保留rulings/declined/未完overall要求；然后继续effect intent接线。
 
 ## Self-review
 
