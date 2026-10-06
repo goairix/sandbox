@@ -43,13 +43,15 @@
 
 **Interfaces:** `(*Backend).RegisterExecIssuer(context.Context)(*CommandIssuerEntry,error)`、`(*Backend).LoadExecIssuer(context.Context,string)(*CommandIssuerEntry,error)`。producerTask1types/factory/codec；consumes ObservePublicationClock/freshManagementVerifier/baseComparisons/validatedresponsehelpers；readDomain丢弃Txn header，新registry private fixedpointreader保留并strict验证response，复用concretehelpers，不改既有sharedprotocol。不调用ExecIssuer.SignStart，futureeffectconsumer须freshverify+exactregistryfences。
 
-- [ ] TDD `TestExecIssuerRegistry` nativefreshscope/canonicalwire/firstCRev/Lease0/replay/copy/expiredhistorical/zeroGrant；`TestExecIssuerRegistryRejects` freshwrongrole/root/binding/time/nilctx/provider/strictresponse/recordlease/mutation/epoch/identity拒绝与无wrongwrite；`TestExecIssuerRegistryCompetition` validdifferentkeys同UUID最多一body；`TestExecIssuerRegistryReplyLoss` 实际committedreplyloss后Load/replay不重写；`TestExecIssuerRegistryDelayedCAS` 实际before-server完整Txn延迟与另一body竞争，最终不覆盖，hook worker必须boundedjoin。
-- [ ] controller提供新唯一ownedmanualfixture endpoints/project/containers，worker用该fixture跑focused实behaviorRED（不以missingAPI编译错代替）。实现精确流程/bounds/shape/unknown，所有authority读取固定linearpoint，无新Lease；nativefailpathctx/release/join资源先于cleanup。
-- [ ] focusedGREEN/targetednative-race、packagevet/gofmt/diffcheck；记录真实cluster/version/top-levelSKIP是否0、CAS/point/Grant0/wiresamples，自审即commit `feat(etcd): register immutable command issuer certificates`。独立spec+qualityreview后controller最终gates。
-- [ ] controllersource冻结后freshownedscript完整nativefault-race、配置manualfixture全仓test/vet/build必要并行checks，真实通过/SKIP/expectedfaultwarnings与fixtureownership cleanup核对；完整base..head整分支finalreview、一次finalfixwave/scoped复核、逐项rulings/declined保存Git，继续originalcap effect intent计划。
+- [x] TDD `TestExecIssuerRegistry` nativefreshscope/canonicalwire/firstCRev/Lease0/replay/copy/expiredhistorical/zeroGrant；`TestExecIssuerRegistryRejects` freshwrongrole/root/binding/time/nilctx/provider/strictresponse/recordlease/mutation/epoch/identity拒绝与无wrongwrite；`TestExecIssuerRegistryCompetition` validdifferentkeys同UUID最多一body；`TestExecIssuerRegistryReplyLoss` 实际committedreplyloss后Load/replay不重写；`TestExecIssuerRegistryDelayedCAS` 实际before-server完整Txn延迟与另一body竞争，最终不覆盖，hook worker必须boundedjoin。
+- [x] controller提供新唯一ownedmanualfixture endpoints/project/containers，worker用该fixture跑focused实behaviorRED（不以missingAPI编译错代替）。实现精确流程/bounds/shape/unknown，所有authority读取固定linearpoint，无新Lease；nativefailpathctx/release/join资源先于cleanup。
+- [x] focusedGREEN/targetednative-race、packagevet/gofmt/diffcheck；记录真实cluster/version/top-levelSKIP是否0、CAS/point/Grant0/wiresamples，自审即commit `feat(etcd): register immutable command issuer certificates`。独立spec+qualityreview后controller最终gates。
+- [x] controllersource冻结后freshownedscript完整nativefault-race、配置manualfixture全仓test/vet/build必要并行checks，真实通过/SKIP/expectedfaultwarnings与fixtureownership cleanup核对；完整base..head整分支finalreview、一次finalfixwave/scoped复核、逐项rulings/declined保存Git，继续originalcap effect intent计划。
 
 ## Self-review
 
 两task共享client.go中的新字段和codec，Task1提供完整签名，Task2只消费不重写；Task1tests与schema/optionalcfg规则一致，Task2测试真正nativeCAS+replyloss并有join。所有ReviewFocus分配具体测试，readOnly metadata loader不fresh且无cap、Registerfreshcrypto但不targetactivation，两者没有互相冒充。少量全局issuer永久retention成本显式不由B_live/N掩盖，后续safeGC仍必做。没有含糊promise把CAS unknown或年龄变成executionabort。
 
 Task1独立gate通过23d9124；focused/race/options/vet/gofmt/diff通过。Task2私有pointreader裁决见本单元ledger：保留完整Txn header以满足正revision/nestedshape，不修改既有readDomain语义；固定identity/restore/registry读开销仍不随idleN增长。
+
+Task2 source0e2a67e + finalfixd82e276／67129ab 闭环：whole实际25124/25124覆盖、scoped两项ADDRESSED、新增0findings；fresh native230PASS0SKIP0FAIL98.792s、全仓native82.873s、vet/build/diffPASS，全部owned资源清理。完整审查及9条裁决见2026-10-07-etcd-command-authority-final-review.md，实际验证／历史失败见2026-10-07-etcd-command-authority-verification.md。整体 phases1–5 未完成，继续下一 effect 单元。
