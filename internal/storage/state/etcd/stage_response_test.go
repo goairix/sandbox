@@ -1,10 +1,13 @@
 package etcd
 
 import (
-	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/api/v3/mvccpb"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func TestStageReceiptStrict(t *testing.T) {
@@ -50,5 +53,76 @@ func TestStageReceiptStrict(t *testing.T) {
 		got, err := decodeReceipt(kv, ref)
 		require.NoError(t, err)
 		require.Equal(t, outcome, got)
+	}
+}
+
+// Only a no-op Delete may describe the revision before the receipt write.
+// Pinning the other response kinds here prevents widening that exception.
+func TestStageResponseHeaderBoundaries(t *testing.T) {
+	headers := []struct {
+		name                    string
+		header                  *pb.ResponseHeader
+		wantDelete0, wantStrict bool
+	}{
+		{"nil", nil, true, true},
+		{"equal-zero-cluster", &pb.ResponseHeader{Revision: 10}, true, true},
+		{"equal-matching-cluster", &pb.ResponseHeader{ClusterId: 7, Revision: 10}, true, true},
+		{"outer-minus-one-zero-cluster", &pb.ResponseHeader{Revision: 9}, true, false},
+		{"outer-minus-one-matching-cluster", &pb.ResponseHeader{ClusterId: 7, Revision: 9}, true, false},
+		{"outer-minus-two", &pb.ResponseHeader{Revision: 8}, false, false},
+		{"future", &pb.ResponseHeader{Revision: 11}, false, false},
+		{"zero", &pb.ResponseHeader{}, false, false},
+		{"negative", &pb.ResponseHeader{Revision: -1}, false, false},
+		{"foreign-equal", &pb.ResponseHeader{ClusterId: 8, Revision: 10}, false, false},
+		{"foreign-outer-minus-one", &pb.ResponseHeader{ClusterId: 8, Revision: 9}, false, false},
+	}
+	for _, kind := range []string{"Delete0", "Delete1", "Put", "ReceiptPut", "Range"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, tc := range headers {
+				t.Run(tc.name, func(t *testing.T) {
+					outer := &pb.ResponseHeader{ClusterId: 7, Revision: 10}
+					response := &clientv3.TxnResponse{Header: outer, Succeeded: true}
+					if kind == "Range" {
+						b := &Backend{clusterID: 7, identityKey: "identity", restoreKey: "restore", identityValue: "id", restoreEpoch: "epoch"}
+						for i, key := range []string{"identity", "restore"} {
+							point := &pb.RangeResponse{Count: 1, Kvs: []*mvccpb.KeyValue{{Key: []byte(key), Value: []byte([]string{"id", "epoch"}[i]), CreateRevision: 1, ModRevision: 1}}}
+							if i == 0 {
+								point.Header = tc.header
+							}
+							response.Responses = append(response.Responses, &pb.ResponseOp{Response: &pb.ResponseOp_ResponseRange{ResponseRange: point}})
+						}
+						_, err := b.stageEvidencePoints(response, []string{"identity", "restore"})
+						if tc.wantStrict {
+							require.NoError(t, err)
+						} else {
+							require.ErrorIs(t, err, ErrOutcomeUnknown)
+						}
+						return
+					}
+					writes := []Write{{Key: "business", Delete: kind != "Put"}}
+					receipt := &pb.PutResponse{}
+					var business *pb.ResponseOp
+					if kind == "Put" {
+						business = &pb.ResponseOp{Response: &pb.ResponseOp_ResponsePut{ResponsePut: &pb.PutResponse{Header: tc.header}}}
+					} else {
+						deleted := &pb.DeleteRangeResponse{Header: tc.header}
+						if kind == "Delete1" {
+							deleted.Deleted = 1
+						}
+						if kind == "ReceiptPut" {
+							deleted.Header = &pb.ResponseHeader{Revision: 9}
+							receipt.Header = tc.header
+						}
+						business = &pb.ResponseOp{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: deleted}}
+					}
+					response.Responses = []*pb.ResponseOp{business, {Response: &pb.ResponseOp_ResponsePut{ResponsePut: receipt}}}
+					want := tc.wantStrict
+					if kind == "Delete0" {
+						want = tc.wantDelete0
+					}
+					require.Equal(t, want, stageCommitResponses(response, writes))
+				})
+			}
+		})
 	}
 }

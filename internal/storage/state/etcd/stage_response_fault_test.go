@@ -277,10 +277,10 @@ func TestStageResponseEvidence(t *testing.T) {
 		require.ErrorIs(t, err, ErrConflict)
 	})
 	t.Run("Delete", func(t *testing.T) {
-		for _, bad := range []string{"zero", "one", "after-put", "negative", "many", "prev", "nested", "outer-minus-two", "future", "zero-revision", "foreign"} {
+		for _, bad := range []string{"zero", "one", "one-outer-minus-one", "after-put", "negative", "many", "prev", "nested", "outer-minus-two", "future", "zero-revision", "foreign"} {
 			t.Run(bad, func(t *testing.T) {
 				key := b.namespace.Root() + "p/07/controls/delete-" + bad
-				if bad == "one" {
+				if bad == "one" || bad == "one-outer-minus-one" {
 					_, err := raw.Put(ctx, key, "exists")
 					require.NoError(t, err)
 				}
@@ -298,6 +298,12 @@ func TestStageResponseEvidence(t *testing.T) {
 					d := r.Responses[len(writes)-1].GetResponseDeleteRange()
 					t.Logf("native delete=%+v outer=%+v", d, r.Header)
 					switch bad {
+					case "one-outer-minus-one":
+						require.True(t, r.Succeeded)
+						require.Equal(t, int64(1), d.Deleted, "native CAS must actually delete the seeded key")
+						require.NotNil(t, d.Header)
+						require.Equal(t, r.Header.Revision, d.Header.Revision)
+						d.Header.Revision = r.Header.Revision - 1
 					case "negative":
 						d.Deleted = -1
 					case "many":
