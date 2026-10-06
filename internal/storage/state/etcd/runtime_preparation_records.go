@@ -64,13 +64,13 @@ type RuntimeMountIntentRecord struct {
 }
 
 func validPreparationClaim(c DispatchClaimReference) bool {
-	return canonicalDispatchUUID(c.ClaimID) && c.ClaimID != "00000000-0000-0000-0000-000000000000" && validDomainSegment(c.WorkerID) && c.CreateRevision > 0 && c.LeaseID > 0
+	return validPreparationUUID(c.ClaimID) && validDomainSegment(c.WorkerID) && c.CreateRevision > 0 && c.LeaseID > 0
 }
 func validPreparationAttempt(a StageAttemptLocator, hash, epoch, stage string) bool {
-	return a.Validate() == nil && a.Partition == hashPartition(hash) && a.RestoreEpoch == epoch && a.StageID == stage
+	return a.Validate() == nil && validPreparationUUID(a.AttemptID) && a.Partition == hashPartition(hash) && a.RestoreEpoch == epoch && a.StageID == stage
 }
 func (r RuntimeBindingRecord) Validate() error {
-	if !validOwnership(r.Version, r.WorkspaceHash, r.SandboxID, r.IntentID, r.RestoreEpoch, r.Generation) || r.Snapshot.Validate() != nil || !validDomainExpiry(r.ExpiresAt) || !canonicalDispatchUUID(r.OperationID) || !validHexDigest(r.PayloadDigest) || !validHexDigest(r.CertificateDigest) || (r.WorkspaceMode != "plain" && r.WorkspaceMode != "fuse") || r.Runtime.Validate() != nil || !validPreparationClaim(r.Claim) || !validPreparationAttempt(r.Attempt, r.WorkspaceHash, r.RestoreEpoch, "runtime_bind") {
+	if !validOwnership(r.Version, r.WorkspaceHash, r.SandboxID, r.IntentID, r.RestoreEpoch, r.Generation) || r.Snapshot.Validate() != nil || !validDomainExpiry(r.ExpiresAt) || !validPreparationUUID(r.OperationID) || !validHexDigest(r.PayloadDigest) || !validHexDigest(r.CertificateDigest) || (r.WorkspaceMode != "plain" && r.WorkspaceMode != "fuse") || r.Runtime.Validate() != nil || !validPreparationClaim(r.Claim) || !validPreparationAttempt(r.Attempt, r.WorkspaceHash, r.RestoreEpoch, "runtime_bind") {
 		return ErrInvalidRecord
 	}
 	return nil
@@ -92,7 +92,7 @@ func (r RuntimeIndexRecord) Validate() error {
 	return nil
 }
 func (r RuntimeMountIntentRecord) Validate() error {
-	if !validOwnership(r.Version, r.WorkspaceHash, r.SandboxID, r.IntentID, r.RestoreEpoch, r.Generation) || r.Runtime.Validate() != nil || !validHexDigest(r.CertificateDigest) || !canonicalDispatchUUID(r.DispatchOperationID) || !canonicalDispatchUUID(r.OperationID) || !validPreparationClaim(r.Claim) || !validPreparationAttempt(r.Attempt, r.WorkspaceHash, r.RestoreEpoch, "runtime_mount") || !((r.WorkspaceMode == "plain" && r.MountAttempt == 0) || (r.WorkspaceMode == "fuse" && r.MountAttempt == 1)) {
+	if !validOwnership(r.Version, r.WorkspaceHash, r.SandboxID, r.IntentID, r.RestoreEpoch, r.Generation) || r.Runtime.Validate() != nil || !validHexDigest(r.CertificateDigest) || !validPreparationUUID(r.DispatchOperationID) || !validPreparationUUID(r.OperationID) || !validPreparationClaim(r.Claim) || !validPreparationAttempt(r.Attempt, r.WorkspaceHash, r.RestoreEpoch, "runtime_mount") || !((r.WorkspaceMode == "plain" && r.MountAttempt == 0) || (r.WorkspaceMode == "fuse" && r.MountAttempt == 1)) {
 		return ErrInvalidRecord
 	}
 	return nil
@@ -145,7 +145,14 @@ func strictPreparationMetadata(wire []byte, typ reflect.Type) error {
 	fields := make(map[string]reflect.Type, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
-		fields[f.Tag.Get("json")] = f.Type
+		if f.Anonymous {
+			for j := 0; j < f.Type.NumField(); j++ {
+				nested := f.Type.Field(j)
+				fields[nested.Tag.Get("json")] = nested.Type
+			}
+		} else {
+			fields[f.Tag.Get("json")] = f.Type
+		}
 	}
 	seen := make(map[string]bool, len(fields))
 	for dec.More() {
@@ -174,4 +181,8 @@ func strictPreparationMetadata(wire []byte, typ reflect.Type) error {
 		return ErrCorruptRecord
 	}
 	return nil
+}
+
+func validPreparationUUID(value string) bool {
+	return canonicalDispatchUUID(value) && value != "00000000-0000-0000-0000-000000000000"
 }

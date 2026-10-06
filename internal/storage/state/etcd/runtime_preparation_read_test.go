@@ -130,3 +130,33 @@ func TestRuntimePreparationMountMetadata(t *testing.T) {
 	_, err = b.LoadRuntimeMountIntent(ctx, w, r.IntentID)
 	require.ErrorIs(t, err, ErrCorruptRecord)
 }
+
+func TestRuntimePreparationRejectsDuplicateReceipt(t *testing.T) {
+	b, raw, w, r, keys := preparationMetadataFixture(t)
+	ctx := context.Background()
+	values, err := b.readDomain(ctx, keys...)
+	require.NoError(t, err)
+	var deletes, puts []clientv3.Op
+	for i, key := range keys {
+		deletes = append(deletes, clientv3.OpDelete(key))
+		wire := string(values[i].Value)
+		if i == 3 {
+			wire = strings.Replace(wire, `"version":1`, `"version":1,"version":1`, 1)
+		}
+		puts = append(puts, clientv3.OpPut(key, wire))
+	}
+	_, err = raw.Txn(ctx).Then(deletes...).Commit()
+	require.NoError(t, err)
+	_, err = raw.Txn(ctx).Then(puts...).Commit()
+	require.NoError(t, err)
+	entry, err := b.LoadRuntimeBinding(ctx, w, r.IntentID)
+	require.ErrorIs(t, err, ErrCorruptReceipt)
+	require.Nil(t, entry)
+}
+
+func TestRuntimePreparationRejectsZeroOperationUUID(t *testing.T) {
+	_, _, _, r, _ := preparationMetadataFixture(t)
+	r.OperationID = "00000000-0000-0000-0000-000000000000"
+	_, err := encodeDomainRecord(r)
+	require.ErrorIs(t, err, ErrInvalidRecord)
+}

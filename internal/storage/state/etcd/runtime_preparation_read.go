@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
@@ -131,6 +133,11 @@ func (b *Backend) loadRuntimePreparation(ctx context.Context, w WorkspaceIdentit
 			return nil, ErrCorruptReceipt
 		}
 		return nil, err
+	}
+	for i := range receiptIndexes {
+		if values[i] == nil || len(values[i].Value) > maxRecordBytes || strictPreparationMetadata(values[i].Value, reflect.TypeOf(stageReceipt{})) != nil {
+			return nil, ErrCorruptReceipt
+		}
 	}
 	bundle.Dispatch, err = b.decodeRuntimeDispatchEntry(values[:3], w, intent, dk, ik, drk, d.Attempt)
 	if err != nil {
