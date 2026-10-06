@@ -47,6 +47,26 @@ cleanup() {
   fi
   echo "kernel boundary verified: canonical native suite; owned inventories empty; evidence $evidence"
 }
+# Only wait after observing that this exact local attach client has exited.
+# A client surviving TERM gets a bounded grace period, then KILL and reaping.
+terminate_attach() {
+  local pid=$1 grace forced=false attach_exit=0
+  kill -TERM "$pid" 2>/dev/null || true
+  grace=$((SECONDS+2))
+  while kill -0 "$pid" 2>/dev/null && (( SECONDS < grace )); do sleep 0.1; done
+  if kill -0 "$pid" 2>/dev/null; then
+    forced=true
+    kill -KILL "$pid" 2>/dev/null || true
+    grace=$((SECONDS+2))
+    while kill -0 "$pid" 2>/dev/null && (( SECONDS < grace )); do sleep 0.1; done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'attachPID=%s forced=%s joined=false; client did not exit\n' "$pid" "$forced" | tee "$evidence/$mode-termination.txt" >&2
+    return 1
+  fi
+  wait "$pid" || attach_exit=$?
+  printf 'attachPID=%s attachExit=%s forced=%s joined=true\n' "$pid" "$attach_exit" "$forced" | tee "$evidence/$mode-termination.txt" >&2
+}
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -92,9 +112,10 @@ for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role 
  while kill -0 "$attach" 2>/dev/null; do
    if (( SECONDS >= deadline )); then
      echo "attach timeout for $mode" >&2
-     docker kill "$name" >>"$evidence/$mode.log" 2>&1 || true
-     kill "$attach" 2>/dev/null || true
-     wait "$attach" || true
+     kill_exit=0
+     docker kill "$name" >>"$evidence/$mode.log" 2>&1 || kill_exit=$?
+     printf 'container kill exit=%s\n' "$kill_exit" >>"$evidence/$mode.log"
+     terminate_attach "$attach" || true
      exit 1
    fi
    sleep 0.2
@@ -103,11 +124,17 @@ for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role 
  wait "$attach" || attach_exit=$?
  docker inspect "$name" >"$evidence/$mode-exited.json"
  terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}' "$name")
+ expected=0
+ [[ "$mode" != reject-securebits ]] || expected=2
+ # An attachment can fail while its container keeps running. Do not enter
+ # docker wait unless actual terminal state and attachment outcome agree.
+ if [[ "$attach_exit" != "$expected" || "$terminal" != "exited false false $expected" ]]; then
+   printf 'mode=%s attachExit=%s terminal=%s waitCommandExit=not-run processWait=not-run\n' "$mode" "$attach_exit" "$terminal" | tee "$evidence/$mode-result.txt" >&2
+   exit 1
+ fi
  wait_exit=0
  waited=$(docker wait "$name") || wait_exit=$?
  printf 'mode=%s attachExit=%s terminal=%s waitCommandExit=%s processWait=%s\n' "$mode" "$attach_exit" "$terminal" "$wait_exit" "$waited" | tee "$evidence/$mode-result.txt"
- expected=0
- [[ "$mode" != reject-securebits ]] || expected=2
  [[ "$attach_exit" == "$expected" && "$terminal" == "exited false false $expected" && "$wait_exit" == 0 && "$waited" == "$expected" ]] || exit 1
  if [[ "$mode" == reject-securebits ]]; then
    grep -Fq 'AllThreadsSyscall6 results differ between threads' "$evidence/$mode.log"
