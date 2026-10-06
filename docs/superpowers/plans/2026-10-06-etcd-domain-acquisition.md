@@ -131,7 +131,7 @@ Acquire reads request/owner/fence plus proposed control/snapshot/intent/placemen
 
 Encode seven permanent records, prepareMutation bounds before anyGrant. BeginStage(requestID,"acquire",acquireStageTTL=30*time.Second) then CommitStage. The guard Lease TTL is independent of business TTL (≤365days), never pass businessTTL toBeginStage. Return exactReference on commitunknown/CASconflict, never call absence proof or erase intent/owner. Defer bounded best-effort Release originalStage, store failure separately inGuardCleanupError. Abort resolver remains separately explicit API: caller persists/refetches request/intent and resolves exact stage; do not abort wholependingrequest. No automaticruntime work or claim inferred fromcommitted stage.
 
-- [ ] 写真实三成员并发与unknown测试，先观察RED。
+- [x] 写真实三成员并发与unknown测试，先观察RED。
 
 ```go
 result, err := b.AcquireIntent(ctx, input)
@@ -144,10 +144,10 @@ require.Equal(t,"pending",request.Phase)
 // real Range verifies owner/fence/control/snapshot/intent/request/placement/receipt share ModRevision and Lease0.
 ```
 
-- [ ] 实现point read helper、公开read methods、bounded atomicacquire。并发同workspace16~32请求仅一个创建；其他occupied或exactstageCASconflict，owner不能被删除。跨partition相同sandboxID竞争只能一胜者；相同幂等key不同workspace和TTL返回conflict；相同digest重放保留原ID/TTL/配置且无rewrite。
-- [ ] 验证generation永久递增及MaxInt64不写；未知commit丢响应后resolver恢复committed且request仍pending；迟到完整Txn先abort再放行不创建任何领域record。原restore更改、leased/corrupt owner/fence/control/snapshot/request/intent，storage mismatch及写入预算失败都不能授权新申请。客户端input在提交前更改不能影响已固定mutation；48小时/365天与短业务TTL不改变固定30秒stageLease。
-- [ ] `bash scripts/test-etcd-state.sh -v`，真实race无skip；`go test ./...`、`go vet ./internal/storage/state/etcd`、sandbox构建、`git diff --check`。
-- [ ] spec review→quality review，修复并复测；保存实际结果，单独提交领域申请事务。
+- [x] 实现point read helper、公开read methods、bounded atomicacquire。并发同workspace16~32请求仅一个创建；其他occupied或exactstageCASconflict，owner不能被删除。跨partition相同sandboxID竞争只能一胜者；相同幂等key不同workspace和TTL返回conflict；相同digest重放保留原ID/TTL/配置且无rewrite。
+- [x] 验证generation永久递增及MaxInt64不写；未知commit丢响应后resolver恢复committed且request仍pending；迟到完整Txn先abort再放行不创建任何领域record。原restore更改、leased/corrupt owner/fence/control/snapshot/request/intent，storage mismatch及写入预算失败都不能授权新申请。客户端input在提交前更改不能影响已固定mutation；48小时/365天与短业务TTL不改变固定30秒stageLease。
+- [x] `bash scripts/test-etcd-state.sh -v`，真实race无skip；`go test ./...`、`go vet ./internal/storage/state/etcd`、sandbox构建、`git diff --check`。
+- [x] spec review→quality review，修复并复测；保存实际结果，单独提交领域申请事务。
 
 ## 计划审查补充
 
