@@ -142,9 +142,9 @@ Bind先以private claim和已提交dispatch派生CertificateContext，clock与Ve
 
 Consume重新核验dispatch及binding/cert/index/receipt的同首次revision、signature/context和clock；固定一个永久mount intent。mode=fuse只消费MountAttempt=1和内部新OperationID，在实际mount发送前必须成功；mode=plain写明确MountAttempt=0/no-mount决策（内部OperationID仍UUID，ready证明MountOperationID必须空），不从absence猜。原claim24+dispatch6+binding四record八条+mount absence一条+write一条+预留14，共54。已有intent返回原operation/creator，不换ID或重新mount；元数据本身不授权外部调用。stage30s，Begin后ctx/live/clock重检，cleanup只原Stage；回执unknown不能当abort。
 
-- [ ] 真实signed binding/index原子RED→GREEN；两个workspace同UID不同Boot只一个预留；新claim恢复旧binding，不换Runtime/cert/expiry，invalid root/clock/sign/context beforeGrant拒绝。
-- [ ] 先消费FUSE mount=1、重放保持原operation，plain显式no-mount=0；旧binding/boot/restore/claim/control变化或wrong receipt拒绝，unknown/lost reply/delayed完整Txn仲裁无半套，caller/output/root copies。
-- [ ] 真实定向race/vet/gofmt/diff、自审即独立提交，再spec→quality审查。不发送runtime/mount调用。
+- [x] 真实signed binding/index原子RED→GREEN；两个workspace同UID不同Boot只一个预留；新claim恢复旧binding，不换Runtime/cert/expiry，invalid root/clock/sign/context beforeGrant拒绝。
+- [x] 先消费FUSE mount=1、重放保持原operation，plain显式no-mount=0；旧binding/boot/restore/claim/control变化或wrong receipt拒绝，unknown/lost reply/delayed完整Txn仲裁无半套，caller/output/root copies。
+- [x] 真实定向race/vet/gofmt/diff、自审即独立提交，再spec→quality审查。不发送runtime/mount调用。
 
 ## Task 3：永久发布journal/proof与历史恢复
 
