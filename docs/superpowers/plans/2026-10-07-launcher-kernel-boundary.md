@@ -48,10 +48,15 @@ Task1 gate：69ab0a1/524ae7d/c2464ea，Root securebits 澄清 cbbfc84；独立�
 
 **Interfaces:** 消费Task1已报告公共API与actualprivatefixedtest-mode。真实parent→monitor→用户使用已编译同一CGO0 testbinary固定模式；Task2完整测试driver负责明确Credential1000/1000/groups0/AmbientCaps空/stdio/cancel释放≤5秒wait。父读取活着的用户每个实际线程proc，stdout只传同步或诊断，不能自认证capset。
 
-- [ ] 写TestKernelUserIsolation真实额外thread、rootexec父/monitor状态与用户四UID/GID/groups/五capset/NNP，独立parent实际proc证据；setuid0/capraise/NNP关闭/ptrace/proc environ/fd/secret反例及仅stdio/无管理env。编译可运行stub或真实缺失检查行为RED；只改变oracle前置错误不算RED。Root owns实际LinuxRED/GREEN必要执行。
-- [ ] 写TestKernelWorkerCleanup与实际Fatalchildpositive/negative independentoracle；先登记release/cancel/有界join后可能Fatal，恢复hooks/关闭FD晚于join，缺证据/没wait必须不打印成功marker。保留每个user/helper实际退出和超时，真实错误不可被预存t.Failed掩盖。
-- [ ] canonical脚本实际inspect既有pinnedimagearchitecture，编译CGO0 testbinary，fullnativepositive0FAIL0SKIP与必要freshnegativecontainers；上述exactresource/security/terminal/trap/inventory契约。worker仅bashsyntax/编译+freeze，请Root实际执行后DONE；清理只有exactowned资源，脚本个别rm没有观测则不claim。
-- [ ] focusedGREEN/race（host适用纯model；Linuxnative与race区别）、pkgvet/gofmt/diff/source自审即小commit；fullreport真实proc/FD/syscall结果、setup/behavior错误、nativeexit/source/counts、可测RSS/FD/threads，明确没有原镜像/全N/namespace/后代terminal/远端settlement证明；独立gate。
+- [x] 写TestKernelUserIsolation真实额外thread、rootexec父/monitor状态与用户四UID/GID/groups/五capset/NNP，独立parent实际proc证据；setuid0/capraise/NNP关闭/ptrace/proc environ/fd/secret反例及仅stdio/无管理env。编译可运行stub或真实缺失检查行为RED；只改变oracle前置错误不算RED。Root owns实际LinuxRED/GREEN必要执行。
+- [x] 写TestKernelWorkerCleanup与实际Fatalchildpositive/negative independentoracle；先登记release/cancel/有界join后可能Fatal，恢复hooks/关闭FD晚于join，缺证据/没wait必须不打印成功marker。保留每个user/helper实际退出和超时，真实错误不可被预存t.Failed掩盖。
+- [x] canonical脚本实际inspect既有pinnedimagearchitecture，编译CGO0 testbinary，fullnativepositive0FAIL0SKIP与必要freshnegativecontainers；上述exactresource/security/terminal/trap/inventory契约。worker仅bashsyntax/编译+freeze，请Root实际执行后DONE；清理只有exactowned资源，脚本个别rm没有观测则不claim。
+- [x] focusedGREEN/race（host适用纯model；Linuxnative与race区别）、pkgvet/gofmt/diff/source自审即小commit；fullreport真实proc/FD/syscall结果、setup/behavior错误、nativeexit/source/counts、可测RSS/FD/threads，明确没有原镜像/全N/namespace/后代terminal/远端settlement证明；独立gate。
+
+Task2 gate：2c5389c/118dbfc/7ba4d27；独立原BASE42b5b9d..7ba4d27审查 C0/I1/M0，I1在6b7c58b修复并经一次scoped复核全部关闭 C0/I0/M0。用户隔离与Fatal真实Linux证据1372PASS/0FAIL/0SKIP；canonical九实例原a833脚本actualexit0，后续2378脚本仅异常等待路径调整，两个实际Bash故障模拟RED→GREEN及原九实例结果条件复核，不声称最新脚本重新native执行。33owned实例/33volume均有individualrm0与emptyinventory证据。Task2产品四项已验收；以下controller最终gate保留未完成状态。
+
+## Final controller gate
+
 - [ ] controller fullhostpkg/race、actualcanonicalLinux、新repo test/vet/build/scopeddiff及一次fullNEWdelta+namedaffectedintegration review；ONEgroupedfinalfix/scoped复核如必要，永久保存全部裁定/代价/证据再清自己workspace。继续完整认证target/monitor后代排空与整体phases1–5，不能停在kernel前置层。
 
 ## 自审
