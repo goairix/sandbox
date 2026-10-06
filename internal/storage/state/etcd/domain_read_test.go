@@ -108,7 +108,7 @@ func TestDomainReadMissingAndContextLinkage(t *testing.T) {
 }
 
 func TestDomainReadWrongResponseKeyAndEnvelope(t *testing.T) {
-	for _, kind := range []string{"wrong key", "extra kv", "nil range", "wrong cluster", "nil header", "nil response"} {
+	for _, kind := range []string{"wrong key", "extra kv", "nil range", "nil kv", "count", "more", "response count", "wrong cluster", "nil header", "nil response"} {
 		t.Run(kind, func(t *testing.T) {
 			b, _ := integrationBackend(t)
 			input := acquisitionInput(t, kind)
@@ -125,6 +125,14 @@ func TestDomainReadWrongResponseKeyAndEnvelope(t *testing.T) {
 					r.Kvs = append(r.Kvs, r.Kvs[0])
 				case "nil range":
 					response.Responses[0] = nil
+				case "nil kv":
+					response.Responses[0].GetResponseRange().Kvs[0] = nil
+				case "count":
+					response.Responses[0].GetResponseRange().Count++
+				case "more":
+					response.Responses[0].GetResponseRange().More = true
+				case "response count":
+					response.Responses = nil
 				case "wrong cluster":
 					response.Header.ClusterId++
 				case "nil header":
@@ -135,7 +143,12 @@ func TestDomainReadWrongResponseKeyAndEnvelope(t *testing.T) {
 				return response, nil
 			}}
 			_, err = b.LoadRequest(ctx, input.Principal, input.IdempotencyKey)
-			require.Error(t, err)
+			want := ErrCorruptRecord
+			if kind == "wrong cluster" || kind == "nil header" || kind == "nil response" {
+				want = ErrIdentityMismatch
+			}
+			require.ErrorIs(t, err, want)
+			require.NotErrorIs(t, err, ErrCorruptReceipt)
 		})
 	}
 }

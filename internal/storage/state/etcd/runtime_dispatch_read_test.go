@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -311,5 +312,102 @@ func TestRuntimeDispatchSecondSnapshot(t *testing.T) {
 	}
 	if _, err := b.LoadRuntimeDispatch(context.Background(), w, "intent"); !errors.Is(err, ErrIdentityMismatch) {
 		t.Fatalf("base metadata missing accepted: %v", err)
+	}
+}
+
+func TestRuntimeDispatchLoadPointResponseClassification(t *testing.T) {
+	// Wrap the real second Txn response, so this exercises the public loader's
+	// reader checks rather than jumping straight to the entry decoder.
+	for _, index := range []int{0, 1, 2} {
+		for _, kind := range []string{"wrong key", "nil response", "nil range", "nil kv", "extra kv", "more", "count"} {
+			t.Run(fmt.Sprintf("point-%d/%s", index, kind), func(t *testing.T) {
+				b, raw := integrationBackend(t)
+				w, r, input, dk, ik, rk := dispatchTestRecords(t, b)
+				receipt := stageReceipt{Version: 1, StageReference: r.Attempt.reference(domainHash), Outcome: OutcomeCommitted}
+				if _, err := raw.Txn(context.Background()).Then(clientv3.OpPut(dk, dispatchTestWire(t, r)), clientv3.OpPut(ik, dispatchTestWire(t, input)), clientv3.OpPut(rk, dispatchTestWire(t, receipt))).Commit(); err != nil {
+					t.Fatal(err)
+				}
+				b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+					return len(ops) == 3 && ops[2].IsGet() && string(ops[2].KeyBytes()) == rk
+				}, after: func(response *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if response == nil || !response.Succeeded || len(response.Responses) != 3 {
+						t.Fatal("fixture did not produce a real successful three-point Txn response")
+					}
+					point := response.Responses[index].GetResponseRange()
+					switch kind {
+					case "wrong key":
+						point.Kvs[0].Key = []byte("/wrong/receipt")
+					case "nil response":
+						response.Responses[index] = nil
+					case "nil range":
+						response.Responses[index].Response = nil
+					case "nil kv":
+						point.Kvs[0] = nil
+					case "extra kv":
+						point.Kvs = append(point.Kvs, point.Kvs[0])
+						point.Count++
+					case "more":
+						point.More = true
+					case "count":
+						point.Count++
+					}
+					return response, nil
+				}}
+				entry, err := b.LoadRuntimeDispatch(context.Background(), w, "intent")
+				want, other := ErrCorruptRecord, ErrCorruptReceipt
+				if index == 2 {
+					want, other = other, want
+				}
+				if entry != nil || !errors.Is(err, want) || errors.Is(err, other) {
+					t.Fatalf("point %d %s: entry=%+v err=%v want=%v only", index, kind, entry, err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestRuntimeDispatchLoadWholeResponseClassification(t *testing.T) {
+	for _, kind := range []string{"response count", "cluster", "nil header", "nil response", "RPC error"} {
+		t.Run(kind, func(t *testing.T) {
+			b, raw := integrationBackend(t)
+			w, r, input, dk, ik, rk := dispatchTestRecords(t, b)
+			receipt := stageReceipt{Version: 1, StageReference: r.Attempt.reference(domainHash), Outcome: OutcomeCommitted}
+			if _, err := raw.Txn(context.Background()).Then(clientv3.OpPut(dk, dispatchTestWire(t, r)), clientv3.OpPut(ik, dispatchTestWire(t, input)), clientv3.OpPut(rk, dispatchTestWire(t, receipt))).Commit(); err != nil {
+				t.Fatal(err)
+			}
+			rpcError := errors.New("injected domain read RPC failure")
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool { return len(ops) == 3 && string(ops[2].KeyBytes()) == rk }, after: func(response *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch kind {
+				case "response count":
+					response.Responses = response.Responses[:2]
+				case "cluster":
+					response.Header.ClusterId++
+				case "nil header":
+					response.Header = nil
+				case "nil response":
+					return nil, nil
+				case "RPC error":
+					return response, rpcError
+				}
+				return response, nil
+			}}
+			entry, err := b.LoadRuntimeDispatch(context.Background(), w, "intent")
+			want := ErrIdentityMismatch
+			if kind == "response count" {
+				want = ErrCorruptRecord
+			}
+			if kind == "RPC error" {
+				want = rpcError
+			}
+			if entry != nil || !errors.Is(err, want) || errors.Is(err, ErrCorruptReceipt) {
+				t.Fatalf("whole %s: entry=%+v err=%v want=%v", kind, entry, err, want)
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"unicode/utf8"
@@ -45,6 +46,10 @@ func (b *Backend) LoadRuntimeDispatch(ctx context.Context, w WorkspaceIdentity, 
 	}
 	values, err := b.readDomain(ctx, dk, ik, rk)
 	if err != nil {
+		var point *domainPointReadError
+		if errors.As(err, &point) && point.index == 2 && point.key == rk {
+			return nil, ErrCorruptReceipt
+		}
 		return nil, err
 	}
 	return b.decodeRuntimeDispatchEntry(values, w, intentID, dk, ik, rk, record.Attempt)

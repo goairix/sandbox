@@ -10,6 +10,18 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// domainPointReadError preserves attribution for one malformed point response.
+// Generic domain readers retain their existing ErrCorruptRecord contract.
+type domainPointReadError struct {
+	index int
+	key   string
+}
+
+func (e *domainPointReadError) Error() string {
+	return fmt.Sprintf("%v: invalid point response at index %d", ErrCorruptRecord, e.index)
+}
+func (e *domainPointReadError) Unwrap() error { return ErrCorruptRecord }
+
 // readDomain takes one linearizable, identity-fenced snapshot of point keys.
 // Read evidence never grants permission to operate a runtime.
 func (b *Backend) readDomain(ctx context.Context, keys ...string) ([]*mvccpb.KeyValue, error) {
@@ -58,15 +70,15 @@ func (b *Backend) readDomain(ctx context.Context, keys ...string) ([]*mvccpb.Key
 	result := make([]*mvccpb.KeyValue, len(keys))
 	for i, response := range response.Responses {
 		if response == nil {
-			return nil, ErrCorruptRecord
+			return nil, &domainPointReadError{index: i, key: keys[i]}
 		}
 		r := response.GetResponseRange()
 		if r == nil || len(r.Kvs) > 1 || r.More || r.Count != int64(len(r.Kvs)) {
-			return nil, ErrCorruptRecord
+			return nil, &domainPointReadError{index: i, key: keys[i]}
 		}
 		if len(r.Kvs) == 1 {
 			if r.Kvs[0] == nil || string(r.Kvs[0].Key) != keys[i] {
-				return nil, ErrCorruptRecord
+				return nil, &domainPointReadError{index: i, key: keys[i]}
 			}
 			result[i] = r.Kvs[0]
 		}
