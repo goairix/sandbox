@@ -34,9 +34,9 @@
 
 **Interfaces:** exactspec JournalIdentity/GateManifest/ExecJournalRecord/JournalOptions/JournalStatus与sentinelerrors；生产JournalIdentity.Validate()、GateManifest.Validate()、ExecJournalRecord.Validate()；private encodeGateManifest(GateManifest)([]byte,error)、decodeGateManifest([]byte,*GateManifest)error、encodeExecJournalRecord(ExecJournalRecord)([]byte,error)、decodeExecJournalRecord([]byte,*ExecJournalRecord)error。复制spec全部exact类型/JSON字段/time约束到taskcontext；Journal receiver留Task2。Task3消费ownedscalarrecord并比较完整canonical bytes。
 
-- [ ] 写TestJournalCodec/Identity，验证真实validmanifest/record、每个typed/nestedfield、canonicalzero/nilUUID/hash、UTC/window/businessE、open历史decoder但producerclosed差异；8192/8193 lexical bound、depth9、duplicate/missing/null/unknown/trailing/case/UTF8，失败dst保持原值，encoded无ticket/payload；max合法typed字段编码和时间长度报告。
-- [ ] `go test ./internal/runtime/controltarget -run '^TestJournal(Codec|Identity)' -count=1 -v` 在可编译stub下实际行为RED；编译/fixture错误不算RED。实现strict局部替换codec，无新公共全局validator/改既有protocol。
-- [ ] 相同focusGREEN+race、pkgvet/gofmt/diff/selfreview后立即coherent小commit。报告真实RED/错误/结果/字节、无filesystem或authority行为；独立spec+qualitygate后Task2。
+- [x] 写TestJournalCodec/Identity，验证真实validmanifest/record、每个typed/nestedfield、canonicalzero/nilUUID/hash、UTC/window/businessE、open历史decoder但producerclosed差异；8192/8193 lexical bound、depth9、duplicate/missing/null/unknown/trailing/case/UTF8，失败dst保持原值，encoded无ticket/payload；max合法typed字段编码和时间长度报告。
+- [x] `go test ./internal/runtime/controltarget -run '^TestJournal(Codec|Identity)' -count=1 -v` 在可编译stub下实际行为RED；编译/fixture错误不算RED。实现strict局部替换codec，无新公共全局validator/改既有protocol。
+- [x] 相同focusGREEN+race、pkgvet/gofmt/diff/selfreview后立即coherent小commit。报告真实RED/错误/结果/字节、无filesystem或authority行为；独立spec+qualitygate后Task2。
 
 ## Task 2: protected Unix journal, durable closed gate and bounded recovery
 
