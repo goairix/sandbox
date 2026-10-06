@@ -44,6 +44,7 @@ func (b *Backend) decodeCreationIntent(kv *mvccpb.KeyValue, w WorkspaceIdentity,
 // creationBundle holds a single linearizable snapshot of all six permanent records.
 type creationBundle struct {
 	intent  *CreationIntentRecord
+	request *CreationRequestRecord
 	control *SandboxControlRecord
 	records []*mvccpb.KeyValue
 	keys    []string
@@ -132,5 +133,5 @@ func (b *Backend) readCreationBundle(ctx context.Context, w WorkspaceIdentity, i
 	if owner.Runtime != nil || owner.MountAttempt != 0 || control.Runtime != nil || control.MountAttempt != 0 {
 		return nil, ErrCorruptRecord
 	}
-	return &creationBundle{intent: intent, control: control, records: records[:6], keys: keys[:6], claim: records[6]}, nil
+	return &creationBundle{request: request, intent: intent, control: control, records: records[:6], keys: keys[:6], claim: records[6]}, nil
 }

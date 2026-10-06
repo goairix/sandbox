@@ -16,6 +16,9 @@ import (
 // Its reference records attribution and cannot reconstruct the capability.
 type CreationClaim struct {
 	origin                    *Backend
+	workspace                 WorkspaceIdentity
+	request                   CreationRequestRecord
+	control                   SandboxControlRecord
 	reference                 CreationClaimReference
 	claimKey, guardKey, value string
 	comparisons               []clientv3.Cmp
@@ -151,7 +154,7 @@ func (b *Backend) ClaimCreation(ctx context.Context, w WorkspaceIdentity, intent
 	if err := ctx.Err(); err != nil {
 		return cleanup(err)
 	}
-	c := &CreationClaim{origin: b, reference: record.reference(response.Header.Revision), claimKey: claimKey, guardKey: guardKey, value: value, deadline: deadline, comparisons: permanent}
+	c := &CreationClaim{workspace: w, request: *bundle.request, control: *bundle.control, origin: b, reference: record.reference(response.Header.Revision), claimKey: claimKey, guardKey: guardKey, value: value, deadline: deadline, comparisons: permanent}
 	for _, key := range []string{claimKey, guardKey} {
 		c.comparisons = append(c.comparisons, clientv3.Compare(clientv3.Value(key), "=", value), clientv3.Compare(clientv3.LeaseValue(key), "=", int64(lease.ID)), clientv3.Compare(clientv3.CreateRevision(key), "=", response.Header.Revision))
 	}
