@@ -158,3 +158,133 @@ func TestPrepareExecEffectSigningRejects(t *testing.T) {
 		})
 	}
 }
+
+// This fails if Prepare skips the metadata commit, exposes a changed payload,
+// remints on retry/renewal, or returns authorization without current fences.
+func TestPrepareExecEffect(t *testing.T) {
+	f := newExecEffectFixture(t)
+	request := execEffectRequest()
+	descriptor, err := controlprotocol.NewExecutionDescriptor(request)
+	require.NoError(t, err)
+	result, err := f.b.PrepareExecEffect(context.Background(), f.cap, request)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.NotNil(t, result.Prepared)
+	require.Equal(t, result.Reference, result.Prepared.Reference())
+	require.NoError(t, result.Reference.Validate())
+	entry, err := f.b.LoadExecEffect(context.Background(), result.Reference)
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	require.Equal(t, descriptor.Digest(), entry.Record.DescriptorDigest)
+	require.Equal(t, f.cap.record, entry.Record.Operation)
+	require.Equal(t, f.cap.admitRevision, entry.Record.AdmissionRevision)
+	request.Argv[1] = "mutated"
+	request.Env["SECRET"] = "mutated"
+	request.Stdin[0] = '!'
+	require.Equal(t, execEffectRequest(), f.cap.execDraft.descriptor.Request())
+	conflict, err := f.b.PrepareExecEffect(context.Background(), f.cap, request)
+	require.ErrorIs(t, err, ErrConflict)
+	require.Nil(t, conflict.Prepared)
+	claims := f.cap.execDraft.claims
+	ticket := f.cap.execDraft.ticket.Wire()
+	stage := f.cap.execDraft.stage
+	require.NoError(t, f.b.RenewOperation(context.Background(), f.cap))
+	retry, err := f.b.PrepareExecEffect(context.Background(), f.cap, execEffectRequest())
+	require.NoError(t, err)
+	require.NotNil(t, retry.Prepared)
+	require.Equal(t, result.Reference, retry.Reference)
+	require.Equal(t, claims, f.cap.execDraft.claims)
+	require.Equal(t, ticket, f.cap.execDraft.ticket.Wire())
+	require.Same(t, stage, f.cap.execDraft.stage)
+	require.Equal(t, 1, f.provider.signCalls)
+	again, err := f.b.LoadExecEffect(context.Background(), result.Reference)
+	require.NoError(t, err)
+	require.Equal(t, entry.Revision, again.Revision)
+	_, err = f.raw.Put(context.Background(), f.cap.fences[0].Key, string(f.cap.fences[0].Value))
+	require.NoError(t, err)
+	denied, err := f.b.PrepareExecEffect(context.Background(), f.cap, execEffectRequest())
+	require.ErrorIs(t, err, ErrConflict)
+	require.Nil(t, denied.Prepared)
+	require.Equal(t, OutcomeCommitted, denied.Outcome)
+}
+func TestPrepareExecEffectRejects(t *testing.T) {
+	for _, defect := range []string{"nil context", "cancelled", "nil capability", "foreign", "public fake", "mutation", "lost", "parent", "deadline", "payload", "config"} {
+		t.Run(defect, func(t *testing.T) {
+			f := newExecEffectFixture(t)
+			c := f.cap
+			ctx := context.Background()
+			request := execEffectRequest()
+			switch defect {
+			case "nil context":
+				ctx = nil
+			case "cancelled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "nil capability":
+				c = nil
+			case "foreign":
+				c.origin = &Backend{}
+			case "public fake":
+				c = &OperationCapability{record: OperationRecord{Reference: c.Reference()}}
+			case "mutation":
+				c.record.Reference.Kind = OperationMutation
+			case "lost":
+				c.lost = true
+			case "parent":
+				c.parentCtx = nil
+			case "deadline":
+				c.deadline = time.Now().Add(-time.Second)
+			case "payload":
+				request.UID = 0
+			case "config":
+				f.b.execIssuer = nil
+			}
+			result, err := f.b.PrepareExecEffect(ctx, c, request)
+			require.Error(t, err)
+			require.Nil(t, result.Prepared)
+			require.Zero(t, f.provider.signCalls)
+			require.Zero(t, f.provider.certificateCalls)
+		})
+	}
+}
+
+func TestPrepareExecEffectCleanup(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
+			f := newExecEffectFixture(t)
+			lease := &creationFaultLease{Lease: f.b.client.Lease}
+			if fail {
+				lease.revoke = func(context.Context, clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+					return nil, errors.New("cleanup unavailable")
+				}
+			}
+			f.b.client.Lease = lease
+			result, err := f.b.PrepareExecEffect(context.Background(), f.cap, execEffectRequest())
+			require.NoError(t, err)
+			require.Equal(t, OutcomeCommitted, result.Outcome)
+			require.NotNil(t, result.Prepared)
+			require.Equal(t, int64(1), lease.revokes.Load())
+			require.Equal(t, int64(1), lease.grants.Load())
+			require.Zero(t, lease.keeps.Load())
+			if fail {
+				require.ErrorContains(t, result.GuardCleanupError, "cleanup unavailable")
+			} else {
+				require.NoError(t, result.GuardCleanupError)
+			}
+			lease.revoke = nil
+			retry, err := f.b.PrepareExecEffect(context.Background(), f.cap, execEffectRequest())
+			require.NoError(t, err)
+			require.NotNil(t, retry.Prepared)
+			require.NoError(t, retry.GuardCleanupError)
+			want := int64(1)
+			if fail {
+				want = 2
+			}
+			require.Equal(t, want, lease.revokes.Load())
+			ttl, err := f.raw.TimeToLive(context.Background(), clientv3.LeaseID(f.cap.record.Reference.LeaseID))
+			require.NoError(t, err)
+			require.Positive(t, ttl.TTL)
+		})
+	}
+}

@@ -34,6 +34,7 @@ type OperationCapability struct {
 	mu                                          sync.Mutex
 	deadline                                    time.Time
 	lost                                        bool
+	execDraft                                   *execEffectDraft
 }
 
 func (c *OperationCapability) Reference() OperationReference {

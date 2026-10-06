@@ -61,3 +61,27 @@ func (r ExecEffectReference) Validate() error {
 func validExecEffectAttempt(l StageAttemptLocator, operation OperationReference) bool {
 	return l.Validate() == nil && validPreparationUUID(l.AttemptID) && l.StageID == "operation_exec_start" && l.Namespace == operation.Namespace && l.Partition == operation.Partition && l.RequestID == operation.RequestID && l.RestoreEpoch == operation.RestoreEpoch
 }
+
+// PrepareExecEffectResult separates metadata outcome from current authority.
+// A committed result can have no Prepared when fresh authorization fails.
+type PrepareExecEffectResult struct {
+	Outcome           Outcome
+	Reference         ExecEffectReference
+	Prepared          *PreparedExecEffect
+	GuardCleanupError error
+}
+
+// PreparedExecEffect is opaque input for a future trusted transport. It grants
+// no public ticket or payload access; that transport must reauthorize delivery.
+type PreparedExecEffect struct {
+	origin     *Backend
+	capability *OperationCapability
+	draft      *execEffectDraft
+}
+
+func (p *PreparedExecEffect) Reference() ExecEffectReference {
+	if p == nil || p.draft == nil {
+		return ExecEffectReference{}
+	}
+	return p.draft.reference
+}

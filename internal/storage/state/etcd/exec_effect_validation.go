@@ -19,6 +19,7 @@ type execEffectDraft struct {
 	recordValue            string
 	stage                  *Stage
 	outcome                Outcome
+	cleaned                bool
 }
 
 // execEffectContext links a call to the original admission parent and the
