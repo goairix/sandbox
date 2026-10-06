@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 	"unicode/utf8"
 
@@ -187,8 +188,10 @@ func (r CreationRequestRecord) Validate() error {
 }
 func domainRecordLimit(record interface{ Validate() error }) int {
 	switch record.(type) {
-	case RuntimeDispatchRecord, *RuntimeDispatchRecord, SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
+	case RuntimeBindingRecord, *RuntimeBindingRecord, RuntimeIndexRecord, *RuntimeIndexRecord, RuntimeMountIntentRecord, *RuntimeMountIntentRecord, RuntimeDispatchRecord, *RuntimeDispatchRecord, SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
 		return 4096
+	case RuntimeBindingCertificateRecord, *RuntimeBindingCertificateRecord:
+		return 8192
 	case WorkspaceFenceRecord, *WorkspaceFenceRecord:
 		return 1024
 	case RuntimeDispatchInputRecord, *RuntimeDispatchInputRecord, SandboxSnapshotRecord, *SandboxSnapshotRecord:
@@ -199,6 +202,14 @@ func domainRecordLimit(record interface{ Validate() error }) int {
 }
 func nilDomainRecord(record interface{ Validate() error }) bool {
 	switch r := record.(type) {
+	case *RuntimeBindingRecord:
+		return r == nil
+	case *RuntimeBindingCertificateRecord:
+		return r == nil
+	case *RuntimeIndexRecord:
+		return r == nil
+	case *RuntimeMountIntentRecord:
+		return r == nil
 	case *RuntimeDispatchRecord:
 		return r == nil
 	case *RuntimeDispatchInputRecord:
@@ -229,6 +240,13 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 	// Own dispatch payload bytes before validation and encoding, preserving their
 	// representation without retaining the caller's RawMessage backing array.
 	switch r := record.(type) {
+	case RuntimeBindingCertificateRecord:
+		r.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = r
+	case *RuntimeBindingCertificateRecord:
+		owned := *r
+		owned.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = owned
 	case RuntimeDispatchInputRecord:
 		r.Payload = append(json.RawMessage(nil), r.Payload...)
 		record = r
@@ -255,6 +273,14 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 }
 func decodeDomainRecord(kv *mvccpb.KeyValue, record interface{ Validate() error }) error {
 	switch destination := record.(type) {
+	case *RuntimeBindingRecord:
+		return decodePreparationDomain(kv, destination, 4096)
+	case *RuntimeBindingCertificateRecord:
+		return decodePreparationDomain(kv, destination, 8192)
+	case *RuntimeIndexRecord:
+		return decodePreparationDomain(kv, destination, 4096)
+	case *RuntimeMountIntentRecord:
+		return decodePreparationDomain(kv, destination, 4096)
 	case *RuntimeDispatchRecord:
 		return decodeTypedDomain(kv, destination, 4096)
 	case *RuntimeDispatchInputRecord:
@@ -339,4 +365,14 @@ func (r SandboxPlacementRecord) Validate() error {
 		return fmt.Errorf("%w: placement partition mismatch", ErrInvalidRecord)
 	}
 	return nil
+}
+
+func decodePreparationDomain[T interface{ Validate() error }](kv *mvccpb.KeyValue, dst *T, limit int) error {
+	if kv == nil || len(kv.Value) > limit || !utf8.Valid(kv.Value) {
+		return ErrCorruptRecord
+	}
+	if err := strictPreparationMetadata(kv.Value, reflect.TypeOf(dst)); err != nil {
+		return err
+	}
+	return decodeTypedDomain(kv, dst, limit)
 }
