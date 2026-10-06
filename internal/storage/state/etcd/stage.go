@@ -109,6 +109,22 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 	if err != nil {
 		return nil, fmt.Errorf("%w: grant stage lease: %w", ErrOutcomeUnknown, err)
 	}
+	// A malformed grant never authorizes guard creation. Only an identified
+	// native grant can authorize best-effort cleanup of its lease.
+	trustedGrant := lease != nil && lease.ResponseHeader != nil && lease.ClusterId == b.clusterID && lease.Revision > 0 && lease.ID > 0
+	if !trustedGrant || lease.TTL <= 0 || lease.Error != "" || requestCtx.Err() != nil {
+		cause := error(ErrOutcomeUnknown)
+		if lease != nil && lease.ResponseHeader != nil && lease.ClusterId != b.clusterID {
+			cause = errors.Join(cause, ErrIdentityMismatch)
+		}
+		if requestCtx.Err() != nil {
+			cause = errors.Join(cause, requestCtx.Err())
+		}
+		if trustedGrant {
+			return nil, joinStageBeginCleanup(cause, b.revokeStageLease(lease.ID))
+		}
+		return nil, cause
+	}
 	s := &Stage{origin: b, reference: ref, mutation: mutation, leaseID: lease.ID, guardKey: guardKey, receiptKey: receiptKey, committedValue: committedValue}
 	guard, err := json.Marshal(struct {
 		StageReference
@@ -123,15 +139,18 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 	if err != nil {
 		return nil, joinStageBeginCleanup(fmt.Errorf("%w: create stage guard: %w", ErrOutcomeUnknown, err), b.revokeStageLease(lease.ID))
 	}
-	if response.Header == nil || response.Header.ClusterId != b.clusterID {
-		return nil, joinStageBeginCleanup(ErrIdentityMismatch, b.revokeStageLease(lease.ID))
+	if err := b.operationResponseHeader(response); err != nil {
+		return nil, joinStageBeginCleanup(errors.Join(ErrOutcomeUnknown, err), b.revokeStageLease(lease.ID))
 	}
 	if !response.Succeeded {
 		cause := error(ErrConflict)
-		if err := b.validateResponseIdentity(response); err != nil {
+		if _, err := b.stageEvidencePoints(response, []string{b.identityKey, b.restoreKey}); err != nil {
 			cause = err
 		}
 		return nil, joinStageBeginCleanup(cause, b.revokeStageLease(lease.ID))
+	}
+	if !operationPutResponses(response, 1) {
+		return nil, joinStageBeginCleanup(ErrOutcomeUnknown, b.revokeStageLease(lease.ID))
 	}
 	s.guardRevision = response.Header.Revision
 	return s, nil
@@ -158,23 +177,24 @@ func (b *Backend) CommitStage(ctx context.Context, s *Stage) (Outcome, error) {
 	if err != nil {
 		return OutcomeUnknown, fmt.Errorf("%w: commit stage: %w", ErrOutcomeUnknown, err)
 	}
-	if response.Header == nil || response.Header.ClusterId != b.clusterID {
-		return OutcomeUnknown, errors.Join(ErrOutcomeUnknown, ErrIdentityMismatch)
+	if err := b.operationResponseHeader(response); err != nil {
+		return OutcomeUnknown, errors.Join(ErrOutcomeUnknown, err)
 	}
 	if response.Succeeded {
+		if !stageCommitResponses(response, s.mutation.Writes) {
+			return OutcomeUnknown, ErrOutcomeUnknown
+		}
 		return OutcomeCommitted, nil
 	}
-	if err := b.validateResponseIdentity(response); err != nil {
+	points, err := b.stageEvidencePoints(response, []string{b.identityKey, b.restoreKey, s.receiptKey, s.guardKey})
+	if err != nil {
 		return OutcomeUnknown, err
 	}
-	if len(response.Responses) != 4 {
-		return OutcomeUnknown, ErrOutcomeUnknown
+	if points[2] != nil {
+		return decodeReceipt(points[2], s.reference)
 	}
-	if receipt := response.Responses[2].GetResponseRange(); receipt != nil && len(receipt.Kvs) == 1 {
-		return decodeReceipt(receipt.Kvs[0], s.reference)
-	}
-	guard := response.Responses[3].GetResponseRange()
-	if guard == nil || len(guard.Kvs) != 1 || string(guard.Kvs[0].Value) != s.guardValue || guard.Kvs[0].Lease != int64(s.leaseID) || guard.Kvs[0].CreateRevision != s.guardRevision {
+	guard := points[3]
+	if guard == nil || string(guard.Value) != s.guardValue || guard.Lease != int64(s.leaseID) || guard.CreateRevision != s.guardRevision || guard.ModRevision != guard.CreateRevision {
 		return OutcomeUnknown, ErrGuardExpired
 	}
 	return OutcomeUnknown, ErrConflict

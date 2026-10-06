@@ -98,23 +98,23 @@ func (b *Backend) ResolveStage(ctx context.Context, ref StageReference) (Outcome
 	if err != nil {
 		return OutcomeUnknown, fmt.Errorf("%w: resolve stage: %w", ErrOutcomeUnknown, err)
 	}
-	if response.Header == nil || response.Header.ClusterId != b.clusterID {
-		return OutcomeUnknown, errors.Join(ErrOutcomeUnknown, ErrIdentityMismatch)
+	if err := b.operationResponseHeader(response); err != nil {
+		return OutcomeUnknown, errors.Join(ErrOutcomeUnknown, err)
 	}
 	if response.Succeeded {
+		if !operationPutResponses(response, 1) {
+			return OutcomeUnknown, ErrOutcomeUnknown
+		}
 		return OutcomeAborted, nil
 	}
-	if err := b.validateResponseIdentity(response); err != nil {
+	points, err := b.stageEvidencePoints(response, []string{b.identityKey, b.restoreKey, receiptKey})
+	if err != nil {
 		return OutcomeUnknown, err
 	}
-	if len(response.Responses) != 3 {
+	if points[2] == nil {
 		return OutcomeUnknown, ErrOutcomeUnknown
 	}
-	receipt := response.Responses[2].GetResponseRange()
-	if receipt == nil || len(receipt.Kvs) != 1 {
-		return OutcomeUnknown, ErrOutcomeUnknown
-	}
-	return decodeReceipt(receipt.Kvs[0], ref)
+	return decodeReceipt(points[2], ref)
 }
 
 func (b *Backend) validateResponseIdentity(response *clientv3.TxnResponse) error {
