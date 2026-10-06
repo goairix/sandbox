@@ -33,6 +33,7 @@ type Options struct {
 	AllowInsecureLoopback bool
 	PublicationTrust      *RuntimePublicationTrust
 	Clock                 AuthorityClock
+	ExecIssuer            ExecCommandIssuer
 }
 
 type Backend struct {
@@ -45,6 +46,8 @@ type Backend struct {
 	clusterID                                 uint64
 	requestTimeout                            time.Duration
 	publicationVerifier                       *controlprotocol.PublicationVerifier
+	execIssuer                                ExecCommandIssuer
+	execVerifier                              *controlprotocol.ManagementVerifier
 	authorityClock                            AuthorityClock
 	publicationAuthorityID, publicationTarget string
 }
@@ -52,6 +55,9 @@ type Backend struct {
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
 	if _, err := publicationVerifier(o); err != nil {
+		return err
+	}
+	if _, err := execAuthority(o); err != nil {
 		return err
 	}
 	if _, err := NewNamespace(o.Namespace.prefix, o.Namespace.scope, o.Namespace.cell); err != nil {
@@ -146,6 +152,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	execVerifier, err := execAuthority(o)
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig, err := cloneTLSConfig(o.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: clone TLS certificate: %v", ErrInvalidConfiguration, err)
@@ -161,6 +171,8 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	}
 	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout}
 	b.publicationVerifier = verifier
+	b.execIssuer = o.ExecIssuer
+	b.execVerifier = execVerifier
 	b.authorityClock = o.Clock
 	if o.PublicationTrust != nil {
 		b.publicationAuthorityID = o.PublicationTrust.AuthorityID
