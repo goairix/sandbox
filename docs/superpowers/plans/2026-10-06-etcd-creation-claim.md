@@ -1,6 +1,6 @@
 # etcd 创建 intent 的原始租约能力实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 为已持久化的 pending 创建 intent 提供可恢复管理权，失租的旧能力不能再提交领域事务。
 
@@ -55,6 +55,8 @@ func (b *Backend) creationClaimComparisons(c *CreationClaim) ([]clientv3.Cmp,err
 
 `ClaimCreation` ctx 非 nil，w 绑定当前 storage，intent/worker 为合法 ASCII segment≤128，TTL 正数≤24h、向上取整到服务端秒数。在 Grant 之前完成所有输入、路径、记录与预算检查。先点读 intent 定位 sandbox/request，再一个线性 Txn 同时读 intent、owner、fence、control、request、placement、现有 claim 共 7 个 key，最终领取事务再次 CAS 全部永久记录。记录必须存在且 pending intent/pending request/publishing control；intent ID、sandbox ID、workspace hash、generation、request hash、configuration digest、restore 互相一致；owner 未绑定 runtime 且 mount0，control 同样未绑定，control/placement 关系必须正确。各 KV CreateRevision>0、ModRevision≥CreateRevision、永久 Lease0。记录变化不准许使用旧值领取。
 
+合法已发布图（published intent、completed request、control 与 owner 的 exact runtime/mount 一致）仅不再适合领取 creation claim，关系核验后返回 `ErrConflict` 且不 Grant；active、workspace_exclusive、destroying、cleanup_pending 均验证。pending/pending 同归属图进入 destroying/cleanup_pending 后也不能再领取 creation claim，返回 `ErrConflict`，交后续 cleanup 协议恢复。不误报存储损坏；字段错位、缺损或矛盾的 phase/runtime 仍返回 `ErrCorruptRecord`，加入真实回归。
+
 固定 claim key：`p/xx/intents/intentID/claim`。每次 guard key：`p/xx/intents/intentID/guards/newUUID`。私有 schema1 claim record≤4096 bytes，明确保存上述归属字段及原 Lease ID；guard 与 claim 使用同一 immutable value，CreateRevision 相同。现有 claim 须严格 JSON/UTF8/字段/精确 key 校验，KV.Lease 非零且与 value 的 LeaseID 一致、归属和当前永久记录匹配；有效已占用返回 ErrConflict；缺损/错位/无租约不能抢占。不存在则 CAS CreateRevision0。
 
 Grant 和 Txn 均使用独立的 bounded request context；校验 grant nonnil/header cluster/非零 ID/TTL>0，无能力时仅撤销已知本集群原 Lease。领取 Txn 比较 base、6 个永久记录的 ModRevision+raw value+Lease0、claim absence、unique guard absence，同时 put 两个 leased key。必须收到成功的本 cluster response 才返回 capability，其 epoch=该 Txn header.Revision。失败或 unknown 都返回 nil；撤销错误可 errors.Join，但不删除领域记录。失败 metadata branch 必须按 exact key、cardinality、nil-safe 校验 identity/restore。
@@ -67,14 +69,14 @@ Grant 和每次 KeepAlive 以请求发送前本地单调 `time.Now()` 加服务�
 
 `RenewCreationClaim` 首先检查本地截止与 lost，以 bounded linear Txn 比较 base+全部 capability 条件，失败分类 identity mismatch 或 ErrGuardExpired；成功再 KeepAliveOnce 原 Lease，并验证 nonnil/header cluster/ID/TTL>0、发送前时间推导 deadline 未越界。并发 renew 串行且等待 mutex 的时间计入调用 context；取锁后先检查 ctx.Err。不写 claim、不刷新 generation/control revision、不重新 Grant。续租与随后 mutation 之间仍可能失租，不能省略 mutation CAS。`ReleaseCreationClaim` 标记本地能力失效并只 Revoke 原 Lease，LeaseNotFound 幂等；即使本地已 lost 也允许清理原 Lease，可在 caller 已取消时由上层用独立 background context 重试。不得删除 owner/control/intent/request 或其他人的新 Lease。
 
-- [ ] 写 `TestCreationClaimPermanentIntentLookup`、`TestCreationClaimAtomicOriginalLease`，真实三成员先观察 RED（不是仅编译失败），永久图 ModRevision/Lease0 不变，两 leased key 同 CreateRevision 与 Lease。
-- [ ] 写 `TestCreationClaimConcurrentOneWinner`（16 contenders）、`TestCreationClaimRenewAndRelease`、`TestCreationClaimReacquireRejectsOldCapability`；读取 claim 的 Lease 与 value，续租不改 revision，旧能力不能提交带 receipt 的真实事务，新能力可以。
-- [ ] 写 unknown grant/实际领取丢回复/迟到领取、restore 变更、wrong key/nil envelope、永久关系缺损、leased/corrupt domain、非法 TTL/ID/w/ctx、其他 Backend capability 的回归；input 错误与损坏记录不 Grant，unknown 不返回 capability。
-- [ ] 写 `TestCreationClaimDelayedRenewCannotRevive`：取得真实 KeepAlive 正响应后延迟交付，原 Lease/guard 在交付前撤销或截止越界；不会以到达时间加 TTL 继续使用同 capability，比较拒绝/真实旧事务失败。覆盖 Renew unknown 后同能力不能再次 KeepAlive，以及并发 renew/race。
-- [ ] 写 `TestCreationClaimControlChangeBlocksDelayedStage`、`TestCreationClaimGuardRecreateBlocksOldStage`：先建包含 private comparisons 的 Stage，再改 control 或删原 guard 并同 value/Lease 重建；旧 CommitStage 不能写测试 checkpoint，ResolveStage 只能 aborted。新 claimant epoch 大于旧 epoch。
-- [ ] 写 `TestCreationClaimStageBudget`：private comparisons 固定 24 条（两 leased key 共6、六永久 key 共18）；沿用 stageProtocolOperations=14，剩余业务 comparisons+writes 上限26。测试总计64允许、65拒绝且拒绝前不 Grant；不降低已有 txn 预算。
-- [ ] 实现上述 API；真实定向 race GREEN 与 spec/quality review，必要问题修复并复审。
-- [ ] fresh `bash scripts/test-etcd-state.sh -v`、`go test ./...`、`go vet ./internal/storage/state/etcd`、sandbox 构建、gofmt/diff checks，通过后保存报告并独立提交 `feat: add original-lease creation intent claims`。
+- [x] 写 `TestCreationClaimPermanentIntentLookup`、`TestCreationClaimAtomicOriginalLease`，真实三成员先观察 RED（不是仅编译失败），永久图 ModRevision/Lease0 不变，两 leased key 同 CreateRevision 与 Lease。
+- [x] 写 `TestCreationClaimConcurrentOneWinner`（16 contenders）、`TestCreationClaimRenewAndRelease`、`TestCreationClaimReacquireRejectsOldCapability`；读取 claim 的 Lease 与 value，续租不改 revision，旧能力不能提交带 receipt 的真实事务，新能力可以。
+- [x] 写 unknown grant/实际领取丢回复/迟到领取、restore 变更、wrong key/nil envelope、永久关系缺损、leased/corrupt domain、非法 TTL/ID/w/ctx、其他 Backend capability 的回归；input 错误与损坏记录不 Grant，unknown 不返回 capability。
+- [x] 写 `TestCreationClaimDelayedRenewCannotRevive`：取得真实 KeepAlive 正响应后延迟交付，原 Lease/guard 在交付前撤销或截止越界；不会以到达时间加 TTL 继续使用同 capability，比较拒绝/真实旧事务失败。覆盖 Renew unknown 后同能力不能再次 KeepAlive，以及并发 renew/race。
+- [x] 写 `TestCreationClaimControlChangeBlocksDelayedStage`、`TestCreationClaimGuardRecreateBlocksOldStage`：先建包含 private comparisons 的 Stage，再改 control 或删原 guard 并同 value/Lease 重建；旧 CommitStage 不能写测试 checkpoint，ResolveStage 只能 aborted。新 claimant epoch 大于旧 epoch。
+- [x] 写 `TestCreationClaimStageBudget`：private comparisons 固定 24 条（两 leased key 共6、六永久 key 共18）；沿用 stageProtocolOperations=14，剩余业务 comparisons+writes 上限26。测试总计64允许、65拒绝且拒绝前不 Grant；不降低已有 txn 预算。
+- [x] 实现上述 API；真实定向 race GREEN 与 spec/quality review，必要问题修复并复审。
+- [x] fresh `bash scripts/test-etcd-state.sh -v`、`go test ./...`、`go vet ./internal/storage/state/etcd`、sandbox 构建、gofmt/diff checks，通过后保存报告并独立提交 `feat: add original-lease creation intent claims`。
 
 ## 下一交付与界限
 
