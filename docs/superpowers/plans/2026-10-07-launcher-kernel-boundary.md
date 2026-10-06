@@ -35,10 +35,12 @@
 
 **Interfaces:** 定义spec完整KernelSnapshot/KernelBoundary/三sentinelerrors与全部公共签名；private kernelRole uint8（PID1=1、monitor=2）及validateKernelSnapshot(KernelSnapshot,kernelRole,bool)error，bool=true检查初始角色、false检查最终角色。平台实现依spec。Task2消费公共Boundary/实际TestMain/helper接口，worker报告exactprivate测试模式、参数/env、exit/stdio/wait接口，不猜未实现全局。
 
-- [ ] TestKernelModels写精确validPID1初始/最终与monitor初始/最终；每个UID/GID位置、五capsetbit差异、NNP/securebits/dumpable/subreaper/PID/CapLast/Threads边界与nil/zero；无schema自反测试。编译stub下`go test ./internal/runtime/launcher -run '^TestKernel(Models|Handles|Unsupported)' -count=1 -v`真实行为RED，helper/compile错误另记。
-- [ ] 实现模型+unsupported及实际Linux proc/syscall顺序；真实proc不能fake，全线程setter不可单线程fallback。TestMain固定nativefixture模式使positive真正PID1；rootmonitor实际exec再PrepareMonitor、读取copy/ValidateCurrent/currentrole。native测试仅Controller明确环境开启，host无权限/平台限制如实报告。
-- [ ] 实际negativefixture覆盖NNP缺失、缺/多cap、非PID1、重复role、单线程差异；必须读取实际前后状态、返回nilboundary/error而不是伪kernel成功。worker sourcefreeze+CGO0GOOSlinux/实际imagearch编译，Root实际运行positive全Task1package0skip与必要negativecases后workerDONE；source修改需Root重跑必要selector。native行为RED若产生须真实保存，纯model RED和编译错误分开。
-- [ ] focusGREEN/race、pkgvet/gofmt/diff、自审coherentkernel/model/inspection小切片即commit；fullreport全部错误/skip/真实source与nativeproof/privateTestMain接口，独立spec+qualitygate后Task2。报告内核线程/UID/masks/exec继承/role失败边界；0clock/Lease/authority/用户生产入口。
+- [x] TestKernelModels写精确validPID1初始/最终与monitor初始/最终；每个UID/GID位置、五capsetbit差异、NNP/securebits/dumpable/subreaper/PID/CapLast/Threads边界与nil/zero；无schema自反测试。编译stub下`go test ./internal/runtime/launcher -run '^TestKernel(Models|Handles|Unsupported)' -count=1 -v`真实行为RED，helper/compile错误另记。
+- [x] 实现模型+unsupported及实际Linux proc/syscall顺序；真实proc不能fake，全线程setter不可单线程fallback。TestMain固定nativefixture模式使positive真正PID1；rootmonitor实际exec再PrepareMonitor、读取copy/ValidateCurrent/currentrole。native测试仅Controller明确环境开启，host无权限/平台限制如实报告。
+- [x] 实际negativefixture覆盖NNP缺失、缺/多cap、非PID1、重复role、单线程差异；必须读取实际前后状态、返回nilboundary/error而不是伪kernel成功。worker sourcefreeze+CGO0GOOSlinux/实际imagearch编译，Root实际运行positive全Task1package0skip与必要negativecases后workerDONE；source修改需Root重跑必要selector。native行为RED若产生须真实保存，纯model RED和编译错误分开。
+- [x] focusGREEN/race、pkgvet/gofmt/diff、自审coherentkernel/model/inspection小切片即commit；fullreport全部错误/skip/真实source与nativeproof/privateTestMain接口，独立spec+qualitygate后Task2。报告内核线程/UID/masks/exec继承/role失败边界；0clock/Lease/authority/用户生产入口。
+
+Task1 gate：69ab0a1/524ae7d/c2464ea，Root securebits 澄清 cbbfc84；独立原BASE7c79d6a..c2464ea完整review通过，Critical/Important/Minor均0。真实Linux full package1368PASS/0FAIL/0SKIP；首轮marker协调错误原exit1保留、原日志复核通过，新增seccomp失败与partial case真实exit0。10次owned fixture individually rm/inventory已证据化；本项不声称userexec、Linuxrace、动态CGO或线程消失调度覆盖。Task2继续。
 
 ## Task 2: actual unprivileged exec, protected parent evidence and repeatable native gates
 
