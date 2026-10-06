@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -30,21 +31,29 @@ type Options struct {
 	RequestTimeout        time.Duration
 	TLS                   *tls.Config
 	AllowInsecureLoopback bool
+	PublicationTrust      *RuntimePublicationTrust
+	Clock                 AuthorityClock
 }
 
 type Backend struct {
-	client         *clientv3.Client
-	namespace      Namespace
-	identityKey    string
-	restoreKey     string
-	identityValue  string
-	restoreEpoch   string
-	clusterID      uint64
-	requestTimeout time.Duration
+	client                                    *clientv3.Client
+	namespace                                 Namespace
+	identityKey                               string
+	restoreKey                                string
+	identityValue                             string
+	restoreEpoch                              string
+	clusterID                                 uint64
+	requestTimeout                            time.Duration
+	publicationVerifier                       *controlprotocol.PublicationVerifier
+	authorityClock                            AuthorityClock
+	publicationAuthorityID, publicationTarget string
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if _, err := publicationVerifier(o); err != nil {
+		return err
+	}
 	if _, err := NewNamespace(o.Namespace.prefix, o.Namespace.scope, o.Namespace.cell); err != nil {
 		return err
 	}
@@ -133,6 +142,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if o.RequestTimeout == 0 {
 		o.RequestTimeout = 3 * time.Second
 	}
+	verifier, err := publicationVerifier(o)
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig, err := cloneTLSConfig(o.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: clone TLS certificate: %v", ErrInvalidConfiguration, err)
@@ -147,6 +160,12 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		return nil, fmt.Errorf("etcd state: create client: %w", err)
 	}
 	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout}
+	b.publicationVerifier = verifier
+	b.authorityClock = o.Clock
+	if o.PublicationTrust != nil {
+		b.publicationAuthorityID = o.PublicationTrust.AuthorityID
+		b.publicationTarget = o.PublicationTrust.Target
+	}
 	b.identityKey, _ = o.Namespace.Key("meta", "identity")
 	b.restoreKey, _ = o.Namespace.Key("meta", "restore_epoch")
 	ready := false
