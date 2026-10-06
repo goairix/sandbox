@@ -57,6 +57,8 @@ AllThreadsSyscall 用于setters，唯一GET例外是上述期望全线程一致0
 
 真实 parent→root monitor exec 前后读 `/proc/.../status` 验证上述集合；用户进程在额外创建线程后阻塞等待，可信父读取每个实际thread状态验证五集合全零、四UID/GID均1000、NNP=1、补充groups空，随后释放并有界wait。用户实际尝试setuid0、增加capability、关闭NNP、ptrace/读管理proc environ与FD、读root0700/0600secret以及继承管理FD均须失败。管理密钥/nonce只用测试临时数据，不读取宿主凭证。namespace/cgroup/remote-write全隔离和完整后代terminal仍不是本单元证明，后续仍需实现。
 
+可信monitor只有三项cap、没有SYS_PTRACE；测试直接审计活用户fd/environ时，允许在锁定OS线程临时raw setfsuid/setfsgid=1000，按[proc fd](https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html)和[ptrace READ_FSCREDS](https://man7.org/linux/man-pages/man2/ptrace.2.html)规则读取。只限测试：预先登记恢复，实际该TID proc第四UID/GID验证进入与恢复，期间不exec；恢复0并ValidateCurrent后才unlock，失败退役线程并结束helper。不能以[setfsuid](https://man7.org/linux/man-pages/man2/setfsuid.2.html)返回值推定成功，不能增加SYS_PTRACE或修改生产全线程/角色契约。真实读取和恢复必须native验证。
+
 新异步worker必须在阻塞/Fatal前登记release/cancel/≤5秒join，恢复hooks与清理FD/fixture晚于join；测试子进程有界终止与wait，成功marker不得因既有t.Failed而无条件输出。报告真实PID/thread/capset/UID/group/NNP、proc/FD反例、错误、skip、child实际退出与allocated/RSS/FD观察（测不到如实说明；本单元不是原镜像overhead证明）。不把model、CGO0编译或hostskip称真实Linux通过。
 
 ## Linux fixture与当前边界
