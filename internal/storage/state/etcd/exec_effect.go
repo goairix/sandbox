@@ -86,7 +86,10 @@ func (b *Backend) PrepareExecEffect(ctx context.Context, c *OperationCapability,
 		}
 	}
 	if d.outcome != OutcomeUnknown && d.stage != nil && !d.cleaned {
-		result.GuardCleanupError = b.ReleaseStage(bounded, d.stage)
+		result.GuardCleanupError = execEffectLive(bounded, c, d)
+		if result.GuardCleanupError == nil {
+			result.GuardCleanupError = b.ReleaseStage(bounded, d.stage)
+		}
 		d.cleaned = result.GuardCleanupError == nil
 	}
 	if d.outcome != OutcomeCommitted {
@@ -109,11 +112,17 @@ func (b *Backend) execEffectComparisons(c *OperationCapability, d *execEffectDra
 	for _, f := range c.fences {
 		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(f.Key), "=", f.ModRevision), clientv3.Compare(clientv3.LeaseValue(f.Key), "=", 0))
 	}
-	comparisons = append(comparisons, operationEnvelopeComparisons(c.guardKey, c.value, c.record.Reference.LeaseID, c.guardRevision)...)
-	comparisons = append(comparisons, operationEnvelopeComparisons(c.tokenKey, c.value, c.record.Reference.LeaseID, c.admitRevision)...)
-	comparisons = append(comparisons, operationEnvelopeComparisons(c.receiptKey, receipt, c.record.Reference.LeaseID, c.admitRevision)...)
+	comparisons = append(comparisons, execEffectEnvelopeComparisons(c.guardKey, c.value, c.record.Reference.LeaseID, c.guardRevision)...)
+	comparisons = append(comparisons, execEffectEnvelopeComparisons(c.tokenKey, c.value, c.record.Reference.LeaseID, c.admitRevision)...)
+	comparisons = append(comparisons, execEffectEnvelopeComparisons(c.receiptKey, receipt, c.record.Reference.LeaseID, c.admitRevision)...)
 	comparisons = append(comparisons, clientv3.Compare(clientv3.Value(d.issuerKey), "=", d.issuerValue), clientv3.Compare(clientv3.ModRevision(d.issuerKey), "=", d.issuer.Revision), clientv3.Compare(clientv3.LeaseValue(d.issuerKey), "=", 0))
 	return comparisons, nil
+}
+
+// Exec starts pin the original operation body, Lease and first revision. The
+// renewal helper additionally compares ModRevision and has a different budget.
+func execEffectEnvelopeComparisons(key, value string, lease, revision int64) []clientv3.Cmp {
+	return []clientv3.Cmp{clientv3.Compare(clientv3.Value(key), "=", value), clientv3.Compare(clientv3.LeaseValue(key), "=", lease), clientv3.Compare(clientv3.CreateRevision(key), "=", revision)}
 }
 
 func (b *Backend) buildExecEffect(c *OperationCapability, d *execEffectDraft, locator StageAttemptLocator) (Mutation, error) {
