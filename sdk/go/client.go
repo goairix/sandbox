@@ -127,6 +127,14 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (SandboxResponse, er
 	return resp, c.do(ctx, http.MethodGet, c.sandboxBase(id), nil, &resp)
 }
 
+// GetSandboxByWorkspace finds an existing usable sandbox for a workspace.
+// It does not create, renew, reconfigure, or destroy the sandbox.
+func (c *Client) GetSandboxByWorkspace(ctx context.Context, workspacePath string) (SandboxResponse, error) {
+	query := url.Values{"workspace_path": {workspacePath}}
+	var resp SandboxResponse
+	return resp, c.do(ctx, http.MethodGet, "/api/v1/sandboxes/by-workspace?"+query.Encode(), nil, &resp)
+}
+
 // DestroySandbox destroys a sandbox. DELETE /api/v1/sandboxes/:id
 func (c *Client) DestroySandbox(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, c.sandboxBase(id), nil, nil)

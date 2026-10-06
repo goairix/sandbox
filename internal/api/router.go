@@ -90,6 +90,7 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 
 	// Sandbox management
 	v1.POST("/sandboxes", h.CreateSandbox)
+	v1.GET("/sandboxes/by-workspace", h.GetSandboxByWorkspace)
 	v1.GET("/sandboxes/:id", h.GetSandbox)
 	v1.DELETE("/sandboxes/:id", h.DestroySandbox)
 	v1.PUT("/sandboxes/:id/network", h.UpdateNetwork)

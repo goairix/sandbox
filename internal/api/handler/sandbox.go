@@ -143,6 +143,19 @@ func (h *Handler) DestroySandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "sandbox destroyed"})
 }
 
+// GetSandboxByWorkspace looks up an existing sandbox without taking ownership
+// of its workspace or mutating its lifecycle.
+func (h *Handler) GetSandboxByWorkspace(c *gin.Context) {
+	ctx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.GetSandboxByWorkspace")
+	defer span.End()
+	sb, err := h.manager.GetByWorkspace(ctx, c.Query("workspace_path"))
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, sandboxToResponse(&sb))
+}
+
 func (h *Handler) UpdateNetwork(c *gin.Context) {
 	spanCtx, span := trace.Tracer().Start(trace.Gin(c), "api.sandbox.UpdateNetwork")
 	defer span.End()
@@ -208,6 +221,7 @@ func sandboxToResponse(sb *sandbox.Sandbox) types.SandboxResponse {
 		resp.ExpiresAt = &expiresAt
 	}
 	if sb.Workspace != nil {
+		resp.WorkspacePath = sb.Workspace.RootPath
 		mountMode := sb.Config.WorkspaceMountMode
 		if mountMode == "" {
 			mountMode = sandbox.WorkspaceMountSync

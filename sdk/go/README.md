@@ -168,6 +168,31 @@ info, err := sb.WorkspaceInfo(ctx)
 err = sb.UnmountWorkspace(ctx)
 ```
 
+### 恢复丢失的工作空间映射
+
+```go
+existing, err := client.GetSandboxByWorkspace(ctx, "team/project-a")
+if err != nil {
+    // errors.Is(err, sandbox.ErrNotFound) 时才尝试创建。
+    // 409/503 保留已有资源，按错误码重试或排查。
+    return err
+}
+if existing.WorkspacePath != "team/project-a" {
+    return fmt.Errorf("unexpected workspace: %s", existing.WorkspacePath)
+}
+// App 将 existing.ID 保存回 workspace → sandbox 映射后直接复用。
+result, err := client.Exec(ctx, existing.ID, sandbox.ExecRequest{
+    Language: "bash",
+    Code:     "pwd",
+})
+```
+
+`GetSandboxByWorkspace` 不创建沙箱、不更新配置、不续租/TTL、不迁移 session，也不销毁沙箱。创建遇到 `WORKSPACE_LEASED` / `WORKSPACE_OWNED` 时再次查回；租约冲突不能成为删除已有沙箱的理由。
+
+接口返回 `WORKSPACE_SANDBOX_CONFLICT`（409）表示当前归属或可用状态不能确认，`WORKSPACE_SANDBOX_AMBIGUOUS`（409）表示存在多个历史候选，`WORKSPACE_LOOKUP_UNAVAILABLE`（503）表示依赖或配置不可用。路径必须是规范的相对工作空间路径。服务端校验工作空间存储身份和 runtime 身份；服务 API key 不提供 App 用户/租户授权，App 仍需校验业务归属。
+
+已有 owner 的旧沙箱不依赖新增映射或索引。没有 owner 的旧 Docker local session 可通过实际 bind mount 查回；没有 owner 的旧对象存储 sync session 缺少后端归属证据，返回 409。
+
 ### Deployment acceptance smoke test
 
 仓库内置的 `cmd/sandbox-sdk-smoke` 是交付验收工具，不是业务 SDK 的必需依赖。它只使用上面展示的公开 SDK 方法，依次验证普通和 FUSE 沙盒的创建、`bash` 执行、workspace sync、FUSE 挂载状态和销毁；FUSE 验收要求 `mounted=true`、`mount_type=fuse`、`mount_state=ready`、`flushed=true`。
@@ -305,6 +330,7 @@ if errors.As(err, &sbErr) {
 |---|---|
 | `CreateSandbox(ctx, req)` | POST /api/v1/sandboxes |
 | `GetSandbox(ctx, id)` | GET /api/v1/sandboxes/:id |
+| `GetSandboxByWorkspace(ctx, workspacePath)` | GET /api/v1/sandboxes/by-workspace?workspace_path=... |
 | `DestroySandbox(ctx, id)` | DELETE /api/v1/sandboxes/:id |
 | `UpdateNetwork(ctx, id, req)` | PUT /api/v1/sandboxes/:id/network |
 | `UpdateTTL(ctx, id, req)` | PUT /api/v1/sandboxes/:id/ttl |

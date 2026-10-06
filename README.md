@@ -38,6 +38,28 @@ curl -X POST http://localhost:8080/api/v1/execute \
   -d '{"language":"python","code":"print(\"Hello Sandbox!\")"}'
 ```
 
+**按工作空间查回已有沙箱：**
+
+```bash
+curl --get http://localhost:8080/api/v1/sandboxes/by-workspace \
+  -H "Authorization: Bearer your-api-key" \
+  --data-urlencode 'workspace_path=team/project-a'
+```
+
+成功返回 HTTP 200，包含已有沙箱的 `id`、`workspace_path` 和 `workspace_mount_mode`。App 映射丢失时先查回，验证路径后恢复映射并直接使用该 ID。HTTP 404（`SANDBOX_NOT_FOUND`）才表示没有可查回的沙箱；创建遇到 `WORKSPACE_LEASED` / `WORKSPACE_OWNED` 时再次查回，不能因此删除已有沙箱。
+
+查询使用现有服务 API key，校验完整存储身份、工作空间 owner、生命周期和精确 runtime 身份；不续租、不续 TTL、不迁移旧 session、不修改配置或清除 owner。这里的归属校验是沙箱与工作空间的关系校验，用户或租户授权仍由 App 执行。
+
+| 状态 | 错误码 | 调用方处理 |
+| --- | --- | --- |
+| 400 | `WORKSPACE_PATH_INVALID` | 修正路径，使用规范的相对工作空间路径 |
+| 404 | `SANDBOX_NOT_FOUND` | 尝试创建；发生租约/owner 冲突时再次查回 |
+| 409 | `WORKSPACE_SANDBOX_CONFLICT` | 发布中、销毁中、过期、租约或归属无法确认；保留已有资源，按场景重试或排查 |
+| 409 | `WORKSPACE_SANDBOX_AMBIGUOUS` | 多个历史沙箱声明同一工作空间；排查关联记录 |
+| 503 | `WORKSPACE_LOOKUP_UNAVAILABLE` | 状态存储、runtime 检查或查回配置不可用；重试，不能当成不存在 |
+
+有 owner 的旧沙箱可以通过原有记录查回，无需预先建立新的索引。旧 Docker local session 可通过实际可写 `/workspace` bind mount 验证目录；缺少独立 runtime UID 时，仅接受精确完整 Docker container ID。没有 owner 的旧对象存储 sync session 缺少后端归属证据，会返回 409；Kubernetes pod UID 不能推测，只有孤立 runtime 而没有关联记录的情况也不能猜测恢复。
+
 **创建持久化沙箱：**
 
 ```bash

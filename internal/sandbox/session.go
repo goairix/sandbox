@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
@@ -252,6 +253,36 @@ func (s *SessionStore) List(ctx context.Context) ([]string, error) {
 	ids := make([]string, len(keys))
 	for i, key := range keys {
 		ids[i] = key[len(sandboxSessionKeyPrefix):]
+	}
+	return ids, nil
+}
+
+// ListReadOnly inventories current and historical generated sandbox IDs without
+// migrating sessions or mistaking other sandbox state namespaces for sessions.
+func (s *SessionStore) ListReadOnly(ctx context.Context) ([]string, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("session store is not configured")
+	}
+	seen := make(map[string]struct{})
+	for _, prefix := range []string{sandboxSessionKeyPrefix, legacySandboxSessionKeyPrefix} {
+		pattern := prefix + "*"
+		if prefix == legacySandboxSessionKeyPrefix {
+			pattern = prefix + "sandbox-*"
+		}
+		keys, err := s.store.Keys(ctx, pattern)
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			id := strings.TrimPrefix(key, prefix)
+			if id != "" && !strings.Contains(id, ":") {
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
 	}
 	return ids, nil
 }

@@ -50,6 +50,7 @@ type SandboxResponse struct {
 	CreatedAt          time.Time  `json:"created_at"`
 	Timeout            int        `json:"timeout"`              // seconds; -1 = never expire
 	ExpiresAt          *time.Time `json:"expires_at,omitempty"` // nil when timeout = -1
+	WorkspacePath      string     `json:"workspace_path,omitempty"`
 	WorkspaceMountMode string     `json:"workspace_mount_mode,omitempty"`
 }
 

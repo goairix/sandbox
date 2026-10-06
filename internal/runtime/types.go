@@ -42,6 +42,9 @@ type SandboxInfo struct {
 	// ListSandboxes. Callers use them to keep independently-owned runtime pools
 	// isolated during startup reconciliation.
 	Labels map[string]string
+	// WorkspaceHostPath is populated only for a verified writable bind mount
+	// at /workspace. It lets historical local sessions prove their backing root.
+	WorkspaceHostPath string
 }
 
 // ExecRequest holds parameters for executing a command in a sandbox.

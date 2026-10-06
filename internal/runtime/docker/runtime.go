@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
@@ -1179,6 +1180,9 @@ func (r *Runtime) effectiveSecretRoot() string {
 func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxInfo, error) {
 	info, err := r.cli.ContainerInspect(ctx, id)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, errors.Join(runtime.ErrNotFound, err)
+		}
 		return nil, err
 	}
 
@@ -1192,13 +1196,20 @@ func (r *Runtime) GetSandbox(ctx context.Context, id string) (*runtime.SandboxIn
 	}
 
 	created, _ := time.Parse(time.RFC3339Nano, info.Created)
+	var workspaceHostPath string
+	for _, mounted := range info.Mounts {
+		if mounted.Type == "bind" && mounted.Destination == "/workspace" && mounted.RW {
+			workspaceHostPath = mounted.Source
+		}
+	}
 
 	return &runtime.SandboxInfo{
-		ID:         id,
-		RuntimeID:  info.ID,
-		RuntimeUID: info.ID,
-		State:      state,
-		CreatedAt:  created,
+		ID:                id,
+		RuntimeID:         info.ID,
+		RuntimeUID:        info.ID,
+		State:             state,
+		CreatedAt:         created,
+		WorkspaceHostPath: workspaceHostPath,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/sandbox"
+	"github.com/goairix/sandbox/internal/storage"
 	telemetry "github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
 )
@@ -46,6 +47,18 @@ func internalError(c *gin.Context, err error) {
 	}
 
 	switch {
+	case errors.Is(err, sandbox.ErrWorkspaceLookupUnavailable):
+		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{Code: "WORKSPACE_LOOKUP_UNAVAILABLE", Message: err.Error()})
+		return
+	case errors.Is(err, sandbox.ErrWorkspaceLookupAmbiguous):
+		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "WORKSPACE_SANDBOX_AMBIGUOUS", Message: err.Error()})
+		return
+	case errors.Is(err, sandbox.ErrWorkspaceLookupConflict):
+		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "WORKSPACE_SANDBOX_CONFLICT", Message: err.Error()})
+		return
+	case errors.Is(err, storage.ErrInvalidWorkspacePrefix):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "WORKSPACE_PATH_INVALID", Message: err.Error()})
+		return
 	case errors.Is(err, runtime.ErrInvalidNetworkTarget):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "NETWORK_TARGET_INVALID", Message: err.Error()})
 		return
