@@ -109,6 +109,16 @@ func TestExecEffectRecordStrictTypedFields(t *testing.T) {
 			for _, defect := range []string{"missing", "null", "duplicate", "case", "unknown"} {
 				t.Run(strings.Join(p, "/")+"/"+defect, func(t *testing.T) {
 					kv := execEffectKV(t, r)
+					var baseline ExecEffectRecord
+					require.NoError(t, decodeExecEffectRecord(kv, &baseline))
+					require.Equal(t, r, baseline)
+					encodeObject := func(object map[string]json.RawMessage) []byte {
+						var wire bytes.Buffer
+						encoder := json.NewEncoder(&wire)
+						encoder.SetEscapeHTML(false)
+						require.NoError(t, encoder.Encode(object))
+						return bytes.TrimSuffix(wire.Bytes(), []byte("\n"))
+					}
 					var mutate func([]byte, []string) []byte
 					mutate = func(wire []byte, parts []string) []byte {
 						var object map[string]json.RawMessage
@@ -116,14 +126,11 @@ func TestExecEffectRecordStrictTypedFields(t *testing.T) {
 						key := parts[0]
 						if len(parts) > 1 {
 							object[key] = mutate(object[key], parts[1:])
-							out, e := json.Marshal(object)
-							require.NoError(t, e)
-							return out
+							return encodeObject(object)
 						}
 						val := object[key]
 						delete(object, key)
-						out, e := json.Marshal(object)
-						require.NoError(t, e)
+						out := encodeObject(object)
 						prefix := out[:len(out)-1]
 						sep := ""
 						if len(object) > 0 {
@@ -143,6 +150,11 @@ func TestExecEffectRecordStrictTypedFields(t *testing.T) {
 						}
 					}
 					kv.Value = mutate(kv.Value, p)
+					if p[0] != "ticket" {
+						var probe ExecEffectRecord
+						require.NoError(t, json.Unmarshal(kv.Value, &probe))
+						require.Equal(t, r.Ticket, probe.Ticket, "typed-field mutation must preserve opaque ticket wire")
+					}
 					old := r
 					old.CommandID = "sentinel"
 					saved := old
