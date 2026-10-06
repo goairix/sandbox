@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -18,16 +20,15 @@ func TestResolveOperationLateCompleteTransaction(t *testing.T) {
 	for _, scenario := range []string{"abort", "commit reply lost", "revoke", "natural expiry"} {
 		t.Run(scenario, func(t *testing.T) {
 			b, raw, in, _ := operationControlFixture(t, "plain")
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
 			reached, release := make(chan OperationReference, 1), make(chan struct{})
 			var once sync.Once
 			unlock := func() { once.Do(func() { close(release) }) }
-			defer unlock()
 			lease := &creationFaultLease{Lease: b.client.Lease, revoke: func(context.Context, clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
 				return nil, errors.New("retain original Lease")
 			}}
 			b.client.Lease = lease
-			defer func() { b.client.Lease = lease.Lease }()
 			// Keep the actual delayed Txn context alive through natural original expiry.
 			b.requestTimeout = 45 * time.Second
 			var ref OperationReference
@@ -43,6 +44,10 @@ func TestResolveOperationLateCompleteTransaction(t *testing.T) {
 				if scenario != "commit reply lost" {
 					reached <- ref
 					<-release
+					if os.Getenv("SANDBOX_TEST_DELAYED_OPERATION_FATAL") == "1" {
+						require.Same(t, lease, b.client.Lease, "hook restored while admission running")
+						t.Fatal("injected worker assertion failure")
+					}
 				}
 			}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
 				require.NoError(t, e)
@@ -56,7 +61,37 @@ func TestResolveOperationLateCompleteTransaction(t *testing.T) {
 				return nil, context.DeadlineExceeded
 			}}
 			done := make(chan BeginOperationResult, 1)
+			finished := make(chan struct{})
+			if os.Getenv("SANDBOX_TEST_DELAYED_OPERATION_FATAL") == "1" {
+				t.Cleanup(func() {
+					select {
+					case <-finished:
+						t.Log("delayed admission completed before fixture cleanup")
+					default:
+						t.Error("admission still running at fixture cleanup")
+					}
+				})
+			}
+			// Registered after the fixture cleanups: release and join first on
+			// every exit, including parent Fatal and worker require/Goexit.
+			t.Cleanup(func() {
+				unlock()
+				cancel()
+				select {
+				case <-finished:
+				case <-time.After(5 * time.Second):
+					t.Error("admission did not finish before fixture cleanup")
+					return // Do not race a still-running worker by restoring hooks.
+				}
+				b.client.Lease = lease.Lease
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanupCancel()
+				if ref.LeaseID > 0 {
+					_, _ = raw.Revoke(cleanupCtx, clientv3.LeaseID(ref.LeaseID))
+				}
+			})
 			go func() {
+				defer close(finished)
 				r, e := b.BeginOperation(ctx, BeginOperationInput{SandboxID: in.SandboxID, RequestID: "delayed-resolve", Kind: OperationMutation})
 				require.ErrorIs(t, e, ErrOutcomeUnknown)
 				done <- r
@@ -66,7 +101,9 @@ func TestResolveOperationLateCompleteTransaction(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("admission not intercepted")
 			}
-			defer func() { _, _ = raw.Revoke(ctx, clientv3.LeaseID(ref.LeaseID)) }()
+			if os.Getenv("SANDBOX_TEST_DELAYED_OPERATION_FATAL") == "1" {
+				t.Fatal("injected early admission assertion failure")
+			}
 			want := OperationAborted
 			if scenario == "commit reply lost" {
 				want = OperationCommitted
@@ -109,6 +146,29 @@ func TestResolveOperationLateCompleteTransaction(t *testing.T) {
 			require.Equal(t, int64(1), lease.grants.Load())
 		})
 	}
+}
+
+// Run the intentional parent/worker Fatal paths in a child test process so an
+// expected assertion failure cannot mark the actual regression suite failed.
+func TestDelayedOperationCleanupAfterFatal(t *testing.T) {
+	if os.Getenv("TEST_ETCD_ENDPOINTS") == "" {
+		t.Skip("set TEST_ETCD_ENDPOINTS to a real three-member etcd cluster")
+	}
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestResolveOperationLateCompleteTransaction$/^abort$", "-test.v")
+	command.Env = append(os.Environ(), "SANDBOX_TEST_DELAYED_OPERATION_FATAL=1")
+	output, err := command.CombinedOutput()
+	require.Error(t, err, "child must encounter the intentionally injected Fatal")
+	require.NoError(t, ctx.Err(), string(output))
+	require.Contains(t, string(output), "injected early admission assertion failure")
+	require.Contains(t, string(output), "injected worker assertion failure")
+	require.Contains(t, string(output), "delayed admission completed before fixture cleanup")
+	require.NotContains(t, string(output), "admission still running at fixture cleanup")
+	require.NotContains(t, string(output), "hook restored while admission running")
+	require.NotContains(t, string(output), "DATA RACE")
 }
 
 func admittedOperation(t *testing.T, b *Backend, raw *clientv3.Client, id string, kind OperationKind) *OperationCapability {
