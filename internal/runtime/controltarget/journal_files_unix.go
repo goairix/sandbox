@@ -74,6 +74,44 @@ func validateJournalFD(f *os.File, uid uint32, directory bool) error {
 	return nil
 }
 
+func (f *journalFiles) observed(op string) {
+	if f.observe != nil {
+		f.observe(op)
+	}
+}
+func (f *journalFiles) validateFD(child *os.File, directory bool) error {
+	f.observed("fstat")
+	return validateJournalFD(child, f.uid, directory)
+}
+func (f *journalFiles) closeFile(child *os.File) error {
+	f.observed("close")
+	return child.Close()
+}
+
+// Count every raw read attempt (including EINTR and EOF), rather than a
+// high-level ReadAll call. No record buffer/cache survives a point operation.
+type journalFDReader struct {
+	files *journalFiles
+	file  *os.File
+}
+
+func (r journalFDReader) Read(p []byte) (int, error) {
+	for {
+		r.files.observed("read")
+		n, err := unix.Read(int(r.file.Fd()), p)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if n == 0 && err == nil {
+			err = io.EOF
+		}
+		if n < 0 {
+			n = 0
+		}
+		return n, err
+	}
+}
+
 func (f *journalFiles) openChild(dir *os.File, name string, directory bool) (*os.File, error) {
 	if !journalName(name) {
 		return nil, fmt.Errorf("%w: invalid child name", ErrInvalidRecord)
@@ -82,13 +120,14 @@ func (f *journalFiles) openChild(dir *os.File, name string, directory bool) (*os
 	if directory {
 		flags |= unix.O_DIRECTORY
 	}
+	f.observed("openat")
 	fd, err := unix.Openat(int(dir.Fd()), name, flags, 0)
 	if err != nil {
 		return nil, err
 	}
 	child := os.NewFile(uintptr(fd), name)
-	if err = validateJournalFD(child, f.uid, directory); err != nil {
-		child.Close()
+	if err = f.validateFD(child, directory); err != nil {
+		f.closeFile(child)
 		return nil, err
 	}
 	return child, nil
@@ -105,7 +144,8 @@ func (f *journalFiles) readFile(ctx context.Context, dir *os.File, name string) 
 	if err != nil {
 		return nil, err
 	}
-	defer child.Close()
+	defer f.closeFile(child)
+	f.observed("fstat")
 	st, err := child.Stat()
 	if err != nil {
 		return nil, err
@@ -113,7 +153,7 @@ func (f *journalFiles) readFile(ctx context.Context, dir *os.File, name string) 
 	if st.Size() > maxJournalWireBytes {
 		return nil, fmt.Errorf("%w: oversized file", ErrInvalidRecord)
 	}
-	b, err := io.ReadAll(io.LimitReader(child, maxJournalWireBytes+1))
+	b, err := io.ReadAll(io.LimitReader(journalFDReader{files: f, file: child}, maxJournalWireBytes+1))
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +167,10 @@ func (f *journalFiles) readFile(ctx context.Context, dir *os.File, name string) 
 }
 
 func (f *journalFiles) syncDir(ctx context.Context, dir *os.File) error {
-	return f.operation(ctx, "dir-sync", dir.Name(), dir.Sync)
+	return f.operation(ctx, "dir-sync", dir.Name(), func() error {
+		f.observed("directory-fsync")
+		return dir.Sync()
+	})
 }
 
 func (f *journalFiles) makeDir(ctx context.Context, dir *os.File, name string) (*os.File, error) {
@@ -260,10 +303,11 @@ func (f *journalFiles) persistFile(ctx context.Context, dir *os.File, name, temp
 	var child *os.File
 	defer func() {
 		if child != nil {
-			child.Close()
+			f.closeFile(child)
 		}
 	}()
 	if err := f.operation(ctx, "open-temp", temp, func() error {
+		f.observed("openat")
 		fd, err := unix.Openat(int(dir.Fd()), temp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 		if err == nil {
 			child = os.NewFile(uintptr(fd), temp)
@@ -272,12 +316,16 @@ func (f *journalFiles) persistFile(ctx context.Context, dir *os.File, name, temp
 	}); err != nil {
 		return err
 	}
-	if err := validateJournalFD(child, f.uid, false); err != nil {
+	if err := f.validateFD(child, false); err != nil {
 		return err
 	}
 	if err := f.operation(ctx, "write", temp, func() error {
 		for len(b) > 0 {
-			n, err := child.Write(b)
+			f.observed("write")
+			n, err := unix.Write(int(child.Fd()), b)
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -290,10 +338,16 @@ func (f *journalFiles) persistFile(ctx context.Context, dir *os.File, name, temp
 	}); err != nil {
 		return err
 	}
-	if err := f.operation(ctx, "file-sync", temp, child.Sync); err != nil {
+	if err := f.operation(ctx, "file-sync", temp, func() error {
+		f.observed("file-fsync")
+		return child.Sync()
+	}); err != nil {
 		return err
 	}
-	if err := f.operation(ctx, "rename", name, func() error { return unix.Renameat(int(dir.Fd()), temp, int(dir.Fd()), name) }); err != nil {
+	if err := f.operation(ctx, "rename", name, func() error {
+		f.observed("renameat")
+		return unix.Renameat(int(dir.Fd()), temp, int(dir.Fd()), name)
+	}); err != nil {
 		return err
 	}
 	return f.syncDir(ctx, dir)
@@ -342,7 +396,7 @@ func (j *Journal) readCommandLocked(ctx context.Context, id string) (*ExecJourna
 	if err != nil {
 		return nil, err
 	}
-	defer bucket.Close()
+	defer j.files.closeFile(bucket)
 	b, err := j.files.readFile(ctx, bucket, id+".json")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -403,7 +457,7 @@ func (j *Journal) persistNewCommandLocked(ctx context.Context, r ExecJournalReco
 	} else if err != nil {
 		return err
 	}
-	defer bucket.Close()
+	defer j.files.closeFile(bucket)
 	if err = j.files.persistFile(ctx, bucket, r.Context.CommandID+".json", "."+r.Context.CommandID+"."+nonce+".tmp", b); err != nil {
 		return j.poison(err)
 	}

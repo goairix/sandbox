@@ -21,6 +21,9 @@ type journalIOHook func(operation, name string, after bool) error
 type journalFiles struct {
 	uid  uint32
 	hook journalIOHook
+	// observe counts actual point IO attempts synchronously. It cannot inject
+	// failures or replace IO; set it only while no operation is in flight.
+	observe func(operation string)
 }
 
 // Journal is passive diagnostic storage. Its lock and pinned descriptors live
