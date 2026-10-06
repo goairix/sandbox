@@ -88,7 +88,7 @@ Loader先线性读两个固定key，both missing返回nil而非外部失败证�
 
 ## Task 3：原 creation claim 下的原子声明
 
-**Files:** Create `runtime_dispatch.go`、对应happy/fault/validation tests；Modify `creation_claim.go`、`creation_claim_read.go`只增加private不可变request/control上下文副本，不改变claim guard/Lease/比较数。
+**Files:** Create `runtime_dispatch.go`、对应happy/fault/validation tests；Modify `creation_claim.go`、`creation_claim_read.go`只增加private不可变workspace identity/request/control上下文副本，不改变claim guard/Lease/比较数。
 
 **Interfaces:**
 
@@ -102,7 +102,7 @@ type RuntimeDispatchResult struct {
 func (b *Backend) DeclareRuntimeDispatch(ctx context.Context,c *CreationClaim,input RuntimeDispatchInput) (RuntimeDispatchResult,error)
 ```
 
-ClaimCreation从已验证bundle保存private request和control值（publishing的runtime=nil），包含原requestID/hash/configdigest、snapshot与expires；不暴露该上下文的可变指针。原24条比较照旧，只有活跃C保留少量副本。声明先验证ctx/origin/current local能力、kind/target、私有payload compact copy/full编码预算；读取existing entry并核对其归属与当前claim上下文。已有合法声明且kind/target/inputdigest相同则replay原operation/ref（允许来自新claim的恢复），不Grant、不改Lease、TTL或原creator；不同输入ErrIdempotencyConflict，错位或corrupt拒绝，不覆盖。replay仅返回metadata evidence，不授予旧creator能力。
+ClaimCreation保存原immutable workspace identity，并从已验证bundle保存private request和control值（publishing的runtime=nil），包含原requestID/hash/configdigest、snapshot与expires；不暴露该上下文的可变指针。workspace identity用于调用既有LoadRuntimeDispatch，不从裸hash重建或绕过storage authority校验。原24条比较照旧，只有活跃C保留少量副本。声明先验证ctx/origin/current local能力、kind/target、私有payload compact copy/full编码预算；读取existing entry并核对其归属与当前claim上下文。已有合法声明且kind/target/inputdigest相同则replay原operation/ref（允许来自新claim的恢复），不Grant、不改Lease、TTL或原creator；不同输入ErrIdempotencyConflict，错位或corrupt拒绝，不覆盖。replay仅返回metadata evidence，不授予旧creator能力。
 
 不存在时内部生成新operationUUID；使用Task1 builder生成新的metadata attempt，构造两个immutable records，其归属均来自private claim上下文，snapshot/expiry不从caller覆盖。mutation包含原24cmp及declaration/input CreateRevision0，两个永久writes；总42项含14stage预留，原预算不放宽。Begin stage30s后重检ctx/local claim，CommitStage；失败/unknown返回exactReference且Entry=nil，不能伪称declared。只有knownCommitted返回declared entry；background bounded Release原stage记录cleanup错误，不能降低known outcome，也不释放creation claim或owner。
 
