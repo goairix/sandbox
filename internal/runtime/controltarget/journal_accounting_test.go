@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func writeHistoryFixture(t *testing.T, o JournalOptions, id string, temp bool) int64 {
@@ -205,6 +207,29 @@ func TestJournalPagedAccounting(t *testing.T) {
 	if s.Records != 1000 || s.TemporaryFiles != 0 || s.LogicalBytes != want || !s.AccountingKnown {
 		t.Fatalf("1000 files status %+v want bytes %d", s, want)
 	}
+	var directoryBytes, allocatedBytes int64
+	var directories, files int
+	err = filepath.Walk(o.Directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		var st unix.Stat_t
+		if err := unix.Lstat(path, &st); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			directories++
+			directoryBytes += st.Blocks * 512
+		} else {
+			files++
+			allocatedBytes += st.Blocks * 512
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("observed filesystem: content=%d bytes, directories=%d allocated-directory=%d bytes, files-including-lock=%d allocated-files=%d bytes, steady-journal-FDs=3; block allocation is platform-specific", s.LogicalBytes, directories, directoryBytes, files, allocatedBytes)
 }
 
 // These are private point primitives for the next evidence consumer. Public
@@ -417,5 +442,77 @@ func TestJournalCommandPersistenceFaults(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestJournalRecoveryCancelledScan(t *testing.T) {
+	j, o := createJournalFixture(t)
+	j.Close()
+	writeHistoryFixture(t, o, "22222222-2222-4222-8222-222222222222", false)
+	before := treeBytes(t, o.Directory)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hook := func(op, name string, after bool) error {
+		if op == "read-page" && after {
+			cancel()
+		}
+		return nil
+	}
+	if j, err := newJournal(ctx, o, false, hook); j != nil || !errors.Is(err, context.Canceled) {
+		if j != nil {
+			j.Close()
+		}
+		t.Fatalf("cancelled scan %v", err)
+	}
+	if treeBytes(t, o.Directory) != before {
+		t.Fatal("cancelled scan mutated evidence")
+	}
+	reopened, err := OpenClosedJournal(context.Background(), o)
+	if err != nil {
+		t.Fatal("lock retained after failed scan", err)
+	}
+	reopened.Close()
+}
+
+func TestJournalPagedAccountingFileLimit(t *testing.T) {
+	j, o := createJournalFixture(t)
+	m := j.Status().Gate
+	j.Close()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These are real valid retained temp files. 65535 content files leave one
+	// transient slot for a gate write, but no slot for another immutable command.
+	for n := 1; n <= 65534; n++ {
+		mustWrite(t, filepath.Join(o.Directory, fmt.Sprintf(".gate.00000000-0000-4000-8000-%012x.tmp", n)), b)
+	}
+	j, err = OpenClosedJournal(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := j.Status()
+	if s.TemporaryFiles != 65534 || !s.NewRecordsStopped || !s.AccountingKnown {
+		j.Close()
+		t.Fatalf("file limit status %+v", s)
+	}
+	j.mu.Lock()
+	err = j.persistNewCommandLocked(context.Background(), journalRecordFixture())
+	j.mu.Unlock()
+	if !errors.Is(err, ErrCapacity) {
+		j.Close()
+		t.Fatalf("reserved gate slot consumed: %v", err)
+	}
+	if _, err = j.CloseGate(context.Background(), 2); err != nil {
+		j.Close()
+		t.Fatal("reserved gate slot unavailable", err)
+	}
+	j.Close()
+	mustWrite(t, filepath.Join(o.Directory, ".gate.00000000-0000-4000-8000-ffffffffffff.tmp"), b)
+	if j, err = OpenClosedJournal(context.Background(), o); j != nil || !errors.Is(err, ErrCapacity) {
+		if j != nil {
+			j.Close()
+		}
+		t.Fatalf("gate exceeded 65536 content files: %v", err)
 	}
 }

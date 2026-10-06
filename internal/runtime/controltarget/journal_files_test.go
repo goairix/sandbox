@@ -217,3 +217,34 @@ func protectedLayoutPath(o JournalOptions, part string) string {
 		return filepath.Join(o.Directory, "commands", "22", "22222222-2222-4222-8222-222222222222.json")
 	}
 }
+
+func TestJournalProtectedFilesPinnedRoot(t *testing.T) {
+	j, o := createJournalFixture(t)
+	moved := o.Directory + "-moved"
+	if err := os.Rename(o.Directory, moved); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(filepath.Dir(o.Directory), "decoy")
+	if err := os.Mkdir(decoy, 0700); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(decoy, "gate.json"), []byte("decoy must remain untouched"))
+	if err := os.Symlink(decoy, o.Directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.CloseGate(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(decoy, "gate.json"))
+	if err != nil || string(b) != "decoy must remain untouched" {
+		t.Fatalf("followed replaced root %s %v", b, err)
+	}
+	b, err = os.ReadFile(filepath.Join(moved, "gate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gate GateManifest
+	if err = decodeGateManifest(b, &gate); err != nil || gate.GateState != "closed" {
+		t.Fatal("pinned root not closed", err)
+	}
+}
