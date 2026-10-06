@@ -187,11 +187,11 @@ func (r CreationRequestRecord) Validate() error {
 }
 func domainRecordLimit(record interface{ Validate() error }) int {
 	switch record.(type) {
-	case SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
+	case RuntimeDispatchRecord, *RuntimeDispatchRecord, SandboxPlacementRecord, *SandboxPlacementRecord, WorkspaceOwnerRecord, *WorkspaceOwnerRecord, SandboxControlRecord, *SandboxControlRecord, CreationIntentRecord, *CreationIntentRecord, CreationRequestRecord, *CreationRequestRecord:
 		return 4096
 	case WorkspaceFenceRecord, *WorkspaceFenceRecord:
 		return 1024
-	case SandboxSnapshotRecord, *SandboxSnapshotRecord:
+	case RuntimeDispatchInputRecord, *RuntimeDispatchInputRecord, SandboxSnapshotRecord, *SandboxSnapshotRecord:
 		return 65536
 	default:
 		return 0
@@ -199,6 +199,10 @@ func domainRecordLimit(record interface{ Validate() error }) int {
 }
 func nilDomainRecord(record interface{ Validate() error }) bool {
 	switch r := record.(type) {
+	case *RuntimeDispatchRecord:
+		return r == nil
+	case *RuntimeDispatchInputRecord:
+		return r == nil
 	case *WorkspaceOwnerRecord:
 		return r == nil
 	case *WorkspaceFenceRecord:
@@ -222,6 +226,17 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 	if limit == 0 || nilDomainRecord(record) {
 		return "", fmt.Errorf("%w: unsupported or nil domain record", ErrInvalidRecord)
 	}
+	// Own dispatch payload bytes before validation and encoding, preserving their
+	// representation without retaining the caller's RawMessage backing array.
+	switch r := record.(type) {
+	case RuntimeDispatchInputRecord:
+		r.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = r
+	case *RuntimeDispatchInputRecord:
+		owned := *r
+		owned.Payload = append(json.RawMessage(nil), r.Payload...)
+		record = owned
+	}
 	if err := record.Validate(); err != nil {
 		return "", err
 	}
@@ -240,6 +255,10 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 }
 func decodeDomainRecord(kv *mvccpb.KeyValue, record interface{ Validate() error }) error {
 	switch destination := record.(type) {
+	case *RuntimeDispatchRecord:
+		return decodeTypedDomain(kv, destination, 4096)
+	case *RuntimeDispatchInputRecord:
+		return decodeTypedDomain(kv, destination, 65536)
 	case *WorkspaceOwnerRecord:
 		return decodeTypedDomain(kv, destination, 4096)
 	case *WorkspaceFenceRecord:
