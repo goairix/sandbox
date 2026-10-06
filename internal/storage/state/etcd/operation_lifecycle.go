@@ -49,18 +49,18 @@ func (b *Backend) RenewOperation(ctx context.Context, c *OperationCapability) (e
 		comparisons = append(comparisons, operationEnvelopeComparisons(c.mutationKey, c.value, c.record.Reference.LeaseID, c.admitRevision)...)
 	}
 	// No evidence is adopted from a reread. All comparisons are against the
-	// already bounded private producer state (30 comparisons at most).
+	// already bounded private producer state (30 comparisons at most). The same
+	// Txn must contain a default linearizable Range: empty branches are classified
+	// as serializable by etcd even when the Txn has comparisons. Both branches
+	// read one fixed metadata point; there are no writes or extra RPCs.
 	request, cancel := b.requestContext(ctx)
-	response, err := b.client.Txn(request).If(comparisons...).Commit()
+	response, err := b.client.Txn(request).If(comparisons...).Then(clientv3.OpGet(b.identityKey)).Else(clientv3.OpGet(b.identityKey)).Commit()
 	cancel()
 	if err != nil {
 		return fmt.Errorf("%w: fence operation renewal: %w", ErrOutcomeUnknown, err)
 	}
-	if err = b.operationResponseHeader(response); err != nil {
+	if err = b.validateFenceCheckResponse(response); err != nil {
 		return err
-	}
-	if len(response.Responses) != 0 {
-		return ErrOutcomeUnknown
 	}
 	if !response.Succeeded {
 		return ErrConflict

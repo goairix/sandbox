@@ -241,7 +241,9 @@ func (b *Backend) commitPreparation(ctx context.Context, c *CreationClaim, stage
 }
 
 // Readonly replays still reject changed server claim/control fences. This does
-// not renew a Lease and grants no mutation or runtime capability.
+// not renew a Lease and grants no mutation or runtime capability. A default
+// linearizable point Range in this same Txn fences the comparison snapshot;
+// empty read-only branches would instead allow stale follower comparisons.
 func (b *Backend) checkPreparationReplay(ctx context.Context, c *CreationClaim) error {
 	comparisons, err := b.creationClaimComparisons(c)
 	if err != nil {
@@ -249,12 +251,12 @@ func (b *Backend) checkPreparationReplay(ctx context.Context, c *CreationClaim) 
 	}
 	bounded, cancel := b.requestContext(ctx)
 	defer cancel()
-	response, err := b.client.Txn(bounded).If(append(b.baseComparisons(), comparisons...)...).Then().Commit()
+	response, err := b.client.Txn(bounded).If(append(b.baseComparisons(), comparisons...)...).Then(clientv3.OpGet(b.identityKey)).Else(clientv3.OpGet(b.identityKey)).Commit()
 	if err != nil {
 		return err
 	}
-	if response == nil || response.Header == nil || response.Header.ClusterId != b.clusterID {
-		return ErrIdentityMismatch
+	if err := b.validateFenceCheckResponse(response); err != nil {
+		return err
 	}
 	if !response.Succeeded {
 		return ErrConflict
