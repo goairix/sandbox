@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -35,7 +36,7 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
-	case "reject-nnp", "reject-missing-cap", "reject-extra-cap", "reject-role", "reject-nonpid1", "reject-thread", "reject-securebits":
+	case "reject-nnp", "reject-missing-cap", "reject-extra-cap", "reject-role", "reject-nonpid1", "reject-thread", "reject-securebits", "reject-setter", "reject-partial":
 		if err := nativeReject(mode); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -234,7 +235,7 @@ func runNativeChild(mode string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-func nativeReject(mode string) error {
+func nativeReject(mode string) (resultErr error) {
 	if mode == "reject-nonpid1" {
 		if os.Getpid() <= 1 {
 			return fmt.Errorf("nonpid1 fixture incorrectly PID1")
@@ -253,9 +254,23 @@ func nativeReject(mode string) error {
 			d := [2]unix.CapUserData{{Permitted: 0x1e0, Effective: 0x1c0}}
 			return unix.Capset(&h, &d[0])
 		})
-		defer stop()
+		defer func() {
+			if err := stop(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
 		if err != nil {
 			return err
+		}
+	}
+	if mode == "reject-setter" || mode == "reject-partial" {
+		initial, err := inspectKernel(rolePID1, true)
+		if err != nil {
+			return fmt.Errorf("setter failure fixture: %w", err)
+		}
+		fmt.Printf("setter failure fixture initial %+v\n", initial)
+		if err := denyNativeSetter(mode); err != nil {
+			return fmt.Errorf("seccomp fixture setup: %w", err)
 		}
 	}
 	before, err := nativeObservations()
@@ -284,7 +299,11 @@ func nativeReject(mode string) error {
 	} else {
 		b, err = BootstrapPID1()
 	}
-	if b != nil || !errors.Is(err, ErrUnsafeKernel) {
+	if mode == "reject-setter" || mode == "reject-partial" {
+		if b != nil || !errors.Is(err, ErrKernelUnavailable) || !errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf("setter failure %s returned boundary=%v err=%v", mode, b, err)
+		}
+	} else if b != nil || !errors.Is(err, ErrUnsafeKernel) {
 		return fmt.Errorf("negative %s returned boundary=%v err=%v", mode, b, err)
 	}
 	fmt.Printf("negative %s rejected: %v\n", mode, err)
@@ -295,11 +314,57 @@ func nativeReject(mode string) error {
 	// Runtime may add/retire threads. Every surviving observed thread must retain
 	// exactly its original credentials, masks and NNP; new threads are also logged.
 	for tid, s := range before {
+		if mode == "reject-partial" {
+			s.Inheritable = 0xe0
+		}
 		if now, ok := after[tid]; ok && !reflect.DeepEqual(s, now) {
 			return fmt.Errorf("rejected call mutated thread %d: %+v -> %+v", tid, s, now)
 		}
 	}
-	fmt.Printf("kernel boundary verified: %s rejected without boundary or credential mutation\n", mode)
+	if mode == "reject-partial" {
+		for tid, s := range after {
+			if s.Permitted != 0x1e0 || s.Effective != 0x1e0 || s.Inheritable != 0xe0 || s.Bounding != 0x1e0 || s.Ambient != 0 {
+				return fmt.Errorf("partial failure thread %d unexpected state %+v", tid, s)
+			}
+		}
+		fmt.Println("kernel boundary verified: reject-partial rejected without boundary after real EPERM; inheritable=e0 retained without rollback")
+	} else {
+		fmt.Printf("kernel boundary verified: %s rejected without boundary or credential mutation\n", mode)
+	}
+	return nil
+}
+
+// denyNativeSetter installs a real seccomp filter across every actual thread.
+// This test fixture makes the kernel reject a specific setter; it does not replace
+// a syscall, a proc read, or a production function with a fake implementation.
+func denyNativeSetter(mode string) error {
+	filter := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0}, // seccomp_data.nr
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: uint32(unix.SYS_CAPSET), Jf: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+	}
+	if mode == "reject-partial" {
+		filter = []unix.SockFilter{
+			{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: uint32(unix.SYS_PRCTL), Jf: 3},
+			{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 16}, // seccomp_data.args[0], native little endian fixture
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: unix.PR_CAPBSET_DROP, Jf: 1},
+			{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+			{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+		}
+	}
+	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	result, _, errno := syscall.Syscall6(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&program)), 0, 0, 0)
+	runtime.KeepAlive(&program)
+	runtime.KeepAlive(filter)
+	if errno != 0 {
+		return errno
+	}
+	if result != 0 {
+		return fmt.Errorf("seccomp TSYNC failed at thread %d", result)
+	}
+	fmt.Printf("native seccomp TSYNC installed for %s\n", mode)
 	return nil
 }
 
