@@ -113,7 +113,7 @@ func (p *nativeProcess) phase(want string) error {
 			}
 		default:
 		}
-		return fmt.Errorf("child exited before %s: %v\n%s", want, p.waitErr, p.output.String())
+		return fmt.Errorf("child exited before %s: %v\n%s", want, p.waitResult(), p.output.String())
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("child timed out before %s", want)
 	}
@@ -125,6 +125,14 @@ func (p *nativeProcess) wait() error {
 		return p.waitErr
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("child %d wait timed out", p.cmd.Process.Pid)
+	}
+}
+func (p *nativeProcess) waitResult() string {
+	select {
+	case <-p.done:
+		return fmt.Sprint(p.waitErr)
+	default:
+		return "not joined"
 	}
 }
 func (p *nativeProcess) stop() error {
@@ -168,7 +176,7 @@ func TestKernelUserIsolation(t *testing.T) {
 		if err := p.stop(); err != nil {
 			t.Error(err)
 		}
-		t.Logf("monitor PID=%d actual wait=%v output:\n%s", p.cmd.Process.Pid, p.waitErr, p.output.String())
+		t.Logf("monitor PID=%d actual wait=%v output:\n%s", p.cmd.Process.Pid, p.waitResult(), p.output.String())
 	})
 	for _, stage := range []struct {
 		phase       string
@@ -244,7 +252,7 @@ func nativeUserMonitor() (resultErr error) {
 	}
 	defer func() {
 		resultErr = errors.Join(resultErr, p.stop())
-		fmt.Printf("user PID=%d actual wait=%v output:\n%s", p.cmd.Process.Pid, p.waitErr, p.output.String())
+		fmt.Printf("user PID=%d actual wait=%v output:\n%s", p.cmd.Process.Pid, p.waitResult(), p.output.String())
 	}()
 	if err = p.phase("phase user ready"); err != nil {
 		return err
@@ -299,89 +307,81 @@ func nativeUserMonitor() (resultErr error) {
 
 // fs credentials are per-thread. Run this test-only audit on a pinned goroutine;
 // never return a thread with unverified restored credentials to the runtime pool.
-func auditNativeUser(b *KernelBoundary, pid int) error {
-	done := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		var result error
-		defer func() {
-			syscall.RawSyscall(unix.SYS_SETFSUID, 0, 0, 0)
-			syscall.RawSyscall(unix.SYS_SETFSGID, 0, 0, 0)
-			restoreErr := checkNativeFSIDs(0)
-			if restoreErr == nil {
-				restoreErr = b.ValidateCurrent()
-			}
-			result = errors.Join(result, restoreErr)
-			if restoreErr == nil {
-				runtime.UnlockOSThread()
-			}
-			done <- result // exiting locked retires this thread if restore failed
-		}()
-		syscall.RawSyscall(unix.SYS_SETFSGID, 1000, 0, 0)
-		syscall.RawSyscall(unix.SYS_SETFSUID, 1000, 0, 0)
-		if result = checkNativeFSIDs(1000); result != nil {
-			return
+func auditNativeUser(b *KernelBoundary, pid int) (result error) {
+	runtime.LockOSThread()
+	defer func() {
+		syscall.RawSyscall(unix.SYS_SETFSUID, 0, 0, 0)
+		syscall.RawSyscall(unix.SYS_SETFSGID, 0, 0, 0)
+		restoreErr := checkNativeFSIDs(0)
+		if restoreErr == nil {
+			restoreErr = b.ValidateCurrent()
 		}
-		data, err := readBounded(fmt.Sprintf("/proc/%d/environ", pid), 4096)
+		result = errors.Join(result, restoreErr)
+		if restoreErr == nil {
+			runtime.UnlockOSThread()
+		}
+		// On failure remain pinned; nativeUserMonitor returns immediately
+		// and TestMain exits the helper, never pooling a dirty thread.
+	}()
+	syscall.RawSyscall(unix.SYS_SETFSGID, 1000, 0, 0)
+	syscall.RawSyscall(unix.SYS_SETFSUID, 1000, 0, 0)
+	if result = checkNativeFSIDs(1000); result != nil {
+		return
+	}
+	data, err := readBounded(fmt.Sprintf("/proc/%d/environ", pid), 4096)
+	if err != nil {
+		result = err
+		return
+	}
+	if string(data) != nativeModeEnv+"=user\x00GOMAXPROCS=2\x00" {
+		result = fmt.Errorf("user inherited unexpected environment %q", data)
+		return
+	}
+	fmt.Printf("parent observed user environment exact=%q\n", data)
+	cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil || cwd != "/" {
+		result = fmt.Errorf("user cwd=%q err=%v", cwd, err)
+		return
+	}
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		result = err
+		return
+	}
+	stdio := map[string]string{}
+	for _, entry := range entries {
+		target, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, entry.Name()))
 		if err != nil {
 			result = err
 			return
 		}
-		if string(data) != nativeModeEnv+"=user\x00GOMAXPROCS=2\x00" {
-			result = fmt.Errorf("user inherited unexpected environment %q", data)
-			return
-		}
-		fmt.Printf("parent observed user environment exact=%q\n", data)
-		cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-		if err != nil || cwd != "/" {
-			result = fmt.Errorf("user cwd=%q err=%v", cwd, err)
-			return
-		}
-		entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
-		if err != nil {
-			result = err
-			return
-		}
-		stdio := map[string]string{}
-		for _, entry := range entries {
-			target, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, entry.Name()))
-			if err != nil {
-				result = err
+		fmt.Printf("parent observed user fd=%s target=%s\n", entry.Name(), target)
+		switch entry.Name() {
+		case "0", "1", "2":
+			if !strings.HasPrefix(target, "pipe:[") {
+				result = fmt.Errorf("unexpected stdio target %q", target)
 				return
 			}
-			fmt.Printf("parent observed user fd=%s target=%s\n", entry.Name(), target)
-			switch entry.Name() {
-			case "0", "1", "2":
-				if !strings.HasPrefix(target, "pipe:[") {
-					result = fmt.Errorf("unexpected stdio target %q", target)
+			stdio[entry.Name()] = target
+		default:
+			if target == "/sys/fs/cgroup/cpu.max" {
+				// Go 1.25 opens this exact cgroup-v2 file anew at startup,
+				// before reading GOMAXPROCS; parent FDs were CLOEXEC.
+				if result = observeNativeCPUFD(pid, entry.Name()); result != nil {
 					return
 				}
-				stdio[entry.Name()] = target
-			default:
-				if target == "/sys/fs/cgroup/cpu.max" {
-					// Go 1.25 opens this exact cgroup-v2 file anew at startup,
-					// before reading GOMAXPROCS; parent FDs were CLOEXEC.
-					if result = observeNativeCPUFD(pid, entry.Name()); result != nil {
-						return
-					}
-					continue
-				}
-				if target != "anon_inode:[eventpoll]" && target != "anon_inode:[eventfd]" {
-					result = fmt.Errorf("non-stdio management/other FD inherited: %s=%s", entry.Name(), target)
-					return
-				}
+				continue
+			}
+			if target != "anon_inode:[eventpoll]" && target != "anon_inode:[eventfd]" {
+				result = fmt.Errorf("non-stdio management/other FD inherited: %s=%s", entry.Name(), target)
+				return
 			}
 		}
-		if len(stdio) != 3 || stdio["1"] != stdio["2"] || stdio["0"] == stdio["1"] {
-			result = fmt.Errorf("unexpected stdio wiring: %v", stdio)
-		}
-	}()
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("fs credential audit did not join")
 	}
+	if len(stdio) != 3 || stdio["1"] != stdio["2"] || stdio["0"] == stdio["1"] {
+		result = fmt.Errorf("unexpected stdio wiring: %v", stdio)
+	}
+	return result
 }
 func checkNativeFSIDs(want uint32) error {
 	tid := unix.Gettid()

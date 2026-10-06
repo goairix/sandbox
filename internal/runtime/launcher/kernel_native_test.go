@@ -28,10 +28,16 @@ const nativeModeEnv = "SANDBOX_LAUNCHER_TEST_MODE"
 func TestMain(m *testing.M) {
 	mode := os.Getenv(nativeModeEnv)
 	switch mode {
-	case "", "positive":
+	case "", "positive", "cleanup-fatal", "cleanup-negative":
 		os.Exit(m.Run())
 	case "monitor-user":
 		if err := nativeUserMonitor(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	case "cleanup-user":
+		if err := nativeCleanupUser(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
