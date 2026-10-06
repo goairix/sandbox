@@ -33,15 +33,15 @@
 
 **Interfaces:** produces ExecCommandIssuer exactspecinterface；Options.ExecIssuer；Backend.execIssuer/execVerifier；privateexecAuthority(Options)(*controlprotocol.ManagementVerifier,error)。CommandIssuerRecord{Version uint32;Namespace,RestoreEpoch,CertificateID,CertificateDigest string;Certificate json.RawMessage}与Validate()error；CommandIssuerEntry{Record CommandIssuerRecord;Revision int64}；Namespace.commandIssuerKey(string)(string,error)，专用encodeCommandIssuerRecord(record)(string,error)、decodeCommandIssuerRecord(kv,*record)error，freshcrypto由Task2消费现有ManagementVerifier而非codec。
 
-- [ ] TDD `TestExecCommandAuthorityConfiguration` optionalnil/typednil/缺trustclock/wrongauthority/roots/copy/构造不callprovider；`TestCommandIssuerRecord` normal/copy/strictmissingunknownnulltrailing/UUIDhashnamespaceepoch/wireinvalidUTF8JSONover4096/recordbounded/LeaseCRevModRev/key生成。记录raw历史载荷非freshidentity，opaqueinner不要假装Verify。
-- [ ] focused `go test ./internal/storage/state/etcd -run 'TestExecCommandAuthority|TestCommandIssuerRecord' -count=1` 实际behaviorRED，最小实现，不加runtime/issuer service/registryRPC。
-- [ ] focusedGREEN+targetedrace、packagevet/gofmt/diffcheck；本task纯配置/codec不重复全nativefaultsuite，metadata-only既有配置测试覆盖一次。自审仅stage本task5files即commit `feat(etcd): configure immutable exec issuer authority`；完整报告、独立spec+qualityreview。
+- [x] TDD `TestExecCommandAuthorityConfiguration` optionalnil/typednil/缺trustclock/wrongauthority/roots/copy/构造不callprovider；`TestCommandIssuerRecord` normal/copy/strictmissingunknownnulltrailing/UUIDhashnamespaceepoch/wireinvalidUTF8JSONover4096/recordbounded/LeaseCRevModRev/key生成。记录raw历史载荷非freshidentity，opaqueinner不要假装Verify。
+- [x] focused `go test ./internal/storage/state/etcd -run 'TestExecCommandAuthority|TestCommandIssuerRecord' -count=1` 实际behaviorRED，最小实现，不加runtime/issuer service/registryRPC。
+- [x] focusedGREEN+targetedrace、packagevet/gofmt/diffcheck；本task纯配置/codec不重复全nativefaultsuite，metadata-only既有配置测试覆盖一次。自审仅stage本task5files即commit `feat(etcd): configure immutable exec issuer authority`；完整报告、独立spec+qualityreview。
 
 ## Task 2：native immutable certificate registry
 
 **Files:** Create `internal/storage/state/etcd/command_issuer.go`, `command_issuer_test.go`；允许另建 `command_issuer_fault_test.go` 专门workerjoin/RPC fault，不改Task1interfaces/其他metadata协议。
 
-**Interfaces:** `(*Backend).RegisterExecIssuer(context.Context)(*CommandIssuerEntry,error)`、`(*Backend).LoadExecIssuer(context.Context,string)(*CommandIssuerEntry,error)`。producerTask1types/factory/codec；consumes ObservePublicationClock/freshManagementVerifier/identity-fencedreadDomain/baseComparisons/validatedresponsehelpers。不调用ExecIssuer.SignStart，futureeffectconsumer须freshverify+exactregistryfences。
+**Interfaces:** `(*Backend).RegisterExecIssuer(context.Context)(*CommandIssuerEntry,error)`、`(*Backend).LoadExecIssuer(context.Context,string)(*CommandIssuerEntry,error)`。producerTask1types/factory/codec；consumes ObservePublicationClock/freshManagementVerifier/baseComparisons/validatedresponsehelpers；readDomain丢弃Txn header，新registry private fixedpointreader保留并strict验证response，复用concretehelpers，不改既有sharedprotocol。不调用ExecIssuer.SignStart，futureeffectconsumer须freshverify+exactregistryfences。
 
 - [ ] TDD `TestExecIssuerRegistry` nativefreshscope/canonicalwire/firstCRev/Lease0/replay/copy/expiredhistorical/zeroGrant；`TestExecIssuerRegistryRejects` freshwrongrole/root/binding/time/nilctx/provider/strictresponse/recordlease/mutation/epoch/identity拒绝与无wrongwrite；`TestExecIssuerRegistryCompetition` validdifferentkeys同UUID最多一body；`TestExecIssuerRegistryReplyLoss` 实际committedreplyloss后Load/replay不重写；`TestExecIssuerRegistryDelayedCAS` 实际before-server完整Txn延迟与另一body竞争，最终不覆盖，hook worker必须boundedjoin。
 - [ ] controller提供新唯一ownedmanualfixture endpoints/project/containers，worker用该fixture跑focused实behaviorRED（不以missingAPI编译错代替）。实现精确流程/bounds/shape/unknown，所有authority读取固定linearpoint，无新Lease；nativefailpathctx/release/join资源先于cleanup。
@@ -51,3 +51,5 @@
 ## Self-review
 
 两task共享client.go中的新字段和codec，Task1提供完整签名，Task2只消费不重写；Task1tests与schema/optionalcfg规则一致，Task2测试真正nativeCAS+replyloss并有join。所有ReviewFocus分配具体测试，readOnly metadata loader不fresh且无cap、Registerfreshcrypto但不targetactivation，两者没有互相冒充。少量全局issuer永久retention成本显式不由B_live/N掩盖，后续safeGC仍必做。没有含糊promise把CAS unknown或年龄变成executionabort。
+
+Task1独立gate通过23d9124；focused/race/options/vet/gofmt/diff通过。Task2私有pointreader裁决见本单元ledger：保留完整Txn header以满足正revision/nestedshape，不修改既有readDomain语义；固定identity/restore/registry读开销仍不随idleN增长。
