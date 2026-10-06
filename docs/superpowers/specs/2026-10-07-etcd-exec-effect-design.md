@@ -18,11 +18,11 @@ Grant：先完成 builder/prepareMutation deep-copy/preflight。RPC error unknow
 
 Begin：Then exact1Put/no PrevKV/nested header一致；Else exact2 identity/restore Range，Count/More/kind/nested/key/revisions/permanent expected value 验证，false正常Conflict、identity变化IdentityMismatch；畸形未知、不返回Stage。guardRevision取原成功header revision。
 
-Commit：Then exact business operations 顺序／kind/count，加1永久 receipt Put；single-key DeleteRange Deleted为0或1且无PrevKvs，nested header一致；无畸形 response 可以证明 committed。Else exact4 identity/restore/receipt/guard points；所有 envelope 验证再读取。合法 immutable receipt 决定已有 outcome；无receipt时只有完全匹配 original guard value/Lease/CRev、ModRev==CRev 的点才判 Conflict，否则 GuardExpired；这些都仍 OutcomeUnknown。未知 RPC不guess失败或panic。
+Commit：Then exact business operations 顺序／kind/count，加1永久 receipt Put；single-key DeleteRange Deleted为0或1且无PrevKvs；Deleted0 的非nil nested header在cluster0或matching、revision正时允许outer或outer-1（native首个no-op后receiptPut）；Delete1仍须等于outer。其余nested header一致；无畸形 response 可以证明 committed。Else exact4 identity/restore/receipt/guard points；所有 envelope 验证再读取。合法 immutable receipt 决定已有 outcome；无receipt时只有完全匹配 original guard value/Lease/CRev、ModRev==CRev 的点才判 Conflict，否则 GuardExpired；这些都仍 OutcomeUnknown。未知 RPC不guess失败或panic。
 
 Resolve：Then exact1 aborted Put；Else exact3 identity/restore/receipt points，同样严格。permanent receipt decode 必须 UTF8／maxRecordBytes、Lease0、CRev>0且MRev==CRev、key与ref namespace/partition/request/stage/attempt精确关联；strict required snake_case/unknown/duplicate/null/trailing，包括 embedded StageReference；version1、outcome committed或aborted、ref exact。既有 wire不变、existing absent read不是失败证据。不从 public reference 重建Stage。
 
-所有 Then/Else native Txn 外层header必须positive revision/matching cluster；nested header可缺省（native），存在时 cluster0或matching+revision相同。point最多一个KV、Count==len、More false、keyexact、0<CRev<=MRev<=outerRev，meta values permanent且expected。畸形 errors 保持 errors.Is(ErrOutcomeUnknown/ErrIdentityMismatch/ErrCorruptReceipt 等)，outcome不能成功；不能把valid false fence错误吞成成功。
+所有 Then/Else native Txn 外层header必须positive revision/matching cluster；nested header可缺省（native），存在时 cluster0或matching+revision相同；仅前述Stage Delete0允许positive outer-1，不扩大到Put/Delete1/Range。point最多一个KV、Count==len、More false、keyexact、0<CRev<=MRev<=outerRev，meta values permanent且expected。畸形 errors 保持 errors.Is(ErrOutcomeUnknown/ErrIdentityMismatch/ErrCorruptReceipt 等)，outcome不能成功；不能把valid false fence错误吞成成功。
 
 私有共享helper `(b *Backend).stageEvidencePoints(*clientv3.TxnResponse, []string) ([]*mvccpb.KeyValue,error)` 在stage_response.go：keys的前2项必须是identity/restore；只验证outer/全部point shape与identity，不把false Succeeded统一猜成identity错误，具体caller解释业务CAS；Task2固定point reader复用它。返回的KV仅调用栈内使用，公共entry再deepcopy。
 
@@ -117,3 +117,5 @@ target UID/BootID possession/bootstrap、rootPID1/managementcredentials/UID/cap/
 ## 自审
 
 Stage增加strict证据不改变业务wire和原TTL最低值兼容；历史record不加crypto/clock/cap；producer只使用私有原状态且meta未知不执行。Task2 publichistory只处理已有record，aborted沿用Stage resolver避免inventedemptyrecord。ticket+originalOperation bounded16KiB，小于Stage64KiB；没有把64KiB descriptor全存etcd。three task生产/消费签名一致，所有未实现physical/runtime项显式保留。依赖pure协议/registry已闭环，不停在artifact审批；当前单元不会外部发布。
+
+Native Delete0规则修正基于真实fixture457/458回复和官方v3.6.15 [mvcc](https://raw.githubusercontent.com/etcd-io/etcd/v3.6.15/server/storage/mvcc/kvstore_txn.go)／[txn](https://raw.githubusercontent.com/etcd-io/etcd/v3.6.15/server/etcdserver/txn/txn.go)实现。初始 all-nested-equal 假设与合法no-op删除冲突，已精确裁决；不修改通用operationNestedHeader。

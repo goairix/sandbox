@@ -33,7 +33,7 @@
 
 **Interfaces:** 公共BeginStage/CommitStage/ResolveStage/ReleaseStage保持；产生private `(b *Backend).stageEvidencePoints(*clientv3.TxnResponse, []string)([]*mvccpb.KeyValue,error)`（keys前2identity/restore、validated native envelope/identity、不猜falseCAS），Task2消费。decodeReceipt已有签名不变。消费existingoperationHeader/Nested/Putresponses、strictPreparationMetadata/immutableDispatchKV。完整Stage contract exact为spec“Task1 所提供的 Stage evidence contract”，controller须把该节拷贝到brief/context，worker不读整个plan。
 
-- [ ] Write TestStageResponseEvidence／TestStageReceiptStrict：nativehook覆盖nilGrant、ID0、TTL0、Error、foreign/nil/headerrev0；nil/wrongheader/kind/cardinality/PrevKV/nested/Count/More/keys/revisions Then/Else；Commit Delete0合法、Delete>1/negative／PrevKvs非法；receipt leased/mutated/wrongkey/missingzeroPartition/duplicate/null/trailing/unknown/invalidUTF8/version/ref/outcome，dst不得影响outcome。使用actualnativeCommit再破坏返回reply，真实committed仍Unknown直到exactreceipt仲裁，不能虚构KV代替CAS。新worker须boundedjoin。
+- [ ] Write TestStageResponseEvidence／TestStageReceiptStrict：nativehook覆盖nilGrant、ID0、TTL0、Error、foreign/nil/headerrev0；nil/wrongheader/kind/cardinality/PrevKV/nested/Count/More/keys/revisions Then/Else；Commit Delete0合法（positive nested outer或outer-1，native leading与after-Put分别覆盖）、Delete>1/negative／PrevKvs非法；receipt leased/mutated/wrongkey/missingzeroPartition/duplicate/null/trailing/unknown/invalidUTF8/version/ref/outcome，dst不得影响outcome。使用actualnativeCommit再破坏返回reply，真实committed仍Unknown直到exactreceipt仲裁，不能虚构KV代替CAS。新worker须boundedjoin。
 - [ ] Write TestStageMutationCopiedDuringGrant，用nativeLease wrapper actualGrant callback改变 caller Cmp.Key／RangeEnd／value oneof／write bytes；验证originaldigest/guard和实际committed originalkey/value。native1s requestedTTL实际返回positive可高于1仍允许Begin/Commit/Release；报告真实TTL。旧existingStage arbitration/replyloss/leader/NOSPACE契约不变。
 - [ ] controller供freshownedfixture，focused `go test ./internal/storage/state/etcd -run '^(TestStageResponseEvidence|TestStageReceiptStrict|TestStageMutationCopiedDuringGrant)$' -count=1` 实行为RED（新API stub允许编译，但不以编译错当RED），实现specexact必要helper与sharedStage checks，不改变outcome/cleanup分离。
 - [ ] focusedGREEN+同selector-race、既有Stage happy/replay/abort/claim siblingUnknownCleanup相关测试一次（精确selector由现有test名列出，不重复全faultsuite），pkgvet/gofmt/diff、自审；按coherent response/receipt/copy片段验证即小commit，不能堆最终大提交。完整actualreport，独立spec+qualitygate后Task2。
@@ -66,7 +66,7 @@
 | --- | --- |
 | 1→2 | stageEvidencePoints+strictreceipt只证metadata；Task2固定点复用，不产生cap。 |
 | 2→3 | record/ref/key/codec/historyexactinterfaces供producer，record16KiB内保存4KiBticket+4KiBoperation；StageRef不在record内digest自引用。 |
-| Task1 | publicwire/TTL/key保持；native短TTL与actualGrantcopy涵盖合法兼容；header/point/receipt tests确证新增拒绝路径。 |
+| Task1 | publicwire/TTL/key保持；native短TTL与actualGrantcopy涵盖合法兼容；header/point/receipt tests确证新增拒绝路径；Delete0只允许native有据的positive outer-1例外，Put/Delete1/Range规则不变。 |
 | Task2 | 只历史无需clock/provider；initialabsent不制造abort，aborted只ResolveStage，coherentrecreate检查原IssuerRevision。 |
 | Task3 | capprivatefield与同mu，固定ticket时间来自oldD，unknown不换身份；zero-Prepared和真实Committed错后验同时断言。 |
 
