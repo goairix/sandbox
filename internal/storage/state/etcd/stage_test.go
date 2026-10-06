@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -418,4 +419,64 @@ func TestMutationCombinedOperationBudget(t *testing.T) {
 	mutation.Writes = append(mutation.Writes, Write{Key: n.Root() + "p/07/controls/extra", Value: []byte("x")})
 	_, _, err = prepareMutation(n, mutation)
 	require.ErrorIs(t, err, ErrInvalidMutation)
+}
+
+type stageGrantHook struct {
+	clientv3.Lease
+	after   func(*clientv3.LeaseGrantResponse, error) (*clientv3.LeaseGrantResponse, error)
+	revoked []clientv3.LeaseID
+}
+
+func (l *stageGrantHook) Grant(ctx context.Context, ttl int64) (*clientv3.LeaseGrantResponse, error) {
+	r, err := l.Lease.Grant(ctx, ttl)
+	return l.after(r, err)
+}
+func (l *stageGrantHook) Revoke(ctx context.Context, id clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+	l.revoked = append(l.revoked, id)
+	return l.Lease.Revoke(ctx, id)
+}
+
+func TestStageMutationCopiedDuringGrant(t *testing.T) {
+	b, raw := integrationBackend(t)
+	ctx := context.Background()
+	key := b.namespace.Root() + "p/07/controls/original"
+	cmpKey := b.namespace.Root() + "p/07/controls/cmp-a"
+	_, err := raw.Put(ctx, cmpKey, "original")
+	require.NoError(t, err)
+	input := Mutation{Comparisons: []clientv3.Cmp{clientv3.Compare(clientv3.Value(cmpKey), "=", "original").WithRange(cmpKey + "z")}, Writes: []Write{{Key: key, Value: []byte("original")}}}
+	_, digest, err := prepareMutation(b.namespace, input)
+	require.NoError(t, err)
+	original := b.client.Lease
+	defer func() { b.client.Lease = original }()
+	b.client.Lease = &stageGrantHook{Lease: original, after: func(r *clientv3.LeaseGrantResponse, e error) (*clientv3.LeaseGrantResponse, error) {
+		require.NoError(t, e)
+		require.Positive(t, r.TTL)
+		t.Logf("requestedTTL=1 nativeTTL=%d", r.TTL)
+		input.Comparisons[0].Key[len(input.Comparisons[0].Key)-1] = 'b'
+		input.Comparisons[0].RangeEnd[len(input.Comparisons[0].RangeEnd)-1] = 'y'
+		copy(input.Comparisons[0].TargetUnion.(*pb.Compare_Value).Value, []byte("tampered"))
+		input.Writes[0].Key = b.namespace.Root() + "p/07/controls/tampered"
+		copy(input.Writes[0].Value, []byte("tampered"))
+		return r, nil
+	}}
+	s, err := b.BeginStage(ctx, 7, "copy", "test", input, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, digest, s.Reference().Digest)
+	guard, err := raw.Get(ctx, s.guardKey)
+	require.NoError(t, err)
+	require.Len(t, guard.Kvs, 1)
+	require.Equal(t, s.guardValue, string(guard.Kvs[0].Value))
+	require.Contains(t, string(guard.Kvs[0].Value), digest)
+	require.Equal(t, int64(s.leaseID), guard.Kvs[0].Lease)
+	outcome, err := b.CommitStage(ctx, s)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, outcome)
+	got, err := raw.Get(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, got.Kvs, 1)
+	require.Equal(t, "original", string(got.Kvs[0].Value))
+	got, err = raw.Get(ctx, input.Writes[0].Key)
+	require.NoError(t, err)
+	require.Empty(t, got.Kvs)
+	require.NoError(t, b.ReleaseStage(ctx, s))
 }
