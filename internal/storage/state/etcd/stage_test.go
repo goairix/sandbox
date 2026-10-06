@@ -47,6 +47,89 @@ func TestMutationRejectsUnsafeWrites(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestMutationReservesCommandIssuerWrites(t *testing.T) {
+	n, err := NewNamespace("/sandbox/v1", "authority", "cell-01")
+	require.NoError(t, err)
+	for _, relative := range []string{"command-issuers", "command-issuers/11234567-89ab-4cde-8012-3456789abcde", "command-issuers/11234567-89ab-4cde-8012-3456789abcde/record"} {
+		for _, deleteKey := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete=%t", relative, deleteKey), func(t *testing.T) {
+				write := Write{Key: n.Root() + relative, Delete: deleteKey}
+				if !deleteKey {
+					write.Value = []byte("issuer")
+				}
+				mutation, digest, err := prepareMutation(n, Mutation{Writes: []Write{write}})
+				require.ErrorIs(t, err, ErrInvalidMutation)
+				require.Equal(t, Mutation{}, mutation)
+				require.Empty(t, digest)
+			})
+		}
+	}
+}
+
+type commandIssuerStageLease struct {
+	clientv3.Lease
+	grants int
+}
+
+func (l *commandIssuerStageLease) Grant(context.Context, int64) (*clientv3.LeaseGrantResponse, error) {
+	l.grants++
+	return nil, errors.New("unexpected lease grant for reserved issuer key")
+}
+
+func TestBeginStageRejectsCommandIssuerWritesBeforeGrant(t *testing.T) {
+	n, err := NewNamespace("/sandbox/v1", "authority", "cell-01")
+	require.NoError(t, err)
+	for _, relative := range []string{"command-issuers", "command-issuers/11234567-89ab-4cde-8012-3456789abcde", "command-issuers/11234567-89ab-4cde-8012-3456789abcde/record"} {
+		for _, deleteKey := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete=%t", relative, deleteKey), func(t *testing.T) {
+				lease := &commandIssuerStageLease{}
+				b := &Backend{namespace: n, restoreEpoch: "epoch", client: &clientv3.Client{Lease: lease}}
+				write := Write{Key: n.Root() + relative, Delete: deleteKey}
+				if !deleteKey {
+					write.Value = []byte("issuer")
+				}
+				stage, err := b.BeginStage(context.Background(), 7, "request", "dispatch", Mutation{Writes: []Write{write}}, time.Second)
+				require.ErrorIs(t, err, ErrInvalidMutation)
+				require.Nil(t, stage)
+				require.Zero(t, lease.grants)
+			})
+		}
+	}
+}
+
+func TestMutationAllowsCommandIssuerComparisonsAndNearPrefixWrites(t *testing.T) {
+	n, err := NewNamespace("/sandbox/v1", "authority", "cell-01")
+	require.NoError(t, err)
+	issuerKey := n.Root() + "command-issuers/11234567-89ab-4cde-8012-3456789abcde"
+	input := Mutation{
+		Comparisons: []clientv3.Cmp{
+			clientv3.Compare(clientv3.Version(n.Root()+"command-issuers"), "=", 0).WithPrefix(),
+			clientv3.Compare(clientv3.Value(issuerKey), "=", "issuer"),
+			clientv3.Compare(clientv3.Version(issuerKey+"/record"), "=", 0),
+		},
+		Writes: []Write{{Key: n.Root() + "p/07/controls/sandbox", Value: []byte("business")}},
+	}
+	mutation, digest, err := prepareMutation(n, input)
+	require.NoError(t, err)
+	require.NotEmpty(t, digest)
+	input.Comparisons[0].Key[0] = 'X'
+	input.Comparisons[0].RangeEnd[0] = 'X'
+	input.Comparisons[1].ValueBytes()[0] = 'X'
+	input.Writes[0].Value[0] = 'X'
+	require.Equal(t, n.Root()+"command-issuers", string(mutation.Comparisons[0].Key))
+	require.Equal(t, n.Root()+"command-issuert", string(mutation.Comparisons[0].RangeEnd))
+	require.Equal(t, "issuer", string(mutation.Comparisons[1].ValueBytes()))
+	require.Equal(t, "business", string(mutation.Writes[0].Value))
+	for _, relative := range []string{"command-issuers-other", "command-issuers-other/record"} {
+		for _, deleteKey := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete=%t", relative, deleteKey), func(t *testing.T) {
+				_, _, err := prepareMutation(n, Mutation{Writes: []Write{{Key: n.Root() + relative, Delete: deleteKey}}})
+				require.NoError(t, err)
+			})
+		}
+	}
+}
+
 func TestMutationComparisonRangeEndLengthBudget(t *testing.T) {
 	n, err := NewNamespace("/sandbox/v1", "authority", "cell-01")
 	require.NoError(t, err)

@@ -100,7 +100,7 @@ func validNamespaceKey(n Namespace, key string) bool {
 
 func reservedStageKey(n Namespace, key string) bool {
 	parts := strings.Split(strings.TrimPrefix(key, n.Root()), "/")
-	return parts[0] == "meta" || (parts[0] == "p" && len(parts) >= 3 && (parts[2] == "attempts" || parts[2] == "stages"))
+	return parts[0] == "meta" || parts[0] == "command-issuers" || (parts[0] == "p" && len(parts) >= 3 && (parts[2] == "attempts" || parts[2] == "stages"))
 }
 
 func validComparison(c clientv3.Cmp) bool {
