@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
@@ -218,6 +219,11 @@ func (b *Backend) commitPreparation(ctx context.Context, c *CreationClaim, stage
 		return mutation, nil
 	})
 	if err != nil {
+		var failure *stageBeginFailure
+		if errors.As(err, &failure) {
+			result.GuardCleanupError = failure.cleanup
+			return failure.cause
+		}
 		return err
 	}
 	defer func() { result.GuardCleanupError = b.ReleaseStage(context.Background(), stage) }()

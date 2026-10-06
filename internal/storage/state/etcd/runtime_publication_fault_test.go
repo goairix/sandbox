@@ -276,3 +276,113 @@ func TestRuntimePublicationConcurrentOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 }
+
+// A lost REAL guard-init reply cannot hide an independently failed revoke.
+// Stage retains its public joined errors; preparation/publication split them.
+func TestRuntimePublicationGuardInitAndCleanupFailures(t *testing.T) {
+	for _, operation := range []string{"publish", "bind", "mount", "stage"} {
+		t.Run(operation, func(t *testing.T) {
+			b, raw, _, c, cert, _ := preparationFixture(t, "fuse")
+			ctx := context.Background()
+			if operation == "publish" || operation == "mount" {
+				_, err := b.BindRuntime(ctx, c, cert)
+				require.NoError(t, err)
+			}
+			var proof []byte
+			if operation == "publish" {
+				_, err := b.ConsumeRuntimeMount(ctx, c)
+				require.NoError(t, err)
+				proof = publicationProof(t, b, c, cert, nil)
+			}
+			keys := publicationKeys(t, b, c)
+			index, err := b.namespace.runtimeIndexKey("uid")
+			require.NoError(t, err)
+			binding, certificate, err := b.namespace.runtimeBindingKeys(c.reference.Partition, c.reference.IntentID)
+			require.NoError(t, err)
+			mount, err := b.namespace.runtimeMountIntentKey(c.reference.Partition, c.reference.IntentID)
+			require.NoError(t, err)
+			keys = append(keys, index, binding, certificate, mount)
+			before, err := b.readDomain(ctx, keys...)
+			require.NoError(t, err)
+			var guard struct {
+				StageReference
+				LeaseID int64 `json:"lease_id"`
+			}
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+				matched := len(ops) == 1 && ops[0].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/attempts/")
+				if matched {
+					require.NoError(t, json.Unmarshal(ops[0].ValueBytes(), &guard))
+				}
+				return matched
+			}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+				require.NoError(t, e)
+				require.True(t, r.Succeeded)
+				return nil, context.DeadlineExceeded
+			}}
+			cleanupFailure := errors.New("failed original guard-init revoke")
+			var revoked clientv3.LeaseID
+			lease := &creationFaultLease{Lease: b.client.Lease, revoke: func(ctx context.Context, id clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+				require.NoError(t, ctx.Err())
+				_, bounded := ctx.Deadline()
+				require.True(t, bounded)
+				require.Equal(t, clientv3.LeaseID(guard.LeaseID), id)
+				require.NotEqual(t, clientv3.LeaseID(c.reference.LeaseID), id)
+				revoked = id
+				return nil, cleanupFailure
+			}}
+			b.client.Lease = lease
+			defer func() {
+				b.client.Lease = lease.Lease
+				if revoked != 0 {
+					_, e := raw.Revoke(context.Background(), revoked)
+					require.NoError(t, e)
+				}
+			}()
+			var reference StageReference
+			var primary, cleanup error
+			switch operation {
+			case "publish":
+				result, e := b.PublishRuntime(ctx, c, proof)
+				primary, cleanup, reference = e, result.GuardCleanupError, result.Reference
+				require.Equal(t, OutcomeUnknown, result.Outcome)
+				require.Nil(t, result.Entry)
+			case "bind":
+				result, e := b.BindRuntime(ctx, c, cert)
+				primary, cleanup, reference = e, result.GuardCleanupError, result.Reference
+				require.Equal(t, OutcomeUnknown, result.Outcome)
+				require.Nil(t, result.Binding)
+				require.Nil(t, result.Mount)
+			case "mount":
+				result, e := b.ConsumeRuntimeMount(ctx, c)
+				primary, cleanup, reference = e, result.GuardCleanupError, result.Reference
+				require.Equal(t, OutcomeUnknown, result.Outcome)
+				require.Nil(t, result.Binding)
+				require.Nil(t, result.Mount)
+			case "stage":
+				stage, e := b.BeginStage(ctx, c.reference.Partition, c.request.RequestID, "cleanup_regression", Mutation{Writes: []Write{{Key: keys[4], Value: []byte("must never be written")}}}, 30*time.Second)
+				primary = e
+				reference = guard.StageReference
+				require.Nil(t, stage)
+			}
+			require.ErrorIs(t, primary, ErrOutcomeUnknown)
+			require.ErrorIs(t, primary, context.DeadlineExceeded)
+			if operation == "stage" {
+				require.ErrorIs(t, primary, cleanupFailure)
+			} else {
+				require.ErrorIs(t, cleanup, cleanupFailure)
+				require.NotErrorIs(t, primary, cleanupFailure)
+			}
+			require.Equal(t, int64(1), lease.revokes.Load())
+			require.NotZero(t, revoked)
+			require.NotEmpty(t, reference.Digest)
+			require.Equal(t, guard.StageReference, reference)
+			fresh := freshDispatchBackend(t, b, raw)
+			outcome, err := fresh.ResolveStage(ctx, reference)
+			require.NoError(t, err)
+			require.Equal(t, OutcomeAborted, outcome)
+			after, err := b.readDomain(ctx, keys...)
+			require.NoError(t, err)
+			require.Equal(t, before, after, "no capability or partial business mutation may escape failed Begin")
+		})
+	}
+}

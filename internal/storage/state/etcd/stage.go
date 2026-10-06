@@ -57,6 +57,21 @@ func (b *Backend) BeginStage(ctx context.Context, partition uint8, requestID, st
 	return b.beginStageWithBuilder(ctx, partition, requestID, stageID, ttl, func(StageAttemptLocator) (Mutation, error) { return input, nil })
 }
 
+// stageBeginFailure transports cleanup separately to higher-level result APIs.
+// Public Stage callers still see both causes through errors.Is, as with Join.
+type stageBeginFailure struct {
+	cause, cleanup error
+}
+
+func (e *stageBeginFailure) Error() string   { return errors.Join(e.cause, e.cleanup).Error() }
+func (e *stageBeginFailure) Unwrap() []error { return []error{e.cause, e.cleanup} }
+func joinStageBeginCleanup(cause, cleanup error) error {
+	if cleanup == nil {
+		return cause
+	}
+	return &stageBeginFailure{cause: cause, cleanup: cleanup}
+}
+
 // beginStageWithBuilder invokes build once, before any RPC, with a fresh
 // attempt. The resulting mutation is validated and copied before Lease grant.
 func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, requestID, stageID string, ttl time.Duration, build func(StageAttemptLocator) (Mutation, error)) (*Stage, error) {
@@ -100,23 +115,23 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 		LeaseID int64 `json:"lease_id"`
 	}{ref, int64(lease.ID)})
 	if err != nil {
-		return nil, errors.Join(err, b.revokeStageLease(lease.ID))
+		return nil, joinStageBeginCleanup(err, b.revokeStageLease(lease.ID))
 	}
 	s.guardValue = string(guard)
 	compares := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
 	response, err := b.client.Txn(requestCtx).If(compares...).Then(clientv3.OpPut(guardKey, s.guardValue, clientv3.WithLease(lease.ID))).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("%w: create stage guard: %w", ErrOutcomeUnknown, err), b.revokeStageLease(lease.ID))
+		return nil, joinStageBeginCleanup(fmt.Errorf("%w: create stage guard: %w", ErrOutcomeUnknown, err), b.revokeStageLease(lease.ID))
 	}
 	if response.Header == nil || response.Header.ClusterId != b.clusterID {
-		return nil, errors.Join(ErrIdentityMismatch, b.revokeStageLease(lease.ID))
+		return nil, joinStageBeginCleanup(ErrIdentityMismatch, b.revokeStageLease(lease.ID))
 	}
 	if !response.Succeeded {
 		cause := error(ErrConflict)
 		if err := b.validateResponseIdentity(response); err != nil {
 			cause = err
 		}
-		return nil, errors.Join(cause, b.revokeStageLease(lease.ID))
+		return nil, joinStageBeginCleanup(cause, b.revokeStageLease(lease.ID))
 	}
 	s.guardRevision = response.Header.Revision
 	return s, nil
