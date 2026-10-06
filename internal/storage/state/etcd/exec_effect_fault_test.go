@@ -384,3 +384,85 @@ func TestPrepareExecEffectDeadlineObservationAnchor(t *testing.T) {
 	require.WithinDuration(t, upper, f.cap.execDraft.claims.NotAfter, 20*time.Millisecond)
 	require.Less(t, f.cap.execDraft.claims.NotAfter.Sub(f.cap.execDraft.claims.NotBefore), 7*time.Second)
 }
+
+func TestPrepareExecEffectAbortRechecksCaller(t *testing.T) {
+	for _, phase := range []string{"resolve", "cleanup"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newExecEffectFixture(t)
+			b := f.b
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			native := b.client.KV
+			if phase == "resolve" {
+				b.client.KV = &faultKV{KV: native, match: func(ops []clientv3.Op) bool {
+					return len(ops) == 1 && ops[0].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/attempts/")
+				}, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+					require.NoError(t, e)
+					return nil, context.DeadlineExceeded
+				}}
+				first, err := b.PrepareExecEffect(ctx, f.cap, execEffectRequest())
+				require.ErrorIs(t, err, ErrOutcomeUnknown)
+				require.Equal(t, OutcomeUnknown, first.Outcome)
+				b.client.KV = &faultKV{KV: native, match: func(ops []clientv3.Op) bool { return len(ops) == 1 && ops[0].IsPut() }, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+					require.NoError(t, e)
+					require.True(t, r.Succeeded)
+					cancel()
+					return r, e
+				}}
+			} else {
+				effectKey, err := b.namespace.execEffectKey(f.cap.Reference())
+				require.NoError(t, err)
+				b.client.KV = &faultKV{KV: native, match: putsKey(effectKey), before: func() {
+					out, e := b.ResolveStage(ctx, f.cap.execDraft.reference.Stage)
+					require.NoError(t, e)
+					require.Equal(t, OutcomeAborted, out)
+				}}
+				originalLease := b.client.Lease
+				b.client.Lease = &creationFaultLease{Lease: originalLease, revoke: func(bound context.Context, id clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+					r, e := originalLease.Revoke(bound, id)
+					cancel()
+					return r, e
+				}}
+			}
+			result, err := b.PrepareExecEffect(ctx, f.cap, execEffectRequest())
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, OutcomeAborted, result.Outcome)
+			require.Nil(t, result.Prepared)
+		})
+	}
+}
+
+func TestPrepareExecEffectCommittedRetryDiagnostics(t *testing.T) {
+	for _, fault := range []string{"nil caller", "cancelled caller", "cancelled parent", "old deadline", "lost"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newExecEffectFixture(t)
+			parent, parentCancel := context.WithCancel(context.Background())
+			defer parentCancel()
+			f.cap.parentCtx = parent
+			first, err := f.b.PrepareExecEffect(context.Background(), f.cap, execEffectRequest())
+			require.NoError(t, err)
+			require.NotNil(t, first.Prepared)
+			ctx := context.Background()
+			switch fault {
+			case "nil caller":
+				ctx = nil
+			case "cancelled caller":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "cancelled parent":
+				parentCancel()
+			case "old deadline":
+				f.cap.execDraft.deadline = time.Now().Add(-time.Second)
+			case "lost":
+				f.cap.lost = true
+			}
+			denied, err := f.b.PrepareExecEffect(ctx, f.cap, execEffectRequest())
+			require.Error(t, err)
+			require.Nil(t, denied.Prepared)
+			require.Equal(t, OutcomeCommitted, denied.Outcome)
+			require.Equal(t, first.Reference, denied.Reference)
+			require.Equal(t, 1, f.provider.signCalls)
+		})
+	}
+}

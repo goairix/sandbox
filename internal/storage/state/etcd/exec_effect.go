@@ -15,7 +15,7 @@ import (
 // operation capability. It does not deliver a command or start physical work.
 func (b *Backend) PrepareExecEffect(ctx context.Context, c *OperationCapability, request controlprotocol.ExecutionRequest) (result PrepareExecEffectResult, err error) {
 	result.Outcome = OutcomeUnknown
-	if ctx == nil || c == nil || c.origin != b || c.parentCtx == nil {
+	if c == nil || c.origin != b || c.parentCtx == nil {
 		return result, ErrInvalidRecord
 	}
 	c.mu.Lock()
@@ -23,6 +23,9 @@ func (b *Backend) PrepareExecEffect(ctx context.Context, c *OperationCapability,
 	d := c.execDraft
 	if d != nil {
 		result.Outcome, result.Reference = d.outcome, d.reference
+	}
+	if ctx == nil {
+		return result, ErrInvalidRecord
 	}
 	if err = ctx.Err(); err != nil {
 		return result, err
@@ -93,7 +96,7 @@ func (b *Backend) PrepareExecEffect(ctx context.Context, c *OperationCapability,
 		d.cleaned = result.GuardCleanupError == nil
 	}
 	if d.outcome != OutcomeCommitted {
-		return result, nil
+		return result, execEffectLive(bounded, c, d)
 	}
 	// An actual commit is retained even when any postcommit check fails.
 	if err = b.authorizePreparedExecEffect(bounded, c, d); err != nil {
