@@ -45,11 +45,11 @@ func (*ManagementVerifier) VerifyCommandIssuerCertificate([]byte,time.Time)(Comm
 
 私有ManagementVerifier certificate认证helper仅按task2需要复用binding/root/time/keylength逻辑，不搞通用任意role动态schema或publication重构。
 
-- [ ] 写 `TestCommandIssuerIdentity` RED：真实root/delegate roundtrip，派生RootKeyID、copygetter、time窗口与无partial evidence；`TestCommandIssuerIdentityRejects` 覆盖strictwire/role/domain/非法key/委托伪root/unknownroot/Δ等号；`TestManagementVerifierPinsTrust` 覆盖binding/root复制、overlap/removal、非法root数量和并发验证，以及root A签root B为delegate但两者皆pinned时拒绝。
-- [ ] 跑 `go test ./internal/runtime/controlprotocol -run 'TestCommandIssuerIdentity|TestManagementVerifier' -count=1`，确认真实behavior RED而非只有编译失败。
-- [ ] 按上述signatures实现Task1；签发root self-delegate拒绝，wire claims不能选择roottrust。修改输入字节不影响已签wire，输出别名不能污染identity。
-- [ ] focused GREEN，再 `go test -race ./internal/runtime/controlprotocol -run 'TestCommandIssuerIdentity|TestManagementVerifier' -count=1`、package vet/gofmt/diffcheck；覆盖既有publicationtests一次，记录命令结果，自审。
-- [ ] stage仅本任务文件，立即commit `feat(controlprotocol): certify independent command issuer identities`；独立spec/qualityreview通过再Task2。
+- [x] 写 `TestCommandIssuerIdentity` RED：真实root/delegate roundtrip，派生RootKeyID、copygetter、time窗口与无partial evidence；`TestCommandIssuerIdentityRejects` 覆盖strictwire/role/domain/非法key/委托伪root/unknownroot/Δ等号；`TestManagementVerifierPinsTrust` 覆盖binding/root复制、overlap/removal、非法root数量和并发验证，以及root A签root B为delegate但两者皆pinned时拒绝。
+- [x] 跑 `go test ./internal/runtime/controlprotocol -run 'TestCommandIssuerIdentity|TestManagementVerifier' -count=1`，确认真实behavior RED而非只有编译失败。
+- [x] 按上述signatures实现Task1；签发root self-delegate拒绝，wire claims不能选择roottrust。修改输入字节不影响已签wire，输出别名不能污染identity。
+- [x] focused GREEN，再 `go test -race ./internal/runtime/controlprotocol -run 'TestCommandIssuerIdentity|TestManagementVerifier' -count=1`、package vet/gofmt/diffcheck；覆盖既有publicationtests一次，记录命令结果，自审。
+- [x] stage仅本任务文件，立即commit `feat(controlprotocol): certify independent command issuer identities`；独立spec/qualityreview通过再Task2。
 
 ## Task 2：root-certified exact runtime receipt identity
 
@@ -72,11 +72,11 @@ func (*ManagementVerifier) VerifyRuntimeIdentityCertificate([]byte,RuntimeIdenti
 
 不会用初始CertificateContext.ExpiresAt或callerbusinessTTL限制ongoingcert；身份通过不发送或授权命令。只提供fresh验证；不存在从historicalidentity恢复权限的入口。
 
-- [ ] 写 `TestRuntimeReceiptIdentity` RED：root/delegate/exactcontext roundtrip、ongoinginterval跨已过businessTTL（测试使用同一synthetic过期publicationcontext作为对照，ongoingtype没有ExpiresAt）、复制与并发、birthwire仍按旧business语义拒绝；`TestRuntimeReceiptIdentityRejects` 覆盖每一exactcontext字段/role/domain/signature/wire/Δ；`TestManagementIdentityRoleSeparation` 两种有效wire双向错用、issuerdelegate签runtime cert不被root信任、removedroot/restore/BootID拒绝。
-- [ ] 跑 `go test ./internal/runtime/controlprotocol -run 'TestRuntimeReceiptIdentity|TestManagementIdentityRoleSeparation' -count=1`，确认behavior RED。
-- [ ] 按接口实现runtime独立schema/sign/verify及完整context相等；无wildcard，不采用proof自述expectedcontext。不更改issuer/publication授权语义。
-- [ ] focused GREEN；完整 `go test -race ./internal/runtime/controlprotocol -count=1`、package vet/gofmt/diffcheck，记录真实结果，自审即commit `feat(controlprotocol): bind management receipts to exact runtime identities`；独立spec/qualityreview。
-- [ ] controller source冻结，`go test ./...`/`go vet ./...`/`go build ./...`并行必要checks；此增量未改etcd不重复ownedfaultsuite，previousOperation实际source证据保留。做完整base..head整分支review；一次finalfixwave与scoped复核，完整记录rulings/declined和未完成整体验收。
+- [x] 写 `TestRuntimeReceiptIdentity` RED：root/delegate/exactcontext roundtrip、ongoinginterval跨已过businessTTL（测试使用同一synthetic过期publicationcontext作为对照，ongoingtype没有ExpiresAt）、复制与并发、birthwire仍按旧business语义拒绝；`TestRuntimeReceiptIdentityRejects` 覆盖每一exactcontext字段/role/domain/signature/wire/Δ；`TestManagementIdentityRoleSeparation` 两种有效wire双向错用、issuerdelegate签runtime cert不被root信任、removedroot/restore/BootID拒绝。
+- [x] 跑 `go test ./internal/runtime/controlprotocol -run 'TestRuntimeReceiptIdentity|TestManagementIdentityRoleSeparation' -count=1`，确认behavior RED。
+- [x] 按接口实现runtime独立schema/sign/verify及完整context相等；无wildcard，不采用proof自述expectedcontext。不更改issuer/publication授权语义。
+- [x] focused GREEN；完整 `go test -race ./internal/runtime/controlprotocol -count=1`、package vet/gofmt/diffcheck，记录真实结果，自审即commit `feat(controlprotocol): bind management receipts to exact runtime identities`；独立spec/qualityreview。
+- [x] controller source冻结，`go test ./...`/`go vet ./...`/`go build ./...`并行必要checks；此增量未改etcd不重复ownedfaultsuite，previousOperation实际source证据保留。做完整base..head整分支review；一次finalfixwave与scoped复核，完整记录rulings/declined和未完成整体验收。
 
 ## Self-review与连续执行
 
