@@ -35,13 +35,13 @@ binding 复用 validateBinding；issuer cert/command/operation ID canonical nonn
 
 签发接口 `SignExecStartTicket(ed25519.PrivateKey,CommandIssuerIdentity,ExecStartTicketClaims)([]byte,error)`：复制并验证私钥与 issuer.PublicKey 完全匹配，issuer evidence 必须非零且结构完整；Context issuerID/digest 必须等于 supplied verified identity，票据 interval 包含于 issuer interval。签发不自行设置 context/时间或接受 root 私钥、不提供权威 clock；消费 identity 的可信调用层仍需再验活性及 current authority。
 
-验证接口 `(*ManagementVerifier).VerifyExecStartTicket(ticketWire,issuerWire []byte,expected ExecStartContext,descriptor ExecutionDescriptor,now time.Time)(ExecStartEvidence,error)`：验证 expected 合法；fresh verify issuerWire、必须其 ID/digest 与 expected 一致；strict decode ticket、固定 purpose/interval、actual Context==expected，digest==actual opaque descriptor.Digest；interval 落在 issuer cert 内；实际 issuer delegate Ed25519Verify 固定 domain。保守Δ1秒：now-Δ>=NotBefore、now+Δ<NotAfter，因 NotAfter<=ExpiresAt 同时拒绝业务过期新启动。证书 fresh 与实际票据 fresh 都必须通过；zero/nil verifier、zero descriptor/evidence、错误 context 不能 panic 或返回 partial evidence。无 historical start 或 renew API。
+验证接口 `(*ManagementVerifier).VerifyExecStartTicket(ticketWire,issuerWire []byte,expected ExecStartContext,descriptor ExecutionDescriptor,now time.Time)(ExecStartEvidence,error)`：验证 expected 合法且其 Namespace/AuthorityID/Target/RestoreEpoch 与 verifier.pinned binding 完全相等（不能仅比较 ticket 与 expected）；fresh verify issuerWire、必须其 ID/digest 与 expected 一致；strict decode ticket、固定 purpose/interval、actual Context==expected，digest==actual opaque descriptor.Digest；interval 落在 issuer cert 内；实际 issuer delegate Ed25519Verify 固定 domain。保守Δ1秒：now-Δ>=NotBefore、now+Δ<NotAfter，因 NotAfter<=ExpiresAt 同时拒绝业务过期新启动。证书 fresh 与实际票据 fresh 都必须通过；zero/nil verifier、zero descriptor/evidence、错误 context 不能 panic 或返回 partial evidence。无 historical start 或 renew API。
 
 ExecStartEvidence 私有 copied wire、digest、context、descriptorDigest、notBefore/notAfter；getters Wire()[]byte, Digest()string, Context()ExecStartContext, DescriptorDigest()string, NotBefore()/NotAfter()time.Time。它证明签名、payload/context/time match；不证明 issuer durable active、不证明 native Lease live、不证明 intent committed、gate open 或 target execution。
 
 ## 故障与规模要求
 
-同 cert ID 不同 digest、同 runtime UID 不同 boot、任何 original revision/lease/gate/context/digest 改动均拒绝。仅凭 issuer identity 不能构造有意义的 zero ticket；测试要独立签无效 claims/换 domain，不让 signer 的 prevalidation 掩盖 verifier 缺陷。有效旧 certificate/birth/runtime receipt signature 不能变成 start authority。
+同 cert ID 不同 digest、同 runtime UID 不同 boot、任何 original revision/lease/gate/context/digest 改动均拒绝。仅凭 issuer identity 不能构造有意义的 zero ticket；测试要独立签无效 claims/换 domain，不让 signer 的 prevalidation 掩盖 verifier 缺陷。有效旧 certificate/birth/runtime receipt signature 不能变成 start authority。须另测 ticket+expected 同时改为其他合法 namespace/authority/target/restore 并用原真实 issuer 重新签名，仍因 pinned binding 不同拒绝，不让只改单侧 expected 的 mismatch 测试掩盖此条件。
 
 这些纯函数无 RPC、Lease、goroutine/ticker/watch、env/default读取或 wall-clock fallback。每个实际请求处理 argv/env/stdin 是 O(payload)，不存在针对 idle N 的后台刷新。计量 descriptor metadata/ticket/issuer wire 的实际字节，声明不含 stdin/stdout 存储；effect history λ×retention、未知预算和证书激活引用由后续集成计入，当前测量不能证明总预算/真实容量通过。
 

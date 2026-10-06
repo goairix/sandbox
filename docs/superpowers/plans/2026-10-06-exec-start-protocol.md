@@ -15,7 +15,7 @@
 - Task1 domain `sandbox-exec-descriptor:v1\x00`；Task2 domain `sandbox-exec-start-ticket:v1\x00`，实际 NUL。Version1，purpose=operation_exec_start；不提供 renewal/historical/file/task 通用授权。
 - argv1–256、argv[0]非空、每项<=65536B；env0–256、key1–256B ASCII `[A-Za-z_][A-Za-z0-9_]*`、value<=65536B；字符串 UTF8/无NUL。UID/GID1..2147483647，WorkDir1..4096B POSIX absolute clean；timeout1..3600s；stdin<=1048576B binary；TTY/network都参与摘要。
 - canonical JSON metadata 固定字段顺序 version,kind,argv,env,uid,gid,work_dir,timeout_seconds,stdin_length,stdin_digest,tty,requires_network；kind=exec；env按key排序非nil name/value数组，argv非nil；stdin不内嵌；metadata<=65536B。nil/empty env/stdin同义，getter/input全部深拷贝，错误 zero evidence。
-- Context 完整 exact binding/certID+digest/CommandID/OperationID/RequestID/OperationDigest/SandboxID/WorkspaceHash/Generation/DataGateEpoch/ControlRevision/AdmissionRevision/LeaseID/Runtime/ExpiresAt。cert/Command/Operation UUID；Request/Sandbox validID；hash64hex；五int64>0，UTC expiry。
+- Context binding必须逐项等于verifier.pinnedbinding，ticket+expected共同改scope仍拒绝；Context 完整 exact binding/certID+digest/CommandID/OperationID/RequestID/OperationDigest/SandboxID/WorkspaceHash/Generation/DataGateEpoch/ControlRevision/AdmissionRevision/LeaseID/Runtime/ExpiresAt。cert/Command/Operation UUID；Request/Sandbox validID；hash64hex；五int64>0，UTC expiry。
 - ticket<=4096B；strict required snake_case/duplicate/unknown/null/trailing/invalidUTF8/surrogate/int/UTC Z；signature64B，privatekey consistency/copy，匹配 issuer delegate；fresh pinned issuer verify + fixed actual delegate signature。
 - Δ1s now-Δ>=NotBefore、now+Δ<NotAfter；UTC非零有序、interval<=30s、NotAfter<=businessExpires；ticket interval须包含于issuer cert。纯协议now来自可信层，无fallback。
 - 只归因签名/payload/context/time，不证明durableactive/capability/intent/gate/terminal。无RPC/Lease/ticker/后台goroutine/新dependency/Manager/image切换；保留Sentinel编辑、不读.env或生产凭证、无push/merge/deploy。
@@ -37,11 +37,11 @@
 
 所有实际值与 canonical规则取 GlobalConstraints/spec；metadata json.Marshal 专用 struct，不用 map 序列化，不在 canonical 内放 stdin。hash actualstdin length/content，不接受caller digest。copy须在有效返回前完成；getter各自重新copy。不做default/envinherit/pathnormalize/shell处理。
 
-- [ ] 写 `TestExecutionDescriptorCanonical`：独立建 expected canonical JSON/域 SHA256，nil/emptyenv/stdin同义，map插入顺序同义，二进制stdin bytes精确；`TestExecutionDescriptorBindsPayload`逐个argv/env/UID/GID/WorkDir/timeout/stdin/TTY/network改变digest；`TestExecutionDescriptorCopies`修改源与getter后原值及digest不变、并发getter。
-- [ ] 写 `TestExecutionDescriptorRejects` 表：zero/too many args/env、emptyargv0、oversize/NUL/UTF8/key/uid/gid/dirtyrelativepath/timeout/over1MiBstdin/>64KiBmetadata，全部error+zero证据；合法等号边界（含1MiB stdin与可在64KiBmetadata内实现的边界）与空后续arg合法。limit fixture按实际marshal尺寸计算，不误称65535B为超限。
-- [ ] `go test ./internal/runtime/controlprotocol -run TestExecutionDescriptor -count=1` 观察实际行为RED（可先只声明error stub），随后最小实现。
-- [ ] focused GREEN，再 `go test -race ./internal/runtime/controlprotocol -run TestExecutionDescriptor -count=1`、一次 `go test ./internal/runtime/controlprotocol -count=1`、package vet/gofmt/diffcheck；自审并报告真实canonical字节样本、全拷贝getter/noidleN成本。
-- [ ] 仅stage两个文件立即commit `feat(controlprotocol): bind execution descriptors to actual payload`；完整report给controller，独立spec+quality通过再Task2。
+- [x] 写 `TestExecutionDescriptorCanonical`：独立建 expected canonical JSON/域 SHA256，nil/emptyenv/stdin同义，map插入顺序同义，二进制stdin bytes精确；`TestExecutionDescriptorBindsPayload`逐个argv/env/UID/GID/WorkDir/timeout/stdin/TTY/network改变digest；`TestExecutionDescriptorCopies`修改源与getter后原值及digest不变、并发getter。
+- [x] 写 `TestExecutionDescriptorRejects` 表：zero/too many args/env、emptyargv0、oversize/NUL/UTF8/key/uid/gid/dirtyrelativepath/timeout/over1MiBstdin/>64KiBmetadata，全部error+zero证据；合法等号边界（含1MiB stdin与可在64KiBmetadata内实现的边界）与空后续arg合法。limit fixture按实际marshal尺寸计算，不误称65535B为超限。
+- [x] `go test ./internal/runtime/controlprotocol -run TestExecutionDescriptor -count=1` 观察实际行为RED（可先只声明error stub），随后最小实现。
+- [x] focused GREEN，再 `go test -race ./internal/runtime/controlprotocol -run TestExecutionDescriptor -count=1`、一次 `go test ./internal/runtime/controlprotocol -count=1`、package vet/gofmt/diffcheck；自审并报告真实canonical字节样本、全拷贝getter/noidleN成本。
+- [x] 仅stage两个文件立即commit `feat(controlprotocol): bind execution descriptors to actual payload`；完整report给controller，独立spec+quality通过再Task2。
 
 ## Task 2：strict original-operation start ticket
 
@@ -49,10 +49,10 @@
 
 **Interfaces:** types/getters及fullcontext严格遵照spec；`SignExecStartTicket(ed25519.PrivateKey,CommandIssuerIdentity,ExecStartTicketClaims)([]byte,error)`；`(*ManagementVerifier).VerifyExecStartTicket(ticketWire,issuerWire []byte,expected ExecStartContext,descriptor ExecutionDescriptor,now time.Time)(ExecStartEvidence,error)`。
 
-Context的所有字段有requiredsnakecase tag，作为claims.context nested固定schema，Runtime沿用runtimeSchema；Claims fixed version/purpose/context/descriptor_digest/not_before/not_after。envelope onlyclaims/signature。同instant UTC时间比较不凭Time.location指针identity。Signer不能修改context/derive时间；验证suppliedverifiedissuer非零、私钥匹配、issuerID/digest与interval，key复制 consistency。Verifier重新fresh验证issuerwire，不信历史identity，先strictclaim/context并对全部expectedcontext比较、actualdescriptor.digest，后实际Ed25519Verify固定domain；保守nowwindow。evidence规范copiedwire/digest/context/descriptorDigest/times，错误zero。
+Context的所有字段有requiredsnakecase tag，作为claims.context nested固定schema，Runtime沿用runtimeSchema；Claims fixed version/purpose/context/descriptor_digest/not_before/not_after。envelope onlyclaims/signature。同instant UTC时间比较不凭Time.location指针identity。Signer不能修改context/derive时间；验证suppliedverifiedissuer非零、私钥匹配、issuerID/digest与interval，key复制 consistency。Verifier重新fresh验证issuerwire，不信历史identity，先检查expectedbinding==verifier.pinnedbinding，再strictclaim/context并对全部expectedcontext比较、actualdescriptor.digest，后实际Ed25519Verify固定domain；保守nowwindow。evidence规范copiedwire/digest/context/descriptorDigest/times，错误zero。
 
 - [ ] 写 `TestExecStartTicket`真实root->issuer->delegate->ticket roundtrip，payload/context/时间getters和wire复制并发；输出issuer/ticket/metadataactualsize，不存stdout/stdin。`TestExecStartTicketRejects`逐一expected字段差异与payload选项差异、nil/zero/privatekeymalformed/不匹配、fresh cert过期/ removedroot、Δ等号/非UTC/业务E/30s/issuerinterval、overwire/strictJSON malformed 与无partial evidence。
-- [ ] `TestExecStartRoleSeparation` 独立root/delegate重新签合法或非法claims，crossdomain/certificate roles/相同certID不同key/digest/startpurpose伪renew拒绝；不是仅依赖signer prevalidation来测试verifier。所有ReviewFocus在本task明确落test。
+- [ ] `TestExecStartRoleSeparation` 独立root/delegate重新签合法或非法claims，crossdomain/certificate roles/相同certID不同key/digest/startpurpose伪renew拒绝；另以原真实issuer签ticket+expected同时改四种合法binding，仍拒绝；不是仅依赖signer prevalidation来测试verifier。所有ReviewFocus在本task明确落test。
 - [ ] `go test ./internal/runtime/controlprotocol -run 'TestExecStart' -count=1` 观察behaviorRED，最小实现后focusedGREEN。
 - [ ] 一次完整 `go test -race ./internal/runtime/controlprotocol -count=1`、packagevet/gofmt/diffcheck，自审即stage本task3文件commit `feat(controlprotocol): authenticate bounded operation exec starts`；独立spec+qualityreview。
 - [ ] controller冻结head，全仓test（无fixtureexplicit）/vet/build必要并行checks；etcd源未变不重复nativefaultsuite，保留216PASS实际native证据。完整branchrangefinalreview、一次发现fixwave+scoped复核，逐项保留rulings/declined/未完overall要求；然后继续effect intent接线。
