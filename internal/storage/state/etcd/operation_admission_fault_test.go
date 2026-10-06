@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -338,6 +339,65 @@ func TestBeginOperationDelayedDispatchRemainsUnknown(t *testing.T) {
 			}
 			_, err = raw.Revoke(context.Background(), clientv3.LeaseID(ref.LeaseID))
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestBeginOperationGrantEnvelope(t *testing.T) {
+	for _, defect := range []string{"nil", "header", "cluster", "zero id", "negative id", "zero ttl", "negative ttl", "oversized ttl", "overflow ttl"} {
+		t.Run(defect, func(t *testing.T) {
+			b, raw, in, _ := operationControlFixture(t, "plain")
+			var original clientv3.LeaseID
+			lease := &creationFaultLease{Lease: b.client.Lease, grant: func(r *clientv3.LeaseGrantResponse, e error) (*clientv3.LeaseGrantResponse, error) {
+				require.NoError(t, e)
+				original = r.ID
+				switch defect {
+				case "nil":
+					return nil, nil
+				case "header":
+					r.ResponseHeader = nil
+				case "cluster":
+					r.ClusterId++
+				case "zero id":
+					r.ID = 0
+				case "negative id":
+					r.ID = -1
+				case "zero ttl":
+					r.TTL = 0
+				case "negative ttl":
+					r.TTL = -1
+				case "oversized ttl":
+					r.TTL = 31
+				case "overflow ttl":
+					r.TTL = math.MaxInt64
+				}
+				return r, nil
+			}}
+			b.client.Lease = lease
+			writes := 0
+			b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
+				for _, op := range ops {
+					if op.IsPut() {
+						writes++
+					}
+				}
+				return false
+			}}
+			result, err := b.BeginOperation(context.Background(), BeginOperationInput{SandboxID: in.SandboxID, RequestID: "grant-envelope", Kind: OperationData})
+			require.Error(t, err)
+			require.Nil(t, result.Capability)
+			require.Zero(t, writes)
+			require.NotEmpty(t, result.Reference.OperationID)
+			require.NotEmpty(t, result.Reference.Digest)
+			if strings.Contains(defect, "ttl") {
+				require.Equal(t, int64(1), lease.revokes.Load())
+				require.Equal(t, int64(original), result.Reference.LeaseID)
+			} else {
+				require.Zero(t, lease.revokes.Load())
+				require.Zero(t, result.Reference.LeaseID)
+				_, err = raw.Revoke(context.Background(), original)
+				require.NoError(t, err)
+			}
 		})
 	}
 }

@@ -17,6 +17,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+const operationLeaseTTL int64 = 30
+
 // OperationCapability authorizes one admitted operation under its original
 // request context and Lease. Public metadata cannot reconstruct this capability.
 type OperationCapability struct {
@@ -137,7 +139,7 @@ func (b *Backend) BeginOperation(ctx context.Context, in BeginOperationInput) (r
 	result.Reference.LeaseID = 0 // diagnostic only; never attach the placeholder to RPCs
 	requestCtx, cancel := b.requestContext(ctx)
 	sent := time.Now()
-	granted, grantErr := b.client.Grant(requestCtx, 30)
+	granted, grantErr := b.client.Grant(requestCtx, operationLeaseTTL)
 	cancel()
 	known := granted != nil && granted.ResponseHeader != nil && granted.ClusterId == b.clusterID && granted.ID > 0
 	if known {
@@ -156,7 +158,7 @@ func (b *Backend) BeginOperation(ctx context.Context, in BeginOperationInput) (r
 	if !known {
 		return result, ErrIdentityMismatch
 	}
-	if granted.TTL <= 0 || granted.TTL > math.MaxInt64/int64(time.Second) {
+	if granted.TTL <= 0 || granted.TTL > operationLeaseTTL {
 		return result, ErrGuardExpired
 	}
 	c.deadline = sent.Add(time.Duration(granted.TTL) * time.Second)
