@@ -1,0 +1,173 @@
+//go:build linux || darwin
+
+package controltarget
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// walkPage keeps at most 128 directory names alive. Recovery scans each level
+// separately, so a parent page is never retained while scanning child pages.
+func (f *journalFiles) walkPage(ctx context.Context, dir *os.File, visit func(string) error) error {
+	for {
+		var names []string
+		var readErr error
+		err := f.operation(ctx, "read-page", dir.Name(), func() error {
+			names, readErr = dir.Readdirnames(128)
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return readErr
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if err = ctx.Err(); err != nil {
+				return err
+			}
+			if err = visit(name); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func (j *Journal) recordBinding(r ExecJournalRecord) error {
+	c := r.Context
+	i := j.gate.Identity
+	if c.Namespace != i.Namespace || c.AuthorityID != i.AuthorityID || c.Target != i.Target || c.RestoreEpoch != i.RestoreEpoch || c.SandboxID != i.SandboxID || c.WorkspaceHash != i.WorkspaceHash || c.Generation != i.Generation || c.Runtime != i.Runtime || c.DataGateEpoch != j.gate.DataGateEpoch {
+		return ErrIdentityMismatch
+	}
+	return nil
+}
+func journalBucket(name string) bool {
+	return len(name) == 2 && strings.ContainsRune("0123456789abcdef", rune(name[0])) && strings.ContainsRune("0123456789abcdef", rune(name[1]))
+}
+func gateTempName(name string) bool {
+	return strings.HasPrefix(name, ".gate.") && strings.HasSuffix(name, ".tmp") && journalUUID(strings.TrimSuffix(strings.TrimPrefix(name, ".gate."), ".tmp"))
+}
+func commandFileName(name string) (id string, temp bool, ok bool) {
+	if len(name) == 41 && strings.HasSuffix(name, ".json") {
+		id = name[:36]
+		return id, false, journalUUID(id)
+	}
+	if len(name) == 78 && name[0] == '.' && name[37] == '.' && strings.HasSuffix(name, ".tmp") {
+		id = name[1:37]
+		return id, true, journalUUID(id) && journalUUID(name[38:74])
+	}
+	return "", false, false
+}
+
+func (j *Journal) scanJournalLocked(ctx context.Context) error {
+	// The required gate was already decoded and bound before scanning. Missing
+	// gate.json can never be substituted with a retained temporary manifest.
+	bytes := j.manifestBytes
+	var records, temps uint64
+	add := func(n int, temp bool) error {
+		bytes += int64(n)
+		if temp {
+			temps++
+		} else {
+			records++
+		}
+		if bytes > j.maxBytes || 1+records+temps > maxJournalContentFiles {
+			return ErrCapacity
+		}
+		return nil
+	}
+	if err := j.files.walkPage(ctx, j.root, func(name string) error {
+		switch name {
+		case "gate.json", "lock", "commands":
+			return nil
+		}
+		if !gateTempName(name) {
+			return fmt.Errorf("%w: unknown root entry %s", ErrInvalidRecord, name)
+		}
+		b, err := j.files.readFile(ctx, j.root, name)
+		if err != nil {
+			return err
+		}
+		var m GateManifest
+		if err = decodeGateManifest(b, &m); err != nil {
+			return err
+		}
+		if m.Identity != j.gate.Identity || m.DataGateEpoch != j.gate.DataGateEpoch {
+			return ErrIdentityMismatch
+		}
+		return add(len(b), true)
+	}); err != nil {
+		return err
+	}
+	if err := j.files.walkPage(ctx, j.commands, func(name string) error {
+		if !journalBucket(name) {
+			return fmt.Errorf("%w: invalid bucket", ErrInvalidRecord)
+		}
+		dir, err := j.files.openChild(j.commands, name, true)
+		if err != nil {
+			return err
+		}
+		return dir.Close()
+	}); err != nil {
+		return err
+	}
+	// Enumerate the fixed 256 possible bucket names without keeping a list/map.
+	// This cold-open cost is bounded independently of the number of records.
+	for n := 0; n < 256; n++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := fmt.Sprintf("%02x", n)
+		bucket, err := j.files.openChild(j.commands, name, true)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		err = j.files.walkPage(ctx, bucket, func(name string) error {
+			id, temp, ok := commandFileName(name)
+			if !ok || id[:2] != bucket.Name() {
+				return fmt.Errorf("%w: command filename or bucket", ErrInvalidRecord)
+			}
+			b, err := j.files.readFile(ctx, bucket, name)
+			if err != nil {
+				return err
+			}
+			var r ExecJournalRecord
+			if err = decodeExecJournalRecord(b, &r); err != nil {
+				return err
+			}
+			if r.Context.CommandID != id {
+				return fmt.Errorf("%w: command filename binding", ErrInvalidRecord)
+			}
+			if err = j.recordBinding(r); err != nil {
+				return err
+			}
+			return add(len(b), temp)
+		})
+		closeErr := bucket.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	if bytes > j.maxBytes {
+		return ErrCapacity
+	}
+	j.logicalBytes = bytes
+	j.records = records
+	j.temporaryFiles = temps
+	j.accountingKnown = true
+	return nil
+}
