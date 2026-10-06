@@ -46,9 +46,11 @@ Task1 independent spec/qualitygate closed after I1 test-only fix e9d5151; initia
 
 **Interfaces:** exactspec ExecEffectRecord／ExecEffectReference／ExecEffectEntry+Validate、Backend.LoadExecEffect、Namespace.execEffectKey、encode/decodeExecEffectRecord；消费Task1 stageEvidencePoints／decodeReceipt、existing operation/schema/registrycodec helpers。复制spec“Task2 record、reference、历史读取”到taskcontext供完整exact字段与规则。Prepared/result类型留Task3。
 
-- [ ] TDD TestExecEffectRecord/Reference：strictnested/allrequired/duplicate/nullmissingpartition/unknown/trailing/UTF8/ticketdigest/UUIDnil/rev/key/firstrev/lease，OperationData only，4096/16384预算、copy/dst原子替换、不HTMLescape改变rawticket；construct真实合法完整最长context，报告encodedworstcase不是仅typicalsample。
-- [ ] TDD native TestLoadExecEffect：initial3points→coherent5points、record/receipt同CRev、exactoriginalissuerrev/digest/ref关联、history过期仍读且0clock/provider/sign/Grant/KA/Revoke、copy、absentnilnil仅snapshot、malformednativeHeader/points、missing/corruptreceipt/issuer、同certbody删除重建rev不adopt。publichistory任何路径无Prepared。
-- [ ] actualbehaviorRED后实现唯一boundedpoint流程、codec/types。focusGREEN+race/pkgvet/gofmt/diff/selfreview即smallcommit；准确RPC/point／recordsize报告，独立spec+qualitygate后Task3。
+- [x] TDD TestExecEffectRecord/Reference：strictnested/allrequired/duplicate/nullmissingpartition/unknown/trailing/UTF8/ticketdigest/UUIDnil/rev/key/firstrev/lease，OperationData only，4096/16384预算、copy/dst原子替换、不HTMLescape改变rawticket；construct真实合法完整最长context，报告encodedworstcase不是仅typicalsample。
+- [x] TDD native TestLoadExecEffect：initial3points→coherent5points、record/receipt同CRev、exactoriginalissuerrev/digest/ref关联、history过期仍读且0clock/provider/sign/Grant/KA/Revoke、copy、absentnilnil仅snapshot、malformednativeHeader/points、missing/corruptreceipt/issuer、同certbody删除重建rev不adopt。publichistory任何路径无Prepared。
+- [x] actualbehaviorRED后实现唯一boundedpoint流程、codec/types。focusGREEN+race/pkgvet/gofmt/diff/selfreview即smallcommit；准确RPC/point／recordsize报告，独立spec+qualitygate后Task3。
+
+Task2 independent spec/qualitygate SpecPASS/Approved C0I0M0 at cd220c7; codec98f8fe5、loader7799e04、testisolationcd220c7 separateverifiedcommits. Finalnativefocus/race each402PASSnodes393leaves0SKIP0FAIL; fixed2Txn8points history/1Txn3points absence.
 
 ## Task 3: original-capability exec intent producer
 
