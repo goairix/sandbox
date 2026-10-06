@@ -220,3 +220,47 @@ func TestDistributedWorkspaceRejectsUIDReplacementWhileDraining(t *testing.T) {
 	rt.mu.Unlock()
 	require.NoError(t, managers[0].Destroy(ctx, sb.ID))
 }
+
+func TestWorkspaceLookupRealRedisAcrossReplicas(t *testing.T) {
+	addr := os.Getenv("TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("requires TEST_REDIS_ADDR")
+	}
+	ctx := context.Background()
+	store, err := redisstate.New(ctx, redisstate.Options{Addr: addr})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	repo, err := redisstate.NewActiveSandboxRepository(store, "lookup-test-"+uuid.NewString())
+	require.NoError(t, err)
+	managers, _, _ := distributedSyncManagers(t)
+	for _, m := range managers {
+		m.activeSandboxes, m.config.ActiveSandboxes = repo, repo
+		m.config.WorkspaceCoordinator = NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+		m.SetSessionStore(NewSessionStore(store, time.Hour))
+	}
+	root := "lookup-" + uuid.NewString()
+	require.NoError(t, managers[0].filesystem.MakeDir(ctx, root, 0o755))
+	sb, err := managers[0].Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: root})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = managers[0].Destroy(ctx, sb.ID) })
+	got, err := managers[1].GetByWorkspace(ctx, root)
+	require.NoError(t, err)
+	require.Equal(t, sb.ID, got.ID)
+	keys, err := workspaceStateKeysFromOwner(sb.Workspace.Owner)
+	require.NoError(t, err)
+	ownerBefore, err := store.Get(ctx, keys.owner)
+	require.NoError(t, err)
+	require.NoError(t, store.Delete(ctx, keys.lease))
+	got, err = managers[2].GetByWorkspace(ctx, root)
+	require.NoError(t, err)
+	require.Equal(t, sb.ID, got.ID)
+	leaseRaw, err := store.Get(ctx, keys.lease)
+	require.NoError(t, err)
+	require.Nil(t, leaseRaw)
+	ownerAfter, err := store.Get(ctx, keys.owner)
+	require.NoError(t, err)
+	require.Equal(t, ownerBefore, ownerAfter)
+	// The normal recovery path can restore this exact durable owner afterward.
+	_, err = managers[2].config.WorkspaceCoordinator.Restore(ctx, got.Workspace.Owner)
+	require.NoError(t, err)
+}

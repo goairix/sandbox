@@ -30,3 +30,14 @@ func TestWorkspaceLookupErrorCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceLookupConflictDetails(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/api/v1/sandboxes/by-workspace", nil)
+	internalError(c, &sandbox.WorkspaceLookupConflict{Reason: "sandbox_record_missing", SandboxID: "sandbox-old"})
+	require.Equal(t, 409, w.Code)
+	require.Contains(t, w.Body.String(), `"reason":"sandbox_record_missing"`)
+	require.Contains(t, w.Body.String(), `"sandbox_id":"sandbox-old"`)
+	require.Contains(t, w.Body.String(), `"code":"WORKSPACE_SANDBOX_CONFLICT"`)
+}

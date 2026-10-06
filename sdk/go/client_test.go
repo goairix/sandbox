@@ -341,3 +341,19 @@ func TestClient_EditFileLines(t *testing.T) {
 		t.Fatalf("EditFileLines error: %v", err)
 	}
 }
+
+func TestClientWorkspaceConflictDetails(t *testing.T) {
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "WORKSPACE_SANDBOX_CONFLICT", "message": "workspace sandbox is not safely reusable: reason=sandbox_record_missing sandbox_id=sandbox-old", "reason": "sandbox_record_missing", "sandbox_id": "sandbox-old"})
+	})
+	_, err := client.GetSandboxByWorkspace(context.Background(), "team/a")
+	var apiErr *sandbox.SandboxError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected SandboxError, got %v", err)
+	}
+	if apiErr.Code != "WORKSPACE_SANDBOX_CONFLICT" || apiErr.Reason != "sandbox_record_missing" || apiErr.SandboxID != "sandbox-old" {
+		t.Fatalf("lost conflict details: %+v", apiErr)
+	}
+}

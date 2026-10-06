@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
 	"github.com/goairix/sandbox/pkg/types"
@@ -150,6 +151,15 @@ func (h *Handler) GetSandboxByWorkspace(c *gin.Context) {
 	defer span.End()
 	sb, err := h.manager.GetByWorkspace(ctx, c.Query("workspace_path"))
 	if err != nil {
+		if !errors.Is(err, sandbox.ErrSandboxNotFound) {
+			span.RecordError(err)
+			fields := []logger.Field{logger.AddField("workspace_path", c.Query("workspace_path")), logger.ErrorField(err)}
+			var conflict *sandbox.WorkspaceLookupConflict
+			if errors.As(err, &conflict) {
+				fields = append(fields, logger.AddField("reason", conflict.Reason), logger.AddField("sandbox_id", conflict.SandboxID))
+			}
+			logger.Warn(ctx, "workspace sandbox lookup failed", fields...)
+		}
 		internalError(c, err)
 		return
 	}

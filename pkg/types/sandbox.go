@@ -55,8 +55,10 @@ type SandboxResponse struct {
 }
 
 type ErrorResponse struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message"`
+	Reason    string `json:"reason,omitempty"`
+	SandboxID string `json:"sandbox_id,omitempty"`
 }
 
 type UpdateNetworkRequest struct {

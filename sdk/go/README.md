@@ -189,6 +189,8 @@ result, err := client.Exec(ctx, existing.ID, sandbox.ExecRequest{
 
 `GetSandboxByWorkspace` 不创建沙箱、不更新配置、不续租/TTL、不迁移 session，也不销毁沙箱。创建遇到 `WORKSPACE_LEASED` / `WORKSPACE_OWNED` 时再次查回；租约冲突不能成为删除已有沙箱的理由。
 
+`SandboxError.Reason` 提供具体拒绝原因，`SandboxError.SandboxID` 提供已知候选 ID；错误文本也包含这些信息，便于现有调用方日志定位。TTL 租约缺失不会提前拒绝健康且归属一致的旧实例，实际使用仍经过正常生命周期恢复与准入检查。
+
 接口返回 `WORKSPACE_SANDBOX_CONFLICT`（409）表示当前归属或可用状态不能确认，`WORKSPACE_SANDBOX_AMBIGUOUS`（409）表示存在多个历史候选，`WORKSPACE_LOOKUP_UNAVAILABLE`（503）表示依赖或配置不可用。路径必须是规范的相对工作空间路径。服务端校验工作空间存储身份和 runtime 身份；服务 API key 不提供 App 用户/租户授权，App 仍需校验业务归属。
 
 已有 owner 的旧沙箱不依赖新增映射或索引。没有 owner 的旧 Docker local session 可通过实际 bind mount 查回；没有 owner 的旧对象存储 sync session 缺少后端归属证据，返回 409。

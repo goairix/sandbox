@@ -58,7 +58,9 @@ curl --get http://localhost:8080/api/v1/sandboxes/by-workspace \
 | 409 | `WORKSPACE_SANDBOX_AMBIGUOUS` | 多个历史沙箱声明同一工作空间；排查关联记录 |
 | 503 | `WORKSPACE_LOOKUP_UNAVAILABLE` | 状态存储、runtime 检查或查回配置不可用；重试，不能当成不存在 |
 
-有 owner 的旧沙箱可以通过原有记录查回，无需预先建立新的索引。旧 Docker local session 可通过实际可写 `/workspace` bind mount 验证目录；缺少独立 runtime UID 时，仅接受精确完整 Docker container ID。没有 owner 的旧对象存储 sync session 缺少后端归属证据，会返回 409；Kubernetes pod UID 不能推测，只有孤立 runtime 而没有关联记录的情况也不能猜测恢复。
+错误响应中的 `reason` 说明具体拒绝原因，已知候选时返回 `sandbox_id`，同时写入包含 workspace_path 和 trace ID 的服务端日志。例如 `sandbox_record_missing` 表示归属记录仍在但关联沙箱状态已丢失，不能当作不存在直接创建或删除 owner。
+
+有 owner 的旧沙箱可以通过原有记录查回，无需预先建立新的索引。TTL 租约过期时仍检查同一实例的归属、状态、runtime UID 和挂载健康；全部一致才返回已有 ID，租约由正常生命周期恢复流程恢复，查询本身不续租。旧 Docker local session 可通过实际可写 `/workspace` bind mount 验证目录；缺少独立 runtime UID 时，仅接受精确完整 Docker container ID。没有 owner 的旧对象存储 sync session 缺少后端归属证据，会返回 409；Kubernetes pod UID 不能推测，只有孤立 runtime 而没有关联记录的情况也不能猜测恢复。
 
 **创建持久化沙箱：**
 

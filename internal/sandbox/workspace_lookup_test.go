@@ -261,7 +261,7 @@ func TestWorkspaceLookupFUSEHealth(t *testing.T) {
 }
 
 func TestWorkspaceLookupOwnerWithoutReusableRecord(t *testing.T) {
-	for _, scenario := range []string{"missing_record", "expired_lease", "malformed_owner", "store_error"} {
+	for _, scenario := range []string{"missing_record", "malformed_owner", "store_error"} {
 		t.Run(scenario, func(t *testing.T) {
 			managers, store, _ := distributedSyncManagers(t)
 			sb, err := managers[0].Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
@@ -275,8 +275,6 @@ func TestWorkspaceLookupOwnerWithoutReusableRecord(t *testing.T) {
 				repo.mu.Lock()
 				delete(repo.records, sb.ID)
 				repo.mu.Unlock()
-			case "expired_lease":
-				store.expireKey(keys.lease)
 			case "malformed_owner":
 				require.NoError(t, store.Set(context.Background(), keys.owner, []byte(`{}`), 0))
 			case "store_error":
@@ -384,4 +382,80 @@ func TestWorkspaceLookupAmbiguityAndFailures(t *testing.T) {
 		_, err := m.GetByWorkspace(context.Background(), "team/b")
 		require.ErrorIs(t, err, ErrSandboxNotFound)
 	})
+}
+
+func TestWorkspaceLookupExpiredLeaseRemainsRestorableReadOnly(t *testing.T) {
+	managers, store, rt := distributedSyncManagers(t)
+	sb, err := managers[0].Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	keys, err := workspaceStateKeysFromOwner(sb.Workspace.Owner)
+	require.NoError(t, err)
+	store.expireKey(keys.lease)
+	got, err := managers[1].GetByWorkspace(context.Background(), "team/a")
+	require.NoError(t, err)
+	require.Equal(t, sb.ID, got.ID)
+	raw, err := store.Get(context.Background(), keys.lease)
+	require.NoError(t, err)
+	require.Nil(t, raw, "lookup leaves restoration to lifecycle admission")
+	rt.mu.Lock()
+	require.Zero(t, rt.removed)
+	rt.mu.Unlock()
+}
+
+func TestWorkspaceLookupResidualOwnerReportsSandboxID(t *testing.T) {
+	managers, store, _ := distributedSyncManagers(t)
+	sb, err := managers[0].Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	keys, err := workspaceStateKeysFromOwner(sb.Workspace.Owner)
+	require.NoError(t, err)
+	store.expireKey(keys.lease)
+	repo := managers[0].activeSandboxes.(*memoryActiveRepository)
+	repo.mu.Lock()
+	delete(repo.records, sb.ID)
+	repo.mu.Unlock()
+	_, err = managers[1].GetByWorkspace(context.Background(), "team/a")
+	require.ErrorIs(t, err, ErrWorkspaceLookupConflict)
+	require.Contains(t, err.Error(), "sandbox_record_missing")
+	require.Contains(t, err.Error(), sb.ID)
+	raw, err := store.Get(context.Background(), keys.owner)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+}
+
+func TestWorkspaceLookupExpiredLeaseStillRejectsUnsafeRuntimeAndRaces(t *testing.T) {
+	for _, scenario := range []string{"missing_runtime", "wrong_uid", "new_lease"} {
+		t.Run(scenario, func(t *testing.T) {
+			managers, store, rt := distributedSyncManagers(t)
+			sb, err := managers[0].Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+			require.NoError(t, err)
+			keys, err := workspaceStateKeysFromOwner(sb.Workspace.Owner)
+			require.NoError(t, err)
+			leaseRaw, err := store.Get(context.Background(), keys.lease)
+			require.NoError(t, err)
+			store.expireKey(keys.lease)
+			managers[1].runtime = lookupInspectRuntime{Runtime: rt, inspect: func(ctx context.Context, id string) (*runtime.SandboxInfo, error) {
+				if scenario == "missing_runtime" {
+					return nil, runtime.ErrNotFound
+				}
+				info, err := rt.GetSandbox(ctx, id)
+				if err == nil && scenario == "wrong_uid" {
+					copy := *info
+					copy.RuntimeUID = "replacement"
+					info = &copy
+				}
+				if scenario == "new_lease" {
+					require.NoError(t, store.Set(ctx, keys.lease, leaseRaw, time.Minute))
+				}
+				return info, err
+			}}
+			_, err = managers[1].GetByWorkspace(context.Background(), "team/a")
+			require.ErrorIs(t, err, ErrWorkspaceLookupConflict)
+			var conflict *WorkspaceLookupConflict
+			require.ErrorAs(t, err, &conflict)
+			require.Equal(t, sb.ID, conflict.SandboxID)
+			rt.mu.Lock()
+			require.Zero(t, rt.removed)
+			rt.mu.Unlock()
+		})
+	}
 }

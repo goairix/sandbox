@@ -22,6 +22,26 @@ var (
 	ErrWorkspaceLookupUnavailable = errors.New("workspace sandbox lookup is unavailable")
 )
 
+// WorkspaceLookupConflict identifies the failed proof without exposing lease
+// capabilities. The API code remains WORKSPACE_SANDBOX_CONFLICT.
+type WorkspaceLookupConflict struct {
+	Reason    string
+	SandboxID string
+}
+
+func (e *WorkspaceLookupConflict) Error() string {
+	if e.SandboxID != "" {
+		return fmt.Sprintf("%s: reason=%s sandbox_id=%s", ErrWorkspaceLookupConflict, e.Reason, e.SandboxID)
+	}
+	return fmt.Sprintf("%s: reason=%s", ErrWorkspaceLookupConflict, e.Reason)
+}
+
+func (e *WorkspaceLookupConflict) Unwrap() error { return ErrWorkspaceLookupConflict }
+
+func lookupConflict(reason, id string) error {
+	return &WorkspaceLookupConflict{Reason: reason, SandboxID: id}
+}
+
 // GetByWorkspace finds a usable sandbox without migrating sessions, acquiring
 // workspace leases, changing configuration, or cleaning up existing owners.
 // The returned snapshot does not reserve the sandbox; subsequent operations
@@ -61,20 +81,29 @@ func (m *Manager) GetByWorkspace(ctx context.Context, root string) (Sandbox, err
 		if ownerRaw != nil {
 			var stored WorkspaceOwner
 			if strictDecodeFlatJSONObject(ownerRaw, &stored) != nil {
-				return Sandbox{}, ErrWorkspaceLookupConflict
+				return Sandbox{}, lookupConflict("owner_invalid", "")
 			}
 			storedKeys, keyErr := workspaceStateKeysFromOwner(stored)
 			if keyErr != nil || validateStoredOwner(stored) != nil || storedKeys != keys || stored.WorkspaceHash != keys.workspaceHash || stored.Runtime != m.workspaceRuntimeType() {
-				return Sandbox{}, ErrWorkspaceLookupConflict
+				return Sandbox{}, lookupConflict("owner_scope_mismatch", stored.SandboxID)
 			}
-			lease, leaseErr := parseActiveWorkspaceLeaseRecord(leaseRaw)
-			if leaseErr != nil || !lookupLeaseMatchesOwner(lease, stored) {
-				return Sandbox{}, ErrWorkspaceLookupConflict
+			// Restore already supports an expired TTL lease for the exact durable
+			// owner. Lookup must inspect that sandbox rather than reject recovery
+			// before checking its identity and health. A present lease must match.
+			if leaseRaw != nil {
+				lease, leaseErr := parseActiveWorkspaceLeaseRecord(leaseRaw)
+				if leaseErr != nil {
+					return Sandbox{}, lookupConflict("lease_invalid", stored.SandboxID)
+				}
+				if !lookupLeaseMatchesOwner(lease, stored) {
+					return Sandbox{}, lookupConflict("lease_owner_mismatch", stored.SandboxID)
+				}
 			}
 			owner = &stored
 		} else if leaseRaw != nil {
 			// Acquisition may have published the provisional lease before owner.
-			return Sandbox{}, ErrWorkspaceLookupConflict
+			lease, _ := parseActiveWorkspaceLeaseRecord(leaseRaw)
+			return Sandbox{}, lookupConflict("lease_without_owner", lease.SandboxID)
 		}
 	}
 
@@ -82,7 +111,7 @@ func (m *Manager) GetByWorkspace(ctx context.Context, root string) (Sandbox, err
 	if owner != nil {
 		sb, err = m.lookupSandboxSnapshot(ctx, owner.SandboxID)
 		if errors.Is(err, ErrSandboxNotFound) {
-			return Sandbox{}, ErrWorkspaceLookupConflict
+			return Sandbox{}, lookupConflict("sandbox_record_missing", owner.SandboxID)
 		}
 	} else {
 		sb, err = m.lookupHistoricalWorkspace(ctx, root)
@@ -103,12 +132,12 @@ func (m *Manager) GetByWorkspace(ctx context.Context, root string) (Sandbox, err
 	current, err := m.lookupSandboxSnapshot(ctx, sb.ID)
 	if err != nil {
 		if errors.Is(err, ErrSandboxNotFound) {
-			return Sandbox{}, ErrWorkspaceLookupConflict
+			return Sandbox{}, lookupConflict("sandbox_record_disappeared", sb.ID)
 		}
 		return Sandbox{}, err
 	}
 	if !reflect.DeepEqual(sb, current) {
-		return Sandbox{}, ErrWorkspaceLookupConflict
+		return Sandbox{}, lookupConflict("sandbox_changed_during_lookup", sb.ID)
 	}
 	if err := m.verifyWorkspaceLookupState(ctx, keys, ownerRaw, leaseRaw); err != nil {
 		return Sandbox{}, err
@@ -130,7 +159,9 @@ func (m *Manager) verifyWorkspaceLookupState(ctx context.Context, keys workspace
 		return lookupUnavailable(err)
 	}
 	if !bytes.Equal(ownerRaw, currentOwner) || !bytes.Equal(leaseRaw, currentLease) {
-		return ErrWorkspaceLookupConflict
+		var owner WorkspaceOwner
+		_ = json.Unmarshal(ownerRaw, &owner)
+		return lookupConflict("ownership_changed_during_lookup", owner.SandboxID)
 	}
 	return nil
 }
@@ -157,7 +188,11 @@ func (m *Manager) lookupSandboxSnapshot(ctx context.Context, id string) (Sandbox
 			return Sandbox{}, err
 		}
 		if err != nil {
-			return Sandbox{}, ErrWorkspaceLookupConflict
+			reason := "sandbox_record_invalid"
+			if record != nil && record.Phase != "active" {
+				reason = "sandbox_phase_" + string(record.Phase)
+			}
+			return Sandbox{}, lookupConflict(reason, id)
 		}
 		return cloneSandbox(sb), nil
 	}
@@ -168,7 +203,7 @@ func (m *Manager) lookupSandboxSnapshot(ctx context.Context, id string) (Sandbox
 	m.mu.RUnlock()
 	if local != nil {
 		if gate != nil && !gate.isOpen() {
-			return Sandbox{}, ErrWorkspaceLookupConflict
+			return Sandbox{}, lookupConflict("sandbox_admission_closed", id)
 		}
 		return snapshot, nil
 	}
@@ -197,12 +232,12 @@ func (m *Manager) lookupHistoricalWorkspace(ctx context.Context, root string) (S
 			for _, record := range page.Records {
 				var sb Sandbox
 				if err := json.Unmarshal(record.Snapshot, &sb); err != nil {
-					return Sandbox{}, ErrWorkspaceLookupConflict
+					return Sandbox{}, lookupConflict("sandbox_record_invalid", record.SandboxID)
 				}
 				if sb.Workspace != nil && sb.Workspace.RootPath == root {
 					checked, err := decodeActiveSandbox(&record, record.SandboxID)
 					if err != nil {
-						return Sandbox{}, ErrWorkspaceLookupConflict
+						return Sandbox{}, lookupConflict("sandbox_record_not_active", record.SandboxID)
 					}
 					candidates[sb.ID] = cloneSandbox(checked)
 				}
@@ -262,44 +297,54 @@ func (m *Manager) lookupHistoricalWorkspace(ctx context.Context, root string) (S
 }
 
 func (m *Manager) validateWorkspaceLookup(ctx context.Context, sb *Sandbox, root string, owner *WorkspaceOwner) error {
-	if sb.ID == "" || sb.RuntimeID == "" || sb.Workspace == nil || sb.Workspace.RootPath != root || sb.WorkspaceTransition != "" ||
-		sb.CreatedAt.IsZero() || (sb.Timeout > 0 && !sb.CreatedAt.Add(sb.Timeout).After(time.Now())) {
-		return ErrWorkspaceLookupConflict
+	if sb.ID == "" || sb.RuntimeID == "" || sb.Workspace == nil || sb.Workspace.RootPath != root || sb.CreatedAt.IsZero() {
+		return lookupConflict("sandbox_identity_invalid", sb.ID)
+	}
+	if sb.WorkspaceTransition != "" {
+		return lookupConflict("workspace_transition_in_progress", sb.ID)
+	}
+	if sb.Timeout > 0 && !sb.CreatedAt.Add(sb.Timeout).After(time.Now()) {
+		return lookupConflict("sandbox_expired", sb.ID)
 	}
 	switch sb.State {
 	case StateReady, StateRunning, StateIdle:
 	default:
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("sandbox_state_"+string(sb.State), sb.ID)
 	}
 	w := sb.Workspace
 	if w.MountState != "" && w.MountState != WorkspaceMountReady {
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("workspace_mount_not_ready", sb.ID)
 	}
 	if owner != nil {
 		if w.Owner != *owner || w.LeaseGeneration != owner.Generation || sb.ID != owner.SandboxID || sb.RuntimeID != owner.RuntimeID ||
 			sb.RuntimeUID == "" || sb.RuntimeUID != owner.RuntimeUID || w.MountType != owner.MountType {
-			return ErrWorkspaceLookupConflict
+			return lookupConflict("sandbox_owner_mismatch", sb.ID)
+		}
+		// Match Restore's owner preconditions even when the lease is absent.
+		if (owner.MountType == WorkspaceMountFUSE && owner.MountAttempt != 1) ||
+			(owner.MountType == WorkspaceMountSync && owner.MountAttempt != 0) {
+			return lookupConflict("owner_mount_attempt_invalid", sb.ID)
 		}
 		if !m.distributedStateEnabled() {
 			m.mu.RLock()
 			local, gate := m.sandboxes[sb.ID], m.operationGates[sb.ID]
 			m.mu.RUnlock()
 			if local == nil || !gate.isOpen() {
-				return ErrWorkspaceLookupConflict
+				return lookupConflict("local_lifecycle_unavailable", sb.ID)
 			}
 		}
 	} else if w.Owner != (WorkspaceOwner{}) || w.LeaseGeneration != 0 || w.MountType == WorkspaceMountFUSE {
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("workspace_owner_missing", sb.ID)
 	}
 	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
 	if errors.Is(err, runtime.ErrNotFound) {
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("runtime_missing", sb.ID)
 	}
 	if err != nil {
 		return lookupUnavailable(err)
 	}
 	if info == nil || info.State != "running" || info.RuntimeID != sb.RuntimeID {
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("runtime_not_running", sb.ID)
 	}
 	uid := sb.RuntimeUID
 	if uid == "" && owner == nil && m.workspaceRuntimeType() == "docker" && info.RuntimeUID == sb.RuntimeID {
@@ -308,12 +353,12 @@ func (m *Manager) validateWorkspaceLookup(ctx context.Context, sb *Sandbox, root
 		uid = sb.RuntimeID
 	}
 	if uid == "" || info.RuntimeUID != uid {
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("runtime_uid_mismatch", sb.ID)
 	}
 	if owner == nil && (m.fsMeta.Provider != storage.ProviderLocal || info.WorkspaceHostPath != m.resolveLocalWorkspacePath(root)) {
 		// Old sync snapshots do not bind a physical object-store namespace.
 		// A local bind mount can instead prove its exact backing directory.
-		return ErrWorkspaceLookupConflict
+		return lookupConflict("workspace_backend_unconfirmed", sb.ID)
 	}
 	if w.MountType == WorkspaceMountFUSE {
 		health, err := m.runtime.WorkspaceHealth(ctx, runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID})
@@ -322,7 +367,7 @@ func (m *Manager) validateWorkspaceLookup(ctx context.Context, sb *Sandbox, root
 		}
 		if health == nil || !health.Ready || health.MountType != "fuse" || health.RuntimeUID != sb.RuntimeUID ||
 			health.Generation != w.LeaseGeneration || health.RestartCount != 0 || health.RestartDetected {
-			return ErrWorkspaceLookupConflict
+			return lookupConflict("fuse_health_mismatch", sb.ID)
 		}
 	}
 	return nil

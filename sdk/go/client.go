@@ -99,14 +99,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // decodeError reads an error response body and returns a *SandboxError.
 func (c *Client) decodeError(resp *http.Response) error {
 	var payload struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Reason    string `json:"reason"`
+		SandboxID string `json:"sandbox_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&payload)
 	return &SandboxError{
 		StatusCode: resp.StatusCode,
 		Code:       payload.Code,
 		Message:    payload.Message,
+		Reason:     payload.Reason,
+		SandboxID:  payload.SandboxID,
 	}
 }
 

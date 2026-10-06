@@ -7,6 +7,8 @@ type SandboxError struct {
 	StatusCode int    // HTTP status code
 	Code       string // server-side error code
 	Message    string // human-readable message
+	Reason     string // specific server-side rejection reason, when available
+	SandboxID  string // existing sandbox involved in the rejection, when available
 }
 
 func (e *SandboxError) Error() string {

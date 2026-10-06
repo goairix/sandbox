@@ -51,10 +51,15 @@ func internalError(c *gin.Context, err error) {
 		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{Code: "WORKSPACE_LOOKUP_UNAVAILABLE", Message: err.Error()})
 		return
 	case errors.Is(err, sandbox.ErrWorkspaceLookupAmbiguous):
-		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "WORKSPACE_SANDBOX_AMBIGUOUS", Message: err.Error()})
+		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "WORKSPACE_SANDBOX_AMBIGUOUS", Message: err.Error(), Reason: "multiple_workspace_candidates"})
 		return
 	case errors.Is(err, sandbox.ErrWorkspaceLookupConflict):
-		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "WORKSPACE_SANDBOX_CONFLICT", Message: err.Error()})
+		response := types.ErrorResponse{Code: "WORKSPACE_SANDBOX_CONFLICT", Message: err.Error()}
+		var conflict *sandbox.WorkspaceLookupConflict
+		if errors.As(err, &conflict) {
+			response.Reason, response.SandboxID = conflict.Reason, conflict.SandboxID
+		}
+		c.JSON(http.StatusConflict, response)
 		return
 	case errors.Is(err, storage.ErrInvalidWorkspacePrefix):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "WORKSPACE_PATH_INVALID", Message: err.Error()})
