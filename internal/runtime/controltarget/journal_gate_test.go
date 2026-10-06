@@ -372,15 +372,32 @@ func TestJournalPersistenceFaultsWorker(t *testing.T) {
 		}
 	})
 	t.Run("fatal-cleanup-regression", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestJournalFatalCleanupHelper$")
-		cmd.WaitDelay = time.Second
-		cmd.Env = append(os.Environ(), "JOURNAL_TEST_FATAL=1")
-		b, err := cmd.CombinedOutput()
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(b), "intentional Fatal exercises release/cancel/join") || !strings.Contains(string(b), "WORKER_JOINED_AND_LOCK_RELEASED") {
-			t.Fatalf("Fatal cleanup regression: %v\n%s", err, b)
+		for _, tc := range []struct {
+			name        string
+			wantSuccess bool
+		}{
+			{"complete", true},
+			{"missing-retained-evidence", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestJournalFatalCleanupHelper$")
+				cmd.WaitDelay = time.Second
+				cmd.Env = append(os.Environ(), "JOURNAL_TEST_FATAL="+tc.name)
+				b, err := cmd.CombinedOutput()
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(b), "intentional Fatal exercises release/cancel/join") {
+					t.Fatalf("Fatal cleanup child: %v\n%s", err, b)
+				}
+				success := strings.Contains(string(b), "WORKER_JOINED_AND_LOCK_RELEASED")
+				if success != tc.wantSuccess {
+					t.Fatalf("cleanup success marker=%t want=%t\n%s", success, tc.wantSuccess, b)
+				}
+				if !tc.wantSuccess && (!strings.Contains(string(b), "MUTATED_RETAINED_EVIDENCE_REMOVED") || !strings.Contains(string(b), "uncertain evidence removed")) {
+					t.Fatalf("non-join negative fixture did not exercise the required failure\n%s", b)
+				}
+			})
 		}
 	})
 }
@@ -391,30 +408,57 @@ func TestJournalFatalCleanupHelper(t *testing.T) {
 	j, o := createJournalFixture(t)
 	// Registered before worker cleanup: executes after join/hook restoration.
 	t.Cleanup(func() {
+		// Deliberately violate a non-join postcondition only after the real
+		// worker cleanup has cancelled, released, joined and restored its hook.
+		if os.Getenv("JOURNAL_TEST_FATAL") == "missing-retained-evidence" {
+			entries, err := os.ReadDir(o.Directory)
+			if err != nil {
+				t.Fatal("negative fixture read", err)
+			}
+			removed := false
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".gate.") {
+					if err := os.Remove(filepath.Join(o.Directory, entry.Name())); err != nil {
+						t.Fatal("negative fixture remove", err)
+					}
+					removed = true
+				}
+			}
+			if !removed {
+				t.Fatal("negative fixture found no retained evidence")
+			}
+			fmt.Println("MUTATED_RETAINED_EVIDENCE_REMOVED")
+		}
+		// Intentional Fatal already makes t.Failed true, so maintain an
+		// independent result for every cleanup postcondition.
+		cleanupOK := true
+		cleanupError := func(args ...any) { cleanupOK = false; t.Error(args...) }
 		if err := j.Close(); err != nil {
-			t.Error(err)
+			cleanupError("close failed", err)
 		}
 		if !j.Status().Poisoned {
-			t.Error("cancel did not poison")
+			cleanupError("cancel did not poison")
 		}
 		entries, err := os.ReadDir(o.Directory)
 		if err != nil {
-			t.Error(err)
+			cleanupError("retained evidence read failed", err)
 		}
 		found := false
 		for _, e := range entries {
 			found = found || strings.HasPrefix(e.Name(), ".gate.")
 		}
 		if !found {
-			t.Error("uncertain evidence removed")
+			cleanupError("uncertain evidence removed")
 		}
 		reopened, err := OpenClosedJournal(context.Background(), o)
 		if err != nil {
-			t.Error("lock not released or retained bytes invalid", err)
-		} else {
-			reopened.Close()
+			cleanupError("lock not released or retained bytes invalid", err)
+		} else if err := reopened.Close(); err != nil {
+			cleanupError("reopened handle close failed", err)
 		}
-		fmt.Println("WORKER_JOINED_AND_LOCK_RELEASED")
+		if cleanupOK {
+			fmt.Println("WORKER_JOINED_AND_LOCK_RELEASED")
+		}
 	})
 	blockJournalSync(t, j)
 	t.Fatal("intentional Fatal exercises release/cancel/join")
