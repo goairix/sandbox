@@ -15,20 +15,16 @@ func (s *Supervisor) Close() error {
 	if err := s.validateReceiver(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	alreadyClosed := s.closed
-	s.mu.Unlock()
-	if alreadyClosed {
-		return nil
-	}
+	return s.transport.close(s.stopExecutions, s.destroyResources)
+}
+
+// stopExecutions seals admission before requesting the original monitor cancel.
+// A failed finite join retains resources for the existing isolation fallback.
+func (s *Supervisor) stopExecutions() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 31*time.Second)
 	defer cancel()
 	err := s.CloseAdmission(ctx)
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return err
-	}
 	s.closed = true
 	active := make([]*Execution, 0, len(s.active))
 	for _, e := range s.active {
@@ -51,13 +47,20 @@ func (s *Supervisor) Close() error {
 		case <-e.ownerDone:
 		case <-ctx.Done():
 			go s.isolate("close_unjoined")
-			return errors.Join(err, ctx.Err())
+			return false, errors.Join(err, ctx.Err())
 		}
 	}
+	return true, err
+}
+
+// Every execution and transport borrower has joined before these shared
+// resources can be destroyed. There is exactly one Close owner.
+func (s *Supervisor) destroyResources() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var err error
 	if s.journal != nil {
-		err = errors.Join(err, s.journal.Close())
+		err = s.journal.Close()
 	}
 	clear(s.key)
 	return err

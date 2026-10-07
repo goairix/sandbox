@@ -41,6 +41,7 @@ type Supervisor struct {
 	pid                       int
 	mu                        sync.Mutex
 	bootstrapMu               sync.Mutex
+	transport                 transportLifetime
 	options                   SupervisorOptions
 	birth                     controlprotocol.BirthContext
 	key                       ed25519.PrivateKey

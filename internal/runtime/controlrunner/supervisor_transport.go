@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 // Serve owns the protected listener and every bounded connection. The idle main
 // path only blocks in Accept; no target clock call or refresh actor runs idle.
-func (s *Supervisor) Serve(ctx context.Context, listener net.Listener) error {
+func (s *Supervisor) Serve(ctx context.Context, listener net.Listener) (err error) {
 	if nilValue(listener) {
 		return ErrInvalidConfiguration
 	}
@@ -28,6 +29,9 @@ func (s *Supervisor) Serve(ctx context.Context, listener net.Listener) error {
 	}
 	active, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if !s.transport.listen(listener, cancel) {
+		return ErrAdmissionClosed
+	}
 	var mu sync.Mutex
 	connections := map[net.Conn]bool{}
 	var workers sync.WaitGroup
@@ -47,7 +51,7 @@ func (s *Supervisor) Serve(ctx context.Context, listener net.Listener) error {
 			<-stopped
 		}
 		closeConnections()
-		s.Close()
+		err = errors.Join(err, s.Close())
 		workers.Wait()
 	}()
 	for {
@@ -67,13 +71,20 @@ func (s *Supervisor) Serve(ctx context.Context, listener net.Listener) error {
 			conn.Close()
 			continue
 		}
+		borrow, handlerContext := s.transport.borrow(active, conn)
+		if borrow == nil {
+			mu.Unlock()
+			conn.Close()
+			return ErrAdmissionClosed
+		}
 		connections[conn] = true
 		workers.Add(1)
 		mu.Unlock()
 		go func() {
 			defer workers.Done()
+			defer borrow.release()
 			defer func() { conn.Close(); mu.Lock(); delete(connections, conn); mu.Unlock() }()
-			s.serveConnection(active, conn)
+			s.serveConnection(handlerContext, conn)
 		}()
 	}
 }
