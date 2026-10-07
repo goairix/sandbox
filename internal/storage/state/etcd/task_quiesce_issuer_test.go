@@ -53,6 +53,8 @@ func TestTaskQuiesceMetadataIssuerRPCFences(t *testing.T) {
 			b.restoreKey, _ = b.namespace.Key("restore")
 			b.restoreEpoch = c.reference.Task.RestoreEpoch
 			b.requestTimeout = time.Second
+			reservationKey, _ := b.namespace.taskQuiescenceAttemptKey(c.reference.Task)
+			d.reservation = taskQuiescenceReservationPin{key: reservationKey, revision: 40}
 			root := ed25519.NewKeyFromSeed(make([]byte, 32))
 			var e error
 			b.taskQuiescenceVerifier, e = p.NewManagementVerifier(p.TrustBinding{Namespace: b.namespace.Root(), RestoreEpoch: b.restoreEpoch, AuthorityID: d.claims.Context.Current.AuthorityID, Target: d.claims.Context.Current.Target}, []ed25519.PublicKey{root.Public().(ed25519.PublicKey)})
@@ -66,9 +68,10 @@ func TestTaskQuiesceMetadataIssuerRPCFences(t *testing.T) {
 				if len(yes) == 1 && yes[0].IsPut() {
 					writes++
 					want := append(b.baseComparisons(), c.comparisons()...)
+					want = append(want, d.reservation.comparison())
 					want = append(want, clientv3.Compare(clientv3.CreateRevision(string(yes[0].KeyBytes())), "=", 0))
 					require.Equal(t, want, cmps)
-					require.Equal(t, 49, len(cmps)+len(yes)+len(no))
+					require.Equal(t, 50, len(cmps)+len(yes)+len(no))
 					if phase == "register" {
 						return nil, sentinel
 					}
@@ -76,8 +79,8 @@ func TestTaskQuiesceMetadataIssuerRPCFences(t *testing.T) {
 				}
 				if len(yes) == 3 {
 					reads++
-					require.Equal(t, append(b.baseComparisons(), c.comparisons()...), cmps)
-					require.Equal(t, 50, len(cmps)+len(yes)+len(no))
+					require.Equal(t, b.reservationComparisons(c, d), cmps)
+					require.Equal(t, 51, len(cmps)+len(yes)+len(no))
 					return nil, sentinel
 				}
 				require.Len(t, yes, 1)

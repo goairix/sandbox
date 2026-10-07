@@ -156,18 +156,23 @@ func quiescenceNativeBudget(t *testing.T) {
 	require.NotNil(t, r.Prepared)
 	require.Equal(t, 1, capture.commits)
 	f.b.client.KV = original
-	for _, kind := range []string{"65", "bytes"} {
+	for _, kind := range []string{"65", "bytes", "protocol-bytes"} {
 		t.Run(kind, func(t *testing.T) {
 			lease := &creationFaultLease{Lease: f.b.client.Lease}
 			f.b.client.Lease = lease
 			defer func() { f.b.client.Lease = lease.Lease }()
 			d := *f.c.quiescenceDraft
+			identity := f.b.identityValue
+			defer func() { f.b.identityValue = identity }()
+			if kind == "protocol-bytes" {
+				f.b.identityValue = strings.Repeat("x", maxRecordBytes+1)
+			}
 			stage, e := f.b.beginReservedTaskQuiescenceStage(f.ctx, d.attemptReference.Attempt, d.reservation, time.Second, func(l StageAttemptLocator) (Mutation, error) {
 				m, e := f.b.buildTaskQuiescence(f.c, &d, l)
 				require.NoError(t, e)
 				if kind == "65" {
 					m.Comparisons = append(m.Comparisons, clientv3.Compare(clientv3.ModRevision(f.c.claimKey), "=", 0))
-				} else {
+				} else if kind == "bytes" {
 					for i := 0; i < 8; i++ {
 						m.Comparisons[i*4] = clientv3.Compare(clientv3.Value(f.c.fences[i].key), "=", strings.Repeat("x", maxRecordBytes))
 					}

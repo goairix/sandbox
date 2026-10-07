@@ -35,6 +35,10 @@ func TestTaskQuiesceNativeDelayedClaim(t *testing.T) {
 				require.Nil(t, cmps)
 				cmps = c
 				ops = o
+				d := f.c.quiescenceDraft
+				require.Equal(t, d.attemptReference.Attempt.reference(d.reference.Stage.Digest), d.stage.Reference())
+				require.Contains(t, c, d.reservation.comparison())
+				require.Len(t, c, 58)
 				if fault == "expiry" {
 					stage := f.c.quiescenceDraft.stage
 					require.NotNil(t, stage)

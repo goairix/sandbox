@@ -124,7 +124,7 @@ func (b *Backend) preflightReservedTaskStage(ref StageReference, m Mutation, gua
 	if len(guard) > maxRecordBytes || len(committed) > maxRecordBytes || len(b.identityValue) > maxRecordBytes || len(b.restoreEpoch) > maxRecordBytes {
 		return ErrInvalidMutation
 	}
-	// Receipt outcome strings have equal length; this still accounts both explicitly.
+	// Account both receipt outcome envelopes explicitly.
 	aborted, err := encodeReceipt(ref, OutcomeAborted)
 	if err != nil || len(aborted) > maxRecordBytes {
 		return ErrInvalidMutation

@@ -70,3 +70,31 @@ func TestTaskQuiesceMetadataAttemptNoResend(t *testing.T) {
 	require.Equal(t, original, d.attemptReference)
 	require.Zero(t, d.reservation.revision)
 }
+
+func TestTaskQuiesceMetadataAttemptHistoryAssociation(t *testing.T) {
+	record := quiesceRecordFixture(t)
+	for _, fault := range []string{"valid", "missing", "same-birth", "future-birth", "task", "claim", "command", "locator", "destroying"} {
+		t.Run(fault, func(t *testing.T) {
+			reservation := &TaskQuiescenceAttemptEntry{Revision: 40, Record: &TaskQuiescenceAttemptRecord{Version: 1, Task: record.Task, Claim: record.Claim, DestroyingRevision: record.Context.Current.ControlRevision, CommandID: record.Context.Current.CommandID, Attempt: record.Attempt}}
+			switch fault {
+			case "missing":
+				reservation = nil
+			case "same-birth":
+				reservation.Revision = 50
+			case "future-birth":
+				reservation.Revision = 51
+			case "task":
+				reservation.Record.Task.Generation++
+			case "claim":
+				reservation.Record.Claim.WorkerID = "other"
+			case "command":
+				reservation.Record.CommandID = "other"
+			case "locator":
+				reservation.Record.Attempt.AttemptID = "other"
+			case "destroying":
+				reservation.Record.DestroyingRevision++
+			}
+			require.Equal(t, fault == "valid", taskQuiescenceHistoryReservation(record, 50, reservation))
+		})
+	}
+}
