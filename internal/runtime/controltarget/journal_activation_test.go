@@ -35,6 +35,7 @@ type liveFixture struct {
 	activation controlprotocol.TargetActivationEvidence
 	e          controlprotocol.ExecStartEvidence
 	issuerKey  ed25519.PrivateKey
+	runtimeKey ed25519.PrivateKey
 	issuerWire []byte
 	descriptor controlprotocol.ExecutionDescriptor
 	claims     controlprotocol.ExecStartTicketClaims
@@ -44,7 +45,7 @@ func liveSetup(t *testing.T) liveFixture {
 	t.Helper()
 	now := time.Date(2026, 10, 7, 1, 0, 0, 0, time.UTC)
 	root, rk, _ := ed25519.GenerateKey(rand.Reader)
-	rp, _, _ := ed25519.GenerateKey(rand.Reader)
+	rp, runtimeKey, _ := ed25519.GenerateKey(rand.Reader)
 	ip, ik, _ := ed25519.GenerateKey(rand.Reader)
 	o := journalOptionsFixture(t)
 	o.Identity.Runtime.BootID = "6a1c1595-cbfd-4d2e-9ef7-f4dd3c84b172"
@@ -100,7 +101,7 @@ func liveSetup(t *testing.T) liveFixture {
 	o.Birth = &birth
 	o.Verifier = v
 	o.Clock = clock
-	return liveFixture{o, clock, a, e, ik, iw, d, claims}
+	return liveFixture{o: o, clock: clock, activation: a, e: e, issuerKey: ik, runtimeKey: runtimeKey, issuerWire: iw, descriptor: d, claims: claims}
 }
 func (f liveFixture) create(t *testing.T) *Journal {
 	t.Helper()
