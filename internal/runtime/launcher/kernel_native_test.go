@@ -54,6 +54,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "drain-monitor", "drain-user", "drain-middle", "drain-leaf", "drain-sender":
+		if err := nativeDrainMode(mode); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "confinement-monitor", "confinement-user", "confinement-leaf", "confinement-hold", "confinement-child-live", "confinement-child-zombie", "confinement-invalid-uid", "confinement-invalid-gid", "confinement-large-uid", "confinement-large-gid", "confinement-nonuniform", "confinement-setter":
 		if _, err := nativeConfinementMode(mode); err != nil {
 			fmt.Fprintln(os.Stderr, err)

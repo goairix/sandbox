@@ -84,11 +84,12 @@ if ! grep -Fxq "$digest" "$evidence/digests.txt"; then echo 'pinned local RepoDi
 (
  cd "$repo"
  env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go test -c -o "$evidence/launcher-kernel.test" ./internal/runtime/launcher
+ env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -o "$evidence/drainclone" ./internal/runtime/launcher/testdata/drainclone
  git rev-parse HEAD >"$evidence/source-commit.txt"
  git diff -- internal/runtime/launcher scripts/test-launcher-kernel.sh >"$evidence/source.diff"
- shasum -a 256 internal/runtime/launcher/*.go scripts/test-launcher-kernel.sh >"$evidence/source-sha256.txt"
+ shasum -a 256 internal/runtime/launcher/*.go internal/runtime/launcher/testdata/drainclone/*.go internal/runtime/launcher/testdata/drainclone/*.s scripts/test-launcher-kernel.sh >"$evidence/source-sha256.txt"
 )
-shasum -a 256 "$evidence/launcher-kernel.test" >"$evidence/binary-sha256.txt"
+shasum -a 256 "$evidence/launcher-kernel.test" "$evidence/drainclone" >"$evidence/binary-sha256.txt"
 for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role reject-thread reject-securebits reject-setter reject-partial; do
  name="$project-$mode"
  volume="$name-tmp"
@@ -106,6 +107,7 @@ for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role 
    --network none --user 0:0 --read-only --memory 64m --pids-limit 128 --cpus 0.5 \
    ${caps[@]+"${caps[@]}"} ${security[@]+"${security[@]}"} \
    --mount "type=bind,src=$evidence/launcher-kernel.test,dst=/launcher-kernel.test,readonly" \
+   --mount "type=bind,src=$evidence/drainclone,dst=/drainclone,readonly" \
    --mount "type=volume,src=$volume,dst=/tmp" \
    --env "SANDBOX_LAUNCHER_TEST_MODE=$mode" --env GOMAXPROCS=2 \
    --entrypoint /launcher-kernel.test "$image" ${args[@]+"${args[@]}"} >"$evidence/$mode-container.txt"
@@ -148,6 +150,7 @@ for mode in positive reject-nnp reject-missing-cap reject-extra-cap reject-role 
    grep -Fq 'kernel boundary verified: worker cleanup' "$evidence/$mode.log"
    grep -Fq 'monitor confinement verified: inherited policy and user exec' "$evidence/$mode.log"
    grep -Fq 'monitor confinement verified: confinement-setter rejected without boundary' "$evidence/$mode.log"
+   grep -Fq 'monitor drain verified: adversaries and sole-owner ECHILD' "$evidence/$mode.log"
    grep -Fxq PASS "$evidence/$mode.log"
    counts=$(awk '/^[[:space:]]*--- PASS:/ {p++} /^[[:space:]]*--- FAIL:/ {f++} /^[[:space:]]*--- SKIP:/ {s++} END {printf "PASS=%d FAIL=%d SKIP=%d",p,f,s}' "$evidence/$mode.log")
    echo "$counts" | tee "$evidence/positive-counts.txt"

@@ -26,3 +26,5 @@ func TestMonitorUnsupported(t *testing.T) {
 
 // The older kernel native dispatcher builds on every Linux architecture.
 func nativeConfinementMode(string) (bool, error) { return false, ErrUnsupported }
+
+func nativeDrainMode(string) error { return ErrUnsupported }
