@@ -75,4 +75,4 @@
 
 ## Final controller gate
 
-- [ ] One independent final review of full NEW unit range plus named current integration seams; reuse retained unchanged predecessor baseline and explicit inherited limits. Resolve findings through required one final fix wave/scoped review. Preserve complete reports, ordered Root rulings with costs, actual verification/raw evidence and unit gates in tracked human-readable artifacts before deleting only this own scratch. Continue directly to authenticated target/monitor integration; whole migration remains open.
+- [x] One independent final review of full NEW unit range plus named current integration seams; reuse retained unchanged predecessor baseline and explicit inherited limits. Resolve findings through required one final fix wave/scoped review. Preserve complete reports, ordered Root rulings with costs, actual verification/raw evidence and unit gates in tracked human-readable artifacts before deleting only this own scratch. Continue directly to authenticated target/monitor integration; whole migration remains open.
