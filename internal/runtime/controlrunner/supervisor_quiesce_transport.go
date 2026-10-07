@@ -46,12 +46,28 @@ func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t
 		}
 		wire, err := s.quiescenceAcceptedReceipt(ctx, owned)
 		if err != nil {
+			// Terminal persistence can win the race before the accepted signer,
+			// which intentionally signs pending only. Consume the same producer's
+			// fresh terminal query; never begin another attempt or revive failure.
+			wire, err = s.queryUserQuiescence(ctx, e.Context, e.TicketDigest)
+			if err != nil {
+				return err
+			}
+			if err = ctx.Err(); err != nil {
+				return err
+			}
+			return writeTransportEvent(conn, t.EventReceipt, wire)
+		}
+		if err = ctx.Err(); err != nil {
 			return err
 		}
 		return writeTransportEvent(conn, t.EventAccepted, wire)
 	case "task_quiesce_users_query":
 		wire, err := s.queryUserQuiescence(ctx, e.Context, e.TicketDigest)
 		if err == nil {
+			if err = ctx.Err(); err != nil {
+				return err
+			}
 			return writeTransportEvent(conn, t.EventReceipt, wire)
 		}
 		// Pending attribution may be reported only through the original owner and
@@ -65,6 +81,9 @@ func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t
 		s.mu.Unlock()
 		wire, err = s.quiescenceAcceptedReceipt(ctx, owned)
 		if err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
 			return err
 		}
 		return writeTransportEvent(conn, t.EventAccepted, wire)
