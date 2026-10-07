@@ -56,6 +56,11 @@ func (m *MonitorBoundary) drainWith(ctx context.Context, calls drainCalls) (obse
 			observation = LocalDrainObservation{}
 		}
 	}()
+	return m.drainLocked(ctx, calls)
+}
+
+// Caller owns m.mu and poisons any attempted operational failure.
+func (m *MonitorBoundary) drainLocked(ctx context.Context, calls drainCalls) (observation LocalDrainObservation, result error) {
 	if err := calls.validate(); err != nil {
 		return observation, err
 	}

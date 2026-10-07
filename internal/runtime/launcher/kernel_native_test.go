@@ -54,6 +54,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "root-monitor":
+		if err := nativeRootMonitor(os.Getenv(drainCaseEnv)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "drain-monitor", "drain-user", "drain-middle", "drain-leaf", "drain-sender":
 		if err := nativeDrainMode(mode); err != nil {
 			fmt.Fprintln(os.Stderr, err)
