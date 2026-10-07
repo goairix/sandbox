@@ -35,6 +35,8 @@ LoadTask/LoadTaskCheckpoint 只在现有 readDomain 的当前 backend identity/r
 
 同一 Stage 事务比较原五点各 value/ModRevision/Lease0、必要 immutable CreateRevision、当前 restore identity、原 stage guard、receipt 不存在，且 task/intent/link/checkpoint 都不存在。一次写入 control.phase=destroying、固定 task、固定 cleanup intent、固定 link、初始 pending checkpoint 与 Stage committed receipt。保留 runtime、gate epoch、expires、snapshot 和 owner/fence/index，不能删除任何 operation token。
 
+Task2 沿用已验收的原 Stage：成功提交比较原 guard value、原 Lease、CreateRevision 与服务器租约存活，没有新增 guard ModRevision 成功 CAS 或本地单调截止。原 guard 在同值、同原 Lease 下被改写不是本阶段承诺的失活检测；不可重建原 CreateRevision/Lease。后文四字段与 grant/renew 单调截止要求绑定新 TaskClaim/task guard；若要加固原 Stage，应独立修改基础原语并评审其既有调用点，不能由本单元静默改变。该继承边界不提供物理清理或 owner 释放权。
+
 prepared Stage 不是已关闭证据；CommitStage 只有 committed 才确认该元数据事务。丢响应按原 StageReference 仲裁；absent 不得作为 aborted。BeginOperation 与 destroy 比较同一 control revision，因此事务排序决定先后：先入场者留下原 token，先销毁者使旧入场失败；后续新 BeginOperation 必须拒绝。destroy committed 只关闭 etcd 准入，不能证明目标已关闭。
 
 ## Claim 与 checkpoint
