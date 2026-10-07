@@ -32,3 +32,24 @@ Evidence lives under `.superpowers/sdd/2026-10-07-task-user-quiescence/`: `root-
 ## Remaining requirements
 
 Task2 independent spec/quality review and deadline finding closure are required. Deterministic Start-in-flight models do not establish a physically blocked OS Start; saved-seal perturbations do not establish actual namespace replacement; uninterruptible syscall/scheduler limitations remain. Task4 authenticated delivery, Task5 same-chain three-member metadata→protected production PID1→dual drain, final FUSE/remote settlement, production wiring/Redis removal and large-existing-sandbox capacity remain mandatory. Separate component results grant none of those outcomes.
+
+## Fix round 1 — new actual interleaving gates
+
+After the human requested resumption, Root ran six genuinely new selectors from immutable candidate `3dd3f6f848e7ad884334de55b81637301320440d`. Runtime changes are `4d42440` and `6061026`; the original six baseline gates above were not replayed. This appendix records amended-source component evidence; independent scoped review and Task2 acceptance remain pending.
+
+| Selector | Actual outcome | Go top/sub PASS | Project |
+| --- | --- | --- | --- |
+| `^TestTaskQuiesceNativeCommittedStart$` | PASS / exit0 | 1/0 | `task-quiesce-local-ad097c4d063a` |
+| `^TestTaskQuiesceNativeEarlierIsolation$` | UNKNOWN_ISOLATED / exit70 | 0/0 | `task-quiesce-local-7012a505d759` |
+| `^TestTaskQuiesceNativePendingDeadline$` | UNKNOWN_ISOLATED / exit70 | 0/0 | `task-quiesce-local-0d79007fded4` |
+| `^TestTaskQuiesceNativeSigningDeadline$` | UNKNOWN_ISOLATED / exit70 | 0/0 | `task-quiesce-local-49f750224ba5` |
+| `^TestTaskQuiesceNativeFailedTerminalQuery$` | UNKNOWN_ISOLATED / exit70 | 0/0 | `task-quiesce-local-284f0b4bb580` |
+| `^TestTaskQuiesceNativeRepeatedClose$` | UNKNOWN_ISOLATED / exit70 | 0/0 | `task-quiesce-local-77854a3ccf02` |
+
+CommittedStart released the same original committed Start path, joined the sole Wait/result/watchdog/owner and original timer, and obtained actual PID1 namespace census/non-reaping ECHILD revalidation: registered1/local1, no never-spawned member. Repeated successful Close retained the original timer.
+
+The other five cases produced actual attach and Docker exit70, non-OOM/nonrunning, exact armed/refusal markers and PID1 isolation diagnostics. They have no Go PASS, FAIL or SKIP and prove UNKNOWN isolation only. EarlierIsolation began the actual cooperative isolation owner before advancing its same timer; pending/signing paused configured AuthorityClock under the actual journal mutex. Failed-terminal obtained a readable terminal and fresh empty census but the failed original coordinator still returned error/nil wire. Failed-terminal and repeated-Close consumed private failureOnce to inspect the failure window before advancing the existing production timer; these do not prove unmodified immediate cooperative isolation. Clock contention is not a blocked kernel fsync, and committed Start gating is context preflight before the OS syscall.
+
+Root audited every retained raw command exit/timeout and stdout/stderr/stdin hash, actual compiled repository input against archive/current source, module/archive/tool/three ELF hashes, root payload custody and target final state. Each fixture kept the original 64MiB/.5CPU/128PID/netnone/NNP/readonly/default security contract and four bootstrap capabilities. All six labeled container/volume/network inventories were empty before and after cleanup; result publication followed cleanup. Positive stderr is empty; each negative stderr contains the expected sandbox-isolation diagnostic and is retained in full.
+
+Evidence: `root-fix1-native-runs.json`, `root-fix1-pid1-native-audit.json` and the six named `root-fixture-evidence/<project>/` directories in this plan OWN. Host race remains separate from Linux CGO0 execution. The binding original31s timer identity is asserted before controlled earlier expiry; the new gates do not independently wait31s. Original real32s successful-history evidence remains the distinct baseline result. Task4/Task5, production lifecycle, Redis removal and capacity obligations remain unchanged.
