@@ -146,7 +146,11 @@ func TestTaskCloseNativeSuccess(t *testing.T) {
 	clear(entry.Record.Ticket)
 	copy, e := f.b.LoadTaskCloseData(f.ctx, f.c.Reference().Task)
 	require.NoError(t, e)
-	require.Equal(t, original, copy.Record.Ticket)
+	require.Equal(t, original, []byte(copy.Record.Ticket))
+	digest, err := snapshotDigest(copy.Record.Ticket)
+	require.NoError(t, err)
+	require.Equal(t, d.ticket.Digest(), digest)
+	require.Equal(t, digest, copy.Record.TicketDigest)
 	require.Equal(t, entry.Revision, copy.Revision)
 	f.b.taskIssuer = nil
 	f.b.authorityClock = nil
