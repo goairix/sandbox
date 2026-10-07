@@ -112,7 +112,7 @@ Specification section9 supersedes draft D1/D2/API/proof alternatives above. Task
 - [x] Independent preflight spec/plan review and individual Root dispositions (C0/I2/M2/CV10; I1/I2 and M1/M2 corrected in spec9/10 and task extraction; scoped confirmation before dispatch).
 - [x] Task1 original-range author + independent review (C0/I0/M1; each CV14 dispositioned; actual Linux journal gate passed).
 - [x] Task2 concrete proof interface preflight, original-range implementation + scoped fix review (runtime component accepted; downstream/physical limits individually retained in runtime-review report).
-- [ ] Task3 original-claim metadata/pages original-range implementation + review.
+- [x] Task3 original-claim metadata/pages original-range implementation + scoped fix review (metadata component accepted; combined physical chain and deployment limits retained in metadata-review report).
 - [ ] Task4 transport/dual-drain original-range implementation + review.
 - [ ] Task5 combined physical gate, original-range review; one full-unit review and tracked acceptance.
 
