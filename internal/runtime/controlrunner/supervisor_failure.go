@@ -3,7 +3,6 @@ package controlrunner
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"time"
 )
@@ -21,36 +20,66 @@ func (s *Supervisor) Close() error {
 // stopExecutions seals admission before requesting the original monitor cancel.
 // A failed finite join retains resources for the existing isolation fallback.
 func (s *Supervisor) stopExecutions() (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 31*time.Second)
-	defer cancel()
-	err := s.CloseAdmission(ctx)
+
 	s.mu.Lock()
 	s.closed = true
+	s.admission = false
+	a := s.quiescence
 	active := make([]*Execution, 0, len(s.active))
 	for _, e := range s.active {
 		active = append(active, e)
 	}
 	s.mu.Unlock()
-	for _, e := range active {
-		e.mu.Lock()
-		e.closeRequested = true
-		if e.control != nil {
-			e.control.SetWriteDeadline(time.Now().Add(time.Second))
-			if x := writeMonitorFrame(e.control, monitorCancel, nil); x != nil {
-				err = errors.Join(err, x)
+	if a != nil {
+		select {
+		case <-a.done:
+			if !a.success {
+				go s.isolate("close_quiescence_unknown")
+				return false, ErrExecutionUnknown
 			}
+			<-a.timer.done
+			return true, nil
+		case <-a.context.Done():
+			select {
+			case <-a.done:
+				if a.success {
+					<-a.timer.done
+					return true, nil
+				}
+			default:
+			}
+			go s.isolate("close_quiescence_unjoined")
+			return false, ErrExecutionUnknown
 		}
-		e.mu.Unlock()
+	}
+	deadline := time.Now().Add(31 * time.Second)
+	owner := s.armIsolationDeadline(deadline, "close_unjoined")
+	owner.mu.Lock()
+	deadline = owner.deadline
+	owner.mu.Unlock()
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	err := s.CloseAdmission(ctx)
+	if err == nil {
+		err = s.stopOriginalExecutions(ctx, active, deadline)
+	}
+	if err != nil {
+		go s.isolate("close_stop_failed")
+		return false, err
 	}
 	for _, e := range active {
 		select {
 		case <-e.ownerDone:
 		case <-ctx.Done():
 			go s.isolate("close_unjoined")
-			return false, errors.Join(err, ctx.Err())
+			return false, ctx.Err()
 		}
 	}
-	return true, err
+	if s.failurePending.Load() || !owner.succeed() {
+		go s.isolate("close_deadline")
+		return false, ErrExecutionUnknown
+	}
+	return true, nil
 }
 
 // Every execution and transport borrower has joined before these shared
@@ -84,26 +113,22 @@ func (s *Supervisor) isolate(reason string) {
 		return
 	}
 	s.failurePending.Store(true)
+
+	var active []*Execution
+	if view := s.activeView.Load(); view != nil {
+		active = *view
+	}
+	remaining := 30 * time.Second
+	now, err := monitorMonotonic()
+	if err != nil {
+		remaining = 0
+	}
+	for _, e := range active {
+		remaining = min(remaining, time.Duration(max(int64(0), e.watchdogDeadline.Load()-now)))
+	}
+	s.armIsolationDeadline(time.Now().Add(remaining), reason)
 	s.failureOnce.Do(func() {
-		var active []*Execution
-		if view := s.activeView.Load(); view != nil {
-			active = *view
-		}
-		remaining := 30 * time.Second
-		now, err := monitorMonotonic()
-		if err != nil {
-			remaining = 0
-		}
-		for _, e := range active {
-			remaining = min(remaining, time.Duration(max(int64(0), e.watchdogDeadline.Load()-now)))
-		}
 		finish := func() { s.emitIsolation(reason, active); os.Exit(70) }
-		if remaining <= 0 {
-			finish()
-			return
-		}
-		fallback := time.AfterFunc(remaining, finish)
-		defer fallback.Stop()
 		bounded, cancel := context.WithTimeout(context.Background(), remaining)
 		defer cancel()
 		for _, e := range active {

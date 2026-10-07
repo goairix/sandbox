@@ -54,6 +54,9 @@ type Supervisor struct {
 	admission, closed, failed bool
 	failurePending            atomic.Bool
 	usersClosed               atomic.Bool
+	quiescence                *userQuiescenceAttempt
+	deadlineMu                sync.Mutex
+	isolationDeadline         *isolationDeadline
 	failureOnce               sync.Once
 	activeView                atomic.Pointer[[]*Execution]
 	isolationPublished        atomic.Bool

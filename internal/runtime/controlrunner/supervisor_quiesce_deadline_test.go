@@ -40,7 +40,14 @@ func TestTaskQuiesceShutdownDeadlineJoin(t *testing.T) {
 func TestTaskQuiesceShutdownDeadlineCallbackJoin(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	d := newIsolationDeadline(time.Now().Add(-time.Second), func() { close(entered); <-release })
-	defer close(release)
+	defer func() {
+		close(release)
+		select {
+		case <-d.done:
+		case <-time.After(time.Second):
+			t.Error("callback owner unjoined")
+		}
+	}()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):

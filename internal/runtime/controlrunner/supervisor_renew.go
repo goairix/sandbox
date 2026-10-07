@@ -104,7 +104,7 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 // Called while the original execution owner mutex is held. Atomic target failure
 // remains observable even when isolation cannot acquire that same mutex.
 func (e *Execution) renewableLocked(now int64) bool {
-	if e.supervisor.failurePending.Load() || e.state != "accepted" || e.rootPID <= 1 || e.terminalSeen.Load() || now >= e.authorityDeadlineNS || now >= e.commandDeadlineNS {
+	if e.supervisor.failurePending.Load() || e.supervisor.usersClosed.Load() || e.state != "accepted" || e.rootPID <= 1 || e.terminalSeen.Load() || now >= e.authorityDeadlineNS || now >= e.commandDeadlineNS {
 		return false
 	}
 	select {
