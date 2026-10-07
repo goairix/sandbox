@@ -205,3 +205,14 @@ func closeOnContext(ctx context.Context, c net.Conn) func() {
 		}
 	}
 }
+
+// VerifyRuntime applies the original backend's immutable verifier and exact
+// trusted identity to this destination's private certificate. A caller-supplied
+// destination verifier cannot add roots or alter the backend's trust binding.
+func (d *Destination) VerifyRuntime(verifier *p.ManagementVerifier, expected p.RuntimeIdentityContext, now time.Time) error {
+	if d == nil || d.self != d || verifier == nil || d.identity != expected {
+		return ErrDestination
+	}
+	_, err := verifier.VerifyRuntimeIdentityCertificate(d.certificate, expected, now)
+	return err
+}
