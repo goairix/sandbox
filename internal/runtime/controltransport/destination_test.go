@@ -25,7 +25,7 @@ func (c *testClock) Observe(context.Context) (p.ClockObservation, error) {
 	c.calls.Add(1)
 	return p.ClockObservation{UTC: c.now, Uncertainty: time.Millisecond}, nil
 }
-func destinationFixture(t *testing.T) (DestinationOptions, *tls.Config, []byte, *testClock, ed25519.PrivateKey) {
+func destinationFixture(t *testing.T) (DestinationOptions, *tls.Config, []byte, *testClock, ed25519.PrivateKey, ed25519.PublicKey) {
 	t.Helper()
 	root, key, _ := ed25519.GenerateKey(rand.Reader)
 	_, ik, _ := ed25519.GenerateKey(rand.Reader)
@@ -58,10 +58,10 @@ func destinationFixture(t *testing.T) (DestinationOptions, *tls.Config, []byte, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return DestinationOptions{Identity: identity, Credential: ic, Verifier: v, Clock: clock, RuntimeCertificate: rw}, server, iw, clock, rk
+	return DestinationOptions{Identity: identity, Credential: ic, Verifier: v, Clock: clock, RuntimeCertificate: rw}, server, iw, clock, rk, root
 }
 func TestDestinationActualTLSFiniteRequest(t *testing.T) {
-	o, server, iw, clock, _ := destinationFixture(t)
+	o, server, iw, clock, _, _ := destinationFixture(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestDestinationRejectsZeroAndCanceled(t *testing.T) {
 			t.Fatal("zero destination opened")
 		}
 	}
-	o, _, _, _, _ := destinationFixture(t)
+	o, _, _, _, _, _ := destinationFixture(t)
 	called := false
 	o.Dial = func(context.Context) (net.Conn, error) { called = true; return nil, nil }
 	d, err := NewDestination(o)
@@ -153,7 +153,7 @@ func TestDestinationRejectsZeroAndCanceled(t *testing.T) {
 }
 
 func TestDestinationReceiptPinsExactRetainedDeadline(t *testing.T) {
-	o, _, iw, clock, key := destinationFixture(t)
+	o, _, iw, clock, key, _ := destinationFixture(t)
 	o.Dial = func(context.Context) (net.Conn, error) { return nil, nil }
 	d, err := NewDestination(o)
 	if err != nil {
