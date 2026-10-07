@@ -6,8 +6,11 @@ import (
 	"context"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	tr "github.com/goairix/sandbox/internal/runtime/controltransport"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -22,8 +25,12 @@ func TestTaskQuiesceTransportNativeTerminalBeforeACK(t *testing.T) {
 	awaitNativeQuiescence(t, f, a)
 	_, err = f.s.quiescenceAcceptedReceipt(context.Background(), a)
 	require.Error(t, err, "pending-only signer must lose after terminal")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Outside the strict journal leaf, inside the original root-only protected
+	// parent. Management uses Unix mTLS under the selected no-IP topology.
+	socket := filepath.Join("/journal/protected", "quiesce-transport-"+uuid.NewString()+".sock")
+	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
+	require.NoError(t, os.Chmod(socket, 0600))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -41,7 +48,7 @@ func TestTaskQuiesceTransportNativeTerminalBeforeACK(t *testing.T) {
 	require.NoError(t, err)
 	d, err := tr.NewDestination(tr.DestinationOptions{Identity: f.s.activation.Identity(), RuntimeCertificate: f.s.activation.RuntimeCertificate(), Credential: credential, Verifier: f.s.options.Verifier, Clock: f.s.options.Clock, Dial: func(ctx context.Context) (net.Conn, error) {
 		var dial net.Dialer
-		return dial.DialContext(ctx, "tcp", listener.Addr().String())
+		return dial.DialContext(ctx, "unix", socket)
 	}})
 	require.NoError(t, err)
 	for _, purpose := range []string{"task_quiesce_users", "task_quiesce_users_query"} {
