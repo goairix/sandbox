@@ -114,6 +114,6 @@ Specification section9 supersedes draft D1/D2/API/proof alternatives above. Task
 - [x] Task2 concrete proof interface preflight, original-range implementation + scoped fix review (runtime component accepted; downstream/physical limits individually retained in runtime-review report).
 - [x] Task3 original-claim metadata/pages original-range implementation + scoped fix review (metadata component accepted; combined physical chain and deployment limits retained in metadata-review report).
 - [x] Task4 transport/dual-drain original-range implementation + scoped deadline fix review (separate component acceptance; mandatory combined physical chain and downstream limits retained in transport-review report).
-- [ ] Task5 combined physical gate, original-range review; one full-unit review and tracked acceptance.
+- [x] Task5 corrected combined Active/Late/Unknown physical gates, original-range full-unit review and one scoped finite-handler fix review; bounded unit accepted at runtime source8f455a0. Original failed/partial runs and individual limits remain in tracked reports. See `docs/superpowers/reports/2026-10-08-task-user-quiescence-unit-acceptance.md`; whole production migration remains incomplete.
 
 Whole migration remains active after this unit. Keep small verified commits, retain every raw failure and current source attribution. Root alone owns fixtures; no old accepted native/kernel replay.
