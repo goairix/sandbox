@@ -28,7 +28,7 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 			s.mu.Unlock()
 		}
 	}()
-	if s.closed || s.failed || s.failurePending.Load() || !s.admission || s.activation == nil {
+	if s.closed || s.failed || s.failurePending.Load() || s.usersClosed.Load() || !s.admission || s.activation == nil {
 		return nil, ErrAdmissionClosed
 	}
 	if len(s.active) >= int(s.options.MaxActive) {
@@ -72,9 +72,12 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 		e.mu.Lock()
 		e.state = "unknown"
 		e.mu.Unlock()
-		close(e.ownerDone)
-		close(e.waitDone)
-		close(e.output)
+		close(e.waitDone) // Start failed; no cmd.Wait owner was installed.
+		if locked {
+			locked = false
+			s.mu.Unlock()
+		}
+		s.finishExecution(e)
 		go s.isolate("monitor_start_failed")
 		return nil, errors.Join(ErrExecutionUnknown, cause)
 	}
@@ -110,6 +113,17 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	locked = false
 	s.mu.Unlock()
 	if err = s.startMonitor(e, monitorStart{Request: request, AuthorityDeadlineNS: e.authorityDeadlineNS, CommandDeadlineNS: e.commandDeadlineNS}); err != nil {
+		e.mu.Lock()
+		never := errors.Is(err, ErrAdmissionClosed) && s.usersClosed.Load() && !e.startCommitted && !s.failurePending.Load()
+		if never {
+			e.state = "never_spawned"
+		}
+		e.mu.Unlock()
+		if never {
+			close(e.waitDone)
+			s.finishExecution(e)
+			return nil, ErrAdmissionClosed
+		}
 		return fail(err)
 	}
 	return e, nil
@@ -218,18 +232,7 @@ func (s *Supervisor) startMonitor(e *Execution, start monitorStart) error {
 	return nil
 }
 func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monitorStart) {
-	defer func() {
-		e.cancel()
-		if e.watchdogDone != nil {
-			<-e.watchdogDone
-		}
-		close(e.ownerDone)
-	}()
-	defer close(e.output)
-	defer e.result.Close()
-	defer e.control.Close()
-	defer e.request.Close()
-	defer e.cancel()
+	defer s.finishExecution(e)
 	fail := func(reason string) {
 		s.failurePending.Store(true)
 		e.mu.Lock()
@@ -375,10 +378,6 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 		fail("terminal_persistence")
 		return
 	}
-	s.mu.Lock()
-	delete(s.active, e.commandID)
-	s.publishActiveLocked()
-	s.mu.Unlock()
 }
 
 // This is an absolute deadline, not a fresh relative cleanup lease. Startup,
@@ -402,7 +401,7 @@ func (e *Execution) publishDiagnosticLocked() {
 // Close before this transition forbids spawn; Close afterward awaits this same
 // registered owner, including late success/failure, never starts a replacement.
 func (e *Execution) beginStartLocked() error {
-	if e.startCommitted || e.closeRequested || e.supervisor.failurePending.Load() || e.runContext.Err() != nil {
+	if e.startCommitted || e.closeRequested || e.supervisor.failurePending.Load() || e.supervisor.usersClosed.Load() || e.runContext.Err() != nil {
 		return ErrAdmissionClosed
 	}
 	e.startCommitted = true

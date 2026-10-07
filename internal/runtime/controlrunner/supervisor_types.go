@@ -53,6 +53,7 @@ type Supervisor struct {
 	active                    map[string]*Execution
 	admission, closed, failed bool
 	failurePending            atomic.Bool
+	usersClosed               atomic.Bool
 	failureOnce               sync.Once
 	activeView                atomic.Pointer[[]*Execution]
 	isolationPublished        atomic.Bool
