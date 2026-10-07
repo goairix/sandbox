@@ -276,6 +276,10 @@ type nativeExecutionFixture struct {
 
 func nativeExecutionSetup(t *testing.T) *nativeExecutionFixture {
 	t.Helper()
+	return nativeExecutionSetupWithActivationChecks(t, false)
+}
+func nativeExecutionSetupWithActivationChecks(t *testing.T, checkActivation bool) *nativeExecutionFixture {
+	t.Helper()
 	nativeEnabled(t)
 	secret := nativeSecretRead(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -374,7 +378,27 @@ func nativeExecutionSetup(t *testing.T) *nativeExecutionFixture {
 	runtimeWire, err := p.SignRuntimeIdentityCertificate(secret.Root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: n.Root(), AuthorityID: binding.AuthorityID, Target: "docker", RestoreEpoch: binding.RestoreEpoch, PublicKey: hello.Birth.RuntimePublicKey, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(35 * time.Minute), SandboxID: expected.SandboxID, WorkspaceHash: expected.WorkspaceHash, Generation: expected.Generation, Runtime: expected.Runtime})
 	require.NoError(t, err)
 	hash := func(w []byte) string { h := sha256.Sum256(w); return hex.EncodeToString(h[:]) }
-	activation, err := p.SignTargetActivation(secret.Root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: expected, DataGateEpoch: claim.control.DataGateEpoch, UID: 1000, GID: 1000, NetworkAllowed: false, ContractDigest: secret.Observation.ContractDigest, RuntimeCertificateDigest: hash(runtimeWire), IssuerCertificateDigest: hash(secret.IssuerWire), NotBefore: now.Add(-3 * time.Second), NotAfter: now.Add(20 * time.Minute)})
+	activationClaims := p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: expected, DataGateEpoch: claim.control.DataGateEpoch, UID: 1000, GID: 1000, NetworkAllowed: false, ContractDigest: secret.Observation.ContractDigest, RuntimeCertificateDigest: hash(runtimeWire), IssuerCertificateDigest: hash(secret.IssuerWire), NotBefore: now.Add(-3 * time.Second), NotAfter: now.Add(20 * time.Minute)}
+	if checkActivation {
+		for _, defect := range []string{"expired", "wrong-constructor-boot"} {
+			invalid := activationClaims
+			if defect == "expired" {
+				invalid.NotBefore = now.Add(-time.Minute)
+				invalid.NotAfter = now.Add(-time.Second)
+			} else {
+				invalid.Identity.Runtime.BootID = uuid.NewString()
+			}
+			wire, err := p.SignTargetActivation(secret.Root, invalid)
+			require.NoError(t, err)
+			nativeBootstrapRefused(t, transport.BootstrapRequest{Version: 1, Purpose: "activate", Activation: wire, RuntimeCertificate: runtimeWire, IssuerCertificate: secret.IssuerWire})
+			var stillClosed transport.BootstrapResponse
+			nativeBootstrap(t, transport.BootstrapRequest{Version: 1, Purpose: "hello"}, &stillClosed)
+			require.Equal(t, "closed_hello", stillClosed.Purpose)
+			require.Equal(t, hello.Birth, stillClosed.Birth)
+			t.Logf("ACTUAL_CLOSED_ACTIVATION_REFUSED defect=%s current_boot=%s", defect, hello.Birth.BootID)
+		}
+	}
+	activation, err := p.SignTargetActivation(secret.Root, activationClaims)
 	require.NoError(t, err)
 	var activated transport.BootstrapResponse
 	nativeBootstrap(t, transport.BootstrapRequest{Version: 1, Purpose: "activate", Activation: activation, RuntimeCertificate: runtimeWire, IssuerCertificate: secret.IssuerWire}, &activated)
