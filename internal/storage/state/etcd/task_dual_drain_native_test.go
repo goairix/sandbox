@@ -5,13 +5,17 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -596,6 +600,210 @@ func TestTaskDualDrainNativeLateArrival(t *testing.T) {
 	require.Equal(t, originalTicket, draft.ticket.Wire())
 	t.Logf("TASK5_REAL_CURRENT_CERTIFICATE_EXPIRY not_after=%s observed_utc=%s fresh_tls_dials=1 backend_query_dials=0 prerequisite_dials=0 application_bytes=0 tls_error=%v query_error=%v prerequisite_error=%v", f.runtimeEnd.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), tlsErr, queryErr, zeroErr)
 	t.Log("CannotVerify: forced public registered-before-spawn/Start-in-flight timing; Task2 deterministic component attribution retained. Management authenticated success precedes original certificate expiry; target daemon remains alive with fresh authentication refusal afterwards.")
+	combinedEmit(t, "backend", "assertions_complete", "", transport.ControlSocket)
+}
+
+// Deliberately faulty test-only adapter, not a healthy Dial implementation:
+// Session has already sent application bytes and TLS EOF before invoking this
+// real Unix write EOF and then discarding responses with real Unix read close.
+// All reads/writes delegate the kernel; no fabricated response is returned.
+type combinedACKLossConn struct {
+	*net.UnixConn
+	writeEOF, readClosed atomic.Uint64
+}
+
+func (c *combinedACKLossConn) CloseWrite() error {
+	err := c.UnixConn.CloseWrite()
+	if err != nil {
+		return err
+	}
+	c.writeEOF.Add(1)
+	err = c.UnixConn.CloseRead()
+	if err == nil {
+		c.readClosed.Add(1)
+	}
+	return err
+}
+
+func (f *combinedFixture) actualTokenZero(t *testing.T, claim *TaskClaim) {
+	t.Helper()
+	prefix, err := f.b.taskOperationsPrefix(claim.Reference().Task)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(f.ctx, 3*time.Second)
+	defer cancel()
+	got, err := f.raw.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithLimit(1))
+	require.NoError(t, err)
+	require.False(t, got.More)
+	require.Empty(t, got.Kvs)
+	require.NotNil(t, got.Header)
+	require.Equal(t, f.b.clusterID, got.Header.ClusterId)
+	require.Positive(t, got.Header.Revision)
+	t.Logf("TASK5_ACTUAL_TOKEN_EMPTY_OBSERVATION prefix=%s revision=%d more=%t limit=1 not_a_prerequisite=true", prefix, got.Header.Revision, got.More)
+}
+
+func (f *combinedFixture) terminalAfterACKLoss(t *testing.T, claim *TaskClaim, ref TaskQuiescenceReference) p.TaskUserQuiescenceReceiptEvidence {
+	t.Helper()
+	deadline := time.Now().Add(33 * time.Second)
+	original, lastRenew := claim.Reference(), time.Now()
+	for {
+		q, err := f.b.QueryTaskQuiescence(f.ctx, ref.Task, f.destination)
+		require.Equal(t, ref, q.Reference)
+		if err != nil {
+			require.ErrorIs(t, err, ErrDeliveryUnknown)
+			require.Nil(t, q.Accepted)
+			require.Nil(t, q.Receipt)
+			t.Logf("TASK5_SAME_ORIGINAL_QUERY_STILL_UNKNOWN reference=%+v error=%v no_delivery_retry=true", ref, err)
+		} else if q.Receipt != nil {
+			require.Nil(t, q.Accepted)
+			require.Equal(t, "users_quiesced", q.Receipt.State())
+			t.Logf("TASK5_AUTHENTICATED_TERMINAL receipt=%s", q.Receipt.Wire())
+			return *q.Receipt
+		} else {
+			require.NotNil(t, q.Accepted)
+			require.Equal(t, "quiescence_accepted", q.Accepted.State())
+		}
+		require.True(t, time.Now().Before(deadline), "ACK loss has no authenticated terminal within original coordinator bound")
+		if time.Since(lastRenew) > 10*time.Second {
+			require.NoError(t, f.b.RenewTaskClaim(f.ctx, claim))
+			require.Equal(t, original, claim.Reference())
+			lastRenew = time.Now()
+		}
+		select {
+		case <-f.ctx.Done():
+			require.NoError(t, f.ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestTaskDualDrainNativeUnknown(t *testing.T) {
+	f := combinedSetup(t)
+	claim, closeRef := f.destroyAndCloseData(t)
+	originalClaim := claim.Reference()
+	f.actualTokenZero(t, claim)
+	missing, err := f.b.LoadTaskQuiescence(f.ctx, originalClaim.Task)
+	require.NoError(t, err)
+	require.Nil(t, missing)
+	before := f.snapshot(t, claim, closeRef)
+	prepared, err := f.b.PrepareTaskQuiescence(f.ctx, claim, f.destination)
+	require.NoError(t, err)
+	require.NoError(t, prepared.GuardCleanupError)
+	require.Equal(t, OutcomeCommitted, prepared.Outcome)
+	require.NotNil(t, prepared.Prepared)
+	draft := prepared.Prepared.draft
+	originalRef, originalDeadline := prepared.Reference, draft.deadline
+	originalClaims, originalTicket := draft.claims, draft.ticket.Wire()
+	unknown, err := f.b.QueryTaskQuiescence(f.ctx, originalRef.Task, f.destination)
+	require.ErrorIs(t, err, ErrDeliveryUnknown)
+	require.Equal(t, originalRef, unknown.Reference)
+	require.Nil(t, unknown.Accepted)
+	require.Nil(t, unknown.Receipt)
+	blocked, err := f.b.PrepareAfterDualDrain(f.ctx, claim, f.destination)
+	require.ErrorIs(t, err, ErrDeliveryUnknown)
+	require.Nil(t, blocked, "native token zero cannot replace absent local quiescence history")
+	require.False(t, draft.deliveryAttempted)
+	t.Logf("TASK5_TOKEN_EMPTY_LOCAL_UNKNOWN reference=%+v prerequisite_nil=true original_ticket_sha256=%s not_before=%s not_after=%s original_send_deadline=%s", originalRef, combinedHash(originalTicket), originalClaims.NotBefore.Format(time.RFC3339Nano), originalClaims.NotAfter.Format(time.RFC3339Nano), originalDeadline)
+	var fault *combinedACKLossConn
+	var faultDials atomic.Uint64
+	destination := f.newDestination(t, func(ctx context.Context) (net.Conn, error) {
+		faultDials.Add(1)
+		raw, err := f.dial(ctx)
+		if err != nil {
+			return nil, err
+		}
+		fault = &combinedACKLossConn{UnixConn: raw.(*net.UnixConn)}
+		return fault, nil
+	})
+	lost, err := f.b.DeliverTaskQuiescence(f.ctx, prepared.Prepared, destination)
+	require.True(t, errors.Is(err, ErrDeliveryUnknown))
+	require.Equal(t, originalRef, lost.Reference)
+	require.Nil(t, lost.Accepted)
+	require.Nil(t, lost.Receipt)
+	require.Equal(t, uint64(1), faultDials.Load())
+	require.NotNil(t, fault)
+	require.Equal(t, uint64(1), fault.writeEOF.Load())
+	require.Equal(t, uint64(1), fault.readClosed.Load())
+	require.True(t, draft.deliveryAttempted)
+	t.Logf("TASK5_REAL_ACK_LOSS reference=%+v fixed_dials=%d real_write_eof=%d real_read_close=%d error=%v unknown_alone_not_delivery_proof=true", originalRef, faultDials.Load(), fault.writeEOF.Load(), fault.readClosed.Load(), err)
+	// Fresh authenticated query of this same original reference must establish
+	// actual target processing. Never retry delivery or prepare a replacement.
+	receipt := f.terminalAfterACKLoss(t, claim, originalRef)
+	require.Zero(t, receipt.RegisteredCount())
+	require.Zero(t, receipt.NeverSpawnedCount())
+	require.Zero(t, receipt.LocalTerminalCount())
+	emptyDigest, err := p.DigestTaskQuiescenceExecutions([]p.TaskQuiescenceExecution{})
+	require.NoError(t, err)
+	require.Equal(t, emptyDigest, receipt.ExecutionSetDigest())
+	for _, until := range []time.Time{originalClaims.NotAfter.Add(2 * time.Second), originalClaims.NotAfter.Add(3 * time.Second)} {
+		f.waitOriginalClock(t, claim, until)
+		queried, err := f.b.QueryTaskQuiescence(f.ctx, originalRef.Task, f.destination)
+		require.NoError(t, err)
+		require.Equal(t, originalRef, queried.Reference)
+		require.NotNil(t, queried.Receipt)
+		require.Equal(t, receipt.Wire(), queried.Receipt.Wire())
+		require.Equal(t, originalClaims, draft.claims)
+		require.Equal(t, originalTicket, draft.ticket.Wire())
+		require.Equal(t, originalDeadline, draft.deadline)
+		t.Logf("TASK5_ORIGINAL_HISTORICAL_QUERY reference=%+v observed_utc=%s original_not_before=%s original_not_after=%s unchanged_receipt_sha256=%s", originalRef, time.Now().UTC().Format(time.RFC3339Nano), originalClaims.NotBefore.Format(time.RFC3339Nano), originalClaims.NotAfter.Format(time.RFC3339Nano), combinedHash(queried.Receipt.Wire()))
+	}
+	f.actualTokenZero(t, claim)
+	zero, err := f.b.PrepareAfterDualDrain(f.ctx, claim, f.destination)
+	require.NoError(t, err)
+	require.NotNil(t, zero)
+	require.Same(t, claim, zero.claim)
+	require.Equal(t, originalClaim, zero.claimReference)
+	require.Positive(t, zero.emptyRevision)
+	require.Positive(t, zero.pin.reservation.revision)
+	require.Len(t, taskEmptyComparisons(f.b, claim, zero.pin.intent, zero.pin.receipt, zero.pin.reservation), 53)
+	t.Logf("TASK5_REAL_DUAL_DRAIN native_empty_revision=%d literal_nodes=55 original_claim=%+v immutable_reservation_revision=%d intent_birth=%d receipt_birth=%d signed_receipt=%s", zero.emptyRevision, zero.claimReference, zero.pin.reservation.revision, zero.pin.intent.create, zero.pin.receipt.create, zero.receipt.Wire())
+	quiesceKey, err := f.b.namespace.taskQuiescenceKey(originalRef.Task)
+	require.NoError(t, err)
+	reservationKey, err := f.b.namespace.taskQuiescenceAttemptKey(originalRef.Task)
+	require.NoError(t, err)
+	_, receiptKey, err := f.b.stageKeys(originalRef.Stage)
+	require.NoError(t, err)
+	combinedUnchanged(t, before, f.snapshot(t, claim, closeRef), map[string]bool{quiesceKey: true, reservationKey: true, receiptKey: true}, map[int64]bool{originalClaim.LeaseID: true, f.creationLease: true})
+	joined := f.inspect(t, "unknown_users_joined_before_daemon_fault")
+	require.Equal(t, float64(0), joined["active"])
+	require.Equal(t, "closed", joined["gate"])
+	f.members(t, "before_failed_target")
+	// Same current original claimant/certificate survive the bounded separate
+	// Root daemon phase; the historical ticket interval is never extended.
+	require.NoError(t, f.b.RenewTaskClaim(f.ctx, claim))
+	require.Equal(t, originalClaim, claim.Reference())
+	require.True(t, time.Now().UTC().Add(20*time.Second).Before(f.runtimeEnd))
+	require.NoError(t, f.destination.VerifyRuntime(f.b.execVerifier, f.identity, time.Now().UTC()))
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGUSR1)
+	defer signal.Stop(signals)
+	phaseCtx, phaseCancel := context.WithTimeout(f.ctx, 15*time.Second)
+	defer phaseCancel()
+	combinedEmit(t, "backend", "failed_target_refusal_ready", "", "")
+	select {
+	case <-signals:
+	case <-phaseCtx.Done():
+		t.Fatalf("Root failed-target restart completion signal absent: %v", phaseCtx.Err())
+	}
+	var refusalDials atomic.Uint64
+	refused := f.newDestination(t, func(ctx context.Context) (net.Conn, error) { refusalDials.Add(1); return f.dial(ctx) })
+	failed, queryErr := f.b.QueryTaskQuiescence(f.ctx, originalRef.Task, refused)
+	require.Error(t, queryErr)
+	require.Equal(t, originalRef, failed.Reference)
+	require.Nil(t, failed.Accepted)
+	require.Nil(t, failed.Receipt)
+	require.Equal(t, uint64(1), refusalDials.Load(), "failed target query must reach fixed dial, not authority expiry")
+	refusalDials.Store(0)
+	prerequisite, prerequisiteErr := f.b.PrepareAfterDualDrain(f.ctx, claim, refused)
+	require.Error(t, prerequisiteErr)
+	require.Nil(t, prerequisite)
+	require.Equal(t, uint64(1), refusalDials.Load())
+	require.Equal(t, originalClaim, claim.Reference())
+	require.Equal(t, originalClaims, draft.claims)
+	require.Equal(t, originalTicket, draft.ticket.Wire())
+	require.Equal(t, originalDeadline, draft.deadline)
+	require.NoError(t, f.destination.VerifyRuntime(f.b.execVerifier, f.identity, time.Now().UTC()))
+	t.Logf("TASK5_FAILED_TARGET_REFUSAL original_reference=%+v original_claim=%+v query_dials=1 prerequisite_dials=1 current_runtime_not_after=%s query_error=%v prerequisite_error=%v", originalRef, originalClaim, f.runtimeEnd.Format(time.RFC3339Nano), queryErr, prerequisiteErr)
+	t.Log("CannotVerify: fresh-different-Boot cold recovery; Root selected stale-socket refusal before new Boot/key creation, with accepted component birth-fence evidence separate and deployment/restore gate mandatory. SIGKILL follows joined users and is not quiescence evidence. No isolation70 is expected; Root retains any unexpected isolation/OOM as failure/unknown.")
 	combinedEmit(t, "backend", "assertions_complete", "", transport.ControlSocket)
 }
 
