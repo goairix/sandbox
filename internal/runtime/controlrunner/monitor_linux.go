@@ -168,6 +168,9 @@ func RunMonitor() error {
 		cmd.SysProcAttr.Setctty = true
 		cmd.SysProcAttr.Ctty = 0
 	}
+	if err = sealExecDescriptors(); err != nil {
+		return err
+	}
 	if err = cmd.Start(); err != nil {
 		return fmt.Errorf("user spawn failed (no attributable root status): %w", err)
 	}
@@ -385,4 +388,15 @@ func collectMonitorReady(root int, elapsed time.Duration) monitorReady {
 	r.MemoryPeak = read("/sys/fs/cgroup/memory.peak")
 	r.PidsCurrent = read("/sys/fs/cgroup/pids.current")
 	return r
+}
+
+// Go ForkExec maps explicit descriptors but expects other inherited descriptors
+// already CLOEXEC. Seal all current non-standard descriptors, preserving their
+// availability in this process and explicit ExtraFiles mappings in the child.
+// Kernel support is mandatory; no enumeration fallback can close the race.
+func sealExecDescriptors() error {
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return fmt.Errorf("required close_range CLOEXEC boundary: %w", err)
+	}
+	return nil
 }

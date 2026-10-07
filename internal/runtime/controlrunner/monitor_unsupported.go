@@ -11,3 +11,5 @@ func inspectExecutable(string) (os.FileInfo, error) { return nil, launcher.ErrUn
 
 func RunMonitor() error                { return launcher.ErrUnsupported }
 func monitorMonotonic() (int64, error) { return 0, launcher.ErrUnsupported }
+
+func sealExecDescriptors() error { return ErrUnavailable }

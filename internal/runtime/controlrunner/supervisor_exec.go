@@ -152,6 +152,10 @@ func (s *Supervisor) startMonitor(e *Execution, start monitorStart) error {
 	cmd.ExtraFiles = []*os.File{reqR, controlR, resultW}
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	if err = sealExecDescriptors(); err != nil {
+		closeAll()
+		return err
+	}
 	if err = cmd.Start(); err != nil {
 		closeAll()
 		return err
@@ -311,3 +315,4 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 	delete(s.active, e.record.Context.CommandID)
 	s.mu.Unlock()
 }
+
