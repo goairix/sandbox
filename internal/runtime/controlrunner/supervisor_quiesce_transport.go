@@ -56,19 +56,19 @@ func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t
 			if err = ctx.Err(); err != nil {
 				return err
 			}
-			return writeTransportEvent(conn, t.EventReceipt, wire)
+			return writeFiniteTransportEvent(ctx, conn, t.EventReceipt, wire)
 		}
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		return writeTransportEvent(conn, t.EventAccepted, wire)
+		return writeFiniteTransportEvent(ctx, conn, t.EventAccepted, wire)
 	case "task_quiesce_users_query":
 		wire, err := s.queryUserQuiescence(ctx, e.Context, e.TicketDigest)
 		if err == nil {
 			if err = ctx.Err(); err != nil {
 				return err
 			}
-			return writeTransportEvent(conn, t.EventReceipt, wire)
+			return writeFiniteTransportEvent(ctx, conn, t.EventReceipt, wire)
 		}
 		// Pending attribution may be reported only through the original owner and
 		// its final live signing boundary. Cold or failed history cannot sign it.
@@ -86,7 +86,7 @@ func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		return writeTransportEvent(conn, t.EventAccepted, wire)
+		return writeFiniteTransportEvent(ctx, conn, t.EventAccepted, wire)
 	default:
 		return t.ErrFrame
 	}

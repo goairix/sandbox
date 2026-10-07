@@ -130,8 +130,14 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 	} else {
 		err = s.dispatchTransport(bounded, ctx, conn, request.Exec)
 	}
-	if err != nil {
-		conn.SetWriteDeadline(time.Now().Add(time.Second))
+	if err != nil && bounded.Err() == nil {
+		refusalDeadline := time.Now().Add(time.Second)
+		if deadline.Before(refusalDeadline) {
+			refusalDeadline = deadline
+		}
+		if conn.SetWriteDeadline(refusalDeadline) != nil || bounded.Err() != nil {
+			return
+		}
 		_ = t.WriteEvent(conn, t.EventError, []byte("request refused or outcome unknown"))
 	}
 }
@@ -288,6 +294,25 @@ func (s *Supervisor) dispatchTransport(ctx, streamContext context.Context, conn 
 }
 func writeTransportEvent(conn net.Conn, kind byte, wire []byte) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	return t.WriteEvent(conn, kind, wire)
+}
+
+// Finite requests retain the original connection bound. The streaming writer
+// above owns a separate per-output-frame deadline for long-lived execution IO.
+func writeFiniteTransportEvent(ctx context.Context, conn net.Conn, kind byte, wire []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ErrInvalidConfiguration
+	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return t.WriteEvent(conn, kind, wire)
