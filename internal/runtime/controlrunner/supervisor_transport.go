@@ -118,12 +118,17 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 	if conn.HandshakeContext(bounded) != nil {
 		return
 	}
-	envelope, err := t.ReadRequest(conn)
+	envelope, task, err := t.ReadControlRequest(conn)
 	if err != nil || bounded.Err() != nil {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if err = s.dispatchTransport(bounded, ctx, conn, envelope); err != nil {
+	if task != nil {
+		err = s.dispatchTaskClose(bounded, conn, *task)
+	} else {
+		err = s.dispatchTransport(bounded, ctx, conn, envelope)
+	}
+	if err != nil {
 		conn.SetWriteDeadline(time.Now().Add(time.Second))
 		_ = t.WriteEvent(conn, t.EventError, []byte("request refused or outcome unknown"))
 	}
@@ -171,9 +176,12 @@ func (s *Supervisor) serveBootstrap(ctx context.Context, conn net.Conn) {
 	}
 }
 func (s *Supervisor) transportContext(c p.ExecStartContext) error {
+	return s.transportExecContext(c, false)
+}
+func (s *Supervisor) transportExecContext(c p.ExecStartContext, query bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || !s.admission {
+	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || (!query && !s.admission) {
 		return ErrAdmissionClosed
 	}
 	a := s.activation
@@ -191,7 +199,7 @@ func (s *Supervisor) dispatchTransport(ctx, streamContext context.Context, conn 
 		}
 		return writeTransportEvent(conn, t.EventDiagnostics, wire)
 	}
-	if err := s.transportContext(envelope.Context); err != nil {
+	if err := s.transportExecContext(envelope.Context, envelope.Purpose == "exec_query"); err != nil {
 		return err
 	}
 	switch envelope.Purpose {
@@ -286,10 +294,10 @@ func (s *Supervisor) queryTransport(ctx context.Context, conn net.Conn, envelope
 }
 func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (byte, []byte, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	e := s.active[envelope.Context.CommandID]
 	journal := s.journal
-	admission := s.admission && !s.closed && !s.failed
-	s.mu.Unlock()
+	admission := s.admission && !s.closed && !s.failed && !s.failurePending.Load()
 	if e != nil {
 		if !e.mu.TryLock() {
 			return 0, nil, ErrUnavailable
@@ -326,6 +334,9 @@ func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (byt
 		return 0, nil, err
 	}
 	if record == nil || record.Context != envelope.Context || record.DescriptorDigest != envelope.DescriptorDigest {
+		return 0, nil, ErrUnavailable
+	}
+	if !admission && record.State != "local_terminal" {
 		return 0, nil, ErrUnavailable
 	}
 	wire, err := s.signRecord(*record)

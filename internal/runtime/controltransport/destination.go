@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"reflect"
 	"sync"
@@ -151,6 +152,12 @@ func (s *Session) Close() error {
 	return s.conn.Close()
 }
 func (s *Session) Send(ctx context.Context, e Envelope) error {
+	return s.send(ctx, func(w io.Writer) error { return WriteRequest(w, e) })
+}
+func (s *Session) SendTaskClose(ctx context.Context, e TaskCloseEnvelope) error {
+	return s.send(ctx, func(w io.Writer) error { return WriteTaskCloseRequest(w, e) })
+}
+func (s *Session) send(ctx context.Context, write func(io.Writer) error) error {
 	if s == nil || s.self != s || isNil(ctx) {
 		return ErrDestination
 	}
@@ -171,7 +178,7 @@ func (s *Session) Send(ctx context.Context, e Envelope) error {
 	if err := bounded.Err(); err != nil {
 		return err
 	}
-	if err := WriteRequest(s.conn, e); err != nil {
+	if err := write(s.conn); err != nil {
 		return err
 	}
 	if err := s.conn.CloseWrite(); err != nil {
