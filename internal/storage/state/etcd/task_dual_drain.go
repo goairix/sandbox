@@ -48,8 +48,21 @@ func validateTaskDualDrainHistory(c *TaskClaim, entry *TaskQuiescenceEntry) erro
 }
 
 func (b *Backend) PrepareAfterDualDrain(ctx context.Context, c *TaskClaim, destination *t.Destination) (*PreparedTaskQuiescence, error) {
+	return b.prepareAfterDualDrain(ctx, c, destination, nil)
+}
+
+// A nil expected preserves the original preparation path. A saved original
+// instead constrains both terminal responses, all pins, and the whole call's
+// deadline; it never substitutes its old emptyRevision for a new native Range.
+func (b *Backend) prepareAfterDualDrain(ctx context.Context, c *TaskClaim, destination *t.Destination, expected *PreparedTaskQuiescence) (*PreparedTaskQuiescence, error) {
 	if !b.validTaskClaim(c) || ctx == nil || b.taskQuiescenceVerifier == nil || b.authorityClock == nil {
 		return nil, ErrInvalidRecord
+	}
+	// Merely presenting expired saved evidence must not mark a renewed claim
+	// lost. Expiry/cancellation during the call retains c.live's existing
+	// conservative lost-on-cancellation policy.
+	if expected != nil && !time.Now().Before(expected.deadline) {
+		return nil, ErrGuardExpired
 	}
 	c.mu.Lock()
 	if err := c.live(ctx); err != nil {
@@ -57,9 +70,17 @@ func (b *Backend) PrepareAfterDualDrain(ctx context.Context, c *TaskClaim, desti
 		return nil, err
 	}
 	deadline := c.deadline
+	var expectedPin *taskDualDrainPin
+	if expected != nil {
+		deadline = expected.deadline
+		expectedPin = &expected.pin
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
 	bounded, cancel := b.taskObservationContext(ctx, c)
 	defer cancel()
-	entry, pin, err := b.pinTaskDualDrain(bounded, c, nil)
+	entry, pin, err := b.pinTaskDualDrain(bounded, c, expectedPin)
 	if err != nil {
 		c.mu.Unlock()
 		return nil, err
@@ -68,6 +89,9 @@ func (b *Backend) PrepareAfterDualDrain(ctx context.Context, c *TaskClaim, desti
 	c.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil && digestTaskQuiescenceProof(first.Wire()) != digestTaskQuiescenceProof(expected.receipt.Wire()) {
+		return nil, ErrConflict
 	}
 	// The accepted helper owns c.mu and performs the NEW linearizable full-prefix
 	// limit1 Range with 53 comparisons and two read branches (55 literal nodes).
@@ -87,6 +111,9 @@ func (b *Backend) PrepareAfterDualDrain(ctx context.Context, c *TaskClaim, desti
 	if digestTaskQuiescenceProof(first.Wire()) != digestTaskQuiescenceProof(second.Wire()) {
 		return nil, ErrConflict
 	}
+	if expected != nil && digestTaskQuiescenceProof(second.Wire()) != digestTaskQuiescenceProof(expected.receipt.Wire()) {
+		return nil, ErrConflict
+	}
 	if _, _, err = b.pinTaskDualDrain(bounded, c, &pin); err != nil {
 		return nil, err
 	}
@@ -95,6 +122,9 @@ func (b *Backend) PrepareAfterDualDrain(ctx context.Context, c *TaskClaim, desti
 	}
 	if err = c.live(bounded); err != nil {
 		return nil, err
+	}
+	if expected != nil {
+		return nil, nil // Revalidation manufactures no replacement prerequisite.
 	}
 	// Queries and final checks do not manufacture a newer emptiness revision.
 	prepared := &PreparedTaskQuiescence{origin: b, claim: c, claimReference: c.reference, deadline: deadline, pin: pin, receipt: second, emptyRevision: revision}

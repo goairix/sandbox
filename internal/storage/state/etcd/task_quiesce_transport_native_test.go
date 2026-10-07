@@ -22,6 +22,15 @@ type quiescenceWireTarget struct {
 	dial             func(context.Context) (net.Conn, error)
 	effects, queries atomic.Int32
 	lose             atomic.Bool
+	response         atomic.Pointer[quiescenceWireResponse]
+}
+
+// An optional immutable replacement lets a later query change the target's
+// signed response while retaining the same current certificate and server.
+// A nil override retains every original fixture's response behavior.
+type quiescenceWireResponse struct {
+	kind byte
+	wire []byte
 }
 
 // Real native metadata and genuine mTLS/EOF are exercised. The fixed response
@@ -94,7 +103,11 @@ func newQuiescenceWireTarget(t *testing.T, f *quiescenceNativeFixture, prepared 
 				} else {
 					target.queries.Add(1)
 				}
-				_ = tr.WriteEvent(conn, kind, wire)
+				responseKind, responseWire := kind, wire
+				if override := target.response.Load(); override != nil {
+					responseKind, responseWire = override.kind, override.wire
+				}
+				_ = tr.WriteEvent(conn, responseKind, responseWire)
 			}()
 		}
 	}()
