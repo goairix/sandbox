@@ -1,6 +1,6 @@
 # Task-user quiescence: actual combined native verification
 
-Status: **corrected Active physical assertions pass; Task5/unit/production acceptance pending**. The first Active run's vacuous snapshot remains a retained defect. Its corrected native run below observes the real records. LateArrival's first run failed before delayed-input assertions; its fix, Unknown and the full original-unit review remain pending.
+Status: **corrected Active and LateArrival physical assertions pass; Task5/unit/production acceptance pending**. The first Active run's vacuous snapshot and first Late codec failure remain retained defects. Changed-source native runs below verify their corrected assertions. Unknown and the full original-unit review remain pending.
 
 ## First Active fixture — retained partial result
 
@@ -76,3 +76,21 @@ Backend bridge total50/retained16/omitted34 and relay52/16/36 preserve the bound
 Source commit `0039d560e1646c8bd9a965c98769cdec4c444a39` adds retained original canonical request bytes, expired-original Backend refusal, delayed-input rejection and65s original runtime certificate expiry assertions. Host physical selectors SKIP; host race/vet and Linux ordinary-package compilation alone do not verify these native assertions.
 
 Actual fixture `sandbox-quiesce-combined-9dcfe8d5fde0`, exact selector `^TestTaskDualDrainNativeLateArrival$`, fails after0.28s at its request roundtrip equality: production decoding normalizes absent stdin to an empty slice, while the original StartEnvelope contains nil. No delayed-input/current-expiry PASS follows. Root runner exits1; complete raw failure is retained, without treating the codec assertion failure as a product dispatch error. Exact-label cleanup finishes with all three inventories empty. Original author is fixing a meaningful canonical codec comparison with a focused regression before another changed-source native run. Unknown has not been replayed or implemented by another agent.
+
+## Corrected LateArrival — original packet and real certificate expiry
+
+Canonical roundtrip repair `320e3a435281d3cb913458316db93963bb6f77b8` retains complete original and decoded re-encoded header/body bytes and hash, plus mandatory exact EOF. Focused codec RED reproduces the old nil/empty equality failure; GREEN verifies actual wire semantics and trailing-byte refusal. Author's host race has2host PASS/1native SKIP, vet/Linux full-package compilation exit0. No host SKIP is counted below.
+
+Changed fixture `sandbox-quiesce-combined-2ee34dbbbeb8`, exact LateArrival selector: **1 top PASS, 0 subtests, 0 FAIL/SKIP**,67.30s. All143command records exit0 without timeout;281repository inputs/3Go tools/3ELFs and full archive/custody are independently audited. Runtime ID=UID `3a2b445ad1a58a0103d46b1bcc103c1ac98bd7beed48de2f88b9ab95bed7b3b8`; Boot `139fcf1e-6867-4dc4-a86d-7108b92b565e`. Manifest SHA256 `c48d0a39b8a770d4f207697e7a2213ee939f9996e65ebc864c813de237a6b6f0`; complete backend record69 is160483bytes/SHA256 `5cd4934489fc47cbfeb4cf7cc4e7abfcd205524718f0d7ee8ecb09571ca1743e`.
+
+| Root-built artifact | Bytes | SHA256 |
+|---|---:|---|
+| combined.test | 32507184 | fc9727957877fecf1ca6ece4feeed0eac400cf0105a1a174d91be9bb51dce979 |
+| sandbox-launcher | 8229196 | ce90db7e132770aaafc88534f274189cd8a3430c087a0bfeda3b019fb0b4f4f8 |
+| combined-user | 3719582 | 34164d9d44c2af38808090023deed19afcd13b8a8be3edd96738ae1aac6f0e2b |
+
+The retained actual original exec frame is4192bytes/SHA256 `12973ea6463362f53362be41ef1c368350241b3b72c9cb259da492ef1a882375`. Native original30s token absence and TTL=-1 precede Backend refusal with0dials/application bytes. A separate fresh genuine bounded mTLS connection sends those exact original bytes after DATA/USERS close and native absence at revision38; actual event_kind5 returns `request refused or outcome unknown`. PID1 diagnostics before/after have identical PID1-only process sets, active0/closed. Signed original terminal has registered/local/never counts all0 and canonical empty execution-set digest; fresh same-original query and public dual-drain prerequisite succeed while current certificate is valid. Ticket expiry and closed gates remain possible causes of delayed refusal; closure-only causation and exact beforeSpawn/Start-in-flight physical timing remain CannotVerify, with Task2 component timing attributed separately.
+
+Original runtime certificate/activation end is20:55:26.130571833Z, selected as original activation-time+65s before activation. Actual independent current UTC20:55:28.264028503Z follows that end. Fresh TLS fails after1real dial; public Query/prerequisite reject current expired certificate before any dial and return no evidence/prerequisite. No lease/ticket/send deadline, clock or trust interval is widened. Target remains running/nonOOM after assertions; successful authenticated management samples precede expiry. Post-expiry daemon liveness is distinct from successful authentication.
+
+Root parses full snapshot40keys/revision32/35677bytes and38keys/revision38/42235bytes, More=false,18required anchors each:35retained whole-KVs unchanged,5declared original leased removals and3unleased immutable quiesce additions. Root audit exits0 after adapting its Python UTC reader to preserve RFC3339 nanoseconds; that auditor parsing issue required no native source change or replay. Actual client WARN/ERROR0; server12WARN/0ERROR in the same three fixture categories. Backend bridge50/16/34omitted and relay53/16/37omitted remain bounded observations, not individual classification of every overflow. Joins0pairs/3listeners, cooperative target/relay teardown0/nonOOM and all three final inventories empty. No Linux race, large-N, throughput, flush/release, recovery or production migration acceptance follows.
