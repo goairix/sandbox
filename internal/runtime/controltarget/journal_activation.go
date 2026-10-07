@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"time"
+
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
 
 const maxJournalActivationBytes = 16384
@@ -98,7 +99,7 @@ func (j *Journal) liveNowLocked(ctx context.Context) (time.Time, error) {
 // InstallActivation is available only on the freshly created live handle.
 // Every uncertain write revokes admission and leaves all bytes for diagnosis.
 func (j *Journal) InstallActivation(ctx context.Context, e controlprotocol.TargetActivationEvidence) error {
-	if j == nil {
+	if j == nil || j.self != j {
 		return ErrJournalUnavailable
 	}
 	j.mu.Lock()

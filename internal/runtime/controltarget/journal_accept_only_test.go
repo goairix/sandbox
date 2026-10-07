@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -126,5 +127,22 @@ func TestLiveJournalAcceptWriteAndLateFaults(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLiveJournalCopiedJournalCannotActivate(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	copy := new(Journal)
+	reflect.ValueOf(copy).Elem().Set(reflect.ValueOf(j).Elem())
+	ctx := context.Background()
+	if err := copy.InstallActivation(ctx, f.activation); err == nil {
+		t.Fatal("copied journal activated")
+	}
+	if err := copy.Close(); err == nil {
+		t.Fatal("copied journal closed owned descriptors")
+	}
+	if err := j.InstallActivation(ctx, f.activation); err != nil {
+		t.Fatal("original damaged by copy", err)
 	}
 }

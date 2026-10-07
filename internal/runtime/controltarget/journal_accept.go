@@ -3,8 +3,9 @@ package controltarget
 import (
 	"context"
 	"fmt"
-	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"time"
+
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
 
 // AcceptedExecution is an origin-bound, one-use registration. Neither a copied
@@ -53,7 +54,7 @@ func (j *Journal) checkStartAtLocked(r ExecJournalRecord, now time.Time) error {
 	return nil
 }
 func (j *Journal) AcceptExecution(ctx context.Context, e controlprotocol.ExecStartEvidence) (*AcceptedExecution, error) {
-	if j == nil {
+	if j == nil || j.self != j {
 		return nil, ErrJournalUnavailable
 	}
 	j.mu.Lock()
@@ -106,7 +107,7 @@ func (j *Journal) AcceptExecution(ctx context.Context, e controlprotocol.ExecSta
 // ConsumeStart burns registration before the supervisor can create a monitor.
 // A failed late check cannot restore it or make renewal rescue a missed start.
 func (j *Journal) ConsumeStart(ctx context.Context, a *AcceptedExecution) error {
-	if j == nil {
+	if j == nil || j.self != j {
 		return ErrJournalUnavailable
 	}
 	j.mu.Lock()

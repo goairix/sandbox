@@ -3,6 +3,7 @@
 package controltarget
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -294,5 +295,48 @@ func TestLiveJournalActivationFaults(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestLiveJournalActivationBundleBounds(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	if err := j.InstallActivation(context.Background(), f.activation); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := os.ReadFile(filepath.Join(f.o.Directory, "activation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range [][]byte{append(wire, []byte(`{}`)...), bytes.Replace(wire, []byte(`"version":1`), []byte(`"version":1,"version":1`), 1), bytes.Replace(wire, []byte(`"wire":`), []byte(`"wire":null,"duplicate":`), 1)} {
+		if _, err := decodeJournalActivation(bad); err == nil {
+			t.Fatal("malformed bundle")
+		}
+	}
+	b, err := decodeJournalActivation(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An encoded bundle above the ordinary record bound still uses its own limit.
+	b.RuntimeCertificate = bytes.Repeat([]byte("x"), 5500)
+	large, err := encodeJournalWireLimit(b, maxJournalActivationBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(large) <= 8192 {
+		t.Fatal("fixture not above record bound")
+	}
+	if _, err := decodeJournalActivation(large); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeJournalActivation(append(large, bytes.Repeat([]byte(" "), 16384-len(large))...)); err != nil {
+		t.Fatal("16384 bounded activation", err)
+	}
+	if _, err := decodeJournalActivation(append(large, bytes.Repeat([]byte(" "), 16385-len(large))...)); err == nil {
+		t.Fatal("16385 activation accepted")
+	}
+	b.RuntimeCertificate = bytes.Repeat([]byte("x"), 8193)
+	if err = b.validate(); err == nil {
+		t.Fatal("individual certificate limit")
 	}
 }

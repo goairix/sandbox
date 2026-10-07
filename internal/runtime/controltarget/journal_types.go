@@ -1,5 +1,5 @@
-// Package controltarget stores passive runtime diagnostic metadata. Journal
-// history does not authorize execution or prove a physical command outcome.
+// Package controltarget provides origin-bound live admission and retained runtime
+// diagnostics. Journal history never authorizes execution or proves a physical outcome.
 package controltarget
 
 import (
@@ -40,7 +40,7 @@ type GateManifest struct {
 	GateState     string          `json:"gate_state"`
 }
 
-// ExecJournalRecord records an intent without physical terminal proof.
+// ExecJournalRecord records an intent and optional trusted local result assertions.
 // It carries digests and scalar context, never command payloads or tickets.
 type ExecJournalRecord struct {
 	Version           uint32                           `json:"version"`

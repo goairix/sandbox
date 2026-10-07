@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"os"
 	"reflect"
 	"sync"
+
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
 
 const (
@@ -28,9 +29,11 @@ type journalFiles struct {
 	observe func(operation string)
 }
 
-// Journal is passive diagnostic storage. Its lock and pinned descriptors live
+// Journal stores diagnostics and, when configured, fresh live admissions.
+// Its constructor origin, lock and pinned descriptors live
 // until Close. The mutex also protects Status and all private command helpers.
 type Journal struct {
+	self                                           *Journal
 	mu                                             sync.Mutex
 	birth                                          *controlprotocol.BirthContext
 	verifier                                       *controlprotocol.ManagementVerifier
@@ -87,10 +90,10 @@ func newJournal(ctx context.Context, o JournalOptions, create bool, hook journal
 // checkLocked is shared by the point operations. Callers hold mu. A poisoned
 // handle still permits validated history reads, but no persistence.
 func (j *Journal) checkLocked(ctx context.Context, write bool) error {
-	if ctx == nil {
+	if nilJournalDependency(ctx) {
 		return ErrInvalidConfiguration
 	}
-	if j == nil || !j.initialized {
+	if j == nil || j.self != j || !j.initialized {
 		return ErrJournalUnavailable
 	}
 	if j.closed {
@@ -115,10 +118,10 @@ func (j *Journal) poison(err error) error {
 }
 
 func (j *Journal) CloseGate(ctx context.Context, expectedEpoch int64) (GateManifest, error) {
-	if ctx == nil {
+	if nilJournalDependency(ctx) {
 		return GateManifest{}, ErrInvalidConfiguration
 	}
-	if j == nil {
+	if j == nil || j.self != j {
 		return GateManifest{}, ErrJournalUnavailable
 	}
 	j.mu.Lock()
@@ -136,7 +139,7 @@ func (j *Journal) CloseGate(ctx context.Context, expectedEpoch int64) (GateManif
 }
 
 func (j *Journal) Status() JournalStatus {
-	if j == nil {
+	if j == nil || j.self != j {
 		return JournalStatus{Closed: true, NewRecordsStopped: true}
 	}
 	j.mu.Lock()
@@ -144,12 +147,15 @@ func (j *Journal) Status() JournalStatus {
 	if !j.initialized {
 		return JournalStatus{Closed: true, NewRecordsStopped: true}
 	}
-	return JournalStatus{Gate: j.gate, LogicalBytes: j.logicalBytes, Records: j.records, TemporaryFiles: j.temporaryFiles, Warning: j.logicalBytes*100 >= j.maxBytes*70, NewRecordsStopped: j.closed || j.poisoned || !j.accountingKnown || j.logicalBytes*100 >= j.maxBytes*85 || j.contentFilesLocked()+1 >= maxJournalContentFiles, Poisoned: j.poisoned, AccountingKnown: j.accountingKnown, Closed: j.closed}
+	return JournalStatus{Gate: j.gate, LogicalBytes: j.logicalBytes, Records: j.records, TemporaryFiles: j.temporaryFiles, Warning: j.logicalBytes*100 >= j.maxBytes*70, NewRecordsStopped: j.closed || j.poisoned || !j.accountingKnown || (j.birth != nil && j.gate.GateState != "open") || j.logicalBytes*100 >= j.maxBytes*85 || j.contentFilesLocked()+1 >= maxJournalContentFiles, Poisoned: j.poisoned, AccountingKnown: j.accountingKnown, Closed: j.closed}
 }
 
 func (j *Journal) Close() error {
 	if j == nil {
 		return nil
+	}
+	if j.initialized && j.self != j {
+		return ErrJournalUnavailable
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()

@@ -68,7 +68,7 @@ func (j *Journal) RecordUnknown(ctx context.Context, evidence controlprotocol.Ex
 	if ctx == nil {
 		return nil, ErrInvalidConfiguration
 	}
-	if j == nil {
+	if j == nil || j.self != j {
 		return nil, ErrJournalUnavailable
 	}
 	j.mu.Lock()
@@ -109,13 +109,13 @@ func (j *Journal) RecordUnknown(ctx context.Context, evidence controlprotocol.Ex
 	return &r, nil
 }
 
-// Lookup is a bounded point read of owned unknown history. Absence is nil,nil;
+// Lookup is a bounded point read of owned history, never a live handle. Absence is nil,nil;
 // corruption and unsafe files are errors, including on poisoned handles.
 func (j *Journal) Lookup(ctx context.Context, commandID string) (*ExecJournalRecord, error) {
 	if ctx == nil {
 		return nil, ErrInvalidConfiguration
 	}
-	if j == nil {
+	if j == nil || j.self != j {
 		return nil, ErrJournalUnavailable
 	}
 	j.mu.Lock()

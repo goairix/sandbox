@@ -19,7 +19,7 @@ func (i JournalIdentity) Validate() error {
 }
 
 // Validate permits historical open manifests. Only the closed state may be
-// produced by this journal's encoder; neither state grants launch authority.
+// produced by the passive encoder; neither decoded state grants launch authority.
 func (m GateManifest) Validate() error {
 	if err := m.Identity.Validate(); err != nil {
 		return err

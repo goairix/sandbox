@@ -205,6 +205,7 @@ func openJournalPlatform(ctx context.Context, o JournalOptions, create bool, hoo
 	}
 	defer parent.Close()
 	j := &Journal{birth: o.Birth, verifier: o.Verifier, clock: o.Clock, fresh: create, files: journalFiles{uid: o.ManagementUID, hook: hook}, maxBytes: o.MaxBytes, initialized: true, gate: GateManifest{Version: 1, Identity: o.Identity, DataGateEpoch: o.DataGateEpoch, GateState: "closed"}}
+	j.self = j
 	defer func() {
 		if result != nil {
 			j.Close()

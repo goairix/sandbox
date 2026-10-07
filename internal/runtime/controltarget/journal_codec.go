@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"io"
 	"strconv"
 	"time"
 	"unicode/utf8"
+
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
 
 const maxJournalWireBytes = 8192
