@@ -110,7 +110,7 @@ Per-task report includes actual interfaces/files, commands/full stdout/stderr/ex
 Specification section9 supersedes draft D1/D2/API/proof alternatives above. Task1 pending/barrier/accepted only; Task2 owns terminal integration and tests under actual kernel proof, not arbitrary completion flags. No QuiescenceHandle; completed live-owner set excludes fully joined history. Original bootstrap seal and same-lock ownerDone/retirement are required section10 corrections. PrepareTaskQuiescence and PrepareAfterDualDrain take Destination and independently authenticate prerequisite receipts. Root preflight reviewer must assess all supersessions, budget and process/callback lifetime before code.
 
 - [x] Independent preflight spec/plan review and individual Root dispositions (C0/I2/M2/CV10; I1/I2 and M1/M2 corrected in spec9/10 and task extraction; scoped confirmation before dispatch).
-- [ ] Task1 original-range author + independent review.
+- [x] Task1 original-range author + independent review (C0/I0/M1; each CV14 dispositioned; actual Linux journal gate passed).
 - [ ] Task2 concrete proof interface preflight, original-range implementation + review.
 - [ ] Task3 original-claim metadata/pages original-range implementation + review.
 - [ ] Task4 transport/dual-drain original-range implementation + review.
