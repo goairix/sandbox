@@ -1,17 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/goairix/sandbox/internal/runtime/controltransport"
 )
 
-func main() {
-	if len(os.Args) != 2 || os.Args[1] != "monitor" {
-		fmt.Fprintln(os.Stderr, "sandbox-launcher: expected fixed monitor mode")
-		os.Exit(2)
+func run(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("expected fixed serve, monitor or bridge mode")
 	}
-	if err := monitor(); err != nil {
-		fmt.Fprintln(os.Stderr, "sandbox-launcher monitor:", err)
+	switch args[0] {
+	case "serve":
+		return serve()
+	case "monitor":
+		return monitor()
+	case "bridge":
+		return controltransport.Bridge(context.Background(), os.Stdin, os.Stdout)
+	default:
+		return fmt.Errorf("unknown fixed mode")
+	}
+}
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "sandbox-launcher:", err)
 		os.Exit(1)
 	}
 }
