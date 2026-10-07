@@ -131,3 +131,7 @@ func (j *Journal) recordBinding(r ExecJournalRecord) error {
 	}
 	return nil
 }
+
+func sameAcceptance(a, b ExecJournalRecord) bool {
+	return a.Context == b.Context && a.DescriptorDigest == b.DescriptorDigest && a.TicketDigest == b.TicketDigest && a.NotBefore.Equal(b.NotBefore) && a.NotAfter.Equal(b.NotAfter)
+}

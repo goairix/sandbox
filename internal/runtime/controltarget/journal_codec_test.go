@@ -68,7 +68,7 @@ func TestJournalIdentityManifestValidation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cases := map[string]func(*GateManifest){"version": func(m *GateManifest) { m.Version = 2 }, "identity": func(m *GateManifest) { m.Identity.Target = "" }, "epoch": func(m *GateManifest) { m.DataGateEpoch = 0 }, "state": func(m *GateManifest) { m.GateState = "accepted" }}
+	cases := map[string]func(*GateManifest){"version": func(m *GateManifest) { m.Version = 3 }, "identity": func(m *GateManifest) { m.Identity.Target = "" }, "epoch": func(m *GateManifest) { m.DataGateEpoch = 0 }, "state": func(m *GateManifest) { m.GateState = "accepted" }}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			m := valid
@@ -127,7 +127,7 @@ func TestJournalCodecStrictFields(t *testing.T) {
 			}
 			return err
 		}},
-		{"record", journalRecordFixture(), func(w []byte) error {
+		{"record", legacyRecordFixture(journalRecordFixture()), func(w []byte) error {
 			dst := journalRecordFixture()
 			before := dst
 			err := decodeExecJournalRecord(w, &dst)
@@ -230,7 +230,7 @@ func TestJournalCodecBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := journalRecordFixture()
-	rw, err := json.Marshal(r)
+	rw, err := json.Marshal(legacyRecordFixture(r))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestJournalCodecBoundaries(t *testing.T) {
 			if err := tc.decode(padded); err != nil {
 				t.Fatalf("8192 rejected: %v", err)
 			}
-			bads := map[string][]byte{"8193": append(padded, ' '), "empty": {}, "null": []byte("null"), "trailing object": append(append([]byte(nil), tc.wire...), []byte(" {}")...), "trailing garbage": append(append([]byte(nil), tc.wire...), 'x'), "invalid utf8": bytes.Replace(tc.wire, []byte("target"), []byte{255}, 1), "depth 9": []byte(`{"identity":{"runtime":{"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}}}}`), "unpaired high": bytes.Replace(tc.wire, []byte("authority<&>"), []byte(`\ud800`), 1), "unpaired low": bytes.Replace(tc.wire, []byte("authority<&>"), []byte(`\udc00`), 1), "wrong version": bytes.Replace(tc.wire, []byte(`"version":1`), []byte(`"version":2`), 1), "uint32 overflow": bytes.Replace(tc.wire, []byte(`"version":1`), []byte(`"version":4294967296`), 1), "int64 overflow": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":9223372036854775808`), 1), "float integer": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":1.0`), 1), "exponent integer": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":1e0`), 1)}
+			bads := map[string][]byte{"8193": append(padded, ' '), "empty": {}, "null": []byte("null"), "trailing object": append(append([]byte(nil), tc.wire...), []byte(" {}")...), "trailing garbage": append(append([]byte(nil), tc.wire...), 'x'), "invalid utf8": bytes.Replace(tc.wire, []byte("target"), []byte{255}, 1), "depth 9": []byte(`{"identity":{"runtime":{"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}}}}`), "unpaired high": bytes.Replace(tc.wire, []byte("authority<&>"), []byte(`\ud800`), 1), "unpaired low": bytes.Replace(tc.wire, []byte("authority<&>"), []byte(`\udc00`), 1), "wrong version": bytes.Replace(tc.wire, []byte(`"version":1`), []byte(`"version":3`), 1), "uint32 overflow": bytes.Replace(tc.wire, []byte(`"version":1`), []byte(`"version":4294967296`), 1), "int64 overflow": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":9223372036854775808`), 1), "float integer": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":1.0`), 1), "exponent integer": bytes.Replace(tc.wire, []byte(`"generation":1`), []byte(`"generation":1e0`), 1)}
 			// Marshaling escapes HTML; target the literal escape sequence as well.
 			bads["unpaired high"] = bytes.Replace(tc.wire, []byte(`authority\u003c\u0026\u003e`), []byte(`\ud800`), 1)
 			bads["unpaired low"] = bytes.Replace(tc.wire, []byte(`authority\u003c\u0026\u003e`), []byte(`\udc00`), 1)
@@ -395,4 +395,17 @@ func TestJournalCodecMaxTypedFields(t *testing.T) {
 			t.Fatal("unencodable year accepted")
 		}
 	}
+}
+
+// Retain the exact legacy wire shape independently of new result fields.
+func legacyRecordFixture(r ExecJournalRecord) any {
+	return struct {
+		Version          uint32                           `json:"version"`
+		State            string                           `json:"state"`
+		Context          controlprotocol.ExecStartContext `json:"context"`
+		DescriptorDigest string                           `json:"descriptor_digest"`
+		TicketDigest     string                           `json:"ticket_digest"`
+		NotBefore        time.Time                        `json:"not_before"`
+		NotAfter         time.Time                        `json:"not_after"`
+	}{r.Version, r.State, r.Context, r.DescriptorDigest, r.TicketDigest, r.NotBefore, r.NotAfter}
 }

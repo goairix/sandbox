@@ -20,7 +20,7 @@ func writeHistoryFixture(t *testing.T, o JournalOptions, id string, temp bool) i
 	t.Helper()
 	r := journalRecordFixture()
 	r.Context.CommandID = id
-	b, err := json.Marshal(r)
+	b, err := json.Marshal(legacyRecordFixture(r))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestJournalRecovery(t *testing.T) {
 			r := journalRecordFixture()
 			r.Context.Runtime.BootID = "other"
 			writeHistoryFixture(t, o, r.Context.CommandID, false)
-			b, _ := json.Marshal(r)
+			b, _ := json.Marshal(legacyRecordFixture(r))
 			mustWrite(t, filepath.Join(o.Directory, "commands", "22", r.Context.CommandID+".json"), b)
 		},
 		"record-filename": func(t *testing.T, o JournalOptions) {

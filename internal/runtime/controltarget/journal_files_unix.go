@@ -3,6 +3,7 @@
 package controltarget
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -134,6 +135,9 @@ func (f *journalFiles) openChild(dir *os.File, name string, directory bool) (*os
 }
 
 func (f *journalFiles) readFile(ctx context.Context, dir *os.File, name string) ([]byte, error) {
+	return f.readFileLimit(ctx, dir, name, maxJournalWireBytes)
+}
+func (f *journalFiles) readFileLimit(ctx context.Context, dir *os.File, name string, limit int) ([]byte, error) {
 	if ctx == nil {
 		return nil, ErrInvalidConfiguration
 	}
@@ -150,14 +154,14 @@ func (f *journalFiles) readFile(ctx context.Context, dir *os.File, name string) 
 	if err != nil {
 		return nil, err
 	}
-	if st.Size() > maxJournalWireBytes {
+	if st.Size() > int64(limit) {
 		return nil, fmt.Errorf("%w: oversized file", ErrInvalidRecord)
 	}
-	b, err := io.ReadAll(io.LimitReader(journalFDReader{files: f, file: child}, maxJournalWireBytes+1))
+	b, err := io.ReadAll(io.LimitReader(journalFDReader{files: f, file: child}, int64(limit)+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > maxJournalWireBytes || int64(len(b)) != st.Size() {
+	if len(b) > limit || int64(len(b)) != st.Size() {
 		return nil, fmt.Errorf("%w: file size changed", ErrInvalidRecord)
 	}
 	if err = ctx.Err(); err != nil {
@@ -200,7 +204,7 @@ func openJournalPlatform(ctx context.Context, o JournalOptions, create bool, hoo
 		return nil, err
 	}
 	defer parent.Close()
-	j := &Journal{files: journalFiles{uid: o.ManagementUID, hook: hook}, maxBytes: o.MaxBytes, initialized: true, gate: GateManifest{Version: 1, Identity: o.Identity, DataGateEpoch: o.DataGateEpoch, GateState: "closed"}}
+	j := &Journal{birth: o.Birth, verifier: o.Verifier, clock: o.Clock, fresh: create, files: journalFiles{uid: o.ManagementUID, hook: hook}, maxBytes: o.MaxBytes, initialized: true, gate: GateManifest{Version: 1, Identity: o.Identity, DataGateEpoch: o.DataGateEpoch, GateState: "closed"}}
 	defer func() {
 		if result != nil {
 			j.Close()
@@ -360,10 +364,7 @@ func (j *Journal) persistClosedGateLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	count := j.records + j.temporaryFiles
-	if j.manifestBytes > 0 {
-		count++
-	}
+	count := j.contentFilesLocked()
 	if j.logicalBytes+int64(len(b)) > j.maxBytes || count+1 > maxJournalContentFiles {
 		return ErrCapacity
 	}
@@ -441,7 +442,7 @@ func (j *Journal) persistNewCommandLocked(ctx context.Context, r ExecJournalReco
 	if !j.accountingKnown {
 		return ErrJournalUnavailable
 	}
-	if (j.logicalBytes+int64(len(b)))*100 >= j.maxBytes*85 || 1+j.records+j.temporaryFiles+1 >= maxJournalContentFiles {
+	if (j.logicalBytes+int64(len(b)))*100 >= j.maxBytes*85 || j.contentFilesLocked()+1 >= maxJournalContentFiles {
 		return ErrCapacity
 	}
 	nonce, err := journalNonce()
@@ -463,5 +464,107 @@ func (j *Journal) persistNewCommandLocked(ctx context.Context, r ExecJournalReco
 	}
 	j.records++
 	j.logicalBytes += int64(len(b))
+	return nil
+}
+
+func (j *Journal) persistActivationLocked(ctx context.Context, b []byte) error {
+	if j.activationBytes != 0 {
+		return ErrConflict
+	}
+	// Reserve enough room for the subsequent gate replacement as well.
+	if (j.logicalBytes+int64(len(b))+j.manifestBytes)*100 >= j.maxBytes*85 || j.contentFilesLocked()+2 > maxJournalContentFiles {
+		return ErrCapacity
+	}
+	if old, err := j.files.openChild(j.root, "activation.json", false); err == nil {
+		old.Close()
+		return ErrConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	if err = j.files.persistFile(ctx, j.root, "activation.json", ".activation."+nonce+".tmp", b); err != nil {
+		return j.poison(err)
+	}
+	j.activationBytes = int64(len(b))
+	j.logicalBytes += int64(len(b))
+	return nil
+}
+
+// This private producer is reachable only after a freshly authenticated bundle
+// has been persisted by InstallActivation. Historical encoders stay close-only.
+func (j *Journal) persistOpenGateLocked(ctx context.Context) error {
+	if !j.fresh || j.birth == nil || j.activationBytes == 0 {
+		return ErrJournalUnavailable
+	}
+	gate := j.gate
+	gate.Version = 2
+	gate.GateState = "open"
+	b, err := encodeJournalWire(gate)
+	if err != nil {
+		return err
+	}
+	if j.logicalBytes+int64(len(b)) > j.maxBytes || j.contentFilesLocked()+1 > maxJournalContentFiles {
+		return ErrCapacity
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	if err = j.files.persistFile(ctx, j.root, "gate.json", ".gate."+nonce+".tmp", b); err != nil {
+		return j.poison(err)
+	}
+	j.logicalBytes += int64(len(b)) - j.manifestBytes
+	j.manifestBytes = int64(len(b))
+	j.gate = gate
+	return nil
+}
+
+// Replacement accounts peak old+new bytes and one temporary content file.
+// A disk record must still exactly match this live handle's expected snapshot.
+func (j *Journal) replaceCommandLocked(ctx context.Context, old, next ExecJournalRecord, dangerous bool) error {
+	previous, err := j.readCommandLocked(ctx, old.Context.CommandID)
+	if err != nil {
+		return j.poison(err)
+	}
+	if previous == nil || *previous != old {
+		return j.poison(ErrConflict)
+	}
+	if !sameAcceptance(old, next) || old.Version != 2 || old.State != "accepted" {
+		return ErrConflict
+	}
+	b, err := encodeExecJournalRecord(next)
+	if err != nil {
+		return err
+	}
+	before, err := encodeExecJournalRecord(old)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(before, b) {
+		return nil
+	}
+	peak := j.logicalBytes + int64(len(b))
+	if !j.accountingKnown {
+		return ErrJournalUnavailable
+	}
+	if peak > j.maxBytes || j.contentFilesLocked()+1 > maxJournalContentFiles || (dangerous && peak*100 >= j.maxBytes*85) {
+		return ErrCapacity
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	bucket, err := j.files.openChild(j.commands, old.Context.CommandID[:2], true)
+	if err != nil {
+		return j.poison(err)
+	}
+	defer j.files.closeFile(bucket)
+	if err = j.files.persistFile(ctx, bucket, old.Context.CommandID+".json", "."+old.Context.CommandID+"."+nonce+".tmp", b); err != nil {
+		return j.poison(err)
+	}
+	j.logicalBytes += int64(len(b)) - int64(len(before))
 	return nil
 }

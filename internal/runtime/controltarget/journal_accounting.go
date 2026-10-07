@@ -64,6 +64,11 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	// gate.json can never be substituted with a retained temporary manifest.
 	bytes := j.manifestBytes
 	var records, temps uint64
+	var activationBytes int64
+	var requiresActivation bool
+	if j.gate.Version == 2 {
+		requiresActivation = true
+	}
 	add := func(n int, temp bool) error {
 		bytes += int64(n)
 		if temp {
@@ -71,7 +76,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		} else {
 			records++
 		}
-		if bytes > j.maxBytes || 1+records+temps > maxJournalContentFiles {
+		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0) > maxJournalContentFiles {
 			return ErrCapacity
 		}
 		return nil
@@ -80,6 +85,28 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		switch name {
 		case "gate.json", "lock", "commands":
 			return nil
+		}
+		if name == "activation.json" || activationTempName(name) {
+			b, err := j.files.readFileLimit(ctx, j.root, name, maxJournalActivationBytes)
+			if err != nil {
+				return err
+			}
+			bundle, err := decodeJournalActivation(b)
+			if err != nil {
+				return err
+			}
+			if bundle.Identity != j.gate.Identity || bundle.DataGateEpoch != j.gate.DataGateEpoch {
+				return ErrIdentityMismatch
+			}
+			if name == "activation.json" {
+				activationBytes = int64(len(b))
+				bytes += activationBytes
+				if bytes > j.maxBytes || 1+records+temps+1 > maxJournalContentFiles {
+					return ErrCapacity
+				}
+				return nil
+			}
+			return add(len(b), true)
 		}
 		if !gateTempName(name) {
 			return fmt.Errorf("%w: unknown root entry %s", ErrInvalidRecord, name)
@@ -91,6 +118,9 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		var m GateManifest
 		if err = decodeGateManifest(b, &m); err != nil {
 			return err
+		}
+		if m.Version == 2 {
+			requiresActivation = true
 		}
 		if m.Identity != j.gate.Identity || m.DataGateEpoch != j.gate.DataGateEpoch {
 			return ErrIdentityMismatch
@@ -138,6 +168,9 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			if err = decodeExecJournalRecord(b, &r); err != nil {
 				return err
 			}
+			if r.Version == 2 {
+				requiresActivation = true
+			}
 			if r.Context.CommandID != id {
 				return fmt.Errorf("%w: command filename binding", ErrInvalidRecord)
 			}
@@ -157,9 +190,23 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	if bytes > j.maxBytes {
 		return ErrCapacity
 	}
+	if requiresActivation && activationBytes == 0 {
+		return fmt.Errorf("%w: missing activation", ErrInvalidRecord)
+	}
+	j.activationBytes = activationBytes
 	j.logicalBytes = bytes
 	j.records = records
 	j.temporaryFiles = temps
 	j.accountingKnown = true
 	return nil
+}
+
+func activationTempName(name string) bool {
+	return strings.HasPrefix(name, ".activation.") && strings.HasSuffix(name, ".tmp") && journalUUID(strings.TrimSuffix(strings.TrimPrefix(name, ".activation."), ".tmp"))
+}
+func boolCount(b bool) uint64 {
+	if b {
+		return 1
+	}
+	return 0
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"os"
+	"reflect"
 	"sync"
 )
 
@@ -30,6 +32,12 @@ type journalFiles struct {
 // until Close. The mutex also protects Status and all private command helpers.
 type Journal struct {
 	mu                                             sync.Mutex
+	birth                                          *controlprotocol.BirthContext
+	verifier                                       *controlprotocol.ManagementVerifier
+	clock                                          controlprotocol.AuthorityClock
+	fresh                                          bool
+	activation                                     *controlprotocol.TargetActivationEvidence
+	activationBytes                                int64
 	files                                          journalFiles
 	root, commands, lock                           *os.File
 	gate                                           GateManifest
@@ -46,7 +54,7 @@ func OpenClosedJournal(ctx context.Context, o JournalOptions) (*Journal, error) 
 }
 
 func newJournal(ctx context.Context, o JournalOptions, create bool, hook journalIOHook) (*Journal, error) {
-	if ctx == nil {
+	if nilJournalDependency(ctx) {
 		return nil, ErrInvalidConfiguration
 	}
 	if err := ctx.Err(); err != nil {
@@ -60,6 +68,18 @@ func newJournal(ctx context.Context, o JournalOptions, create bool, hook journal
 	}
 	if err := o.Identity.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidConfiguration, err)
+	}
+	present := o.Birth != nil || o.Verifier != nil || o.Clock != nil
+	if present {
+		if o.Birth == nil || o.Verifier == nil || nilJournalDependency(o.Clock) {
+			return nil, ErrInvalidConfiguration
+		}
+		b := *o.Birth
+		b.RuntimePublicKey = append([]byte(nil), b.RuntimePublicKey...)
+		if !journalUUID(b.BootID) || b.BootID != o.Identity.Runtime.BootID || len(b.RuntimePublicKey) != 32 || b.UID == 0 || b.UID > 2147483647 || b.GID == 0 || b.GID > 2147483647 || !journalHash(b.ContractDigest) {
+			return nil, ErrInvalidConfiguration
+		}
+		o.Birth = &b
 	}
 	return openJournalPlatform(ctx, o, create, hook)
 }
@@ -87,6 +107,9 @@ func (j *Journal) checkLocked(ctx context.Context, write bool) error {
 
 func (j *Journal) poison(err error) error {
 	j.poisoned = true
+	if j.birth != nil {
+		j.gate.GateState = "closed"
+	}
 	j.accountingKnown = false
 	return fmt.Errorf("%w: %w", ErrJournalUnavailable, err)
 }
@@ -121,7 +144,7 @@ func (j *Journal) Status() JournalStatus {
 	if !j.initialized {
 		return JournalStatus{Closed: true, NewRecordsStopped: true}
 	}
-	return JournalStatus{Gate: j.gate, LogicalBytes: j.logicalBytes, Records: j.records, TemporaryFiles: j.temporaryFiles, Warning: j.logicalBytes*100 >= j.maxBytes*70, NewRecordsStopped: j.closed || j.poisoned || !j.accountingKnown || j.logicalBytes*100 >= j.maxBytes*85 || 1+j.records+j.temporaryFiles+1 >= maxJournalContentFiles, Poisoned: j.poisoned, AccountingKnown: j.accountingKnown, Closed: j.closed}
+	return JournalStatus{Gate: j.gate, LogicalBytes: j.logicalBytes, Records: j.records, TemporaryFiles: j.temporaryFiles, Warning: j.logicalBytes*100 >= j.maxBytes*70, NewRecordsStopped: j.closed || j.poisoned || !j.accountingKnown || j.logicalBytes*100 >= j.maxBytes*85 || j.contentFilesLocked()+1 >= maxJournalContentFiles, Poisoned: j.poisoned, AccountingKnown: j.accountingKnown, Closed: j.closed}
 }
 
 func (j *Journal) Close() error {
@@ -170,4 +193,26 @@ func (f *journalFiles) operation(ctx context.Context, op, name string, call func
 		}
 	}
 	return ctx.Err()
+}
+
+func nilJournalDependency(v any) bool {
+	if v == nil {
+		return true
+	}
+	r := reflect.ValueOf(v)
+	switch r.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice:
+		return r.IsNil()
+	}
+	return false
+}
+func (j *Journal) contentFilesLocked() uint64 {
+	n := j.records + j.temporaryFiles
+	if j.manifestBytes > 0 {
+		n++
+	}
+	if j.activationBytes > 0 {
+		n++
+	}
+	return n
 }

@@ -15,3 +15,11 @@ func (j *Journal) readCommandLocked(context.Context, string) (*ExecJournalRecord
 func (j *Journal) persistNewCommandLocked(context.Context, ExecJournalRecord) error {
 	return ErrInvalidConfiguration
 }
+
+func (j *Journal) persistActivationLocked(context.Context, []byte) error {
+	return ErrInvalidConfiguration
+}
+func (j *Journal) persistOpenGateLocked(context.Context) error { return ErrInvalidConfiguration }
+func (j *Journal) replaceCommandLocked(context.Context, ExecJournalRecord, ExecJournalRecord, bool) error {
+	return ErrInvalidConfiguration
+}
