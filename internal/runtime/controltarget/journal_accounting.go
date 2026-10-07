@@ -64,7 +64,9 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	// gate.json can never be substituted with a retained temporary manifest.
 	bytes := j.manifestBytes
 	var records, temps uint64
-	var activationBytes, taskCloseBytes int64
+	var activationBytes, taskCloseBytes, taskQuiescenceBytes int64
+	var firstQuiescence *TaskUserQuiescenceRecord
+	var retainedClose *TaskDataCloseRecord
 	var firstClose *TaskDataCloseRecord
 	var requiresActivation bool
 	if j.gate.Version == 2 {
@@ -77,7 +79,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		} else {
 			records++
 		}
-		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0) > maxJournalContentFiles {
+		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0) > maxJournalContentFiles {
 			return ErrCapacity
 		}
 		return nil
@@ -102,7 +104,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			if name == "activation.json" {
 				activationBytes = int64(len(b))
 				bytes += activationBytes
-				if bytes > j.maxBytes || 1+records+temps+1+boolCount(taskCloseBytes > 0) > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+1+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0) > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -130,9 +132,41 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 				return ErrInvalidRecord
 			}
 			if name == "data-close.json" {
+				retainedClose = &r
 				taskCloseBytes = int64(len(b))
 				bytes += taskCloseBytes
-				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+1 > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskQuiescenceBytes > 0)+1 > maxJournalContentFiles {
+					return ErrCapacity
+				}
+				return nil
+			}
+			return add(len(b), true)
+		}
+
+		if name == "users-quiesce.json" || taskQuiescenceTempName(name) {
+			requiresActivation = true
+			b, err := j.files.readFileLimit(ctx, j.root, name, maxTaskQuiescenceRecordBytes)
+			if err != nil {
+				return err
+			}
+			r, err := decodeTaskQuiescence(b)
+			if err != nil {
+				return err
+			}
+			if err = j.taskCloseBinding(r.Context.Current); err != nil {
+				return err
+			}
+			if j.gate.GateState != "closed" {
+				return ErrInvalidRecord
+			}
+			if firstQuiescence != nil && !sameTaskQuiescence(*firstQuiescence, r) {
+				return ErrConflict
+			}
+			firstQuiescence = &r
+			if name == "users-quiesce.json" {
+				taskQuiescenceBytes = int64(len(b))
+				bytes += taskQuiescenceBytes
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+1 > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -224,6 +258,13 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	if requiresActivation && activationBytes == 0 {
 		return fmt.Errorf("%w: missing activation", ErrInvalidRecord)
 	}
+	if firstQuiescence != nil {
+		if retainedClose == nil || retainedClose.State != "data_closed" || retainedClose.Context != firstQuiescence.Context.CloseDataContext || retainedClose.TicketDigest != firstQuiescence.Context.CloseDataTicketDigest {
+			return ErrConflict
+		}
+	}
+	j.taskQuiescenceBytes = taskQuiescenceBytes
+	j.usersClosed = firstQuiescence != nil
 	j.activationBytes = activationBytes
 	j.taskCloseBytes = taskCloseBytes
 	j.logicalBytes = bytes

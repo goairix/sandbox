@@ -42,6 +42,9 @@ type Journal struct {
 	activation                                     *controlprotocol.TargetActivationEvidence
 	activationBytes                                int64
 	taskCloseBytes                                 int64
+	taskQuiescenceBytes                            int64
+	usersClosed                                    bool
+	userQuiescence                                 *AcceptedUserQuiescence
 	files                                          journalFiles
 	root, commands, lock                           *os.File
 	gate                                           GateManifest
@@ -222,6 +225,9 @@ func (j *Journal) contentFilesLocked() uint64 {
 		n++
 	}
 	if j.taskCloseBytes > 0 {
+		n++
+	}
+	if j.taskQuiescenceBytes > 0 {
 		n++
 	}
 	return n
