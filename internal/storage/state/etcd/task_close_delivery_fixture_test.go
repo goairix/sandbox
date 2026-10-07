@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -19,6 +20,76 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func newTaskDeliveryFixture(t *testing.T, expired bool) *taskCloseFixture {
+	t.Helper()
+	// Construct the original published identity with the live target's UUID
+	// birth contract; do not rewrite any already-frozen destroy/claim evidence.
+	ownedFixtureContainers(t)
+	base, raw, input, creation, certificate, publicationRoot := preparationFixture(t, "plain")
+	var original struct {
+		Claims p.RuntimeCertificateClaims `json:"claims"`
+	}
+	require.NoError(t, json.Unmarshal(certificate, &original))
+	original.Claims.Runtime.BootID = uuid.NewString()
+	certificate, e := p.SignRuntimeCertificate(publicationRoot, original.Claims)
+	require.NoError(t, e)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	bound, e := base.BindRuntime(ctx, creation, certificate)
+	require.NoError(t, e)
+	require.Equal(t, OutcomeCommitted, bound.Outcome)
+	mounted, e := base.ConsumeRuntimeMount(ctx, creation)
+	require.NoError(t, e)
+	require.Equal(t, OutcomeCommitted, mounted.Outcome)
+	published, e := base.PublishRuntime(ctx, creation, publicationProof(t, base, creation, certificate, nil))
+	require.NoError(t, e)
+	require.Equal(t, OutcomeCommitted, published.Outcome)
+	controlKey, _, e := base.namespace.sandboxKeys(creation.workspace.Partition(), input.SandboxID, "read")
+	require.NoError(t, e)
+	got, e := raw.Get(ctx, controlKey)
+	require.NoError(t, e)
+	require.Len(t, got.Kvs, 1)
+	in := BeginDestroyInput{SandboxID: input.SandboxID, RequestID: "destroy-request", ExpectedControlRevision: got.Kvs[0].ModRevision}
+	if expired {
+		r, e := raw.Get(ctx, controlKey)
+		require.NoError(t, e)
+		var c SandboxControlRecord
+		require.NoError(t, decodeDomainRecord(r.Kvs[0], &c))
+		c.ExpiresAt = time.Now().UTC().Add(-time.Hour)
+		v, e := encodeDomainRecord(c)
+		require.NoError(t, e)
+		put, e := raw.Put(ctx, controlKey, v)
+		require.NoError(t, e)
+		in.ExpectedControlRevision = put.Header.Revision
+	}
+	s, ref := taskDestroyPrepare(t, base, ctx, in)
+	out, e := base.CommitStage(ctx, s)
+	require.NoError(t, e)
+	require.Equal(t, OutcomeCommitted, out)
+	now := time.Now().UTC()
+	root := ed25519.NewKeyFromSeed(make([]byte, 32))
+	key := ed25519.NewKeyFromSeed([]byte("12345678901234567890123456789012"))
+	wire, e := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: base.namespace.Root(), AuthorityID: base.publicationAuthorityID, Target: base.publicationTarget, RestoreEpoch: base.restoreEpoch, PublicKey: key.Public().(ed25519.PublicKey), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Minute)})
+	require.NoError(t, e)
+	p := &taskCloseProvider{wire: wire, key: key}
+	id, e := decodeIdentity(base.identityValue, base.namespace)
+	require.NoError(t, e)
+	id.RestoreEpoch = base.restoreEpoch
+	clockCalls := 0
+	b, e := New(ctx, Options{Endpoints: raw.Endpoints(), Namespace: base.namespace, Identity: id, AllowInsecureLoopback: true, RequestTimeout: 3 * time.Second, TaskIssuer: p, Clock: testAuthorityClock(func(context.Context) (ClockObservation, error) { clockCalls++; return ClockObservation{UTC: now}, nil }), PublicationTrust: &RuntimePublicationTrust{AuthorityID: base.publicationAuthorityID, Target: base.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}})
+	require.NoError(t, e)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	require.Zero(t, clockCalls)
+	require.Zero(t, p.certCalls)
+	require.Zero(t, p.signCalls)
+	p.identity, e = b.taskVerifier.VerifyCommandIssuerCertificate(wire, now)
+	require.NoError(t, e)
+	c, e := b.ClaimTask(ctx, ref, "close-worker", 30*time.Second)
+	require.NoError(t, e)
+	t.Cleanup(func() { taskReleaseClaim(t, b, c) })
+	return &taskCloseFixture{b, raw, c, p, now, ctx}
+}
 
 type taskDeliveryClock struct{ now atomic.Int64 }
 

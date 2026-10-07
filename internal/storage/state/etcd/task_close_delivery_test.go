@@ -26,7 +26,7 @@ func TestTaskCloseDeliveryRejectsOrigin(t *testing.T) {
 func TestTaskCloseDeliveryNative(t *testing.T) {
 	for _, lose := range []bool{false, true} {
 		t.Run(fmt.Sprint(lose), func(t *testing.T) {
-			f := newTaskCloseFixture(t, true)
+			f := newTaskDeliveryFixture(t, true)
 			prepared, err := f.b.PrepareTaskCloseData(f.ctx, f.c)
 			require.NoError(t, err)
 			require.NotNil(t, prepared.Prepared)
@@ -79,21 +79,24 @@ func TestTaskCloseDeliveryNative(t *testing.T) {
 func TestTaskCloseDeliveryStale(t *testing.T) {
 	for _, boundary := range []string{"before-dial", "during-handshake", "before-bytes", "fixed-deadline"} {
 		t.Run(boundary, func(t *testing.T) {
-			f := newTaskCloseFixture(t, false)
+			f := newTaskDeliveryFixture(t, false)
 			prepared, err := f.b.PrepareTaskCloseData(f.ctx, f.c)
 			require.NoError(t, err)
 			require.NotNil(t, prepared.Prepared)
 			target := newTaskDeliveryTarget(t, f, prepared.Prepared)
+			revoked, dialed, checks := false, false, 0
+			originalDial := target.dial
+			target.dial = func(ctx context.Context) (net.Conn, error) { dialed = true; return originalDial(ctx) }
 			revoke := func() {
 				_, err := f.raw.Revoke(f.ctx, clientv3.LeaseID(f.c.reference.LeaseID))
 				require.NoError(t, err)
+				revoked = true
 			}
 			if boundary == "before-dial" {
 				revoke()
 			} else if boundary == "before-bytes" {
 				original := f.b.client.KV
 				defer func() { f.b.client.KV = original }()
-				checks := 0
 				f.b.client.KV = &faultKV{KV: original, match: func(ops []clientv3.Op) bool {
 					if len(ops) == 1 && ops[0].IsGet() && string(ops[0].KeyBytes()) == f.b.identityKey {
 						checks++
@@ -116,7 +119,17 @@ func TestTaskCloseDeliveryStale(t *testing.T) {
 				}
 			}
 			result, err := f.b.DeliverTaskCloseData(f.ctx, prepared.Prepared, target.destination)
-			require.Error(t, err)
+			if boundary == "fixed-deadline" {
+				require.ErrorIs(t, err, ErrGuardExpired)
+				require.False(t, revoked)
+			} else {
+				require.ErrorIs(t, err, ErrConflict)
+				require.True(t, revoked, "must reach actual revoke boundary")
+			}
+			require.Equal(t, boundary != "before-dial", dialed, "must reach intended transport boundary")
+			if boundary == "before-bytes" {
+				require.Equal(t, 3, checks, "must reach third original-fence read before bytes")
+			}
 			require.Nil(t, result.Receipt)
 			require.Zero(t, target.closes.Load())
 			require.Equal(t, "open", target.journal.Status().Gate.GateState)
