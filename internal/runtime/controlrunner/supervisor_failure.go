@@ -75,7 +75,15 @@ func (s *Supervisor) stopExecutions() (bool, error) {
 			return false, ctx.Err()
 		}
 	}
+	return s.finishStopExecutions(owner, deadline)
+}
+
+// The original standalone Close owner must join within its original bound.
+func (s *Supervisor) finishStopExecutions(owner *isolationDeadline, originalDeadline time.Time) (bool, error) {
 	if s.failurePending.Load() || !owner.succeed() {
+		// succeed can stop its timer but lose the bound while joining its owner.
+		// Preserve that bound synchronously before any fallible isolation work.
+		s.armIsolationDeadline(originalDeadline, "close_deadline")
 		go s.isolate("close_deadline")
 		return false, ErrExecutionUnknown
 	}
