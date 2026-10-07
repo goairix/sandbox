@@ -9,17 +9,10 @@ import (
 	"time"
 )
 
-type ClockObservation struct {
-	UTC         time.Time
-	Uncertainty time.Duration
-}
+// Aliases preserve existing AuthorityClock provider method signatures.
+type ClockObservation = controlprotocol.ClockObservation
+type AuthorityClock = controlprotocol.AuthorityClock
 
-// AuthorityClock must honor context and provide controlled UTC observed during
-// this call with verified uncertainty. Implementations must be immutable and
-// concurrency safe throughout the backend lifetime.
-type AuthorityClock interface {
-	Observe(context.Context) (ClockObservation, error)
-}
 type RuntimePublicationTrust struct {
 	AuthorityID, Target string
 	Roots               []ed25519.PublicKey
