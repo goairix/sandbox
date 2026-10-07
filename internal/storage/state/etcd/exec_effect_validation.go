@@ -8,6 +8,7 @@ import (
 )
 
 type execEffectDraft struct {
+	delivery               *ExecDeliveryHandle
 	descriptor             controlprotocol.ExecutionDescriptor
 	deadline               time.Time
 	commandID              string

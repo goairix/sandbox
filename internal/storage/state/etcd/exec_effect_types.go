@@ -74,6 +74,7 @@ type PrepareExecEffectResult struct {
 // PreparedExecEffect is opaque input for a future trusted transport. It grants
 // no public ticket or payload access; that transport must reauthorize delivery.
 type PreparedExecEffect struct {
+	self       *PreparedExecEffect
 	origin     *Backend
 	capability *OperationCapability
 	draft      *execEffectDraft

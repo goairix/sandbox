@@ -103,6 +103,7 @@ func (b *Backend) PrepareExecEffect(ctx context.Context, c *OperationCapability,
 		return result, err
 	}
 	result.Prepared = &PreparedExecEffect{origin: b, capability: c, draft: d}
+	result.Prepared.self = result.Prepared
 	return result, nil
 }
 
