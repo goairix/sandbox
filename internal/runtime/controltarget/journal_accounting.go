@@ -64,7 +64,8 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	// gate.json can never be substituted with a retained temporary manifest.
 	bytes := j.manifestBytes
 	var records, temps uint64
-	var activationBytes int64
+	var activationBytes, taskCloseBytes int64
+	var firstClose *TaskDataCloseRecord
 	var requiresActivation bool
 	if j.gate.Version == 2 {
 		requiresActivation = true
@@ -76,7 +77,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		} else {
 			records++
 		}
-		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0) > maxJournalContentFiles {
+		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0) > maxJournalContentFiles {
 			return ErrCapacity
 		}
 		return nil
@@ -101,7 +102,37 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			if name == "activation.json" {
 				activationBytes = int64(len(b))
 				bytes += activationBytes
-				if bytes > j.maxBytes || 1+records+temps+1 > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+1+boolCount(taskCloseBytes > 0) > maxJournalContentFiles {
+					return ErrCapacity
+				}
+				return nil
+			}
+			return add(len(b), true)
+		}
+		if name == "data-close.json" || taskCloseTempName(name) {
+			requiresActivation = true
+			b, err := j.files.readFile(ctx, j.root, name)
+			if err != nil {
+				return err
+			}
+			r, err := decodeTaskDataClose(b)
+			if err != nil {
+				return err
+			}
+			if err = j.taskCloseBinding(r.Context); err != nil {
+				return err
+			}
+			if firstClose != nil && !sameTaskClose(*firstClose, r) {
+				return ErrConflict
+			}
+			firstClose = &r
+			if r.State == "data_closed" && j.gate.GateState != "closed" {
+				return ErrInvalidRecord
+			}
+			if name == "data-close.json" {
+				taskCloseBytes = int64(len(b))
+				bytes += taskCloseBytes
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+1 > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -194,6 +225,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		return fmt.Errorf("%w: missing activation", ErrInvalidRecord)
 	}
 	j.activationBytes = activationBytes
+	j.taskCloseBytes = taskCloseBytes
 	j.logicalBytes = bytes
 	j.records = records
 	j.temporaryFiles = temps
@@ -209,4 +241,8 @@ func boolCount(b bool) uint64 {
 		return 1
 	}
 	return 0
+}
+
+func taskCloseTempName(name string) bool {
+	return strings.HasPrefix(name, ".data-close.") && strings.HasSuffix(name, ".tmp") && journalUUID(strings.TrimSuffix(strings.TrimPrefix(name, ".data-close."), ".tmp"))
 }

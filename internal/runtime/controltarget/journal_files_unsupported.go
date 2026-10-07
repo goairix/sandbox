@@ -23,3 +23,10 @@ func (j *Journal) persistOpenGateLocked(context.Context) error { return ErrInval
 func (j *Journal) replaceCommandLocked(context.Context, ExecJournalRecord, ExecJournalRecord, bool) error {
 	return ErrInvalidConfiguration
 }
+
+func (j *Journal) readTaskCloseLocked(context.Context) (*TaskDataCloseRecord, error) {
+	return nil, ErrInvalidConfiguration
+}
+func (j *Journal) persistTaskCloseLocked(context.Context, []byte) error {
+	return ErrInvalidConfiguration
+}

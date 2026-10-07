@@ -569,3 +569,47 @@ func (j *Journal) replaceCommandLocked(ctx context.Context, old, next ExecJourna
 	j.logicalBytes += int64(len(b)) - int64(len(before))
 	return nil
 }
+
+// The one fixed close point remains bounded and owned, including on a poisoned
+// handle. Original bytes count toward accounting, not a re-encoded estimate.
+func (j *Journal) readTaskCloseLocked(ctx context.Context) (*TaskDataCloseRecord, error) {
+	if err := j.checkLocked(ctx, false); err != nil {
+		return nil, err
+	}
+	b, err := j.files.readFile(ctx, j.root, "data-close.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if j.accountingKnown && int64(len(b)) != j.taskCloseBytes {
+		return nil, ErrConflict
+	}
+	r, err := decodeTaskDataClose(b)
+	if err != nil {
+		return nil, err
+	}
+	if err = j.taskCloseBinding(r.Context); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+func (j *Journal) persistTaskCloseLocked(ctx context.Context, b []byte) error {
+	if !j.accountingKnown {
+		return ErrJournalUnavailable
+	}
+	if j.logicalBytes+int64(len(b)) > j.maxBytes || j.contentFilesLocked()+1 > maxJournalContentFiles {
+		return ErrCapacity
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	if err = j.files.persistFile(ctx, j.root, "data-close.json", ".data-close."+nonce+".tmp", b); err != nil {
+		return err
+	}
+	j.logicalBytes += int64(len(b)) - j.taskCloseBytes
+	j.taskCloseBytes = int64(len(b))
+	return nil
+}
