@@ -45,7 +45,7 @@
 - `monitor_models_test.go`, `monitor_linux_test.go`, `monitor_unsupported_test.go`: portable contracts and Linux parser/policy/fault cases.
 - `monitor_native_test.go`, `monitor_drain_native_test.go`: test-only fixed monitor/user modes and trusted parent observations.
 - Modify `kernel_native_test.go` only to register fixed test modes; keep existing gates.
-- Modify `scripts/test-launcher-kernel.sh` to require an explicit evidence-directory argument (never recreate the closed predecessor workspace), and only as needed for new positive markers/time budgets consistent with actual bounded tests; preserve current I1 failure ordering/client joining and exact cleanup.
+- Modify `scripts/test-launcher-kernel.sh` to require an explicit evidence-directory argument (never recreate the closed predecessor workspace), and as needed for positive markers/time budgets and the optional fixed testdata helper build, read-only binary mount, complete helper Go/assembly source manifest and binary digest; preserve current I1 failure ordering/client joining, original resources and exact cleanup.
 
 ### Task 1: Seal an actual monitor and install inherited confinement
 
@@ -62,7 +62,7 @@
 
 ### Task 2: Kill pinned direct children and reap to actual __WALL ECHILD
 
-**Files:** Create `internal/runtime/launcher/monitor_drain_linux.go`, monitor_process_linux.go and monitor_drain_native_test.go. Modify monitor_types.go/private state, monitor_unsupported.go/unsupported tests, monitor_linux_test.go/fault tests and kernel_native_test.go fixed test modes only. Optional new fixed test-only non-SIGCHLD clone helper under `internal/runtime/launcher/testdata/` using a raw-syscall-safe standalone assembly/C test program or separate Go program with child-only raw assembly, built with the current toolchain without installing dependencies. No Go runtime continuation in a raw-fork child. No production helper binary or deployment changes.
+**Files:** Create `internal/runtime/launcher/monitor_drain_linux.go`, monitor_process_linux.go and monitor_drain_native_test.go. Modify monitor_types.go/private state, monitor_unsupported.go/unsupported tests, monitor_linux_test.go/fault tests and kernel_native_test.go fixed test modes only. Optional new fixed test-only non-SIGCHLD clone helper under `internal/runtime/launcher/testdata/` using a raw-syscall-safe standalone assembly/C test program or separate Go program with child-only raw assembly, built with the current toolchain without installing dependencies. No Go runtime continuation in a raw-fork child. If used, modify scripts/test-launcher-kernel.sh only for its fixed current-toolchain build, read-only helper mount, complete helper source/binary proof and required positive markers/time budgets; preserve existing I1 lifecycle, caps and resource limits. Root owns the matching focused runner. No production helper binary or deployment changes.
 
 **Interfaces:** Consume Task1 `MonitorBoundary`, `ValidateCurrent`, UID/GID/cgroup/filter seals and mutex/poison/private bounded exit list. Produce `(*MonitorBoundary).Drain(ctx context.Context) (LocalDrainObservation,error)` with copied observations only after actual ECHILD; native fixed user/monitor modes never expose a product start API.
 
