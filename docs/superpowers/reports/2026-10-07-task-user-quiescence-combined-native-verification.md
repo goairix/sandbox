@@ -1,6 +1,6 @@
 # Task-user quiescence: actual combined native verification
 
-Status: **partial physical Active evidence, not Task5/unit/production acceptance**. The first actual test returned PASS, but Root independently found its namespace invariant snapshot was vacuous. Corrected coverage and a changed Active run are required. LateArrival/Unknown and the full original-unit review remain pending.
+Status: **corrected Active physical assertions pass; Task5/unit/production acceptance pending**. The first Active run's vacuous snapshot remains a retained defect. Its corrected native run below observes the real records. LateArrival's first run failed before delayed-input assertions; its fix, Unknown and the full original-unit review remain pending.
 
 ## First Active fixture — retained partial result
 
@@ -50,3 +50,29 @@ Backend bridge reports48 before-stop observations and relay52; each retains16 de
 Full raw evidence stays in the current unit's protected OWN under `root-fixture-evidence/sandbox-quiesce-combined-0e054d6e3b3b/`: records, source/archive/tool manifests, payload tar/readback, daemon inspections, initializer protected inventory, logs, result, cleanup and Root audit. Private key-containing custody remains0700/0600 and is never copied into this report. Authoritative backend raw record69 is54352 bytes, SHA256 `c4ec8b646d631914c66e1ce07abfe88082f12a79f79e70c951bfafba34e4b32f`; repeated full logs are byte-identical. Root independently audited all records; helper assertion success is not used to paper over the discovered snapshot defect.
 
 Next gates: corrected Active coverage, LateArrival's original expired packet and current-certificate refusal, Unknown's genuine ACK loss/same-original query and declared failed-target/stale-socket refusal, then one full new-unit original-range review. Fresh different-Boot recovery remains separately required in later deployment/recovery work; the selected stale-socket failure phase creates no new Boot/key. Final sync/flush/remote settlement/End/safe release/production wiring/scheduler/FUSE/collector/N capacity/deployment/Redis removal remain mandatory downstream.
+
+## Corrected Active — actual nonvacuous invariant
+
+Candidate `bb64c11765649b88cba9c65ed6f825ac05a7f1e9`, fixture `sandbox-quiesce-combined-14d86783b6d5`, same fixed Active selector: **1 top PASS, 0 subtests, 0 FAIL/SKIP**. All143 recorded commands exit0 without timeout. Root independently checks raw stream hashes/lengths, source archive,281compiled repository inputs,3Go tools, effective build environment, image and daemon payload custody. Manifest SHA256 `5f767dc573a8418b3d0f337e5a89bda05d4e1316078445e3d44042688d801a73`; authoritative backend record69 is214162bytes, SHA256 `a1a28ec920f1eb581656c3e824fb2e58d510ce31f5e8848b285f12415fc99b4f`.
+
+Actual Runtime ID=UID `4dfde4b277df70b0b95354cf033f89a6f353ec4e8545f61f1d29bfe90ca7b700`, Boot `cf450b89-c50e-42b5-ba05-f08ddeee3a08`. Target uses the same production entrypoint/resource/security contract and is running/nonOOM after assertions. Actual attempted quiescence sample has active2, RSS12708kB, cgroup19406848bytes/PIDs22, including the declared diagnostic overhead. This is one measured fixture, not capacity or performance acceptance.
+
+| Root-built artifact | Bytes | SHA256 |
+|---|---:|---|
+| combined.test | 32434443 | 91ae6479ded09fd1e16926b63695ca931027d77e3a037205724bd6a7e8fb909a |
+| sandbox-launcher | 8229188 | b03dcff96d23658837309289cd646c619474bdb9d74ad921e836f9e1ff3a922f |
+| combined-user | 3719582 | 913c5aaff3fe19492cd1bd0b89e40cd9bacc368af8a0e11616482dc50c3d1c63 |
+
+The canonical namespace snapshots contain50records at revision42 (49055key/value bytes) and42records at revision50 (49863bytes), both More=false. Each independently logged20required anchors is present with matching Create/Mod/Lease. Root parses complete native record groups and independently confirms39retained records are byte/native-birth/lease identical. Exactly3unleased immutable additions are the original quiescence reservation (birth43), intent and StageReceipt (birth45). Exactly11missing records match declared original native lease expiry: creation claim+guard2, and three original operation token+guard+receipt groups9. No retained owner/control/index/task/remote record changes. The source's permanent claimant fence checks also pass. This repairs the prior nonce-only snapshot coverage; it does not upgrade the prior candidate's result.
+
+Fresh native token absence/TTL=-1 plus signed local terminal evidence yields the public prerequisite under the same original claimant and literal55nodes. Historical terminal queries retain the original signed interval even after ticket NotAfter, while verifying current runtime certificate and original claimant; effect delivery still requires its original live deadline. No old ticket, worker deadline or trust interval is extended.
+
+Client JSON WARN/ERROR count0. Server severity is **14 WARN, 1 ERROR, 0 FATAL/PANIC**, not15WARN. Twelve WARN match the first fixture configuration categories. Additional etcd-3 startup records are `etcdserver/server.go:2334` at20:40:09.509799Z and20:40:09.520412Z, `Failed to detect schema version`, error `missing term information`; `version/monitor.go:120` at20:40:09.520792Z reports `failed to update storage version`, cluster-version3.6.0, `cannot detect storage schema version: missing term information`. Exact raw records and stack remain retained in backend-independent member log record89/stderr and `root-server-warnings.json`. Actual member Status/MemberList/quorum replication passes are separate facts. No pristine log or storage-version recovery acceptance is claimed.
+
+Backend bridge total50/retained16/omitted34 and relay52/16/36 preserve the bounded-observation limit. Both joins are0pairs/3listeners. Target and relay cooperative teardown exit0/nonOOM; exact final container/volume/network inventories are empty. Updated independent audit exit0 retains the full snapshot delta and explicit severity counts in `root-fixture-evidence/sandbox-quiesce-combined-14d86783b6d5/root-audit.json`. The earlier `server_warning_count` aggregate field counts WARN and ERROR; explicit severity fields disambiguate it. Component physical assertions pass; original-range independent review and downstream gates remain pending.
+
+## First LateArrival — real failure retained
+
+Source commit `0039d560e1646c8bd9a965c98769cdec4c444a39` adds retained original canonical request bytes, expired-original Backend refusal, delayed-input rejection and65s original runtime certificate expiry assertions. Host physical selectors SKIP; host race/vet and Linux ordinary-package compilation alone do not verify these native assertions.
+
+Actual fixture `sandbox-quiesce-combined-9dcfe8d5fde0`, exact selector `^TestTaskDualDrainNativeLateArrival$`, fails after0.28s at its request roundtrip equality: production decoding normalizes absent stdin to an empty slice, while the original StartEnvelope contains nil. No delayed-input/current-expiry PASS follows. Root runner exits1; complete raw failure is retained, without treating the codec assertion failure as a product dispatch error. Exact-label cleanup finishes with all three inventories empty. Original author is fixing a meaningful canonical codec comparison with a focused regression before another changed-source native run. Unknown has not been replayed or implemented by another agent.
