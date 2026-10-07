@@ -75,3 +75,11 @@ func (n Namespace) taskQuiescenceKey(r TaskReference) (string, error) {
 	}
 	return n.Key(append(parts, "quiesce-users")...)
 }
+
+func (n Namespace) taskQuiescenceAttemptKey(r TaskReference) (string, error) {
+	parts, err := n.taskKeyParts(r)
+	if err != nil {
+		return "", err
+	}
+	return n.Key(append(parts, "quiesce-users-attempt")...)
+}
