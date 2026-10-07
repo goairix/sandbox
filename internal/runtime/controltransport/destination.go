@@ -23,6 +23,9 @@ type DestinationOptions struct {
 	Clock              p.AuthorityClock
 	// Dial transfers exclusive byte-connection ownership and must honor context.
 	// It never receives command payloads, tickets, credentials or private keys.
+	// An optional CloseWrite() error must provide real bounded write EOF while
+	// preserving reads. Send invokes it only after successful TLS CloseWrite;
+	// arbitrary custom connection methods remain a trusted, non-preemptible seam.
 	Dial func(context.Context) (net.Conn, error)
 }
 
@@ -173,6 +176,17 @@ func (s *Session) Send(ctx context.Context, e Envelope) error {
 	}
 	if err := s.conn.CloseWrite(); err != nil {
 		return err
+	}
+	if err := bounded.Err(); err != nil {
+		return err
+	}
+	// TLS EOF precedes transport EOF. A finite pipe/SSH/Unix adapter can then
+	// stop its input owner without closing the response side. No raw getter is
+	// exposed; unsupported transports retain the existing TLS-only behavior.
+	if half, ok := s.conn.NetConn().(interface{ CloseWrite() error }); ok {
+		if err := half.CloseWrite(); err != nil {
+			return err
+		}
 	}
 	return bounded.Err()
 }
