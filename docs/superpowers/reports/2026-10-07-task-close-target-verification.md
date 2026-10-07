@@ -37,3 +37,22 @@ Initial project `task-close-journal-6ea94da597d0` failed before target start/att
 ## Explicit remaining scope
 
 This native case uses a malformed renew ticket and does not independently prove refusal of an otherwise valid signed renew; a distinct valid-renew closure case and concurrent query/shutdown ownership case remain required. Standalone actual target plus future actual three-member backend delivery are compositional evidence, not one combined protected-target/metadata fixture. Three-member delivery, independent Task4 original-range review, whole-unit unfiltered review, CloseAll/dual drain/final sync+flush/exact termination/remote settlement or fencing/safe owner release, production wiring/Redis removal and large-existing-N/long-run capacity remain mandatory. This gate establishes neither owner release nor performance improvement. All OWN remains retained.
+
+## Additional new-case native gates
+
+At candidate `18871f3bec12f58fcfd9b346d65aa6632fcbe1b3`, Root ran two new selectors; it did not replay the previously accepted TestTaskCloseNative.
+
+| Gate | Actual result | Raw commands | Compiled repo / compiler files |
+|---|---|---:|---:|
+| `^TestTaskCloseNativeQueryShutdown$`, project `task-close-journal-f3913dc0ec88` |1top/0sub PASS,0 FAIL/SKIP,0.03s|41 all exit0|101 /3|
+| `^TestJournalTaskCloseReceipt`, project `task-close-journal-79a15592b191` |4top/4sub PASS,0 FAIL/SKIP|29 all exit0|52 /3|
+
+Both run Linuxarm64 Go1.25.6 CGO0 non-race under unchanged resource limits; all raw stdout/stderr hashes, source/current/candidate Git bytes, payload export custody and final state independently audited. No stderr, timeout or OOM; all three owned cleanup inventories empty. Complete original failures remain. The query/shutdown test reused actual production monitor/user and inspect-bound protected PID1 fixture; the journal test requires no extra capabilities or kernel supervisor.
+
+The new query/shutdown case starts a real hold user, waits for execution readiness, successfully sends a valid signed renewal, closes data admission, and refuses the identical valid renewal. It asserts the same active pointer/root/monitor, a live root PID, and outstanding owner/Wait channels across close; an active exec query remains unknown. A canceled authenticated task query retains its borrower until its context-honoring clock exits. Actual public Close seals new borrowers, joins the query/owner/Wait and only then clears key/journal. Actual kernel snapshot remains PID1/P=E=I224/B0/NNPtrue/Subreapertrue/Dumpable0. These assertions strengthen the original shorter preaccepted-command case; the original malformed-renew result is not rewritten as valid-renew evidence.
+
+Journal cases cover historical receipt after ticket interval, readable terminal after uncertain terminal directory-fsync refusing signature, lock-serialized poison before/after signing and late clock/context failure returning no bytes. These are actual Linux protected IO plus named hooks, not physical power-loss experiments.
+
+Query/shutdown source-freeze SHA256 `f2de404bc93dba72fd88ebdcd51e0337be75afca0482bfd7826314bee37439f8`; raw030 SHA256 `bdd4504fe3713144a191e959f0385305be05b3108513b5eb6039e61df88ffbb5`. Journal source-freeze `38a8167ff38c379ba82ef0bdf42e9f58cebe2874b804704413224dc4b4706080`; raw018 `d18d09fda4dc4d062bb61a3337261facb2761ca41a2cab91fe8b2b90e36004aa`. Raw streams, independent audits and manifests remain in each OWN/root-fixture-evidence project directory. Earlier target production is unchanged; its native test file later gains this new case. Source attribution stays per candidate, not an assertion that every older test file matches final bytes.
+
+The parallel first three-member metadata delivery attempt at18871f3 failed six native subcases during invalid test activation construction, before delivery. It is recorded separately; the corrected candidate767afb9 subsequently passed all four top-level and six subtests. See the delivery verification report for the original failure, exact correction and accepted raw evidence. Task4 independent review and the complete migration remain pending.
