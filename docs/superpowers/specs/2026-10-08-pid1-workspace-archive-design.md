@@ -1,0 +1,29 @@
+# PID1 fixed workspace archive source
+
+Parent authority: `2026-10-06-etcd-state-management-design.md`; accepted prerequisite and producer reservation are recorded in `2026-10-08-task-finalization-preflight-verification.md` and `2026-10-08-task-final-sync-reservation-verification.md`.
+
+## Scope and authority
+
+Deliver a real Linux PID1 readonly archive source, replacing neither the production DownloadDir path nor its authentication yet. This is a physical source primitive; its completion is diagnostic, never a final-sync permission, remote-settlement receipt, durable USERS/DATA barrier, or owner-release proof. The integrating Supervisor must hold permanent closed gates, original authenticated task/claim/producer and runtime Boot binding, and prohibit user spawn throughout use. Kernel process absence alone does not provide that authority. No privileged external-writer atomic snapshot is promised.
+
+## Interface
+
+`KernelBoundary.OpenWorkspaceArchive(ctx context.Context, observation *UserNamespaceQuiescenceObservation) (*WorkspaceArchiveSource, error)` accepts only original current PID1 boundary and original observation belonging to it. It revalidates actual process absence before opening fixed `/workspace`; no caller-supplied path, command, executable or observer. Non-Linux fails unsupported. The returned source has private original identity, root FD/inode/device, origin and observation.
+
+`(*WorkspaceArchiveSource).WriteArchive(ctx context.Context, dst io.Writer) (WorkspaceArchiveSummary, error)` is synchronous, single-consumption, and original-handle-only. Consumption starts before any output; success or failure never permits a second stream. `Close() error` closes an unused source, is idempotent on its original handle, and serializes with the actual stream. No pipe, subprocess, goroutine, external provider call or asynchronous cancellation acknowledgement. A copied handle is rejected before locking or accessing descriptors. Summary contains archive byte count, entry count and SHA-256 only; error returns zero summary.
+
+## Physical confinement and completion
+
+- Open `/workspace` with readonly directory/no-follow/close-on-exec flags; pin fstat device/inode. Check current fixed root against pinned identity at stream entry and completion. Never select another workspace or re-open a replaced root for continuation.
+- Children are opened relative to that root FD using Linux openat2 with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, RESOLVE_NO_MAGICLINKS and RESOLVE_NO_XDEV. Unsupported native syscall fails closed. All files are readonly/no-follow/close-on-exec/nonblocking so a raced FIFO cannot block at open. fstat determines accepted object kind, not a prior directory-entry hint.
+- Only directories and regular files with link count one are accepted. Reject symlinks, hardlinked regular files, devices, sockets, FIFOs, cross-mount children, invalid names and traversal. Root and child FDs close on every return. No symlink target is read, no metadata mutation and no user tar command.
+- Archive names are canonical relative `workspace/` plus validated components. Reject empty/dot/dotdot, slash/backslash, NUL/control characters and invalid UTF-8. TAR contains regular files/directories, sanitized permission bits and no UID/GID authority, links, xattrs or caller-selected headers. Directory enumeration need not be sorted and the result is not advertised as a stable content digest across separately generated archives.
+- Stream in bounded chunks; directory enumeration in bounded pages, recursion depth <=128, path bytes <=4096, entries <=1,000,000, total emitted archive bytes <=1 TiB. At most one file FD and a bounded directory-FD stack are active; no per-entry goroutine or all-tree list. Limits apply to headers/padding/end records as well as payload. Private limit helpers may support small test limits; no caller API loosens production caps.
+- Check context between operations and chunks. Compare regular-file identity, size and modification metadata before/after copying; exact declared payload length must be read. Revalidate original kernel observation and fixed-root identity at completion; successful tar close must also precede success. Any writer/read/root/process/limit/cancel failure returns no completion summary even if a prefix was emitted.
+- Context cancellation cannot interrupt an arbitrary blocked kernel read or caller writer. Keep ownership and the stream occupied until the synchronous call physically returns. Close must not claim completion before that return. Integrating transport must supply bounded write deadlines and retain unknown operations; this primitive does not manufacture physical join or remote settlement.
+
+## Verification and boundaries
+
+Host tests cover names, size/entry/depth accounting, copied/foreign/nil handles and unsupported OS; these are not native confinement proof. New focused Linux CGO0 native PID1 tests must exercise actual archived content, repeated/copy use, symlink-to-outside and special-file rejection, hardlink rejection, cancellation, writer failure, root replacement and incomplete-result behavior. Root replacement must restore fixture path on exit.
+
+Use the already available pinned etcd 3.6.15 container image as a local test carrier, pull never, no network, readonly rootfs, dedicated labeled `/tmp` and `/workspace` volumes, root UID, NNP, only KILL/SETUID/SETGID/SETPCAP startup caps, the original BootstrapPID1 and native helpers. Run only new archive tests, not old accepted kernel scenarios. Verify actual container terminal status and owned cleanup. Native arm64 CGO0 is not a race run; separate affected host package race/vet and Linux compile checks are identified honestly. No deployment, external storage, capacity, FUSE cache settlement or Redis removal claims.
