@@ -147,7 +147,7 @@ func TestAuthenticatedTargetNativeFences(t *testing.T) {
 	f.establishQueryControl(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	families := []string{"placement", "control", "owner", "fence", "index", "guard", "token", "receipt", "issuer", "identity", "epoch", "effect"}
+	families := []string{"placement", "control", "owner", "fence", "guard", "token", "receipt", "identity", "epoch", "effect"}
 	for _, family := range families {
 		for _, defect := range []string{"value", "lease", "recreation"} {
 			// Identity/epoch are value+no-Lease fences; same-value recreation is valid.
@@ -155,60 +155,7 @@ func TestAuthenticatedTargetNativeFences(t *testing.T) {
 				continue
 			}
 			t.Run(family+"/"+defect, func(t *testing.T) {
-				capability, prepared := f.prepare(t, nativeRequest("quick", 5))
-				require.Len(t, capability.fences, 5)
-				effect, err := f.b.namespace.execEffectKey(capability.Reference())
-				require.NoError(t, err)
-				keys := map[string]string{"placement": capability.fences[0].Key, "control": capability.fences[1].Key, "owner": capability.fences[2].Key, "fence": capability.fences[3].Key, "index": capability.fences[4].Key, "guard": capability.guardKey, "token": capability.tokenKey, "receipt": capability.receiptKey, "issuer": prepared.draft.issuerKey, "identity": f.b.identityKey, "epoch": f.b.restoreKey, "effect": effect}
-				key := keys[family]
-				old, err := f.raw.Get(ctx, key)
-				require.NoError(t, err)
-				require.Len(t, old.Kvs, 1)
-				kv := old.Kvs[0]
-				var added clientv3.LeaseID
-				restore := func() {
-					options := []clientv3.OpOption{}
-					if kv.Lease != 0 {
-						options = append(options, clientv3.WithLease(clientv3.LeaseID(kv.Lease)))
-					}
-					_, err := f.raw.Put(ctx, key, string(kv.Value), options...)
-					require.NoError(t, err)
-					if added != 0 {
-						_, err = f.raw.Revoke(ctx, added)
-						require.NoError(t, err)
-					}
-				}
-				defer restore()
-				completedTLS := false
-				destination := f.boundaryDestination(t, func() {
-					completedTLS = true
-					value := string(kv.Value)
-					options := []clientv3.OpOption{}
-					if kv.Lease != 0 {
-						options = append(options, clientv3.WithLease(clientv3.LeaseID(kv.Lease)))
-					}
-					switch defect {
-					case "value":
-						value += " "
-					case "lease":
-						lease, err := f.raw.Grant(ctx, 30)
-						require.NoError(t, err)
-						added = lease.ID
-						options = []clientv3.OpOption{clientv3.WithLease(added)}
-					case "recreation":
-						_, err := f.raw.Delete(ctx, key)
-						require.NoError(t, err)
-					}
-					changed, err := f.raw.Put(ctx, key, value, options...)
-					require.NoError(t, err)
-					t.Logf("AFTER_ACTUAL_TLS_MUTATION family=%s defect=%s key=%s old_create=%d old_mod=%d old_lease=%d new_revision=%d", family, defect, key, kv.CreateRevision, kv.ModRevision, kv.Lease, changed.Header.Revision)
-				}, false)
-				h, err := f.b.DeliverExecEffect(ctx, prepared, destination)
-				require.True(t, completedTLS, "case did not reach actual mutual TLS completion")
-				require.Error(t, err)
-				require.Nil(t, h)
-				require.Nil(t, prepared.draft.delivery)
-				f.absentCommand(t, prepared)
+				f.fenceMutation(t, ctx, family, defect, true)
 			})
 		}
 	}
@@ -436,4 +383,96 @@ func (w *nativeBlockingWriter) Write(b []byte) (int, error) {
 	w.once.Do(func() { w.first = bytes.Clone(b); close(w.entered) })
 	<-w.release
 	return len(b), nil
+}
+
+// Shared write-once index/issuer rows are never byte-restored for later cases.
+// Every isolated selector uses a fresh Root-owned project and public admission.
+func (f *nativeExecutionFixture) fenceMutation(t *testing.T, ctx context.Context, family, defect string, restoreAfter bool) {
+	t.Helper()
+	capability, prepared := f.prepare(t, nativeRequest("quick", 5))
+	require.Len(t, capability.fences, 5)
+	effect, err := f.b.namespace.execEffectKey(capability.Reference())
+	require.NoError(t, err)
+	keys := map[string]string{"placement": capability.fences[0].Key, "control": capability.fences[1].Key, "owner": capability.fences[2].Key, "fence": capability.fences[3].Key, "index": capability.fences[4].Key, "guard": capability.guardKey, "token": capability.tokenKey, "receipt": capability.receiptKey, "issuer": prepared.draft.issuerKey, "identity": f.b.identityKey, "epoch": f.b.restoreKey, "effect": effect}
+	key := keys[family]
+	old, err := f.raw.Get(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, old.Kvs, 1)
+	kv := old.Kvs[0]
+	var added clientv3.LeaseID
+	restore := func() {
+		options := []clientv3.OpOption{}
+		if kv.Lease != 0 {
+			options = append(options, clientv3.WithLease(clientv3.LeaseID(kv.Lease)))
+		}
+		_, err := f.raw.Put(ctx, key, string(kv.Value), options...)
+		require.NoError(t, err)
+		if added != 0 {
+			_, err = f.raw.Revoke(ctx, added)
+			require.NoError(t, err)
+		}
+	}
+	if restoreAfter {
+		defer restore()
+	} else {
+		t.Cleanup(func() {
+			bounded, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if added != 0 {
+				_, err := f.raw.Revoke(bounded, added)
+				require.NoError(t, err)
+			}
+		})
+	}
+	completedTLS := false
+	destination := f.boundaryDestination(t, func() {
+		completedTLS = true
+		value := string(kv.Value)
+		options := []clientv3.OpOption{}
+		if kv.Lease != 0 {
+			options = append(options, clientv3.WithLease(clientv3.LeaseID(kv.Lease)))
+		}
+		switch defect {
+		case "value":
+			value += " "
+		case "lease":
+			lease, err := f.raw.Grant(ctx, 30)
+			require.NoError(t, err)
+			added = lease.ID
+			options = []clientv3.OpOption{clientv3.WithLease(added)}
+		case "recreation":
+			_, err := f.raw.Delete(ctx, key)
+			require.NoError(t, err)
+		}
+		changed, err := f.raw.Put(ctx, key, value, options...)
+		require.NoError(t, err)
+		t.Logf("AFTER_ACTUAL_TLS_MUTATION family=%s defect=%s key=%s old_create=%d old_mod=%d old_lease=%d new_revision=%d", family, defect, key, kv.CreateRevision, kv.ModRevision, kv.Lease, changed.Header.Revision)
+	}, false)
+	h, err := f.b.DeliverExecEffect(ctx, prepared, destination)
+	require.True(t, completedTLS, "case did not reach actual mutual TLS completion")
+	require.Error(t, err)
+	require.Nil(t, h)
+	require.Nil(t, prepared.draft.delivery)
+	f.absentCommand(t, prepared)
+}
+func nativeImmutableFence(t *testing.T, family, defect string) {
+	f := nativeExecutionSetup(t)
+	f.establishQueryControl(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f.fenceMutation(t, ctx, family, defect, false)
+}
+func TestAuthenticatedTargetNativeIndexValue(t *testing.T) { nativeImmutableFence(t, "index", "value") }
+func TestAuthenticatedTargetNativeIndexLease(t *testing.T) { nativeImmutableFence(t, "index", "lease") }
+func TestAuthenticatedTargetNativeIndexRecreation(t *testing.T) {
+	nativeImmutableFence(t, "index", "recreation")
+}
+func TestAuthenticatedTargetNativeIssuerValue(t *testing.T) {
+	nativeImmutableFence(t, "issuer", "value")
+}
+func TestAuthenticatedTargetNativeIssuerLease(t *testing.T) {
+	nativeImmutableFence(t, "issuer", "lease")
+}
+func TestAuthenticatedTargetNativeIssuerRecreation(t *testing.T) {
+	nativeImmutableFence(t, "issuer", "recreation")
 }
