@@ -1,8 +1,10 @@
 package launcher
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // MonitorBoundary is process-local confinement and cleanup evidence, never start
@@ -50,6 +52,24 @@ func (m *MonitorBoundary) validateReceiver(pid int) error {
 	}
 	if m.self != m || m.pid != pid {
 		return fmt.Errorf("%w: copied monitor or another PID", ErrUnsafeKernel)
+	}
+	return nil
+}
+
+// validateDrainContext runs before ownership or any child operation.
+func validateDrainContext(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil drain context", ErrUnsafeKernel)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 30*time.Second {
+		return fmt.Errorf("%w: drain requires deadline within 30 seconds", ErrUnsafeKernel)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
 	}
 	return nil
 }

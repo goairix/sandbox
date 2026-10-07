@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -14,6 +15,9 @@ func TestMonitorUnsupported(t *testing.T) {
 		}
 	}
 	for _, m := range []*MonitorBoundary{nil, {}} {
+		if o, err := m.Drain(context.Background()); !errors.Is(err, ErrUnsupported) || o.MonitorPID != 0 || o.Reaped != nil {
+			t.Fatalf("unsupported drain: %+v %v", o, err)
+		}
 		if err := m.ValidateCurrent(); !errors.Is(err, ErrUnsupported) {
 			t.Fatalf("unsupported validation: %v", err)
 		}
