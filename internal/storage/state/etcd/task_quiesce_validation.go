@@ -68,7 +68,7 @@ func (b *Backend) checkTaskQuiescenceFences(ctx context.Context, c *TaskClaim, d
 	cancel()
 	if err != nil || requestErr != nil {
 		c.lost = true
-		return fmt.Errorf("%w: task close fences: %w", ErrOutcomeUnknown, errors.Join(err, requestErr))
+		return fmt.Errorf("%w: task quiescence fences: %w", ErrOutcomeUnknown, errors.Join(err, requestErr))
 	}
 	if err = b.validateFenceCheckResponse(response); err != nil {
 		c.lost = true
@@ -178,7 +178,7 @@ func (b *Backend) signTaskQuiescence(ctx context.Context, c *TaskClaim, d *taskQ
 		return liveErr
 	}
 	if err != nil {
-		return fmt.Errorf("task close signer: %w", err)
+		return fmt.Errorf("task quiescence signer: %w", err)
 	}
 	if err = taskQuiescenceLive(ctx, c, d); err != nil {
 		return err
@@ -192,7 +192,7 @@ func (b *Backend) signTaskQuiescence(ctx context.Context, c *TaskClaim, d *taskQ
 	}
 	evidence, err := b.taskQuiescenceVerifier.VerifyTaskUserQuiescenceTicket(wire, d.certificate, d.claims.Context, now)
 	if err != nil {
-		return fmt.Errorf("%w: task close ticket: %v", ErrInvalidRecord, err)
+		return fmt.Errorf("%w: task quiescence ticket: %v", ErrInvalidRecord, err)
 	}
 	if !evidence.NotBefore().Equal(d.claims.NotBefore) || !evidence.NotAfter().Equal(d.claims.NotAfter) {
 		return ErrInvalidRecord
@@ -217,7 +217,7 @@ func (b *Backend) verifyTaskQuiescenceTicket(ctx context.Context, c *TaskClaim, 
 	_, err = b.taskQuiescenceVerifier.VerifyTaskUserQuiescenceTicket(d.ticket.Wire(), d.certificate, d.claims.Context, now)
 	if err != nil {
 		d.lost = true
-		return fmt.Errorf("%w: task close ticket: %v", ErrInvalidRecord, err)
+		return fmt.Errorf("%w: task quiescence ticket: %v", ErrInvalidRecord, err)
 	}
 	return nil
 }

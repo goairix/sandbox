@@ -15,6 +15,8 @@ func TestTaskQuiesceNativeMetadata(t *testing.T) {
 	t.Run("unknown", quiescenceNativeUnknown)
 	t.Run("postcommit", quiescenceNativePostcommit)
 	t.Run("budget", quiescenceNativeBudget)
+	t.Run("signing", quiescenceNativeSigning)
+	t.Run("history", quiescenceNativeHistory)
 }
 func TestTaskQuiesceNativeReceiptFence(t *testing.T) {
 	for _, fault := range []string{"delete", "same-bytes", "alternate", "lease", "recreate", "restore"} {
@@ -82,10 +84,11 @@ func deferRestore(t *testing.T, f *quiescenceNativeFixture) {
 
 type quiescenceCaptureKV struct {
 	clientv3.KV
-	t       *testing.T
-	b       *Backend
-	c       *TaskClaim
-	commits int
+	t          *testing.T
+	b          *Backend
+	c          *TaskClaim
+	commits    int
+	emptyReads int
 }
 type quiescenceCaptureTxn struct {
 	clientv3.Txn
@@ -125,6 +128,20 @@ func (t *quiescenceCaptureTxn) Commit() (*clientv3.TxnResponse, error) {
 		require.Equal(t.k.t, 63, len(t.cmps)+len(t.yes)+len(t.no))
 		require.Equal(t.k.t, t.k.c.comparisons(), t.cmps[8:48])
 		require.Equal(t.k.t, 64, len(t.cmps[8:])+1+stageProtocolOperations)
+	}
+	if len(t.cmps) == 52 && len(t.yes) == 1 && len(t.yes[0].RangeBytes()) > 0 {
+		t.k.emptyReads++
+		require.Len(t.k.t, t.no, 1)
+		require.Equal(t.k.t, 54, len(t.cmps)+len(t.yes)+len(t.no))
+		prefix, err := t.k.b.taskOperationsPrefix(t.k.c.reference.Task)
+		require.NoError(t.k.t, err)
+		for _, ops := range [][]clientv3.Op{t.yes, t.no} {
+			require.True(t.k.t, ops[0].IsGet())
+			require.False(t.k.t, ops[0].IsSerializable())
+			require.Equal(t.k.t, prefix, string(ops[0].KeyBytes()))
+			require.Equal(t.k.t, clientv3.GetPrefixRangeEnd(prefix), string(ops[0].RangeBytes()))
+			require.EqualValues(t.k.t, 1, ops[0].Limit())
+		}
 	}
 	return t.Txn.Commit()
 }

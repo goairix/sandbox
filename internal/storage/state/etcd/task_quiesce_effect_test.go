@@ -40,7 +40,10 @@ type quiescenceNativeFixture struct {
 
 func newQuiescenceNativeFixture(t *testing.T) *quiescenceNativeFixture {
 	t.Helper()
-	f := newTaskDeliveryFixture(t, true)
+	return finishQuiescenceFixture(t, newTaskDeliveryFixture(t, true))
+}
+func finishQuiescenceFixture(t *testing.T, f *taskCloseFixture) *quiescenceNativeFixture {
+	t.Helper()
 	closed, err := f.b.PrepareTaskCloseData(f.ctx, f.c)
 	require.NoError(t, err)
 	require.NotNil(t, closed.Prepared)
