@@ -37,14 +37,20 @@ for name in sorted(paths):
     source=root/name
     manifest['sources'][name]=digest(source)
     copy=out/'source'/name;copy.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,copy)
-env=os.environ.copy();env.update(GOOS='linux',GOARCH=arch,CGO_ENABLED='0',GOTOOLCHAIN='local',GOMAXPROCS='2')
-manifest['go_env']=json.loads(subprocess.check_output(['go','env','-json','GOOS','GOARCH','CGO_ENABLED','GOVERSION','GOROOT','GOTOOLDIR','GOMOD','GOFLAGS'],cwd=root,env=env,text=True))
-for tool in [pathlib.Path(shutil.which('go')),pathlib.Path(manifest['go_env']['GOTOOLDIR'])/'compile',pathlib.Path(manifest['go_env']['GOTOOLDIR'])/'link']:
+preflight_cmd=['go','env','-json','GOVERSION','GOROOT','GOTOOLDIR','GOTOOLCHAIN','GOFLAGS']
+preflight=subprocess.run(preflight_cmd,cwd=root,capture_output=True,text=True)
+(out/'toolchain-preflight.json').write_text(json.dumps({'argv':preflight_cmd,'exit':preflight.returncode,'stdout':preflight.stdout,'stderr':preflight.stderr},indent=2))
+if preflight.returncode: raise SystemExit('existing toolchain resolution failed')
+resolved=json.loads(preflight.stdout)
+selected_go=pathlib.Path(resolved['GOROOT'])/'bin/go'
+env=os.environ.copy();env.update(GOOS='linux',GOARCH=arch,CGO_ENABLED='0',GOTOOLCHAIN='local',GOMAXPROCS='2',GOROOT=resolved['GOROOT'])
+manifest['go_env']=json.loads(subprocess.check_output([str(selected_go),'env','-json','GOOS','GOARCH','CGO_ENABLED','GOVERSION','GOROOT','GOTOOLDIR','GOMOD','GOFLAGS'],cwd=root,env=env,text=True))
+for tool in [selected_go,pathlib.Path(manifest['go_env']['GOTOOLDIR'])/'compile',pathlib.Path(manifest['go_env']['GOTOOLDIR'])/'link']:
     manifest['compiler'][str(tool.resolve())]=digest(tool)
-commands=[('sandbox-launcher',['go','build','-mod=readonly','-o',str(out/'sandbox-launcher'),'./cmd/sandbox-launcher']),('user',['go','build','-mod=readonly','-o',str(out/'user'),'./internal/runtime/controlrunner/testdata/user']),('etcd.test',['go','test','-mod=readonly','-c','-o',str(out/'etcd.test'),'./internal/storage/state/etcd'])]
+commands=[('sandbox-launcher',[str(selected_go),'build','-mod=readonly','-o',str(out/'sandbox-launcher'),'./cmd/sandbox-launcher']),('user',[str(selected_go),'build','-mod=readonly','-o',str(out/'user'),'./internal/runtime/controlrunner/testdata/user']),('etcd.test',[str(selected_go),'test','-mod=readonly','-c','-o',str(out/'etcd.test'),'./internal/storage/state/etcd'])]
 for name,cmd in commands:
     start=time.monotonic();utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime());result=subprocess.run(cmd,cwd=root,env=env,capture_output=True,text=True)
-    (out/(name+'.build.json')).write_text(json.dumps({'argv':cmd,'environment':{k:env[k] for k in ('GOOS','GOARCH','CGO_ENABLED','GOTOOLCHAIN','GOMAXPROCS')},'start_utc':utc,'duration_seconds':time.monotonic()-start,'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr},indent=2))
+    (out/(name+'.build.json')).write_text(json.dumps({'argv':cmd,'environment':{k:env[k] for k in ('GOOS','GOARCH','CGO_ENABLED','GOTOOLCHAIN','GOMAXPROCS','GOROOT')},'GOFLAGS':manifest['go_env']['GOFLAGS'],'start_utc':utc,'duration_seconds':time.monotonic()-start,'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr},indent=2))
     if result.returncode: raise SystemExit(result.stdout+result.stderr)
     manifest['executables'][name]=digest(out/name)
 for name,want in manifest['sources'].items():
