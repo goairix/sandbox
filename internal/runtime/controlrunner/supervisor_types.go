@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/controltarget"
@@ -48,6 +49,7 @@ type Supervisor struct {
 	tlsConfig                 *tls.Config
 	active                    map[string]*Execution
 	admission, closed, failed bool
+	failurePending            atomic.Bool
 	failureOnce               sync.Once
 }
 
@@ -82,6 +84,7 @@ type Execution struct {
 	output                                 chan streamFrame
 	ack                                    chan renewAck
 	authorityDeadlineNS, commandDeadlineNS int64
+	terminalSeen                           atomic.Bool
 	sequence                               uint64
 }
 type streamFrame struct {

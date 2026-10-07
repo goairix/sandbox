@@ -16,6 +16,12 @@ func (s *Supervisor) Close() error {
 	if err := s.validateReceiver(); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	alreadyClosed := s.closed
+	s.mu.Unlock()
+	if alreadyClosed {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 31*time.Second)
 	defer cancel()
 	err := s.CloseAdmission(ctx)
@@ -31,12 +37,14 @@ func (s *Supervisor) Close() error {
 	}
 	s.mu.Unlock()
 	for _, e := range active {
+		e.mu.Lock()
 		if e.control != nil {
 			e.control.SetWriteDeadline(time.Now().Add(time.Second))
 			if x := writeMonitorFrame(e.control, monitorCancel, nil); x != nil {
 				err = errors.Join(err, x)
 			}
 		}
+		e.mu.Unlock()
 	}
 	for _, e := range active {
 		select {

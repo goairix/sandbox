@@ -23,7 +23,7 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.failed || !s.admission || s.activation == nil {
+	if s.closed || s.failed || s.failurePending.Load() || !s.admission || s.activation == nil {
 		return nil, ErrAdmissionClosed
 	}
 	if len(s.active) >= int(s.options.MaxActive) {
@@ -43,6 +43,11 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	}
 	accepted, err := s.journal.AcceptExecution(ctx, evidence)
 	if err != nil {
+		if s.journal.Status().Poisoned {
+			s.admission = false
+			s.failurePending.Store(true)
+			go s.isolate("accept_persistence")
+		}
 		return nil, err
 	}
 	e := &Execution{supervisor: s, accepted: accepted, descriptor: start.descriptor, state: "accepted", ownerDone: make(chan struct{}), waitDone: make(chan struct{}), output: make(chan streamFrame, 2), ack: make(chan renewAck, 1)}
@@ -54,6 +59,7 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	s.active[e.record.Context.CommandID] = e
 	fail := func(cause error) (*Execution, error) {
 		s.admission = false
+		s.failurePending.Store(true)
 		e.state = "unknown"
 		close(e.ownerDone)
 		close(e.waitDone)
@@ -86,6 +92,9 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	e.acceptedReceipt, err = s.signRecord(e.record)
 	if err != nil {
 		return fail(err)
+	}
+	if s.failurePending.Load() {
+		return fail(ErrAdmissionClosed)
 	}
 	if err = s.startMonitor(e, monitorStart{Request: request, AuthorityDeadlineNS: e.authorityDeadlineNS, CommandDeadlineNS: e.commandDeadlineNS}); err != nil {
 		return fail(err)
@@ -245,6 +254,7 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 				return
 			}
 		case monitorResult:
+			e.terminalSeen.Store(true)
 			var result monitorCompletion
 			if err := decodeMonitorJSON(data, &result); err != nil || !result.DrainConfirmed {
 				fail("invalid_monitor_result")
