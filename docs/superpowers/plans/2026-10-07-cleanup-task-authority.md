@@ -68,4 +68,4 @@
 
 ## Final unit gate
 
-- [ ] Independent complete new-unit range review and exactly one collective final fix/scoped re-review if required. Permanently retain full reports/reviews/raw and ordered controller rulings with costs, individually dispose physical/production limits. Keep branch for ongoing migration, no overall completion. Runtime task-authenticated durable gate closure/dual drain/remote settlement/safe final release, then production Manager/runtime/images/pool/upload/scheduler/collector/deployment/complete Redis removal remain mandatory.
+- [x] Independent complete new-unit range review and exactly one collective final fix/scoped re-review if required. Permanently retain full reports/reviews/raw and ordered controller rulings with costs, individually dispose physical/production limits. Keep branch for ongoing migration, no overall completion. Runtime task-authenticated durable gate closure/dual drain/remote settlement/safe final release, then production Manager/runtime/images/pool/upload/scheduler/collector/deployment/complete Redis removal remain mandatory.
