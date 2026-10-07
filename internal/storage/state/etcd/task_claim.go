@@ -30,6 +30,7 @@ type TaskClaim struct {
 	lost                                     bool
 	closeDraft                               *taskCloseDraft
 	quiescenceDraft                          *taskQuiescenceDraft
+	finalSyncDraft                           *taskFinalSyncDraft
 }
 
 func (c *TaskClaim) Reference() TaskClaimReference {
