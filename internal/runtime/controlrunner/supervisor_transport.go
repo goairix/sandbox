@@ -118,15 +118,17 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 	if conn.HandshakeContext(bounded) != nil {
 		return
 	}
-	envelope, task, err := t.ReadControlRequest(conn)
+	request, err := t.ReadRuntimeRequest(conn)
 	if err != nil || bounded.Err() != nil {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if task != nil {
-		err = s.dispatchTaskClose(bounded, conn, *task)
+	if request.Quiesce != nil {
+		err = s.dispatchTaskQuiesce(bounded, conn, *request.Quiesce)
+	} else if request.CloseData != nil {
+		err = s.dispatchTaskClose(bounded, conn, *request.CloseData)
 	} else {
-		err = s.dispatchTransport(bounded, ctx, conn, envelope)
+		err = s.dispatchTransport(bounded, ctx, conn, request.Exec)
 	}
 	if err != nil {
 		conn.SetWriteDeadline(time.Now().Add(time.Second))

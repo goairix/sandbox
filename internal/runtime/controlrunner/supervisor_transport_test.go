@@ -3,8 +3,6 @@ package controlrunner
 import (
 	"context"
 	"errors"
-	protocol "github.com/goairix/sandbox/internal/runtime/controlprotocol"
-	transport "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"net"
 	"testing"
 	"time"
@@ -30,12 +28,22 @@ func TestSupervisorTransportRejectsUntrustedOwner(t *testing.T) {
 // monitor or successful execution is fabricated. A busy original owner cannot
 // create a detached waiter or fall back to an unacknowledged journal snapshot.
 func TestQueryBusyOwnerDoesNotWaitOrReadHistory(t *testing.T) {
+	// Genuine verified installed host history gets through the activated binding
+	// gate. Its local-result fixture is not physical process evidence. The active
+	// Execution below is refusal-only: no successful capability is fabricated.
+	s, envelope := taskCloseTerminalHistory(t)
 	e := &Execution{}
-	s := &Supervisor{active: map[string]*Execution{"busy-command": e}}
-	envelope := transport.Envelope{Context: protocol.ExecStartContext{CommandID: "busy-command"}}
+	s.active = map[string]*Execution{envelope.Context.CommandID: e}
 	e.mu.Lock()
 	done := make(chan error, 1)
-	go func() { _, _, err := s.queryReceipt(context.Background(), envelope); done <- err }()
+	go func() {
+		kind, wire, err := s.queryReceipt(context.Background(), envelope)
+		if kind != 0 || wire != nil {
+			done <- errors.New("busy owner exposed evidence")
+			return
+		}
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		e.mu.Unlock()
