@@ -72,6 +72,7 @@ type Execution struct {
 	mu                                     sync.Mutex
 	accepted                               *controltarget.AcceptedExecution
 	descriptor                             controlprotocol.ExecutionDescriptor
+	commandID                              string // immutable original registration key, published before active registry
 	record                                 controltarget.ExecJournalRecord
 	acceptedReceipt, resultReceipt         []byte
 	state                                  string

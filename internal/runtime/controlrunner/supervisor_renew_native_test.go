@@ -14,12 +14,15 @@ func TestTask3NativeRenewalExpiry(t *testing.T) {
 	f := newNativeFixture(t)
 	e, _ := f.start(t, controlprotocol.ExecutionRequest{Argv: []string{os.Getenv("SANDBOX_TASK3_USER"), "hold"}, Env: map[string]string{"GOMAXPROCS": "2"}, UID: 1000, GID: 1000, WorkDir: "/tmp", TimeoutSeconds: 10}, 4*time.Second)
 	waitExecutionReady(t, e)
+	e.mu.Lock()
+	originalRecord := e.record
+	e.mu.Unlock()
 	now := time.Now().UTC()
-	wire, err := controlprotocol.SignExecRenewTicket(f.issuer, controlprotocol.ExecRenewTicketClaims{Version: 1, Purpose: "operation_exec_renew", Context: e.record.Context, DescriptorDigest: e.record.DescriptorDigest, NotBefore: now.Add(-2 * time.Second), NotAfter: now.Add(6 * time.Second)})
+	wire, err := controlprotocol.SignExecRenewTicket(f.issuer, controlprotocol.ExecRenewTicketClaims{Version: 1, Purpose: "operation_exec_renew", Context: originalRecord.Context, DescriptorDigest: originalRecord.DescriptorDigest, NotBefore: now.Add(-2 * time.Second), NotAfter: now.Add(6 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	evidence, err := f.s.options.Verifier.VerifyExecRenewTicket(wire, f.issuerWire, e.record.Context, e.record.DescriptorDigest, now)
+	evidence, err := f.s.options.Verifier.VerifyExecRenewTicket(wire, f.issuerWire, originalRecord.Context, originalRecord.DescriptorDigest, now)
 	if err != nil {
 		t.Fatal(err)
 	}

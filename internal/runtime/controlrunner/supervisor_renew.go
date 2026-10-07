@@ -18,9 +18,7 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 	}
 	bounded, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	s.mu.Lock()
-	active := s.admission && !s.closed && !s.failed && !s.failurePending.Load() && s.active[e.record.Context.CommandID] == e
-	s.mu.Unlock()
+	active := s.isActiveExecution(e)
 	if !active {
 		return ErrAdmissionClosed
 	}
@@ -115,4 +113,12 @@ func (e *Execution) renewableLocked(now int64) bool {
 	default:
 		return true
 	}
+}
+
+// Registry lookup uses the supervisor lock; mutable records belong exclusively
+// to the execution owner lock.
+func (s *Supervisor) isActiveExecution(e *Execution) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.admission && !s.closed && !s.failed && !s.failurePending.Load() && s.active[e.commandID] == e
 }

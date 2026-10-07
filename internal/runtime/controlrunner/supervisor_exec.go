@@ -62,8 +62,9 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	if err != nil {
 		return nil, err
 	}
+	e.commandID = e.record.Context.CommandID
 	e.publishDiagnosticLocked()
-	s.active[e.record.Context.CommandID] = e
+	s.active[e.commandID] = e
 	s.publishActiveLocked()
 	fail := func(cause error) (*Execution, error) {
 		s.failurePending.Store(true)
@@ -375,7 +376,7 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 		return
 	}
 	s.mu.Lock()
-	delete(s.active, e.record.Context.CommandID)
+	delete(s.active, e.commandID)
 	s.publishActiveLocked()
 	s.mu.Unlock()
 }
@@ -394,7 +395,7 @@ func (s *Supervisor) publishActiveLocked() {
 	s.activeView.Store(&view)
 }
 func (e *Execution) publishDiagnosticLocked() {
-	e.diagnostic.Store(&isolationExecution{CommandID: e.record.Context.CommandID, MonitorPID: e.monitorPID, RootPID: e.rootPID, State: "unknown"})
+	e.diagnostic.Store(&isolationExecution{CommandID: e.commandID, MonitorPID: e.monitorPID, RootPID: e.rootPID, State: "unknown"})
 }
 
 // The prepared registration has exactly one transition to an in-flight Start.
