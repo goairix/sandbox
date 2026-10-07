@@ -27,6 +27,8 @@
 
 TaskReference 包含 Namespace、RestoreEpoch、TaskID、Partition、SandboxID，仅供定位/诊断。TaskRecord 固定 version1、kind=`cleanup`，绑定 WorkspaceHash、CreationIntentID、Generation、DataGateEpoch、完整 RuntimeReference、SnapshotReference、ExpiresAt 与销毁前 ControlRevision。CleanupIntentRecord 绑定同一 TaskReference 和同一 tuple；TaskLinkRecord 绑定完整 TaskReference。所有记录必须严格 UTF-8/JSON，拒绝未知、重复、遗漏字段、null、尾随 JSON、错误租约/身份/版本与大小超限。TaskRecord/intent 各4096字节，link2048字节；这三个不可改写的永久记录 Lease0、CreateRevision>0、ModRevision==CreateRevision。checkpoint 同为永久 Lease0，但可由合法 CAS 更新，因此 CreateRevision>0、ModRevision>=CreateRevision，硬上限4096字节。decode 失败不改写调用者目标。LoadTask 只返回拥有的副本，不返回 live capability。
 
+LoadTask/LoadTaskCheckpoint 只在现有 readDomain 的当前 backend identity/restore 条件下，读取各自固定的精确 key，并验证完整 record.Reference 与请求一致；这是诊断，不要求仍然存在的 owner/control/intent/link。已保留的历史元数据不会因为后续安全清理改变这些关联记录而自动失去诊断可读性。Task2/3 的创建、claim、续租和 checkpoint 授权必须另行读取并比较完整关联链，不能把这个诊断加载结果当授权 snapshot。
+
 ## 原子销毁关闭
 
 `PrepareDestroy(ctx, BeginDestroyInput{SandboxID, RequestID, ExpectedControlRevision}, ttl) (*Stage, TaskReference, error)` 读取原五点 placement/control/owner/fence/runtime-index 权威链，要求 active、精确当前已绑定 runtime。ExpectedControlRevision>0 且匹配读取的 control，调用者不能按时间猜测销毁新版 control。生成一次新的 task UUID，通过 `beginStageWithBuilder` 写入 StageAttemptLocator，以便诊断未知提交。
