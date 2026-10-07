@@ -26,8 +26,7 @@ func TestTaskDualDrainHistoricalClaimBoundary(t *testing.T) {
 	require.NoError(t, validateTaskDualDrainHistory(c, entry), "new claimant derives only local prerequisite")
 	for _, fault := range []string{"older", "equal-foreign", "task", "birth", "pending"} {
 		t.Run(fault, func(t *testing.T) {
-			x := *c
-			x.reference = old
+			x := TaskClaim{reference: old, fences: c.fences, birth: c.birth}
 			y := r
 			e := *entry
 			e.Record = &y
