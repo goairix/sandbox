@@ -1,5 +1,7 @@
 # Root native verification — finite authenticated transport and dual drain
 
+Final status: Task4 components accepted at source `fc605d6` after scoped I1 review; full dispositions are in [transport-review](2026-10-07-task-user-quiescence-transport-review.md). The baseline below preserves its original source and pending-review attribution. Task5 and full production migration remain pending.
+
 Frozen source `7fdb188c1eda42b713cc38e07259dfb9c6a79753`, original Task4 BASE `acee0c8c12e3cf590ecef903dc92fa07ebd9c0f8`. These are separate component results. Task4 remains unaccepted while its independent original-range review and strict five-second write-deadline correction are pending.
 
 ## Actual execution
@@ -35,7 +37,7 @@ The original raw streams and per-event coordinates remain in `root-task4-client-
 
 | Class | Count | Current evidence and limit |
 | --- | ---: | --- |
-| Client LeaseRevoke NotFound | 14 | Exact test/record/JSON-row mapping retained. Original author is attributing fixture cleanup and deliberate revocation repeats; logs do not include lease IDs, so individual lease attribution must be described as source/order inference. |
+| Client LeaseRevoke NotFound | 14 | Exact test/record/JSON-row mapping retained. Nine repeated initial CloseData-claim cleanups, three deliberately revoked current-claim cleanups, one released original-claim cleanup and one original operation-lease cleanup. Client logs lack lease IDs, so ownership is source/order inference; server logs independently identify14 exact request/lease pairs replicated on three members. |
 | Client KV/Txn Canceled | 1 | Actual `late-cancel` final-barrier fault, record24 JSON row28. Cancellation refusal asserts nil prerequisite and fired fault boundary. |
 | Server failed apply / lease not found | 42 | Only this failed-apply error class observed; three replicas for each of14 missing-lease revokes. |
 | Server mixed HTTP/gRPC port | 18 | Unchanged correctness fixture startup, two per member. No production TLS/RBAC acceptance. |
@@ -49,3 +51,15 @@ No server error/fatal/panic event was observed in these four batches. Warning at
 Original-range review found the inherited event writer can replace the fixed receive deadline with now+5seconds; the generic error writer can add another second. Passing component cases do not establish the five-second bound for a slow reader. This issue requires a targeted original-author fix and independent scoped review, plus actual changed-path verification.
 
 Task5 combined public chain, safe final sync/remote settlement/End/exact runtime termination/release, production API/Pool/Docker/Upload wiring, partition scheduler, FUSE/collector, large-existing-sandbox capacity, deployment/restore and Redis removal remain mandatory. Neither token absence, this local prerequisite nor these separate component passes establish whole production migration or performance improvement.
+
+## Fix round1 — changed finite writer
+
+Original author committed `fc605d69a371f846534a2e2c334c1f2bac1fb001`: all four quiesce reply branches consume the original bounded context deadline; generic errors refuse expired/canceled dispatch and clamp to the original deadline. Existing exec output keeps its separate per-frame deadline. Independent scoped review resolves I1 with no new Critical/Important/Minor finding; Root accepts the bounded Task4 component scope with every downstream obligation retained.
+
+Actual host tests42/43 retain the five initial meaningful nonreading-TLS RED failures and preliminary GREEN. Final45 includes the real production five-second EOF/dispatch/refusal bound, accepted/terminal blocked writes, delayed/expired/canceled error handling and old execution-output compatibility: three top-level/six nested PASS. Controlled mutation46 restores the old generic error deadline reset and the real five-second test fails at its original-deadline+150ms join guard. Final47 runs both affected packages with race successfully;48vet and49build exit0 with empty stderr. Record44 is a retained incorrect test assumption about the clock's separate one-second inner context, not product defect evidence. Host transport-only opaque payloads are not valid drain receipts.
+
+The original optional test filename collided with an inherited file in the uncommitted tree. Before commit the author restored all four inherited tests byte-identically (SHA256 `3724c1fd65357eaaebc1b1e101f216844b23197ddc59e519b9a5b829095b2c62`) and placed new tests in the verified-absent `supervisor_quiesce_transport_deadline_test.go`. Only two production files and that new test file are in the fix commit. No inherited coverage loss is committed.
+
+Root executed only the changed protected selector against frozen `fc605d6`: `task-quiesce-local-3db028ac18b4`, one actual PID1 top-level PASS/zero FAIL/SKIP. All35 commands exited0 without timeout. Root `root-task4-fix1-native-audit.json` verifies122 actual repository inputs, three installed tools, source archive SHA256 `b9018e7393abde4f044a4d91944b26d0906f43bf0d314dbd487cae3b1dbb7959`, three daemon-custodied ELF payloads, unchanged resource/security contract and empty cleanup. Actual runtime UID/container ID is `2207746e7ca4ef4e58624f60ac4ac48b906856a7af371550108b392a0d8c5231`. It revalidates the original census/ECHILD and genuine zero-user terminal before real authenticated fallback/query. This is current-candidate Linux CGO0 component evidence; slow-reader sensitivity is separately the host TLS regression, and public combined-chain proof remains Task5.
+
+Root also rechecked all244 compiled repository inputs for each of the earlier three metadata batches against final source: all remain identical, and none includes controlrunner. No metadata/predecessor fixture replay or relabeling of an old binary as a new candidate occurred. The complete original51 embedded author JSON records match their retained files, including failures; the original75,599-byte prefix remains unchanged. Source/tool current/Git hashes and final diff checks are retained in record51. All baseline warnings remain recorded; the changed protected run emitted no warning/error event. Original component, Linux race, supply-chain, future flush, capacity and production-migration limits remain.

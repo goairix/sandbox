@@ -113,7 +113,7 @@ Specification section9 supersedes draft D1/D2/API/proof alternatives above. Task
 - [x] Task1 original-range author + independent review (C0/I0/M1; each CV14 dispositioned; actual Linux journal gate passed).
 - [x] Task2 concrete proof interface preflight, original-range implementation + scoped fix review (runtime component accepted; downstream/physical limits individually retained in runtime-review report).
 - [x] Task3 original-claim metadata/pages original-range implementation + scoped fix review (metadata component accepted; combined physical chain and deployment limits retained in metadata-review report).
-- [ ] Task4 transport/dual-drain original-range implementation + review.
+- [x] Task4 transport/dual-drain original-range implementation + scoped deadline fix review (separate component acceptance; mandatory combined physical chain and downstream limits retained in transport-review report).
 - [ ] Task5 combined physical gate, original-range review; one full-unit review and tracked acceptance.
 
 Whole migration remains active after this unit. Keep small verified commits, retain every raw failure and current source attribution. Root alone owns fixtures; no old accepted native/kernel replay.
