@@ -336,3 +336,163 @@ func TestClockRequestStrictnessAndClientCopies(t *testing.T) {
 		t.Fatal("wrong pinned key authenticated")
 	}
 }
+
+type closingClock struct {
+	started chan struct{}
+	closed  atomic.Bool
+}
+
+func (c *closingClock) Observe(ctx context.Context) (ClockObservation, error) {
+	close(c.started)
+	<-ctx.Done()
+	return ClockObservation{}, ctx.Err()
+}
+func (c *closingClock) Close() error { c.closed.Store(true); return nil }
+func TestSignedClockStopsAndJoinsActiveSource(t *testing.T) {
+	binding, pub, key, _ := clockFixture(t)
+	source := &closingClock{started: make(chan struct{})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeSignedClock(ctx, listener, SignedClockServerOptions{Binding: binding, Key: key, Source: source})
+	}()
+	client, err := NewSignedClockClient(SignedClockClientOptions{Binding: binding, Audience: "pid1", PublicKey: pub, Dial: func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := make(chan error, 1)
+	go func() { _, err := client.Observe(context.Background()); observed <- err }()
+	select {
+	case <-source.started:
+	case <-time.After(time.Second):
+		t.Fatal("source not entered")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not join canceled source")
+	}
+	select {
+	case err := <-observed:
+		if err == nil {
+			t.Fatal("returned canceled observation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client not stopped")
+	}
+	if source.closed.Load() {
+		t.Fatal("server closed borrowed source")
+	}
+}
+
+type nilClockContext struct{ context.Context }
+
+func TestSignedClockTypedNilDependencies(t *testing.T) {
+	b, p, k, _ := clockFixture(t)
+	var ctx *nilClockContext
+	var conn *net.TCPConn
+	var listener *net.TCPListener
+	c, err := NewSignedClockClient(SignedClockClientOptions{Binding: b, Audience: "pid1", PublicKey: p, Dial: func(context.Context) (net.Conn, error) { return conn, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Observe(context.Background()); err == nil {
+		t.Fatal("accepted typed nil conn")
+	}
+	if _, err := c.Observe(ctx); err == nil {
+		t.Fatal("accepted typed nil context")
+	}
+	if err := ServeSignedClock(context.Background(), listener, SignedClockServerOptions{}); err == nil {
+		t.Fatal("accepted typed nil listener")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ServeSignedClock(context.Background(), l, SignedClockServerOptions{Binding: b, Key: k, Source: clockFunc(func(context.Context) (ClockObservation, error) {
+		t.Fatal("invalid server called source")
+		return ClockObservation{}, nil
+	}), MaxConnections: 17}); err == nil {
+		t.Fatal("accepted connection cap17")
+	}
+	if conn, err := net.DialTimeout("tcp", l.Addr().String(), 50*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatal("validation error did not close owned listener")
+	}
+}
+
+type observedListener struct {
+	net.Listener
+	accepted chan struct{}
+}
+
+func (l observedListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted <- struct{}{}
+	}
+	return c, err
+}
+func TestSignedClockConnectionLimitAndDeadline(t *testing.T) {
+	b, _, k, _ := clockFixture(t)
+	var calls atomic.Int32
+	source := clockFunc(func(context.Context) (ClockObservation, error) { calls.Add(1); return ClockObservation{}, nil })
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := observedListener{Listener: raw, accepted: make(chan struct{}, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeSignedClock(ctx, listener, SignedClockServerOptions{Binding: b, Key: k, Source: source, MaxConnections: 1})
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("server not joined")
+		}
+	}()
+	first, err := net.Dial("tcp", raw.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	<-listener.accepted
+	// A completed second Accept can only occur after the first was registered.
+	second, err := net.Dial("tcp", raw.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	<-listener.accepted
+	second.SetReadDeadline(time.Now().Add(time.Second))
+	var one [1]byte
+	if _, err := second.Read(one[:]); err != io.EOF {
+		t.Fatalf("excess connection not closed: %v", err)
+	}
+	first.SetReadDeadline(time.Now().Add(6 * time.Second))
+	start := time.Now()
+	if _, err := first.Read(one[:]); err != io.EOF {
+		t.Fatalf("request deadline did not close connection: %v", err)
+	}
+	if time.Since(start) > 5500*time.Millisecond {
+		t.Fatal("request deadline exceeds5seconds")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("idle clients called source")
+	}
+}
