@@ -73,5 +73,5 @@
 
 ## Whole-unit gate
 
-- [ ] One complete unfiltered original9a7e37d..final unit review; if necessary one collective fix wave and one scoped re-review, with individual findings/rulings retained.
-- [ ] Publish tracked whole-unit acceptance/evidence custody. Keep OWN until exhaustive rulings are delivered to the human. Continue required CloseAll/dual drain/remote settlement/exact termination/safe release and production migration.
+- [x] One complete unfiltered original9a7e37d..final unit review; if necessary one collective fix wave and one scoped re-review, with individual findings/rulings retained.
+- [x] Publish tracked whole-unit acceptance/evidence custody. Keep OWN until exhaustive rulings are delivered to the human. Continue required CloseAll/dual drain/remote settlement/exact termination/safe release and production migration.
