@@ -255,3 +255,27 @@ func TestMonitorMountStrictFields(t *testing.T) {
 		t.Fatalf("valid proc escapes: %v", err)
 	}
 }
+
+// ScanLines drops a raw CR before LF. Strict proc parsing must reject that byte
+// before token normalization, including the extra byte beyond the line bound.
+func TestMonitorMountCRLF(t *testing.T) {
+	line := strings.TrimSuffix(monitorMountFixture, "\n")
+	const mountpoint = "/sys/fs/cgroup"
+	boundary := strings.Replace(line, mountpoint, "/"+strings.Repeat("x", maxMountLineBytes-len(line)+len(mountpoint)-1), 1)
+	for _, valid := range []string{line + "\n", boundary + "\n"} {
+		if err := validateCgroupMounts([]byte(valid)); err != nil {
+			t.Fatalf("valid LF mountinfo rejected: %v", err)
+		}
+	}
+	for name, data := range map[string]string{
+		"cgroup CRLF":               line + "\r\n",
+		"other record CRLF":         "22 1 0:20 / / rw - overlay overlay rw\r\n" + monitorMountFixture,
+		"CR exceeds raw line bound": boundary + "\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateCgroupMounts([]byte(data)); !errors.Is(err, ErrUnsafeKernel) {
+				t.Fatalf("raw CR accepted after line normalization: %v", err)
+			}
+		})
+	}
+}

@@ -176,6 +176,11 @@ func validateCgroupMounts(data []byte) error {
 	if len(data) == 0 || len(data) > maxMountBytes || data[len(data)-1] != '\n' {
 		return unsafeMount("byte bound")
 	}
+	// ScanLines strips CR before LF; reject it before normalization can hide a
+	// raw control byte or an extra byte beyond the per-line bound.
+	if bytes.IndexByte(data, '\r') >= 0 {
+		return unsafeMount("raw control byte")
+	}
 	scan := bufio.NewScanner(bytes.NewReader(data))
 	scan.Buffer(make([]byte, 4096), maxMountLineBytes+2)
 	ids := map[uint64]bool{}
