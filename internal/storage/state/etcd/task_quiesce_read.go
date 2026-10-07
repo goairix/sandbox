@@ -22,7 +22,7 @@ type taskQuiescencePrerequisite struct {
 // readQuiescencePoints is private to fixed task-derived discovery bundles. A
 // claim-aware caller holds the original mutex and fixed parent/deadline context.
 func (b *Backend) readQuiescencePoints(ctx context.Context, c *TaskClaim, keys []string) ([]*mvccpb.KeyValue, error) {
-	if len(keys) < 3 || len(keys) > 6 || keys[0] != b.identityKey || keys[1] != b.restoreKey {
+	if len(keys) < 3 || len(keys) > 7 || keys[0] != b.identityKey || keys[1] != b.restoreKey {
 		return nil, ErrInvalidRecord
 	}
 	cmps := b.baseComparisons()
@@ -34,6 +34,9 @@ func (b *Backend) readQuiescencePoints(ctx context.Context, c *TaskClaim, keys [
 			return nil, err
 		}
 		cmps = append(cmps, c.comparisons()...)
+		if d := c.quiescenceDraft; d != nil && d.reservation.revision > 0 {
+			cmps = append(cmps, d.reservation.comparison())
+		}
 	}
 	ops := make([]clientv3.Op, len(keys))
 	for i, k := range keys {
@@ -172,7 +175,11 @@ func (b *Backend) loadTaskQuiescence(ctx context.Context, task TaskReference, c 
 	if err != nil {
 		return nil, err
 	}
-	points, err := b.readQuiescencePoints(bounded, c, []string{b.identityKey, b.restoreKey, key, receiptKey, prior.intent.key, prior.receiptKey})
+	reservationKey, err := b.namespace.taskQuiescenceAttemptKey(task)
+	if err != nil {
+		return nil, err
+	}
+	points, err := b.readQuiescencePoints(bounded, c, []string{b.identityKey, b.restoreKey, key, receiptKey, prior.intent.key, prior.receiptKey, reservationKey})
 	if err != nil {
 		return nil, err
 	}
@@ -197,9 +204,24 @@ func (b *Backend) loadTaskQuiescence(ctx context.Context, task TaskReference, c 
 	if _, err = quiescenceCommittedReceipt(points[5], prior.receiptKey, points[4].CreateRevision, old.Attempt); err != nil {
 		return nil, err
 	}
+	reservation, err := taskQuiescenceAttemptEntry(points[6], task)
+	if err != nil {
+		return nil, err
+	}
+	if !taskQuiescenceHistoryReservation(record, birth, reservation) {
+		return nil, ErrCorruptRecord
+	}
 	ref := TaskQuiescenceReference{Task: task, CommandID: record.Context.Current.CommandID, Stage: stage}
 	if ref.Validate() != nil {
 		return nil, ErrCorruptRecord
 	}
-	return &TaskQuiescenceEntry{Reference: ref, Record: &record, Revision: birth, Outcome: OutcomeCommitted}, nil
+	return &TaskQuiescenceEntry{Reference: ref, Record: &record, Revision: birth, Outcome: OutcomeCommitted, reservation: reservation}, nil
+}
+
+func taskQuiescenceHistoryReservation(record TaskQuiescenceRecord, birth int64, reservation *TaskQuiescenceAttemptEntry) bool {
+	if reservation == nil || reservation.Record == nil || reservation.Revision <= 0 || reservation.Revision >= birth {
+		return false
+	}
+	r := reservation.Record
+	return r.Task == record.Task && r.Claim == record.Claim && r.DestroyingRevision == record.Context.Current.ControlRevision && r.CommandID == record.Context.Current.CommandID && r.Attempt == record.Attempt
 }

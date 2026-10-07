@@ -123,12 +123,13 @@ func TestTaskOperationDrainPagesFinalBudget(t *testing.T) {
 	b.restoreKey = "restore"
 	intent := taskFence{key: "quiescence", value: "original", create: 31, mod: 31}
 	receipt := taskFence{key: "receipt", value: "committed", create: 31, mod: 31}
-	cmps := taskEmptyComparisons(b, c, intent, receipt)
-	require.Len(t, cmps, 52)
-	require.Equal(t, 54, len(cmps)+2)
+	cmps := taskEmptyComparisons(b, c, intent, receipt, taskQuiescenceReservationPin{key: "reservation", revision: 30})
+	require.Len(t, cmps, 53)
+	require.Equal(t, 55, len(cmps)+2)
 	require.Equal(t, b.baseComparisons(), cmps[:4])
 	require.Equal(t, c.comparisons(), cmps[4:44])
 	require.Equal(t, intent.comparisons(), cmps[44:48])
-	require.Equal(t, receipt.comparisons(), cmps[48:])
+	require.Equal(t, receipt.comparisons(), cmps[48:52])
+	require.Equal(t, clientv3.Compare(clientv3.ModRevision("reservation"), "=", 30), cmps[52])
 	require.NotNil(t, d)
 }

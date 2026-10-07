@@ -221,7 +221,11 @@ func (b *Backend) observeTaskOperationsEmpty(ctx context.Context, c *TaskClaim, 
 	}
 	intent := taskFence{key: key, value: value, create: fresh.Revision, mod: fresh.Revision}
 	receipt := taskFence{key: receiptKey, value: string(points[3].Value), create: fresh.Revision, mod: fresh.Revision}
-	cmps := taskEmptyComparisons(b, c, intent, receipt)
+	reservationKey, err := b.namespace.taskQuiescenceAttemptKey(c.reference.Task)
+	if err != nil || fresh.reservation == nil {
+		return 0, false, ErrCorruptRecord
+	}
+	cmps := taskEmptyComparisons(b, c, intent, receipt, taskQuiescenceReservationPin{key: reservationKey, revision: fresh.reservation.Revision})
 	prefix, err := b.taskOperationsPrefix(c.reference.Task)
 	if err != nil {
 		return 0, false, err
@@ -232,8 +236,9 @@ func (b *Backend) observeTaskOperationsEmpty(ctx context.Context, c *TaskClaim, 
 	}
 	return page.Revision, len(page.Entries) == 0, nil
 }
-func taskEmptyComparisons(b *Backend, c *TaskClaim, intent, receipt taskFence) []clientv3.Cmp {
+func taskEmptyComparisons(b *Backend, c *TaskClaim, intent, receipt taskFence, reservation taskQuiescenceReservationPin) []clientv3.Cmp {
 	cmps := append(b.baseComparisons(), c.comparisons()...)
 	cmps = append(cmps, intent.comparisons()...)
-	return append(cmps, receipt.comparisons()...)
+	cmps = append(cmps, receipt.comparisons()...)
+	return append(cmps, reservation.comparison())
 }

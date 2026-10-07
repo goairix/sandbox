@@ -34,7 +34,7 @@ func (b *Backend) registerTaskQuiescenceIssuer(ctx context.Context, c *TaskClaim
 	if err != nil {
 		return nil, err
 	}
-	cmps := append(b.baseComparisons(), c.comparisons()...)
+	cmps := b.reservationComparisons(c, d)
 	cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
 	// Fixed reserved issuer metadata is not a Stage business write. Account
 	// its full request directly without widening prepareMutation's reserved keys.
@@ -92,7 +92,7 @@ func (b *Backend) registerTaskQuiescenceIssuer(ctx context.Context, c *TaskClaim
 		return nil, err
 	}
 	points := b.commandIssuerPoints(key)
-	response, err = b.client.Txn(ctx).If(append(b.baseComparisons(), c.comparisons()...)...).Then(points...).Else(points...).Commit()
+	response, err = b.client.Txn(ctx).If(b.reservationComparisons(c, d)...).Then(points...).Else(points...).Commit()
 	if live := taskQuiescenceLive(ctx, c, d); live != nil {
 		return nil, live
 	}

@@ -27,10 +27,11 @@ type TaskQuiescenceReference struct {
 	Stage     StageReference
 }
 type TaskQuiescenceEntry struct {
-	Reference TaskQuiescenceReference
-	Record    *TaskQuiescenceRecord
-	Revision  int64
-	Outcome   Outcome
+	reservation *TaskQuiescenceAttemptEntry
+	Reference   TaskQuiescenceReference
+	Record      *TaskQuiescenceRecord
+	Revision    int64
+	Outcome     Outcome
 }
 
 func (r TaskQuiescenceReference) Validate() error {
@@ -47,6 +48,7 @@ func validTaskQuiescenceAttempt(l StageAttemptLocator, r TaskReference, claimID 
 // PrepareTaskQuiescenceResult separates durable outcome from original dispatch.
 // A known commit can have no Prepared after original authority loss.
 type PrepareTaskQuiescenceResult struct {
+	AttemptReference  TaskQuiescenceAttemptReference
 	Outcome           Outcome
 	Reference         TaskQuiescenceReference
 	Prepared          *PreparedTaskUserQuiescence

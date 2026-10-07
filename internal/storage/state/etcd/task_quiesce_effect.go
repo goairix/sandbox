@@ -20,7 +20,7 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 	defer c.mu.Unlock()
 	d := c.quiescenceDraft
 	if d != nil {
-		result.Reference, result.Outcome = d.reference, d.outcome
+		result.Reference, result.Outcome, result.AttemptReference = d.reference, d.outcome, d.attemptReference
 	}
 	if err = c.live(ctx); err != nil {
 		return result, err
@@ -36,7 +36,9 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 		d = &taskQuiescenceDraft{task: task, deadline: c.deadline, commandID: uuid.NewString(), outcome: OutcomeUnknown}
 		c.quiescenceDraft = d
 	}
-	defer func() { result.Reference, result.Outcome = d.reference, d.outcome }()
+	defer func() {
+		result.Reference, result.Outcome, result.AttemptReference = d.reference, d.outcome, d.attemptReference
+	}()
 	bounded, cancel := b.taskQuiescenceContext(ctx, c, d)
 	defer cancel()
 	// Provider errors cannot hide irreversible cancellation of this attempt.
@@ -46,6 +48,9 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 		}
 	}()
 	if err = taskQuiescenceLive(bounded, c, d); err != nil {
+		return result, err
+	}
+	if err = b.reserveTaskQuiescenceAttempt(bounded, c, d); err != nil {
 		return result, err
 	}
 	if d.outcome == OutcomeUnknown {
@@ -72,7 +77,7 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 				if err = b.verifyTaskQuiescenceRuntime(bounded, c, d, destination); err != nil {
 					return result, err
 				}
-				d.stage, err = b.beginStageWithBuilder(bounded, c.reference.Task.Partition, c.reference.ClaimID, "task_quiesce_users", time.Until(d.deadline), func(l StageAttemptLocator) (Mutation, error) { return b.buildTaskQuiescence(c, d, l) })
+				d.stage, err = b.beginReservedTaskQuiescenceStage(bounded, d.attemptReference.Attempt, d.reservation, time.Until(d.deadline), func(l StageAttemptLocator) (Mutation, error) { return b.buildTaskQuiescence(c, d, l) })
 				if err != nil {
 					var fail *stageBeginFailure
 					if errors.As(err, &fail) {

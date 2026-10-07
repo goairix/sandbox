@@ -122,17 +122,17 @@ func (t *quiescenceCaptureTxn) Commit() (*clientv3.TxnResponse, error) {
 	key, _ := t.k.b.namespace.taskQuiescenceKey(t.k.c.reference.Task)
 	if putsKey(key)(t.yes) {
 		t.k.commits++
-		require.Len(t.k.t, t.cmps, 57)
+		require.Len(t.k.t, t.cmps, 58)
 		require.Len(t.k.t, t.yes, 2)
 		require.Len(t.k.t, t.no, 4)
-		require.Equal(t.k.t, 63, len(t.cmps)+len(t.yes)+len(t.no))
-		require.Equal(t.k.t, t.k.c.comparisons(), t.cmps[8:48])
-		require.Equal(t.k.t, 64, len(t.cmps[8:])+1+stageProtocolOperations)
+		require.Equal(t.k.t, 64, len(t.cmps)+len(t.yes)+len(t.no))
+		require.Equal(t.k.t, t.k.c.comparisons(), t.cmps[9:49])
+		require.Equal(t.k.t, 64, len(t.cmps[9:])+1+stageProtocolOperations)
 	}
-	if len(t.cmps) == 52 && len(t.yes) == 1 && len(t.yes[0].RangeBytes()) > 0 {
+	if len(t.cmps) == 53 && len(t.yes) == 1 && len(t.yes[0].RangeBytes()) > 0 {
 		t.k.emptyReads++
 		require.Len(t.k.t, t.no, 1)
-		require.Equal(t.k.t, 54, len(t.cmps)+len(t.yes)+len(t.no))
+		require.Equal(t.k.t, 55, len(t.cmps)+len(t.yes)+len(t.no))
 		prefix, err := t.k.b.taskOperationsPrefix(t.k.c.reference.Task)
 		require.NoError(t.k.t, err)
 		for _, ops := range [][]clientv3.Op{t.yes, t.no} {
@@ -162,7 +162,7 @@ func quiescenceNativeBudget(t *testing.T) {
 			f.b.client.Lease = lease
 			defer func() { f.b.client.Lease = lease.Lease }()
 			d := *f.c.quiescenceDraft
-			stage, e := f.b.beginStageWithBuilder(f.ctx, f.c.reference.Task.Partition, f.c.reference.ClaimID, "task_quiesce_users", time.Second, func(l StageAttemptLocator) (Mutation, error) {
+			stage, e := f.b.beginReservedTaskQuiescenceStage(f.ctx, d.attemptReference.Attempt, d.reservation, time.Second, func(l StageAttemptLocator) (Mutation, error) {
 				m, e := f.b.buildTaskQuiescence(f.c, &d, l)
 				require.NoError(t, e)
 				if kind == "65" {

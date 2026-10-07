@@ -10,6 +10,10 @@ import (
 )
 
 type taskQuiescenceDraft struct {
+	attemptReference       TaskQuiescenceAttemptReference
+	reservation            taskQuiescenceReservationPin
+	reservationValue       string
+	reservationSent        bool
 	task                   TaskRecord
 	deadline               time.Time
 	commandID              string
@@ -59,6 +63,9 @@ func (b *Backend) checkTaskQuiescenceFences(ctx context.Context, c *TaskClaim, d
 		return err
 	}
 	cmps := append(b.baseComparisons(), b.taskQuiescenceComparisons(c, d)...)
+	if d.reservation.revision > 0 {
+		cmps = append(cmps, d.reservation.comparison())
+	}
 	if intent != nil {
 		cmps = append(cmps, intent.comparisons()...)
 	}

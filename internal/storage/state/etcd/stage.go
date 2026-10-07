@@ -46,6 +46,7 @@ type Stage struct {
 	guardRevision  int64
 	receiptKey     string
 	committedValue string
+	reservation    *taskQuiescenceReservationPin
 }
 
 // Reference returns a copy suitable for a durable intent/checkpoint.
@@ -82,6 +83,11 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 	if err := locator.Validate(); err != nil {
 		return nil, err
 	}
+	return b.beginStageWithLocator(ctx, locator, ttl, build, nil)
+}
+
+// Generic callers retain fresh locator allocation and their original behavior.
+func (b *Backend) beginStageWithLocator(ctx context.Context, locator StageAttemptLocator, ttl time.Duration, build func(StageAttemptLocator) (Mutation, error), reservation *taskQuiescenceReservationPin) (*Stage, error) {
 	input, err := build(locator)
 	if err != nil {
 		return nil, err
@@ -98,6 +104,11 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 	committedValue, err := encodeReceipt(ref, OutcomeCommitted)
 	if err != nil {
 		return nil, err
+	}
+	if reservation != nil {
+		if err := b.preflightReservedTaskStage(ref, mutation, guardKey, receiptKey, committedValue, *reservation); err != nil {
+			return nil, err
+		}
 	}
 	requestCtx, cancel := b.requestContext(ctx)
 	defer cancel()
@@ -125,7 +136,7 @@ func (b *Backend) beginStageWithBuilder(ctx context.Context, partition uint8, re
 		}
 		return nil, cause
 	}
-	s := &Stage{origin: b, reference: ref, mutation: mutation, leaseID: lease.ID, guardKey: guardKey, receiptKey: receiptKey, committedValue: committedValue}
+	s := &Stage{origin: b, reference: ref, mutation: mutation, leaseID: lease.ID, guardKey: guardKey, receiptKey: receiptKey, committedValue: committedValue, reservation: reservation}
 	guard, err := json.Marshal(struct {
 		StageReference
 		LeaseID int64 `json:"lease_id"`
@@ -170,6 +181,9 @@ func (b *Backend) CommitStage(ctx context.Context, s *Stage) (Outcome, error) {
 		clientv3.Compare(clientv3.CreateRevision(s.guardKey), "=", s.guardRevision),
 		clientv3.Compare(clientv3.CreateRevision(s.receiptKey), "=", 0),
 	)
+	if s.reservation != nil {
+		compares = append(compares, s.reservation.comparison())
+	}
 	compares = append(compares, s.mutation.Comparisons...)
 	operations := s.businessOperations()
 	operations = append(operations, clientv3.OpPut(s.receiptKey, s.committedValue))
