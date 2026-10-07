@@ -79,6 +79,10 @@ func parseSchema(d *json.Decoder, schema *wireSchema) error {
 		if schema.kind == 't' && !strings.HasSuffix(s, "Z") {
 			return fmt.Errorf("publication time must use UTC Z")
 		}
+	case 'b':
+		if _, ok := token.(bool); !ok {
+			return fmt.Errorf("publication field must be a non-null boolean")
+		}
 	case 'n':
 		n, ok := token.(json.Number)
 		if !ok {

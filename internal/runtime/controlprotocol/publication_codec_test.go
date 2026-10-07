@@ -106,3 +106,20 @@ func TestPublicationExactWireLimits(t *testing.T) {
 		t.Fatal("proof over exact limit accepted")
 	}
 }
+
+func TestStrictBooleanSchema(t *testing.T) {
+	schema := &wireSchema{kind: 'o', maxBytes: 128, fields: map[string]*wireSchema{"allowed": {kind: 'b'}}}
+	for _, v := range []string{"true", "false", "null", `"true"`, "1"} {
+		var got struct {
+			Allowed bool `json:"allowed"`
+		}
+		err := decodeWire([]byte(`{"allowed":`+v+`}`), schema, &got)
+		if v == "true" || v == "false" {
+			if err != nil || got.Allowed != (v == "true") {
+				t.Fatalf("boolean %s: %v", v, err)
+			}
+		} else if err == nil {
+			t.Fatalf("accepted %s as boolean", v)
+		}
+	}
+}
