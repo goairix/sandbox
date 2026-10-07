@@ -25,6 +25,31 @@ func taskClaimFixture(t *testing.T) (*Backend, *clientv3.Client, TaskReference, 
 }
 
 func TestTaskClaimCopies(t *testing.T) {
+	t.Run("invalid-before-rpc", func(t *testing.T) {
+		b := new(Backend)
+		task, _, _, _ := taskTestRecords()
+		for _, ttl := range []time.Duration{0, -time.Second, 24*time.Hour + time.Nanosecond} {
+			c, e := b.ClaimTask(context.Background(), task.Reference, "worker", ttl)
+			require.ErrorIs(t, e, ErrInvalidMutation)
+			require.Nil(t, c)
+		}
+		c, e := b.ClaimTask(nil, task.Reference, "worker", time.Second)
+		require.ErrorIs(t, e, ErrInvalidRecord)
+		require.Nil(t, c)
+		c, e = b.ClaimTask(context.Background(), task.Reference, "bad/worker", time.Second)
+		require.ErrorIs(t, e, ErrInvalidRecord)
+		require.Nil(t, c)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c, e = b.ClaimTask(ctx, task.Reference, "worker", time.Second)
+		require.ErrorIs(t, e, context.Canceled)
+		require.Nil(t, c)
+		for _, bad := range []*TaskClaim{nil, {}} {
+			require.ErrorIs(t, b.RenewTaskClaim(context.Background(), bad), ErrInvalidRecord)
+			require.ErrorIs(t, b.ReleaseTaskClaim(context.Background(), bad), ErrInvalidRecord)
+		}
+	})
+
 	t.Run("seal-and-owned-reference", func(t *testing.T) {
 		b, _, ref, ctx := taskClaimFixture(t)
 		c, e := b.ClaimTask(ctx, ref, "worker", 30*time.Second)
@@ -118,6 +143,26 @@ func TestTaskClaimCopies(t *testing.T) {
 }
 
 func TestTaskClaimLifecycle(t *testing.T) {
+	t.Run("short-request-native-minimum", func(t *testing.T) {
+		b, raw, ref, ctx := taskClaimFixture(t)
+		lease := &creationFaultLease{Lease: b.client.Lease}
+		b.client.Lease = lease
+		sent := time.Now()
+		c, e := b.ClaimTask(ctx, ref, "worker", time.Nanosecond)
+		require.NoError(t, e)
+		defer taskReleaseClaim(t, b, c)
+		require.EqualValues(t, 1, lease.requestedTTL.Load())
+		require.GreaterOrEqual(t, c.ttlSeconds, int64(1))
+		require.LessOrEqual(t, c.ttlSeconds, int64(86400))
+		native, e := raw.TimeToLive(ctx, clientv3.LeaseID(c.Reference().LeaseID))
+		require.NoError(t, e)
+		require.Equal(t, native.GrantedTTL, c.ttlSeconds)
+		require.False(t, c.deadline.Before(sent.Add(time.Duration(native.GrantedTTL)*time.Second)))
+		require.True(t, c.deadline.Before(time.Now().Add(time.Duration(native.GrantedTTL)*time.Second)))
+		require.NoError(t, b.RenewTaskClaim(ctx, c))
+		t.Logf("requested=1 actual_native_granted=%d original_lease=%d", native.GrantedTTL, c.Reference().LeaseID)
+	})
+
 	t.Run("original-pair-renew-release", func(t *testing.T) {
 		b, raw, ref, ctx := taskClaimFixture(t)
 		lease := &creationFaultLease{Lease: b.client.Lease}
@@ -127,8 +172,8 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		require.NoError(t, e)
 		defer taskReleaseClaim(t, b, c)
 		require.EqualValues(t, 2, lease.requestedTTL.Load())
-		require.True(t, c.deadline.Before(time.Now().Add(2*time.Second)))
-		require.False(t, c.deadline.Before(sent.Add(2*time.Second)))
+		require.True(t, c.deadline.Before(time.Now().Add(time.Duration(c.ttlSeconds)*time.Second)))
+		require.False(t, c.deadline.Before(sent.Add(time.Duration(c.ttlSeconds)*time.Second)))
 		original := c.Reference()
 		for _, key := range []string{c.claimKey, c.guardKey} {
 			v, e := raw.Get(ctx, key)

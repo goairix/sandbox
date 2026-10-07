@@ -111,6 +111,8 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if ttl%time.Second != 0 {
 		seconds++
 	}
+	// Maximal integers here are byte-budget placeholders, never native revisions
+	// or published authority. Checked server values replace both before return.
 	c := &TaskClaim{origin: b, parentCtx: ctx, reference: TaskClaimReference{Task: ref, ClaimID: uuid.NewString(), WorkerID: workerID, LeaseID: math.MaxInt64, CreateRevision: math.MaxInt64}, fences: bundle.fences, birth: bundle.birth, initial: bundle.initial, ttlSeconds: seconds}
 	c.self = c
 	c.claimKey, err = b.namespace.taskClaimKey(ref)
@@ -155,7 +157,9 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if grantErr != nil || requestErr != nil {
 		return nil, errors.Join(ErrOutcomeUnknown, grantErr, requestErr)
 	}
-	if !known || grant.Error != "" || grant.TTL <= 0 || grant.TTL > seconds {
+	// Native etcd may raise a short request to its minimum Lease TTL.
+	// Bound the actual grant, and retain it for original-Lease renewal checks.
+	if !known || grant.Error != "" || grant.TTL <= 0 || grant.TTL > 86400 {
 		return nil, ErrOutcomeUnknown
 	}
 	c.deadline = sent.Add(time.Duration(grant.TTL) * time.Second)
