@@ -11,9 +11,10 @@ import (
 // It is pending barrier ownership, not a coordinator, drain or execution grant.
 // Only a future trusted Supervisor that owns the finite worker may expose ACK.
 type AcceptedUserQuiescence struct {
-	self    *AcceptedUserQuiescence
-	journal *Journal
-	record  TaskUserQuiescenceRecord
+	self     *AcceptedUserQuiescence
+	journal  *Journal
+	record   TaskUserQuiescenceRecord
+	terminal *TaskUserQuiescenceRecord
 }
 
 // AcceptUserQuiescence installs the immutable pending USERS barrier. It never

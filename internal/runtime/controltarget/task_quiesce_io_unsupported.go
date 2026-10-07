@@ -10,3 +10,7 @@ func (j *Journal) readTaskQuiescenceLocked(context.Context) (*TaskUserQuiescence
 func (j *Journal) persistTaskQuiescencePendingLocked(context.Context, []byte) error {
 	return ErrInvalidConfiguration
 }
+
+func (j *Journal) persistTaskQuiescenceTerminalLocked(context.Context, []byte) error {
+	return ErrInvalidConfiguration
+}
