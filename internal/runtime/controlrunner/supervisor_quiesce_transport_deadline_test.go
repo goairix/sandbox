@@ -276,3 +276,79 @@ func TestExecOutputWriterRetainsPerFrameDeadline(t *testing.T) {
 	require.NoError(t, <-done)
 	joined = true
 }
+
+// A held admission mutex must not retain an actual finite transport borrower.
+// The host fixture proves lock/refusal ownership only, never PID1 success.
+func TestTaskQuiesceSupervisorContentionReleasesBorrow(t *testing.T) {
+	for _, seam := range []string{"activation-snapshot", "quiesce-dispatch", "query-dispatch", "exec-query-dispatch", "close-query-dispatch"} {
+		t.Run(seam, func(t *testing.T) {
+			s, _, client := quiesceDeadlineTLS(t)
+			raw, peer := net.Pipe()
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			borrow, call := s.transport.borrow(ctx, raw)
+			done := make(chan struct{})
+			if seam == "activation-snapshot" {
+				s.mu.Lock()
+			}
+			go func() {
+				defer close(done)
+				defer borrow.release()
+				defer raw.Close()
+				s.serveConnection(call, raw)
+			}()
+			if seam != "activation-snapshot" {
+				conn := tls.Client(peer, client)
+				require.NoError(t, conn.HandshakeContext(ctx))
+				b, i := s.activation.Binding(), s.activation.Identity()
+				c := p.TaskCloseDataContext{Namespace: b.Namespace, AuthorityID: b.AuthorityID, Target: b.Target, RestoreEpoch: b.RestoreEpoch, SandboxID: i.SandboxID, WorkspaceHash: i.WorkspaceHash, Generation: i.Generation, Runtime: i.Runtime, DataGateEpoch: 1}
+				e := tr.TaskQuiesceEnvelope{Version: 1, Purpose: "task_quiesce_users_query", Context: p.TaskUserQuiescenceContext{Current: c}, TicketDigest: strings.Repeat("a", 64)}
+				if seam == "quiesce-dispatch" {
+					e.Purpose = "task_quiesce_users"
+					e.Ticket, e.IssuerCertificate, e.OriginalCloseDataReceipt = []byte("invalid"), s.activation.IssuerCertificate(), []byte("invalid")
+				}
+				s.mu.Lock()
+				var writeErr error
+				switch seam {
+				case "exec-query-dispatch":
+					writeErr = tr.WriteRequest(conn, tr.Envelope{Version: 1, Purpose: "exec_query", Context: p.ExecStartContext{Namespace: b.Namespace}, DescriptorDigest: strings.Repeat("b", 64)})
+				case "close-query-dispatch":
+					writeErr = tr.WriteTaskCloseRequest(conn, tr.TaskCloseEnvelope{Version: 1, Purpose: "task_close_data_query", Context: c, TicketDigest: strings.Repeat("a", 64)})
+				default:
+					writeErr = tr.WriteTaskQuiesceRequest(conn, e)
+				}
+				if writeErr != nil {
+					s.mu.Unlock()
+					cancel()
+					raw.Close()
+					peer.Close()
+					<-done
+					t.Fatal(writeErr)
+				}
+				if err := conn.CloseWrite(); err != nil {
+					s.mu.Unlock()
+					cancel()
+					raw.Close()
+					peer.Close()
+					<-done
+					t.Fatal(err)
+				}
+			}
+			// Always release the deliberately held mutex before joining on failure.
+			select {
+			case <-done:
+			case <-time.After(300 * time.Millisecond):
+				t.Error("finite handler retained borrower behind supervisor mutex")
+			}
+			s.mu.Unlock()
+			cancel()
+			raw.Close()
+			peer.Close()
+			<-done
+			s.transport.workers.Wait()
+			s.transport.mu.Lock()
+			require.Empty(t, s.transport.users)
+			s.transport.mu.Unlock()
+		})
+	}
+}

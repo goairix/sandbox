@@ -21,7 +21,9 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	if nilValue(ctx) || start == nil || start.supervisor != s {
 		return nil, ErrUnavailable
 	}
-	s.mu.Lock()
+	if ctx.Err() != nil || !s.mu.TryLock() {
+		return nil, ErrUnavailable
+	}
 	locked := true
 	defer func() {
 		if locked {

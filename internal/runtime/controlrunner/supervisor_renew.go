@@ -30,13 +30,26 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 		return ErrUnavailable
 	}
 	before := e.record.AuthorityDeadline
+	// e.mu is already owned; TryLock never inverts into a blocking lock order.
+	// Keep the original registry check and persistence/Snapshot serialized with
+	// quiescence's pending owner, then release before original monitor delivery.
+	if bounded.Err() != nil || !s.mu.TryLock() {
+		return ErrUnavailable
+	}
+	if !s.admission || s.closed || s.failed || s.failurePending.Load() || s.usersClosed.Load() || s.active[e.commandID] != e || !live() {
+		s.mu.Unlock()
+		return ErrAdmissionClosed
+	}
 	if err := s.journal.RenewAccepted(bounded, e.accepted, evidence); err != nil {
 		if s.journal.Status().Poisoned {
 			s.failurePending.Store(true)
 			go s.isolate("renewal_persistence")
 		}
+		s.mu.Unlock()
 		return err
 	}
+	record, snapshotErr := e.accepted.Snapshot()
+	s.mu.Unlock()
 	fail := func(err error) error {
 		e.state = "unknown"
 		s.failurePending.Store(true)
@@ -46,11 +59,11 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 	if !live() {
 		return fail(ErrUnavailable)
 	}
-	record, err := e.accepted.Snapshot()
-	if err != nil {
-		return fail(err)
+	if snapshotErr != nil {
+		return fail(snapshotErr)
 	}
 	deadline := e.authorityDeadlineNS
+	var err error
 	if record.AuthorityDeadline.After(before) {
 		deadline, err = s.absoluteDeadline(bounded, record.AuthorityDeadline)
 		if err != nil {
@@ -118,7 +131,9 @@ func (e *Execution) renewableLocked(now int64) bool {
 // Registry lookup uses the supervisor lock; mutable records belong exclusively
 // to the execution owner lock.
 func (s *Supervisor) isActiveExecution(e *Execution) bool {
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return false
+	}
 	defer s.mu.Unlock()
 	return s.admission && !s.closed && !s.failed && !s.failurePending.Load() && s.active[e.commandID] == e
 }

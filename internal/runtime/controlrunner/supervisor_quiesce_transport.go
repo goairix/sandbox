@@ -10,7 +10,9 @@ import (
 // Called only by the genuine activated TLS handshake owner. Admission closure
 // does not close management transport or cancel the finite registered worker.
 func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t.TaskQuiesceEnvelope) error {
-	s.mu.Lock()
+	if ctx.Err() != nil || !s.mu.TryLock() {
+		return ErrUnavailable
+	}
 	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || s.journal == nil {
 		s.mu.Unlock()
 		return ErrAdmissionClosed
@@ -72,7 +74,9 @@ func (s *Supervisor) dispatchTaskQuiesce(ctx context.Context, conn net.Conn, e t
 		}
 		// Pending attribution may be reported only through the original owner and
 		// its final live signing boundary. Cold or failed history cannot sign it.
-		s.mu.Lock()
+		if ctx.Err() != nil || !s.mu.TryLock() {
+			return ErrUnavailable
+		}
 		owned := s.quiescence
 		if owned == nil || owned.evidence.Context() != e.Context || owned.evidence.Digest() != e.TicketDigest {
 			s.mu.Unlock()

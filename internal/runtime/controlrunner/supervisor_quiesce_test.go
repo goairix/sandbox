@@ -152,8 +152,9 @@ func TestTaskQuiesceShutdownAcceptedBoundary(t *testing.T) {
 	for _, fault := range []string{"expired", "failure", "cancel", "closed"} {
 		t.Run(fault, func(t *testing.T) {
 			s := &Supervisor{activation: &p.TargetActivationEvidence{}}
-			a := &userQuiescenceAttempt{supervisor: s, deadline: time.Now().Add(time.Hour), acceptedWire: []byte("historical bytes")}
+			a := &userQuiescenceAttempt{supervisor: s, deadline: time.Now().Add(time.Hour), acceptedWire: []byte("historical bytes"), ready: make(chan struct{})}
 			a.self = a
+			close(a.ready)
 			s.quiescence = a
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

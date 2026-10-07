@@ -11,7 +11,9 @@ import (
 // Only the activated TLS handler reaches this dispatch. The admission mutex
 // orders closure against accepts without destroying preaccepted execution owners.
 func (s *Supervisor) dispatchTaskClose(ctx context.Context, conn net.Conn, e t.TaskCloseEnvelope) error {
-	s.mu.Lock()
+	if ctx.Err() != nil || !s.mu.TryLock() {
+		return ErrUnavailable
+	}
 	defer s.mu.Unlock()
 	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || s.journal == nil {
 		return ErrAdmissionClosed

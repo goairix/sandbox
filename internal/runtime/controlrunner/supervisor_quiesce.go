@@ -57,7 +57,9 @@ type userQuiescenceAttempt struct {
 	cancel                     context.CancelFunc
 	timer                      *isolationDeadline
 	done                       chan struct{}
-	acceptedWire, terminalWire []byte // s.mu protected; copied when exposed
+	ready                      chan struct{} // original pending owner finished; never caller-owned
+	pendingErr                 error         // immutable once ready closes
+	acceptedWire, terminalWire []byte        // s.mu protected; copied when exposed
 	err                        error
 	success                    bool
 }
@@ -72,8 +74,33 @@ func (s *Supervisor) beginUserQuiescence(ctx context.Context, request *authentic
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.mu.TryLock() {
+		return nil, ErrUnavailable
+	}
+	a, err := s.registerUserQuiescenceLocked(ctx, request)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// The caller borrows only this wait. Persistence and cleanup belong to the
+	// same already-registered coordinator, even if this context expires first.
+	select {
+	case <-a.ready:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if a.pendingErr != nil {
+		return nil, a.pendingErr
+	}
+	return a, nil
+}
+
+// Caller holds the admission mutex. This fixes ownership and the barrier only;
+// no pending journal IO can run until the single registered worker starts.
+func (s *Supervisor) registerUserQuiescenceLocked(ctx context.Context, request *authenticatedUserQuiescence) (*userQuiescenceAttempt, error) {
 	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || s.journal == nil {
 		return nil, ErrUnavailable
 	}
@@ -107,7 +134,7 @@ func (s *Supervisor) beginUserQuiescence(ctx context.Context, request *authentic
 	// D1: capture/arm before the first pending IO. Permanent closure also wins
 	// against an original start owner which has not crossed beginStartLocked.
 	t0 := time.Now()
-	a := &userQuiescenceAttempt{supervisor: s, evidence: evidence, started: t0, deadline: t0.Add(31 * time.Second), done: make(chan struct{})}
+	a := &userQuiescenceAttempt{supervisor: s, evidence: evidence, started: t0, deadline: t0.Add(31 * time.Second), done: make(chan struct{}), ready: make(chan struct{})}
 	a.self = a
 	a.context, a.cancel = context.WithDeadline(context.Background(), a.deadline)
 	s.usersClosed.Store(true)
@@ -117,28 +144,10 @@ func (s *Supervisor) beginUserQuiescence(ctx context.Context, request *authentic
 	}
 	s.quiescence = a
 	a.timer = s.armIsolationDeadline(a.deadline, "user_quiescence_deadline")
-	accepted, err := s.journal.AcceptUserQuiescence(a.context, evidence, bytes.Clone(request.originalCloseReceipt))
-	a.accepted = accepted
-	if err == nil {
-		a.acceptedWire, err = s.journal.SignUserQuiescenceAccepted(a.context, accepted, s.key)
-	}
-	if err == nil && (a.context.Err() != nil || s.failurePending.Load()) {
-		err = ErrUnavailable
-	}
-	if err != nil {
-		a.err = errors.Join(ErrExecutionUnknown, err)
-		a.acceptedWire = nil
-		a.cancel()
-		close(a.done)
-		s.failurePending.Store(true)
-		go s.isolate("user_quiescence_pending")
-		return nil, a.err
-	}
-	// Registration and the worker exist before the caller can expose acceptedWire.
-	go s.runUserQuiescence(a)
+	go s.runUserQuiescence(a, bytes.Clone(request.originalCloseReceipt))
 	return a, nil
 }
-func (s *Supervisor) runUserQuiescence(a *userQuiescenceAttempt) {
+func (s *Supervisor) runUserQuiescence(a *userQuiescenceAttempt, closeReceipt []byte) {
 	defer a.cancel()
 	defer close(a.done)
 	fail := func(err error) {
@@ -150,6 +159,38 @@ func (s *Supervisor) runUserQuiescence(a *userQuiescenceAttempt) {
 		s.mu.Unlock()
 		go s.isolate("user_quiescence_unknown")
 	}
+	// Preserve the original journal/key serialization under the admission lock.
+	// Finite request entries refuse contention; only this registered coordinator
+	// owns pending IO and may wait beyond the caller's original deadline.
+	s.mu.Lock()
+	if s.closed || s.failed || s.failurePending.Load() || a.context.Err() != nil || s.quiescence != a {
+		s.mu.Unlock()
+		fail(ErrUnavailable)
+		a.pendingErr = a.err
+		close(a.ready)
+		return
+	}
+	accepted, err := s.journal.AcceptUserQuiescence(a.context, a.evidence, closeReceipt)
+	a.accepted = accepted
+	if err == nil && (s.closed || s.failed || s.failurePending.Load() || a.context.Err() != nil || s.quiescence != a) {
+		err = ErrUnavailable
+	}
+	if err == nil {
+		a.acceptedWire, err = s.journal.SignUserQuiescenceAccepted(a.context, accepted, s.key)
+	}
+	if err == nil && (a.context.Err() != nil || s.failurePending.Load()) {
+		err = ErrUnavailable
+	}
+	if err != nil {
+		a.acceptedWire = nil
+		s.mu.Unlock()
+		fail(err)
+		a.pendingErr = a.err
+		close(a.ready)
+		return
+	}
+	s.mu.Unlock()
+	close(a.ready)
 	if err := s.stopOriginalExecutions(a.context, a.executions, a.deadline); err != nil {
 		fail(err)
 		return
@@ -247,7 +288,9 @@ func (s *Supervisor) queryUserQuiescence(ctx context.Context, expected p.TaskUse
 	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return nil, ErrExecutionUnknown
+	}
 	defer s.mu.Unlock()
 	a := s.quiescence
 	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || a == nil || a.self != a || a.supervisor != s || !a.success || a.err != nil || !s.usersClosed.Load() || a.evidence.Context() != expected || a.evidence.Digest() != digest {
@@ -302,7 +345,17 @@ func (s *Supervisor) quiescenceAcceptedReceipt(ctx context.Context, a *userQuies
 	if nilValue(ctx) {
 		return nil, ErrUnavailable
 	}
-	s.mu.Lock()
+	if a == nil || a.self != a || a.supervisor != s || a.ready == nil {
+		return nil, ErrExecutionUnknown
+	}
+	select {
+	case <-a.ready:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if !s.mu.TryLock() {
+		return nil, ErrExecutionUnknown
+	}
 	defer s.mu.Unlock()
 	if a == nil || a.self != a || a.supervisor != s || s.quiescence != a || s.closed || s.failed || s.activation == nil || s.failurePending.Load() || a.err != nil || ctx.Err() != nil || !time.Now().Before(a.deadline) {
 		return nil, ErrExecutionUnknown

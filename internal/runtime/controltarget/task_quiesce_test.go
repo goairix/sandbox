@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type quiesceFixture struct {
@@ -16,6 +17,44 @@ type quiesceFixture struct {
 	j       *Journal
 	e       controlprotocol.TaskUserQuiescenceEvidence
 	receipt []byte
+}
+
+func TestTaskQuiesceSignerRefusesJournalContention(t *testing.T) {
+	for _, seam := range []string{"accepted", "terminal-query"} {
+		t.Run(seam, func(t *testing.T) {
+			f := quiesceJournalSetup(t)
+			defer f.j.Close()
+			a, err := f.j.AcceptUserQuiescence(context.Background(), f.e, f.receipt)
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			f.j.mu.Lock()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				var wire []byte
+				var err error
+				if seam == "accepted" {
+					wire, err = f.j.SignUserQuiescenceAccepted(ctx, a, f.runtimeKey)
+				} else {
+					wire, err = f.j.SignUserQuiescenceReceipt(ctx, f.e.Context(), f.e.Digest(), nil, f.runtimeKey)
+				}
+				require.Error(t, err)
+				require.Nil(t, wire)
+			}()
+			select {
+			case <-done:
+			case <-time.After(150 * time.Millisecond):
+				t.Error("finite signer retained request behind journal mutex")
+			}
+			f.j.mu.Unlock()
+			<-done
+			// Contention itself must not poison durable pending ownership.
+			wire, err := f.j.SignUserQuiescenceAccepted(context.Background(), a, f.runtimeKey)
+			require.NoError(t, err)
+			require.NotEmpty(t, wire)
+		})
+	}
 }
 
 func quiesceJournalSetup(t *testing.T) quiesceFixture {

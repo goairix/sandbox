@@ -69,7 +69,9 @@ func (s *Supervisor) diagnostics(ctx context.Context) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return nil, ErrUnavailable
+	}
 	snap := diagnosticSnapshot{Version: 1, PID: os.Getpid(), BootID: s.birth.BootID, Gate: "closed", Active: len(s.active), ObservedAt: time.Now().UTC(), Status: map[string]string{}, Cgroup: map[string]string{}}
 	if s.admission && !s.closed && !s.failed && !s.failurePending.Load() {
 		snap.Gate = "open"

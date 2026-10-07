@@ -85,7 +85,9 @@ func (j *Journal) SignUserQuiescenceReceipt(ctx context.Context, expected p.Task
 	if j == nil || j.self != j {
 		return nil, ErrJournalUnavailable
 	}
-	j.mu.Lock()
+	if !j.mu.TryLock() {
+		return nil, ErrJournalUnavailable
+	}
 	defer j.mu.Unlock()
 	a := j.userQuiescence
 	if err := j.quiescenceTerminalLiveLocked(ctx, a, key); err != nil {

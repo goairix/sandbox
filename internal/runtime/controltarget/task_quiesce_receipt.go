@@ -14,7 +14,11 @@ func (j *Journal) SignUserQuiescenceAccepted(ctx context.Context, a *AcceptedUse
 	if j == nil || j.self != j {
 		return nil, ErrJournalUnavailable
 	}
-	j.mu.Lock()
+	// Finite transport callers may refuse contention, but never detach a signer
+	// or retain a resource borrow after their original context expires.
+	if !j.mu.TryLock() {
+		return nil, ErrJournalUnavailable
+	}
 	defer j.mu.Unlock()
 	if err := j.checkLocked(ctx, true); err != nil {
 		return nil, err

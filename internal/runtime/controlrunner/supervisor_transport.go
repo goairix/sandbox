@@ -100,7 +100,10 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 	if !s.bootstrapMu.TryLock() {
 		return
 	}
-	s.mu.Lock()
+	if bounded.Err() != nil || !s.mu.TryLock() {
+		s.bootstrapMu.Unlock()
+		return
+	}
 	config := s.tlsConfig
 	closed := s.closed || s.failed || s.failurePending.Load()
 	s.mu.Unlock()
@@ -146,7 +149,9 @@ func (s *Supervisor) serveBootstrap(ctx context.Context, conn net.Conn) {
 	if t.ReadBootstrap(conn, &request) != nil || ctx.Err() != nil || request.Version != 1 {
 		return
 	}
-	s.mu.Lock()
+	if ctx.Err() != nil || !s.mu.TryLock() {
+		return
+	}
 	closed := s.closed || s.failed || s.activation != nil || s.failurePending.Load()
 	s.mu.Unlock()
 	if closed {
@@ -187,7 +192,9 @@ func (s *Supervisor) transportContext(c p.ExecStartContext) error {
 	return s.transportExecContext(c, false)
 }
 func (s *Supervisor) transportExecContext(c p.ExecStartContext, query bool) error {
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return ErrUnavailable
+	}
 	defer s.mu.Unlock()
 	return s.transportExecContextLocked(c, query)
 }
@@ -219,7 +226,9 @@ func (s *Supervisor) dispatchTransport(ctx, streamContext context.Context, conn 
 	case "exec_query":
 		return s.queryTransport(ctx, conn, envelope)
 	case "exec_renew":
-		s.mu.Lock()
+		if ctx.Err() != nil || !s.mu.TryLock() {
+			return ErrUnavailable
+		}
 		e := s.active[envelope.Context.CommandID]
 		issuer := s.activation.IssuerCertificate()
 		s.mu.Unlock()
@@ -247,9 +256,10 @@ func (s *Supervisor) dispatchTransport(ctx, streamContext context.Context, conn 
 		}
 		return s.queryTransport(ctx, conn, envelope)
 	case "exec_start":
-		s.mu.Lock()
+		if ctx.Err() != nil || !s.mu.TryLock() {
+			return ErrUnavailable
+		}
 		issuer := s.activation.IssuerCertificate()
-		journal := s.journal
 		s.mu.Unlock()
 		if !bytes.Equal(issuer, envelope.IssuerCertificate) {
 			return ErrUnavailable
@@ -266,7 +276,17 @@ func (s *Supervisor) dispatchTransport(ctx, streamContext context.Context, conn 
 		if err != nil {
 			return err
 		}
-		old, err := journal.Lookup(ctx, envelope.Context.CommandID)
+		// Lookup shares the original admission serialization with quiescence IO.
+		// An already-handshaken request must not wait behind its journal owner.
+		if ctx.Err() != nil || !s.mu.TryLock() {
+			return ErrUnavailable
+		}
+		if err = s.transportExecContextLocked(envelope.Context, false); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		old, err := s.journal.Lookup(ctx, envelope.Context.CommandID)
+		s.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -325,7 +345,9 @@ func (s *Supervisor) queryTransport(ctx context.Context, conn net.Conn, envelope
 	return writeTransportEvent(conn, kind, wire)
 }
 func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (kind byte, wire []byte, err error) {
-	s.mu.Lock()
+	if ctx.Err() != nil || !s.mu.TryLock() {
+		return 0, nil, ErrUnavailable
+	}
 	defer s.mu.Unlock()
 	if err = s.transportExecContextLocked(envelope.Context, true); err != nil {
 		return 0, nil, err
