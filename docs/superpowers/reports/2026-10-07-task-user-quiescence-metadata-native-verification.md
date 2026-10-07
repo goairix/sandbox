@@ -47,3 +47,34 @@ The warning census contains no server error/fatal/panic event. No unexpected cli
 Independent Task3 review found two Important issues despite passing these component cases: a new claimant can replace an aborted/unresolved attempt before committed history exists, and writing issuer-registration composition lacks the required full original-claim fence at each RPC. Both are fix-round1 work and require targeted regression/native verification plus scoped independent review. This report is baseline evidence, not acceptance of that source.
 
 Task4 authenticated receipt/query composition and fresh dual-drain prerequisite, Task5 same-chain three-member metadata→protected production PID1→dual drain, production scheduler/API/Pool/Docker/Upload integration, FUSE/remote settlement, deployment/restore/Redis removal and large-existing-sandbox measurements remain required. Page progress or token absence alone grants no successful business End, remote settlement or safe owner release.
+
+## Fix round 1 — actual reservation and amended-path verification
+
+Frozen candidate `d7833e5a6354fe493723cd6d5647c105063b1f9b` adds issuer fencing, immutable task-attempt reservation, original Stage locator/pin, complete protocol preflight, coherent history and the53comparison+2Range final barrier. Root executed14 focused fresh three-member batches:14top/57sub PASS,53 actual per-case metadata fixtures, zero FAIL/SKIP. Independent scoped review remains pending. These are metadata component results, with a host authenticated target; the protected production PID1/combined chain remains Task5.
+
+| Selector suffix | Top/sub | Project suffix |
+| --- | --- | --- |
+| IssuerClaimFences |1/4|45628-1791394179475304000|
+| ReservationReconcile |1/4|46617-1791394260673761000|
+| ReservationNoReplacement |1/6|47139-1791394278481498000|
+| ReservationFence |1/5|47792-1791394297567835000|
+| ReservationDelayedPacket |1/2|47914-1791394313753312000|
+| ReservationHistory |1/4|48852-1791394331247376000|
+| StageCompatibility |1/0|48982-1791394346925665000|
+| Metadata/success |1/1|49878-1791394363756375000|
+| Metadata/budget |1/4|50042-1791394378022053000|
+| Metadata/unknown |1/8|50579-1791394391265273000|
+| Metadata/history |1/9|51549-1791394409474778000|
+| DelayedClaim |1/3|52179-1791394427343264000|
+| Pages/pagination |1/1|52728-1791394447915422000|
+| ReceiptFence |1/6|52946-1791394462628325000|
+
+All projects have prefix `sandbox-etcd-state-test-`. Exact anchored selectors, actual names/counts and new-versus-amended rationale are retained in `task-3-evidence/fix1-reservation-native-selectors.json` and `root-task3-fix1-native-audit.json`.21 new reservation cases,4 new issuer cases and one new generic Stage fixture are distinct from changed earlier uncertainty/history/budget/delayed/final/prior-receipt cases. Unaffected page-malformation, signing and postcommit families retain baseline attribution; no blanket baseline replay occurred.
+
+Actual assertions establish one reservation CAS before providers/Lease, read-only reconciliation without resend, no newer/cold claimant replacement after abort/unresolved begin/commit, exact obsolete reservation packet rejection, native reservation MOD tamper/restore rejection, coherent history association/chronology, generic Stage arbitration compatibility and per-RPC issuer claim loss. The actual final Stage packet retains58comparisons+2writes+4Else=64literal nodes while49business+1write+14reserve=64conservative charge remains.65/business-byte/full-protocol-byte cases make zero real wrapper Lease calls; changed final emptiness capture retains53+2=55. This does not prove fleet performance or atomic absence outside the freshly fenced observation.
+
+Root independently audited434 raw command stdout/stderr hashes, exits and timeouts; each actual235repository GoFiles/CgoFiles/SFiles manifest against archive/current, module inputs, four Go tool binaries and race test binary. Each batch retains exact three healthy owned full container IDs, loopback endpoints, actual member/cluster observations, final running/non-OOM members and three empty before/after cleanup inventories. Server resource settings remain unchanged from the repository fixture, with no explicit production-sized quota; this is correctness evidence only. Generated wrappers/stdlib/module-cache/native C supply chain are not separately certified. The author archive's801 copied source files independently match exact candidate Git; its wider package/test closure is separate from Root's actual compiled-input count.
+
+Logs are not pristine. Client output contains95 LeaseRevoke/NotFound and1 KV/Txn/DeadlineExceeded; full per-event attribution is retained separately. Server logs contain457 WARN and2 ERROR:285 failed-apply missing-lease events,84 HTTP+gRPC-port warnings,42 data-directory0755 warnings,42 unsigned-token warnings,4 schema-detection warnings and2 storage-version errors. Both storage-version errors and four schema warnings occur during fresh cluster startup, before Compose reports healthy and before product tests begin. Exact timestamps, members, stack traces and raw log locations are in `root-task3-fix1-schema-startup-audit.json`; they are retained as errors, not suppressed or converted into clean logs.
+
+The pinned source's [storage-version monitor](https://github.com/etcd-io/etcd/blob/v3.6.15/server/etcdserver/version/monitor.go) logs and returns when updating fails; the [server monitoring loop](https://github.com/etcd-io/etcd/blob/v3.6.15/server/etcdserver/server.go) runs again on its interval or cluster-version signal. Timing establishes startup attribution, not successful persistent schema repair. These short disposable gates do not certify storage-version migration, downgrade, backup/restore, production TLS/RBAC or filesystem permissions; deployment/recovery acceptance must validate those separately. All existing Task4/Task5, production, remote/End/release and large-existing-N obligations above remain mandatory.
