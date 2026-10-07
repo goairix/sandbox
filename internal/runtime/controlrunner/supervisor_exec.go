@@ -198,6 +198,13 @@ func (s *Supervisor) startMonitor(e *Execution, start monitorStart) error {
 		closeAll()
 		return err
 	}
+	return s.startCommittedMonitor(e, start, cmd, mono, reqR, controlR, resultW)
+}
+
+// Called immediately after the original beginStartLocked transition, with e.mu
+// still held. This transfers that same fixed monitor's Start, sole Wait and
+// result ownership; it is not another registration or replacement Start path.
+func (s *Supervisor) startCommittedMonitor(e *Execution, start monitorStart, cmd *exec.Cmd, mono int64, reqR, controlR, resultW *os.File) error {
 	e.watchdogDeadline.Store(min(e.authorityDeadlineNS, e.commandDeadlineNS) + int64(30*time.Second))
 	e.watchdog = time.NewTimer(watchdogRemaining(mono, e.authorityDeadlineNS, e.commandDeadlineNS))
 	e.watchdogDone = make(chan struct{})
@@ -213,10 +220,12 @@ func (s *Supervisor) startMonitor(e *Execution, start monitorStart) error {
 		}
 	}()
 	e.mu.Unlock()
-	if err = cmd.Start(); err != nil {
+	if err := cmd.Start(); err != nil {
 		e.cancel()
 		<-e.watchdogDone
-		closeAll()
+		for _, f := range []*os.File{reqR, e.request, controlR, e.control, e.result, resultW} {
+			f.Close()
+		}
 		return err
 	}
 	// Register sole management wait immediately, before assertions or IO errors.
