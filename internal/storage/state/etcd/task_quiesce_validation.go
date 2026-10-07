@@ -107,7 +107,7 @@ func (b *Backend) signTaskQuiescence(ctx context.Context, c *TaskClaim, d *taskQ
 		d.certificate = identity.Wire()
 	}
 	if d.issuer == nil {
-		entry, err := b.registerCommandIssuerCertificate(ctx, d.certificate, b.taskQuiescenceVerifier)
+		entry, err := b.registerTaskQuiescenceIssuer(ctx, c, d)
 		if err != nil {
 			return err
 		}
