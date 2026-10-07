@@ -3,12 +3,15 @@ package etcd
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -404,6 +407,164 @@ func TestTaskDualDrainNativeActive(t *testing.T) {
 	combinedEmit(t, "backend", "assertions_complete", "", transport.ControlSocket)
 }
 
-// The additional physical cases are added after the coherent public Active
-// slice. No infrastructure PASS is counted as their combined acceptance.
+// Only original claim renewal is allowed while time advances naturally. This
+// cannot replace the original send draft or alter any retained ticket interval.
+func (f *combinedFixture) waitOriginalClock(t *testing.T, claim *TaskClaim, until time.Time) {
+	t.Helper()
+	original := claim.Reference()
+	lastRenew := time.Now()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for time.Now().UTC().Before(until) {
+		if time.Since(lastRenew) >= 10*time.Second {
+			require.NoError(t, f.b.RenewTaskClaim(f.ctx, claim))
+			require.Equal(t, original, claim.Reference())
+			lastRenew = time.Now()
+		}
+		select {
+		case <-f.ctx.Done():
+			require.NoError(t, f.ctx.Err())
+		case <-tick.C:
+		}
+	}
+}
+
+// This is an externally delayed negative input, not a Backend send capability.
+// Fresh mutual TLS and actual application/transport EOF carry the exact frame.
+func (f *combinedFixture) delayedFrame(t *testing.T, frame []byte, token *OperationCapability) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+	config, err := p.NewManagementTLSConfig(p.ManagementTLSOptions{Verifier: f.b.execVerifier, Clock: f.clock, Credential: f.credential, PeerCertificate: f.runtimeWire, PeerRuntime: &f.identity})
+	require.NoError(t, err)
+	raw, err := f.dial(ctx)
+	require.NoError(t, err)
+	conn := tls.Client(raw, config)
+	defer conn.Close()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(closed); conn.Close() })
+	defer func() {
+		if !stop() {
+			<-closed
+		}
+	}()
+	deadline, _ := ctx.Deadline()
+	require.NoError(t, conn.SetDeadline(deadline))
+	require.NoError(t, conn.HandshakeContext(ctx))
+	// At the actual send boundary, strict native absence is a separate fact
+	// from the retained packet's expired ticket and the durable closed gate.
+	read, err := f.raw.Get(ctx, token.tokenKey)
+	require.NoError(t, err)
+	require.Empty(t, read.Kvs)
+	written, err := io.Copy(conn, bytes.NewReader(frame))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(frame)), written)
+	require.NoError(t, conn.CloseWrite())
+	require.NoError(t, raw.(*net.UnixConn).CloseWrite())
+	kind, event, err := transport.ReadEvent(conn)
+	require.NoError(t, err)
+	require.Equal(t, transport.EventError, kind, "delayed packet must produce actual target refusal")
+	t.Logf("TASK5_DELAYED_TARGET_REFUSAL original_reference=%+v frame_sha256=%s application_bytes=%d native_absent_revision=%d event_kind=%d event=%s current_runtime_not_after=%s", token.Reference(), combinedHash(frame), written, read.Header.Revision, kind, event, f.runtimeEnd.Format(time.RFC3339Nano))
+	t.Log("CannotVerify: delayed frame rejection isolates closure-only cause; expired original ticket and durable DATA/USERS gates are both possible causes")
+}
+
+func TestTaskDualDrainNativeLateArrival(t *testing.T) {
+	f := combinedSetup(t)
+	token, execution := f.prepareExec(t, "hold")
+	draft := execution.draft
+	originalRef, originalDeadline := execution.Reference(), draft.deadline
+	originalTicket := draft.ticket.Wire()
+	envelope := transport.StartEnvelope(draft.claims.Context, draft.descriptor, originalTicket, draft.issuer.Record.Certificate)
+	var retained bytes.Buffer
+	require.NoError(t, transport.WriteRequest(&retained, envelope))
+	frame := bytes.Clone(retained.Bytes())
+	require.LessOrEqual(t, len(frame), 16384)
+	decoded, err := transport.ReadRequest(bytes.NewReader(frame))
+	require.NoError(t, err)
+	require.Equal(t, envelope, decoded)
+	history, err := f.b.LoadExecEffect(f.ctx, originalRef)
+	require.NoError(t, err)
+	require.NotNil(t, history)
+	require.Equal(t, OutcomeCommitted, history.Outcome)
+	require.Equal(t, originalTicket, []byte(history.Record.Ticket))
+	t.Logf("TASK5_RETAINED_ORIGINAL_FRAME reference=%+v native_birth=%d frame_sha256=%s frame=%x ticket_not_before=%s ticket_not_after=%s original_send_deadline=%s", originalRef, history.Revision, combinedHash(frame), frame, draft.claims.NotBefore.Format(time.RFC3339Nano), draft.claims.NotAfter.Format(time.RFC3339Nano), originalDeadline)
+	claim, closeRef := f.destroyAndCloseData(t)
+	before := f.snapshot(t, claim, closeRef, execution)
+	prepared, err := f.b.PrepareTaskQuiescence(f.ctx, claim, f.destination)
+	require.NoError(t, err)
+	require.NoError(t, prepared.GuardCleanupError)
+	require.NotNil(t, prepared.Prepared)
+	require.Equal(t, OutcomeCommitted, prepared.Outcome)
+	delivered, err := f.b.DeliverTaskQuiescence(f.ctx, prepared.Prepared, f.destination)
+	require.NoError(t, err)
+	require.Equal(t, prepared.Reference, delivered.Reference)
+	receipt := f.terminal(t, claim, prepared.Reference)
+	require.Zero(t, receipt.RegisteredCount())
+	require.Zero(t, receipt.NeverSpawnedCount())
+	require.Zero(t, receipt.LocalTerminalCount())
+	emptyDigest, err := p.DigestTaskQuiescenceExecutions([]p.TaskQuiescenceExecution{})
+	require.NoError(t, err)
+	require.Equal(t, emptyDigest, receipt.ExecutionSetDigest())
+	f.expireTokens(t, claim, []*OperationCapability{token})
+	var dials atomic.Uint64
+	counted := f.newDestination(t, func(ctx context.Context) (net.Conn, error) { dials.Add(1); return f.dial(ctx) })
+	handle, err := f.b.DeliverExecEffect(f.ctx, execution, counted)
+	require.Error(t, err)
+	require.Nil(t, handle)
+	require.Zero(t, dials.Load(), "expired original Backend must refuse before dialing")
+	require.Equal(t, originalRef, execution.Reference())
+	require.Equal(t, originalDeadline, draft.deadline)
+	require.Equal(t, originalTicket, draft.ticket.Wire())
+	t.Logf("TASK5_EXPIRED_BACKEND_REFUSAL reference=%+v dial_count=%d application_bytes=0 error=%v", originalRef, dials.Load(), err)
+	pre := f.inspect(t, "late_before_external_packet")
+	require.Equal(t, float64(0), pre["active"])
+	require.Equal(t, "closed", pre["gate"])
+	f.delayedFrame(t, frame, token)
+	post := f.inspect(t, "late_after_external_packet")
+	require.Equal(t, float64(0), post["active"])
+	require.Equal(t, "closed", post["gate"])
+	require.Equal(t, pre["processes"], post["processes"], "negative packet spawned a new process")
+	queried, err := f.b.QueryTaskQuiescence(f.ctx, prepared.Reference.Task, f.destination)
+	require.NoError(t, err)
+	require.NotNil(t, queried.Receipt)
+	require.Equal(t, receipt.Wire(), queried.Receipt.Wire())
+	zero, err := f.b.PrepareAfterDualDrain(f.ctx, claim, f.destination)
+	require.NoError(t, err)
+	require.NotNil(t, zero)
+	require.Positive(t, zero.emptyRevision)
+	require.Len(t, taskEmptyComparisons(f.b, claim, zero.pin.intent, zero.pin.receipt, zero.pin.reservation), 53)
+	quiesceKey, err := f.b.namespace.taskQuiescenceKey(claim.Reference().Task)
+	require.NoError(t, err)
+	reservationKey, err := f.b.namespace.taskQuiescenceAttemptKey(claim.Reference().Task)
+	require.NoError(t, err)
+	_, receiptKey, err := f.b.stageKeys(prepared.Reference.Stage)
+	require.NoError(t, err)
+	combinedUnchanged(t, before, f.snapshot(t, claim, closeRef, execution), map[string]bool{quiesceKey: true, reservationKey: true, receiptKey: true}, map[int64]bool{token.Reference().LeaseID: true, claim.Reference().LeaseID: true, f.creationLease: true})
+	f.members(t, "after_late_positive")
+	// Cross the retained certificate end using actual independent current clocks.
+	// Original claimant renewal changes no captured send/ticket interval.
+	f.waitOriginalClock(t, claim, f.runtimeEnd.Add(2*time.Second))
+	require.True(t, time.Now().UTC().After(f.runtimeEnd))
+	session, tlsErr := counted.Open(f.ctx)
+	require.Error(t, tlsErr)
+	require.Nil(t, session)
+	require.Equal(t, uint64(1), dials.Load(), "fresh TLS expiry failure must actually dial")
+	dials.Store(0)
+	failedQuery, queryErr := f.b.QueryTaskQuiescence(f.ctx, prepared.Reference.Task, counted)
+	require.Error(t, queryErr)
+	require.Nil(t, failedQuery.Receipt)
+	require.Nil(t, failedQuery.Accepted)
+	require.Equal(t, prepared.Reference, failedQuery.Reference)
+	require.Zero(t, dials.Load(), "public query must reject expired current certificate before dial")
+	failedZero, zeroErr := f.b.PrepareAfterDualDrain(f.ctx, claim, counted)
+	require.Error(t, zeroErr)
+	require.Nil(t, failedZero)
+	require.Zero(t, dials.Load())
+	require.Equal(t, originalDeadline, draft.deadline)
+	require.Equal(t, originalTicket, draft.ticket.Wire())
+	t.Logf("TASK5_REAL_CURRENT_CERTIFICATE_EXPIRY not_after=%s observed_utc=%s fresh_tls_dials=1 backend_query_dials=0 prerequisite_dials=0 application_bytes=0 tls_error=%v query_error=%v prerequisite_error=%v", f.runtimeEnd.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), tlsErr, queryErr, zeroErr)
+	t.Log("CannotVerify: forced public registered-before-spawn/Start-in-flight timing; Task2 deterministic component attribution retained. Management authenticated success precedes original certificate expiry; target daemon remains alive with fresh authentication refusal afterwards.")
+	combinedEmit(t, "backend", "assertions_complete", "", transport.ControlSocket)
+}
+
 var _ io.Writer = (*combinedOutput)(nil)

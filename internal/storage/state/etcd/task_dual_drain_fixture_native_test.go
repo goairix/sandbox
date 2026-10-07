@@ -419,6 +419,7 @@ type combinedFixture struct {
 	clock         *combinedClock // independent backend observation source
 	identity      p.RuntimeIdentityContext
 	runtimeWire   []byte
+	runtimeEnd    time.Time
 	credential    *p.ManagementTLSCredential
 	destination   *transport.Destination
 	input         AcquireIntentInput
@@ -562,9 +563,17 @@ func combinedSetup(t *testing.T) *combinedFixture {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, mount.Outcome)
 	require.Zero(t, mount.Mount.Record.MountAttempt)
-	f.runtimeWire, err = p.SignRuntimeIdentityCertificate(s.Root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: n.Root(), AuthorityID: binding.AuthorityID, Target: "docker", RestoreEpoch: binding.RestoreEpoch, PublicKey: hello.Birth.RuntimePublicKey, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(35 * time.Minute), SandboxID: f.identity.SandboxID, WorkspaceHash: f.identity.WorkspaceHash, Generation: f.identity.Generation, Runtime: runtimeRef})
+	// The fixed LateArrival selector chooses its original interval before this
+	// birth is activated. It never replaces or extends an existing certificate.
+	f.runtimeEnd = now.Add(35 * time.Minute)
+	activationEnd := now.Add(20 * time.Minute)
+	if t.Name() == "TestTaskDualDrainNativeLateArrival" {
+		f.runtimeEnd = now.Add(65 * time.Second)
+		activationEnd = f.runtimeEnd
+	}
+	f.runtimeWire, err = p.SignRuntimeIdentityCertificate(s.Root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: n.Root(), AuthorityID: binding.AuthorityID, Target: "docker", RestoreEpoch: binding.RestoreEpoch, PublicKey: hello.Birth.RuntimePublicKey, NotBefore: now.Add(-time.Minute), NotAfter: f.runtimeEnd, SandboxID: f.identity.SandboxID, WorkspaceHash: f.identity.WorkspaceHash, Generation: f.identity.Generation, Runtime: runtimeRef})
 	require.NoError(t, err)
-	activation, err := p.SignTargetActivation(s.Root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: f.identity, DataGateEpoch: claim.control.DataGateEpoch, UID: 1000, GID: 1000, NetworkAllowed: false, ContractDigest: s.Observation.ContractDigest, RuntimeCertificateDigest: combinedHash(f.runtimeWire), IssuerCertificateDigest: combinedHash(s.IssuerWire), NotBefore: now.Add(-3 * time.Second), NotAfter: now.Add(20 * time.Minute)})
+	activation, err := p.SignTargetActivation(s.Root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: f.identity, DataGateEpoch: claim.control.DataGateEpoch, UID: 1000, GID: 1000, NetworkAllowed: false, ContractDigest: s.Observation.ContractDigest, RuntimeCertificateDigest: combinedHash(f.runtimeWire), IssuerCertificateDigest: combinedHash(s.IssuerWire), NotBefore: now.Add(-3 * time.Second), NotAfter: activationEnd})
 	require.NoError(t, err)
 	var activated transport.BootstrapResponse
 	combinedBootstrap(t, ctx, transport.BootstrapRequest{Version: 1, Purpose: "activate", Activation: activation, RuntimeCertificate: f.runtimeWire, IssuerCertificate: s.IssuerWire}, &activated)
@@ -585,7 +594,7 @@ func combinedSetup(t *testing.T) *combinedFixture {
 	published, err := f.b.PublishRuntime(ctx, claim, ready)
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, published.Outcome)
-	t.Logf("TASK5_ACTIVATION identity=%+v runtime_cert=%s publication_cert=%s issuer=%s activation=%s", f.identity, combinedHash(f.runtimeWire), combinedHash(publication), issuer.identity.Digest(), combinedHash(activation))
+	t.Logf("TASK5_ACTIVATION identity=%+v runtime_cert=%s runtime_not_after=%s activation_not_after=%s publication_cert=%s issuer=%s activation=%s", f.identity, combinedHash(f.runtimeWire), f.runtimeEnd.Format(time.RFC3339Nano), activationEnd.Format(time.RFC3339Nano), combinedHash(publication), issuer.identity.Digest(), combinedHash(activation))
 	return f
 }
 func (f *combinedFixture) dial(ctx context.Context) (net.Conn, error) {
