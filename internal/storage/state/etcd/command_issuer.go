@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
+
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -32,11 +34,17 @@ func (b *Backend) RegisterExecIssuer(ctx context.Context) (*CommandIssuerEntry, 
 	if err := bounded.Err(); err != nil {
 		return nil, err
 	}
+	return b.registerCommandIssuerCertificate(bounded, certificate, b.execVerifier)
+}
+
+// registerCommandIssuerCertificate shares the immutable registration protocol,
+// not provider selection. Callers own the certificate and bounded context.
+func (b *Backend) registerCommandIssuerCertificate(bounded context.Context, certificate []byte, verifier *controlprotocol.ManagementVerifier) (*CommandIssuerEntry, error) {
 	now, err := b.observePublicationClock(bounded)
 	if err != nil {
 		return nil, err
 	}
-	identity, err := b.execVerifier.VerifyCommandIssuerCertificate(certificate, now)
+	identity, err := verifier.VerifyCommandIssuerCertificate(certificate, now)
 	if err != nil {
 		return nil, fmt.Errorf("%w: command issuer certificate: %v", ErrInvalidRecord, err)
 	}

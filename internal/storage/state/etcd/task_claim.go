@@ -28,6 +28,7 @@ type TaskClaim struct {
 	mu                                       sync.Mutex
 	deadline                                 time.Time
 	lost                                     bool
+	closeDraft                               *taskCloseDraft
 }
 
 func (c *TaskClaim) Reference() TaskClaimReference {

@@ -104,7 +104,7 @@ func decodeTaskCloseDataRecord(kv *mvccpb.KeyValue, dst *TaskCloseDataRecord) er
 		return ErrCorruptRecord
 	}
 	r := w.record()
-	if r.Validate() != nil {
+	if r.Validate() != nil || kv.CreateRevision <= r.Claim.CreateRevision || kv.CreateRevision <= r.IssuerRevision {
 		return ErrCorruptRecord
 	}
 	expected := fmt.Sprintf("%sp/%02x/tasks/%s/close-data", r.Task.Reference.Namespace, r.Task.Reference.Partition, r.Task.Reference.TaskID)

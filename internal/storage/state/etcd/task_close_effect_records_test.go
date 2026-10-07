@@ -170,3 +170,28 @@ func TestTaskCloseSchema(t *testing.T) {
 	require.NoError(t, e)
 	reject(t, public)
 }
+
+func TestTaskCloseRecordBirth(t *testing.T) {
+	r := taskCloseRecordFixture(t)
+	n := namespaceFromTaskCloseTest(t, r.Task.Reference)
+	key, e := n.taskCloseDataKey(r.Task.Reference)
+	require.NoError(t, e)
+	for _, fault := range []string{"claim-at-intent", "issuer-at-intent", "issuer-after-intent"} {
+		t.Run(fault, func(t *testing.T) {
+			x := r
+			revision := r.Claim.CreateRevision
+			if fault != "claim-at-intent" {
+				revision = 50
+				x.IssuerRevision = revision
+				if fault == "issuer-after-intent" {
+					x.IssuerRevision++
+				}
+			}
+			wire, e := encodeTaskCloseDataRecord(x)
+			require.NoError(t, e)
+			var dst TaskCloseDataRecord
+			require.Error(t, decodeTaskCloseDataRecord(&mvccpb.KeyValue{Key: []byte(key), Value: []byte(wire), CreateRevision: revision, ModRevision: revision}, &dst))
+			require.Equal(t, TaskCloseDataRecord{}, dst)
+		})
+	}
+}

@@ -42,3 +42,28 @@ func (r TaskCloseDataReference) Validate() error {
 func validTaskCloseAttempt(l StageAttemptLocator, r TaskReference, claimID string) bool {
 	return taskAttemptMatches(l, r) && validPreparationUUID(l.AttemptID) && validPreparationUUID(claimID) && l.RequestID == claimID && l.StageID == "task_close_data"
 }
+
+// PrepareTaskCloseDataResult separates permanent metadata from live dispatch.
+// A known commit may have no Prepared after local or authority loss.
+type PrepareTaskCloseDataResult struct {
+	Outcome           Outcome
+	Reference         TaskCloseDataReference
+	Prepared          *PreparedTaskCloseData
+	GuardCleanupError error
+}
+
+// PreparedTaskCloseData can only originate in this Backend's original claim.
+// No public accessor exposes a ticket or reconstructs live authority.
+type PreparedTaskCloseData struct {
+	self   *PreparedTaskCloseData
+	origin *Backend
+	claim  *TaskClaim
+	draft  *taskCloseDraft
+}
+
+func (p *PreparedTaskCloseData) Reference() TaskCloseDataReference {
+	if p == nil || p.draft == nil {
+		return TaskCloseDataReference{}
+	}
+	return p.draft.reference
+}
