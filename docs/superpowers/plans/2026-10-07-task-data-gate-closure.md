@@ -44,10 +44,10 @@
 
 **Interfaces:** Consume Task1 evidence; produce `TaskDataCloseRecord{Version uint32; State string; Context controlprotocol.TaskCloseDataContext; TicketDigest string; NotBefore,NotAfter time.Time}` and Journal.CloseData/LookupDataClose exactly as spec. Own fixed file data-close.json; no signed receipt production in journal.
 
-- [ ] **Step1:** Pin actual syscall pending->gate->closed ordering, ambiguous write/file-sync/rename/dir-sync at each phase, clock/cancel before/after IO, origin/cold/birth/issuer/restore mismatch, identical replay/different claim conflict, immutable caller copies, hard capacity/85% behavior, cold pending/closed and preserved temp accounting. No closed proof from initial/local CloseGate alone.
-- [ ] **Step2:** Implement strict fixed record codec, original ticket reauthentication, one-way persistence and exact point lookup; cold scan remains bounded128names/256buckets and diagnostics only. Existing formats/exec records unchanged.
-- [ ] **Step3:** Focused race/vet/diff; propose named changed-seam Linux journal selector/freeze to Root for real protected IO, preserve full evidence. No Docker launch by worker.
-- [ ] **Step4:** Small verified commits/report/independent review. Task3 may execute in parallel in disjoint etcd files after Task1 acceptance; no Task4 until both accepted.
+- [x] **Step1:** Pin actual syscall pending->gate->closed ordering, ambiguous write/file-sync/rename/dir-sync at each phase, clock/cancel before/after IO, origin/cold/birth/issuer/restore mismatch, identical replay/different claim conflict, immutable caller copies, hard capacity/85% behavior, cold pending/closed and preserved temp accounting. No closed proof from initial/local CloseGate alone.
+- [x] **Step2:** Implement strict fixed record codec, original ticket reauthentication, one-way persistence and exact point lookup; cold scan remains bounded128names/256buckets and diagnostics only. Existing formats/exec records unchanged.
+- [x] **Step3:** Focused race/vet/diff; propose named changed-seam Linux journal selector/freeze to Root for real protected IO, preserve full evidence. No Docker launch by worker.
+- [x] **Step4:** Small verified commits/report/independent review. Task3 may execute in parallel in disjoint etcd files after Task1 acceptance; no Task4 until both accepted.
 
 ### Task 3: Original-claim-fenced permanent CloseData intent
 
