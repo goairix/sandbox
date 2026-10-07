@@ -32,7 +32,7 @@ if mode!='freeze' or len(archargs)!=1 or archargs[0] not in ('amd64','arm64'): r
 arch=archargs[0]
 out.mkdir(mode=0o700)
 paths=subprocess.check_output(['rg','--files','-g','*.go','-g','*.sh','-g','go.mod','-g','go.sum'],cwd=root,text=True).splitlines()
-manifest={'version':1,'started_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'base':'a671f93d2b00f2b31c32889a8d5b8c9f1bc129c1','head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'sources':{},'executables':{},'compiler':{},'selectors':['^TestAuthenticatedTargetInitialize$','^TestAuthenticatedTargetNativeSuccess$'],'scope':'single-member native metadata and actual production PID1; no fleet or three-member failover claim'}
+manifest={'version':1,'started_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'base':'a671f93d2b00f2b31c32889a8d5b8c9f1bc129c1','head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'sources':{},'executables':{},'compiler':{},'selectors':['^TestAuthenticatedTargetInitialize$','^TestAuthenticatedTargetNativeSuccess$','^TestAuthenticatedTargetNativeFences$','^TestAuthenticatedTargetNativeLifecycle$','^TestAuthenticatedTargetNativeFrames$','^TestAuthenticatedTargetNativeStreamLoss$','^TestAuthenticatedTargetNativeStartFailure$'],'scope':'single-member native metadata and actual production PID1; no fleet or three-member failover claim'}
 for name in sorted(paths):
     source=root/name
     manifest['sources'][name]=digest(source)

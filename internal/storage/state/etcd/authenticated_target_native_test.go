@@ -136,11 +136,14 @@ func TestAuthenticatedTargetInitialize(t *testing.T) {
 	fmt.Println("AUTHENTICATED_INIT_COMPLETE", observation.Project, observation.TargetID, observation.MetadataID)
 }
 
-type nativeClock struct{ calls atomic.Int64 }
+type nativeClock struct {
+	calls    atomic.Int64
+	offsetNS atomic.Int64
+}
 
 func (c *nativeClock) Observe(ctx context.Context) (p.ClockObservation, error) {
 	c.calls.Add(1)
-	return p.ClockObservation{UTC: time.Now().UTC(), Uncertainty: time.Millisecond}, ctx.Err()
+	return p.ClockObservation{UTC: time.Now().UTC().Add(time.Duration(c.offsetNS.Load())), Uncertainty: time.Millisecond}, ctx.Err()
 }
 
 type nativeIssuer struct {
@@ -260,14 +263,15 @@ func nativeSecretRead(t *testing.T) nativeSecret {
 }
 
 type nativeExecutionFixture struct {
-	b           *Backend
-	raw         *clientv3.Client
-	destination *transport.Destination
-	input       AcquireIntentInput
-	clock       *nativeClock
-	secret      nativeSecret
-	identity    p.RuntimeIdentityContext
-	runtimeWire []byte
+	b            *Backend
+	raw          *clientv3.Client
+	destination  *transport.Destination
+	input        AcquireIntentInput
+	clock        *nativeClock
+	secret       nativeSecret
+	identity     p.RuntimeIdentityContext
+	runtimeWire  []byte
+	queryControl *ExecDeliveryHandle
 }
 
 func nativeExecutionSetup(t *testing.T) *nativeExecutionFixture {
