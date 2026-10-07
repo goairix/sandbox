@@ -34,6 +34,7 @@ type Options struct {
 	PublicationTrust      *RuntimePublicationTrust
 	Clock                 AuthorityClock
 	ExecIssuer            ExecCommandIssuer
+	TaskIssuer            TaskCommandIssuer
 }
 
 type Backend struct {
@@ -47,6 +48,8 @@ type Backend struct {
 	requestTimeout                            time.Duration
 	publicationVerifier                       *controlprotocol.PublicationVerifier
 	execIssuer                                ExecCommandIssuer
+	taskIssuer                                TaskCommandIssuer
+	taskVerifier                              *controlprotocol.ManagementVerifier
 	execVerifier                              *controlprotocol.ManagementVerifier
 	authorityClock                            AuthorityClock
 	publicationAuthorityID, publicationTarget string
@@ -58,6 +61,9 @@ func validateOptions(o Options) error {
 		return err
 	}
 	if _, err := execAuthority(o); err != nil {
+		return err
+	}
+	if _, err := taskAuthority(o); err != nil {
 		return err
 	}
 	if _, err := NewNamespace(o.Namespace.prefix, o.Namespace.scope, o.Namespace.cell); err != nil {
@@ -156,6 +162,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	taskVerifier, err := taskAuthority(o)
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig, err := cloneTLSConfig(o.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: clone TLS certificate: %v", ErrInvalidConfiguration, err)
@@ -172,6 +182,8 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout}
 	b.publicationVerifier = verifier
 	b.execIssuer = o.ExecIssuer
+	b.taskIssuer = o.TaskIssuer
+	b.taskVerifier = taskVerifier
 	b.execVerifier = execVerifier
 	b.authorityClock = o.Clock
 	if o.PublicationTrust != nil {

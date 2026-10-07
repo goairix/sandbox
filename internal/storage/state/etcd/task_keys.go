@@ -59,3 +59,11 @@ func (n Namespace) taskCheckpointKey(r TaskReference) (string, error) {
 	}
 	return n.Key(append(parts, "checkpoint")...)
 }
+
+func (n Namespace) taskCloseDataKey(r TaskReference) (string, error) {
+	parts, err := n.taskKeyParts(r)
+	if err != nil {
+		return "", err
+	}
+	return n.Key(append(parts, "close-data")...)
+}
