@@ -35,6 +35,7 @@ type Options struct {
 	Clock                 AuthorityClock
 	ExecIssuer            ExecCommandIssuer
 	TaskIssuer            TaskCommandIssuer
+	TaskQuiescenceIssuer  TaskQuiescenceIssuer
 }
 
 type Backend struct {
@@ -49,6 +50,8 @@ type Backend struct {
 	publicationVerifier                       *controlprotocol.PublicationVerifier
 	execIssuer                                ExecCommandIssuer
 	taskIssuer                                TaskCommandIssuer
+	taskQuiescenceIssuer                      TaskQuiescenceIssuer
+	taskQuiescenceVerifier                    *controlprotocol.ManagementVerifier
 	taskVerifier                              *controlprotocol.ManagementVerifier
 	execVerifier                              *controlprotocol.ManagementVerifier
 	authorityClock                            AuthorityClock
@@ -64,6 +67,9 @@ func validateOptions(o Options) error {
 		return err
 	}
 	if _, err := taskAuthority(o); err != nil {
+		return err
+	}
+	if _, err := taskQuiescenceAuthority(o); err != nil {
 		return err
 	}
 	if _, err := NewNamespace(o.Namespace.prefix, o.Namespace.scope, o.Namespace.cell); err != nil {
@@ -166,6 +172,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	quiescenceVerifier, err := taskQuiescenceAuthority(o)
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig, err := cloneTLSConfig(o.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: clone TLS certificate: %v", ErrInvalidConfiguration, err)
@@ -183,6 +193,8 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b.publicationVerifier = verifier
 	b.execIssuer = o.ExecIssuer
 	b.taskIssuer = o.TaskIssuer
+	b.taskQuiescenceIssuer = o.TaskQuiescenceIssuer
+	b.taskQuiescenceVerifier = quiescenceVerifier
 	b.taskVerifier = taskVerifier
 	b.execVerifier = execVerifier
 	b.authorityClock = o.Clock

@@ -67,3 +67,11 @@ func (n Namespace) taskCloseDataKey(r TaskReference) (string, error) {
 	}
 	return n.Key(append(parts, "close-data")...)
 }
+
+func (n Namespace) taskQuiescenceKey(r TaskReference) (string, error) {
+	parts, err := n.taskKeyParts(r)
+	if err != nil {
+		return "", err
+	}
+	return n.Key(append(parts, "quiesce-users")...)
+}
