@@ -40,14 +40,19 @@ func initializeKernel(role kernelRole) (*KernelBoundary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &KernelBoundary{role: role, pid: after.PID, verified: after}, nil
+	b := &KernelBoundary{role: role, pid: after.PID, verified: after}
+	b.self = b
+	return b, nil
 }
 
 // ValidateCurrent refreshes diagnostics by inspecting the actual kernel. It makes
 // no changes and does not turn this handle into an execution authorization.
 func (b *KernelBoundary) ValidateCurrent() error {
-	if b == nil {
+	if b == nil || b.self == nil {
 		return ErrKernelUnavailable
+	}
+	if b.self != b {
+		return fmt.Errorf("%w: copied kernel boundary", ErrUnsafeKernel)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()

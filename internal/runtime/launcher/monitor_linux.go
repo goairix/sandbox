@@ -23,8 +23,11 @@ var monitorInitialization struct {
 // begins, any failure requires process termination; the layer is never repaired
 // or rolled back. This handle grants no execution permission.
 func ConfineMonitor(kernel *KernelBoundary, uid, gid uint32) (*MonitorBoundary, error) {
-	if kernel == nil {
+	if kernel == nil || kernel.self == nil {
 		return nil, ErrKernelUnavailable
+	}
+	if kernel.self != kernel {
+		return nil, fmt.Errorf("%w: copied kernel boundary", ErrUnsafeKernel)
 	}
 	kernel.mu.Lock()
 	valid := kernel.role == roleMonitor && kernel.pid == os.Getpid() && kernel.pid > 1

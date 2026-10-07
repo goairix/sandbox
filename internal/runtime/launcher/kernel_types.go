@@ -35,13 +35,14 @@ const (
 
 type KernelBoundary struct {
 	mu       sync.Mutex
+	self     *KernelBoundary
 	role     kernelRole
 	pid      int
 	verified KernelSnapshot
 }
 
 func (b *KernelBoundary) Snapshot() KernelSnapshot {
-	if b == nil {
+	if b == nil || b.self != b {
 		return KernelSnapshot{}
 	}
 	b.mu.Lock()

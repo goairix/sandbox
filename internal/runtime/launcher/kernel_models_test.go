@@ -110,6 +110,7 @@ func TestKernelHandles(t *testing.T) {
 		}
 	}
 	b := &KernelBoundary{verified: KernelSnapshot{PID: 1, Threads: 4}}
+	b.self = b
 	s := b.Snapshot()
 	s.Threads = 77
 	if b.Snapshot().Threads != 4 {
