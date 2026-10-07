@@ -69,3 +69,16 @@ func TestTaskQuiesceTerminalOriginalExecutions(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskQuiesceTerminalRejectsInconsistentPrivateKey(t *testing.T) {
+	f := quiesceJournalSetup(t)
+	ctx := context.Background()
+	a, err := f.j.AcceptUserQuiescence(ctx, f.e, f.receipt)
+	require.NoError(t, err)
+	bad := append([]byte(nil), f.runtimeKey...)
+	bad[0] ^= 1
+	wire, err := f.j.CompleteUserQuiescence(ctx, a, nil, nil, bad)
+	require.ErrorIs(t, err, ErrIdentityMismatch)
+	require.Nil(t, wire)
+	require.False(t, f.j.Status().Poisoned)
+}

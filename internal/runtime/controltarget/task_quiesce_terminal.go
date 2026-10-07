@@ -113,7 +113,7 @@ func (j *Journal) quiescenceTerminalLiveLocked(ctx context.Context, a *AcceptedU
 	if err := j.taskCloseInstalledLocked(); err != nil {
 		return err
 	}
-	if len(key) != ed25519.PrivateKeySize || !bytes.Equal(key[32:], j.birth.RuntimePublicKey) {
+	if len(key) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(key[:ed25519.SeedSize]), key) || !bytes.Equal(key[32:], j.birth.RuntimePublicKey) {
 		return ErrIdentityMismatch
 	}
 	return j.authenticateTaskQuiescenceReceiptLocked(ctx, a.record)
