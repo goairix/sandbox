@@ -102,3 +102,46 @@ func TestTaskQuiesceTransportActualTLSAndEOF(t *testing.T) {
 	require.NoError(t, <-done)
 	require.Error(t, s.SendTaskQuiesce(ctx, e), "one finite request")
 }
+
+func TestTaskQuiesceTransportTLSRejectsForeignPeerAndCurrentClock(t *testing.T) {
+	for _, fault := range []string{"foreign-peer", "expired-current-clock"} {
+		t.Run(fault, func(t *testing.T) {
+			o, server, _, clock, _, _ := destinationFixture(t)
+			if fault == "foreign-peer" {
+				_, server, _, _, _, _ = destinationFixture(t)
+			} else {
+				clock.now = clock.now.Add(2 * time.Hour)
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer listener.Close()
+			o.Dial = func(ctx context.Context) (net.Conn, error) {
+				var dial net.Dialer
+				return dial.DialContext(ctx, "tcp", listener.Addr().String())
+			}
+			d, err := NewDestination(o)
+			require.NoError(t, err)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				raw, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer raw.Close()
+				raw.SetDeadline(time.Now().Add(time.Second))
+				_ = tls.Server(raw, server).Handshake()
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			s, err := d.Open(ctx)
+			require.Error(t, err)
+			require.Nil(t, s)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handshake owner unjoined")
+			}
+		})
+	}
+}
