@@ -64,9 +64,9 @@ func TestRootLifecycleReadiness(t *testing.T) {
 	})
 	t.Run("origin-before-lock-and-context-bound", func(t *testing.T) {
 		l := newRootLifecycle(1)
-		l.mu.Lock()
-		copy := *l
-		l.mu.Unlock()
+		copy := RootLifecycle{self: l, pid: l.pid, deadline: l.deadline, registered: l.registered, running: l.running, closed: l.closed, requests: l.requests, done: l.done, ready: l.ready}
+		copy.mu.Lock()
+		defer copy.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		done := make(chan error, 1)

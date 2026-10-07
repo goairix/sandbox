@@ -26,18 +26,8 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	live := func() bool {
-		now, err := monitorMonotonic()
-		if err != nil || e.state != "accepted" || e.rootPID <= 1 || e.terminalSeen.Load() || now >= e.authorityDeadlineNS || now >= e.commandDeadlineNS {
-			return false
-		}
-		select {
-		case <-e.waitDone:
-			return false
-		default:
-			return true
-		}
-	}
+	live := func() bool { now, err := monitorMonotonic(); return err == nil && e.renewableLocked(now) }
+
 	if !live() {
 		return ErrUnavailable
 	}
@@ -110,5 +100,19 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 		return fail(ErrUnavailable)
 	case <-bounded.Done():
 		return fail(bounded.Err())
+	}
+}
+
+// Called while the original execution owner mutex is held. Atomic target failure
+// remains observable even when isolation cannot acquire that same mutex.
+func (e *Execution) renewableLocked(now int64) bool {
+	if e.supervisor.failurePending.Load() || e.state != "accepted" || e.rootPID <= 1 || e.terminalSeen.Load() || now >= e.authorityDeadlineNS || now >= e.commandDeadlineNS {
+		return false
+	}
+	select {
+	case <-e.waitDone:
+		return false
+	default:
+		return true
 	}
 }
