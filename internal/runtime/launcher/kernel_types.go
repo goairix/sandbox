@@ -39,6 +39,7 @@ type KernelBoundary struct {
 	role     kernelRole
 	pid      int
 	verified KernelSnapshot
+	seal     *pid1Seal
 }
 
 func (b *KernelBoundary) Snapshot() KernelSnapshot {

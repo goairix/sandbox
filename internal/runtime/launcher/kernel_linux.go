@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -42,6 +43,14 @@ func initializeKernel(role kernelRole) (*KernelBoundary, error) {
 	}
 	b := &KernelBoundary{role: role, pid: after.PID, verified: after}
 	b.self = b
+	if role == rolePID1 {
+		seal, proc, err := capturePID1Seal(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		proc.Close()
+		b.seal = &seal
+	}
 	return b, nil
 }
 
@@ -65,6 +74,19 @@ func (b *KernelBoundary) ValidateCurrent() error {
 	s, err := inspectKernel(b.role, false)
 	if err != nil {
 		return err
+	}
+	if b.role == rolePID1 {
+		if b.seal == nil {
+			return ErrKernelUnavailable
+		}
+		seal, proc, err := capturePID1Seal(context.Background())
+		if err != nil {
+			return err
+		}
+		proc.Close()
+		if seal != *b.seal {
+			return ErrUnsafeKernel
+		}
 	}
 	b.verified = s
 	return nil
