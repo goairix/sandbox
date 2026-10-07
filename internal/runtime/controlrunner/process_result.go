@@ -98,15 +98,22 @@ func readMonitorRequest(r io.Reader) (monitorStart, error) {
 	return start, nil
 }
 
+type monitorFD struct {
+	FD     int    `json:"fd"`
+	Target string `json:"target"`
+	Flags  int    `json:"flags"`
+}
+
 type monitorReady struct {
-	Completed     bool   `json:"completed"`
-	RootPID       int    `json:"root_pid"`
-	MonitorPID    int    `json:"monitor_pid"`
-	FDCount       int    `json:"fd_count"`
-	Status        string `json:"status"`
-	Cgroup        string `json:"cgroup"`
-	MemoryCurrent string `json:"memory_current"`
-	MemoryPeak    string `json:"memory_peak"`
-	PidsCurrent   string `json:"pids_current"`
-	ElapsedNS     int64  `json:"elapsed_ns"`
+	FDs           []monitorFD `json:"fds"`
+	Completed     bool        `json:"completed"`
+	RootPID       int         `json:"root_pid"`
+	MonitorPID    int         `json:"monitor_pid"`
+	FDCount       int         `json:"fd_count"`
+	Status        string      `json:"status"`
+	Cgroup        string      `json:"cgroup"`
+	MemoryCurrent string      `json:"memory_current"`
+	MemoryPeak    string      `json:"memory_peak"`
+	PidsCurrent   string      `json:"pids_current"`
+	ElapsedNS     int64       `json:"elapsed_ns"`
 }

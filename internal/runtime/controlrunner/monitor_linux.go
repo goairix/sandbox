@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -408,7 +409,26 @@ func resolveUserExecutable(r controlprotocol.ExecutionRequest) (string, error) {
 func collectMonitorReady(root int, elapsed time.Duration) monitorReady {
 	r := monitorReady{RootPID: root, MonitorPID: os.Getpid(), FDCount: -1, ElapsedNS: elapsed.Nanoseconds()}
 	if files, e := os.ReadDir("/proc/self/fd"); e == nil {
-		r.FDCount = len(files)
+		r.FDCount = 0
+		for _, file := range files {
+			if len(r.FDs) >= 64 {
+				break
+			}
+			fd, err := strconv.Atoi(file.Name())
+			if err != nil {
+				continue
+			}
+			target, err := os.Readlink("/proc/self/fd/" + file.Name())
+			if err != nil {
+				continue
+			}
+			flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+			if err != nil {
+				continue
+			}
+			r.FDs = append(r.FDs, monitorFD{FD: fd, Target: target, Flags: flags})
+			r.FDCount++
+		}
 	}
 	read := func(path string) string {
 		f, e := os.Open(path)

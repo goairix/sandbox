@@ -263,7 +263,11 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 			if errors.Is(readErr, io.EOF) && completion != nil {
 				break
 			}
-			fail("monitor_lost")
+			if errors.Is(readErr, os.ErrDeadlineExceeded) {
+				fail("monitor_watchdog")
+			} else {
+				fail("monitor_lost")
+			}
 			return
 		}
 		if completion != nil {
