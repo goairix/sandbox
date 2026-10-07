@@ -468,6 +468,38 @@ func (f *combinedFixture) delayedFrame(t *testing.T, frame []byte, token *Operat
 	t.Log("CannotVerify: delayed frame rejection isolates closure-only cause; expired original ticket and durable DATA/USERS gates are both possible causes")
 }
 
+func combinedAssertOriginalFrame(t *testing.T, original transport.Envelope, frame []byte, decoded transport.Envelope) {
+	t.Helper()
+	// ReadRequest represents a zero-length body with a nonnil empty slice;
+	// stdin's Go allocation shape is not part of the canonical wire contract.
+	// Re-encoding both envelopes checks every header/body byte, not selected
+	// fields, and retains the complete original frame and hash unchanged.
+	var originalWire, decodedWire bytes.Buffer
+	require.NoError(t, transport.WriteRequest(&originalWire, original))
+	require.NoError(t, transport.WriteRequest(&decodedWire, decoded))
+	require.Equal(t, frame, originalWire.Bytes())
+	require.Equal(t, frame, decodedWire.Bytes())
+	require.Equal(t, combinedHash(frame), combinedHash(decodedWire.Bytes()))
+}
+
+// Structural codec regression only: the opaque ticket/issuer bytes below grant
+// no authority and are never sent or accepted as a native fixture result.
+func TestTaskDualDrainFixtureOriginalFrameCodec(t *testing.T) {
+	descriptor, err := p.NewExecutionDescriptor(p.ExecutionRequest{Argv: []string{"/native/combined-user", "hold"}, Env: map[string]string{"PATH": "/native", "GOMAXPROCS": "2"}, UID: 1000, GID: 1000, WorkDir: "/", TimeoutSeconds: 60})
+	require.NoError(t, err)
+	original := transport.StartEnvelope(p.ExecStartContext{}, descriptor, []byte("codec-only-ticket"), []byte("codec-only-issuer"))
+	var wire bytes.Buffer
+	require.NoError(t, transport.WriteRequest(&wire, original))
+	decoded, err := transport.ReadRequest(bytes.NewReader(wire.Bytes()))
+	require.NoError(t, err)
+	require.Nil(t, original.Stdin)
+	require.NotNil(t, decoded.Stdin)
+	require.Empty(t, decoded.Stdin)
+	combinedAssertOriginalFrame(t, original, wire.Bytes(), decoded)
+	_, err = transport.ReadRequest(bytes.NewReader(append(bytes.Clone(wire.Bytes()), 0)))
+	require.Error(t, err, "exact original application frame requires genuine EOF")
+}
+
 func TestTaskDualDrainNativeLateArrival(t *testing.T) {
 	f := combinedSetup(t)
 	token, execution := f.prepareExec(t, "hold")
@@ -481,7 +513,7 @@ func TestTaskDualDrainNativeLateArrival(t *testing.T) {
 	require.LessOrEqual(t, len(frame), 16384)
 	decoded, err := transport.ReadRequest(bytes.NewReader(frame))
 	require.NoError(t, err)
-	require.Equal(t, envelope, decoded)
+	combinedAssertOriginalFrame(t, envelope, frame, decoded)
 	history, err := f.b.LoadExecEffect(f.ctx, originalRef)
 	require.NoError(t, err)
 	require.NotNil(t, history)
