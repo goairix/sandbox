@@ -3,7 +3,9 @@
 package controltarget
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -255,4 +257,114 @@ func TestJournalTaskCloseCancellationJoin(t *testing.T) {
 	}
 	require.ErrorIs(t, <-result, context.Canceled)
 	require.True(t, j.Status().Poisoned)
+}
+
+// Byte boundaries use actual protected records and cold-scan accounting on the
+// live fixture; this is a bounded ~64KiB fixture, not a fleet capacity model.
+func fillTaskCloseBytes(t *testing.T, j *Journal, f liveFixture, target int64) {
+	t.Helper()
+	r, err := recordFromEvidence(f.e)
+	require.NoError(t, err)
+	current := j.logicalBytes
+	for n := 1; current < target; n++ {
+		r.Context.CommandID = fmt.Sprintf("23000000-0000-4000-8000-%012x", n)
+		b, err := encodeExecJournalRecord(r)
+		require.NoError(t, err)
+		remaining := target - current
+		size := int64(8192)
+		if remaining < size {
+			size = remaining
+		}
+		if next := remaining - size; next > 0 && next < int64(len(b)) {
+			size -= int64(len(b)) - next
+		}
+		require.GreaterOrEqual(t, size, int64(len(b)))
+		b = append(b, bytes.Repeat([]byte(" "), int(size)-len(b))...)
+		require.NoError(t, os.MkdirAll(filepath.Join(f.o.Directory, "commands", "23"), 0700))
+		require.NoError(t, os.WriteFile(commandPath(f.o, r.Context.CommandID), b, 0600))
+		current += size
+	}
+	_, err = j.root.Seek(0, 0)
+	require.NoError(t, err)
+	_, err = j.commands.Seek(0, 0)
+	require.NoError(t, err)
+	require.NoError(t, j.scanJournalLocked(context.Background()))
+	require.Equal(t, target, j.logicalBytes)
+	require.Equal(t, target, treeBytes(t, f.o.Directory))
+}
+func TestJournalTaskCloseCapacity(t *testing.T) {
+	for _, peak := range []int64{55705, 55706, 65537} {
+		t.Run(fmt.Sprintf("actual-bytes-%d", peak), func(t *testing.T) {
+			f := liveSetup(t)
+			f.o.MaxBytes = 65536
+			j := f.create(t)
+			ctx := context.Background()
+			require.NoError(t, j.InstallActivation(ctx, f.activation))
+			e := taskCloseEvidence(t, f, taskCloseClaims(f))
+			pending := TaskDataCloseRecord{Version: 1, State: "pending", Context: e.Context(), TicketDigest: e.Digest(), NotBefore: e.NotBefore(), NotAfter: e.NotAfter()}
+			terminal := pending
+			terminal.State = "data_closed"
+			encode := func(v any) []byte {
+				var b bytes.Buffer
+				enc := json.NewEncoder(&b)
+				enc.SetEscapeHTML(false)
+				require.NoError(t, enc.Encode(v))
+				return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+			}
+			p := encode(pending)
+			d := encode(terminal)
+			g := j.gate
+			g.GateState = "closed"
+			gw := encode(g)
+			target := peak - int64(len(p)+len(d)+len(gw)) + j.manifestBytes
+			fillTaskCloseBytes(t, j, f, target)
+			before := j.Status()
+			require.True(t, before.Warning)
+			writes := 0
+			var observedPeak int64
+			j.files.hook = func(op, name string, after bool) error {
+				if op == "write" && after {
+					writes++
+					n := treeBytes(t, f.o.Directory)
+					if n > observedPeak {
+						observedPeak = n
+					}
+				}
+				return nil
+			}
+			r, err := j.CloseData(ctx, e)
+			if peak == 55705 {
+				require.NoError(t, err)
+				require.NotNil(t, r)
+				require.Equal(t, peak, observedPeak)
+				require.Equal(t, 3, writes)
+			} else {
+				require.ErrorIs(t, err, ErrCapacity)
+				require.Nil(t, r)
+				require.Zero(t, writes)
+				require.Equal(t, before, j.Status())
+			}
+		})
+	}
+	// Synthetic count boundary checks the actual allocator's two-file reservation
+	// without creating65536 files; every admitted write still executes real IO.
+	for _, available := range []uint64{1, 2} {
+		t.Run(fmt.Sprintf("synthetic-file-slots-%d", available), func(t *testing.T) {
+			f := liveSetup(t)
+			j := f.create(t)
+			ctx := context.Background()
+			require.NoError(t, j.InstallActivation(ctx, f.activation))
+			e := taskCloseEvidence(t, f, taskCloseClaims(f))
+			j.records = maxJournalContentFiles - available - 2
+			r, err := j.CloseData(ctx, e)
+			if available == 1 {
+				require.ErrorIs(t, err, ErrCapacity)
+				require.Nil(t, r)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, r)
+				require.Equal(t, maxJournalContentFiles-1, j.contentFilesLocked())
+			}
+		})
+	}
 }
