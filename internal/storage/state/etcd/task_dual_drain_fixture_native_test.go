@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -315,9 +316,29 @@ func (b *combinedBridge) close(t *testing.T) {
 	for _, err := range b.errors {
 		t.Logf("TASK5_BRIDGE_IO before-stop %s", err)
 	}
-	t.Logf("TASK5_BRIDGE_JOIN pairs=%d listeners=%d errors=%d retained=%d", len(b.pairs), len(b.listeners), b.errorCount, len(b.errors))
+	t.Logf("TASK5_BRIDGE_JOIN pairs=%d listeners=%d errors=%d retained=%d omitted_details=%d", len(b.pairs), len(b.listeners), b.errorCount, len(b.errors), b.errorCount-uint64(len(b.errors)))
 }
 func combinedSocket(i int) string { return fmt.Sprintf("/run/sandbox-metadata/member-%d.sock", i+1) }
+
+// Transfer ownership only after validation; failed validation closes the newly
+// created listener before any accept owner exists. Existing paths are refused.
+func combinedProtectedListener(path string) (net.Listener, error) {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return nil, fmt.Errorf("refuse existing protected socket %s", path)
+	}
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	err = os.Chmod(path, 0600)
+	if err == nil {
+		err = transport.CheckProtectedPath(path, os.ModeSocket|0600)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("validate protected socket: %w (listener close: %v)", err, l.Close())
+	}
+	return l, nil
+}
 func TestTaskDualDrainFixtureRelay(t *testing.T) {
 	lifetime := combinedEnabled(t, "relay")
 	ctx, cancel := signal.NotifyContext(lifetime, syscall.SIGTERM, syscall.SIGINT)
@@ -327,12 +348,8 @@ func TestTaskDualDrainFixtureRelay(t *testing.T) {
 	require.NoError(t, transport.CheckProtectedPath("/run/sandbox-metadata", os.ModeDir|0700))
 	for i := 0; i < 3; i++ {
 		path := combinedSocket(i)
-		_, err := os.Lstat(path)
-		require.True(t, os.IsNotExist(err), "refuse stale metadata socket: %s", path)
-		l, err := net.Listen("unix", path)
+		l, err := combinedProtectedListener(path)
 		require.NoError(t, err)
-		require.NoError(t, os.Chmod(path, 0600))
-		require.NoError(t, transport.CheckProtectedPath(path, os.ModeSocket|0600))
 		b.listen(l, "tcp", fmt.Sprintf("etcd-%d:2379", i+1))
 		combinedEmit(t, "relay", "member_socket_ready", fmt.Sprintf("etcd-%d", i+1), path)
 	}
@@ -452,12 +469,8 @@ func combinedSetup(t *testing.T) *combinedFixture {
 	// Target clock source and backend clock are independent current observations.
 	source := &combinedClock{}
 	require.NoError(t, transport.CheckProtectedPath("/run/sandbox-clock", os.ModeDir|0700))
-	_, err := os.Lstat(transport.ClockSocket)
-	require.True(t, os.IsNotExist(err), "refuse stale clock socket")
-	l, err := net.Listen("unix", transport.ClockSocket)
+	l, err := combinedProtectedListener(transport.ClockSocket)
 	require.NoError(t, err)
-	require.NoError(t, os.Chmod(transport.ClockSocket, 0600))
-	require.NoError(t, transport.CheckProtectedPath(transport.ClockSocket, os.ModeSocket|0600))
 	clockCtx, clockCancel := context.WithCancel(ctx)
 	clockDone := make(chan error, 1)
 	go func() {
@@ -623,6 +636,7 @@ func (f *combinedFixture) members(t *testing.T, phase string) uint64 {
 		require.Equal(t, cluster, status.Header.ClusterId)
 		one, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 3 * time.Second})
 		require.NoError(t, err)
+		defer func() { require.NoError(t, one.Close()) }()
 		ctx, cancel = context.WithTimeout(f.ctx, 3*time.Second)
 		members, err := one.MemberList(ctx)
 		cancel()
@@ -648,11 +662,10 @@ func (f *combinedFixture) members(t *testing.T, phase string) uint64 {
 			t.Logf("TASK5_MEMBER phase=%s endpoint=%s cluster=%x member=%x alias=%s container=%s ip=%s image=%s", phase, endpoint, cluster, member.ID, member.Name, f.secret.Observation.Members[index].ContainerID, f.secret.Observation.Members[index].NetworkIP, combinedImage)
 		}
 		require.True(t, found)
-		require.NoError(t, one.Close())
 	}
 	// A quorum-acknowledged unleased write and linearizable reads through every
 	// separate endpoint show replication; this nonce is not dual-drain proof.
-	key := f.secret.Namespace + "/fixture-health"
+	key := f.secret.Namespace + "fixture-health"
 	nonce := uuid.NewString()
 	ctx, cancel := context.WithTimeout(f.ctx, 3*time.Second)
 	put, err := f.raw.Put(ctx, key, nonce)
@@ -662,6 +675,7 @@ func (f *combinedFixture) members(t *testing.T, phase string) uint64 {
 	for _, endpoint := range f.endpoints {
 		one, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 3 * time.Second})
 		require.NoError(t, err)
+		defer func() { require.NoError(t, one.Close()) }()
 		ctx, cancel := context.WithTimeout(f.ctx, 3*time.Second)
 		got, err := one.Get(ctx, key)
 		cancel()
@@ -669,22 +683,72 @@ func (f *combinedFixture) members(t *testing.T, phase string) uint64 {
 		require.Len(t, got.Kvs, 1)
 		require.Equal(t, nonce, string(got.Kvs[0].Value))
 		require.Zero(t, got.Kvs[0].Lease)
-		require.NoError(t, one.Close())
 	}
 	t.Logf("TASK5_QUORUM_REPLICATION phase=%s cluster=%x revision=%d nonce=%s", phase, cluster, put.Header.Revision, nonce)
 	return cluster
 }
-func (f *combinedFixture) snapshot(t *testing.T) map[string]*mvccpb.KeyValue {
+func combinedSnapshotPrefix(namespace string) string { return namespace }
+
+// This regression exercises actual production key builders: a fixture range
+// that cannot contain these keys cannot prove unchanged business metadata.
+func TestTaskDualDrainFixtureSnapshotPrefix(t *testing.T) {
+	n, err := NewNamespace("/codex-test", "combined", "sandbox-quiesce-combined-0123456789ab")
+	require.NoError(t, err)
+	w, err := NewWorkspaceIdentity("s3", "test-storage", "bucket", "team/project/")
+	require.NoError(t, err)
+	sandboxID := uuid.NewString()
+	owner, _, err := n.workspaceKeys(w)
+	require.NoError(t, err)
+	control, _, err := n.sandboxKeys(w.Partition(), sandboxID, uuid.NewString())
+	require.NoError(t, err)
+	placement, err := n.placementKey(sandboxID)
+	require.NoError(t, err)
+	task, err := n.taskKey(TaskReference{Namespace: n.Root(), RestoreEpoch: "native-epoch", TaskID: uuid.NewString(), SandboxID: sandboxID, Partition: w.Partition()})
+	require.NoError(t, err)
+	for name, key := range map[string]string{"owner": owner, "control": control, "placement": placement, "task": task} {
+		require.True(t, strings.HasPrefix(key, combinedSnapshotPrefix(n.Root())), "snapshot prefix excludes genuine %s key %s", name, key)
+	}
+}
+func (f *combinedFixture) snapshot(t *testing.T, claim *TaskClaim, closeRef TaskCloseDataReference, execs ...*PreparedExecEffect) map[string]*mvccpb.KeyValue {
 	t.Helper()
+	n := f.b.namespace
+	require.Equal(t, n.Root(), f.secret.Namespace)
+	must := func(key string, err error) string { require.NoError(t, err); return key }
+	owner, fence, err := n.workspaceKeys(f.input.Workspace)
+	require.NoError(t, err)
+	control, snapshot, err := n.sandboxKeys(f.input.Workspace.Partition(), f.input.SandboxID, f.input.SnapshotVersion)
+	require.NoError(t, err)
+	_, closeReceipt, err := f.b.stageKeys(closeRef.Stage)
+	require.NoError(t, err)
+	ref := claim.Reference().Task
+	required := map[string]string{
+		"identity": must(n.Key("meta", "identity")), "restore_epoch": must(n.Key("meta", "restore_epoch")),
+		"owner": owner, "workspace_fence": fence, "control": control, "snapshot": snapshot,
+		"sandbox_index": must(n.placementKey(f.input.SandboxID)), "runtime_index": must(n.runtimeIndexKey(f.identity.Runtime.UID)),
+		"creation_intent": must(n.intentKey(f.input.Workspace.Partition(), f.input.IntentID)),
+		"task":            must(n.taskKey(ref)), "cleanup_intent": must(n.cleanupIntentKey(ref)), "task_link": must(n.taskLinkKey(ref)),
+		"checkpoint": claim.checkpointKey, "original_claim": claim.claimKey, "original_guard": claim.guardKey,
+		"close_data": must(n.taskCloseDataKey(ref)), "close_data_receipt": closeReceipt,
+	}
+	for i, execution := range execs {
+		required[fmt.Sprintf("exec_intent_%d", i)] = must(n.execEffectKey(execution.Reference().Operation))
+	}
 	ctx, cancel := context.WithTimeout(f.ctx, 3*time.Second)
 	defer cancel()
-	r, err := f.raw.Get(ctx, f.secret.Namespace+"/", clientv3.WithPrefix(), clientv3.WithLimit(129))
+	r, err := f.raw.Get(ctx, combinedSnapshotPrefix(f.secret.Namespace), clientv3.WithPrefix(), clientv3.WithLimit(129))
 	require.NoError(t, err)
+	require.NotNil(t, r.Header)
+	require.Positive(t, r.Header.Revision)
+	require.Equal(t, f.b.clusterID, r.Header.ClusterId)
 	require.False(t, r.More)
 	require.LessOrEqual(t, len(r.Kvs), 128)
 	result := map[string]*mvccpb.KeyValue{}
 	totalBytes := 0
 	for _, kv := range r.Kvs {
+		require.True(t, strings.HasPrefix(string(kv.Key), n.Root()))
+		require.NotContains(t, string(kv.Key), "//", "noncanonical key in native prefix")
+		require.Positive(t, kv.CreateRevision)
+		require.GreaterOrEqual(t, kv.ModRevision, kv.CreateRevision)
 		totalBytes += len(kv.Key) + len(kv.Value)
 		require.LessOrEqual(t, totalBytes, 256*1024, "native snapshot exceeds fixed bound")
 		wire, err := json.Marshal(kv)
@@ -692,5 +756,14 @@ func (f *combinedFixture) snapshot(t *testing.T) map[string]*mvccpb.KeyValue {
 		t.Logf("TASK5_NATIVE_RECORD %s", wire)
 		result[string(kv.Key)] = kv
 	}
+	for name, key := range required {
+		kv := result[key]
+		require.NotNil(t, kv, "native full prefix omitted required %s record %s", name, key)
+		t.Logf("TASK5_REQUIRED_NATIVE_RECORD name=%s key=%s create=%d mod=%d lease=%d", name, key, kv.CreateRevision, kv.ModRevision, kv.Lease)
+	}
+	for _, fence := range claim.fences {
+		require.True(t, fence.matches(result[fence.key]), "original claim permanent fence missing or changed: %s", fence.key)
+	}
+	t.Logf("TASK5_NATIVE_SNAPSHOT prefix=%s revision=%d count=%d more=%t bytes=%d required=%d", n.Root(), r.Header.Revision, len(r.Kvs), r.More, totalBytes, len(required))
 	return result
 }
