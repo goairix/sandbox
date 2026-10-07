@@ -238,3 +238,76 @@ func TestTaskCloseNativeQueryShutdown(t *testing.T) {
 	}
 	t.Logf("valid renewal accepted then closure rejected identical renewal; live exec query returned unknown; command=%s actualmonitor=%d; canceled task query borrowed until clock exit, publicClose joined owner/Wait then cleared key/journal", e.Context().CommandID, execution.monitorPID)
 }
+
+func TestTaskCloseNativeQueryEligibility(t *testing.T) {
+	f := newNativeFixture(t)
+	t.Logf("actual PID=%d kernel=%+v", os.Getpid(), f.s.options.Kernel.Snapshot())
+	execution, start := f.start(t, p.ExecutionRequest{Argv: []string{os.Getenv("SANDBOX_TASK3_USER"), "hold"}, Env: map[string]string{"GOMAXPROCS": "2"}, UID: 1000, GID: 1000, WorkDir: "/tmp", TimeoutSeconds: 2}, 10*time.Second)
+	waitExecutionReady(t, execution)
+	d := taskNativeDestination(t, f)
+	query := tr.Envelope{Version: 1, Purpose: "exec_query", Context: start.evidence.Context(), DescriptorDigest: start.descriptor.Digest()}
+	kind, wire := nativeExecCall(t, d, query)
+	require.Equal(t, tr.EventAccepted, kind)
+	require.NotEmpty(t, wire)
+	closeRequest, _ := nativeCloseEnvelope(t, f)
+	kind, _ = nativeTaskCall(t, d, closeRequest)
+	require.Equal(t, tr.EventReceipt, kind)
+	kind, _ = nativeExecCall(t, d, query)
+	require.Equal(t, tr.EventError, kind, "closed admission cannot reconfirm live accepted owner")
+	drainExecution(t, execution)
+	kind, wire = nativeExecCall(t, d, query)
+	require.Equal(t, tr.EventReceipt, kind)
+	execution.mu.Lock()
+	record := execution.record
+	execution.mu.Unlock()
+	require.Equal(t, "local_terminal", record.State)
+	_, err := f.s.options.Verifier.VerifyLocalExecReceipt(wire, f.s.activation.RuntimeCertificate(), record.Context, record.DescriptorDigest, record.TicketDigest, record.NotBefore, record.NotAfter, record.AuthorityDeadline, time.Now().UTC())
+	require.NoError(t, err)
+	for _, fault := range []string{"pending", "closed", "failed", "no-activation", "late-pending", "late-cancel"} {
+		t.Run(fault, func(t *testing.T) {
+			require.NoError(t, f.s.transportExecContext(query.Context, true))
+			activation := f.s.activation
+			defer func() {
+				f.s.mu.Lock()
+				f.s.closed = false
+				f.s.failed = false
+				f.s.activation = activation
+				f.s.failurePending.Store(false)
+				f.s.mu.Unlock()
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var call context.Context = ctx
+			var late *taskCloseLookupContext
+			f.s.mu.Lock()
+			switch fault {
+			case "pending":
+				f.s.failurePending.Store(true)
+			case "closed":
+				f.s.closed = true
+			case "failed":
+				f.s.failed = true
+			case "no-activation":
+				f.s.activation = nil
+			case "late-pending":
+				late = &taskCloseLookupContext{Context: ctx, at: 2, flip: func() { f.s.failurePending.Store(true) }}
+				call = late
+			case "late-cancel":
+				late = &taskCloseLookupContext{Context: ctx, at: 2, flip: cancel}
+				call = late
+			}
+			f.s.mu.Unlock()
+			kind, wire, err := f.s.queryReceipt(call, query)
+			require.Error(t, err)
+			require.Nil(t, wire)
+			require.Zero(t, kind)
+			if late != nil {
+				require.True(t, late.hit.Load(), "must reach retained-owner post-sign cancellation observation")
+			}
+		})
+	}
+	kind, wire = nativeExecCall(t, d, query)
+	require.Equal(t, tr.EventReceipt, kind)
+	require.NotEmpty(t, wire)
+	t.Logf("actual monitor=%d root=%d: active query accepted before close, unknown after close, terminal query verified; all guard-gap and post-sign failure/cancel cases returned nil wire", execution.monitorPID, record.RootPID)
+}

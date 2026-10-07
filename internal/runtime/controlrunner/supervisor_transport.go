@@ -181,6 +181,11 @@ func (s *Supervisor) transportContext(c p.ExecStartContext) error {
 func (s *Supervisor) transportExecContext(c p.ExecStartContext, query bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.transportExecContextLocked(c, query)
+}
+
+// Caller holds s.mu. Query eligibility is independent of admission closure.
+func (s *Supervisor) transportExecContextLocked(c p.ExecStartContext, query bool) error {
 	if s.closed || s.failed || s.failurePending.Load() || s.activation == nil || (!query && !s.admission) {
 		return ErrAdmissionClosed
 	}
@@ -292,12 +297,31 @@ func (s *Supervisor) queryTransport(ctx context.Context, conn net.Conn, envelope
 	}
 	return writeTransportEvent(conn, kind, wire)
 }
-func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (byte, []byte, error) {
+func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (kind byte, wire []byte, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err = s.transportExecContextLocked(envelope.Context, true); err != nil {
+		return 0, nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return 0, nil, err
+	}
+	// failurePending is set without s.mu by execution/watchdog owners. Check
+	// again after lookup/signing, before any signature leaves this boundary.
+	defer func() {
+		if err == nil {
+			err = ctx.Err()
+			if err == nil && s.failurePending.Load() {
+				err = ErrAdmissionClosed
+			}
+		}
+		if err != nil {
+			kind, wire = 0, nil
+		}
+	}()
 	e := s.active[envelope.Context.CommandID]
 	journal := s.journal
-	admission := s.admission && !s.closed && !s.failed && !s.failurePending.Load()
+	admission := s.admission
 	if e != nil {
 		if !e.mu.TryLock() {
 			return 0, nil, ErrUnavailable
@@ -339,7 +363,7 @@ func (s *Supervisor) queryReceipt(ctx context.Context, envelope t.Envelope) (byt
 	if !admission && record.State != "local_terminal" {
 		return 0, nil, ErrUnavailable
 	}
-	wire, err := s.signRecord(*record)
+	wire, err = s.signRecord(*record)
 	return t.EventReceipt, wire, err
 }
 func (s *Supervisor) streamTransport(ctx context.Context, conn net.Conn, e *Execution, writable bool) {
