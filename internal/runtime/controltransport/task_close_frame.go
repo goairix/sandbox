@@ -107,3 +107,33 @@ func ReadControlRequest(r io.Reader) (Envelope, *TaskCloseEnvelope, error) {
 	}
 	return Envelope{}, &e, nil
 }
+
+func ReadRuntimeRequest(r io.Reader) (RuntimeRequest, error) {
+	var size [4]byte
+	if _, err := io.ReadFull(r, size[:]); err != nil {
+		return RuntimeRequest{}, err
+	}
+	n := binary.BigEndian.Uint32(size[:])
+	if n == 0 || n > MaxHeader {
+		return RuntimeRequest{}, ErrFrame
+	}
+	header := make([]byte, n)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return RuntimeRequest{}, err
+	}
+	var purpose struct {
+		Purpose string `json:"purpose"`
+	}
+	if err := json.Unmarshal(header, &purpose); err != nil {
+		return RuntimeRequest{}, err
+	}
+	if purpose.Purpose == "task_quiesce_users" || purpose.Purpose == "task_quiesce_users_query" {
+		e, err := readTaskQuiesceHeader(r, header)
+		if err != nil {
+			return RuntimeRequest{}, err
+		}
+		return RuntimeRequest{Quiesce: &e}, nil
+	}
+	e, c, err := ReadControlRequest(io.MultiReader(bytes.NewReader(size[:]), bytes.NewReader(header), r))
+	return RuntimeRequest{Exec: e, CloseData: c}, err
+}
