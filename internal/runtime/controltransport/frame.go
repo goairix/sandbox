@@ -24,6 +24,7 @@ const (
 	EventStderr
 	EventReceipt
 	EventError
+	EventDiagnostics
 )
 
 var ErrFrame = errors.New("invalid control frame")
@@ -85,6 +86,10 @@ func (e Envelope) validateHeader() error {
 	switch e.Purpose {
 	case "exec_start":
 		if e.Metadata == nil || e.Metadata.StdinLength > MaxStdin || len(e.Ticket) == 0 || len(e.IssuerCertificate) == 0 {
+			return ErrFrame
+		}
+	case "exec_inspect":
+		if e.Metadata != nil || len(e.Ticket) != 0 || len(e.IssuerCertificate) != 0 || e.Context != (controlprotocol.ExecStartContext{}) || e.DescriptorDigest != "" {
 			return ErrFrame
 		}
 	case "exec_query":
@@ -173,7 +178,7 @@ func ReadRequest(r io.Reader) (Envelope, error) {
 	return e, nil
 }
 func WriteEvent(w io.Writer, kind byte, data []byte) error {
-	if kind < EventAccepted || kind > EventError || len(data) > MaxEvent {
+	if kind < EventAccepted || kind > EventDiagnostics || len(data) > MaxEvent {
 		return ErrFrame
 	}
 	var header [5]byte
@@ -190,7 +195,7 @@ func ReadEvent(r io.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	n := binary.BigEndian.Uint32(header[1:])
-	if header[0] < EventAccepted || header[0] > EventError || n > MaxEvent {
+	if header[0] < EventAccepted || header[0] > EventDiagnostics || n > MaxEvent {
 		return 0, nil, ErrFrame
 	}
 	data := make([]byte, n)

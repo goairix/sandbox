@@ -40,6 +40,7 @@ type Supervisor struct {
 	self                      *Supervisor
 	pid                       int
 	mu                        sync.Mutex
+	bootstrapMu               sync.Mutex
 	options                   SupervisorOptions
 	birth                     controlprotocol.BirthContext
 	key                       ed25519.PrivateKey
