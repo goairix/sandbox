@@ -456,6 +456,7 @@ func TestSignedClockConnectionLimitAndDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
+		defer close(done)
 		done <- ServeSignedClock(ctx, listener, SignedClockServerOptions{Binding: b, Key: k, Source: source, MaxConnections: 1})
 	}()
 	defer func() {
@@ -466,19 +467,31 @@ func TestSignedClockConnectionLimitAndDeadline(t *testing.T) {
 			t.Error("server not joined")
 		}
 	}()
+	waitForAccept := func(connection string) {
+		t.Helper()
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		select {
+		case <-listener.accepted:
+		case err := <-done:
+			t.Fatalf("server completed before %s Accept: %v", connection, err)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s Accept", connection)
+		}
+	}
 	first, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	<-listener.accepted
+	waitForAccept("first")
 	// A completed second Accept can only occur after the first was registered.
 	second, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	<-listener.accepted
+	waitForAccept("second")
 	second.SetReadDeadline(time.Now().Add(time.Second))
 	var one [1]byte
 	if _, err := second.Read(one[:]); err != io.EOF {
