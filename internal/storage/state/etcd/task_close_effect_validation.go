@@ -24,6 +24,7 @@ type taskCloseDraft struct {
 	stage                  *Stage
 	outcome                Outcome
 	cleaned, lost          bool
+	deliveryAttempted      bool
 }
 
 func (b *Backend) taskCloseContext(ctx context.Context, c *TaskClaim, d *taskCloseDraft) (context.Context, context.CancelFunc) {

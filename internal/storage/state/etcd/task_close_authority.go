@@ -18,7 +18,7 @@ type TaskCommandIssuer interface {
 }
 
 func taskAuthority(o Options) (*controlprotocol.ManagementVerifier, error) {
-	if o.TaskIssuer == nil {
+	if o.TaskIssuer == nil && (o.PublicationTrust == nil || o.Clock == nil) {
 		return nil, nil
 	}
 	value := reflect.ValueOf(o.TaskIssuer)
