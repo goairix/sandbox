@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/controltarget"
@@ -51,6 +52,8 @@ type Supervisor struct {
 	admission, closed, failed bool
 	failurePending            atomic.Bool
 	failureOnce               sync.Once
+	activeView                atomic.Pointer[[]*Execution]
+	isolationPublished        atomic.Bool
 }
 
 // authenticatedStart is constructed only by the package's authenticated TLS
@@ -86,6 +89,14 @@ type Execution struct {
 	authorityDeadlineNS, commandDeadlineNS int64
 	terminalSeen                           atomic.Bool
 	sequence                               uint64
+	runContext                             context.Context
+	watchdog                               *time.Timer
+	watchdogDone                           chan struct{}
+	diagnostic                             atomic.Pointer[isolationExecution]
+	receiptIssued                          atomic.Bool
+	watchdogDeadline                       atomic.Int64
+	startCommitted                         bool
+	closeRequested                         bool
 }
 type streamFrame struct {
 	kind byte

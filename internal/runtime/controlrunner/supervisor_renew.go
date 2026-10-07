@@ -92,6 +92,19 @@ func (s *Supervisor) renew(ctx context.Context, e *Execution, evidence controlpr
 		}
 		e.record = record
 		e.authorityDeadlineNS = deadline
+		mono, err := monitorMonotonic()
+		if err != nil {
+			return fail(err)
+		}
+		remaining := watchdogRemaining(mono, deadline, e.commandDeadlineNS)
+		if remaining <= 0 {
+			return fail(ErrUnavailable)
+		}
+		e.watchdogDeadline.Store(min(deadline, e.commandDeadlineNS) + int64(30*time.Second))
+		e.watchdog.Reset(remaining)
+		if err = e.result.SetReadDeadline(time.Now().Add(remaining)); err != nil {
+			return fail(err)
+		}
 		return nil
 	case <-e.waitDone:
 		return fail(ErrUnavailable)

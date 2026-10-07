@@ -99,6 +99,7 @@ func readMonitorRequest(r io.Reader) (monitorStart, error) {
 }
 
 type monitorReady struct {
+	Completed     bool   `json:"completed"`
 	RootPID       int    `json:"root_pid"`
 	MonitorPID    int    `json:"monitor_pid"`
 	FDCount       int    `json:"fd_count"`

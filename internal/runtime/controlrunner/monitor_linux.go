@@ -175,9 +175,18 @@ func RunMonitor() error {
 		return fmt.Errorf("user spawn failed (no attributable root status): %w", err)
 	}
 	root := cmd.Process.Pid
+	rootDone := make(chan struct{})
+	var observation launcher.RootExitObservation
+	var waitErr error
+	go func() {
+		defer close(rootDone)
+		observation, waitErr = boundary.SuperviseRootWithLifecycle(ctx, root, life)
+	}()
 	// Never Cmd.Wait for user; Release closes Go's process handle only.
 	if err = cmd.Process.Release(); err != nil {
-		return err
+		cancel()
+		<-rootDone
+		return errors.Join(err, waitErr)
 	}
 	stdin.Close()
 	if !req.TTY {
@@ -205,17 +214,38 @@ func RunMonitor() error {
 		}
 		return input.Close()
 	})
-	controlDone := make(chan error, 1)
-	go func() { controlDone <- runMonitorControl(ctx, cancel, control, life, &writer) }()
+	readinessCtx, readinessCancel := context.WithTimeout(ctx, time.Second)
+	readinessErr := life.WaitRegistered(readinessCtx)
+	readinessCancel()
+	completed := false
+	if readinessErr != nil {
+		cancel()
+		<-rootDone
+		if waitErr != nil || !validCompletedRoot(observation, root, os.Getpid()) {
+			err = errors.Join(readinessErr, waitErr)
+		} else {
+			completed = true
+		}
+	}
 	ready := collectMonitorReady(root, time.Since(started))
-	data, err := json.Marshal(ready)
+	ready.Completed = completed
+	data, marshalErr := json.Marshal(ready)
+	if err == nil {
+		err = marshalErr
+	}
 	if err == nil {
 		err = writer.frame(monitorStarted, data)
+	}
+	controlDone := make(chan error, 1)
+	if err == nil && !completed {
+		go func() { controlDone <- runMonitorControl(ctx, cancel, control, life, &writer) }()
+	} else {
+		controlDone <- nil
 	}
 	if err != nil {
 		cancel()
 	}
-	observation, waitErr := boundary.SuperviseRootWithLifecycle(ctx, root, life)
+	<-rootDone
 	cancel()
 	control.Close()
 	if !req.TTY {
@@ -227,19 +257,34 @@ func RunMonitor() error {
 	case <-time.After(time.Second):
 		err = errors.Join(err, fmt.Errorf("control owner did not join"))
 	}
-	for i := 0; i < workers; i++ {
+	joined := 0
+	joinTimer := time.NewTimer(time.Second)
+	for joined < workers {
 		select {
 		case e := <-work:
+			joined++
 			err = errors.Join(err, e)
-		case <-time.After(time.Second):
+		case <-joinTimer.C:
+			err = errors.Join(err, fmt.Errorf("stream owner join deadline"))
 			output.Close()
 			if errorOutput != nil {
 				errorOutput.Close()
 			}
 			input.Close()
-			return fmt.Errorf("stream owner did not join")
+			// Closing streams interrupts pollable IO; make a final bounded join attempt.
+			final := time.NewTimer(time.Second)
+			for joined < workers {
+				select {
+				case <-work:
+					joined++
+				case <-final.C:
+					return err
+				}
+			}
+			final.Stop()
 		}
 	}
+	joinTimer.Stop()
 	if err = errors.Join(err, waitErr); err != nil {
 		return err
 	}
@@ -399,4 +444,17 @@ func sealExecDescriptors() error {
 		return fmt.Errorf("required close_range CLOEXEC boundary: %w", err)
 	}
 	return nil
+}
+
+func validCompletedRoot(o launcher.RootExitObservation, root, monitor int) bool {
+	status := unix.WaitStatus(o.RootWaitStatus)
+	return o.RootPID == root && root > 1 && o.Drain.MonitorPID == monitor && (status.Exited() || status.Signaled())
+}
+
+// A full or broken diagnostic pipe cannot defer namespace isolation. A short
+// write is deliberately best effort; no lock, retry loop or unbounded writer.
+func writeIsolationDiagnostic(wire []byte) {
+	if unix.SetNonblock(2, true) == nil {
+		_, _ = unix.Write(2, wire)
+	}
 }

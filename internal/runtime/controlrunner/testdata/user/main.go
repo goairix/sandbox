@@ -19,6 +19,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "quick":
+		return
 	case "hold":
 		fmt.Println("USER_READY")
 		time.Sleep(time.Minute)

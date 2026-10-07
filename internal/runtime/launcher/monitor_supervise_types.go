@@ -28,6 +28,7 @@ type RootLifecycle struct {
 	registered, running, closed bool
 	requests                    chan rootRenewRequest
 	done                        chan struct{}
+	ready                       chan struct{}
 }
 type rootRenewRequest struct {
 	ctx      context.Context
@@ -36,7 +37,7 @@ type rootRenewRequest struct {
 }
 
 func newRootLifecycle(deadline int64) *RootLifecycle {
-	l := &RootLifecycle{pid: os.Getpid(), deadline: deadline, requests: make(chan rootRenewRequest, 1), done: make(chan struct{})}
+	l := &RootLifecycle{pid: os.Getpid(), deadline: deadline, requests: make(chan rootRenewRequest, 1), done: make(chan struct{}), ready: make(chan struct{})}
 	l.self = l
 	return l
 }
@@ -60,6 +61,7 @@ func (l *RootLifecycle) bind() error {
 	}
 	l.registered = true
 	l.running = true
+	close(l.ready)
 	return nil
 }
 func (l *RootLifecycle) stop() {
@@ -133,5 +135,39 @@ func validateRootContext(ctx context.Context) error {
 		return fmt.Errorf("%w: root context requires <=3600second deadline", ErrUnsafeKernel)
 	}
 	// A structurally valid but canceled command still requires fresh cleanup.
+	return nil
+}
+
+// WaitRegistered observes ownership of an already-spawned root. It grants no
+// spawn or continued-liveness authority; closed ownership wins over readiness.
+func (l *RootLifecycle) WaitRegistered(ctx context.Context) error {
+	if err := l.validateReceiver(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		return ErrKernelUnavailable
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > time.Second {
+		return ErrUnsafeKernel
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.done:
+		return ErrKernelUnavailable
+	case <-l.ready:
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !l.registered || !l.running || l.closed {
+		return ErrKernelUnavailable
+	}
 	return nil
 }

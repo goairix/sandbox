@@ -22,7 +22,12 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 		return nil, ErrUnavailable
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
 	if s.closed || s.failed || s.failurePending.Load() || !s.admission || s.activation == nil {
 		return nil, ErrAdmissionClosed
 	}
@@ -52,15 +57,20 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	}
 	e := &Execution{supervisor: s, accepted: accepted, descriptor: start.descriptor, state: "accepted", ownerDone: make(chan struct{}), waitDone: make(chan struct{}), output: make(chan streamFrame, 2), ack: make(chan renewAck, 1)}
 	e.self = e
+	e.runContext, e.cancel = context.WithCancel(context.Background())
 	e.record, err = accepted.Snapshot()
 	if err != nil {
 		return nil, err
 	}
+	e.publishDiagnosticLocked()
 	s.active[e.record.Context.CommandID] = e
+	s.publishActiveLocked()
 	fail := func(cause error) (*Execution, error) {
-		s.admission = false
 		s.failurePending.Store(true)
+		e.cancel()
+		e.mu.Lock()
 		e.state = "unknown"
+		e.mu.Unlock()
 		close(e.ownerDone)
 		close(e.waitDone)
 		close(e.output)
@@ -96,6 +106,8 @@ func (s *Supervisor) accept(ctx context.Context, start *authenticatedStart) (*Ex
 	if s.failurePending.Load() {
 		return fail(ErrAdmissionClosed)
 	}
+	locked = false
+	s.mu.Unlock()
 	if err = s.startMonitor(e, monitorStart{Request: request, AuthorityDeadlineNS: e.authorityDeadlineNS, CommandDeadlineNS: e.commandDeadlineNS}); err != nil {
 		return fail(err)
 	}
@@ -156,32 +168,74 @@ func (s *Supervisor) startMonitor(e *Execution, start monitorStart) error {
 		closeAll()
 		return err
 	}
+	e.mu.Lock()
+	e.control = controlW
+	e.request = reqW
+	e.result = resultR
+	mono, clockErr := monitorMonotonic()
+	if clockErr != nil {
+		e.mu.Unlock()
+		closeAll()
+		return clockErr
+	}
+	if err := e.beginStartLocked(); err != nil {
+		e.mu.Unlock()
+		closeAll()
+		return err
+	}
+	e.watchdogDeadline.Store(min(e.authorityDeadlineNS, e.commandDeadlineNS) + int64(30*time.Second))
+	e.watchdog = time.NewTimer(watchdogRemaining(mono, e.authorityDeadlineNS, e.commandDeadlineNS))
+	e.watchdogDone = make(chan struct{})
+	go func() {
+		defer close(e.watchdogDone)
+		defer e.watchdog.Stop()
+		select {
+		case <-e.runContext.Done():
+		case <-e.ownerDone:
+		case <-e.watchdog.C:
+			s.failurePending.Store(true)
+			go s.isolate("monitor_watchdog")
+		}
+	}()
+	e.mu.Unlock()
 	if err = cmd.Start(); err != nil {
+		e.cancel()
+		<-e.watchdogDone
 		closeAll()
 		return err
 	}
 	// Register sole management wait immediately, before assertions or IO errors.
+	e.mu.Lock()
 	e.monitorPID = cmd.Process.Pid
-	e.control = controlW
-	e.request = reqW
-	e.result = resultR
-	run, cancel := context.WithCancel(context.Background())
-	e.cancel = cancel
+	e.publishDiagnosticLocked()
+	e.mu.Unlock()
 	go func() { e.waitErr = cmd.Wait(); close(e.waitDone) }()
 	reqR.Close()
 	controlR.Close()
 	resultW.Close()
-	go s.runExecution(run, e, start)
+	go s.runExecution(e.runContext, e, start)
 	return nil
 }
 func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monitorStart) {
-	defer close(e.ownerDone)
+	defer func() {
+		e.cancel()
+		if e.watchdogDone != nil {
+			<-e.watchdogDone
+		}
+		close(e.ownerDone)
+	}()
 	defer close(e.output)
 	defer e.result.Close()
 	defer e.control.Close()
 	defer e.request.Close()
 	defer e.cancel()
-	fail := func(reason string) { e.mu.Lock(); e.state = "unknown"; e.mu.Unlock(); go s.isolate(reason) }
+	fail := func(reason string) {
+		s.failurePending.Store(true)
+		e.mu.Lock()
+		e.state = "unknown"
+		e.mu.Unlock()
+		go s.isolate(reason)
+	}
 	if err := e.request.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		fail("request_io")
 		return
@@ -198,7 +252,7 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 		fail("monotonic_clock")
 		return
 	}
-	if err = e.result.SetReadDeadline(time.Now().Add(time.Duration(e.commandDeadlineNS-mono) + 31*time.Second)); err != nil {
+	if err = e.result.SetReadDeadline(time.Now().Add(watchdogRemaining(mono, e.authorityDeadlineNS, e.commandDeadlineNS))); err != nil {
 		fail("result_deadline")
 		return
 	}
@@ -236,10 +290,14 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 				fail("invalid_root_registration")
 				return
 			}
+			if ready.Completed {
+				e.terminalSeen.Store(true)
+			}
 			e.mu.Lock()
 			duplicate := e.rootPID != 0
 			e.rootPID = ready.RootPID
 			e.stats = ready
+			e.publishDiagnosticLocked()
 			e.mu.Unlock()
 			if duplicate {
 				fail("duplicate_root_registration")
@@ -304,6 +362,7 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 		e.resultReceipt, err = s.signRecord(*record)
 	}
 	if err == nil {
+		e.receiptIssued.Store(true)
 		e.state = "local_terminal"
 	}
 	e.mu.Unlock()
@@ -313,6 +372,34 @@ func (s *Supervisor) runExecution(ctx context.Context, e *Execution, start monit
 	}
 	s.mu.Lock()
 	delete(s.active, e.record.Context.CommandID)
+	s.publishActiveLocked()
 	s.mu.Unlock()
 }
 
+// This is an absolute deadline, not a fresh relative cleanup lease. Startup,
+// queueing and repeated reads consume the same authority plus cleanup budget.
+func watchdogRemaining(now, authority, command int64) time.Duration {
+	return time.Duration(max(int64(0), min(authority, command)+int64(30*time.Second)-now))
+}
+
+func (s *Supervisor) publishActiveLocked() {
+	view := make([]*Execution, 0, len(s.active))
+	for _, e := range s.active {
+		view = append(view, e)
+	}
+	s.activeView.Store(&view)
+}
+func (e *Execution) publishDiagnosticLocked() {
+	e.diagnostic.Store(&isolationExecution{CommandID: e.record.Context.CommandID, MonitorPID: e.monitorPID, RootPID: e.rootPID, State: "unknown"})
+}
+
+// The prepared registration has exactly one transition to an in-flight Start.
+// Close before this transition forbids spawn; Close afterward awaits this same
+// registered owner, including late success/failure, never starts a replacement.
+func (e *Execution) beginStartLocked() error {
+	if e.startCommitted || e.closeRequested || e.supervisor.failurePending.Load() || e.runContext.Err() != nil {
+		return ErrAdmissionClosed
+	}
+	e.startCommitted = true
+	return nil
+}
