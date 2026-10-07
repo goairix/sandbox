@@ -29,6 +29,7 @@ type TaskClaim struct {
 	deadline                                 time.Time
 	lost                                     bool
 	closeDraft                               *taskCloseDraft
+	quiescenceDraft                          *taskQuiescenceDraft
 }
 
 func (c *TaskClaim) Reference() TaskClaimReference {

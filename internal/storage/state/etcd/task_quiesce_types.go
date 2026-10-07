@@ -43,3 +43,27 @@ func (r TaskQuiescenceReference) Validate() error {
 func validTaskQuiescenceAttempt(l StageAttemptLocator, r TaskReference, claimID string) bool {
 	return taskAttemptMatches(l, r) && validPreparationUUID(l.AttemptID) && validPreparationUUID(claimID) && l.RequestID == claimID && l.StageID == "task_quiesce_users"
 }
+
+// PrepareTaskQuiescenceResult separates durable outcome from original dispatch.
+// A known commit can have no Prepared after original authority loss.
+type PrepareTaskQuiescenceResult struct {
+	Outcome           Outcome
+	Reference         TaskQuiescenceReference
+	Prepared          *PreparedTaskUserQuiescence
+	GuardCleanupError error
+}
+
+// PreparedTaskUserQuiescence has no ticket getter or history reconstruction.
+type PreparedTaskUserQuiescence struct {
+	self   *PreparedTaskUserQuiescence
+	origin *Backend
+	claim  *TaskClaim
+	draft  *taskQuiescenceDraft
+}
+
+func (p *PreparedTaskUserQuiescence) Reference() TaskQuiescenceReference {
+	if p == nil || p.draft == nil {
+		return TaskQuiescenceReference{}
+	}
+	return p.draft.reference
+}
