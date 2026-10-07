@@ -103,3 +103,9 @@ func (s *tlsOnlySigner) Sign(_ io.Reader, input []byte, opts crypto.SignerOpts) 
 	}
 	return ed25519.Sign(s.key, input), nil
 }
+
+// MatchesCertificate compares only the immutable custom certificate bytes. It
+// establishes neither root trust, freshness, possession nor execution authority.
+func (c *ManagementTLSCredential) MatchesCertificate(wire []byte) bool {
+	return c != nil && len(c.certificate) != 0 && len(wire) != 0 && bytes.Equal(c.certificate, wire)
+}
