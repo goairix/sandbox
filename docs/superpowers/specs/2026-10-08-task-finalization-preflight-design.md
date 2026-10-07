@@ -16,7 +16,7 @@
 func (b *Backend) RevalidateTaskQuiescence(ctx context.Context, c *TaskClaim, prepared *PreparedTaskQuiescence, destination *controltransport.Destination) error
 ```
 
-`prepared` 必须是原对象（self 指针）、原 Backend、原 claim 指针与精确 ClaimReference；空对象、拷贝、其他 Backend、其他 claim、零 revision、零 deadline、空 receipt 均在 RPC 前拒绝。原 prepared deadline 是这次复核的上限，同 claim 续租不能延长旧 prepared。不能因旧 prepared 过期把仍有效的新 claim 人为判 lost；但当前 claim 失效继续按既有 live/fence 策略处理。
+`prepared` 必须是原对象（self 指针）、原 Backend、原 claim 指针与精确 ClaimReference；空对象、拷贝、其他 Backend、其他 claim、零 revision、零 deadline、空 receipt 均在 RPC 前拒绝。原 prepared deadline 是这次复核的上限，同 claim 续租不能延长旧 prepared。入口处已经过期的旧 prepared 在调用 `c.live` 前拒绝，不把仍有效的续租 claim 人为判 lost。进入有效复核后 deadline 越界或取消仍沿用原 `c.live(bounded)` 的保守 lost 策略，即使 claim 在期间续租；不能恢复 lost 位或放宽共享 claim/fence 策略。这种中途超时的可用性代价保留，下一 claimant 必须重新获取只读前提。
 
 复用 `PrepareAfterDualDrain` 的 Query → 新 native whole-prefix limit1 Range → Query → final immutable-pin check 算法，提取一个内部共同函数以避免两个版本漂移。原 API 保持原有行为。复核路径在首次 runtime query 前用已有 `pinTaskDualDrain` 比较保存的 exact pins；两次经过当前 runtime 证书验证的 terminal receipt 都必须与保存的 receipt wire 摘要一致。新 Range 必须真正执行，不读取保存的 `emptyRevision` 作为结果；新观察 revision 可与旧 revision 相同（没有新 mutation 时），不能以 `>` 冒充“新查询”。
 
@@ -34,8 +34,8 @@ func (b *Backend) RevalidateTaskQuiescence(ctx context.Context, c *TaskClaim, pr
 
 - 纯 host 拒绝用例：nil context/claim/prepared、非原对象或外来 identity、空证据、旧 deadline；拒绝在任何 KV 或 Dial 前发生。
 - 原生三成员 etcd + genuine mTLS 测试替身：保存合法 prerequisite 后再次复核，断言两次新 query、一次新完整-prefix limit1 Range、无发送/签票/Grant/mutation，前后 native 值/revision/lease 不变。
-- 保存后重新加入真实有效 operation（测试操作员注入，不声称生产可以越过 closed admission），复核必须因新 Range 非空失败；证明没有复用旧 emptyRevision。
-- 保存后在新 Range 前修改 receipt/reservation revision、撤销原 claim 或取消 context，均失败。过期旧 prepared 后续租仍有效的原 claim，不允许 deadline 延长。
+- 保存后重新加入 wire/原 lease tuple 有效的原 operation（测试操作员注入）。native 重建的 CreateRevision 晚于已冻结 destroy birth，按既有 decoder 视为 ErrCorruptRecord；新 Range 必须真实看到非空并拒绝，证明没有复用旧 emptyRevision。生产 closed admission 本来就不允许合法新 operation，此测试不伪造旧 native birth、不放宽 decoder、不声称出现了生产合法的迟到入场。
+- 保存后在新 Range 前修改 receipt/reservation revision、撤销原 claim 或取消 context，均失败。入口已过期的旧 prepared 不毒化续租仍有效的原 claim；中途越界保留原保守 lost 策略，两者都不允许 deadline 延长。
 - genuine mTLS 目标失联或返回仅 accepted/未知、不同 terminal receipt，均不得成功。测试目标的签名证明协议归因，不证明物理 PID1 排空；上一单元物理证据保留其原冻结范围，不重放。
 - 受影响 etcd package 的 host race/vet 和 Linux arm64 CGO0 编译。三成员集成用例必须实际执行；缺失 fixture 只能记录 SKIP，不能当 PASS。
 

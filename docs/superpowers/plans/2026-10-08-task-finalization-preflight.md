@@ -22,9 +22,9 @@
 
 ## Review Focus
 
-- 已保存 prerequisite 后的新增 operation：必须新 full-prefix query 而非缓存 zero。
+- 已保存 prerequisite 后的操作员重建 operation：必须新 full-prefix query 而非缓存 zero；新 birth 按原 decoder 归类 corrupt，不放宽生产 closed admission。
 - receipt/reservation 相同 bytes 的 revision 改变：exact immutable pin 必须拒绝。
-- 旧 prepared 过期但同 claim 已续租：原 deadline 不延长，也不无故毒化新 claim。
+- 旧 prepared 过期但同 claim 已续租：原 deadline 不延长；入口过期在 c.live 前拒绝，中途超时保留原 lost 策略。
 - runtime 只能证明 accepted 或失联：nil/未知/不同 terminal 不能复核成功。
 - 原 API 回归与只读边界：提取共同算法不改变 PrepareAfterDualDrain，成功复核不能产生隐藏 mutation 或授权对象。
 
@@ -35,6 +35,7 @@
 - Modify: internal/storage/state/etcd/task_dual_drain.go
 - Create: internal/storage/state/etcd/task_finalization_preflight_test.go
 - Create: internal/storage/state/etcd/task_finalization_preflight_native_test.go
+- Optional modify: internal/storage/state/etcd/task_quiesce_transport_native_test.go (仅现有 mTLS test helper 的 concurrency-safe response override；保留默认行为，不复制 TLS server loop)
 - Create after review: docs/superpowers/reports/2026-10-08-task-finalization-preflight-verification.md (Root)
 
 **Interfaces:**
@@ -45,4 +46,4 @@
 - [ ] **Step 2: Run meaningful RED.** Use a compilable temporary implementation returning ErrInvalidRecord for all calls, then run the new selector against actual three-member etcd to observe positive-case assertion failure. Retain raw output and actual exit; missing fixture/compile failure does not count as behavioral RED.
 - [ ] **Step 3: Implement the specified API.** Extract shared internal algorithm in task_dual_drain.go, compare original pins before first query and saved terminal digest around fresh Range. Limit context by saved deadline and existing claim/request deadlines; validate again before return. Original public PrepareAfterDualDrain follows its old nil-expected path.
 - [ ] **Step 4: Run focused GREEN and required checks.** Run new selector plus existing TestTaskDualDrainNativeConjunction and TestTaskDualDrainNativeFinalBarrierMutation once against real three-member etcd; run full affected package race once, vet and Linux arm64 CGO0 compile. Record every SKIP/warning/failure separately, including gated unchanged physical suites. Do not rerun the old combined fixture or broaden to unrelated packages.
-- [ ] **Step 5: Commit and report.** Self-review complete diff; commit only four owned source/test paths with feat(etcd): revalidate finalization prerequisites at use. Report complete commands/raw logs/TDD/commit/limitations in OWN/task-1-report.md; Root supplies sole independent review and records each CannotVerify disposition before marking this task accepted.
+- [ ] **Step 5: Commit and report.** Self-review complete diff; commit only the four owned source/test paths and, if needed, the named optional existing test-helper path with feat(etcd): revalidate finalization prerequisites at use. Report complete commands/raw logs/TDD/commit/limitations in OWN/task-1-report.md; Root supplies sole independent review and records each CannotVerify disposition before marking this task accepted.
