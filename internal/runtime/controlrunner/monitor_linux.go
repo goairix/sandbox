@@ -172,7 +172,7 @@ func RunMonitor() error {
 	if err = sealExecDescriptors(); err != nil {
 		return err
 	}
-	if err = cmd.Start(); err != nil {
+	if err = startPreparedUser(ctx, start.AuthorityDeadlineNS, start.CommandDeadlineNS, cmd); err != nil {
 		return fmt.Errorf("user spawn failed (no attributable root status): %w", err)
 	}
 	root := cmd.Process.Pid
@@ -477,4 +477,22 @@ func writeIsolationDiagnostic(wire []byte) {
 	if unix.SetNonblock(2, true) == nil {
 		_, _ = unix.Write(2, wire)
 	}
+}
+
+// The fixed monitor alone calls this boundary after request/credential/stream
+// preparation. It accepts no alternate spawn implementation or public payload.
+func startPreparedUser(ctx context.Context, authorityDeadlineNS, commandDeadlineNS int64, cmd *exec.Cmd) error {
+	now, err := monitorMonotonic()
+	if err != nil {
+		return err
+	}
+	if now >= authorityDeadlineNS || now >= commandDeadlineNS {
+		return fmt.Errorf("user deadline expired after preparation: %w", context.DeadlineExceeded)
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	// No further preparation between this fresh check and the actual spawn. A
+	// stall inside the OS spawn itself remains outside context preemption.
+	return cmd.Start()
 }
