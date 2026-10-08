@@ -4,9 +4,11 @@
 
 已验收组件包括原生 etcd 元数据与永久 owner/事务回执、原始 operation/claim 和命令 fencing、运行时关闭与用户排空，以及实际 workspace 归档生产者。最新两个功能提交：`b5bdca2` 封闭 TLS 归档传输接口；`f1e3086` Supervisor 原始生产者、独立截止时间、历史完成查询和物理关闭等待。对应验收见 `2026-10-08-supervisor-workspace-archive-verification.md`。这些组件验收不等于整条生产链路完成。
 
+新增已验收功能提交 `bd46b2b`：后端私有归档接收器，含原始 spool 的磁盘/索引/并发额度、真实 TLS 数据与签名/TAR/EOF 校验、物理关闭等待和保守退款。限定新测试/race、包 vet、Linux arm64 编译通过；独立 review 无阻断项。验收见 `2026-10-08-backend-workspace-archive-receive-verification.md`。这仍是接收组件，尚未完成当前 KV 所有权约束的发送链路。
+
 后续按以下依赖顺序推进：
 
-1. 后端原始 final-sync 发送者与接收器：当前 claim/KV 发送屏障、长接收期间续约、受限 spool、实际 TAR/字节/摘要/签名/EOF 校验及一次性归属。
+1. 后端原始 final-sync 发送者：签名与不可变归档命令、当前 claim/KV 发送屏障、长接收期间续约、已验收接收器的生产接入及归档消费前的当前所有权检查。
 2. 每个真实远端请求（包括 SDK 重试/跳转/分片）的意图、fencing、确定结算或 sticky unknown；结合实际运行时/基础设施终止，完成安全释放链路。
 3. API、Pool、Docker/Upload 与主程序生产接线；分区 due/dirty 调度，移除全量扫描和按已有沙盒常驻的控制循环。
 4. FUSE/collector/可信同步、长期空闲运行时按需证书维护；验证 N 增大时 idle 成本与活跃工作背压。
