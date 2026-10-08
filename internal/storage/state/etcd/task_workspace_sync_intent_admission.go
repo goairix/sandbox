@@ -21,7 +21,7 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 		return result, ErrInvalidRecord
 	}
 	body.mu.Lock()
-	if body.closed || body.active || body.bytes != 0 || body.ctx.Err() != nil {
+	if body.closed || body.active || body.bytes != 0 || body.complete || body.ctx.Err() != nil {
 		body.mu.Unlock()
 		return result, ErrInvalidRecord
 	}

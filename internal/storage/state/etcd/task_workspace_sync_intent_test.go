@@ -98,7 +98,7 @@ func TestTaskWorkspaceSyncIntentRejectsUnoriginalBeforeRPC(t *testing.T) {
 	var source *PreparedTaskWorkspaceSyncSource
 	_, err := source.reservePutIntent(context.Background(), nil)
 	require.Error(t, err)
-	_, source = syncSourceHostIO(t, nil)
+	backend, source := syncSourceHostIO(t, nil)
 	entry := &taskWorkspaceSyncEntry{origin: source, kind: '0'}
 	entry.self = entry
 	body := &taskWorkspaceSyncBody{source: source, entry: entry, ctx: context.Background()}
@@ -116,6 +116,18 @@ func TestTaskWorkspaceSyncIntentRejectsUnoriginalBeforeRPC(t *testing.T) {
 	_, err = source.reservePutIntent(context.Background(), body)
 	require.ErrorIs(t, err, ErrInvalidRecord)
 	body.closed = false
+	t.Run("completed-empty-body", func(t *testing.T) {
+		// A successful EOF read of an empty body keeps bytes at zero while
+		// setting complete. Its first reservation must still be refused.
+		body.mu.Lock()
+		body.complete = true
+		body.mu.Unlock()
+		defer func() { body.mu.Lock(); body.complete = false; body.mu.Unlock() }()
+		require.Nil(t, backend.client, "any native RPC would panic in this host fixture")
+		_, err := source.reservePutIntent(context.Background(), body)
+		require.ErrorIs(t, err, ErrInvalidRecord)
+		require.Nil(t, body.intent, "completed empty body cannot create an intent draft")
+	})
 	_, err = source.reservePutIntent(context.Background(), body)
 	require.ErrorIs(t, err, ErrInvalidConfiguration)
 }
