@@ -21,10 +21,12 @@
 
 **Consumes:** original KernelBoundary/self/role/PID/seal, original UserNamespaceQuiescenceObservation/RevalidateCurrent; original requireNativeBoundary helper. **Produces:** OpenWorkspaceArchive, original single-use WriteArchive/Close and diagnostic WorkspaceArchiveSummary defined by Spec. Linux openat2 native confinement and bounded synchronous tar stream.
 
-- [ ] Step 1 RED: meaningful positive native archive assertion fails with compilable all-reject temporary implementation; retain raw failure and stub snapshot. Add failure cases against actual namespace/file descriptors, without claiming a fake filesystem proves confinement.
-- [ ] Step 2 implement the complete Spec, including all error cleanup, no-follow/nonblocking kind validation, bounded native traversal, single-consumption lifecycle and zero summary on failures.
-- [ ] Step 3 GREEN: focused new native archive fixture, affected launcher host race once, vet, Linux arm64 CGO0 compile. Capture exact Docker native terminal state, all diagnostics and cleanup inventories. Classify skipped old native tests honestly; no full kernel gate replay.
-- [ ] Step 4 self-review and source commit under OWN lock; author evidence report; independent sole task/unit review and Root adjudication of every limitation; separate tracked acceptance commit.
+- [x] Step 1 RED: meaningful positive native archive assertion fails with compilable all-reject temporary implementation; retain raw failure and stub snapshot. Add failure cases against actual namespace/file descriptors, without claiming a fake filesystem proves confinement.
+- [x] Step 2 implement the complete Spec, including all error cleanup, no-follow/nonblocking kind validation, bounded native traversal, single-consumption lifecycle and zero summary on failures.
+- [x] Step 3 GREEN: focused new native archive fixture, affected launcher host race once, vet, Linux arm64 CGO0 compile. Capture exact Docker native terminal state, all diagnostics and cleanup inventories. Classify skipped old native tests honestly; no full kernel gate replay.
+- [x] Step 4 self-review and source commit under OWN lock; author evidence report; independent sole task/unit review and Root adjudication of every limitation; separate tracked acceptance commit.
+
+Acceptance: `../reports/2026-10-08-pid1-workspace-archive-verification.md`; source3408bb3; scoped review C0/I0/M0. Actual user-private0600/0700 reading remains a required integration gap, along with authenticated task/producer/gate/stream/effects/termination/release. No production migration or capacity completion claim.
 
 ## Review Focus
 
