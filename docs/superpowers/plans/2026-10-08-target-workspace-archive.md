@@ -44,10 +44,10 @@
 
 **Interfaces:** Value receiver `(c TaskWorkspaceArchiveContext) Validate() error`, same value method for TicketClaims/ReceiptClaims wrapping existing private validators. `Journal.AcceptWorkspaceArchive(ctx,e p.TaskWorkspaceArchiveEvidence,q *AcceptedUserQuiescence,receipt []byte) (*AcceptedWorkspaceArchive,error)`; `Journal.LookupWorkspaceArchive(ctx,expected p.TaskWorkspaceArchiveContext,ticketDigest string) (*TaskWorkspaceArchiveRecord,error)`. Record fields exactly Spec; self/journal/record/deadline/prior pointers private, no public completion or stream method yet. Task2 consumes these original fields and persistence helpers.
 
-- [ ] Step 1 RED: compiled reject admission stub plus genuinely authenticated ticket and original structural host prerequisite; positive assertion fails for unavailable admission, not compiler/setup error. Retain exact snapshot/raw failure.
-- [ ] Step 2 implement admission/records/accounting/authentication/cold refusal; independent corrupt/changed context/receipt/cert tests and capacity/retained/temp cases; meaningful per-syscall persistence and late auth failures retain uncertainty.
-- [ ] Step 3 GREEN: once frozen affected host race `go test -race -count=1 -v ./internal/runtime/controltarget ./internal/runtime/controlprotocol`; vet same; Linuxarm64CGO0 compile controltarget and native new admission-only carrier with actual completed quiescence. No old native replay; classify host fixture versus physical proof.
-- [ ] Step 4 self-review/exact11-path source commit; concise task-1 report/manifest in this OWN; sole independent task review, fixes/rulings and Root tracked acceptance; proceed Task2 without approval pause.
+- [x] Step 1 RED: compiled reject admission stub plus genuinely authenticated ticket and original structural host prerequisite; positive assertion fails for unavailable admission, not compiler/setup error. Retain exact snapshot/raw failure.
+- [x] Step 2 implement admission/records/accounting/authentication/cold refusal; independent corrupt/changed context/receipt/cert tests and capacity/retained/temp cases; meaningful per-syscall persistence and late auth failures retain uncertainty.
+- [x] Step 3 GREEN: once frozen affected host race `go test -race -count=1 -v ./internal/runtime/controltarget ./internal/runtime/controlprotocol`; vet same; Linuxarm64CGO0 compile controltarget and native new admission-only carrier with actual completed quiescence. No old native replay; classify host fixture versus physical proof.
+- [x] Step 4 self-review/exact11-path source commit; concise task-1 report/manifest in this OWN; sole independent task review, fixes/rulings and Root tracked acceptance; proceed Task2 without approval pause.
 
 ### Task 2: Actual original source producer and terminal persistence
 
