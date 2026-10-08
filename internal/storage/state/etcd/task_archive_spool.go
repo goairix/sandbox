@@ -106,9 +106,16 @@ func (r *taskArchiveSpool) close() error {
 	r.closing = true
 	r.closeDone = make(chan struct{})
 	done := r.ownerDone
+	consumer := r.consumer
 	s.mu.Unlock()
 	r.cancel()
+	if consumer != nil {
+		consumer.cancel()
+	}
 	<-done // Cancellation alone never proves the physical owner returned.
+	if consumer != nil {
+		<-consumer.done
+	}
 	err := taskArchiveRemove(s.root, r.name, r.file, r.identity)
 	s.mu.Lock()
 	if err == nil {
@@ -128,6 +135,7 @@ func (s *taskArchiveStore) close() error {
 	if s == nil || s.self != s {
 		return errTaskArchive
 	}
+	s.sealAndCancel()
 	s.mu.Lock()
 	if s.closeDone != nil {
 		done := s.closeDone
@@ -145,10 +153,6 @@ func (s *taskArchiveStore) close() error {
 		owners = append(owners, r)
 	}
 	s.mu.Unlock()
-	// Cancel all owners before joining any, without a lock across callbacks.
-	for _, r := range owners {
-		r.cancel()
-	}
 	var err error
 	for _, r := range owners {
 		err = errors.Join(err, r.close())
@@ -159,4 +163,29 @@ func (s *taskArchiveStore) close() error {
 	close(s.closeDone)
 	s.mu.Unlock()
 	return err
+}
+
+// Seal under the admission lock, then cancel every immutable consumer before
+// Backend joins even its first delivery owner. Cleanup remains close's job.
+func (s *taskArchiveStore) sealAndCancel() {
+	if s == nil || s.self != s {
+		return
+	}
+	s.mu.Lock()
+	s.closed = true
+	owners := make([]*taskArchiveSpool, 0, len(s.spools))
+	consumers := make([]*PreparedTaskWorkspaceSyncSource, 0, len(s.spools))
+	for r := range s.spools {
+		owners = append(owners, r)
+		if r.consumer != nil {
+			consumers = append(consumers, r.consumer)
+		}
+	}
+	s.mu.Unlock()
+	for _, r := range owners {
+		r.cancel()
+	}
+	for _, c := range consumers {
+		c.cancel()
+	}
 }

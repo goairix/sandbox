@@ -213,6 +213,9 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	for _, o := range owners {
 		o.cancel()
 	}
+	if b.archiveStore != nil {
+		b.archiveStore.sealAndCancel()
+	}
 	for _, o := range owners {
 		<-o.done
 	}

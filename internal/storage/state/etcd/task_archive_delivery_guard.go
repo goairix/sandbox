@@ -43,6 +43,15 @@ func (o *taskArchiveDelivery) currentGuard(ctx context.Context) error {
 	if err := o.local(ctx, false); err != nil {
 		return err
 	}
+	if err := o.nativeGuard(ctx); err != nil {
+		return err
+	}
+	return o.local(ctx, false)
+}
+
+// nativeGuard has only immutable comparisons and native wire validation.
+// Its callers serialize with nativeMu and supply their own lifetime fences.
+func (o *taskArchiveDelivery) nativeGuard(ctx context.Context) error {
 	b := o.backend
 	op := taskProtoRange(o.prefix)
 	op.GetRequestRange().RangeEnd = []byte(clientv3.GetPrefixRangeEnd(o.prefix))
@@ -74,7 +83,7 @@ func (o *taskArchiveDelivery) currentGuard(ctx context.Context) error {
 	if !response.Succeeded || r.Count != 0 || len(r.Kvs) != 0 || r.More {
 		return ErrConflict
 	}
-	return o.local(ctx, false)
+	return nil
 }
 
 func (o *taskArchiveDelivery) startGuard(ctx context.Context) error {

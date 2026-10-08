@@ -49,6 +49,7 @@ type taskArchiveSpool struct {
 	ownerDone, closeDone     chan struct{}
 	closeErr                 error
 	witness                  *taskReceivedArchive
+	consumer                 *PreparedTaskWorkspaceSyncSource // one immutable registration, store.mu
 }
 
 type taskArchiveExpected struct {

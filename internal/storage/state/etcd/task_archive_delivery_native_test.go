@@ -194,12 +194,30 @@ func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNat
 }
 
 func deliveryNativeFixture(t *testing.T, horizon time.Duration, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithPlan(t, horizon, nil, ttl...)
+}
+
+// A pure optional builder binds canonical policy before immutable reservation.
+// Nil retains the original opaque plan and 45 second session behavior.
+func deliveryNativeFixtureWithPlan(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
-	base := newTaskDeliveryFixture(t, true)
+	base := newTaskDeliveryFixtureWithCompletedSetup(t, true, builder != nil)
 	archiveTrackCleanup(base.b)
 	f := finishQuiescenceFixture(t, base)
 	archiveTrackCleanup(f.b)
 	require.NoError(t, f.b.ReleaseTaskClaim(f.ctx, f.c))
+	if builder != nil {
+		lifetime := 40 * time.Second
+		if len(ttl) > 0 {
+			lifetime = ttl[0] + 10*time.Second
+		}
+		// The canonical source fixture may outlive the old 20sec setup ctx.
+		// Its raw client remains owned by test cleanup; only the new current
+		// Backend/claim uses this independent bounded parent.
+		longCtx, cancelLong := context.WithTimeout(context.Background(), lifetime)
+		t.Cleanup(cancelLong)
+		f.ctx = longCtx
+	}
 	identity, err := decodeIdentity(f.b.identityValue, f.b.namespace)
 	require.NoError(t, err)
 	identity.RestoreEpoch = f.b.restoreEpoch
@@ -251,7 +269,11 @@ func deliveryNativeFixture(t *testing.T, horizon time.Duration, ttl ...time.Dura
 	}
 	prepared, err := b.PrepareAfterDualDrain(f.ctx, c, w.destination)
 	require.NoError(t, err)
-	_, err = b.ReserveTaskFinalSync(f.ctx, c, prepared, w.destination, finalSyncPlan())
+	plan := finalSyncPlan()
+	if builder != nil {
+		plan = builder(prepared.pin.task)
+	}
+	_, err = b.ReserveTaskFinalSync(f.ctx, c, prepared, w.destination, plan)
 	require.NoError(t, err)
 	r, err := b.PrepareTaskWorkspaceArchive(f.ctx, c, prepared, w.destination, 45*time.Second)
 	require.NoError(t, err)

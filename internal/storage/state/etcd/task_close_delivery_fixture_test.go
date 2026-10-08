@@ -22,6 +22,12 @@ import (
 )
 
 func newTaskDeliveryFixture(t *testing.T, expired bool) *taskCloseFixture {
+	return newTaskDeliveryFixtureWithCompletedSetup(t, expired, false)
+}
+
+// Canonical source fixtures can outlive the completed setup's 30sec leases.
+// Keep default behavior, and retire only the exact completed original owners.
+func newTaskDeliveryFixtureWithCompletedSetup(t *testing.T, expired, retireSetup bool) *taskCloseFixture {
 	t.Helper()
 	// Construct the original published identity with the live target's UUID
 	// birth contract; do not rewrite any already-frozen destroy/claim evidence.
@@ -67,6 +73,11 @@ func newTaskDeliveryFixture(t *testing.T, expired bool) *taskCloseFixture {
 	out, e := base.CommitStage(ctx, s)
 	require.NoError(t, e)
 	require.Equal(t, OutcomeCommitted, out)
+	if retireSetup {
+		archiveTrackCleanup(base)
+		require.NoError(t, base.ReleaseCreationClaim(ctx, creation))
+		require.NoError(t, base.ReleaseStage(ctx, s))
+	}
 	now := time.Now().UTC()
 	root := ed25519.NewKeyFromSeed(make([]byte, 32))
 	key := ed25519.NewKeyFromSeed([]byte("12345678901234567890123456789012"))
