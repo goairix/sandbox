@@ -54,6 +54,7 @@ type taskFinalSyncDraft struct {
 	writeAttempted bool
 	revision       int64
 	lost           bool
+	archive        *taskArchiveDraft
 }
 
 type taskFinalSyncQuiescenceWire struct {
