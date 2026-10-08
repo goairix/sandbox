@@ -38,6 +38,7 @@ type Options struct {
 	TaskQuiescenceIssuer       TaskQuiescenceIssuer
 	TaskWorkspaceArchiveIssuer TaskWorkspaceArchiveIssuer
 	TaskWorkspaceArchiveSpool  *TaskWorkspaceArchiveSpoolOptions
+	TaskWorkspaceSyncBudget    *TaskWorkspaceSyncBudgetOptions
 }
 
 type Backend struct {
@@ -62,10 +63,14 @@ type Backend struct {
 	publicationAuthorityID, publicationTarget string
 	archiveStore                              *taskArchiveStore
 	archiveLife                               *taskArchiveBackend
+	workspaceSyncBudget                       *taskWorkspaceSyncBudgetPin
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validateTaskWorkspaceSyncBudget(o.TaskWorkspaceSyncBudget); err != nil {
+		return err
+	}
 	if err := validateTaskArchiveSpool(o.TaskWorkspaceArchiveSpool); err != nil {
 		return err
 	}
@@ -165,6 +170,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	}
 	if err := validateOptions(o); err != nil {
 		return nil, err
+	}
+	if o.TaskWorkspaceSyncBudget != nil {
+		owned := *o.TaskWorkspaceSyncBudget
+		o.TaskWorkspaceSyncBudget = &owned
 	}
 	if o.TaskWorkspaceArchiveSpool != nil {
 		owned := *o.TaskWorkspaceArchiveSpool
@@ -273,6 +282,9 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		return nil, fmt.Errorf("%w: operator identity or restore epoch differs", ErrIdentityMismatch)
 	}
 	b.identityValue = string(identity.Kvs[0].Value)
+	if err = b.pinTaskWorkspaceSyncBudget(ctx, o.TaskWorkspaceSyncBudget); err != nil {
+		return nil, err
+	}
 	if o.TaskWorkspaceArchiveSpool != nil {
 		b.archiveStore, err = newTaskArchiveStore(o.TaskWorkspaceArchiveSpool.Directory, o.TaskWorkspaceArchiveSpool.limits())
 		if err != nil {

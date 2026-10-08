@@ -58,4 +58,5 @@ type taskWorkspaceSyncBody struct {
 	hash     hash.Hash
 	bytes    int64
 	complete bool
+	intent   *taskWorkspaceSyncIntentDraft
 }

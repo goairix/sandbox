@@ -19,6 +19,7 @@ import (
 	tr "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func newTaskDeliveryFixture(t *testing.T, expired bool) *taskCloseFixture {
@@ -28,11 +29,22 @@ func newTaskDeliveryFixture(t *testing.T, expired bool) *taskCloseFixture {
 // Canonical source fixtures can outlive the completed setup's 30sec leases.
 // Keep default behavior, and retire only the exact completed original owners.
 func newTaskDeliveryFixtureWithCompletedSetup(t *testing.T, expired, retireSetup bool) *taskCloseFixture {
+	return newTaskDeliveryFixtureWithSetup(t, expired, retireSetup, nil)
+}
+
+type taskDeliverySetupFactory func(*testing.T) (*Backend, *clientv3.Client, AcquireIntentInput, *CreationClaim, []byte, ed25519.PrivateKey)
+
+func newTaskDeliveryFixtureWithSetup(t *testing.T, expired, retireSetup bool, setup taskDeliverySetupFactory) *taskCloseFixture {
 	t.Helper()
 	// Construct the original published identity with the live target's UUID
 	// birth contract; do not rewrite any already-frozen destroy/claim evidence.
 	ownedFixtureContainers(t)
-	base, raw, input, creation, certificate, publicationRoot := preparationFixture(t, "plain")
+	if setup == nil {
+		setup = func(t *testing.T) (*Backend, *clientv3.Client, AcquireIntentInput, *CreationClaim, []byte, ed25519.PrivateKey) {
+			return preparationFixture(t, "plain")
+		}
+	}
+	base, raw, input, creation, certificate, publicationRoot := setup(t)
 	var original struct {
 		Claims p.RuntimeCertificateClaims `json:"claims"`
 	}

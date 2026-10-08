@@ -200,8 +200,16 @@ func deliveryNativeFixture(t *testing.T, horizon time.Duration, ttl ...time.Dura
 // A pure optional builder binds canonical policy before immutable reservation.
 // Nil retains the original opaque plan and 45 second session behavior.
 func deliveryNativeFixtureWithPlan(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithBudget(t, horizon, builder, nil, ttl...)
+}
+
+func deliveryNativeFixtureWithBudget(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithBudgetSetup(t, horizon, builder, budget, nil, ttl...)
+}
+
+func deliveryNativeFixtureWithBudgetSetup(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
-	base := newTaskDeliveryFixtureWithCompletedSetup(t, true, builder != nil)
+	base := newTaskDeliveryFixtureWithSetup(t, true, builder != nil, setup)
 	archiveTrackCleanup(base.b)
 	f := finishQuiescenceFixture(t, base)
 	archiveTrackCleanup(f.b)
@@ -225,7 +233,23 @@ func deliveryNativeFixtureWithPlan(t *testing.T, horizon time.Duration, builder 
 	issuer := &archiveNativeIssuer{old: f.issuer.old}
 	anchor := time.Now()
 	options := deliverySpoolOptions(archiveTestDirectory(t))
-	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: 500 * time.Millisecond, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: options, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
+	if budget != nil {
+		key, e := f.b.namespace.Key("meta", "workspace_sync_budget")
+		require.NoError(t, e)
+		value, e := encodeOperationMetadata(taskWorkspaceSyncBudgetRecord{1, *budget}, 1024)
+		require.NoError(t, e)
+		got, e := f.raw.Get(f.ctx, key)
+		require.NoError(t, e)
+		if len(got.Kvs) == 0 {
+			_, e = f.raw.Put(f.ctx, key, value)
+			require.NoError(t, e)
+		} else {
+			require.Len(t, got.Kvs, 1)
+			require.True(t, immutableWorkspaceSyncKV(got.Kvs[0]))
+			require.Equal(t, value, string(got.Kvs[0].Value))
+		}
+	}
+	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: 500 * time.Millisecond, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: options, TaskWorkspaceSyncBudget: budget, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
 		return ClockObservation{UTC: f.now.Add(time.Since(anchor))}, ctx.Err()
 	})})
 	require.NoError(t, err)
@@ -242,6 +266,20 @@ func deliveryNativeFixtureWithPlan(t *testing.T, horizon time.Duration, builder 
 	c, err := b.ClaimTask(claimCtx, f.c.reference.Task, "delivery-worker", claimTTL)
 	require.NoError(t, err)
 	t.Cleanup(func() {
+		if budget != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), time.Second)
+			lease, leaseErr := f.raw.TimeToLive(cleanupCtx, clientv3.LeaseID(c.reference.LeaseID))
+			cancelCleanup()
+			require.NoError(t, leaseErr)
+			require.NotNil(t, lease)
+			require.NotNil(t, lease.ResponseHeader)
+			require.Equal(t, b.clusterID, lease.ResponseHeader.ClusterId)
+			require.Equal(t, clientv3.LeaseID(c.reference.LeaseID), lease.ID)
+			if lease.TTL < 0 {
+				t.Logf("optional intent fixture original lease %d is natively absent; skip redundant revoke", c.reference.LeaseID)
+				return
+			}
+		}
 		b.archiveLife.mu.Lock()
 		closed := b.archiveLife.closed
 		b.archiveLife.mu.Unlock()

@@ -1,6 +1,7 @@
 package etcd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,7 +86,7 @@ func taskCheckWire(n Namespace, requests []*pb.TxnRequest, replies []*pb.TxnResp
 			return ErrInvalidMutation
 		}
 		for _, c := range r.Compare {
-			if !validNamespaceKey(n, string(c.Key)) || !validComparison(clientv3.Cmp(*c)) {
+			if c == nil || !validComparison(clientv3.Cmp(*c)) || !validNamespaceKey(n, string(c.Key)) && !taskWorkspaceSyncEmptyPrefixComparison(n, c) {
 				return ErrInvalidMutation
 			}
 		}
@@ -96,6 +97,32 @@ func taskCheckWire(n Namespace, requests []*pb.TxnRequest, replies []*pb.TxnResp
 		}
 	}
 	return nil
+}
+
+// Only the entire native task operations prefix may use the trailing-slash
+// range form. Point comparison validation remains unchanged.
+func taskWorkspaceSyncEmptyPrefixComparison(n Namespace, c *pb.Compare) bool {
+	if c == nil || c.Target != pb.Compare_VERSION || c.Result != pb.Compare_EQUAL || !validComparison(clientv3.Cmp(*c)) {
+		return false
+	}
+	v, ok := c.TargetUnion.(*pb.Compare_Version)
+	if !ok || v.Version != 0 || len(c.Key) > maxNamespaceKeyBytes {
+		return false
+	}
+	key := string(c.Key)
+	if !strings.HasPrefix(key, n.Root()) || !strings.HasSuffix(key, "/") || !validNamespaceKey(n, strings.TrimSuffix(key, "/")) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(key, n.Root()), "/")
+	if len(parts) != 6 || parts[0] != "p" || len(parts[1]) != 2 || parts[2] != "sandboxes" || !validDomainSegment(parts[3]) || parts[4] != "operations" || parts[5] != "" {
+		return false
+	}
+	for _, digit := range parts[1] {
+		if !(digit >= '0' && digit <= '9' || digit >= 'a' && digit <= 'f') {
+			return false
+		}
+	}
+	return string(c.RangeEnd) == clientv3.GetPrefixRangeEnd(key) && bytes.Compare(c.RangeEnd, []byte(clientv3.GetPrefixRangeEnd(n.Root()))) <= 0
 }
 func (b *Backend) preflightTaskReservation(cmps []clientv3.Cmp, key, value string) error {
 	if len(value) > 8192 {
