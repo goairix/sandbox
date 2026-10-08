@@ -55,6 +55,11 @@ type Supervisor struct {
 	failurePending            atomic.Bool
 	usersClosed               atomic.Bool
 	quiescence                *userQuiescenceAttempt
+	archive                   *workspaceArchiveAttempt
+	closeOnce                 sync.Once
+	closeStarted              atomic.Bool
+	closeTimer                *isolationDeadline
+	closeDeadline             time.Time
 	deadlineMu                sync.Mutex
 	isolationDeadline         *isolationDeadline
 	failureOnce               sync.Once

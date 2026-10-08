@@ -14,17 +14,38 @@ func (s *Supervisor) Close() error {
 	if err := s.validateReceiver(); err != nil {
 		return err
 	}
+	s.registerCloseDeadline()
 	return s.transport.close(s.stopExecutions, s.destroyResources)
+}
+
+func (s *Supervisor) registerCloseDeadline() {
+	s.closeOnce.Do(func() {
+		s.closeStarted.Store(true)
+		s.closeDeadline = time.Now().Add(31 * time.Second)
+		// Quiescence may still stop its own timer concurrently. Close therefore
+		// retains a distinct original guard through every transport/journal join.
+		s.closeTimer = newIsolationDeadline(s.closeDeadline, func() {
+			s.failurePending.Store(true)
+			var active []*Execution
+			if view := s.activeView.Load(); view != nil {
+				active = *view
+			}
+			s.emitIsolation("close_unjoined", active)
+			os.Exit(70)
+		})
+		s.armIsolationDeadline(s.closeDeadline, "close_unjoined")
+	})
 }
 
 // stopExecutions seals admission before requesting the original monitor cancel.
 // A failed finite join retains resources for the existing isolation fallback.
 func (s *Supervisor) stopExecutions() (bool, error) {
-
+	s.registerCloseDeadline()
 	s.mu.Lock()
 	s.closed = true
 	s.admission = false
 	a := s.quiescence
+	archive := s.archive
 	active := make([]*Execution, 0, len(s.active))
 	for _, e := range s.active {
 		active = append(active, e)
@@ -38,13 +59,13 @@ func (s *Supervisor) stopExecutions() (bool, error) {
 				return false, ErrExecutionUnknown
 			}
 			<-a.timer.done
-			return true, nil
+			return s.joinArchiveClose(archive)
 		case <-a.context.Done():
 			select {
 			case <-a.done:
 				if a.success {
 					<-a.timer.done
-					return true, nil
+					return s.joinArchiveClose(archive)
 				}
 			default:
 			}
@@ -75,7 +96,28 @@ func (s *Supervisor) stopExecutions() (bool, error) {
 			return false, ctx.Err()
 		}
 	}
-	return s.finishStopExecutions(owner, deadline)
+	return true, nil
+}
+
+func (s *Supervisor) joinArchiveClose(a *workspaceArchiveAttempt) (bool, error) {
+	if a == nil {
+		return true, nil
+	}
+	a.cancel()
+	select {
+	case <-a.done:
+		return true, nil
+	case <-a.context.Done():
+		// Cancellation alone never proves that source or transport IO joined.
+		select {
+		case <-a.done:
+			return true, nil
+		default:
+		}
+		// The independent Close/session timer remains live through this wait.
+		<-a.done
+		return true, nil
+	}
 }
 
 // The original standalone Close owner must join within its original bound.
@@ -94,12 +136,30 @@ func (s *Supervisor) finishStopExecutions(owner *isolationDeadline, originalDead
 // resources can be destroyed. There is exactly one Close owner.
 func (s *Supervisor) destroyResources() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	journal := s.journal
+	s.mu.Unlock()
 	var err error
-	if s.journal != nil {
-		err = s.journal.Close()
+	if journal != nil {
+		err = journal.Close()
 	}
+	s.mu.Lock()
 	clear(s.key)
+	s.mu.Unlock()
+	if joined, timerErr := s.finishStopExecutions(s.closeTimer, s.closeDeadline); !joined {
+		return timerErr
+	}
+	s.deadlineMu.Lock()
+	owner := s.isolationDeadline
+	owner.mu.Lock()
+	stopped := owner.state == 2
+	owner.mu.Unlock()
+	if !stopped && !owner.succeed() {
+		s.deadlineMu.Unlock()
+		s.armIsolationDeadline(s.closeDeadline, "close_unjoined")
+		go s.isolate("close_deadline")
+		return ErrExecutionUnknown
+	}
+	s.deadlineMu.Unlock()
 	return err
 }
 

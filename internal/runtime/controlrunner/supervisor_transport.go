@@ -117,7 +117,8 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	s.bootstrapMu.Unlock()
-	conn := tls.Server(raw, config)
+	archiveDeadline := &archiveDeadlineConn{Conn: raw}
+	conn := tls.Server(archiveDeadline, config)
 	if conn.HandshakeContext(bounded) != nil {
 		return
 	}
@@ -126,7 +127,16 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if request.Quiesce != nil {
+	if request.Archive != nil {
+		// Admission parsing is finite; the registered archive owner uses the
+		// separate handler lifetime and owns this borrower until physical return.
+		response := &archiveResponseConn{Conn: conn, deadline: archiveDeadline}
+		if request.Archive.Purpose == "task_workspace_archive_query" {
+			response.sealArchiveDeadline(deadline)
+		}
+		_ = s.dispatchTaskArchive(bounded, ctx, response, *request.Archive)
+		return
+	} else if request.Quiesce != nil {
 		err = s.dispatchTaskQuiesce(bounded, conn, *request.Quiesce)
 	} else if request.CloseData != nil {
 		err = s.dispatchTaskClose(bounded, conn, *request.CloseData)
