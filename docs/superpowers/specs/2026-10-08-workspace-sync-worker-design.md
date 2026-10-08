@@ -12,6 +12,8 @@ worker允许实际PID>=1（独立Deployment容器通常为PID1），要求各thr
 
 capture只打开固定/proc及当前os.Getpid的数字目录（禁止caller路径），pin真实PROC_SUPER_MAGIC；复用procOpenAt/procReadAt/sealStat等既有有界helper，固定ns magic links仅在当前原始proc目录下打开并核对NSFS_MAGIC。boot_id<=64bytes、stat<=16384bytes；PID/start字段严格解析（comm可含空格/括号，不能按整行简单Fields），拒绝missing/overflow/zero PID或start、PID不等于实际self。所有FD均CLOEXEC、一次observation结束即Close，不开放FD/path/callback。seal中不保存凭证或无限proc dump。constant boot与incarnation不能由env或caller传入。
 
+真实native诊断确认：非root进程dumpable0后固定/proc/PID/ns目录变成root-owned/read-restricted。该固定目录可由worker私有helper使用O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC取得仅搜索/观察的原始fd，保留Fstat/Fstatfs和固定namespace links检查。不得改旧procOpenAt/PID1路径，不能添加DAC_OVERRIDE、恢复dumpable或升级权限。首次EACCES失败日志及真实terminal/清理结果保留。
+
 原KernelBoundary可以保存私有workerseal，但禁止复用PID1seal伪造worker；worker ValidateCurrent应确认原UID/GID和完整seal，而不是仅重新接受任意非零UID。shared inspector增加跨thread worker UID/GID一致检查，旧roles不变。无需每sandbox actor、goroutine、map、后台ticker，bootstrap一process一次，ValidateCurrent按实际active work调用。
 
 ## 证明范围

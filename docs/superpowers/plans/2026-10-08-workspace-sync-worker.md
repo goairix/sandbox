@@ -30,9 +30,11 @@ Branch codex/etcd-state-management BASE3688e5c. Prior intent OWN CLOSED neverrea
 
 **Produces:** `BootstrapWorkspaceSyncWorker() (*KernelBoundary,error)`, `WorkspaceSyncWorkerReference` copieddiagnostics andstructuralValidate; `KernelBoundary.WorkspaceSyncWorkerReference()`; exactoriginalworker seal checkedbyValidateCurrent. Fieldnames may be chosen byauthor per strictspec; no new provider capability.
 
-- [ ] Add hostworkerrolemodel callable scaffold and compiledsemanticRED without undefinedsymbols orrealhostmutation.
-- [ ] Implement privateworkerrole strictactualUID/GID/caps/NNP/hardening witholdrolespreserved, originalsingleattemptbootstrappolicy.
-- [ ] Add boundedoriginalseal/ref copy andstrictprocstat parsing; actualValidateCurrent pins UID/GID/boot/start/ns/exe, selfcopied/foreignref never authority.
-- [ ] Add hostnegative/reference/unsupported andnewnativeoriginal/copy/repeat/actualchildidentity plus4realnegativecontainer cases; boundedphysicaljoin/ownedcleanup, nooldselectors.
-- [ ] Run host `go test -race -count=1 ./internal/runtime/launcher -run '^TestWorkspaceSyncWorker' -v`; newnativeownedscript OWN; packagevet/Linuxarm64CGO0compile/gofmt-d/diffcheck. Reportactualcounts/limits andmetadataSHA/loghash, exact11pathsmallsourcecommitunderOWNfcntlLOCK_EX/prepostempty.
-- [ ] Soleindependentreview andscopedfixifneeded, Rootacceptance withallprooflimits, next actualtarget/providerwire/native terminalsettlement stillopen.
+- [x] Add hostworkerrolemodel callable scaffold and compiledsemanticRED without undefinedsymbols orrealhostmutation.
+- [x] Implement privateworkerrole strictactualUID/GID/caps/NNP/hardening witholdrolespreserved, originalsingleattemptbootstrappolicy.
+- [x] Add boundedoriginalseal/ref copy andstrictprocstat parsing; actualValidateCurrent pins UID/GID/boot/start/ns/exe, selfcopied/foreignref never authority.
+- [x] Add hostnegative/reference/unsupported andnewnativeoriginal/copy/repeat/actualchildidentity plus4realnegativecontainer cases; boundedphysicaljoin/ownedcleanup, nooldselectors.
+- [x] Run host `go test -race -count=1 ./internal/runtime/launcher -run '^TestWorkspaceSyncWorker' -v`; newnativeownedscript OWN; packagevet/Linuxarm64CGO0compile/gofmt-d/diffcheck. Reportactualcounts/limits andmetadataSHA/loghash, exact11pathsmallsourcecommitunderOWNfcntlLOCK_EX/prepostempty.
+- [x] Soleindependentreview andscopedfixifneeded, Rootacceptance withallprooflimits, next actualtarget/providerwire/native terminalsettlement stillopen.
+
+Accepted cdb5612/b75fbeb, sole review+script scopedfixreview remainingC0/I0/M0. Host34actualmodelleaves; 5actualnativekernelcontainers +childproof, CGO0notrace; fix3actualchildlifecyclecases+1freshnativepositive, baselinekernelnegativesnotreplayed. Verification `../reports/2026-10-08-workspace-sync-worker-verification.md` carries scope/rulings/hashes. This diagnosticbootstrap is notproduction/provider/credentials/settlement/safe-release/capacityacceptance.
