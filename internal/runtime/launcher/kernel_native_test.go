@@ -28,6 +28,14 @@ const nativeModeEnv = "SANDBOX_LAUNCHER_TEST_MODE"
 func TestMain(m *testing.M) {
 	mode := os.Getenv(nativeModeEnv)
 	switch mode {
+	case "workspace-worker-positive", "workspace-worker-reject-root", "workspace-worker-reject-gid", "workspace-worker-reject-nnp", "workspace-worker-reject-cap":
+		os.Exit(m.Run())
+	case "workspace-worker-child":
+		if err := nativeWorkspaceSyncWorkerChild(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "", "positive", "cleanup-fatal", "cleanup-negative":
 		os.Exit(m.Run())
 	case "monitor-user":

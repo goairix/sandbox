@@ -29,17 +29,19 @@ type KernelSnapshot struct {
 type kernelRole uint8
 
 const (
-	rolePID1    kernelRole = 1
-	roleMonitor kernelRole = 2
+	rolePID1                kernelRole = 1
+	roleMonitor             kernelRole = 2
+	roleWorkspaceSyncWorker kernelRole = 3
 )
 
 type KernelBoundary struct {
-	mu       sync.Mutex
-	self     *KernelBoundary
-	role     kernelRole
-	pid      int
-	verified KernelSnapshot
-	seal     *pid1Seal
+	mu         sync.Mutex
+	self       *KernelBoundary
+	role       kernelRole
+	pid        int
+	verified   KernelSnapshot
+	seal       *pid1Seal
+	workerSeal *workspaceSyncWorkerSeal
 }
 
 func (b *KernelBoundary) Snapshot() KernelSnapshot {
@@ -52,13 +54,22 @@ func (b *KernelBoundary) Snapshot() KernelSnapshot {
 }
 
 func validateKernelSnapshot(s KernelSnapshot, role kernelRole, initial bool) error {
-	if role != rolePID1 && role != roleMonitor {
+	if role != rolePID1 && role != roleMonitor && role != roleWorkspaceSyncWorker {
 		return fmt.Errorf("%w: unknown role", ErrUnsafeKernel)
 	}
 	if (role == rolePID1 && s.PID != 1) || (role == roleMonitor && s.PID <= 1) {
 		return fmt.Errorf("%w: role/PID mismatch", ErrUnsafeKernel)
 	}
-	if s.UIDs != [4]uint32{} || s.GIDs != [4]uint32{} {
+	if role == roleWorkspaceSyncWorker {
+		if s.PID < 1 || s.UIDs[0] == 0 || s.GIDs[0] == 0 {
+			return fmt.Errorf("%w: worker PID/credentials", ErrUnsafeKernel)
+		}
+		for j := range s.UIDs {
+			if s.UIDs[j] != s.UIDs[0] || s.GIDs[j] != s.GIDs[0] {
+				return fmt.Errorf("%w: nonuniform worker credentials", ErrUnsafeKernel)
+			}
+		}
+	} else if s.UIDs != [4]uint32{} || s.GIDs != [4]uint32{} {
 		return fmt.Errorf("%w: non-root credentials", ErrUnsafeKernel)
 	}
 	if s.CapLast < 8 || s.CapLast > 63 || s.Threads < 1 || s.Threads > 4096 {
@@ -71,6 +82,9 @@ func validateKernelSnapshot(s KernelSnapshot, role kernelRole, initial bool) err
 		return fmt.Errorf("%w: dumpable/subreaper", ErrUnsafeKernel)
 	}
 	p, i, b := uint64(0xe0), uint64(0), uint64(0)
+	if role == roleWorkspaceSyncWorker {
+		p = 0
+	}
 	if role == rolePID1 && initial {
 		p, b = 0x1e0, 0x1e0
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 var kernelInitialization struct {
@@ -22,6 +24,12 @@ func BootstrapPID1() (*KernelBoundary, error) { return initializeKernel(rolePID1
 // PrepareMonitor accepts only a fresh root monitor exec inheriting the PID1
 // boundary. It removes inheritable capabilities before any later user exec.
 func PrepareMonitor() (*KernelBoundary, error) { return initializeKernel(roleMonitor) }
+
+// BootstrapWorkspaceSyncWorker hardens one actual non-root zero-cap process.
+// Failure consumes initialization; the caller must terminate the worker process.
+func BootstrapWorkspaceSyncWorker() (*KernelBoundary, error) {
+	return initializeKernel(roleWorkspaceSyncWorker)
+}
 
 func initializeKernel(role kernelRole) (*KernelBoundary, error) {
 	kernelInitialization.Lock()
@@ -50,6 +58,21 @@ func initializeKernel(role kernelRole) (*KernelBoundary, error) {
 		}
 		proc.Close()
 		b.seal = &seal
+	}
+	if role == roleWorkspaceSyncWorker {
+		seal, err := captureWorkspaceSyncWorkerSeal(after)
+		if err != nil {
+			return nil, err
+		}
+		incarnation, err := uuid.NewRandom()
+		if err != nil {
+			return nil, unavailable("worker incarnation", err)
+		}
+		seal.reference.Incarnation = incarnation.String()
+		if err := seal.reference.Validate(); err != nil {
+			return nil, err
+		}
+		b.workerSeal = &seal
 	}
 	return b, nil
 }
@@ -85,6 +108,19 @@ func (b *KernelBoundary) ValidateCurrent() error {
 		}
 		proc.Close()
 		if seal != *b.seal {
+			return ErrUnsafeKernel
+		}
+	}
+	if b.role == roleWorkspaceSyncWorker {
+		if b.workerSeal == nil || !b.workerSeal.matchesSnapshot(s) || b.workerSeal.reference.Validate() != nil {
+			return ErrUnsafeKernel
+		}
+		seal, err := captureWorkspaceSyncWorkerSeal(s)
+		if err != nil {
+			return err
+		}
+		seal.reference.Incarnation = b.workerSeal.reference.Incarnation
+		if seal != *b.workerSeal {
 			return ErrUnsafeKernel
 		}
 	}

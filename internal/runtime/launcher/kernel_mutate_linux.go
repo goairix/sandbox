@@ -43,6 +43,10 @@ func mutateKernel(role kernelRole, capLast uint32) error {
 		if err := allThreadsCaps(0x1e0, 0x1e0, 0xe0); err != nil {
 			return err
 		}
+	} else if role == roleWorkspaceSyncWorker {
+		if err := allThreadsCaps(0, 0, 0); err != nil {
+			return err
+		}
 	} else {
 		if err := allThreadsCaps(0xe0, 0xe0, 0); err != nil {
 			return err

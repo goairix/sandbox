@@ -260,6 +260,9 @@ func inspectKernelOnce(role kernelRole, initial bool) (KernelSnapshot, error) {
 		if err := validateKernelSnapshot(s, role, initial); err != nil {
 			return fmt.Errorf("thread %d: %w", tid, err)
 		}
+		if role == roleWorkspaceSyncWorker && result.PID != 0 && (result.UIDs != s.UIDs || result.GIDs != s.GIDs) {
+			return fmt.Errorf("%w: worker credentials differ between threads", ErrUnsafeKernel)
+		}
 		result = s
 		return nil
 	})
