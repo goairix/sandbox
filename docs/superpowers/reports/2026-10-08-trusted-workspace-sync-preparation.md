@@ -43,3 +43,11 @@
 现有33-byte slot 仅为 path hash/kind，无 body offset/hash；不能无额度扩大 index。可以顺序解析有界 TAR、逐 entry 算 hash 并以受注册 owner 保护的 SectionReader 流式消费，但 PAX 的逻辑 body offset 必须明确。索引缺失和索引损坏不可都当作“源中没有该文件”以授权删除。当前 task checkpoint 仅 pending/needs_reconciliation；没有 terminal safe-release 实现，现有 Lease-attached OperationRecord 也不能代替永久 provider unknown。
 
 per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 intent 一起提交，崩溃/unknown 后继续收费；退款须有原生 adapter 的确定结算证据，终态历史 GC 独立。预算配置身份需持久固定，不能由多个 Backend 各自复制额度。归档 fixture 已用50 comparisons，加入预算与 intent CAS 后必须重新检查实际 protobuf 节点及 request/response 字节上限。上述都是后续约束，尚未实现。
+
+## 下一单元的预算与性能约束
+
+全局 usage 每次请求 CAS 会形成热点。下一设计需在固定 partition credits 或持久有限 budget slots 中选择具体方案：分区额度总和受 cell 上限约束；unknown/崩溃占用不能随着 lease 过期释放，也不能重新分配出重复额度。目前未选定实现或默认额度。预算增加后继续保留当前全部原始历史 pins，并核对实际 protobuf64节点/64KiB记录/256KiB事务限制。
+
+每个请求归属须规范绑定逻辑 body 字节/hash 与实际 provider、物理 target、bucket/key、multipart ID/part number、删除对象及分页 cursor；先检查 metadata 上限再复制，不记录认证头或预签名 URL。原始 source 只能证明原始字节与当前 claim，不证明调用者 WorkerID 就是实际可信 worker，也不证明 provider 请求已经结算。
+
+当前消费实现保守地在描述符/打开 body 前重复校验整份 archive SHA。固定32KiB scratch 限制内存，但多文件时总读量仍可能随 entry 数乘 archive 大小增长。该实现尚未验收，且不能称性能改善；容量验收前必须独立解决不可变 source 与避免重复扫描的问题，不能为了速度直接取消篡改校验。原有 archive path index 未为每个 entry 预留内容 hash/offset，优化不得无额度扩张索引。

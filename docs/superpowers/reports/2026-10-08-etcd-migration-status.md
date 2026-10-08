@@ -2,7 +2,9 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
-已按用户要求合入基分支修复 `52b4d4f`、`d543cf3`，合并提交 `7bca73a`。无冲突；三个受影响包 race/vet/Linuxarm64CGO0编译通过。见 `2026-10-08-base-quiesce-fixes-verification.md`。后续归档原始消费者正在按 `2026-10-08-workspace-sync-source.md` 实现，尚未验收。
+已按用户要求合入基分支修复 `52b4d4f`、`d543cf3`，合并提交 `7bca73a`。无冲突；三个受影响包 race/vet/Linuxarm64CGO0编译通过。见 `2026-10-08-base-quiesce-fixes-verification.md`。
+
+新增已验收功能提交 `61fe19a`：原始归档消费owner、当前native权限、有界TAR/PAX私有body和所有关闭路径的物理等待。实际native24项与host5项通过，native零跳过/零警告，vet/Linuxarm64编译通过，独立review无问题。见 `2026-10-08-workspace-sync-source-verification.md`。原始45秒会话实际过期后继续消费、真实续约已测；当前重复整归档SHA存在多文件IO成本，尚不是性能/容量或安全释放验收。
 
 已验收组件包括原生 etcd 元数据与永久 owner/事务回执、原始 operation/claim 和命令 fencing、运行时关闭与用户排空，以及实际 workspace 归档生产者。最新两个功能提交：`b5bdca2` 封闭 TLS 归档传输接口；`f1e3086` Supervisor 原始生产者、独立截止时间、历史完成查询和物理关闭等待。对应验收见 `2026-10-08-supervisor-workspace-archive-verification.md`。这些组件验收不等于整条生产链路完成。
 
@@ -16,7 +18,7 @@
 
 后续按以下依赖顺序推进：
 
-1. 归档的原始受信消费 owner、消费前当前权限验证、实际 provider 物理目标校验与有界 body 接线。规范计划已验收；接线研究见 `2026-10-08-trusted-workspace-sync-preparation.md`。
+1. 原始归档消费者与规范计划已验收；继续实际可信provider worker、物理目标校验与有界body接线。接线研究见 `2026-10-08-trusted-workspace-sync-preparation.md`；重复归档完整性扫描必须在容量验收前优化。
 2. 每个真实远端请求（包括 SDK 重试/跳转/分片）的持久意图、fencing、确定结算或 sticky unknown；本地 provider 的可信物理 IO 证据；结合实际运行时/基础设施终止，完成安全释放链路。当前归档能力只能保守拒绝重建，正常 manager 故障恢复仍需实现和实测。
 3. API、Pool、Docker/Upload 与主程序生产接线；分区 due/dirty 调度，移除全量扫描和按已有沙盒常驻的控制循环。
 4. FUSE/collector/可信同步、长期空闲运行时按需证书维护；验证 N 增大时 idle 成本与活跃工作背压。
