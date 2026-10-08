@@ -50,4 +50,4 @@ per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 
 
 每个请求归属须规范绑定逻辑 body 字节/hash 与实际 provider、物理 target、bucket/key、multipart ID/part number、删除对象及分页 cursor；先检查 metadata 上限再复制，不记录认证头或预签名 URL。原始 source 只能证明原始字节与当前 claim，不证明调用者 WorkerID 就是实际可信 worker，也不证明 provider 请求已经结算。
 
-当前消费实现保守地在描述符/打开 body 前重复校验整份 archive SHA。固定32KiB scratch 限制内存，但多文件时总读量仍可能随 entry 数乘 archive 大小增长。该实现尚未验收，且不能称性能改善；容量验收前必须独立解决不可变 source 与避免重复扫描的问题，不能为了速度直接取消篡改校验。原有 archive path index 未为每个 entry 预留内容 hash/offset，优化不得无额度扩张索引。
+当前消费实现保守地在描述符/打开 body 前重复校验整份 archive SHA。固定32KiB scratch 限制内存，但多文件时总读量仍可能随 entry 数乘 archive 大小增长。该source单元已在f1e67e6验收，不能称性能改善；容量验收前必须独立解决不可变 source 与避免重复扫描的问题，不能为了速度直接取消篡改校验。原有 archive path index 未为每个 entry 预留内容 hash/offset，优化不得无额度扩张索引。
