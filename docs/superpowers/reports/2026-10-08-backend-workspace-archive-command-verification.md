@@ -1,0 +1,13 @@
+# Original Backend archive command verification
+
+Accepted source `90d23d0230ecd182d325ef2e5d6fe5eb27e25396` (base `2ee7d5a`). Purpose-specific optional issuer and instance-sealed command preparation bind original committed final-sync, current native claim and exact historical quiescence attribution. The original certificate/sign callback result, ticket times and native revision pins are fixed; fresh linearizable whole-prefix observations precede native writes. Copied/cold/expired inputs and ABA refuse. No archive application bytes are sent by this prerequisite.
+
+Ambiguous first Put response can yield committed diagnostics with ErrOutcomeUnknown and nil Prepared. It cannot reconstruct an original sender. The current single Destination requires the same actual still-valid query/archive certificate; coordinated idle certificate/query/TLS maintenance remains later work.
+
+Compiled configuration behavior RED exit1 preceded implementation. Final new-selector host race passed4top-level/28subtests (3.602s); genuine native etcd race passed11top-level/58subtests (36.083s), no skips or warning noise. Package vet and Linuxarm64CGO0 test compilation reported exit0. The earlier final native run failed one cumulative Certificate-count baseline assertion after an intentional coverage refusal; that failed log is retained. The corrected candidate and final checks passed. Existing accepted selectors were not replayed.
+
+Sole independent reviewer `/root/backend_archive_command_review` returned Spec compliant / Approved, Critical0 Important0 Minor0. Review included focused historical query/certificate matching, immutable MOD pin/linearizable Range and acknowledged-only cleanup-wrapper contracts; no duplicate testing.
+
+Root independently matched19 source/log checks: exact8 current SHA256/current+committed Git blobs and11 rawlog hashes/sizes; index empty. Evidence SHA256 `4ce71d164dddfdff0d92fb443f742628f5980fd854e05fb7e023a46422ab28ae`; author report SHA256 `9e9a4fdc8298462571839409402b6bbfef104937e7b93925fd3a00c9bc8f3a5b`. Empty vet/compile diagnostic logs accompany author-reported exits; Root did not independently replay those commands. All source/test/format changes apply_patch and exact source commit used OWN fcntl git-commit.lock.
+
+One native sample measured54 literal nodes,22,871 protobuf request bytes and12,318 command bytes. This is not throughput, MVCC/WAL/replication size or large-N capacity acceptance. TLS signing fixture is not actual PID1 delivery. Guarded long receiving/renewal, provider per-wire intent/settlement, safe physical termination/release, production/API/pool/scheduler/FUSE/collector wiring, deployment/recovery/capacity and Redis removal remain open. Next unit is `2026-10-08-backend-workspace-archive-delivery.md`.
