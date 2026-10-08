@@ -10,9 +10,11 @@
 
 新增已验收功能提交 `4e3c3c3`、修复 `d97d221`：当前 claim/KV 发送屏障、长接收期间真实续约、接收额度背压、接收后新鲜权限检查及物理关闭等待。最终新 native race15项通过，vet/Linux arm64编译通过，独立审查与针对性复审无未解决项。见 `2026-10-08-backend-workspace-archive-delivery-verification.md`。测试使用真实 etcd 和 TLS 协议 fixture，尚未接到实际生产运行时或 provider，不是安全释放与容量验收。
 
+新增已验收功能提交 `4ca3e45`：不可变规范同步计划绑定实际 workspace identity、排除规则和删除策略；新预留入口在错误目标时、查询/写入前拒绝，且不消耗原始申请。新 native race8项通过，vet/Linuxarm64编译通过，独立审查无问题。见 `2026-10-08-workspace-sync-plan-verification.md`。计划仅为结构归属，当前原生 provider 物理身份和消费接线仍未实现。
+
 后续按以下依赖顺序推进：
 
-1. 归档的原始受信消费 owner、实际 provider/目标/排除与删除语义的规范计划、消费前当前权限验证。接线研究见 `2026-10-08-trusted-workspace-sync-preparation.md`。
+1. 归档的原始受信消费 owner、消费前当前权限验证、实际 provider 物理目标校验与有界 body 接线。规范计划已验收；接线研究见 `2026-10-08-trusted-workspace-sync-preparation.md`。
 2. 每个真实远端请求（包括 SDK 重试/跳转/分片）的持久意图、fencing、确定结算或 sticky unknown；本地 provider 的可信物理 IO 证据；结合实际运行时/基础设施终止，完成安全释放链路。当前归档能力只能保守拒绝重建，正常 manager 故障恢复仍需实现和实测。
 3. API、Pool、Docker/Upload 与主程序生产接线；分区 due/dirty 调度，移除全量扫描和按已有沙盒常驻的控制循环。
 4. FUSE/collector/可信同步、长期空闲运行时按需证书维护；验证 N 增大时 idle 成本与活跃工作背压。

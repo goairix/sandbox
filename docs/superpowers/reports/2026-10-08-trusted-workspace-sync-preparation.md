@@ -33,3 +33,13 @@
 当前原始 final-sync/command/发送能力在 manager 重启后不能由记录重建。它们证明保守拒绝，并未完成主方案承诺的正常 manager 故障恢复；后续必须分别验收无外部效果的重启恢复和有未知远端效果的 sticky pending。长期空闲 runtime 的 query/TLS/issuer 证书协调更新同样未完成，不能放松旧证书 Match 或为每个已有 sandbox 增加常驻 actor。
 
 下一实现先规范绑定实际同步计划与原始归档消费身份，再落地持久 per-wire intent、原生 provider/本地 IO 结算、实际基础设施终止及安全释放。之后仍须生产 API/Pool/Docker 接线、分区调度、FUSE/collector、实际大 N 容量/性能、部署恢复与 Redis 移除。
+
+## 规范计划之后的消费接缝
+
+当前 `taskReceivedArchive.inspect` 校验原始 seal/store/witness 与关闭状态，没有授予新时效权限。接收 ctx 仍固定在归档 SessionNotAfter；新消费需要独立当前 claim ctx，不能直接延长或复用归档 ctx。`task_archive_spool.go` 的 active/ownerDone 已保护 reserve/receive，但 cancel 只覆盖旧 receive ctx；新消费者需在任何读取之前登记原始 owner、独立取消入口和物理完成通道。Claim Renew/Release 与 Backend.Close 还须发布新 owner 的有效期、取消并等待其 native monitor 与实际 IO，之后再关闭 client、删除文件和退款。
+
+`task_archive_spool_unix.go` 的现有检查覆盖 UID0600、regular/nlink1、dev/inode 和原始目录名，不覆盖 exact length/content hash。未来消费须在效果之前核对 artifact size/SHA256，按原始 body descriptor 保持完整性；已发 body 的 hash 不符要保留远端未知，不能撤销已发字节。私有 FD 不公开也不能代替内容检查。
+
+现有33-byte slot 仅为 path hash/kind，无 body offset/hash；不能无额度扩大 index。可以顺序解析有界 TAR、逐 entry 算 hash 并以受注册 owner 保护的 SectionReader 流式消费，但 PAX 的逻辑 body offset 必须明确。索引缺失和索引损坏不可都当作“源中没有该文件”以授权删除。当前 task checkpoint 仅 pending/needs_reconciliation；没有 terminal safe-release 实现，现有 Lease-attached OperationRecord 也不能代替永久 provider unknown。
+
+per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 intent 一起提交，崩溃/unknown 后继续收费；退款须有原生 adapter 的确定结算证据，终态历史 GC 独立。预算配置身份需持久固定，不能由多个 Backend 各自复制额度。归档 fixture 已用50 comparisons，加入预算与 intent CAS 后必须重新检查实际 protobuf 节点及 request/response 字节上限。上述都是后续约束，尚未实现。
