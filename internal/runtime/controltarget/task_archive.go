@@ -15,6 +15,24 @@ type AcceptedWorkspaceArchive struct {
 	record   TaskWorkspaceArchiveRecord
 	deadline time.Time
 	prior    *AcceptedUserQuiescence
+	consumed bool
+	cancel   context.CancelFunc
+	done     chan struct{}
+	terminal *TaskWorkspaceArchiveRecord
+}
+
+// Deadline returns the sealed admission deadline without renewing authority.
+func (a *AcceptedWorkspaceArchive) Deadline() (time.Time, error) {
+	if a == nil || a.self != a || a.journal == nil || a.journal.self != a.journal {
+		return time.Time{}, ErrJournalUnavailable
+	}
+	j := a.journal
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.workspaceArchive != a {
+		return time.Time{}, ErrJournalUnavailable
+	}
+	return a.deadline, nil
 }
 
 func (j *Journal) AcceptWorkspaceArchive(ctx context.Context, e p.TaskWorkspaceArchiveEvidence, q *AcceptedUserQuiescence, receipt []byte) (*AcceptedWorkspaceArchive, error) {

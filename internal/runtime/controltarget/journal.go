@@ -45,6 +45,7 @@ type Journal struct {
 	taskQuiescenceBytes                            int64
 	taskArchiveBytes                               int64
 	workspaceArchive                               *AcceptedWorkspaceArchive
+	closeDone                                      chan struct{}
 	usersClosed                                    bool
 	userQuiescence                                 *AcceptedUserQuiescence
 	files                                          journalFiles
@@ -164,11 +165,30 @@ func (j *Journal) Close() error {
 		return ErrJournalUnavailable
 	}
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.closed || !j.initialized {
+	if !j.initialized {
+		j.mu.Unlock()
+		return nil
+	}
+	if j.closeDone != nil {
+		done := j.closeDone
+		j.mu.Unlock()
+		<-done
 		return nil
 	}
 	j.closed = true
+	j.closeDone = make(chan struct{})
+	var owner chan struct{}
+	if a := j.workspaceArchive; a != nil && a.done != nil {
+		owner = a.done
+		a.cancel()
+	}
+	j.mu.Unlock()
+	// Cancellation does not release a blocked physical source/writer owner.
+	if owner != nil {
+		<-owner
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	// Closing the actual lock descriptor releases flock, including on hard exit.
 	var errs []error
 	for _, f := range []*os.File{j.commands, j.lock, j.root} {
@@ -181,6 +201,7 @@ func (j *Journal) Close() error {
 	j.commands = nil
 	j.lock = nil
 	j.root = nil
+	close(j.closeDone)
 	return errors.Join(errs...)
 }
 

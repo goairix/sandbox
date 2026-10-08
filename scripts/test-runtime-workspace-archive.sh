@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Task1 admission-only physical fixture; binary must be frozen and precompiled.
+# Selected physical fixture; binaries must be frozen and precompiled.
 set -euo pipefail
 image='gcr.io/etcd-development/etcd:v3.6.15@sha256:5ed4e32061aa061f970d6500629213e8579ef17571dcf9789074966acb9afad1'
 digest='gcr.io/etcd-development/etcd@sha256:5ed4e32061aa061f970d6500629213e8579ef17571dcf9789074966acb9afad1'
 project="sandbox-runtime-workspace-archive-$$-$(date +%s)"
 fixture=runtime-workspace-archive
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-[[ $# == 3 && -n "$1" && "$2" == admission && -f "$3" ]] || { echo 'usage: test-runtime-workspace-archive.sh EVIDENCE_DIRECTORY admission PRECOMPILED_BINARY' >&2; exit 2; }
+[[ ( $# == 3 && "$2" == admission ) || ( $# == 4 && "$2" == producer && -f "$4" ) ]] && [[ -n "$1" && -f "$3" ]] || { echo 'usage: test-runtime-workspace-archive.sh EVIDENCE_DIRECTORY admission|producer PRECOMPILED_BINARY [USER_HELPER]' >&2; exit 2; }
 mkdir -p "$1"
 evidence=$(cd "$1" && pwd)
 containers=()
@@ -49,12 +49,20 @@ binary=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 shasum -a 256 "$binary" >"$evidence/binary-sha256.txt"
 selected="^TestTaskArchiveAdmissionNative$"
 expected=0
-case_name=admission
+case_name="$2"
+producer_args=()
+if [[ "$case_name" == producer ]]; then
+  selected="^TestTaskArchiveProducerNative$"
+  helper=$(cd "$(dirname "$4")" && pwd)/$(basename "$4")
+  shasum -a 256 "$helper" >"$evidence/helper-sha256.txt"
+  producer_args+=(--mount "type=bind,src=$helper,dst=/archive-user,readonly" --tmpfs /workspace:rw,nosuid,nodev,noexec,size=8m,mode=0777)
+fi
 name="$project-$case_name"
 docker create --pull=never --name "$name" --label "sandbox.test.project=$project" --label "sandbox.test.fixture=$fixture" \
   --network none --user 0:0 --read-only --memory 128m --pids-limit 128 --cpus 0.5 \
   --cap-drop ALL --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges:true \
   --mount "type=bind,src=$binary,dst=/workspace-archive.test,readonly" \
+  ${producer_args[@]+"${producer_args[@]}"} \
   --tmpfs /journal:rw,nosuid,nodev,noexec,size=32m,mode=0700 \
   --env SANDBOX_LAUNCHER_TEST_MODE=positive --env SANDBOX_TASK_ARCHIVE_NATIVE=1 --env TMPDIR=/journal --env GOMAXPROCS=2 --entrypoint /workspace-archive.test "$image" \
   -test.v -test.count=1 -test.timeout=45s -test.run "$selected" >"$evidence/container.txt"
@@ -104,6 +112,12 @@ if [[ "$attach_exit" != "$expected" || "$terminal" != "exited false false false 
   exit 1
 fi
 [[ "$waited" == "$expected" ]] || exit 1
+if [[ "$case_name" == producer ]]; then
+  # Stopped-container tmpfs is gone; decode exact native stdout snapshots.
+  awk '/producer TAR base64:/ {print $NF}' "$evidence/native.log" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read().strip(),validate=True))' >"$evidence/producer.tar"
+  awk '/producer receipt base64:/ {print $NF}' "$evidence/native.log" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read().strip(),validate=True))' >"$evidence/producer-receipt.json"
+  shasum -a 256 "$evidence/producer.tar" "$evidence/producer-receipt.json" >"$evidence/producer-sha256.txt"
+fi
 grep -Fxq PASS "$evidence/native.log"
 counts=$(awk '/^[[:space:]]*--- PASS:/ {p++} /^[[:space:]]*--- FAIL:/ {f++} /^[[:space:]]*--- SKIP:/ {s++} END {printf "PASS=%d FAIL=%d SKIP=%d",p,f,s}' "$evidence/native.log")
 echo "$counts" | tee "$evidence/counts.txt"
