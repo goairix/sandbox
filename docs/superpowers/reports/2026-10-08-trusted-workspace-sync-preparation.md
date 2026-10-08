@@ -12,7 +12,7 @@
 
 ## 原有语义与有界资源
 
-`internal/service/workspace.go` 原同步按 runtime/storage manifest 差异上传，并删除源中不存在、且未被排除的对象。新链路保持现有对象布局、排除和删除语义，禁止排空后再次普通 exec/DownloadTAR。原有全量 map、ScopedFS 全文件 buffer 不适用于大 workspace；采用受限归档索引、已知长度的流式 body、有界分页 listing 和有限分片并发。Listing 只用于观察，不是陈旧 DELETE 的授权。保留 workspace root marker；目录、排除和索引哈希碰撞处理需明确。
+`internal/sandbox/workspace.go` 原同步按 runtime/storage manifest 差异上传，并删除源中不存在、且未被排除的对象。新链路保持现有对象布局、排除和删除语义，禁止排空后再次普通 exec/DownloadTAR。原有全量 map、ScopedFS 全文件 buffer 不适用于大 workspace；采用受限归档索引、已知长度的流式 body、有界分页 listing 和有限分片并发。Listing 只用于观察，不是陈旧 DELETE 的授权。保留 workspace root marker；目录、排除和索引哈希碰撞处理需明确。
 
 每个真实 wire 请求都要有不可变描述符、原始受信 worker UID/incarnation、当前 fences、持久意图和结算结果。SDK 重试、跳转、region discovery、分页、分片及 CompleteMultipart 都是独立请求边界。逻辑 entry 的长度/hash 与签名封装后的 wire 字节可以不同，描述符不能记录认证秘密。全 cell/partition 的意图数量与字节须背压，unknown 不随 lease、年龄或 worker 退出自动回收。
 
