@@ -28,13 +28,25 @@ type TaskWorkspaceArchiveEnvelope struct {
 }
 
 func (e TaskWorkspaceArchiveEnvelope) validateHeader() error {
-	if e.Version != 1 || e.Purpose != "task_workspace_archive" || len(e.TicketDigest) != 64 || len(e.Ticket) == 0 || len(e.Ticket) > 8192 || len(e.IssuerCertificate) == 0 || len(e.IssuerCertificate) > 4096 || len(e.OriginalQuiescenceReceipt) == 0 || len(e.OriginalQuiescenceReceipt) > 12288 {
+	if e.Version != 1 || len(e.TicketDigest) != 64 || len(e.Ticket) > 8192 || len(e.IssuerCertificate) > 4096 || len(e.OriginalQuiescenceReceipt) > 12288 {
 		return ErrFrame
 	}
 	for _, c := range e.TicketDigest {
 		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
 			return ErrFrame
 		}
+	}
+	switch e.Purpose {
+	case "task_workspace_archive":
+		if len(e.Ticket) == 0 || len(e.IssuerCertificate) == 0 || len(e.OriginalQuiescenceReceipt) == 0 {
+			return ErrFrame
+		}
+	case "task_workspace_archive_query":
+		if e.Ticket != nil || e.IssuerCertificate != nil || e.OriginalQuiescenceReceipt != nil {
+			return ErrFrame
+		}
+	default:
+		return ErrFrame
 	}
 	return nil
 }
@@ -103,6 +115,11 @@ func ReadTaskWorkspaceArchiveRequest(r io.Reader) (TaskWorkspaceArchiveEnvelope,
 	if _, err := io.ReadFull(r, header); err != nil {
 		return fail(err)
 	}
+	return readTaskWorkspaceArchiveHeader(r, header)
+}
+
+func readTaskWorkspaceArchiveHeader(r io.Reader, header []byte) (TaskWorkspaceArchiveEnvelope, error) {
+	fail := func(err error) (TaskWorkspaceArchiveEnvelope, error) { return TaskWorkspaceArchiveEnvelope{}, err }
 	var e TaskWorkspaceArchiveEnvelope
 	d := json.NewDecoder(bytes.NewReader(header))
 	d.DisallowUnknownFields()

@@ -91,7 +91,12 @@ func (d *Destination) Open(ctx context.Context) (*Session, error) {
 	if isNil(raw) {
 		return nil, ErrDestination
 	}
-	conn := tls.Client(raw, d.config)
+	archiveTransport := &archiveTLSConn{Conn: raw}
+	var transport net.Conn = archiveTransport
+	if half, ok := raw.(interface{ CloseWrite() error }); ok {
+		transport = &archiveHalfTLSConn{archiveTLSConn: archiveTransport, half: half}
+	}
+	conn := tls.Client(transport, d.config)
 	stop := closeOnContext(bounded, conn)
 	defer stop()
 	deadline, _ := bounded.Deadline()
@@ -109,7 +114,7 @@ func (d *Destination) Open(ctx context.Context) (*Session, error) {
 		conn.Close()
 		return nil, err
 	}
-	s := &Session{conn: conn}
+	s := &Session{conn: conn, archiveTransport: archiveTransport}
 	s.self = s
 	return s, nil
 }
@@ -139,10 +144,14 @@ func (d *Destination) VerifyReceipt(ctx context.Context, wire []byte, c p.ExecSt
 
 // Session carries one finite request and its response. It owns no payload buffer.
 type Session struct {
-	self *Session
-	conn *tls.Conn
-	mu   sync.Mutex
-	sent bool
+	self              *Session
+	conn              *tls.Conn
+	mu                sync.Mutex
+	sent              bool
+	mode              requestMode
+	archiveComplete   bool
+	archiveEOFChecked bool
+	archiveTransport  *archiveTLSConn
 }
 
 func (s *Session) Close() error {
@@ -158,6 +167,9 @@ func (s *Session) SendTaskClose(ctx context.Context, e TaskCloseEnvelope) error 
 	return s.send(ctx, func(w io.Writer) error { return WriteTaskCloseRequest(w, e) })
 }
 func (s *Session) send(ctx context.Context, write func(io.Writer) error) error {
+	return s.sendMode(ctx, requestEvents, write)
+}
+func (s *Session) sendMode(ctx context.Context, mode requestMode, write func(io.Writer) error) error {
 	if s == nil || s.self != s || isNil(ctx) {
 		return ErrDestination
 	}
@@ -167,6 +179,10 @@ func (s *Session) send(ctx context.Context, write func(io.Writer) error) error {
 		return ErrFrame
 	}
 	s.sent = true
+	s.mode = mode
+	if mode == requestArchive {
+		s.archiveTransport.strict.Store(true)
+	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	stop := closeOnContext(bounded, s.conn)
@@ -195,7 +211,15 @@ func (s *Session) send(ctx context.Context, write func(io.Writer) error) error {
 			return err
 		}
 	}
-	return bounded.Err()
+	if err := bounded.Err(); err != nil {
+		return err
+	}
+	if mode == requestArchive {
+		// Admission owns only the send. Archive response IO receives its own
+		// context and must never inherit the finite send deadline.
+		return s.conn.SetDeadline(time.Time{})
+	}
+	return nil
 }
 func (s *Session) Read(ctx context.Context) (byte, []byte, error) {
 	if s == nil || s.self != s || isNil(ctx) {
@@ -203,7 +227,7 @@ func (s *Session) Read(ctx context.Context) (byte, []byte, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.sent {
+	if !s.sent || s.mode != requestEvents {
 		return 0, nil, ErrFrame
 	}
 	if err := ctx.Err(); err != nil {

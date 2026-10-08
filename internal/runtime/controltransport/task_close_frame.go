@@ -134,6 +134,13 @@ func ReadRuntimeRequest(r io.Reader) (RuntimeRequest, error) {
 		}
 		return RuntimeRequest{Quiesce: &e}, nil
 	}
+	if purpose.Purpose == "task_workspace_archive" || purpose.Purpose == "task_workspace_archive_query" {
+		e, err := readTaskWorkspaceArchiveHeader(r, header)
+		if err != nil {
+			return RuntimeRequest{}, err
+		}
+		return RuntimeRequest{Archive: &e}, nil
+	}
 	e, c, err := ReadControlRequest(io.MultiReader(bytes.NewReader(size[:]), bytes.NewReader(header), r))
 	return RuntimeRequest{Exec: e, CloseData: c}, err
 }

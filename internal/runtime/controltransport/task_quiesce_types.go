@@ -14,10 +14,11 @@ type TaskQuiesceEnvelope struct {
 	OriginalCloseDataReceipt []byte                      `json:"original_close_data_receipt"`
 }
 
-// RuntimeRequest preserves the existing codecs while adding one narrowly typed
-// quiescence branch. At most one task pointer can be nonnil.
+// RuntimeRequest preserves the existing codecs with narrowly typed task
+// branches. At most one task pointer can be nonnil.
 type RuntimeRequest struct {
 	Exec      Envelope
 	CloseData *TaskCloseEnvelope
 	Quiesce   *TaskQuiesceEnvelope
+	Archive   *TaskWorkspaceArchiveEnvelope
 }

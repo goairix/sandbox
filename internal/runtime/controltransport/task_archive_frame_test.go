@@ -24,6 +24,47 @@ func archiveSized(header []byte) []byte {
 	return b
 }
 
+func TestTaskWorkspaceArchiveCanonicalQuery(t *testing.T) {
+	e := archiveEnvelope()
+	e.Purpose = "task_workspace_archive_query"
+	e.Ticket, e.IssuerCertificate, e.OriginalQuiescenceReceipt = nil, nil, nil
+	var wire bytes.Buffer
+	require.NoError(t, WriteTaskWorkspaceArchiveRequest(&wire, e), "attribution-only archive queries must be accepted")
+	got, err := ReadTaskWorkspaceArchiveRequest(&wire)
+	require.NoError(t, err)
+	require.Equal(t, e, got)
+	for _, purpose := range []string{"task_workspace_archive", "task_workspace_archive_query"} {
+		e := archiveEnvelope()
+		e.Purpose = purpose
+		if purpose == "task_workspace_archive_query" {
+			e.Ticket, e.IssuerCertificate, e.OriginalQuiescenceReceipt = nil, nil, nil
+		}
+		var wire bytes.Buffer
+		require.NoError(t, WriteTaskWorkspaceArchiveRequest(&wire, e))
+		request, err := ReadRuntimeRequest(&wire)
+		require.NoError(t, err)
+		require.Equal(t, &e, request.Archive)
+		require.Nil(t, request.Quiesce)
+		require.Nil(t, request.CloseData)
+		require.Equal(t, Envelope{}, request.Exec)
+		for _, mutate := range []func(*TaskWorkspaceArchiveEnvelope){
+			func(e *TaskWorkspaceArchiveEnvelope) { e.Ticket = []byte{} },
+			func(e *TaskWorkspaceArchiveEnvelope) { e.IssuerCertificate = []byte{} },
+			func(e *TaskWorkspaceArchiveEnvelope) { e.OriginalQuiescenceReceipt = []byte{} },
+		} {
+			bad := e
+			mutate(&bad)
+			var wire bytes.Buffer
+			require.Error(t, WriteTaskWorkspaceArchiveRequest(&wire, bad))
+			require.Empty(t, wire.Bytes())
+			header, err := json.Marshal(bad)
+			require.NoError(t, err)
+			_, err = ReadRuntimeRequest(bytes.NewReader(archiveSized(header)))
+			require.Error(t, err)
+		}
+	}
+}
+
 func TestTaskWorkspaceArchiveRequestRoundTripAndBounds(t *testing.T) {
 	for _, maximum := range []bool{false, true} {
 		e := archiveEnvelope()
@@ -112,6 +153,9 @@ func TestTaskWorkspaceArchiveRequestStrictAndEOF(t *testing.T) {
 	reject := func(t *testing.T, h []byte) {
 		_, err := ReadTaskWorkspaceArchiveRequest(bytes.NewReader(archiveSized(h)))
 		require.Error(t, err)
+		request, err := ReadRuntimeRequest(bytes.NewReader(archiveSized(h)))
+		require.Error(t, err)
+		require.Nil(t, request.Archive)
 	}
 	walk = func(raw []byte, path []string) {
 		var fields map[string]json.RawMessage
