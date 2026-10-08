@@ -1,0 +1,18 @@
+# Supervisor workspace archive integration
+
+Parent authority: `2026-10-06-etcd-state-management-design.md`; predecessor accepted at `1dd11e3`. This implements the approved migration inside the current feature branch. Main remains Redis until production integration is accepted.
+
+## Requirements
+
+1. The activated management TLS endpoint accepts a canonical finite `task_workspace_archive` request and an attribution-only `task_workspace_archive_query`. The query carries no ticket, certificate, or quiescence receipt and cannot create a producer. Existing exec, close-data, and quiescence codecs retain their behavior.
+2. Destination/Session remain original-instance sealed and send one request. Archive response methods are available only for the archive request mode, read bounded data/complete frames, and require actual authenticated TLS EOF after completion. Frames alone do not prove cumulative bytes, logical TAR entries, digest, current backend ownership, or safe release.
+3. The Supervisor authenticates the original ticket/context and successful physically joined original user quiescence, registers one original attempt before pending IO, and constructs the physical source using birth UID/GID and original kernel observation. No request path or UID selects the source. Pending duplicates do not replay DATA; cold or copied state cannot recreate a producer. Only original successful local terminal state may answer a historical query after fresh census/certificate checks.
+4. Finite startup/handshake/request admission is bounded to five seconds. Once admitted, archive IO has a separately sealed monotonic deadline derived from trusted SessionNotAfter and uncertainty, may only shorten, and cannot inherit the expired admission context or be extended by retry. An independent isolation timer is armed before IO and must remain effective while IO or locks block. Exit 70 is unknown/isolation, never release proof.
+5. Archive worker exclusively owns source and framed writes outside Supervisor/Journal mutexes. Actual source summary drives durable terminal and signature. Terminal local success and delivery of the completion frame are separate: failed delivery permits historical completion query, never DATA replay. The timer succeeds only when the physical worker has joined; blocked completion IO cannot bypass it.
+6. Close seals admissions, cancels and closes registered transport owners, and joins the archive worker before journal descriptors or runtime key are destroyed. It does not interpret cancellation or network error as proof that IO has stopped.
+
+## Validation and limits
+
+Transport tests use real pinned mutual TLS, mode isolation, finite request EOF, response EOF/truncation/trailing data, and independent response lifetime. Supervisor validation uses actual Linux PID1/bootstrap, UID/GID 1000 private workspace fixture, real original quiescence and TLS archive request, actual TAR/count/hash/signed receipt, historical query, refusal cases, and physical close or independent blocked-writer isolation. No previously accepted native selector is replayed. Record expected isolation exits separately from passing normal cases with actual attach/wait/OOM/owned cleanup evidence.
+
+This unit does not implement backend KV send fences, bounded spool/receiver validation, per-HTTP-attempt upload settlement, production main wiring, FUSE/collector, capacity, recovery, or Redis removal. Long-idle runtime/issuer credential maintenance needs a later on-demand production design without one actor per idle sandbox; this unit adds no trust roots or certificate renewal channel. Host race evidence is not Linux physical execution; native CGO0 execution is not Linux race or power-loss acceptance.
