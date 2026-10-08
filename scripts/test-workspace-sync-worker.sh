@@ -15,6 +15,7 @@ mkdir -p "$1"
 evidence=$(cd "$1" && pwd)
 containers=()
 attach=''
+attach_join_failed=0
 mode='initial'
 
 join_attach() {
@@ -26,7 +27,7 @@ join_attach() {
   grace=$((SECONDS+2))
   while kill -0 "$pid" 2>/dev/null && (( SECONDS < grace )); do sleep 0.1; done
   if kill -0 "$pid" 2>/dev/null; then
-    echo "attach PID=$pid joined=false" >>"$evidence/cleanup.log"
+    echo "attach PID=$pid mode=$mode project=$project fixture=$fixture joined=false retained=true" >>"$evidence/cleanup.log"
     return 1
   fi
   wait "$pid" || status=$?
@@ -34,7 +35,7 @@ join_attach() {
 }
 
 cleanup() {
-  local original=$? failed=0 name labels terminal waited wait_exit remaining kind
+  local original=$? failed=$attach_join_failed name labels terminal waited wait_exit remaining kind
   trap - EXIT INT TERM
   for name in ${containers[@]+"${containers[@]}"}; do
     if labels=$(docker inspect --format '{{index .Config.Labels "sandbox.test.project"}} {{index .Config.Labels "sandbox.test.fixture"}}' "$name" 2>/dev/null); then
@@ -57,7 +58,14 @@ cleanup() {
       docker rm "$name" >>"$evidence/cleanup.log" 2>&1 || failed=1
     else failed=1; fi
   done
-  if [[ -n "$attach" ]]; then join_attach "$attach" || failed=1; attach=''; fi
+  if [[ -n "$attach" ]]; then
+    if join_attach "$attach"; then
+      attach=''
+    else
+      failed=1
+      attach_join_failed=1
+    fi
+  fi
   for kind in container volume network; do
     case "$kind" in
       container) remaining=$(docker ps -aq --filter "label=sandbox.test.project=$project") || { failed=1; remaining='query failed'; };;
@@ -68,7 +76,7 @@ cleanup() {
     [[ -z "$remaining" ]] || failed=1
   done
   if (( original != 0 || failed != 0 )); then
-    echo "workspace worker fixture failed; evidence $evidence" >&2
+    echo "workspace worker fixture failed; unjoinedAttachPID=${attach:-none}; evidence $evidence" >&2
     exit 1
   fi
   echo "workspace worker native verified; exact owned inventories empty; evidence $evidence"
@@ -113,8 +121,11 @@ for mode in workspace-worker-positive workspace-worker-reject-root workspace-wor
     if (( SECONDS >= deadline )); then
       echo "attach timeout for $mode" >&2
       docker kill "$name" >>"$evidence/$mode.log" 2>&1 || true
-      join_attach "$attach" || true
-      attach=''
+      if join_attach "$attach"; then
+        attach=''
+      else
+        attach_join_failed=1
+      fi
       exit 1
     fi
     sleep 0.2
