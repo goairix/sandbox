@@ -46,8 +46,16 @@ per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 
 
 ## 下一单元的预算与性能约束
 
-全局 usage 每次请求 CAS 会形成热点。下一设计需在固定 partition credits 或持久有限 budget slots 中选择具体方案：分区额度总和受 cell 上限约束；unknown/崩溃占用不能随着 lease 过期释放，也不能重新分配出重复额度。目前未选定实现或默认额度。预算增加后继续保留当前全部原始历史 pins，并核对实际 protobuf64节点/64KiB记录/256KiB事务限制。
+全局 usage 每次请求 CAS 会形成热点。7391a5e/27feaf6已验收固定partition的永久budget slots：256分区每分区S1..64，unknown/崩溃占用不会随lease过期释放；实际Txn保留50历史pins、同一写Txn完整prefix条件，63helper节点/13360requestbytes，继续受原64节点/64KiB记录/256KiB事务限制。默认nil拒绝意图，operator固定配置只读；没有自动退款/重分配。分区热点可能保守背压，尚未实测实际容量或吞吐。
 
 每个请求归属须规范绑定逻辑 body 字节/hash 与实际 provider、物理 target、bucket/key、multipart ID/part number、删除对象及分页 cursor；先检查 metadata 上限再复制，不记录认证头或预签名 URL。原始 source 只能证明原始字节与当前 claim，不证明调用者 WorkerID 就是实际可信 worker，也不证明 provider 请求已经结算。
 
 当前消费实现保守地在描述符/打开 body 前重复校验整份 archive SHA。固定32KiB scratch 限制内存，但多文件时总读量仍可能随 entry 数乘 archive 大小增长。该source单元已在f1e67e6验收，不能称性能改善；容量验收前必须独立解决不可变 source 与避免重复扫描的问题，不能为了速度直接取消篡改校验。原有 archive path index 未为每个 entry 预留内容 hash/offset，优化不得无额度扩张索引。
+
+## 持久意图之后的真实 worker 接线
+
+现有launcher只有rolePID1/roleMonitor，BootstrapPID1/PrepareMonitor的原始seal不能证明任意backend goroutine或配置WorkerID是实际sync worker。后续须建立自己的原始bootstrap/incarnation/OS UID、凭证/FD/进程隔离证据，或验证具体runtime管理任务；API进程PID字符串或runtime ref不能替代该边界。
+
+现有FileSystemMeta的StorageIdentity/Endpoint/Bucket/SubPath是配置归属，legacy ScopedFS向opaque driver转交Create/List/Remove，不能给出每个wire、实际物理target或writer退出的证据。已验收put意图单元仅有原始body/plan/claim的native元数据归属；后续实际worker/target/派发/终态证据的额外持久记录必须先计入预算，不能假定intent+slot收费已包含无限证明空间。
+
+目前source.body.Read每个最多32KiB chunk前后各做一次fresh nativeguard，另有250ms监控与描述符整archive检查。吞吐模型须计入约每32KiB两次native事务的活跃读成本，不能仅凭内存有界称性能提升。后续优化需实际adapter IO取消/物理等待与fencing证明，本意图单元不改既有source权限检查。
