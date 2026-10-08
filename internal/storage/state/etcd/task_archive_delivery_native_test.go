@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 	tr "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -193,7 +195,10 @@ func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNat
 
 func deliveryNativeFixture(t *testing.T, horizon time.Duration, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
-	f := newQuiescenceNativeFixture(t)
+	base := newTaskDeliveryFixture(t, true)
+	archiveTrackCleanup(base.b)
+	f := finishQuiescenceFixture(t, base)
+	archiveTrackCleanup(f.b)
 	require.NoError(t, f.b.ReleaseTaskClaim(f.ctx, f.c))
 	identity, err := decodeIdentity(f.b.identityValue, f.b.namespace)
 	require.NoError(t, err)
@@ -224,7 +229,11 @@ func deliveryNativeFixture(t *testing.T, horizon time.Duration, ttl ...time.Dura
 		b.archiveLife.mu.Unlock()
 		if closed {
 			_, err := f.raw.Revoke(context.Background(), clientv3.LeaseID(c.reference.LeaseID))
-			require.NoError(t, err)
+			if errors.Is(err, rpctypes.ErrLeaseNotFound) {
+				t.Logf("native fixture lease %d is already absent at cleanup", c.reference.LeaseID)
+			} else {
+				require.NoError(t, err)
+			}
 		} else {
 			taskReleaseClaim(t, b, c)
 		}

@@ -22,10 +22,20 @@ func taskArchiveIndexBytes(entries uint64) (uint64, error) {
 	return slots * taskArchiveSlotBytes, nil
 }
 
-func newTaskArchiveStore(directory string, l taskArchiveLimits) (*taskArchiveStore, error) {
+// validateTaskArchiveStore has no filesystem or operator callback effects.
+// Both optional Backend options and actual private store opening use it.
+func validateTaskArchiveStore(directory string, l taskArchiveLimits) (uint64, error) {
 	index, err := taskArchiveIndexBytes(l.Entries)
 	if err != nil || l.Jobs == 0 || l.JobBytes < 1536 || l.JobBytes > 1<<40 || l.TotalBytes < l.JobBytes || l.JobIndexBytes < index || l.TotalIndexBytes < l.JobIndexBytes || index > uint64(math.MaxInt) || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
-		return nil, errTaskArchive
+		return 0, errTaskArchive
+	}
+	return index, nil
+}
+
+func newTaskArchiveStore(directory string, l taskArchiveLimits) (*taskArchiveStore, error) {
+	index, err := validateTaskArchiveStore(directory, l)
+	if err != nil {
+		return nil, err
 	}
 	root, err := taskArchiveOpenRoot(directory)
 	if err != nil {
