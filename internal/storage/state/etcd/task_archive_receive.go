@@ -54,6 +54,11 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 	if err = taskArchiveCheck(s.root, r.name, r.file, r.identity); err != nil {
 		return nil, err
 	}
+	if e.beforeOpen != nil {
+		if err = e.beforeOpen(bounded); err != nil {
+			return nil, err
+		}
+	}
 	session, err := e.destination.Open(bounded)
 	if err != nil {
 		return nil, err
@@ -68,6 +73,11 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 			s.mu.Unlock()
 		}
 	}()
+	if e.beforeSend != nil {
+		if err = e.beforeSend(bounded); err != nil {
+			return nil, err
+		}
+	}
 	if err = session.SendTaskWorkspaceArchive(bounded, e.envelope); err != nil {
 		return nil, err
 	}
@@ -132,6 +142,11 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 		}
 		if err := bounded.Err(); err != nil {
 			return nil, err
+		}
+		if e.beforeWitness != nil {
+			if err = e.beforeWitness(bounded); err != nil {
+				return nil, err
+			}
 		}
 		w := &taskReceivedArchive{origin: r, diagnostics: taskArchiveDiagnostics{Bytes: total, Entries: count, SHA256: digest, Context: e.context, TicketDigest: e.digest, Before: e.before, After: e.after, SessionAfter: e.sessionAfter}}
 		w.self = w

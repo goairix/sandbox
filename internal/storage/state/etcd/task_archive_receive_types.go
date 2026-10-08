@@ -59,6 +59,8 @@ type taskArchiveExpected struct {
 	digest                      string
 	before, after, sessionAfter time.Time
 	now                         func(context.Context) (time.Time, error)
+	beforeOpen, beforeSend      func(context.Context) error
+	beforeWitness               func(context.Context) error
 }
 
 type taskArchiveDiagnostics struct {

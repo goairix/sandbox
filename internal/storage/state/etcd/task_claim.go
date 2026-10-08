@@ -31,6 +31,7 @@ type TaskClaim struct {
 	closeDraft                               *taskCloseDraft
 	quiescenceDraft                          *taskQuiescenceDraft
 	finalSyncDraft                           *taskFinalSyncDraft
+	archiveDelivery                          *taskArchiveDelivery
 }
 
 func (c *TaskClaim) Reference() TaskClaimReference {
@@ -234,10 +235,27 @@ func (b *Backend) RenewTaskClaim(ctx context.Context, c *TaskClaim) (err error) 
 		return ErrInvalidRecord
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	defer func() {
 		if err != nil {
 			c.lost = true
+		}
+		owner := c.archiveDelivery
+		if owner != nil {
+			if err != nil {
+				owner.fail(err)
+			} else {
+				deadline := c.deadline
+				owner.deadline.Store(&deadline)
+				select {
+				case owner.wake <- struct{}{}:
+				default:
+				}
+			}
+		}
+		c.mu.Unlock()
+		if owner != nil && err != nil {
+			<-owner.done
+			err = errors.Join(err, owner.spool.close())
 		}
 	}()
 	if err = c.live(ctx); err != nil {
@@ -282,14 +300,23 @@ func (b *Backend) ReleaseTaskClaim(ctx context.Context, c *TaskClaim) error {
 		return ErrInvalidRecord
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.lost = true
+	owner := c.archiveDelivery
+	if owner != nil {
+		owner.cancel()
+	}
+	c.mu.Unlock()
+	var joined error
+	if owner != nil {
+		<-owner.done
+		joined = owner.spool.close()
+	}
 	if ctx == nil {
-		return ErrInvalidRecord
+		return errors.Join(ErrInvalidRecord, joined)
 	}
 	request, cancel := b.requestContext(ctx)
 	defer cancel()
-	return b.revokeTaskLease(request, clientv3.LeaseID(c.reference.LeaseID))
+	return errors.Join(joined, b.revokeTaskLease(request, clientv3.LeaseID(c.reference.LeaseID)))
 }
 func (b *Backend) revokeTaskLease(ctx context.Context, id clientv3.LeaseID) error {
 	response, err := b.client.Revoke(ctx, id)

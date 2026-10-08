@@ -37,6 +37,7 @@ type Options struct {
 	TaskIssuer                 TaskCommandIssuer
 	TaskQuiescenceIssuer       TaskQuiescenceIssuer
 	TaskWorkspaceArchiveIssuer TaskWorkspaceArchiveIssuer
+	TaskWorkspaceArchiveSpool  *TaskWorkspaceArchiveSpoolOptions
 }
 
 type Backend struct {
@@ -59,10 +60,15 @@ type Backend struct {
 	execVerifier                              *controlprotocol.ManagementVerifier
 	authorityClock                            AuthorityClock
 	publicationAuthorityID, publicationTarget string
+	archiveStore                              *taskArchiveStore
+	archiveLife                               *taskArchiveBackend
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validateTaskArchiveSpool(o.TaskWorkspaceArchiveSpool); err != nil {
+		return err
+	}
 	if _, err := publicationVerifier(o); err != nil {
 		return err
 	}
@@ -160,6 +166,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if err := validateOptions(o); err != nil {
 		return nil, err
 	}
+	if o.TaskWorkspaceArchiveSpool != nil {
+		owned := *o.TaskWorkspaceArchiveSpool
+		o.TaskWorkspaceArchiveSpool = &owned
+	}
 	if o.DialTimeout == 0 {
 		o.DialTimeout = 5 * time.Second
 	}
@@ -199,7 +209,7 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("etcd state: create client: %w", err)
 	}
-	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout}
+	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout, archiveLife: &taskArchiveBackend{}}
 	b.publicationVerifier = verifier
 	b.execIssuer = o.ExecIssuer
 	b.taskIssuer = o.TaskIssuer
@@ -219,6 +229,9 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	ready := false
 	defer func() {
 		if !ready {
+			if b.archiveStore != nil {
+				_ = b.archiveStore.close()
+			}
 			_ = client.Close()
 		}
 	}()
@@ -260,6 +273,15 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		return nil, fmt.Errorf("%w: operator identity or restore epoch differs", ErrIdentityMismatch)
 	}
 	b.identityValue = string(identity.Kvs[0].Value)
+	if o.TaskWorkspaceArchiveSpool != nil {
+		b.archiveStore, err = newTaskArchiveStore(o.TaskWorkspaceArchiveSpool.Directory, o.TaskWorkspaceArchiveSpool.limits())
+		if err != nil {
+			return nil, fmt.Errorf("%w: open archive spool: %v", ErrInvalidConfiguration, err)
+		}
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	ready = true
 	return b, nil
 }
@@ -351,4 +373,4 @@ func (b *Backend) baseComparisons() []clientv3.Cmp {
 		clientv3.Compare(clientv3.LeaseValue(b.restoreKey), "=", 0),
 	}
 }
-func (b *Backend) Close() error { return b.client.Close() }
+func (b *Backend) Close() error { return b.closeTaskArchiveBackend() }
