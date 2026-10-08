@@ -2103,7 +2103,15 @@ func (m *Manager) resolve(ctx context.Context, id string) (*Sandbox, error) {
 
 // Destroy removes a sandbox.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
-	return m.destroyWithReason(ctx, id, "manual")
+	// Requests must finish before the SDK's default HTTP timeout. A live owner
+	// can keep renewing while background finalization remains blocked.
+	requestCtx, cancel := context.WithTimeout(ctx, workspaceRequestWait)
+	defer cancel()
+	err := m.destroyWithReason(requestCtx, id, "manual")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	return err
 }
 
 func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) error {
@@ -2129,7 +2137,7 @@ func (m *Manager) destroyWithReason(ctx context.Context, id, reason string) erro
 	syncLifecycle := m.syncLifecycles[id]
 	m.mu.RUnlock()
 	if fuseLifecycle != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), m.fuseTeardownTimeout())
+		cleanupCtx, cancel := context.WithTimeout(ctx, m.fuseTeardownTimeout())
 		defer cancel()
 		completed := m.teardownFUSESandboxWithResult(cleanupCtx, fuseLifecycle, fmt.Errorf("sandbox destroy: %s", reason))
 		fuseLifecycle.teardownMu.Lock()
@@ -3378,7 +3386,7 @@ func (m *Manager) restoreFUSELifecycleWithController(ctx context.Context, sb *Sa
 	var restoreMu sync.Mutex
 	var renewalLost error
 	published := false
-	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, func(lost error) {
+	renewal, err := m.config.WorkspaceCoordinator.startRenewal(ctx, context.Background(), lease, func(lost error) {
 		restoreMu.Lock()
 		current := lifecycle
 		if !published {

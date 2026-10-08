@@ -437,7 +437,7 @@ func (c *WorkspaceCoordinator) Restore(ctx context.Context, expected WorkspaceOw
 			if errors.Is(setErr, state.ErrDurabilityUnconfirmed) {
 				return nil, errors.Join(ErrWorkspaceLeaseLost, fmt.Errorf("restore expired workspace lease: %w", setErr))
 			}
-			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
+			checkCtx, cancel := context.WithTimeout(ctx, workspaceCleanupTimeout)
 			current, verifyErr := c.store.Get(checkCtx, keys.lease)
 			cancel()
 			if verifyErr != nil || !bytes.Equal(current, leaseRaw) {
@@ -784,15 +784,21 @@ func (r *WorkspaceLeaseRenewal) Stop() {
 // StartRenewal immediately renews once before starting its ticker. Any lease
 // failure wins a single atomic race with Stop and invokes onLost exactly once.
 func (c *WorkspaceCoordinator) StartRenewal(ctx context.Context, lease *WorkspaceLease, onLost func(error)) (*WorkspaceLeaseRenewal, error) {
+	return c.startRenewal(ctx, ctx, lease, onLost)
+}
+
+// Restoration bounds the initial RPC by its request, while the published
+// lifecycle owns and stops the renewal loop independently of that request.
+func (c *WorkspaceCoordinator) startRenewal(initialCtx, lifetimeCtx context.Context, lease *WorkspaceLease, onLost func(error)) (*WorkspaceLeaseRenewal, error) {
 	if onLost == nil {
 		onLost = func(error) {}
 	}
-	if err := c.Renew(ctx, lease); err != nil {
-		metrics.RecordWorkspaceLeaseLost(ctx, lease.OwnerSnapshot().Runtime)
+	if err := c.Renew(initialCtx, lease); err != nil {
+		metrics.RecordWorkspaceLeaseLost(initialCtx, lease.OwnerSnapshot().Runtime)
 		onLost(err)
 		return nil, err
 	}
-	loopCtx, cancel := context.WithCancel(ctx)
+	loopCtx, cancel := context.WithCancel(lifetimeCtx)
 	renewal := &WorkspaceLeaseRenewal{cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(renewal.done)

@@ -121,7 +121,9 @@ func (c *activeController) Fence(ctx context.Context) error {
 	if c == nil {
 		return state.ErrActiveSandboxStaleToken
 	}
-	c.mu.Lock()
+	if err := c.lockContext(ctx); err != nil {
+		return err
+	}
 	defer c.mu.Unlock()
 	if c.lost != nil {
 		return errors.Join(state.ErrActiveSandboxStaleToken, c.lost)
@@ -141,6 +143,29 @@ func (c *activeController) Fence(ctx context.Context) error {
 	c.lease = *renewed
 	c.validUntil = time.Now().Add(c.ttl)
 	return nil
+}
+
+// A background renewal holds mu across its RPC. Requests must be able to stop
+// waiting for that renewal when their own deadline expires.
+func (c *activeController) lockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.mu.TryLock() {
+		return nil
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if c.mu.TryLock() {
+				return nil
+			}
+		}
+	}
 }
 
 func (c *activeController) Stop(ctx context.Context) error {
@@ -346,7 +371,7 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	keepController := false
 	defer func() {
 		if !keepController {
-			_ = controller.Stop(context.WithoutCancel(ctx))
+			_ = controller.Stop(ctx)
 		}
 	}()
 

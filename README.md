@@ -44,6 +44,10 @@ curl -X POST http://localhost:8080/api/v1/execute \
 
 创建响应始终包含布尔字段 `reused`：新建逻辑实例为 `false`（包括使用预热池），返回已有实例或恢复后复用为 `true`。同 workspace 并发首次申请时，实际创建的请求返回 `false`，其余请求返回 `true`。这个字段描述本次申请的结果，调用方直接读取服务端返回值；GET 查询响应不包含该字段。
 
+工作空间锁等待、查回、恢复复用和旧实例回收共用 20 秒等待预算；实际新建保留原有的创建超时。手动销毁也限制等待 20 秒，并遵守调用方更短的截止时间。回收未完成时返回 `SANDBOX_CLEANUP_PENDING`（503），后台继续回收并保留归属记录；分布式锁释放另有最多 5 秒的收尾时间，为 SDK 默认 30 秒 HTTP 超时留出响应时间。
+
+FUSE 回收时，探针只跳过已确认整个线程组退出的僵尸或死进程；仍有线程存活、状态不明或 I/O 阻塞的进程继续参与停止核验。Kubernetes quiesce 的 `quiesce-process-not-stopped` 仅在收到完整退出码 1 且诊断确认尚未生成令牌时允许同 UID、同 generation 重试；执行结果未知仍保留归属并拒绝重放。该修复需要同时发布 `sandbox-api` 和包含 `workspace-probe` 的 runtime 镜像；更新镜像配置不会替换已运行 Pod 内的探针，历史阻塞实例仍需协调完成回收并验证工作空间重新申请成功。
+
 ```json
 {"id":"sandbox-xxx","reused":true}
 ```

@@ -665,8 +665,14 @@ func (p *sharedOrdinaryPool) withLock(ctx context.Context, fn func(context.Conte
 }
 
 func withPoolLock(ctx context.Context, store state.AtomicStore, lockKey string, fn func(context.Context) error) error {
+	return withPoolLockAcquisition(ctx, ctx, store, lockKey, fn)
+}
+
+// Workspace requests limit acquisition separately from provisioning. Once
+// acquired, lock loss still cancels the operation's own context.
+func withPoolLockAcquisition(ctx, acquireCtx context.Context, store state.AtomicStore, lockKey string, fn func(context.Context) error) error {
 	token := []byte(randSuffix(24))
-	locked, err := store.SetNX(ctx, lockKey, token, ordinaryPoolLockTTL)
+	locked, err := store.SetNX(acquireCtx, lockKey, token, ordinaryPoolLockTTL)
 	if err != nil {
 		return fmt.Errorf("lock shared ordinary pool: %w", err)
 	}

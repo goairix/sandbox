@@ -37,6 +37,7 @@ type processIdentity struct {
 	UID       int
 	StartTime uint64
 	State     byte
+	threads   uint64 // local proc evidence; not part of the broker wire identity
 }
 
 type descriptor struct {

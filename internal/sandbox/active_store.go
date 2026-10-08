@@ -296,7 +296,7 @@ func (m *Manager) destroyDistributedSandbox(ctx context.Context, id string) erro
 func (m *Manager) destroyDistributedSandboxWithWait(ctx context.Context, id string, waitForOwner bool) (bool, error) {
 	record, _, _, err := m.activeSandboxes.BeginDestroy(ctx, id)
 	if err != nil {
-		current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), id)
+		current, loadErr := m.activeSandboxes.Load(ctx, id)
 		if loadErr != nil || current == nil || (current.Phase != state.ActiveSandboxDestroying && current.Phase != state.ActiveSandboxCleanupPending) {
 			return false, errors.Join(err, loadErr)
 		}
@@ -364,7 +364,7 @@ func (m *Manager) finishDistributedSandboxCleanup(ctx context.Context, record *s
 		}
 		return false, m.waitForActiveCleanup(ctx, id)
 	}
-	defer func() { _ = controller.Stop(context.WithoutCancel(ctx)) }()
+	defer func() { _ = controller.Stop(ctx) }()
 	if err := controller.Fence(ctx); err != nil {
 		return false, err
 	}
@@ -429,7 +429,7 @@ func (m *Manager) destroyDistributedWorkspaceWithResult(ctx context.Context, sb 
 	keepController := false
 	defer func() {
 		if !keepController {
-			_ = controller.Stop(context.WithoutCancel(ctx))
+			_ = controller.Stop(ctx)
 		}
 	}()
 	switch sb.Workspace.MountType {
@@ -481,7 +481,7 @@ func (m *Manager) beginActiveCleanup(ctx context.Context, sandboxID string) erro
 	}
 	record, _, _, err := m.activeSandboxes.BeginDestroy(ctx, sandboxID)
 	if err != nil {
-		current, loadErr := m.activeSandboxes.Load(context.WithoutCancel(ctx), sandboxID)
+		current, loadErr := m.activeSandboxes.Load(ctx, sandboxID)
 		if loadErr != nil || current == nil ||
 			(current.Phase != state.ActiveSandboxDestroying && current.Phase != state.ActiveSandboxCleanupPending) {
 			return errors.Join(err, loadErr)

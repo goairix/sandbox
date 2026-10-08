@@ -18,7 +18,8 @@ import (
 // recovered automatically. It is an operational failure, not caller contention.
 var ErrWorkspaceRecoveryRequired = errors.New("workspace sandbox requires server-side recovery")
 
-const workspaceRequestWait = 30 * time.Second
+// Leave response delivery time before the SDK's default 30-second HTTP timeout.
+const workspaceRequestWait = 20 * time.Second
 const workspaceRequestRetry = 50 * time.Millisecond
 
 type workspaceRequestLock struct {
@@ -84,7 +85,8 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 	stop := context.AfterFunc(m.controlCtx, cancel)
 	defer stop()
 	defer cancel()
-	lockWaitCtx, cancelLockWait := context.WithTimeout(requestCtx, workspaceRequestWait)
+	waitUntil := time.Now().Add(workspaceRequestWait)
+	lockWaitCtx, cancelLockWait := context.WithDeadline(requestCtx, waitUntil)
 	defer cancelLockWait()
 	unlock, err := m.lockWorkspaceRequest(lockWaitCtx, cfg.WorkspacePath)
 	if err != nil {
@@ -95,7 +97,7 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 	var reused bool
 	request := func(ctx context.Context) error {
 		var err error
-		result, reused, err = m.getOrCreateWorkspace(ctx, cfg)
+		result, reused, err = m.getOrCreateWorkspace(ctx, cfg, waitUntil)
 		return err
 	}
 	coordinator := m.config.WorkspaceCoordinator
@@ -114,8 +116,11 @@ func (m *Manager) GetOrCreate(ctx context.Context, cfg SandboxConfig) (*Sandbox,
 			return nil, false, ErrWorkspaceLookupUnavailable
 		}
 		for {
-			err = withPoolLock(requestCtx, coordinator.store, "sandbox:workspace:request:"+keys.workspaceHash, request)
+			err = withPoolLockAcquisition(requestCtx, lockWaitCtx, coordinator.store, "sandbox:workspace:request:"+keys.workspaceHash, request)
 			if !errors.Is(err, errOrdinaryPoolLockBusy) {
+				if errors.Is(err, context.DeadlineExceeded) {
+					err = lookupUnavailable(err)
+				}
 				break
 			}
 			if err = waitWorkspaceRequest(lockWaitCtx); err != nil {
@@ -147,16 +152,18 @@ func waitWorkspaceRequest(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (*Sandbox, bool, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, workspaceRequestWait)
+func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig, waitUntil time.Time) (*Sandbox, bool, error) {
+	// Lock contention, reuse and old-lifecycle cleanup share one request budget.
+	// Actual creation keeps its existing provisioning context and timeout.
+	waitCtx, cancelWait := context.WithDeadline(ctx, waitUntil)
 	defer cancelWait()
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := waitCtx.Err(); err != nil {
 			return nil, false, lookupUnavailable(err)
 		}
-		sb, err := m.GetByWorkspace(ctx, cfg.WorkspacePath)
+		sb, err := m.GetByWorkspace(waitCtx, cfg.WorkspacePath)
 		if err == nil {
-			if err = m.prepareWorkspaceReuse(ctx, &sb); err == nil {
+			if err = m.prepareWorkspaceReuse(waitCtx, &sb); err == nil {
 				return &sb, true, nil
 			}
 			if !errors.Is(err, ErrSandboxNotReady) && !errors.Is(err, ErrWorkspaceLeased) && !errors.Is(err, ErrWorkspaceLeaseLost) {
@@ -183,7 +190,7 @@ func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (
 			case "sandbox_expired", "sandbox_phase_destroying", "sandbox_phase_cleanup_pending", "sandbox_state_destroying":
 				// Only the recorded expired/destroying lifecycle is retired through its
 				// normal, UID-fenced cleanup. Healthy owners are never displaced.
-				if cleanupErr := m.cleanupRequestedWorkspace(ctx, cfg.WorkspacePath, conflict.SandboxID); cleanupErr != nil {
+				if cleanupErr := m.cleanupRequestedWorkspace(waitCtx, cfg.WorkspacePath, conflict.SandboxID); cleanupErr != nil {
 					if errors.Is(cleanupErr, state.ErrActiveSandboxConflict) || errors.Is(cleanupErr, ErrSandboxNotReady) {
 						if waitErr := waitWorkspaceRequest(waitCtx); waitErr != nil {
 							return nil, false, lookupUnavailable(errors.Join(cleanupErr, waitErr))
@@ -198,7 +205,7 @@ func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig) (
 			case "sandbox_record_missing":
 				// A fresh owner precedes publication. An old owner without lifecycle
 				// evidence needs server recovery rather than a speculative replacement.
-				if !m.workspaceOwnerPublishing(ctx, cfg.WorkspacePath) {
+				if !m.workspaceOwnerPublishing(waitCtx, cfg.WorkspacePath) {
 					return nil, false, fmt.Errorf("%w: %w", ErrWorkspaceRecoveryRequired, err)
 				}
 			default:
