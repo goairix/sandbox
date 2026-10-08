@@ -64,7 +64,9 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 	// gate.json can never be substituted with a retained temporary manifest.
 	bytes := j.manifestBytes
 	var records, temps uint64
-	var activationBytes, taskCloseBytes, taskQuiescenceBytes int64
+	var activationBytes, taskCloseBytes, taskQuiescenceBytes, taskArchiveBytes int64
+	var firstArchive, terminalArchive *TaskWorkspaceArchiveRecord
+	var retainedQuiescence *TaskUserQuiescenceRecord
 	var firstQuiescence *TaskUserQuiescenceRecord
 	var retainedClose *TaskDataCloseRecord
 	var firstClose *TaskDataCloseRecord
@@ -79,7 +81,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 		} else {
 			records++
 		}
-		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0) > maxJournalContentFiles {
+		if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0)+boolCount(taskArchiveBytes > 0) > maxJournalContentFiles {
 			return ErrCapacity
 		}
 		return nil
@@ -104,7 +106,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			if name == "activation.json" {
 				activationBytes = int64(len(b))
 				bytes += activationBytes
-				if bytes > j.maxBytes || 1+records+temps+1+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0) > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+1+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0)+boolCount(taskArchiveBytes > 0) > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -135,7 +137,7 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 				retainedClose = &r
 				taskCloseBytes = int64(len(b))
 				bytes += taskCloseBytes
-				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskQuiescenceBytes > 0)+1 > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskQuiescenceBytes > 0)+boolCount(taskArchiveBytes > 0)+1 > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -164,9 +166,46 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			}
 			firstQuiescence = &r
 			if name == "users-quiesce.json" {
+				retainedQuiescence = &r
 				taskQuiescenceBytes = int64(len(b))
 				bytes += taskQuiescenceBytes
-				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+1 > maxJournalContentFiles {
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+boolCount(taskArchiveBytes > 0)+1 > maxJournalContentFiles {
+					return ErrCapacity
+				}
+				return nil
+			}
+			return add(len(b), true)
+		}
+		if name == "workspace-archive.json" || taskArchiveTempName(name) {
+			requiresActivation = true
+			b, err := j.files.readFileLimit(ctx, j.root, name, maxTaskArchiveRecordBytes)
+			if err != nil {
+				return err
+			}
+			r, err := decodeTaskArchive(b)
+			if err != nil {
+				return err
+			}
+			if err = j.taskCloseBinding(r.Context.Current); err != nil {
+				return err
+			}
+			if j.gate.GateState != "closed" {
+				return ErrInvalidRecord
+			}
+			if firstArchive != nil && !sameTaskArchive(*firstArchive, r) {
+				return ErrConflict
+			}
+			firstArchive = &r
+			if r.State == "archive_complete" {
+				if terminalArchive != nil && (terminalArchive.ArchiveBytes != r.ArchiveBytes || terminalArchive.EntryCount != r.EntryCount || terminalArchive.SHA256 != r.SHA256) {
+					return ErrConflict
+				}
+				terminalArchive = &r
+			}
+			if name == "workspace-archive.json" {
+				taskArchiveBytes = int64(len(b))
+				bytes += taskArchiveBytes
+				if bytes > j.maxBytes || 1+records+temps+boolCount(activationBytes > 0)+boolCount(taskCloseBytes > 0)+boolCount(taskQuiescenceBytes > 0)+1 > maxJournalContentFiles {
 					return ErrCapacity
 				}
 				return nil
@@ -263,6 +302,12 @@ func (j *Journal) scanJournalLocked(ctx context.Context) error {
 			return ErrConflict
 		}
 	}
+	if firstArchive != nil {
+		if taskArchiveBytes == 0 || retainedQuiescence == nil || retainedQuiescence.State != "users_quiesced" || retainedQuiescence.Context != firstArchive.Context.QuiescenceContext || retainedQuiescence.TicketDigest != firstArchive.Context.QuiescenceTicketDigest {
+			return ErrConflict
+		}
+	}
+	j.taskArchiveBytes = taskArchiveBytes
 	j.taskQuiescenceBytes = taskQuiescenceBytes
 	j.usersClosed = firstQuiescence != nil
 	j.activationBytes = activationBytes

@@ -25,6 +25,12 @@ type TaskWorkspaceArchiveTicketClaims struct {
 	SessionNotAfter time.Time                   `json:"session_not_after"`
 }
 
+func (c TaskWorkspaceArchiveContext) Validate() error      { return validateTaskArchiveContext(c) }
+func (c TaskWorkspaceArchiveTicketClaims) Validate() error { return validateTaskArchiveTicketClaims(c) }
+func (c TaskWorkspaceArchiveReceiptClaims) Validate() error {
+	return validateTaskArchiveReceiptClaims(c)
+}
+
 // TaskWorkspaceArchiveEvidence is copied attribution and a fixed window,
 // never live claim, producer, remote settlement, or safe-release authority.
 type TaskWorkspaceArchiveEvidence struct {

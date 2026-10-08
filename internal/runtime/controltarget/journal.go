@@ -43,6 +43,8 @@ type Journal struct {
 	activationBytes                                int64
 	taskCloseBytes                                 int64
 	taskQuiescenceBytes                            int64
+	taskArchiveBytes                               int64
+	workspaceArchive                               *AcceptedWorkspaceArchive
 	usersClosed                                    bool
 	userQuiescence                                 *AcceptedUserQuiescence
 	files                                          journalFiles
@@ -228,6 +230,9 @@ func (j *Journal) contentFilesLocked() uint64 {
 		n++
 	}
 	if j.taskQuiescenceBytes > 0 {
+		n++
+	}
+	if j.taskArchiveBytes > 0 {
 		n++
 	}
 	return n
