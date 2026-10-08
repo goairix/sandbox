@@ -344,7 +344,7 @@ func (m *Manager) destroySyncSandboxWithResult(ctx context.Context, lifecycle *s
 	}
 	m.mu.Unlock()
 	if lifecycle.controller != nil {
-		_ = lifecycle.controller.Stop(context.WithoutCancel(ctx))
+		_ = lifecycle.controller.Stop(ctx)
 	}
 	m.pool.NotifyRemoved()
 	return completed, nil
@@ -393,7 +393,7 @@ func (m *Manager) restoreSyncSandboxWithController(ctx context.Context, sb *Sand
 		}
 		lifecycle.ephemeralRecord = ephemeralRecord
 	}
-	renewal, err := m.config.WorkspaceCoordinator.StartRenewal(context.Background(), lease, func(lost error) {
+	renewal, err := m.config.WorkspaceCoordinator.startRenewal(ctx, context.Background(), lease, func(lost error) {
 		m.markSyncLeaseLost(lifecycle, lost)
 	})
 	if err != nil {

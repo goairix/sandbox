@@ -156,7 +156,7 @@ func (m *Manager) cleanupInterruptedSyncWorkspaceWithResult(ctx context.Context,
 		}
 		return false, m.waitForActiveCleanup(ctx, sb.ID)
 	}
-	defer func() { _ = controller.Stop(context.WithoutCancel(ctx)) }()
+	defer func(stopCtx context.Context) { _ = controller.Stop(stopCtx) }(ctx)
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	controller.SetOnLost(cancel)

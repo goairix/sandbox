@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -71,6 +72,15 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 func kubernetesControlExecError(streamErr error, stderr []byte) error {
 	if code, ok := mounter.ParseDiagnosticToken(stderr); ok {
 		return fmt.Errorf("execute Kubernetes control command: workspace mounter failure: %s", code)
+	}
+	// Older workspace-probe images emit this fixed diagnostic rather than a
+	// wire token. Accept only the exact, bounded grammar; never expose raw stderr.
+	if len(stderr) < 64 && strings.HasSuffix(string(stderr), "\n") {
+		message := strings.TrimSuffix(string(stderr), "\n")
+		pid, err := strconv.ParseUint(strings.TrimPrefix(message, "verify stopped process "), 10, 31)
+		if err == nil && pid > 0 && message == fmt.Sprintf("verify stopped process %d", pid) {
+			return fmt.Errorf("execute Kubernetes control command: quiesce-process-not-stopped: %w", streamErr)
+		}
 	}
 	// Arbitrary stderr can contain supervisor input-derived diagnostics.
 	return fmt.Errorf("execute Kubernetes control command: %w", streamErr)

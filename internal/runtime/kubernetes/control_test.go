@@ -124,3 +124,18 @@ func TestKubernetesControlErrorAcceptsOnlySafeDiagnosticToken(t *testing.T) {
 	assert.NotContains(t, err.Error(), "storage-auth")
 	assert.NotContains(t, err.Error(), "AKIA-DO-NOT-LEAK")
 }
+
+func TestKubernetesControlErrorIdentifiesBlockedQuiesceWithoutRawStderr(t *testing.T) {
+	err := kubernetesControlExecError(errors.New("exit code 1"), []byte("verify stopped process 1458\n"))
+	require.ErrorContains(t, err, "quiesce-process-not-stopped")
+	for _, raw := range []string{
+		"verify stopped process 1458\nsecret-value\n",
+		"verify stopped process 0\n",
+		"verify stopped process 01\n",
+		"verify stopped process secret-value\n",
+	} {
+		err = kubernetesControlExecError(errors.New("exit code 1"), []byte(raw))
+		require.NotContains(t, err.Error(), "quiesce-process-not-stopped")
+		require.NotContains(t, err.Error(), "secret-value")
+	}
+}

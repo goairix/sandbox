@@ -133,6 +133,7 @@ type workspaceRuntimeState struct {
 	idle            chan struct{}
 	quiesceInFlight bool
 	quiescePoisoned bool
+	quiesceFailure  error
 	flushInFlight   bool
 	quiesceToken    *runtime.WorkspaceQuiesceToken
 	proof           *runtime.TerminationEvidence
@@ -814,7 +815,7 @@ func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (
 	}, nil
 }
 
-func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (runtime.WorkspaceQuiesceToken, error) {
+func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (result runtime.WorkspaceQuiesceToken, resultErr error) {
 	if expectedGeneration <= 0 {
 		return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("expected workspace generation must be positive")
 	}
@@ -826,7 +827,11 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 	r.stateMu.Lock()
 	if (state.generation != 0 && state.generation != expectedGeneration) || state.quiesceToken != nil ||
 		state.quiesceInFlight || state.quiescePoisoned || state.flushInFlight {
+		failure := state.quiesceFailure
 		r.stateMu.Unlock()
+		if failure != nil {
+			return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("workspace cannot be quiesced: previous attempt failed: %w", failure)
+		}
 		return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("workspace cannot be quiesced")
 	}
 	state.generation = expectedGeneration
@@ -839,6 +844,7 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 		state.quiesceInFlight = false
 		if dispatched && !succeeded {
 			state.quiescePoisoned = true
+			state.quiesceFailure = resultErr
 		}
 		r.stateMu.Unlock()
 	}()
@@ -858,6 +864,7 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 	r.stateMu.Lock()
 	state.quiesceToken = &token
 	state.quiescePoisoned = false
+	state.quiesceFailure = nil
 	r.stateMu.Unlock()
 	succeeded = true
 	return token, nil

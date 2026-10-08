@@ -1755,6 +1755,9 @@ func TestAmbiguousQuiesceOrResumePoisonsCycle(t *testing.T) {
 			require.Error(t, err)
 			_, err = rt.QuiesceWorkspace(context.Background(), ref, 7)
 			require.Error(t, err)
+			if operation == "quiesce" {
+				require.ErrorContains(t, err, "response lost", "retain the original failed quiesce cause")
+			}
 		})
 	}
 }

@@ -291,6 +291,12 @@ func (r *memoryActiveRepository) DeleteControllerWithResult(_ context.Context, l
 func (r *memoryActiveRepository) AcquireController(_ context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Match Redis: a captured cleanup snapshot cannot acquire a phantom
+	// controller after another replica has deleted the lifecycle record.
+	record, exists := r.records[lease.SandboxID]
+	if !exists || record.Generation != lease.Generation {
+		return nil, false, state.ErrActiveSandboxStaleToken
+	}
 	if current, ok := r.controllers[lease.SandboxID]; ok && current.ExpiresAt.After(time.Now()) {
 		return nil, false, nil
 	}
