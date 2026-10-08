@@ -843,7 +843,10 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 		r.stateMu.Lock()
 		state.quiesceInFlight = false
 		if dispatched && !succeeded {
-			state.quiescePoisoned = true
+			// A completed stop verification failure issued no broker/token. The
+			// same UID/generation can retry after its process set changes. Unknown
+			// outcomes remain poisoned, since a live broker may already exist.
+			state.quiescePoisoned = !errors.Is(resultErr, errQuiesceProcessNotStopped)
 			state.quiesceFailure = resultErr
 		}
 		r.stateMu.Unlock()

@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
+	utilexec "k8s.io/client-go/util/exec"
 
 	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 )
@@ -1757,6 +1758,57 @@ func TestAmbiguousQuiesceOrResumePoisonsCycle(t *testing.T) {
 			require.Error(t, err)
 			if operation == "quiesce" {
 				require.ErrorContains(t, err, "response lost", "retain the original failed quiesce cause")
+			}
+		})
+	}
+}
+
+func TestQuiesceRetriesOnlyConfirmedPreBrokerStopFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		execErr error
+		stderr  string
+		retry   bool
+	}{
+		{"confirmed_exit", utilexec.CodeExitError{Err: errors.New("command exited"), Code: 1}, "verify stopped process 1458\n", true},
+		{"lost_stream_with_diagnostic", errors.New("response lost"), "verify stopped process 1458\n", false},
+		{"deadline_with_diagnostic", context.DeadlineExceeded, "verify stopped process 1458\n", false},
+		{"different_exit", utilexec.CodeExitError{Err: errors.New("command exited"), Code: 137}, "verify stopped process 1458\n", false},
+		{"unrecognized_failure", utilexec.CodeExitError{Err: errors.New("command exited"), Code: 1}, "start quiesce broker: response lost\n", false},
+		{"extra_output", utilexec.CodeExitError{Err: errors.New("command exited"), Code: 1}, "verify stopped process 1458\nextra\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := preparedScript()
+			var attempts int
+			script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+				if len(command.argv) > 1 && command.argv[1] == "quiesce" {
+					attempts++
+					if attempts == 1 {
+						return nil, kubernetesControlExecError(tc.execErr, []byte(tc.stderr))
+					}
+				}
+				return base.handler(command)
+			}}
+			rt, _ := newFakeKubernetesRuntime(t, script)
+			info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+			require.NoError(t, err)
+			ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+			auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+			require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+			_, err = rt.QuiesceWorkspace(context.Background(), ref, 7)
+			require.Error(t, err)
+			require.Error(t, rt.FlushWorkspace(context.Background(), ref, 7), "a failed stop never authorizes flush")
+			_, err = rt.QuiesceWorkspace(context.Background(), ref, 8)
+			require.Error(t, err, "failure must not authorize a different generation")
+			token, err := rt.QuiesceWorkspace(context.Background(), ref, 7)
+			if tc.retry {
+				require.NoError(t, err)
+				require.Equal(t, "token-a", token.Opaque)
+				require.NoError(t, rt.FlushWorkspace(context.Background(), ref, 7))
+				assert.Equal(t, 2, attempts)
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, 1, attempts, "unknown outcomes must not replay quiesce")
 			}
 		})
 	}

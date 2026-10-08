@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/mounter"
@@ -27,8 +28,9 @@ const (
 )
 
 var (
-	ErrInvalidControlContainer = errors.New("invalid workspace control container")
-	ErrInvalidControlCommand   = errors.New("invalid workspace control command")
+	ErrInvalidControlContainer  = errors.New("invalid workspace control container")
+	ErrInvalidControlCommand    = errors.New("invalid workspace control command")
+	errQuiesceProcessNotStopped = errors.New("quiesce-process-not-stopped")
 )
 
 type podCommandExecutor interface {
@@ -79,6 +81,12 @@ func kubernetesControlExecError(streamErr error, stderr []byte) error {
 		message := strings.TrimSuffix(string(stderr), "\n")
 		pid, err := strconv.ParseUint(strings.TrimPrefix(message, "verify stopped process "), 10, 31)
 		if err == nil && pid > 0 && message == fmt.Sprintf("verify stopped process %d", pid) {
+			// Only a completed probe's exit status proves failure before broker
+			// creation. Stderr plus a lost stream/deadline is still ambiguous.
+			var exitErr utilexec.ExitError
+			if errors.As(streamErr, &exitErr) && exitErr.Exited() && exitErr.ExitStatus() == 1 {
+				return fmt.Errorf("execute Kubernetes control command: %w: %w", errQuiesceProcessNotStopped, streamErr)
+			}
 			return fmt.Errorf("execute Kubernetes control command: quiesce-process-not-stopped: %w", streamErr)
 		}
 	}

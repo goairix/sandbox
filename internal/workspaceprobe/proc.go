@@ -30,7 +30,11 @@ func (p procFS) listSameUID(uid, selfPID int) ([]processIdentity, error) {
 			}
 			return nil, err
 		}
-		if identity.UID == uid {
+		// A dead leader may still have live sibling threads. Only a dead leader
+		// with exactly one remaining thread proves the whole group has exited.
+		// Keep other groups and all live states, including blocked I/O (D).
+		exited := (identity.State == 'Z' || identity.State == 'X' || identity.State == 'x') && identity.threads == 1
+		if identity.UID == uid && !exited {
 			result = append(result, identity)
 		}
 	}
@@ -104,7 +108,12 @@ func parseProcStat(pid int, stat []byte) (processIdentity, error) {
 	if err != nil {
 		return processIdentity{}, fmt.Errorf("malformed proc start time")
 	}
-	return processIdentity{PID: pid, State: fields[0][0], StartTime: startTime}, nil
+	// num_threads is field 20, read from the same stat snapshot as state.
+	threads, err := strconv.ParseUint(string(fields[17]), 10, 64)
+	if err != nil || threads == 0 {
+		return processIdentity{}, fmt.Errorf("malformed proc thread count")
+	}
+	return processIdentity{PID: pid, State: fields[0][0], StartTime: startTime, threads: threads}, nil
 }
 
 func parseEffectiveUID(status []byte) (int, error) {
