@@ -27,14 +27,22 @@ type WorkspaceArchiveSummary struct {
 // Close waits for a synchronous stream to physically return; cancellation does
 // not interrupt an arbitrary blocked reader or caller writer.
 type WorkspaceArchiveSource struct {
-	mu          sync.Mutex
-	self        *WorkspaceArchiveSource
-	origin      *KernelBoundary
-	observation *UserNamespaceQuiescenceObservation
-	root        *os.File
-	dev, ino    uint64
-	used        bool
-	limits      archiveLimits
+	mu           sync.Mutex
+	self         *WorkspaceArchiveSource
+	origin       *KernelBoundary
+	observation  *UserNamespaceQuiescenceObservation
+	root         *os.File
+	dev, ino     uint64
+	used         bool
+	limits       archiveLimits
+	readIdentity *archiveReadIdentity
+}
+
+// This is filesystem access policy, never authenticated caller authority.
+type archiveReadIdentity struct{ uid, gid uint32 }
+
+func archiveReadIdentityValid(uid, gid uint32) bool {
+	return uid > 0 && uid <= 2147483647 && gid > 0 && gid <= 2147483647
 }
 
 type archiveLimits struct {

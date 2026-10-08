@@ -11,6 +11,10 @@ func (b *KernelBoundary) OpenWorkspaceArchive(ctx context.Context, observation *
 	return nil, ErrUnsupported
 }
 
+func (b *KernelBoundary) OpenWorkspaceArchiveAsUser(ctx context.Context, observation *UserNamespaceQuiescenceObservation, uid, gid uint32) (*WorkspaceArchiveSource, error) {
+	return nil, ErrUnsupported
+}
+
 func (s *WorkspaceArchiveSource) writeArchive(ctx context.Context, dst io.Writer) (WorkspaceArchiveSummary, error) {
 	return WorkspaceArchiveSummary{}, ErrUnsupported
 }

@@ -15,19 +15,39 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// OpenWorkspaceArchiveAsUser selects readonly filesystem access policy. The
+// caller must obtain uid/gid from its authenticated activated user identity;
+// these parameters and the resulting summary grant no external authority.
+func (b *KernelBoundary) OpenWorkspaceArchiveAsUser(ctx context.Context, observation *UserNamespaceQuiescenceObservation, uid, gid uint32) (*WorkspaceArchiveSource, error) {
+	if !archiveReadIdentityValid(uid, gid) {
+		return nil, ErrWorkspaceArchive
+	}
+	return b.openWorkspaceArchive(ctx, observation, &archiveReadIdentity{uid: uid, gid: gid})
+}
+
 func (b *KernelBoundary) OpenWorkspaceArchive(ctx context.Context, observation *UserNamespaceQuiescenceObservation) (*WorkspaceArchiveSource, error) {
+	return b.openWorkspaceArchive(ctx, observation, nil)
+}
+
+func (b *KernelBoundary) openWorkspaceArchive(ctx context.Context, observation *UserNamespaceQuiescenceObservation, identity *archiveReadIdentity) (*WorkspaceArchiveSource, error) {
 	if ctx == nil || b == nil || b.self != b || b.role != rolePID1 || b.pid != 1 || os.Getpid() != 1 || b.seal == nil || observation == nil || observation.self != observation || observation.origin != b || observation.pid != 1 || observation.seal != *b.seal {
 		return nil, ErrWorkspaceArchive
 	}
 	if err := observation.RevalidateCurrent(ctx); err != nil {
 		return nil, err
 	}
-	root, stat, err := openArchiveRoot()
+	// Original revalidation already rejects CGO via AllThreadsSyscall. Check
+	// the reviewed runtime template and syscall ABI once, before any mutation.
+	if identity != nil && !archiveIdentityRuntimeSupported() {
+		return nil, ErrUnsupported
+	}
+	s := &WorkspaceArchiveSource{origin: b, observation: observation, readIdentity: identity, limits: productionArchiveLimits()}
+	root, stat, err := s.openRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	// There is deliberately no fallback when native confinement is unavailable.
-	probe, err := openArchiveChild(int(root.Fd()), ".")
+	probe, err := s.openChild(ctx, int(root.Fd()), ".")
 	if err != nil {
 		root.Close()
 		return nil, err
@@ -40,7 +60,7 @@ func (b *KernelBoundary) OpenWorkspaceArchive(ctx context.Context, observation *
 		root.Close()
 		return nil, err
 	}
-	s := &WorkspaceArchiveSource{origin: b, observation: observation, root: root, dev: uint64(stat.Dev), ino: stat.Ino, limits: productionArchiveLimits()}
+	s.root, s.dev, s.ino = root, uint64(stat.Dev), stat.Ino
 	s.self = s
 	return s, nil
 }
@@ -53,7 +73,7 @@ func (s *WorkspaceArchiveSource) writeArchive(ctx context.Context, dst io.Writer
 	if err := s.observation.RevalidateCurrent(ctx); err != nil {
 		return zero, err
 	}
-	if err := s.validateRoot(); err != nil {
+	if err := s.validateRootContext(ctx); err != nil {
 		return zero, err
 	}
 	output := &archiveOutput{ctx: ctx, dst: dst, hash: sha256.New(), limit: s.limits.bytes}
@@ -72,7 +92,7 @@ func (s *WorkspaceArchiveSource) writeArchive(ctx context.Context, dst io.Writer
 	if err := s.observation.RevalidateCurrent(ctx); err != nil {
 		return zero, err
 	}
-	if err := s.validateRoot(); err != nil {
+	if err := s.validateRootContext(ctx); err != nil {
 		return zero, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -113,7 +133,11 @@ func openArchiveChild(root int, path string) (*os.File, error) {
 }
 
 func (s *WorkspaceArchiveSource) validateRoot() error {
-	current, stat, err := openArchiveRoot()
+	return s.validateRootContext(context.Background())
+}
+
+func (s *WorkspaceArchiveSource) validateRootContext(ctx context.Context) error {
+	current, stat, err := s.openRoot(ctx)
 	if err != nil {
 		return err
 	}
@@ -178,7 +202,7 @@ func (w *archiveWalk) directory(dir *os.File, relative, name string, depth int, 
 			if err := w.ctx.Err(); err != nil {
 				return err
 			}
-			file, err := openArchiveChild(int(w.source.root.Fd()), path)
+			file, err := w.source.openChild(w.ctx, int(w.source.root.Fd()), path)
 			if err != nil {
 				return err
 			}
