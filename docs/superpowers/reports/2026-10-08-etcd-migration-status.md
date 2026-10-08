@@ -27,3 +27,5 @@
 当前无外部阻塞，剩余工作仍然较多。容量验收须测量实际 MVCC/WAL/复制、调度/API/FUSE 成本和大 N 空闲行为；现有组件测试与编码大小样本不能替代。每个连贯改动继续独立验证、审查和提交，源码修改使用 apply_patch。
 
 新增已验收源码`7391a5e`与修复`27feaf6`：原始未读body的持久put意图、固定分区slot跨Backend共享背压、未知响应不重发与出生pin诊断。基线native38实际叶子零跳过/警告；独立review发现空body已完成读取的缺口，针对性RED→GREEN修复及复审通过，剩余C0/I0/M0。详见`2026-10-08-workspace-sync-intent-verification.md`。这是native元数据组件，实际可信worker/provider派发和结算未完成，不能把归属记录当OS UID或安全释放证据；S1..64的逻辑预算上界不等于实际MVCC容量测试。
+
+当前下一实施单元`2026-10-08-workspace-sync-worker.md`补齐实际非特权worker的原始kernel/process身份：非零UID/GID、零cap、NNP、固定boot/start/ns/exe及不可复用incarnation。它仍不能代替Deployment/凭证隔离、物理provider target、native派发与终态证明，尚未验收。
