@@ -46,15 +46,15 @@
 
 ### Task 2: 实际 local regular-file 写入与原始结算 witness
 
-**Files:** create `internal/storage/state/etcd/task_workspace_sync_local_put_linux.go`, `task_workspace_sync_local_put_unsupported.go`; modify Task1 `local_types/local_linux/local_guard/local_test/local_native_linux_test.go`、source_body.go/source_types.go 仅消费互斥封闭需要的接缝、`scripts/test-workspace-sync-local.sh` 仅新case；其他文件须 Root ruling。
+**Files:** create `internal/storage/state/etcd/task_workspace_sync_local_put_linux.go`, `task_workspace_sync_local_put_unsupported.go`; modify Task1 `local_types/local_linux/local_guard/local_test/local_native_linux_test.go`、source_body.go/source_types.go 仅消费互斥封闭需要的接缝、`scripts/test-workspace-sync-local.sh` 仅新case；`task_archive_delivery_native_test.go` 仅真实 TLS data 参数工厂，默认仍 archiveValidTar；其他文件须 Root ruling。
 
 **Interfaces:** consume Task1 private original IO owner；produce private source `putLocal(ctx context.Context, body *taskWorkspaceSyncBody, target *taskWorkspaceSyncLocalTarget) (*taskWorkspaceSyncLocalWitness,error)` 与原始 self/origin witness，仅诊断 syscall completion。一个 original body只派发一次，source/body/target Close 实际join该 owner。
 
 **Binding constraints:** 阅读新 spec；基线使用Task1验收后的HEAD。原始ACK门/nativepins/旧RPC限额、固定32KiB/4096path/128depth、only apply_patch/OWN exact locked commits、无Sentinel/CLOSED OWN/子agents/push/deploy相同。永久intent/slot完全保留，无native terminal/退款；tmpfs不证明重启持久性。不能用Reader/callback成功或复制reference重建权能。
 
-- [ ] Step 1: RED真实 Linux 用例覆盖空/多chunk/nested/覆盖，错误root、symlink、hardlink、specialfile拒绝；host只纯 validation/unsupported。
-- [ ] Step 2: Task1门在首mutating syscall前；scope rootFD、每个parent原始worker owned/private0700/noXdev/nosymlink，缺失parent可bounded mkdir+fsync，打开/create exact regular worker文件nlink1。不引入 staging/rename 布局；截断/覆盖 partial失败仍charged。新建mode按archive；最终确认文件身份。
-- [ ] Step 3: 固定32KiB流式复制原始body，保留 source nativeguard/integrity。解决put已持source begin与body.Read嵌套的互斥接缝，不删guard、不持mu跨IO/RPC。每mutating阶段检查原worker/target/current权限。实际完整bytes/hash、file fsync+Close、modifiedparent fsync、postguard后才创建私有original witness。任何不确定/失败无witness/无重发/无退款。
-- [ ] Step 4: owner注册先于IO，source/target/body/claim/Backend Close封闭取消后真实wait；真实读写完成处限定pause seam验证Close确实等owner，不能伪造syscall结果或无限挂fixture。IO错误和bodyhash破坏无success；slot保留、repeat拒绝、原始进程内witness不可复制/冷恢复。
-- [ ] Step 5: host -race scoped pure/source接缝覆盖；真实LinuxCGO0原始worker+3membernative+TLS归档+物理文件逐项证明，报告实际leaf数/zeroSKIP/WARN与tmpfs限制，实际返回bytes/files/modes/hash/FD/Close证据；vet/Linuxcompile/gofmt-diff/bashsyntax/diff，不复测未触及全量HA/容量。
-- [ ] Step 6: exact-path小提交与OWN/task-2-report.md/evidence-task2.json、自审；Root独立review/根审计/更新tracked进度验收。此次2-unit plan完成可封闭自身OWN，整体迁移仍未完成。
+- [x] Step 1: RED真实 Linux 用例覆盖空/多chunk/nested/覆盖，错误root、symlink、hardlink、specialfile拒绝；host只纯 validation/unsupported。
+- [x] Step 2: Task1门在首mutating syscall前；scope rootFD、每个parent原始worker owned/private0700/noXdev/nosymlink，缺失parent可bounded mkdir+fsync，打开/create exact regular worker文件nlink1。不引入 staging/rename 布局；截断/覆盖 partial失败仍charged。新建mode按archive；最终确认文件身份。
+- [x] Step 3: 固定32KiB流式复制原始body，保留 source nativeguard/integrity。解决put已持source begin与body.Read嵌套的互斥接缝，不删guard、不持mu跨IO/RPC。每mutating阶段检查原worker/target/current权限。实际完整bytes/hash、file fsync+Close、modifiedparent fsync、postguard后才创建私有original witness。任何不确定/失败无witness/无重发/无退款。
+- [x] Step 4: owner注册先于IO，source/target/body/claim/Backend Close封闭取消后真实wait；真实读写完成处限定pause seam验证Close确实等owner，不能伪造syscall结果或无限挂fixture。IO错误和bodyhash破坏无success；slot保留、repeat拒绝、原始进程内witness不可复制/冷恢复。
+- [x] Step 5: host -race scoped pure/source接缝覆盖；真实LinuxCGO0原始worker+3membernative+TLS归档+物理文件逐项证明，报告实际leaf数/zeroSKIP/WARN与tmpfs限制，实际返回bytes/files/modes/hash/FD/Close证据；vet/Linuxcompile/gofmt-diff/bashsyntax/diff，不复测未触及全量HA/容量。
+- [x] Step 6: exact-path小提交与OWN/task-2-report.md/evidence-task2.json、自审；Root独立review/根审计/更新tracked进度验收。此次2-unit plan完成可封闭自身OWN，整体迁移仍未完成。

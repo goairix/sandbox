@@ -66,7 +66,7 @@ per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 
 
 ## 2026-10-09 local IO 接线与 driver 源码研究
 
-当前执行 `2026-10-09-workspace-sync-local.md` 两个顺序小单元，规划提交 `0ef0a57`。首单元 `fac3953`/`7bc4ff6`/review修复`6b411a0` 已验收：只读绑定实际 root FD/worker 与收费意图 v2 profile，保留全部50历史pins，实际59nodes/11517requestbytes/2629replybytes；原始明确ACK加postguard才有one-shot权限，unknown/cold诊断无权派发。原native21叶、修复覆盖15实际local叶和真实timeout保留/释放/Wait/reap通过，限定复审C0/I0/M0。详见`2026-10-09-workspace-sync-local-gate-verification.md`。第二单元真实 regular-file IO/fsync/Close尚待实现，成功证据仅原始进程内witness，永久intent/slot保留；没有额外native terminal key、退款或safe-release。
+当前 `2026-10-09-workspace-sync-local.md` 两个顺序小单元均已验收，规划提交 `0ef0a57`。首单元 `fac3953`/`7bc4ff6`/review修复`6b411a0`：只读绑定实际 root FD/worker 与收费意图 v2 profile，保留全部50历史pins，实际59nodes/11517requestbytes/2629replybytes；原始明确ACK加postguard才有one-shot权限，unknown/cold诊断无权派发。原native21叶、修复覆盖15实际local叶和真实timeout保留/释放/Wait/reap通过，限定复审C0/I0/M0。详见`2026-10-09-workspace-sync-local-gate-verification.md`。第二单元`96c21cc`/`2f59c93`完成实际 regular-file写入/hash/fsync/Close，24不同实际叶同源分批覆盖，完整轮setup deadline失败保留，限定reviewC0/I0/M0；详见`2026-10-09-workspace-sync-local-put-verification.md`。成功仅原始进程内witness，永久intent/slot保留；没有额外native terminal key、退款或safe-release。
 
 已读取本地固定依赖 `github.com/goairix/fs@v0.3.11` 的 MinIO/S3 writer 与 local Create：远端两个 writer 都先将完整文件存入 `bytes.Buffer`，Close 才调用 PutObject；MinIO Create 返回的只是该 buffer writer，Remove 转交 SDK RemoveObject。local Create 用普通路径 mkdir/create，未提供 scoped original root FD、native task fencing 或 fsync 结算。新链路不能直接将 legacy Create/Close 的 nil error 提升为本方案证明；大文件 buffer 同样不能放入固定32KiB可信 adapter。
 
