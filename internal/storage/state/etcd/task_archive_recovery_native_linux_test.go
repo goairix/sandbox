@@ -507,3 +507,82 @@ func TestTaskArchiveRecoveryCloseNative(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskArchiveRecoveryInitializationCloseNative(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit original Linux worker fixture required")
+	}
+	for _, stage := range []string{"pending-next-fsync", "metadata-gate-wait"} {
+		t.Run(stage, func(t *testing.T) {
+			f, prepared, wire, _ := recoveryNativePrepared(t)
+			store := f.b.archiveStore
+			var opens atomic.Int32
+			wire.mu.Lock()
+			wire.dialHook = func(context.Context) error { opens.Add(1); return nil }
+			wire.mu.Unlock()
+			var release func()
+			var entered <-chan struct{}
+			if stage == "pending-next-fsync" {
+				entered, release = recoveryHoldProbe(store, stage)
+			} else {
+				<-store.recovery.gate
+				var once sync.Once
+				release = func() { once.Do(func() { store.recovery.gate <- struct{}{} }) }
+			}
+			rawRelease := release
+			var releaseOnce sync.Once
+			release = func() { releaseOnce.Do(rawRelease) }
+			t.Cleanup(release)
+			done := deliveryBegin(f, prepared)
+			var spool *taskArchiveSpool
+			require.Eventually(t, func() bool {
+				store.mu.Lock()
+				defer store.mu.Unlock()
+				for r := range store.spools {
+					spool = r
+				}
+				return spool != nil && spool.active
+			}, time.Second, time.Millisecond)
+			if entered != nil {
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("initializer did not reach actual pending next-file fsync")
+				}
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- f.b.Close() }()
+			cancelled := false
+			select {
+			case <-spool.ctx.Done():
+				cancelled = true
+			case <-time.After(250 * time.Millisecond):
+			}
+			if stage == "pending-next-fsync" {
+				select {
+				case err := <-closed:
+					t.Fatalf("Close passed physically suspended pending initializer: %v", err)
+				default:
+				}
+			} else if cancelled {
+				select {
+				case err := <-closed:
+					require.NoError(t, err, "cancelled gate waiter must join without acquiring held gate")
+				case <-time.After(time.Second):
+					t.Fatal("Close could not join cancelled metadata-gate initializer")
+				}
+			}
+			release()
+			require.Error(t, deliveryWait(t, done).err)
+			if stage != "metadata-gate-wait" || !cancelled {
+				require.NoError(t, <-closed)
+			}
+			require.True(t, cancelled, "Backend.Close must seal/cancel initialization before held gate/IO owner is released")
+			require.Zero(t, opens.Load())
+			require.Zero(t, wire.sends.Load())
+			require.EqualValues(t, 1, store.jobs)
+			require.Equal(t, store.limits.JobBytes, store.disk, "uncertain initial charge is never refunded")
+			t.Logf("stage=%s original initializer cancelled before release; physical ownerDone/Backend.Close joined; zero Open/Send", stage)
+		})
+	}
+}

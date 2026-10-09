@@ -22,6 +22,7 @@ case "$mode" in
 	archive-recovery-crash-bound) test_run='^TestTaskArchiveRecoveryCrashNative$/^bound-';;
 	archive-recovery-failure) test_run='^TestTaskArchiveRecoveryFailureNative$';;
 	archive-recovery-close) test_run='^TestTaskArchiveRecoveryCloseNative$';;
+	archive-recovery-initialization-close) test_run='^TestTaskArchiveRecoveryInitializationCloseNative$';;
   postguard-proof) test_run='^TestTaskWorkspaceSyncLocalNativePostguardClose$';;
   local-gate-proof) test_run='^TestTaskWorkspaceSyncLocalNative';;
   local-put-proof) test_run='^TestTaskWorkspaceSyncLocalPutNative';;

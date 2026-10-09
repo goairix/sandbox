@@ -59,7 +59,13 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 			b.archiveLife.mu.Unlock()
 			return nil, seedErr
 		}
+		// The store seals admission and registers active/ownerDone under its
+		// own lock. Close can cancel and physically join that initializer even
+		// before a delivery owner is published. Never hold life.mu across the
+		// metadata gate or pending durable IO.
+		b.archiveLife.mu.Unlock()
 		r, err = b.archiveStore.reserveRecovery(owned, seed)
+		b.archiveLife.mu.Lock()
 	} else {
 		r, err = b.archiveStore.reserve(owned)
 	}
@@ -67,6 +73,11 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		cancel()
 		b.archiveLife.mu.Unlock()
 		return nil, err
+	}
+	if b.archiveLife.closed {
+		b.archiveLife.mu.Unlock()
+		cancel()
+		return nil, errors.Join(errTaskArchive, r.close())
 	}
 	o := &taskArchiveDelivery{backend: b, claim: c, prepared: prepared, spool: r, ctx: owned, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), sessionAfter: d.claims.SessionNotAfter, comparisons: cmps, prefix: prefix}
 	o.deadline.Store(&deadline)

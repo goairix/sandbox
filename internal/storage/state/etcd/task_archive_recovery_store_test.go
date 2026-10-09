@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -301,4 +302,41 @@ func TestTaskArchiveRecoveryColdContentQuota(t *testing.T) {
 			require.Equal(t, int64(limit+1), st.Size(), "rejection preserves content")
 		})
 	}
+}
+
+func TestTaskArchiveRecoveryUnpublishedInitializerJoin(t *testing.T) {
+	// Host lifecycle check only: the original registered FD/ownerDone is real;
+	// no manifest or received authority is reconstructed by this fixture.
+	s, err := newTaskArchiveStore(archiveTestDirectory(t), archiveTestLimits())
+	require.NoError(t, err)
+	r, err := s.reserve(context.Background())
+	require.NoError(t, err)
+	life, cancel := context.WithCancel(context.Background())
+	r.recovery = &taskArchiveRecoveryOwner{ctx: life, cancel: cancel}
+	s.mu.Lock()
+	r.active = true
+	r.ownerDone = make(chan struct{})
+	s.mu.Unlock()
+	b := &Backend{archiveStore: s, archiveLife: &taskArchiveBackend{}}
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	select {
+	case <-r.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel unpublished store initializer")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close passed physical initializer ownerDone: %v", err)
+	default:
+	}
+	s.mu.Lock()
+	r.active = false
+	close(r.ownerDone)
+	s.mu.Unlock()
+	require.NoError(t, <-closed)
+	require.Error(t, life.Err())
+	_, err = s.reserve(context.Background())
+	require.Error(t, err, "closed store cannot admit an initializer after backend seal")
+	require.EqualValues(t, 1, s.jobs, "recovery owner is retained without refund")
 }
