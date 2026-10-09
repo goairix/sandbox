@@ -45,14 +45,21 @@ func (b *taskWorkspaceSyncBody) Read(data []byte) (int, error) {
 		return 0, err
 	}
 	defer s.end()
-	if err := s.guard(b.ctx); err != nil {
+	return b.readOwned(b.ctx, data)
+}
+
+// The original put owner holds source.busy and body.active for this whole read.
+// Ordinary Read establishes those registrations above; put never nests begin.
+func (b *taskWorkspaceSyncBody) readOwned(ctx context.Context, data []byte) (int, error) {
+	s := b.source
+	if err := s.guard(ctx); err != nil {
 		return 0, err
 	}
 	if len(data) > 32768 {
 		data = data[:32768]
 	}
 	n, err := b.reader.Read(data)
-	if e := s.guard(b.ctx); e != nil {
+	if e := s.guard(ctx); e != nil {
 		b.source.cancel()
 		return n, errors.Join(err, e)
 	}

@@ -52,6 +52,19 @@ type taskWorkspaceSyncLocalTarget struct {
 	err    error
 }
 
+type taskWorkspaceSyncLocalWitness struct {
+	self   *taskWorkspaceSyncLocalWitness
+	origin *taskWorkspaceSyncLocalPut
+	bytes  int64
+	sha256 string
+	dev    uint64
+	ino    uint64
+}
+
+func (w *taskWorkspaceSyncLocalWitness) original() bool {
+	return w != nil && w.self == w && w.origin != nil && w.origin.self == w.origin && w.origin.witness == w
+}
+
 func (t *taskWorkspaceSyncLocalTarget) begin(ctx context.Context) error {
 	if t == nil || t.self != t || ctx == nil {
 		return ErrInvalidRecord
@@ -107,6 +120,7 @@ type taskWorkspaceSyncLocalPut struct {
 	successBytes  int
 	failureBytes  int
 	responseBytes int
+	witness       *taskWorkspaceSyncLocalWitness
 	// Test-only seam after an actual final target.check; protected by mu.
 	probeComplete func()
 }

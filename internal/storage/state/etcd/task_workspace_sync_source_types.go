@@ -31,6 +31,8 @@ type PreparedTaskWorkspaceSyncSource struct {
 	// Test-only completion seam: runs after an actual original file.ReadAt.
 	// Accessed under mu; never a public reader or substitute file.
 	readComplete func()
+	// Test-only pause after an actual local mutating syscall, under IO owner.
+	localIOComplete func(string)
 }
 
 type taskWorkspaceSyncEntry struct {

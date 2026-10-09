@@ -109,6 +109,22 @@ func TestTaskWorkspaceSyncLocalUnoriginal(t *testing.T) {
 	require.Error(t, err)
 	var target *taskWorkspaceSyncLocalTarget
 	require.Error(t, target.Close())
+	w, err := s.putLocal(context.Background(), nil, nil)
+	require.Error(t, err)
+	require.Nil(t, w)
+	var absent *taskWorkspaceSyncLocalWitness
+	require.False(t, absent.original())
+	origin := &taskWorkspaceSyncLocalPut{}
+	origin.self = origin
+	original := &taskWorkspaceSyncLocalWitness{origin: origin}
+	original.self = original
+	require.False(t, original.original(), "self/origin diagnostics alone are not original issuance")
+	origin.witness = original
+	require.True(t, original.original())
+	copy := *original
+	require.False(t, copy.original())
+	copy.self = &copy
+	require.False(t, copy.original(), "resetting copied self cannot replace the original issuance")
 }
 
 func TestTaskWorkspaceSyncLocalBodiesRejectedBeforeRPC(t *testing.T) {
