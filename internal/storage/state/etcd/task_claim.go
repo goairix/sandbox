@@ -32,6 +32,24 @@ type TaskClaim struct {
 	quiescenceDraft                          *taskQuiescenceDraft
 	finalSyncDraft                           *taskFinalSyncDraft
 	archiveDelivery                          *taskArchiveDelivery
+	archiveRecoveryAttempt                   bool // c.mu; charged attempts are never reopened
+}
+
+// Both helpers require c.mu. They are used only by recovery receive admission.
+func (c *TaskClaim) sealArchiveRecoveryAttempt() bool {
+	if c.archiveRecoveryAttempt || c.archiveDelivery != nil {
+		return false
+	}
+	c.archiveRecoveryAttempt = true
+	return true
+}
+
+func (c *TaskClaim) finishArchiveRecoveryInitialization(r *taskArchiveSpool, err error) {
+	// A nonnil error result is an already closed original charge marker only;
+	// it grants no file/witness access. Only definite precharge refusal retries.
+	if err != nil && r == nil {
+		c.archiveRecoveryAttempt = false
+	}
 }
 
 func (c *TaskClaim) Reference() TaskClaimReference {

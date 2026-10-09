@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,4 +341,35 @@ func TestTaskArchiveRecoveryUnpublishedInitializerJoin(t *testing.T) {
 	_, err = s.reserve(context.Background())
 	require.Error(t, err, "closed store cannot admit an initializer after backend seal")
 	require.EqualValues(t, 1, s.jobs, "recovery owner is retained without refund")
+}
+
+func TestTaskArchiveRecoveryAttemptExclusion(t *testing.T) {
+	claim := &TaskClaim{}
+	var accepted atomic.Int32
+	var workers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			claim.mu.Lock()
+			if claim.sealArchiveRecoveryAttempt() {
+				accepted.Add(1)
+			}
+			claim.mu.Unlock()
+		}()
+	}
+	workers.Wait()
+	require.EqualValues(t, 1, accepted.Load(), "one original initializer excludes competing attempts")
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	claim.finishArchiveRecoveryInitialization(&taskArchiveSpool{}, errTaskArchive)
+	require.False(t, claim.sealArchiveRecoveryAttempt(), "charged failed attempt stays sealed")
+	retry := &TaskClaim{}
+	retry.mu.Lock()
+	defer retry.mu.Unlock()
+	require.True(t, retry.sealArchiveRecoveryAttempt())
+	retry.finishArchiveRecoveryInitialization(nil, errTaskArchive)
+	require.True(t, retry.sealArchiveRecoveryAttempt(), "definite precharge refusal can be retried")
+	retry.finishArchiveRecoveryInitialization(&taskArchiveSpool{}, nil)
+	require.False(t, retry.sealArchiveRecoveryAttempt(), "successful charged attempt stays sealed")
 }

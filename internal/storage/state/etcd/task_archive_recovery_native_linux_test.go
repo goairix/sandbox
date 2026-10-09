@@ -509,6 +509,14 @@ func TestTaskArchiveRecoveryCloseNative(t *testing.T) {
 }
 
 func TestTaskArchiveRecoveryInitializationCloseNative(t *testing.T) {
+	recoveryInitializationCloseNative(t, false)
+}
+
+func TestTaskArchiveRecoveryInitializationDuplicateNative(t *testing.T) {
+	recoveryInitializationCloseNative(t, true)
+}
+
+func recoveryInitializationCloseNative(t *testing.T, duplicate bool) {
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("explicit original Linux worker fixture required")
 	}
@@ -550,6 +558,26 @@ func TestTaskArchiveRecoveryInitializationCloseNative(t *testing.T) {
 					t.Fatal("initializer did not reach actual pending next-file fsync")
 				}
 			}
+			var second <-chan deliveryResult
+			var secondResult *deliveryResult
+			var duplicateJobs uint64
+			var beforeNames, afterNames []os.DirEntry
+			if duplicate {
+				var err error
+				beforeNames, err = os.ReadDir(store.recovery.directory)
+				require.NoError(t, err)
+				second = deliveryBegin(f, prepared)
+				select {
+				case result := <-second:
+					secondResult = &result
+				case <-time.After(250 * time.Millisecond):
+				}
+				store.mu.Lock()
+				duplicateJobs = store.jobs
+				store.mu.Unlock()
+				afterNames, err = os.ReadDir(store.recovery.directory)
+				require.NoError(t, err)
+			}
 			closed := make(chan error, 1)
 			go func() { closed <- f.b.Close() }()
 			cancelled := false
@@ -576,6 +604,17 @@ func TestTaskArchiveRecoveryInitializationCloseNative(t *testing.T) {
 			require.Error(t, deliveryWait(t, done).err)
 			if stage != "metadata-gate-wait" || !cancelled {
 				require.NoError(t, <-closed)
+			}
+			if duplicate {
+				if secondResult == nil {
+					_ = deliveryWait(t, second) // physically join even the failing RED initializer
+				}
+				t.Logf("duplicate before release: charged jobs=%d returned=%v names=%d->%d", duplicateJobs, secondResult != nil, len(beforeNames), len(afterNames))
+				require.EqualValues(t, 1, duplicateJobs, "duplicate cannot charge another permanent slot")
+				require.NotNil(t, secondResult, "duplicate must reject before the original gate/IO is released")
+				require.ErrorIs(t, secondResult.err, ErrConflict)
+				require.Nil(t, secondResult.archive)
+				require.Equal(t, beforeNames, afterNames, "duplicate cannot create persistent names")
 			}
 			require.True(t, cancelled, "Backend.Close must seal/cancel initialization before held gate/IO owner is released")
 			require.Zero(t, opens.Load())

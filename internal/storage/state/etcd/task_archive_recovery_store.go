@@ -274,6 +274,8 @@ func (s *taskArchiveStore) coldSnapshot(slot uint32) (taskArchiveRecoveryDiagnos
 	return s.recovery.slots[slot].diagnostic, nil
 }
 
+// An initialization error returns the already closed original spool only as a
+// charged-attempt marker, never file/witness authority. Precharge errors return nil.
 func (s *taskArchiveStore) reserveRecovery(ctx context.Context, seed taskArchiveRecoverySeed) (*taskArchiveSpool, error) {
 	if s == nil || s.self != s || s.recovery == nil || ctx == nil || seed.validate() != nil {
 		return nil, errTaskArchive
@@ -309,7 +311,7 @@ func (s *taskArchiveStore) reserveRecovery(ctx context.Context, seed taskArchive
 	close(r.ownerDone)
 	s.mu.Unlock()
 	if err != nil {
-		return nil, errors.Join(err, r.close())
+		return r, errors.Join(err, r.close())
 	}
 	return r, nil
 }

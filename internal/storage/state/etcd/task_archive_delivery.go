@@ -32,7 +32,7 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		return nil, ErrInvalidRecord
 	}
 	d := prepared.draft
-	if c.archiveDelivery != nil || !d.writeAttempted || d.revision <= 0 || d.issuerRevision <= 0 || d.ticket.Digest() == "" || d.finalSync.revision <= 0 {
+	if c.archiveDelivery != nil || b.archiveStore.recovery != nil && c.archiveRecoveryAttempt || !d.writeAttempted || d.revision <= 0 || d.issuerRevision <= 0 || d.ticket.Digest() == "" || d.finalSync.revision <= 0 {
 		c.mu.Unlock()
 		b.archiveLife.mu.Unlock()
 		return nil, ErrConflict
@@ -59,6 +59,14 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 			b.archiveLife.mu.Unlock()
 			return nil, seedErr
 		}
+		c.mu.Lock()
+		if !c.sealArchiveRecoveryAttempt() {
+			c.mu.Unlock()
+			cancel()
+			b.archiveLife.mu.Unlock()
+			return nil, ErrConflict
+		}
+		c.mu.Unlock()
 		// The store seals admission and registers active/ownerDone under its
 		// own lock. Close can cancel and physically join that initializer even
 		// before a delivery owner is published. Never hold life.mu across the
@@ -66,6 +74,9 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		b.archiveLife.mu.Unlock()
 		r, err = b.archiveStore.reserveRecovery(owned, seed)
 		b.archiveLife.mu.Lock()
+		c.mu.Lock()
+		c.finishArchiveRecoveryInitialization(r, err)
+		c.mu.Unlock()
 	} else {
 		r, err = b.archiveStore.reserve(owned)
 	}

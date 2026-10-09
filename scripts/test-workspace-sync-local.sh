@@ -23,6 +23,8 @@ case "$mode" in
 	archive-recovery-failure) test_run='^TestTaskArchiveRecoveryFailureNative$';;
 	archive-recovery-close) test_run='^TestTaskArchiveRecoveryCloseNative$';;
 	archive-recovery-initialization-close) test_run='^TestTaskArchiveRecoveryInitializationCloseNative$';;
+	archive-recovery-initialization-duplicate) test_run='^TestTaskArchiveRecoveryInitializationDuplicateNative$';;
+	archive-recovery-initialization-r2) test_run='^TestTaskArchiveRecoveryInitialization(Close|Duplicate)Native$';;
   postguard-proof) test_run='^TestTaskWorkspaceSyncLocalNativePostguardClose$';;
   local-gate-proof) test_run='^TestTaskWorkspaceSyncLocalNative';;
   local-put-proof) test_run='^TestTaskWorkspaceSyncLocalPutNative';;
