@@ -3,9 +3,11 @@
 package etcd
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,10 @@ import (
 )
 
 func workspaceSyncRecyclingNativeBody(t *testing.T, plan TaskWorkspaceSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget) {
+	return workspaceSyncRecyclingNativeBodyData(t, plan, budget, setup, nil, 0, 60*time.Second)
+}
+
+func workspaceSyncRecyclingNativeBodyData(t *testing.T, plan TaskWorkspaceSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, ttl time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget) {
 	t.Helper()
 	if setup == nil {
 		setup = func(t *testing.T) (*Backend, *clientv3.Client, AcquireIntentInput, *CreationClaim, []byte, ed25519.PrivateKey) {
@@ -50,7 +56,7 @@ func workspaceSyncRecyclingNativeBody(t *testing.T, plan TaskWorkspaceSyncPlan, 
 		p, err := plan.FinalSyncPlan()
 		require.NoError(t, err)
 		return p
-	}, budget, setup, nil, 0, true, 60*time.Second)
+	}, budget, setup, data, entries, true, ttl)
 	done := deliveryBegin(f, prepared)
 	deliveryWaitSent(t, wire, done)
 	close(wire.body)
@@ -139,6 +145,586 @@ func TestTaskWorkspaceSyncRecyclingNativeSettlement(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "bye", string(actual))
 	t.Logf("original terminal and GC acknowledged; permanent slot create=%d mod=%d version=%d; next=%s", point.Kvs[0].CreateRevision, point.Kvs[0].ModRevision, point.Kvs[0].Version, entry.path)
+}
+
+func recyclingTerminalMatch(ops []clientv3.Op) bool {
+	return len(ops) == 1 && ops[0].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-slots/")
+}
+
+func recyclingGCMatch(ops []clientv3.Op) bool {
+	return len(ops) == 2 && ops[0].IsPut() && ops[1].IsDelete() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-slots/")
+}
+
+func workspaceSyncRecyclingNativeWritten(t *testing.T) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget, *taskWorkspaceSyncLocalWitness) {
+	t.Helper()
+	f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	_, err := s.reservePutIntent(f.ctx, body)
+	require.NoError(t, err)
+	w, err := s.putLocal(f.ctx, body, target)
+	require.NoError(t, err)
+	require.Error(t, w.origin.ctx.Err(), "finished put ctx is canceled; settlement needs fresh ownership")
+	return f, s, body, target, w
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeSettlementAuthority(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f, s, body, target, w := workspaceSyncRecyclingNativeWritten(t)
+	var mutations atomic.Int32
+	workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingTerminalMatch, before: func() { mutations.Add(1) }})
+	for _, fault := range []string{"witness-copy", "joint-copy", "foreign-body", "unfinished-join", "missing-ack", "count", "hash", "dev", "ino"} {
+		t.Run(fault, func(t *testing.T) {
+			candidate := w
+			restore := func() {}
+			switch fault {
+			case "witness-copy", "joint-copy":
+				copy := *w
+				copy.self = &copy
+				candidate = &copy
+				if fault == "joint-copy" {
+					p := &taskWorkspaceSyncLocalPut{source: s, body: body, target: target, draft: body.intent, witness: &copy, sealed: true, ioDone: w.origin.ioDone}
+					p.self, copy.origin = p, p
+				}
+			case "foreign-body":
+				original := w.origin.body
+				w.origin.body = &taskWorkspaceSyncBody{source: s, entry: body.entry, ctx: body.ctx}
+				w.origin.body.self = w.origin.body
+				restore = func() { w.origin.body = original }
+			case "unfinished-join":
+				original := w.origin.ioDone
+				w.origin.ioDone = make(chan struct{})
+				restore = func() { w.origin.ioDone = original }
+			case "missing-ack":
+				body.intent.acknowledged = false
+				restore = func() { body.intent.acknowledged = true }
+			case "count":
+				w.bytes++
+				restore = func() { w.bytes-- }
+			case "hash":
+				original := w.sha256
+				w.sha256 = strings.Repeat("a", 64)
+				restore = func() { w.sha256 = original }
+			case "dev":
+				w.dev++
+				restore = func() { w.dev-- }
+			case "ino":
+				original := w.ino
+				w.ino = 0
+				restore = func() { w.ino = original }
+			}
+			defer restore()
+			_, err := s.settleLocal(f.ctx, candidate)
+			require.Error(t, err)
+			require.Zero(t, mutations.Load(), "invalid authority cannot emit terminal mutation")
+		})
+	}
+	q, err := s.settleLocal(f.ctx, w)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, mutations.Load())
+	var gcMutations atomic.Int32
+	workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingGCMatch, before: func() { gcMutations.Add(1) }})
+	for _, joint := range []bool{false, true} {
+		t.Run(fmt.Sprintf("settlement-copy-joint-%t", joint), func(t *testing.T) {
+			copy := *q
+			copy.self = &copy
+			if joint {
+				wcopy := *w
+				p := &taskWorkspaceSyncLocalPut{source: s, body: body, target: target, draft: body.intent, witness: &wcopy, sealed: true, ioDone: w.origin.ioDone}
+				p.self, wcopy.self, wcopy.origin = p, &wcopy, p
+				copy.witness = &wcopy
+			}
+			_, err := s.recycleLocal(f.ctx, &copy)
+			require.Error(t, err)
+			require.Zero(t, gcMutations.Load())
+		})
+	}
+	outcome, err := s.recycleLocal(f.ctx, q)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, outcome)
+	require.EqualValues(t, 1, gcMutations.Load())
+	actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(actual))
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCursorGate(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, state := range []string{"io-complete", "terminal", "unknown-gc", "failed-io"} {
+		t.Run(state, func(t *testing.T) {
+			f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			_, err := s.reservePutIntent(f.ctx, body)
+			require.NoError(t, err)
+			if state == "failed-io" {
+				s.mu.Lock()
+				s.localIOComplete = func(stage string) {
+					if stage == "fsync" {
+						require.NoError(t, os.Chmod(target.pin.Root, 0750))
+					}
+				}
+				s.mu.Unlock()
+			}
+			w, err := s.putLocal(f.ctx, body, target)
+			if state == "failed-io" {
+				require.Error(t, err)
+				require.Nil(t, w)
+				_, err = s.settleLocal(f.ctx, w)
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.True(t, body.complete, "Read completed even when subsequent IO/settlement was not known successful")
+			if state == "terminal" || state == "unknown-gc" {
+				q, err := s.settleLocal(f.ctx, w)
+				require.NoError(t, err)
+				if state == "unknown-gc" {
+					workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingGCMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+						require.NoError(t, err)
+						return nil, context.DeadlineExceeded
+					}})
+					_, err = s.recycleLocal(f.ctx, q)
+					require.ErrorIs(t, err, ErrOutcomeUnknown)
+					require.False(t, q.completed)
+				}
+			}
+			current := s.current
+			_, err = s.next(f.ctx)
+			require.Error(t, err)
+			require.Same(t, body, s.body, "GC not clearly completed: current original body retained")
+			require.Same(t, current, s.current)
+		})
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeSequential65(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	headers := []*tar.Header{{Name: "workspace", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/z", Typeflag: tar.TypeDir, Mode: 0700}}
+	bodies := []string{"", ""}
+	for i := 0; i < 65; i++ {
+		contents := fmt.Sprintf("original-file-%02d", i)
+		headers = append(headers, &tar.Header{Name: fmt.Sprintf("workspace/z/file-%02d", i), Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(contents))})
+		bodies = append(bodies, contents)
+	}
+	data := archiveTarBytes(t, headers, bodies)
+	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspaceSyncIdentity(t, "local", "test-storage", "bucket", "team/project/")})
+	require.NoError(t, err)
+	f, s, body, target := workspaceSyncRecyclingNativeBodyData(t, plan, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 1, 4096}, nil, data, 67, 180*time.Second)
+	started := time.Now()
+	originalKV := f.b.client.KV
+	var oldReserve, oldTerminal, oldGC clientv3.Txn
+	var create, previous int64
+	for i := 0; i < 65; i++ {
+		require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+		if i == 0 {
+			workspaceSyncIntentSetKV(s, &faultKV{KV: originalKV, match: recyclingPutMatch, before: func() {
+				d := body.intent
+				oldReserve = f.raw.Txn(f.ctx).If(s.recyclingReserveComparisons(d)...).Then(clientv3.OpPut(d.intentKey, d.value), clientv3.OpPut(d.slotKey, d.slotValue))
+			}})
+		}
+		_, err := s.reservePutIntent(f.ctx, body)
+		require.NoError(t, err)
+		d := body.intent
+		if i == 0 {
+			create = d.recycling.create
+		}
+		inspect := func(state string, version, revision int64, count int) {
+			t.Helper()
+			all, err := f.raw.Get(f.ctx, fmt.Sprintf("%sp/%02x/workspace-sync-recycling-", f.b.namespace.Root(), plan.workspace.partition), clientv3.WithPrefix())
+			require.NoError(t, err)
+			require.Len(t, all.Kvs, count, "S1 active key bound")
+			point, err := f.raw.Get(f.ctx, d.slotKey)
+			require.NoError(t, err)
+			require.Len(t, point.Kvs, 1)
+			kv := point.Kvs[0]
+			slot, err := decodeWorkspaceSyncRecyclingSlot(kv)
+			require.NoError(t, err)
+			require.Equal(t, state, slot.State)
+			require.Equal(t, create, kv.CreateRevision)
+			require.Equal(t, version, kv.Version)
+			require.Equal(t, revision, kv.ModRevision)
+			require.Greater(t, revision, previous)
+			previous = revision
+			t.Logf("file=%02d state=%s Create=%d MOD=%d Version=%d activeKeys=%d", i, state, create, revision, version, count)
+		}
+		inspect("occupied", int64(i*3+2), d.revision, 2)
+		if i == 1 {
+			for _, txn := range []clientv3.Txn{oldReserve, oldTerminal, oldGC} {
+				r, err := txn.Commit()
+				require.NoError(t, err)
+				require.False(t, r.Succeeded, "captured original old Txn cannot modify the next occupied generation")
+			}
+			point, err := f.raw.Get(f.ctx, d.slotKey)
+			require.NoError(t, err)
+			require.Equal(t, d.revision, point.Kvs[0].ModRevision)
+			t.Log("captured original reserve/terminal/GC actual late native Txns all rejected after next reserve")
+		}
+		w, err := s.putLocal(f.ctx, body, target)
+		require.NoError(t, err)
+		actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+		require.NoError(t, err)
+		require.Equal(t, bodies[i+2], string(actual))
+		require.Equal(t, workspaceSyncIntentDigest(string(actual)), w.sha256)
+		if i == 0 {
+			workspaceSyncIntentSetKV(s, &faultKV{KV: originalKV, match: recyclingTerminalMatch, before: func() {
+				q := d.localSettlement
+				oldTerminal = f.raw.Txn(f.ctx).If(s.recyclingTerminalComparisons(d)...).Then(clientv3.OpPut(d.slotKey, q.value))
+			}})
+		}
+		q, err := s.settleLocal(f.ctx, w)
+		require.NoError(t, err)
+		inspect("terminal", int64(i*3+3), q.terminal.mod, 2)
+		if i == 0 {
+			workspaceSyncIntentSetKV(s, &faultKV{KV: originalKV, match: recyclingGCMatch, before: func() {
+				free, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: d.record.Reference.BudgetID, Partition: d.record.Reference.Task.Partition, Slot: 0, State: "free"})
+				require.NoError(t, err)
+				oldGC = f.raw.Txn(f.ctx).If(s.recyclingGCComparisons(q)...).Then(clientv3.OpPut(d.slotKey, free), clientv3.OpDelete(d.intentKey))
+			}})
+		}
+		outcome, err := s.recycleLocal(f.ctx, q)
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, outcome)
+		point, err := f.raw.Get(f.ctx, d.slotKey)
+		require.NoError(t, err)
+		inspect("free", int64(i*3+4), point.Kvs[0].ModRevision, 1)
+		if i == 0 {
+			workspaceSyncIntentSetKV(s, originalKV)
+		}
+		require.NoError(t, body.Close())
+		if i < 64 {
+			e, err := s.next(f.ctx)
+			require.NoError(t, err)
+			body, err = s.openBody(f.ctx, e)
+			require.NoError(t, err)
+		}
+	}
+	_, err = s.next(f.ctx)
+	require.ErrorIs(t, err, io.EOF)
+	all, err := f.raw.Get(f.ctx, f.b.namespace.Root(), clientv3.WithPrefix())
+	require.NoError(t, err)
+	slots, intents := 0, 0
+	for _, kv := range all.Kvs {
+		if strings.Contains(string(kv.Key), "/workspace-sync-recycling-slots/") {
+			slots++
+		} else if strings.Contains(string(kv.Key), "/workspace-sync-recycling-intents/") {
+			intents++
+		}
+	}
+	require.Equal(t, 256, slots)
+	require.Zero(t, intents)
+	entries, err := os.ReadDir(filepath.Join(target.pin.Root, "z"))
+	require.NoError(t, err)
+	require.Len(t, entries, 65)
+	t.Logf("65 actual local files completed sequentially S1; final Version196/Create%d; slots256/intents0; elapsed=%s; tmpfs and repeated archive guards, no power-loss/performance proof", create, time.Since(started))
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCompletionUnknown(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, stage := range []string{"terminal", "gc"} {
+		for _, fault := range []string{"lost-ack", "malformed-ack", "unknown-absent"} {
+			t.Run(stage+"-"+fault, func(t *testing.T) {
+				f, s, body, target, w := workspaceSyncRecyclingNativeWritten(t)
+				var q *taskWorkspaceSyncLocalSettlement
+				var err error
+				match := recyclingTerminalMatch
+				if stage == "gc" {
+					q, err = s.settleLocal(f.ctx, w)
+					require.NoError(t, err)
+					match = recyclingGCMatch
+				}
+				var writes atomic.Int32
+				var late *recyclingLateKV
+				if fault == "unknown-absent" {
+					late = &recyclingLateKV{KV: f.b.client.KV, ctx: f.ctx, gate: make(chan struct{}), done: make(chan error, 1), joined: make(chan struct{}), match: match}
+					workspaceSyncIntentSetKV(s, late)
+				} else {
+					workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: match, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+						writes.Add(1)
+						require.NoError(t, err)
+						require.True(t, r.Succeeded)
+						if fault == "lost-ack" {
+							return nil, context.DeadlineExceeded
+						}
+						if stage == "terminal" {
+							r.Responses = nil
+						} else {
+							r.Responses[1].GetResponseDeleteRange().Deleted = 0
+						}
+						return r, nil
+					}})
+				}
+				call := func() error {
+					if stage == "terminal" {
+						q, err = s.settleLocal(f.ctx, w)
+						return err
+					}
+					_, err = s.recycleLocal(f.ctx, q)
+					return err
+				}
+				require.ErrorIs(t, call(), ErrOutcomeUnknown)
+				require.NotNil(t, q)
+				if stage == "terminal" {
+					require.False(t, q.known)
+					_, err := s.recycleLocal(f.ctx, q)
+					require.Error(t, err, "unknown terminal is not GC authority")
+				} else {
+					require.False(t, q.completed)
+				}
+				copy := *q
+				copy.self = &copy
+				_, err = s.recycleLocal(f.ctx, &copy)
+				require.Error(t, err, "copied unknown cannot gain completion authority")
+				if late != nil {
+					for i := 0; i < 2; i++ {
+						require.ErrorIs(t, call(), ErrOutcomeUnknown, "same-point unchanged native state remains unknown")
+					}
+					require.EqualValues(t, 1, late.writes.Load())
+					close(late.gate)
+					require.NoError(t, <-late.done)
+					<-late.joined
+					t.Log("actual original escaped native Txn joined once; earlier diagnostics were readonly")
+				}
+				require.NoError(t, call(), "only original fixed guarded read can recognize exact next native generation")
+				require.NoError(t, call(), "repeated original call does not resend mutation")
+				if late == nil {
+					require.EqualValues(t, 1, writes.Load())
+				} else {
+					require.EqualValues(t, 1, late.writes.Load())
+				}
+				point, err := f.raw.Get(f.ctx, body.intent.slotKey)
+				require.NoError(t, err)
+				require.Len(t, point.Kvs, 1)
+				if stage == "terminal" {
+					require.True(t, q.known)
+					require.Equal(t, body.intent.recycling.version+2, point.Kvs[0].Version)
+				} else {
+					require.True(t, q.completed)
+					require.Equal(t, q.terminal.version+1, point.Kvs[0].Version)
+				}
+				actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(actual), "readonly arbitration never repeats file IO")
+			})
+		}
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCompletionFences(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, stage := range []string{"terminal", "gc"} {
+		for _, fault := range []string{"slot-generation", "intent-immutable", "restore", "claim-lost", "root", "deadline"} {
+			t.Run(stage+"-"+fault, func(t *testing.T) {
+				f, s, body, target, w := workspaceSyncRecyclingNativeWritten(t)
+				d := body.intent
+				var q *taskWorkspaceSyncLocalSettlement
+				var err error
+				if stage == "gc" {
+					q, err = s.settleLocal(f.ctx, w)
+					require.NoError(t, err)
+				}
+				ctx := f.ctx
+				switch fault {
+				case "slot-generation":
+					point, e := f.raw.Get(f.ctx, d.slotKey)
+					require.NoError(t, e)
+					_, err = f.raw.Put(f.ctx, d.slotKey, string(point.Kvs[0].Value))
+				case "intent-immutable":
+					_, err = f.raw.Put(f.ctx, d.intentKey, d.value)
+				case "restore":
+					deferRestore(t, f)
+					_, err = f.raw.Put(f.ctx, f.b.restoreKey, "different-epoch")
+				case "claim-lost":
+					_, err = f.raw.Revoke(f.ctx, clientv3.LeaseID(f.c.reference.LeaseID))
+				case "root":
+					err = os.Chmod(target.pin.Root, 0750)
+				case "deadline":
+					bounded, cancel := context.WithTimeout(f.ctx, time.Nanosecond)
+					defer cancel()
+					<-bounded.Done()
+					ctx = bounded
+				}
+				require.NoError(t, err)
+				if stage == "terminal" {
+					q, err = s.settleLocal(ctx, w)
+				} else {
+					_, err = s.recycleLocal(ctx, q)
+				}
+				require.Error(t, err)
+				if q != nil {
+					require.False(t, q.completed)
+				}
+				point, err := f.raw.Get(f.ctx, d.slotKey)
+				require.NoError(t, err)
+				require.Len(t, point.Kvs, 1)
+				slot, err := decodeWorkspaceSyncRecyclingSlot(point.Kvs[0])
+				require.NoError(t, err)
+				want := "occupied"
+				if stage == "gc" {
+					want = "terminal"
+				}
+				require.Equal(t, want, slot.State, "failed guard conservatively retains charged state")
+				intent, err := f.raw.Get(f.ctx, d.intentKey)
+				require.NoError(t, err)
+				require.Len(t, intent.Kvs, 1)
+				actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(actual))
+			})
+		}
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCompletionClose(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, stage := range []string{"terminal", "gc"} {
+		for _, point := range []string{"rpc", "postguard"} {
+			for _, owner := range []string{"source", "body", "target"} {
+				t.Run(stage+"-"+point+"-"+owner, func(t *testing.T) {
+					f, s, body, target, w := workspaceSyncRecyclingNativeWritten(t)
+					var q *taskWorkspaceSyncLocalSettlement
+					var err error
+					match := recyclingTerminalMatch
+					if stage == "gc" {
+						q, err = s.settleLocal(f.ctx, w)
+						require.NoError(t, err)
+						match = recyclingGCMatch
+					}
+					entered, release := make(chan struct{}), make(chan struct{})
+					var free atomic.Bool
+					pause := func() {
+						if point == "postguard" {
+							available := s.archive.owner.nativeMu.TryLock()
+							free.Store(available)
+							if available {
+								s.archive.owner.nativeMu.Unlock()
+							}
+						}
+						close(entered)
+						<-release
+					}
+					fault := &faultKV{KV: f.b.client.KV, match: match}
+					if point == "rpc" {
+						fault.before = pause
+					} else {
+						fault.after = func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+							body.intent.localSettlement.probeComplete = pause
+							return r, err
+						}
+					}
+					workspaceSyncIntentSetKV(s, fault)
+					done := make(chan error, 1)
+					go func() {
+						if stage == "terminal" {
+							_, err := s.settleLocal(f.ctx, w)
+							done <- err
+						} else {
+							_, err := s.recycleLocal(f.ctx, q)
+							done <- err
+						}
+					}()
+					select {
+					case <-entered:
+					case <-time.After(5 * time.Second):
+						close(release)
+						t.Fatal("original completion did not reach controlled boundary")
+					}
+					closed := make(chan error, 1)
+					go func() {
+						switch owner {
+						case "source":
+							closed <- s.Close()
+						case "body":
+							closed <- body.Close()
+						case "target":
+							closed <- target.Close()
+						}
+					}()
+					early := false
+					select {
+					case err := <-closed:
+						early = true
+						t.Errorf("%s.Close returned before original %s %s joined: %v", owner, stage, point, err)
+					case <-time.After(30 * time.Millisecond):
+					}
+					close(release)
+					require.Error(t, <-done, "Close cancels pending completion authority")
+					if !early {
+						require.NoError(t, <-closed)
+					}
+					if point == "postguard" {
+						require.True(t, free.Load(), "nativeMu free at suspension after actual physical check")
+					}
+					if stage == "gc" {
+						require.False(t, q.completed)
+					} else {
+						require.False(t, body.intent.localSettlement.known)
+					}
+					t.Logf("original %s.Close actually joined %s at %s; post-check hook does not prove lock freedom throughout syscall", owner, stage, point)
+				})
+			}
+		}
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeGCReusedUnknown(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f1, s1, body1, _, w := workspaceSyncRecyclingNativeWritten(t)
+	q, err := s1.settleLocal(f1.ctx, w)
+	require.NoError(t, err)
+	var writes atomic.Int32
+	workspaceSyncIntentSetKV(s1, &faultKV{KV: f1.b.client.KV, match: recyclingGCMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		writes.Add(1)
+		require.NoError(t, err)
+		return nil, context.DeadlineExceeded
+	}})
+	_, err = s1.recycleLocal(f1.ctx, q)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	var workspace WorkspaceIdentity
+	for i := 0; i < 10000; i++ {
+		candidate := workspaceSyncIdentity(t, "local", "test-storage", "bucket", fmt.Sprintf("gc-reuse/%d/", i))
+		if candidate.partition == s1.plan.workspace.partition {
+			workspace = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, workspace.hash)
+	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspace})
+	require.NoError(t, err)
+	budget := f1.b.workspaceSyncBudget.options
+	f2, s2, body2, target2 := workspaceSyncRecyclingNativeBody(t, plan, &budget, workspaceSyncIntentSecondSetup(t, f1, workspace))
+	require.NotSame(t, f1.b, f2.b)
+	require.NotSame(t, f1.b.client, f2.b.client)
+	require.NoError(t, s2.bindLocalPut(f2.ctx, body2, target2))
+	_, err = s2.reservePutIntent(f2.ctx, body2)
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		outcome, err := s1.recycleLocal(f1.ctx, q)
+		require.ErrorIs(t, err, ErrOutcomeUnknown, "already reused free cannot confirm old GC")
+		require.Equal(t, OutcomeUnknown, outcome)
+	}
+	require.EqualValues(t, 1, writes.Load())
+	require.False(t, q.completed)
+	require.Same(t, body1, s1.body)
+	point, err := f2.raw.Get(f2.ctx, body2.intent.slotKey)
+	require.NoError(t, err)
+	require.Len(t, point.Kvs, 1)
+	require.Equal(t, body2.intent.revision, point.Kvs[0].ModRevision)
+	require.Equal(t, q.terminal.create, point.Kvs[0].CreateRevision)
+	require.Equal(t, q.terminal.version+2, point.Kvs[0].Version)
+	t.Log("original old unknown GC remains readonly after independent Backend/client reserves next native generation; same physical worker only")
 }
 
 func TestTaskWorkspaceSyncRecyclingNativeAdmission(t *testing.T) {
@@ -562,6 +1148,7 @@ type recyclingLateKV struct {
 	done   chan error
 	joined chan struct{}
 	writes atomic.Int32
+	match  func([]clientv3.Op) bool
 }
 
 func (kv *recyclingLateKV) Txn(ctx context.Context) clientv3.Txn {
@@ -583,6 +1170,9 @@ func (txn *recyclingLateTxn) If(cmps ...clientv3.Cmp) clientv3.Txn {
 
 func (txn *recyclingLateTxn) Then(ops ...clientv3.Op) clientv3.Txn {
 	txn.late = recyclingPutMatch(ops)
+	if txn.owner.match != nil {
+		txn.late = txn.owner.match(ops)
+	}
 	if txn.late {
 		txn.Txn = txn.owner.KV.Txn(txn.owner.ctx).If(txn.cmps...).Then(ops...)
 	} else {

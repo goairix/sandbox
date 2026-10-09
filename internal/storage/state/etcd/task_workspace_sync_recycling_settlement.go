@@ -72,7 +72,15 @@ func (s *PreparedTaskWorkspaceSyncSource) beginLocalSettlement(ctx context.Conte
 	p.mu.Unlock()
 	b := s.archive.owner.backend
 	body.mu.Lock()
-	valid := joined && body.intent == d && body.localTarget == target && !body.closed && !body.active && body.localConsumed && body.complete && body.ctx.Err() == nil && body.bytes == d.record.Size && hex.EncodeToString(body.hash.Sum(nil)) == d.record.BodySHA256 && w.bytes == d.record.Size && w.sha256 == d.record.BodySHA256 && d.record.Local != nil && w.dev == d.record.Local.Dev && w.ino != 0 && d.acknowledged && d.revision > 0 && d.revision < math.MaxInt64 && d.recycling != nil && d.recycling.version < math.MaxInt64-1 && b.workspaceSyncBudget != nil && b.workspaceSyncBudget.profile == 2 && target != nil && target.self == target && *d.record.Local == target.pin
+	versionValid := d.recycling != nil && recyclingCanAdvance(d.recycling.version) && recyclingCanAdvance(d.recycling.version+1)
+	valid := joined && body.intent == d && body.localTarget == target &&
+		!body.closed && !body.active && body.localConsumed && body.complete && body.ctx.Err() == nil &&
+		body.bytes == d.record.Size && hex.EncodeToString(body.hash.Sum(nil)) == d.record.BodySHA256 &&
+		w.bytes == d.record.Size && w.sha256 == d.record.BodySHA256 &&
+		d.record.Local != nil && w.dev == d.record.Local.Dev && w.ino != 0 &&
+		d.acknowledged && d.revision > 0 && d.revision < math.MaxInt64 && versionValid &&
+		b.workspaceSyncBudget != nil && b.workspaceSyncBudget.profile == 2 &&
+		target != nil && target.self == target && *d.record.Local == target.pin
 	if !valid {
 		body.mu.Unlock()
 		s.end()
@@ -261,4 +269,9 @@ func recyclingGenerationMatches(kv *mvccpb.KeyValue, create, version, previous i
 		return false
 	}
 	return kv.CreateRevision == create && kv.Version == version && kv.ModRevision > previous && string(kv.Value) == value
+}
+
+func recyclingCanAdvance(version int64) bool {
+	// Max is deliberately unusable, matching the strict native slot decoder.
+	return version > 0 && version < math.MaxInt64-1
 }

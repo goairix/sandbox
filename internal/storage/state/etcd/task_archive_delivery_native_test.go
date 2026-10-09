@@ -251,6 +251,16 @@ func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, b
 	issuer := &archiveNativeIssuer{old: f.issuer.old}
 	anchor := time.Now()
 	options := deliverySpoolOptions(archiveTestDirectory(t))
+	if recycling && data != nil {
+		// Explicit bounded 65-file recycling proof; default/legacy fixture limits
+		// and production options keep their existing independent admission bounds.
+		require.LessOrEqual(t, entries, uint64(67))
+		options.Entries = 67
+		indexBytes, err := taskArchiveIndexBytes(options.Entries)
+		require.NoError(t, err)
+		options.JobIndexBytes = indexBytes
+		options.TotalIndexBytes = options.Jobs * options.JobIndexBytes
+	}
 	if budget != nil {
 		metadata := "workspace_sync_budget"
 		if recycling {

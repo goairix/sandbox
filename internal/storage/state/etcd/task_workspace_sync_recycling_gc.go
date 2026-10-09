@@ -28,7 +28,7 @@ func (s *PreparedTaskWorkspaceSyncSource) recycleLocal(ctx context.Context, q *t
 		return OutcomeUnknown, err
 	}
 	defer op.end()
-	if !q.known || q.terminal.create != q.draft.recycling.create || q.terminal.mod <= q.draft.revision || q.terminal.mod == math.MaxInt64 || q.terminal.version != q.draft.recycling.version+2 || q.terminal.version == math.MaxInt64 || q.terminal.value != q.value {
+	if !q.known || q.terminal.create != q.draft.recycling.create || q.terminal.mod <= q.draft.revision || q.terminal.mod == math.MaxInt64 || q.terminal.version != q.draft.recycling.version+2 || !recyclingCanAdvance(q.terminal.version) || q.terminal.value != q.value {
 		return OutcomeUnknown, ErrInvalidRecord
 	}
 	if q.completed {
