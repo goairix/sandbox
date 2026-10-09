@@ -2,6 +2,8 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
+最新已验收源码 `b1c9d12`/`6922d0d`：永久 generation slot 的原始申请、unknown 固定候选只读、occupied 本地 gate 和 Close 等待。最终限定 host race154叶、同源 Linux 分批24不同叶通过；独立review Missing0/Extra0/C0/I0/M2，两个证明范围/环境限制已披露，Root684artifact与源码/二进制/19环境清理核对。见 `2026-10-09-workspace-sync-recycling-admission-verification.md`。较大批次原始child SIGKILL原因仍未知，不能称完整轮全绿或可靠性/容量通过。成功IO仍charged；正在接续原始witness持久terminal和有预算GC，之后仍需checkpoint/正常恢复、安全释放、生产接线与大N验收。
+
 已按用户要求合入基分支修复 `52b4d4f`、`d543cf3`，合并提交 `7bca73a`。无冲突；三个受影响包 race/vet/Linuxarm64CGO0编译通过。见 `2026-10-08-base-quiesce-fixes-verification.md`。
 
 新增已验收功能提交 `61fe19a`：原始归档消费owner、当前native权限、有界TAR/PAX私有body和所有关闭路径的物理等待。实际native24项与host5项通过，native零跳过/零警告，vet/Linuxarm64编译通过，独立review无问题。见 `2026-10-08-workspace-sync-source-verification.md`。原始45秒会话实际过期后继续消费、真实续约已测；当前重复整归档SHA存在多文件IO成本，尚不是性能/容量或安全释放验收。

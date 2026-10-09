@@ -45,12 +45,12 @@
 
 **Interfaces:** 原 reservePutIntent profile dispatch→private reserveRecyclingPutIntent；draft captures permanent free create/mod/version/value beforeRPC；只originalACKpostguard设置acknowledged。local gate适配profile2 occupiedslot，旧profile完全原样；Load选择backend explicitprofile读复制diagnostics，nilbackend保留legacylookup不推断authority。
 
-- [ ] Step 1: RED实际S1 operator预建256slots，原始localbody reserve/gate/put及foreign/malformed/missingfree/knownoccupied拒绝；hostprotocolwire64nodes/worstB边界；legacy targeted回归。
-- [ ] Step 2: 新profile free point-read→bounded候选nativeTxnfence Mod/Value→2Put；未知固定候选只读，不重发/换槽/授权；失败fresh完整quota guard才检查下一候选。所有原history/restore/prefix/budgetpins保持。
-- [ ] Step 3: profile2 occupied strictCreate/Version/knownACKMod/value/intentbirth gate；原body一次消费和physicalpostguard保持。read arbitration只是诊断。真实crossBackend并发S1只一winner；captured oldfreeTxn在另一次generation变化后拒绝，测试native实际事务非fakeclient。
-- [ ] Step 4: 实际wire节点/bytes/requestresponses严格预检；originalchild/control/attachwait/inventory安全复用已跟踪脚本，实现模式必须有上限/原句柄，不能读旧OWN。
-- [ ] Step 5: scoped hostrace/nativeLinux实际leaf0SKIP、旧v1/knownACK/unknown/localIO接缝回归；vet/cross/format/bash/exactdiff；失败/rawWARN/clientserver证据如实保留，不反复全轮setupdeadline重试。
-- [ ] Step 6: exact-path source小提交、OWNtask2完整报告manifest、自审；Root一次独立review与audit，trackedacceptance后Task3。
+- [x] Step 1: RED实际S1 operator预建256slots，原始localbody reserve/gate/put及foreign/malformed/missingfree/knownoccupied拒绝；hostprotocolwire64nodes/worstB边界；legacy targeted回归。
+- [x] Step 2: 新profile free point-read→bounded候选nativeTxnfence Mod/Value→2Put；未知固定候选只读，不重发/换槽/授权；失败fresh完整quota guard才检查下一候选。所有原history/restore/prefix/budgetpins保持。
+- [x] Step 3: profile2 occupied strictCreate/Version/knownACKMod/value/intentbirth gate；原body一次消费和physicalpostguard保持。read arbitration只是诊断。真实crossBackend并发S1只一winner；captured oldfreeTxn在另一次generation变化后拒绝，测试native实际事务非fakeclient。
+- [x] Step 4: 实际wire节点/bytes/requestresponses严格预检；originalchild/control/attachwait/inventory安全复用已跟踪脚本，实现模式必须有上限/原句柄，不能读旧OWN。
+- [x] Step 5: scoped hostrace/nativeLinux实际leaf0SKIP、旧v1/knownACK/unknown/localIO接缝回归；vet/cross/format/bash/exactdiff；失败/rawWARN/clientserver证据如实保留，不反复全轮setupdeadline重试。
+- [x] Step 6: exact-path source小提交、OWNtask2完整报告manifest、自审；Root一次独立review与audit，trackedacceptance后Task3。
 
 ### Task 3: 原始 witness 持久 terminal 与原生有预算 GC
 
