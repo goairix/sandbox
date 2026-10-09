@@ -24,3 +24,24 @@ type taskWorkspaceSyncRecyclingGeneration struct {
 	create, mod, version int64
 	value                string
 }
+
+// Original in-process terminal owner; copied metadata cannot recycle a slot.
+type taskWorkspaceSyncLocalSettlement struct {
+	self        *taskWorkspaceSyncLocalSettlement
+	witness     *taskWorkspaceSyncLocalWitness
+	draft       *taskWorkspaceSyncIntentDraft
+	value       string
+	terminal    taskWorkspaceSyncRecyclingGeneration
+	attempted   bool
+	denied      bool
+	known       bool
+	gcAttempted bool
+	gcDenied    bool
+	completed   bool
+	// Test-only suspension after the actual physical postguard has returned.
+	probeComplete func()
+}
+
+func (q *taskWorkspaceSyncLocalSettlement) original() bool {
+	return q != nil && q.self == q && q.witness.original() && q.draft != nil && q.draft == q.witness.origin.draft && q.draft.localSettlement == q
+}

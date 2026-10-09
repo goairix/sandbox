@@ -21,6 +21,7 @@ case "$mode" in
   local-put-mode) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^mode-zero-preserved$';;
   local-put-error) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^real-write-error-retains-partial-charge$';;
   recycling-admission) test_run='^TestTaskWorkspaceSyncRecyclingNativeAdmission$';;
+  recycling-settlement) test_run='^TestTaskWorkspaceSyncRecyclingNativeSettlement$';;
   recycling-proof) test_run='^TestTaskWorkspaceSyncRecyclingNative';;
   recycling-close-rpc) test_run='^TestTaskWorkspaceSyncRecyclingNativeCloseRPC$';;
   recycling-competition) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompetition$';;
@@ -187,6 +188,10 @@ docker volume ls -q --filter "label=sandbox.test.project=$project" --filter "lab
 docker network ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-networks.txt"
 [[ ! -s "$evidence/pre-containers.txt" && ! -s "$evidence/pre-volumes.txt" && ! -s "$evidence/pre-networks.txt" ]] || { echo 'exact project pre-inventory is not empty' >&2; exit 1; }
 source_files=(
+  internal/storage/state/etcd/task_workspace_sync_recycling_settlement.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_gc.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_settlement_test.go
+  internal/storage/state/etcd/task_workspace_sync_source_cursor.go
   internal/storage/state/etcd/task_workspace_sync_recycling_admission.go
   internal/storage/state/etcd/task_workspace_sync_recycling_read.go
   internal/storage/state/etcd/task_workspace_sync_recycling_guard.go

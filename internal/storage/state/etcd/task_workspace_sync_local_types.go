@@ -62,7 +62,7 @@ type taskWorkspaceSyncLocalWitness struct {
 }
 
 func (w *taskWorkspaceSyncLocalWitness) original() bool {
-	return w != nil && w.self == w && w.origin != nil && w.origin.self == w.origin && w.origin.witness == w
+	return w != nil && w.self == w && w.origin != nil && w.origin.self == w.origin && w.origin.witness == w && w.origin.draft != nil && w.origin.draft.localPut == w.origin
 }
 
 func (t *taskWorkspaceSyncLocalTarget) begin(ctx context.Context) error {

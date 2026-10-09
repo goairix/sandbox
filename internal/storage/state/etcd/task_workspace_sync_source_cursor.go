@@ -49,6 +49,10 @@ func (s *PreparedTaskWorkspaceSyncSource) next(ctx context.Context) (entry *task
 		}
 		s.body.mu.Lock()
 		complete := s.body.complete && !s.body.active
+		if s.archive.owner.backend.workspaceSyncBudget != nil && s.archive.owner.backend.workspaceSyncBudget.profile == 2 && s.body.localConsumed {
+			d := s.body.intent
+			complete = complete && d != nil && d.localSettlement.original() && d.localSettlement.completed
+		}
 		s.body.mu.Unlock()
 		if !complete {
 			return nil, errTaskArchive

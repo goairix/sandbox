@@ -102,6 +102,8 @@ type taskWorkspaceSyncIntentDraft struct {
 	revision                             int64
 	acknowledged                         bool // only original full successful ACK + local postguard
 	recycling                            *taskWorkspaceSyncRecyclingGeneration
+	localPut                             *taskWorkspaceSyncLocalPut
+	localSettlement                      *taskWorkspaceSyncLocalSettlement
 }
 
 func immutableWorkspaceSyncKV(kv *mvccpb.KeyValue) bool {

@@ -120,11 +120,17 @@ func TestTaskWorkspaceSyncLocalUnoriginal(t *testing.T) {
 	original.self = original
 	require.False(t, original.original(), "self/origin diagnostics alone are not original issuance")
 	origin.witness = original
+	require.False(t, original.original(), "issuance must belong to the unique registered draft owner")
+	origin.draft = &taskWorkspaceSyncIntentDraft{localPut: origin}
 	require.True(t, original.original())
 	copy := *original
 	require.False(t, copy.original())
 	copy.self = &copy
 	require.False(t, copy.original(), "resetting copied self cannot replace the original issuance")
+	putCopy := &taskWorkspaceSyncLocalPut{draft: origin.draft, witness: &copy}
+	putCopy.self = putCopy
+	copy.origin = putCopy
+	require.False(t, copy.original(), "joint copies cannot replace the draft's unique original put")
 }
 
 func TestTaskWorkspaceSyncLocalBodiesRejectedBeforeRPC(t *testing.T) {

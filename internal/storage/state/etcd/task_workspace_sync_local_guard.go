@@ -80,6 +80,7 @@ func (s *PreparedTaskWorkspaceSyncSource) prepareLocalPut(ctx context.Context, b
 	owned, cancel := context.WithCancel(ctx)
 	p := &taskWorkspaceSyncLocalPut{source: s, body: body, target: target, draft: draft, ctx: owned, cancel: cancel}
 	p.self = p
+	draft.localPut = p // immutable unique owner registration, never copied wire data
 	p.stops = []func() bool{context.AfterFunc(s.ctx, cancel), context.AfterFunc(body.ctx, cancel), context.AfterFunc(target.ctx, cancel)}
 	if err := p.guard(); err != nil {
 		return nil, errors.Join(err, p.Close())
