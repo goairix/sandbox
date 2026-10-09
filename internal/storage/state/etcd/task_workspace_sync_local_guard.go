@@ -92,7 +92,7 @@ func (p *taskWorkspaceSyncLocalPut) guard() error {
 		return ErrInvalidRecord
 	}
 	p.mu.Lock()
-	if p.sealed || p.guarding || p.ctx.Err() != nil {
+	if p.sealed || p.guarding || p.ctx.Err() != nil || p.body.ctx.Err() != nil {
 		p.mu.Unlock()
 		return ErrGuardExpired
 	}

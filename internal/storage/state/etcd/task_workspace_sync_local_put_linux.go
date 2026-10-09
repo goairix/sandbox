@@ -18,7 +18,11 @@ type workspaceSyncLocalHandle struct {
 }
 
 func workspaceSyncLocalScopedOpen(root int, path string, flags int, mode uint32) (int, error) {
-	return unix.Openat2(root, path, &unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC | unix.O_NONBLOCK), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	flags |= unix.O_CLOEXEC
+	if flags&unix.O_PATH == 0 {
+		flags |= unix.O_NONBLOCK // opening a hostile FIFO must never block
+	}
+	return unix.Openat2(root, path, &unix.OpenHow{Flags: uint64(flags), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
 }
 
 func (t *taskWorkspaceSyncLocalTarget) localStat(fd int, directory bool) (unix.Stat_t, error) {
@@ -37,9 +41,9 @@ func (t *taskWorkspaceSyncLocalTarget) checkLocalHandle(h workspaceSyncLocalHand
 	if err != nil || st.Dev != h.stat.Dev || st.Ino != h.stat.Ino {
 		return errors.Join(ErrIdentityMismatch, err)
 	}
-	flags := unix.O_RDONLY
+	flags := unix.O_PATH
 	if directory {
-		flags |= unix.O_DIRECTORY
+		flags = unix.O_RDONLY | unix.O_DIRECTORY
 	}
 	fd, err := workspaceSyncLocalScopedOpen(t.fd, h.path, flags, 0)
 	if err != nil {
@@ -63,9 +67,11 @@ func (p *taskWorkspaceSyncLocalPut) localStage(parents []workspaceSyncLocalHandl
 		}
 	}
 	if file != nil {
-		return p.target.checkLocalHandle(*file, false)
+		if err := p.target.checkLocalHandle(*file, false); err != nil {
+			return err
+		}
 	}
-	return nil
+	return errors.Join(p.ctx.Err(), p.body.ctx.Err(), p.source.ctx.Err(), p.target.ctx.Err())
 }
 
 func (s *PreparedTaskWorkspaceSyncSource) localCallComplete(stage string) {
@@ -225,7 +231,7 @@ func (s *PreparedTaskWorkspaceSyncSource) putLocal(ctx context.Context, body *ta
 	if err := unix.Fsync(target.fd); err != nil {
 		return nil, err
 	}
-	fd, err = workspaceSyncLocalScopedOpen(target.fd, e.path, unix.O_RDONLY, 0)
+	fd, err = workspaceSyncLocalScopedOpen(target.fd, e.path, unix.O_PATH, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +256,9 @@ func (s *PreparedTaskWorkspaceSyncSource) putLocal(ctx context.Context, body *ta
 		}
 	}
 	if err := p.guard(); err != nil {
+		return nil, err
+	}
+	if err := errors.Join(p.ctx.Err(), body.ctx.Err(), s.ctx.Err(), target.ctx.Err()); err != nil {
 		return nil, err
 	}
 	w := &taskWorkspaceSyncLocalWitness{origin: p, bytes: e.size, sha256: e.sha256, dev: uint64(final.Dev), ino: final.Ino}

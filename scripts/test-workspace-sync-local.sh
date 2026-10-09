@@ -14,6 +14,12 @@ case "$mode" in
   normal) ;;
   postguard-proof) test_run='^TestTaskWorkspaceSyncLocalNativePostguardClose$';;
   local-gate-proof) test_run='^TestTaskWorkspaceSyncLocalNative';;
+  local-put-proof) test_run='^TestTaskWorkspaceSyncLocalPutNative';;
+  local-put-core) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^nested-and-successive-original-files$';;
+  local-put-close) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^io-pending-';;
+  local-put-ownership) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^ownership$';;
+  local-put-mode) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^mode-zero-preserved$';;
+  local-put-error) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^real-write-error-retains-partial-charge$';;
   pending-proof) test_run='^TestTaskWorkspaceSyncLocalNative$/^readonly-attribution-original-gate$';;
   reap-retained) ;;
   attach-owner) ;;
@@ -32,6 +38,7 @@ if [[ "$mode" == attach-owner ]]; then
   project=$(awk -F= '$1 == "project" {print $2}' "$evidence/attach-input.txt")
   retained_fixture=$(awk -F= '$1 == "fixture" {print $2}' "$evidence/attach-input.txt")
   container=$(awk -F= '$1 == "container" {print $2}' "$evidence/attach-input.txt")
+  foreign_fixture=$(awk -F= '$1 == "foreignFixture" {print $2}' "$evidence/attach-input.txt")
   [[ "$project" =~ ^sandbox-workspace-sync-local-[0-9]+-[0-9]+$ && "$retained_fixture" == "$fixture" && "$container" == "$project-native" ]] || exit 1
   labels=$(docker inspect --format '{{index .Config.Labels "sandbox.test.project"}} {{index .Config.Labels "sandbox.test.fixture"}}' "$container")
   [[ "$labels" == "$project $fixture" ]] || exit 1
@@ -40,12 +47,29 @@ if [[ "$mode" == attach-owner ]]; then
   docker start -a "$container" >"$evidence/native.log" 2>&1 &
   actual_attach=$!
   printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s attachPID=%s\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_attach" >"$evidence/attach-handle.txt"
+  helper_exit=0
+  if [[ "$foreign_fixture" == 1 ]]; then
+    helper_deadline=$((SECONDS+10))
+    until [[ $(docker inspect --format '{{.State.Running}}' "$container") == true ]]; do
+      (( SECONDS < helper_deadline )) || { helper_exit=1; break; }
+      sleep 0.1
+    done
+    if [[ "$helper_exit" == 0 ]]; then
+      docker exec --user 0:0 --env SANDBOX_WORKSPACE_SYNC_LOCAL_FOREIGN_INITIALIZER=1 "$container" /workspace-sync-local.test >"$evidence/foreign-helper.log" 2>&1 &
+      actual_helper=$!
+      printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s helperPID=%s distinctUID0Fixture=true\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_helper" >"$evidence/foreign-helper-handle.txt"
+      wait "$actual_helper" || helper_exit=$?
+      printf '%s\n' "$helper_exit" >"$evidence/foreign-helper-exit.txt"
+      printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s helperPID=%s actualDockerExecWait=true joined=true exit=%s distinctUID0Fixture=true\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_helper" "$helper_exit" >"$evidence/foreign-helper-joined.txt"
+    fi
+  fi
   actual_status=0
   wait "$actual_attach" || actual_status=$?
   printf '%s\n' "$actual_status" >"$evidence/attach-exit.txt"
   printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s attachPID=%s joined=true exit=%s\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_attach" "$actual_status" >"$evidence/attach-joined.tmp"
   mv "$evidence/attach-joined.tmp" "$evidence/attach-joined.txt"
   printf 'ownerPID=%s session=%s actualAttachWait=true exit=%s supervisorEnding=true\n' "$$" "$owner_session" "$actual_status" >"$evidence/attach-owner-ending.txt"
+  if [[ "$helper_exit" != 0 ]]; then exit "$helper_exit"; fi
   exit "$actual_status"
 fi
 
@@ -64,6 +88,11 @@ attach_join_complete() {
   [[ -f "$evidence/attach-owner.txt" && -f "$evidence/attach-joined.txt" ]] && grep -Fq "project=$project fixture=$fixture container=$container ownerPID=" "$evidence/attach-owner.txt" && grep -Fq "$(<"$evidence/attach-owner.txt") attachPID=" "$evidence/attach-joined.txt" && grep -Fq ' joined=true ' "$evidence/attach-joined.txt"
 }
 
+helper_join_complete() {
+  if [[ $(awk -F= '$1 == "foreignFixture" {print $2}' "$evidence/attach-input.txt") != 1 ]]; then return 0; fi
+  [[ -f "$evidence/foreign-helper-handle.txt" && -f "$evidence/foreign-helper-joined.txt" ]] && grep -Fq "$(sed 's/ distinctUID0Fixture=true$//' "$evidence/foreign-helper-handle.txt") actualDockerExecWait=true joined=true exit=" "$evidence/foreign-helper-joined.txt"
+}
+
 cleanup() {
   local original=$? failed=$join_failed labels terminal waited wait_exit kind remaining
   trap - EXIT INT TERM
@@ -74,7 +103,7 @@ cleanup() {
         failed=1
       else
         terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}}' "$container") || { failed=1; terminal='unknown'; }
-        if [[ "$terminal" == 'exited false' ]] && child_joins_complete && attach_join_complete; then
+        if [[ "$terminal" == 'exited false' ]] && child_joins_complete && attach_join_complete && helper_join_complete; then
           wait_exit=0
           waited=$(docker wait "$container") || wait_exit=$?
           echo "container=$container terminal=$terminal waitCommandExit=$wait_exit processWait=$waited" >>"$evidence/cleanup.log"
@@ -96,7 +125,7 @@ cleanup() {
     else failed=1; fi
   fi
   if [[ -n "$attach" ]]; then
-    if child_joins_complete && attach_join_complete; then
+    if child_joins_complete && attach_join_complete && helper_join_complete; then
       echo "attach owner PID=$attach observed actual attach Wait marker; supervisor lifecycle separately recorded" >>"$evidence/cleanup.log"
       attach=''
     else
@@ -129,7 +158,7 @@ if [[ "$mode" == reap-retained ]]; then
   retained_fixture=$(awk -F= '$1 == "fixture" {print $2}' "$evidence/retained-handle.txt")
   container=$(awk -F= '$1 == "container" {print $2}' "$evidence/retained-handle.txt")
   [[ "$project" =~ ^sandbox-workspace-sync-local-[0-9]+-[0-9]+$ && "$retained_fixture" == "$fixture" && "$container" == "$project-native" ]] || exit 1
-  child_joins_complete && attach_join_complete || exit 1
+  child_joins_complete && attach_join_complete && helper_join_complete || exit 1
   # EXIT cleanup freshly checks exact labels, Docker terminal/wait, and all
   # observed original child/attach joins before removing this retained handle.
   exit 0
@@ -143,6 +172,10 @@ grep -Fxq "$digest" "$evidence/digests.txt" || { echo 'pinned RepoDigest mismatc
 printf 'project=%s fixture=%s platform=%s CGO_ENABLED=0\n' "$project" "$fixture" "$platform" >"$evidence/fixture.txt"
 source_files=(
   internal/storage/state/etcd/task_workspace_sync_local_types.go
+  internal/storage/state/etcd/task_workspace_sync_local_put_linux.go
+  internal/storage/state/etcd/task_workspace_sync_local_put_unsupported.go
+  internal/storage/state/etcd/task_workspace_sync_source_body.go
+  internal/storage/state/etcd/task_archive_delivery_native_test.go
   internal/storage/state/etcd/task_workspace_sync_local_linux.go
   internal/storage/state/etcd/task_workspace_sync_local_unsupported.go
   internal/storage/state/etcd/task_workspace_sync_local_guard.go
@@ -166,18 +199,22 @@ shasum -a 256 "$evidence/workspace-sync-local.test" >"$evidence/binary-sha256.tx
 "$go_tool" version -m "$evidence/workspace-sync-local.test" >"$evidence/binary-build-info.txt"
 pending_proof=0
 [[ "$mode" != pending-proof ]] || pending_proof=1
+foreign_fixture=0
+[[ "$mode" != local-put-proof ]] || foreign_fixture=1
+[[ "$mode" != local-put-ownership ]] || foreign_fixture=1
 docker create --pull=never --name "$name" --label "sandbox.test.project=$project" --label "sandbox.test.fixture=$fixture" \
   --network none --user 65532:65532 --read-only --memory 512m --pids-limit 256 --cpus 2 \
   --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /work:rw,nosuid,nodev,noexec,size=512m,mode=1777 \
   --mount "type=bind,src=$evidence/workspace-sync-local.test,dst=/workspace-sync-local.test,readonly" \
   --env SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE=1 --env "SANDBOX_WORKSPACE_SYNC_LOCAL_PENDING_PROOF=$pending_proof" --env GOMAXPROCS=2 \
+  --env "SANDBOX_WORKSPACE_SYNC_LOCAL_FOREIGN_FIXTURE=$foreign_fixture" \
   --entrypoint /workspace-sync-local.test "$image" \
   -test.run "$test_run" \
   -test.v -test.count=1 -test.timeout=240s >"$evidence/container-id.txt"
 container="$name"
 docker inspect --format '{{.Id}} user={{.Config.User}} capAdd={{.HostConfig.CapAdd}} capDrop={{.HostConfig.CapDrop}} security={{.HostConfig.SecurityOpt}} readonly={{.HostConfig.ReadonlyRootfs}} network={{.HostConfig.NetworkMode}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} cpus={{.HostConfig.NanoCpus}} tmpfs={{.HostConfig.Tmpfs}}' "$container" >"$evidence/container-config.txt"
 # The launcher does not own attach; the dedicated session owner above does.
-printf 'project=%s\nfixture=%s\ncontainer=%s\n' "$project" "$fixture" "$container" >"$evidence/attach-input.txt"
+printf 'project=%s\nfixture=%s\ncontainer=%s\nforeignFixture=%s\n' "$project" "$fixture" "$container" "$foreign_fixture" >"$evidence/attach-input.txt"
 attach=$(python3 -c 'import subprocess,sys; log=open(sys.argv[3],"ab",buffering=0); p=subprocess.Popen(["bash",sys.argv[1],sys.argv[2],"attach-owner"],start_new_session=True,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT); print(p.pid)' "$repo/scripts/test-workspace-sync-local.sh" "$evidence" "$evidence/attach-owner.log")
 printf 'ownerPID=%s session=%s launch=start_new_session\n' "$attach" "$attach" >"$evidence/attach-launch.txt"
 deadline=$((SECONDS+270))
@@ -192,6 +229,10 @@ while ! attach_join_complete; do
   sleep 0.2
 done
 attach_exit=$(<"$evidence/attach-exit.txt")
+if [[ "$foreign_fixture" == 1 ]]; then
+  helper_join_complete || exit 1
+  [[ $(<"$evidence/foreign-helper-exit.txt") == 0 ]] || exit 1
+fi
 [[ "$attach_exit" =~ ^[0-9]+$ ]] || exit 1
 terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}' "$container")
 printf 'attachExit=%s joined=true terminal=%s\n' "$attach_exit" "$terminal" >"$evidence/result.txt"

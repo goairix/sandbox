@@ -3,6 +3,7 @@
 package etcd
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -30,11 +32,67 @@ var workspaceSyncLocalNativeWorker *launcher.KernelBoundary
 // Only this explicit owned CGO0 container mode hardens the process. Ordinary
 // host tests retain their existing bootstrap-free behavior.
 func TestMain(m *testing.M) {
+	if os.Getenv("SANDBOX_WORKSPACE_SYNC_LOCAL_FOREIGN_INITIALIZER") == "1" {
+		os.Exit(workspaceSyncLocalForeignInitializer())
+	}
 	if os.Getenv("SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE") != "1" {
 		os.Exit(m.Run())
 	}
 	code := workspaceSyncLocalNativeMain(m)
 	os.Exit(code)
+}
+
+// A distinct test-only UID0 process creates the foreign ownership fixture.
+// It never bootstraps or supplies the original nonprivileged worker authority.
+func workspaceSyncLocalForeignInitializer() int {
+	if os.Geteuid() != 0 || os.Getegid() != 0 {
+		return 1
+	}
+	root := "/work/foreign-test"
+	if err := os.Mkdir(root, 0777); err != nil {
+		return 1
+	}
+	if err := os.Chmod(root, 0777); err != nil {
+		return 1
+	}
+	file, err := os.OpenFile(root+"/root-file", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
+	if err != nil {
+		return 1
+	}
+	_, writeErr := file.Write([]byte("foreign preserve exact bytes"))
+	chmodErr := file.Chmod(0666)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if errors.Join(writeErr, chmodErr, syncErr, closeErr) != nil {
+		return 1
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(root+"/root-file", &st); err != nil || st.Uid != 0 || st.Gid != 0 || st.Nlink != 1 {
+		return 1
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil || !strings.Contains(string(status), "CapEff:\t0000000000000000") || !strings.Contains(string(status), "NoNewPrivs:\t1") {
+		return 1
+	}
+	fmt.Printf("foreign fixture helper uid=0 gid=0 caps0=true NNP=true nlink=%d dev=%d ino=%d fileUID=%d mode=%o fsyncClose=true\n", st.Nlink, st.Dev, st.Ino, st.Uid, st.Mode&0777)
+	if err := os.WriteFile(root+"/ready", []byte("helper actual file fsync and Close completed"), 0644); err != nil {
+		return 1
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(root + "/cleanup-ready"); err == nil {
+			if err := errors.Join(os.Remove(root+"/ready"), os.Remove(root+"/cleanup-ready")); err != nil {
+				return 1
+			}
+			if err := os.Remove(root); err != nil {
+				return 1
+			}
+			fmt.Println("foreign UID0 fixture helper exact paths removed; original initializer process ending")
+			return 0
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return 1
 }
 
 type workspaceSyncLocalServer struct {
@@ -53,6 +111,19 @@ func workspaceSyncLocalNativeMain(m *testing.M) (code int) {
 		return
 	}
 	workspaceSyncLocalNativeWorker = worker
+	if os.Getenv("SANDBOX_WORKSPACE_SYNC_LOCAL_FOREIGN_FIXTURE") == "1" {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat("/work/foreign-test/ready"); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				fmt.Fprintln(os.Stderr, "foreign fixture helper did not complete")
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 	if err := os.MkdirAll("/work/tmp", 0700); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -221,6 +292,10 @@ func workspaceSyncLocalNativeMain(m *testing.M) (code int) {
 }
 
 func workspaceSyncLocalNativeBody(t *testing.T) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget) {
+	return workspaceSyncLocalNativeBodyData(t, nil, 0)
+}
+
+func workspaceSyncLocalNativeBodyData(t *testing.T, data []byte, entries uint64) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget) {
 	t.Helper()
 	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspaceSyncIdentity(t, "local", "test-storage", "bucket", "team/project/")})
 	require.NoError(t, err)
@@ -247,7 +322,37 @@ func workspaceSyncLocalNativeBody(t *testing.T) (*quiescenceNativeFixture, *Prep
 		wire := preparationCertificate(t, base, dispatch.Entry.Record, root, "plain", RuntimeReference{ID: uuid.NewString(), UID: uuid.NewString(), BootID: uuid.NewString()})
 		return base, raw, input, claim, wire, root
 	}
-	f, s, body := workspaceSyncIntentBodyWithSetup(t, plan, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 2, 4096}, setup)
+	var f *quiescenceNativeFixture
+	var s *PreparedTaskWorkspaceSyncSource
+	var body *taskWorkspaceSyncBody
+	if data == nil {
+		f, s, body = workspaceSyncIntentBodyWithSetup(t, plan, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 2, 4096}, setup)
+	} else {
+		var prepared *PreparedTaskWorkspaceArchive
+		var wire *deliveryNativeWire
+		f, prepared, wire = deliveryNativeFixtureWithData(t, 0, func(TaskRecord) TaskFinalSyncPlan {
+			p, err := plan.FinalSyncPlan()
+			require.NoError(t, err)
+			return p
+		}, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 2, 4096}, setup, data, entries, 60*time.Second)
+		done := deliveryBegin(f, prepared)
+		deliveryWaitSent(t, wire, done)
+		close(wire.body)
+		r := deliveryWait(t, done)
+		require.NoError(t, r.err)
+		require.NoError(t, <-wire.done)
+		var err error
+		s, err = f.b.PrepareTaskWorkspaceSyncSource(f.ctx, r.archive, plan)
+		require.NoError(t, err)
+		entry, err := s.next(f.ctx)
+		require.NoError(t, err)
+		for entry.kind == tar.TypeDir {
+			entry, err = s.next(f.ctx)
+			require.NoError(t, err)
+		}
+		body, err = s.openBody(f.ctx, entry)
+		require.NoError(t, err)
+	}
 	root := archiveTestDirectory(t)
 	target, err := openTaskWorkspaceSyncLocalTarget(f.ctx, workspaceSyncLocalNativeWorker, plan, root)
 	require.NoError(t, err)
@@ -464,4 +569,326 @@ func TestTaskWorkspaceSyncLocalNativePostguardClose(t *testing.T) {
 	}
 	require.True(t, free, "nativeMu must be released before the final physical postguard")
 	t.Log("actual postguard observed; nativeMu free; original guard retained owner/source/target Close registrations")
+}
+
+func TestTaskWorkspaceSyncLocalPutNative(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	t.Run("nested-and-successive-original-files", func(t *testing.T) {
+		f, s, body, target := workspaceSyncLocalNativeBody(t)
+		for _, expected := range []string{"hello", "bye"} {
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			_, err := s.reservePutIntent(f.ctx, body)
+			require.NoError(t, err)
+			w, err := s.putLocal(f.ctx, body, target)
+			require.NoError(t, err)
+			require.NotNil(t, w)
+			require.True(t, w.original())
+			require.Same(t, w, w.self)
+			require.Same(t, s, w.origin.source)
+			require.Equal(t, int64(len(expected)), w.bytes)
+			actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+			require.NoError(t, err)
+			require.Equal(t, expected, string(actual))
+			st, err := os.Stat(filepath.Join(target.pin.Root, body.entry.path))
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(body.entry.mode), st.Mode().Perm())
+			fds, err := os.ReadDir("/proc/self/fd")
+			require.NoError(t, err)
+			for _, descriptor := range fds {
+				link, err := os.Readlink("/proc/self/fd/" + descriptor.Name())
+				if err == nil {
+					require.False(t, strings.HasPrefix(link, target.pin.Root+"/"), "all child file and parent FDs physically closed: %s", link)
+				}
+			}
+			t.Logf("original file bytes=%d SHA256=%s mode=%o dev=%d inode=%d; scoped child FD inventory empty", w.bytes, w.sha256, st.Mode().Perm(), w.dev, w.ino)
+			_, err = s.putLocal(f.ctx, body, target)
+			require.Error(t, err, "original successful file dispatch is never repeated")
+			require.NoError(t, body.Close())
+			if expected == "hello" {
+				entry, err := s.next(f.ctx)
+				require.NoError(t, err, "success releases IO owner without canceling source")
+				body, err = s.openBody(f.ctx, entry)
+				require.NoError(t, err)
+			}
+		}
+	})
+	for _, contents := range []string{"", strings.Repeat("chunk", 15000)} {
+		name := "zero"
+		if contents != "" {
+			name = "multichunk"
+		}
+		t.Run(name, func(t *testing.T) {
+			data := archiveTarBytes(t, []*tar.Header{{Name: "workspace", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/deep", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/deep/nested", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/deep/nested/file", Typeflag: tar.TypeReg, Mode: 0640, Size: int64(len(contents))}}, []string{"", "", "", contents})
+			f, s, body, target := workspaceSyncLocalNativeBodyData(t, data, 4)
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			_, err := s.reservePutIntent(f.ctx, body)
+			require.NoError(t, err)
+			w, err := s.putLocal(f.ctx, body, target)
+			require.NoError(t, err)
+			require.Equal(t, int64(len(contents)), w.bytes)
+			require.Equal(t, body.entry.sha256, w.sha256)
+			actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+			require.NoError(t, err)
+			require.Equal(t, contents, string(actual))
+			t.Logf("actual regular file bytes=%d SHA256=%s mode=0640 filesystem=%s original FD closed", w.bytes, w.sha256, target.pin.FilesystemName)
+		})
+	}
+	t.Run("mode-zero-preserved", func(t *testing.T) {
+		data := archiveTarBytes(t, []*tar.Header{{Name: "workspace", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/opaque", Typeflag: tar.TypeReg, Mode: 0, Size: 6}}, []string{"", "opaque"})
+		f, s, body, target := workspaceSyncLocalNativeBodyData(t, data, 2)
+		require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+		_, err := s.reservePutIntent(f.ctx, body)
+		require.NoError(t, err)
+		w, err := s.putLocal(f.ctx, body, target)
+		require.NoError(t, err, "a scoped identity observation must not require archive read permission")
+		require.True(t, w.original())
+		path := filepath.Join(target.pin.Root, body.entry.path)
+		st, err := os.Stat(path)
+		require.NoError(t, err)
+		require.EqualValues(t, 0, st.Mode().Perm())
+		require.NoError(t, os.Chmod(path, 0600), "test-only inspection after witnessing original mode 0000")
+		actual, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, "opaque", string(actual))
+	})
+	for _, fault := range []string{"overwrite", "symlink", "hardlink", "fifo", "parent-symlink", "parent-mode", "body-hash", "no-ack", "unknown", "root-mode", "ownership"} {
+		t.Run(fault, func(t *testing.T) {
+			f, s, body, target := workspaceSyncLocalNativeBody(t)
+			require.NoError(t, os.Mkdir(filepath.Join(target.pin.Root, "z"), 0700))
+			path := filepath.Join(target.pin.Root, body.entry.path)
+			other := filepath.Join(target.pin.Root, "original")
+			var foreign syscall.Stat_t
+			switch fault {
+			case "ownership":
+				require.NoError(t, syscall.Stat("/work/foreign-test/root-file", &foreign))
+				require.EqualValues(t, 0, foreign.Uid)
+				require.EqualValues(t, 1, foreign.Nlink)
+				require.NoError(t, os.Rename("/work/foreign-test/root-file", path))
+				t.Cleanup(func() {
+					require.NoError(t, os.WriteFile("/work/foreign-test/cleanup-ready", []byte("original worker moved foreign leaf; helper may remove exact empty fixture"), 0644))
+					deadline := time.Now().Add(3 * time.Second)
+					for {
+						_, err := os.Stat("/work/foreign-test")
+						if os.IsNotExist(err) {
+							break
+						}
+						if time.Now().After(deadline) {
+							t.Fatal("original foreign fixture helper did not remove exact paths")
+						}
+						time.Sleep(20 * time.Millisecond)
+					}
+				})
+			case "overwrite", "hardlink":
+				require.NoError(t, os.WriteFile(path, []byte("preserve this long content"), 0600))
+				if fault == "hardlink" {
+					require.NoError(t, os.Link(path, other))
+				}
+			case "symlink":
+				require.NoError(t, os.WriteFile(other, []byte("preserve"), 0600))
+				require.NoError(t, os.Symlink(other, path))
+			case "fifo":
+				require.NoError(t, syscall.Mkfifo(path, 0600))
+			case "parent-symlink":
+				require.NoError(t, os.Remove(filepath.Join(target.pin.Root, "z")))
+				require.NoError(t, os.Symlink(archiveTestDirectory(t), filepath.Join(target.pin.Root, "z")))
+			case "parent-mode":
+				require.NoError(t, os.Chmod(filepath.Join(target.pin.Root, "z"), 0750))
+			}
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			if fault == "unknown" {
+				workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: workspaceSyncIntentPutMatch, after: func(r *clientv3.TxnResponse, e error) (*clientv3.TxnResponse, error) {
+					return nil, context.DeadlineExceeded
+				}})
+			}
+			if fault != "no-ack" {
+				_, err := s.reservePutIntent(f.ctx, body)
+				if fault == "unknown" {
+					require.ErrorIs(t, err, ErrOutcomeUnknown)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+			if fault == "body-hash" {
+				_, err := s.archive.owner.spool.file.WriteAt([]byte("j"), body.entry.offset)
+				require.NoError(t, err)
+			}
+			if fault == "root-mode" {
+				require.NoError(t, os.Chmod(target.pin.Root, 0750))
+			}
+			w, err := s.putLocal(f.ctx, body, target)
+			if fault == "overwrite" {
+				require.NoError(t, err)
+				require.NotNil(t, w)
+				actual, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(actual))
+			} else {
+				require.Error(t, err)
+				require.Nil(t, w)
+				if fault == "no-ack" || fault == "unknown" || fault == "root-mode" {
+					_, err := os.Lstat(path)
+					require.True(t, os.IsNotExist(err), "no original ACK/current gate means no leaf effect")
+				}
+				if fault == "hardlink" || fault == "symlink" {
+					actual, err := os.ReadFile(other)
+					require.NoError(t, err)
+					if fault == "hardlink" {
+						require.Equal(t, "preserve this long content", string(actual))
+					} else {
+						require.Equal(t, "preserve", string(actual))
+					}
+				}
+				if fault == "ownership" {
+					actual, err := os.ReadFile(path)
+					require.NoError(t, err)
+					require.Equal(t, "foreign preserve exact bytes", string(actual))
+					var current syscall.Stat_t
+					require.NoError(t, syscall.Stat(path, &current))
+					require.Equal(t, foreign.Dev, current.Dev)
+					require.Equal(t, foreign.Ino, current.Ino)
+					require.Equal(t, foreign.Uid, current.Uid)
+					require.Equal(t, foreign.Gid, current.Gid)
+					require.Equal(t, foreign.Mode, current.Mode)
+					require.EqualValues(t, 1, current.Nlink)
+					require.NoError(t, target.worker.ValidateCurrent())
+					t.Logf("real worker uid=%d gid=%d caps0; foreign file uid=%d nlink=%d inode=%d mode=%o bytes preserved before truncate", target.pin.UID, target.pin.GID, current.Uid, current.Nlink, current.Ino, current.Mode&0777)
+				}
+			}
+			if body.intent != nil {
+				for _, key := range []string{body.intent.intentKey, body.intent.slotKey} {
+					got, err := f.raw.Get(f.ctx, key)
+					require.NoError(t, err)
+					require.Len(t, got.Kvs, 1, "permanent intent/slot remain charged")
+				}
+			}
+		})
+	}
+	for _, route := range []string{"body", "source", "target", "claim", "backend", "cancel", "root-after-write", "target-after-file-close"} {
+		t.Run("io-pending-"+route, func(t *testing.T) {
+			f, s, body, target := workspaceSyncLocalNativeBody(t)
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			_, err := s.reservePutIntent(f.ctx, body)
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
+			observed, resume := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			s.mu.Lock()
+			s.localIOComplete = func(stage string) {
+				want := "write"
+				if route == "target-after-file-close" {
+					want = "close"
+				}
+				if stage == want {
+					once.Do(func() { close(observed); <-resume })
+				}
+			}
+			s.mu.Unlock()
+			putDone := make(chan error, 1)
+			go func() {
+				w, err := s.putLocal(ctx, body, target)
+				if w != nil {
+					err = errors.Join(err, errors.New("canceled physical IO issued witness"))
+				}
+				putDone <- err
+			}()
+			select {
+			case <-observed:
+			case err := <-putDone:
+				t.Fatalf("put ended before actual syscall observation: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual IO did not reach bounded pause")
+			}
+			_, err = body.Read(make([]byte, 1))
+			require.Error(t, err)
+			_, err = s.next(f.ctx)
+			require.Error(t, err)
+			_, err = s.putLocal(f.ctx, body, target)
+			require.Error(t, err)
+			joined := make(chan error, 2)
+			switch route {
+			case "body":
+				go func() { joined <- body.Close() }()
+			case "source":
+				go func() { joined <- s.Close() }()
+			case "target", "target-after-file-close":
+				go func() { joined <- target.Close() }()
+			case "claim":
+				go func() { joined <- f.b.ReleaseTaskClaim(f.ctx, f.c) }()
+			case "backend":
+				go func() { joined <- f.b.Close() }()
+				go func() { joined <- f.b.Close() }()
+			case "cancel":
+				cancel()
+			case "root-after-write":
+				require.NoError(t, os.Chmod(target.pin.Root, 0750))
+			}
+			joinedCount := 0
+			select {
+			case err := <-joined:
+				joinedCount++
+				t.Errorf("Close returned before physical owner finished: %v", err)
+			case <-time.After(30 * time.Millisecond):
+			}
+			_, err = s.archive.owner.spool.file.Stat()
+			require.NoError(t, err, "original spool FD remains open while real put is pending")
+			free := s.archive.owner.nativeMu.TryLock()
+			if free {
+				s.archive.owner.nativeMu.Unlock()
+			}
+			require.True(t, free, "nativeMu is free during actual filesystem IO")
+			close(resume)
+			require.Error(t, <-putDone)
+			if route != "cancel" && route != "root-after-write" {
+				wantJoins := 1
+				if route == "backend" {
+					wantJoins = 2
+				}
+				for joinedCount < wantJoins {
+					require.NoError(t, <-joined)
+					joinedCount++
+				}
+			}
+			t.Logf("actual syscall completion pause; Close route=%s waited original IO; witness=nil; syscall cleanup joined", route)
+		})
+	}
+	t.Run("real-write-error-retains-partial-charge", func(t *testing.T) {
+		f, s, body, target := workspaceSyncLocalNativeBody(t)
+		require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+		_, err := s.reservePutIntent(f.ctx, body)
+		require.NoError(t, err)
+		var original syscall.Rlimit
+		require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_FSIZE, &original))
+		limited := original
+		limited.Cur = 2
+		wasIgnored := signal.Ignored(syscall.SIGXFSZ)
+		signal.Ignore(syscall.SIGXFSZ)
+		defer func() {
+			if wasIgnored {
+				signal.Ignore(syscall.SIGXFSZ)
+			} else {
+				signal.Reset(syscall.SIGXFSZ)
+			}
+		}()
+		require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limited))
+		defer func() { require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original)) }()
+		w, putErr := s.putLocal(f.ctx, body, target)
+		require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original))
+		require.ErrorIs(t, putErr, syscall.EFBIG)
+		require.Nil(t, w)
+		actual, err := os.ReadFile(filepath.Join(target.pin.Root, body.entry.path))
+		require.NoError(t, err)
+		require.Equal(t, "he", string(actual), "actual short write leaves charged partial leaf")
+		w, err = s.putLocal(f.ctx, body, target)
+		require.Error(t, err)
+		require.Nil(t, w)
+		for _, key := range []string{body.intent.intentKey, body.intent.slotKey} {
+			got, err := f.raw.Get(f.ctx, key)
+			require.NoError(t, err)
+			require.Len(t, got.Kvs, 1)
+		}
+		t.Log("real EFBIG after 2 written bytes; original soft rlimit restored; no witness/retry/refund")
+	})
 }

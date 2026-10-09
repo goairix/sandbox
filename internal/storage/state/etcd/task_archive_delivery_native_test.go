@@ -53,6 +53,10 @@ type deliveryNativeWire struct {
 // The peer uses genuine pinned mTLS, signed frames, TAR and authenticated EOF.
 // It is a protocol fixture, not PID1 or provider settlement evidence.
 func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNativeWire {
+	return deliveryNativeTargetData(t, f, archiveValidTar(t), 4)
+}
+
+func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []byte, entries uint64) *deliveryNativeWire {
 	t.Helper()
 	d := f.c.quiescenceDraft
 	c := d.claims.Context.Current
@@ -90,7 +94,6 @@ func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNat
 		return raw, err
 	}})
 	require.NoError(t, err)
-	data := archiveValidTar(t)
 	sum := sha256.Sum256(data)
 	stop := make(chan struct{})
 	joined := make(chan struct{})
@@ -167,9 +170,16 @@ func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNat
 				case <-stop:
 					return
 				}
-				receipt, err := p.SignTaskWorkspaceArchiveReceipt(rk, p.TaskWorkspaceArchiveReceiptClaims{Version: 1, State: "archive_complete", Context: e.Context, TicketDigest: e.TicketDigest, NotBefore: ticket.NotBefore(), NotAfter: ticket.NotAfter(), SessionNotAfter: ticket.SessionNotAfter(), ArchiveBytes: uint64(len(data)), EntryCount: 4, SHA256: hex.EncodeToString(sum[:])})
+				receipt, err := p.SignTaskWorkspaceArchiveReceipt(rk, p.TaskWorkspaceArchiveReceiptClaims{Version: 1, State: "archive_complete", Context: e.Context, TicketDigest: e.TicketDigest, NotBefore: ticket.NotBefore(), NotAfter: ticket.NotAfter(), SessionNotAfter: ticket.SessionNotAfter(), ArchiveBytes: uint64(len(data)), EntryCount: entries, SHA256: hex.EncodeToString(sum[:])})
 				if err == nil {
-					err = tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveData, data)
+					for offset := 0; offset < len(data) && err == nil; {
+						end := offset + 32768
+						if end > len(data) {
+							end = len(data)
+						}
+						err = tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveData, data[offset:end])
+						offset = end
+					}
 				}
 				if err == nil {
 					err = tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveComplete, receipt)
@@ -208,6 +218,10 @@ func deliveryNativeFixtureWithBudget(t *testing.T, horizon time.Duration, builde
 }
 
 func deliveryNativeFixtureWithBudgetSetup(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithData(t, horizon, builder, budget, setup, nil, 0, ttl...)
+}
+
+func deliveryNativeFixtureWithData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
 	base := newTaskDeliveryFixtureWithSetup(t, true, builder != nil, setup)
 	archiveTrackCleanup(base.b)
@@ -298,7 +312,12 @@ func deliveryNativeFixtureWithBudgetSetup(t *testing.T, horizon time.Duration, b
 	q, err := b.PrepareTaskQuiescence(f.ctx, c, f.target.destination)
 	require.NoError(t, err)
 	require.NotNil(t, q.Prepared)
-	w := deliveryNativeTarget(t, f)
+	var w *deliveryNativeWire
+	if data == nil {
+		w = deliveryNativeTarget(t, f)
+	} else {
+		w = deliveryNativeTargetData(t, f, data, entries)
+	}
 	w.claimCancel = cancelClaim
 	if horizon > 0 {
 		c.mu.Lock()
