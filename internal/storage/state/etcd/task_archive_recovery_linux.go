@@ -98,6 +98,19 @@ func taskArchiveRecoveryOpen(root *os.File, name string) (*os.File, taskArchiveI
 	return f, id, nil
 }
 
+// Cold quarantine cannot exempt file contents from the precharged disk cap.
+// Never open or follow an untrusted name merely to measure its content.
+func taskArchiveRecoveryContentSize(root *os.File, name string) (uint64, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(root.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return 0, err
+	}
+	if st.Size < 0 || st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFLNK {
+		return 0, errTaskArchive
+	}
+	return uint64(st.Size), nil
+}
+
 // No failure path unlinks or truncates an existing generation. An uncertain
 // next generation remains charged and will be quarantined by a cold open.
 func taskArchiveRecoveryCommit(root *os.File, base string, wire []byte) (taskArchiveIdentity, error) {

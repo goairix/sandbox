@@ -14,6 +14,9 @@ func taskArchiveRecoveryCheckRoot(*os.File, string, taskArchiveRecoveryRoot) err
 func taskArchiveRecoveryOpen(*os.File, string) (*os.File, taskArchiveIdentity, error) {
 	return nil, taskArchiveIdentity{}, errTaskArchive
 }
+func taskArchiveRecoveryContentSize(*os.File, string) (uint64, error) {
+	return 0, errTaskArchive
+}
 func taskArchiveRecoveryCommit(*os.File, string, []byte) (taskArchiveIdentity, error) {
 	return taskArchiveIdentity{}, errTaskArchive
 }

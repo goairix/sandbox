@@ -62,3 +62,31 @@ func TestTaskArchiveRecoveryStoreUnsupported(t *testing.T) {
 	_, err := newTaskArchiveRecoveryStore(recoveryTestOptions(archiveTestDirectory(t), 1))
 	require.Error(t, err)
 }
+
+func TestTaskArchiveRecoveryColdContentQuota(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux descriptor store")
+	}
+	for _, extension := range []string{"tar", "json", "next"} {
+		t.Run(extension, func(t *testing.T) {
+			o := recoveryTestOptions(archiveTestDirectory(t), 2)
+			limit := uint64(taskArchiveRecoveryMetadataBytes)
+			if extension == "tar" {
+				limit = o.JobBytes - 2*taskArchiveRecoveryMetadataBytes
+			}
+			path := filepath.Join(o.Directory, "slot-00."+extension)
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			require.NoError(t, err)
+			require.NoError(t, f.Truncate(int64(limit+1)))
+			require.NoError(t, f.Close())
+			cold, err := newTaskArchiveRecoveryStore(o)
+			if cold != nil {
+				require.NoError(t, cold.close())
+			}
+			require.Error(t, err, "oversized orphan must reject empty-slot admission")
+			st, err := os.Lstat(path)
+			require.NoError(t, err)
+			require.Equal(t, int64(limit+1), st.Size(), "rejection preserves content")
+		})
+	}
+}

@@ -153,6 +153,19 @@ func (s *taskArchiveStore) scanRecovery() error {
 			s.recovery.slots[slot].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, Quarantined: true}
 		}
 	}
+	var content [taskArchiveRecoverySlots]uint64
+	for _, name := range names {
+		slot, kind, _ := recoveryName(name, s.limits.Jobs)
+		limit := uint64(taskArchiveRecoveryMetadataBytes)
+		if kind == 1 {
+			limit = s.limits.JobBytes - 2*taskArchiveRecoveryMetadataBytes
+		}
+		size, err := taskArchiveRecoveryContentSize(s.root, name)
+		if err != nil || size > limit || size > s.limits.JobBytes-content[slot] {
+			return errors.Join(errTaskArchive, err)
+		}
+		content[slot] += size
+	}
 	var index []byte
 	for slot, files := range present {
 		if files == 0 {
