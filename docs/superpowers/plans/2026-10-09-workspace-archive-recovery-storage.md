@@ -34,9 +34,10 @@
 ### Task 1: Fixed persistent store and original receive/local binding
 
 **Files:**
-- Modify: `internal/storage/state/etcd/client.go`, `task_archive_delivery_options.go`, `task_archive_receive_types.go`, `task_archive_spool.go`, `task_archive_delivery.go`, `task_workspace_sync_intent_admission.go`。
+- Modify: `internal/storage/state/etcd/client.go`, `task_archive_delivery_options.go`, `task_archive_receive_types.go`, `task_archive_receive.go`, `task_archive_spool.go`, `task_archive_delivery.go`, `task_workspace_sync_intent_admission.go`。
+- Modify: `internal/storage/state/etcd/task_claim.go`仅增加recovery原始初始化attempt标记，防止释放生命周期锁后同prepared重复收费；不改变legacy路径。
 - Create: `internal/storage/state/etcd/task_archive_recovery_{types,codec,store,linux,unsupported}.go`；types职责状态/诊断，codec职责bounded canonical wire，store职责quota/state/lifecycle，linux职责descriptor filesystem，unsupported拒绝profile。
-- Test: new `internal/storage/state/etcd/task_archive_recovery_{codec,store,native_linux}_test.go`；可修改 `scripts/test-workspace-sync-local.sh` 只加入精确本单元selector，不重跑旧suite。
+- Test: new `internal/storage/state/etcd/task_archive_recovery_{codec,store,native_linux}_test.go`；可修改现有 `internal/storage/state/etcd/task_archive_delivery_native_test.go` 的共用fixture以配置recovery profile、固定root及实际session窗口，原有入口继续使用legacy配置；可修改 `scripts/test-workspace-sync-local.sh` 只加入精确本单元selector，不重跑旧suite。
 
 **Interfaces:**
 - Consumes现有TaskClaim/archive draft/received/spool/source/localTarget原始链、`taskArchiveIndexBytes`、`taskWorkspaceSyncLocalAttribution.Validate`与checkpoint TargetDigest生成规范。

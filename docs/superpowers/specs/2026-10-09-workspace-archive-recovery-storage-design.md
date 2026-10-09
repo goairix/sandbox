@@ -27,7 +27,7 @@ live-owner map 仍只存已收费的原始 owner，长度≤Jobs。冷槽固定�
 
 received 保存实际完整验证的 SHA256、bytes、entries；binding 保存完整 plan wire、原 canonical local attribution 及与 checkpoint 一致的 TargetDigest。plan wire 显式含 Provider/StorageIdentityHash/Bucket/Prefix/Hash/Partition/Exclude/DeleteExtraneous/Digest，不直接 Marshal 私有 WorkspaceIdentity。解码后重建并核对 plan identity/digest；不是旧 execution authority。
 
-codec 固定字段顺序、无 map/RawMessage、`SetEscapeHTML(false)`，有界 writer/reader。拒绝重复/未知/缺失/null字段、非canonical数值/编码、尾随内容、超深结构，重新编码必须逐字节一致。pending 尚无 artifact identity 的合法初始化窗口需显式 schema；状态相关必需字段必须完整，不用零值猜测。
+codec 固定字段顺序、无 map/RawMessage，输出采用 `SetEscapeHTML(false)` 的编码语义，有界 writer/reader。可用只遍历此固定wire的有界writer消除标准encoder完整scratch，但合法最大wire须与标准JSON encoder的EscapeHTML(false)输出逐字节对照；不扩成通用JSON框架。拒绝重复/未知/缺失/null字段、非canonical数值/编码、尾随内容、超深结构，重新编码必须逐字节一致。pending 尚无 artifact identity 的合法初始化窗口需显式 schema；状态相关必需字段必须完整，不用零值猜测。
 
 合法 path 禁止控制字符和反斜杠；quote 和 U+2028/U+2029 扩张≤2倍 UTF-8字节。exclusion 内容≤32768B、256个数组框架≤769B、local Root内容≤8192B、workspace内容≤3200B；固定 key/TaskReference/claim/worker/root数值和摘要 envelope 必须逐字段证明≤8192B，总上界≤53121B。最终 schema 需合法最大编码实测及逐字段上界，不拿普通示例替代。不改变 etcd 64KiB record、256KiB transaction、64 nodes、全部50 history pins、现有 checkpoint 和 GC事务。
 
@@ -39,7 +39,10 @@ codec 固定字段顺序、无 map/RawMessage、`SetEscapeHTML(false)`，有界 
 4. 在 `reservePutIntent` 已持 `s.begin`、`body.active`、`body.localTarget.begin` 登记后，紧邻 `reserveRecyclingPutIntent` 前调用私有 `sealOriginalBinding(ctx, source, body)`；核对原received/spool/source链，保存完整plan/local pin。durable bound和实际source/target postguard均成功后才允许reserve RPC，随后才可能本地效果。再次申请只接受相同冻结binding。
 5. 编码/文件/rename/fsync失败、cancel或结果不明禁止进一步效果，不降级、不删除、不重建ACK。后续guard失败不删除durable received/bound，它们仍只是历史。
 
-store.mu和原nativeMu不跨文件IO、transport、RPC或实际join。专用metadata串行gate可跨metadata IO，但所有等待和IO都须有原spool/source/body/target生命周期登记并可取消；Close先封入口再cancel、等待实际owners/metadata/consumer完成。特别注意delivery-layer received seal发生在r.receive的ownerDone之后，必须额外登记，不能借已结束的receive登记覆盖它。
+store.mu、archiveLife.mu和原nativeMu不跨文件IO、transport、RPC或实际join。专用metadata串行gate可跨metadata IO，但所有等待和IO都须有原spool/source/body/target生命周期登记并可取消；Close先封入口再cancel、等待实际owners/metadata/consumer完成。特别注意delivery-layer received seal发生在r.receive的ownerDone之后，必须额外登记，不能借已结束的receive登记覆盖它。
+原始recovery初始化在释放短生命周期同步前封闭attempt，同prepared并发者须在任何收费/IO前拒绝。只有明确未收费的背压失败可重新尝试，已收费的不确定初始化失败保持封闭；私有reserve可用closed原spool+error表达已收费，只作状态判断，不授予文件或执行权限。初始化通过store active/ownerDone接入Close实际join，禁止新无界登记表或退款。
+
+原spool接收ctx含SessionNotAfter截止时间；它只约束接收/admission/received封存。完整接收后的consumer/binding不能受旧发送会话截止时间撤权，必须独立受当前source/body/target/claim和spool实际Close封入口、取消及join约束。新profile必须实测旧会话真实过期而当前claim继续有效时的首次绑定和后续写入，不重跑旧已验收profile。
 
 ## 文件、冷打开和关闭
 
