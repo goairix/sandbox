@@ -34,25 +34,26 @@ type TaskWorkspaceSyncIntentReference struct {
 }
 
 type taskWorkspaceSyncIntentAttribution struct {
-	Version             uint32                           `json:"version"`
-	Reference           TaskWorkspaceSyncIntentReference `json:"reference"`
-	BudgetRevision      int64                            `json:"budget_revision"`
-	Kind                string                           `json:"kind"`
-	FinalSyncAttemptID  string                           `json:"final_sync_attempt_id"`
-	CommandID           string                           `json:"command_id"`
-	TicketDigest        string                           `json:"ticket_digest"`
-	ArchiveSHA256       string                           `json:"archive_sha256"`
-	PlanDigest          string                           `json:"plan_digest"`
-	WorkspaceHash       string                           `json:"workspace_hash"`
-	Provider            string                           `json:"provider"`
-	StorageIdentityHash string                           `json:"storage_identity_hash"`
-	Bucket              string                           `json:"bucket"`
-	Prefix              string                           `json:"prefix"`
-	RelativePath        string                           `json:"relative_path"`
-	Mode                int64                            `json:"mode"`
-	Size                int64                            `json:"size"`
-	Offset              int64                            `json:"offset"`
-	BodySHA256          string                           `json:"body_sha256"`
+	Version             uint32                             `json:"version"`
+	Reference           TaskWorkspaceSyncIntentReference   `json:"reference"`
+	BudgetRevision      int64                              `json:"budget_revision"`
+	Kind                string                             `json:"kind"`
+	FinalSyncAttemptID  string                             `json:"final_sync_attempt_id"`
+	CommandID           string                             `json:"command_id"`
+	TicketDigest        string                             `json:"ticket_digest"`
+	ArchiveSHA256       string                             `json:"archive_sha256"`
+	PlanDigest          string                             `json:"plan_digest"`
+	WorkspaceHash       string                             `json:"workspace_hash"`
+	Provider            string                             `json:"provider"`
+	StorageIdentityHash string                             `json:"storage_identity_hash"`
+	Bucket              string                             `json:"bucket"`
+	Prefix              string                             `json:"prefix"`
+	RelativePath        string                             `json:"relative_path"`
+	Mode                int64                              `json:"mode"`
+	Size                int64                              `json:"size"`
+	Offset              int64                              `json:"offset"`
+	BodySHA256          string                             `json:"body_sha256"`
+	Local               *taskWorkspaceSyncLocalAttribution `json:"local,omitempty"`
 }
 
 // TaskWorkspaceSyncIntentRecord records structural attribution only. Claim.WorkerID
@@ -94,6 +95,7 @@ type taskWorkspaceSyncIntentDraft struct {
 	intentKey, slotKey, value, slotValue string
 	writeAttempted                       bool
 	revision                             int64
+	acknowledged                         bool // only original full successful ACK + local postguard
 }
 
 func immutableWorkspaceSyncKV(kv *mvccpb.KeyValue) bool {

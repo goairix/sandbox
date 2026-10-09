@@ -45,18 +45,20 @@ type taskWorkspaceSyncEntry struct {
 }
 
 type taskWorkspaceSyncBody struct {
-	self     *taskWorkspaceSyncBody
-	source   *PreparedTaskWorkspaceSyncSource
-	entry    *taskWorkspaceSyncEntry
-	ctx      context.Context
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	active   bool
-	closed   bool
-	done     chan struct{}
-	reader   *io.SectionReader
-	hash     hash.Hash
-	bytes    int64
-	complete bool
-	intent   *taskWorkspaceSyncIntentDraft
+	self          *taskWorkspaceSyncBody
+	source        *PreparedTaskWorkspaceSyncSource
+	entry         *taskWorkspaceSyncEntry
+	ctx           context.Context
+	mu            sync.Mutex
+	cancel        context.CancelFunc
+	active        bool
+	closed        bool
+	done          chan struct{}
+	reader        *io.SectionReader
+	hash          hash.Hash
+	bytes         int64
+	complete      bool
+	intent        *taskWorkspaceSyncIntentDraft
+	localTarget   *taskWorkspaceSyncLocalTarget
+	localConsumed bool
 }

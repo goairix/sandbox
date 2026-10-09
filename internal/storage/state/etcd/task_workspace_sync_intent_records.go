@@ -1,9 +1,14 @@
 package etcd
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"reflect"
+	"strings"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
@@ -18,7 +23,19 @@ func (r TaskWorkspaceSyncIntentReference) Validate() error {
 func (r TaskWorkspaceSyncIntentRecord) Validate() error {
 	w := WorkspaceIdentity{provider: r.Provider, storageIdentityHash: r.StorageIdentityHash, bucket: r.Bucket, prefix: r.Prefix, hash: r.WorkspaceHash, partition: r.Reference.Task.Partition}
 	c := r.Claim
-	if r.Version != 1 || r.Reference.Validate() != nil || r.Reference.Revision != 0 || r.BudgetRevision <= 0 || r.Kind != "put_object" || validateWorkspaceSyncIdentity(w) != nil || c.Task != r.Reference.Task || !validPreparationUUID(c.ClaimID) || !validDomainSegment(c.WorkerID) || c.CreateRevision <= 0 || c.LeaseID <= 0 || !validPreparationUUID(r.FinalSyncAttemptID) || !validPreparationUUID(r.CommandID) || !validHexDigest(r.TicketDigest) || !validHexDigest(r.ArchiveSHA256) || !validHexDigest(r.PlanDigest) || !validHexDigest(r.BodySHA256) || !validWorkspaceSyncPath(r.RelativePath) || r.Mode < 0 || r.Mode > 0777 || r.Size < 0 || r.Offset < 0 {
+	if r.Reference.Validate() != nil || r.Reference.Revision != 0 || r.BudgetRevision <= 0 || r.Kind != "put_object" || validateWorkspaceSyncIdentity(w) != nil || c.Task != r.Reference.Task || !validPreparationUUID(c.ClaimID) || !validDomainSegment(c.WorkerID) || c.CreateRevision <= 0 || c.LeaseID <= 0 || !validPreparationUUID(r.FinalSyncAttemptID) || !validPreparationUUID(r.CommandID) || !validHexDigest(r.TicketDigest) || !validHexDigest(r.ArchiveSHA256) || !validHexDigest(r.PlanDigest) || !validHexDigest(r.BodySHA256) || !validWorkspaceSyncPath(r.RelativePath) || r.Mode < 0 || r.Mode > 0777 || r.Size < 0 || r.Offset < 0 {
+		return ErrInvalidRecord
+	}
+	switch r.Version {
+	case 1:
+		if r.Local != nil {
+			return ErrInvalidRecord
+		}
+	case 2:
+		if r.Provider != "local" || r.Local == nil || r.Local.Validate() != nil {
+			return ErrInvalidRecord
+		}
+	default:
 		return ErrInvalidRecord
 	}
 	return nil
@@ -66,7 +83,7 @@ func (b *Backend) workspaceSyncIntentKeys(r TaskWorkspaceSyncIntentReference) (s
 func decodeWorkspaceSyncIntent(kv *mvccpb.KeyValue, limit int) (TaskWorkspaceSyncIntentRecord, error) {
 	var r TaskWorkspaceSyncIntentRecord
 	var wire taskWorkspaceSyncIntentWire
-	if !immutableWorkspaceSyncKV(kv) || decodePreparationDomain(kv, &wire, limit) != nil {
+	if !immutableWorkspaceSyncKV(kv) || len(kv.Value) > limit || strictWorkspaceSyncIntentMetadata(kv.Value, reflect.TypeOf(wire)) != nil || decodeTypedDomain(kv, &wire, limit) != nil {
 		return r, ErrCorruptRecord
 	}
 	r = wire.record()
@@ -75,6 +92,71 @@ func decodeWorkspaceSyncIntent(kv *mvccpb.KeyValue, limit int) (TaskWorkspaceSyn
 		return r, ErrCorruptRecord
 	}
 	return r, nil
+}
+
+// Keep the original v1 bytes/required fields while permitting only its absent
+// local field. Nested v2 diagnostics remain exact, complete and duplicate-free.
+func strictWorkspaceSyncIntentMetadata(wire []byte, typ reflect.Type) error {
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if bytes.Equal(bytes.TrimSpace(wire), []byte("null")) {
+		return ErrCorruptRecord
+	}
+	if typ.Kind() != reflect.Struct {
+		return nil
+	}
+	fields := make(map[string]reflect.StructField, typ.NumField())
+	var add func(reflect.Type)
+	add = func(t reflect.Type) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if f.Anonymous {
+				add(f.Type)
+				continue
+			}
+			name := strings.Split(f.Tag.Get("json"), ",")[0]
+			if name == "" {
+				name = f.Name
+			}
+			fields[name] = f
+		}
+	}
+	add(typ)
+	dec := json.NewDecoder(bytes.NewReader(wire))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return ErrCorruptRecord
+	}
+	seen := make(map[string]bool, len(fields))
+	for dec.More() {
+		tok, err = dec.Token()
+		if err != nil {
+			return ErrCorruptRecord
+		}
+		name, ok := tok.(string)
+		f, exists := fields[name]
+		if !ok || !exists || seen[name] {
+			return ErrCorruptRecord
+		}
+		seen[name] = true
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil || strictWorkspaceSyncIntentMetadata(raw, f.Type) != nil {
+			return ErrCorruptRecord
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return ErrCorruptRecord
+	}
+	for name, f := range fields {
+		if !seen[name] && f.Tag.Get("json") != "local,omitempty" {
+			return ErrCorruptRecord
+		}
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		return ErrCorruptRecord
+	}
+	return nil
 }
 
 func decodeWorkspaceSyncSlot(kv *mvccpb.KeyValue) (taskWorkspaceSyncSlotRecord, error) {

@@ -34,11 +34,19 @@ func newTaskDeliveryFixtureWithCompletedSetup(t *testing.T, expired, retireSetup
 
 type taskDeliverySetupFactory func(*testing.T) (*Backend, *clientv3.Client, AcquireIntentInput, *CreationClaim, []byte, ed25519.PrivateKey)
 
+// Set only by the explicit owned Linux local TestMain, after it retains three
+// actual child processes. Default and global Docker-fault fixtures stay intact.
+var taskWorkspaceSyncLocalOwnershipVerifier func(*testing.T)
+
 func newTaskDeliveryFixtureWithSetup(t *testing.T, expired, retireSetup bool, setup taskDeliverySetupFactory) *taskCloseFixture {
 	t.Helper()
 	// Construct the original published identity with the live target's UUID
 	// birth contract; do not rewrite any already-frozen destroy/claim evidence.
-	ownedFixtureContainers(t)
+	if taskWorkspaceSyncLocalOwnershipVerifier != nil {
+		taskWorkspaceSyncLocalOwnershipVerifier(t)
+	} else {
+		ownedFixtureContainers(t)
+	}
 	if setup == nil {
 		setup = func(t *testing.T) (*Backend, *clientv3.Client, AcquireIntentInput, *CreationClaim, []byte, ed25519.PrivateKey) {
 			return preparationFixture(t, "plain")

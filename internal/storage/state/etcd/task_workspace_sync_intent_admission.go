@@ -21,7 +21,7 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 		return result, ErrInvalidRecord
 	}
 	body.mu.Lock()
-	if body.closed || body.active || body.bytes != 0 || body.complete || body.ctx.Err() != nil {
+	if body.closed || body.active || body.bytes != 0 || body.complete || body.localConsumed || body.ctx.Err() != nil {
 		body.mu.Unlock()
 		return result, ErrInvalidRecord
 	}
@@ -42,6 +42,13 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 		entry, w, archive := body.entry, s.plan.workspace, o.prepared.draft
 		ref := TaskWorkspaceSyncIntentReference{Task: o.claim.reference.Task, BudgetID: budget.options.BudgetID, IntentID: uuid.NewString()}
 		r := TaskWorkspaceSyncIntentRecord{taskWorkspaceSyncIntentAttribution: taskWorkspaceSyncIntentAttribution{Version: 1, Reference: ref, BudgetRevision: budget.create, Kind: "put_object", FinalSyncAttemptID: archive.finalSync.record.AttemptID, CommandID: archive.reference().CommandID, TicketDigest: archive.ticket.Digest(), ArchiveSHA256: s.diagnostics.SHA256, PlanDigest: s.plan.digest, WorkspaceHash: w.hash, Provider: w.provider, StorageIdentityHash: w.storageIdentityHash, Bucket: w.bucket, Prefix: w.prefix, RelativePath: entry.path, Mode: entry.mode, Size: entry.size, Offset: entry.offset, BodySHA256: entry.sha256}, Claim: o.claim.reference}
+		if body.localTarget != nil {
+			if err := s.workspaceSyncBoundLocal(ctx, body); err != nil {
+				return result, err
+			}
+			pin := body.localTarget.pin
+			r.Version, r.Local = 2, &pin
+		}
 		draft = &taskWorkspaceSyncIntentDraft{record: r}
 		body.mu.Lock()
 		body.intent = draft
@@ -104,7 +111,16 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 			draft.revision = r.Header.Revision
 			result.Reference.Revision = draft.revision
 			result.Outcome = OutcomeCommitted
-			return result, s.workspaceSyncIntentLocal(bounded, body)
+			if err := s.workspaceSyncIntentLocal(bounded, body); err != nil {
+				return result, err
+			}
+			if draft.record.Version == 2 {
+				if err := s.workspaceSyncBoundLocal(bounded, body); err != nil {
+					return result, err
+				}
+				draft.acknowledged = true
+			}
+			return result, nil
 		}
 		values, err := workspaceSyncPointResponse(b, r, keys)
 		if err != nil {
