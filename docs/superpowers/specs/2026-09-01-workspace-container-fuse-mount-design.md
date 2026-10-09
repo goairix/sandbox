@@ -691,7 +691,7 @@ UpdateFUSENetwork(ctx context.Context, ref RuntimeRef, enabled bool, whitelist [
 
 `RuntimeRef` 同时携带 runtime 名称和 provider 返回的不可变 RuntimeUID；所有 FUSE 私有控制与 FUSE 网络更新都必须验证这两个字段，不能回退为 name-only 操作。`expectedGeneration` 必须来自持久 owner/session，不能从 runtime 进程内缓存或 mounter health 反向学习。`WorkspaceHealth` 只返回观测值，由 Manager 与持久 generation 比对。
 
-`QuiesceWorkspace` 在 Manager 已关闭 admission、等待 API 引用归零后验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。成功返回绑定 exact RuntimeUID/generation 的一次性 `WorkspaceQuiesceToken`；`FlushWorkspace` 只接受与当前 quiesce token 相同的显式 generation，非销毁 flush 后必须用 `ResumeWorkspace` 消费同一 token 恢复进程，跨 runtime、跨 generation 或重放都失败。控制命令的回复不确定时本次 token/cycle 进入 fail-closed 状态，不能重放。验证失败时调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
+`QuiesceWorkspace` 在 Manager 已关闭 admission、等待 API 引用归零后验证没有脱离的用户进程或仍指向 `/workspace` 的打开写句柄；它不能把“客户端断开”当作进程退出。成功返回绑定 exact RuntimeUID/generation 的一次性 `WorkspaceQuiesceToken`；`FlushWorkspace` 只接受与当前 quiesce token 相同的显式 generation，非销毁 flush 后必须用 `ResumeWorkspace` 消费同一 token 恢复进程，跨 runtime、跨 generation 或重放都失败。控制命令的回复不确定时本次 token/cycle 进入 fail-closed 状态，不能重放。 终态销毁允许通过 `QuiesceWorkspaceForCleanup` 获取全新的不可恢复证明：先取得 PID1 对 exact RuntimeUID/generation 的永久 cleanup fence 确认，拒绝所有后续 register/resume，然后重新停止并核验全部业务进程及 workspace 写句柄。丢失 cleanup 回复时只能重复此完整流程；刷新回复不确定时必须清除本地 quiesced 标记并重新核验，再通过串行 sidecar 刷新取得成功确认，之后才能持久化回收检查点。不得重放旧 token、跳过 flush、强制释放归属或删除尚未确认退出的 runtime。验证失败时调用方只能保持 unavailable 或停止整个 sandbox，不能继续 flush、重挂载或释放租约。Kubernetes 实现只能对固定名称的容器执行固定控制命令；Docker 实现只能走私有 `execControl`。挂载授权与这些能力都不能从公共 Exec 请求中选择容器、用户或 argv。
 
 上传接口需要把调用方声明并由流式读取校验的文件大小传入 runtime，使 tar header 可以先写出并通过 pipe 直接流向 Docker/Kubernetes，而不是 `io.ReadAll`：
 

@@ -331,7 +331,7 @@ func AllowedProbeCommand(argv []string) bool {
 	if argv[1] == "resume" {
 		return len(argv) == 7 && argv[6] == "--token-stdin"
 	}
-	return len(argv) == 6
+	return len(argv) == 6 || (argv[1] == "quiesce" && len(argv) == 7 && argv[6] == "--cleanup")
 }
 
 func AllowedProbeCLI(argv []string) bool {

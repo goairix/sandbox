@@ -5,6 +5,7 @@ package workspaceprobe
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,10 @@ type brokerClient interface {
 
 type brokerProcessProtector interface {
 	protectedProcess() (*processIdentity, error)
+}
+
+type brokerCleanupFencer interface {
+	fenceCleanup(runtimeUID string, generation int64) error
 }
 
 type mountVerifier interface {
@@ -291,6 +296,16 @@ func (p *Probe) cleanupProbeDirect(runtimeUID string, generation int64, name str
 }
 
 func (p *Probe) Quiesce(runtimeUID string, generation int64) (fuseprotocol.ProbeStatus, error) {
+	return p.quiesce(runtimeUID, generation, false)
+}
+
+// QuiesceForCleanup cannot be resumed. Each retry fences PID1 then verifies the
+// complete live process set again; a lost reply leaves no broker to recreate.
+func (p *Probe) QuiesceForCleanup(runtimeUID string, generation int64) (fuseprotocol.ProbeStatus, error) {
+	return p.quiesce(runtimeUID, generation, true)
+}
+
+func (p *Probe) quiesce(runtimeUID string, generation int64, cleanup bool) (fuseprotocol.ProbeStatus, error) {
 	if err := p.validateRequest(runtimeUID, generation); err != nil {
 		return fuseprotocol.ProbeStatus{}, err
 	}
@@ -307,12 +322,30 @@ func (p *Probe) Quiesce(runtimeUID string, generation int64) (fuseprotocol.Probe
 			protected[process.PID] = *process
 		}
 	}
+	if cleanup {
+		fencer, ok := p.broker.(brokerCleanupFencer)
+		if !ok {
+			return fuseprotocol.ProbeStatus{}, fmt.Errorf("terminal cleanup fence is unavailable")
+		}
+		if err := fencer.fenceCleanup(runtimeUID, generation); err != nil {
+			return fuseprotocol.ProbeStatus{}, fmt.Errorf("fence workspace cleanup: %w", err)
+		}
+	}
 	stopped, err := p.stopToFixedPoint(protected)
 	if err != nil {
 		return fuseprotocol.ProbeStatus{}, err
 	}
 	if err := p.verifyNoWritableWorkspaceFD(stopped); err != nil {
 		return fuseprotocol.ProbeStatus{}, err
+	}
+	if cleanup {
+		nonce := make([]byte, 32)
+		if _, err := io.ReadFull(p.random, nonce); err != nil {
+			return fuseprotocol.ProbeStatus{}, fmt.Errorf("generate cleanup proof: %w", err)
+		}
+		token := "cleanup." + base64.RawURLEncoding.EncodeToString(nonce)
+		wipe(nonce)
+		return successStatus(runtimeUID, generation, token), nil
 	}
 	token, err := p.broker.start(brokerState{RuntimeUID: runtimeUID, Generation: generation, Processes: stopped})
 	if err != nil {

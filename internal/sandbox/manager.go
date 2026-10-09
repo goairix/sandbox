@@ -1619,7 +1619,13 @@ func (m *Manager) teardownFUSESandboxWithResult(ctx context.Context, lifecycle *
 				return false
 			}
 		}
-		token, err := m.runtime.QuiesceWorkspace(ctx, ref, generation)
+		var token runtime.WorkspaceQuiesceToken
+		var err error
+		if cleanup, ok := m.runtime.(runtime.WorkspaceCleanupQuiescer); ok {
+			token, err = cleanup.QuiesceWorkspaceForCleanup(ctx, ref, generation)
+		} else {
+			token, err = m.runtime.QuiesceWorkspace(ctx, ref, generation)
+		}
 		if err == nil && token.RuntimeUID == ref.UID && token.Generation == generation && token.Opaque != "" {
 			lifecycle.quiesceAttempted = true
 			lifecycle.quiesced = true
@@ -1650,6 +1656,12 @@ func (m *Manager) teardownFUSESandboxWithResult(ctx context.Context, lifecycle *
 			metrics.RecordWorkspaceFlush(ctx, spec.RuntimeType, spec.Provider, result, time.Since(started).Seconds())
 		}
 		if flushErr != nil {
+			if _, ok := m.runtime.(runtime.WorkspaceCleanupQuiescer); ok {
+				// A missing flush acknowledgement is not a durable checkpoint. Obtain
+				// a fresh terminal proof before the next serialized flush attempt.
+				lifecycle.quiesceAttempted = false
+				lifecycle.quiesced = false
+			}
 			m.logFUSETeardownFailure(lifecycle, "durable-flush", flushErr)
 			return false
 		}

@@ -2552,3 +2552,53 @@ func TestBuildInstallCommandKeepsPackageCachesOutOfWorkspace(t *testing.T) {
 	assert.Contains(t, command, "npm_config_cache=/tmp/npm-cache npm install")
 	assert.NotContains(t, command, "/workspace")
 }
+
+type cleanupRetryRuntime struct {
+	*fuseManagerRuntime
+	cleanupCalls int
+	cleanupProof bool
+}
+
+func (r *cleanupRetryRuntime) QuiesceWorkspaceForCleanup(_ context.Context, ref runtime.RuntimeRef, generation int64) (runtime.WorkspaceQuiesceToken, error) {
+	r.cleanupCalls++
+	r.cleanupProof = true
+	return runtime.WorkspaceQuiesceToken{RuntimeUID: ref.UID, Generation: generation, Opaque: "cleanup-proof"}, nil
+}
+func (r *cleanupRetryRuntime) FlushWorkspace(_ context.Context, _ runtime.RuntimeRef, _ int64) error {
+	if !r.cleanupProof {
+		return errors.New("missing fresh cleanup proof")
+	}
+	r.cleanupProof = false
+	if r.cleanupCalls == 1 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+func TestManagerCleanupRevalidatesAfterLostFlushAcknowledgement(t *testing.T) {
+	base := newFUSEManagerRuntime()
+	mgr, _, _, _ := newFUSETestManager(t, base)
+	sb, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	rt := &cleanupRetryRuntime{fuseManagerRuntime: base}
+	mgr.runtime = rt
+	mgr.mu.RLock()
+	lifecycle := mgr.fuseLifecycles[sb.ID]
+	mgr.mu.RUnlock()
+	require.NotNil(t, lifecycle)
+	require.False(t, mgr.teardownFUSESandboxWithResult(context.Background(), lifecycle, errors.New("cleanup")))
+	require.False(t, base.wasRemoved(sb.RuntimeID))
+	require.False(t, lifecycle.flushAttempted)
+	require.Equal(t, 1, rt.cleanupCalls)
+	require.True(t, mgr.teardownFUSESandboxWithResult(context.Background(), lifecycle, errors.New("retry")))
+	require.Equal(t, 2, rt.cleanupCalls)
+	require.True(t, base.wasRemoved(sb.RuntimeID))
+	// The marker client fixture models all objects with one bit; reset the
+	// workspace root marker after cleanup deleted its separate probe object.
+	mgr.config.WorkspaceObjectClient.(*fuseMarkerClient).exists = true
+	// The same workspace is available again through the normal create path.
+	require.NoError(t, mgr.fusePool.WarmUp(context.Background()))
+	next, err := mgr.Create(context.Background(), SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/a"})
+	require.NoError(t, err)
+	require.NotEqual(t, sb.ID, next.ID)
+	require.NoError(t, mgr.Destroy(context.Background(), next.ID))
+}

@@ -74,7 +74,7 @@ func TestDNSAdmissionOwnedContractAndDefault(t *testing.T) {
 	require.Equal(t, "", b.dnsOptions[0].Value)
 	empty := &Runtime{namespace: "runtime"}
 	WithDNSAdmission(false, []kubecontract.DNSOption{})(empty)
-	require.Equal(t, "kubernetes-sandbox-pod/v3:control=1:runtime:cilium=false", empty.WarmPoolContract())
+	require.Equal(t, "kubernetes-sandbox-pod/v4:control=1:runtime:cilium=false", empty.WarmPoolContract())
 }
 
 func TestDNSAdmissionIndependentSettings(t *testing.T) {

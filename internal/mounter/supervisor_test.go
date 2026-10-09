@@ -829,3 +829,17 @@ func TestCanceledShutdownQueuedBehindFlushHasNoSideEffect(t *testing.T) {
 func TestImageContractRetainsLSBinaryCompatibility(t *testing.T) {
 	assert.Contains(t, requiredImageBinaries, "/bin/ls")
 }
+
+func TestFailedDurableFlushCannotBecomeSuccessfulByRetry(t *testing.T) {
+	runner := &fakeRunner{}
+	s, _ := newVerifiedFlushSupervisor(t, runner)
+	runner.runErr = errors.New("actual flush failure")
+	request := fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: 1}
+	_, err := s.Flush(context.Background(), request)
+	require.Error(t, err)
+	require.Equal(t, StateUnhealthy, s.State())
+	runner.runErr = nil
+	ack, err := s.Flush(context.Background(), request)
+	require.Error(t, err)
+	require.False(t, ack.Accepted)
+}

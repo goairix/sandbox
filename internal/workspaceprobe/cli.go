@@ -38,7 +38,11 @@ func runCLI(probe *Probe, argv []string, stdin io.Reader, stdout, stderr io.Writ
 	case "write-read-delete":
 		status, err = probe.WriteReadDelete(runtimeUID, generation)
 	case "quiesce":
-		status, err = probe.Quiesce(runtimeUID, generation)
+		if len(argv) == 7 {
+			status, err = probe.QuiesceForCleanup(runtimeUID, generation)
+		} else {
+			status, err = probe.Quiesce(runtimeUID, generation)
+		}
 	case "resume":
 		var input []byte
 		input, err = io.ReadAll(io.LimitReader(stdin, fuseprotocol.MaxJSONBytes+1))

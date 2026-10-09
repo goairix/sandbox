@@ -24,6 +24,40 @@ func TestCLIAcceptsOnlyExactGrammar(t *testing.T) {
 	}
 }
 
+func TestCleanupQuiesceCanRepeatWithoutCreatingResumeBroker(t *testing.T) {
+	probe, processes, broker := testProbe(t)
+	p10 := processIdentity{PID: 10, UID: 1000, StartTime: 101, State: 'T'}
+	processes.states[10] = p10
+	processes.snapshots = [][]processIdentity{{p10}, {p10}}
+	broker.state = brokerState{RuntimeUID: "existing-cycle", Generation: 3}
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		code := runCLI(probe, []string{fuseprotocol.ProbeBinary, "quiesce", "--runtime-uid", "runtime-a", "--generation", "7", "--cleanup"}, bytes.NewReader(nil), &stdout, &stderr)
+		require.Zero(t, code, stderr.String())
+		var status fuseprotocol.ProbeStatus
+		require.NoError(t, fuseprotocol.DecodeExact(bytes.TrimSpace(stdout.Bytes()), &status))
+		require.True(t, status.OK)
+		require.Equal(t, "runtime-a", status.RuntimeUID)
+		require.Equal(t, int64(7), status.Generation)
+		require.NotEmpty(t, status.Token)
+		require.Equal(t, "existing-cycle", broker.state.RuntimeUID, "cleanup must not create or replace a resume broker")
+		require.Equal(t, i+1, broker.cleanupCalls)
+	}
+}
+
+func TestCleanupQuiesceRefusesWritableWorkspaceDescriptor(t *testing.T) {
+	probe, processes, _ := testProbe(t)
+	p10 := processIdentity{PID: 10, UID: 1000, StartTime: 101, State: 'T'}
+	processes.states[10] = p10
+	processes.snapshots = [][]processIdentity{{p10}, {p10}}
+	processes.fds[10] = []descriptor{{Target: probe.workspace + "/business", Flags: 1}}
+	var stdout, stderr bytes.Buffer
+	code := runCLI(probe, []string{fuseprotocol.ProbeBinary, "quiesce", "--runtime-uid", "runtime-a", "--generation", "7", "--cleanup"}, bytes.NewReader(nil), &stdout, &stderr)
+	require.NotZero(t, code)
+	require.Empty(t, stdout.String())
+	require.Contains(t, stderr.String(), "writable workspace descriptor")
+}
+
 func TestCLIResumeStrictlyDecodesAndEmitsStatus(t *testing.T) {
 	probe, _, broker := testProbe(t)
 	broker.state = brokerState{RuntimeUID: "runtime-a", Generation: 7}
@@ -53,4 +87,18 @@ func TestCLIResumeRejectsDuplicateOrMismatchedEnvelope(t *testing.T) {
 		assert.NotZero(t, code)
 		assert.Empty(t, stdout.String())
 	}
+}
+
+func TestCleanupQuiesceRequiresAcknowledgedFenceBeforeStoppingProcesses(t *testing.T) {
+	probe, processes, broker := testProbe(t)
+	p10 := processIdentity{PID: 10, UID: 1000, StartTime: 101, State: 'R'}
+	processes.states[10] = p10
+	processes.snapshots = [][]processIdentity{{p10}}
+	broker.cleanupErr = ErrInvalidToken
+	var stdout, stderr bytes.Buffer
+	code := runCLI(probe, []string{fuseprotocol.ProbeBinary, "quiesce", "--runtime-uid", "runtime-a", "--generation", "7", "--cleanup"}, bytes.NewReader(nil), &stdout, &stderr)
+	require.NotZero(t, code)
+	require.Empty(t, stdout.String())
+	require.Zero(t, processes.scans)
+	require.Empty(t, processes.stopped)
 }

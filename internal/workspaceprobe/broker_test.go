@@ -7,6 +7,7 @@ import (
 	"net"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -262,4 +263,72 @@ func callPID1Ledger(t *testing.T, ledger *pid1Ledger, processes processTable, re
 	_ = client.Close()
 	<-done
 	return response
+}
+
+func TestPID1CleanupFenceRejectsDelayedResumeAndIsIdempotent(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
+	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	register := pid1Request{Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{{PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
+	cycle := callPID1Ledger(t, ledger, processes, register)
+	require.True(t, cycle.OK)
+	fence := pid1Request{Version: 1, Command: "cleanup", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}}
+	wrong := fence
+	wrong.RuntimeUID = "runtime-b"
+	require.False(t, callPID1Ledger(t, ledger, processes, wrong).OK)
+	wrong = fence
+	wrong.Generation = 8
+	require.False(t, callPID1Ledger(t, ledger, processes, wrong).OK)
+	require.True(t, callPID1Ledger(t, ledger, processes, fence).OK)
+	require.True(t, callPID1Ledger(t, ledger, processes, fence).OK, "lost cleanup acknowledgement must be safely retryable")
+	// This request can already be queued when the cleanup fence is acknowledged.
+	late := pid1Request{Version: 1, Command: "resume", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}, Token: cycle.Token}
+	require.False(t, callPID1Ledger(t, ledger, processes, late).OK)
+	require.Empty(t, processes.resumed)
+	require.False(t, callPID1Ledger(t, ledger, processes, register).OK)
+	require.False(t, callPID1Ledger(t, ledger, processes, wrong).OK)
+}
+
+type blockedResumeProcesses struct {
+	*fakeProcesses
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockedResumeProcesses) signal(pid int, signal syscall.Signal) error {
+	if signal == syscall.SIGCONT {
+		close(p.entered)
+		<-p.release
+	}
+	return p.fakeProcesses.signal(pid, signal)
+}
+func TestPID1CleanupFenceWaitsForAlreadyRunningResume(t *testing.T) {
+	processes := &blockedResumeProcesses{fakeProcesses: &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}, entered: make(chan struct{}), release: make(chan struct{})}
+	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	cycle := callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{{PID: 10, UID: 1000, StartTime: 42, State: 'T'}}})
+	require.True(t, cycle.OK)
+	resumeDone := make(chan pid1Response, 1)
+	go func() {
+		resumeDone <- callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "resume", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}, Token: cycle.Token})
+	}()
+	<-processes.entered
+	fenceDone := make(chan pid1Response, 1)
+	go func() {
+		fenceDone <- callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "cleanup", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}})
+	}()
+	var earlyFence *pid1Response
+	select {
+	case response := <-fenceDone:
+		earlyFence = &response
+		t.Error("fence acknowledged while an earlier Resume could still issue SIGCONT")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(processes.release)
+	require.True(t, (<-resumeDone).OK)
+	if earlyFence == nil {
+		require.True(t, (<-fenceDone).OK)
+	} else {
+		require.True(t, earlyFence.OK)
+	}
+	require.False(t, callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "resume", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}, Token: cycle.Token}).OK)
+	require.Equal(t, []int{10}, processes.resumed)
 }

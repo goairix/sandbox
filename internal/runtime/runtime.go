@@ -139,6 +139,13 @@ type ReservedFileCounter interface {
 	CountReservedFiles(ctx context.Context, id, baseDir string, maxDepth int, globPattern string) (int, error)
 }
 
+// WorkspaceCleanupQuiescer provides irreversible, retryable terminal quiescence.
+// It must fence all future resumes before checking processes and descriptors.
+// Its proof authorizes flush and destruction only, never resuming execution.
+type WorkspaceCleanupQuiescer interface {
+	QuiesceWorkspaceForCleanup(ctx context.Context, ref RuntimeRef, expectedGeneration int64) (WorkspaceQuiesceToken, error)
+}
+
 // Runtime is the abstraction over container orchestration backends (Docker, Kubernetes).
 type Runtime interface {
 	// CreateSandbox creates a new sandbox container/pod from the given spec.
