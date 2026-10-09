@@ -2,7 +2,7 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
-最新已验收源码 `b1c9d12`/`6922d0d`：永久 generation slot 的原始申请、unknown 固定候选只读、occupied 本地 gate 和 Close 等待。最终限定 host race154叶、同源 Linux 分批24不同叶通过；独立review Missing0/Extra0/C0/I0/M2，两个证明范围/环境限制已披露，Root684artifact与源码/二进制/19环境清理核对。见 `2026-10-09-workspace-sync-recycling-admission-verification.md`。较大批次原始child SIGKILL原因仍未知，不能称完整轮全绿或可靠性/容量通过。成功IO仍charged；正在接续原始witness持久terminal和有预算GC，之后仍需checkpoint/正常恢复、安全释放、生产接线与大N验收。
+最新已验收源码 `8d32040`/`7f67def`/审查修复`9d58c07`：原始成功 local witness 的持久 terminal、有预算 generation slot GC 和下一文件消费。修复前49实际 native叶/18 host race叶通过，S1实际65文件连续复用；R1当前源码限定4 native叶/5 host race叶通过，两组源码证明分开。独立复审 C0/I0/M1，Root1187 artifacts及27环境/81原始 child join与独立清理核对通过。见 `2026-10-09-workspace-sync-recycling-settlement-verification.md`。环境告警及首次 manifest 原字节未保存的 metadata 缺口明确披露；历史 child SIGKILL原因仍未知。当前开始持久 checkpoint/正常恢复；安全释放、生产接线与大N验收仍未完成，不能宣称生产迁移或容量性能通过。
 
 已按用户要求合入基分支修复 `52b4d4f`、`d543cf3`，合并提交 `7bca73a`。无冲突；三个受影响包 race/vet/Linuxarm64CGO0编译通过。见 `2026-10-08-base-quiesce-fixes-verification.md`。
 

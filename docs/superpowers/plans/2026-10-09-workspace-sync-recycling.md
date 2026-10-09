@@ -58,9 +58,9 @@
 
 **Interfaces:** private `settleLocal(ctx,witness) (*taskWorkspaceSyncLocalSettlement,error)` 与 `recycleLocal(ctx,settlement) (Outcome,error)`；originalsettlement自引用/origin/draft与terminalnativepin，wire/evidencecodec及具体fields按spec。oneoriginalbody留到GC结果；后续body.Close/Next可继续，不取消wholeSource。
 
-- [ ] Step 1: RED原始success/witnesscopy/unfinishedjoin/foreignbody/knownACKmissing/failedIO拒绝；持久terminal然后free+delete，原native状态检查。旧slotValue/Mod捕获后真实延迟Txn不能破坏后一代。
-- [ ] Step 2: settle重新注册current source/body/target ops及contexts，在不复用cancelputctx前提下freshcurrentnative/worker/rootguard；完整originalcount/hash/devino与intent符合；64nodesTxnonePutterminal；attemptonce、unknown只能原始guarded诊断相同version/intent，不能二次效果。
-- [ ] Step 3: GC originalknownterminal64nodesPutfree+exactDeleteintent、成功原ACK及delete1检查；unknown仅固定same-txnfree/absence/version/Create/MOD验证，已复用保持unknown。currenthistory/restore/claim改变保守保留收费，无TTL退款或coldauthority。
-- [ ] Step 4: S1至少65个实际连续local文件→terminal→GC，验证activekeybound/nativegeneration增长/bytesfsync结果；unknownreserve/terminal/GC、crossBackend新代、Restore/claim/root变化、Close同时physicalwait原RPC/postguard；合法错误/未知仍charged。
-- [ ] Step 5: 实际protobuf worstB/node/reply检查与scopedrace/native0SKIP、vet/cross/format/bash/exactdiff；使用original3children/logblocks/Wait/inventory证据，tmpfs不证明crash；未实现cursor/normalrecovery/saferelease/生产性能明确列出。
-- [ ] Step 6: source及时小提交和OWNtask3报告manifest；Root独立review/audit/tracked验收更新整体状态，封闭本OWN。wholemaster未完成不进入branchfinish/push、不重读本OWN；下一步有预算checkpoint/实际安全释放与生产接线。
+- [x] Step 1: RED原始success/witnesscopy/unfinishedjoin/foreignbody/knownACKmissing/failedIO拒绝；持久terminal然后free+delete，原native状态检查。旧slotValue/Mod捕获后真实延迟Txn不能破坏后一代。
+- [x] Step 2: settle重新注册current source/body/target ops及contexts，在不复用cancelputctx前提下freshcurrentnative/worker/rootguard；完整originalcount/hash/devino与intent符合；64nodesTxnonePutterminal；attemptonce、unknown只能原始guarded诊断相同version/intent，不能二次效果。
+- [x] Step 3: GC originalknownterminal64nodesPutfree+exactDeleteintent、成功原ACK及delete1检查；unknown仅固定same-txnfree/absence/version/Create/MOD验证，已复用保持unknown。currenthistory/restore/claim改变保守保留收费，无TTL退款或coldauthority。
+- [x] Step 4: S1至少65个实际连续local文件→terminal→GC，验证activekeybound/nativegeneration增长/bytesfsync结果；unknownreserve/terminal/GC、crossBackend新代、Restore/claim/root变化、Close同时physicalwait原RPC/postguard；合法错误/未知仍charged。
+- [x] Step 5: 实际protobuf worstB/node/reply检查与scopedrace/native0SKIP、vet/cross/format/bash/exactdiff；使用original3children/logblocks/Wait/inventory证据，tmpfs不证明crash；未实现cursor/normalrecovery/saferelease/生产性能明确列出。
+- [x] Step 6: source及时小提交和OWNtask3报告manifest；Root独立review/audit/tracked验收更新整体状态，封闭本OWN。wholemaster未完成不进入branchfinish/push、不重读本OWN；下一步有预算checkpoint/实际安全释放与生产接线。
