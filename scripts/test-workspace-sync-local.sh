@@ -7,7 +7,7 @@ project="sandbox-workspace-sync-local-$$-$(date +%s)"
 fixture='workspace-sync-local'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 go_tool='/Users/dysodeng/go/go1.25.6/bin/go'
-if [[ $# -lt 1 || $# -gt 2 || -z "$1" ]]; then echo 'usage: test-workspace-sync-local.sh EVIDENCE_DIRECTORY [postguard-proof|local-gate-proof|pending-proof|reap-retained]' >&2; exit 2; fi
+if [[ $# -lt 1 || $# -gt 2 || -z "$1" ]]; then echo 'usage: test-workspace-sync-local.sh EVIDENCE_DIRECTORY [fixed local/recycling proof mode|reap-retained]' >&2; exit 2; fi
 mode=${2:-normal}
 test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
 case "$mode" in
@@ -22,6 +22,15 @@ case "$mode" in
   local-put-error) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^real-write-error-retains-partial-charge$';;
   recycling-admission) test_run='^TestTaskWorkspaceSyncRecyclingNativeAdmission$';;
   recycling-proof) test_run='^TestTaskWorkspaceSyncRecyclingNative';;
+  recycling-close-rpc) test_run='^TestTaskWorkspaceSyncRecyclingNativeCloseRPC$';;
+  recycling-competition) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompetition$';;
+  recycling-gate-generation) test_run='^TestTaskWorkspaceSyncRecyclingNativeGateFaults$/^(slot-same-value-generation|slot-birth|intent-immutable)$';;
+  recycling-gate-authority) test_run='^TestTaskWorkspaceSyncRecyclingNativeGateFaults$/^(restore|whole-prefix|claim-lost)$';;
+  recycling-gate-local) test_run='^TestTaskWorkspaceSyncRecyclingNativeGateFaults$/^(root-after-ack|caller-canceled)$';;
+  recycling-postguard) test_run='^TestTaskWorkspaceSyncRecyclingNativePostguardClose$';;
+  recycling-unknown-absent) test_run='^TestTaskWorkspaceSyncRecyclingNativeUnknownAbsent$';;
+  recycling-base) test_run='^TestTaskWorkspaceSyncRecyclingNative(Admission|CloseRPC|CandidateFaults)$';;
+  recycling-outcomes) test_run='^TestTaskWorkspaceSyncRecyclingNative(Unknown|GenerationABA)$';;
   recycling-legacy) test_run='^TestTaskWorkspaceSync(IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|LocalPutNative)$/^nested-and-successive-original-files$';;
   pending-proof) test_run='^TestTaskWorkspaceSyncLocalNative$/^readonly-attribution-original-gate$';;
   reap-retained) ;;
@@ -173,6 +182,10 @@ docker image inspect --format '{{.Id}}' "$image" >"$evidence/image-id.txt"
 docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" >"$evidence/digests.txt"
 grep -Fxq "$digest" "$evidence/digests.txt" || { echo 'pinned RepoDigest mismatch' >&2; exit 1; }
 printf 'project=%s fixture=%s platform=%s CGO_ENABLED=0\n' "$project" "$fixture" "$platform" >"$evidence/fixture.txt"
+docker ps -aq --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-containers.txt"
+docker volume ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-volumes.txt"
+docker network ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-networks.txt"
+[[ ! -s "$evidence/pre-containers.txt" && ! -s "$evidence/pre-volumes.txt" && ! -s "$evidence/pre-networks.txt" ]] || { echo 'exact project pre-inventory is not empty' >&2; exit 1; }
 source_files=(
   internal/storage/state/etcd/task_workspace_sync_recycling_admission.go
   internal/storage/state/etcd/task_workspace_sync_recycling_read.go

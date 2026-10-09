@@ -5,13 +5,17 @@ package etcd
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -89,6 +93,17 @@ func TestTaskWorkspaceSyncRecyclingNativeAdmission(t *testing.T) {
 	}
 	require.Equal(t, 256, freeCount, "operator provisioned all permanent slots before traffic")
 	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingPutMatch, before: func() {
+		d := body.intent
+		cmps := s.recyclingReserveComparisons(d)
+		keys := []string{f.b.identityKey, f.b.restoreKey, f.b.workspaceSyncBudget.key, d.intentKey, d.slotKey}
+		request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(d.intentKey, d.value, 0), taskProtoPut(d.slotKey, d.slotValue, 0)}, Failure: taskProtoPoints(keys)}
+		values := []string{f.b.identityValue, f.b.restoreEpoch, f.b.workspaceSyncBudget.value, strings.Repeat("x", int(f.b.workspaceSyncBudget.options.MaxIntentBytes)), strings.Repeat("x", 512)}
+		require.Len(t, cmps, 57)
+		require.Equal(t, 64, len(cmps)+len(request.Success)+len(request.Failure))
+		require.NoError(t, taskCheckWire(f.b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{taskProtoResponse(keys, values)}))
+		t.Logf("original native reserve pins=50 nodes=64 request=%d successReply=%d failureReply=%d", request.Size(), taskProtoPutResponse(2).Size(), taskProtoResponse(keys, values).Size())
+	}})
 	result, err := s.reservePutIntent(f.ctx, body)
 	require.NoError(t, err, "original bound unread local body reserves the recycling profile")
 	require.Equal(t, OutcomeCommitted, result.Outcome)
@@ -113,4 +128,487 @@ func TestTaskWorkspaceSyncRecyclingNativeAdmission(t *testing.T) {
 	require.Equal(t, result.Reference.Revision, occupied.Kvs[0].ModRevision)
 	require.EqualValues(t, 2, occupied.Kvs[0].Version)
 	t.Logf("original profile2 IO bytes=%d hash=%s slotCreate=%d ACKmod=%d nativeVersion=%d originalPins=%d", witness.bytes, witness.sha256, occupied.Kvs[0].CreateRevision, occupied.Kvs[0].ModRevision, occupied.Kvs[0].Version, len(s.archive.owner.comparisons))
+}
+
+func recyclingPutMatch(ops []clientv3.Op) bool {
+	return len(ops) == 2 && ops[0].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-intents/")
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCloseRPC(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	entered, release := make(chan struct{}), make(chan struct{})
+	workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingPutMatch, before: func() { close(entered); <-release }})
+	done := make(chan error, 1)
+	go func() { _, err := s.reservePutIntent(f.ctx, body); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("original reserve request did not reach controlled native transport")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- target.Close() }()
+	early := false
+	select {
+	case err := <-closed:
+		early = true
+		t.Errorf("target.Close returned before original reserve RPC joined: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	require.Error(t, <-done, "target cancellation cannot become ACK authority")
+	if !early {
+		require.NoError(t, <-closed)
+	}
+	require.False(t, body.intent.acknowledged)
+	entries, err := os.ReadDir(target.pin.Root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+	t.Log("original target.Close joined the outstanding original reserve call; no IO authority")
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCandidateFaults(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, fault := range []string{"unbound", "foreign-body", "missing-free", "malformed-free", "foreign-budget", "known-occupied"} {
+		t.Run(fault, func(t *testing.T) {
+			f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+			_, key, err := f.b.workspaceSyncRecyclingKeys(TaskWorkspaceSyncIntentReference{Task: f.c.reference.Task, BudgetID: f.b.workspaceSyncBudget.options.BudgetID, IntentID: uuid.NewString()})
+			require.NoError(t, err)
+			before, err := f.raw.Get(f.ctx, key)
+			require.NoError(t, err)
+			require.Len(t, before.Kvs, 1)
+			candidate := body
+			if fault != "unbound" {
+				require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			}
+			switch fault {
+			case "foreign-body":
+				candidate = &taskWorkspaceSyncBody{source: s, entry: body.entry, ctx: body.ctx}
+				candidate.self = candidate
+			case "missing-free":
+				_, err = f.raw.Delete(f.ctx, key) // operator-only negative fixture
+			case "malformed-free":
+				_, err = f.raw.Put(f.ctx, key, string(before.Kvs[0].Value)+" ")
+			case "foreign-budget", "known-occupied":
+				slot, e := decodeWorkspaceSyncRecyclingSlot(before.Kvs[0])
+				require.NoError(t, e)
+				if fault == "foreign-budget" {
+					slot.BudgetID = uuid.NewString()
+				} else {
+					slot.State, slot.IntentID, slot.IntentDigest = "occupied", uuid.NewString(), strings.Repeat("a", 64)
+				}
+				value, e := encodeWorkspaceSyncRecyclingSlot(slot)
+				require.NoError(t, e)
+				_, err = f.raw.Put(f.ctx, key, value)
+			}
+			require.NoError(t, err)
+			var writes atomic.Int32
+			workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingPutMatch, before: func() { writes.Add(1) }})
+			_, err = s.reservePutIntent(f.ctx, candidate)
+			require.Error(t, err)
+			if fault == "known-occupied" {
+				require.ErrorIs(t, err, errTaskWorkspaceSyncIntentQuota)
+			}
+			require.Zero(t, writes.Load(), "bad diagnostics never emit reserve mutations")
+			entries, err := os.ReadDir(target.pin.Root)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+			if fault == "missing-free" {
+				after, err := f.raw.Get(f.ctx, key)
+				require.NoError(t, err)
+				require.Empty(t, after.Kvs, "consumer never repairs an operator's missing permanent slot")
+			}
+		})
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeUnknown(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, fault := range []string{"lost-ack", "malformed-ack", "physical-postguard"} {
+		t.Run(fault, func(t *testing.T) {
+			f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			var writes atomic.Int32
+			workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingPutMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+				writes.Add(1)
+				require.NoError(t, err)
+				require.True(t, r.Succeeded)
+				switch fault {
+				case "lost-ack":
+					return nil, context.DeadlineExceeded
+				case "malformed-ack":
+					r.Responses = r.Responses[:1]
+				case "physical-postguard":
+					require.NoError(t, os.Chmod(target.pin.Root, 0750))
+				}
+				return r, nil
+			}})
+			unknown, err := s.reservePutIntent(f.ctx, body)
+			require.Error(t, err)
+			require.False(t, body.intent.acknowledged)
+			if fault != "physical-postguard" {
+				require.ErrorIs(t, err, ErrOutcomeUnknown)
+				require.Equal(t, OutcomeUnknown, unknown.Outcome)
+			}
+			for i := 0; i < 2; i++ {
+				read, err := s.reservePutIntent(f.ctx, body)
+				require.NoError(t, err, "matching original fixed candidate is copied diagnostic metadata")
+				require.Equal(t, OutcomeCommitted, read.Outcome)
+				require.Equal(t, unknown.Reference.IntentID, read.Reference.IntentID)
+				require.Equal(t, unknown.Reference.Slot, read.Reference.Slot)
+				require.False(t, body.intent.acknowledged, "read arbitration cannot upgrade original authority")
+				entry, err := f.b.LoadTaskWorkspaceSyncIntent(f.ctx, read.Reference)
+				require.NoError(t, err)
+				entry.Record.Local.Root = "/copied/diagnostic"
+				again, err := f.b.LoadTaskWorkspaceSyncIntent(f.ctx, read.Reference)
+				require.NoError(t, err)
+				require.Equal(t, target.pin.Root, again.Record.Local.Root)
+				cold := freshDispatchBackend(t, f.b, f.raw)
+				_, err = cold.LoadTaskWorkspaceSyncIntent(f.ctx, read.Reference)
+				require.Error(t, err, "nil budget remains a legacy lookup; cannot infer profile2")
+			}
+			require.EqualValues(t, 1, writes.Load())
+			_, err = s.putLocal(f.ctx, body, target)
+			require.Error(t, err)
+			entries, err := os.ReadDir(target.pin.Root)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+			charged, err := f.raw.Get(f.ctx, body.intent.slotKey)
+			require.NoError(t, err)
+			require.Len(t, charged.Kvs, 1)
+			slot, err := decodeWorkspaceSyncRecyclingSlot(charged.Kvs[0])
+			require.NoError(t, err)
+			require.Equal(t, "occupied", slot.State)
+		})
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeGenerationABA(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	var captured clientv3.Txn
+	workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingPutMatch, before: func() {
+		d := body.intent
+		captured = f.raw.Txn(f.ctx).If(s.recyclingReserveComparisons(d)...).Then(clientv3.OpPut(d.intentKey, d.value), clientv3.OpPut(d.slotKey, d.slotValue))
+		old, err := f.raw.Get(f.ctx, d.slotKey)
+		require.NoError(t, err)
+		require.Len(t, old.Kvs, 1)
+		require.Equal(t, d.recycling.mod, old.Kvs[0].ModRevision)
+		_, err = f.raw.Put(f.ctx, d.slotKey, string(old.Kvs[0].Value)) // operator-only same-value free generation advance
+		require.NoError(t, err)
+	}, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		require.NoError(t, err)
+		require.False(t, r.Succeeded, "actual original native CAS rejects same free bytes with a new ModRevision")
+		return r, err
+	}})
+	_, err := s.reservePutIntent(f.ctx, body)
+	require.ErrorIs(t, err, errTaskWorkspaceSyncIntentQuota)
+	require.NotNil(t, captured)
+	replayed, err := captured.Commit()
+	require.NoError(t, err)
+	require.False(t, replayed.Succeeded, "captured old native transaction cannot reserve the operator's next generation")
+	free, err := f.raw.Get(f.ctx, body.intent.slotKey)
+	require.NoError(t, err)
+	require.Len(t, free.Kvs, 1)
+	require.Equal(t, body.intent.recycling.value, string(free.Kvs[0].Value))
+	require.Greater(t, free.Kvs[0].ModRevision, body.intent.recycling.mod)
+	require.Equal(t, body.intent.recycling.version+1, free.Kvs[0].Version)
+	intent, err := f.raw.Get(f.ctx, body.intent.intentKey)
+	require.NoError(t, err)
+	require.Empty(t, intent.Kvs)
+	t.Logf("operator-only free ABA oldMod=%d newMod=%d oldVersion=%d newVersion=%d; actual original CAS and captured replay both failed", body.intent.recycling.mod, free.Kvs[0].ModRevision, body.intent.recycling.version, free.Kvs[0].Version)
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeCompetition(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f1, s1, body1, target1 := workspaceSyncRecyclingNativeDefault(t)
+	var workspace WorkspaceIdentity
+	for i := 0; i < 10000; i++ {
+		candidate, err := NewWorkspaceIdentity("local", "test-storage", "bucket", fmt.Sprintf("other/workspace-%d/", i))
+		require.NoError(t, err)
+		if candidate.partition == s1.plan.workspace.partition {
+			workspace = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, workspace.hash)
+	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspace})
+	require.NoError(t, err)
+	budget := f1.b.workspaceSyncBudget.options
+	f2, s2, body2, target2 := workspaceSyncRecyclingNativeBody(t, plan, &budget, workspaceSyncIntentSecondSetup(t, f1, workspace))
+	require.NotSame(t, f1.b, f2.b)
+	require.NotSame(t, f1.b.client, f2.b.client)
+	require.NotEqual(t, f1.c.reference.Task, f2.c.reference.Task)
+	require.NotEqual(t, s1.plan.workspace.hash, s2.plan.workspace.hash)
+	require.Equal(t, f1.b.namespace, f2.b.namespace)
+	require.Equal(t, s1.plan.workspace.partition, s2.plan.workspace.partition)
+	require.Equal(t, f1.b.workspaceSyncBudget.create, f2.b.workspaceSyncBudget.create)
+	require.Same(t, target1.worker, target2.worker, "this proves native client CAS in one physical worker process")
+	require.NoError(t, s1.bindLocalPut(f1.ctx, body1, target1))
+	require.NoError(t, s2.bindLocalPut(f2.ctx, body2, target2))
+	start := make(chan struct{})
+	type answer struct {
+		result taskWorkspaceSyncIntentResult
+		err    error
+		body   *taskWorkspaceSyncBody
+	}
+	done := make(chan answer, 2)
+	for _, pair := range []struct {
+		s    *PreparedTaskWorkspaceSyncSource
+		body *taskWorkspaceSyncBody
+	}{{s1, body1}, {s2, body2}} {
+		go func(s *PreparedTaskWorkspaceSyncSource, body *taskWorkspaceSyncBody) {
+			<-start
+			r, err := s.reservePutIntent(context.Background(), body)
+			done <- answer{r, err, body}
+		}(pair.s, pair.body)
+	}
+	close(start)
+	a, b := <-done, <-done
+	if a.err != nil {
+		a, b = b, a
+	}
+	require.NoError(t, a.err)
+	require.True(t, a.body.intent.acknowledged)
+	require.ErrorIs(t, b.err, errTaskWorkspaceSyncIntentQuota)
+	require.False(t, b.body.intent.acknowledged)
+	all, err := f1.raw.Get(f1.ctx, fmt.Sprintf("%sp/%02x/workspace-sync-recycling-", f1.b.namespace.Root(), workspace.partition), clientv3.WithPrefix())
+	require.NoError(t, err)
+	require.Len(t, all.Kvs, 2, "one permanent slot and one charged intent in the shared S1 partition")
+	t.Logf("distinct Backend/client/claim/workspace same namespace+partition+BudgetID; one original ACK=%d, other rejected; same worker process only", a.result.Reference.Revision)
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeGateFaults(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, fault := range []string{"slot-same-value-generation", "slot-birth", "intent-immutable", "restore", "whole-prefix", "claim-lost", "root-after-ack", "caller-canceled"} {
+		t.Run(fault, func(t *testing.T) {
+			f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+			require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+			_, err := s.reservePutIntent(f.ctx, body)
+			require.NoError(t, err)
+			d := body.intent
+			putCtx := f.ctx
+			switch fault {
+			case "slot-same-value-generation":
+				_, err = f.raw.Put(f.ctx, d.slotKey, d.slotValue)
+			case "slot-birth":
+				_, err = f.raw.Delete(f.ctx, d.slotKey) // operator-only ABA negative fixture
+				require.NoError(t, err)
+				_, err = f.raw.Put(f.ctx, d.slotKey, d.slotValue)
+			case "intent-immutable":
+				_, err = f.raw.Put(f.ctx, d.intentKey, d.value)
+			case "restore":
+				deferRestore(t, f)
+				_, err = f.raw.Put(f.ctx, f.b.restoreKey, "different-epoch")
+			case "whole-prefix":
+				_, err = f.raw.Put(f.ctx, s.archive.owner.prefix+"zz/future", "present")
+			case "claim-lost":
+				_, err = f.raw.Revoke(f.ctx, clientv3.LeaseID(f.c.reference.LeaseID))
+			case "root-after-ack":
+				err = os.Chmod(target.pin.Root, 0750)
+			case "caller-canceled":
+				ctx, cancel := context.WithCancel(f.ctx)
+				cancel()
+				putCtx = ctx
+			}
+			require.NoError(t, err)
+			_, err = s.putLocal(putCtx, body, target)
+			require.Error(t, err)
+			entries, err := os.ReadDir(target.pin.Root)
+			require.NoError(t, err)
+			require.Empty(t, entries, "no physical local file dispatch after failed original gate")
+			slot, err := f.raw.Get(f.ctx, d.slotKey)
+			require.NoError(t, err)
+			require.Len(t, slot.Kvs, 1, "failure never frees or deletes the charged slot")
+			intent, err := f.raw.Get(f.ctx, d.intentKey)
+			require.NoError(t, err)
+			require.Len(t, intent.Kvs, 1, "failure retains immutable charge")
+		})
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingNativePostguardClose(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	_, err := s.reservePutIntent(f.ctx, body)
+	require.NoError(t, err)
+	p, err := s.prepareLocalPut(f.ctx, body, target)
+	require.NoError(t, err)
+	require.Equal(t, 59, p.nodes)
+	t.Logf("profile2 native gate nodes=%d request=%d actualResponse=%d successReply=%d failureReply=%d", p.nodes, p.requestBytes, p.responseBytes, p.successBytes, p.failureBytes)
+	observed, resume := make(chan struct{}), make(chan struct{})
+	p.mu.Lock()
+	p.probeComplete = func() { close(observed); <-resume }
+	p.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- p.guard() }()
+	select {
+	case <-observed:
+	case <-time.After(5 * time.Second):
+		close(resume)
+		t.Fatal("actual physical postguard was not observed")
+	}
+	nativeFree := s.archive.owner.nativeMu.TryLock()
+	if nativeFree {
+		s.archive.owner.nativeMu.Unlock()
+	}
+	joined := make(chan error, 3)
+	go func() { joined <- p.Close() }()
+	go func() { joined <- target.Close() }()
+	go func() { joined <- s.Close() }()
+	early := 0
+	select {
+	case err := <-joined:
+		early++
+		t.Errorf("Close returned while original physical postguard pending: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(resume)
+	require.NoError(t, <-done)
+	for i := early; i < 3; i++ {
+		require.NoError(t, <-joined)
+	}
+	require.True(t, nativeFree, "nativeMu must be free throughout the actual physical postguard")
+	t.Log("original owner/source/target Close waited actual physical postguard; nativeMu free")
+}
+
+// Controlled transport loss retains the exact original native Txn. It models
+// an escaped request; it is not a replacement etcd implementation or partition.
+type recyclingLateKV struct {
+	clientv3.KV
+	ctx    context.Context
+	gate   chan struct{}
+	done   chan error
+	joined chan struct{}
+	writes atomic.Int32
+}
+
+func (kv *recyclingLateKV) Txn(ctx context.Context) clientv3.Txn {
+	return &recyclingLateTxn{Txn: kv.KV.Txn(ctx), owner: kv}
+}
+
+type recyclingLateTxn struct {
+	clientv3.Txn
+	owner *recyclingLateKV
+	cmps  []clientv3.Cmp
+	late  bool
+}
+
+func (txn *recyclingLateTxn) If(cmps ...clientv3.Cmp) clientv3.Txn {
+	txn.cmps = cmps
+	txn.Txn = txn.Txn.If(cmps...)
+	return txn
+}
+
+func (txn *recyclingLateTxn) Then(ops ...clientv3.Op) clientv3.Txn {
+	txn.late = recyclingPutMatch(ops)
+	if txn.late {
+		txn.Txn = txn.owner.KV.Txn(txn.owner.ctx).If(txn.cmps...).Then(ops...)
+	} else {
+		txn.Txn = txn.Txn.Then(ops...)
+	}
+	return txn
+}
+
+func (txn *recyclingLateTxn) Else(ops ...clientv3.Op) clientv3.Txn {
+	txn.Txn = txn.Txn.Else(ops...)
+	return txn
+}
+
+func (txn *recyclingLateTxn) Commit() (*clientv3.TxnResponse, error) {
+	if !txn.late {
+		return txn.Txn.Commit()
+	}
+	txn.owner.writes.Add(1)
+	go func() {
+		defer close(txn.owner.joined)
+		select {
+		case <-txn.owner.gate:
+		case <-txn.owner.ctx.Done():
+			txn.owner.done <- txn.owner.ctx.Err()
+			return
+		}
+		r, err := txn.Txn.Commit()
+		if err == nil && !r.Succeeded {
+			err = ErrConflict
+		}
+		txn.owner.done <- err
+	}()
+	return nil, context.DeadlineExceeded
+}
+
+func TestTaskWorkspaceSyncRecyclingNativeUnknownAbsent(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspaceSyncIdentity(t, "local", "test-storage", "bucket", "team/project/")})
+	require.NoError(t, err)
+	f, s, body, target := workspaceSyncRecyclingNativeBody(t, plan, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 2, 4096}, nil)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	transportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	late := &recyclingLateKV{KV: f.b.client.KV, ctx: transportCtx, gate: make(chan struct{}), done: make(chan error, 1), joined: make(chan struct{})}
+	t.Cleanup(func() {
+		cancel()
+		if late.writes.Load() != 0 {
+			select {
+			case <-late.joined:
+			case <-time.After(5 * time.Second):
+				t.Error("actual original escaped native transaction did not join")
+			}
+		}
+	})
+	workspaceSyncIntentSetKV(s, late)
+	unknown, err := s.reservePutIntent(f.ctx, body)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	d := body.intent
+	for i := 0; i < 2; i++ {
+		read, err := s.reservePutIntent(f.ctx, body)
+		require.ErrorIs(t, err, ErrOutcomeUnknown)
+		require.Equal(t, unknown, read, "absence never changes the escaped request's fixed candidate")
+	}
+	require.EqualValues(t, 1, late.writes.Load())
+	otherRef := d.record.Reference
+	otherRef.Slot = (otherRef.Slot + 1) % 2
+	_, otherKey, err := f.b.workspaceSyncRecyclingKeys(otherRef)
+	require.NoError(t, err)
+	other, err := f.raw.Get(f.ctx, otherKey)
+	require.NoError(t, err)
+	require.Len(t, other.Kvs, 1)
+	otherSlot, err := decodeWorkspaceSyncRecyclingSlot(other.Kvs[0])
+	require.NoError(t, err)
+	require.Equal(t, "free", otherSlot.State, "available alternate slot cannot cause an unknown original request to retarget")
+	require.EqualValues(t, 1, other.Kvs[0].Version)
+	close(late.gate)
+	require.NoError(t, <-late.done, "only the actual originally escaped native transaction eventually commits")
+	<-late.joined
+	read, err := s.reservePutIntent(f.ctx, body)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, read.Outcome)
+	require.False(t, d.acknowledged)
+	require.EqualValues(t, 1, late.writes.Load())
+	_, err = s.putLocal(f.ctx, body, target)
+	require.Error(t, err)
+	entries, err := os.ReadDir(target.pin.Root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+	t.Log("S2 fixed unknown candidate remained readonly while another free generation was available; one actual original late Txn committed without IO authority")
 }

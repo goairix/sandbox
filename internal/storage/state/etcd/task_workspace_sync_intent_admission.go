@@ -38,6 +38,12 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	if budget.profile == 2 && body.localTarget == nil {
 		return result, ErrInvalidRecord
 	}
+	if budget.profile == 2 {
+		if err := body.localTarget.begin(ctx); err != nil {
+			return result, err
+		}
+		defer body.localTarget.ops.Done() // Close joins reserve RPC and its postguard
+	}
 	if err := s.local(ctx); err != nil {
 		return result, err
 	}
@@ -65,6 +71,8 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	defer stopBody()
 	defer cancel()
 	if budget.profile == 2 {
+		stopTarget := context.AfterFunc(body.localTarget.ctx, cancel)
+		defer stopTarget()
 		return s.reserveRecyclingPutIntent(bounded, body, draft)
 	}
 	o.nativeMu.Lock()
@@ -218,7 +226,7 @@ func (s *PreparedTaskWorkspaceSyncSource) workspaceSyncIntentLocal(ctx context.C
 	}
 	body.mu.Lock()
 	defer body.mu.Unlock()
-	if body.closed || body.ctx.Err() != nil || body.bytes != 0 {
+	if body.closed || body.ctx.Err() != nil || body.bytes != 0 || body.localTarget != nil && body.localTarget.ctx.Err() != nil {
 		return ErrGuardExpired
 	}
 	return nil
