@@ -7,7 +7,18 @@ project="sandbox-workspace-sync-local-$$-$(date +%s)"
 fixture='workspace-sync-local'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 go_tool='/Users/dysodeng/go/go1.25.6/bin/go'
-if [[ $# != 1 || -z "$1" ]]; then echo 'usage: test-workspace-sync-local.sh EVIDENCE_DIRECTORY' >&2; exit 2; fi
+if [[ $# -lt 1 || $# -gt 2 || -z "$1" ]]; then echo 'usage: test-workspace-sync-local.sh EVIDENCE_DIRECTORY [postguard-proof|local-gate-proof|pending-proof|reap-retained]' >&2; exit 2; fi
+mode=${2:-normal}
+test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
+case "$mode" in
+  normal) ;;
+  postguard-proof) test_run='^TestTaskWorkspaceSyncLocalNativePostguardClose$';;
+  local-gate-proof) test_run='^TestTaskWorkspaceSyncLocalNative';;
+  pending-proof) test_run='^TestTaskWorkspaceSyncLocalNative$/^readonly-attribution-original-gate$';;
+  reap-retained) ;;
+  attach-owner) ;;
+  *) echo "unknown fixture mode $mode" >&2; exit 2;;
+esac
 mkdir -p "$1"
 evidence=$(cd "$1" && pwd)
 name="$project-native"
@@ -15,20 +26,42 @@ container=''
 attach=''
 join_failed=0
 
-join_attach() {
-  local pid=$1 grace status=0
-  kill -TERM "$pid" 2>/dev/null || true
-  grace=$((SECONDS+2))
-  while kill -0 "$pid" 2>/dev/null && (( SECONDS < grace )); do sleep 0.1; done
-  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
-  grace=$((SECONDS+2))
-  while kill -0 "$pid" 2>/dev/null && (( SECONDS < grace )); do sleep 0.1; done
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "attach PID=$pid project=$project fixture=$fixture joined=false retained=true" >>"$evidence/cleanup.log"
-    return 1
-  fi
-  wait "$pid" || status=$?
-  echo "attach PID=$pid exit=$status joined=true" >>"$evidence/cleanup.log"
+# Internal original owner runs in its own session, independently of the
+# bounded controller. Only this process publishes its actual attach Wait.
+if [[ "$mode" == attach-owner ]]; then
+  project=$(awk -F= '$1 == "project" {print $2}' "$evidence/attach-input.txt")
+  retained_fixture=$(awk -F= '$1 == "fixture" {print $2}' "$evidence/attach-input.txt")
+  container=$(awk -F= '$1 == "container" {print $2}' "$evidence/attach-input.txt")
+  [[ "$project" =~ ^sandbox-workspace-sync-local-[0-9]+-[0-9]+$ && "$retained_fixture" == "$fixture" && "$container" == "$project-native" ]] || exit 1
+  labels=$(docker inspect --format '{{index .Config.Labels "sandbox.test.project"}} {{index .Config.Labels "sandbox.test.fixture"}}' "$container")
+  [[ "$labels" == "$project $fixture" ]] || exit 1
+  owner_session=$(python3 -c 'import os; print(os.getsid(os.getppid()))')
+  printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s\n' "$project" "$fixture" "$container" "$$" "$owner_session" >"$evidence/attach-owner.txt"
+  docker start -a "$container" >"$evidence/native.log" 2>&1 &
+  actual_attach=$!
+  printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s attachPID=%s\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_attach" >"$evidence/attach-handle.txt"
+  actual_status=0
+  wait "$actual_attach" || actual_status=$?
+  printf '%s\n' "$actual_status" >"$evidence/attach-exit.txt"
+  printf 'project=%s fixture=%s container=%s ownerPID=%s session=%s attachPID=%s joined=true exit=%s\n' "$project" "$fixture" "$container" "$$" "$owner_session" "$actual_attach" "$actual_status" >"$evidence/attach-joined.tmp"
+  mv "$evidence/attach-joined.tmp" "$evidence/attach-joined.txt"
+  printf 'ownerPID=%s session=%s actualAttachWait=true exit=%s supervisorEnding=true\n' "$$" "$owner_session" "$actual_status" >"$evidence/attach-owner-ending.txt"
+  exit "$actual_status"
+fi
+
+child_joins_complete() {
+  local i count
+  [[ -f "$evidence/native.log" ]] || return 1
+  for i in 1 2 3; do
+    count=$(grep -Ec "^native etcd child name=local$i pid=[0-9]+ joined=true exit=" "$evidence/native.log") || return 1
+    [[ "$count" == 1 ]] || return 1
+    [[ $(grep -Fxc "BEGIN RAW ETCD CHILD local$i" "$evidence/native.log") == 1 ]] || return 1
+    [[ $(grep -Fxc "END RAW ETCD CHILD local$i" "$evidence/native.log") == 1 ]] || return 1
+  done
+}
+
+attach_join_complete() {
+  [[ -f "$evidence/attach-owner.txt" && -f "$evidence/attach-joined.txt" ]] && grep -Fq "project=$project fixture=$fixture container=$container ownerPID=" "$evidence/attach-owner.txt" && grep -Fq "$(<"$evidence/attach-owner.txt") attachPID=" "$evidence/attach-joined.txt" && grep -Fq ' joined=true ' "$evidence/attach-joined.txt"
 }
 
 cleanup() {
@@ -41,11 +74,7 @@ cleanup() {
         failed=1
       else
         terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}}' "$container") || { failed=1; terminal='unknown'; }
-        if [[ "$terminal" == *' true' ]]; then
-          docker kill "$container" >>"$evidence/cleanup.log" 2>&1 || failed=1
-          terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}}' "$container") || { failed=1; terminal='unknown'; }
-        fi
-        if [[ "$terminal" == 'exited false' ]]; then
+        if [[ "$terminal" == 'exited false' ]] && child_joins_complete && attach_join_complete; then
           wait_exit=0
           waited=$(docker wait "$container") || wait_exit=$?
           echo "container=$container terminal=$terminal waitCommandExit=$wait_exit processWait=$waited" >>"$evidence/cleanup.log"
@@ -59,14 +88,21 @@ cleanup() {
         elif [[ "$terminal" == 'created false' ]]; then
           docker rm "$container" >>"$evidence/cleanup.log" 2>&1 || failed=1
         else
-          echo "container=$container terminal=$terminal retained=true" >>"$evidence/cleanup.log"
+          echo "container=$container terminal=$terminal childJoins=incomplete-or-attach-pending attachOwnerPID=${attach:-recorded} retained=true" >>"$evidence/cleanup.log"
+          printf 'project=%s\nfixture=%s\ncontainer=%s\nattachOwnerPID=%s\nevidence=%s\n' "$project" "$fixture" "$container" "${attach:-recorded}" "$evidence" >"$evidence/retained-handle.txt"
           failed=1
         fi
       fi
     else failed=1; fi
   fi
   if [[ -n "$attach" ]]; then
-    if join_attach "$attach"; then attach=''; else failed=1; join_failed=1; fi
+    if child_joins_complete && attach_join_complete; then
+      echo "attach owner PID=$attach observed actual attach Wait marker; supervisor lifecycle separately recorded" >>"$evidence/cleanup.log"
+      attach=''
+    else
+      echo "attach owner PID=$attach project=$project fixture=$fixture retained=true; original supervisor continues actual attach Wait" >>"$evidence/cleanup.log"
+      failed=1
+    fi
   fi
   for kind in container volume network; do
     case "$kind" in
@@ -78,11 +114,26 @@ cleanup() {
     [[ -z "$remaining" ]] || failed=1
   done
   if (( original != 0 || failed != 0 )); then echo "local fixture failed; retainedAttachPID=${attach:-none}; evidence=$evidence" >&2; exit 1; fi
-  echo "local native gate verified; three original servers joined; exact owned inventories empty; evidence=$evidence"
+  if [[ "$mode" == reap-retained ]]; then
+    echo "retained original ownership joined; exact owned inventories empty; evidence=$evidence"
+  else
+    echo "local native gate verified; three original servers joined; exact owned inventories empty; evidence=$evidence"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [[ "$mode" == reap-retained ]]; then
+  project=$(awk -F= '$1 == "project" {print $2}' "$evidence/retained-handle.txt")
+  retained_fixture=$(awk -F= '$1 == "fixture" {print $2}' "$evidence/retained-handle.txt")
+  container=$(awk -F= '$1 == "container" {print $2}' "$evidence/retained-handle.txt")
+  [[ "$project" =~ ^sandbox-workspace-sync-local-[0-9]+-[0-9]+$ && "$retained_fixture" == "$fixture" && "$container" == "$project-native" ]] || exit 1
+  child_joins_complete && attach_join_complete || exit 1
+  # EXIT cleanup freshly checks exact labels, Docker terminal/wait, and all
+  # observed original child/attach joins before removing this retained handle.
+  exit 0
+fi
 
 platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")
 case "$platform" in linux/arm64) arch=arm64;; linux/amd64) arch=amd64;; *) echo "unsupported local platform $platform" >&2; exit 1;; esac
@@ -113,36 +164,40 @@ source_files=(
 chmod 755 "$evidence/workspace-sync-local.test"
 shasum -a 256 "$evidence/workspace-sync-local.test" >"$evidence/binary-sha256.txt"
 "$go_tool" version -m "$evidence/workspace-sync-local.test" >"$evidence/binary-build-info.txt"
+pending_proof=0
+[[ "$mode" != pending-proof ]] || pending_proof=1
 docker create --pull=never --name "$name" --label "sandbox.test.project=$project" --label "sandbox.test.fixture=$fixture" \
   --network none --user 65532:65532 --read-only --memory 512m --pids-limit 256 --cpus 2 \
   --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /work:rw,nosuid,nodev,noexec,size=512m,mode=1777 \
   --mount "type=bind,src=$evidence/workspace-sync-local.test,dst=/workspace-sync-local.test,readonly" \
-  --env SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE=1 --env GOMAXPROCS=2 \
+  --env SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE=1 --env "SANDBOX_WORKSPACE_SYNC_LOCAL_PENDING_PROOF=$pending_proof" --env GOMAXPROCS=2 \
   --entrypoint /workspace-sync-local.test "$image" \
-  -test.run '^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)' \
+  -test.run "$test_run" \
   -test.v -test.count=1 -test.timeout=240s >"$evidence/container-id.txt"
 container="$name"
 docker inspect --format '{{.Id}} user={{.Config.User}} capAdd={{.HostConfig.CapAdd}} capDrop={{.HostConfig.CapDrop}} security={{.HostConfig.SecurityOpt}} readonly={{.HostConfig.ReadonlyRootfs}} network={{.HostConfig.NetworkMode}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} cpus={{.HostConfig.NanoCpus}} tmpfs={{.HostConfig.Tmpfs}}' "$container" >"$evidence/container-config.txt"
-docker start -a "$container" >"$evidence/native.log" 2>&1 &
-attach=$!
+# The launcher does not own attach; the dedicated session owner above does.
+printf 'project=%s\nfixture=%s\ncontainer=%s\n' "$project" "$fixture" "$container" >"$evidence/attach-input.txt"
+attach=$(python3 -c 'import subprocess,sys; log=open(sys.argv[3],"ab",buffering=0); p=subprocess.Popen(["bash",sys.argv[1],sys.argv[2],"attach-owner"],start_new_session=True,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT); print(p.pid)' "$repo/scripts/test-workspace-sync-local.sh" "$evidence" "$evidence/attach-owner.log")
+printf 'ownerPID=%s session=%s launch=start_new_session\n' "$attach" "$attach" >"$evidence/attach-launch.txt"
 deadline=$((SECONDS+270))
-while kill -0 "$attach" 2>/dev/null; do
+[[ "$mode" != pending-proof ]] || deadline=$((SECONDS+18))
+while ! attach_join_complete; do
+  kill -0 "$attach" 2>/dev/null || { echo 'original attach owner exited without a Wait marker' >&2; exit 1; }
   if (( SECONDS >= deadline )); then
     echo 'native attach timeout' >&2
-    docker kill "$container" >>"$evidence/native.log" 2>&1 || true
-    if join_attach "$attach"; then attach=''; else join_failed=1; fi
+    echo "controller deadline; original attachOwnerPID=$attach container=$container project=$project fixture=$fixture retained=true" >>"$evidence/cleanup.log"
     exit 1
   fi
   sleep 0.2
 done
-attach_exit=0
-wait "$attach" || attach_exit=$?
-attach=''
+attach_exit=$(<"$evidence/attach-exit.txt")
+[[ "$attach_exit" =~ ^[0-9]+$ ]] || exit 1
 terminal=$(docker inspect --format '{{.State.Status}} {{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}' "$container")
 printf 'attachExit=%s joined=true terminal=%s\n' "$attach_exit" "$terminal" >"$evidence/result.txt"
 [[ "$attach_exit" == 0 && "$terminal" == 'exited false false 0' ]] || exit 1
 grep -Fxq PASS "$evidence/native.log"
-[[ $(grep -c 'native etcd child .*joined=true' "$evidence/native.log") == 3 ]] || exit 1
+child_joins_complete && attach_join_complete || exit 1
 counts=$(awk '/^[[:space:]]*--- PASS:/ {p++} /^[[:space:]]*--- FAIL:/ {f++} /^[[:space:]]*--- SKIP:/ {s++} END {printf "PASS=%d FAIL=%d SKIP=%d",p,f,s}' "$evidence/native.log")
 echo "$counts" >"$evidence/counts.txt"
 [[ "$counts" == *' FAIL=0 SKIP=0' ]] || exit 1

@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,6 +31,30 @@ func TestTaskWorkspaceSyncLocalRecords(t *testing.T) {
 	decoded, err := decodeWorkspaceSyncIntent(kv, 4096)
 	require.NoError(t, err)
 	require.Equal(t, r, decoded)
+	localWire, err := json.Marshal(r.Local)
+	require.NoError(t, err)
+	workerWire, err := json.Marshal(r.Local.Worker)
+	require.NoError(t, err)
+	for _, fault := range []struct{ name, old, replacement string }{
+		{"absent-local", `,"local":` + string(localWire), ""},
+		{"null-local", `"local":` + string(localWire), `"local":null`},
+		{"absent-worker", `"worker":` + string(workerWire) + ",", ""},
+		{"null-worker", `"worker":` + string(workerWire), `"worker":null`},
+		{"absent-worker-field", `"StartTicks":10,`, ""},
+		{"null-worker-field", `"StartTicks":10`, `"StartTicks":null`},
+		{"absent-root", `"root":"/work/root",`, ""},
+		{"null-root", `"root":"/work/root"`, `"root":null`},
+		{"absent-top-field", `"kind":"put_object",`, ""},
+		{"null-top-field", `"kind":"put_object"`, `"kind":null`},
+	} {
+		t.Run("decode-"+fault.name, func(t *testing.T) {
+			bad := *kv
+			bad.Value = []byte(strings.Replace(value, fault.old, fault.replacement, 1))
+			require.NotEqual(t, value, string(bad.Value), "fault must change the canonical wire")
+			_, err := decodeWorkspaceSyncIntent(&bad, 4096)
+			require.ErrorIs(t, err, ErrCorruptRecord)
+		})
+	}
 	for _, fault := range []string{"missing", "provider", "worker", "root", "dev", "inode", "mount", "filesystem", "filesystem-name", "owner", "bound"} {
 		t.Run(fault, func(t *testing.T) {
 			bad := r

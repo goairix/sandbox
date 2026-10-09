@@ -111,7 +111,12 @@ func (p *taskWorkspaceSyncLocalPut) guard() error {
 	}
 	o, b := s.archive.owner, s.archive.owner.backend
 	o.nativeMu.Lock()
-	defer o.nativeMu.Unlock()
+	nativeLocked := true
+	defer func() {
+		if nativeLocked {
+			o.nativeMu.Unlock()
+		}
+	}()
 	if err := s.local(p.ctx); err != nil {
 		return err
 	}
@@ -165,5 +170,14 @@ func (p *taskWorkspaceSyncLocalPut) guard() error {
 	if string(points[0].Value) != d.value || string(points[1].Value) != d.slotValue || points[0].CreateRevision != d.revision || points[1].CreateRevision != d.revision || intent.Version != 2 || intent.Local == nil || *intent.Local != target.pin || intent.Reference != d.record.Reference || intent.BudgetRevision != b.workspaceSyncBudget.create || slot.IntentDigest != workspaceSyncIntentDigest(d.value) {
 		return ErrCorruptRecord
 	}
-	return errors.Join(s.local(p.ctx), target.check(p.ctx))
+	o.nativeMu.Unlock() // fully validated native response; physical postguard is outside
+	nativeLocked = false
+	postErr := errors.Join(s.local(p.ctx), target.check(p.ctx))
+	p.mu.Lock()
+	probeComplete := p.probeComplete
+	p.mu.Unlock()
+	if probeComplete != nil {
+		probeComplete()
+	}
+	return postErr
 }

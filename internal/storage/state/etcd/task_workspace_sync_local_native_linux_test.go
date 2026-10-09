@@ -67,17 +67,19 @@ func workspaceSyncLocalNativeMain(m *testing.M) (code int) {
 			_ = s.cmd.Process.Signal(syscall.SIGTERM)
 			select {
 			case <-s.done:
-				fmt.Printf("native etcd child name=%s pid=%d joined=true exit=%v\n", s.name, s.cmd.Process.Pid, s.waitErr)
 			case <-time.After(3 * time.Second):
 				_ = s.cmd.Process.Kill()
 				select {
 				case <-s.done:
-					fmt.Printf("native etcd child name=%s pid=%d killed=true joined=true exit=%v\n", s.name, s.cmd.Process.Pid, s.waitErr)
 				case <-time.After(3 * time.Second):
-					fmt.Printf("native etcd child name=%s pid=%d joined=false retained=true\n", s.name, s.cmd.Process.Pid)
+					fmt.Printf("native etcd child name=%s pid=%d owner_pid=%d joined=false retained=true\n", s.name, s.cmd.Process.Pid, os.Getpid())
 					code = 1
+					// Bounded stop attempts are not a join. Preserve this original
+					// process/log owner indefinitely until actual Wait is observed.
+					<-s.done
 				}
 			}
+			fmt.Printf("native etcd child name=%s pid=%d joined=true exit=%v\n", s.name, s.cmd.Process.Pid, s.waitErr)
 			if err := s.log.Close(); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				code = 1
@@ -119,7 +121,21 @@ func workspaceSyncLocalNativeMain(m *testing.M) (code int) {
 		}
 		s := &workspaceSyncLocalServer{cmd: cmd, log: log, done: make(chan struct{}), name: name}
 		servers = append(servers, s) // retain each original child before next start
-		go func() { s.waitErr = s.cmd.Wait(); close(s.done) }()
+		go func() {
+			s.waitErr = s.cmd.Wait()
+			if os.Getenv("SANDBOX_WORKSPACE_SYNC_LOCAL_PENDING_PROOF") == "1" && s.name == "local1" {
+				// Explicit fixture seam delays only publication after a real Wait
+				// returned. It does not model an unkillable kernel child.
+				fmt.Printf("native child wait name=%s pid=%d actual_wait_complete=true publication_pending=true\n", s.name, s.cmd.Process.Pid)
+				for {
+					if _, err := os.Stat("/work/release-local1-join"); err == nil {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			close(s.done)
+		}()
 		endpoints = append(endpoints, client)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -407,4 +423,45 @@ func TestTaskWorkspaceSyncLocalNative(t *testing.T) {
 		}
 		require.True(t, errors.Is(p.ctx.Err(), context.Canceled))
 	})
+}
+
+func TestTaskWorkspaceSyncLocalNativePostguardClose(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	f, s, body, target := workspaceSyncLocalNativeBody(t)
+	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
+	_, err := s.reservePutIntent(f.ctx, body)
+	require.NoError(t, err)
+	p, err := s.prepareLocalPut(f.ctx, body, target)
+	require.NoError(t, err)
+	observed, resume := make(chan struct{}), make(chan struct{})
+	p.mu.Lock()
+	p.probeComplete = func() { close(observed); <-resume }
+	p.mu.Unlock()
+	guardDone := make(chan error, 1)
+	go func() { guardDone <- p.guard() }()
+	<-observed // callback is after a real final physical target.check
+	free := s.archive.owner.nativeMu.TryLock()
+	if free {
+		s.archive.owner.nativeMu.Unlock()
+	}
+	joined := make(chan error, 3)
+	go func() { joined <- p.Close() }()
+	go func() { joined <- target.Close() }()
+	go func() { joined <- s.Close() }()
+	joinedCount := 0
+	select {
+	case err := <-joined:
+		joinedCount++
+		t.Errorf("Close returned while the original postguard owner was pending: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(resume)
+	require.NoError(t, <-guardDone)
+	for i := joinedCount; i < 3; i++ {
+		require.NoError(t, <-joined)
+	}
+	require.True(t, free, "nativeMu must be released before the final physical postguard")
+	t.Log("actual postguard observed; nativeMu free; original guard retained owner/source/target Close registrations")
 }

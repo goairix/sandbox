@@ -107,6 +107,8 @@ type taskWorkspaceSyncLocalPut struct {
 	successBytes  int
 	failureBytes  int
 	responseBytes int
+	// Test-only seam after an actual final target.check; protected by mu.
+	probeComplete func()
 }
 
 func (p *taskWorkspaceSyncLocalPut) release() {
