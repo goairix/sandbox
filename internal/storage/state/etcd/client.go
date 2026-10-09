@@ -38,6 +38,7 @@ type Options struct {
 	TaskQuiescenceIssuer             TaskQuiescenceIssuer
 	TaskWorkspaceArchiveIssuer       TaskWorkspaceArchiveIssuer
 	TaskWorkspaceArchiveSpool        *TaskWorkspaceArchiveSpoolOptions
+	TaskWorkspaceArchiveRecovery     *TaskWorkspaceArchiveRecoveryOptions
 	TaskWorkspaceSyncBudget          *TaskWorkspaceSyncBudgetOptions
 	TaskWorkspaceSyncRecyclingBudget *TaskWorkspaceSyncBudgetOptions
 }
@@ -69,6 +70,17 @@ type Backend struct {
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if o.TaskWorkspaceArchiveRecovery != nil {
+		if o.TaskWorkspaceArchiveSpool != nil || o.TaskWorkspaceSyncRecyclingBudget == nil {
+			return invalid("archive recovery requires recycling budget and excludes legacy spool")
+		}
+		if _, err := validateTaskArchiveRecovery(o.TaskWorkspaceArchiveRecovery); err != nil {
+			return invalid("archive recovery limits or directory")
+		}
+		if err := taskArchiveRecoverySupported(); err != nil {
+			return invalid("archive recovery requires Linux")
+		}
+	}
 	if o.TaskWorkspaceSyncBudget != nil && o.TaskWorkspaceSyncRecyclingBudget != nil {
 		return invalid("workspace sync budget profiles are mutually exclusive")
 	}
@@ -175,9 +187,6 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
-	if err := validateOptions(o); err != nil {
-		return nil, err
-	}
 	if o.TaskWorkspaceSyncBudget != nil {
 		owned := *o.TaskWorkspaceSyncBudget
 		o.TaskWorkspaceSyncBudget = &owned
@@ -189,6 +198,13 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if o.TaskWorkspaceArchiveSpool != nil {
 		owned := *o.TaskWorkspaceArchiveSpool
 		o.TaskWorkspaceArchiveSpool = &owned
+	}
+	if o.TaskWorkspaceArchiveRecovery != nil {
+		owned := *o.TaskWorkspaceArchiveRecovery
+		o.TaskWorkspaceArchiveRecovery = &owned
+	}
+	if err := validateOptions(o); err != nil {
+		return nil, err
 	}
 	if o.DialTimeout == 0 {
 		o.DialTimeout = 5 * time.Second
@@ -303,6 +319,15 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		b.archiveStore, err = newTaskArchiveStore(o.TaskWorkspaceArchiveSpool.Directory, o.TaskWorkspaceArchiveSpool.limits())
 		if err != nil {
 			return nil, fmt.Errorf("%w: open archive spool: %v", ErrInvalidConfiguration, err)
+		}
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if o.TaskWorkspaceArchiveRecovery != nil {
+		b.archiveStore, err = newTaskArchiveRecoveryStore(*o.TaskWorkspaceArchiveRecovery)
+		if err != nil {
+			return nil, fmt.Errorf("%w: open archive recovery: %v", ErrInvalidConfiguration, err)
 		}
 		if err = ctx.Err(); err != nil {
 			return nil, err

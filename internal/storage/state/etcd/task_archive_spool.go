@@ -49,7 +49,7 @@ func newTaskArchiveStore(directory string, l taskArchiveLimits) (*taskArchiveSto
 // Admission precedes file creation and any command or DATA IO. The only map
 // stores admitted original owners, never arbitrary archive paths.
 func (s *taskArchiveStore) reserve(ctx context.Context) (*taskArchiveSpool, error) {
-	if s == nil || s.self != s || ctx == nil {
+	if s == nil || s.self != s || ctx == nil || s.recovery != nil {
 		return nil, errTaskArchive
 	}
 	if err := ctx.Err(); err != nil {
@@ -116,13 +116,23 @@ func (r *taskArchiveSpool) close() error {
 	if consumer != nil {
 		<-consumer.done
 	}
-	err := taskArchiveRemove(s.root, r.name, r.file, r.identity)
+	var err error
+	if r.recovery != nil {
+		r.recovery.metadata.Wait() // actual metadata owners, including gate waiters
+		if r.file != nil {
+			err = r.file.Close()
+		}
+	} else {
+		err = taskArchiveRemove(s.root, r.name, r.file, r.identity)
+	}
 	s.mu.Lock()
 	if err == nil {
 		delete(s.spools, r)
-		s.jobs--
-		s.disk -= s.limits.JobBytes
-		s.memory -= s.indexBytes
+		if r.recovery == nil {
+			s.jobs--
+			s.disk -= s.limits.JobBytes
+			s.memory -= s.indexBytes
+		}
 		r.index = nil
 	}
 	r.closeErr = err

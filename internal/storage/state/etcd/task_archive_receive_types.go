@@ -34,6 +34,7 @@ type taskArchiveStore struct {
 	closed             bool
 	closeDone          chan struct{}
 	closeErr           error
+	recovery           *taskArchiveRecoveryStore
 }
 
 type taskArchiveSpool struct {
@@ -50,6 +51,7 @@ type taskArchiveSpool struct {
 	closeErr                 error
 	witness                  *taskReceivedArchive
 	consumer                 *PreparedTaskWorkspaceSyncSource // one immutable registration, store.mu
+	recovery                 *taskArchiveRecoveryOwner
 }
 
 type taskArchiveExpected struct {

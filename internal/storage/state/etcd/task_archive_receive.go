@@ -89,7 +89,7 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 			return nil, err
 		}
 		if kind == t.ArchiveData {
-			if uint64(len(data)) > s.limits.JobBytes-total {
+			if uint64(len(data)) > r.archiveBytesLimit()-total {
 				return nil, errTaskArchive
 			}
 			if err := bounded.Err(); err != nil {
