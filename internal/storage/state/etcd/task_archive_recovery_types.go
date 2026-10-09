@@ -1,6 +1,9 @@
 package etcd
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 const (
 	taskArchiveRecoveryMetadataBytes = 65536
@@ -114,4 +117,6 @@ type taskArchiveRecoveryOwner struct {
 	slot     uint32
 	manifest taskArchiveRecoveryManifest // only accessed with metadata gate held
 	metadata sync.WaitGroup              // Add under store.mu; Close seals then Wait
+	ctx      context.Context             // independent Close seal, not send/session expiry
+	cancel   context.CancelFunc
 }

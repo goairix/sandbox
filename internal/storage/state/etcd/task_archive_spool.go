@@ -109,6 +109,9 @@ func (r *taskArchiveSpool) close() error {
 	consumer := r.consumer
 	s.mu.Unlock()
 	r.cancel()
+	if r.recovery != nil {
+		r.recovery.cancel()
+	}
 	if consumer != nil {
 		consumer.cancel()
 	}
@@ -194,6 +197,9 @@ func (s *taskArchiveStore) sealAndCancel() {
 	s.mu.Unlock()
 	for _, r := range owners {
 		r.cancel()
+		if r.recovery != nil {
+			r.recovery.cancel()
+		}
 	}
 	for _, c := range consumers {
 		c.cancel()

@@ -272,7 +272,8 @@ func (s *taskArchiveStore) reserveRecovery(ctx context.Context, seed taskArchive
 	}
 	s.recovery.slots[slot].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, Quarantined: true}
 	owned, cancel := context.WithCancel(ctx)
-	r := &taskArchiveSpool{store: s, name: recoverySlotName(slot) + ".tar", ctx: owned, cancel: cancel, active: true, ownerDone: make(chan struct{}), recovery: &taskArchiveRecoveryOwner{slot: slot}}
+	life, closeCancel := context.WithCancel(context.Background())
+	r := &taskArchiveSpool{store: s, name: recoverySlotName(slot) + ".tar", ctx: owned, cancel: cancel, active: true, ownerDone: make(chan struct{}), recovery: &taskArchiveRecoveryOwner{slot: slot, ctx: life, cancel: closeCancel}}
 	r.self = r
 	s.spools[r] = struct{}{}
 	s.mu.Unlock()
@@ -291,10 +292,10 @@ func (r *taskArchiveSpool) recoveryGate(ctx context.Context) (func(), error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-r.ctx.Done():
-		return nil, r.ctx.Err()
+	case <-r.recovery.ctx.Done():
+		return nil, r.recovery.ctx.Err()
 	case <-r.store.recovery.gate:
-		if err := errors.Join(ctx.Err(), r.ctx.Err()); err != nil {
+		if err := errors.Join(ctx.Err(), r.recovery.ctx.Err()); err != nil {
 			r.store.recovery.gate <- struct{}{}
 			return nil, err
 		}
@@ -327,7 +328,7 @@ func (r *taskArchiveSpool) initializeRecovery(seed taskArchiveRecoverySeed) erro
 
 func (r *taskArchiveSpool) commitRecovery(ctx context.Context, next taskArchiveRecoveryManifest, existing bool) error {
 	s, recovery := r.store, r.store.recovery
-	if err := errors.Join(ctx.Err(), r.ctx.Err(), taskArchiveRecoveryCheckRoot(s.root, recovery.directory, recovery.root)); err != nil {
+	if err := errors.Join(ctx.Err(), r.recovery.ctx.Err(), taskArchiveRecoveryCheckRoot(s.root, recovery.directory, recovery.root)); err != nil {
 		return err
 	}
 	buf := s.recoveryBuffers()
@@ -356,7 +357,7 @@ func (r *taskArchiveSpool) commitRecovery(ctx context.Context, next taskArchiveR
 	s.mu.Lock()
 	s.recovery.slots[r.recovery.slot].diagnostic = recoveryDiagnostic(next)
 	s.mu.Unlock()
-	return errors.Join(ctx.Err(), r.ctx.Err(), taskArchiveRecoveryCheckRoot(s.root, recovery.directory, recovery.root))
+	return errors.Join(ctx.Err(), r.recovery.ctx.Err(), taskArchiveRecoveryCheckRoot(s.root, recovery.directory, recovery.root))
 }
 
 func (r *taskArchiveSpool) archiveBytesLimit() uint64 {
@@ -389,20 +390,23 @@ func (r *taskArchiveSpool) beginRecoveryMetadata(ctx context.Context) (context.C
 	}
 	s := r.store
 	s.mu.Lock()
-	if s.closed || r.closing || r.active || r.ctx.Err() != nil || ctx.Err() != nil {
+	if s.closed || r.closing || r.active || r.recovery.ctx.Err() != nil || ctx.Err() != nil {
 		s.mu.Unlock()
-		return nil, nil, errors.Join(errTaskArchive, ctx.Err(), r.ctx.Err())
+		return nil, nil, errors.Join(errTaskArchive, ctx.Err(), r.recovery.ctx.Err())
 	}
 	r.recovery.metadata.Add(1)
 	s.mu.Unlock()
 	bounded, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(r.ctx, cancel)
+	stop := context.AfterFunc(r.recovery.ctx, cancel)
 	return bounded, func() { stop(); cancel(); r.recovery.metadata.Done() }, nil
 }
 
 func (r *taskArchiveSpool) sealOriginalReceived(ctx context.Context, original *taskReceivedArchive) error {
 	if r != nil && r.self == r && r.store != nil && r.store.self == r.store && r.store.recovery == nil {
 		return nil
+	}
+	if r != nil && r.ctx != nil && r.ctx.Err() != nil {
+		return r.ctx.Err() // receiving and received seal retain original session expiry
 	}
 	bounded, finish, err := r.beginRecoveryMetadata(ctx)
 	if err != nil {
