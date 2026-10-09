@@ -30,9 +30,9 @@ v1strict/canonical兼容；v2checkpoint被legacy覆盖/降级；GC先释放后�
 
 **Binding context:** currentcode+trackedacceptancereports可读，CLOSEDOWN不可读；cwd /Users/dysodeng/project/go/cloud/sandbox，Go /Users/dysodeng/go/go1.25.6/bin/go；freshONEauthor/freshONEreviewer由Root派发。
 
-- [ ] Step 1: RED既有原始两文件GC无checkpoint，新增实际断言；host v1byte兼容/v2mandatorynullunknowndup/canonicallimits/invaliddigest/nativegeneration/64nodeworstcase。只focusedRED，不重放已经验收的套件。
-- [ ] Step 2: strictboundedv2wire及v1compat、deepcopy诊断、claimbundlevalidated读与legacyPrepare拒绝v2；hostrace相关cases与已有checkpoint/claim/records必要回归，通过后第一笔连贯source小提交。
-- [ ] Step 3: originalsettlement checkpointpin/newvalue/attemptonce、54pinpointread、GC61cmp+3write/failureempty，sharednativefailurepolicy；ACK3responses和unknownslotintentcheckpoint同点generation校验，保持originalpointer/lifetimes/currentguards。
-- [ ] Step 4: 真实两文件/65文件checkpoint+GC同MOD/ordinal/bound；checkpoint冲突/corrupt/missing/foreign/needs_reconciliation/unknownlostmalformedlate/reused、restoreclaimroot与Close新RPC/postguard，固定最少必要批次。若现有测试期待reply2，狭窄升级oracle，不重新完整49/154套件。
-- [ ] Step 5: hostrace scoped、nativeactual0SKIP、vet/cross/format/bash/exactdiff；保留失败/ENV告警、compiler真正选中输入与二进制源码绑定、原始childWait/controller/cleanup。自审原子性/budget/lifetime/schema，及时第二笔功能或限定测试提交，不累积一个巨型提交。
-- [ ] Step 6: OWN完整report/稳定manifest，Root独立review/fix≤3原authorreviewer、rawaudit与trackedacceptance，封闭此OWN；master未完成继续正常恢复/安全释放，禁止branchfinish/push/重复执行已完成任务。
+- [x] Step 1: RED既有原始两文件GC无checkpoint，新增实际断言；host v1byte兼容/v2mandatorynullunknowndup/canonicallimits/invaliddigest/nativegeneration/64nodeworstcase。只focusedRED，不重放已经验收的套件。
+- [x] Step 2: strictboundedv2wire及v1compat、deepcopy诊断、claimbundlevalidated读与legacyPrepare拒绝v2；hostrace相关cases与已有checkpoint/claim/records必要回归，通过后第一笔连贯source小提交。
+- [x] Step 3: originalsettlement checkpointpin/newvalue/attemptonce、54pinpointread、GC61cmp+3write/failureempty，sharednativefailurepolicy；ACK3responses和unknownslotintentcheckpoint同点generation校验，保持originalpointer/lifetimes/currentguards。
+- [x] Step 4: 真实两文件/65文件checkpoint+GC同MOD/ordinal/bound；checkpoint冲突/corrupt/missing/foreign/needs_reconciliation/unknownlostmalformedlate/reused、restoreclaimroot与Close新RPC/postguard，固定最少必要批次。若现有测试期待reply2，狭窄升级oracle，不重新完整49/154套件。
+- [x] Step 5: hostrace scoped、nativeactual0SKIP、vet/cross/format/bash/exactdiff；保留失败/ENV告警、compiler真正选中输入与二进制源码绑定、原始childWait/controller/cleanup。自审原子性/budget/lifetime/schema，及时第二笔功能或限定测试提交，不累积一个巨型提交。
+- [x] Step 6: OWN完整report/稳定manifest，Root独立review/fix≤3原authorreviewer、rawaudit与trackedacceptance，封闭此OWN；master未完成继续正常恢复/安全释放，禁止branchfinish/push/重复执行已完成任务。

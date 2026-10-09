@@ -2,7 +2,7 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
-最新已验收源码 `8d32040`/`7f67def`/审查修复`9d58c07`：原始成功 local witness 的持久 terminal、有预算 generation slot GC 和下一文件消费。修复前49实际 native叶/18 host race叶通过，S1实际65文件连续复用；R1当前源码限定4 native叶/5 host race叶通过，两组源码证明分开。独立复审 C0/I0/M1，Root1187 artifacts及27环境/81原始 child join与独立清理核对通过。见 `2026-10-09-workspace-sync-recycling-settlement-verification.md`。环境告警及首次 manifest 原字节未保存的 metadata 缺口明确披露；历史 child SIGKILL原因仍未知。当前开始持久 checkpoint/正常恢复；安全释放、生产接线与大N验收仍未完成，不能宣称生产迁移或容量性能通过。
+最新已验收源码 `7fd87c1`/`a483a7b`/`e398f41`：v1兼容/v2严格持久checkpoint、进度与generation GC原子64节点提交、unknown同点只读和Close等待。成功覆盖39不同native叶、最终host race14叶，65文件属于准确记录的提交前snapshot；较大批次14PASS/23FAIL和SIGKILL原因UNKNOWN仍保留，不称整轮可靠性通过。唯一review Missing0/Extra0/C0/I0/M1 Approved；Root354 artifacts、12源码绑定/9binary/目标包231编译输入、8环境24原始child join及独立清理通过。见 `2026-10-09-workspace-sync-checkpoint-verification.md`。正常恢复研究已形成，下一步补有预算归档持久manifest、重新打开与新权限接线；该研究不是恢复验收。主程序仍Redis，安全释放、生产接线、分区/FUSE/collector、大N容量、部署恢复与Redis移除均未完成。
 
 已按用户要求合入基分支修复 `52b4d4f`、`d543cf3`，合并提交 `7bca73a`。无冲突；三个受影响包 race/vet/Linuxarm64CGO0编译通过。见 `2026-10-08-base-quiesce-fixes-verification.md`。
 
