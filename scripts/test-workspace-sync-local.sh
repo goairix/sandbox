@@ -23,6 +23,11 @@ case "$mode" in
   recycling-admission) test_run='^TestTaskWorkspaceSyncRecyclingNativeAdmission$';;
   recycling-settlement) test_run='^TestTaskWorkspaceSyncRecyclingNativeSettlement$';;
   recycling-65) test_run='^TestTaskWorkspaceSyncRecyclingNativeSequential65$';;
+  checkpoint-core) test_run='^TestTaskWorkspaceSyncRecyclingNative(Settlement|Sequential65)$';;
+  checkpoint-faults) test_run='^TestTaskWorkspaceSyncRecyclingNativeCheckpoint';;
+  checkpoint-unknown) test_run='^TestTaskWorkspaceSyncRecyclingNative(CompletionUnknown|GCReusedUnknown)$/^gc-|^TestTaskWorkspaceSyncRecyclingNativeGCReusedUnknown$';;
+  checkpoint-guards) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionFences$/^gc-';;
+  checkpoint-close) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionClose$/^gc-';;
   recycling-settlement-authority) test_run='^TestTaskWorkspaceSyncRecyclingNativeSettlementAuthority$';;
   recycling-cursor) test_run='^TestTaskWorkspaceSyncRecyclingNativeCursorGate$';;
   recycling-terminal-unknown) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionUnknown$/^terminal-';;
@@ -202,6 +207,13 @@ docker volume ls -q --filter "label=sandbox.test.project=$project" --filter "lab
 docker network ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-networks.txt"
 [[ ! -s "$evidence/pre-containers.txt" && ! -s "$evidence/pre-volumes.txt" && ! -s "$evidence/pre-networks.txt" ]] || { echo 'exact project pre-inventory is not empty' >&2; exit 1; }
 source_files=(
+  internal/storage/state/etcd/task_records.go
+  internal/storage/state/etcd/task_claim_records.go
+  internal/storage/state/etcd/task_checkpoint.go
+  internal/storage/state/etcd/task_read.go
+  internal/storage/state/etcd/task_workspace_sync_checkpoint_records.go
+  internal/storage/state/etcd/task_workspace_sync_checkpoint.go
+  internal/storage/state/etcd/task_workspace_sync_checkpoint_test.go
   internal/storage/state/etcd/task_workspace_sync_recycling_settlement.go
   internal/storage/state/etcd/task_workspace_sync_recycling_gc.go
   internal/storage/state/etcd/task_workspace_sync_recycling_settlement_test.go
@@ -235,8 +247,16 @@ source_files=(
 (
   cd "$repo"
   shasum -a 256 "${source_files[@]}" >"$evidence/source-sha256.txt"
+  git rev-parse HEAD >"$evidence/working-head.txt"
+  git branch --show-current >"$evidence/working-branch.txt"
+  git status --short -- "${source_files[@]}" >"$evidence/working-source-status.txt"
+  git diff -- "${source_files[@]}" >"$evidence/working-source.diff"
+  env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -json ./internal/storage/state/etcd >"$evidence/compiler-package.json"
+  python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print("\n".join(p["Dir"]+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[])))' "$evidence/compiler-package.json" >"$evidence/compiler-selected-inputs.txt"
+  xargs shasum -a 256 <"$evidence/compiler-selected-inputs.txt" >"$evidence/compiler-selected-sha256.txt"
   env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" test -c -o "$evidence/workspace-sync-local.test" ./internal/storage/state/etcd
   shasum -a 256 -c "$evidence/source-sha256.txt" >"$evidence/source-build-match.txt"
+  shasum -a 256 -c "$evidence/compiler-selected-sha256.txt" >"$evidence/compiler-build-match.txt"
 ) >"$evidence/build.log" 2>&1
 chmod 755 "$evidence/workspace-sync-local.test"
 shasum -a 256 "$evidence/workspace-sync-local.test" >"$evidence/binary-sha256.txt"

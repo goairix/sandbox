@@ -32,6 +32,7 @@ type taskWorkspaceSyncLocalSettlement struct {
 	draft       *taskWorkspaceSyncIntentDraft
 	value       string
 	terminal    taskWorkspaceSyncRecyclingGeneration
+	checkpoint  *taskWorkspaceSyncCheckpointAttempt
 	attempted   bool
 	denied      bool
 	known       bool

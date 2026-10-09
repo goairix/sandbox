@@ -123,3 +123,52 @@ func TestTaskWorkspaceSyncCheckpointV1Compatibility(t *testing.T) {
 	require.NoError(t, decodeTaskCheckpointRecord(&mvccpb.KeyValue{CreateRevision: 11, ModRevision: 11, Value: []byte(wire + " ")}, &got), "v1 retains its original whitespace acceptance")
 	require.Equal(t, r, got)
 }
+
+func TestTaskWorkspaceSyncCheckpointCapture(t *testing.T) {
+	r := workspaceSyncCheckpointRecordFixture()
+	_, _, _, initial := taskTestRecords()
+	c := &TaskClaim{reference: TaskClaimReference{Task: r.Reference, ClaimID: r.ClaimID}, checkpointKey: r.Reference.Namespace + "checkpoint", birth: 11, initial: r.Attempt}
+	wire, err := encodeTaskCheckpointRecord(initial)
+	require.NoError(t, err)
+	kv := &mvccpb.KeyValue{Key: []byte(c.checkpointKey), Value: []byte(wire), CreateRevision: 11, ModRevision: 11, Version: 1}
+	p, err := captureWorkspaceSyncCheckpoint(kv, c, *r.WorkspaceSync)
+	require.NoError(t, err)
+	require.Equal(t, wire, p.before.value)
+	advanced := &mvccpb.KeyValue{Key: kv.Key, Value: []byte(p.value), CreateRevision: 11, ModRevision: 13, Version: 2}
+	next := *r.WorkspaceSync
+	next.ArchiveEntries, next.EntryOrdinal, next.BodyEnd = 3, 3, 1500
+	_, err = captureWorkspaceSyncCheckpoint(advanced, c, next)
+	require.ErrorIs(t, err, ErrConflict, "same claim cannot change archive binding")
+	next.ArchiveEntries = 2
+	next.EntryOrdinal = 2
+	_, err = captureWorkspaceSyncCheckpoint(advanced, c, next)
+	require.ErrorIs(t, err, ErrConflict, "ordinal must strictly advance")
+	for _, mutate := range []func(*mvccpb.KeyValue){
+		func(kv *mvccpb.KeyValue) { kv.ModRevision++ },
+		func(kv *mvccpb.KeyValue) { kv.CreateRevision++ },
+		func(kv *mvccpb.KeyValue) { kv.Version = math.MaxInt64 - 1 },
+		func(kv *mvccpb.KeyValue) { kv.Version = 2 },
+		func(kv *mvccpb.KeyValue) { kv.Lease = 1 },
+		func(kv *mvccpb.KeyValue) { kv.Value = append(bytes.Clone(kv.Value), ' ') },
+		func(kv *mvccpb.KeyValue) { kv.Key = []byte("foreign") },
+	} {
+		bad := *kv
+		mutate(&bad)
+		_, err := captureWorkspaceSyncCheckpoint(&bad, c, *r.WorkspaceSync)
+		require.Error(t, err)
+	}
+	_, err = captureWorkspaceSyncCheckpoint(nil, c, *r.WorkspaceSync)
+	require.ErrorIs(t, err, ErrCorruptRecord)
+	slot := &mvccpb.KeyValue{ModRevision: 13}
+	require.True(t, workspaceSyncCheckpointGenerationMatches(advanced, p, slot))
+	for _, mutate := range []func(*mvccpb.KeyValue){
+		func(kv *mvccpb.KeyValue) { kv.CreateRevision++ },
+		func(kv *mvccpb.KeyValue) { kv.ModRevision++ },
+		func(kv *mvccpb.KeyValue) { kv.Version++ },
+		func(kv *mvccpb.KeyValue) { kv.Value = []byte(p.before.value) },
+	} {
+		bad := *advanced
+		mutate(&bad)
+		require.False(t, workspaceSyncCheckpointGenerationMatches(&bad, p, slot), "same-point arbitration requires exact original next generation")
+	}
+}

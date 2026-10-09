@@ -146,9 +146,18 @@ func (s *PreparedTaskWorkspaceSyncSource) recyclingTerminalComparisons(d *taskWo
 }
 
 func (op *taskWorkspaceSyncSettlementOperation) native(cmps []clientv3.Cmp, success []clientv3.Op, protoSuccess []*pb.RequestOp, reply *pb.TxnResponse) (*clientv3.TxnResponse, error) {
+	return op.nativeFailure(cmps, success, protoSuccess, reply, false)
+}
+
+// The original GC spends all 64 nodes on comparisons and success writes.
+// Its private empty failure policy shares the same transport/wire/header checks.
+func (op *taskWorkspaceSyncSettlementOperation) nativeFailure(cmps []clientv3.Cmp, success []clientv3.Op, protoSuccess []*pb.RequestOp, reply *pb.TxnResponse, emptyFailure bool) (*clientv3.TxnResponse, error) {
 	o, b := op.source.archive.owner, op.source.archive.owner.backend
 	keys := []string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key}
 	values := []string{b.identityValue, b.restoreEpoch, b.workspaceSyncBudget.value}
+	if emptyFailure {
+		keys, values = nil, nil
+	}
 	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: protoSuccess, Failure: taskProtoPoints(keys)}
 	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{reply, taskProtoResponse(keys, values)}); err != nil {
 		return nil, err
@@ -172,6 +181,12 @@ func (op *taskWorkspaceSyncSettlementOperation) native(cmps []clientv3.Cmp, succ
 		return nil, errors.Join(ErrOutcomeUnknown, err)
 	}
 	if !r.Succeeded {
+		if emptyFailure {
+			if len(r.Responses) != 0 {
+				return nil, ErrOutcomeUnknown
+			}
+			return r, ErrConflict
+		}
 		points, err := workspaceSyncPointResponse(b, r, keys)
 		if err != nil {
 			return nil, errors.Join(ErrOutcomeUnknown, err)

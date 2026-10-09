@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -84,6 +85,43 @@ func workspaceSyncRecyclingNativeDefault(t *testing.T) (*quiescenceNativeFixture
 	return workspaceSyncRecyclingNativeBody(t, plan, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 1, 4096}, nil)
 }
 
+func workspaceSyncCheckpointInspectNative(t *testing.T, f *quiescenceNativeFixture, s *PreparedTaskWorkspaceSyncSource, body *taskWorkspaceSyncBody, q *taskWorkspaceSyncLocalSettlement, slot *mvccpb.KeyValue, version int64) {
+	t.Helper()
+	point, err := f.raw.Get(f.ctx, f.c.checkpointKey)
+	require.NoError(t, err)
+	require.Len(t, point.Kvs, 1)
+	kv := point.Kvs[0]
+	r, err := decodeTaskCheckpointAt(kv, f.c.reference.Task, f.c.birth, f.c.initial)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, r.Version)
+	require.Equal(t, version, kv.Version)
+	require.Equal(t, f.c.birth, kv.CreateRevision)
+	require.Equal(t, slot.ModRevision, kv.ModRevision)
+	require.Equal(t, f.c.reference.ClaimID, r.ClaimID)
+	p := r.WorkspaceSync
+	require.NotNil(t, p)
+	require.Equal(t, s.count, p.EntryOrdinal)
+	require.Equal(t, uint64(body.entry.offset+body.entry.size), p.BodyEnd)
+	require.Equal(t, s.diagnostics.Bytes, p.ArchiveBytes)
+	require.Equal(t, s.diagnostics.Entries, p.ArchiveEntries)
+	require.Equal(t, s.diagnostics.SHA256, p.ArchiveSHA256)
+	require.Equal(t, s.diagnostics.TicketDigest, p.TicketDigest)
+	require.Equal(t, s.plan.digest, p.PlanDigest)
+	require.Equal(t, body.intent.record.FinalSyncAttemptID, p.FinalSyncAttemptID)
+	require.Equal(t, workspaceSyncIntentDigest(body.entry.path), p.PathDigest)
+	require.Equal(t, body.entry.sha256, p.BodySHA256)
+	require.Equal(t, body.intent.record.Reference.IntentID, p.IntentID)
+	require.Equal(t, body.intent.revision, p.IntentBirth)
+	local, err := encodeOperationMetadata(*body.intent.record.Local, 16384)
+	require.NoError(t, err)
+	require.Equal(t, workspaceSyncIntentDigest(local), p.TargetDigest)
+	terminal, err := decodeWorkspaceSyncRecyclingSlot(&mvccpb.KeyValue{Value: []byte(q.value), CreateRevision: q.terminal.create, ModRevision: q.terminal.mod, Version: q.terminal.version})
+	require.NoError(t, err)
+	require.Equal(t, terminal.EvidenceDigest, p.EvidenceDigest)
+	require.LessOrEqual(t, len(kv.Value), 4096)
+	t.Logf("checkpoint original Create=%d MOD=%d Version=%d ordinal=%d bodyEnd=%d bytes=%d slotSameMOD=true", kv.CreateRevision, kv.ModRevision, kv.Version, p.EntryOrdinal, p.BodyEnd, len(kv.Value))
+}
+
 func TestTaskWorkspaceSyncRecyclingNativeSettlement(t *testing.T) {
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("explicit owned Linux native fixture required")
@@ -122,6 +160,12 @@ func TestTaskWorkspaceSyncRecyclingNativeSettlement(t *testing.T) {
 	intent, err := f.raw.Get(f.ctx, body.intent.intentKey)
 	require.NoError(t, err)
 	require.Empty(t, intent.Kvs)
+	checkpoint, err := f.raw.Get(f.ctx, s.archive.owner.claim.checkpointKey)
+	require.NoError(t, err)
+	require.Len(t, checkpoint.Kvs, 1)
+	require.Contains(t, string(checkpoint.Kvs[0].Value), `"workspace_sync":`, "original GC must persist progress in its existing checkpoint")
+	require.Equal(t, point.Kvs[0].ModRevision, checkpoint.Kvs[0].ModRevision, "free and progress must share the original native transaction")
+	workspaceSyncCheckpointInspectNative(t, f, s, body, terminal, point.Kvs[0], 2)
 	require.NoError(t, body.Close())
 	entry, err := s.next(f.ctx)
 	require.NoError(t, err)
@@ -144,6 +188,26 @@ func TestTaskWorkspaceSyncRecyclingNativeSettlement(t *testing.T) {
 	actual, err = os.ReadFile(filepath.Join(target.pin.Root, second.entry.path))
 	require.NoError(t, err)
 	require.Equal(t, "bye", string(actual))
+	point, err = f.raw.Get(f.ctx, second.intent.slotKey)
+	require.NoError(t, err)
+	workspaceSyncCheckpointInspectNative(t, f, s, second, terminal2, point.Kvs[0], 3)
+	diagnostic, err := f.b.LoadTaskCheckpoint(f.ctx, f.c.reference.Task)
+	require.NoError(t, err)
+	diagnostic.WorkspaceSync.BodyEnd = 1
+	again, err := f.b.LoadTaskCheckpoint(f.ctx, f.c.reference.Task)
+	require.NoError(t, err)
+	require.NotSame(t, diagnostic.WorkspaceSync, again.WorkspaceSync)
+	require.Equal(t, uint64(second.entry.offset+second.entry.size), again.WorkspaceSync.BodyEnd)
+	lease := &creationFaultLease{Lease: f.b.client.Lease}
+	f.b.client.Lease = lease
+	legacy, err := f.b.PrepareTaskCheckpoint(f.ctx, f.c, TaskCheckpointInput{StageID: "checkpoint", ExpectedRevision: point.Kvs[0].ModRevision, State: TaskCheckpointPending, DetailDigest: strings.Repeat("a", 64)}, 30*time.Second)
+	require.ErrorIs(t, err, ErrConflict)
+	require.Nil(t, legacy)
+	require.Zero(t, lease.grants.Load(), "legacy cannot downgrade v2 or allocate a stage")
+	require.NoError(t, f.b.ReleaseTaskClaim(f.ctx, f.c))
+	next, err := f.b.ClaimTask(f.ctx, f.c.reference.Task, "new-diagnostic-claim", 30*time.Second)
+	require.NoError(t, err, "strict claim bundle can validate v2 metadata under a new claim")
+	require.NoError(t, f.b.ReleaseTaskClaim(f.ctx, next))
 	t.Logf("original terminal and GC acknowledged; permanent slot create=%d mod=%d version=%d; next=%s", point.Kvs[0].CreateRevision, point.Kvs[0].ModRevision, point.Kvs[0].Version, entry.path)
 }
 
@@ -152,7 +216,7 @@ func recyclingTerminalMatch(ops []clientv3.Op) bool {
 }
 
 func recyclingGCMatch(ops []clientv3.Op) bool {
-	return len(ops) == 2 && ops[0].IsPut() && ops[1].IsDelete() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-slots/")
+	return len(ops) == 3 && ops[0].IsPut() && ops[1].IsDelete() && ops[2].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-slots/")
 }
 
 func workspaceSyncRecyclingNativeWritten(t *testing.T) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget, *taskWorkspaceSyncLocalWitness) {
@@ -383,7 +447,7 @@ func TestTaskWorkspaceSyncRecyclingNativeSequential65(t *testing.T) {
 			workspaceSyncIntentSetKV(s, &faultKV{KV: originalKV, match: recyclingGCMatch, before: func() {
 				free, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: d.record.Reference.BudgetID, Partition: d.record.Reference.Task.Partition, Slot: 0, State: "free"})
 				require.NoError(t, err)
-				oldGC = f.raw.Txn(f.ctx).If(s.recyclingGCComparisons(q)...).Then(clientv3.OpPut(d.slotKey, free), clientv3.OpDelete(d.intentKey))
+				oldGC = f.raw.Txn(f.ctx).If(s.recyclingGCComparisons(q)...).Then(clientv3.OpPut(d.slotKey, free), clientv3.OpDelete(d.intentKey), clientv3.OpPut(q.checkpoint.key, q.checkpoint.value))
 			}})
 		}
 		outcome, err := s.recycleLocal(f.ctx, q)
@@ -392,6 +456,7 @@ func TestTaskWorkspaceSyncRecyclingNativeSequential65(t *testing.T) {
 		point, err := f.raw.Get(f.ctx, d.slotKey)
 		require.NoError(t, err)
 		inspect("free", int64(i*3+4), point.Kvs[0].ModRevision, 1)
+		workspaceSyncCheckpointInspectNative(t, f, s, body, q, point.Kvs[0], int64(i+2))
 		if i == 0 {
 			workspaceSyncIntentSetKV(s, originalKV)
 		}

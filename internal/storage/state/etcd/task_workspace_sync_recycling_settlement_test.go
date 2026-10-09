@@ -65,6 +65,12 @@ func TestTaskWorkspaceSyncSettlementWireBounds(t *testing.T) {
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(value), 512)
 	q := &taskWorkspaceSyncLocalSettlement{draft: d, value: value, terminal: taskWorkspaceSyncRecyclingGeneration{create: 2, mod: 8, version: 3, value: value}}
+	checkpointRecord := workspaceSyncCheckpointRecordFixture()
+	checkpointValue, err := encodeTaskCheckpointRecord(checkpointRecord)
+	require.NoError(t, err)
+	checkpointKey, err := b.namespace.taskCheckpointKey(d.record.Reference.Task)
+	require.NoError(t, err)
+	q.checkpoint = &taskWorkspaceSyncCheckpointAttempt{key: checkpointKey, before: taskWorkspaceSyncRecyclingGeneration{create: 3, mod: 6, version: 1, value: strings.Repeat("c", 4096)}, value: checkpointValue}
 	ref := d.record.Reference
 	free, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: ref.BudgetID, Partition: ref.Task.Partition, Slot: ref.Slot, State: "free"})
 	require.NoError(t, err)
@@ -76,15 +82,18 @@ func TestTaskWorkspaceSyncSettlementWireBounds(t *testing.T) {
 			cmps := s.recyclingTerminalComparisons(d)
 			ops := []*pb.RequestOp{taskProtoPut(d.slotKey, value, 0)}
 			success := taskProtoPutResponse(1)
+			failureOps, failureReply := taskProtoPoints(failureKeys), failure
 			if stage == "gc" {
 				cmps = s.recyclingGCComparisons(q)
-				ops = taskProtoWrites([]Write{{Key: d.slotKey, Value: []byte(free)}, {Key: d.intentKey, Delete: true}})
+				ops = taskProtoWrites([]Write{{Key: d.slotKey, Value: []byte(free)}, {Key: d.intentKey, Delete: true}, {Key: checkpointKey, Value: []byte(checkpointValue)}})
 				success = recyclingGCReply()
+				failureOps, failureReply = nil, taskProtoResponse(nil, nil)
+				require.Len(t, cmps, 61)
 			}
-			request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: ops, Failure: taskProtoPoints(failureKeys)}
+			request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: ops, Failure: failureOps}
 			require.Equal(t, 64, len(request.Compare)+len(request.Success)+len(request.Failure))
-			require.NoError(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{success, failure}))
-			t.Logf("actual protobuf %s originalPins50 nodes64 request%d success%d failure%d intent%d slot%d", stage, request.Size(), success.Size(), failure.Size(), len(d.value), len(value))
+			require.NoError(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{success, failureReply}))
+			t.Logf("actual protobuf %s originalPins50 nodes64 request%d success%d failure%d intent%d slot%d checkpoint%d", stage, request.Size(), success.Size(), failureReply.Size(), len(d.value), len(value), len(checkpointValue))
 			request.Failure = append(request.Failure, taskProtoRange(b.identityKey))
 			require.ErrorIs(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, nil), ErrInvalidMutation)
 		})
