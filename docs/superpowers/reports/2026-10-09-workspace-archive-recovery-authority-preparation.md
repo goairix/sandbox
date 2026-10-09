@@ -1,0 +1,20 @@
+# 归档持久存储后的恢复权限接线研究
+
+这是只读代码研究，未实现、未运行测试，不是恢复验收。当前 manager 持久 archive 单元仍在实施；主程序仍 Redis。研究来自 fresh `workspace_archive_recovery_authority_design`，Root已核对现有receipt verifier允许历史session window，仍要求当前runtime certificate有效。
+
+- `BootstrapWorkspaceSyncWorker`约束并强化调用Go进程自身，`putLocal`直接执行Mkdirat/Ftruncate/Write/Fchmod/Fsync/Close；当前没有生产独立writer launcher或持久exec.Cmd。后续不能把结构化WorkerReference描述为已存在的进程supervisor。
+- transport已有`task_workspace_archive_query`：原context/ticket digest，无旧ticket/certificate/quiescence payload；要求单一ArchiveComplete、认证EOF和Session.Close实际返回，DATA/extra frame/关闭不明拒绝。Backend尚需私有query wrapper，不能用归属-only loader代替完整command解码。
+- 新wrapper需绑定fresh current claim，读完整immutable command/final-sync/quiescence/issuer并核对exact revisions/bytes、seed摘要、task出生、旧claim顺序及归档事实；传输前后有界native当前claim/history屏障。历史query不用过期发送ticket续权。
+- Supervisor历史query要求原attempt实际joinedSuccess/done/terminal/healthy，并重新观察无用户descendant；新鲜性来自当前认证查询，签名wire可能与旧receipt相同。runtime supervisor替换或journal丢失尚不在此路径覆盖内。
+- 新恢复authority必须是独立私有owner：Backend、fresh TaskClaim、charged fixedslot、immutablehistory、新鲜receipt、fresh实际worker session。复用PrepareAfterDualDrain，不填旧draft，不制造Prepared/Received/source/witness指针链或放宽原始验证器。
+- 对同进程同步IO profile，原始first binding和每次fresh recovery binding明确把实际writer与持锁store生命周期绑定；所有archive读、metadata、reserve、local IO、file/parent/root fsync、descriptor关闭、postguard、terminal/GC登记都实际join后才释放store锁。获取同一未替换store inode锁只能在此连接成立时排除遵守协议的旧session。
+- root rename/replacement须核对旧身份；不能通过锁一个新inode越过旧writer。CLOEXEC不防fork继承；禁止此profile委派detached writer/mmap/AIO/io_uring或不受控子进程。flock是可信代码的合作约束，不能抵抗任意同UID/root修改。
+- 不以kill(savedPID)、PID不存在、JSON BootID/starttime作为退出证明；pidfd是不能序列化的实际handle，Wait/reap依赖真实parent/supervisor所有权。新coldmanager需要实际session排除，不能“恢复原pidfd”。
+- checkpoint旧TargetDigest按manifest旧canonical attribution验证；另核对稳定root/storage身份，再建立新worker pin，不能将旧digest换成新worker摘要。最小恢复限定同host/boot/PID和mount namespace/storage连续性；跨boot的mount ID/dev-inode数值不是连续性证明。
+- 建议接续：receipt/history wrapper → actual writer session连接 → distinct recovery source → charged-intent reconciliation/cursor继续。每已有Job有固定注册，无按N新增actor/map、无etcd attempt日志。旧活writer未join时继续阻挡；cancel/deadline不是退款或释放许可。
+
+完整生产若manager与writer分进程，必须先有有界supervisor真实exec.Cmd/pidfd/session登记；实际writer自身持store/session锁，manager失败触发封入口/cancel并实际join或精确终止等待，所有descendant受控或禁止委派。此部分需在部署接线前实现，不能把同进程诊断恢复当作完整部署恢复。
+
+部署接线最短候选是manager＋独立syncworker＋跨manager重启存活的本机supervisor：每配置store一个worker，内部复用≤64固定Jobs，不按已有sandbox数启动进程。worker独占TAR/manifest/锁及完整claim/source/target/结算链；manager经有界IPC取诊断，不持写FD、不直接写manifest。supervisor保留真实Cmd/pidfd，登记和启动握手后才开放job；control失联先封提交，再cancel/join或信号原pidfd并实际Wait。manager持Docker/control权限，worker不能继承这些FD/环境或Docker组访问。现有Go指针不能跨IPC，真实authority必须在worker内建立。supervisor自身故障恢复另需服务管理器实际确认旧worker组已清空，不从manifest恢复PID句柄。该候选需后续具体设计和实测，不是已存在能力。
+
+producer/transfer期间故障、manager主机丢失和runtime supervisor重启另需目标侧有预算持久不可变archive、producer/transfer生命周期分离、新授权只读会话、旧会话实际join和存储连续性。本研究没有减少完整迁移这些要求。
