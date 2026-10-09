@@ -224,6 +224,23 @@ func main() {
 	}
 	defer fuseCredentials.Zero()
 
+	// Keep the Redis Store concrete so exactly one production FUSE repository
+	// wrapper owns its Lua state machine. The compile-time assertion documents
+	// the only broader capability the coordinator/session code relies on.
+	var redisStore *redisstate.Store
+	if cfg.Storage.State.Redis.Addr != "" || len(cfg.Storage.State.Redis.Addrs) > 0 {
+		redisStore, err = redisstate.New(ctx, redisOptionsFromConfig(cfg.Storage.State.Redis))
+		if err != nil {
+			log.Fatalf("failed to create redis state store: %v", err)
+		}
+		defer func() {
+			if closeErr := redisStore.Close(); closeErr != nil {
+				log.Print("Redis state store cleanup failed")
+			}
+		}()
+		var _ state.AtomicStore = redisStore
+	}
+
 	// Initialize the runtime with its own in-memory credential copy. Prepared
 	// containers and Pods remain credential-free until one-shot authorization.
 	var rt runtime.Runtime
@@ -251,6 +268,23 @@ func main() {
 		options = append(options, kubernetesAppArmorOptions(cfg.Runtime.Kubernetes, cfg.Workspace.Backend.LSMProfile, inspectOwners, *drainRelease)...)
 		if fuseEnabled {
 			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))
+			if !inspectOwners {
+				if redisStore == nil {
+					log.Fatal("FUSE workspace control requires Redis")
+				}
+				scope := os.Getenv("SANDBOX_STATE_SCOPE")
+				if scope == "" {
+					scope = cfg.Runtime.Kubernetes.Namespace
+				}
+				keyCtx, cancelKey := context.WithTimeout(ctx, 30*time.Second)
+				controlKey, keyErr := k8sruntime.LoadWorkspaceControlKey(keyCtx, redisStore, scope)
+				cancelKey()
+				if keyErr != nil {
+					log.Fatalf("failed to initialize workspace control authority: %v", keyErr)
+				}
+				options = append(options, k8sruntime.WithWorkspaceControlKey(controlKey))
+				defer clear(controlKey)
+			}
 		}
 		rt, err = k8sruntime.New(cfg.Runtime.Kubernetes.Kubeconfig, cfg.Runtime.Kubernetes.Namespace, options...)
 		if err != nil {
@@ -258,23 +292,6 @@ func main() {
 		}
 	default:
 		log.Fatalf("unknown runtime type: %s", cfg.Runtime.Type)
-	}
-
-	// Keep the Redis Store concrete so exactly one production FUSE repository
-	// wrapper owns its Lua state machine. The compile-time assertion documents
-	// the only broader capability the coordinator/session code relies on.
-	var redisStore *redisstate.Store
-	if cfg.Storage.State.Redis.Addr != "" || len(cfg.Storage.State.Redis.Addrs) > 0 {
-		redisStore, err = redisstate.New(ctx, redisOptionsFromConfig(cfg.Storage.State.Redis))
-		if err != nil {
-			log.Fatalf("failed to create redis state store: %v", err)
-		}
-		defer func() {
-			if closeErr := redisStore.Close(); closeErr != nil {
-				log.Print("Redis state store cleanup failed")
-			}
-		}()
-		var _ state.AtomicStore = redisStore
 	}
 
 	var fsys fs.FileSystem

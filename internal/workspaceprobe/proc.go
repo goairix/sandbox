@@ -23,19 +23,22 @@ func (p procFS) listSameUID(uid, selfPID int) ([]processIdentity, error) {
 		if err != nil || pid <= 0 || pid == selfPID || !entry.IsDir() {
 			continue
 		}
-		identity, err := p.identity(pid)
+		snapshot, err := p.stableGroupSnapshot(pid)
 		if err != nil {
-			if os.IsNotExist(err) {
+			// Only disappearance of the entire group can be skipped. Missing
+			// task evidence inside a still-existing group fails closed.
+			if _, statErr := os.Stat(filepath.Join(p.root, strconv.Itoa(pid))); os.IsNotExist(statErr) {
 				continue
 			}
 			return nil, err
 		}
-		// A dead leader may still have live sibling threads. Only a dead leader
-		// with exactly one remaining thread proves the whole group has exited.
-		// Keep other groups and all live states, including blocked I/O (D).
-		exited := (identity.State == 'Z' || identity.State == 'X' || identity.State == 'x') && identity.threads == 1
-		if identity.UID == uid && !exited {
-			result = append(result, identity)
+		sameUID, live := false, false
+		for _, task := range snapshot.tasks {
+			sameUID = sameUID || task.UID == uid
+			live = live || !isExitedTask(task.State)
+		}
+		if sameUID && live {
+			result = append(result, snapshot.identity())
 		}
 	}
 	return result, nil
@@ -45,8 +48,42 @@ func (p procFS) signal(pid int, signal syscall.Signal) error {
 	return syscall.Kill(pid, signal)
 }
 
+// procGroupSnapshot keeps task evidence local: the broker wire identity is
+// still the leader PID, UID and starttime.
+type procGroupSnapshot struct {
+	leader  processIdentity
+	tasks   []processIdentity
+	stopped bool
+}
+
+func isExitedTask(state byte) bool { return state == 'Z' || state == 'X' || state == 'x' }
+
+func (s procGroupSnapshot) identity() processIdentity {
+	identity := s.leader
+	if s.stopped {
+		identity.State = 'T'
+	} else if isStopped(identity.State) || isExitedTask(identity.State) {
+		// The leader may be stopped or dead while a sibling can still execute.
+		for _, task := range s.tasks {
+			if !isExitedTask(task.State) && !isStopped(task.State) {
+				identity.State = task.State
+				break
+			}
+		}
+	}
+	return identity
+}
+
 func (p procFS) identity(pid int) (processIdentity, error) {
-	stat, err := os.ReadFile(filepath.Join(p.root, strconv.Itoa(pid), "stat"))
+	snapshot, err := p.stableGroupSnapshot(pid)
+	if err != nil {
+		return processIdentity{}, err
+	}
+	return snapshot.identity(), nil
+}
+
+func readProcIdentity(dir string, pid int) (processIdentity, error) {
+	stat, err := os.ReadFile(filepath.Join(dir, "stat"))
 	if err != nil {
 		return processIdentity{}, err
 	}
@@ -54,34 +91,173 @@ func (p procFS) identity(pid int) (processIdentity, error) {
 	if err != nil {
 		return processIdentity{}, err
 	}
-	status, err := os.ReadFile(filepath.Join(p.root, strconv.Itoa(pid), "status"))
+	status, err := os.ReadFile(filepath.Join(dir, "status"))
 	if err != nil {
 		return processIdentity{}, err
 	}
-	uid, err := parseEffectiveUID(status)
+	identity.UID, err = parseEffectiveUID(status)
+	return identity, err
+}
+
+func readTaskIDs(dir string) ([]int, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return processIdentity{}, err
+		return nil, err
 	}
-	identity.UID = uid
-	return identity, nil
+	ids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		tid, err := strconv.Atoi(entry.Name())
+		if err != nil || tid <= 0 || !entry.IsDir() {
+			return nil, fmt.Errorf("unexpected proc task entry")
+		}
+		ids = append(ids, tid)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("empty proc task set")
+	}
+	return ids, nil
+}
+
+func (p procFS) groupSnapshot(pid int) (procGroupSnapshot, error) {
+	dir := filepath.Join(p.root, strconv.Itoa(pid))
+	leader, err := readProcIdentity(dir, pid)
+	if err != nil {
+		return procGroupSnapshot{}, err
+	}
+	taskDir := filepath.Join(dir, "task")
+	tids, err := readTaskIDs(taskDir)
+	if err != nil {
+		return procGroupSnapshot{}, err
+	}
+	if uint64(len(tids)) != leader.threads {
+		return procGroupSnapshot{}, fmt.Errorf("proc task count changed")
+	}
+	snapshot := procGroupSnapshot{leader: leader, stopped: true}
+	foundLeader, live := false, false
+	for _, tid := range tids {
+		task, err := readProcIdentity(filepath.Join(taskDir, strconv.Itoa(tid)), tid)
+		if err != nil {
+			return procGroupSnapshot{}, err
+		}
+		if task.threads != leader.threads {
+			return procGroupSnapshot{}, fmt.Errorf("proc task count changed")
+		}
+		if tid == pid {
+			if task.UID != leader.UID || task.StartTime != leader.StartTime {
+				return procGroupSnapshot{}, fmt.Errorf("proc leader identity changed")
+			}
+			snapshot.leader = task
+			foundLeader = true
+		}
+		if !isExitedTask(task.State) {
+			live = true
+			snapshot.stopped = snapshot.stopped && isStopped(task.State)
+		}
+		snapshot.tasks = append(snapshot.tasks, task)
+	}
+	if !foundLeader {
+		return procGroupSnapshot{}, fmt.Errorf("proc leader task is missing")
+	}
+	snapshot.stopped = snapshot.stopped && live
+	after, err := readTaskIDs(taskDir)
+	if err != nil {
+		return procGroupSnapshot{}, err
+	}
+	if len(tids) != len(after) {
+		return procGroupSnapshot{}, fmt.Errorf("proc task set changed")
+	}
+	for i, tid := range tids {
+		if tid != after[i] {
+			return procGroupSnapshot{}, fmt.Errorf("proc task set changed")
+		}
+	}
+	return snapshot, nil
+}
+
+func sameTaskIdentities(before, after procGroupSnapshot, requireSameState bool) bool {
+	if len(before.tasks) != len(after.tasks) {
+		return false
+	}
+	for i, task := range before.tasks {
+		current := after.tasks[i]
+		if task.PID != current.PID || task.UID != current.UID || task.StartTime != current.StartTime || task.threads != current.threads ||
+			(requireSameState && task.State != current.State) || isExitedTask(task.State) != isExitedTask(current.State) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p procFS) stableGroupSnapshot(pid int) (procGroupSnapshot, error) {
+	before, err := p.groupSnapshot(pid)
+	if err != nil {
+		return procGroupSnapshot{}, err
+	}
+	after, err := p.groupSnapshot(pid)
+	if err != nil {
+		return procGroupSnapshot{}, err
+	}
+	if !sameTaskIdentities(before, after, false) {
+		return procGroupSnapshot{}, fmt.Errorf("proc task identities changed")
+	}
+	// A running group can transition through S/R while SIGSTOP is pending.
+	// It only becomes stopped evidence when both complete passes prove it.
+	after.stopped = before.stopped && after.stopped
+	if !after.stopped && isStopped(after.leader.State) {
+		after.leader.State = 'R'
+	}
+	return after, nil
 }
 
 func (p procFS) descriptors(pid int) ([]descriptor, error) {
-	fdDir := filepath.Join(p.root, strconv.Itoa(pid), "fd")
+	before, err := p.stableGroupSnapshot(pid)
+	if err != nil {
+		return nil, err
+	}
+	if !before.stopped {
+		return nil, fmt.Errorf("proc thread group is not stopped")
+	}
+	result := make([]descriptor, 0)
+	for _, task := range before.tasks {
+		// Dead tasks have released their files; in particular, /proc/PID/fd
+		// may be unavailable once the group leader has exited.
+		if isExitedTask(task.State) {
+			continue
+		}
+		taskDir := filepath.Join(p.root, strconv.Itoa(pid), "task", strconv.Itoa(task.PID))
+		fds, err := readTaskDescriptors(taskDir)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, fds...)
+	}
+	after, err := p.stableGroupSnapshot(pid)
+	if err != nil {
+		return nil, err
+	}
+	if !after.stopped || !sameTaskIdentities(before, after, true) {
+		return nil, fmt.Errorf("proc task evidence changed during descriptor scan")
+	}
+	return result, nil
+}
+
+func readTaskDescriptors(taskDir string) ([]descriptor, error) {
+	fdDir := filepath.Join(taskDir, "fd")
 	entries, err := os.ReadDir(fdDir)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]descriptor, 0, len(entries))
 	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		fd, err := strconv.Atoi(entry.Name())
+		if err != nil || fd < 0 {
 			return nil, fmt.Errorf("unexpected descriptor name")
 		}
 		target, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
-		info, err := os.ReadFile(filepath.Join(p.root, strconv.Itoa(pid), "fdinfo", entry.Name()))
+		info, err := os.ReadFile(filepath.Join(taskDir, "fdinfo", entry.Name()))
 		if err != nil {
 			return nil, err
 		}

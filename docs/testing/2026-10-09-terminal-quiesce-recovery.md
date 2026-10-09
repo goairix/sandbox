@@ -44,6 +44,16 @@
 
 ## 发布要求
 
-必须从同一源码构建并配套发布 sandbox-api 和 sandbox-runtime 新镜像。Kubernetes warm pool contract 已升至 v4，避免复用旧模板池；该变化不能升级已发布 active Pod 内的 PID1。
+必须从同一源码构建并配套发布 sandbox-api 和 sandbox-runtime 新镜像。Kubernetes warm pool contract 已升至 v5，避免复用旧模板池；该变化不能升级已发布 active Pod 内的 PID1。
 
-发布前应通过现有服务正常回收旧 active FUSE runtime，确认 flush、卸载及 runtime 删除完成，再切换新 runtime 镜像与 API。仅更新 API、复用 v0.3.39 runtime 镜像，或给运行中的旧 Pod 单独替换探针，都不满足新协议。旧 PID1 不支持 cleanup fence 时新流程会保留归属并拒绝继续销毁，不能用强制删除或清空 Redis 绕过。
+使用本次更新的 Helm chart 发布。cleanup protocol v3 和 runtime control v5 会触发升级前排空；hook 使用已安装 API 镜像、原 env/envFrom、挂载和 Redis scope，旧服务按旧控制协议正常完成 flush、卸载、runtime 删除及状态收尾，再应用新 API/runtime 镜像。不能只更新 Deployment 绕开 hook。首次跨协议升级会终止现有沙盒实例，workspace 文件仍按正常持久化流程保存。跨协议 rollback 会被 fingerprint guard 拒绝；维护步骤与限制见 [Helm 升级文档](../deployment/helm-deployment-upgrade.md)。
+
+## 复审发现及补充修复
+
+- PID1 的 register/cleanup 只接受服务端 Ed25519 授权，绑定命令、exact runtime UID 和 lease generation。未授权或签名不匹配在修改 ledger 前拒绝，不能用错误 generation 永久毒化回收。签名经私有 exec stdin 传递，探针读入前关闭 dump。
+- 仅公钥进入 sandbox Pod 环境。每个 state scope 的签名 seed 由 Redis SetNX 持久化，跨 API 副本、重启及 API 密钥轮换保持一致；加载必须取得 durability ACK，异常或损坏不生成替代密钥。该记录属于控制 fencing 历史，无 TTL，release drain 不删除。
+- proc 核验遍历每个 /proc/PID/task/TID 的 UID、starttime、state 与 FD 表，核验前后 task 集合及身份稳定。leader T、worker D 不能成为暂停证明；leader 已退出但 sibling 全部停止时可以继续；线程私有的 workspace 可写 FD 必须拒绝 flush。
+- owner 已正常释放、session/active 删除仍未完成的合法 pending FUSE 记录会继续现有 checkpoint 恢复，在请求预算内等待收尾。缺少 owner 不能单独授权替代；持久化 flush、consumed/claimed identity、exact UID 终止证据及 controller fence 仍必须全部验证。
+- checkpoint 恢复即使读到 owner/lease 都不存在，也必须取得两者 durable absence 确认才可跳过已完成的 Release。删除 ACK 丢失、确认失败会保留旧 active 记录；确认恢复后同 workspace 请求可以完成回收并创建。
+
+补充验证：四项复现与 durable absence 回归均在旧代码 RED、新代码 GREEN；完整 root 与 SDK race、宿主及 Linux arm64 lint、Helm 渲染和脚本验证通过。独立 Redis 7.4 覆盖 state Lua 集成及跨客户端控制密钥恢复。实际 Linux UID 1000 的完整 workspaceprobe 测试包含 private FD/退出 leader，无 skip；PID1 容器验证伪造请求拒绝、合法普通 cycle、两次终态 fence、延迟 resume/register 拒绝。未构建、推送或部署镜像，未执行线上 Helm 升级。

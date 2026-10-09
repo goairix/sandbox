@@ -97,7 +97,26 @@ func (c *WorkspaceCoordinator) restoreFUSECleanupLease(ctx context.Context, owne
 	if current != nil && !bytes.Equal(current, value) {
 		return nil, false, ErrWorkspaceLeaseLost
 	}
-	return lease, current == nil, nil
+	if current == nil {
+		// A missing leader read may follow a delete whose replication ACK was
+		// lost. Do not skip normal Release unless both absences are durable.
+		absent, err := confirmStateAbsence(ctx, c.store, keys.owner)
+		if err != nil {
+			return nil, false, err
+		}
+		if !absent {
+			return nil, false, ErrWorkspaceOwnerLost
+		}
+		absent, err = confirmStateAbsence(ctx, c.store, keys.lease)
+		if err != nil {
+			return nil, false, err
+		}
+		if !absent {
+			return nil, false, ErrWorkspaceLeaseLost
+		}
+		return lease, true, nil
+	}
+	return lease, false, nil
 }
 
 func (m *Manager) restoreCheckpointedFUSECleanup(ctx context.Context, sb *Sandbox, controller *activeController, active *state.ActiveSandboxRecord) error {

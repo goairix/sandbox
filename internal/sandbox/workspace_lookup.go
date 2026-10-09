@@ -11,6 +11,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/storage/state"
 )
 
 var (
@@ -231,6 +232,7 @@ func (m *Manager) lookupSandboxSnapshot(ctx context.Context, id string) (Sandbox
 
 func (m *Manager) lookupHistoricalWorkspace(ctx context.Context, root string) (Sandbox, error) {
 	candidates := make(map[string]Sandbox)
+	pending := make(map[string]state.ActiveSandboxPhase)
 	if m.distributedStateEnabled() {
 		var cursor uint64
 		for {
@@ -244,11 +246,14 @@ func (m *Manager) lookupHistoricalWorkspace(ctx context.Context, root string) (S
 					return Sandbox{}, lookupConflict("sandbox_record_invalid", record.SandboxID)
 				}
 				if sb.Workspace != nil && sb.Workspace.RootPath == root {
-					checked, err := decodeActiveSandbox(&record, record.SandboxID)
+					checked, err := decodeActiveSandboxPhase(&record, record.SandboxID, state.ActiveSandboxActive, state.ActiveSandboxDestroying, state.ActiveSandboxCleanupPending)
 					if err != nil {
 						return Sandbox{}, lookupConflict("sandbox_record_not_active", record.SandboxID)
 					}
 					candidates[sb.ID] = cloneSandbox(checked)
+					if record.Phase == state.ActiveSandboxDestroying || record.Phase == state.ActiveSandboxCleanupPending {
+						pending[sb.ID] = record.Phase
+					}
 				}
 			}
 			cursor = page.Cursor
@@ -300,6 +305,9 @@ func (m *Manager) lookupHistoricalWorkspace(ctx context.Context, root string) (S
 		return Sandbox{}, ErrWorkspaceLookupAmbiguous
 	}
 	for _, sb := range candidates {
+		if phase, ok := pending[sb.ID]; ok {
+			return Sandbox{}, lookupConflict("sandbox_phase_"+string(phase), sb.ID)
+		}
 		return sb, nil
 	}
 	return Sandbox{}, ErrSandboxNotFound

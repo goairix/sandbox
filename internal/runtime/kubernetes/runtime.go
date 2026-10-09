@@ -3,8 +3,10 @@ package kubernetes
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,11 +50,15 @@ const defaultKubernetesControlTimeout = 60 * time.Second
 
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
-const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v4"
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v5"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {
 	contract := fmt.Sprintf("%s:control=%v:%s:cilium=%t", warmPoolTemplateVersion, controlWireVersion, r.namespace, r.hasCilium)
+	if len(r.workspaceControlKey) == ed25519.PrivateKeySize {
+		publicDigest := sha256.Sum256(r.workspaceControlKey.Public().(ed25519.PublicKey))
+		contract += ":control-authority=" + hex.EncodeToString(publicDigest[:])
+	}
 	if r.appArmorProfile != "" {
 		contract += ":apparmor=" + r.appArmorProfile
 	}
@@ -156,6 +162,7 @@ type Runtime struct {
 	controlExecutor              podCommandExecutor
 	infraFencer                  InfrastructureFencer
 	fuseCredentials              runtime.FUSECredentials
+	workspaceControlKey          ed25519.PrivateKey
 	endpointLookup               runtime.LookupNetIPFunc
 	appArmorProfile              string
 	nodeSelector                 map[string]string
@@ -465,6 +472,13 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if err != nil {
 		return nil, err
 	}
+	if len(r.workspaceControlKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("workspace control signer is unavailable")
+	}
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  fuseprotocol.ProbeControlPublicKeyEnv,
+		Value: base64.RawURLEncoding.EncodeToString(r.workspaceControlKey.Public().(ed25519.PublicKey)),
+	})
 	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
 	if err := r.applyDNSAdmission(pod, spec.Labels); err != nil {
 		return nil, err
@@ -869,12 +883,24 @@ func (r *Runtime) quiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 	if _, err := r.getExactPod(ctx, ref); err != nil {
 		return runtime.WorkspaceQuiesceToken{}, err
 	}
-	dispatched = true
 	argv := probeArgv("quiesce", ref, expectedGeneration, false)
 	if cleanup {
 		argv = append(argv, "--cleanup")
 	}
-	raw, err := r.execSandboxProbe(ctx, ref.ID, argv, nil)
+	command := "register"
+	if cleanup {
+		command = "cleanup"
+	}
+	authorization, err := fuseprotocol.SignProbeControl(r.workspaceControlKey, command, ref.UID, expectedGeneration)
+	if err != nil {
+		return runtime.WorkspaceQuiesceToken{}, err
+	}
+	request, err := json.Marshal(authorization)
+	if err != nil {
+		return runtime.WorkspaceQuiesceToken{}, err
+	}
+	dispatched = true
+	raw, err := r.execSandboxProbe(ctx, ref.ID, argv, request)
 	if err != nil {
 		return runtime.WorkspaceQuiesceToken{}, err
 	}

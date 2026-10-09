@@ -2,6 +2,7 @@ package workspaceprobe
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"net"
@@ -189,7 +190,7 @@ func TestBrokerFrameRejectsDuplicateFields(t *testing.T) {
 
 func TestPID1LedgerRejectsCrossGenerationAndReplay(t *testing.T) {
 	processes := &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
-	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	ledger := trustedTestPID1Ledger()
 	register := pid1Request{
 		Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7,
 		Processes: []processIdentity{{PID: 10, UID: 1000, StartTime: 42, State: 'T'}}, Token: "",
@@ -227,7 +228,7 @@ func TestPID1LedgerRejectsCrossGenerationAndReplay(t *testing.T) {
 
 func TestPID1LedgerRejectsDuplicatePIDRegistration(t *testing.T) {
 	processes := &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
-	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	ledger := trustedTestPID1Ledger()
 	identity := processIdentity{PID: 10, UID: 1000, StartTime: 42, State: 'T'}
 	response := callPID1Ledger(t, ledger, processes, pid1Request{
 		Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7,
@@ -239,7 +240,7 @@ func TestPID1LedgerRejectsDuplicatePIDRegistration(t *testing.T) {
 
 func TestPID1LedgerRejectsRegistrationForDifferentRuntime(t *testing.T) {
 	processes := &fakeProcesses{states: map[int]processIdentity{}}
-	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	ledger := trustedTestPID1Ledger()
 	response := callPID1Ledger(t, ledger, processes, pid1Request{
 		Version: 1, Command: "register", RuntimeUID: "runtime-b", Generation: 7,
 		Processes: []processIdentity{}, Token: "",
@@ -248,7 +249,23 @@ func TestPID1LedgerRejectsRegistrationForDifferentRuntime(t *testing.T) {
 	assert.Nil(t, ledger.active)
 }
 
+func trustedTestPID1Ledger() *pid1Ledger {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6a}, ed25519.SeedSize))
+	return &pid1Ledger{runtimeUID: "runtime-a", publicKey: key.Public().(ed25519.PublicKey)}
+}
+
 func callPID1Ledger(t *testing.T, ledger *pid1Ledger, processes processTable, request pid1Request) pid1Response {
+	t.Helper()
+	if len(ledger.publicKey) > 0 && (request.Command == "register" || request.Command == "cleanup") && request.Authorization == "" {
+		key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6a}, ed25519.SeedSize))
+		envelope, err := fuseprotocol.SignProbeControl(key, request.Command, request.RuntimeUID, request.Generation)
+		require.NoError(t, err)
+		request.Authorization = envelope.Authorization
+	}
+	return callRawPID1Ledger(t, ledger, processes, request)
+}
+
+func callRawPID1Ledger(t *testing.T, ledger *pid1Ledger, processes processTable, request pid1Request) pid1Response {
 	t.Helper()
 	server, client := net.Pipe()
 	done := make(chan struct{})
@@ -267,7 +284,7 @@ func callPID1Ledger(t *testing.T, ledger *pid1Ledger, processes processTable, re
 
 func TestPID1CleanupFenceRejectsDelayedResumeAndIsIdempotent(t *testing.T) {
 	processes := &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
-	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	ledger := trustedTestPID1Ledger()
 	register := pid1Request{Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{{PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}
 	cycle := callPID1Ledger(t, ledger, processes, register)
 	require.True(t, cycle.OK)
@@ -303,7 +320,7 @@ func (p *blockedResumeProcesses) signal(pid int, signal syscall.Signal) error {
 }
 func TestPID1CleanupFenceWaitsForAlreadyRunningResume(t *testing.T) {
 	processes := &blockedResumeProcesses{fakeProcesses: &fakeProcesses{states: map[int]processIdentity{10: {PID: 10, UID: 1000, StartTime: 42, State: 'T'}}}, entered: make(chan struct{}), release: make(chan struct{})}
-	ledger := &pid1Ledger{runtimeUID: "runtime-a"}
+	ledger := trustedTestPID1Ledger()
 	cycle := callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{{PID: 10, UID: 1000, StartTime: 42, State: 'T'}}})
 	require.True(t, cycle.OK)
 	resumeDone := make(chan pid1Response, 1)
@@ -331,4 +348,35 @@ func TestPID1CleanupFenceWaitsForAlreadyRunningResume(t *testing.T) {
 	}
 	require.False(t, callPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "resume", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}, Token: cycle.Token}).OK)
 	require.Equal(t, []int{10}, processes.resumed)
+}
+
+func TestPID1UnauthenticatedCleanupCannotPoisonGeneration(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{}}
+	ledger := trustedTestPID1Ledger()
+	forged := pid1Request{Version: 1, Command: "cleanup", RuntimeUID: "runtime-a", Generation: 999, Processes: []processIdentity{}}
+	response := callRawPID1Ledger(t, ledger, processes, forged)
+	require.False(t, response.OK, "untrusted process must not latch an arbitrary cleanup generation")
+	require.Zero(t, ledger.cleanupGeneration)
+	require.Nil(t, ledger.active)
+}
+
+func TestPID1UnauthenticatedRegisterCannotPoisonGeneration(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{}}
+	ledger := trustedTestPID1Ledger()
+	response := callRawPID1Ledger(t, ledger, processes, pid1Request{Version: 1, Command: "register", RuntimeUID: "runtime-a", Generation: 999, Processes: []processIdentity{}})
+	require.False(t, response.OK)
+	require.Nil(t, ledger.active)
+}
+
+func TestPID1AuthorizedCleanupStillWorksAfterForgedRequests(t *testing.T) {
+	processes := &fakeProcesses{states: map[int]processIdentity{}}
+	ledger := trustedTestPID1Ledger()
+	forged := pid1Request{Version: 1, Command: "cleanup", RuntimeUID: "runtime-a", Generation: 999, Processes: []processIdentity{}}
+	require.False(t, callRawPID1Ledger(t, ledger, processes, forged).OK)
+	forged.Command = "register"
+	require.False(t, callRawPID1Ledger(t, ledger, processes, forged).OK)
+	legitimate := pid1Request{Version: 1, Command: "cleanup", RuntimeUID: "runtime-a", Generation: 7, Processes: []processIdentity{}}
+	require.True(t, callPID1Ledger(t, ledger, processes, legitimate).OK)
+	require.True(t, callPID1Ledger(t, ledger, processes, legitimate).OK)
+	require.Equal(t, int64(7), ledger.cleanupGeneration)
 }

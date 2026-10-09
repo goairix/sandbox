@@ -1,7 +1,9 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -443,8 +445,9 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 	rt := &Runtime{
 		client: client, dynClient: dynamicClient, namespace: "runtime", controlExecutor: script,
 		pollInterval: time.Millisecond, prepareTimeout: 100 * time.Millisecond, readyTimeout: 100 * time.Millisecond,
-		terminationTimeout: 100 * time.Millisecond,
-		fuseCredentials:    sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
+		terminationTimeout:  100 * time.Millisecond,
+		workspaceControlKey: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6a}, ed25519.SeedSize)),
+		fuseCredentials:     sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
 	}
 	// The fake cluster has no allocation API controller. Supply its complete
 	// synthetic Pod/Service allocation ranges instead of silently skipping it.

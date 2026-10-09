@@ -1,6 +1,7 @@
 package workspaceprobe
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -25,15 +26,19 @@ const (
 	pid1Socket                = "\x00workspace-probe-pid1-v1"
 )
 
-type pid1Broker struct{ processes processTable }
+type pid1Broker struct {
+	processes     processTable
+	authorization string
+}
 
 type pid1Request struct {
-	Version    int               `json:"version"`
-	Command    string            `json:"command"`
-	RuntimeUID string            `json:"runtime_uid"`
-	Generation int64             `json:"generation"`
-	Processes  []processIdentity `json:"processes"`
-	Token      string            `json:"token"`
+	Version       int               `json:"version"`
+	Command       string            `json:"command"`
+	RuntimeUID    string            `json:"runtime_uid"`
+	Generation    int64             `json:"generation"`
+	Processes     []processIdentity `json:"processes"`
+	Token         string            `json:"token"`
+	Authorization string            `json:"authorization"`
 }
 
 type pid1Response struct {
@@ -46,6 +51,7 @@ type pid1Response struct {
 type pid1Ledger struct {
 	mu                sync.Mutex
 	runtimeUID        string
+	publicKey         ed25519.PublicKey
 	active            *pid1Cycle
 	cleanupGeneration int64
 }
@@ -92,7 +98,7 @@ func (b *pid1Broker) start(state brokerState) (string, error) {
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 	request := pid1Request{
 		Version: fuseprotocol.Version, Command: "register", RuntimeUID: state.RuntimeUID,
-		Generation: state.Generation, Processes: cloneProcessSnapshot(state.Processes), Token: "",
+		Generation: state.Generation, Processes: cloneProcessSnapshot(state.Processes), Token: "", Authorization: b.authorization,
 	}
 	if err := writeBrokerFrame(connection, request); err != nil {
 		return "", err
@@ -118,7 +124,7 @@ func (b *pid1Broker) fenceCleanup(runtimeUID string, generation int64) error {
 		return fmt.Errorf("unexpected pid 1 cleanup peer")
 	}
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
-	request := pid1Request{Version: fuseprotocol.Version, Command: "cleanup", RuntimeUID: runtimeUID, Generation: generation, Processes: []processIdentity{}}
+	request := pid1Request{Version: fuseprotocol.Version, Command: "cleanup", RuntimeUID: runtimeUID, Generation: generation, Processes: []processIdentity{}, Authorization: b.authorization}
 	if err := writeBrokerFrame(connection, request); err != nil {
 		return err
 	}
@@ -192,7 +198,11 @@ func MaybeRunPID1() (bool, int) {
 	}
 	defer func() { _ = listener.Close() }()
 	startChildReaper()
-	ledger := &pid1Ledger{runtimeUID: runtimeUID}
+	publicKey, err := fuseprotocol.ParseProbeControlPublicKey(os.Getenv(fuseprotocol.ProbeControlPublicKeyEnv))
+	if err != nil {
+		return true, 1
+	}
+	ledger := &pid1Ledger{runtimeUID: runtimeUID, publicKey: publicKey}
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -233,13 +243,19 @@ func (l *pid1Ledger) handle(connection net.Conn, processes processTable) {
 	}
 }
 
+func (l *pid1Ledger) authorized(request pid1Request) bool {
+	return fuseprotocol.VerifyProbeControl(l.publicKey, fuseprotocol.ProbeControlRequest{
+		Version: request.Version, Command: request.Command, RuntimeUID: request.RuntimeUID, Generation: request.Generation, Authorization: request.Authorization,
+	}, request.Command, l.runtimeUID, request.Generation)
+}
+
 // The fence and resume signals share the ledger lock. Once acknowledged, no
 // earlier or later resume can issue SIGCONT, including requests queued before
 // the client timed out. Repeating the exact fence is safe after a lost reply.
 func (l *pid1Ledger) fenceCleanup(connection net.Conn, request pid1Request) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if request.RuntimeUID != l.runtimeUID || request.Generation <= 0 || request.Token != "" || len(request.Processes) != 0 ||
+	if !l.authorized(request) || request.RuntimeUID != l.runtimeUID || request.Generation <= 0 || request.Token != "" || len(request.Processes) != 0 ||
 		(l.cleanupGeneration != 0 && l.cleanupGeneration != request.Generation) ||
 		(l.active != nil && l.active.Generation != request.Generation) {
 		writePID1Response(connection, false, "", "invalid_cleanup")
@@ -251,7 +267,7 @@ func (l *pid1Ledger) fenceCleanup(connection net.Conn, request pid1Request) {
 }
 
 func (l *pid1Ledger) register(connection net.Conn, request pid1Request, processes processTable) {
-	if request.Token != "" || request.RuntimeUID != l.runtimeUID || !fuseprotocol.ValidIdentity(request.RuntimeUID) || request.Generation <= 0 || len(request.Processes) > 32768 {
+	if !l.authorized(request) || request.Token != "" || request.RuntimeUID != l.runtimeUID || !fuseprotocol.ValidIdentity(request.RuntimeUID) || request.Generation <= 0 || len(request.Processes) > 32768 {
 		writePID1Response(connection, false, "", "invalid_registration")
 		return
 	}

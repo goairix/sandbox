@@ -27,7 +27,7 @@ func TestDrainEnvironmentNamesAreUnique(t *testing.T) {
 	}{
 		{"offline", "", "aiadp-sandbox-fuse/sandbox-fuse", false},
 		{"installed_scope", "original-runtime/sandbox-fuse", "original-runtime/sandbox-fuse", true},
-		{"legacy_missing_scope", "", "aiadp-sandbox-fuse/sandbox-fuse", true},
+		{"legacy_missing_scope", "", "original-runtime/sandbox-fuse", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tempChart := t.TempDir()
@@ -48,11 +48,11 @@ func TestDrainEnvironmentNamesAreUnique(t *testing.T) {
 					return err
 				}
 				if tc.installed && rel == "templates/pre-backend-change-drain.yaml" {
-					env := []map[string]interface{}{{"name": "PRESERVED_SETTING", "value": "original-value"}}
+					env := []map[string]interface{}{{"name": "PRESERVED_SETTING", "value": "original-value"}, {"name": "SANDBOX_RUNTIME_KUBERNETES_NAMESPACE", "value": "original-runtime"}}
 					if tc.installedScope != "" {
 						env = append(env, map[string]interface{}{"name": "SANDBOX_STATE_SCOPE", "value": tc.installedScope})
 					}
-					deployment := map[string]interface{}{"spec": map[string]interface{}{"template": map[string]interface{}{"spec": map[string]interface{}{"containers": []interface{}{map[string]interface{}{"env": env}}}}}}
+					deployment := map[string]interface{}{"spec": map[string]interface{}{"template": map[string]interface{}{"spec": map[string]interface{}{"containers": []interface{}{map[string]interface{}{"name": "sandbox", "image": "registry/api:installed-v2", "env": env}}}}}}
 					fixture, err := json.Marshal(deployment)
 					if err != nil {
 						return err

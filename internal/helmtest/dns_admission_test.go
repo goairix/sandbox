@@ -18,7 +18,7 @@ import (
 func TestDNSAdmissionDefaultHelmBaseline(t *testing.T) {
 	docs := render(t, "apparmorLoader.enabled=true")
 	for _, tc := range []struct{ kind, name, want string }{
-		{"Deployment", "sandbox-api", "0741a9dbeef99a955540d7cbca279d13be71c3bb024214458030902e61f649c2"},
+		{"Deployment", "sandbox-api", "3712cacefd2364528b4e61e858901570b0ec1674cac4f15af14c20a395771bcf"},
 		{"DaemonSet", "sandbox-apparmor-loader", "d12941e36702f546e509e3fe066deb979b998d5cae582932f97eac9fafdba19d"},
 		{"StatefulSet", "sandbox-redis", "c287ff99b6ff26d718585fcafa9ba5d61754452e08c6065b30a4b0e6a4948fac"},
 	} {
@@ -153,7 +153,7 @@ func TestDNSAdmissionPreUpgradeDrainRetainsInstalledContract(t *testing.T) {
 					map[string]any{"name": "SANDBOX_RUNTIME_KUBERNETES_DNS_OPTIONS", "value": `[{"name":"timeout","value":"3"}]`})
 			}
 			installed := map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
-				"containers": []any{map[string]any{"name": "sandbox", "env": oldEnv}},
+				"containers": []any{map[string]any{"name": "sandbox", "image": "registry/api:installed-v2", "env": oldEnv}},
 			}}}}
 			encoded, err := json.Marshal(installed)
 			if err != nil {

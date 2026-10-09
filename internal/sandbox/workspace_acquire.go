@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goairix/sandbox/internal/logger"
@@ -191,7 +192,7 @@ func (m *Manager) getOrCreateWorkspace(ctx context.Context, cfg SandboxConfig, w
 				// Only the recorded expired/destroying lifecycle is retired through its
 				// normal, UID-fenced cleanup. Healthy owners are never displaced.
 				if cleanupErr := m.cleanupRequestedWorkspace(waitCtx, cfg.WorkspacePath, conflict.SandboxID); cleanupErr != nil {
-					if errors.Is(cleanupErr, state.ErrActiveSandboxConflict) || errors.Is(cleanupErr, ErrSandboxNotReady) {
+					if errors.Is(cleanupErr, state.ErrActiveSandboxConflict) || errors.Is(cleanupErr, ErrSandboxNotReady) || errors.Is(cleanupErr, ErrSandboxCleanupPending) {
 						if waitErr := waitWorkspaceRequest(waitCtx); waitErr != nil {
 							return nil, false, lookupUnavailable(errors.Join(cleanupErr, waitErr))
 						}
@@ -287,11 +288,13 @@ func (m *Manager) prepareWorkspaceReuse(ctx context.Context, sb *Sandbox) error 
 }
 
 // workspaceCleanupIdentity proves the requested workspace against the durable
-// owner before allowing normal lifecycle cleanup. Expiry alone is not proof of
-// ownership. Cleanup still applies the repository's generation and UID fences.
+// owner before allowing normal lifecycle cleanup. A pending FUSE checkpoint
+// can instead delegate proof to normal checkpoint recovery after owner release.
+// Expiry or owner absence alone never authorizes cleanup or replacement.
 func (m *Manager) workspaceCleanupIdentity(ctx context.Context, root, id string) (bool, error) {
 	var sb Sandbox
 	pending := false
+	cleanupCheckpoint := ""
 	if m.distributedStateEnabled() {
 		record, err := m.activeSandboxes.Load(ctx, id)
 		if err != nil {
@@ -306,6 +309,7 @@ func (m *Manager) workspaceCleanupIdentity(ctx context.Context, root, id string)
 		}
 		sb = cloneSandbox(snapshot)
 		pending = record.Phase == state.ActiveSandboxDestroying || record.Phase == state.ActiveSandboxCleanupPending
+		cleanupCheckpoint = record.CleanupCheckpoint
 	} else {
 		m.mu.RLock()
 		sb = cloneSandbox(m.sandboxes[id])
@@ -320,6 +324,7 @@ func (m *Manager) workspaceCleanupIdentity(ctx context.Context, root, id string)
 	w := sb.Workspace
 	var proofKeys workspaceKeys
 	var proofOwner, proofLease []byte
+	ownerReleased := false
 	if m.config.WorkspaceCoordinator != nil && m.fsMeta.Provider != storage.ProviderLocal {
 		prefix, err := storage.BuildWorkspacePrefix(m.fsMeta.SubPath, root)
 		if err != nil {
@@ -334,7 +339,20 @@ func (m *Manager) workspaceCleanupIdentity(ctx context.Context, root, id string)
 			return false, lookupUnavailable(err)
 		}
 		var owner WorkspaceOwner
-		if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
+		if raw == nil {
+			// Owner release happens before final session/active deletion. Only
+			// the exact pending FUSE snapshot may reach checkpoint recovery,
+			// which proves durable flush and UID-bound termination before any
+			// finalization mutation. Missing owners in other phases fail closed.
+			if !pending || w.MountType != WorkspaceMountFUSE || !strings.HasPrefix(cleanupCheckpoint, fuseCleanupCheckpointPrefix) {
+				return false, lookupConflict("cleanup_owner_unconfirmed", id)
+			}
+			owner = w.Owner
+			ownerReleased = true
+		} else if strictDecodeFlatJSONObject(raw, &owner) != nil {
+			return false, lookupConflict("cleanup_owner_invalid", id)
+		}
+		if validateStoredOwner(owner) != nil {
 			return false, lookupConflict("cleanup_owner_invalid", id)
 		}
 		storedKeys, keyErr := workspaceStateKeysFromOwner(owner)
@@ -362,7 +380,7 @@ func (m *Manager) workspaceCleanupIdentity(ctx context.Context, root, id string)
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return false, lookupUnavailable(err)
 	}
-	if err == nil && (info == nil || info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID) {
+	if err == nil && ((info == nil && !ownerReleased) || (info != nil && (info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID))) {
 		return false, lookupConflict("cleanup_runtime_uid_mismatch", id)
 	}
 	if m.fsMeta.Provider == storage.ProviderLocal && info != nil && info.WorkspaceHostPath != m.resolveLocalWorkspacePath(root) {

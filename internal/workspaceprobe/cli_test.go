@@ -2,6 +2,8 @@ package workspaceprobe
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -101,4 +103,39 @@ func TestCleanupQuiesceRequiresAcknowledgedFenceBeforeStoppingProcesses(t *testi
 	require.Empty(t, stdout.String())
 	require.Zero(t, processes.scans)
 	require.Empty(t, processes.stopped)
+}
+
+func TestCLIKubernetesQuiesceRejectsForgedControlBeforeStopping(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6a}, ed25519.SeedSize))
+	t.Setenv(PID1EnvironmentName, PID1EnvironmentValue)
+	t.Setenv(fuseprotocol.ProbeControlPublicKeyEnv, base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey)))
+	valid, err := fuseprotocol.SignProbeControl(key, "cleanup", "runtime-a", 7)
+	require.NoError(t, err)
+	wrongGeneration, err := fuseprotocol.SignProbeControl(key, "cleanup", "runtime-a", 999)
+	require.NoError(t, err)
+	wrongCommand, err := fuseprotocol.SignProbeControl(key, "register", "runtime-a", 7)
+	require.NoError(t, err)
+	wrongUID, err := fuseprotocol.SignProbeControl(key, "cleanup", "runtime-b", 7)
+	require.NoError(t, err)
+	otherKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7b}, ed25519.SeedSize))
+	forged, err := fuseprotocol.SignProbeControl(otherKey, "cleanup", "runtime-a", 7)
+	require.NoError(t, err)
+	for _, request := range []fuseprotocol.ProbeControlRequest{{}, wrongGeneration, wrongCommand, wrongUID, forged} {
+		probe, processes, broker := testProbe(t)
+		input, err := json.Marshal(request)
+		require.NoError(t, err)
+		var stdout, stderr bytes.Buffer
+		code := runCLI(probe, []string{fuseprotocol.ProbeBinary, "quiesce", "--runtime-uid", "runtime-a", "--generation", "7", "--cleanup"}, bytes.NewReader(input), &stdout, &stderr)
+		require.NotZero(t, code)
+		require.Empty(t, stdout.String())
+		require.Empty(t, processes.stopped)
+		require.Zero(t, processes.scans)
+		require.Zero(t, broker.cleanupCalls)
+	}
+	probe, _, broker := testProbe(t)
+	input, err := json.Marshal(valid)
+	require.NoError(t, err)
+	var stdout, stderr bytes.Buffer
+	require.Zero(t, runCLI(probe, []string{fuseprotocol.ProbeBinary, "quiesce", "--runtime-uid", "runtime-a", "--generation", "7", "--cleanup"}, bytes.NewReader(input), &stdout, &stderr), stderr.String())
+	require.Equal(t, 1, broker.cleanupCalls)
 }
