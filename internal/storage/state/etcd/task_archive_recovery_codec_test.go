@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/goairix/sandbox/internal/runtime/launcher"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,9 @@ func TestTaskArchiveRecoveryCodecMaximumCanonical(t *testing.T) {
 			require.Equal(t, m, fresh)
 			t.Logf("legal maximum state=%s wire=%d cap=53121 M=65536", state, len(wire))
 			if state == "bound" {
+				heads := unsafe.Sizeof(fresh) + unsafe.Sizeof(*fresh.Artifact) + unsafe.Sizeof(*fresh.Received) + unsafe.Sizeof(*fresh.Binding) + uintptr(cap(fresh.Binding.Plan.Exclude))*unsafe.Sizeof("")
+				require.LessOrEqual(t, cap(fresh.Binding.Plan.Exclude), 303)
+				t.Logf("typed bound headers=%d exclusion len=%d cap=%d; word=%d", heads, len(fresh.Binding.Plan.Exclude), cap(fresh.Binding.Plan.Exclude), unsafe.Sizeof(uintptr(0)))
 				var content int
 				for _, path := range m.Binding.Plan.Exclude {
 					content += len(path)
