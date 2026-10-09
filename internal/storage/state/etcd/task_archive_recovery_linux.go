@@ -113,7 +113,7 @@ func taskArchiveRecoveryContentSize(root *os.File, name string) (uint64, error) 
 
 // No failure path unlinks or truncates an existing generation. An uncertain
 // next generation remains charged and will be quarantined by a cold open.
-func taskArchiveRecoveryCommit(root *os.File, base string, wire []byte) (taskArchiveIdentity, error) {
+func taskArchiveRecoveryCommit(root *os.File, base string, wire []byte, probe func(string)) (taskArchiveIdentity, error) {
 	f, id, err := taskArchiveCreate(root, base+".next")
 	if err != nil {
 		if f != nil {
@@ -128,14 +128,23 @@ func taskArchiveRecoveryCommit(root *os.File, base string, wire []byte) (taskArc
 	if err == nil {
 		err = f.Sync()
 	}
+	if err == nil && probe != nil {
+		probe("next-fsync")
+	}
 	if err == nil {
 		err = taskArchiveCheck(root, base+".next", f, id)
 	}
 	if err == nil {
 		err = unix.Renameat(int(root.Fd()), base+".next", int(root.Fd()), base+".json")
 	}
+	if err == nil && probe != nil {
+		probe("rename")
+	}
 	if err == nil {
 		err = root.Sync()
+	}
+	if err == nil && probe != nil {
+		probe("root-fsync")
 	}
 	if err == nil {
 		err = taskArchiveCheck(root, base+".json", f, id)

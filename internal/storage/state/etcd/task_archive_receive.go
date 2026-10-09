@@ -59,6 +59,9 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 			return nil, err
 		}
 	}
+	if err = r.checkRecoveryRoot(); err != nil {
+		return nil, err
+	}
 	session, err := e.destination.Open(bounded)
 	if err != nil {
 		return nil, err
@@ -77,6 +80,9 @@ func (r *taskArchiveSpool) receive(ctx context.Context, e taskArchiveExpected) (
 		if err = e.beforeSend(bounded); err != nil {
 			return nil, err
 		}
+	}
+	if err = r.checkRecoveryRoot(); err != nil {
+		return nil, err
 	}
 	if err = session.SendTaskWorkspaceArchive(bounded, e.envelope); err != nil {
 		return nil, err

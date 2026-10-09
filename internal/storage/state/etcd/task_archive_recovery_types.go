@@ -111,6 +111,9 @@ type taskArchiveRecoveryStore struct {
 	gate         chan struct{}
 	buffers      *taskArchiveRecoveryBuffers // allocated only after a slot charge
 	slots        [taskArchiveRecoverySlots]taskArchiveRecoverySlot
+	// Test-only suspension at real filesystem/postguard windows. Never exposed
+	// by options or cold diagnostics; set before starting the original operation.
+	probe func(string)
 }
 
 type taskArchiveRecoveryOwner struct {

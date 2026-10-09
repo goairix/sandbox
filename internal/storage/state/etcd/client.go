@@ -325,7 +325,7 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		}
 	}
 	if o.TaskWorkspaceArchiveRecovery != nil {
-		b.archiveStore, err = newTaskArchiveRecoveryStore(*o.TaskWorkspaceArchiveRecovery)
+		b.archiveStore, err = newTaskArchiveRecoveryStoreContext(ctx, *o.TaskWorkspaceArchiveRecovery)
 		if err != nil {
 			return nil, fmt.Errorf("%w: open archive recovery: %v", ErrInvalidConfiguration, err)
 		}

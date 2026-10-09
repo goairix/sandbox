@@ -43,6 +43,13 @@ func recoveryLimitsDigest(o TaskWorkspaceArchiveRecoveryOptions) string {
 }
 
 func newTaskArchiveRecoveryStore(o TaskWorkspaceArchiveRecoveryOptions) (*taskArchiveStore, error) {
+	return newTaskArchiveRecoveryStoreContext(context.Background(), o)
+}
+
+func newTaskArchiveRecoveryStoreContext(ctx context.Context, o TaskWorkspaceArchiveRecoveryOptions) (*taskArchiveStore, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errTaskArchive
+	}
 	memory, err := validateTaskArchiveRecovery(&o)
 	if err != nil {
 		return nil, err
@@ -55,7 +62,7 @@ func newTaskArchiveRecoveryStore(o TaskWorkspaceArchiveRecoveryOptions) (*taskAr
 	s := &taskArchiveStore{root: root, limits: o.limits(), indexBytes: i, spools: make(map[*taskArchiveSpool]struct{}), recovery: &taskArchiveRecoveryStore{root: identity, directory: o.Directory, limitsDigest: recoveryLimitsDigest(o), memoryBytes: memory, gate: make(chan struct{}, 1)}}
 	s.self = s
 	s.recovery.gate <- struct{}{}
-	if err = s.scanRecovery(); err != nil {
+	if err = s.scanRecovery(ctx); err != nil {
 		return nil, errors.Join(err, root.Close())
 	}
 	if s.recovery.storeID == "" {
@@ -124,7 +131,7 @@ func recoveryRead(f *os.File, input []byte) ([]byte, error) {
 	return input[:n], nil
 }
 
-func (s *taskArchiveStore) scanRecovery() error {
+func (s *taskArchiveStore) scanRecovery(ctx context.Context) error {
 	names, err := s.root.Readdirnames(193)
 	// For n>0, os.File can return a short batch with nil error; EOF is reported
 	// by the next read. The combined allocation and read count remain <=193.
@@ -155,6 +162,9 @@ func (s *taskArchiveStore) scanRecovery() error {
 	}
 	var content [taskArchiveRecoverySlots]uint64
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		slot, kind, _ := recoveryName(name, s.limits.Jobs)
 		limit := uint64(taskArchiveRecoveryMetadataBytes)
 		if kind == 1 {
@@ -170,6 +180,9 @@ func (s *taskArchiveStore) scanRecovery() error {
 	for slot, files := range present {
 		if files == 0 {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		base := recoverySlotName(uint32(slot))
 		f, _, err := taskArchiveRecoveryOpen(s.root, base+".json")
@@ -202,16 +215,16 @@ func (s *taskArchiveStore) scanRecovery() error {
 		} else {
 			clear(index)
 		}
-		err = s.verifyColdTar(tarf, base+".tar", id, m, index)
+		err = s.verifyColdTar(ctx, tarf, base+".tar", id, m, index)
 		err = errors.Join(err, tarf.Close())
 		if err == nil {
 			s.recovery.slots[slot].diagnostic = recoveryDiagnostic(m)
 		}
 	}
-	return taskArchiveRecoveryCheckRoot(s.root, s.recovery.directory, s.recovery.root)
+	return errors.Join(ctx.Err(), taskArchiveRecoveryCheckRoot(s.root, s.recovery.directory, s.recovery.root))
 }
 
-func (s *taskArchiveStore) verifyColdTar(f *os.File, name string, id taskArchiveIdentity, m taskArchiveRecoveryManifest, index []byte) error {
+func (s *taskArchiveStore) verifyColdTar(ctx context.Context, f *os.File, name string, id taskArchiveIdentity, m taskArchiveRecoveryManifest, index []byte) error {
 	if m.Artifact == nil || m.Received == nil || id != (taskArchiveIdentity{m.Artifact.Dev, m.Artifact.Ino}) || m.Received.Bytes > s.limits.JobBytes-2*taskArchiveRecoveryMetadataBytes || m.Received.Entries > s.limits.Entries {
 		return errTaskArchive
 	}
@@ -221,11 +234,11 @@ func (s *taskArchiveStore) verifyColdTar(f *os.File, name string, id taskArchive
 	}
 	h := sha256.New()
 	var scratch [32768]byte
-	n, err := io.CopyBuffer(h, io.NewSectionReader(f, 0, st.Size()), scratch[:])
+	n, err := io.CopyBuffer(h, taskArchiveContextReader{ctx, io.NewSectionReader(f, 0, st.Size())}, scratch[:])
 	if err != nil || uint64(n) != m.Received.Bytes || hex.EncodeToString(h.Sum(nil)) != m.Received.SHA256 {
 		return errors.Join(errTaskArchive, err)
 	}
-	entries, err := taskArchiveValidateTar(context.Background(), f, m.Received.Bytes, s.limits.Entries, index)
+	entries, err := taskArchiveValidateTar(ctx, f, m.Received.Bytes, s.limits.Entries, index)
 	if err != nil || entries != m.Received.Entries {
 		return errors.Join(errTaskArchive, err)
 	}
@@ -324,6 +337,7 @@ func (r *taskArchiveSpool) initializeRecovery(seed taskArchiveRecoverySeed) erro
 	defer unlock()
 	s := r.store
 	m := taskArchiveRecoveryManifest{Version: 1, Slot: r.recovery.slot, State: "pending", StoreID: s.recovery.storeID, LimitsDigest: s.recovery.limitsDigest, Root: s.recovery.root, Seed: seed}
+	r.recoveryProbe("pending-before")
 	if err = r.commitRecovery(r.ctx, m, false); err != nil {
 		return err
 	}
@@ -331,6 +345,7 @@ func (r *taskArchiveSpool) initializeRecovery(seed taskArchiveRecoverySeed) erro
 	if err != nil {
 		return err
 	}
+	r.recoveryProbe("artifact-created")
 	m.Artifact = &taskArchiveRecoveryArtifact{r.identity.dev, r.identity.ino}
 	if err = r.commitRecovery(r.ctx, m, true); err != nil {
 		return err
@@ -362,7 +377,11 @@ func (r *taskArchiveSpool) commitRecovery(ctx context.Context, next taskArchiveR
 	if err != nil {
 		return err
 	}
-	if _, err = taskArchiveRecoveryCommit(s.root, base, wire); err != nil {
+	prefix := next.State
+	if prefix == "pending" && next.Artifact != nil {
+		prefix = "artifact"
+	}
+	if _, err = taskArchiveRecoveryCommit(s.root, base, wire, func(stage string) { r.recoveryProbe(prefix + "-" + stage) }); err != nil {
 		return err
 	}
 	// This durable generation remains history even when the postguard fails.
@@ -452,6 +471,7 @@ func (r *taskArchiveSpool) sealOriginalReceived(ctx context.Context, original *t
 	if err := errors.Join(bounded.Err(), r.file.Sync()); err != nil {
 		return err
 	}
+	r.recoveryProbe("tar-fsync")
 	if err := taskArchiveCheck(s.root, r.name, r.file, r.identity); err != nil {
 		return err
 	}
@@ -503,6 +523,9 @@ func (r *taskArchiveSpool) sealOriginalBinding(ctx context.Context, source *Prep
 	if err := errors.Join(source.local(bounded), body.localTarget.check(bounded)); err != nil {
 		return err
 	}
+	if err := r.checkRecoveryRoot(); err != nil {
+		return err
+	}
 	m := r.recovery.manifest
 	if m.Received == nil || m.Seed.Task != source.archive.owner.claim.reference.Task || m.Seed.ClaimID != source.archive.owner.claim.reference.ClaimID || m.Seed.TicketDigest != source.diagnostics.TicketDigest || *m.Received != (taskArchiveRecoveryReceived{source.diagnostics.Bytes, source.diagnostics.Entries, source.diagnostics.SHA256}) {
 		return errTaskArchive
@@ -521,6 +544,7 @@ func (r *taskArchiveSpool) sealOriginalBinding(ctx context.Context, source *Prep
 			return errTaskArchive
 		}
 		m.State, m.Binding = "bound", &binding
+		r.recoveryProbe("bound-before")
 		if err := r.commitRecovery(bounded, m, true); err != nil {
 			return err
 		}
@@ -530,5 +554,22 @@ func (r *taskArchiveSpool) sealOriginalBinding(ctx context.Context, source *Prep
 	if err := source.guard(bounded); err != nil {
 		return err
 	}
-	return body.localTarget.check(bounded)
+	if err := body.localTarget.check(bounded); err != nil {
+		return err
+	}
+	r.recoveryProbe("bound-postguard")
+	return errors.Join(bounded.Err(), r.recovery.ctx.Err(), source.local(bounded), body.localTarget.ctx.Err())
+}
+
+func (r *taskArchiveSpool) recoveryProbe(stage string) {
+	if r.store.recovery != nil && r.store.recovery.probe != nil {
+		r.store.recovery.probe(stage)
+	}
+}
+
+func (r *taskArchiveSpool) checkRecoveryRoot() error {
+	if r.store.recovery == nil {
+		return nil
+	}
+	return taskArchiveRecoveryCheckRoot(r.store.root, r.store.recovery.directory, r.store.recovery.root)
 }
