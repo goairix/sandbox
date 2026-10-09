@@ -32,8 +32,14 @@ terminal summary `EvidenceDigest` 为固定 canonical 版本化 completion（int
 
 ## Acceptance and limits
 
+Root overflow clarification: native slot Version 或 ModRevision 等于 MaxInt64 时拒绝，因为下一次递增不可安全表达。此保守停止不是自动切换 budget 或提高上限。
+
+Root original-owner clarification for Task3: 不仅检查 witness.self/origin.self；原始 intent draft 必须在实际 put owner 构造时保存唯一 original put 指针，terminal 消费时同时验证该绑定和 original issued witness。这样 joint-copy put+witness 后重设 self 也不能重建权限。settlement 同理保存在原始 draft，并以指针身份约束 GC；全部进程内字段不增加 KV，不改变旧 profile wire。
+
+Root cursor clarification for Task3: profile2 已实际消费 local put 的 body，在 GC 明确完成之前 `next` 必须拒绝推进，保留当前原始 body 身份；unknown/failed IO 不得通过 body.complete 偷渡到下一条。未派发的纯读取及 legacy 游标不改变。误序调用可以保守取消 source，不能放弃占用或创建成功终态。
+
 1. 新配置互斥、strict slot/schema/native generation、缺失或错误配置不初始化、legacy canonical兼容；host race 和真实 operator metadata 读取证明。
-2. 真实 Linux worker/3member etcd/local IO：S=1 reserve→put→terminal→GC 连续至少65文件；实际观察每步 key/state/revision、bounded active keys；两个 Backend 跨进程额度互斥；捕获旧 native Txn 在下一代 replay 失败。未知 reserve 不派发，未知 terminal/GC 不重写，真实 claim/restore/slot变化和 Close wait 拒绝。
+2. 真实 Linux worker/3member etcd/local IO：S=1 reserve→put→terminal→GC 连续至少65文件；实际观察每步 key/state/revision、bounded active keys；两个独立 Backend/client 通过原生事务竞争同分区 S1，仅一原始 ACK；捕获旧 native Txn 在下一代 replay 失败。未知 reserve 不派发，未知 terminal/GC 不重写，真实 claim/restore/slot变化和 Close wait 拒绝。同一物理 worker 进程中的两个 Backend 不能声称完成多 worker 进程或部署验证，后者留到实际 Deployment/容量单元。
 3. 原始 evidence 记录所有命令/退出/实际叶子/SKIP/WARN/server日志、原 source/binary hashes、原始 child/attach/controller Wait 和独立 exact inventories。失败批次保留；同源分批通过不得称整轮全绿。tmpfs/nativeCGO0不证明断电持久性或 race。
 
 这仅支持当前原始 owner 连续本地成功文件的有预算循环。失败/unknown 仍占用；不凭进程死亡退款，不处理目录/delete/云SDK。GC 后不保留每条历史 terminal；正常 manager 冷恢复需要后续有预算 cursor/checkpoint 协议，本单元不证明完整 final-sync、重启恢复或安全释放。生产接线、分区调度、FUSE/collector、大N性能/容量、备份部署和 Redis 移除仍未完成。Source重复归档SHA/每chunk guard成本保留，不宣称性能提升。

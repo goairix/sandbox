@@ -26,6 +26,8 @@
 
 当前无外部阻塞，剩余工作仍然较多。容量验收须测量实际 MVCC/WAL/复制、调度/API/FUSE 成本和大 N 空闲行为；现有组件测试与编码大小样本不能替代。每个连贯改动继续独立验证、审查和提交，源码修改使用 apply_patch。
 
+新增已验收 `a6d340c`/独立审查修复`9e49f60`：独立 recycling profile、严格free/occupied/terminal slot编码、只读operator配置pin与新旧入口隔离。最终scopedhostrace149叶/真实etcd metadata13叶PASS、vet/cross/format通过；限定复审C0/I0/M1（server环境告警按限制披露），Root167artifact/302source/3336inputs/10workingGitcompiled绑定与两轮exactcleanup核对。详见`2026-10-09-workspace-sync-recycling-profile-verification.md`。这还没有实现slot复用：当前接续generation reserve/local gate，再持久terminal与GC，旧永久收费记录仍保留。主程序仍Redis；安全释放、生产接线、分区/FUSE/collector、大N容量、部署恢复和Redis移除均未完成。
+
 新增已验收源码`7391a5e`与修复`27feaf6`：原始未读body的持久put意图、固定分区slot跨Backend共享背压、未知响应不重发与出生pin诊断。基线native38实际叶子零跳过/警告；独立review发现空body已完成读取的缺口，针对性RED→GREEN修复及复审通过，剩余C0/I0/M0。详见`2026-10-08-workspace-sync-intent-verification.md`。这是native元数据组件，实际可信worker/provider派发和结算未完成，不能把归属记录当OS UID或安全释放证据；S1..64的逻辑预算上界不等于实际MVCC容量测试。
 
 新增已验收源码`cdb5612`/脚本修复`b75fbeb`：实际非特权worker的原始kernel/process身份，非零UID/GID、零cap、NNP、固定boot/start/ns/exe及不可复用incarnation。host34实际模型叶、五个实际native容器和原始子进程身份通过；独立review发现attach超时句柄丢失，独立修复并以三真实child生命周期场景/单nativepositive和限定复审验证，剩余C0/I0/M0。详见`2026-10-08-workspace-sync-worker-verification.md`。它不能代替Deployment/凭证隔离、物理provider target、native派发与终态证明；下一步继续这些实际IO接线，主程序仍Redis。

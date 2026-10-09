@@ -32,12 +32,12 @@
 
 **Binding context:** 已批准master实施裁决；Task1范围只配置/严格编码，无slot mutations或provider效果。cwd /Users/dysodeng/project/go/cloud/sandbox；基线planningcommit由Root dispatch给出。onlyapply_patch、newOWN exactlockedcommit、noSentinel/CLOSEDOWN/nestedagents。Go /Users/dysodeng/go/go1.25.6/bin/go；hostrace/realetcd环境能力分别报告。
 
-- [ ] Step 1: RED：pointer互斥/非法options、legacycanonical保持；3state mandatory/null/dup/unknown/非法组合/512越界/nativeLease或revision不合法/slot上下界/不同budget partition key。不用复制Validate逻辑作为测试oracle。
-- [ ] Step 2: 新profile record/schema/独立paths与logicalbound，legacy3fieldoptions不加字段；private pin加profile并旧literal改keyed。严格bounded decoder拒绝非canonical，无不受限分配。
-- [ ] Step 3: New拥有optionscopy、validate互斥、只读immutable配置2 pin、错误version/值/lease/missing拒绝且无writes。profile2旧reserve/load failclosed；nil/legacy不变。不用公开非功能执行入口。
-- [ ] Step 4: 真实native operator预置config后New读取/pin，缺失/错误/变化拒绝并验证key inventory无初始化；旧profile targeted回归。host-race新pure cases；real-etcd unavailable如实报告，不伪称通过。
-- [ ] Step 5: scoped test/race、vet包、Linuxarm64CGO0及Darwincompile、gofmt-diff/bash若无脚本不需bash、exactdiff。相关旧profile回归一次；不重跑全migration/HA/容量。
-- [ ] Step 6: exact-path coherent source commit与完整OWN报告/evidence、自审。Root独立review/证据audit/acceptance提交后进入Task2。
+- [x] Step 1: RED：pointer互斥/非法options、legacycanonical保持；3state mandatory/null/dup/unknown/非法组合/512越界/nativeLease或revision不合法/slot上下界/不同budget partition key。不用复制Validate逻辑作为测试oracle。
+- [x] Step 2: 新profile record/schema/独立paths与logicalbound，legacy3fieldoptions不加字段；private pin加profile并旧literal改keyed。严格bounded decoder拒绝非canonical，无不受限分配。
+- [x] Step 3: New拥有optionscopy、validate互斥、只读immutable配置2 pin、错误version/值/lease/missing拒绝且无writes。profile2旧reserve/load failclosed；nil/legacy不变。不用公开非功能执行入口。
+- [x] Step 4: 真实native operator预置config后New读取/pin，缺失/错误/变化拒绝并验证key inventory无初始化；旧profile targeted回归。host-race新pure cases；real-etcd unavailable如实报告，不伪称通过。
+- [x] Step 5: scoped test/race、vet包、Linuxarm64CGO0及Darwincompile、gofmt-diff/bash若无脚本不需bash、exactdiff。相关旧profile回归一次；不重跑全migration/HA/容量。
+- [x] Step 6: exact-path coherent source commit与完整OWN报告/evidence、自审。Root独立review/证据audit/acceptance提交后进入Task2。
 
 ### Task 2: 原始 generation reserve 与 local gate 适配
 
@@ -54,7 +54,7 @@
 
 ### Task 3: 原始 witness 持久 terminal 与原生有预算 GC
 
-**Files:** create `task_workspace_sync_recycling_settlement.go`, `task_workspace_sync_recycling_gc.go`, `task_workspace_sync_recycling_settlement_test.go`；modify recyclingtypes/records/guard/native_linux_test、localtypes、source_types/body仅ownership互斥需要、script仅fixedcases。其他先Root ruling。
+**Files:** create `task_workspace_sync_recycling_settlement.go`, `task_workspace_sync_recycling_gc.go`, `task_workspace_sync_recycling_settlement_test.go`；modify recyclingtypes/records/guard/native_linux_test、localtypes/local_guard/intent_types仅originaldraft→put/settlement唯一指针绑定、source_types/body/cursor仅ownership互斥及profile2派发后GC明确完成前保留currentbody需要、script仅fixedcases。其他先Root ruling。
 
 **Interfaces:** private `settleLocal(ctx,witness) (*taskWorkspaceSyncLocalSettlement,error)` 与 `recycleLocal(ctx,settlement) (Outcome,error)`；originalsettlement自引用/origin/draft与terminalnativepin，wire/evidencecodec及具体fields按spec。oneoriginalbody留到GC结果；后续body.Close/Next可继续，不取消wholeSource。
 
