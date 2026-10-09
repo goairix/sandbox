@@ -184,18 +184,6 @@ func (op *taskWorkspaceSyncSettlementOperation) native(cmps []clientv3.Cmp, succ
 	return r, nil
 }
 
-func recyclingPutACK(r *clientv3.TxnResponse, count int) bool {
-	if r == nil || len(r.Responses) != count {
-		return false
-	}
-	for _, response := range r.Responses {
-		if response == nil || response.GetResponsePut() == nil || response.GetResponsePut().PrevKv != nil || !operationNestedHeader(response.GetResponsePut().Header, r.Header) {
-			return false
-		}
-	}
-	return true
-}
-
 func (op *taskWorkspaceSyncSettlementOperation) readCompletion(d *taskWorkspaceSyncIntentDraft) ([]*mvccpb.KeyValue, error) {
 	b := op.source.archive.owner.backend
 	keys := []string{d.slotKey, d.intentKey}
@@ -246,7 +234,7 @@ func (s *PreparedTaskWorkspaceSyncSource) settleLocal(ctx context.Context, w *ta
 			q.denied = r != nil && !r.Succeeded
 			return q, err
 		}
-		if !recyclingPutACK(r, 1) || r.Header.Revision <= d.revision || r.Header.Revision == math.MaxInt64 {
+		if !operationPutResponses(r, 1) || r.Header.Revision <= d.revision || r.Header.Revision == math.MaxInt64 {
 			return q, ErrOutcomeUnknown
 		}
 		q.terminal = taskWorkspaceSyncRecyclingGeneration{d.recycling.create, r.Header.Revision, d.recycling.version + 2, value}
