@@ -51,7 +51,18 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		return nil, err
 	}
 	owned, cancel := context.WithDeadline(ctx, d.claims.SessionNotAfter)
-	r, err := b.archiveStore.reserve(owned)
+	var r *taskArchiveSpool
+	if b.archiveStore.recovery != nil {
+		seed, seedErr := originalArchiveRecoverySeed(c, d)
+		if seedErr != nil {
+			cancel()
+			b.archiveLife.mu.Unlock()
+			return nil, seedErr
+		}
+		r, err = b.archiveStore.reserveRecovery(owned, seed)
+	} else {
+		r, err = b.archiveStore.reserve(owned)
+	}
 	if err != nil {
 		cancel()
 		b.archiveLife.mu.Unlock()
@@ -117,6 +128,14 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 	// before sealing the externally returned original result.
 	if err = o.currentGuard(owned); err != nil {
 		return nil, errors.Join(err, r.close())
+	}
+	if r.recovery != nil {
+		if err = r.sealOriginalReceived(owned, w); err != nil {
+			return nil, errors.Join(err, r.close())
+		}
+		if err = o.currentGuard(owned); err != nil {
+			return nil, errors.Join(err, r.close())
+		}
 	}
 	b.archiveLife.mu.Lock()
 	closed := b.archiveLife.closed

@@ -73,6 +73,9 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	if budget.profile == 2 {
 		stopTarget := context.AfterFunc(body.localTarget.ctx, cancel)
 		defer stopTarget()
+		if err := s.archive.owner.spool.sealOriginalBinding(bounded, s, body); err != nil {
+			return result, err
+		}
 		return s.reserveRecyclingPutIntent(bounded, body, draft)
 	}
 	o.nativeMu.Lock()

@@ -365,3 +365,153 @@ func (r *taskArchiveSpool) archiveBytesLimit() uint64 {
 	}
 	return r.store.limits.JobBytes
 }
+
+// Called only while the original validated claim/draft chain remains in the
+// receive admission. Fixed roles replace neither permanent history nor receipts.
+func originalArchiveRecoverySeed(c *TaskClaim, d *taskArchiveDraft) (taskArchiveRecoverySeed, error) {
+	if c == nil || c.self != c || d == nil || d.finalSync == nil || d.finalSync != c.finalSyncDraft || d.finalSync.archive != d || d.finalSync.record.Claim != c.reference {
+		return taskArchiveRecoverySeed{}, errTaskArchive
+	}
+	task, err := encodeTaskRecord(d.finalSync.record.Task)
+	if err != nil {
+		return taskArchiveRecoverySeed{}, err
+	}
+	seed := taskArchiveRecoverySeed{Task: c.reference.Task, TaskBirth: c.birth, TaskDigest: workspaceSyncIntentDigest(task), ClaimID: c.reference.ClaimID, WorkerID: c.reference.WorkerID, LeaseID: c.reference.LeaseID, ClaimRevision: c.reference.CreateRevision, ClaimDigest: workspaceSyncIntentDigest(c.value), FinalSyncAttempt: d.finalSync.record.AttemptID, FinalSyncRevision: d.finalSync.revision, FinalSyncDigest: workspaceSyncIntentDigest(d.finalSync.value), ArchiveCommand: d.reference().CommandID, ArchiveRevision: d.revision, ArchiveDigest: workspaceSyncIntentDigest(d.value), IssuerRevision: d.issuerRevision, IssuerDigest: workspaceSyncIntentDigest(d.issuerValue), TicketDigest: d.ticket.Digest()}
+	return seed, seed.validate()
+}
+
+// The receive owner has already physically returned before this registration.
+// Add/Wait is sealed under the same admission mutex as spool Close, so metadata
+// waiters and IO cannot outlive the descriptor they actually use.
+func (r *taskArchiveSpool) beginRecoveryMetadata(ctx context.Context) (context.Context, func(), error) {
+	if r == nil || r.self != r || r.store == nil || r.store.self != r.store || r.recovery == nil || ctx == nil {
+		return nil, nil, errTaskArchive
+	}
+	s := r.store
+	s.mu.Lock()
+	if s.closed || r.closing || r.active || r.ctx.Err() != nil || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, nil, errors.Join(errTaskArchive, ctx.Err(), r.ctx.Err())
+	}
+	r.recovery.metadata.Add(1)
+	s.mu.Unlock()
+	bounded, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.ctx, cancel)
+	return bounded, func() { stop(); cancel(); r.recovery.metadata.Done() }, nil
+}
+
+func (r *taskArchiveSpool) sealOriginalReceived(ctx context.Context, original *taskReceivedArchive) error {
+	if r != nil && r.self == r && r.store != nil && r.store.self == r.store && r.store.recovery == nil {
+		return nil
+	}
+	bounded, finish, err := r.beginRecoveryMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	s := r.store
+	s.mu.Lock()
+	valid := original != nil && original.self == original && original.origin == r && r.witness == original && r.started && r.consumer == nil
+	s.mu.Unlock()
+	if !valid {
+		return errTaskArchive
+	}
+	unlock, err := r.recoveryGate(bounded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m, d := r.recovery.manifest, original.diagnostics
+	if m.State != "pending" || m.Artifact == nil || m.Seed.TicketDigest != d.TicketDigest || d.Bytes < 1536 || d.Bytes > r.archiveBytesLimit() || d.Entries == 0 || d.Entries > s.limits.Entries || !validHexDigest(d.SHA256) {
+		return errTaskArchive
+	}
+	if err := taskArchiveCheck(s.root, r.name, r.file, r.identity); err != nil {
+		return err
+	}
+	st, err := r.file.Stat()
+	if err != nil || st.Size() < 0 || uint64(st.Size()) != d.Bytes {
+		return errors.Join(errTaskArchive, err)
+	}
+	if err := errors.Join(bounded.Err(), r.file.Sync()); err != nil {
+		return err
+	}
+	if err := taskArchiveCheck(s.root, r.name, r.file, r.identity); err != nil {
+		return err
+	}
+	m.State = "received"
+	m.Received = &taskArchiveRecoveryReceived{d.Bytes, d.Entries, d.SHA256}
+	return r.commitRecovery(bounded, m, true)
+}
+
+func recoverySameBinding(a, b taskArchiveRecoveryBinding) bool {
+	ap, bp := a.Plan, b.Plan
+	if a.Local != b.Local || a.TargetDigest != b.TargetDigest || ap.Provider != bp.Provider || ap.StorageIdentityHash != bp.StorageIdentityHash || ap.Bucket != bp.Bucket || ap.Prefix != bp.Prefix || ap.Hash != bp.Hash || ap.Partition != bp.Partition || ap.DeleteExtraneous != bp.DeleteExtraneous || ap.Digest != bp.Digest || len(ap.Exclude) != len(bp.Exclude) {
+		return false
+	}
+	for i := range ap.Exclude {
+		if ap.Exclude[i] != bp.Exclude[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *taskArchiveSpool) sealOriginalBinding(ctx context.Context, source *PreparedTaskWorkspaceSyncSource, body *taskWorkspaceSyncBody) error {
+	if r != nil && r.self == r && r.store != nil && r.store.self == r.store && r.store.recovery == nil {
+		return nil
+	}
+	bounded, finish, err := r.beginRecoveryMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	s := r.store
+	s.mu.Lock()
+	valid := source != nil && source.self == source && r.consumer == source && source.archive != nil && source.archive.witness == r.witness && source.archive.owner != nil && source.archive.owner.spool == r
+	s.mu.Unlock()
+	if !valid || !source.originalLocalBody(body) || body.localTarget == nil || source.plan.validate() != nil {
+		return errTaskArchive
+	}
+	body.mu.Lock()
+	active := body.active && !body.closed && body.ctx.Err() == nil
+	body.mu.Unlock()
+	if !active {
+		return errTaskArchive
+	}
+	unlock, err := r.recoveryGate(bounded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := errors.Join(source.local(bounded), body.localTarget.check(bounded)); err != nil {
+		return err
+	}
+	m := r.recovery.manifest
+	if m.Received == nil || m.Seed.Task != source.archive.owner.claim.reference.Task || m.Seed.ClaimID != source.archive.owner.claim.reference.ClaimID || m.Seed.TicketDigest != source.diagnostics.TicketDigest || *m.Received != (taskArchiveRecoveryReceived{source.diagnostics.Bytes, source.diagnostics.Entries, source.diagnostics.SHA256}) {
+		return errTaskArchive
+	}
+	local, err := encodeOperationMetadata(body.localTarget.pin, 16384)
+	if err != nil {
+		return err
+	}
+	binding := taskArchiveRecoveryBinding{recoveryPlanWire(source.plan), body.localTarget.pin, workspaceSyncIntentDigest(local)}
+	if m.State == "bound" {
+		if m.Binding == nil || !recoverySameBinding(*m.Binding, binding) {
+			return ErrIdentityMismatch
+		}
+	} else {
+		if m.State != "received" || m.Binding != nil {
+			return errTaskArchive
+		}
+		m.State, m.Binding = "bound", &binding
+		if err := r.commitRecovery(bounded, m, true); err != nil {
+			return err
+		}
+	}
+	// Both actual original source history and the physical target are checked
+	// after the durable bound generation, immediately before the first reserve.
+	if err := source.guard(bounded); err != nil {
+		return err
+	}
+	return body.localTarget.check(bounded)
+}
