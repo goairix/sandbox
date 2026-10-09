@@ -85,9 +85,14 @@ type taskWorkspaceSyncSlotRecord struct {
 }
 
 type taskWorkspaceSyncBudgetPin struct {
+	profile     uint8 // zero is legacy-compatible only for internal fixtures
 	options     TaskWorkspaceSyncBudgetOptions
 	key, value  string
 	create, mod int64
+}
+
+func (p *taskWorkspaceSyncBudgetPin) legacyProfile() bool {
+	return p == nil || p.profile == 0 || p.profile == 1
 }
 
 type taskWorkspaceSyncIntentDraft struct {

@@ -47,7 +47,7 @@ func (b *Backend) pinTaskWorkspaceSyncBudget(ctx context.Context, options *TaskW
 	if err != nil || value != string(kv.Value) {
 		return ErrIdentityMismatch
 	}
-	b.workspaceSyncBudget = &taskWorkspaceSyncBudgetPin{*options, key, value, kv.CreateRevision, kv.ModRevision}
+	b.workspaceSyncBudget = &taskWorkspaceSyncBudgetPin{profile: 1, options: *options, key: key, value: value, create: kv.CreateRevision, mod: kv.ModRevision}
 	return nil
 }
 

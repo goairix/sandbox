@@ -32,7 +32,7 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	defer func() { body.mu.Lock(); body.active = false; close(body.done); body.mu.Unlock() }()
 	o := s.archive.owner
 	b, budget := o.backend, o.backend.workspaceSyncBudget
-	if budget == nil {
+	if budget == nil || !budget.legacyProfile() {
 		return result, ErrInvalidConfiguration
 	}
 	if err := s.local(ctx); err != nil {

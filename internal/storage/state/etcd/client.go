@@ -24,21 +24,22 @@ import (
 // concurrent use for the backend lifetime, and must not mutate Options during New.
 // Certificates already added to RootCAs or ClientCAs must also remain immutable.
 type Options struct {
-	Endpoints                  []string
-	Namespace                  Namespace
-	Identity                   Identity
-	DialTimeout                time.Duration
-	RequestTimeout             time.Duration
-	TLS                        *tls.Config
-	AllowInsecureLoopback      bool
-	PublicationTrust           *RuntimePublicationTrust
-	Clock                      AuthorityClock
-	ExecIssuer                 ExecCommandIssuer
-	TaskIssuer                 TaskCommandIssuer
-	TaskQuiescenceIssuer       TaskQuiescenceIssuer
-	TaskWorkspaceArchiveIssuer TaskWorkspaceArchiveIssuer
-	TaskWorkspaceArchiveSpool  *TaskWorkspaceArchiveSpoolOptions
-	TaskWorkspaceSyncBudget    *TaskWorkspaceSyncBudgetOptions
+	Endpoints                        []string
+	Namespace                        Namespace
+	Identity                         Identity
+	DialTimeout                      time.Duration
+	RequestTimeout                   time.Duration
+	TLS                              *tls.Config
+	AllowInsecureLoopback            bool
+	PublicationTrust                 *RuntimePublicationTrust
+	Clock                            AuthorityClock
+	ExecIssuer                       ExecCommandIssuer
+	TaskIssuer                       TaskCommandIssuer
+	TaskQuiescenceIssuer             TaskQuiescenceIssuer
+	TaskWorkspaceArchiveIssuer       TaskWorkspaceArchiveIssuer
+	TaskWorkspaceArchiveSpool        *TaskWorkspaceArchiveSpoolOptions
+	TaskWorkspaceSyncBudget          *TaskWorkspaceSyncBudgetOptions
+	TaskWorkspaceSyncRecyclingBudget *TaskWorkspaceSyncBudgetOptions
 }
 
 type Backend struct {
@@ -68,6 +69,12 @@ type Backend struct {
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if o.TaskWorkspaceSyncBudget != nil && o.TaskWorkspaceSyncRecyclingBudget != nil {
+		return invalid("workspace sync budget profiles are mutually exclusive")
+	}
+	if err := validateTaskWorkspaceSyncBudget(o.TaskWorkspaceSyncRecyclingBudget); err != nil {
+		return err
+	}
 	if err := validateTaskWorkspaceSyncBudget(o.TaskWorkspaceSyncBudget); err != nil {
 		return err
 	}
@@ -174,6 +181,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if o.TaskWorkspaceSyncBudget != nil {
 		owned := *o.TaskWorkspaceSyncBudget
 		o.TaskWorkspaceSyncBudget = &owned
+	}
+	if o.TaskWorkspaceSyncRecyclingBudget != nil {
+		owned := *o.TaskWorkspaceSyncRecyclingBudget
+		o.TaskWorkspaceSyncRecyclingBudget = &owned
 	}
 	if o.TaskWorkspaceArchiveSpool != nil {
 		owned := *o.TaskWorkspaceArchiveSpool
@@ -283,6 +294,9 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	}
 	b.identityValue = string(identity.Kvs[0].Value)
 	if err = b.pinTaskWorkspaceSyncBudget(ctx, o.TaskWorkspaceSyncBudget); err != nil {
+		return nil, err
+	}
+	if err = b.pinTaskWorkspaceSyncRecyclingBudget(ctx, o.TaskWorkspaceSyncRecyclingBudget); err != nil {
 		return nil, err
 	}
 	if o.TaskWorkspaceArchiveSpool != nil {

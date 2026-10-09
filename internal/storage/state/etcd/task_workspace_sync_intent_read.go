@@ -38,10 +38,13 @@ func workspaceSyncPointResponse(b *Backend, r *clientv3.TxnResponse, keys []stri
 
 func (b *Backend) workspaceSyncBudgetMatches(kv *mvccpb.KeyValue) bool {
 	p := b.workspaceSyncBudget
-	return p != nil && immutableWorkspaceSyncKV(kv) && string(kv.Key) == p.key && string(kv.Value) == p.value && kv.CreateRevision == p.create && kv.ModRevision == p.mod
+	return p != nil && p.profile <= 2 && immutableWorkspaceSyncKV(kv) && string(kv.Key) == p.key && string(kv.Value) == p.value && kv.CreateRevision == p.create && kv.ModRevision == p.mod
 }
 
 func (b *Backend) readWorkspaceSyncIntent(ctx context.Context, ref TaskWorkspaceSyncIntentReference) (*TaskWorkspaceSyncIntentEntry, error) {
+	if !b.workspaceSyncBudget.legacyProfile() {
+		return nil, ErrInvalidConfiguration
+	}
 	intent, slot, err := b.workspaceSyncIntentKeys(ref)
 	if err != nil {
 		return nil, err
@@ -107,6 +110,9 @@ func (b *Backend) readWorkspaceSyncIntent(ctx context.Context, ref TaskWorkspace
 // LoadTaskWorkspaceSyncIntent reads copied historical metadata. It cannot recover
 // an original body or authorize dispatch, settlement, refunds or slot reuse.
 func (b *Backend) LoadTaskWorkspaceSyncIntent(ctx context.Context, ref TaskWorkspaceSyncIntentReference) (*TaskWorkspaceSyncIntentEntry, error) {
+	if b != nil && !b.workspaceSyncBudget.legacyProfile() {
+		return nil, ErrInvalidConfiguration
+	}
 	if b == nil || b.client == nil || ctx == nil || ref.Validate() != nil || ref.Revision <= 0 {
 		return nil, ErrInvalidRecord
 	}
