@@ -163,12 +163,21 @@ func (p *taskWorkspaceSyncLocalPut) guard() error {
 	if err != nil {
 		return err
 	}
-	slot, err := decodeWorkspaceSyncSlot(points[1])
-	if err != nil {
-		return err
-	}
-	if string(points[0].Value) != d.value || string(points[1].Value) != d.slotValue || points[0].CreateRevision != d.revision || points[1].CreateRevision != d.revision || intent.Version != 2 || intent.Local == nil || *intent.Local != target.pin || intent.Reference != d.record.Reference || intent.BudgetRevision != b.workspaceSyncBudget.create || slot.IntentDigest != workspaceSyncIntentDigest(d.value) {
+	if string(points[0].Value) != d.value || points[0].CreateRevision != d.revision || intent.Version != 2 || intent.Local == nil || *intent.Local != target.pin || intent.Reference != d.record.Reference || intent.BudgetRevision != b.workspaceSyncBudget.create {
 		return ErrCorruptRecord
+	}
+	if b.workspaceSyncBudget.profile == 2 {
+		if err := b.validateRecyclingLocalSlot(d, points[1]); err != nil {
+			return err
+		}
+	} else {
+		slot, err := decodeWorkspaceSyncSlot(points[1])
+		if err != nil {
+			return err
+		}
+		if !b.workspaceSyncBudget.legacyProfile() || string(points[1].Value) != d.slotValue || points[1].CreateRevision != d.revision || slot.IntentDigest != workspaceSyncIntentDigest(d.value) {
+			return ErrCorruptRecord
+		}
 	}
 	o.nativeMu.Unlock() // fully validated native response; physical postguard is outside
 	nativeLocked = false

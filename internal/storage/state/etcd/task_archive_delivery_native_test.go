@@ -222,6 +222,10 @@ func deliveryNativeFixtureWithBudgetSetup(t *testing.T, horizon time.Duration, b
 }
 
 func deliveryNativeFixtureWithData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithProfileData(t, horizon, builder, budget, setup, data, entries, false, ttl...)
+}
+
+func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, recycling bool, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
 	base := newTaskDeliveryFixtureWithSetup(t, true, builder != nil, setup)
 	archiveTrackCleanup(base.b)
@@ -248,22 +252,58 @@ func deliveryNativeFixtureWithData(t *testing.T, horizon time.Duration, builder 
 	anchor := time.Now()
 	options := deliverySpoolOptions(archiveTestDirectory(t))
 	if budget != nil {
-		key, e := f.b.namespace.Key("meta", "workspace_sync_budget")
+		metadata := "workspace_sync_budget"
+		if recycling {
+			metadata = "workspace_sync_recycling_budget"
+		}
+		key, e := f.b.namespace.Key("meta", metadata)
 		require.NoError(t, e)
 		value, e := encodeOperationMetadata(taskWorkspaceSyncBudgetRecord{1, *budget}, 1024)
+		if recycling {
+			value, e = encodeOperationMetadata(taskWorkspaceSyncRecyclingBudgetRecord{2, *budget}, 1024)
+		}
 		require.NoError(t, e)
 		got, e := f.raw.Get(f.ctx, key)
 		require.NoError(t, e)
 		if len(got.Kvs) == 0 {
 			_, e = f.raw.Put(f.ctx, key, value)
 			require.NoError(t, e)
+			if recycling {
+				// Explicit operator provisioning, before opening the consumer Backend.
+				// Every partition is provisioned; native batches never exceed 64 ops.
+				ops := make([]clientv3.Op, 0, 64)
+				for partition := 0; partition < 256; partition++ {
+					for slot := uint32(0); slot < budget.SlotsPerPartition; slot++ {
+						ref := f.c.reference.Task
+						ref.Partition = uint8(partition)
+						_, slotKey, err := f.b.workspaceSyncRecyclingKeys(TaskWorkspaceSyncIntentReference{Task: ref, BudgetID: budget.BudgetID, IntentID: uuid.NewString(), Slot: slot})
+						require.NoError(t, err)
+						free, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: budget.BudgetID, Partition: uint8(partition), Slot: slot, State: "free"})
+						require.NoError(t, err)
+						ops = append(ops, clientv3.OpPut(slotKey, free))
+						if len(ops) == 64 {
+							_, err = f.raw.Txn(f.ctx).Then(ops...).Commit()
+							require.NoError(t, err)
+							ops = ops[:0]
+						}
+					}
+				}
+				if len(ops) > 0 {
+					_, err := f.raw.Txn(f.ctx).Then(ops...).Commit()
+					require.NoError(t, err)
+				}
+			}
 		} else {
 			require.Len(t, got.Kvs, 1)
 			require.True(t, immutableWorkspaceSyncKV(got.Kvs[0]))
 			require.Equal(t, value, string(got.Kvs[0].Value))
 		}
 	}
-	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: 500 * time.Millisecond, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: options, TaskWorkspaceSyncBudget: budget, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
+	legacyBudget, recyclingBudget, requestTimeout := budget, (*TaskWorkspaceSyncBudgetOptions)(nil), 500*time.Millisecond
+	if recycling {
+		legacyBudget, recyclingBudget, requestTimeout = nil, budget, 3*time.Second
+	}
+	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: requestTimeout, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: options, TaskWorkspaceSyncBudget: legacyBudget, TaskWorkspaceSyncRecyclingBudget: recyclingBudget, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
 		return ClockObservation{UTC: f.now.Add(time.Since(anchor))}, ctx.Err()
 	})})
 	require.NoError(t, err)

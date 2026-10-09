@@ -20,6 +20,9 @@ case "$mode" in
   local-put-ownership) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^ownership$';;
   local-put-mode) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^mode-zero-preserved$';;
   local-put-error) test_run='^TestTaskWorkspaceSyncLocalPutNative$/^real-write-error-retains-partial-charge$';;
+  recycling-admission) test_run='^TestTaskWorkspaceSyncRecyclingNativeAdmission$';;
+  recycling-proof) test_run='^TestTaskWorkspaceSyncRecyclingNative';;
+  recycling-legacy) test_run='^TestTaskWorkspaceSync(IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|LocalPutNative)$/^nested-and-successive-original-files$';;
   pending-proof) test_run='^TestTaskWorkspaceSyncLocalNative$/^readonly-attribution-original-gate$';;
   reap-retained) ;;
   attach-owner) ;;
@@ -171,6 +174,14 @@ docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ima
 grep -Fxq "$digest" "$evidence/digests.txt" || { echo 'pinned RepoDigest mismatch' >&2; exit 1; }
 printf 'project=%s fixture=%s platform=%s CGO_ENABLED=0\n' "$project" "$fixture" "$platform" >"$evidence/fixture.txt"
 source_files=(
+  internal/storage/state/etcd/task_workspace_sync_recycling_admission.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_read.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_guard.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_test.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_native_linux_test.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_types.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_records.go
+  internal/storage/state/etcd/task_workspace_sync_recycling_budget.go
   internal/storage/state/etcd/task_workspace_sync_local_types.go
   internal/storage/state/etcd/task_workspace_sync_local_put_linux.go
   internal/storage/state/etcd/task_workspace_sync_local_put_unsupported.go
@@ -184,6 +195,7 @@ source_files=(
   internal/storage/state/etcd/task_workspace_sync_intent_types.go
   internal/storage/state/etcd/task_workspace_sync_intent_records.go
   internal/storage/state/etcd/task_workspace_sync_intent_admission.go
+  internal/storage/state/etcd/task_workspace_sync_intent_read.go
   internal/storage/state/etcd/task_workspace_sync_source_types.go
   internal/storage/state/etcd/task_close_delivery_fixture_test.go
   scripts/test-workspace-sync-local.sh

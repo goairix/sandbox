@@ -32,8 +32,11 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	defer func() { body.mu.Lock(); body.active = false; close(body.done); body.mu.Unlock() }()
 	o := s.archive.owner
 	b, budget := o.backend, o.backend.workspaceSyncBudget
-	if budget == nil || !budget.legacyProfile() {
+	if budget == nil || budget.profile > 2 {
 		return result, ErrInvalidConfiguration
+	}
+	if budget.profile == 2 && body.localTarget == nil {
+		return result, ErrInvalidRecord
 	}
 	if err := s.local(ctx); err != nil {
 		return result, err
@@ -61,8 +64,16 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 	defer stopSource()
 	defer stopBody()
 	defer cancel()
+	if budget.profile == 2 {
+		return s.reserveRecyclingPutIntent(bounded, body, draft)
+	}
 	o.nativeMu.Lock()
-	defer o.nativeMu.Unlock()
+	nativeLocked := true
+	defer func() {
+		if nativeLocked {
+			o.nativeMu.Unlock()
+		}
+	}()
 	if draft.writeAttempted {
 		return s.arbitrateWorkspaceSyncIntent(bounded, body, draft)
 	}
@@ -111,11 +122,16 @@ func (s *PreparedTaskWorkspaceSyncSource) reservePutIntent(ctx context.Context, 
 			draft.revision = r.Header.Revision
 			result.Reference.Revision = draft.revision
 			result.Outcome = OutcomeCommitted
+			o.nativeMu.Unlock()
+			nativeLocked = false
 			if err := s.workspaceSyncIntentLocal(bounded, body); err != nil {
 				return result, err
 			}
 			if draft.record.Version == 2 {
 				if err := s.workspaceSyncBoundLocal(bounded, body); err != nil {
+					return result, err
+				}
+				if err := s.workspaceSyncIntentLocal(bounded, body); err != nil {
 					return result, err
 				}
 				draft.acknowledged = true

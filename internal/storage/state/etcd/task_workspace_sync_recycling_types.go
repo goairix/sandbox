@@ -17,3 +17,10 @@ type taskWorkspaceSyncRecyclingSlotRecord struct {
 	IntentBirth    int64  `json:"intent_birth"`
 	EvidenceDigest string `json:"evidence_digest"`
 }
+
+// Captured before the one original reserve request escapes. ACK birth is kept
+// separately in the original intent draft; copied diagnostics grant no IO.
+type taskWorkspaceSyncRecyclingGeneration struct {
+	create, mod, version int64
+	value                string
+}

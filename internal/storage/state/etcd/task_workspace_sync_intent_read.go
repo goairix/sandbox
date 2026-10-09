@@ -110,11 +110,14 @@ func (b *Backend) readWorkspaceSyncIntent(ctx context.Context, ref TaskWorkspace
 // LoadTaskWorkspaceSyncIntent reads copied historical metadata. It cannot recover
 // an original body or authorize dispatch, settlement, refunds or slot reuse.
 func (b *Backend) LoadTaskWorkspaceSyncIntent(ctx context.Context, ref TaskWorkspaceSyncIntentReference) (*TaskWorkspaceSyncIntentEntry, error) {
-	if b != nil && !b.workspaceSyncBudget.legacyProfile() {
+	if b != nil && b.workspaceSyncBudget != nil && b.workspaceSyncBudget.profile > 2 {
 		return nil, ErrInvalidConfiguration
 	}
 	if b == nil || b.client == nil || ctx == nil || ref.Validate() != nil || ref.Revision <= 0 {
 		return nil, ErrInvalidRecord
+	}
+	if b.workspaceSyncBudget != nil && b.workspaceSyncBudget.profile == 2 {
+		return b.readRecyclingIntent(ctx, ref)
 	}
 	return b.readWorkspaceSyncIntent(ctx, ref)
 }

@@ -11,7 +11,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func TestTaskWorkspaceSyncRecyclingOptionsContract(t *testing.T) {
@@ -244,7 +246,11 @@ func TestTaskWorkspaceSyncRecyclingKeysAndLegacyFailClosed(t *testing.T) {
 		_, err = b.readWorkspaceSyncIntent(context.Background(), TaskWorkspaceSyncIntentReference{})
 		require.ErrorIs(t, err, ErrInvalidConfiguration, "must refuse before nil client RPC")
 		_, err = b.LoadTaskWorkspaceSyncIntent(context.Background(), TaskWorkspaceSyncIntentReference{})
-		require.ErrorIs(t, err, ErrInvalidConfiguration)
+		if profile == 2 {
+			require.ErrorIs(t, err, ErrInvalidRecord, "explicit profile dispatch still requires a valid diagnostic reference")
+		} else {
+			require.ErrorIs(t, err, ErrInvalidConfiguration)
+		}
 		backend, source := syncSourceHostIO(t, nil)
 		backend.workspaceSyncBudget = b.workspaceSyncBudget
 		entry := &taskWorkspaceSyncEntry{origin: source, kind: '0'}
@@ -253,7 +259,104 @@ func TestTaskWorkspaceSyncRecyclingKeysAndLegacyFailClosed(t *testing.T) {
 		body.self = body
 		source.current, source.body = entry, body
 		_, err = source.reservePutIntent(context.Background(), body)
-		require.ErrorIs(t, err, ErrInvalidConfiguration)
+		if profile == 2 {
+			require.ErrorIs(t, err, ErrInvalidRecord, "profile2 requires an original bound local body")
+		} else {
+			require.ErrorIs(t, err, ErrInvalidConfiguration)
+		}
 		require.Nil(t, body.intent)
 	}
+}
+
+func recyclingLocalDraftFixture(t *testing.T) (*Backend, *taskWorkspaceSyncIntentDraft) {
+	t.Helper()
+	n, err := NewNamespace("/test", "scope", "cell")
+	require.NoError(t, err)
+	r := workspaceSyncIntentRecordFixture(t)
+	w := workspaceSyncIdentity(t, "local", "test-storage", "bucket", "team/project/")
+	r.Version, r.Provider, r.WorkspaceHash, r.Reference.Task.Partition = 2, w.provider, w.hash, w.partition
+	r.Claim.Task, r.Local = r.Reference.Task, localAttributionFixture()
+	pin := &taskWorkspaceSyncBudgetPin{profile: 2, options: TaskWorkspaceSyncBudgetOptions{r.Reference.BudgetID, 64, 16384}, key: n.Root() + "meta/workspace_sync_recycling_budget", value: "cfg", create: 1, mod: 1}
+	b := &Backend{namespace: n, identityKey: n.Root() + "meta/identity", restoreKey: n.Root() + "meta/restore_epoch", identityValue: "identity", restoreEpoch: "epoch", workspaceSyncBudget: pin}
+	d := &taskWorkspaceSyncIntentDraft{record: r, revision: 9, acknowledged: true}
+	require.NoError(t, b.prepareRecyclingIntent(d))
+	free, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: r.Reference.BudgetID, Partition: r.Reference.Task.Partition, State: "free"})
+	require.NoError(t, err)
+	d.recycling = &taskWorkspaceSyncRecyclingGeneration{create: 2, mod: 7, version: 4, value: free}
+	return b, d
+}
+
+func TestTaskWorkspaceSyncRecyclingLocalGeneration(t *testing.T) {
+	b, d := recyclingLocalDraftFixture(t)
+	kv := &mvccpb.KeyValue{Key: []byte(d.slotKey), Value: []byte(d.slotValue), CreateRevision: 2, ModRevision: 9, Version: 5}
+	require.NoError(t, b.validateRecyclingLocalSlot(d, kv), "slot is mutable; occupied version need not be 1")
+	for _, fault := range []string{"create", "mod", "version", "value", "lease", "unknown-ack", "missing-capture", "free", "terminal"} {
+		t.Run(fault, func(t *testing.T) {
+			bad, draft := *kv, *d
+			switch fault {
+			case "create":
+				bad.CreateRevision++
+			case "mod":
+				bad.ModRevision++
+			case "version":
+				bad.Version++
+			case "value":
+				bad.Value = []byte(" " + d.slotValue)
+			case "lease":
+				bad.Lease = 1
+			case "unknown-ack":
+				draft.acknowledged = false
+			case "missing-capture":
+				draft.recycling = nil
+			case "free":
+				bad.Value = []byte(d.recycling.value)
+			case "terminal":
+				slot, err := decodeWorkspaceSyncRecyclingSlot(kv)
+				require.NoError(t, err)
+				slot.State, slot.IntentBirth, slot.EvidenceDigest = "terminal", 9, strings.Repeat("b", 64)
+				value, err := encodeWorkspaceSyncRecyclingSlot(slot)
+				require.NoError(t, err)
+				bad.Value = []byte(value)
+			}
+			require.Error(t, b.validateRecyclingLocalSlot(&draft, &bad))
+		})
+	}
+}
+
+func TestTaskWorkspaceSyncRecyclingAdmissionWireBounds(t *testing.T) {
+	b, d := recyclingLocalDraftFixture(t)
+	d.record.RelativePath = strings.Repeat("p", workspaceSyncMaxPathBytes)
+	d.record.Local.Root = "/" + strings.Repeat("r", 4095)
+	require.NoError(t, b.prepareRecyclingIntent(d), "largest local fields fit B16384")
+	o := &taskArchiveDelivery{backend: b, prefix: fmt.Sprintf("%sp/%02x/sandboxes/%s/operations/", b.namespace.Root(), d.record.Reference.Task.Partition, d.record.Reference.Task.SandboxID)}
+	for i := 0; i < 50; i++ {
+		// Exercise the point-key limit with bounded history values, independently
+		// of the maximum budgeted intent and reply sizes below.
+		key := b.namespace.Root() + fmt.Sprintf("history/%02d/", i)
+		key += strings.Repeat("k", 1024-len(key))
+		o.comparisons = append(o.comparisons, clientv3.Compare(clientv3.Value(key), "=", strings.Repeat("v", 512)))
+	}
+	s := &PreparedTaskWorkspaceSyncSource{archive: &ReceivedTaskWorkspaceArchive{owner: o}}
+	cmps := s.recyclingReserveComparisons(d)
+	require.Len(t, cmps, 57)
+	keys := []string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key, d.intentKey, d.slotKey}
+	require.NoError(t, b.preflightWorkspaceSyncIntent(cmps, d, keys))
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(d.intentKey, d.value, 0), taskProtoPut(d.slotKey, d.slotValue, 0)}, Failure: taskProtoPoints(keys)}
+	values := []string{strings.Repeat("i", 1024), strings.Repeat("r", 128), strings.Repeat("b", 1024), strings.Repeat("x", 16384), strings.Repeat("s", 512)}
+	replyKeys := make([]string, len(keys))
+	for i := range replyKeys {
+		replyKeys[i] = strings.Repeat("k", 1024)
+	}
+	reply := taskProtoResponse(replyKeys, values)
+	require.Equal(t, 64, len(request.Compare)+len(request.Success)+len(request.Failure))
+	require.NoError(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{reply}))
+	require.LessOrEqual(t, request.Size(), maxMutationBytes)
+	require.LessOrEqual(t, reply.Size(), maxMutationBytes)
+	t.Logf("actual protobuf originalPins=50 nodes=64 requestBytes=%d failureReplyWorstB16384Key1024=%d intentBytes=%d slotBytes=%d", request.Size(), reply.Size(), len(d.value), len(d.slotValue))
+	request.Failure = append(request.Failure, taskProtoRange(b.identityKey))
+	require.ErrorIs(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, nil), ErrInvalidMutation, "65th node rejected")
+	request.Failure = request.Failure[:5]
+	request.Success[0] = taskProtoPut(d.intentKey, strings.Repeat("x", maxMutationBytes), 0)
+	require.ErrorIs(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, nil), ErrInvalidMutation)
+	require.ErrorIs(t, taskCheckWire(b.namespace, nil, []*pb.TxnResponse{taskProtoResponse(keys[3:4], []string{strings.Repeat("x", maxMutationBytes)})}), ErrInvalidMutation)
 }
