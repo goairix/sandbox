@@ -50,6 +50,10 @@ type deliveryNativeWire struct {
 	claimCancel  context.CancelFunc
 }
 
+// Only the owned crash subprocess fixture sets this before constructing New.
+var taskArchiveRecoveryFixtureDirectory string
+var taskArchiveRecoveryFixtureDuration time.Duration
+
 // The peer uses genuine pinned mTLS, signed frames, TAR and authenticated EOF.
 // It is a protocol fixture, not PID1 or provider settlement evidence.
 func deliveryNativeTarget(t *testing.T, f *quiescenceNativeFixture) *deliveryNativeWire {
@@ -227,6 +231,11 @@ func deliveryNativeFixtureWithData(t *testing.T, horizon time.Duration, builder 
 
 func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, recycling bool, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
+	return deliveryNativeFixtureWithRecoveryProfileData(t, horizon, builder, budget, setup, data, entries, recycling, false, ttl...)
+}
+
+func deliveryNativeFixtureWithRecoveryProfileData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, recycling, recovery bool, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	t.Helper()
 	base := newTaskDeliveryFixtureWithSetup(t, true, builder != nil, setup)
 	archiveTrackCleanup(base.b)
 	f := finishQuiescenceFixture(t, base)
@@ -313,11 +322,27 @@ func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, b
 	if recycling {
 		legacyBudget, recyclingBudget, requestTimeout = nil, budget, 3*time.Second
 	}
-	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: requestTimeout, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: options, TaskWorkspaceSyncBudget: legacyBudget, TaskWorkspaceSyncRecyclingBudget: recyclingBudget, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
+	var recoveryOptions *TaskWorkspaceArchiveRecoveryOptions
+	legacySpool := options
+	if recovery {
+		require.True(t, recycling)
+		copy := *options
+		if taskArchiveRecoveryFixtureDirectory != "" {
+			copy.Directory = taskArchiveRecoveryFixtureDirectory
+		}
+		copy.JobIndexBytes += 4 * taskArchiveRecoveryMetadataBytes
+		copy.TotalIndexBytes = copy.Jobs * copy.JobIndexBytes
+		recoveryOptions = &TaskWorkspaceArchiveRecoveryOptions{copy}
+		legacySpool = nil
+	}
+	b, err := New(f.ctx, Options{Endpoints: f.raw.Endpoints(), Namespace: f.b.namespace, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: requestTimeout, TaskQuiescenceIssuer: f.issuer, TaskWorkspaceArchiveIssuer: issuer, TaskWorkspaceArchiveSpool: legacySpool, TaskWorkspaceArchiveRecovery: recoveryOptions, TaskWorkspaceSyncBudget: legacyBudget, TaskWorkspaceSyncRecyclingBudget: recyclingBudget, PublicationTrust: &RuntimePublicationTrust{AuthorityID: f.b.publicationAuthorityID, Target: f.b.publicationTarget, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: testAuthorityClock(func(ctx context.Context) (ClockObservation, error) {
 		return ClockObservation{UTC: f.now.Add(time.Since(anchor))}, ctx.Err()
 	})})
 	require.NoError(t, err)
 	options.Jobs = 0
+	if recoveryOptions != nil {
+		recoveryOptions.Jobs = 0
+	}
 	require.EqualValues(t, 2, b.archiveStore.limits.Jobs, "constructor owns its copied options")
 	archiveTrackCleanup(b)
 	t.Cleanup(func() { _ = b.Close() })
@@ -382,7 +407,11 @@ func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, b
 	}
 	_, err = b.ReserveTaskFinalSync(f.ctx, c, prepared, w.destination, plan)
 	require.NoError(t, err)
-	r, err := b.PrepareTaskWorkspaceArchive(f.ctx, c, prepared, w.destination, 45*time.Second)
+	archiveDuration := 45 * time.Second
+	if recovery && taskArchiveRecoveryFixtureDuration > 0 {
+		archiveDuration = taskArchiveRecoveryFixtureDuration
+	}
+	r, err := b.PrepareTaskWorkspaceArchive(f.ctx, c, prepared, w.destination, archiveDuration)
 	require.NoError(t, err)
 	require.NotNil(t, r.Prepared)
 	w.armed.Store(true)

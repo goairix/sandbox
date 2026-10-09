@@ -2,6 +2,9 @@ package etcd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +64,215 @@ func TestTaskArchiveRecoveryStoreUnsupported(t *testing.T) {
 	require.Error(t, taskArchiveRecoverySupported())
 	_, err := newTaskArchiveRecoveryStore(recoveryTestOptions(archiveTestDirectory(t), 1))
 	require.Error(t, err)
+}
+
+func TestTaskArchiveRecoveryMetadataSessionExpiry(t *testing.T) {
+	s := &taskArchiveStore{recovery: &taskArchiveRecoveryStore{gate: make(chan struct{}, 1)}}
+	s.self = s
+	s.recovery.gate <- struct{}{}
+	session, stopSession := context.WithCancel(context.Background())
+	stopSession()
+	life, stopLife := context.WithCancel(context.Background())
+	defer stopLife()
+	r := &taskArchiveSpool{store: s, ctx: session, recovery: &taskArchiveRecoveryOwner{ctx: life, cancel: stopLife}}
+	r.self = r
+	bounded, done, err := r.beginRecoveryMetadata(context.Background())
+	require.NoError(t, err, "original consumer registration survives send/session expiry")
+	require.NoError(t, bounded.Err())
+	unlock, err := r.recoveryGate(bounded)
+	require.NoError(t, err)
+	unlock()
+	done()
+	stopLife()
+	_, _, err = r.beginRecoveryMetadata(context.Background())
+	require.Error(t, err, "spool Close cancellation still rejects new metadata owners")
+}
+
+func TestTaskArchiveRecoveryStoreFullAndPeakQuota(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux descriptor store")
+	}
+	o := recoveryTestOptions(archiveTestDirectory(t), 64)
+	s, err := newTaskArchiveRecoveryStore(o)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.close()) })
+	for i := 0; i < 64; i++ {
+		r, err := s.reserveRecovery(context.Background(), recoveryTestSeed(t))
+		require.NoError(t, err)
+		require.EqualValues(t, i, r.recovery.slot)
+		require.NoError(t, r.close(), "retirement cannot refund durable slot charge")
+	}
+	_, err = s.reserveRecovery(context.Background(), recoveryTestSeed(t))
+	require.Error(t, err)
+	require.Equal(t, uint64(64), s.jobs)
+	require.Equal(t, o.TotalBytes, s.disk)
+	require.Equal(t, o.TotalIndexBytes, s.memory)
+	require.Empty(t, s.spools, "live owner map contains only original owners")
+	for _, dimension := range []string{"disk", "memory"} {
+		t.Run(dimension, func(t *testing.T) {
+			limited := recoveryTestOptions(archiveTestDirectory(t), 2)
+			if dimension == "disk" {
+				limited.TotalBytes = limited.JobBytes
+			} else {
+				limited.TotalIndexBytes = limited.JobIndexBytes
+			}
+			store, err := newTaskArchiveRecoveryStore(limited)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.close()) })
+			_, err = store.reserveRecovery(context.Background(), recoveryTestSeed(t))
+			require.NoError(t, err)
+			_, err = store.reserveRecovery(context.Background(), recoveryTestSeed(t))
+			require.Error(t, err)
+			_, err = os.Stat(filepath.Join(limited.Directory, "slot-01.json"))
+			require.True(t, os.IsNotExist(err), "quota fails before filesystem creation")
+		})
+	}
+}
+
+// A structural store fixture, never a transported authority or cold source.
+func recoveryStoreReceivedFixture(t *testing.T, s *taskArchiveStore) *taskArchiveSpool {
+	t.Helper()
+	r, err := s.reserveRecovery(context.Background(), recoveryTestSeed(t))
+	require.NoError(t, err)
+	data := archiveValidTar(t)
+	_, err = r.file.Write(data)
+	require.NoError(t, err)
+	entries, err := taskArchiveValidateTar(context.Background(), r.file, uint64(len(data)), s.limits.Entries, r.index)
+	require.NoError(t, err)
+	h := sha256.Sum256(data)
+	w := &taskReceivedArchive{origin: r, diagnostics: taskArchiveDiagnostics{Bytes: uint64(len(data)), Entries: entries, SHA256: hex.EncodeToString(h[:]), TicketDigest: r.recovery.manifest.Seed.TicketDigest}}
+	w.self = w
+	r.started, r.witness = true, w
+	require.NoError(t, r.sealOriginalReceived(context.Background(), w))
+	return r
+}
+
+func TestTaskArchiveRecoveryStoreFilesystemQuarantine(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux descriptor store")
+	}
+	for _, fault := range []string{"tar-byte", "tar-mode", "tar-hardlink", "tar-symlink", "tar-rename", "json-unknown", "json-null", "json-oversize", "next-leftover", "root-boot", "root-mount", "root-inode"} {
+		t.Run(fault, func(t *testing.T) {
+			o := recoveryTestOptions(archiveTestDirectory(t), 2)
+			s, err := newTaskArchiveRecoveryStore(o)
+			require.NoError(t, err)
+			r := recoveryStoreReceivedFixture(t, s)
+			m := r.recovery.manifest
+			require.NoError(t, s.close())
+			tar, metadata := filepath.Join(o.Directory, "slot-00.tar"), filepath.Join(o.Directory, "slot-00.json")
+			original, err := os.ReadFile(metadata)
+			require.NoError(t, err)
+			t.Logf("original manifest before %s replacement: %s", fault, original)
+			switch fault {
+			case "tar-byte":
+				f, err := os.OpenFile(tar, os.O_WRONLY, 0)
+				require.NoError(t, err)
+				_, err = f.WriteAt([]byte{1}, 0)
+				require.NoError(t, err)
+				require.NoError(t, f.Close())
+			case "tar-mode":
+				require.NoError(t, os.Chmod(tar, 0644))
+			case "tar-hardlink":
+				require.NoError(t, os.Link(tar, filepath.Join(archiveTestDirectory(t), "link")))
+			case "tar-symlink":
+				require.NoError(t, os.Remove(tar))
+				require.NoError(t, os.Symlink(filepath.Join(archiveTestDirectory(t), "missing"), tar))
+			case "tar-rename":
+				require.NoError(t, os.Rename(tar, filepath.Join(archiveTestDirectory(t), "moved")))
+			case "json-unknown":
+				require.NoError(t, os.WriteFile(metadata, []byte("{\"unknown\":1}"), 0600))
+			case "json-null":
+				require.NoError(t, os.WriteFile(metadata, []byte("null"), 0600))
+			case "json-oversize":
+				require.NoError(t, os.WriteFile(metadata, make([]byte, taskArchiveRecoveryMetadataBytes+1), 0600))
+			case "next-leftover":
+				require.NoError(t, os.WriteFile(filepath.Join(o.Directory, "slot-00.next"), original, 0600))
+			default:
+				if fault == "root-boot" {
+					m.Root.BootID = "22222222-2222-4222-8222-222222222222"
+				} else if fault == "root-mount" {
+					m.Root.MountID++
+				} else {
+					m.Root.Ino++
+				}
+				var out [taskArchiveRecoveryMetadataBytes]byte
+				wire, err := encodeTaskArchiveRecovery(m, out[:])
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(metadata, wire, 0600))
+			}
+			cold, err := newTaskArchiveRecoveryStore(o)
+			if fault == "json-oversize" {
+				if cold != nil {
+					require.NoError(t, cold.close())
+				}
+				require.Error(t, err, "oversized content must reject all admission")
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cold.close()) })
+			d, err := cold.coldSnapshot(0)
+			require.NoError(t, err)
+			require.True(t, d.Occupied)
+			require.True(t, d.Quarantined)
+			require.Equal(t, o.JobBytes, cold.disk)
+			_, err = cold.reserveRecovery(context.Background(), recoveryTestSeed(t))
+			require.NoError(t, err, "other empty slot remains available")
+		})
+	}
+	for _, name := range []string{"unknown", "slot-02.tar", "slot-64.json", "slot-0.tar", "slot-00.other"} {
+		t.Run("reject-name-"+name, func(t *testing.T) {
+			o := recoveryTestOptions(archiveTestDirectory(t), 2)
+			require.NoError(t, os.WriteFile(filepath.Join(o.Directory, name), []byte("preserve"), 0600))
+			_, err := newTaskArchiveRecoveryStore(o)
+			require.Error(t, err)
+			preserved, err := os.ReadFile(filepath.Join(o.Directory, name))
+			require.NoError(t, err)
+			require.Equal(t, "preserve", string(preserved))
+		})
+	}
+	for _, extension := range []string{"tar", "json", "next"} {
+		t.Run("orphan-"+extension, func(t *testing.T) {
+			o := recoveryTestOptions(archiveTestDirectory(t), 2)
+			require.NoError(t, os.WriteFile(filepath.Join(o.Directory, "slot-00."+extension), []byte("orphan"), 0600))
+			s, err := newTaskArchiveRecoveryStore(o)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, s.close()) })
+			d, err := s.coldSnapshot(0)
+			require.NoError(t, err)
+			require.True(t, d.Quarantined)
+			require.Equal(t, o.JobBytes, s.disk)
+		})
+	}
+	for _, fault := range []string{"config", "root-mode", "root-symlink", "root-live-replacement"} {
+		t.Run(fault, func(t *testing.T) {
+			o := recoveryTestOptions(archiveTestDirectory(t), 2)
+			s, err := newTaskArchiveRecoveryStore(o)
+			require.NoError(t, err)
+			_, err = s.reserveRecovery(context.Background(), recoveryTestSeed(t))
+			require.NoError(t, err)
+			if fault == "root-live-replacement" {
+				require.NoError(t, os.Rename(o.Directory, o.Directory+"-original"))
+				require.NoError(t, os.Mkdir(o.Directory, 0700))
+				_, err = s.reserveRecovery(context.Background(), recoveryTestSeed(t))
+				require.Error(t, err)
+				require.NoError(t, s.close())
+				return
+			}
+			require.NoError(t, s.close())
+			switch fault {
+			case "config":
+				o.TotalBytes++
+			case "root-mode":
+				require.NoError(t, os.Chmod(o.Directory, 0755))
+			case "root-symlink":
+				link := filepath.Join(archiveTestDirectory(t), "root-link")
+				require.NoError(t, os.Symlink(o.Directory, link))
+				o.Directory = link
+			}
+			_, err = newTaskArchiveRecoveryStore(o)
+			require.Error(t, err, fmt.Sprint(fault))
+		})
+	}
 }
 
 func TestTaskArchiveRecoveryColdContentQuota(t *testing.T) {

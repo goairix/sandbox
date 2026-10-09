@@ -12,6 +12,16 @@ mode=${2:-normal}
 test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
 case "$mode" in
   normal) ;;
+	archive-recovery-red) test_run='^TestTaskArchiveRecoveryOriginalNative$';;
+	archive-recovery) test_run='^TestTaskArchiveRecovery';;
+	archive-recovery-session) test_run='^TestTaskArchiveRecoverySessionNative$';;
+	archive-recovery-quota) test_run='^TestTaskArchiveRecoveryColdContentQuota$';;
+	archive-recovery-filesystem) test_run='^TestTaskArchiveRecoveryStoreFilesystemQuarantine$';;
+	archive-recovery-crash-artifact) test_run='^TestTaskArchiveRecoveryCrashNative$/^(artifact-created|artifact-root-fsync|tar-fsync)$';;
+	archive-recovery-crash-received) test_run='^TestTaskArchiveRecoveryCrashNative$/^received-';;
+	archive-recovery-crash-bound) test_run='^TestTaskArchiveRecoveryCrashNative$/^bound-';;
+	archive-recovery-failure) test_run='^TestTaskArchiveRecoveryFailureNative$';;
+	archive-recovery-close) test_run='^TestTaskArchiveRecoveryCloseNative$';;
   postguard-proof) test_run='^TestTaskWorkspaceSyncLocalNativePostguardClose$';;
   local-gate-proof) test_run='^TestTaskWorkspaceSyncLocalNative';;
   local-put-proof) test_run='^TestTaskWorkspaceSyncLocalPutNative';;
