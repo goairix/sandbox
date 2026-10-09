@@ -28,6 +28,10 @@ case "$mode" in
   checkpoint-unknown) test_run='^TestTaskWorkspaceSyncRecyclingNative(CompletionUnknown|GCReusedUnknown)$/^gc-|^TestTaskWorkspaceSyncRecyclingNativeGCReusedUnknown$';;
   checkpoint-guards) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionFences$/^gc-';;
   checkpoint-close) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionClose$/^gc-';;
+  checkpoint-protocol) test_run='^TestTaskWorkspaceSyncRecyclingNative(Checkpoint|GCReusedUnknown|CompletionUnknown|CompletionFences|CompletionClose)$/^(gc-|checkpoint-|fault-|unknown-|ack-|legacy-)';;
+  checkpoint-legacy) test_run='^TestTaskWorkspaceSyncRecyclingNativeCheckpoint$/^legacy-';;
+  checkpoint-close-reads) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionClose$/^(checkpoint-rpc-|gc-observe-rpc-)';;
+  checkpoint-close-mutation) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionClose$/^gc-(rpc|postguard)-';;
   recycling-settlement-authority) test_run='^TestTaskWorkspaceSyncRecyclingNativeSettlementAuthority$';;
   recycling-cursor) test_run='^TestTaskWorkspaceSyncRecyclingNativeCursorGate$';;
   recycling-terminal-unknown) test_run='^TestTaskWorkspaceSyncRecyclingNativeCompletionUnknown$/^terminal-';;

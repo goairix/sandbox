@@ -3,12 +3,16 @@ package etcd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func TestTaskWorkspaceSyncCheckpointV2Wire(t *testing.T) {
@@ -170,5 +174,49 @@ func TestTaskWorkspaceSyncCheckpointCapture(t *testing.T) {
 		bad := *advanced
 		mutate(&bad)
 		require.False(t, workspaceSyncCheckpointGenerationMatches(&bad, p, slot), "same-point arbitration requires exact original next generation")
+	}
+}
+
+func TestTaskWorkspaceSyncCheckpointLimits(t *testing.T) {
+	require.Equal(t, 15, reflect.TypeOf(TaskWorkspaceSyncCheckpoint{}).NumField())
+	r := workspaceSyncCheckpointRecordFixture()
+	n, err := NewNamespace("/"+strings.Repeat("p", 253), strings.Repeat("s", 128), strings.Repeat("c", 127))
+	require.NoError(t, err)
+	require.Len(t, n.Root(), 512)
+	r.Reference.Namespace, r.Reference.RestoreEpoch, r.Reference.SandboxID, r.Reference.Partition = n.Root(), strings.Repeat("e", 128), strings.Repeat("b", 128), 255
+	r.Attempt.Namespace, r.Attempt.RestoreEpoch, r.Attempt.Partition, r.Attempt.RequestID, r.Attempt.StageID = n.Root(), r.Reference.RestoreEpoch, 255, strings.Repeat("r", 128), strings.Repeat("s", 128)
+	p := r.WorkspaceSync
+	p.ArchiveBytes, p.ArchiveEntries, p.EntryOrdinal, p.BodyEnd, p.IntentBirth = math.MaxInt64, math.MaxUint64, math.MaxUint64, math.MaxInt64, math.MaxInt64-1
+	payload, err := encodeOperationMetadata(*p, 4096)
+	require.NoError(t, err)
+	r.DetailDigest = workspaceSyncIntentDigest(payload)
+	wire, err := encodeTaskCheckpointRecord(r)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(wire), 4096)
+	t.Logf("largest legal fixed checkpoint bytes=%d payload=%d maxNamespace512 maxSegments128 maxIntegers", len(wire), len(payload))
+	b, d := recyclingLocalDraftFixture(t)
+	o := &taskArchiveDelivery{backend: b, prefix: fmt.Sprintf("%sp/%02x/sandboxes/%s/operations/", b.namespace.Root(), d.record.Reference.Task.Partition, d.record.Reference.Task.SandboxID)}
+	for i := 0; i < 50; i++ {
+		o.comparisons = append(o.comparisons, clientv3.Compare(clientv3.ModRevision(b.namespace.Root()+fmt.Sprintf("history/%02d/", i)+strings.Repeat("k", 900)), "=", int64(i+1)))
+	}
+	s := &PreparedTaskWorkspaceSyncSource{archive: &ReceivedTaskWorkspaceArchive{owner: o}}
+	cmps := taskProtoComparisons(s.recyclingCompletionComparisons(d, false))
+	require.Len(t, cmps, 54)
+	failure := taskProtoPoints([]string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key})
+	for _, count := range []int{1, 3} {
+		keys, values := []string{}, []string{}
+		bounds := []int{4096}
+		if count == 3 {
+			bounds = []int{512, 16384, 4096}
+		}
+		for i := 0; i < count; i++ {
+			keys = append(keys, b.namespace.Root()+strings.Repeat("x", 1024-len(b.namespace.Root())))
+			values = append(values, strings.Repeat("v", bounds[i]))
+		}
+		request := &pb.TxnRequest{Compare: cmps, Success: taskProtoPoints(keys), Failure: failure}
+		require.Equal(t, 57+count, len(request.Compare)+len(request.Success)+len(request.Failure))
+		reply := taskProtoResponse(keys, values)
+		require.NoError(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{reply}))
+		t.Logf("original checkpoint read points=%d comparisons54 nodes=%d request=%d worstReply=%d", count, 57+count, request.Size(), reply.Size())
 	}
 }

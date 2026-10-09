@@ -219,6 +219,170 @@ func recyclingGCMatch(ops []clientv3.Op) bool {
 	return len(ops) == 3 && ops[0].IsPut() && ops[1].IsDelete() && ops[2].IsPut() && strings.Contains(string(ops[0].KeyBytes()), "/workspace-sync-recycling-slots/")
 }
 
+func TestTaskWorkspaceSyncRecyclingNativeCheckpoint(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit owned Linux native fixture required")
+	}
+	for _, fault := range []string{"missing", "corrupt", "changed-pending", "needs-reconciliation", "foreign-claim", "foreign-binding", "same-value-after-read", "recreated-after-read"} {
+		t.Run("fault-"+fault, func(t *testing.T) {
+			f, s, body, _, w := workspaceSyncRecyclingNativeWritten(t)
+			q, err := s.settleLocal(f.ctx, w)
+			require.NoError(t, err)
+			originalKV := f.b.client.KV
+			before, err := f.raw.Get(f.ctx, f.c.checkpointKey)
+			require.NoError(t, err)
+			var writes atomic.Int32
+			workspaceSyncIntentSetKV(s, &faultKV{KV: originalKV, match: recyclingGCMatch, before: func() {
+				writes.Add(1)
+				if fault == "same-value-after-read" || fault == "recreated-after-read" {
+					if fault == "recreated-after-read" {
+						_, err := f.raw.Delete(f.ctx, f.c.checkpointKey)
+						require.NoError(t, err)
+					}
+					_, err := f.raw.Put(f.ctx, f.c.checkpointKey, string(before.Kvs[0].Value))
+					require.NoError(t, err)
+				}
+			}})
+			switch fault {
+			case "missing":
+				_, err = f.raw.Delete(f.ctx, f.c.checkpointKey)
+			case "corrupt":
+				_, err = f.raw.Put(f.ctx, f.c.checkpointKey, "{}")
+			case "changed-pending", "needs-reconciliation":
+				r := TaskCheckpointRecord{Version: 1, Reference: f.c.reference.Task, ClaimID: f.c.reference.ClaimID, DetailDigest: strings.Repeat("a", 64), State: TaskCheckpointPending, Attempt: f.c.initial}
+				if fault == "needs-reconciliation" {
+					r.State = TaskCheckpointNeedsReconciliation
+				}
+				value, encodeErr := encodeTaskCheckpointRecord(r)
+				require.NoError(t, encodeErr)
+				_, err = f.raw.Put(f.ctx, f.c.checkpointKey, value)
+			case "foreign-claim", "foreign-binding":
+				r := workspaceSyncCheckpointRecordFixture()
+				r.Reference, r.Attempt, r.ClaimID = f.c.reference.Task, f.c.initial, f.c.reference.ClaimID
+				if fault == "foreign-claim" {
+					r.ClaimID = uuid.NewString()
+				}
+				value, encodeErr := encodeTaskCheckpointRecord(r)
+				require.NoError(t, encodeErr)
+				_, err = f.raw.Put(f.ctx, f.c.checkpointKey, value)
+			}
+			require.NoError(t, err)
+			outcome, err := s.recycleLocal(f.ctx, q)
+			require.Error(t, err)
+			require.Equal(t, OutcomeUnknown, outcome)
+			require.False(t, q.completed)
+			if strings.HasSuffix(fault, "after-read") {
+				require.True(t, q.gcDenied)
+				require.EqualValues(t, 1, writes.Load())
+				captured := q.checkpoint
+				_, err = s.recycleLocal(f.ctx, q)
+				require.ErrorIs(t, err, ErrConflict)
+				require.Same(t, captured, q.checkpoint, "denied original attempt never changes its captured before")
+				require.EqualValues(t, 1, writes.Load())
+			} else {
+				require.False(t, q.gcAttempted)
+				require.Zero(t, writes.Load())
+			}
+			point, err := f.raw.Get(f.ctx, body.intent.slotKey)
+			require.NoError(t, err)
+			slot, err := decodeWorkspaceSyncRecyclingSlot(point.Kvs[0])
+			require.NoError(t, err)
+			require.Equal(t, "terminal", slot.State)
+			intent, err := f.raw.Get(f.ctx, body.intent.intentKey)
+			require.NoError(t, err)
+			require.Len(t, intent.Kvs, 1, "denied GC retains the original charge")
+		})
+	}
+	for _, fault := range []string{"same-value", "recreated", "same-point-rewrite"} {
+		t.Run("unknown-"+fault, func(t *testing.T) {
+			f, s, body, _, w := workspaceSyncRecyclingNativeWritten(t)
+			q, err := s.settleLocal(f.ctx, w)
+			require.NoError(t, err)
+			var writes atomic.Int32
+			workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingGCMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+				writes.Add(1)
+				require.NoError(t, err)
+				require.True(t, r.Succeeded)
+				return nil, context.DeadlineExceeded
+			}})
+			_, err = s.recycleLocal(f.ctx, q)
+			require.ErrorIs(t, err, ErrOutcomeUnknown)
+			captured := q.checkpoint
+			if fault == "recreated" {
+				_, err = f.raw.Delete(f.ctx, captured.key)
+				require.NoError(t, err)
+			}
+			if fault == "same-point-rewrite" {
+				point, err := f.raw.Get(f.ctx, body.intent.slotKey)
+				require.NoError(t, err)
+				_, err = f.raw.Txn(f.ctx).Then(clientv3.OpPut(captured.key, captured.value), clientv3.OpPut(body.intent.slotKey, string(point.Kvs[0].Value))).Commit()
+				require.NoError(t, err)
+			} else {
+				_, err = f.raw.Put(f.ctx, captured.key, captured.value)
+				require.NoError(t, err)
+			}
+			for i := 0; i < 2; i++ {
+				_, err = s.recycleLocal(f.ctx, q)
+				require.ErrorIs(t, err, ErrOutcomeUnknown)
+				require.False(t, q.completed)
+				require.Same(t, captured, q.checkpoint)
+			}
+			require.EqualValues(t, 1, writes.Load(), "readonly arbitration must not resend original GC")
+		})
+	}
+	for _, fault := range []string{"third-response", "third-header", "third-prevkv"} {
+		t.Run("ack-"+fault, func(t *testing.T) {
+			f, s, body, _, w := workspaceSyncRecyclingNativeWritten(t)
+			q, err := s.settleLocal(f.ctx, w)
+			require.NoError(t, err)
+			var writes atomic.Int32
+			workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingGCMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+				writes.Add(1)
+				require.NoError(t, err)
+				require.True(t, r.Succeeded)
+				switch fault {
+				case "third-response":
+					r.Responses = r.Responses[:2]
+				case "third-header":
+					r.Responses[2].GetResponsePut().Header = &pb.ResponseHeader{Revision: r.Header.Revision - 1}
+				case "third-prevkv":
+					r.Responses[2].GetResponsePut().PrevKv = &mvccpb.KeyValue{}
+				}
+				return r, nil
+			}})
+			_, err = s.recycleLocal(f.ctx, q)
+			require.ErrorIs(t, err, ErrOutcomeUnknown)
+			require.False(t, q.completed)
+			outcome, err := s.recycleLocal(f.ctx, q)
+			require.NoError(t, err)
+			require.Equal(t, OutcomeCommitted, outcome)
+			require.EqualValues(t, 1, writes.Load())
+			point, err := f.raw.Get(f.ctx, body.intent.slotKey)
+			require.NoError(t, err)
+			workspaceSyncCheckpointInspectNative(t, f, s, body, q, point.Kvs[0], 2)
+		})
+	}
+	t.Run("legacy-prepared-before-progress", func(t *testing.T) {
+		f, s, body, _, w := workspaceSyncRecyclingNativeWritten(t)
+		before, err := f.raw.Get(f.ctx, f.c.checkpointKey)
+		require.NoError(t, err)
+		legacy, err := f.b.PrepareTaskCheckpoint(f.ctx, f.c, TaskCheckpointInput{StageID: "checkpoint", ExpectedRevision: before.Kvs[0].ModRevision, State: TaskCheckpointNeedsReconciliation, DetailDigest: strings.Repeat("a", 64)}, 30*time.Second)
+		require.NoError(t, err)
+		defer f.b.ReleaseStage(f.ctx, legacy)
+		q, err := s.settleLocal(f.ctx, w)
+		require.NoError(t, err)
+		outcome, err := s.recycleLocal(f.ctx, q)
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, outcome)
+		outcome, err = f.b.CommitStage(f.ctx, legacy)
+		require.ErrorIs(t, err, ErrConflict)
+		require.Equal(t, OutcomeUnknown, outcome)
+		point, err := f.raw.Get(f.ctx, body.intent.slotKey)
+		require.NoError(t, err)
+		workspaceSyncCheckpointInspectNative(t, f, s, body, q, point.Kvs[0], 2)
+	})
+}
+
 func workspaceSyncRecyclingNativeWritten(t *testing.T) (*quiescenceNativeFixture, *PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget, *taskWorkspaceSyncLocalWitness) {
 	t.Helper()
 	f, s, body, target := workspaceSyncRecyclingNativeDefault(t)
@@ -652,18 +816,36 @@ func TestTaskWorkspaceSyncRecyclingNativeCompletionClose(t *testing.T) {
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("explicit owned Linux native fixture required")
 	}
-	for _, stage := range []string{"terminal", "gc"} {
+	for _, stage := range []string{"terminal", "checkpoint", "gc", "gc-observe"} {
 		for _, point := range []string{"rpc", "postguard"} {
+			if point == "postguard" && (stage == "checkpoint" || stage == "gc-observe") {
+				continue
+			}
 			for _, owner := range []string{"source", "body", "target"} {
 				t.Run(stage+"-"+point+"-"+owner, func(t *testing.T) {
 					f, s, body, target, w := workspaceSyncRecyclingNativeWritten(t)
 					var q *taskWorkspaceSyncLocalSettlement
 					var err error
 					match := recyclingTerminalMatch
-					if stage == "gc" {
+					if stage != "terminal" {
 						q, err = s.settleLocal(f.ctx, w)
 						require.NoError(t, err)
 						match = recyclingGCMatch
+					}
+					if stage == "checkpoint" {
+						match = func(ops []clientv3.Op) bool {
+							return len(ops) == 1 && ops[0].IsGet() && string(ops[0].KeyBytes()) == f.c.checkpointKey
+						}
+					}
+					if stage == "gc-observe" {
+						workspaceSyncIntentSetKV(s, &faultKV{KV: f.b.client.KV, match: recyclingGCMatch, after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+							return nil, context.DeadlineExceeded
+						}})
+						_, err = s.recycleLocal(f.ctx, q)
+						require.ErrorIs(t, err, ErrOutcomeUnknown)
+						match = func(ops []clientv3.Op) bool {
+							return len(ops) == 3 && ops[0].IsGet() && ops[1].IsGet() && ops[2].IsGet()
+						}
 					}
 					entered, release := make(chan struct{}), make(chan struct{})
 					var free atomic.Bool
@@ -730,7 +912,7 @@ func TestTaskWorkspaceSyncRecyclingNativeCompletionClose(t *testing.T) {
 					if point == "postguard" {
 						require.True(t, free.Load(), "nativeMu free at suspension after actual physical check")
 					}
-					if stage == "gc" {
+					if stage != "terminal" {
 						require.False(t, q.completed)
 					} else {
 						require.False(t, body.intent.localSettlement.known)
