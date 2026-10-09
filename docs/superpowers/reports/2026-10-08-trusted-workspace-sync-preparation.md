@@ -63,3 +63,23 @@ per-wire ledger 必须把全 cell 与 partition 数量/字节收费和不可变 
 已验收cdb5612/b75fbeb原始worker kernel单元新增非零UID/GID、caps0/NNP及固定boot/start/ns/exe身份；这仅证明实际原始process及可复查kernel状态，仍不证明已登记Deployment或实际凭证/FD隔离。未来provider接口必须消费原始boundary与原始source，不能仅接收其复制reference或配置WorkerID。原生硬化依赖LinuxCGO0 AllThreadsSyscall，生产worker静态构建/安全配置接线还须验收，不能把host模型race称native硬化race。非root/dumpable0下固定namespace目录必须使用保留PROC/NSFS/type检查的O_PATH观察，不能通过加cap/恢复dumpable解决；fixture超时未join须保留ownedPID和失败诊断，不得丢句柄。
 
 后续派发/终态描述符还须在native首次effect前绑定实际worker与物理target，并为每个额外持久proof计入固定额度。现有intent+slot申请实际已用63/64helper节点；新协议必须重新检查实际request与两分支reply，不能删历史pins腾节点或将额外records视作已经收费。首次ACK丢失且无认识birth的配对同字节ABA仅有元数据存在性诊断，任何原始worker或终态权能都不能据此重建。
+
+## 2026-10-09 local IO 接线与 driver 源码研究
+
+当前执行 `2026-10-09-workspace-sync-local.md` 两个顺序小单元，规划提交 `0ef0a57`。首单元 `fac3953`/`7bc4ff6`/review修复`6b411a0` 已验收：只读绑定实际 root FD/worker 与收费意图 v2 profile，保留全部50历史pins，实际59nodes/11517requestbytes/2629replybytes；原始明确ACK加postguard才有one-shot权限，unknown/cold诊断无权派发。原native21叶、修复覆盖15实际local叶和真实timeout保留/释放/Wait/reap通过，限定复审C0/I0/M0。详见`2026-10-09-workspace-sync-local-gate-verification.md`。第二单元真实 regular-file IO/fsync/Close尚待实现，成功证据仅原始进程内witness，永久intent/slot保留；没有额外native terminal key、退款或safe-release。
+
+已读取本地固定依赖 `github.com/goairix/fs@v0.3.11` 的 MinIO/S3 writer 与 local Create：远端两个 writer 都先将完整文件存入 `bytes.Buffer`，Close 才调用 PutObject；MinIO Create 返回的只是该 buffer writer，Remove 转交 SDK RemoveObject。local Create 用普通路径 mkdir/create，未提供 scoped original root FD、native task fencing 或 fsync 结算。新链路不能直接将 legacy Create/Close 的 nil error 提升为本方案证明；大文件 buffer 同样不能放入固定32KiB可信 adapter。
+
+本地 `minio-go/v7@v7.0.91` 源码 `retry.go` 定义 MaxRetry=10，`api.go` 的 executeMethod 使用 client maxRetries；这是当前固定依赖的实现观察，不是生产配置/实际云请求证明。远端接线必须单次实际 wire 为边界：SDK内部 retry/discovery/redirect/listing/multipart 的每次新请求在永久原始意图与当前门之后进行，响应不确定时保留收费；普通 net/http cancellation 不证明服务端不会稍后生效。仅设置重试数或包裹最终 SDK nil error 还缺少实际服务端结算证明。
+
+后续 terminal 协议仍须先明确额外持久 proof 的固定收费与 GC：现有两 key logical bound 只覆盖 intent/slot，不覆盖每请求无限终态历史。native 终态写 ACK 丢失应只仲裁精确原始 birth、不得重发 provider 字节；冷恢复不能凭 object 当前内容 hash、路径或进程已退出推断原请求已结算。需分别验证正常无外部效果重启恢复和存在未知效果时的保守 pending。
+
+## 终态与 slot 回收的新增协议研究（未实现）
+
+仅在原始 body one-shot 或 known terminal 后删除 v1 intent/slot 不足以允许安全回收：旧 reserve 的 VERSION(intent)==0、VERSION(slot)==0 条件可在删除后重新为真；同一 claim 仍存活时，网络中的迟到原事务可能重新登记。不能只靠 caller 不再重试、SDK 返回成功或固定 TTL 阻挡。等整个原 claim 失效后再 GC 虽保守安全，但一个大 workspace 可能先耗完本分区 S≤64 slots，无法完成剩余文件。
+
+候选后续协议是固定 generation slots，使用新的 immutable operator budget profile/namespace，保留 v1 诊断但不暗改其 immutable-slot 规则。每个有限 slot 保留 permanent free/occupied/terminal KV，native ModRevision 是不可复用的代次；新的申请先只读取得原始 free slot，再在原全部50pins+prefix+budget条件下比较精确 slot ModRevision/Value 与 intent absence。已结算后的 GC 更新同一 slot 的 free 代次并条件删除原 intent，永远不删除 slot；迟到原申请比较旧 ModRevision 必然失败。实际物理 key 数依旧固定256×S，与已有 sandbox N 无关，operator provisioning 与 quota 要计入固定成本。
+
+节点初算：原 reserve 63helper nodes 的两个 absence 比较，替换成 intent absence + slot ModRevision/Value 会多一节点，预计64；必须用真实 protobuf/两分支字节实测，不能先删历史pins。原始 completion witness 的摘要可放入已收费≤512-byte slot 的一次 terminal 转换（完整原始物理归属留在 immutable intent≤B），而不是新增未收费无限 proof keys。若 terminal CAS 采用原54pins+intent3+slot3、success1Put、failure3points，初算也是64；这只是设计候选，未实现/未验收，失败分支和冷仲裁的语义仍须完整设计。
+
+退款必须来自原始 adapter 的确定结算 witness；unknown、first-ACK arbitration、source/worker退出、file当前hash均不能产生 witness。native terminal ACK丢失仅仲裁精确代次/原始intent/slot的终态，不能重发文件字节；GC原始转变结果丢失仍保守，不能获得第二份quota。generation overflow或budget配置变化拒绝/新namespace，不自动复用编号。local进程内witness尚不能解决崩溃在真实IO完成与native终态之间的窗口，正常恢复与未知效果恢复继续分开处理。

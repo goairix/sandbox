@@ -29,3 +29,5 @@
 新增已验收源码`7391a5e`与修复`27feaf6`：原始未读body的持久put意图、固定分区slot跨Backend共享背压、未知响应不重发与出生pin诊断。基线native38实际叶子零跳过/警告；独立review发现空body已完成读取的缺口，针对性RED→GREEN修复及复审通过，剩余C0/I0/M0。详见`2026-10-08-workspace-sync-intent-verification.md`。这是native元数据组件，实际可信worker/provider派发和结算未完成，不能把归属记录当OS UID或安全释放证据；S1..64的逻辑预算上界不等于实际MVCC容量测试。
 
 新增已验收源码`cdb5612`/脚本修复`b75fbeb`：实际非特权worker的原始kernel/process身份，非零UID/GID、零cap、NNP、固定boot/start/ns/exe及不可复用incarnation。host34实际模型叶、五个实际native容器和原始子进程身份通过；独立review发现attach超时句柄丢失，独立修复并以三真实child生命周期场景/单nativepositive和限定复审验证，剩余C0/I0/M0。详见`2026-10-08-workspace-sync-worker-verification.md`。它不能代替Deployment/凭证隔离、物理provider target、native派发与终态证明；下一步继续这些实际IO接线，主程序仍Redis。
+
+新增已验收源码`fac3953`/`7bc4ff6`与review修复`6b411a0`：原始非特权worker、只读local root FD与v2永久意图绑定，只有原始明确ACK/postguard可进入一次性native写前门；保留50历史pins，实际59nodes/11517requestbytes/2629replybytes。原native21叶、修复15实际local叶、真实超时保留→释放→原attach Wait→独立reap通过，限定复审C0/I0/M0；失败试验和server日志完整保留，启动错误归类已纠正。见`2026-10-09-workspace-sync-local-gate-verification.md`。当前开始实际本地文件写入/hash/fsync/Close与进程内witness；持久终态/退款、安全释放、生产接线、分区/FUSE/collector、大N容量与Redis移除仍未完成。
