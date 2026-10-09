@@ -49,9 +49,13 @@ func (b *Backend) PrepareTaskCheckpoint(ctx context.Context, c *TaskClaim, in Ta
 		c.lost = true
 		return nil, err
 	}
-	if _, err = decodeTaskCheckpointAt(values[0], c.reference.Task, c.birth, c.initial); err != nil {
+	record, err := decodeTaskCheckpointAt(values[0], c.reference.Task, c.birth, c.initial)
+	if err != nil {
 		c.lost = true
 		return nil, err
+	}
+	if record.Version == 2 {
+		return nil, ErrConflict
 	}
 	if values[0].ModRevision != in.ExpectedRevision {
 		return nil, ErrConflict

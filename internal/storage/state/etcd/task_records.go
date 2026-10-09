@@ -46,12 +46,13 @@ const (
 )
 
 type TaskCheckpointRecord struct {
-	Version      uint32              `json:"version"`
-	Reference    TaskReference       `json:"reference"`
-	ClaimID      string              `json:"claim_id"`
-	DetailDigest string              `json:"detail_digest"`
-	State        TaskCheckpointState `json:"state"`
-	Attempt      StageAttemptLocator `json:"attempt"`
+	Version       uint32                       `json:"version"`
+	Reference     TaskReference                `json:"reference"`
+	ClaimID       string                       `json:"claim_id"`
+	DetailDigest  string                       `json:"detail_digest"`
+	State         TaskCheckpointState          `json:"state"`
+	Attempt       StageAttemptLocator          `json:"attempt"`
+	WorkspaceSync *TaskWorkspaceSyncCheckpoint `json:"workspace_sync,omitempty"`
 }
 
 func (r TaskReference) Validate() error {
@@ -90,8 +91,20 @@ func (r TaskLinkRecord) Validate() error {
 	return nil
 }
 func (r TaskCheckpointRecord) Validate() error {
-	if r.Version != 1 || r.Reference.Validate() != nil || !taskAttemptMatches(r.Attempt, r.Reference) || (r.State != TaskCheckpointPending && r.State != TaskCheckpointNeedsReconciliation) {
+	if (r.Version != 1 && r.Version != 2) || r.Reference.Validate() != nil || !taskAttemptMatches(r.Attempt, r.Reference) || (r.State != TaskCheckpointPending && r.State != TaskCheckpointNeedsReconciliation) {
 		return ErrInvalidRecord
+	}
+	if r.Version == 1 && r.WorkspaceSync != nil {
+		return ErrInvalidRecord
+	}
+	if r.Version == 2 {
+		if r.State != TaskCheckpointPending || r.WorkspaceSync == nil || r.WorkspaceSync.Validate() != nil {
+			return ErrInvalidRecord
+		}
+		payload, err := encodeOperationMetadata(*r.WorkspaceSync, 4096)
+		if err != nil || r.DetailDigest != workspaceSyncIntentDigest(payload) {
+			return ErrInvalidRecord
+		}
 	}
 	if r.ClaimID == "" && r.DetailDigest == "" && r.State != TaskCheckpointPending {
 		return ErrInvalidRecord
@@ -108,9 +121,6 @@ func encodeCleanupIntentRecord(r CleanupIntentRecord) (string, error) {
 	return encodeOperationMetadata(r, 4096)
 }
 func encodeTaskLinkRecord(r TaskLinkRecord) (string, error) { return encodeOperationMetadata(r, 2048) }
-func encodeTaskCheckpointRecord(r TaskCheckpointRecord) (string, error) {
-	return encodeOperationMetadata(r, 4096)
-}
 
 // Keep task envelope policy local: unlike the immutable task/intent/link, a
 // checkpoint may advance through metadata CAS, but must remain permanent.
@@ -128,7 +138,4 @@ func decodeCleanupIntentRecord(kv *mvccpb.KeyValue, dst *CleanupIntentRecord) er
 }
 func decodeTaskLinkRecord(kv *mvccpb.KeyValue, dst *TaskLinkRecord) error {
 	return decodeTaskMetadata(kv, dst, 2048, false)
-}
-func decodeTaskCheckpointRecord(kv *mvccpb.KeyValue, dst *TaskCheckpointRecord) error {
-	return decodeTaskMetadata(kv, dst, 4096, true)
 }

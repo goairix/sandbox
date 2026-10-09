@@ -71,6 +71,9 @@ func decodeTaskCheckpointAt(kv *mvccpb.KeyValue, ref TaskReference, birth int64,
 	if record.Reference != ref || kv.CreateRevision != birth {
 		return TaskCheckpointRecord{}, ErrCorruptRecord
 	}
+	if record.Version == 2 && (record.Attempt != initial || kv.Version < 2 || kv.ModRevision <= birth) {
+		return TaskCheckpointRecord{}, ErrCorruptRecord
+	}
 	if kv.ModRevision == birth {
 		if record.ClaimID != "" || record.DetailDigest != "" || record.State != TaskCheckpointPending || record.Attempt != initial {
 			return TaskCheckpointRecord{}, ErrCorruptRecord
