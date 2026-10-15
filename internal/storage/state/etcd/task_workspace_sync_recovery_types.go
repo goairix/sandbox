@@ -16,8 +16,10 @@ type taskWorkspaceSyncRecoverySource struct {
 	self                           *taskWorkspaceSyncRecoverySource
 	store                          *taskArchiveStore
 	slot                           uint32
+	diagnostic                     taskArchiveRecoveryDiagnostic
 	ctx                            context.Context
 	cancel                         context.CancelFunc
+	parentStop                     func() bool
 	done                           chan struct{}
 	mu                             sync.Mutex
 	sealed, busy                   bool

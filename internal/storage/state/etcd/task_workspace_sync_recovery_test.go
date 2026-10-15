@@ -15,7 +15,7 @@ import (
 )
 
 func TestTaskWorkspaceSyncRecoveryOwner(t *testing.T) {
-	s := &taskArchiveStore{limits: taskArchiveLimits{Jobs: 1}, recovery: &taskArchiveRecoveryStore{}}
+	s := &taskArchiveStore{limits: taskArchiveLimits{Jobs: 2}, recovery: &taskArchiveRecoveryStore{}}
 	s.self = s
 	s.recovery.slots[0].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, State: 3}
 	r, err := s.registerRecovery(context.Background(), 0)
@@ -23,6 +23,9 @@ func TestTaskWorkspaceSyncRecoveryOwner(t *testing.T) {
 	require.Nil(t, r.index, "a registered waiter allocates no archive index or metadata buffers")
 	_, err = s.registerRecovery(context.Background(), 0)
 	require.ErrorIs(t, err, ErrConflict)
+	s.recovery.slots[1].diagnostic = s.recovery.slots[0].diagnostic
+	_, err = s.registerRecovery(context.Background(), 1)
+	require.ErrorIs(t, err, ErrConflict, "duplicate cold slots cannot own concurrent writers for one task")
 	require.NoError(t, r.begin(context.Background()))
 	joined := make(chan error, 1)
 	go func() { joined <- r.Close() }()
@@ -110,4 +113,16 @@ func TestTaskWorkspaceSyncRecoveryRejectedProfiles(t *testing.T) {
 		require.False(t, r.RegularFilesComplete)
 		require.Zero(t, r.CompletedFiles)
 	}
+}
+
+func TestTaskWorkspaceSyncRecoveryMetadataOwnsDecodedValues(t *testing.T) {
+	m := recoveryTestManifest(t, "bound")
+	var input, output [taskArchiveRecoveryMetadataBytes]byte
+	wire, err := encodeTaskArchiveRecovery(m, input[:])
+	require.NoError(t, err)
+	decoded, err := decodeTaskArchiveRecovery(wire, output[:])
+	require.NoError(t, err)
+	clear(input[:])
+	clear(output[:])
+	require.Equal(t, m, decoded, "manifest and exclusions own decoded strings; neither metadata scratch array escapes")
 }

@@ -25,13 +25,20 @@ func (s *taskArchiveStore) registerRecovery(ctx context.Context, slot uint32) (*
 	if s.closed || ctx.Err() != nil || !d.Occupied || d.Quarantined || d.State != 3 || s.recovery.slots[slot].owner != nil {
 		return nil, ErrConflict
 	}
+	// Duplicate cold slots must not create two cooperative writers for the same
+	// task/target under one fresh claim. The fixed array needs no task map.
+	for _, candidate := range s.recovery.slots {
+		if candidate.owner != nil && candidate.diagnostic.TaskID == d.TaskID {
+			return nil, ErrConflict
+		}
+	}
 	for r := range s.spools {
-		if r.recovery != nil && r.recovery.slot == slot {
+		if r.recovery != nil && (r.recovery.slot == slot || s.recovery.slots[r.recovery.slot].diagnostic.TaskID == d.TaskID) {
 			return nil, ErrConflict
 		}
 	}
 	owned, cancel := context.WithCancel(ctx)
-	r := &taskWorkspaceSyncRecoverySource{store: s, slot: slot, ctx: owned, cancel: cancel, done: make(chan struct{})}
+	r := &taskWorkspaceSyncRecoverySource{store: s, slot: slot, diagnostic: d, ctx: owned, cancel: cancel, done: make(chan struct{})}
 	r.self = r
 	s.recovery.slots[slot].owner = r
 	go r.own()
@@ -44,6 +51,9 @@ func (s *taskWorkspaceSyncRecoverySource) own() {
 	s.sealed = true
 	s.mu.Unlock()
 	s.ops.Wait()
+	if s.parentStop != nil {
+		s.parentStop()
+	}
 	if s.target != nil {
 		s.err = errors.Join(s.err, s.target.Close())
 	}
@@ -97,7 +107,12 @@ func (s *taskWorkspaceSyncRecoverySource) load(ctx context.Context) error {
 		return s.ctx.Err()
 	case <-r.gate:
 	}
-	defer func() { r.gate <- struct{}{} }()
+	defer func() {
+		// decode owns strings/slices; no canonical wire escapes this gate. Drop
+		// both metadata arrays before history/query/body/parent-handle storage.
+		r.buffers = nil
+		r.gate <- struct{}{}
+	}()
 	if err := errors.Join(ctx.Err(), s.ctx.Err(), taskArchiveRecoveryCheckRoot(s.store.root, r.directory, r.root)); err != nil {
 		return err
 	}
@@ -112,7 +127,7 @@ func (s *taskWorkspaceSyncRecoverySource) load(ctx context.Context) error {
 		return errors.Join(err, closeErr)
 	}
 	m, err := decodeTaskArchiveRecovery(in, buf.output[:])
-	if err != nil || m.Slot != s.slot || m.State != "bound" || m.StoreID != r.storeID || m.Root != r.root || m.LimitsDigest != r.limitsDigest {
+	if err != nil || m.Slot != s.slot || m.State != "bound" || m.StoreID != r.storeID || m.Root != r.root || m.LimitsDigest != r.limitsDigest || recoveryDiagnostic(m) != s.diagnostic {
 		return errors.Join(ErrIdentityMismatch, err)
 	}
 	s.file, s.identity, err = taskArchiveRecoveryOpen(s.store.root, recoverySlotName(s.slot)+".tar")
@@ -155,7 +170,13 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 	if err := s.begin(ctx); err != nil {
 		return nil, err
 	}
-	err = s.load(s.ctx)
+	s.parentStop = context.AfterFunc(c.parentCtx, s.cancel)
+	// Current claim/operator/prefix/budget precede metadata IO. Full historical
+	// dual-drain and all 50 pins are acquired separately after parsing.
+	err = b.guardTaskWorkspaceRecoveryClaim(s.ctx, c)
+	if err == nil {
+		err = s.load(s.ctx)
+	}
 	if err == nil {
 		var q *PreparedTaskQuiescence
 		q, err = b.PrepareAfterDualDrain(s.ctx, c, destination)
@@ -184,6 +205,30 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 	}
 	go s.monitor()
 	return s, nil
+}
+
+func (b *Backend) guardTaskWorkspaceRecoveryClaim(ctx context.Context, c *TaskClaim) error {
+	c.mu.Lock()
+	if err := c.live(ctx); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	cmps := append(b.baseComparisons(), c.comparisons()...)
+	c.mu.Unlock()
+	prefix, err := b.taskOperationsPrefix(c.reference.Task)
+	if err != nil {
+		return err
+	}
+	cmps = append(cmps, clientv3.Compare(clientv3.Version(prefix), "=", 0).WithRange(clientv3.GetPrefixRangeEnd(prefix)))
+	cmps = append(cmps, b.workspaceSyncBudget.comparisons()...)
+	keys := []string{b.identityKey}
+	_, err = workspaceSyncNativeTxn(ctx, b, cmps, workspaceSyncPointOps(keys), taskProtoPoints(keys), taskProtoResponse(keys, []string{b.identityValue}), false)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.live(ctx)
 }
 
 func (s *taskWorkspaceSyncRecoverySource) monitor() {

@@ -78,7 +78,7 @@ func TestTaskWorkspaceSyncRecoveryNativeCloseJoin(t *testing.T) {
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("explicit actual Linux worker required")
 	}
-	for _, stage := range []string{"write", "fsync", "close", "terminal", "gc"} {
+	for _, stage := range []string{"write", "fsync", "close", "terminal", "gc", "query"} {
 		t.Run(stage, func(t *testing.T) {
 			f, wire, slot := recoveryExecutionCold(t)
 			s, err := f.b.prepareTaskWorkspaceSyncRecovery(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker)
@@ -93,7 +93,19 @@ func TestTaskWorkspaceSyncRecoveryNativeCloseJoin(t *testing.T) {
 				}
 			}
 			var call func() error
-			if stage == "terminal" || stage == "gc" {
+			if stage == "query" {
+				wire.mu.Lock()
+				wire.closeControl = &archiveCloseControl{entered: entered, release: release}
+				wire.mu.Unlock()
+				call = func() error {
+					if err := s.begin(s.ctx); err != nil {
+						return err
+					}
+					defer s.end()
+					_, err := s.authority.queryProducer(s.ctx, wire.destination)
+					return err
+				}
+			} else if stage == "terminal" || stage == "gc" {
 				_, charge, q := recoveryExecutionFirst(t, s)
 				if stage == "gc" {
 					require.NoError(t, s.settleLocal(f.ctx, charge, q))

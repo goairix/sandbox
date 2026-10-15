@@ -29,6 +29,12 @@ type deliveryCountReader struct {
 	count *atomic.Int64
 }
 
+type deliveryQueryCloseConn struct{ net.Conn }
+
+func (c *deliveryQueryCloseConn) Close() error {
+	return errors.Join(c.Conn.Close(), errors.New("controlled query physical Close failure"))
+}
+
 func (r deliveryCountReader) Read(data []byte) (int, error) {
 	n, err := r.Reader.Read(data)
 	r.count.Add(int64(n))
@@ -36,18 +42,20 @@ func (r deliveryCountReader) Read(data []byte) (int, error) {
 }
 
 type deliveryNativeWire struct {
-	mu           sync.Mutex
-	destination  *tr.Destination
-	armed        atomic.Bool
-	bytes        atomic.Int64
-	sends        atomic.Int32
-	sent         chan struct{}
-	body         chan struct{}
-	done         chan error
-	gate         <-chan struct{}
-	closeControl *archiveCloseControl
-	dialHook     func(context.Context) error
-	claimCancel  context.CancelFunc
+	mu              sync.Mutex
+	destination     *tr.Destination
+	armed           atomic.Bool
+	bytes           atomic.Int64
+	sends           atomic.Int32
+	sent            chan struct{}
+	body            chan struct{}
+	done            chan error
+	gate            <-chan struct{}
+	closeControl    *archiveCloseControl
+	dialHook        func(context.Context) error
+	claimCancel     context.CancelFunc
+	queryFault      string
+	queryCloseError bool
 }
 
 // Only the owned crash subprocess fixture sets this before constructing New.
@@ -83,7 +91,7 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 		raw, err := dial.DialContext(ctx, "tcp", listener.Addr().String())
 		if err == nil && w.armed.Load() {
 			w.mu.Lock()
-			hook, control := w.dialHook, w.closeControl
+			hook, control, closeError := w.dialHook, w.closeControl, w.queryCloseError
 			w.mu.Unlock()
 			if hook != nil {
 				if e := hook(ctx); e != nil {
@@ -93,6 +101,9 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 			}
 			if control != nil {
 				return &archiveCloseConn{Conn: raw, control: control}, nil
+			}
+			if closeError {
+				return &deliveryQueryCloseConn{Conn: raw}, nil
 			}
 		}
 		return raw, err
@@ -161,7 +172,21 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 						w.done <- errTaskArchive
 						return
 					}
-					err := tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveComplete, archiveReceipt)
+					w.mu.Lock()
+					fault := w.queryFault
+					w.mu.Unlock()
+					kind, receipt := byte(tr.ArchiveComplete), archiveReceipt
+					if fault == "data" {
+						kind, receipt = tr.ArchiveData, []byte("forbidden query DATA")
+					}
+					err := tr.WriteTaskWorkspaceArchiveFrame(conn, kind, receipt)
+					if err == nil && fault == "double" {
+						err = tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveComplete, archiveReceipt)
+					}
+					if fault == "abrupt" {
+						w.done <- err
+						return
+					}
 					if err == nil {
 						err = conn.CloseWrite()
 					}

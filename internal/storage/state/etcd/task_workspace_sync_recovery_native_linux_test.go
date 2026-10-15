@@ -117,6 +117,7 @@ func TestTaskWorkspaceSyncRecoveryNativeCold(t *testing.T) {
 	require.EqualValues(t, 2, r.CompletedFiles)
 	require.EqualValues(t, 8, r.CompletedBytes)
 	require.Nil(t, f.c.finalSyncDraft)
+	require.Nil(t, f.b.archiveStore.recovery.buffers, "metadata scratch does not overlap execution owners")
 }
 
 func TestTaskWorkspaceSyncRecoveryNativeAuthority(t *testing.T) {
