@@ -1,5 +1,7 @@
 # etcd生产接线缺口图
 
+2026-10-15补充：基分支新增Kubernetes LoadWorkspaceControlKey，main将Redis Store传入，以永久SetNX/Get保存scope级probe签名seed。它是fencing历史，生产etcd接线须明确持久authority/协议替代与旧版本排空；下文早期“未发现credential必须依赖Redis”的研究结论不覆盖这项新增。见2026-10-15-base-fuse-fixes-merge-verification.md。
+
 这是fresh `etcd_production_wiring_gap_map`对master spec及当前业务代码的只读研究，未实施、未测试，不是生产验收。Root抽查LoadOwner/LoadControl/LoadSnapshot签名、distributedStateEnabled和全量协调器/FUSE检查接点。当前main仍Redis；不能用通用etcd.Store包装保留旧循环来宣称完成迁移。
 
 ## 已有能力与真实接点
