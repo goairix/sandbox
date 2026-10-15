@@ -68,6 +68,7 @@ func (b *Backend) controlKeyRead(ctx context.Context, name string) ([]byte, erro
 	}
 	rpcCtx, cancel := b.requestContext(ctx)
 	r, rpcErr := b.client.Txn(rpcCtx).If(b.baseComparisons()...).Then(clientv3.OpGet(name)).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
+	defer clearControlKeyResponse(r)
 	deadlineErr := rpcCtx.Err()
 	cancel()
 	if rpcErr != nil || deadlineErr != nil {
@@ -88,7 +89,6 @@ func (b *Backend) controlKeyRead(ctx context.Context, name string) ([]byte, erro
 		keys, limits = []string{b.identityKey, b.restoreKey}, []int{maxIdentityJSONBytes, maxIdentityFieldBytes}
 	}
 	points, err := b.readViewResponse(r, keys, limits)
-	defer clearControlKeyPoints(points)
 	if err != nil {
 		return nil, err
 	}
@@ -106,4 +106,25 @@ func (b *Backend) controlKeyRead(ctx context.Context, name string) ([]byte, erro
 		return nil, err
 	}
 	return bytes.Clone(points[0].Value), nil
+}
+
+// Clear temporary seed-sized point values even when validation rejects the
+// envelope. Never walk an untrusted recursive shape or clear an oversized
+// transport allocation: at most three flat operations and one KV per point.
+func clearControlKeyResponse(r *clientv3.TxnResponse) {
+	if r == nil {
+		return
+	}
+	for _, op := range r.Responses[:min(3, len(r.Responses))] {
+		if op == nil {
+			continue
+		}
+		point := op.GetResponseRange()
+		if point == nil || len(point.Kvs) == 0 {
+			continue
+		}
+		if kv := point.Kvs[0]; kv != nil && len(kv.Value) <= ed25519.SeedSize {
+			clear(kv.Value)
+		}
+	}
 }

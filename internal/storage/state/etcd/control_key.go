@@ -33,6 +33,7 @@ func (b *Backend) ProvisionWorkspaceControlKey(ctx context.Context, seed []byte)
 	defer clear(put.ValueBytes())
 	rpcCtx, cancel := b.requestContext(ctx)
 	r, rpcErr := b.client.Txn(rpcCtx).If(append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(name), "=", 0))...).Then(put).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(name)).Commit()
+	defer clearControlKeyResponse(r)
 	deadlineErr := rpcCtx.Err()
 	cancel()
 	if rpcErr != nil || deadlineErr != nil {
@@ -56,7 +57,6 @@ func (b *Backend) ProvisionWorkspaceControlKey(ctx context.Context, seed []byte)
 			}
 		} else {
 			points, err := b.readViewResponse(r, []string{b.identityKey, b.restoreKey, name}, []int{maxIdentityJSONBytes, maxIdentityFieldBytes, ed25519.SeedSize})
-			defer clearControlKeyPoints(points)
 			if err != nil {
 				return nil, err
 			}
@@ -118,12 +118,4 @@ func controlKeyRecord(kv *mvccpb.KeyValue) error {
 		return ErrCorruptRecord
 	}
 	return nil
-}
-
-func clearControlKeyPoints(points []*mvccpb.KeyValue) {
-	for _, point := range points {
-		if point != nil {
-			clear(point.Value)
-		}
-	}
 }
