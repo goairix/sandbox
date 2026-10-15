@@ -85,6 +85,14 @@ func launcherNativeBootstrap(ctx context.Context, request ct.BootstrapRequest) (
 }
 
 func TestEnrolledLauncherNative(t *testing.T) {
+	runEnrolledLauncherNative(t, []string{"active", "wrong-node"})
+}
+
+func TestEnrolledLauncherNativeLiveGate(t *testing.T) {
+	runEnrolledLauncherNative(t, []string{"live-gate"})
+}
+
+func runEnrolledLauncherNative(t *testing.T, modes []string) {
 	if os.Getenv("SANDBOX_ENROLLED_LAUNCHER_NATIVE") != "1" {
 		t.Skip("requires exact owned enrolled launcher Linux fixture")
 	}
@@ -147,7 +155,7 @@ func TestEnrolledLauncherNative(t *testing.T) {
 		err := <-clockDone
 		require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "original signed clock Serve join: %v", err)
 	})
-	for _, mode := range []string{"active", "wrong-node"} {
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			caseDir := filepath.Join(dir, mode)
 			require.NoError(t, os.Mkdir(caseDir, 0700))
@@ -292,33 +300,67 @@ func TestEnrolledLauncherNative(t *testing.T) {
 				require.Equal(t, nodeUID, evidence.EnrollmentReceipt().NodeUID)
 				require.True(t, bytes.Equal(activation, enrollment.Request.Activation))
 				t.Logf("formal CLI PID1 original verifier authenticated enrolled ready=%s bytes=%d", evidence.Digest(), len(proof))
-				badCertificate := bytes.Clone(certificate)
-				badCertificate[len(badCertificate)-2] ^= 1
-				_, _, err = destination.ReadEnrolledPublication(call, badCertificate, claim)
-				require.Error(t, err)
-				wrongClaims := claims
-				wrongClaims.Runtime.UID = uuid.NewString()
-				wrongCertificate, err := p.SignRuntimeCertificate(root, wrongClaims)
-				require.NoError(t, err)
-				_, _, err = destination.ReadEnrolledPublication(call, wrongCertificate, claim)
-				require.Error(t, err)
-				_, wrongIssuerKey, err := ed25519.GenerateKey(rand.Reader)
-				require.NoError(t, err)
-				wrongIssuerWire, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: wrongIssuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
-				require.NoError(t, err)
-				wrongCredential, err := p.NewManagementTLSCredential(wrongIssuerKey, wrongIssuerWire, "command_issuer")
-				require.NoError(t, err)
-				defer wrongCredential.Close()
-				options.Credential = wrongCredential
-				wrongDestination, err := ct.NewDestination(options)
-				require.NoError(t, err)
-				_, _, err = wrongDestination.ReadEnrolledPublication(call, certificate, claim)
-				require.Error(t, err)
+				if mode == "live-gate" {
+					// The fixture's original certified issuer only tightens the gate.
+					// These fixed claims do not demonstrate a Backend creation claim.
+					closeNow := time.Now().UTC()
+					issuer, err := verifier.VerifyCommandIssuerCertificate(issuerCert, closeNow)
+					require.NoError(t, err)
+					closeContext := p.TaskCloseDataContext{Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IssuerCertificateID: issuer.CertificateID(), IssuerCertificateDigest: issuer.Digest(), CommandID: uuid.NewString(), TaskID: uuid.NewString(), TaskDigest: strings.Repeat("d", 64), ClaimID: uuid.NewString(), WorkerID: "launcher-fixture", SandboxID: ri.SandboxID, WorkspaceHash: ri.WorkspaceHash, Generation: ri.Generation, DataGateEpoch: 1, ControlRevision: 10, ClaimCreateRevision: 11, LeaseID: 12, Runtime: ri.Runtime}
+					closeTicket, err := p.SignTaskCloseDataTicket(issuerKey, issuer, p.TaskCloseDataTicketClaims{Version: 1, Purpose: "task_close_data", Context: closeContext, NotBefore: closeNow.Add(-2 * time.Second), NotAfter: closeNow.Add(20 * time.Second)})
+					require.NoError(t, err)
+					closeEvidence, err := verifier.VerifyTaskCloseDataTicket(closeTicket, issuerCert, closeContext, closeNow)
+					require.NoError(t, err)
+					closeEnvelope := ct.TaskCloseEnvelope{Version: 1, Purpose: "task_close_data", Context: closeContext, TicketDigest: closeEvidence.Digest(), Ticket: closeTicket, IssuerCertificate: issuerCert}
+					kind, closeReceipt := nativeTaskCall(t, destination, closeEnvelope)
+					require.Equal(t, ct.EventReceipt, kind)
+					closed, err := verifier.VerifyTaskDataClosedReceipt(closeReceipt, runtimeCert, closeContext, closeEvidence.Digest(), closeEvidence.NotBefore(), closeEvidence.NotAfter(), time.Now().UTC())
+					require.NoError(t, err)
+					require.Equal(t, "data_closed", closed.State())
+					require.NoError(t, child.Process.Signal(syscall.Signal(0)))
+					_, _, err = destination.ReadEnrolledPublication(call, certificate, claim)
+					require.Error(t, err, "live but data-closed launcher must refuse new publication")
+					closeEnvelope.Purpose = "task_close_data_query"
+					closeEnvelope.Ticket, closeEnvelope.IssuerCertificate = nil, nil
+					kind, retained := nativeTaskCall(t, destination, closeEnvelope)
+					require.Equal(t, ct.EventReceipt, kind)
+					_, err = verifier.VerifyTaskDataClosedReceipt(retained, runtimeCert, closeContext, closeEvidence.Digest(), closeEvidence.NotBefore(), closeEvidence.NotAfter(), time.Now().UTC())
+					require.NoError(t, err, "same live TLS endpoint must retain authenticated closed-gate history")
+					executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", child.Process.Pid))
+					require.NoError(t, err)
+					require.Equal(t, "/fixture/launcher", executable)
+					t.Log("original signed data_closed receipt authenticated; same formal CLI alive with TLS history available; new publication refused")
+				} else {
+					badCertificate := bytes.Clone(certificate)
+					badCertificate[len(badCertificate)-2] ^= 1
+					_, _, err = destination.ReadEnrolledPublication(call, badCertificate, claim)
+					require.Error(t, err)
+					wrongClaims := claims
+					wrongClaims.Runtime.UID = uuid.NewString()
+					wrongCertificate, err := p.SignRuntimeCertificate(root, wrongClaims)
+					require.NoError(t, err)
+					_, _, err = destination.ReadEnrolledPublication(call, wrongCertificate, claim)
+					require.Error(t, err)
+					_, wrongIssuerKey, err := ed25519.GenerateKey(rand.Reader)
+					require.NoError(t, err)
+					wrongIssuerWire, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: wrongIssuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
+					require.NoError(t, err)
+					wrongCredential, err := p.NewManagementTLSCredential(wrongIssuerKey, wrongIssuerWire, "command_issuer")
+					require.NoError(t, err)
+					defer wrongCredential.Close()
+					options.Credential = wrongCredential
+					wrongDestination, err := ct.NewDestination(options)
+					require.NoError(t, err)
+					_, _, err = wrongDestination.ReadEnrolledPublication(call, certificate, claim)
+					require.Error(t, err)
+				}
 				require.NoError(t, child.Process.Signal(syscall.SIGTERM))
 				require.NoError(t, waitChild())
-				_, _, err = destination.ReadEnrolledPublication(call, certificate, claim)
-				require.Error(t, err)
-				t.Log("wrong certificate/runtime/issuer and closed formal launcher refused publication")
+				if mode != "live-gate" {
+					_, _, err = destination.ReadEnrolledPublication(call, certificate, claim)
+					require.Error(t, err)
+					t.Log("wrong certificate/runtime/issuer and closed formal launcher refused publication")
+				}
 			}
 			if !waited {
 				require.NoError(t, child.Process.Signal(syscall.SIGTERM))

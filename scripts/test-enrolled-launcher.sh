@@ -59,6 +59,8 @@ if [[ "$mode" == build ]]; then
   exit 0
 fi
 if [[ "$mode" == run ]]; then
+  native_selector=${ENROLLED_LAUNCHER_NATIVE_SELECTOR:-'^TestEnrolledLauncherNative$'}
+  case "$native_selector" in '^TestEnrolledLauncherNative$'|'^TestEnrolledLauncherNativeLiveGate$') ;; *) exit 2;; esac
   image=sha256:684aa844d79d5b300db6586a25503607838055db7e7f480a50abb7c7ee7b4e32
   etcd="$own/etcd-linux-arm64"
   [[ $(shasum -a 256 "$etcd" | awk '{print $1}') == 117cc09981c0f1eb378e7520be6969756c2d6a762f376944e53f7bc9800c0c59 ]]
@@ -70,7 +72,7 @@ if [[ "$mode" == run ]]; then
   run="enrolled-launcher-$epoch"
   [[ ! -e "$own/native-$epoch.log" ]]
   [[ -z $(docker ps -aq --filter label=sandbox.task=enrolled-launcher-transport) ]]
-  id=$(docker create --name "$run" --label sandbox.task=enrolled-launcher-transport --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --tmpfs /workspace:rw,nosuid,nodev,size=1048576,uid=1000,gid=1000,mode=0700 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch-runner.test,dst=/fixture/runner.test,readonly" --mount "type=bind,src=$own/native-$epoch-launcher,dst=/fixture/launcher,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_ENROLLED_LAUNCHER_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /fixture/runner.test "$image" -test.run '^TestEnrolledLauncherNative$' -test.v -test.timeout=100s)
+  id=$(docker create --name "$run" --label sandbox.task=enrolled-launcher-transport --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --tmpfs /workspace:rw,nosuid,nodev,size=1048576,uid=1000,gid=1000,mode=0700 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch-runner.test,dst=/fixture/runner.test,readonly" --mount "type=bind,src=$own/native-$epoch-launcher,dst=/fixture/launcher,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_ENROLLED_LAUNCHER_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /fixture/runner.test "$image" -test.run "$native_selector" -test.v -test.timeout=100s)
   started=false
   attach_pid=
   attach_waited=false
@@ -132,8 +134,13 @@ if [[ "$mode" == run ]]; then
   id=
   [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]]
   [[ "$attach_status" == 0 && "$container_status" == 0 ]]
-  [[ $(rg -c '^--- PASS: TestEnrolledLauncherNative ' "$own/native-$epoch.log") == 1 ]]
-  [[ $(rg -c 'original formal launcher mode=.* Cmd.Wait=exit0' "$own/native-$epoch.log") == 2 ]]
+  if [[ "$native_selector" == '^TestEnrolledLauncherNative$' ]]; then
+    [[ $(rg -c '^--- PASS: TestEnrolledLauncherNative ' "$own/native-$epoch.log") == 1 ]]
+    [[ $(rg -c 'original formal launcher mode=.* Cmd.Wait=exit0' "$own/native-$epoch.log") == 2 ]]
+  else
+    [[ $(rg -c '^--- PASS: TestEnrolledLauncherNativeLiveGate ' "$own/native-$epoch.log") == 1 ]]
+    [[ $(rg -c 'original formal launcher mode=live-gate Cmd.Wait=exit0' "$own/native-$epoch.log") == 1 ]]
+  fi
   ! rg -q '^--- SKIP:' "$own/native-$epoch.log"
   printf 'ENROLLED_LAUNCHER_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"
   exit 0
