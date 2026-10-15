@@ -4,14 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -26,38 +23,11 @@ var errTaskCleanupRefused = errors.New("task runtime cleanup refused")
 // user callback, shared transport, environment proxy or mutable TLS container
 // participates in an operation.
 func (c *TaskRuntimeCleanupClient) configure(config *rest.Config) error {
-	if config == nil || config.Transport != nil || config.WrapTransport != nil || config.Dial != nil || config.Proxy != nil || config.ExecProvider != nil || config.AuthProvider != nil || config.AuthConfigPersister != nil || config.RateLimiter != nil || config.WarningHandler != nil || config.WarningHandlerWithContext != nil || config.BearerTokenFile != "" || config.CAFile != "" || config.CertFile != "" || config.KeyFile != "" || config.Insecure || config.Impersonate.UserName != "" || config.Impersonate.UID != "" || len(config.Impersonate.Groups) != 0 || len(config.Impersonate.Extra) != 0 {
-		return fmt.Errorf("%w: static config required", errTaskCleanupRefused)
+	snapshot, err := snapshotStaticAPI(config)
+	if err != nil {
+		return err
 	}
-	// Check raw lengths before parsing or cloning any caller-owned container.
-	rawSize := len(config.CAData) + len(config.CertData) + len(config.KeyData)
-	for _, value := range []string{config.Host, config.Username, config.Password, config.BearerToken, config.ServerName, config.UserAgent, config.APIPath, config.ContentType, config.AcceptContentTypes} {
-		if len(value) > taskCleanupBodyLimit || strings.ContainsAny(value, "\r\n") {
-			return fmt.Errorf("%w: config bound", errTaskCleanupRefused)
-		}
-		rawSize += len(value)
-	}
-	if rawSize > taskCleanupBodyLimit || len(config.CAData) > taskCleanupBodyLimit || len(config.CertData) > taskCleanupBodyLimit || len(config.KeyData) > taskCleanupBodyLimit || len(config.NextProtos) > 1 || len(config.NextProtos) == 1 && config.NextProtos[0] != "http/1.1" {
-		return fmt.Errorf("%w: TLS bound/profile", errTaskCleanupRefused)
-	}
-	u, err := url.Parse(config.Host)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" || config.APIPath != "" || config.BearerToken != "" && (config.Username != "" || config.Password != "") {
-		return fmt.Errorf("%w: API origin", errTaskCleanupRefused)
-	}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.Clone(config.ServerName), NextProtos: []string{"http/1.1"}}
-	if len(config.CAData) != 0 {
-		tlsConfig.RootCAs = x509.NewCertPool()
-		if !tlsConfig.RootCAs.AppendCertsFromPEM(config.CAData) {
-			return fmt.Errorf("%w: static CA", errTaskCleanupRefused)
-		}
-	}
-	if len(config.CertData) != 0 || len(config.KeyData) != 0 {
-		certificate, err := tls.X509KeyPair(config.CertData, config.KeyData)
-		if err != nil {
-			return fmt.Errorf("%w: static certificate", errTaskCleanupRefused)
-		}
-		tlsConfig.Certificates = []tls.Certificate{certificate}
-	}
+	tlsConfig := snapshot.tls
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		ctx, done, err := c.trackDial(ctx)
 		if err != nil {
@@ -94,7 +64,7 @@ func (c *TaskRuntimeCleanupClient) configure(config *rest.Config) error {
 		}
 		return tlsConn, nil
 	}
-	ownedHTTP := &http.Client{Transport: &taskCleanupTransport{base: transport, token: strings.Clone(config.BearerToken), username: strings.Clone(config.Username), password: strings.Clone(config.Password)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	ownedHTTP := &http.Client{Transport: &taskCleanupTransport{base: transport, token: snapshot.token, username: snapshot.username, password: snapshot.password}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	api, err := rest.RESTClientForConfigAndClient(&rest.Config{Host: config.Host, QPS: -1, ContentConfig: rest.ContentConfig{ContentType: "application/json", AcceptContentTypes: "application/json", GroupVersion: &schema.GroupVersion{Version: "v1"}, NegotiatedSerializer: scheme.Codecs.WithoutConversion()}}, ownedHTTP)
 	if err != nil {
 		return err
