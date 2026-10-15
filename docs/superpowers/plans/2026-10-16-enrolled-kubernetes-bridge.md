@@ -24,7 +24,7 @@
 1. Dial短ctx成功返回后取消，不得杀死已移交连接；建立取消必须真实关闭并join。
 2. deadline/关闭与并发Read/Write/FIN的锁序、退款时机、SDK后台Serve无join陷阱。
 3. malformed/oversized/redirect/协议回退不导致无限分配、隐式重发或凭证外发。
-4. 原始TCP buffered HTTP字节不能在切SPDY时丢失，stdout EOF不能掩盖非零status/stderr错误。
+4. 原始TCP buffered HTTP字节不能在升级WebSocket时丢失，stdout EOF不能掩盖非零status/stderr错误。
 5. copied candidate不能授权native行为，Node/Pod替换不能把HTTP成功当安全，cleanup纯提取不得改变其预算或现有实际请求规则。
 
 ### Task 1: Complete owned Kubernetes bridge transport
@@ -36,10 +36,10 @@
 **Interfaces:** NewEnrolledBridgeClient(EnrolledBridgeOptions)(*EnrolledBridgeClient,error), (*EnrolledBridgeClient).Dial(context.Context,EnrolledBridgeTarget)(net.Conn,error), Close()error；options/target/spec caps见spec。没有注册global factory或接收外部Dial callback。
 
 - [x] Step1 只读预检发现installed moby的无join后台与未cap分配，Root裁决改用owned gorilla WebSocket/v5；不造SPDY parser或放宽边界。未获START-GO前仍只读。
-- [ ] Step2 最小新selector RED→实现static snapshot/client/2GET完整tuple校验，host/race/affectedvet及新cleanup提取回归通过，Root及时小提交。
-- [ ] Step3 新wire selector RED→固定GET upgrade/WebSocket四channel/二进制/半关闭/原短ctx不传染，host/race/affectedvet通过，Root及时小提交。
-- [ ] Step4 新故障selectors RED→补取消/deadline/额度/实际join/oversize/redirect与错协议，验证各规定场景，Root小提交，不重放已GREEN矩阵。
-- [ ] Step5 author冻结全部源码SHA/各epoch原日志/报告；Root唯一fresh整Taskreview，限定修复、tracked验收，继续master真实创建/发布编排。
+- [x] Step2 最小新selector RED→实现static snapshot/client/2GET完整tuple校验，host/race/affectedvet及新cleanup提取回归通过，Root及时小提交。
+- [x] Step3 新wire selector RED→固定GET upgrade/WebSocket四channel/二进制/半关闭/原短ctx不传染，host/race/affectedvet通过，Root及时小提交。
+- [x] Step4 新故障selectors RED→补取消/deadline/额度/实际join/oversize/redirect与错协议，验证各规定场景，Root小提交，不重放已GREEN矩阵。
+- [x] Step5 author冻结全部源码SHA/各epoch原日志/报告；唯一完整审查I1经711d4e9修复及同reviewer限定复审Approved，tracked验收见2026-10-16-enrolled-kubernetes-bridge-verification.md。下一startup集成继续，不代表生产切换。
 
 ## Root preflight and rulings
 
