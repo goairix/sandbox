@@ -117,6 +117,9 @@ func localReleaseUnknownEffect(t *testing.T, ctx context.Context, b *state.Backe
 	var record struct{ Slots []struct{ State string } }
 	require.NoError(t, json.Unmarshal(before.Kvs[0].Value, &record))
 	index, err := strconv.Atoi(strings.TrimPrefix(s.Fault, "http-"))
+	if s.Fault == "ack-provider-intent" {
+		index, err = 0, nil
+	}
 	require.NoError(t, err)
 	require.Equal(t, "intent", record.Slots[index].State, "lost ACK leaves original durable intent; it never grants resend")
 	require.NoError(t, b.ReleaseTaskClaim(ctx, claim))

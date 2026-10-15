@@ -289,7 +289,32 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 		localReleaseCloseHTTP(t, ctx, b, claim, termination, s.ProviderAddress)
 		return
 	}
+	if strings.HasPrefix(s.Fault, "boundary-") {
+		localReleaseBoundaryRefusal(t, ctx, b, claim, termination, s, tlsConfig, ns, workspace, task)
+		return
+	}
+	if s.Fault == "ack-provider-intent" {
+		localReleaseUnknownEffect(t, ctx, b, claim, termination, s, tlsConfig, ns, task)
+		return
+	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+	if s.Fault == "ack-terminated" {
+		require.Error(t, err)
+		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
+		original, loadErr := b.LoadTaskRuntimeTermination(ctx, task)
+		require.NoError(t, loadErr)
+		require.Equal(t, "terminated", original.Phase)
+		repeated, repeatErr := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.NoError(t, repeatErr)
+		require.Equal(t, original, repeated.Entry)
+		require.Equal(t, state.OutcomeUnknown, repeated.Outcome)
+		require.NoError(t, b.ReleaseTaskClaim(ctx, claim))
+		claim, err = b.ClaimTask(ctx, task, "physical-death-recovery", time.Minute)
+		require.NoError(t, err)
+		terminated, err = b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.NoError(t, err)
+		require.Equal(t, original.CreateRevision, terminated.Entry.CreateRevision)
+	}
 	if s.Fault == "ack-reserved" {
 		require.Error(t, err)
 		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
@@ -466,6 +491,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var proxy *localReleaseNativeProxy
 	var effectErrors []error
 	var effectCounts [7]int
+	boundaryArmed, boundaryPodReads := false, 0
 	blockedHTTP, canceledHTTP, releaseHTTP, joinedHTTP := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var releaseHTTPOnce sync.Once
 	policies := localReleaseNativePolicies(input.SandboxID, podName, podUID)
@@ -519,6 +545,11 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		}
 		apiMu.Lock()
 		defer apiMu.Unlock()
+		if r.URL.Path == "/fixture/arm-boundary" && strings.HasPrefix(fault, "boundary-provider-") {
+			boundaryArmed = true
+			w.WriteHeader(200)
+			return
+		}
 		if r.Method != http.MethodGet {
 			receivedMutations[r.Method+" "+r.URL.Path]++
 		}
@@ -566,6 +597,15 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 			return
 		}
 		if r.Method == http.MethodGet {
+			if boundaryArmed {
+				boundaryPodReads++
+				if fault == "boundary-provider-uid" && boundaryPodReads == 1 {
+					pod.UID = types.UID(uuid.NewString())
+				}
+				if fault == "boundary-provider-rv" && boundaryPodReads == 3 {
+					pod.ResourceVersion = "99"
+				}
+			}
 			_ = json.NewEncoder(w).Encode(pod)
 			return
 		}
@@ -744,7 +784,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	workerErr := worker.Wait()
 	t.Logf("original local worker Cmd.Wait=%v", workerErr)
 	require.NoError(t, workerErr)
-	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" || fault == "close-http" || effectIndex == 0 || effectIndex == 1 {
+	if strings.HasPrefix(fault, "enrollment-") || strings.HasPrefix(fault, "boundary-") || fault == "ack-provider-intent" || fault == "ack-reserved" || fault == "close-http" || effectIndex == 0 || effectIndex == 1 {
 		require.NoError(t, child.Process.Kill())
 	}
 	childErr := child.Wait()
@@ -752,7 +792,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || effectIndex >= 2 {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || effectIndex >= 2 {
 		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
 	} else {
 		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
@@ -782,7 +822,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		}
 		require.Equal(t, effectIndex == 6, absent)
 		t.Logf("actual seven-slot HTTP received total=%d effects=%v; each send independently checked native durable intent and immediately preceding fresh provider MOD guard; four unique configured policies", totalReceived, effectCounts)
-	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
+	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)
@@ -794,6 +834,11 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		require.Zero(t, actualPatch)
 		require.Zero(t, actualDelete)
 		require.False(t, absent)
+		require.Empty(t, receivedMutations)
+		if fault == "boundary-provider-rv" {
+			require.Equal(t, 3, boundaryPodReads)
+			require.Equal(t, "99", pod.ResourceVersion)
+		}
 	}
 	t.Logf("actual received HTTP mutations patch=%d delete=%d; exact original UID/RV enforced; absent policies are skipped diagnostics", actualPatch, actualDelete)
 	if proxy != nil {

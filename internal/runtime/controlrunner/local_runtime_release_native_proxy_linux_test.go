@@ -106,6 +106,12 @@ func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*p
 				label = "release"
 			case strings.HasSuffix(string(put.Key), "/runtime-provider-cleanup"):
 				label = "provider"
+				if p.fault == "ack-provider-intent" {
+					var v struct{ Slots []struct{ State string } }
+					if json.Unmarshal(put.Value, &v) == nil && len(v.Slots) == 7 && v.Slots[0].State == "intent" {
+						label = "provider-intent"
+					}
+				}
 			}
 		}
 	}
