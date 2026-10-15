@@ -117,13 +117,59 @@ func requirePublicationEOF(r io.Reader) error {
 	return nil
 }
 
+// Publication objects have a fixed canonical field order. Read only raw values
+// until every object and blob has passed preflight: struct unmarshaling would
+// merge duplicate objects and hide earlier values behind their final occurrence.
+func publicationRawFields(wire []byte, names ...string) ([]json.RawMessage, error) {
+	d := json.NewDecoder(bytes.NewReader(wire))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, ErrFrame
+	}
+	fields := make([]json.RawMessage, len(names))
+	canonical := []byte{'{'}
+	for i, name := range names {
+		key, err := d.Token()
+		if err != nil || key != name || d.Decode(&fields[i]) != nil {
+			return nil, ErrFrame
+		}
+		if i != 0 {
+			canonical = append(canonical, ',')
+		}
+		canonical = append(canonical, '"')
+		canonical = append(canonical, name...)
+		canonical = append(canonical, '"', ':')
+		canonical = append(canonical, fields[i]...)
+	}
+	end, err := d.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, ErrFrame
+	}
+	canonical = append(canonical, '}')
+	if !bytes.Equal(wire, canonical) {
+		return nil, ErrFrame
+	}
+	return fields, nil
+}
+
+func validateRuntimePublicationRequestRaw(wire []byte) error {
+	if len(wire) == 0 || len(wire) > MaxRuntimePublicationRequest {
+		return ErrFrame
+	}
+	fields, err := publicationRawFields(wire, "version", "purpose", "publication_certificate", "claim")
+	if err != nil || !publicationBlobBound(fields[2], 4096) {
+		return ErrFrame
+	}
+	if _, err := publicationRawFields(fields[3], "claim_id", "create_revision", "lease_id"); err != nil {
+		return ErrFrame
+	}
+	return nil
+}
+
 func readRuntimePublicationHeader(r io.Reader, wire []byte) (RuntimePublicationEnvelope, error) {
 	var e RuntimePublicationEnvelope
-	var raw struct {
-		Certificate json.RawMessage `json:"publication_certificate"`
-	}
-	if len(wire) == 0 || len(wire) > MaxRuntimePublicationRequest || json.Unmarshal(wire, &raw) != nil || !publicationBlobBound(raw.Certificate, 4096) {
-		return e, ErrFrame
+	if err := validateRuntimePublicationRequestRaw(wire); err != nil {
+		return e, err
 	}
 	if err := canonicalPublicationJSON(wire, &e); err != nil {
 		return RuntimePublicationEnvelope{}, err
@@ -153,24 +199,8 @@ func ReadRuntimePublicationResponse(r io.Reader) (RuntimePublicationResponse, er
 	if _, err := io.ReadFull(r, wire); err != nil {
 		return e, err
 	}
-	var raw struct {
-		Enrollment struct {
-			Request             json.RawMessage
-			ObserverCertificate json.RawMessage
-			Receipt             json.RawMessage
-		} `json:"enrollment"`
-		Ready json.RawMessage `json:"ready"`
-	}
-	if json.Unmarshal(wire, &raw) != nil || len(raw.Enrollment.Request) > p.NodeEnrollmentFrameBytes || !publicationBlobBound(raw.Ready, 8192) || !publicationBlobBound(raw.Enrollment.ObserverCertificate, 2048) || !publicationBlobBound(raw.Enrollment.Receipt, 4096) {
-		return e, ErrFrame
-	}
-	var request struct {
-		RuntimeCertificate json.RawMessage `json:"runtime_certificate"`
-		Activation         json.RawMessage `json:"activation"`
-		IssuerCertificate  json.RawMessage `json:"issuer_certificate"`
-	}
-	if json.Unmarshal(raw.Enrollment.Request, &request) != nil || !publicationBlobBound(request.RuntimeCertificate, 4096) || !publicationBlobBound(request.Activation, 16384) || !publicationBlobBound(request.IssuerCertificate, 4096) {
-		return e, ErrFrame
+	if err := validateRuntimePublicationResponseRaw(wire); err != nil {
+		return e, err
 	}
 	if err := canonicalPublicationJSON(wire, &e); err != nil {
 		return RuntimePublicationResponse{}, err
@@ -182,4 +212,23 @@ func ReadRuntimePublicationResponse(r io.Reader) (RuntimePublicationResponse, er
 		return RuntimePublicationResponse{}, err
 	}
 	return e, nil
+}
+
+func validateRuntimePublicationResponseRaw(wire []byte) error {
+	if len(wire) == 0 || len(wire) > MaxRuntimePublicationResponse {
+		return ErrFrame
+	}
+	fields, err := publicationRawFields(wire, "version", "purpose", "enrollment", "ready")
+	if err != nil || !publicationBlobBound(fields[3], 8192) {
+		return ErrFrame
+	}
+	enrollment, err := publicationRawFields(fields[2], "Request", "ObserverCertificate", "Receipt")
+	if err != nil || len(enrollment[0]) > p.NodeEnrollmentFrameBytes || !publicationBlobBound(enrollment[1], 2048) || !publicationBlobBound(enrollment[2], 4096) {
+		return ErrFrame
+	}
+	request, err := publicationRawFields(enrollment[0], "version", "purpose", "runtime_certificate", "activation", "issuer_certificate")
+	if err != nil || !publicationBlobBound(request[2], 4096) || !publicationBlobBound(request[3], 16384) || !publicationBlobBound(request[4], 4096) {
+		return ErrFrame
+	}
+	return nil
 }

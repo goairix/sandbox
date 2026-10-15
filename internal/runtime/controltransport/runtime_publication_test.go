@@ -23,6 +23,82 @@ func publicationFrameResponse() RuntimePublicationResponse {
 	return RuntimePublicationResponse{Version: 1, Purpose: RuntimeEnrolledPublicationPurpose, Enrollment: p.EnrolledRuntimeEvidence{Request: p.NodeEnrollmentRequest{Version: 1, Purpose: "runtime_node_enrollment", RuntimeCertificate: bytes.Repeat([]byte("r"), 4096), Activation: bytes.Repeat([]byte("a"), 8000), IssuerCertificate: []byte("i")}, ObserverCertificate: bytes.Repeat([]byte("o"), 2048), Receipt: bytes.Repeat([]byte("e"), 4096)}, Ready: bytes.Repeat([]byte("p"), 8192)}
 }
 
+func TestRuntimePublicationRawPreflight(t *testing.T) {
+	request := RuntimePublicationEnvelope{Version: 1, Purpose: RuntimeEnrolledPublicationPurpose, PublicationCertificate: []byte("certificate"), Claim: p.ClaimReference{ClaimID: "11111111-1111-4111-8111-111111111111", CreateRevision: 1, LeaseID: 2}}
+	response := publicationFrameResponse()
+	// Keep duplicate-object regressions below the outer bound so only the
+	// pre-decode schema/nested caps can reject them.
+	response.Enrollment.Request.RuntimeCertificate = []byte("r")
+	response.Enrollment.Request.Activation = []byte("a")
+	response.Enrollment.ObserverCertificate = []byte("o")
+	response.Enrollment.Receipt = []byte("e")
+	response.Ready = []byte("p")
+	requestWire, _ := json.Marshal(request)
+	responseWire, _ := json.Marshal(response)
+	if _, err := ReadRuntimeRequest(bytes.NewReader(publicationFramePayload(requestWire))); err != nil {
+		t.Fatalf("canonical request: %v", err)
+	}
+	if _, err := ReadRuntimePublicationResponse(bytes.NewReader(publicationFramePayload(responseWire))); err != nil {
+		t.Fatalf("canonical response: %v", err)
+	}
+	for _, valid := range []struct {
+		wire  []byte
+		check func([]byte) error
+	}{{requestWire, validateRuntimePublicationRequestRaw}, {responseWire, validateRuntimePublicationResponseRaw}} {
+		if err := valid.check(valid.wire); err != nil {
+			t.Fatalf("valid raw preflight: %v", err)
+		}
+	}
+	duplicate := func(wire []byte, field string, first any) []byte {
+		value, err := json.Marshal(first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := `"` + field + `":`
+		return []byte(strings.Replace(string(wire), key, key+string(value)+","+key, 1))
+	}
+	oversizedRequest := response.Enrollment.Request
+	oversizedRequest.Activation = bytes.Repeat([]byte("a"), 12300) // aggregate >16384, individual blob within cap
+	oversizedEnrollment := response.Enrollment
+	oversizedEnrollment.Request = oversizedRequest
+	oversizedResponse := response
+	oversizedResponse.Enrollment = oversizedEnrollment
+	aggregateWire, _ := json.Marshal(oversizedResponse)
+	cases := []struct {
+		name  string
+		wire  []byte
+		check func([]byte) error
+	}{
+		{"request-certificate", duplicate(requestWire, "publication_certificate", make([]byte, 5000)), validateRuntimePublicationRequestRaw},
+		{"ready", duplicate(responseWire, "ready", make([]byte, 9000)), validateRuntimePublicationResponseRaw},
+		{"observer", duplicate(responseWire, "ObserverCertificate", make([]byte, 3000)), validateRuntimePublicationResponseRaw},
+		{"receipt", duplicate(responseWire, "Receipt", make([]byte, 5000)), validateRuntimePublicationResponseRaw},
+		{"runtime", duplicate(responseWire, "runtime_certificate", make([]byte, 5000)), validateRuntimePublicationResponseRaw},
+		{"issuer", duplicate(responseWire, "issuer_certificate", make([]byte, 5000)), validateRuntimePublicationResponseRaw},
+		{"activation", duplicate(responseWire, "activation", make([]byte, 17000)), validateRuntimePublicationResponseRaw},
+		{"request-object", duplicate(responseWire, "Request", oversizedRequest), validateRuntimePublicationResponseRaw},
+		{"enrollment-object", duplicate(responseWire, "enrollment", oversizedEnrollment), validateRuntimePublicationResponseRaw},
+		{"aggregate", aggregateWire, validateRuntimePublicationResponseRaw},
+		{"claim-duplicate", duplicate(requestWire, "claim_id", request.Claim.ClaimID), validateRuntimePublicationRequestRaw},
+		{"case-alias", []byte(strings.Replace(string(responseWire), `"ready":`, `"Ready":"cA==","ready":`, 1)), validateRuntimePublicationResponseRaw},
+		{"escaped-key", []byte(strings.Replace(string(responseWire), `"ready":`, `"r\u0065ady":`, 1)), validateRuntimePublicationResponseRaw},
+		{"nested-unknown", []byte(strings.Replace(string(responseWire), `"Request":`, `"unknown":1,"Request":`, 1)), validateRuntimePublicationResponseRaw},
+		{"nested-null", []byte(strings.Replace(string(responseWire), `"Request":`, `"Request":null,"Request":`, 1)), validateRuntimePublicationResponseRaw},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.wire) > MaxRuntimePublicationRequest {
+				t.Fatal("regression unexpectedly exceeds outer cap")
+			}
+			// Directly assert rejection by the raw-only stage: a later canonical
+			// error after typed []byte decoding cannot satisfy this assertion.
+			if err := tc.check(tc.wire); err == nil {
+				t.Fatal("raw preflight accepted earlier oversized duplicate")
+			}
+		})
+	}
+}
+
 func TestRuntimePublicationFrames(t *testing.T) {
 	e := RuntimePublicationEnvelope{Version: 1, Purpose: RuntimeEnrolledPublicationPurpose, PublicationCertificate: []byte("certificate"), Claim: p.ClaimReference{ClaimID: "11111111-1111-4111-8111-111111111111", CreateRevision: 1, LeaseID: 2}}
 	var buffer bytes.Buffer
