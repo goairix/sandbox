@@ -20,6 +20,8 @@
 
 ## 2026-10-15 接续
 
+2026-10-16 受控Kubernetes profile已范围验收：c38a4cc/e7b2e30/575b714/a702c20/d92fb85与审查补测cf10144，交付共享canonical config、严格五volume/pinned image合同、正式serve-provisioned PID1、observer/cleanup完整tuple核对；唯一新Linux实际readonly mounts/observer/signedclock/ready/Prepare通过。唯一完整review的I1明确回归经同reviewerR1 Approved，保留原etcd日志M1和历史输入快照限制。详见2026-10-16-enrolled-kubernetes-profile-verification.md。这不是实际KubeAPI/CRI、创建发布/main接线或大N容量；功能55%/整体40%/生产0%暂不变。后续固定Kubernetes管理bridge方案4d3f4e4已准备，紧接编码，不重启本单元。
+
 2026-10-16 正式launcher接线已范围验收：2976b16/3f6dfde/7e2001f/78f53ab及review修复9336fc0，v2固定节点配置、真实管理TLS只读publication、正式CLI PID1独立observer/signedclock正例和存活关闭gate拒绝。唯一review的nested分配前cap I1经8项直接rawvalidator RED→GREEN、host/race/vet及同reviewer限定复审闭环，Approved；原native启动/关闭日志与Root AppleDouble审计假设失败保留。详见2026-10-16-enrolled-launcher-transport-verification.md。下一受控Kubernetes Pod profile/provisioning方案3302feb已准备，接着编码；尚不是真实kubelet/生产driver/main。功能代码约55%/整体交付约40%/生产切换0%的口径暂不因这个接点重复上调。
 
 2026-10-16 最新验收：本地普通运行时安全释放已完成，十二源码提交至824c1a8与唯一review的R1补测c20e586。真实链路、六enrollment变更、七HTTP实际效果丢ACK、多个native ACK、Close真实join、身份/claim/UIDRV拒绝以及最后observer Terminate响应丢失→freshclaim仅Query恢复均通过。原reviewer确认I1解决、无新增C/I/M；保留未归因前置EOF、compositescriptexit1和原日志/历史输入绑定限制。详见 `2026-10-16-local-runtime-safe-release-verification.md`，不重放旧矩阵。正式launcher enrolled config/TLS publication单元已开始：spec/plan f618f31，新增config/frame有限RED→GREEN进行中，尚未整项验收；main仍Redis。接着继续真实driver/业务API、分区与FUSE、容量及部署切换。下述早期阶段记录保留为历史，以本节最新范围验收与顶部百分比为准。

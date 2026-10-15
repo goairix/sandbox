@@ -46,8 +46,8 @@
 
 - [x] Step1 读取实际 v2 config/原 Pod/两个消费者，写最小 config共享与profile RED；报告精确矛盾，不扩张原authority。迁移 config、实现共享严格profile及纯builder，有限host/race/vet通过后小提交。
 - [x] Step2 正式 provisioning mode 与真实 FD/NOFOLLOW/O_EXCL/root/mode/stale 检查；两个消费者新显式 profile分支，保持旧分支不变。对受控关键字段有限negative和原拒绝条件完成host/race与Linuxcompile/vet，及时小提交。
-- [ ] Step3 新Linux fixture exec正式serve-provisioned PID1，真实readonly socket mounts/初始EmptyDir，原observer签名enrollment/ready认证；同真实GET Pod profile由cleanup Prepare接受。有限stale/foreign-entry拒绝和原Wait/join/cleanup、actualall17源码ELF绑定完成，小提交。
-- [ ] Step4 冻结原始证据/报告，Root唯一fresh完整review，同pair修复、tracked验收并继续创建/发布生产编排。
+- [x] Step3 新Linux fixture exec正式serve-provisioned PID1，真实readonly socket mounts/初始EmptyDir，原observer签名enrollment/ready认证；同真实GET Pod profile由cleanup Prepare接受。有限stale/foreign-entry拒绝和原Wait/join/cleanup、actualall17源码ELF绑定完成，小提交。
+- [x] Step4 冻结原始证据/报告，Root唯一fresh完整review，同pair修复、tracked验收并继续创建/发布生产编排。I1补测cf10144经同reviewer scopedR1 Approved；M1原日志保留，不重放已验收矩阵，见2026-10-16-enrolled-kubernetes-profile-verification.md。
 
 ## Root preflight and rulings
 
