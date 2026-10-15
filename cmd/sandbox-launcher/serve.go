@@ -31,6 +31,9 @@ func serve() error {
 	if err = t.CheckProtectedPath(t.ClockSocket, os.ModeSocket|0600); err != nil {
 		return err
 	}
+	if err = t.CheckProtectedPath(t.EnrollmentSocket, os.ModeSocket|0600); err != nil {
+		return err
+	}
 	verifier, err := p.NewManagementVerifier(c.trustBinding(), c.Roots)
 	if err != nil {
 		return err
@@ -52,7 +55,7 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	supervisor, err := controlrunner.NewSupervisor(controlrunner.SupervisorOptions{Kernel: boundary, UID: c.UID, GID: c.GID, NetworkAllowed: c.NetworkAllowed, ContractDigest: c.ContractDigest, Verifier: verifier, Clock: clock, JournalDirectory: t.ControlDirectory + "/journal", Executable: executable, MaxActive: c.MaxActive})
+	supervisor, err := controlrunner.NewEnrolledSupervisor(controlrunner.SupervisorOptions{Kernel: boundary, UID: c.UID, GID: c.GID, NetworkAllowed: c.NetworkAllowed, ContractDigest: c.ContractDigest, Verifier: verifier, Clock: clock, JournalDirectory: t.ControlDirectory + "/journal", Executable: executable, MaxActive: c.MaxActive}, controlrunner.NodeEnrollmentOptions{SocketPath: t.EnrollmentSocket, NodeUID: c.Enrollment.NodeUID, NodeBootID: c.Enrollment.NodeBootID})
 	if err != nil {
 		return err
 	}

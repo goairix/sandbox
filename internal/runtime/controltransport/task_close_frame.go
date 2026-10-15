@@ -127,6 +127,13 @@ func ReadRuntimeRequest(r io.Reader) (RuntimeRequest, error) {
 	if err := json.Unmarshal(header, &purpose); err != nil {
 		return RuntimeRequest{}, err
 	}
+	if purpose.Purpose == RuntimeEnrolledPublicationPurpose {
+		e, err := readRuntimePublicationHeader(r, header)
+		if err != nil {
+			return RuntimeRequest{}, err
+		}
+		return RuntimeRequest{Publication: &e}, nil
+	}
 	if purpose.Purpose == "task_quiesce_users" || purpose.Purpose == "task_quiesce_users_query" {
 		e, err := readTaskQuiesceHeader(r, header)
 		if err != nil {

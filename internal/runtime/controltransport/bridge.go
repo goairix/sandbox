@@ -13,6 +13,7 @@ import (
 const ControlDirectory = "/run/sandbox-control"
 const ControlSocket = ControlDirectory + "/control.sock"
 const ClockSocket = "/run/sandbox-clock/clock.sock"
+const EnrollmentSocket = ControlDirectory + "/enrollment.sock"
 
 // CheckProtectedPath checks every original path component without following
 // symlinks. Privileged operator replacement remains an external trust boundary.
