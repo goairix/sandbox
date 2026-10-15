@@ -12,7 +12,7 @@
 
 正式serve-provisioned仍只实际root/PID1。固定root/run FD祖先NOFOLLOW/root-owned/不可group/world写不变；control FD必须实际directory、root UID/GID0，仅初始exact0700/0755/0777/01777接受，其他specialbit/mode/owner/type拒绝。在持有control原FD后、检查任何子项或创建配置之前先Fchmod0700，并Fstat确认同一FD现在root:root exact0700。只有唯一enrollment.sock且root0600、无其他birth数据时，才O_EXCL/NOFOLLOW创建config0600/file+dirSync，再原serve/BootstrapPID1。检查失败只允许已做的权限收紧，所有旧文件内容/inode保留；无unlink/覆盖/重新出生/fallback。没有用户程序运行、无init/sidecar、RestartNever的固定Pod合同是允许收紧fresh目录的前提；不让任意hostPath/其他进程据此进入旧弱分支。
 
-不改变共享profile五volumes/readonly hostPath/command/image/authority/UIDGID校验，不增加CHOWN/DAC_OVERRIDE等cap，不使用init脚本。允许一个纯固定mode策略私有函数用于host边界回归，但实际FD检查/收紧必须在正式Linux程序而非测试factory执行。
+不改变共享profile五volumes/readonly hostPath/command/image/authority/UIDGID校验，不增加生产cap或CHOWN/DAC_OVERRIDE，不使用init脚本。允许一个纯固定mode策略私有函数用于host边界回归，但实际FD检查/收紧必须在正式Linux程序而非测试factory执行。
 
 ## 真实桥接组合
 
@@ -28,6 +28,12 @@ server的stdin/stdout/stderr/normalstatus转发需原实际copy和bridge Cmd.Wai
 
 host新增mode策略RED→GREEN/race，Linux affected compile/vet和新增native RED→GREEN；原失败/源快照保留，当前与历史输入明确区分。最终一位fresh完整Taskreview，同pair scoped修复，tracked验收后继续真正创建/Pool/manager生产编排。
 
-只apply_patch写源码/测试/文档/格式；Go1.25.6；无依赖升级/真实Redis/Kube/secrets/env/fullDockerinspect/push/deploy/Sentinel/CLOSED OWN。Root-only expectedHEAD/exactpaths common→本OPEN OWN fcntl锁小提交。每作者≤1、总≤2原隔离fixture，cachedarm64runner sha256:684aa844d79d5b300db6586a25503607838055db7e7f480a50abb7c7ee7b4e32，networknone/private/nohostPID/readonlyroot/NNP/512MiB/2CPU/256PID，原setupcap白名单不扩张。Root明确允许本Task private /run tmpfs≤1MiB之外再有exact control tmpfs≤1MiB以模拟实际MemoryEmptyDir；无host/run mount。每次实际native命令仍先报Root检查批准；只是方案记录不授权任意运行。新源码全部Go写/GoList/native须前置bridge验收后START-GO，之前只读准备。
+只apply_patch写源码/测试/文档/格式；Go1.25.6；无依赖升级/真实Redis/Kube/secrets/env/fullDockerinspect/push/deploy/Sentinel/CLOSED OWN。Root-only expectedHEAD/exactpaths common→本OPEN OWN fcntl锁小提交。每作者≤1、总≤2原隔离fixture，cachedarm64runner sha256:684aa844d79d5b300db6586a25503607838055db7e7f480a50abb7c7ee7b4e32，networknone/private/nohostPID/readonlyroot/NNP/512MiB/2CPU/256PID。仅本Task新增fixture setupcap SYS_CHROOT，原因及执行前丢弃要求见下；其余原setup白名单不变。Root明确允许本Task private /run tmpfs≤1MiB之外再有exact control tmpfs≤1MiB以模拟实际MemoryEmptyDir；无host/run mount。每次实际native命令仍先报Root检查批准；只是方案记录不授权任意运行。新源码全部Go写/GoList/native须前置bridge验收后START-GO，之前只读准备。
+
+## 原namespace进入所需的测试权限纠正
+
+原计划假定已有SYS_ADMIN足够，实际[Linux setns(2) mount namespace规则](https://man7.org/linux/man-pages/man2/setns.2.html)还要求caller自身user namespace内SYS_CHROOT，并禁止共享CLONE_FS。Root与作者在运行GREEN前各自核实；未把EPERM/setup失败充作产品RED。为保留原持有namespace FD和真实同namespace执行，只在新startup隔离fixture增加SYS_CHROOT；不采用另建broker、重建相似namespace或跳过setns。没有修改生产Pod/cap合同。
+
+两个固定test helper（原PID1启动helper的startup-only分支及新bridge helper）在正式exec之前必须移除SYS_ADMIN/SYS_PTRACE/SYS_CHROOT的bounding位，清空ambient，permitted/effective只保留原四个生产cap、inheritable清零，并实际核验。旧helper在原六cap场景只drop前两项，新增CHROOT不会自动从bounding消失，故startup-only额外drop/核验不可省略。bridge helper仍LockOSThread、unshare(CLONE_FS)、只setns原传入FD，绝不重开任意PID/path。setup错误保留原退出，不能报告集成通过。代价是这个明确记录的测试setup权限例外；正式程序、现有旧selector和部署权限不扩大。
 
 Ruling: 用户持续授权包括修复真实集成缺陷；旧Task已CLOSED，保持原历史证据，独立新完整startup集成Task修复和验证实际行为，不重复申请许可或复用已关闭pair。此前0755假设错误由本Task明确纠正，不能宣称原fixture已代表kubelet。

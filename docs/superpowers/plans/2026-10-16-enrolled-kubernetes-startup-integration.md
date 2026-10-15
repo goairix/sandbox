@@ -13,11 +13,11 @@
 ## Global Constraints
 
 - 只root/PID1；root/run祖先不放宽，control root:root exact0700/0755/0777/01777→原FD先0700再子项检查；旧birth数据不覆盖/删除。
-- 原五volume/authority/cap/UIDGID/BootstrapPID1和TLS校验保持；不加cap/init/shell/任意program/Dial成功factory。
+- 原五volume/authority/生产cap/UIDGID/BootstrapPID1和TLS校验保持；不加生产cap/init/shell/任意program/Dial成功factory。
 - 新native必须实际tmpfs size1m不设mode→正式CLI，原Kube bridge client→实际正式bridge child→原TLS ready验证，所有原IO/Wait/Serve/Closejoin。
 - 新OWN fresh产物、actual17环境匹配/prepost filenamesSHA/每archive成员/ELFscript独立绑定；不重放旧矩阵，不碰Sentinel/CLOSEDOWN/外部环境/升级/push/deploy。
 - 只apply_patch；Root-only exactpaths/HEAD/common→OPEN OWN锁小提交；唯一fresh author/reviewer，同pair修复，无nested。
-- 每作者1/总2fixture上限、原512MiB/2CPU/256PID/no-network/private/nohostPID/readonlyroot/NNP/原caps；额外仅private exactcontrol tmpfs≤1MiB，加原/run≤1MiB。实际run须Root具体批准。
+- 每作者1/总2fixture上限、原512MiB/2CPU/256PID/no-network/private/nohostPID/readonlyroot/NNP；唯一setupcap例外SYS_CHROOT在两个固定helper正式exec前连同ADMIN/PTRACE从bounding等全部丢弃并核验，生产四cap不变；额外仅private exactcontrol tmpfs≤1MiB，加原/run≤1MiB。实际run须Root具体批准。
 
 ## Review Focus
 
@@ -35,9 +35,9 @@
 
 **Interfaces:** 原生产client `NewEnrolledBridgeClient`, `Dial(ctx,target)(net.Conn,error)`；原BuildEnrolledPlainPod、Destination、publication verifier。新增全是私有有限testhelper/固定mode策略，不改原public authority接口。若原fixture无可替换Dial点，作者先报具体最小源级ruling，不复制完整fixture。
 
-- [ ] Step1 READONLY预检实际fixture接口/路径/原Wait；bridge前置验收后Root设immutableBASE/START-GO。
-- [ ] Step2 新有限mode策略RED和实际tmpfs正式CLI nativeRED；输入/原退出/精确清理齐全，保留原失败快照，尚不单独提交红态产品/测试。
-- [ ] Step3 rootFD先0700再子项检查/有限mode修复，host/race/Linuxvet通过后提交连贯fix+回归；不改共享profile/管理权限。
+- [x] Step1 READONLY预检实际fixture接口/路径/原Wait；bridge已937f018范围验收，同HEAD为immutableBASE/START-GO。
+- [x] Step2 新mode策略0777/01777真实RED；独立默认tmpfs实际01777，正式CLI拒绝invalid fresh control directory，原child/attach/container均exit1，原服务退出与exact容器清理齐全；原输入归档保留，不单独提交红态。
+- [x] Step3 ee0bc98：rootFD先0700并Fstat后检查子项，有限mode回归host/race及Linuxvet通过；只提交3个连贯产品/回归文件，不改共享profile/管理权限。
 - [ ] Step4 新freshbuild nativeGREEN经生产WSclient和正式bridge，最多两个1777旧数据负例；原verify/IO/Wait/join/精确清理/all17及ELF绑定，及时提交。
 - [ ] Step5 冻结report/manifest，唯一fresh整Taskreview，同pair修复并tracked验收；继续真正create/quota/manager。
 
@@ -51,4 +51,4 @@
 | Step3→Step4 | 正式provision→enrollment/WS | 不用kernel/authority成功factory，固定exec及实际namespaceFD/Wait链。 |
 | Task内部 | 已有native服务→新fixture | 允许最窄test-only mode/exectransport seam；不提供生产可选program，具体接口预检后Root裁决。 |
 
-Ruling: master持续授权下的真实兼容修复与组合验证，不额外停止审批。额外control tmpfs仅为准确复现MemoryEmptyDir，仍在512MiB总memory内；root/run/hostmount/caps均不放宽。
+Ruling: master持续授权下的真实兼容修复与组合验证，不额外停止审批。额外control tmpfs仅为准确复现MemoryEmptyDir，仍在512MiB总memory内；root/run/hostmount/生产caps均不放宽。实际setns要求SYS_CHROOT，Root纠正初始setupcap假设：仅新fixture新增此cap，原PID1 helper startup-only与bridge helper正式exec前必须真实drop bounding/ambient并核验只剩原四cap；不增加broker或绕过原namespaceFD。详见spec权限纠正段和官方setns规则。
