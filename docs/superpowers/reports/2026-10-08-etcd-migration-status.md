@@ -12,6 +12,8 @@
 
 基分支新增Redis持久probe签名key，应纳入etcd生产接线和旧版本排空，不能在移除Redis时直接丢弃fencing历史。
 
+新增probe原生密钥存储源码226b543/dc08b41已范围验收：operator显式seed永久CAS、API只读owned key加载、未知回执只读仲裁及严格wire/故障边界。独立源码审查C0/I0/M0；原始容器退出码未记录的环境M1透明保留，down0与精确清理已核对。见2026-10-15-etcd-probe-control-key-verification.md。main和旧Redis loader尚未切换，启动接线/原seed导入/部署权限仍需完成。
+
 ## 2026-10-09 整体交付状态
 
 | 交付项 | 当前状态 | 还需完成 |

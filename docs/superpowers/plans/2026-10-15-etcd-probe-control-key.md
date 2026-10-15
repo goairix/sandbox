@@ -33,7 +33,9 @@
 
 **Interfaces:** spec中的ProvisionWorkspaceControlKey(ctx,seed)(ed25519.PublicKey,error)、LoadWorkspaceControlKey(ctx)(ed25519.PrivateKey,error)。使用既有Backend/native helpers、integrationBackend/faultKV测试接点；错误沿用当前etcd领域errors，不暴露seed值。
 
-- [ ] **Step 1: RED。** 可编译拒绝入口、真实初始化/加载反例，编译失败不算RED。
-- [ ] **Step 2: 实现和首次小提交。** 当前operator屏障、固定CAS、只读load与ownedkey；新真实三成员positive/concurrency/readonly/复制通过即提交连贯功能。
-- [ ] **Step 3: 故障边界。** 丢ACK只读仲裁、错seed/Lease/version/wire/漂移/取消、最大namespace有限wire；只跑新增或实际改变源码相关用例，及时提交。
-- [ ] **Step 4: gate。** 新host race/native/vet/format/diffcheck、源码binary/真实Wait/精确cleanup，短OWN report；唯一fresh Task review，修复同作者/reviewer限定循环。无main切换/容量/安全轮换claim。
+- [x] **Step 1: RED。** 可编译拒绝入口、真实初始化/加载反例，编译失败不算RED。
+- [x] **Step 2: 实现和首次小提交。** 当前operator屏障、固定CAS、只读load与ownedkey；新真实三成员positive/concurrency/readonly/复制通过即提交连贯功能。
+- [x] **Step 3: 故障边界。** 丢ACK只读仲裁、错seed/Lease/version/wire/漂移/取消、最大namespace有限wire；只跑新增或实际改变源码相关用例，及时提交。
+- [x] **Step 4: gate。** 新host race/native/vet/format/diffcheck、源码binary/精确cleanup与唯一fresh review已核对。原始container退出Wait缺口M1经Root透明裁定范围接受，未验收容器退出检查，不能把up --wait当退出证明。无main切换/容量/安全轮换claim。
+
+范围验收见reports/2026-10-15-etcd-probe-control-key-verification.md，源码226b543/dc08b41；生产接线继续，不结束主分支工作。
