@@ -38,10 +38,12 @@
 
 **Interfaces:** nodeobserver.New(Options)(*Observer,error)、Observer.Serve(ctx,*net.UnixListener,net.Listener)error与Close()error；Options精确字段和固定协议OpenNodeEnrollment/Session.Enroll/TerminationDestination.Terminate/Query签名见Spec60/68；shared Encode/DecodeTaskRuntimeTerminationIntent见Spec59；固定签名/verification角色和claims见Spec46/61–67。
 
-- [ ] **Step1 RED+strict wire/authority。** 新TestNodeObserverProtocol验证role/domain/canonical fields、max16384/duplicate/null拒绝及固定key/hash；TestNodeObserverAuthority验证真实TLS etcd claim/Lease/header/59+1/256KiB，错误native数据拒绝无signal。先记录RED，再实现共享codec、新role/tickets及concrete clients/guards。GREEN后小提交，不先建大型框架。
-- [ ] **Step2 enrollment/journal。** TestNodeObserverEnrollment验证actual SO_PEERCRED+nonce/runtimecert关联、固定node/Pod profile/root/boot、真实pidfd/ns/cgroupanchors；TestNodeObserverJournal验证固定槽、canonical≤32768、双代fsync/crash、满/损坏拒绝。实现注册与有限owner/Close生命周期，focused GREEN后提交。
-- [ ] **Step3 physical terminate/query。** TestNodeObserverPhysicalNative真实private PID1及forked descendants，deleting exactUID+Never前置，actual pidfd SIGKILL、death+originalcgroup empty、durable signed terminal、restart Query原bytes；单次signal/lostACK/query不执行、blockedkernel/join/cancel保留unknown。Linuxfixture必须真实验证权限与cgroup，缺失向Root报告；不得mock替代。GREEN后提交。
-- [ ] **Step4 refusal/resource/lifecycle。** 真实peer转发/PID/ns/cgroup/boot替换、claim/restore丢失、unknownDELETE、journal断点、FD/slot/wire上界、backpressure和并发Close验证ReviewFocus五类；保留实际child Wait、exactlabels/ownedcgroup cleanup、source/binary SHA。源码改动仅跑新增受影响case，及时提交。
-- [ ] **Step5 complete evidence+self-review。** 新增hostrace、affectedvet、Linux compile、gofmt-l/bash-n/diffcheck；不重跑accepted矩阵。写OWN/task-1-report.md，列小commits、RED/GREEN各epoch命令/结果/原始Wait与cleanup、key/node/wire和FD/allocation表、明确production integration/rollout pending。Root仅派一次fresh taskreview，限定fix轮次同author/reviewer，验收后继续publication/termination/release而不结束master。
+- [x] **Step1 RED+strict wire/authority。** 新TestNodeObserverProtocol验证role/domain/canonical fields、max16384/duplicate/null拒绝及固定key/hash；TestNodeObserverAuthority验证真实TLS etcd claim/Lease/header/59+1/256KiB，错误native数据拒绝无signal。实际结果与初始compile RED限制见验收报告。
+- [x] **Step2 enrollment/journal。** actual SO_PEERCRED+nonce/runtimecert、固定node/Pod profile/root/boot、真实pidfd/ns/cgroupanchors及固定槽双代journal实现；注册与有限owner/Close生命周期已验证。
+- [x] **Step3 physical terminate/query（范围验收）。** 真实private PID1及descendants、exact deletingUID+Never、solepidfdSIGKILL、death+originalcgroupempty、durable terminal，以及新OS进程Query原bytes和独立claim-loss unknown通过。不可中断内核任务未强制；不以claim-loss替代该项物理证明。
+- [x] **Step4 refusal/resource/lifecycle（范围验收）。** peer/nonce/userdeny、boot/restore/operations/foreignPIDNS/unknownDELETE等具名拒绝、资源界限与Close已有结果；actualchildWait/cleanup/sourcebinarySHA保留。cgroup replacement因fixtureEPERM未执行，数值PID复用及已有livePIDNS替换未强制，仍是对应环境验收限制，不能记PASS。
+- [x] **Step5 evidence+独立review。** 十个源码小提交及ec60d6f/2bbcb12/b76ebb8修复，hostrace/vet/Linuxcompile/format/script/diff和实际Linux证据完成；唯一fresh完整审查及同reviewer两轮限定复审结束，所有findings解决。无重复review seat/旧矩阵重放，生产integration/rollout仍pending。
+
+范围验收记录：`docs/superpowers/reports/2026-10-15-node-observer-physical-termination-verification.md`。上述勾选确认独立组件交付与明确限制，不表示五类物理负例全部已强制、provider清理/owner释放、生产迁移或大N容量完成；后续部署须验证实际内核/容器拓扑。继续既定master，不重复实现本组件。
 
 Plan执行由用户既有master批准与多次continue授权；不重复询问是否继续。受限privileged Linuxfixture仅操作具名测试资源，若不能证明确切资源边界则停止该fixture并报告，继续可独立源码工作。

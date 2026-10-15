@@ -6,7 +6,9 @@
 
 本地完整同步单元已范围验收：`44673b4/0488e3c/3b1e4e6/30b5fc9` 与复审修复 `ba7a3dc`，接通目录/空目录、类型替换、删除策略与 excluded、临时权限恢复、实际关闭和 immutable complete。初审发现新 claim regular adoption 缺口，已通过真实延迟 GC 的 RED→GREEN 修复；同 reviewer 限定复审 C0/I0/M1 Approved，M1 为保留的 etcd teardown 日志。详见 `2026-10-15-workspace-sync-local-finalization-verification.md`。S64 单 partition 边界测试不是 full-cell 或大 N 容量验收，结果不是 release 权限。
 
-后续运行时关闭生产者正在实现：已小步提交固定 termination codec、observer 身份/票据、固定槽持久 journal、真实 Linux pidfd/cgroup 排空和独立 TLS 角色（`a1bc3cc/ea9a927/29500a6/15efe90/5a96a03`）。服务/鉴权/终止/重启查询接线仍待真实认证端到端验证与独立审查，不能称运行时关闭或 owner 释放已完成。接着完成 enrolled publication、精确 provider 清理和原子安全释放，再接生产业务与调度。当前无外部阻塞，主程序仍连接 Redis。
+后续运行时关闭生产者已范围验收：十个连贯源码提交至 `2b2e55d`，以及 review 修复 `ec60d6f/2bbcb12/b76ebb8`，实现真实 Supervisor 登记、独立 TLS、固定60节点原生权限、单次 pidfd 终止、实际死亡和原 cgroup 排空、持久 terminal/unknown 的新 OS 进程查询。初审两项 Important 和 R1 引入的共享 TLS 容器竞态均已解决，同 reviewer R2 无新增 C/I/M。实际 Linux 结果、原始失败和物理替换等未强制场景仍明确保留；这不是 provider 清理、安全释放或生产部署验收。见 `2026-10-15-node-observer-physical-termination-verification.md`。
+
+enrolled publication 已小步提交 `2beadb8/beb7e26/c3aa645/b43d9c2/c4a9743`：Supervisor 登记前准入关闭、新签名域、实际64节点原子发布及只读冷仲裁。首轮 Linux genuine 组合链路、晚 ACK/Close 已通过，整轮因最大 namespace fixture 误写513字节失败；修正后的独立 backend 轮次18个叶测试通过，包含真实512 namespace、lost-ACK只读trace、claim/history失效与损坏冷读，原始退出和清理完成。原失败保留。当前补完两个计划内 journal 安装交错检查后做唯一完整 review；本单元尚未验收。这些不是 owner 释放或生产接线完成。接着完成 etcd termination composer、精确 provider 清理和原子安全释放，再接生产业务与调度。当前无外部阻塞，主程序仍连接 Redis。
 
 已合并feat/workspace-fuse-mount最新c14a52c，merge45ebc70，无冲突；六个受影响普通Go包race、正确标签下Helm限定回归、vet及Linuxarm64构建通过，首批漏Helm标签导致的setup exit1如实保留。详见2026-10-15-base-fuse-fixes-merge-verification.md。
 
