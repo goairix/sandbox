@@ -16,6 +16,10 @@
 
 受控annotation只允许7个：`goairix.github.io/sandbox-launcher-profile`、同prefix的`sandbox-launcher-generation/node-uid/node-boot-id/config-digest/image-digest`以及原`sandbox.creation.intent`；authority/restore由canonical config和digest绑定。SandboxSpec无Annotations字段，annotation由builder生成。合法caller labels允许，但受控sandbox.id/managed/workspace.mode不能覆盖，pool/claim保留身份拒绝。真实CNI/admission新增annotation如有需要须后续显式评审allowlist，本fixture不声称其兼容性。SandboxSpec.PidLimit非零明确拒绝，不能在PodSpec无字段时默默忽略；0不代表本Task已部署PIDs限制，operator/node配置属部署验收。
 
+已知 API 默认必须精确处理：模板包含原普通Pod的not-ready/unreachable两个NoExecute300秒toleration；无PriorityClassName时仅允许Priority nil/0及PreemptionPolicy nil/PreemptLowerPriority，校验对copy规范化，不能修改传入Pod或原cleanup全PodSpec哈希。其他优先级/抢占/toleration拒绝。共用`EnrolledPlainPodSpec(nodeName,image,config string, resources corev1.ResourceRequirements, volumes []corev1.Volume) corev1.PodSpec`仅生成固定fresh模板，builder与validator调用，后者仍独立验证动态config/resources/volumes；不提供任何执行权限。HostUsers暂只接受nil，显式true虽在本地API模型与nil语义同为host userns，仍留真实admission兼容性限制，不以未经验证的profile宽化处理。
+
+新profile无需复制旧shell的KUBERNETES_*环境mask：原Supervisor monitor环境固定GOMAXPROCS=2，用户环境仅来自已签请求，不继承管理PID1环境；正式provision成功后删除public配置环境变量。不得以后为兼容而把管理全环境透传用户。
+
 ## 验收
 
 一个完整 Task、多个小提交、一位 fresh author 与一位 fresh reviewer。host RED→GREEN/race 覆盖 canonical 配置迁移、Pod builder 输出及两消费者接受同一 profile；对每个 hostPath/mount/command/security/node/config/intent 关键边界作有限 mutation 拒绝，旧 profile 原拒绝条件保留。明确测试未知 profile 不能掉进旧分支、config 与 nodeUID/boot 不一致拒绝、oversize/secret 字段拒绝。
