@@ -52,6 +52,7 @@ type taskArchiveSpool struct {
 	witness                  *taskReceivedArchive
 	consumer                 *PreparedTaskWorkspaceSyncSource // one immutable registration, store.mu
 	recovery                 *taskArchiveRecoveryOwner
+	recoverySeedTask         TaskReference // immutable at registration, including failed initialization
 }
 
 type taskArchiveExpected struct {

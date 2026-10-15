@@ -33,7 +33,9 @@ func (s *taskArchiveStore) registerRecovery(ctx context.Context, slot uint32) (*
 		}
 	}
 	for r := range s.spools {
-		if r.recovery != nil && (r.recovery.slot == slot || s.recovery.slots[r.recovery.slot].diagnostic.TaskID == d.TaskID) {
+		var seedTaskID [36]byte
+		copy(seedTaskID[:], r.recoverySeedTask.TaskID)
+		if r.recovery != nil && (r.recovery.slot == slot || seedTaskID == d.TaskID || s.recovery.slots[r.recovery.slot].diagnostic.TaskID == d.TaskID) {
 			return nil, ErrConflict
 		}
 	}

@@ -288,6 +288,20 @@ func (s *taskArchiveStore) reserveRecovery(ctx context.Context, seed taskArchive
 		s.mu.Unlock()
 		return nil, errTaskArchive
 	}
+	for _, candidate := range s.recovery.slots {
+		var taskID [36]byte
+		copy(taskID[:], seed.Task.TaskID)
+		if candidate.owner != nil && candidate.diagnostic.TaskID == taskID {
+			s.mu.Unlock()
+			return nil, ErrConflict
+		}
+	}
+	for original := range s.spools {
+		if original.recovery != nil && original.recoverySeedTask == seed.Task {
+			s.mu.Unlock()
+			return nil, ErrConflict
+		}
+	}
 	var slot uint32
 	for ; uint64(slot) < s.limits.Jobs; slot++ {
 		if !s.recovery.slots[slot].diagnostic.Occupied {
@@ -301,7 +315,7 @@ func (s *taskArchiveStore) reserveRecovery(ctx context.Context, seed taskArchive
 	s.recovery.slots[slot].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, Quarantined: true}
 	owned, cancel := context.WithCancel(ctx)
 	life, closeCancel := context.WithCancel(context.Background())
-	r := &taskArchiveSpool{store: s, name: recoverySlotName(slot) + ".tar", ctx: owned, cancel: cancel, active: true, ownerDone: make(chan struct{}), recovery: &taskArchiveRecoveryOwner{slot: slot, ctx: life, cancel: closeCancel}}
+	r := &taskArchiveSpool{store: s, name: recoverySlotName(slot) + ".tar", ctx: owned, cancel: cancel, active: true, ownerDone: make(chan struct{}), recovery: &taskArchiveRecoveryOwner{slot: slot, ctx: life, cancel: closeCancel}, recoverySeedTask: seed.Task}
 	r.self = r
 	s.spools[r] = struct{}{}
 	s.mu.Unlock()
