@@ -152,53 +152,14 @@ func (op *taskWorkspaceSyncSettlementOperation) native(cmps []clientv3.Cmp, succ
 // The original GC spends all 64 nodes on comparisons and success writes.
 // Its private empty failure policy shares the same transport/wire/header checks.
 func (op *taskWorkspaceSyncSettlementOperation) nativeFailure(cmps []clientv3.Cmp, success []clientv3.Op, protoSuccess []*pb.RequestOp, reply *pb.TxnResponse, emptyFailure bool) (*clientv3.TxnResponse, error) {
-	o, b := op.source.archive.owner, op.source.archive.owner.backend
-	keys := []string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key}
-	values := []string{b.identityValue, b.restoreEpoch, b.workspaceSyncBudget.value}
-	if emptyFailure {
-		keys, values = nil, nil
-	}
-	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: protoSuccess, Failure: taskProtoPoints(keys)}
-	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{reply, taskProtoResponse(keys, values)}); err != nil {
-		return nil, err
-	}
+	o := op.source.archive.owner
 	o.nativeMu.Lock()
 	defer o.nativeMu.Unlock()
 	if err := op.local(); err != nil {
 		return nil, err
 	}
-	rpcCtx, cancel := b.requestContext(op.ctx)
-	r, err := b.client.Txn(rpcCtx).If(cmps...).Then(success...).Else(workspaceSyncPointOps(keys)...).Commit()
-	rpcErr := rpcCtx.Err()
-	cancel()
-	if err != nil || rpcErr != nil {
-		return nil, errors.Join(ErrOutcomeUnknown, err, rpcErr)
-	}
-	if err := b.operationResponseHeader(r); err != nil {
-		return nil, errors.Join(ErrOutcomeUnknown, err)
-	}
-	if err := taskCheckWire(b.namespace, nil, []*pb.TxnResponse{(*pb.TxnResponse)(r)}); err != nil {
-		return nil, errors.Join(ErrOutcomeUnknown, err)
-	}
-	if !r.Succeeded {
-		if emptyFailure {
-			if len(r.Responses) != 0 {
-				return nil, ErrOutcomeUnknown
-			}
-			return r, ErrConflict
-		}
-		points, err := workspaceSyncPointResponse(b, r, keys)
-		if err != nil {
-			return nil, errors.Join(ErrOutcomeUnknown, err)
-		}
-		if !b.workspaceSyncBudgetMatches(points[2]) {
-			return r, ErrIdentityMismatch
-		}
-		return r, ErrConflict
-	}
-	return r, nil
+	return workspaceSyncNativeTxn(op.ctx, o.backend, cmps, success, protoSuccess, reply, emptyFailure)
 }
-
 func (op *taskWorkspaceSyncSettlementOperation) readCompletion(d *taskWorkspaceSyncIntentDraft) ([]*mvccpb.KeyValue, error) {
 	b := op.source.archive.owner.backend
 	keys := []string{d.slotKey, d.intentKey}

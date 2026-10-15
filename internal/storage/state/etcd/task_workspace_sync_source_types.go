@@ -1,7 +1,6 @@
 package etcd
 
 import (
-	"archive/tar"
 	"context"
 	"hash"
 	"io"
@@ -22,8 +21,7 @@ type PreparedTaskWorkspaceSyncSource struct {
 	sealed      bool
 	busy        bool
 	ops         sync.WaitGroup
-	reader      *tar.Reader
-	stream      *taskWorkspaceSyncStream
+	cursor      *taskWorkspaceSyncArchiveCursor
 	count       uint64
 	current     *taskWorkspaceSyncEntry
 	body        *taskWorkspaceSyncBody

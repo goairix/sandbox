@@ -3,14 +3,11 @@ package etcd
 import (
 	"archive/tar"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"io"
-	"strings"
 )
 
-// Offset counts bytes actually consumed by archive/tar, including PAX headers.
+// Retained original bounded stream adapter; TAR traversal itself uses the
+// shared mechanical cursor, and the original ReadAt authority stays strict.
 type taskWorkspaceSyncStream struct {
 	source *PreparedTaskWorkspaceSyncSource
 	ctx    context.Context
@@ -18,14 +15,11 @@ type taskWorkspaceSyncStream struct {
 }
 
 func (r *taskWorkspaceSyncStream) Read(data []byte) (int, error) {
-	if r.offset == int64(r.source.diagnostics.Bytes) {
-		return 0, io.EOF
-	}
-	if int64(len(data)) > int64(r.source.diagnostics.Bytes)-r.offset {
-		data = data[:int64(r.source.diagnostics.Bytes)-r.offset]
-	}
-	n, err := (taskWorkspaceSyncReadAt{r.source, r.ctx}).ReadAt(data, r.offset)
-	r.offset += int64(n)
+	c := taskWorkspaceSyncArchiveCursor{bytes: r.source.diagnostics.Bytes, offset: r.offset, ctx: r.ctx, readAt: func(ctx context.Context, data []byte, offset int64) (int, error) {
+		return (taskWorkspaceSyncReadAt{r.source, ctx}).ReadAt(data, offset)
+	}}
+	n, err := c.Read(data)
+	r.offset = c.offset
 	return n, err
 }
 
@@ -62,57 +56,20 @@ func (s *PreparedTaskWorkspaceSyncSource) next(ctx context.Context) (entry *task
 	if err := s.verify(ctx); err != nil {
 		return nil, err
 	}
-	s.stream.ctx = ctx
-	var buffer [32768]byte
-	for {
-		h, err := s.reader.Next()
+	e, err := s.cursor.next(ctx)
+	s.count = s.cursor.count
+	if err != nil {
 		if err == io.EOF {
-			if s.count != s.diagnostics.Entries || s.stream.offset != int64(s.diagnostics.Bytes) {
-				return nil, errTaskArchive
+			if guardErr := s.guard(ctx); guardErr != nil {
+				return nil, guardErr
 			}
-			if err := s.guard(ctx); err != nil {
-				return nil, err
-			}
-			return nil, io.EOF
 		}
-		if err != nil {
-			return nil, err
-		}
-		if s.count >= s.diagnostics.Entries || h.Size < 0 || h.Size > int64(s.diagnostics.Bytes)-s.stream.offset || (h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir) {
-			return nil, errTaskArchive
-		}
-		name, err := taskArchivePath(h, s.count == 0)
-		if err != nil {
-			return nil, err
-		}
-		kind, err := taskArchiveIndex(ctx, s.archive.owner.spool.index, name, 0, false)
-		if err != nil || kind != h.Typeflag {
-			return nil, errTaskArchive
-		}
-		offset := s.stream.offset
-		hash := sha256.New()
-		n, err := io.CopyBuffer(hash, s.reader, buffer[:])
-		if err != nil || n != h.Size {
-			return nil, errors.Join(errTaskArchive, err)
-		}
-		s.count++
-		if name == "workspace" {
-			continue
-		}
-		path := strings.TrimPrefix(name, "workspace/")
-		excluded, err := s.plan.Excludes(path)
-		if err != nil {
-			return nil, err
-		}
-		if excluded {
-			continue
-		}
-		if err := s.verify(ctx); err != nil {
-			return nil, err
-		}
-		e := &taskWorkspaceSyncEntry{origin: s, path: path, kind: h.Typeflag, mode: h.Mode, size: h.Size, offset: offset, sha256: hex.EncodeToString(hash.Sum(nil))}
-		e.self = e
-		s.current = e
-		return e, nil
+		return nil, err
 	}
+	if err := s.verify(ctx); err != nil {
+		return nil, err
+	}
+	entry = &taskWorkspaceSyncEntry{origin: s, path: e.path, kind: e.kind, mode: e.mode, size: e.size, offset: e.offset, sha256: e.sha256}
+	entry.self, s.current = entry, entry
+	return entry, nil
 }

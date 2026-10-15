@@ -1,7 +1,6 @@
 package etcd
 
 import (
-	"archive/tar"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -62,8 +61,9 @@ func (b *Backend) PrepareTaskWorkspaceSyncSource(ctx context.Context, r *Receive
 	if err != nil {
 		return nil, errors.Join(err, s.Close())
 	}
-	s.stream = &taskWorkspaceSyncStream{source: s, ctx: s.ctx}
-	s.reader = tar.NewReader(s.stream)
+	s.cursor = newWorkspaceSyncArchiveCursor(s.diagnostics.Bytes, s.diagnostics.Entries, spool.index, s.plan, func(ctx context.Context, data []byte, offset int64) (int, error) {
+		return (taskWorkspaceSyncReadAt{s, ctx}).ReadAt(data, offset)
+	})
 	return s, nil
 }
 
