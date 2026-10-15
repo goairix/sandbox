@@ -42,6 +42,8 @@
 
 **Fixed shape:** `kubecontract.EnrolledPlainPodSpec(nodeName,image,config string, resources corev1.ResourceRequirements, volumes []corev1.Volume) corev1.PodSpec` 统一builder/validator固定模板，fresh结构且不修改caller对象；动态项仍独立检查。加入原普通Pod两个NoExecute300s；只在无PriorityClassName时校验copy允许Priority nil/0、PreemptionPolicy nil/PreemptLowerPriority，其他值拒绝，原Pod/hash不变。Step1新增唯一TestEnrolledProfileAdmissionDefaults先RED→GREEN/scopedrace/affectedvet，不重放其他已GREEN选择器。HostUsers ptrtrue暂保留部署限制；用户Env原monitor白名单隔离不变。
 
+**Image contract:** `kubecontract.EnrolledPlainContractDigest(image string) (string,error)` 以固定domain/profile版本/合法image sha256 digest派生，Inspect要求新config.ContractDigest相等，operator可一次配置原Backend全局contract。新增Step1单独selector验证image+annotation双改/旧合同拒绝；Step2两consumer验证连config/digest也改为自洽但与原trusted Birth/binding不符时拒绝。旧decoder/旧profile不动。
+
 - [ ] Step1 读取实际 v2 config/原 Pod/两个消费者，写最小 config共享与profile RED；报告精确矛盾，不扩张原authority。迁移 config、实现共享严格profile及纯builder，有限host/race/vet通过后小提交。
 - [ ] Step2 正式 provisioning mode 与真实 FD/NOFOLLOW/O_EXCL/root/mode/stale 检查；两个消费者新显式 profile分支，保持旧分支不变。对受控关键字段有限negative和原拒绝条件完成host/race与Linuxcompile/vet，及时小提交。
 - [ ] Step3 新Linux fixture exec正式serve-provisioned PID1，真实readonly socket mounts/初始EmptyDir，原observer签名enrollment/ready认证；同真实GET Pod profile由cleanup Prepare接受。有限stale/foreign-entry拒绝和原Wait/join/cleanup、actualall17源码ELF绑定完成，小提交。

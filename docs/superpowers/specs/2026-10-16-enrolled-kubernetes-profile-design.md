@@ -20,6 +20,8 @@
 
 新profile无需复制旧shell的KUBERNETES_*环境mask：原Supervisor monitor环境固定GOMAXPROCS=2，用户环境仅来自已签请求，不继承管理PID1环境；正式provision成功后删除public配置环境变量。不得以后为兼容而把管理全环境透传用户。
 
+镜像信任绑定：只让image annotation与Pod.Image自洽不够。新增`EnrolledPlainContractDigest(image string) (string,error)`，从固定domain、profile版本与合法sha256 image digest派生SHA256，要求新profile config.ContractDigest等于该值。该静态合同不包含node/CPU/请求可变量，可由operator一次计算并由原Root签名Birth/activation及Backend原ContractDigest pin消费；原decoder和旧profile不改。新回归必须拒绝修改image并同步annotation但沿用旧config合同；两消费者还必须拒绝同步修改image/config/digest后与原verified Birth或cleanupbinding的contract不一致。结构自洽的副本永不成为权限。
+
 ## 验收
 
 一个完整 Task、多个小提交、一位 fresh author 与一位 fresh reviewer。host RED→GREEN/race 覆盖 canonical 配置迁移、Pod builder 输出及两消费者接受同一 profile；对每个 hostPath/mount/command/security/node/config/intent 关键边界作有限 mutation 拒绝，旧 profile 原拒绝条件保留。明确测试未知 profile 不能掉进旧分支、config 与 nodeUID/boot 不一致拒绝、oversize/secret 字段拒绝。
