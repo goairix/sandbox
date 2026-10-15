@@ -80,6 +80,25 @@ func TestLocalRuntimeReleaseRecords(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLocalRuntimeReleaseOpaqueBinding(t *testing.T) {
+	r := localReleaseRecordFixture(t)
+	r.Binding.Authority.AuthorityID = "authority / 生产"
+	r.Binding.Authority.Target = strings.Repeat("t", 128)
+	r.Task.RestoreEpoch, r.Binding.Authority.RestoreEpoch = "restore-non-uuid", "restore-non-uuid"
+	_, err := encodeTaskRuntimeProviderCleanup(r)
+	require.NoError(t, err, "opaque trust identities are compared exactly, never joined into keys")
+	for _, bad := range []string{"", strings.Repeat("x", 129), "line\nfeed", "nul\x00byte", string([]byte{0xff})} {
+		copy := r
+		copy.Binding.Authority.AuthorityID = bad
+		_, err := encodeTaskRuntimeProviderCleanup(copy)
+		require.Error(t, err)
+		copy = r
+		copy.Binding.Authority.Target = bad
+		_, err = encodeTaskRuntimeProviderCleanup(copy)
+		require.Error(t, err)
+	}
+}
+
 func TestLocalRuntimeReleaseOwners(t *testing.T) {
 	b := &Backend{archiveLife: &taskArchiveBackend{}, localRuntimeRelease: &LocalRuntimeReleaseOptions{MaxActive: 1, Timeout: time.Second, Provider: &k.TaskRuntimeCleanupClient{}}}
 	seed := recoveryTestSeed(t)
