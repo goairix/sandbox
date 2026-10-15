@@ -13,11 +13,12 @@ type requestMode uint8
 const (
 	requestEvents requestMode = iota
 	requestArchive
+	requestPublication
 )
 
 // Go TLS accepts a raw EOF between records as io.EOF without close_notify.
-// The original archive session requires authenticated EOF instead. Translate
-// raw EOF only in that mode, preserving other requests' existing behavior.
+// Archive and enrolled publication sessions require authenticated EOF instead.
+// Translate raw EOF only in those modes, preserving existing event behavior.
 type archiveTLSConn struct {
 	net.Conn
 	strict atomic.Bool

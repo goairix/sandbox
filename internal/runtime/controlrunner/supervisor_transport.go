@@ -127,7 +127,12 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if request.Archive != nil {
+	if request.Publication != nil {
+		// Publication has its own finite response framing. Refusal closes this
+		// connection without emitting a legacy event or creating new authority.
+		_ = s.dispatchEnrolledPublication(bounded, conn, *request.Publication)
+		return
+	} else if request.Archive != nil {
 		// Admission parsing is finite; the registered archive owner uses the
 		// separate handler lifetime and owns this borrower until physical return.
 		response := &archiveResponseConn{Conn: conn, deadline: archiveDeadline}
