@@ -50,7 +50,7 @@ const defaultKubernetesControlTimeout = 60 * time.Second
 
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
-const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v5"
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v6"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {

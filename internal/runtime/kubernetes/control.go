@@ -47,11 +47,15 @@ func (e *spdyPodCommandExecutor) Exec(ctx context.Context, pod, container string
 	if e.client == nil || e.restConfig == nil {
 		return nil, fmt.Errorf("kubernetes control executor is not configured")
 	}
+	command := append([]string(nil), argv...)
+	if container == sandboxContainer {
+		command = sandboxCommand(command)
+	}
 	request := e.client.CoreV1().RESTClient().Post().
 		Resource("pods").Name(pod).Namespace(e.namespace).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: container,
-			Command:   append([]string(nil), argv...),
+			Command:   command,
 			Stdin:     len(stdin) != 0,
 			Stdout:    true,
 			Stderr:    true,

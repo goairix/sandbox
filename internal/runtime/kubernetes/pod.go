@@ -177,14 +177,14 @@ func buildOrdinaryPod(namespace string, spec runtime.SandboxSpec) (*corev1.Pod, 
 					ImagePullPolicy:          corev1.PullIfNotPresent,
 					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
 					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-					Command:                  []string{"sleep", "infinity"},
+					Command:                  sandboxCommand([]string{"sleep", "infinity"}),
 					WorkingDir:               "/workspace",
 					Resources:                resources,
 					SecurityContext:          securityContext,
 					// Override kubelet-injected KUBERNETES_* env vars to empty strings.
 					// enableServiceLinks=false suppresses other service vars but not these.
-					// The API server is unreachable anyway (no SA token + network policy),
-					// but clearing them avoids information leakage in security audits.
+					// Mask addresses in the CRI config too; sandboxCommand removes the
+					// variables entirely from PID 1 and platform-launched processes.
 					Env: []corev1.EnvVar{
 						{Name: "SANDBOX_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
 						{Name: "KUBERNETES_SERVICE_HOST", Value: ""},
@@ -399,7 +399,7 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 					ImagePullPolicy:          corev1.PullIfNotPresent,
 					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
 					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-					Command:                  []string{fuseprotocol.ProbeBinary, "self-check"},
+					Command:                  sandboxCommand([]string{fuseprotocol.ProbeBinary, "self-check"}),
 					WorkingDir:               workspaceMountPath,
 					Resources:                validated.sandboxResources,
 					SecurityContext: &corev1.SecurityContext{
