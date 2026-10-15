@@ -42,7 +42,7 @@
 - [x] Step1 阅读原config/request decoder/ready verifier实际上限，报告任何精确矛盾；保留新RED。实现v2config和新bounded wire，host finiteunit/race与format/vet通过后小提交。
 - [x] Step2 新目的client/server真实TLS接线；覆盖positive/身份与证书错配/closedgate/overflow/trailing/取消/一次send与actualjoin，保留RED→GREEN。仅新增选择器，不重复旧suite；通过后小提交。
 - [x] Step3 正式serve只构造enrolled实例；新有限Linux fixture运行真实CLI PID1、protected config/signed clock/独立observer→bootstrap activate→新TLS查询→原verifier认证；错node/关闭拒绝。使用新OWN原产物、全部原Wait/exactcleanup/sourcebinary绑定，GREEN小提交。
-- [ ] Step4 affectedhostgate/Linuxcompile/vet/bash-n/gofmt-l/scopedBASEdiffcheck；报告所有实际命令/输入/失败/限制，声明不是真实Kube/容量/main切换。源码冻结后Root唯一fresh完整审查，同pair修复、tracked验收后继续master。
+- [x] Step4 affectedhostgate/Linuxcompile/vet/bash-n/gofmt-l/scopedBASEdiffcheck；报告所有实际命令/输入/失败/限制，声明不是真实Kube/容量/main切换。源码冻结后Root唯一fresh完整审查，同pair修复、tracked验收后继续master。
 
 ## Root preflight
 
@@ -62,3 +62,5 @@ Ruling: 用户已批准完整迁移并明确“继续，不要停”，本spec/p
 2026-10-16 Step3结果：native-v1正式CLI的真实ready/错证书-runtime-issuer/进程关闭及wrong-node两child通过；随后78f53ab仅新增live-gate selector，原认证issuer经真实TaskCloseData TLS/原verifier签名回执封闭gate，process仍alive、新publication拒绝、相同TLS关闭历史可认证，再SIGTERM原Wait。前者是closedprocess，后者才是liveclosedgate，不混称。只读transport测试中的fixtureissuer命令不声称Backend/nativeclaim验收。所有原Wait/精确清理与source/ELF绑定已核，三个child不是实际kubelet。
 
 Finalgate裁决：引用已运行slice1/2 host/race的各自实际源码快照与Root独立有限gate，Linux-only新fixture不重放无变化host/native/旧suite，不称一次最终同源host整轮。最后三affected包Linuxarm64CGO0 vet/full17field输入前后核对，以及live-gate新增selector原生编译/执行和Rootcontrolrunner Linuxvet均通过；macOS源码归档AppleDouble metadata额外成员已单独验证归属，保留Root初始审计计数假设错误，不重建历史artifact。本Task唯一fresh完整审查尚待执行，master范围与非性能/容量结论不变。
+
+验收：四源码commit至78f53ab，经唯一fresh整Taskreview C0/I1/M1；同author修复9336fc0、八个直接rawvalidator RED→GREEN/affectedrace/vet、Root全17field pre/post/sourceSHA审计通过。同reviewer scopedR1 I1 ADDRESSED、无新增C/I/M、Approved，原M1 retained。正式CLI/transport范围接受，详见2026-10-16-enrolled-launcher-transport-verification.md；继续master新受控Kubernetes profile，不把本单元算main/容量验收。
