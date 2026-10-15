@@ -170,6 +170,69 @@ func TestTaskWorkspaceSyncLocalFinalizationNativeDeferredLedger(t *testing.T) {
 	require.Zero(t, info.Mode().Perm())
 }
 
+func TestTaskWorkspaceSyncLocalFinalizationNativeDeferredRegularGC(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit actual Linux worker required")
+	}
+	f, wire, slot := recoveryExecutionCold(t)
+	s, err := f.b.prepareTaskWorkspaceSyncRecoveryMode(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker, true)
+	require.NoError(t, err)
+	progress, _, err := f.b.namespace.workspaceSyncLocalKeys(f.c.reference.Task)
+	require.NoError(t, err)
+	original := f.b.client.KV
+	// Claim A durably creates regular progress, then loses that ACK before
+	// regular effects. The original occupied S1 put is still present.
+	recoveryExecutionSetKV(s, &faultKV{KV: original, match: putsKey(progress), after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		require.NoError(t, err)
+		require.True(t, r.Succeeded)
+		return nil, context.DeadlineExceeded
+	}})
+	_, err = s.finalizeLocal(f.ctx)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	recoveryExecutionSetKV(s, original)
+	require.NoError(t, s.Close())
+	require.NoError(t, <-wire.done)
+	recoveryExecutionReopen(t, f) // genuine claim B
+	bClaim := f.c.reference.ClaimID
+	b, err := f.b.prepareTaskWorkspaceSyncRecoveryMode(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker, true)
+	require.NoError(t, err)
+	original = f.b.client.KV
+	deferred := &finalizationDeferredKV{KV: original, match: recyclingGCMatch}
+	recoveryExecutionSetKV(b, deferred)
+	_, err = b.finalizeLocal(f.ctx)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	require.NotNil(t, deferred.pending, "actual regular GC remains able to commit after ACK loss")
+	recoveryExecutionSetKV(b, original)
+	require.NoError(t, b.Close())
+	require.NoError(t, <-wire.done)
+	next, err := f.b.prepareTaskWorkspaceSyncRecoveryMode(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, next.Close()) })
+	effects := 0
+	next.localIOComplete = func(string) { effects++ }
+	_, err = next.finalizeLocal(f.ctx)
+	require.ErrorIs(t, err, ErrConflict, "claim B must already own durable regular progress before its uncertain GC")
+	require.Zero(t, effects, "same-claim refusal precedes any repeated repair")
+	require.NoError(t, next.Close())
+	require.NoError(t, <-wire.done)
+	point, err := f.raw.Get(f.ctx, progress)
+	require.NoError(t, err)
+	require.Len(t, point.Kvs, 1)
+	p, err := decodeWorkspaceSyncLocalProgress(point.Kvs[0])
+	require.NoError(t, err)
+	require.Equal(t, bClaim, p.Claim.ClaimID)
+	recoveryExecutionReopen(t, f) // genuine claim C fences B's full64-node GC
+	// Reopening joins/closes B's client too. Submit the captured exact native
+	// request through the still-live fixture connection, keeping every B pin.
+	deferred.KV = f.raw.KV
+	late, err := deferred.pending()
+	require.NoError(t, err)
+	require.False(t, late.Succeeded, "only genuine claim C fences B GC without weakening its existing pins")
+	r, err := f.b.FinalizeTaskWorkspaceSyncLocal(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker)
+	require.NoError(t, err)
+	require.True(t, r.LocalComplete)
+}
+
 func TestTaskWorkspaceSyncLocalFinalizationNativeFaults(t *testing.T) {
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("explicit actual Linux worker required")

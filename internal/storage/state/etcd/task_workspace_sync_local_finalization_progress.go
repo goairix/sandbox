@@ -167,6 +167,13 @@ func (f *taskWorkspaceSyncLocalFinalizer) loadProgress(ctx context.Context) (*mv
 		return nil, ErrConflict
 	}
 	f.progress, f.progressKV = p, points[0]
+	if p.Phase == "regular" {
+		// The new claimant must be durable before it can issue legacy regular
+		// effects/GC. Otherwise its next attempt could still see the old claim
+		// here and bypass the genuine-new-claim requirement above.
+		release()
+		return points[1], f.saveProgress(ctx, p)
+	}
 	return points[1], nil
 }
 

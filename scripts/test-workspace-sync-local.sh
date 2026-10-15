@@ -26,6 +26,7 @@ case "$mode" in
   finalization-finalguards) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Refusal|OriginalRefusal|Bounds)$';;
   finalization-gate) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Ledger|DeferredLedger|Join)$';;
   finalization-finalcoverage) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(DirectoryToRegular|PreparedRefusal)$';;
+  finalization-r1-regular) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeDeferredRegularGC$';;
   normal) ;;
 	recovery-execution-cold) test_run='^TestTaskWorkspaceSyncRecoveryNativeCold$';;
 	recovery-execution-authority) test_run='^TestTaskWorkspaceSyncRecoveryNativeAuthority$';;
