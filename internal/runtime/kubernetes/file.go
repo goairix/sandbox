@@ -68,7 +68,7 @@ func consumePodUploadStream(ctx context.Context, client kubernetes.Interface, re
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"sh", "-c", command},
+			Command:   sandboxCommand([]string{"sh", "-c", command}),
 			Stdin:     true,
 			Stdout:    true,
 			Stderr:    true,
@@ -143,7 +143,7 @@ func downloadFileFromPod(ctx context.Context, client kubernetes.Interface, restC
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"tar", "cf", "-", srcPath},
+			Command:   sandboxCommand([]string{"tar", "cf", "-", srcPath}),
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -209,7 +209,7 @@ func (r *Runtime) ReadFileContent(ctx context.Context, id string, srcPath string
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"cat", srcPath},
+			Command:   sandboxCommand([]string{"cat", srcPath}),
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -254,7 +254,7 @@ func (r *Runtime) GlobInfo(ctx context.Context, id string, pattern string) ([]ru
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"find", baseDir, "-path", baseDir + "/" + relPattern, "-type", "f"},
+			Command:   sandboxCommand([]string{"find", baseDir, "-path", baseDir + "/" + relPattern, "-type", "f"}),
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -337,7 +337,7 @@ func uploadArchiveToPod(ctx context.Context, client kubernetes.Interface, restCo
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"tar", "xf", "-", "-C", destDir},
+			Command:   sandboxCommand([]string{"tar", "xf", "-", "-C", destDir}),
 			Stdin:     true,
 			Stdout:    true,
 			Stderr:    true,
@@ -373,7 +373,7 @@ func downloadDirFromPod(ctx context.Context, client kubernetes.Interface, restCo
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   command,
+			Command:   sandboxCommand(command),
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -433,7 +433,7 @@ func execPipeInPod(ctx context.Context, client kubernetes.Interface, restConfig 
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   cmd,
+			Command:   sandboxCommand(cmd),
 			Stdin:     true,
 			Stdout:    true,
 			Stderr:    true,

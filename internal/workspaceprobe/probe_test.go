@@ -64,12 +64,16 @@ func (f *fakeProcesses) descriptors(pid int) ([]descriptor, error) {
 }
 
 type fakeBroker struct {
-	state     brokerState
-	token     string
-	resumes   []resumeRequest
-	consumed  bool
-	protected *processIdentity
+	state        brokerState
+	token        string
+	resumes      []resumeRequest
+	consumed     bool
+	protected    *processIdentity
+	cleanupCalls int
+	cleanupErr   error
 }
+
+func (f *fakeBroker) fenceCleanup(string, int64) error { f.cleanupCalls++; return f.cleanupErr }
 
 func (f *fakeBroker) protectedProcess() (*processIdentity, error) { return f.protected, nil }
 

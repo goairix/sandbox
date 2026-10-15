@@ -131,7 +131,7 @@ func TestCreatePodLegacyRenderingRemainsDeepEqual(t *testing.T) {
 			Containers: []corev1.Container{{
 				Name: "sandbox", Image: "sandbox:legacy", ImagePullPolicy: corev1.PullIfNotPresent,
 				TerminationMessagePath: corev1.TerminationMessagePathDefault, TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-				Command: []string{"sleep", "infinity"}, WorkingDir: "/workspace", Resources: corev1.ResourceRequirements{},
+				Command: []string{"/usr/bin/env", "-u", "KUBERNETES_SERVICE_HOST", "-u", "KUBERNETES_SERVICE_PORT", "-u", "KUBERNETES_SERVICE_PORT_HTTPS", "-u", "KUBERNETES_PORT", "-u", "KUBERNETES_PORT_443_TCP", "-u", "KUBERNETES_PORT_443_TCP_PROTO", "-u", "KUBERNETES_PORT_443_TCP_PORT", "-u", "KUBERNETES_PORT_443_TCP_ADDR", "--", "sleep", "infinity"}, WorkingDir: "/workspace", Resources: corev1.ResourceRequirements{},
 				SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: &falseVal, AllowPrivilegeEscalation: &falseVal},
 				Env: []corev1.EnvVar{
 					{Name: "SANDBOX_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
@@ -250,7 +250,8 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, corev1.PullIfNotPresent, sandbox.ImagePullPolicy)
 	assert.Equal(t, corev1.TerminationMessagePathDefault, sandbox.TerminationMessagePath)
 	assert.Equal(t, corev1.TerminationMessageReadFile, sandbox.TerminationMessagePolicy)
-	assert.Equal(t, []string{"/usr/local/bin/workspace-probe", "self-check"}, sandbox.Command)
+	require.GreaterOrEqual(t, len(sandbox.Command), 2)
+	assert.Equal(t, []string{"/usr/local/bin/workspace-probe", "self-check"}, sandbox.Command[len(sandbox.Command)-2:])
 	assert.Equal(t, "/workspace", sandbox.WorkingDir, "user commands keep the public workspace working directory contract")
 	assert.Equal(t, "serve", podEnv(t, sandbox.Env, "WORKSPACE_PROBE_INTERNAL_PID1_V1").Value)
 	require.NotNil(t, sandbox.SecurityContext)

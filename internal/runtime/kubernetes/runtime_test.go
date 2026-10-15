@@ -1,7 +1,9 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -443,8 +445,9 @@ func newFakeKubernetesRuntime(t *testing.T, script *commandScript) (*Runtime, *k
 	rt := &Runtime{
 		client: client, dynClient: dynamicClient, namespace: "runtime", controlExecutor: script,
 		pollInterval: time.Millisecond, prepareTimeout: 100 * time.Millisecond, readyTimeout: 100 * time.Millisecond,
-		terminationTimeout: 100 * time.Millisecond,
-		fuseCredentials:    sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
+		terminationTimeout:  100 * time.Millisecond,
+		workspaceControlKey: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6a}, ed25519.SeedSize)),
+		fuseCredentials:     sandboxruntime.FUSECredentials{AccessKey: []byte("do-not-persist-access"), SecretKey: []byte("do-not-persist-secret")},
 	}
 	// The fake cluster has no allocation API controller. Supply its complete
 	// synthetic Pod/Service allocation ranges instead of silently skipping it.
@@ -1761,6 +1764,56 @@ func TestAmbiguousQuiesceOrResumePoisonsCycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCleanupQuiesceRevalidatesAfterLostRepliesAndCannotResume(t *testing.T) {
+	base := preparedScript()
+	var cleanupCalls, flushCalls int
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if len(command.argv) > 1 && command.argv[1] == "quiesce" {
+			if len(command.argv) != 7 || command.argv[6] != "--cleanup" {
+				return nil, context.DeadlineExceeded
+			}
+			cleanupCalls++
+			if cleanupCalls == 1 {
+				return nil, context.DeadlineExceeded
+			}
+			return []byte(fmt.Sprintf(`{"version":1,"runtime_uid":"pod-uid-a","generation":7,"ok":true,"token":"cleanup.%d"}`, cleanupCalls)), nil
+		}
+		if len(command.argv) > 1 && command.argv[1] == "flush" {
+			flushCalls++
+			if flushCalls == 1 {
+				return nil, context.DeadlineExceeded
+			}
+		}
+		return base.handler(command)
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	_, err = rt.QuiesceWorkspace(context.Background(), ref, 7)
+	require.Error(t, err)
+	cleanup, ok := any(rt).(interface {
+		QuiesceWorkspaceForCleanup(context.Context, sandboxruntime.RuntimeRef, int64) (sandboxruntime.WorkspaceQuiesceToken, error)
+	})
+	require.True(t, ok, "terminal cleanup must have a revalidation path independent of resumable broker state")
+	_, err = cleanup.QuiesceWorkspaceForCleanup(context.Background(), ref, 8)
+	require.Error(t, err)
+	_, err = cleanup.QuiesceWorkspaceForCleanup(context.Background(), ref, 7)
+	require.Error(t, err)
+	require.Error(t, rt.FlushWorkspace(context.Background(), ref, 7), "an unknown cleanup result must not authorize flush")
+	token, err := cleanup.QuiesceWorkspaceForCleanup(context.Background(), ref, 7)
+	require.NoError(t, err)
+	require.Error(t, rt.ResumeWorkspace(context.Background(), ref, token), "terminal proof must never authorize resume")
+	require.Error(t, rt.FlushWorkspace(context.Background(), ref, 7))
+	_, err = cleanup.QuiesceWorkspaceForCleanup(context.Background(), ref, 7)
+	require.NoError(t, err)
+	require.NoError(t, rt.FlushWorkspace(context.Background(), ref, 7))
+	_, err = rt.QuiesceWorkspace(context.Background(), ref, 7)
+	require.Error(t, err, "terminal cleanup cannot switch back to resumable quiesce")
 }
 
 func TestQuiesceRetriesOnlyConfirmedPreBrokerStopFailure(t *testing.T) {
@@ -3120,4 +3173,77 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestCleanupQuiesceRejectsConcurrentControlOperations(t *testing.T) {
+	for _, operation := range []string{"quiesce", "flush", "resume"} {
+		t.Run(operation, func(t *testing.T) {
+			base := preparedScript()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var block atomic.Bool
+			var cleanupCalls atomic.Int32
+			script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+				if len(command.argv) > 1 && command.argv[1] == "quiesce" && len(command.argv) == 7 {
+					cleanupCalls.Add(1)
+				}
+				if len(command.argv) > 1 && command.argv[1] == operation && block.Load() {
+					close(entered)
+					<-release
+				}
+				return base.handler(command)
+			}}
+			rt, _ := newFakeKubernetesRuntime(t, script)
+			info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+			require.NoError(t, err)
+			ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+			auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+			require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+			var token sandboxruntime.WorkspaceQuiesceToken
+			if operation != "quiesce" {
+				token, err = rt.QuiesceWorkspace(context.Background(), ref, 7)
+				require.NoError(t, err)
+			}
+			block.Store(true)
+			done := make(chan error, 1)
+			go func() {
+				var callErr error
+				switch operation {
+				case "quiesce":
+					_, callErr = rt.QuiesceWorkspace(context.Background(), ref, 7)
+				case "flush":
+					callErr = rt.FlushWorkspace(context.Background(), ref, 7)
+				case "resume":
+					callErr = rt.ResumeWorkspace(context.Background(), ref, token)
+				}
+				done <- callErr
+			}()
+			<-entered
+			_, err = rt.QuiesceWorkspaceForCleanup(context.Background(), ref, 7)
+			require.Error(t, err)
+			require.Zero(t, cleanupCalls.Load())
+			close(release)
+			require.NoError(t, <-done)
+		})
+	}
+}
+func TestFailedCleanupInvalidatesPriorResumableToken(t *testing.T) {
+	base := preparedScript()
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		if len(command.argv) == 7 && command.argv[6] == "--cleanup" {
+			return nil, context.DeadlineExceeded
+		}
+		return base.handler(command)
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.NoError(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	token, err := rt.QuiesceWorkspace(context.Background(), ref, 7)
+	require.NoError(t, err)
+	_, err = rt.QuiesceWorkspaceForCleanup(context.Background(), ref, 7)
+	require.Error(t, err)
+	require.Error(t, rt.ResumeWorkspace(context.Background(), ref, token))
+	require.Error(t, rt.FlushWorkspace(context.Background(), ref, 7))
 }

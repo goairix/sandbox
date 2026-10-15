@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,14 @@ import (
 
 // Run executes the complete public workspace-probe CLI grammar.
 func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Protect signed control envelopes and resume tokens from same-UID proc
+	// inspection before reading private stdin.
+	if len(argv) > 1 && (argv[1] == "quiesce" || argv[1] == "resume") {
+		if err := disableProcessDump(); err != nil {
+			writeCLIError(stderr, "workspace control process cannot be protected")
+			return 1
+		}
+	}
 	return runCLI(New(), argv, stdin, stdout, stderr)
 }
 
@@ -38,7 +47,33 @@ func runCLI(probe *Probe, argv []string, stdin io.Reader, stdout, stderr io.Writ
 	case "write-read-delete":
 		status, err = probe.WriteReadDelete(runtimeUID, generation)
 	case "quiesce":
-		status, err = probe.Quiesce(runtimeUID, generation)
+		if os.Getenv(PID1EnvironmentName) == PID1EnvironmentValue {
+			command := "register"
+			if len(argv) == 7 {
+				command = "cleanup"
+			}
+			var input []byte
+			input, err = io.ReadAll(io.LimitReader(stdin, fuseprotocol.MaxJSONBytes+1))
+			var request fuseprotocol.ProbeControlRequest
+			if err == nil && len(input) <= fuseprotocol.MaxJSONBytes {
+				err = fuseprotocol.DecodeExact(input, &request)
+			} else {
+				err = fmt.Errorf("workspace control input is invalid")
+			}
+			key, keyErr := fuseprotocol.ParseProbeControlPublicKey(os.Getenv(fuseprotocol.ProbeControlPublicKeyEnv))
+			if err != nil || keyErr != nil || !fuseprotocol.VerifyProbeControl(key, request, command, runtimeUID, generation) {
+				err = fmt.Errorf("workspace control authorization is invalid")
+				break
+			}
+			if broker, ok := probe.broker.(*hybridBroker); ok {
+				broker.pid1.authorization = request.Authorization
+			}
+		}
+		if len(argv) == 7 {
+			status, err = probe.QuiesceForCleanup(runtimeUID, generation)
+		} else {
+			status, err = probe.Quiesce(runtimeUID, generation)
+		}
 	case "resume":
 		var input []byte
 		input, err = io.ReadAll(io.LimitReader(stdin, fuseprotocol.MaxJSONBytes+1))

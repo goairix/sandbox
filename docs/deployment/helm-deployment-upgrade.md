@@ -157,7 +157,7 @@ config:
 不同节点和三个独立 PVC；同节点三成员只可用于隔离部署功能测试，不代表节点级 HA。
 本次版本门禁整改只需同步 Chart，未新增生产 values 配置，也不需要重建镜像。
 
-以下安装/升级命令中的 `--atomic` 仅适用于 standalone/external；内置 Sentinel 必须去掉 `--atomic`，失败时保留当前身份状态，通过新的 upgrade 修复，不自动 rollback。AppArmor 未完成隔离验收时继续保持关闭。
+以下命令不启用 `--atomic`。standalone/external 仅在 backend 和 runtime 控制契约均不变时可自行启用；跨控制契约升级（含首次 v3 升级）和内置 Sentinel 不使用 `--atomic`，失败时保留当前状态，通过新的 upgrade 修复。AppArmor 未完成隔离验收时继续保持关闭。
 
 ```bash
 CTX=ds-ai-research
@@ -243,8 +243,9 @@ Redis Pod 被替换、重启或出现新 Job 都会返回失败。
 普通滚动升级不等于重建所有沙盒。Kubernetes 普通池和 FUSE 池按固定运行契约维护：
 
 - 只改 API tag、日志或 API 副本数时，健康兼容的预热 Pod 保留；即使所有 API 暂时退出，也不会清空共享池。
-- runtime 镜像、资源、安全属性、Pod 模板或控制协议契约改变时，先补齐新契约预热容量，再退掉无活跃 API 租约的旧契约空闲库存。运行模板版本由代码维护，不需要在 values 中新增配置。release scope 参与池身份，不能让两个 release 登记并领取同一个 Pod。
-- 已领取、挂载中、业务使用中的沙盒不会因换池重启；旧 FUSE 业务实例按原持久化记录、不可变 UID、workspace owner 和运行健康证明接管，并在业务正常结束时清理。存储后端变化仍走上面说明的显式排空，不属于兼容换池。
+- 兼容的 runtime 镜像、资源、安全属性或 Pod 模板改变时，先补齐新契约预热容量，再退掉无活跃 API 租约的旧契约空闲库存。运行模板版本由代码维护，不需要在 values 中新增配置。release scope 参与池身份，不能让两个 release 登记并领取同一个 Pod。
+- runtime 控制协议发生不兼容变化时，Chart 的控制契约指纹必须同步更新；这类升级先执行完整 release drain，包含已领取的业务沙盒，不能套用兼容换池的保留规则。本次认证控制协议使用 `v5` 控制契约和 cleanup protocol `v3`。
+- 兼容换池时，已领取、挂载中、业务使用中的沙盒不会因换池重启；旧 FUSE 业务实例按原持久化记录、不可变 UID、workspace owner 和运行健康证明接管，并在业务正常结束时清理。存储后端变化仍走上面说明的显式排空，不属于兼容换池。
 - 普通池周期清理不会仅凭领取超时或副本租约丢失删除已领取 Pod，这些条件不能证明正在进行的申请已停止。无法确认的遗弃 claim 保守保留，交由受控 release drain 清理。
 - API 租约无法确认时暂停领取和退旧，恢复后自动重新登记；旧库存状态损坏或删除未确认时保留记录并重试，不阻断健康新池。退旧单轮有清理时间预算，避免异常旧 Pod 长期拖住启动。
 - `helm uninstall` 的 release drain 才负责清空库存和池代登记状态；不能把普通 API Stop 当作 uninstall。
@@ -253,20 +254,32 @@ Redis Pod 被替换、重启或出现新 Job 都会返回失败。
 
 **排空边界：** 当前 release drain 的历史孤儿扫描覆盖整个 sandbox namespace 和 FUSE Redis 库。部署时必须让该 namespace 和 Redis logical DB 专用于当前 release，并在排空前停止这一范围内所有 API。运行期的池指纹 scope 隔离不代表已支持共享 namespace/Redis DB 的多 release 独立卸载；不要在这种共享部署中直接执行单个 release 的 drain/uninstall。
 
-从不含 drain protocol 标记的旧 Chart 首次升级时，先保持 backend
-fingerprint 不变，只更新新版 Chart 和 `sandbox-api`。这一步会给 Deployment
-写入 `goairix.github.io/sandbox-drain-protocol: v1`，并把安全的 upgrade/resume/
-rollback guard Hook 写入 release revision。确认这次同 backend 升级成功后，
-才能在下一次 `helm upgrade` 中修改 backend fingerprint。若把协议迁移和
-backend 切换混在第一次升级里，pre-upgrade Hook 会在缩容前拒绝，避免旧
-revision 缺少 resume Hook 时发生不安全的 atomic rollback。
+升级前，已安装 Deployment 必须已经具有
+`goairix.github.io/sandbox-drain-protocol: v1`，且已安装 API 支持
+`--kubernetes-cleanup-protocol`（cleanup protocol v2 的过渡版本已支持）。
+缺少这些条件的早期版本，先使用包含 drain/resume/rollback guard 的 **包含 v2 清理协议的过渡 Chart 和 API**，保持原 backend、runtime 镜像和控制契约不变；确认迁移完成后，
+再部署本次包含 v3 清理协议的 Chart/API/runtime。不能直接把协议迁移、认证控制协议升级和
+backend 切换混在第一次升级中。未知 flag 或缺少 drain 标记均须在缩容前失败，
+不要用跳过 Hook 绕过这一门禁。
 
-Kubernetes FUSE 崩溃恢复协议从 v1 升级到 v2 时，Deployment 会写入
-`goairix.github.io/sandbox-cleanup-protocol: v2`。即使 backend fingerprint 不变，
-pre-upgrade Hook 也会执行一次完整 drain。已安装 Deployment 必须先具有
-`goairix.github.io/sandbox-drain-protocol: v1`；缺少该标记时 Hook 会在缩容前拒绝，
-应先升级到包含 drain/resume guard 的过渡版本。v2 drain 会给仍在运行的旧 FUSE Pod
-补加 cleanup finalizer，并在 Redis 持久化终止证据后完成删除。
+本次 Kubernetes FUSE 清理使用
+`goairix.github.io/sandbox-cleanup-protocol: v3`，backend fingerprint 同时包含
+`runtimeControlContract: v5`。即使存储配置不变，v2 到 v3 也执行一次完整
+release drain，业务沙盒会终止，须预留维护窗口并先停止新请求。
+pre-upgrade Hook 在渲染时读取已安装 Deployment 的 `sandbox` 容器，使用其
+**已安装 API 镜像、拉取策略、环境和卷配置**，按旧运行控制协议清理旧 runtime；
+不会使用目标 API 去清理旧 runtime。缺少已安装 API 镜像或环境时拒绝渲染。
+目标 v3 只是旧 API 的字符串比较参数，旧 API 不会因此切换成新清理实现。
+只有旧 API 全部退出、release drain 成功且遗留资源审计通过后，Helm 才应用
+新 Deployment 并由 resume Hook 等待就绪。清理超时或失败会中止 upgrade，
+不能强删 finalizer、清空 Redis 或直接启动新 API 来绕过。
+
+runtime 镜像 tag 不进入 backend fingerprint；兼容的镜像更新仍保留健康池。
+不兼容的控制协议变化必须更新代码中的运行模板契约及 Chart 的
+`runtimeControlContract`/`cleanupProtocol`，并同步发布兼容的 API/runtime。
+Helm rollback 使用目标 revision 已保存的 Hook，不会重新执行 `lookup`。
+控制契约进入 fingerprint 后，历史 v2 rollback guard 会拒绝跨 v2/v3 回退，
+避免旧 API 接管认证协议 runtime。
 
 启用 HPA 时，Deployment 始终省略 `spec.replicas`，普通升级不会改写 HPA
 当前容量。pre-upgrade Hook 会在运行时比较集群中的 backend fingerprint；
@@ -277,11 +290,15 @@ post-upgrade/post-rollback resume Hook 始终存在，但只有实时副本为 0
 release drain 还会清理“NetworkPolicy 已创建但 Pod 尚未创建”的未绑定
 attempt 残留，不需要人工删除策略。
 
-不要使用 `helm rollback` 跨 backend fingerprint 回退；Chart 会在
+不要使用 `helm rollback` 跨 backend 或 runtime 控制契约 fingerprint 回退；Chart 会在
 pre-rollback 阶段明确拒绝它，因为目标 revision 保存的环境无法安全排空
-当前 backend。需要切回旧 backend 时，把目标配置作为一次新的
+当前 backend 或控制契约。需要切回旧 backend 时，把目标配置作为一次新的
 `helm upgrade` 执行，让运行时 fingerprint 检查和 release drain 正常完成。
-standalone/external 的同 backend rollback 仍可正常执行；内置 Sentinel
+确需降级控制协议时，先停止请求，用**当前已安装 API 镜像及环境**执行受控
+release drain，并确认 API 副本为 0、沙盒及池库存已清空、终止证据和资源审计通过；
+然后以一次新的 `helm upgrade` 部署目标 Chart/API/runtime，不能用目标旧 API
+清理当前新协议 runtime。后续使用的版本仍须具备 drain/resume guard。
+standalone/external 的同 backend、同控制契约 rollback 仍可正常执行；内置 Sentinel
 例外，pre-rollback Hook 明确拒绝历史状态重放，也不要使用 `--atomic`。
 需要更换应用版本时使用新的 `helm upgrade` 保留当前初始化状态和卷组。
 
@@ -447,10 +464,12 @@ docker buildx imagetools inspect \
 
 如果本次只升级 Docker multipart tmpfs、Docker pair network 自动回收或 Docker FUSE AppArmor 默认行为修复，只需重新构建 `sandbox-api`，并在环境 values 中更新 `image.tag`。其他项目镜像不需要因此重建，也不需要重启 Docker daemon。以 Kubernetes runtime 运行时，Docker pair network 回收逻辑不会参与 Pod 网络管理。
 
-如果本次只升级 Kubernetes FUSE cleanup protocol v2 修复，同样只需构建
-`sandbox-api` 并同步使用新版 Chart；`sandbox-runtime`、`sandbox-gateway`、
-`sandbox-fuse-mounter` 和 `sandbox-fuse-docker` 不需要重建。首次 v2 升级会执行一次 drain，
-正常情况下会短暂看到带 finalizer 的 Pod 处于 `Terminating`。
+本次升级到 Kubernetes FUSE cleanup protocol v3 / runtime 控制契约 v5，
+需要分别构建兼容的新 `sandbox-api` 和 `sandbox-runtime`，同步使用新版 Chart，
+并更新 `image.tag` 和 `config.images.sandbox`。使用新不可变 tag，不覆盖已发布镜像。
+`sandbox-gateway`、`sandbox-fuse-mounter` 和 `sandbox-fuse-docker` 不需要因
+认证控制协议重建。先保留可拉取的已安装 API 镜像供 pre-upgrade drain 使用；
+首次 v3 升级会完整排空旧普通/FUSE runtime，随后新 API 才能创建或领取新协议实例。
 
 ## 7. 升级后检查
 

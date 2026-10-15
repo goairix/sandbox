@@ -96,6 +96,15 @@ func (b *hybridBroker) protectedProcess() (*processIdentity, error) {
 	return process, err
 }
 
+func (b *hybridBroker) fenceCleanup(runtimeUID string, generation int64) error {
+	// Only Kubernetes PID1 implements a persistent terminal fence. Never fall
+	// back to a local broker that cannot revoke a queued resume across execs.
+	if !b.pid1Probe || !b.usePID1 {
+		return fmt.Errorf("terminal pid 1 fence is unavailable")
+	}
+	return b.pid1.fenceCleanup(runtimeUID, generation)
+}
+
 func (b *hybridBroker) start(state brokerState) (string, error) {
 	if !b.pid1Probe {
 		return "", fmt.Errorf("pid 1 broker must be probed before registration")

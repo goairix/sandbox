@@ -506,9 +506,15 @@ seccompProfile:
 {{- end }}
 {{- end -}}
 
+{{/* Bump these together when runtime cleanup/control becomes incompatible.
+     The control contract also fences stored pre-rollback fingerprint guards. */}}
+{{- define "sandbox.cleanupProtocol" -}}v3{{- end -}}
+{{- define "sandbox.runtimeControlContract" -}}v5{{- end -}}
+
 {{- define "sandbox.backend.fingerprint" -}}
 {{- $filesystem := .Values.config.storage.filesystem -}}
 {{- $contract := dict
+  "runtimeControlContract" (include "sandbox.runtimeControlContract" .)
   "preset" $filesystem.preset
   "provider" (include "sandbox.backend.provider" .)
   "profile" (include "sandbox.backend.profile" .)

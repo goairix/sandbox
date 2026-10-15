@@ -29,8 +29,8 @@ func TestDNSAdmissionDefaultPodBaseline(t *testing.T) {
 		pod  *corev1.Pod
 		want string
 	}{
-		{"ordinary", ordinary, "a8e4406774995e4bb2c4fac136d9a0fc142c82ac8d0e6aa5a9a15f2bbf2ae57e"},
-		{"fuse", fuse, "44530bbabacf0b481ad7d1317afe5637a712d2add0b15e4bc0b99554b48989cf"},
+		{"ordinary", ordinary, "640fbd45ce1c32da93aa62ce9c7535553cd9718ba65b589e4f9887d3f9c29116"},
+		{"fuse", fuse, "9392fe42ccd770b530e806b0716012b2dc7f4777610c7bfdd8d76c540a11f663"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			encoded, err := json.Marshal(tc.pod)
@@ -74,7 +74,7 @@ func TestDNSAdmissionOwnedContractAndDefault(t *testing.T) {
 	require.Equal(t, "", b.dnsOptions[0].Value)
 	empty := &Runtime{namespace: "runtime"}
 	WithDNSAdmission(false, []kubecontract.DNSOption{})(empty)
-	require.Equal(t, "kubernetes-sandbox-pod/v3:control=1:runtime:cilium=false", empty.WarmPoolContract())
+	require.Equal(t, "kubernetes-sandbox-pod/v6:control=1:runtime:cilium=false", empty.WarmPoolContract())
 }
 
 func TestDNSAdmissionIndependentSettings(t *testing.T) {

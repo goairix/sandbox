@@ -3,13 +3,33 @@
 {{- $installedContainers := dig "spec" "template" "spec" "containers" (list) $installedDeployment -}}
 {{- $installedVolumes := dig "spec" "template" "spec" "volumes" (list) $installedDeployment -}}
 {{- $installedContainer := dict -}}
-{{- if gt (len $installedContainers) 0 -}}
-{{- $installedContainer = index $installedContainers 0 -}}
+{{- range $installedContainers -}}
+{{- if eq (get . "name") "sandbox" -}}
+{{- $installedContainer = . -}}
+{{- end -}}
+{{- end -}}
+{{- $drainImage := include "sandbox.apiImage" . -}}
+{{- $drainPullPolicy := .Values.image.pullPolicy -}}
+{{- if not (empty $installedDeployment) -}}
+{{- if or (empty (get $installedContainer "image")) (empty (get $installedContainer "env")) -}}
+{{- fail "installed sandbox API image and environment are required for safe release drain" -}}
+{{- end -}}
+{{/* Old runtimes must be drained with the installed API's control client,
+     before Helm applies the desired Deployment and its new control contract. */}}
+{{- $drainImage = get $installedContainer "image" -}}
+{{- $drainPullPolicy = get $installedContainer "imagePullPolicy" | default "IfNotPresent" -}}
 {{- end -}}
 {{- $hasInstalledScope := false -}}
+{{- $drainRuntimeNamespace := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace -}}
+{{- if not (empty $installedDeployment) -}}
+{{- $drainRuntimeNamespace = .Release.Namespace -}}
+{{- end -}}
 {{- range (get $installedContainer "env" | default (list)) -}}
 {{- if eq (get . "name") "SANDBOX_STATE_SCOPE" -}}
 {{- $hasInstalledScope = true -}}
+{{- end -}}
+{{- if and (eq (get . "name") "SANDBOX_RUNTIME_KUBERNETES_NAMESPACE") (not (empty (get . "value"))) -}}
+{{- $drainRuntimeNamespace = get . "value" -}}
 {{- end -}}
 {{- end -}}
 apiVersion: batch/v1
@@ -38,8 +58,8 @@ spec:
       restartPolicy: Never
       containers:
         - name: drain
-          image: {{ include "sandbox.apiImage" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ $drainImage | quote }}
+          imagePullPolicy: {{ $drainPullPolicy }}
           args:
             - {{ printf "--drain-kubernetes-deployment=%s-api" .Release.Name | quote }}
             - {{ printf "--drain-kubernetes-hpa=%s-api" .Release.Name | quote }}
@@ -47,19 +67,23 @@ spec:
             - {{ printf "--kubernetes-backend-fingerprint-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--kubernetes-backend-fingerprint-deployment=%s-api" .Release.Name | quote }}
             - {{ printf "--kubernetes-backend-fingerprint=%s" $desiredFingerprint | quote }}
-            - "--kubernetes-cleanup-protocol=v2"
+            - {{ printf "--kubernetes-cleanup-protocol=%s" (include "sandbox.cleanupProtocol" .) | quote }}
             - "--required-kubernetes-drain-protocol=v1"
             - {{ printf "--drain-timeout=%ds" (int .Values.preDeleteDrain.timeoutSeconds) | quote }}
             - "--drain-release"
           env:
           {{- if not $hasInstalledScope }}
             - name: SANDBOX_STATE_SCOPE
-              value: {{ printf "%s/%s" (.Values.config.runtime.kubernetes.namespace | default .Release.Namespace) .Release.Name | quote }}
+              value: {{ printf "%s/%s" $drainRuntimeNamespace .Release.Name | quote }}
           {{- end }}
           {{- if hasKey $installedContainer "env" }}
 {{ toYaml (get $installedContainer "env") | nindent 12 }}
           {{- else }}
 {{ include "sandbox.drainEnv" . | nindent 12 }}
+          {{- end }}
+          {{- if hasKey $installedContainer "envFrom" }}
+          envFrom:
+{{ toYaml (get $installedContainer "envFrom") | nindent 12 }}
           {{- end }}
           {{- if hasKey $installedContainer "volumeMounts" }}
           volumeMounts:

@@ -68,7 +68,7 @@ func execInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   cmd,
+			Command:   sandboxCommand(cmd),
 			Stdin:     req.Stdin != "",
 			Stdout:    true,
 			Stderr:    !req.LineBuffered,
@@ -156,7 +156,7 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   cmd,
+			Command:   sandboxCommand(cmd),
 			Stdout:    true,
 			Stderr:    !req.LineBuffered,
 			TTY:       req.LineBuffered,

@@ -3,8 +3,10 @@ package kubernetes
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,11 +50,15 @@ const defaultKubernetesControlTimeout = 60 * time.Second
 
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
-const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v3"
+const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v6"
 
 // WarmPoolContract identifies the versioned Pod/control/network template.
 func (r *Runtime) WarmPoolContract() string {
 	contract := fmt.Sprintf("%s:control=%v:%s:cilium=%t", warmPoolTemplateVersion, controlWireVersion, r.namespace, r.hasCilium)
+	if len(r.workspaceControlKey) == ed25519.PrivateKeySize {
+		publicDigest := sha256.Sum256(r.workspaceControlKey.Public().(ed25519.PublicKey))
+		contract += ":control-authority=" + hex.EncodeToString(publicDigest[:])
+	}
 	if r.appArmorProfile != "" {
 		contract += ":apparmor=" + r.appArmorProfile
 	}
@@ -131,6 +137,7 @@ type workspaceRuntimeState struct {
 	removing        bool
 	active          int
 	idle            chan struct{}
+	cleanupQuiesce  bool
 	quiesceInFlight bool
 	quiescePoisoned bool
 	quiesceFailure  error
@@ -155,6 +162,7 @@ type Runtime struct {
 	controlExecutor              podCommandExecutor
 	infraFencer                  InfrastructureFencer
 	fuseCredentials              runtime.FUSECredentials
+	workspaceControlKey          ed25519.PrivateKey
 	endpointLookup               runtime.LookupNetIPFunc
 	appArmorProfile              string
 	nodeSelector                 map[string]string
@@ -464,6 +472,13 @@ func (r *Runtime) PrepareSandbox(ctx context.Context, spec runtime.SandboxSpec) 
 	if err != nil {
 		return nil, err
 	}
+	if len(r.workspaceControlKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("workspace control signer is unavailable")
+	}
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  fuseprotocol.ProbeControlPublicKeyEnv,
+		Value: base64.RawURLEncoding.EncodeToString(r.workspaceControlKey.Public().(ed25519.PublicKey)),
+	})
 	pod.Spec.NodeSelector = cloneNodeSelector(r.nodeSelector)
 	if err := r.applyDNSAdmission(pod, spec.Labels); err != nil {
 		return nil, err
@@ -815,7 +830,15 @@ func (r *Runtime) WorkspaceHealth(ctx context.Context, ref runtime.RuntimeRef) (
 	}, nil
 }
 
-func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (result runtime.WorkspaceQuiesceToken, resultErr error) {
+func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (runtime.WorkspaceQuiesceToken, error) {
+	return r.quiesceWorkspace(ctx, ref, expectedGeneration, false)
+}
+
+func (r *Runtime) QuiesceWorkspaceForCleanup(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64) (runtime.WorkspaceQuiesceToken, error) {
+	return r.quiesceWorkspace(ctx, ref, expectedGeneration, true)
+}
+
+func (r *Runtime) quiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, expectedGeneration int64, cleanup bool) (result runtime.WorkspaceQuiesceToken, resultErr error) {
 	if expectedGeneration <= 0 {
 		return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("expected workspace generation must be positive")
 	}
@@ -825,14 +848,19 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 	}
 	defer done()
 	r.stateMu.Lock()
-	if (state.generation != 0 && state.generation != expectedGeneration) || state.quiesceToken != nil ||
-		state.quiesceInFlight || state.quiescePoisoned || state.flushInFlight {
+	if (state.generation != 0 && state.generation != expectedGeneration) ||
+		state.quiesceInFlight || state.flushInFlight ||
+		(!cleanup && (state.cleanupQuiesce || state.quiesceToken != nil || state.quiescePoisoned)) {
 		failure := state.quiesceFailure
 		r.stateMu.Unlock()
 		if failure != nil {
 			return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("workspace cannot be quiesced: previous attempt failed: %w", failure)
 		}
 		return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("workspace cannot be quiesced")
+	}
+	if cleanup {
+		state.cleanupQuiesce = true
+		state.quiesceToken = nil // Invalidate all earlier proofs before a new attempt.
 	}
 	state.generation = expectedGeneration
 	state.quiesceInFlight = true
@@ -844,9 +872,10 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 		state.quiesceInFlight = false
 		if dispatched && !succeeded {
 			// A completed stop verification failure issued no broker/token. The
-			// same UID/generation can retry after its process set changes. Unknown
-			// outcomes remain poisoned, since a live broker may already exist.
-			state.quiescePoisoned = !errors.Is(resultErr, errQuiesceProcessNotStopped)
+			// same UID/generation can retry after its process set changes. Ordinary
+			// unknown outcomes remain poisoned since a live broker may exist. Terminal
+			// cleanup retries instead fence PID1 and obtain a fresh full-process proof.
+			state.quiescePoisoned = !cleanup && !errors.Is(resultErr, errQuiesceProcessNotStopped)
 			state.quiesceFailure = resultErr
 		}
 		r.stateMu.Unlock()
@@ -854,13 +883,29 @@ func (r *Runtime) QuiesceWorkspace(ctx context.Context, ref runtime.RuntimeRef, 
 	if _, err := r.getExactPod(ctx, ref); err != nil {
 		return runtime.WorkspaceQuiesceToken{}, err
 	}
+	argv := probeArgv("quiesce", ref, expectedGeneration, false)
+	if cleanup {
+		argv = append(argv, "--cleanup")
+	}
+	command := "register"
+	if cleanup {
+		command = "cleanup"
+	}
+	authorization, err := fuseprotocol.SignProbeControl(r.workspaceControlKey, command, ref.UID, expectedGeneration)
+	if err != nil {
+		return runtime.WorkspaceQuiesceToken{}, err
+	}
+	request, err := json.Marshal(authorization)
+	if err != nil {
+		return runtime.WorkspaceQuiesceToken{}, err
+	}
 	dispatched = true
-	raw, err := r.execSandboxProbe(ctx, ref.ID, probeArgv("quiesce", ref, expectedGeneration, false), nil)
+	raw, err := r.execSandboxProbe(ctx, ref.ID, argv, request)
 	if err != nil {
 		return runtime.WorkspaceQuiesceToken{}, err
 	}
 	probe, err := decodeProbeStatus(raw)
-	if err != nil || !probe.OK || probe.RuntimeUID != ref.UID || probe.Generation != expectedGeneration || probe.Token == "" {
+	if err != nil || !probe.OK || probe.RuntimeUID != ref.UID || probe.Generation != expectedGeneration || probe.Token == "" || (cleanup && !strings.HasPrefix(probe.Token, "cleanup.")) {
 		return runtime.WorkspaceQuiesceToken{}, fmt.Errorf("workspace quiesce acknowledgement is invalid")
 	}
 	token := runtime.WorkspaceQuiesceToken{RuntimeUID: ref.UID, Generation: expectedGeneration, Opaque: probe.Token}
@@ -880,7 +925,7 @@ func (r *Runtime) ResumeWorkspace(ctx context.Context, ref runtime.RuntimeRef, t
 	}
 	defer done()
 	r.stateMu.Lock()
-	if state.quiesceToken == nil || *state.quiesceToken != token || token.RuntimeUID != ref.UID || token.Generation != state.generation ||
+	if state.cleanupQuiesce || state.quiesceToken == nil || *state.quiesceToken != token || token.RuntimeUID != ref.UID || token.Generation != state.generation ||
 		token.Opaque == "" || state.quiesceInFlight || state.flushInFlight || state.quiescePoisoned {
 		r.stateMu.Unlock()
 		return fmt.Errorf("workspace quiesce token is invalid")
@@ -888,8 +933,14 @@ func (r *Runtime) ResumeWorkspace(ctx context.Context, ref runtime.RuntimeRef, t
 	// Consume before the side effect. An ambiguous exec result is never replayed.
 	state.quiesceToken = nil
 	state.quiescePoisoned = true
+	state.quiesceInFlight = true
 	generation := state.generation
 	r.stateMu.Unlock()
+	defer func() {
+		r.stateMu.Lock()
+		state.quiesceInFlight = false
+		r.stateMu.Unlock()
+	}()
 	request, _ := json.Marshal(probeResumeRequestWire{Version: controlWireVersion, RuntimeUID: ref.UID, Generation: generation, Token: token.Opaque})
 	raw, err := r.execSandboxProbe(ctx, ref.ID, probeArgv("resume", ref, generation, true), request)
 	if err != nil {
