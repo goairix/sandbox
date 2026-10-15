@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -28,13 +29,16 @@ type localReleaseNativeProxy struct {
 	pb.UnimplementedKVServer
 	pb.UnimplementedLeaseServer
 	pb.UnimplementedMaintenanceServer
-	kv           pb.KVClient
-	lease        pb.LeaseClient
-	maintenance  pb.MaintenanceClient
-	mu           sync.Mutex
-	fault        string
-	dropped      int
-	transactions []localReleaseNativeTransaction
+	kv            pb.KVClient
+	lease         pb.LeaseClient
+	maintenance   pb.MaintenanceClient
+	mu            sync.Mutex
+	fault         string
+	dropped       int
+	transactions  []localReleaseNativeTransaction
+	providerKey   string
+	lastRequest   *pb.TxnRequest
+	lastSucceeded bool
 }
 
 type localReleaseNativeTransaction struct {
@@ -112,6 +116,12 @@ func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*p
 		x.ResponseBytes, x.Succeeded = response.Size(), response.Succeeded
 	}
 	p.mu.Lock()
+	for _, op := range r.Success {
+		if put := op.GetRequestPut(); put != nil && strings.HasSuffix(string(put.Key), "/runtime-provider-cleanup") {
+			p.providerKey = string(put.Key)
+		}
+	}
+	p.lastRequest, p.lastSucceeded = r, err == nil && x.Succeeded
 	if err == nil && x.Succeeded && label == strings.TrimPrefix(p.fault, "ack-") && p.dropped == 0 {
 		p.dropped++
 		x.Dropped = true
@@ -128,7 +138,11 @@ func (p *localReleaseNativeProxy) verify(t *testing.T) {
 	t.Helper()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	require.Equal(t, 1, p.dropped)
+	if strings.HasPrefix(p.fault, "ack-") {
+		require.Equal(t, 1, p.dropped)
+	} else {
+		require.Zero(t, p.dropped)
+	}
 	counts := map[string]int{}
 	for _, x := range p.transactions {
 		if x.Label == "other" {
@@ -150,5 +164,48 @@ func (p *localReleaseNativeProxy) verify(t *testing.T) {
 		}
 		t.Logf("actual native received+forwarded transaction label=%s nodes=%d comparisons=%d success=%d failure=%d request=%d response=%d succeeded=%t drop=%t", x.Label, x.Nodes, x.Comparisons, x.Success, x.Failure, x.RequestBytes, x.ResponseBytes, x.Succeeded, x.Dropped)
 	}
-	require.Equal(t, 1, counts[strings.TrimPrefix(p.fault, "ack-")], "actual native mutable request must never replay after ACK loss")
+	if strings.HasPrefix(p.fault, "ack-") {
+		require.Equal(t, 1, counts[strings.TrimPrefix(p.fault, "ack-")], "actual native mutable request must never replay after ACK loss")
+	}
+}
+
+// Inspect the independently stored native intent at the HTTP boundary. The
+// last forwarded RPC must have been the fresh compare-only authority guard.
+func (p *localReleaseNativeProxy) beforeEffect(ctx context.Context, raw *clientv3.Client, slot int, uid, rv string) error {
+	p.mu.Lock()
+	key, request, succeeded := p.providerKey, p.lastRequest, p.lastSucceeded
+	p.mu.Unlock()
+	if key == "" || request == nil || !succeeded || len(request.Compare) < 59 {
+		return fmt.Errorf("missing fresh native effect guard")
+	}
+	for _, op := range request.Success {
+		if op.GetRequestPut() != nil || op.GetRequestDeleteRange() != nil {
+			return fmt.Errorf("last native RPC was a mutation, not fresh guard")
+		}
+	}
+	got, err := raw.Get(ctx, key)
+	if err != nil || len(got.Kvs) != 1 {
+		return fmt.Errorf("actual effect intent read: %w", err)
+	}
+	var record struct {
+		Slots []struct {
+			State, UID      string
+			ResourceVersion string `json:"resource_version"`
+			EffectID        string `json:"effect_id"`
+			Claim           json.RawMessage
+		}
+	}
+	if json.Unmarshal(got.Kvs[0].Value, &record) != nil || len(record.Slots) != 7 {
+		return fmt.Errorf("invalid actual intent slots")
+	}
+	s := record.Slots[slot]
+	if s.State != "intent" || s.UID != uid || s.ResourceVersion != rv || s.EffectID == "" || len(s.Claim) < 3 {
+		return fmt.Errorf("missing exact durable slot intent")
+	}
+	for _, cmp := range request.Compare {
+		if string(cmp.Key) == key && cmp.Target == pb.Compare_MOD && cmp.Result == pb.Compare_EQUAL && cmp.GetModRevision() == got.Kvs[0].ModRevision {
+			return nil
+		}
+	}
+	return fmt.Errorf("fresh guard did not pin actual durable intent MOD")
 }

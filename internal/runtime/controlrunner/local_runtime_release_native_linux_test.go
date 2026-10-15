@@ -215,7 +215,7 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	i, err := verifier.VerifyCommandIssuerCertificate(s.IssuerCertificate, time.Now().UTC())
 	require.NoError(t, err)
 	issuer := localReleaseNativeIssuer{s.IssuerKey, s.IssuerCertificate, i}
-	provider, err := k.NewTaskRuntimeCleanupClient(k.TaskRuntimeCleanupOptions{Config: &rest.Config{Host: s.ProviderAddress}, Namespace: "runtimes", RequestTimeout: 2 * time.Second, MaxActive: 1})
+	provider, err := k.NewTaskRuntimeCleanupClient(k.TaskRuntimeCleanupOptions{Config: &rest.Config{Host: s.ProviderAddress}, Namespace: "runtimes", RequestTimeout: 2 * time.Second, MaxActive: 1, IncludeCilium: strings.HasPrefix(s.Fault, "http-")})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, provider.Close()) }()
 	workspace, err := state.NewWorkspaceIdentity(s.WorkspaceProvider, s.WorkspaceStorage, s.WorkspaceBucket, s.WorkspacePrefix)
@@ -279,6 +279,10 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	defer termination.Close()
 	if strings.HasPrefix(s.Fault, "enrollment-") {
 		localReleaseEnrollmentRefusal(t, ctx, b, claim, termination, s, tlsConfig, ns, workspace, task)
+		return
+	}
+	if strings.HasPrefix(s.Fault, "http-") {
+		localReleaseUnknownEffect(t, ctx, b, claim, termination, s, tlsConfig, ns, task)
 		return
 	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
@@ -454,12 +458,78 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
 	var apiMu sync.Mutex
 	mutations := map[string]int{}
+	receivedMutations := map[string]int{}
+	var proxy *localReleaseNativeProxy
+	var effectErrors []error
+	var effectCounts [7]int
+	policies := localReleaseNativePolicies(input.SandboxID, podName, podUID)
+	effectIndex := -1
+	if strings.HasPrefix(fault, "http-") {
+		effectIndex, err = strconv.Atoi(strings.TrimPrefix(fault, "http-"))
+		require.NoError(t, err)
+	}
+	beforeEffect := func(step int, uid, rv string) bool {
+		if effectIndex < 0 {
+			return true
+		}
+		if err := proxy.beforeEffect(ctx, admin, step, uid, rv); err != nil {
+			effectErrors = append(effectErrors, err)
+			return false
+		}
+		effectCounts[step]++
+		return true
+	}
+	dropEffect := func(w http.ResponseWriter, step int) bool {
+		if effectIndex != step {
+			return false
+		}
+		if err := localReleaseDropHTTP(w); err != nil {
+			effectErrors = append(effectErrors, err)
+		}
+		return true
+	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiMu.Lock()
 		defer apiMu.Unlock()
+		if r.Method != http.MethodGet {
+			receivedMutations[r.Method+" "+r.URL.Path]++
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-a" {
 			_ = json.NewEncoder(w).Encode(node)
+			return
+		}
+		if effectIndex >= 0 && policies[r.URL.Path] != nil {
+			object := policies[r.URL.Path]
+			if r.Method == http.MethodGet {
+				_ = json.NewEncoder(w).Encode(object)
+				return
+			}
+			if r.Method != http.MethodDelete {
+				w.WriteHeader(405)
+				return
+			}
+			var request metav1.DeleteOptions
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&request) != nil || request.Preconditions == nil || request.Preconditions.UID == nil || request.Preconditions.ResourceVersion == nil || *request.Preconditions.UID != object.GetUID() || *request.Preconditions.ResourceVersion != object.GetResourceVersion() {
+				w.WriteHeader(409)
+				return
+			}
+			step := 2
+			if object.GetKind() == "CiliumNetworkPolicy" {
+				step = 4
+			}
+			if strings.HasSuffix(object.GetName(), podName) {
+				step++
+			}
+			if !beforeEffect(step, string(object.GetUID()), object.GetResourceVersion()) {
+				w.WriteHeader(409)
+				return
+			}
+			delete(policies, r.URL.Path)
+			if dropEffect(w, step) {
+				return
+			}
+			_ = json.NewEncoder(w).Encode(metav1.Status{Status: "Success", Code: 200})
 			return
 		}
 		if r.URL.Path != "/api/v1/namespaces/runtimes/pods/"+podName || pod == nil {
@@ -491,13 +561,25 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 				w.WriteHeader(400)
 				return
 			}
+			step := 0
+			if len(finalizers) == 0 {
+				step = 6
+			}
+			if !beforeEffect(step, uid, rv) {
+				w.WriteHeader(409)
+				return
+			}
 			pod.Finalizers = finalizers
 			version, _ := strconv.Atoi(pod.ResourceVersion)
 			pod.ResourceVersion = strconv.Itoa(version + 1)
-			_ = json.NewEncoder(w).Encode(pod)
+			response := pod.DeepCopy()
 			if pod.DeletionTimestamp != nil && len(finalizers) == 0 {
 				pod = nil
 			}
+			if dropEffect(w, step) {
+				return
+			}
+			_ = json.NewEncoder(w).Encode(response)
 			return
 		}
 		if r.Method == http.MethodDelete {
@@ -507,9 +589,16 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 				return
 			}
 			at := metav1.Now()
+			if !beforeEffect(1, string(pod.UID), pod.ResourceVersion) {
+				w.WriteHeader(409)
+				return
+			}
 			pod.DeletionTimestamp = &at
 			version, _ := strconv.Atoi(pod.ResourceVersion)
 			pod.ResourceVersion = strconv.Itoa(version + 1)
+			if dropEffect(w, 1) {
+				return
+			}
 			_ = json.NewEncoder(w).Encode(pod)
 			return
 		}
@@ -544,8 +633,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	}()
 	setup := localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "empty/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}
 	setup.Fault = fault
-	var proxy *localReleaseNativeProxy
-	if strings.HasPrefix(fault, "ack-") {
+	if strings.HasPrefix(fault, "ack-") || strings.HasPrefix(fault, "http-") {
 		setup.EtcdAddress, proxy = newLocalReleaseNativeProxy(t, appTLS, fault)
 	}
 	setupPath := filepath.Join(dir, "supervisor.json")
@@ -619,7 +707,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	workerErr := worker.Wait()
 	t.Logf("original local worker Cmd.Wait=%v", workerErr)
 	require.NoError(t, workerErr)
-	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" {
+	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" || effectIndex == 0 || effectIndex == 1 {
 		require.NoError(t, child.Process.Kill())
 	}
 	childErr := child.Wait()
@@ -627,7 +715,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || effectIndex >= 2 {
 		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
 	} else {
 		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
@@ -636,7 +724,28 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	actualPatch, actualDelete := mutations[http.MethodPatch], mutations[http.MethodDelete]
 	absent := pod == nil
 	apiMu.Unlock()
-	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
+	if effectIndex >= 0 {
+		require.Empty(t, effectErrors)
+		totalReceived := 0
+		for key, count := range receivedMutations {
+			totalReceived += count
+			if strings.HasPrefix(key, "PATCH ") && effectIndex == 6 {
+				require.Equal(t, 2, count)
+			} else {
+				require.Equal(t, 1, count)
+			}
+		}
+		require.Equal(t, effectIndex+1, totalReceived, "count all requests, including retries rejected before UID/RV validation")
+		for step, count := range effectCounts {
+			if step <= effectIndex {
+				require.Equal(t, 1, count)
+			} else {
+				require.Zero(t, count)
+			}
+		}
+		require.Equal(t, effectIndex == 6, absent)
+		t.Logf("actual seven-slot HTTP received total=%d effects=%v; each send independently checked native durable intent and immediately preceding fresh provider MOD guard; four unique configured policies", totalReceived, effectCounts)
+	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)
