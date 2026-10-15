@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -151,6 +152,35 @@ func TestEnrolledSupervisorNativeChild(t *testing.T) {
 	}
 	require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "pending-no-child"})))
 	command = read()
+	if strings.HasPrefix(setup.Mode, "refuse-") {
+		require.Equal(t, "refuse", command.Action)
+		activationError := <-activated
+		require.Error(t, activationError)
+		expectedError := map[string]string{"refuse-peer": "untrusted management certificate root", "refuse-nonce": "noncanonical node enrollment challenge", "refuse-node-boot": "observer node incarnation mismatch"}[setup.Mode]
+		require.Contains(t, activationError.Error(), expectedError, "refusal must occur in the intended consumer validation")
+		t.Logf("actual enrolled Supervisor mode=%s consumer refusal=%v", setup.Mode, activationError)
+		require.False(t, s.admission)
+		require.Nil(t, s.activation)
+		require.Nil(t, s.journal)
+		_, err := os.Stat(journalDir)
+		require.ErrorIs(t, err, os.ErrNotExist, "refused challenge must not create the journal")
+		_, err = s.EnrolledPublicationProof(context.Background(), command.Certificate, command.Claim)
+		require.ErrorIs(t, err, ErrAdmissionClosed)
+		_, err = s.accept(context.Background(), &authenticatedStart{supervisor: s})
+		require.ErrorIs(t, err, ErrAdmissionClosed)
+		select {
+		case <-s.enrollment.done:
+		default:
+			t.Fatal("original enrollment owner not joined")
+		}
+		var b [1]byte
+		_, err = s.enrollment.conn.Read(b[:])
+		require.ErrorIs(t, err, net.ErrClosed, "actual original UDS must be closed before owner done")
+		require.NoError(t, s.Close())
+		require.Equal(t, make([]byte, ed25519.PrivateKeySize), []byte(s.key))
+		require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "challenge-refused-owner-joined"})))
+		return
+	}
 	if paused != nil {
 		require.Equal(t, "journal", command.Action)
 		select {
@@ -292,6 +322,10 @@ func TestEnrolledSupervisorNativeJournal(t *testing.T) {
 	runEnrolledSupervisorNative(t, []string{"journal-close-admission", "journal-close"}, false)
 }
 
+func TestEnrolledSupervisorNativeRefusal(t *testing.T) {
+	runEnrolledSupervisorNative(t, []string{"refuse-peer", "refuse-nonce", "refuse-node-boot"}, false)
+}
+
 func runEnrolledSupervisorNative(t *testing.T, modes []string, withBackend bool) {
 	if os.Getenv("SANDBOX_ENROLLED_PUBLICATION_NATIVE") != "1" {
 		t.Skip("requires exact owned enrolled Linux fixture")
@@ -395,20 +429,119 @@ func runEnrolledSupervisorNative(t *testing.T, modes []string, withBackend bool)
 			defer api.Close()
 			observerJournal := filepath.Join(caseDir, "observer-journal")
 			require.NoError(t, os.Mkdir(observerJournal, 0700))
-			observer, err := nodeobserver.New(nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: observerTLS, EtcdClusterID: cluster, EtcdIdentity: identityWire, KubernetesConfig: &rest.Config{Host: api.URL}, KubernetesNamespace: "runtimes", JournalDirectory: observerJournal, MaxSlots: 1, MaxActive: 2, RequestTimeout: 5 * time.Second, TerminationTimeout: 20 * time.Second})
-			require.NoError(t, err)
 			uds, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(caseDir, "enroll.sock"), Net: "unix"})
 			require.NoError(t, err)
 			require.NoError(t, os.Chmod(uds.Addr().String(), 0600))
-			tcp, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
 			served := make(chan error, 1)
-			go func() { served <- observer.Serve(ctx, uds, tcp) }()
-			defer func() {
-				require.NoError(t, observer.Close())
-				err := <-served
-				require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "actual observer Serve join: %v", err)
-			}()
+			if strings.HasPrefix(mode, "refuse-") {
+				peerDone := make(chan struct{})
+				// A bounded signed unit peer tests this new consumer, not physical
+				// SO_PEERCRED/kernel observation or the accepted observer producer.
+				go func() {
+					defer close(peerDone)
+					conn, err := uds.AcceptUnix()
+					if err != nil {
+						served <- err
+						return
+					}
+					defer conn.Close()
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					wire, err := ct.ReadNodeObserverFrame(conn)
+					if err != nil {
+						served <- err
+						return
+					}
+					request, err := p.DecodeNodeEnrollmentRequest(wire)
+					if err != nil {
+						served <- err
+						return
+					}
+					v, err := p.NewManagementVerifier(binding, []ed25519.PublicKey{root.Public().(ed25519.PublicKey)})
+					if err != nil {
+						served <- err
+						return
+					}
+					activation, err := v.VerifyNodeEnrollmentRequest(request, time.Now().UTC())
+					if err != nil {
+						served <- err
+						return
+					}
+					cert, peerBoot := observerCert, boot
+					if mode != "refuse-nonce" {
+						signer := root
+						if mode == "refuse-peer" {
+							_, signer, err = ed25519.GenerateKey(rand.Reader)
+						} else {
+							peerBoot = uuid.NewString()
+						}
+						if err == nil {
+							cert, err = p.SignNodeObserverCertificate(signer, p.NodeObserverCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "node_observer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, NodeUID: nodeUID, NodeBootID: peerBoot, PublicKey: observerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
+						}
+						if err != nil {
+							served <- err
+							return
+						}
+					}
+					challenge := p.NodeEnrollmentChallenge{Version: 1, Purpose: "runtime_node_enrollment_challenge", ObserverCertificate: cert, Nonce: strings.Repeat("a", 64), RequestDigest: hashBytes(wire), Runtime: activation.Identity().Runtime, NodeUID: nodeUID, NodeBootID: peerBoot}
+					if mode == "refuse-nonce" {
+						challenge.Nonce = strings.Repeat("a", 63)
+					} else {
+						if _, err := p.EncodeNodeEnrollmentChallenge(challenge); err != nil {
+							served <- err
+							return
+						}
+						if mode == "refuse-node-boot" {
+							if _, err := v.VerifyNodeObserverCertificate(cert, nodeUID, peerBoot, time.Now().UTC()); err != nil {
+								served <- err
+								return
+							}
+						}
+					}
+					// json.Marshal intentionally permits the malformed nonce into a
+					// bounded real UDS frame, so the consumer's decoder must reject it.
+					frame, err := json.Marshal(challenge)
+					if err != nil {
+						served <- err
+						return
+					}
+					close(barrier)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						served <- ctx.Err()
+						return
+					}
+					if err = ct.WriteNodeObserverFrame(conn, frame); err != nil {
+						served <- err
+						return
+					}
+					if _, err = ct.ReadNodeObserverFrame(conn); err == nil {
+						served <- fmt.Errorf("refused challenge produced a private-key enrollment response")
+						return
+					}
+					if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+						served <- nil
+					} else {
+						served <- err
+					}
+				}()
+				defer func() {
+					require.NoError(t, uds.Close())
+					require.NoError(t, <-served, "original signed UDS unit peer must actually join")
+					<-peerDone
+				}()
+			} else {
+				observer, err := nodeobserver.New(nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: observerTLS, EtcdClusterID: cluster, EtcdIdentity: identityWire, KubernetesConfig: &rest.Config{Host: api.URL}, KubernetesNamespace: "runtimes", JournalDirectory: observerJournal, MaxSlots: 1, MaxActive: 2, RequestTimeout: 5 * time.Second, TerminationTimeout: 20 * time.Second})
+				require.NoError(t, err)
+				tcp, err := net.Listen("tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				go func() { served <- observer.Serve(ctx, uds, tcp) }()
+				defer func() {
+					require.NoError(t, observer.Close())
+					err := <-served
+					require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "actual observer Serve join: %v", err)
+				}()
+			}
 			coord, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(caseDir, "coord.sock"), Net: "unix"})
 			require.NoError(t, err)
 			defer coord.Close()
@@ -474,7 +607,7 @@ func runEnrolledSupervisorNative(t *testing.T, modes []string, withBackend bool)
 			select {
 			case <-barrier:
 			case <-time.After(3 * time.Second):
-				t.Fatal("genuine observer second provider GET not reached")
+				t.Fatal("enrollment peer did not reach the pending barrier")
 			}
 			send(enrolledNativeCommand{Action: "pending"})
 			require.Equal(t, "pending-no-child", read().State)
@@ -485,7 +618,11 @@ func runEnrolledSupervisorNative(t *testing.T, modes []string, withBackend bool)
 				require.NoError(t, err)
 				require.Empty(t, strings.TrimSpace(string(wire)))
 			}
-			if strings.HasPrefix(mode, "journal-") {
+			if strings.HasPrefix(mode, "refuse-") {
+				close(release)
+				send(enrolledNativeCommand{Action: "refuse", Certificate: certificate, Claim: claimReference})
+				require.Equal(t, "challenge-refused-owner-joined", read().State)
+			} else if strings.HasPrefix(mode, "journal-") {
 				close(release)
 				send(enrolledNativeCommand{Action: "journal", Certificate: certificate, Claim: claimReference})
 				if mode == "journal-close" {
