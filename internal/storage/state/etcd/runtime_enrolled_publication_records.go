@@ -90,8 +90,10 @@ func decodeEnrolledRecord(wire []byte, record interface{ Validate() error }) err
 
 func enrolledRecordLimit(record interface{ Validate() error }) int {
 	switch record.(type) {
-	case RuntimeEnrollmentRecord, *RuntimeEnrollmentRecord, RuntimeEnrollmentActivationRecord, *RuntimeEnrollmentActivationRecord:
+	case RuntimeEnrollmentRecord, *RuntimeEnrollmentRecord, RuntimeEnrollmentActivationRecord, *RuntimeEnrollmentActivationRecord, RuntimeEnrolledPublicationRecord, *RuntimeEnrolledPublicationRecord:
 		return 8192
+	case RuntimeEnrolledPublicationProofRecord, *RuntimeEnrolledPublicationProofRecord:
+		return 16384
 	default:
 		return maxRecordBytes
 	}

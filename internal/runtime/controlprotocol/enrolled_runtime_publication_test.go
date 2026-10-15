@@ -51,6 +51,16 @@ func TestEnrolledPublicationProtocol(t *testing.T) {
 	require.Error(t, err)
 	_, err = v.VerifyEnrolledPublicationHistorical(proof, context, e, f.birth.ContractDigest)
 	require.NoError(t, err)
+	for _, issuer := range []bool{false, true} {
+		bad := e.Clone()
+		if issuer {
+			bad.Request.IssuerCertificate = append([]byte(" "), bad.Request.IssuerCertificate...)
+		} else {
+			bad.Request.RuntimeCertificate = append([]byte(" "), bad.Request.RuntimeCertificate...)
+		}
+		_, err := v.VerifyEnrolledPublication(proof, context, bad, f.birth.ContractDigest, f.now)
+		require.Error(t, err, "v2 retained certificates must be canonical")
+	}
 	for _, wire := range [][]byte{append([]byte(" "), proof...), bytes.Replace(proof, []byte(`"version":2`), []byte(`"version":2,"version":2`), 1), bytes.Replace(proof, []byte(`"enrollment_digest":"`+rc.EnrollmentDigest+`"`), []byte(`"enrollment_digest":null`), 1), bytes.Replace(proof, []byte(`"claims":{`), []byte(`"claims":{"unknown":1,`), 1), bytes.Repeat([]byte(" "), 8193)} {
 		_, err := v.VerifyEnrolledPublication(wire, context, e, f.birth.ContractDigest, f.now)
 		require.Error(t, err)

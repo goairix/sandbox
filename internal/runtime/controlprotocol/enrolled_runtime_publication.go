@@ -182,6 +182,9 @@ func (v *PublicationVerifier) verifyEnrolledPublication(wire []byte, context Pub
 	if err != nil {
 		return fail(err)
 	}
+	if !bytes.Equal(enrollment.Request.RuntimeCertificate, a.RuntimeCertificate()) || !bytes.Equal(enrollment.Request.IssuerCertificate, a.IssuerCertificate()) {
+		return fail(fmt.Errorf("noncanonical enrolled management certificates"))
+	}
 	if a.Birth().ContractDigest != contract {
 		return fail(fmt.Errorf("unapproved enrolled birth contract"))
 	}

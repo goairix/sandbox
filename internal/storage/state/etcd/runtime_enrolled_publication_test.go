@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -34,6 +35,18 @@ func TestEnrolledPublicationRecords(t *testing.T) {
 	a.Activation = json.RawMessage(`{"large":"` + strings.Repeat("x", 8192) + `"}`)
 	_, err = encodeEnrolledRecord(a)
 	require.Error(t, err)
+}
+
+func TestEnrolledPublicationHistoryEncoding(t *testing.T) {
+	payload := json.RawMessage(`{"html":"<>&中>"}`)
+	digest, err := snapshotDigest(payload)
+	require.NoError(t, err)
+	r := RuntimeDispatchInputRecord{Version: 1, IntentID: "intent", SandboxID: "sandbox", WorkspaceHash: strings.Repeat("a", 64), RestoreEpoch: "epoch", OperationID: "11111111-1111-4111-8111-111111111111", PayloadDigest: digest, Generation: 1, Payload: payload}
+	wire, err := encodeDomainRecord(r)
+	require.NoError(t, err)
+	var got RuntimeDispatchInputRecord
+	require.NoError(t, enrolledDecodeHistory(&mvccpb.KeyValue{Value: []byte(wire), Version: 1, CreateRevision: 9, ModRevision: 9}, &got))
+	require.Equal(t, r, got)
 }
 
 func TestEnrolledPublicationBounds(t *testing.T) {
