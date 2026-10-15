@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"reflect"
 	"sync"
@@ -15,6 +16,126 @@ import (
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
+
+// The one-byte terminal probe is observable without replacing the actual TCP
+// transport. crypto/tls reads whole records into its own larger input buffer.
+type publicationTerminalTCP struct {
+	*net.TCPConn
+	terminal chan struct{}
+	once     sync.Once
+}
+
+func (c *publicationTerminalTCP) Read(b []byte) (int, error) {
+	if len(b) == 1 {
+		c.once.Do(func() { close(c.terminal) })
+	}
+	return c.TCPConn.Read(b)
+}
+
+func TestRuntimePublicationDestinationTerminal(t *testing.T) {
+	for _, mode := range []string{"success", "trailing", "cancel", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			o, server, _, _, _, _ := destinationFixture(t)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			terminal := make(chan struct{})
+			o.Dial = func(ctx context.Context) (net.Conn, error) {
+				raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+				if err != nil {
+					return nil, err
+				}
+				return &publicationTerminalTCP{TCPConn: raw.(*net.TCPConn), terminal: terminal}, nil
+			}
+			d, err := NewDestination(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := make(chan struct{})
+			var release sync.Once
+			unblock := func() { release.Do(func() { close(gate) }) }
+			serverDone := make(chan error, 1)
+			serverFinished := make(chan struct{})
+			clientDone := make(chan error, 1)
+			response := publicationFrameResponse()
+			go func() {
+				defer close(serverFinished)
+				raw, err := listener.Accept()
+				if err != nil {
+					serverDone <- err
+					return
+				}
+				defer raw.Close()
+				_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+				conn := tls.Server(raw, server)
+				_, err = ReadRuntimeRequest(conn)
+				if err == nil {
+					err = WriteRuntimePublicationResponse(conn, response)
+				}
+				if err == nil {
+					err = conn.CloseWrite()
+				}
+				if err == nil {
+					<-gate
+					if mode == "trailing" {
+						_ = raw.SetWriteDeadline(time.Now().Add(time.Second))
+						_, err = raw.Write([]byte{255})
+					}
+				}
+				serverDone <- err
+			}()
+			go func() {
+				claim := p.ClaimReference{ClaimID: "11111111-1111-4111-8111-111111111111", CreateRevision: 1, LeaseID: 2}
+				enrollment, ready, err := d.ReadEnrolledPublication(ctx, []byte("certificate"), claim)
+				if err == nil && (!reflect.DeepEqual(enrollment, response.Enrollment) || !reflect.DeepEqual(ready, response.Ready)) {
+					err = errors.New("publication response mismatch")
+				}
+				clientDone <- err
+			}()
+			var clientErr error
+			var joined sync.Once
+			join := func() { joined.Do(func() { clientErr = <-clientDone }) }
+			t.Cleanup(func() {
+				cancel()
+				unblock()
+				listener.Close()
+				join()
+				err := <-serverDone
+				<-serverFinished
+				if err != nil && !t.Failed() {
+					t.Errorf("original TLS server: %v", err)
+				}
+			})
+			select {
+			case clientErr = <-clientDone:
+				joined.Do(func() {})
+				t.Fatalf("publication completed before physical terminal gate: %v", clientErr)
+			case <-terminal:
+			case <-ctx.Done():
+				t.Fatal("publication never reached physical terminal wait")
+			}
+			switch mode {
+			case "cancel":
+				cancel()
+			case "deadline":
+				// Keep the original server gate shut until the caller's deadline
+				// itself terminates the entered physical read.
+			case "success", "trailing":
+				unblock()
+			}
+			join()
+			if mode == "success" && clientErr != nil {
+				t.Fatal(clientErr)
+			}
+			if mode != "success" && (clientErr == nil || errors.Is(clientErr, io.EOF)) {
+				t.Fatalf("terminal failure accepted: %v", clientErr)
+			}
+		})
+	}
+}
 
 func TestRuntimePublicationDestinationTLS(t *testing.T) {
 	for _, mode := range []string{"positive", "trailing", "no-close-notify", "oversize", "cancel"} {

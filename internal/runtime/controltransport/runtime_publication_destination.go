@@ -66,6 +66,19 @@ func (s *Session) readEnrolledPublication(ctx context.Context) (RuntimePublicati
 	}
 	response, err := ReadRuntimePublicationResponse(s.conn)
 	if err == nil {
+		// TLS close_notify authenticates the response, but a finite adapter may
+		// still owe its terminal status. Preserve the same deadline and context
+		// owner until the original transport confirms EOF before Session.Close.
+		// Bypass only the strict TLS wrapper: authenticated EOF was checked above.
+		var extra [1]byte
+		n, terminalErr := s.archiveTransport.Conn.Read(extra[:])
+		if n != 0 || terminalErr == nil {
+			err = ErrFrame
+		} else if terminalErr != io.EOF {
+			err = terminalErr
+		}
+	}
+	if err == nil {
 		err = bounded.Err()
 	}
 	if err != nil {

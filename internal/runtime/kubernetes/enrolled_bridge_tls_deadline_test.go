@@ -144,6 +144,21 @@ func (c *bridgeTLSServerWire) Write(data []byte) (int, error) {
 }
 
 func TestEnrolledBridgeActualTLSCloseWrite(t *testing.T) {
+	testEnrolledBridgeActualTLS(t, "idle-write")
+}
+
+func TestEnrolledBridgeActualTLSTerminalGate(t *testing.T) {
+	for _, mode := range []string{"terminal-success", "terminal-failure"} {
+		t.Run(mode, func(t *testing.T) { testEnrolledBridgeActualTLS(t, mode) })
+	}
+}
+
+func testEnrolledBridgeActualTLS(t *testing.T, mode string) {
+	t.Helper()
+	gate := make(chan struct{})
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(gate) }) }
+	defer unblock()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	now := time.Now()
@@ -174,8 +189,20 @@ func TestEnrolledBridgeActualTLSCloseWrite(t *testing.T) {
 		if err := conn.CloseWrite(); err != nil {
 			return err
 		}
+		if mode != "idle-write" {
+			<-gate
+		}
 		if err := raw.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			return err
+		}
+		if mode != "idle-write" {
+			status := `{"status":"Success"}`
+			if mode == "terminal-failure" {
+				status = `{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"1"}]}}`
+			}
+			if err := ws.WriteMessage(websocket.BinaryMessage, append([]byte{3}, []byte(status)...)); err != nil {
+				return err
+			}
 		}
 		return ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 	})
@@ -193,11 +220,32 @@ func TestEnrolledBridgeActualTLSCloseWrite(t *testing.T) {
 	require.NoError(t, conn.CloseWrite())
 	// Real crypto/tls leaves a past write deadline. Its idle expiration must
 	// not kill the response while the transport owner restores its FIN budget.
-	time.Sleep(20 * time.Millisecond)
+	if mode == "idle-write" {
+		time.Sleep(20 * time.Millisecond)
+	}
 	require.NoError(t, raw.SetWriteDeadline(time.Now().Add(time.Second)))
 	require.NoError(t, raw.(interface{ CloseWrite() error }).CloseWrite())
 	response, err := io.ReadAll(conn)
 	require.NoError(t, err)
 	require.Equal(t, "response", string(response))
+	if mode != "idle-write" {
+		// TLS EOF alone cannot finish the production byte connection. With the
+		// actual terminal status gated, a bounded physical read must time out.
+		require.NoError(t, raw.SetReadDeadline(time.Now().Add(20*time.Millisecond)))
+		var extra [1]byte
+		n, err := raw.Read(extra[:])
+		require.Zero(t, n)
+		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+		require.NoError(t, raw.SetReadDeadline(time.Now().Add(time.Second)))
+		unblock()
+		n, err = raw.Read(extra[:])
+		require.Zero(t, n)
+		if mode == "terminal-success" {
+			require.ErrorIs(t, err, io.EOF)
+		} else {
+			require.Error(t, err)
+			require.NotErrorIs(t, err, io.EOF)
+		}
+	}
 	require.NoError(t, join(), "original TLS/WS handler joined")
 }
