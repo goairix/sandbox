@@ -21,7 +21,7 @@
 
 预计修改 internal/storage/state/etcd 的新 preparation allocation 领域方法/记录/namespace校验与可选options；新增 internal/runtime/kubernetes 固定 create/inspect driver；新增 internal/provisioning 的具体 service、不可变 capsule 和 bootstrap/material恢复；按需增加 Manager 窄适配但不启用 main。新增独立 collectors/native selector，可复用 tracked startup fixture 源级真实生命周期，不能读取旧产物。
 
-- [ ] Step1 只读预检：逐项确认原 opaque claim、slot schema/bootstrap、POST owner、activation恢复、满预算结算、plain-empty业务映射；给出最小具体接口/有限候选和事务节点数。Root裁决后开始，不因接口不齐另拆一堆成功工厂。
+- [x] Step1 只读预检：原 opaque claim、slot schema/bootstrap、POST owner、activation恢复、满预算结算、plain-empty业务映射及最小接口/有限候选/字面预算已确认。Root裁决复用fresh Stage结算和私有13记录历史验证，仍须前置startup R1验收后设置immutableBASE/START-GO。
 - [ ] Step2 新quota/preparation selector RED→显式operator初始化/持久32与runtimequota/原子freeindex+reservation/unknown只读仲裁；两个Backend实际隔离etcd验证，不启动32进程。达到绿色及时小提交。
 - [ ] Step3 具体owned Create/Inspect driver RED→固定完整spec、一次POST、明确未发送/UID/unknown、GET404不补偿、实际取消/Closejoin；限定host/race/vet通过及时提交。
 - [ ] Step4 具体service/capsule/公共material持久化及Hello/activation恢复RED→接原Bind/Consume/Read/Publish，不留任意factory；独立prepslot结算与quota保留，稳定typed结果/Resume/workmarker。限定验证后小提交。
@@ -36,8 +36,10 @@
 | allocation/dispatch → POST | 封闭service复核持久一次attempt后调用真实driver；copied record不是native许可。 |
 | POST UID → Hello/material | 原实际UID与Birth.BootID绑定，公共材料先固定再activation；NodeBootID不同。 |
 | activation unknown → Resume | 原材料、原target pinned TLS查询；过期/unknown保留预算与恢复ID，不生成替代。 |
-| publication → prep settlement | 原加载器验证immutable committed witness后独立CAS；不改满64原事务，quota继续占用。 |
+| publication → prep settlement | 原CreationClaim已消费；复用fresh Stage（完整39节点，保守40）独立CAS。私有13记录历史loader在index被安全释放删除后仍认证曾发布完成，原公开loader不变；quota继续占用。 |
 | safe owner release → quota | 精确死亡/cleanup/原release证据后另结算，不给未发布出生套用已发布释放路径。 |
 | service → Manager/main | typed有限构造/调用接点明确；不支持配置显式拒绝，main整体切换依赖仍保留。 |
 
 Ruling: 这是 master 已批准的生产接线单元，连续授权无需再确认。第一条有限创建路径与后续兼容/恢复/运维缺口须如实报告；不能把准备账本或provider单独完成描述为整个创建或生产迁移完成。
+
+Ruling: 原publication改写CreationClaim所固定的pending owner/control/request/intent，故结算使用原fresh Stage guard，不新增长期SettlementClaim。快速release删除runtime index，不能直接复用原14记录loader；只增加结算私有13记录历史入口，保留签名观察时刻、所有存留记录/原receipt认证和分组revision关系。历史证据不作健康/死亡/当前发布许可。若此判断有误，代价是准备槽保守多占及修复重做，绝不能先退款quota或削弱原64节点屏障。

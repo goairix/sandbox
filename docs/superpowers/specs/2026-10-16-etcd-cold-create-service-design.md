@@ -31,7 +31,9 @@ slot 不因 worker Lease/HTTP 取消/Pod GET404 消失。任何已持久 dispatc
 3. 取得实际 UID 后，经原 bridge 做真实 Hello；以原 Birth.BootID/public key 构造 runtime identity，不用 NodeBootID 替代。对同 UID 的证书、activation、issuer 材料在发送 activation 前固定并持久化。只保存公共 wire 和摘要；显式部署的稳定私有 signer/credential 必须匹配已有材料，重启不得自动生成替代密钥。
 4. activation 丢 ACK/重启后使用原材料先做 pinned mTLS 查询；不能重新 Hello 冒认新 incarnation。仅对原 exact activation 做有界恢复，不因 TLS 拒绝推断 pristine。过期或不可判定材料保留 reservation/恢复 ID 并给 recovery-required，不伪造续期或自动开新 runtime。证书维护与这类长期恢复的运维闭环仍须在生产切换前补齐。
 5. BindRuntime → ConsumeRuntimeMount 的明确 plain no-mount → 具体 Destination.ReadEnrolledPublication → 原 Backend.PublishRuntimeEnrolled。元数据 unknown 按各自 exact stage 仲裁，enrolled stage 用专用只读 attempt 接口。只有原认证证明与提交成立后才报告 completed；请求等待结束返回原 request/intent/attempt，而不是丢弃恢复任务。
-6. 独立、可恢复的结算 CAS 释放 preparation slot，runtime quota 继续持有。publication 已满64节点，不能附加 quota/due 写、升上限或删原 guard。结算先经原 native loader 验证不可变已发布证据，再比较该不可变 committed witness 与原 slot/record、当前 identity/restore/claim，完成原子 free-index 恢复；这是单调的准备完成结算，不能用它释放 runtime quota。
+6. 独立、可恢复的结算 CAS 释放 preparation slot，runtime quota 继续持有。publication 已满64节点，不能附加 quota/due 写、升上限或删原 guard。结算由 Backend 私有历史入口认证原不可变已发布证据，再比较 committed witness、原 slot/record、当前 identity/restore 和 fresh Stage guard，原子恢复 free index；已被 publication 消费的 CreationClaim 不能复用。它只证明准备曾完成，不能用它释放 runtime quota。
+
+结算复用原 BeginStage/CommitStage，不新增长期 claim 或外部执行许可。设计预算为 domain mutation22 compares+4 writes，原 CommitStage完整分支39节点（原保守预检40），实现必须用真实 protobuf 请求及响应锁定预算。快速安全释放可能先删除 runtime index，因此结算专用 loader 读取其余13个保留记录，逐项保留 canonical、Version1/Create=Mod/Lease0、签名及归属认证；publication 五项同 revision，binding/certificate/receipt 三项同 revision，dispatch/mount及其原 committed receipts 完整验证。不伪造已删除的 index，不放宽现有公开 loader。复用原 Historical verifier 在签名观察时刻核验证书窗口；当前过期不会抹去历史完成事实，也不能获得当前健康、死亡、activation 或新发布授权。必须覆盖释放早于结算、index 已删、历史证书过期及篡改拒绝。
 
 runtime quota 只能在原精确终止、provider 安全清理和 owner release 已认证成立后另行释放。允许先保守多占、后结算，不能先归还再等待安全证明。无已发布证据的 unknown 出生不接到只适用于已发布 runtime 的释放接口；记录 recovery-required 并保留预算。不能用超时/不存在/Lease 到期制造死亡证明。
 
