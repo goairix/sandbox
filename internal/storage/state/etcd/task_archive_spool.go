@@ -170,6 +170,16 @@ func (s *taskArchiveStore) close() error {
 	for _, r := range owners {
 		err = errors.Join(err, r.close())
 	}
+	if s.recovery != nil {
+		for slot := range s.recovery.slots {
+			s.mu.Lock()
+			owner := s.recovery.slots[slot].owner
+			s.mu.Unlock()
+			if owner != nil {
+				err = errors.Join(err, owner.Close())
+			}
+		}
+	}
 	err = errors.Join(err, s.root.Close())
 	s.mu.Lock()
 	s.closeErr = err
@@ -203,5 +213,15 @@ func (s *taskArchiveStore) sealAndCancel() {
 	}
 	for _, c := range consumers {
 		c.cancel()
+	}
+	if s.recovery != nil {
+		for slot := range s.recovery.slots {
+			s.mu.Lock()
+			owner := s.recovery.slots[slot].owner
+			if owner != nil {
+				owner.cancel()
+			}
+			s.mu.Unlock()
+		}
 	}
 }

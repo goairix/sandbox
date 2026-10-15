@@ -96,6 +96,7 @@ type taskArchiveRecoveryDiagnostic struct {
 
 type taskArchiveRecoverySlot struct {
 	diagnostic taskArchiveRecoveryDiagnostic
+	owner      *taskWorkspaceSyncRecoverySource // store.mu; fixed, charged admission
 }
 
 type taskArchiveRecoveryBuffers struct {

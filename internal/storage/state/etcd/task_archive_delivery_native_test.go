@@ -103,6 +103,9 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 	joined := make(chan struct{})
 	go func() {
 		defer close(joined)
+		var archiveReceipt []byte
+		var archiveContext p.TaskWorkspaceArchiveContext
+		var archiveDigest string
 		for {
 			raw, err := listener.Accept()
 			if err != nil {
@@ -153,6 +156,18 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 					return
 				}
 				e := request.Archive
+				if e.Purpose == "task_workspace_archive_query" {
+					if archiveReceipt == nil || e.Context != archiveContext || e.TicketDigest != archiveDigest || e.Ticket != nil || e.IssuerCertificate != nil || e.OriginalQuiescenceReceipt != nil {
+						w.done <- errTaskArchive
+						return
+					}
+					err := tr.WriteTaskWorkspaceArchiveFrame(conn, tr.ArchiveComplete, archiveReceipt)
+					if err == nil {
+						err = conn.CloseWrite()
+					}
+					w.done <- err
+					return
+				}
 				now, err := f.b.observePublicationClock(context.Background())
 				if err != nil {
 					w.done <- err
@@ -175,6 +190,9 @@ func deliveryNativeTargetData(t *testing.T, f *quiescenceNativeFixture, data []b
 					return
 				}
 				receipt, err := p.SignTaskWorkspaceArchiveReceipt(rk, p.TaskWorkspaceArchiveReceiptClaims{Version: 1, State: "archive_complete", Context: e.Context, TicketDigest: e.TicketDigest, NotBefore: ticket.NotBefore(), NotAfter: ticket.NotAfter(), SessionNotAfter: ticket.SessionNotAfter(), ArchiveBytes: uint64(len(data)), EntryCount: entries, SHA256: hex.EncodeToString(sum[:])})
+				if err == nil {
+					archiveReceipt, archiveContext, archiveDigest = receipt, e.Context, e.TicketDigest
+				}
 				if err == nil {
 					for offset := 0; offset < len(data) && err == nil; {
 						end := offset + 32768

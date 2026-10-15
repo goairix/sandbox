@@ -12,6 +12,8 @@ mode=${2:-normal}
 test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
 case "$mode" in
   normal) ;;
+	recovery-execution-cold) test_run='^TestTaskWorkspaceSyncRecoveryNativeCold$';;
+	recovery-execution-authority) test_run='^TestTaskWorkspaceSyncRecoveryNativeAuthority$';;
 	archive-recovery-red) test_run='^TestTaskArchiveRecoveryOriginalNative$';;
 	archive-recovery) test_run='^TestTaskArchiveRecovery';;
 	archive-recovery-session) test_run='^TestTaskArchiveRecoverySessionNative$';;
