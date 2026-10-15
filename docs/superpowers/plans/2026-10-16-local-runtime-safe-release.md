@@ -22,7 +22,7 @@
 - 只apply_patch写源码/测试/文档/格式；raw JSON/log/binary/sourcearchive/diff/brief例外。禁止cat/heredoc/Python内容写入和gofmt-w。
 - 每次Git先Root expectedHEAD+exactpaths窗口，再common→OPEN OWN fcntl锁，branch/HEAD/initialempty/exactstaged/diffcheck/postempty；达到小步验证条件及时提交，不等整Task完成。
 - 每作者≤1/总≤2nativefixtures；GoList→compile→postfilename/SHA保持实际依赖closure quiet。保留原Cmd.Wait/attach/containerWait、binary/sourceSHA和exactcleanup，不补造历史Wait。
-- 一个fresh implementer、一次唯一fresh完整Taskreview，fix同pair限定，不重放已验收旧矩阵。前置 enrolled-publication Task验收后才能开始本Task产品实现。
+- 本组合Task一个fresh implementer、一次唯一fresh完整Taskreview，fix同pair限定，不重放已验收旧矩阵。第3步provider具体客户端在6160c36接口固定后，改由独立并行依赖计划 `2026-10-16-task-runtime-cleanup-client.md` 的作者独占实现/验证和唯一审查，组合作者不重复写这些文件；Root协调Git和实际编译closure quiet。前置 enrolled-publication Task验收后才能开始本Task产品实现。
 
 ## Review Focus
 
@@ -50,7 +50,7 @@
 
 **Narrow modify:** etcd `client.go`、`task_claim.go`、`task_archive_delivery_types.go`、`task_archive_delivery.go`，仅显式配置/原始attempt字段/共用Close seal和实际join。复用既有private固定codec，不修改已验收local finalization/observer/publication产品逻辑；必要新接点先Root裁决。
 
-**Create provider:** `internal/runtime/kubernetes/task_runtime_cleanup.go`、`task_runtime_cleanup_transport.go`、`task_runtime_cleanup_records.go`、`task_runtime_cleanup_test.go`。严格复用ownership validator，不调用bundled cleanup。新真实组合fixture `internal/runtime/controlrunner/local_runtime_release_native_linux_test.go`，只复用既有有限helper；新 `scripts/test-local-runtime-safe-release.sh`。
+**Provider dependency (独立作者独占):** `internal/runtime/kubernetes/task_runtime_cleanup.go`、`task_runtime_cleanup_transport.go`、`task_runtime_cleanup_records.go`、`task_runtime_cleanup_test.go`。接口已在6160c36固定；具体实现和独立验收由并行依赖计划交付，组合作者只消费其opaque descriptor/observations，不复制实现。严格复用ownership validator，不调用bundled cleanup。组合作者仍拥有新真实组合fixture `internal/runtime/controlrunner/local_runtime_release_native_linux_test.go` 和 `scripts/test-local-runtime-safe-release.sh`，只复用既有有限helper。
 
 **Interfaces:**
 - Backend四个public方法、LocalRuntimeReleaseOptions/固定issuer、concrete provider构造/Prepare/Descriptor/Observe/Apply/Close的精确签名与边界见Spec2–5/17–20。
@@ -59,7 +59,7 @@
 
 - [ ] **Step1 strict codec/owner/config RED→GREEN并小提交。** 新 `TestLocalRuntimeReleaseRecords/Profile/Owners/Bounds` 拒绝nil/typednil/profile降级、unknown/null/duplicate/超界/phase篡改，要求原始Current不可改、七slots固定、MaxActive/Close实际join。先保留RED；实现类型/codec/同mutexowner，不先扩generic Stage。
 - [ ] **Step2 retained completion与完整native authority。** 新 `TestLocalRuntimeReleaseAuthorityNative` 独立加载真正complete和历史，拒绝fake/copied结果、foreign root/generation/runtime/node/restore/claim；两enrollment key各同值put/lease/delete-recreate均使reserve拒绝且零外部效果。列实际60/61和wire上界，限定GREEN后提交。
-- [ ] **Step3 concrete one-request provider。** 新 `TestTaskRuntimeCleanupClient` 使用真实HTTP/TLS server验证UID/RV、固定七动作/最多四policies、不动replacement/foreign finalizer，不List；429+RetryAfter、307/308、broken connection逐一数实际收到的mutation≤1，不自动retry。blocked originalbody/dial/Close实际join，SDK config容器不改写。RED→GREEN后提交，无fakephysical回调。
+- [ ] **Step3 接受独立并行provider dependency。** `2026-10-16-task-runtime-cleanup-client.md` 交付具体one-request client及有限HTTP/TLS拒绝/重试/真实Close测试。组合作者不重复执行组件矩阵，验收后消费公开具体API；Step5和Step7仍必须验证写前意图、真实顺序及整链路，不能以独立client测试替代。
 - [ ] **Step4 termination组合与cold恢复。** 新 `TestLocalRuntimeTerminationNative` 用当前任务/原archive issuer reserve/sign/唯一send，observer真实proof后持久terminated；每个native/send ACK gap同attempt只读，禁止resignal。fresh claimant处理已退出runtime时不调用旧runtime RPC，保持原Current与unknown归属；无proof则pending。GREEN后提交。
 - [ ] **Step5 七槽精确cleanup。** 新 `TestLocalRuntimeCleanupNative` 对每个真实API mutation写前意图+fresh nativeguard，原UID/RV与policyownership精确；finalizer/DELETE不确定、替换对象、其他finalizer、unsupportedmount等均不release。完成最后artifact观测才CAS cleanup-complete并pin实际provider MOD；每crashgap有限验证，GREEN后提交。
 - [ ] **Step6 原子release与冷诊断。** 新 `TestLocalOwnerReleaseNative` 证明实际60compares+3delete+1put，任务/fence/history保留；未cleanup-complete拒绝。原release lostACK、新owner已获取后LoadTaskOwnerRelease仍确认原receipt，absent不算success，不调用ClaimTask、不重发删除。最大namespace/record/protobuf请求和两分支独立预检GREEN后提交。
