@@ -68,6 +68,10 @@ func (c *NodeObserverTLSCredential) Public() crypto.PublicKey {
 	return ed25519.PublicKey(bytes.Clone(c.key[ed25519.SeedSize:]))
 }
 
+func (c *NodeObserverTLSCredential) MatchesCertificate(wire []byte) bool {
+	return c != nil && bytes.Equal(c.certificate, wire)
+}
+
 func (c *NodeObserverTLSCredential) Sign(_ io.Reader, input []byte, opts crypto.SignerOpts) ([]byte, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
