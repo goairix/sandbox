@@ -1,0 +1,25 @@
+# Enrolled Kubernetes launcher profile
+
+本单元继续已批准的 etcd master，交付普通无外部挂载 sandbox 的受控 Kubernetes Pod 启动合同：生产 builder 能构造正式 launcher Pod，正式 PID1 能从该合同建立受保护配置，observer 与安全清理器能识别同一严格 profile。它不是 main 切换、创建/发布事务编排或真实 kubelet 部署验收。
+
+## 设计与边界
+
+采用单容器、无 init 的显式新 profile `sandbox-enrolled-plain/v1`。沿用原普通 Pod/cleanup profile；未知 annotation、路径或 mount 不能选择一个较宽松的旧分支。新 profile 绑定规范 namespace、Pod name、logical ID、creation intent UUID、generation、authority/restore binding、固定 node name/UID/boot UUID、镜像 digest、配置 digest 与受控资源。节点调度采用已选择的 exact NodeName；driver 之后仍须读取 Node UID/boot 和 exact Pod UID，不把本 builder 的输入当健康或物理证明。
+
+1. 共用 `internal/runtime/launcherconfig` 拥有现有 canonical v2 公开配置 DTO/Decode，保持原全部 cap、字段顺序、UUID/clock/trust/UID/network 校验；cmd 私有别名/薄调用保留原测试及 serve 语义。配置只含公钥与公开身份，无私钥、token、kubeconfig、可选路径或管理 signer。单一 decoder 避免 profile 与正式 CLI 接受不同配置。
+2. 新固定 CLI mode `serve-provisioned` 仅允许实际 PID1/root。从唯一固定环境变量 `SANDBOX_LAUNCHER_CONFIG_V2` 读取 canonical≤16384 公共配置，先完整 Decode。环境不是长期配置来源：成功后移除变量，后续仍执行原 `serve`、原 protected file 读取与实际 BootstrapPID1。无 fallback、任意命令或 kernel 成功 factory。
+3. kubelet 提供 control EmptyDir。启动只允许 root 拥有、无 symlink 的固定 `/run/sandbox-control`（初始0755或0700），其中只能有 root0600 的 `enrollment.sock`；拒绝已有 config/control socket/journal/其他项。通过持有目录 FD、NOFOLLOW/精确 ownership 与 mode 检查将它收紧为0700，以 O_EXCL 创建 config.json、0600、完整写入并同步；失败不覆盖、不删旧数据、不尝试重新出生。clock 固定 `/run/sandbox-clock/clock.sock`。原 serve 的全部祖先/protected path 和 stale socket 检查保留。非 Linux 明确拒绝实际 provisioning。
+4. 新 Pod 只有 sandbox 容器，固定绝对镜像内 launcher 路径 `/usr/local/bin/sandbox-launcher` 与唯一参数 `serve-provisioned`。镜像使用明确 sha256 digest，不能让 annotation 指定可执行文件。单次 Never、私有 PID/IPC/network、root 管理 PID1、readonly rootfs、NNP、dropALL，仅 KILL/SETUID/SETGID/SETPCAP，RuntimeDefault seccomp；用户 UID/GID 非零由原 launcher 切换，不能与管理 UID 混用。无 SA token、service link、host port、生命周期 shell、probe exec、ephemeral/init/sidecar 或未知 security 字段。
+5. 精确五个 volume：workspace/tmp 为有界正 sizeLimit EmptyDir，control 为有界≤1MiB Memory EmptyDir，clock 为固定 `/run/sandbox-clock` 的 readonly Directory HostPath，enrollment 为固定 `/run/sandbox-node-observer/enrollment.sock` 的 readonly Socket HostPath。mount 分别 `/workspace`、`/tmp`、`/run/sandbox-control`、`/run/sandbox-clock`、`/run/sandbox-control/enrollment.sock`。socket mount 无 propagation/subPath。所有 Node 上 operator 负责提前提供 root0700 clock directory/root0600 两个实际 socket，且其证书对应被选择的 Node UID/boot；缺失即拒绝，不能改用 TCP proxy 伪造 SO_PEERCRED。对 socket 的 readonly mount 不代表禁止 connect；实际 UDS peer 仍由原 observer 验证。Control dir root0700 使用户无法访问管理文件。
+6. `internal/kubecontract` 拥有新 profile 的 builder/strict validator，供 Kubernetes builder、nodeobserver providerGuard、task cleanup 三处复用。所有 profile 关键字段都精确验证，host mount 只能这两个固定 readonly 源；不因自称 profile 而跳过原 exact UID/node/intent/generation/证书、资源或安全校验。保留原 no-volume/两 EmptyDir cleanup 分支，明确标记新 profile 才进入新校验；清理 descriptor 的原全 PodSpec hash、UID/RV 条件写和真实物理终止证明保持。profile validation 只给出结构符合，不授权命令/发布/owner释放。
+7. builder 入口 `BuildEnrolledPlainPod(namespace string, request EnrolledPlainPodRequest) (*corev1.Pod, error)`，位于 runtime/kubernetes。request 含标准 SandboxSpec、exact NodeName/UID/BootID、canonical config、creation intent 与 generation。它是纯 builder，无 API mutation、自动选择 Node 或 O(N) inventory，不改旧 createPod 默认入口。输出含原 cleanup retain finalizer、严格 logical/intent/profile metadata，并经共享 validator 自检；已有 caller labels/annotations不能覆盖受控字段。完整 create/inspect/bootstrap/etcd Publish 编排随后使用本接口。
+
+## 验收
+
+一个完整 Task、多个小提交、一位 fresh author 与一位 fresh reviewer。host RED→GREEN/race 覆盖 canonical 配置迁移、Pod builder 输出及两消费者接受同一 profile；对每个 hostPath/mount/command/security/node/config/intent 关键边界作有限 mutation 拒绝，旧 profile 原拒绝条件保留。明确测试未知 profile 不能掉进旧分支、config 与 nodeUID/boot 不一致拒绝、oversize/secret 字段拒绝。
+
+新增一份 Linux fixture，使用新 OWN 原产物执行正式 `serve-provisioned` PID1，实际模拟 readonly socket bind mounts 和初始0755 EmptyDir，由正式程序创建0600配置/0700目录；真实独立 observer/signed clock→bootstrap activation→management TLS publication→原 verifier 验证。新共享 Pod profile 必须是 observer 实际 GET 所见和 cleanup prepare 实际接受的结构，不能另造弱 fixture Pod。有限 stale-config/non-root/foreign-entry 负例可在同一隔离 fixture 串行执行，不重放旧完整矩阵。真实 kubelet/CRI admission、镜像打包、Node operator/provisioning和主流程尚未部署，应在报告中明确。
+
+沿用仅 apply_patch 编辑、无依赖升级/真实Redis/Kube/secret/fullinspect/push/deploy、每作者≤1/总≤2批准私有 Linux fixture、512MiB/2CPU/256PID/no-network/readonlyroot/NNP/原caps、原 Wait/Close/join/精确清理、全17字段实际GoList环境匹配→测试→独立post filename/SHA→ELF/source绑定、Root exactpaths锁窗口小步提交。不得读 CLOSED OWN 或修改无关 Sentinel。没有按已有 sandbox N 的常驻 map/timer/扫描。
+
+Ruling: 这是 master 已批准真实 launcher 路径的明确受控 profile，用户要求持续执行，不重复寻求执行许可。新 CLI mode 仅收紧和落盘公开配置；失败关闭，不扩大用户管理权限。错误选择的代价是后续真实 kubelet 验收返工；不能将本地 mount fixture 宣称为真实 Kubernetes 验收。
