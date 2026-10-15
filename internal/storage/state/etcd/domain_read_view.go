@@ -81,8 +81,28 @@ func (b *Backend) ReadSandboxView(ctx context.Context, sandboxID string) (*Sandb
 	return b.readViewFinal(ctx, keys, []clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(key), "=", points[0].ModRevision)})
 }
 
+// ConfirmSandboxView checks only that the same Backend's metadata evidence is
+// still current. A successful check grants no future operation, health, or TTL
+// permission. It performs exactly one read-only transaction and never retries.
 func (b *Backend) ConfirmSandboxView(ctx context.Context, view *SandboxReadView) error {
-	return ErrInvalidRecord
+	if err := b.readViewInput(ctx); err != nil {
+		return err
+	}
+	if view == nil || view.self != view || view.origin != b || view.revision <= 0 {
+		return ErrInvalidRecord
+	}
+	if view.identityValue != b.identityValue || view.restoreEpoch != b.restoreEpoch || view.clusterID != b.clusterID {
+		return ErrIdentityMismatch
+	}
+	pins := make([]clientv3.Cmp, 4)
+	for i, key := range view.keys {
+		if !validNamespaceKey(b.namespace, key) || view.mods[i] <= 0 || view.mods[i] > view.revision {
+			return ErrInvalidRecord
+		}
+		pins[i] = clientv3.Compare(clientv3.ModRevision(key), "=", view.mods[i])
+	}
+	_, _, err := b.readViewPoints(ctx, nil, nil, pins)
+	return err
 }
 
 func (b *Backend) readViewInput(ctx context.Context) error {
