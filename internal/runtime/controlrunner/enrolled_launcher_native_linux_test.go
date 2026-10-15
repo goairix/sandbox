@@ -93,7 +93,15 @@ func TestEnrolledLauncherNativeLiveGate(t *testing.T) {
 }
 
 func runEnrolledLauncherNative(t *testing.T, modes []string) {
-	if os.Getenv("SANDBOX_ENROLLED_LAUNCHER_NATIVE") != "1" {
+	runEnrolledLauncherNativeWithProfile(t, modes, false)
+}
+
+func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolledProfile bool) {
+	enabled := "SANDBOX_ENROLLED_LAUNCHER_NATIVE"
+	if enrolledProfile {
+		enabled = "SANDBOX_ENROLLED_PROFILE_NATIVE"
+	}
+	if os.Getenv(enabled) != "1" {
 		t.Skip("requires exact owned enrolled launcher Linux fixture")
 	}
 	require.Zero(t, os.Geteuid())
@@ -108,7 +116,14 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 	// Root approved this bounded private tmpfs solely for fixed protected paths.
 	require.NoError(t, unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700,size=1048576"))
 	t.Cleanup(func() { require.NoError(t, unix.Unmount("/run", 0)) })
-	require.NoError(t, os.Mkdir(ct.ControlDirectory, 0700))
+	controlMode := os.FileMode(0700)
+	if enrolledProfile {
+		controlMode = 0755
+	}
+	require.NoError(t, os.Mkdir(ct.ControlDirectory, controlMode))
+	if enrolledProfile {
+		require.NoError(t, os.Mkdir("/run/sandbox-node-observer", 0700))
+	}
 	require.NoError(t, os.Mkdir(filepath.Dir(ct.ClockSocket), 0700))
 	admin, observerTLS, cluster := observerNativeEtcd(t, dir)
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
@@ -127,6 +142,9 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 	publicationVerifier, err := p.NewPublicationVerifier(binding, []ed25519.PublicKey{root.Public().(ed25519.PublicKey)})
 	require.NoError(t, err)
 	contract := hashBytes([]byte("formal-enrolled-launcher-v2"))
+	if enrolledProfile {
+		contract = profileFixtureContract(t)
+	}
 	bootWire, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	require.NoError(t, err)
 	boot, nodeUID := strings.TrimSpace(string(bootWire)), uuid.NewString()
@@ -163,6 +181,9 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 			podName := "launcher-" + mode
 			zero, no, yes := int64(0), false, true
 			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: "runtimes", UID: types.UID(podUID), ResourceVersion: "1", Annotations: map[string]string{"sandbox.creation.intent": creation}}, Spec: v1.PodSpec{NodeName: "node-a", RestartPolicy: v1.RestartPolicyNever, SecurityContext: &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}, Containers: []v1.Container{{Name: "sandbox", SecurityContext: &v1.SecurityContext{RunAsUser: &zero, Privileged: &no, AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, Capabilities: &v1.Capabilities{Drop: []v1.Capability{"ALL"}, Add: []v1.Capability{"KILL", "SETUID", "SETGID", "SETPCAP"}}}}}}}
+			if enrolledProfile {
+				pod = profileFixturePod(t, binding, root.Public().(ed25519.PublicKey), clockPublic, nodeUID, boot, creation, podName, podUID, mode)
+			}
 			node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
 			var podReads atomic.Int32
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,10 +215,17 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 					require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "original observer Serve join: %v", err)
 				}
 			})
-			uds, err := net.ListenUnix("unix", &net.UnixAddr{Name: ct.EnrollmentSocket, Net: "unix"})
+			enrollmentSocket := ct.EnrollmentSocket
+			if enrolledProfile {
+				enrollmentSocket = "/run/sandbox-node-observer/enrollment.sock"
+			}
+			uds, err := net.ListenUnix("unix", &net.UnixAddr{Name: enrollmentSocket, Net: "unix"})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = uds.Close() })
-			require.NoError(t, os.Chmod(ct.EnrollmentSocket, 0600))
+			require.NoError(t, os.Chmod(enrollmentSocket, 0600))
+			if enrolledProfile {
+				require.NoError(t, os.WriteFile(ct.EnrollmentSocket, nil, 0600))
+			}
 			tcp, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = tcp.Close() })
@@ -210,7 +238,12 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 			bindingWire := observerNativeRecord(t, "namespace,authority_id,target,restore_epoch", binding.Namespace, binding.AuthorityID, binding.Target, binding.RestoreEpoch)
 			enrollmentWire := observerNativeRecord(t, "node_uid,node_boot_id", configuredNode, boot)
 			config := observerNativeRecord(t, "version,binding,roots,uid,gid,network_allowed,contract_digest,clock_socket,clock_public_key,clock_audience,max_active,enrollment", 2, json.RawMessage(bindingWire), []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, 1000, 1000, false, contract, ct.ClockSocket, clockPublic, "launcher", 4, json.RawMessage(enrollmentWire))
-			require.NoError(t, os.WriteFile(ct.ControlDirectory+"/config.json", config, 0600))
+			if enrolledProfile {
+				require.Equal(t, string(config), pod.Spec.Containers[0].Env[0].Value)
+				profileNativeRefusals(t, mount, config)
+			} else {
+				require.NoError(t, os.WriteFile(ct.ControlDirectory+"/config.json", config, 0600))
+			}
 			owned := filepath.Join(mount, "launcher-"+uuid.NewString())
 			require.NoError(t, os.Mkdir(owned, 0700))
 			t.Cleanup(func() {
@@ -223,6 +256,10 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 			require.NoError(t, err)
 			child := exec.Command(os.Args[0], "-test.run=^TestEnrolledLauncherNativeExec$", "-test.v", "-test.timeout=30s")
 			child.Env = append(os.Environ(), "ENROLLED_LAUNCHER_EXEC_CGROUP_MOUNT="+mount)
+			if enrolledProfile {
+				child.Args = []string{os.Args[0], "-test.run=^TestEnrolledProfileNativeExec$", "-test.v", "-test.timeout=30s"}
+				child.Env = append(child.Env, "SANDBOX_LAUNCHER_CONFIG_V2="+string(config), "ENROLLED_PROFILE_EXEC_MODE=active")
+			}
 			child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWNS, UseCgroupFD: true, CgroupFD: fd}
 			child.Stdout, child.Stderr = os.Stdout, os.Stderr
 			startErr := child.Start()
@@ -259,7 +296,12 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 			}
 			executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", child.Process.Pid))
 			require.NoError(t, err)
-			require.Equal(t, "/fixture/launcher", executable)
+			if enrolledProfile {
+				require.Equal(t, "/usr/local/bin/sandbox-launcher", executable)
+				profileNativeProvisioned(t, child.Process.Pid, config)
+			} else {
+				require.Equal(t, "/fixture/launcher", executable)
+			}
 			call, cancelCall := context.WithTimeout(ctx, 10*time.Second)
 			defer cancelCall()
 			hello, err := launcherNativeBootstrap(call, ct.BootstrapRequest{Version: 1, Purpose: "hello"})
@@ -300,6 +342,9 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 				require.Equal(t, nodeUID, evidence.EnrollmentReceipt().NodeUID)
 				require.True(t, bytes.Equal(activation, enrollment.Request.Activation))
 				t.Logf("formal CLI PID1 original verifier authenticated enrolled ready=%s bytes=%d", evidence.Digest(), len(proof))
+				if enrolledProfile {
+					profileNativeCleanupPrepare(t, api.URL, binding, ri, creation, nodeUID, boot, contract, evidence.EnrollmentReceipt().EnrollmentDigest)
+				}
 				if mode == "live-gate" {
 					// The fixture's original certified issuer only tightens the gate.
 					// These fixed claims do not demonstrate a Backend creation claim.
@@ -330,7 +375,7 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 					require.NoError(t, err)
 					require.Equal(t, "/fixture/launcher", executable)
 					t.Log("original signed data_closed receipt authenticated; same formal CLI alive with TLS history available; new publication refused")
-				} else {
+				} else if !enrolledProfile {
 					badCertificate := bytes.Clone(certificate)
 					badCertificate[len(badCertificate)-2] ^= 1
 					_, _, err = destination.ReadEnrolledPublication(call, badCertificate, claim)
@@ -356,7 +401,7 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 				}
 				require.NoError(t, child.Process.Signal(syscall.SIGTERM))
 				require.NoError(t, waitChild())
-				if mode != "live-gate" {
+				if mode != "live-gate" && !enrolledProfile {
 					_, _, err = destination.ReadEnrolledPublication(call, certificate, claim)
 					require.Error(t, err)
 					t.Log("wrong certificate/runtime/issuer and closed formal launcher refused publication")
