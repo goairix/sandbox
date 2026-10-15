@@ -1,12 +1,18 @@
 package etcd
 
 import (
+	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/goairix/sandbox/internal/runtime/launcher"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func (s *taskArchiveStore) registerRecovery(ctx context.Context, slot uint32) (*taskWorkspaceSyncRecoverySource, error) {
@@ -114,8 +120,16 @@ func (s *taskWorkspaceSyncRecoverySource) load(ctx context.Context) error {
 		return err
 	}
 	s.index = make([]byte, int(s.store.indexBytes))
+	before, err := workspaceSyncRecoveryArchiveStamp(s.file)
+	if err != nil {
+		return err
+	}
 	if err := s.store.verifyColdTar(ctx, s.file, recoverySlotName(s.slot)+".tar", s.identity, m, s.index); err != nil {
 		return err
+	}
+	s.stamp, err = workspaceSyncRecoveryArchiveStamp(s.file)
+	if err != nil || before != s.stamp {
+		return errors.Join(ErrIdentityMismatch, err)
 	}
 	s.manifest = m
 	s.plan, err = m.Binding.Plan.plan()
@@ -151,9 +165,21 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 		if err == nil {
 			_, err = s.authority.queryProducer(s.ctx, destination)
 		}
+		if err == nil {
+			s.target, err = openTaskWorkspaceSyncLocalTarget(s.ctx, worker, s.plan, s.manifest.Binding.Local.Root)
+		}
+		if err == nil && !workspaceSyncRecoverySameTarget(s.manifest.Binding.Local, s.target.pin) {
+			err = ErrIdentityMismatch
+		}
+	}
+	if err == nil {
+		s.cursor = newWorkspaceSyncArchiveCursor(s.manifest.Received.Bytes, s.manifest.Received.Entries, s.index, s.plan, s.readAt)
 	}
 	s.end()
 	if err != nil {
+		return nil, err
+	}
+	if err := s.restoreCheckpoint(s.ctx); err != nil {
 		return nil, err
 	}
 	go s.monitor()
@@ -172,10 +198,14 @@ func (s *taskWorkspaceSyncRecoverySource) monitor() {
 				if s.ctx.Err() != nil {
 					return
 				}
+				if s.local(s.ctx) != nil {
+					s.cancel()
+					return
+				}
 				timer.Reset(250 * time.Millisecond)
 				continue
 			}
-			err := s.authority.guard(s.ctx)
+			err := s.guard(s.ctx)
 			s.end()
 			if err != nil {
 				s.cancel()
@@ -184,4 +214,236 @@ func (s *taskWorkspaceSyncRecoverySource) monitor() {
 			timer.Reset(250 * time.Millisecond)
 		}
 	}
+}
+
+func workspaceSyncRecoverySameTarget(a, b taskWorkspaceSyncLocalAttribution) bool {
+	x, y := a.Worker, b.Worker
+	if x.BootID != y.BootID || x.PIDNamespaceDev != y.PIDNamespaceDev || x.PIDNamespaceIno != y.PIDNamespaceIno || x.MountNamespaceDev != y.MountNamespaceDev || x.MountNamespaceIno != y.MountNamespaceIno {
+		return false
+	}
+	a.Worker = b.Worker
+	return a == b
+}
+
+// local never performs IO and may run while nativeMu is held. Source begin/end
+// owns descriptor lifetime; physical checks deliberately run outside nativeMu.
+func (s *taskWorkspaceSyncRecoverySource) local(ctx context.Context) error {
+	if ctx == nil || ctx.Err() != nil || s.ctx.Err() != nil {
+		return ErrGuardExpired
+	}
+	return s.authority.local(ctx)
+}
+
+func (s *taskWorkspaceSyncRecoverySource) physical(ctx context.Context) error {
+	if err := s.local(ctx); err != nil {
+		return err
+	}
+	r := s.store.recovery
+	if err := taskArchiveRecoveryCheckRoot(s.store.root, r.directory, r.root); err != nil {
+		return err
+	}
+	if err := taskArchiveCheck(s.store.root, recoverySlotName(s.slot)+".tar", s.file, s.identity); err != nil {
+		return err
+	}
+	stamp, err := workspaceSyncRecoveryArchiveStamp(s.file)
+	if err != nil || stamp != s.stamp {
+		return errors.Join(ErrIdentityMismatch, err)
+	}
+	if s.target != nil {
+		return errors.Join(s.target.check(ctx), s.local(ctx))
+	}
+	return s.local(ctx)
+}
+
+func (s *taskWorkspaceSyncRecoverySource) comparisons(charge *taskWorkspaceSyncRecoveryCharge) []clientv3.Cmp {
+	a, b := s.authority, s.authority.backend
+	cmps := append([]clientv3.Cmp(nil), a.comparisons...)
+	cmps = append(cmps, clientv3.Compare(clientv3.Version(a.prefix), "=", 0).WithRange(clientv3.GetPrefixRangeEnd(a.prefix)))
+	cmps = append(cmps, b.workspaceSyncBudget.comparisons()...)
+	if charge != nil {
+		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(charge.intentKey), "=", charge.birth), clientv3.Compare(clientv3.ModRevision(charge.intentKey), "=", charge.birth), clientv3.Compare(clientv3.Value(charge.intentKey), "=", charge.value))
+	}
+	return cmps
+}
+
+func (s *taskWorkspaceSyncRecoverySource) native(ctx context.Context, cmps []clientv3.Cmp, success []clientv3.Op, protoSuccess []*pb.RequestOp, reply *pb.TxnResponse, emptyFailure bool) (*clientv3.TxnResponse, error) {
+	a := s.authority
+	a.nativeMu.Lock()
+	defer a.nativeMu.Unlock()
+	if err := s.local(ctx); err != nil {
+		return nil, err
+	}
+	r, err := workspaceSyncNativeTxn(ctx, a.backend, cmps, success, protoSuccess, reply, emptyFailure)
+	return r, errors.Join(err, s.local(ctx))
+}
+
+func (s *taskWorkspaceSyncRecoverySource) guard(ctx context.Context) error {
+	if err := s.physical(ctx); err != nil {
+		return err
+	}
+	var charge *taskWorkspaceSyncRecoveryCharge
+	if s.body != nil {
+		charge = s.body.charge
+	}
+	cmps := s.comparisons(charge)
+	if charge != nil {
+		g := charge.generation
+		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(charge.slotKey), "=", g.create), clientv3.Compare(clientv3.ModRevision(charge.slotKey), "=", g.mod), clientv3.Compare(clientv3.Value(charge.slotKey), "=", g.value))
+	}
+	keys := []string{s.authority.backend.identityKey}
+	_, err := s.native(ctx, cmps, workspaceSyncPointOps(keys), taskProtoPoints(keys), taskProtoResponse(keys, []string{s.authority.backend.identityValue}), false)
+	if err != nil {
+		return err
+	}
+	return s.physical(ctx)
+}
+
+func (s *taskWorkspaceSyncRecoverySource) readAt(ctx context.Context, data []byte, offset int64) (int, error) {
+	if offset < 0 || uint64(offset) > s.manifest.Received.Bytes || uint64(len(data)) > s.manifest.Received.Bytes-uint64(offset) {
+		return 0, ErrInvalidRecord
+	}
+	total := 0
+	for len(data) > 0 {
+		if err := s.physical(ctx); err != nil {
+			return total, err
+		}
+		chunk := data
+		if len(chunk) > 32768 {
+			chunk = chunk[:32768]
+		}
+		n, err := s.file.ReadAt(chunk, offset+int64(total))
+		total += n
+		if after := s.physical(ctx); after != nil {
+			return total, errors.Join(err, after)
+		}
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrNoProgress
+		}
+		data = data[n:]
+	}
+	return total, nil
+}
+
+func (s *taskWorkspaceSyncRecoverySource) next(ctx context.Context) (*workspaceSyncArchiveEntry, error) {
+	if err := s.begin(ctx); err != nil {
+		return nil, err
+	}
+	defer s.end()
+	if s.body != nil && !s.body.settled {
+		return nil, ErrConflict
+	}
+	if err := s.guard(ctx); err != nil {
+		return nil, err
+	}
+	s.current, s.body = nil, nil
+	e, err := s.cursor.next(ctx)
+	if err != nil {
+		if err == io.EOF {
+			if after := s.guard(ctx); after != nil {
+				return nil, after
+			}
+		}
+		return nil, err
+	}
+	if err := s.guard(ctx); err != nil {
+		return nil, err
+	}
+	s.current = e
+	return e, nil
+}
+
+type workspaceSyncRecoveryReadAt struct {
+	source *taskWorkspaceSyncRecoverySource
+	ctx    context.Context
+}
+
+func (r workspaceSyncRecoveryReadAt) ReadAt(data []byte, offset int64) (int, error) {
+	return r.source.readAt(r.ctx, data, offset)
+}
+
+func (s *taskWorkspaceSyncRecoverySource) openBody(ctx context.Context, e *workspaceSyncArchiveEntry) (*taskWorkspaceSyncRecoveryBody, error) {
+	if err := s.begin(ctx); err != nil {
+		return nil, err
+	}
+	defer s.end()
+	if e == nil || s.current != e || e.kind != tar.TypeReg || s.body != nil {
+		return nil, ErrInvalidRecord
+	}
+	if err := s.guard(ctx); err != nil {
+		return nil, err
+	}
+	owned, cancel := context.WithCancel(s.ctx)
+	body := &taskWorkspaceSyncRecoveryBody{source: s, entry: e, ctx: owned, cancel: cancel, hash: sha256.New(), reader: io.NewSectionReader(workspaceSyncRecoveryReadAt{s, owned}, e.offset, e.size)}
+	body.self, s.body = body, body
+	return body, nil
+}
+
+func (b *taskWorkspaceSyncRecoveryBody) readOwned(ctx context.Context, data []byte) (int, error) {
+	if err := errors.Join(b.ctx.Err(), b.source.guard(ctx)); err != nil {
+		return 0, err
+	}
+	if len(data) > 32768 {
+		data = data[:32768]
+	}
+	n, err := b.reader.Read(data)
+	b.bytes += int64(n)
+	b.hash.Write(data[:n])
+	if after := b.source.guard(ctx); after != nil {
+		return n, errors.Join(err, after)
+	}
+	if b.bytes == b.entry.size && (err == nil || err == io.EOF) {
+		if hex.EncodeToString(b.hash.Sum(nil)) != b.entry.sha256 {
+			return n, ErrIdentityMismatch
+		}
+		b.complete = true
+		return n, io.EOF
+	}
+	if err != nil {
+		return n, errors.Join(io.ErrUnexpectedEOF, err)
+	}
+	return n, nil
+}
+
+func (b *taskWorkspaceSyncRecoveryBody) Read(data []byte) (int, error) {
+	if b == nil || b.self != b {
+		return 0, ErrInvalidRecord
+	}
+	if err := b.source.begin(b.ctx); err != nil {
+		return 0, err
+	}
+	defer b.source.end()
+	b.mu.Lock()
+	if b.closed || b.active {
+		b.mu.Unlock()
+		return 0, ErrInvalidRecord
+	}
+	b.active, b.done = true, make(chan struct{})
+	b.mu.Unlock()
+	defer func() { b.mu.Lock(); b.active = false; close(b.done); b.mu.Unlock() }()
+	return b.readOwned(b.ctx, data)
+}
+
+func (b *taskWorkspaceSyncRecoveryBody) Close() error {
+	if b == nil || b.self != b {
+		return ErrInvalidRecord
+	}
+	b.mu.Lock()
+	b.closed = true
+	active, done := b.active, b.done
+	if active {
+		b.cancel()
+	}
+	b.mu.Unlock()
+	if active {
+		<-done
+	}
+	b.cancel()
+	if !b.complete {
+		b.source.cancel()
+		return errTaskArchive
+	}
+	return nil
 }
