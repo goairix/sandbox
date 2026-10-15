@@ -6,12 +6,15 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
 // ManagementTLSCredential owns a copied delegate key and custom certificate.
 // It has no key getter and grants no operation or activation authority.
 type ManagementTLSCredential struct {
+	mu                  sync.RWMutex
+	closed              bool
 	key                 ed25519.PrivateKey
 	certificate         []byte
 	role                string
@@ -38,6 +41,12 @@ func NewManagementTLSCredential(key ed25519.PrivateKey, certificate []byte, role
 		return nil, err
 	}
 	c := &ManagementTLSCredential{key: private, certificate: append([]byte(nil), certificate...), role: role}
+	installed := false
+	defer func() {
+		if !installed {
+			clear(private)
+		}
+	}()
 	var public []byte
 	switch role {
 	case "command_issuer":
@@ -75,7 +84,59 @@ func NewManagementTLSCredential(key ed25519.PrivateKey, certificate []byte, role
 	if !bytes.Equal(public, private[ed25519.SeedSize:]) {
 		return nil, fmt.Errorf("management TLS key does not match custom certificate")
 	}
+	installed = true
 	return c, nil
+}
+
+// Close seals future key access. The owning Supervisor joins its actual
+// transport and signing owners before disposing this credential.
+func (c *ManagementTLSCredential) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	clear(c.key)
+	return nil
+}
+
+func (c *ManagementTLSCredential) available() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.closed && len(c.key) == ed25519.PrivateKeySize
+}
+
+func (c *ManagementTLSCredential) matchesPublicKey(key []byte) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.closed && len(c.key) == ed25519.PrivateKeySize && bytes.Equal(key, c.key[ed25519.SeedSize:])
+}
+
+type managementCredentialSigner struct {
+	credential *ManagementTLSCredential
+	context    string
+}
+
+func (s *managementCredentialSigner) Public() crypto.PublicKey {
+	c := s.credential
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed || len(c.key) != ed25519.PrivateKeySize {
+		return ed25519.PublicKey(nil)
+	}
+	return append(ed25519.PublicKey(nil), c.key[ed25519.SeedSize:]...)
+}
+
+func (s *managementCredentialSigner) Sign(random io.Reader, input []byte, options crypto.SignerOpts) ([]byte, error) {
+	c := s.credential
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed || len(c.key) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("management TLS credential closed")
+	}
+	borrowed := tlsOnlySigner{key: c.key, context: s.context}
+	return borrowed.Sign(random, input, options)
 }
 
 // tlsOnlySigner exposes possession proof solely in the role-specific TLS 1.3

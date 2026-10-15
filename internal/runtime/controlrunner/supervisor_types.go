@@ -47,6 +47,9 @@ type Supervisor struct {
 	key                       ed25519.PrivateKey
 	executable                os.FileInfo
 	activation                *controlprotocol.TargetActivationEvidence
+	enrollmentOptions         *NodeEnrollmentOptions
+	enrollment                *supervisorEnrollmentAttempt
+	enrollmentSealed          bool
 	journal                   *controltarget.Journal
 	credential                *controlprotocol.ManagementTLSCredential
 	tlsConfig                 *tls.Config

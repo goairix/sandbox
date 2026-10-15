@@ -15,6 +15,9 @@ func (s *Supervisor) Activate(ctx context.Context, e controlprotocol.TargetActiv
 	if nilValue(ctx) {
 		return ErrInvalidConfiguration
 	}
+	if s.enrollmentOptions != nil {
+		return s.activateEnrolled(ctx, e)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.failed {
@@ -67,6 +70,18 @@ func (s *Supervisor) Activate(ctx context.Context, e controlprotocol.TargetActiv
 func (s *Supervisor) CloseAdmission(ctx context.Context) error {
 	if err := s.validateReceiver(); err != nil {
 		return err
+	}
+	if s.enrollmentOptions != nil {
+		s.mu.Lock()
+		s.enrollmentSealed = true
+		s.admission = false
+		journal, activation := s.journal, s.activation
+		s.mu.Unlock()
+		if journal != nil && activation != nil {
+			_, err := journal.CloseGate(ctx, activation.DataGateEpoch())
+			return err
+		}
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

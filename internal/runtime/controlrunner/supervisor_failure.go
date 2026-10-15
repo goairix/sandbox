@@ -46,11 +46,14 @@ func (s *Supervisor) stopExecutions() (bool, error) {
 	s.admission = false
 	a := s.quiescence
 	archive := s.archive
+	enrollment := s.enrollment
+	s.enrollmentSealed = true
 	active := make([]*Execution, 0, len(s.active))
 	for _, e := range s.active {
 		active = append(active, e)
 	}
 	s.mu.Unlock()
+	s.joinEnrollment(enrollment)
 	if a != nil {
 		select {
 		case <-a.done:
@@ -137,11 +140,13 @@ func (s *Supervisor) finishStopExecutions(owner *isolationDeadline, originalDead
 func (s *Supervisor) destroyResources() error {
 	s.mu.Lock()
 	journal := s.journal
+	credential := s.credential
 	s.mu.Unlock()
 	var err error
 	if journal != nil {
 		err = journal.Close()
 	}
+	_ = credential.Close()
 	s.mu.Lock()
 	clear(s.key)
 	s.mu.Unlock()

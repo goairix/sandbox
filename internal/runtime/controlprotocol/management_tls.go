@@ -29,7 +29,7 @@ func NewManagementTLSConfig(o ManagementTLSOptions) (*tls.Config, error) {
 	if o.Server {
 		expectedRole = "runtime_receipt"
 	}
-	if c.role != expectedRole || len(c.key) != ed25519.PrivateKeySize {
+	if c.role != expectedRole || !c.available() {
 		return nil, fmt.Errorf("management TLS local role mismatch")
 	}
 	peer := append([]byte(nil), o.PeerCertificate...)
@@ -115,7 +115,7 @@ func NewManagementTLSConfig(o ManagementTLSOptions) (*tls.Config, error) {
 			peerBefore = remote.notBefore
 			peerAfter = remote.notAfter
 		}
-		if !bytes.Equal(localKey, c.key[ed25519.SeedSize:]) || bytes.Equal(localKey, peerKey) {
+		if !c.matchesPublicKey(localKey) || bytes.Equal(localKey, peerKey) {
 			return fmt.Errorf("management TLS delegates must match and be independent")
 		}
 		return verifyManagementTLSLeaf(state.PeerCertificates[0], peerKey, server, peerBefore, peerAfter, now)
@@ -124,6 +124,11 @@ func NewManagementTLSConfig(o ManagementTLSOptions) (*tls.Config, error) {
 }
 
 func managementTLSLeaf(c *ManagementTLSCredential) (tls.Certificate, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed || len(c.key) != ed25519.PrivateKeySize {
+		return tls.Certificate{}, fmt.Errorf("management TLS credential closed")
+	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return tls.Certificate{}, err
@@ -152,7 +157,7 @@ func managementTLSLeaf(c *ManagementTLSCredential) (tls.Certificate, error) {
 	if len(der) > maxManagementTLSLeafBytes {
 		return tls.Certificate{}, fmt.Errorf("TLS leaf exceeds limit")
 	}
-	signer := &tlsOnlySigner{key: append(ed25519.PrivateKey(nil), c.key...), context: "TLS 1.3, " + role + " CertificateVerify\x00"}
+	signer := &managementCredentialSigner{credential: c, context: "TLS 1.3, " + role + " CertificateVerify\x00"}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: signer}, nil
 }
 func verifyManagementTLSLeaf(leaf *x509.Certificate, key ed25519.PublicKey, peerIsClient bool, notBefore, notAfter, now time.Time) error {
