@@ -51,7 +51,7 @@ build() {
 }
 if [[ "$mode" == host-red || "$mode" == host-green ]]; then
   selector=${LOCAL_RELEASE_HOST_SELECTOR:-'^TestLocalRuntimeReleaseOpaqueBinding$'}
-  case "$selector" in '^TestLocalRuntimeReleaseOpaqueBinding$'|'^TestLocalRuntimeReleaseDomainRecords$') ;; *) exit 2;; esac
+  case "$selector" in '^TestLocalRuntimeReleaseOpaqueBinding$'|'^TestLocalRuntimeReleaseDomainRecords$'|'^TestLocalRuntimeReleaseMaximumWire$') ;; *) exit 2;; esac
   base="$own/host-$epoch"
   inputs "$base-inputs.txt" ./internal/storage/state/etcd test darwin
   xargs shasum -a 256 < "$base-inputs.txt" > "$base-before.sha256"
