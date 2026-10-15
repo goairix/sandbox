@@ -77,18 +77,22 @@ func TestEnrolledProfileNativeExec(t *testing.T) {
 	require.NoError(t, unix.Unmount(os.Getenv("ENROLLED_LAUNCHER_EXEC_CGROUP_MOUNT"), 0))
 	require.NoError(t, unix.Unmount("/proc", unix.MNT_DETACH))
 	require.NoError(t, unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""))
-	for _, capability := range []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_SYS_PTRACE} {
-		_, _, errno := syscall.AllThreadsSyscall6(unix.SYS_PRCTL, unix.PR_CAPBSET_DROP, capability, 0, 0, 0, 0)
+	if os.Getenv("ENROLLED_STARTUP_PROFILE_EXEC") == "1" {
+		require.NoError(t, startupDropSetupCapabilities())
+	} else {
+		for _, capability := range []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_SYS_PTRACE} {
+			_, _, errno := syscall.AllThreadsSyscall6(unix.SYS_PRCTL, unix.PR_CAPBSET_DROP, capability, 0, 0, 0, 0)
+			require.Zero(t, errno)
+		}
+		header := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+		data := &[2]unix.CapUserData{{Permitted: 0x1e0, Effective: 0x1e0}}
+		_, _, errno := syscall.AllThreadsSyscall(unix.SYS_CAPSET, uintptr(unsafe.Pointer(header)), uintptr(unsafe.Pointer(data)), 0)
+		runtime.KeepAlive(header)
+		runtime.KeepAlive(data)
 		require.Zero(t, errno)
 	}
-	header := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	data := &[2]unix.CapUserData{{Permitted: 0x1e0, Effective: 0x1e0}}
-	_, _, errno := syscall.AllThreadsSyscall(unix.SYS_CAPSET, uintptr(unsafe.Pointer(header)), uintptr(unsafe.Pointer(data)), 0)
-	runtime.KeepAlive(header)
-	runtime.KeepAlive(data)
-	require.Zero(t, errno)
 	if mode == "nonroot" {
-		_, _, errno = syscall.AllThreadsSyscall(unix.SYS_SETGID, 1000, 0, 0)
+		_, _, errno := syscall.AllThreadsSyscall(unix.SYS_SETGID, 1000, 0, 0)
 		require.Zero(t, errno)
 		_, _, errno = syscall.AllThreadsSyscall(unix.SYS_SETUID, 1000, 0, 0)
 		require.Zero(t, errno)
@@ -213,7 +217,7 @@ func profileNativeProvisioned(t *testing.T, pid int, config []byte) {
 		return h.Sum(nil)
 	}
 	require.Equal(t, hash(kubecontract.EnrolledLauncherPath), hash(fmt.Sprintf("/proc/%d/exe", pid)))
-	t.Log("formal PID1 provisioned original0755 to0700/config0600; actual readonly socket/clock mounts and exact executable ELF verified")
+	t.Log("formal PID1 provisioned control0700/config0600; actual readonly socket/clock mounts and exact executable ELF verified")
 }
 
 func profileNativeCleanupPrepare(t *testing.T, endpoint string, authority p.TrustBinding, identity p.RuntimeIdentityContext, intent, nodeUID, boot, contract, enrollment string) {

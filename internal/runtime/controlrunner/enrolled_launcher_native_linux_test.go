@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/goairix/sandbox/internal/nodeobserver"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
+	kube "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -97,9 +99,16 @@ func runEnrolledLauncherNative(t *testing.T, modes []string) {
 }
 
 func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolledProfile bool) {
+	runEnrolledLauncherFixture(t, modes, enrolledProfile, false)
+}
+
+func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, startup bool) {
 	enabled := "SANDBOX_ENROLLED_LAUNCHER_NATIVE"
 	if enrolledProfile {
 		enabled = "SANDBOX_ENROLLED_PROFILE_NATIVE"
+	}
+	if startup {
+		enabled = "SANDBOX_ENROLLED_KUBERNETES_STARTUP_NATIVE"
 	}
 	if os.Getenv(enabled) != "1" {
 		t.Skip("requires exact owned enrolled launcher Linux fixture")
@@ -121,6 +130,11 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 		controlMode = 0755
 	}
 	require.NoError(t, os.Mkdir(ct.ControlDirectory, controlMode))
+	if startup {
+		require.NoError(t, unix.Mount("tmpfs", ct.ControlDirectory, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "size=1048576"))
+		t.Cleanup(func() { require.NoError(t, unix.Unmount(ct.ControlDirectory, 0)) })
+		startupNativeInitialPermissions(t)
+	}
 	if enrolledProfile {
 		require.NoError(t, os.Mkdir("/run/sandbox-node-observer", 0700))
 	}
@@ -185,10 +199,26 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 				pod = profileFixturePod(t, binding, root.Public().(ed25519.PublicKey), clockPublic, nodeUID, boot, creation, podName, podUID, mode)
 			}
 			node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
+			var bridge *startupBridgeFixture
+			if startup {
+				pod.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
+				node.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Node"}
+				bridge = newStartupBridgeFixture()
+				t.Cleanup(func() {
+					bridge.Close()
+					if bridge.attempted {
+						t.Logf("startup bridge cleanup original Cmd.Wait called=%t result=%v; all IO/handler joined; relay=%v", bridge.waited, bridge.waitErr, bridge.result)
+					}
+				})
+			}
 			var podReads atomic.Int32
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
 					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				if startup && r.URL.Path == "/api/v1/namespaces/runtimes/pods/"+podName+"/exec" {
+					bridge.ServeHTTP(w, r)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -240,7 +270,9 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 			config := observerNativeRecord(t, "version,binding,roots,uid,gid,network_allowed,contract_digest,clock_socket,clock_public_key,clock_audience,max_active,enrollment", 2, json.RawMessage(bindingWire), []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, 1000, 1000, false, contract, ct.ClockSocket, clockPublic, "launcher", 4, json.RawMessage(enrollmentWire))
 			if enrolledProfile {
 				require.Equal(t, string(config), pod.Spec.Containers[0].Env[0].Value)
-				profileNativeRefusals(t, mount, config)
+				if !startup {
+					profileNativeRefusals(t, mount, config)
+				}
 			} else {
 				require.NoError(t, os.WriteFile(ct.ControlDirectory+"/config.json", config, 0600))
 			}
@@ -260,8 +292,16 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 				child.Args = []string{os.Args[0], "-test.run=^TestEnrolledProfileNativeExec$", "-test.v", "-test.timeout=30s"}
 				child.Env = append(child.Env, "SANDBOX_LAUNCHER_CONFIG_V2="+string(config), "ENROLLED_PROFILE_EXEC_MODE=active")
 			}
+			if startup {
+				child.Env = append(child.Env, "ENROLLED_STARTUP_PROFILE_EXEC=1")
+			}
 			child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWNS, UseCgroupFD: true, CgroupFD: fd}
 			child.Stdout, child.Stderr = os.Stdout, os.Stderr
+			var startupOutput bytes.Buffer
+			if startup {
+				output := io.MultiWriter(os.Stdout, &startupOutput)
+				child.Stdout, child.Stderr = output, output
+			}
 			startErr := child.Start()
 			closeErr := unix.Close(fd)
 			require.NoError(t, startErr)
@@ -288,6 +328,19 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 			}
 			readyDeadline := time.Now().Add(5 * time.Second)
 			for {
+				if startup {
+					select {
+					case early := <-wait:
+						waited = true
+						var exited *exec.ExitError
+						require.ErrorAs(t, early, &exited)
+						require.Equal(t, 1, exited.ExitCode())
+						require.Contains(t, startupOutput.String(), "sandbox-launcher: invalid fresh control directory\n")
+						require.NotContains(t, startupOutput.String(), "--- FAIL:")
+						t.Fatal("startup original formal CLI Cmd.Wait=exit1: invalid fresh control directory")
+					default:
+					}
+				}
 				if _, err := os.Lstat(ct.ControlSocket); err == nil {
 					break
 				}
@@ -301,6 +354,11 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 				profileNativeProvisioned(t, child.Process.Pid, config)
 			} else {
 				require.Equal(t, "/fixture/launcher", executable)
+			}
+			if startup {
+				require.NoError(t, bridge.bindOriginalMountNamespace(child.Process.Pid))
+				// This later registration joins bridge children before PID1 cleanup.
+				t.Cleanup(bridge.Close)
 			}
 			call, cancelCall := context.WithTimeout(ctx, 10*time.Second)
 			defer cancelCall()
@@ -330,6 +388,13 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 				options := ct.DestinationOptions{Identity: ri, RuntimeCertificate: runtimeCert, Credential: credential, Verifier: verifier, Clock: nativeFixtureClock{}, Dial: func(ctx context.Context) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", ct.ControlSocket)
 				}}
+				if startup {
+					client, err := kube.NewEnrolledBridgeClient(kube.EnrolledBridgeOptions{Config: &rest.Config{Host: api.URL}, Namespace: "runtimes", MaxActive: 1, RequestTimeout: 5 * time.Second})
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, client.Close()) })
+					target := kube.EnrolledBridgeTarget{PodName: podName, PodUID: podUID, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, LogicalID: ri.SandboxID, CreationIntentID: creation, Generation: 1, Authority: binding, ContractDigest: contract, UID: 1000, GID: 1000}
+					options.Dial = func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, target) }
+				}
 				destination, err := ct.NewDestination(options)
 				require.NoError(t, err)
 				claim := p.ClaimReference{ClaimID: uuid.NewString(), CreateRevision: 1, LeaseID: 2}
@@ -342,6 +407,9 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 				require.Equal(t, nodeUID, evidence.EnrollmentReceipt().NodeUID)
 				require.True(t, bytes.Equal(activation, enrollment.Request.Activation))
 				t.Logf("formal CLI PID1 original verifier authenticated enrolled ready=%s bytes=%d", evidence.Digest(), len(proof))
+				if startup {
+					bridge.requireJoined(t)
+				}
 				if enrolledProfile {
 					profileNativeCleanupPrepare(t, api.URL, binding, ri, creation, nodeUID, boot, contract, evidence.EnrollmentReceipt().EnrollmentDigest)
 				}
