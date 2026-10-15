@@ -35,11 +35,13 @@
 
 **Interfaces:** exact public constructor/Prepare/Close and handle Descriptor/Observe/Apply signatures in Spec1; consume existing TaskRuntimeCleanupOptions/Binding/Step/Observation. 公共字段/enum不得擅改，opaque descriptor格式由本单元内部定义，不把可变API观察冒充权限。
 
-- [ ] **Step1 RED→GREEN boundedclient/descriptor/Close。** 新TestTaskRuntimeCleanupClientProfile/Descriptor/Owners验证nil/copy/config拒绝、strictcaps、真实原IOjoin。constructor不发API，Prepare/Observe只读。GREEN即小提交。
-- [ ] **Step2 RED→GREEN exact7effects。** TestTaskRuntimeCleanupClientEffects用实际HTTP/TLS server记录method/path/body/UID+RV；正向七动作、同名去重、replacement/foreignpolicy/finalizer/unknownprofile拒绝。复用strict ownership，不List；GREEN即小提交。
-- [ ] **Step3 one-requesttransport。** TestTaskRuntimeCleanupClientNoReplay逐个429+RetryAfter/307/308/brokenconn数实际收到请求，验证MaxRetries(0)/no redirect/HTTP1禁复用；blockedbody与Close实测。保留RED/failedattempt，再GREEN小提交。
-- [ ] **Step4 affectedgate/selfreport。** 有限 `^TestTaskRuntimeCleanupClient` race、kubernetesvet、Linuxarm64编译、gofmt-l和scope diffcheck，实际sourceclosure前后quiet/SHA；报告scope/原日志/真实Wait和限制，不称整链路/生产/容量完成。
-- [ ] **Step5 solefreshTaskreview。** Root只给本单元commits完整diff和binding spec；同pair限定fix。验收后通知组合作者消费，不重复组件矩阵；组合整链路仍独立验证durableintent/physicalproof/release。
+- [x] **Step1 RED→GREEN boundedclient/descriptor/Close。** 新TestTaskRuntimeCleanupClientProfile/Descriptor/Owners验证nil/copy/config拒绝、strictcaps、真实原IOjoin。constructor不发API，Prepare/Observe只读。GREEN即小提交。
+- [x] **Step2 RED→GREEN exact7effects。** TestTaskRuntimeCleanupClientEffects用实际HTTP/TLS server记录method/path/body/UID+RV；正向七动作、同名去重、replacement/foreignpolicy/finalizer/unknownprofile拒绝。复用strict ownership，不List；GREEN即小提交。
+- [x] **Step3 one-requesttransport。** TestTaskRuntimeCleanupClientNoReplay逐个429+RetryAfter/307/308/brokenconn数实际收到请求，验证MaxRetries(0)/no redirect/HTTP1禁复用；blockedbody与Close实测。保留RED/failedattempt，再GREEN小提交。
+- [x] **Step4 affectedgate/selfreport。** 有限 `^TestTaskRuntimeCleanupClient` race、kubernetesvet、Linuxarm64编译、gofmt-l和scope diffcheck，实际sourceclosure前后quiet/SHA；报告scope/原日志/真实Wait和限制，不称整链路/生产/容量完成。
+- [x] **Step5 solefreshTaskreview。** Root只给本单元commits完整diff和binding spec；同pair限定fix。验收后通知组合作者消费，不重复组件矩阵；组合整链路仍独立验证durableintent/physicalproof/release。
+
+范围验收记录：`docs/superpowers/reports/2026-10-16-task-runtime-cleanup-client-verification.md`。原 host subset/race 条件限制保留；R1 新完整绑定、限定 UID 增量与同 reviewer I1 关闭不替代原整轮或真实整链路。
 
 ## Root execution ruling
 

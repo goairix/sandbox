@@ -20,6 +20,10 @@
 
 ## 2026-10-15 接续
 
+2026-10-16 新增安全释放实现切片：`6160c36/7a06877/b03dbca` 和消费者身份修复 `cb09c09`，已提交严格记录/有界owner、独立历史权限、本地公开绑定、终止/清理/原子释放编排及只读冷诊断。当前 host 限定测试和64节点 wire投影通过，真实 Supervisor/observer/local sync→release 组合正在构建验证，尚未验收本完整安全释放单元。
+
+其独立 Kubernetes 精确清理客户端 `1cb993c/2689e5d/402fbc0` 与审查修复 `e2aa59e` 已范围验收：固定七槽、实际一次请求、UID/RV preflight、原body/dial真实join、超界响应硬拒绝。唯一fresh审查的policy UID缺口已由同pair修复闭环；原host source subset/race条件限制保留，新R1匹配条件的完整输入绑定和Linux编译已核对，未执行Linux或真实kubelet。详见 `2026-10-16-task-runtime-cleanup-client-verification.md`。该依赖完成不等于主程序生产迁移完成；百分比口径暂不因组件提交数上调，仍功能代码约50%/整体交付约35%/生产切换0%。
+
 本地完整同步单元已范围验收：`44673b4/0488e3c/3b1e4e6/30b5fc9` 与复审修复 `ba7a3dc`，接通目录/空目录、类型替换、删除策略与 excluded、临时权限恢复、实际关闭和 immutable complete。初审发现新 claim regular adoption 缺口，已通过真实延迟 GC 的 RED→GREEN 修复；同 reviewer 限定复审 C0/I0/M1 Approved，M1 为保留的 etcd teardown 日志。详见 `2026-10-15-workspace-sync-local-finalization-verification.md`。S64 单 partition 边界测试不是 full-cell 或大 N 容量验收，结果不是 release 权限。
 
 后续运行时关闭生产者已范围验收：十个连贯源码提交至 `2b2e55d`，以及 review 修复 `ec60d6f/2bbcb12/b76ebb8`，实现真实 Supervisor 登记、独立 TLS、固定60节点原生权限、单次 pidfd 终止、实际死亡和原 cgroup 排空、持久 terminal/unknown 的新 OS 进程查询。初审两项 Important 和 R1 引入的共享 TLS 容器竞态均已解决，同 reviewer R2 无新增 C/I/M。实际 Linux 结果、原始失败和物理替换等未强制场景仍明确保留；这不是 provider 清理、安全释放或生产部署验收。见 `2026-10-15-node-observer-physical-termination-verification.md`。
