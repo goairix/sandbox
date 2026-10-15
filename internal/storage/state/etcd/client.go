@@ -42,6 +42,8 @@ type Options struct {
 	TaskWorkspaceArchiveRecovery     *TaskWorkspaceArchiveRecoveryOptions
 	TaskWorkspaceSyncBudget          *TaskWorkspaceSyncBudgetOptions
 	TaskWorkspaceSyncRecyclingBudget *TaskWorkspaceSyncBudgetOptions
+	LocalRuntimeRelease              *LocalRuntimeReleaseOptions
+	TaskRuntimeTerminationIssuer     TaskRuntimeTerminationIssuer
 }
 
 type Backend struct {
@@ -69,10 +71,15 @@ type Backend struct {
 	archiveStore                              *taskArchiveStore
 	archiveLife                               *taskArchiveBackend
 	workspaceSyncBudget                       *taskWorkspaceSyncBudgetPin
+	localRuntimeRelease                       *LocalRuntimeReleaseOptions
+	taskRuntimeTerminationIssuer              TaskRuntimeTerminationIssuer
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validateLocalRuntimeRelease(o); err != nil {
+		return err
+	}
 	if _, err := enrolledPublicationAuthority(o); err != nil {
 		return err
 	}
@@ -193,6 +200,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
+	if o.LocalRuntimeRelease != nil {
+		owned := *o.LocalRuntimeRelease
+		o.LocalRuntimeRelease = &owned
+	}
 	if o.EnrolledPublication != nil {
 		owned := *o.EnrolledPublication
 		o.EnrolledPublication = &owned
@@ -268,6 +279,8 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b.taskVerifier = taskVerifier
 	b.execVerifier = execVerifier
 	b.authorityClock = o.Clock
+	b.localRuntimeRelease = o.LocalRuntimeRelease
+	b.taskRuntimeTerminationIssuer = o.TaskRuntimeTerminationIssuer
 	if o.PublicationTrust != nil {
 		b.publicationAuthorityID = o.PublicationTrust.AuthorityID
 		b.publicationTarget = o.PublicationTrust.Target

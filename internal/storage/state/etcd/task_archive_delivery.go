@@ -266,7 +266,13 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	for o := range b.archiveLife.enrolled {
 		enrolled = append(enrolled, o)
 	}
+	releases := b.archiveLife.runtimeReleases
 	b.archiveLife.mu.Unlock()
+	for _, o := range releases {
+		if o != nil {
+			o.cancel()
+		}
+	}
 	for _, o := range enrolled {
 		o.cancel()
 	}
@@ -281,6 +287,11 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	}
 	for _, o := range enrolled {
 		<-o.done
+	}
+	for _, o := range releases {
+		if o != nil {
+			<-o.done
+		}
 	}
 	var err error
 	if b.archiveStore != nil {

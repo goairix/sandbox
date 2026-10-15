@@ -58,12 +58,13 @@ func (o *taskArchiveDelivery) fail(err error) {
 // Pointer ownership keeps Backend diagnostic copies from copying live locks;
 // original Close callers share one admission seal and physical shutdown join.
 type taskArchiveBackend struct {
-	mu        sync.Mutex
-	owners    map[*taskArchiveDelivery]struct{}
-	enrolled  map[*runtimeEnrolledPublicationOwner]struct{}
-	closed    bool
-	closeDone chan struct{}
-	closeErr  error
+	mu              sync.Mutex
+	owners          map[*taskArchiveDelivery]struct{}
+	enrolled        map[*runtimeEnrolledPublicationOwner]struct{}
+	runtimeReleases [32]*taskLocalRuntimeReleaseOwner
+	closed          bool
+	closeDone       chan struct{}
+	closeErr        error
 }
 
 func (o *taskArchiveDelivery) failureError() error {

@@ -33,6 +33,7 @@ type TaskClaim struct {
 	finalSyncDraft                           *taskFinalSyncDraft
 	archiveDelivery                          *taskArchiveDelivery
 	archiveRecoveryAttempt                   bool // c.mu; charged attempts are never reopened
+	runtimeReleaseAttempt                    *taskLocalRuntimeReleaseOwner
 }
 
 // Both helpers require c.mu. They are used only by recovery receive admission.
