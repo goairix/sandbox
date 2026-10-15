@@ -151,11 +151,10 @@ func clearOwnedTLS(config *tls.Config) {
 				key.Precomputed = rsa.PrecomputedValues{}
 			}
 		}
-		config.Certificates[i] = tls.Certificate{}
 	}
-	config.Certificates = nil
-	config.RootCAs = nil
-	config.ClientCAs = nil
+	// Published Config clones share certificate backing storage. Keep every
+	// public container unchanged; late SDK work may read it and encounter the
+	// closed signer safely. Only Observer's own references are dropped below.
 }
 
 func copyObserverTLS(config *tls.Config) (_ *tls.Config, result error) {
@@ -512,9 +511,8 @@ func (o *Observer) Close() error {
 		}
 		if o.apiTransport != nil {
 			o.apiTransport.CloseIdleConnections()
-			// Client-go may cache parsed TLS objects: drop its references, do
-			// not mutate library-owned/shared private-key caches.
-			o.apiTransport.TLSClientConfig = nil
+			// Detached SDK dials may still read this Transport. Keep its public
+			// TLS config immutable and only release our owning reference.
 			o.apiTransport = nil
 		}
 		if o.lock != nil {

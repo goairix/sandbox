@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -33,6 +34,7 @@ func (credentialTestClock) Observe(ctx context.Context) (p.ClockObservation, err
 }
 
 func TestNodeObserverCredentialsCloseOwnership(t *testing.T) {
+	t.Run("published clone and transport remain immutable", testPublishedCredentialContainers)
 	public, callerKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	callerTLS := &tls.Config{RootCAs: x509.NewCertPool(), Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("bounded-public-cert")}, PrivateKey: callerKey}}}
@@ -44,6 +46,7 @@ func TestNodeObserverCredentialsCloseOwnership(t *testing.T) {
 	ownedKube := bytes.Clone(callerKube)
 	config := &rest.Config{BearerToken: "borrowed-immutable-token", TLSClientConfig: rest.TLSClientConfig{KeyData: ownedKube}}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{}}
+	publishedAPI := transport.TLSClientConfig
 	observer := &Observer{options: Options{EtcdTLS: ownedTLS, KubernetesConfig: config, PrivateKey: bytes.Clone(callerKey)}, apiTransport: transport, provider: providerGuard{client: &kubernetes.Clientset{}}}
 	require.NoError(t, observer.Close())
 	require.True(t, bytes.Equal(make([]byte, len(ownedKey)), ownedKey), "producer-owned TLS key bytes survive Close")
@@ -55,10 +58,62 @@ func TestNodeObserverCredentialsCloseOwnership(t *testing.T) {
 	require.Nil(t, observer.options.KubernetesConfig)
 	require.Nil(t, observer.provider.client)
 	require.Nil(t, observer.apiTransport)
-	require.Nil(t, transport.TLSClientConfig)
+	require.Same(t, publishedAPI, transport.TLSClientConfig)
 	message := []byte("caller remains usable")
 	require.True(t, ed25519.Verify(public, message, ed25519.Sign(callerKey, message)))
 	require.Equal(t, []byte("owned-kube-private-key"), callerKube)
+}
+
+func testPublishedCredentialContainers(t *testing.T) {
+	_, callerKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	owned, err := copyObserverTLS(&tls.Config{RootCAs: x509.NewCertPool(), Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("immutable-public-DER")}, PrivateKey: callerKey}}})
+	require.NoError(t, err)
+	clone := owned.Clone() // tls.Config.Clone shares the Certificates backing array.
+	signer := clone.Certificates[0].PrivateKey.(*observerTLSKey)
+	rootPool := owned.RootCAs
+	apiTLS := &tls.Config{ServerName: "immutable-api"}
+	transport := &http.Transport{TLSClientConfig: apiTLS}
+	o := &Observer{options: Options{EtcdTLS: owned}, apiTransport: transport}
+	read := func() error {
+		if len(clone.Certificates) != 1 || clone.Certificates[0].PrivateKey != signer || !bytes.Equal(clone.Certificates[0].Certificate[0], []byte("immutable-public-DER")) {
+			return fmt.Errorf("published TLS clone certificate container mutated")
+		}
+		if owned.RootCAs != rootPool || transport.TLSClientConfig != apiTLS {
+			return fmt.Errorf("published TLS config or Transport container mutated")
+		}
+		if signer.Public() == nil {
+			return fmt.Errorf("closed signer lost immutable public identity")
+		}
+		return nil
+	}
+	started, stop, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(started)
+		for {
+			if err := read(); err != nil {
+				done <- err
+				return
+			}
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+		}
+	}()
+	<-started
+	require.NoError(t, o.Close())
+	close(stop)
+	require.NoError(t, <-done)
+	require.NoError(t, read()) // Deterministic post-Close check, not only a race detector assertion.
+	_, err = signer.Sign(rand.Reader, []byte("SDK late handshake"), crypto.Hash(0))
+	require.Error(t, err)
+	require.Nil(t, o.options.EtcdTLS)
+	require.Nil(t, o.apiTransport)
+	message := []byte("caller still valid")
+	require.True(t, ed25519.Verify(callerKey.Public().(ed25519.PublicKey), message, ed25519.Sign(callerKey, message)))
 }
 
 func TestNodeObserverCredentialsFailurePreservesCaller(t *testing.T) {
