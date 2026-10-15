@@ -1,10 +1,15 @@
 package etcd
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,7 +19,96 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
+
+func TestEnrolledPublicationOversizeBeforeRPC(t *testing.T) {
+	// Count every outgoing native unary/stream RPC, including reads, rather
+	// than merely counting Grant or calling the record encoder directly.
+	var calls atomic.Int64
+	client, err := clientv3.New(clientv3.Config{Endpoints: []string{"http://127.0.0.1:1"}, Logger: zap.NewNop(), DialOptions: []grpc.DialOption{
+		grpc.WithUnaryInterceptor(func(context.Context, string, any, any, *grpc.ClientConn, grpc.UnaryInvoker, ...grpc.CallOption) error {
+			calls.Add(1)
+			return errors.New("unexpected native RPC")
+		}),
+		grpc.WithStreamInterceptor(func(context.Context, *grpc.StreamDesc, *grpc.ClientConn, string, grpc.Streamer, ...grpc.CallOption) (grpc.ClientStream, error) {
+			calls.Add(1)
+			return nil, errors.New("unexpected native stream RPC")
+		}),
+	}})
+	require.NoError(t, err)
+	defer client.Close()
+	n, err := NewNamespace("/"+strings.Repeat("p", 252), strings.Repeat("s", 128), strings.Repeat("c", 128))
+	require.NoError(t, err)
+	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
+	runtimeKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, 32))
+	issuerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, 32))
+	now := time.Now().UTC()
+	nb, na := now.Add(-time.Minute), now.Add(5*time.Minute)
+	var material controlprotocol.EnrolledRuntimeEvidence
+	var verifier *controlprotocol.ManagementVerifier
+	var reference CreationClaimReference
+	var recordBytes int
+	// Escaping is legitimate legacy wire expansion, not padding/unknown fields.
+	// Find an independently valid signed legacy activation+delegate set whose
+	// combined canonical companion exceeds the new record's stricter cap.
+	for width := 32; width <= 128; width += 8 {
+		large := strings.Repeat("<", width)
+		binding := controlprotocol.TrustBinding{Namespace: n.Root(), AuthorityID: large, Target: large, RestoreEpoch: "restore"}
+		v, err := controlprotocol.NewManagementVerifier(binding, []ed25519.PublicKey{root.Public().(ed25519.PublicKey)})
+		require.NoError(t, err)
+		runtime := controlprotocol.RuntimeReference{ID: large, UID: large, BootID: "11111111-1111-4111-8111-111111111111"}
+		identity := controlprotocol.RuntimeIdentityContext{SandboxID: "sandbox", WorkspaceHash: strings.Repeat("a", 64), Generation: 1, Runtime: runtime}
+		runtimeCertificate, err := controlprotocol.SignRuntimeIdentityCertificate(root, controlprotocol.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: "22222222-2222-4222-8222-222222222222", Role: "runtime_receipt", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: runtimeKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na, SandboxID: identity.SandboxID, WorkspaceHash: identity.WorkspaceHash, Generation: identity.Generation, Runtime: runtime})
+		if err != nil {
+			continue
+		}
+		issuerCertificate, err := controlprotocol.SignCommandIssuerCertificate(root, controlprotocol.CommandIssuerCertificateClaims{Version: 1, CertificateID: "33333333-3333-4333-8333-333333333333", Role: "command_issuer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: issuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
+		if err != nil {
+			continue
+		}
+		rd, _ := snapshotDigest(runtimeCertificate)
+		id, _ := snapshotDigest(issuerCertificate)
+		activation, err := controlprotocol.SignTargetActivation(root, controlprotocol.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: "44444444-4444-4444-8444-444444444444", Binding: binding, Identity: identity, DataGateEpoch: 1, UID: 1000, GID: 1000, ContractDigest: strings.Repeat("b", 64), RuntimeCertificateDigest: rd, IssuerCertificateDigest: id, NotBefore: nb, NotAfter: na})
+		require.NoError(t, err)
+		request := controlprotocol.NodeEnrollmentRequest{Version: 1, Purpose: "runtime_node_enrollment", RuntimeCertificate: runtimeCertificate, Activation: activation, IssuerCertificate: issuerCertificate}
+		if _, err := controlprotocol.EncodeNodeEnrollmentRequest(request); err != nil {
+			continue
+		}
+		_, err = v.VerifyNodeEnrollmentRequest(request, now)
+		require.NoError(t, err, "legacy activation and both root-signed delegates must actually verify")
+		receipt, err := json.Marshal(struct {
+			Claims struct {
+				Runtime controlprotocol.RuntimeReference `json:"runtime"`
+			} `json:"claims"`
+		}{Claims: struct {
+			Runtime controlprotocol.RuntimeReference `json:"runtime"`
+		}{runtime}})
+		require.NoError(t, err)
+		candidate := controlprotocol.EnrolledRuntimeEvidence{Request: request, ObserverCertificate: []byte(`{"shape":"input-only"}`), Receipt: receipt}
+		d := RuntimeDispatchRecord{IntentID: "intent", SandboxID: identity.SandboxID, WorkspaceHash: identity.WorkspaceHash, RestoreEpoch: binding.RestoreEpoch, Generation: 1}
+		_, companion := enrollmentRecords(d, candidate)
+		wire, err := json.Marshal(companion)
+		require.NoError(t, err)
+		if len(wire) <= 8192 {
+			continue
+		}
+		material, verifier, recordBytes = candidate, v, len(wire)
+		reference = CreationClaimReference{IntentID: d.IntentID, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, RestoreEpoch: d.RestoreEpoch, Generation: d.Generation}
+		break
+	}
+	require.Greater(t, recordBytes, 8192, "fixture must exceed the new companion cap within the valid legacy frame")
+	b := &Backend{client: client, namespace: n, restoreEpoch: "restore", requestTimeout: 50 * time.Millisecond, archiveLife: &taskArchiveBackend{}, enrolledPublication: &EnrolledPublicationOptions{MaxActive: 1}, publicationVerifier: &controlprotocol.PublicationVerifier{}, enrolledVerifier: verifier}
+	b.identityKey, _ = n.Key("meta", "identity")
+	b.restoreKey, _ = n.Key("meta", "restore_epoch")
+	c := &CreationClaim{origin: b, reference: reference, deadline: time.Now().Add(time.Minute)}
+	calls.Store(0)
+	_, err = b.PublishRuntimeEnrolled(context.Background(), c, []byte(`{}`), material)
+	require.ErrorIs(t, err, ErrInvalidRecord)
+	require.Zero(t, calls.Load(), "oversized final companion must refuse at the public entry before every native RPC")
+	require.Nil(t, c.enrolledAttempt, "rejected input must not freeze a Stage attempt")
+	t.Logf("verified legacy request accepted, new companion=%d bytes, native unary/stream calls=0", recordBytes)
+}
 
 func TestEnrolledPublicationOwners(t *testing.T) {
 	b := &Backend{enrolledPublication: &EnrolledPublicationOptions{MaxActive: 1}, archiveLife: &taskArchiveBackend{}}

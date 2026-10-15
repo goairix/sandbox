@@ -20,11 +20,16 @@ type runtimeEnrolledPublicationOwner struct {
 	done    chan struct{}
 }
 
-func enrolledPublicationInput(proof []byte, enrollment p.EnrolledRuntimeEvidence) (string, error) {
+func enrolledPublicationInputBounds(proof []byte, enrollment p.EnrolledRuntimeEvidence) error {
 	if len(proof) == 0 || len(proof) > 8192 || len(enrollment.ObserverCertificate) == 0 || len(enrollment.ObserverCertificate) > 2048 || len(enrollment.Receipt) == 0 || len(enrollment.Receipt) > 4096 {
-		return "", ErrInvalidRecord
+		return ErrInvalidRecord
 	}
-	if _, err := p.EncodeNodeEnrollmentRequest(enrollment.Request); err != nil {
+	_, err := p.EncodeNodeEnrollmentRequest(enrollment.Request)
+	return err
+}
+
+func enrolledPublicationInput(proof []byte, enrollment p.EnrolledRuntimeEvidence) (string, error) {
+	if err := enrolledPublicationInputBounds(proof, enrollment); err != nil {
 		return "", err
 	}
 	wire, err := json.Marshal(struct {
@@ -48,6 +53,10 @@ func (b *Backend) PublishRuntimeEnrolled(ctx context.Context, c *CreationClaim, 
 	if c == nil || c.origin != b {
 		return result, ErrInvalidRecord
 	}
+	// Refuse untrusted unbounded backing before making any owned copies.
+	if err := enrolledPublicationInputBounds(proof, enrollment); err != nil {
+		return result, err
+	}
 	owned, material := bytes.Clone(proof), enrollment.Clone()
 	input, err := enrolledPublicationInput(owned, material)
 	if err != nil {
@@ -59,6 +68,17 @@ func (b *Backend) PublishRuntimeEnrolled(ctx context.Context, c *CreationClaim, 
 	}
 	defer o.finish()
 	ctx = o.context
+	// This is input rejection only. Local attribution belongs to the original
+	// opaque claim; receipt runtime bytes remain untrusted until the unchanged
+	// preparation/certificate verification below. Check both final canonical
+	// records before even a native read, including on a frozen-attempt replay.
+	local := c.reference
+	inputEnrollment, inputActivation := enrollmentRecords(RuntimeDispatchRecord{IntentID: local.IntentID, SandboxID: local.SandboxID, WorkspaceHash: local.WorkspaceHash, RestoreEpoch: local.RestoreEpoch, Generation: local.Generation}, material)
+	for _, record := range []interface{ Validate() error }{inputEnrollment, inputActivation} {
+		if _, err := encodeEnrolledRecord(record); err != nil {
+			return result, err
+		}
+	}
 	c.mu.Lock()
 	frozen := c.enrolledAttempt
 	c.mu.Unlock()
