@@ -7,7 +7,7 @@ go_bin=${GO_BIN:-/Users/dysodeng/go/go1.25.6/bin/go}
 epoch=${LOCAL_RELEASE_EPOCH:?set a unique owned epoch}
 mode=${1:-run}
 selector=${LOCAL_RELEASE_SELECTOR:-'^TestLocalRuntimeReleaseNative$'}
-case "$selector" in '^TestLocalRuntimeReleaseNative$'|'^TestLocalRuntimeReleaseNativeFaults$') ;; *) exit 2;; esac
+case "$selector" in '^TestLocalRuntimeReleaseNative$'|'^TestLocalRuntimeReleaseNativeFaults$'|'^TestLocalRuntimeReleaseNativeACKs$') ;; *) exit 2;; esac
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]]
 [[ "$mode" == build || "$mode" == run || "$mode" == host-red || "$mode" == host-green ]]
 # The exact pre-existing approved image; never pull or install.
@@ -145,9 +145,12 @@ if [[ "$attach_status" != 0 || "$container_status" != 0 ]]; then exit 1; fi
 if [[ "$selector" == '^TestLocalRuntimeReleaseNative$' ]]; then
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNative ' "$own/native-$epoch.log") == 1 ]]
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 1 ]]
-else
+elif [[ "$selector" == '^TestLocalRuntimeReleaseNativeFaults$' ]]; then
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeFaults ' "$own/native-$epoch.log") == 1 ]]
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 6 ]]
+else
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeACKs ' "$own/native-$epoch.log") == 1 ]]
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 3 ]]
 fi
 ! rg -q '^--- SKIP:' "$own/native-$epoch.log"
 printf 'LOCAL_RELEASE_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"

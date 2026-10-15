@@ -58,6 +58,7 @@ type localReleaseNativeSetup struct {
 	ControlRevision                                                       int64
 	Generation                                                            int64
 	Fault                                                                 string
+	EtcdAddress                                                           string
 }
 
 type localReleaseNativeReply struct {
@@ -222,6 +223,9 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	plan, err := state.NewTaskWorkspaceSyncPlan(state.TaskWorkspaceSyncPlanOptions{Workspace: workspace})
 	require.NoError(t, err)
 	o := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: s.Identity, TLS: tlsConfig, RequestTimeout: 2 * time.Second, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: s.Binding.AuthorityID, Target: s.Binding.Target, Roots: []ed25519.PublicKey{s.Root}}, Clock: nativeFixtureClock{}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: s.Contract, MaxActive: 2}, TaskIssuer: issuer, TaskQuiescenceIssuer: issuer, TaskWorkspaceArchiveIssuer: issuer, TaskRuntimeTerminationIssuer: issuer, LocalRuntimeRelease: &state.LocalRuntimeReleaseOptions{MaxActive: 1, Timeout: 30 * time.Second, Provider: provider}, TaskWorkspaceArchiveRecovery: &state.TaskWorkspaceArchiveRecoveryOptions{TaskWorkspaceArchiveSpoolOptions: state.TaskWorkspaceArchiveSpoolOptions{Directory: filepath.Join(s.Directory, "spool"), Jobs: 1, JobBytes: 1 << 20, TotalBytes: 1 << 20, Entries: 16, JobIndexBytes: 1 << 20, TotalIndexBytes: 1 << 20}}, TaskWorkspaceSyncRecyclingBudget: &state.TaskWorkspaceSyncBudgetOptions{BudgetID: s.BudgetID, SlotsPerPartition: 1, MaxIntentBytes: 16384}}
+	if s.EtcdAddress != "" {
+		o.Endpoints = []string{s.EtcdAddress}
+	}
 	b, err := state.New(ctx, o)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, b.Close()) }()
@@ -278,6 +282,37 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 		return
 	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+	if s.Fault == "ack-reserved" {
+		require.Error(t, err)
+		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
+		original, readErr := b.LoadTaskRuntimeTermination(ctx, task)
+		require.NoError(t, readErr)
+		require.Equal(t, "reserved", original.Phase)
+		repeated, repeatErr := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.NoError(t, repeatErr)
+		require.Equal(t, state.OutcomeUnknown, repeated.Outcome)
+		require.Equal(t, original, repeated.Entry)
+		require.NoError(t, b.ReleaseTaskClaim(ctx, claim))
+		claim, err = b.ClaimTask(ctx, task, "reserved-no-proof", time.Minute)
+		require.NoError(t, err)
+		repeated, err = b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.Error(t, err)
+		require.Equal(t, state.OutcomeUnknown, repeated.Outcome)
+		after, readErr := b.LoadTaskRuntimeTermination(ctx, task)
+		require.NoError(t, readErr)
+		require.Equal(t, original, after)
+		release, releaseErr := b.ReleaseTaskWorkspaceOwnerLocal(ctx, claim)
+		require.Error(t, releaseErr)
+		require.Equal(t, state.OutcomeUnknown, release.Outcome)
+		require.NoError(t, b.ReleaseTaskClaim(ctx, claim))
+		t.Log("actual reserve ACK loss: same attempt read only; fresh claim preserved original Current; no proof, no release")
+		return
+	}
+	if s.Fault == "ack-cleanup-complete" {
+		require.Error(t, err)
+		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
+		terminated, err = b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+	}
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, terminated.Outcome)
 	require.Equal(t, "cleanup-complete", terminated.Entry.Phase)
@@ -291,6 +326,11 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	require.Equal(t, state.OutcomeCommitted, recovered.Outcome)
 	require.Equal(t, terminated.Entry, recovered.Entry, "new claim must not replace original Current or proof")
 	released, err := b.ReleaseTaskWorkspaceOwnerLocal(ctx, claim)
+	if s.Fault == "ack-release" {
+		require.Error(t, err)
+		require.Equal(t, state.OutcomeUnknown, released.Outcome)
+		released, err = b.ReleaseTaskWorkspaceOwnerLocal(ctx, claim)
+	}
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, released.Outcome)
 	newInput := state.AcquireIntentInput{Workspace: workspace, Principal: "fixture", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"mode":"plain"}`), Now: time.Now().UTC(), TTL: time.Hour}
@@ -324,7 +364,17 @@ func TestLocalRuntimeReleaseNativeFaults(t *testing.T) {
 	for _, record := range []string{"runtime-enrollment", "runtime-enrollment-activation"} {
 		for _, mutation := range []string{"same-value", "lease", "recreate"} {
 			mode := "enrollment-" + record + "-" + mutation
-			t.Run(mode, func(t *testing.T) { runLocalRuntimeReleaseNative(t, mode) })
+			if !t.Run(mode, func(t *testing.T) { runLocalRuntimeReleaseNative(t, mode) }) {
+				return
+			}
+		}
+	}
+}
+
+func TestLocalRuntimeReleaseNativeACKs(t *testing.T) {
+	for _, mode := range []string{"ack-reserved", "ack-cleanup-complete", "ack-release"} {
+		if !t.Run(mode, func(t *testing.T) { runLocalRuntimeReleaseNative(t, mode) }) {
+			return
 		}
 	}
 }
@@ -494,6 +544,10 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	}()
 	setup := localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "empty/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}
 	setup.Fault = fault
+	var proxy *localReleaseNativeProxy
+	if strings.HasPrefix(fault, "ack-") {
+		setup.EtcdAddress, proxy = newLocalReleaseNativeProxy(t, appTLS, fault)
+	}
 	setupPath := filepath.Join(dir, "supervisor.json")
 	require.NoError(t, os.WriteFile(setupPath, observerNativeJSON(t, setup), 0600))
 	fd, err := unix.Open(owned, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -565,7 +619,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	workerErr := worker.Wait()
 	t.Logf("original local worker Cmd.Wait=%v", workerErr)
 	require.NoError(t, workerErr)
-	if strings.HasPrefix(fault, "enrollment-") {
+	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" {
 		require.NoError(t, child.Process.Kill())
 	}
 	childErr := child.Wait()
@@ -573,7 +627,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	if fault == "" {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
 		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
 	} else {
 		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
@@ -582,16 +636,23 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	actualPatch, actualDelete := mutations[http.MethodPatch], mutations[http.MethodDelete]
 	absent := pod == nil
 	apiMu.Unlock()
-	if fault == "" {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)
+	} else if fault == "ack-reserved" {
+		require.Equal(t, 1, actualPatch)
+		require.Zero(t, actualDelete)
+		require.False(t, absent)
 	} else {
 		require.Zero(t, actualPatch)
 		require.Zero(t, actualDelete)
 		require.False(t, absent)
 	}
 	t.Logf("actual received HTTP mutations patch=%d delete=%d; exact original UID/RV enforced; absent policies are skipped diagnostics", actualPatch, actualDelete)
+	if proxy != nil {
+		proxy.verify(t)
+	}
 }
 
 func localReleaseEnrollmentRefusal(t *testing.T, ctx context.Context, b *state.Backend, claim *state.TaskClaim, destination *ct.TerminationDestination, s localReleaseNativeSetup, tlsConfig *tls.Config, ns state.Namespace, workspace state.WorkspaceIdentity, task state.TaskReference) {
