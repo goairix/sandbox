@@ -30,6 +30,8 @@ case "$mode" in
 	recovery-execution-join-query) test_run='^TestTaskWorkspaceSyncRecoveryNativeCloseJoin$/^query$';;
 	recovery-execution-r1-monitor) test_run='^TestTaskWorkspaceSyncRecoveryNativeReviewMonitor$';;
 	recovery-execution-r1-terminal) test_run='^TestTaskWorkspaceSyncRecoveryNativeReviewTerminalPostguard$';;
+	recovery-execution-mode-0000) test_run='^TestTaskWorkspaceSyncRecoveryNativePermissions$/^0000$';;
+	recovery-execution-mode-0444) test_run='^TestTaskWorkspaceSyncRecoveryNativePermissions$/^0444$';;
 	recovery-execution-history) test_run='^TestTaskWorkspaceSyncRecoveryNativeHistoricalQuery$';;
 	recovery-execution-query-data) test_run='^TestTaskWorkspaceSyncRecoveryNativeQueryRejects$/^data$';;
 	recovery-execution-query-double) test_run='^TestTaskWorkspaceSyncRecoveryNativeQueryRejects$/^double$';;

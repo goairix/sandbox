@@ -16,7 +16,7 @@ func workspaceSyncRecoveryArchiveStamp(f *os.File) ([5]int64, error) {
 	return [5]int64{st.Ctim.Sec, st.Ctim.Nsec, st.Mtim.Sec, st.Mtim.Nsec, st.Size}, err
 }
 
-func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, body *taskWorkspaceSyncRecoveryBody, charge *taskWorkspaceSyncRecoveryCharge) (*taskWorkspaceSyncRecoveryCompletion, error) {
+func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, body *taskWorkspaceSyncRecoveryBody, charge *taskWorkspaceSyncRecoveryCharge) (completion *taskWorkspaceSyncRecoveryCompletion, resultErr error) {
 	if err := s.begin(ctx); err != nil {
 		return nil, err
 	}
@@ -36,7 +36,24 @@ func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, bo
 		return nil, err
 	}
 	defer s.target.ops.Done()
-	guard := func() error { return s.guard(ctx) }
+	permission, err := s.prepareLocalPermission(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if permission != nil {
+			resultErr = errors.Join(resultErr, permission.close())
+			if resultErr != nil {
+				completion = nil
+			}
+		}
+	}()
+	guard := func() error {
+		if permission != nil {
+			return permission.guard(ctx)
+		}
+		return s.guard(ctx)
+	}
 	completed := func(stage string) {
 		if s.localIOComplete != nil {
 			s.localIOComplete(stage)
@@ -45,6 +62,16 @@ func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, bo
 	result, err := executeWorkspaceSyncLocalPut(ctx, s.target, body.entry.workspaceSyncLocalFile, body.readOwned, guard, completed)
 	if err != nil {
 		return nil, err
+	}
+	if permission != nil {
+		joined := permission
+		permission = nil
+		if err := joined.close(); err != nil {
+			return nil, err
+		}
+		if err := s.guard(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if !body.complete || body.bytes != charge.record.Size {
 		return nil, ErrInvalidRecord

@@ -23,7 +23,7 @@ func recoveryExecutionCold(t *testing.T) (*quiescenceNativeFixture, *deliveryNat
 	return recoveryExecutionColdData(t, nil, 0)
 }
 
-func recoveryExecutionColdData(t *testing.T, data []byte, entries uint64) (*quiescenceNativeFixture, *deliveryNativeWire, uint32) {
+func recoveryExecutionColdData(t *testing.T, data []byte, entries uint64, beforeCold ...func(*PreparedTaskWorkspaceSyncSource, *taskWorkspaceSyncBody, *taskWorkspaceSyncLocalTarget)) (*quiescenceNativeFixture, *deliveryNativeWire, uint32) {
 	var f *quiescenceNativeFixture
 	var prepared *PreparedTaskWorkspaceArchive
 	var wire *deliveryNativeWire
@@ -78,6 +78,9 @@ func recoveryExecutionColdData(t *testing.T, data []byte, entries uint64) (*quie
 	require.NoError(t, s.bindLocalPut(f.ctx, body, target))
 	_, err = s.reservePutIntent(f.ctx, body)
 	require.NoError(t, err)
+	for _, inspect := range beforeCold {
+		inspect(s, body, target)
+	}
 	require.NoError(t, s.Close())
 	require.NoError(t, target.Close())
 	recoveryExecutionReopen(t, f)
