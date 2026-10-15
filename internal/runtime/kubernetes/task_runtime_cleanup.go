@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
@@ -85,14 +87,39 @@ func (c *TaskRuntimeCleanupClient) Close() error {
 	return nil
 }
 
-func (c *TaskRuntimeCleanupClient) trackDial() (func(), error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil, errTaskCleanupRefused
+type taskCleanupOperationKey struct{}
+
+type taskCleanupOperation struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+	ctx    context.Context
+}
+
+func (c *TaskRuntimeCleanupClient) trackDial(ctx context.Context) (context.Context, func(), error) {
+	owner, ok := ctx.Value(taskCleanupOperationKey{}).(*taskCleanupOperation)
+	if !ok {
+		return nil, nil, errTaskCleanupRefused
 	}
-	c.wg.Add(1)
-	return c.wg.Done, nil
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, nil, errTaskCleanupRefused
+	}
+	owner.mu.Lock()
+	if owner.closed || owner.ctx.Err() != nil {
+		owner.mu.Unlock()
+		c.mu.Unlock()
+		return nil, nil, errTaskCleanupRefused
+	}
+	owner.wg.Add(1)
+	owner.mu.Unlock()
+	c.mu.Unlock()
+	// net/http intentionally strips the request cancellation signal while
+	// retaining context values. Restore the actual owner's cancellation here.
+	dialCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(owner.ctx, cancel)
+	return dialCtx, func() { stop(); cancel(); owner.wg.Done() }, nil
 }
 
 func (c *TaskRuntimeCleanupClient) begin(ctx context.Context) (context.Context, func(), error) {
@@ -109,9 +136,14 @@ func (c *TaskRuntimeCleanupClient) begin(ctx context.Context) (context.Context, 
 	c.mu.Unlock()
 	opCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	stop := context.AfterFunc(c.ctx, cancel)
-	return opCtx, func() {
+	owner := &taskCleanupOperation{ctx: opCtx}
+	return context.WithValue(opCtx, taskCleanupOperationKey{}, owner), func() {
 		stop()
 		cancel()
+		owner.mu.Lock()
+		owner.closed = true
+		owner.mu.Unlock()
+		owner.wg.Wait()
 		c.mu.Lock()
 		c.active--
 		c.mu.Unlock()
@@ -313,18 +345,67 @@ func (h *PreparedTaskRuntimeCleanup) podObservation(pod *v1.Pod) TaskRuntimeClea
 }
 
 func validTaskCleanupBinding(b TaskRuntimeCleanupBinding) bool {
-	for _, value := range []string{b.Authority.Namespace, b.Authority.AuthorityID, b.Authority.Target, b.TaskID} {
-		if len(value) == 0 || len(value) > 128 || strings.ContainsAny(value, "/\\\x00\r\n") {
+	if !taskCleanupNamespace(b.Authority.Namespace) {
+		return false
+	}
+	for _, value := range []string{b.Authority.AuthorityID, b.Authority.Target} {
+		if !taskCleanupOpaque(value) {
 			return false
 		}
 	}
-	for _, value := range []string{b.Authority.RestoreEpoch, b.Runtime.UID, b.Runtime.BootID, b.CreationIntentID, b.NodeUID, b.NodeBootID} {
+	if len(b.Authority.RestoreEpoch) > 128 || !taskCleanupSegment(b.Authority.RestoreEpoch) {
+		return false
+	}
+	for _, value := range []string{b.TaskID, b.Runtime.UID, b.Runtime.BootID, b.CreationIntentID, b.NodeUID, b.NodeBootID} {
 		id, err := uuid.Parse(value)
 		if err != nil || id == uuid.Nil || id.String() != value {
 			return false
 		}
 	}
 	return len(validation.IsDNS1123Subdomain(b.Runtime.ID)) == 0 && len(validation.IsDNS1123Subdomain(b.LogicalID)) == 0 && len(b.Runtime.ID) <= 128 && len(b.LogicalID) <= 128 && b.Generation > 0 && b.DataGateEpoch > 0 && taskCleanupHash(b.WorkspaceHash) && taskCleanupHash(b.EnrollmentDigest) && taskCleanupHash(b.ContractDigest)
+}
+
+func taskCleanupOpaque(value string) bool {
+	if len(value) == 0 || len(value) > 128 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, ch := range value {
+		if unicode.IsControl(ch) {
+			return false
+		}
+	}
+	return true
+}
+
+// This local grammar matches the authority publication namespace boundary,
+// without importing the etcd consumer (which itself imports this package).
+func taskCleanupNamespace(value string) bool {
+	if len(value) < 2 || len(value) > 512 || value[0] != '/' || value[len(value)-1] != '/' {
+		return false
+	}
+	parts := strings.Split(value[1:len(value)-1], "/")
+	if len(parts) < 3 || len(parts[len(parts)-2]) > 128 || len(parts[len(parts)-1]) > 128 {
+		return false
+	}
+	for _, part := range parts {
+		if !taskCleanupSegment(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func taskCleanupSegment(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for i := range value {
+		ch := value[i]
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func taskCleanupHash(value string) bool {

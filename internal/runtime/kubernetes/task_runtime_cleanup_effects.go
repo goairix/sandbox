@@ -37,10 +37,10 @@ func (h *PreparedTaskRuntimeCleanup) enter(ctx context.Context) (context.Context
 	h.busy = true
 	h.mu.Unlock()
 	return opCtx, func() {
+		done()
 		h.mu.Lock()
 		h.busy = false
 		h.mu.Unlock()
-		done()
 	}, nil
 }
 

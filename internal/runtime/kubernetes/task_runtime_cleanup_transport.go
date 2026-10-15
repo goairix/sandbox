@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -58,7 +59,7 @@ func (c *TaskRuntimeCleanupClient) configure(config *rest.Config) error {
 		tlsConfig.Certificates = []tls.Certificate{certificate}
 	}
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
-		done, err := c.trackDial()
+		ctx, done, err := c.trackDial(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +68,7 @@ func (c *TaskRuntimeCleanupClient) configure(config *rest.Config) error {
 	}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DisableCompression: true, ForceAttemptHTTP2: false, TLSClientConfig: tlsConfig, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}, DialContext: dial, MaxResponseHeaderBytes: taskCleanupBodyLimit, ResponseHeaderTimeout: c.timeout, TLSHandshakeTimeout: c.timeout}
 	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		done, err := c.trackDial()
+		ctx, done, err := c.trackDial(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -127,23 +128,16 @@ func (t *taskCleanupTransport) RoundTrip(request *http.Request) (*http.Response,
 		response.Body.Close()
 		return nil, fmt.Errorf("%w: response body bound", errTaskCleanupRefused)
 	}
-	response.Body = &taskCleanupBody{ReadCloser: response.Body, remaining: taskCleanupBodyLimit}
+	// DoRaw overwrites body read errors for non-2xx responses. Enforce the
+	// bound before SDK error conversion, joining the original Read and Close.
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, taskCleanupBodyLimit+1))
+	closeErr := response.Body.Close()
+	if len(body) > taskCleanupBodyLimit {
+		return nil, fmt.Errorf("%w: response body bound", errTaskCleanupRefused)
+	}
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
 	return response, nil
-}
-
-type taskCleanupBody struct {
-	io.ReadCloser
-	remaining int
-}
-
-func (b *taskCleanupBody) Read(buffer []byte) (int, error) {
-	if len(buffer) > b.remaining+1 {
-		buffer = buffer[:b.remaining+1]
-	}
-	n, err := b.ReadCloser.Read(buffer)
-	if n > b.remaining {
-		return 0, fmt.Errorf("%w: response body bound", errTaskCleanupRefused)
-	}
-	b.remaining -= n
-	return n, err
 }

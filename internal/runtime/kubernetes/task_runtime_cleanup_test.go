@@ -20,7 +20,82 @@ import (
 )
 
 func cleanupBinding() TaskRuntimeCleanupBinding {
-	return TaskRuntimeCleanupBinding{Authority: p.TrustBinding{Namespace: "kv", AuthorityID: "authority", Target: "target", RestoreEpoch: "11111111-1111-4111-8111-111111111111"}, Runtime: p.RuntimeReference{ID: "runtime-a", UID: "22222222-2222-4222-8222-222222222222", BootID: "33333333-3333-4333-8333-333333333333"}, Generation: 1, DataGateEpoch: 1, TaskID: "44444444-4444-4444-8444-444444444444", LogicalID: "logical-a", WorkspaceHash: strings.Repeat("a", 64), CreationIntentID: "55555555-5555-4555-8555-555555555555", NodeUID: "66666666-6666-4666-8666-666666666666", NodeBootID: "77777777-7777-4777-8777-777777777777", EnrollmentDigest: strings.Repeat("b", 64), ContractDigest: strings.Repeat("c", 64)}
+	return TaskRuntimeCleanupBinding{Authority: p.TrustBinding{Namespace: "/sandbox/scope/cell/", AuthorityID: "authority", Target: "target", RestoreEpoch: "restore"}, Runtime: p.RuntimeReference{ID: "runtime-a", UID: "22222222-2222-4222-8222-222222222222", BootID: "33333333-3333-4333-8333-333333333333"}, Generation: 1, DataGateEpoch: 1, TaskID: "44444444-4444-4444-8444-444444444444", LogicalID: "logical-a", WorkspaceHash: strings.Repeat("a", 64), CreationIntentID: "55555555-5555-4555-8555-555555555555", NodeUID: "66666666-6666-4666-8666-666666666666", NodeBootID: "77777777-7777-4777-8777-777777777777", EnrollmentDigest: strings.Repeat("b", 64), ContractDigest: strings.Repeat("c", 64)}
+}
+
+func TestTaskRuntimeCleanupClientNamespace(t *testing.T) {
+	s, count := cleanupServer(t, cleanupPod())
+	client, err := NewTaskRuntimeCleanupClient(cleanupOptions(s.URL))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	long := "/" + strings.Repeat("p", 499) + "/scope/cell/"
+	require.Len(t, long, 512)
+	for _, namespace := range []string{cleanupBinding().Authority.Namespace, long} {
+		t.Run(namespace[:8], func(t *testing.T) {
+			binding := cleanupBinding()
+			binding.Authority.Namespace = namespace
+			h, err := client.Prepare(context.Background(), binding, nil)
+			require.NoError(t, err)
+			var descriptor taskCleanupDescriptor
+			require.NoError(t, json.Unmarshal(h.Descriptor(), &descriptor))
+			require.Equal(t, "runtimes", descriptor.Namespace)
+			require.Equal(t, namespace, descriptor.Binding.Authority.Namespace)
+			binding.Authority.Namespace = "/sandbox/scope/other/"
+			before := count.Load()
+			_, err = client.Prepare(context.Background(), binding, h.Descriptor())
+			require.Error(t, err, "canonical descriptor retains exact authority namespace")
+			require.Equal(t, before, count.Load())
+		})
+	}
+	for _, namespace := range []string{"/" + strings.Repeat("p", 500) + "/scope/cell/", "/sandbox/scope/cell", "sandbox/scope/cell/", "/scope/cell/", "/sandbox//cell/", "/sandbox/../cell/", "/sandbox/scope/" + strings.Repeat("c", 129) + "/"} {
+		binding := cleanupBinding()
+		binding.Authority.Namespace = namespace
+		before := count.Load()
+		_, err := client.Prepare(context.Background(), binding, nil)
+		require.Error(t, err)
+		require.Equal(t, before, count.Load())
+	}
+	binding := cleanupBinding()
+	binding.TaskID = "task-alias"
+	_, err = client.Prepare(context.Background(), binding, nil)
+	require.Error(t, err, "TaskID is a canonical nonzero UUID")
+}
+
+func TestTaskRuntimeCleanupClientAuthorityIdentity(t *testing.T) {
+	s, count := cleanupServer(t, cleanupPod())
+	client, err := NewTaskRuntimeCleanupClient(cleanupOptions(s.URL))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	binding := cleanupBinding()
+	binding.Authority.AuthorityID = "authority/控制"
+	binding.Authority.Target = "target /opaque"
+	h, err := client.Prepare(context.Background(), binding, nil)
+	require.NoError(t, err, "opaque authority IDs and non-UUID restore epoch are genuine bindings")
+	var descriptor taskCleanupDescriptor
+	require.NoError(t, json.Unmarshal(h.Descriptor(), &descriptor))
+	require.Equal(t, binding, descriptor.Binding)
+	for _, invalid := range []string{"", ".", "..", "restore/path", strings.Repeat("x", 129), "restore\n"} {
+		bad := binding
+		bad.Authority.RestoreEpoch = invalid
+		before := count.Load()
+		_, err := client.Prepare(context.Background(), bad, nil)
+		require.Error(t, err)
+		require.Equal(t, before, count.Load())
+	}
+	for _, invalid := range []string{"", "bad\n", "bad\x00", string([]byte{0xff}), strings.Repeat("x", 129)} {
+		for _, target := range []bool{false, true} {
+			bad := binding
+			if target {
+				bad.Authority.Target = invalid
+			} else {
+				bad.Authority.AuthorityID = invalid
+			}
+			before := count.Load()
+			_, err := client.Prepare(context.Background(), bad, nil)
+			require.Error(t, err)
+			require.Equal(t, before, count.Load())
+		}
+	}
 }
 
 func cleanupPod() *v1.Pod {
