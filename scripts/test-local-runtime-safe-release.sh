@@ -6,6 +6,8 @@ own="$repo/.superpowers/sdd/2026-10-16-local-runtime-safe-release"
 go_bin=${GO_BIN:-/Users/dysodeng/go/go1.25.6/bin/go}
 epoch=${LOCAL_RELEASE_EPOCH:?set a unique owned epoch}
 mode=${1:-run}
+selector=${LOCAL_RELEASE_SELECTOR:-'^TestLocalRuntimeReleaseNative$'}
+case "$selector" in '^TestLocalRuntimeReleaseNative$'|'^TestLocalRuntimeReleaseNativeFaults$') ;; *) exit 2;; esac
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]]
 [[ "$mode" == build || "$mode" == run || "$mode" == host-red || "$mode" == host-green ]]
 # The exact pre-existing approved image; never pull or install.
@@ -77,7 +79,7 @@ done
 [[ $(docker image inspect --format '{{.Id}} {{.Architecture}}' "$image") == "$image arm64" ]]
 run="local-runtime-release-$epoch"
 [[ -z $(docker ps -aq --filter label=sandbox.task=local-runtime-safe-release) ]]
-id=$(docker create --name "$run" --label sandbox.task=local-runtime-safe-release --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --tmpfs /workspace:rw,nosuid,nodev,size=1048576,uid=1000,gid=1000,mode=0700 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch-runner.test,dst=/fixture/runner.test,readonly" --mount "type=bind,src=$own/native-$epoch-monitor,dst=/fixture/monitor,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_LOCAL_RELEASE_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /fixture/runner.test "$image" -test.run '^TestLocalRuntimeReleaseNative$' -test.v -test.timeout=150s)
+id=$(docker create --name "$run" --label sandbox.task=local-runtime-safe-release --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --tmpfs /workspace:rw,nosuid,nodev,size=1048576,uid=1000,gid=1000,mode=0700 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch-runner.test,dst=/fixture/runner.test,readonly" --mount "type=bind,src=$own/native-$epoch-monitor,dst=/fixture/monitor,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_LOCAL_RELEASE_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /fixture/runner.test "$image" -test.run "$selector" -test.v -test.timeout=150s)
 started=false
 attach_pid=
 attach_waited=false
@@ -140,7 +142,12 @@ docker rm "$id"
 id=
 [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]]
 if [[ "$attach_status" != 0 || "$container_status" != 0 ]]; then exit 1; fi
-[[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNative ' "$own/native-$epoch.log") == 1 ]]
-[[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 1 ]]
+if [[ "$selector" == '^TestLocalRuntimeReleaseNative$' ]]; then
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNative ' "$own/native-$epoch.log") == 1 ]]
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 1 ]]
+else
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeFaults ' "$own/native-$epoch.log") == 1 ]]
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 6 ]]
+fi
 ! rg -q '^--- SKIP:' "$own/native-$epoch.log"
 printf 'LOCAL_RELEASE_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"

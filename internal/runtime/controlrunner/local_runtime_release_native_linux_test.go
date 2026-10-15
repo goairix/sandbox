@@ -57,6 +57,7 @@ type localReleaseNativeSetup struct {
 	RuntimeAddress, ObserverAddress, ProviderAddress, BudgetID            string
 	ControlRevision                                                       int64
 	Generation                                                            int64
+	Fault                                                                 string
 }
 
 type localReleaseNativeReply struct {
@@ -272,6 +273,10 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	termination, err := ct.NewTerminationDestination(ct.TerminationDestinationOptions{Address: s.ObserverAddress, Binding: s.Binding, Roots: []ed25519.PublicKey{s.Root}, Clock: nativeFixtureClock{}, Credential: observerCredential, ObserverCertificate: s.ObserverCertificate, NodeUID: s.NodeUID, NodeBootID: s.NodeBootID, EnrollmentDigest: enrollmentDigestForRelease(t, b, ctx, workspace, s.IntentID)})
 	require.NoError(t, err)
 	defer termination.Close()
+	if strings.HasPrefix(s.Fault, "enrollment-") {
+		localReleaseEnrollmentRefusal(t, ctx, b, claim, termination, s, tlsConfig, ns, workspace, task)
+		return
+	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, terminated.Outcome)
@@ -312,6 +317,19 @@ func enrollmentDigestForRelease(t *testing.T, b *state.Backend, ctx context.Cont
 }
 
 func TestLocalRuntimeReleaseNative(t *testing.T) {
+	runLocalRuntimeReleaseNative(t, "")
+}
+
+func TestLocalRuntimeReleaseNativeFaults(t *testing.T) {
+	for _, record := range []string{"runtime-enrollment", "runtime-enrollment-activation"} {
+		for _, mutation := range []string{"same-value", "lease", "recreate"} {
+			mode := "enrollment-" + record + "-" + mutation
+			t.Run(mode, func(t *testing.T) { runLocalRuntimeReleaseNative(t, mode) })
+		}
+	}
+}
+
+func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	if os.Getenv("SANDBOX_LOCAL_RELEASE_NATIVE") != "1" {
 		t.Skip("explicit exact owned Linux fixture required")
 	}
@@ -475,6 +493,7 @@ func TestLocalRuntimeReleaseNative(t *testing.T) {
 		require.NoError(t, os.Remove(owned))
 	}()
 	setup := localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "empty/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}
+	setup.Fault = fault
 	setupPath := filepath.Join(dir, "supervisor.json")
 	require.NoError(t, os.WriteFile(setupPath, observerNativeJSON(t, setup), 0600))
 	fd, err := unix.Open(owned, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -546,18 +565,98 @@ func TestLocalRuntimeReleaseNative(t *testing.T) {
 	workerErr := worker.Wait()
 	t.Logf("original local worker Cmd.Wait=%v", workerErr)
 	require.NoError(t, workerErr)
+	if strings.HasPrefix(fault, "enrollment-") {
+		require.NoError(t, child.Process.Kill())
+	}
 	childErr := child.Wait()
 	childWaited = true
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
+	if fault == "" {
+		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
+	} else {
+		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
+	}
 	apiMu.Lock()
 	actualPatch, actualDelete := mutations[http.MethodPatch], mutations[http.MethodDelete]
 	absent := pod == nil
 	apiMu.Unlock()
-	require.Equal(t, 2, actualPatch)
-	require.Equal(t, 1, actualDelete)
-	require.True(t, absent)
+	if fault == "" {
+		require.Equal(t, 2, actualPatch)
+		require.Equal(t, 1, actualDelete)
+		require.True(t, absent)
+	} else {
+		require.Zero(t, actualPatch)
+		require.Zero(t, actualDelete)
+		require.False(t, absent)
+	}
 	t.Logf("actual received HTTP mutations patch=%d delete=%d; exact original UID/RV enforced; absent policies are skipped diagnostics", actualPatch, actualDelete)
+}
+
+func localReleaseEnrollmentRefusal(t *testing.T, ctx context.Context, b *state.Backend, claim *state.TaskClaim, destination *ct.TerminationDestination, s localReleaseNativeSetup, tlsConfig *tls.Config, ns state.Namespace, workspace state.WorkspaceIdentity, task state.TaskReference) {
+	t.Helper()
+	raw, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://127.0.0.1:2379"}, TLS: tlsConfig, DialTimeout: 2 * time.Second})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, raw.Close()) }()
+	record := "runtime-enrollment"
+	if strings.Contains(s.Fault, "-activation-") {
+		record += "-activation"
+	}
+	key, err := ns.Key("p", fmt.Sprintf("%02x", workspace.Partition()), "intents", s.IntentID, record)
+	require.NoError(t, err)
+	original, err := raw.Get(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, original.Kvs, 1)
+	before := original.Kvs[0]
+	require.EqualValues(t, 1, before.Version)
+	require.Zero(t, before.Lease)
+	var lease clientv3.LeaseID
+	switch {
+	case strings.HasSuffix(s.Fault, "-same-value"):
+		_, err = raw.Put(ctx, key, string(before.Value))
+	case strings.HasSuffix(s.Fault, "-lease"):
+		grant, grantErr := raw.Grant(ctx, 60)
+		require.NoError(t, grantErr)
+		lease = grant.ID
+		_, err = raw.Put(ctx, key, string(before.Value), clientv3.WithLease(lease))
+	case strings.HasSuffix(s.Fault, "-recreate"):
+		deleted, deleteErr := raw.Delete(ctx, key)
+		require.NoError(t, deleteErr)
+		require.EqualValues(t, 1, deleted.Deleted)
+		_, err = raw.Put(ctx, key, string(before.Value))
+	default:
+		t.Fatal("unrecognized finite enrollment fault")
+	}
+	require.NoError(t, err)
+	after, err := raw.Get(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, after.Kvs, 1)
+	require.Equal(t, before.Value, after.Kvs[0].Value)
+	require.Greater(t, after.Kvs[0].ModRevision, before.ModRevision)
+	if lease != 0 {
+		require.EqualValues(t, lease, after.Kvs[0].Lease)
+		defer func() { _, revokeErr := raw.Revoke(ctx, lease); require.NoError(t, revokeErr) }()
+	}
+	result, err := b.TerminateTaskRuntimeLocal(ctx, claim, destination)
+	require.Error(t, err)
+	require.Equal(t, state.OutcomeUnknown, result.Outcome)
+	require.Nil(t, result.Entry)
+	release, err := b.ReleaseTaskWorkspaceOwnerLocal(ctx, claim)
+	require.Error(t, err)
+	require.Equal(t, state.OutcomeUnknown, release.Outcome)
+	for _, suffix := range []string{"runtime-termination", "runtime-provider-cleanup", "owner-release"} {
+		key, err := ns.Key("p", fmt.Sprintf("%02x", task.Partition), "tasks", task.TaskID, suffix)
+		require.NoError(t, err)
+		point, err := raw.Get(ctx, key)
+		require.NoError(t, err)
+		require.Empty(t, point.Kvs, "rejected authority must not create transition state")
+	}
+	ownerKey, err := ns.Key("p", fmt.Sprintf("%02x", task.Partition), "workspaces", workspace.Hash(), "owner")
+	require.NoError(t, err)
+	owner, err := raw.Get(ctx, ownerKey)
+	require.NoError(t, err)
+	require.Len(t, owner.Kvs, 1)
+	require.NoError(t, b.ReleaseTaskClaim(ctx, claim))
+	t.Logf("actual enrollment refusal %s originalMOD=%d changedMOD=%d: transition keys absent, owner retained", s.Fault, before.ModRevision, after.Kvs[0].ModRevision)
 }
