@@ -38,6 +38,10 @@ func TestNodeObserverOptionsRejectMissingAuthority(t *testing.T) {
 	if observer, err := New(Options{}); err == nil || observer != nil {
 		t.Fatal("observer accepted missing concrete authority")
 	}
+	var empty Observer
+	if err := empty.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestNodeObserverEnrollmentBoundary(t *testing.T) {

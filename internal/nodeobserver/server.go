@@ -227,7 +227,9 @@ func (o *Observer) stop() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.stopping = true
-	o.cancel()
+	if o.cancel != nil {
+		o.cancel()
+	}
 	if o.enroll != nil {
 		_ = o.enroll.Close()
 	}

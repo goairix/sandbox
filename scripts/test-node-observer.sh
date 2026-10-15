@@ -27,7 +27,7 @@ shasum -a 256 "$own/native-$epoch.test" "$own/native-$epoch-unit.test" > "$own/n
 printf 'NATIVE_BINARY_VERIFIED %s\n' "$epoch"
 run="node-observer-$epoch"
 [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]]
-id=$(docker create --name "$run" --label sandbox.task=node-observer-physical --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch.test,dst=/fixture/observer.test,readonly" --mount "type=bind,src=$own/native-$epoch-unit.test,dst=/fixture/unit.test,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_NODE_OBSERVER_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /bin/sh "$image" -ec '/fixture/unit.test -test.run "^TestNodeObserverEnrollmentBoundary$" -test.v; exec /fixture/observer.test -test.run "^TestNodeObserverPhysicalNative$" -test.v -test.timeout=65s')
+id=$(docker create --name "$run" --label sandbox.task=node-observer-physical --label "sandbox.run=$run" --network none --cgroupns private --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --pids-limit 256 --memory 512m --cpus 2 --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add KILL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt no-new-privileges=true --user 0:0 --mount "type=bind,src=$own/native-$epoch.test,dst=/fixture/observer.test,readonly" --mount "type=bind,src=$own/native-$epoch-unit.test,dst=/fixture/unit.test,readonly" --mount "type=bind,src=$etcd,dst=/fixture/etcd,readonly" --env SANDBOX_NODE_OBSERVER_NATIVE=1 --env GOMAXPROCS=2 --entrypoint /bin/sh "$image" -ec '/fixture/unit.test -test.run "^TestNodeObserver(EnrollmentBoundary|OptionsRejectMissingAuthority)$" -test.v; exec /fixture/observer.test -test.run "^TestNodeObserverPhysicalNative(Unknown)?$" -test.v -test.timeout=65s')
 cleanup() {
   if [[ -n ${id:-} ]]; then
     if [[ $(docker inspect --format '{{.State.Running}}' "$id") == true ]]; then docker kill "$id"; fi
@@ -50,6 +50,7 @@ docker inspect --format '{{.Id}} {{.State.Running}} {{.State.ExitCode}} {{index 
 docker rm "$id"
 id=
 [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]]
-[[ "$attach_status" == 0 && "$container_status" == 0 ]]
+if [[ "$attach_status" != 0 || "$container_status" != 0 ]]; then exit 1; fi
 [[ $(rg -c '^--- PASS: TestNodeObserverPhysicalNative ' "$own/native-$epoch.log") == 1 ]]
+[[ $(rg -c '^--- PASS: TestNodeObserverPhysicalNativeUnknown ' "$own/native-$epoch.log") == 1 ]]
 ! rg -q '^--- SKIP:' "$own/native-$epoch.log"

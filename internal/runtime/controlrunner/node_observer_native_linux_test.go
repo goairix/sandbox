@@ -13,15 +13,18 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -116,6 +119,23 @@ func TestNodeObserverPhysicalNativeChild(t *testing.T) {
 	require.NoError(t, err)
 	session, challenge, err := ct.OpenNodeEnrollment(context.Background(), peer, request)
 	require.NoError(t, err)
+	// A signature forwarded from this original connection must fail under the
+	// next connection's fresh nonce, even with the genuine runtime key.
+	originalChallenge := challenge
+	require.NoError(t, session.Close())
+	peer, err = net.DialUnix("unix", nil, &net.UnixAddr{Name: filepath.Join(filepath.Dir(path), "enroll.sock"), Net: "unix"})
+	require.NoError(t, err)
+	session, challenge, err = ct.OpenNodeEnrollment(context.Background(), peer, request)
+	require.NoError(t, err)
+	forwarded, err := p.NodeEnrollmentChallengeSigningBytes(originalChallenge)
+	require.NoError(t, err)
+	_, err = session.Enroll(context.Background(), p.NodeEnrollmentResponse{Version: 1, Purpose: "runtime_node_enrollment_response", Signature: ed25519.Sign(s.key, forwarded)})
+	require.Error(t, err)
+	require.NoError(t, session.Close())
+	peer, err = net.DialUnix("unix", nil, &net.UnixAddr{Name: filepath.Join(filepath.Dir(path), "enroll.sock"), Net: "unix"})
+	require.NoError(t, err)
+	session, challenge, err = ct.OpenNodeEnrollment(context.Background(), peer, request)
+	require.NoError(t, err)
 	defer session.Close()
 	_, err = verifier.VerifyNodeObserverCertificate(challenge.ObserverCertificate, challenge.NodeUID, challenge.NodeBootID, time.Now().UTC())
 	require.NoError(t, err)
@@ -125,6 +145,12 @@ func TestNodeObserverPhysicalNativeChild(t *testing.T) {
 	receipt, err := session.Enroll(context.Background(), p.NodeEnrollmentResponse{Version: 1, Purpose: "runtime_node_enrollment_response", Signature: ed25519.Sign(s.key, signed)})
 	require.NoError(t, err)
 	require.NoError(t, s.Activate(context.Background(), activation))
+	probe := exec.Command(os.Args[0], "-test.run=^TestNodeObserverPhysicalUserBoundary$", "-test.v")
+	probe.Env = append(os.Environ(), "SANDBOX_NODE_OBSERVER_USER_PROBE="+path)
+	probe.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, NoSetGroups: true}}
+	probe.Stdout, probe.Stderr = os.Stdout, os.Stderr
+	require.NoError(t, probe.Run())
+	t.Log("original user boundary probe Cmd.Wait=exit0")
 	user := exec.Command("/bin/sleep", "600")
 	user.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, NoSetGroups: true}}
 	require.NoError(t, user.Start())
@@ -134,6 +160,27 @@ func TestNodeObserverPhysicalNativeChild(t *testing.T) {
 	// real descendant. Its original parent Cmd.Wait is checked outside this PIDNS.
 	_ = user.Wait()
 	t.Fatal("descendant exited before external observer SIGKILL")
+}
+
+func TestNodeObserverPhysicalUserBoundary(t *testing.T) {
+	path := os.Getenv("SANDBOX_NODE_OBSERVER_USER_PROBE")
+	if path == "" {
+		return
+	}
+	require.Equal(t, 1000, os.Geteuid())
+	_, err := os.ReadFile(path)
+	require.Error(t, err)
+	f, err := os.Open("/proc/1/mem")
+	if f != nil {
+		_ = f.Close()
+	}
+	require.Error(t, err)
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: filepath.Join(filepath.Dir(path), "enroll.sock"), Net: "unix"})
+	if conn != nil {
+		_ = conn.Close()
+	}
+	require.Error(t, err)
+	t.Log("actual UID1000 denied protected setup, Supervisor memory/key, and enrollment socket")
 }
 
 func observerNativeRecord(t *testing.T, names string, values ...any) []byte {
@@ -233,6 +280,14 @@ func observerNativeEtcd(t *testing.T, dir string) (*clientv3.Client, *tls.Config
 }
 
 func TestNodeObserverPhysicalNative(t *testing.T) {
+	runNodeObserverPhysicalNative(t, false)
+}
+
+func TestNodeObserverPhysicalNativeUnknown(t *testing.T) {
+	runNodeObserverPhysicalNative(t, true)
+}
+
+func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
 	if os.Getenv("SANDBOX_NODE_OBSERVER_NATIVE") != "1" {
 		t.Skip("requires exact owned full producer Linux fixture")
 	}
@@ -288,13 +343,29 @@ func TestNodeObserverPhysicalNative(t *testing.T) {
 	zero, no, yes := int64(0), false, true
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "runtimes", UID: "pod-uid", ResourceVersion: "1", Annotations: map[string]string{"sandbox.creation.intent": creation}, Finalizers: []string{"goairix.github.io/sandbox-runtime-termination"}, DeletionTimestamp: &metav1.Time{Time: now}}, Spec: v1.PodSpec{NodeName: "node-a", RestartPolicy: v1.RestartPolicyNever, SecurityContext: &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}, Containers: []v1.Container{{Name: "sandbox", SecurityContext: &v1.SecurityContext{RunAsUser: &zero, Privileged: &no, AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, Capabilities: &v1.Capabilities{Drop: []v1.Capability{"ALL"}, Add: []v1.Capability{"KILL", "SETUID", "SETGID", "SETPCAP"}}}}}}}
 	node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
+	var providerMu sync.Mutex
+	blockProvider, providerCalls := false, 0
+	barrier, release := make(chan struct{}), make(chan struct{})
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerMu.Lock()
+		defer providerMu.Unlock()
 		require.Equal(t, http.MethodGet, r.Method)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/nodes/node-a":
 			_ = json.NewEncoder(w).Encode(node)
 		case "/api/v1/namespaces/runtimes/pods/pod-a":
+			if blockProvider {
+				providerCalls++
+				if providerCalls == 2 {
+					close(barrier)
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+				}
+			}
 			_ = json.NewEncoder(w).Encode(pod)
 		default:
 			w.WriteHeader(404)
@@ -355,12 +426,37 @@ func TestNodeObserverPhysicalNative(t *testing.T) {
 	require.NoError(t, err)
 	request, err := p.EncodeNodeEnrollmentRequest(p.NodeEnrollmentRequest{Version: 1, Purpose: "runtime_node_enrollment", RuntimeCertificate: runtimeCert, Activation: activation, IssuerCertificate: issuerCert})
 	require.NoError(t, err)
+	wrongPeer, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: filepath.Join(dir, "enroll.sock"), Net: "unix"})
+	require.NoError(t, err)
+	require.NoError(t, wrongPeer.SetDeadline(time.Now().Add(time.Second)))
+	_ = ct.WriteNodeObserverFrame(wrongPeer, request)
+	_, err = ct.ReadNodeObserverFrame(wrongPeer)
+	require.Error(t, err)
+	require.NoError(t, wrongPeer.Close())
 	require.NoError(t, ct.WriteNodeObserverFrame(conn, request))
 	wire, err = ct.ReadNodeObserverFrame(conn)
 	require.NoError(t, err)
 	receipt, err := p.DecodeNodeEnrollmentReceipt(wire)
 	require.NoError(t, err)
 	t.Logf("actual enrollment receipt=%s", receipt.Claims.EnrollmentDigest)
+	retained, err := os.ReadFile(filepath.Join(journal, "slot-0000.a"))
+	require.NoError(t, err)
+	var enrolled struct {
+		Record struct {
+			Enrollment struct {
+				Kernel json.RawMessage `json:"kernel"`
+			} `json:"enrollment"`
+		} `json:"record"`
+	}
+	require.NoError(t, json.Unmarshal(retained, &enrolled))
+	var kernelPeer struct {
+		PID       int    `json:"pid"`
+		Starttime uint64 `json:"starttime"`
+	}
+	require.NoError(t, json.Unmarshal(enrolled.Record.Enrollment.Kernel, &kernelPeer))
+	require.Equal(t, child.Process.Pid, kernelPeer.PID)
+	require.Positive(t, kernelPeer.Starttime)
+	t.Logf("actual persisted kernel peer/starttime/ns/cgroup anchors=%s", enrolled.Record.Enrollment.Kernel)
 	intent, ticket := observerNativeAuthority(t, ctx, admin, binding, runtimeIdentity, issuer, issuerKey, issuerCert, receipt.Claims, creation)
 	credential, err := p.NewNodeObserverTLSCredential(issuerKey, issuerCert, false)
 	require.NoError(t, err)
@@ -372,6 +468,144 @@ func TestNodeObserverPhysicalNative(t *testing.T) {
 	}
 	d := destination(address)
 	defer d.Close()
+	makeQuery := func() p.NodeTerminationQuery {
+		var e struct {
+			Claims p.TaskRuntimeTerminationTicketClaims `json:"claims"`
+		}
+		require.NoError(t, json.Unmarshal(ticket, &e))
+		c := e.Claims
+		return p.NodeTerminationQuery{Version: 1, Purpose: "task_runtime_terminate_query", Partition: c.Partition, TaskID: c.Current.TaskID, CommandID: c.Current.CommandID, IntentCreateRevision: c.IntentCreateRevision, IntentDigest: c.IntentDigest, EnrollmentDigest: c.EnrollmentDigest}
+	}
+	if unknown {
+		providerMu.Lock()
+		blockProvider = true
+		providerMu.Unlock()
+		done := make(chan p.NodeTerminationResult, 1)
+		failed := make(chan error, 1)
+		go func() { r, err := d.Terminate(ctx, ticket, issuerCert); done <- r; failed <- err }()
+		select {
+		case <-barrier:
+		case <-ctx.Done():
+			t.Fatal("actual pre-signal provider barrier not reached")
+		}
+		issued, err := os.ReadFile(filepath.Join(journal, "slot-0000.a"))
+		require.NoError(t, err)
+		require.Contains(t, string(issued), `"state":"signal-issued"`)
+		_, err = admin.Revoke(ctx, clientv3.LeaseID(intent.Current.LeaseID))
+		require.NoError(t, err)
+		close(release)
+		r := <-done
+		require.NoError(t, <-failed)
+		require.Equal(t, "unknown", r.State)
+		r, err = d.Terminate(ctx, ticket, issuerCert)
+		require.NoError(t, err)
+		require.Equal(t, "unknown", r.State)
+		_, err = os.ReadFile(fmt.Sprintf("/proc/%d/stat", child.Process.Pid))
+		require.NoError(t, err)
+		query := makeQuery()
+		r, err = d.Query(ctx, query)
+		require.NoError(t, err)
+		require.Equal(t, "unknown", r.State)
+		require.NoError(t, d.Close())
+		require.NoError(t, observer.Close())
+		require.NoError(t, <-served)
+		r = observerNativeColdQuery(t, options, query, credential, dir)
+		require.Equal(t, "unknown", r.State)
+		require.Empty(t, r.Proof)
+		_, err = os.ReadFile(fmt.Sprintf("/proc/%d/stat", child.Process.Pid))
+		require.NoError(t, err)
+		require.NoError(t, child.Process.Kill())
+		err = child.Wait()
+		waited = true
+		var exited *exec.ExitError
+		require.True(t, errors.As(err, &exited))
+		require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
+		t.Logf("original Supervisor Cmd.Wait=%v from explicit fixture cleanup ONLY; producer lost real claim after durable signal-issued, retained unknown and cold process Query never signaled", err)
+		return
+	}
+	// Each refusal leaves the same genuine original child alive. Remote service
+	// fixtures change authority/provider inputs; none supplies physical success.
+	alive := func() {
+		status, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child.Process.Pid))
+		require.NoError(t, err)
+		require.NotEmpty(t, status)
+	}
+	refuses := func(name string, command []byte) {
+		t.Helper()
+		r, err := d.Terminate(ctx, command, issuerCert)
+		require.NoError(t, err)
+		require.NotEqual(t, "terminal", r.State, name)
+		alive()
+		t.Log("actual no-signal refusal: " + name)
+	}
+	providerMu.Lock()
+	pod.DeletionTimestamp = nil
+	providerMu.Unlock()
+	refuses("provider DELETE unresolved", ticket)
+	providerMu.Lock()
+	pod.DeletionTimestamp = &metav1.Time{Time: now}
+	node.Status.NodeInfo.BootID = "replacement"
+	providerMu.Unlock()
+	refuses("node boot replacement", ticket)
+	providerMu.Lock()
+	node.Status.NodeInfo.BootID = boot
+	providerMu.Unlock()
+	keys, err := p.TaskRuntimeTerminationKeysFor(intent)
+	require.NoError(t, err)
+	_, err = admin.Put(ctx, keys.OperationsPrefix+"nested/tail", "{}")
+	require.NoError(t, err)
+	refuses("whole nested operations prefix", ticket)
+	_, err = admin.Delete(ctx, keys.OperationsPrefix+"nested/tail")
+	require.NoError(t, err)
+	_, err = admin.Put(ctx, keys.Restore, "replacement")
+	require.NoError(t, err)
+	refuses("native restore epoch lost", ticket)
+	_, err = admin.Put(ctx, keys.Restore, binding.RestoreEpoch)
+	require.NoError(t, err)
+	func() {
+		old := owned + "-original"
+		if err := os.Rename(owned, old); err != nil {
+			// cgroup-v2 kernels can prohibit rename. Do not alter the fixed
+			// /sys mount or count an unexecuted replacement as physical proof.
+			t.Logf("UNAVAILABLE actual cgroup path replacement: owned rename refused: %v", err)
+			return
+		}
+		restored := false
+		defer func() {
+			if !restored {
+				_ = os.Remove(owned)
+				require.NoError(t, os.Rename(old, owned))
+			}
+		}()
+		require.NoError(t, os.Mkdir(owned, 0700))
+		refuses("same path different original cgroup identity", ticket)
+		require.NoError(t, os.Remove(owned))
+		require.NoError(t, os.Rename(old, owned))
+		restored = true
+	}()
+	func() {
+		fd, err := unix.Open(owned, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		require.NoError(t, err)
+		foreign := exec.Command("/bin/sleep", "600")
+		foreign.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: fd}
+		require.NoError(t, foreign.Start())
+		require.NoError(t, unix.Close(fd))
+		joined := false
+		defer func() {
+			if !joined {
+				_ = foreign.Process.Kill()
+				t.Logf("original foreign child cleanup Cmd.Wait=%v", foreign.Wait())
+			}
+		}()
+		refuses("foreign PID namespace descendant escape", ticket)
+		require.NoError(t, foreign.Process.Kill())
+		err = foreign.Wait()
+		joined = true
+		var exited *exec.ExitError
+		require.True(t, errors.As(err, &exited))
+		require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
+		t.Logf("original owned foreign child Cmd.Wait=%v", err)
+	}()
 	result, err := d.Terminate(ctx, ticket, issuerCert)
 	// The original RPC may time out while its owner finishes; Query is readonly.
 	if err != nil {
@@ -406,22 +640,117 @@ func TestNodeObserverPhysicalNative(t *testing.T) {
 	duplicate, err := d.Terminate(ctx, ticket, issuerCert)
 	require.NoError(t, err)
 	require.Equal(t, original, duplicate.Proof)
+	_, err = admin.Revoke(ctx, clientv3.LeaseID(intent.Current.LeaseID))
+	require.NoError(t, err)
+	queryOnly, err := d.Query(ctx, query)
+	require.NoError(t, err)
+	require.Equal(t, original, queryOnly.Proof)
 	require.NoError(t, d.Close())
 	require.NoError(t, observer.Close())
 	require.NoError(t, <-served)
-	observer, err = nodeobserver.New(options)
-	require.NoError(t, err)
-	defer observer.Close()
-	address, served = serve(observer)
-	d = destination(address)
-	defer d.Close()
-	result, err = d.Query(ctx, query)
-	require.NoError(t, err)
+	result = observerNativeColdQuery(t, options, query, credential, dir)
 	require.Equal(t, "terminal", result.State)
 	require.Equal(t, original, result.Proof)
-	require.NoError(t, observer.Close())
-	require.NoError(t, <-served)
-	t.Log("real TLS etcd59+1 + Supervisor birthkey enrollment + actual PID1/descendant SIGKILL + fsynced original proof + restart readonly query PASS")
+	t.Log("real TLS etcd59+1 + Supervisor birthkey enrollment + actual PID1/descendant SIGKILL + fsynced original proof + cold OS process readonly query PASS")
+}
+
+type observerColdConfig struct {
+	Options         nodeobserver.Options
+	CA, Client, Key []byte
+	API, Ready      string
+}
+
+func TestNodeObserverPhysicalColdQuery(t *testing.T) {
+	path := os.Getenv("SANDBOX_NODE_OBSERVER_COLD")
+	if path == "" {
+		return
+	}
+	wire, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var c observerColdConfig
+	require.NoError(t, json.Unmarshal(wire, &c))
+	certificate, err := tls.X509KeyPair(c.Client, c.Key)
+	require.NoError(t, err)
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(c.CA))
+	c.Options.Clock = nativeFixtureClock{}
+	c.Options.EtcdTLS = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{certificate}}
+	c.Options.KubernetesConfig = &rest.Config{Host: c.API}
+	o, err := nodeobserver.New(c.Options)
+	require.NoError(t, err)
+	defer o.Close()
+	uds, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(filepath.Dir(path), "enroll.sock"), Net: "unix"})
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(uds.Addr().String(), 0600))
+	commands, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- o.Serve(ctx, uds, commands) }()
+	ready, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: c.Ready, Net: "unix"})
+	require.NoError(t, err)
+	require.NoError(t, ct.WriteNodeObserverFrame(ready, []byte(commands.Addr().String())))
+	require.NoError(t, ready.Close())
+	require.NoError(t, <-done)
+	require.NoError(t, o.Close())
+	t.Log("cold observer actual Serve+Close joins completed")
+}
+
+func observerNativeColdQuery(t *testing.T, options nodeobserver.Options, query p.NodeTerminationQuery, credential *p.NodeObserverTLSCredential, dir string) p.NodeTerminationResult {
+	t.Helper()
+	ca, err := os.ReadFile(filepath.Join(dir, "ca.pem"))
+	require.NoError(t, err)
+	client := options.EtcdTLS.Certificates[0]
+	key, err := x509.MarshalPKCS8PrivateKey(client.PrivateKey)
+	require.NoError(t, err)
+	c := observerColdConfig{Options: options, CA: ca, Client: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: client.Certificate[0]}), Key: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), API: options.KubernetesConfig.Host, Ready: filepath.Join(dir, "cold-ready.sock")}
+	c.Options.Clock = nil
+	c.Options.EtcdTLS = nil
+	c.Options.KubernetesConfig = nil
+	path := filepath.Join(dir, "cold.json")
+	require.NoError(t, os.WriteFile(path, observerNativeJSON(t, c), 0600))
+	ready, err := net.ListenUnix("unix", &net.UnixAddr{Name: c.Ready, Net: "unix"})
+	require.NoError(t, err)
+	defer ready.Close()
+	require.NoError(t, ready.SetDeadline(time.Now().Add(5*time.Second)))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNodeObserverPhysicalColdQuery$", "-test.v", "-test.timeout=15s")
+	cmd.Env = append(os.Environ(), "SANDBOX_NODE_OBSERVER_COLD="+path)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	require.NoError(t, cmd.Start())
+	waited := false
+	defer func() {
+		if !waited {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			t.Logf("original cold observer cleanup Cmd.Wait=%v", cmd.Wait())
+		}
+	}()
+	conn, err := ready.AcceptUnix()
+	require.NoError(t, err)
+	wire, err := ct.ReadNodeObserverFrame(conn)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	d, err := ct.NewTerminationDestination(ct.TerminationDestinationOptions{Address: string(wire), Binding: options.Binding, Roots: options.Roots, Clock: nativeFixtureClock{}, Credential: credential, ObserverCertificate: options.Certificate, NodeUID: options.NodeUID, NodeBootID: queryNodeBoot(t, options.Certificate), EnrollmentDigest: query.EnrollmentDigest})
+	require.NoError(t, err)
+	defer d.Close()
+	r, err := d.Query(context.Background(), query)
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	err = cmd.Wait()
+	waited = true
+	require.NoError(t, err)
+	t.Log("original cold observer process Cmd.Wait=exit0")
+	return r
+}
+
+func queryNodeBoot(t *testing.T, wire []byte) string {
+	t.Helper()
+	var e struct {
+		Claims p.NodeObserverCertificateClaims `json:"claims"`
+	}
+	require.NoError(t, json.Unmarshal(wire, &e))
+	return e.Claims.NodeBootID
 }
 
 func observerNativeAuthority(t *testing.T, ctx context.Context, client *clientv3.Client, b p.TrustBinding, identity p.RuntimeIdentityContext, issuer p.CommandIssuerIdentity, key ed25519.PrivateKey, issuerWire []byte, enrollment p.NodeEnrollmentReceiptClaims, creation string) (p.TaskRuntimeTerminationIntent, []byte) {
@@ -433,6 +762,12 @@ func observerNativeAuthority(t *testing.T, ctx context.Context, client *clientv3
 	keys, err := p.TaskRuntimeTerminationKeysFor(intent)
 	require.NoError(t, err)
 	put := func(key string, wire []byte) p.RecordStamp {
+		old, err := client.Get(ctx, key)
+		require.NoError(t, err)
+		if len(old.Kvs) == 1 && bytes.Equal(old.Kvs[0].Value, wire) {
+			kv := old.Kvs[0]
+			return p.RecordStamp{CreateRevision: kv.CreateRevision, ModRevision: kv.ModRevision, SHA256: hashBytes(wire)}
+		}
 		r, err := client.Put(ctx, key, string(wire))
 		require.NoError(t, err)
 		return p.RecordStamp{CreateRevision: r.Header.Revision, ModRevision: r.Header.Revision, SHA256: hashBytes(wire)}

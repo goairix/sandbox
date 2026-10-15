@@ -267,6 +267,11 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if err != nil {
 		return err
 	}
+	// Signing must have actually completed while authority is live. Only the
+	// subsequent joined persistence may cross this historical-fact cutoff.
+	if err := snapshot.live(ctx); err != nil {
+		return err
+	}
 	record.State, record.Terminal = "terminal", proof
 	o.mu.Lock()
 	err = o.journal.put(slot, record)
