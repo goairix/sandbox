@@ -4,6 +4,10 @@
 
 ## 2026-10-15 接续
 
+本地完整同步单元已范围验收：`44673b4/0488e3c/3b1e4e6/30b5fc9` 与复审修复 `ba7a3dc`，接通目录/空目录、类型替换、删除策略与 excluded、临时权限恢复、实际关闭和 immutable complete。初审发现新 claim regular adoption 缺口，已通过真实延迟 GC 的 RED→GREEN 修复；同 reviewer 限定复审 C0/I0/M1 Approved，M1 为保留的 etcd teardown 日志。详见 `2026-10-15-workspace-sync-local-finalization-verification.md`。S64 单 partition 边界测试不是 full-cell 或大 N 容量验收，结果不是 release 权限。
+
+后续运行时关闭生产者正在实现：已小步提交固定 termination codec、observer 身份/票据、固定槽持久 journal、真实 Linux pidfd/cgroup 排空和独立 TLS 角色（`a1bc3cc/ea9a927/29500a6/15efe90/5a96a03`）。服务/鉴权/终止/重启查询接线仍待真实认证端到端验证与独立审查，不能称运行时关闭或 owner 释放已完成。接着完成 enrolled publication、精确 provider 清理和原子安全释放，再接生产业务与调度。当前无外部阻塞，主程序仍连接 Redis。
+
 已合并feat/workspace-fuse-mount最新c14a52c，merge45ebc70，无冲突；六个受影响普通Go包race、正确标签下Helm限定回归、vet及Linuxarm64构建通过，首批漏Helm标签导致的setup exit1如实保留。详见2026-10-15-base-fuse-fixes-merge-verification.md。
 
 暂停前的bea7f2d已完成限定复审，持久归档与原始归属单元接受，无未解决阻断项；容量M1仍保留。详见2026-10-15-workspace-archive-recovery-storage-verification.md。冷bound archive→fresh claim/认证历史query→旧intent修复/新reserve/checkpoint本地regular-file恢复已范围验收，源码509632a/d7dc18b/fbe66c1/a46d203/5a78262及修复f68923a/d8e6eb7。两文件、跨claim继续、65文件、partial-write、terminal/GC丢ACK、物理Close、0000/0444恢复通过；初轮两个Important和Root新增权限缺口均限定复审闭环。见2026-10-15-workspace-sync-local-recovery-verification.md；历史失败Wait缺口如实保留，不称完整sync/安全释放或容量完成。自动进度跟进恢复，每10分钟汇报；整体生产迁移仍未完成。
