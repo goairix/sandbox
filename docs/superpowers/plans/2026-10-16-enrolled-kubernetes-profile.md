@@ -34,9 +34,11 @@
 
 **Create:** `internal/runtime/launcherconfig/config.go`, `config_test.go`；`internal/kubecontract/enrolled_plain.go`, `enrolled_plain_test.go`（按职责可拆 config/security/volumes 文件）；`internal/runtime/kubernetes/enrolled_plain_pod.go`, `enrolled_plain_pod_test.go`；`cmd/sandbox-launcher/provision.go`, `provision_linux.go`, `provision_unsupported.go`, `provision_test.go`；`internal/runtime/controlrunner/enrolled_profile_native_linux_test.go`；`scripts/test-enrolled-profile.sh`。
 
-**Modify narrowly:** `cmd/sandbox-launcher/protected_config.go` 迁移 decoder为共用别名/薄调用、`main.go` 固定 mode分派；`internal/nodeobserver/kubernetes_guard.go` 新profile分支；`internal/runtime/kubernetes/task_runtime_cleanup_profile.go` 新profile分支；对应两个消费者新增有限新测试文件，不重写已验收矩阵。其余旧 producer/validator 接点需要先报Root具体矛盾。
+**Modify narrowly:** `cmd/sandbox-launcher/protected_config.go` 迁移 decoder为共用wrapper/薄调用、`main.go` 固定 mode分派；`internal/nodeobserver/kubernetes_guard.go` 新profile分支及临时providerRegistration.Binding，`enrollment.go`/`termination.go` 两处仅从原已验证activation.Binding赋值，不改persistedproviderObservation/journalwire；`internal/runtime/kubernetes/task_runtime_cleanup_profile.go` 新profile分支；对应两个消费者新增有限新测试文件，不重写已验收矩阵。其余旧 producer/validator 接点需要先报Root具体矛盾。
 
 **Interfaces:** `launcherconfig.Decode([]byte) (Config,error)` 精确保留原v2字段顺序与规则；`kubecontract.EnrolledPlainProfile = "sandbox-enrolled-plain/v1"` 与 `ValidateEnrolledPlainPod(*corev1.Pod) error`，严格解析 config并核对profilemetadata，不授权；`kubernetes.EnrolledPlainPodRequest{Spec runtime.SandboxSpec, NodeName,NodeUID,NodeBootID,CreationIntentID string, Generation int64, Config []byte}` 与 `BuildEnrolledPlainPod(namespace string, request EnrolledPlainPodRequest) (*corev1.Pod,error)`。固定CLI `serve-provisioned` 从 SANDBOX_LAUNCHER_CONFIG_V2 消费公开配置并移除变量，完成固定受保护文件后调用原serve。
+
+**Shared extraction:** `SelectEnrolledPlainPodProfile(*corev1.Pod)(bool,error)` 中央拒绝unknown或缺marker但有reserved迹象，两消费者无条件先调用；`InspectEnrolledPlainPod(*corev1.Pod)(EnrolledPlainPodIdentity,error)` 返回copy诊断DTO Config/LogicalID/CreationIntentID/NodeUID/NodeBootID/Generation，Validate薄调用。两个消费者再比对原verifiedactivation或cleanupbinding完整tuple。spec列明7受控annotation；PidLimit非零拒绝；cmd definedwrapper保持跨包私有方法而不复制decoder。
 
 - [ ] Step1 读取实际 v2 config/原 Pod/两个消费者，写最小 config共享与profile RED；报告精确矛盾，不扩张原authority。迁移 config、实现共享严格profile及纯builder，有限host/race/vet通过后小提交。
 - [ ] Step2 正式 provisioning mode 与真实 FD/NOFOLLOW/O_EXCL/root/mode/stale 检查；两个消费者新显式 profile分支，保持旧分支不变。对受控关键字段有限negative和原拒绝条件完成host/race与Linuxcompile/vet，及时小提交。
