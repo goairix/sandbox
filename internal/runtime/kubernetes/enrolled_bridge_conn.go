@@ -115,6 +115,9 @@ func (c *bridgeConn) Read(p []byte) (int, error) {
 			if !ok {
 				c.mu.Lock()
 				err := c.terminal
+				if c.abortErr != nil {
+					err = c.abortErr
+				}
 				c.mu.Unlock()
 				return 0, err
 			}
@@ -231,9 +234,14 @@ func (c *bridgeConn) watchDeadline() {
 			c.mu.Lock()
 			current := c.deadline()
 			due := !current.IsZero() && !current.After(time.Now())
+			// Expiration and deadline replacement linearize under the same lock.
+			if due && c.abortErr == nil {
+				c.abortErr = os.ErrDeadlineExceeded
+				close(c.stop)
+			}
 			c.mu.Unlock()
 			if due {
-				c.abort(os.ErrDeadlineExceeded)
+				c.op.abort()
 				return
 			}
 		}
@@ -248,6 +256,12 @@ func (c *bridgeConn) readWire() {
 		c.terminal = terminal
 		c.mu.Unlock()
 		close(c.stdout)
+		c.op.mu.Lock()
+		raw := c.op.raw
+		c.op.mu.Unlock()
+		if raw != nil {
+			raw.Close()
+		}
 		c.ws.Close()
 		close(c.readerDone)
 	}()
@@ -292,6 +306,35 @@ func (c *bridgeConn) readWire() {
 func bridgeSuccess(wire []byte) bool {
 	if len(wire) == 0 {
 		return true
+	}
+	// encoding/json accepts case aliases and duplicate keys by default. Require
+	// unique exact Status fields before typed decoding, without canonicalizing
+	// legitimate API metadata or whitespace.
+	keys := json.NewDecoder(bytes.NewReader(wire))
+	first, err := keys.Token()
+	if err != nil || first != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool, 8)
+	for keys.More() {
+		token, err := keys.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[key] || len(seen) == 8 {
+			return false
+		}
+		switch key {
+		case "kind", "apiVersion", "metadata", "status", "message", "reason", "details", "code":
+		default:
+			return false
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if keys.Decode(&value) != nil {
+			return false
+		}
+	}
+	if last, err := keys.Token(); err != nil || last != json.Delim('}') || keys.Decode(new(any)) != io.EOF {
+		return false
 	}
 	var status metav1.Status
 	d := json.NewDecoder(bytes.NewReader(wire))

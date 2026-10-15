@@ -22,7 +22,7 @@ import (
 func bridgeWireServer(t *testing.T, secure bool, serve func(*websocket.Conn) error) (*httptest.Server, EnrolledBridgeOptions, EnrolledBridgeTarget, <-chan error) {
 	t.Helper()
 	pod, node, target := bridgeCandidate(t)
-	result := make(chan error, 1)
+	result := make(chan error, 32)
 	var mu sync.Mutex
 	var paths []string
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,8 +51,9 @@ func bridgeWireServer(t *testing.T, secure bool, serve func(*websocket.Conn) err
 				result <- err
 				return
 			}
-			defer conn.Close()
-			result <- serve(conn)
+			err = serve(conn)
+			conn.Close()
+			result <- err
 		default:
 			http.NotFound(w, r)
 		}
@@ -116,6 +117,10 @@ func TestEnrolledBridgeWireBinaryHalfClose(t *testing.T) {
 			client, err := NewEnrolledBridgeClient(options)
 			require.NoError(t, err)
 			defer client.Close()
+			options.Config.BearerToken = "changed-after-construction"
+			for i := range options.Config.CAData {
+				options.Config.CAData[i] = 'x'
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			conn, err := client.Dial(ctx, target)
 			require.NoError(t, err)

@@ -21,9 +21,18 @@ const bridgeHeaderLimit = 64 << 10
 // sees it. Its private reader preserves bytes read beyond the header for upgrade.
 type bridgeHeaderConn struct {
 	net.Conn
+	raw    net.Conn
 	reader *bufio.Reader
 	header *bytes.Reader
 	parsed bool
+}
+
+func (c *bridgeHeaderConn) Close() error {
+	// TLS Close may write close_notify. Terminate the physical API socket first
+	// on every GET/rejected-upgrade/byte-connection close path.
+	err := c.raw.Close()
+	c.Conn.Close()
+	return err
 }
 
 func (c *EnrolledBridgeClient) upgrade(ctx context.Context, op *bridgeOperation, target EnrolledBridgeTarget) (net.Conn, error) {
@@ -43,7 +52,7 @@ func (c *EnrolledBridgeClient) upgrade(ctx context.Context, op *bridgeOperation,
 	if err != nil {
 		return nil, err
 	}
-	if len(response.Header.Values("Sec-Websocket-Protocol")) != 1 || response.Header.Get("Sec-Websocket-Protocol") != "v5.channel.k8s.io" || len(response.Header.Values("Upgrade")) != 1 || !strings.EqualFold(response.Header.Get("Upgrade"), "websocket") || len(response.Header.Values("Connection")) != 1 || !strings.EqualFold(response.Header.Get("Connection"), "Upgrade") || response.Header.Get("Sec-Websocket-Extensions") != "" || response.Header.Get("Content-Encoding") != "" {
+	if len(response.Header.Values("Sec-Websocket-Protocol")) != 1 || response.Header.Get("Sec-Websocket-Protocol") != "v5.channel.k8s.io" || len(response.Header.Values("Upgrade")) != 1 || !strings.EqualFold(response.Header.Get("Upgrade"), "websocket") || len(response.Header.Values("Connection")) != 1 || !strings.EqualFold(response.Header.Get("Connection"), "Upgrade") || len(response.Header.Values("Sec-Websocket-Extensions")) != 0 || len(response.Header.Values("Content-Encoding")) != 0 {
 		ws.Close()
 		return nil, ErrEnrolledBridge
 	}
@@ -112,7 +121,7 @@ func (c *EnrolledBridgeClient) dialAPI(ctx context.Context, op *bridgeOperation)
 		}
 		conn = tlsConn
 	}
-	return &bridgeHeaderConn{Conn: conn, reader: bufio.NewReader(conn)}, nil
+	return &bridgeHeaderConn{Conn: conn, raw: raw, reader: bufio.NewReader(conn)}, nil
 }
 
 // get uses a fresh synchronous, owned connection; no implicit retries, proxy,
@@ -141,7 +150,7 @@ func (c *EnrolledBridgeClient) get(ctx context.Context, op *bridgeOperation, pat
 	}
 	// Close the socket before body.Close: it must never drain an untrusted body.
 	defer func() { conn.Close(); response.Body.Close() }()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" || response.Header.Get("Upgrade") != "" || response.ContentLength > taskCleanupBodyLimit {
+	if response.StatusCode != http.StatusOK || len(response.Header.Values("Content-Encoding")) != 0 || len(response.Header.Values("Upgrade")) != 0 || response.ContentLength > taskCleanupBodyLimit {
 		return ErrEnrolledBridge
 	}
 	wire, err := io.ReadAll(io.LimitReader(response.Body, taskCleanupBodyLimit+1))

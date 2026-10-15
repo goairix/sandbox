@@ -56,6 +56,9 @@ func NewEnrolledBridgeClient(o EnrolledBridgeOptions) (*EnrolledBridgeClient, er
 	if err != nil {
 		return nil, errors.Join(ErrEnrolledBridge, err)
 	}
+	if strings.ContainsAny(o.Config.Host, "?#") {
+		return nil, ErrEnrolledBridge
+	}
 	c := &EnrolledBridgeClient{config: snapshot, namespace: strings.Clone(o.Namespace), limit: o.MaxActive, timeout: o.RequestTimeout, active: make(map[*bridgeOperation]struct{})}
 	c.self = c
 	return c, nil
