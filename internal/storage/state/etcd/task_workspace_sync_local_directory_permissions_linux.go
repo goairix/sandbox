@@ -26,7 +26,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataStat(fd int) (unix.Stat_t, err
 	return st, nil
 }
 
-func (f *taskWorkspaceSyncLocalFinalizer) metadataStage(parent int, name string, anchor int, guard func() error) error {
+func (f *taskWorkspaceSyncLocalFinalizer) metadataStage(parent int, name, path string, anchor int, guard func() error) error {
 	if err := guard(); err != nil {
 		return err
 	}
@@ -40,6 +40,15 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataStage(parent int, name string,
 	}
 	if linked.Dev != st.Dev || linked.Ino != st.Ino || linked.Mode&unix.S_IFMT != st.Mode&unix.S_IFMT {
 		return ErrIdentityMismatch
+	}
+	fd, err := workspaceSyncLocalScopedOpen(f.source.target.fd, path, unix.O_PATH, 0)
+	if err != nil {
+		return err
+	}
+	current, statErr := f.metadataStat(fd)
+	closeErr := unix.Close(fd)
+	if statErr != nil || closeErr != nil || current.Dev != st.Dev || current.Ino != st.Ino {
+		return errors.Join(ErrIdentityMismatch, statErr, closeErr)
 	}
 	return nil
 }
@@ -81,7 +90,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataChmod(ctx context.Context, par
 	if fs.Type != unix.PROC_SUPER_MAGIC || root.Dev != current.Dev || root.Ino != current.Ino || linked.Dev != st.Dev || linked.Ino != st.Ino || linked.Mode != st.Mode {
 		return ErrIdentityMismatch
 	}
-	if err := f.metadataStage(parent, name, anchor, guard); err != nil {
+	if err := f.metadataStage(parent, name, path, anchor, guard); err != nil {
 		return err
 	}
 	if err := unix.Fchmodat(fd, strconv.Itoa(anchor), mode, 0); err != nil {
@@ -90,7 +99,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataChmod(ctx context.Context, par
 	if err := f.transcriptEffect("directory-chmod", path, st, mode); err != nil {
 		return err
 	}
-	if err := f.metadataStage(parent, name, anchor, guard); err != nil {
+	if err := f.metadataStage(parent, name, path, anchor, guard); err != nil {
 		return err
 	}
 	after, err := f.metadataStat(anchor)

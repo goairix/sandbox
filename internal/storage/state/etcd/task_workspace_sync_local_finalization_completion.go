@@ -48,6 +48,9 @@ func (f *taskWorkspaceSyncLocalFinalizer) sealEffects(ctx context.Context) error
 	if err := s.target.Close(); err != nil {
 		return err
 	}
+	if s.localIOComplete != nil {
+		s.localIOComplete("target-close")
+	}
 	return s.guard(ctx)
 }
 

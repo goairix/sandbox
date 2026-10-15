@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -41,8 +42,8 @@ type taskWorkspaceSyncLocalDirPage struct {
 // only the native cookie survives in the bounded ancestor frame.
 func (p *taskWorkspaceSyncLocalDirPage) next(fd int, cookie int64) (string, int64, error) {
 	if p.fd != fd || p.cookie != cookie || p.offset == p.end {
-		if _, err := unix.Seek(fd, cookie, io.SeekStart); err != nil {
-			return "", 0, err
+		if position, err := unix.Seek(fd, cookie, io.SeekStart); err != nil || position != cookie {
+			return "", 0, errors.Join(ErrIdentityMismatch, err)
 		}
 		n, err := unix.Getdents(fd, p.scratch[:])
 		if err != nil {
@@ -60,8 +61,11 @@ func (p *taskWorkspaceSyncLocalDirPage) next(fd int, cookie int64) (string, int6
 		d := p.scratch[p.offset:p.end]
 		size := int(binary.NativeEndian.Uint16(d[16:18]))
 		next := int64(binary.NativeEndian.Uint64(d[8:16]))
-		if size < 20 || size > len(d) || next <= cookie {
-			return "", 0, ErrIdentityMismatch
+		// Cookies are opaque: tmpfs legitimately returns descending values.
+		// Require native seek round-trip and actual advancement, never numeric
+		// ordering or a cookie persisted across a crash.
+		if size < 20 || size > len(d) || next < 0 || next == cookie {
+			return "", 0, fmt.Errorf("%w: getdents cookie %d after %d (record %d)", ErrIdentityMismatch, next, cookie, size)
 		}
 		end := 19
 		for end < size && d[end] != 0 {
@@ -88,7 +92,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataUnlink(parent int, name, path 
 	if f.protectedPath(path) {
 		return ErrConflict
 	}
-	if err := f.metadataStage(parent, name, anchor, guard); err != nil {
+	if err := f.metadataStage(parent, name, path, anchor, guard); err != nil {
 		return err
 	}
 	st, err := f.metadataStat(anchor)
@@ -115,6 +119,10 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataUnlink(parent int, name, path 
 	if err := unix.Fsync(parent); err != nil {
 		return err
 	}
+	var absent unix.Stat_t
+	if err := unix.Fstatat(parent, name, &absent, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
+		return errors.Join(ErrIdentityMismatch, err)
+	}
 	return guard()
 }
 
@@ -139,7 +147,8 @@ func (f *taskWorkspaceSyncLocalFinalizer) removeTree(ctx context.Context, path s
 
 func (f *taskWorkspaceSyncLocalFinalizer) walkMetadata(ctx context.Context, parent int, name, initial string, all bool, guard func() error) (resultErr error) {
 	page := taskWorkspaceSyncLocalDirPage{fd: -1}
-	var frames [128]taskWorkspaceSyncLocalWalkFrame
+	// The fixed root frame is additional to at most 128 relative components.
+	var frames [129]taskWorkspaceSyncLocalWalkFrame
 	path := make([]byte, 0, 4096)
 	path = append(path, initial...)
 	depth := 0
@@ -195,7 +204,11 @@ func (f *taskWorkspaceSyncLocalFinalizer) walkMetadata(ctx context.Context, pare
 			page.fd = -1
 			base, leaf := parent, name
 			if depth > 1 {
-				base, leaf = frames[depth-2].fd, string(path[frames[depth-2].end+1:])
+				start := frames[depth-2].end
+				if start > 0 {
+					start++
+				}
+				base, leaf = frames[depth-2].fd, string(path[start:])
 			}
 			if err := guard(); err != nil {
 				return err
@@ -224,6 +237,12 @@ func (f *taskWorkspaceSyncLocalFinalizer) walkMetadata(ctx context.Context, pare
 			depth--
 			if closeErr != nil {
 				return closeErr
+			}
+			if f.source.localIOComplete != nil {
+				f.source.localIOComplete("metadata-close")
+			}
+			if err := guard(); err != nil {
+				return err
 			}
 			if pop {
 				next := f.progress

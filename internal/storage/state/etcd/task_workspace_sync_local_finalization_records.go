@@ -48,6 +48,9 @@ func (p taskWorkspaceSyncLocalProgress) Validate() error {
 		return ErrInvalidRecord
 	}
 	if len(p.Ledger.Frames) > 0 {
+		if p.IntentID == "" {
+			return ErrInvalidRecord
+		}
 		path, err := base64.StdEncoding.Strict().DecodeString(p.Ledger.Path)
 		if err != nil || len(path) > 4096 || base64.StdEncoding.EncodeToString(path) != p.Ledger.Path || !validWorkspaceSyncPath(string(path)) {
 			return ErrInvalidRecord
@@ -85,7 +88,7 @@ func encodeWorkspaceSyncLocalProgress(p taskWorkspaceSyncLocalProgress) (string,
 
 func decodeWorkspaceSyncLocalProgress(kv *mvccpb.KeyValue) (taskWorkspaceSyncLocalProgress, error) {
 	var p taskWorkspaceSyncLocalProgress
-	if kv == nil || kv.Lease != 0 || kv.CreateRevision <= 0 || kv.ModRevision < kv.CreateRevision || kv.Version <= 0 || decodePreparationDomain(kv, &p, 16384) != nil {
+	if kv == nil || kv.Lease != 0 || kv.CreateRevision <= 0 || kv.ModRevision < kv.CreateRevision || kv.Version <= 0 || kv.Version == 1 && kv.ModRevision != kv.CreateRevision || kv.Version > 1 && kv.ModRevision <= kv.CreateRevision || decodePreparationDomain(kv, &p, 16384) != nil {
 		return p, ErrCorruptRecord
 	}
 	wire, err := encodeWorkspaceSyncLocalProgress(p)

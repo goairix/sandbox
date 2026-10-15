@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -94,6 +95,12 @@ func (f *taskWorkspaceSyncLocalFinalizer) restoreLedger(ctx context.Context) (re
 		if closeErr != nil {
 			return closeErr
 		}
+		if f.source.localIOComplete != nil {
+			f.source.localIOComplete("metadata-close")
+		}
+		if err := guard(); err != nil {
+			return err
+		}
 	}
 	next := f.progress
 	next.Ledger = taskWorkspaceSyncLocalLedger{}
@@ -136,6 +143,9 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataPass(ctx context.Context, mode
 		if err := unix.Fsync(q.fd); err != nil {
 			return err
 		}
+		if s.localIOComplete != nil {
+			s.localIOComplete("metadata-fsync")
+		}
 		if err := guard(); err != nil {
 			return err
 		}
@@ -149,7 +159,13 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataPass(ctx context.Context, mode
 		} else {
 			path = path[:0]
 		}
-		return closeErr
+		if closeErr != nil {
+			return closeErr
+		}
+		if s.localIOComplete != nil {
+			s.localIOComplete("metadata-close")
+		}
+		return guard()
 	}
 	for {
 		e, err := cursor.next(ctx)
@@ -217,7 +233,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) executeMetadata(ctx context.Context) e
 	}
 	if s.plan.deleteExtraneous {
 		if err := f.walkMetadata(ctx, s.target.fd, ".", "", false, func() error { return f.metadataGuard(ctx) }); err != nil {
-			return err
+			return fmt.Errorf("local metadata prune: %w", err)
 		}
 	}
 	if err := f.metadataPass(ctx, true); err != nil {
@@ -305,11 +321,20 @@ func (f *taskWorkspaceSyncLocalFinalizer) ensureArchiveParents(ctx context.Conte
 			if err := unix.Mkdirat(parent, name, 0700); err != nil {
 				return err
 			}
+			created, err := workspaceSyncLocalScopedOpen(parent, name, unix.O_PATH, 0)
+			if err != nil {
+				return err
+			}
+			observed, statErr := f.metadataStat(created)
+			closeErr := unix.Close(created)
+			if statErr != nil || closeErr != nil || observed.Mode != unix.S_IFDIR|0700 {
+				return errors.Join(ErrIdentityMismatch, statErr, closeErr)
+			}
 			if f.result.CreatedDirectories == ^uint64(0) {
 				return ErrInvalidRecord
 			}
 			f.result.CreatedDirectories++
-			if err := f.transcriptEffect("mkdir", full, unix.Stat_t{}, 0700); err != nil {
+			if err := f.transcriptEffect("mkdir", full, observed, 0700); err != nil {
 				return err
 			}
 			if err := guard(); err != nil {

@@ -577,6 +577,52 @@ func (r *taskArchiveSpool) sealOriginalBinding(ctx context.Context, source *Prep
 	return errors.Join(bounded.Err(), r.recovery.ctx.Err(), source.local(bounded), body.localTarget.ctx.Err())
 }
 
+func (r *taskArchiveSpool) sealOriginalFinalizationBinding(ctx context.Context, source *PreparedTaskWorkspaceSyncSource, target *taskWorkspaceSyncLocalTarget) error {
+	bounded, finish, err := r.beginRecoveryMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	s := r.store
+	s.mu.Lock()
+	valid := source != nil && source.self == source && r.consumer == source && source.archive != nil && source.archive.witness == r.witness && source.archive.owner != nil && source.archive.owner.spool == r
+	s.mu.Unlock()
+	if !valid || target == nil || target.self != target || source.plan.validate() != nil || target.plan.digest != source.plan.digest || target.plan.workspace != source.plan.workspace {
+		return ErrInvalidRecord
+	}
+	unlock, err := r.recoveryGate(bounded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := errors.Join(source.guard(bounded), target.check(bounded), r.checkRecoveryRoot()); err != nil {
+		return err
+	}
+	m := r.recovery.manifest
+	if m.Received == nil || m.Seed.Task != source.archive.owner.claim.reference.Task || m.Seed.ClaimID != source.archive.owner.claim.reference.ClaimID || m.Seed.TicketDigest != source.diagnostics.TicketDigest || *m.Received != (taskArchiveRecoveryReceived{source.diagnostics.Bytes, source.diagnostics.Entries, source.diagnostics.SHA256}) {
+		return ErrIdentityMismatch
+	}
+	local, err := encodeOperationMetadata(target.pin, 16384)
+	if err != nil {
+		return err
+	}
+	binding := taskArchiveRecoveryBinding{recoveryPlanWire(source.plan), target.pin, workspaceSyncIntentDigest(local)}
+	if m.State == "bound" {
+		if m.Binding == nil || !recoverySameBinding(*m.Binding, binding) {
+			return ErrIdentityMismatch
+		}
+	} else {
+		if m.State != "received" || m.Binding != nil {
+			return ErrConflict
+		}
+		m.State, m.Binding = "bound", &binding
+		if err := r.commitRecovery(bounded, m, true); err != nil {
+			return err
+		}
+	}
+	return errors.Join(source.guard(bounded), target.check(bounded), r.checkRecoveryRoot())
+}
+
 func (r *taskArchiveSpool) recoveryProbe(stage string) {
 	if r.store.recovery != nil && r.store.recovery.probe != nil {
 		r.store.recovery.probe(stage)

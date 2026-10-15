@@ -87,6 +87,26 @@ func (s *PreparedTaskWorkspaceSyncSource) begin(ctx context.Context) error {
 	return nil
 }
 
+// The original registered source can durably attribute a local target even
+// when its archive contains no regular body. This grants no metadata effect.
+func (s *PreparedTaskWorkspaceSyncSource) bindLocalFinalizationTarget(ctx context.Context, target *taskWorkspaceSyncLocalTarget) error {
+	if err := s.begin(ctx); err != nil {
+		return err
+	}
+	defer s.end()
+	if s.broken || target == nil || target.self != target || target.plan.validate() != nil || target.plan.digest != s.plan.digest || target.plan.workspace != s.plan.workspace || s.archive.owner.spool.store.recovery == nil {
+		return ErrInvalidRecord
+	}
+	if err := target.begin(ctx); err != nil {
+		return err
+	}
+	defer target.ops.Done()
+	if err := errors.Join(s.guard(ctx), target.check(ctx)); err != nil {
+		return err
+	}
+	return s.archive.owner.spool.sealOriginalFinalizationBinding(ctx, s, target)
+}
+
 func (s *PreparedTaskWorkspaceSyncSource) end() {
 	s.mu.Lock()
 	s.busy = false

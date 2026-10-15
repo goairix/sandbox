@@ -12,6 +12,15 @@ mode=${2:-normal}
 test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
 case "$mode" in
   finalization-regular) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeRegular$';;
+  finalization-policy) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativePolicy$';;
+  finalization-policy-prune) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativePolicy$/^prune$';;
+  finalization-completion) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeCompletion$';;
+  finalization-empty-ledger) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Empty|Ledger)$';;
+  finalization-unknown) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeUnknown$';;
+  finalization-deferred) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeDeferredLedger$';;
+  finalization-ledger-deferred) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Ledger|DeferredLedger)$';;
+  finalization-faults) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeFaults$';;
+  finalization-join) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeJoin$';;
   normal) ;;
 	recovery-execution-cold) test_run='^TestTaskWorkspaceSyncRecoveryNativeCold$';;
 	recovery-execution-authority) test_run='^TestTaskWorkspaceSyncRecoveryNativeAuthority$';;
@@ -301,10 +310,21 @@ source_files=(
   git branch --show-current >"$evidence/working-branch.txt"
   git status --short -- "${source_files[@]}" >"$evidence/working-source-status.txt"
   git diff -- "${source_files[@]}" >"$evidence/working-source.diff"
-  env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -json ./internal/storage/state/etcd >"$evidence/compiler-package.json"
-  python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print("\n".join(p["Dir"]+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[])))' "$evidence/compiler-package.json" >"$evidence/compiler-selected-inputs.txt"
+  env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -deps -test -json ./internal/storage/state/etcd >"$evidence/compiler-package.json"
+  python3 -c 'import json,os,sys; raw=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); files=set(); root=os.path.realpath(sys.argv[2])+os.sep
+while raw.strip():
+ p,end=decoder.raw_decode(raw.lstrip()); raw=raw.lstrip()[end:]; directory=p.get("Dir","")
+ if directory.startswith(root): files.update(directory+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[]) if not os.path.isabs(f))
+print("\n".join(sorted(files)))' "$evidence/compiler-package.json" "$repo" >"$evidence/compiler-selected-inputs.txt"
   xargs shasum -a 256 <"$evidence/compiler-selected-inputs.txt" >"$evidence/compiler-selected-sha256.txt"
   env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" test -c -o "$evidence/workspace-sync-local.test" ./internal/storage/state/etcd
+  env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -deps -test -json ./internal/storage/state/etcd >"$evidence/compiler-package-after.json"
+  python3 -c 'import json,os,sys; raw=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); files=set(); root=os.path.realpath(sys.argv[2])+os.sep
+while raw.strip():
+ p,end=decoder.raw_decode(raw.lstrip()); raw=raw.lstrip()[end:]; directory=p.get("Dir","")
+ if directory.startswith(root): files.update(directory+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[]) if not os.path.isabs(f))
+print("\n".join(sorted(files)))' "$evidence/compiler-package-after.json" "$repo" >"$evidence/compiler-selected-inputs-after.txt"
+  cmp "$evidence/compiler-selected-inputs.txt" "$evidence/compiler-selected-inputs-after.txt" >"$evidence/compiler-selected-set-match.txt"
   shasum -a 256 -c "$evidence/source-sha256.txt" >"$evidence/source-build-match.txt"
   shasum -a 256 -c "$evidence/compiler-selected-sha256.txt" >"$evidence/compiler-build-match.txt"
 ) >"$evidence/build.log" 2>&1

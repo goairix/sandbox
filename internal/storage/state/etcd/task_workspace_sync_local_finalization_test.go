@@ -3,13 +3,16 @@ package etcd
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func TestTaskWorkspaceSyncLocalFinalizationAdmission(t *testing.T) {
@@ -74,6 +77,7 @@ func TestTaskWorkspaceSyncLocalFinalizationRecords(t *testing.T) {
 		require.Error(t, err)
 	}
 	p.Phase, p.CheckpointRevision, p.CheckpointDigest = "metadata", 3, d
+	p.IntentID, p.IntentBirth = seed.ArchiveCommand, 4
 	path := strings.Repeat(strings.Repeat("<", 31)+"/", 127) + strings.Repeat("<", 32)
 	require.Len(t, path, 4096)
 	p.Ledger.Path = base64.StdEncoding.EncodeToString([]byte(path))
@@ -108,4 +112,33 @@ func TestTaskWorkspaceSyncLocalFinalizationArchiveOrder(t *testing.T) {
 		require.NoError(t, order.accept(&e))
 	}
 	require.Error(t, order.accept(&workspaceSyncArchiveEntry{workspaceSyncLocalFile: workspaceSyncLocalFile{path: "a/y"}, kind: '0'}), "a closed producer subtree cannot reopen")
+}
+
+func TestTaskWorkspaceSyncLocalFinalizationBounds(t *testing.T) {
+	b, d := recyclingLocalDraftFixture(t)
+	prefix, err := b.taskOperationsPrefix(d.record.Reference.Task)
+	require.NoError(t, err)
+	checkpointKey, err := b.namespace.taskCheckpointKey(d.record.Reference.Task)
+	require.NoError(t, err)
+	c := &TaskClaim{reference: d.record.Claim, checkpointKey: checkpointKey}
+	a := &taskArchiveRecoveryAuthority{backend: b, claim: c, prefix: prefix}
+	for i := 0; i < 50; i++ {
+		a.comparisons = append(a.comparisons, clientv3.Compare(clientv3.Value(b.namespace.Root()+fmt.Sprintf("history/%02d", i)), "=", strings.Repeat("v", 512)))
+	}
+	s := &taskWorkspaceSyncRecoverySource{authority: a, manifest: taskArchiveRecoveryManifest{Seed: taskArchiveRecoverySeed{ArchiveCommand: d.record.Reference.IntentID}}}
+	progress, complete, err := b.namespace.workspaceSyncLocalKeys(c.reference.Task)
+	require.NoError(t, err)
+	f := &taskWorkspaceSyncLocalFinalizer{source: s, progressKey: progress, completeKey: complete, progressKV: &mvccpb.KeyValue{ModRevision: 9, Value: []byte(strings.Repeat("p", 16384))}}
+	require.NoError(t, f.preflight())
+	f.charge = &taskWorkspaceSyncLocalMetadataCharge{intentKey: d.intentKey, slotKey: d.slotKey, value: strings.Repeat("i", int(b.workspaceSyncBudget.options.MaxIntentBytes)), birth: 8, generation: taskWorkspaceSyncRecyclingGeneration{create: 1, mod: 8, version: 2, value: strings.Repeat("s", 512)}}
+	cmps := f.metadataComparisons(false)
+	require.Len(t, cmps, 61)
+	writes := []Write{{Key: d.slotKey, Value: []byte(strings.Repeat("s", 512))}, {Key: d.intentKey, Delete: true}, {Key: progress, Value: []byte(strings.Repeat("p", 16384))}}
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites(writes)}
+	require.Equal(t, 64, len(request.Compare)+len(request.Success)+len(request.Failure))
+	require.NoError(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{recyclingGCReply(), taskProtoResponse(nil, nil)}))
+	require.LessOrEqual(t, request.Size(), 256*1024)
+	require.Len(t, f.metadataComparisons(true), 62)
+	request.Success = append(request.Success, taskProtoRange(b.identityKey))
+	require.Error(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, nil))
 }

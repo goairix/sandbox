@@ -48,6 +48,7 @@
 - Produces Backend.FinalizeTaskWorkspaceSyncLocal(ctx context.Context,c *TaskClaim,slot uint32,destination *controltransport.Destination,worker *launcher.KernelBoundary) (TaskWorkspaceSyncLocalFinalizationResult,error)。result/reference精确字段见Spec Binding；private reader不公开authority。
 - Consumes当前prepareTaskWorkspaceSyncRecovery/registerRecovery/regular checkpoint及history/query guard；新增private模式/strict dispatcher，普通恢复路径语义保持。
 - Producesprogress regular→metadata→effects-done→sealed、单槽local_metadata_pass v3、immutable complete及私有只读重验；后续release自己重建current pins并比较exact key，不消费boolean授权。
+- Private bindLocalFinalizationTarget(ctx,target)在原始source/target实际登记和native权限下完成无regular-body的received→bound，不分配put槽；纯目录测试必须走真实原始绑定和Close后cold恢复。所有mutable resume先CAS新progress Mod；sameclaim regular resume拒绝至genuine newclaim，completed marker仍零写。
 
 - [ ] **Step 1: Focused RED and budget/admission skeleton.** 新测试TestTaskWorkspaceSyncLocalFinalizationRecords验证strict canonical/Lease0/immutable、最大base64ledger和native nodes/bytes；TestTaskWorkspaceSyncLocalFinalizationAdmission验证两个准入方向及quarantined seed。记录旧源码下feature RED，补最小可编译新模式/record和对称准入，host/race验证后第一笔小提交。
 - [ ] **Step 2: Full regular phase and S1 repair.** 实现private DFS-order验证、progress regular、necessary ancestor/type修复及全新repair evidence domain；只修exact intended path，excluded冲突破坏前拒绝。真实native测试TestTaskWorkspaceSyncLocalFinalizationNativeRegular覆盖file↔dir、S1已占旧put、无regular/emptydirs、旧checkpoint prefix不重写；focused GREEN后独立提交。

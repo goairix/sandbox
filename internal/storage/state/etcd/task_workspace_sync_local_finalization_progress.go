@@ -46,6 +46,8 @@ func (f *taskWorkspaceSyncLocalFinalizer) progressComparisons() []clientv3.Cmp {
 
 func (f *taskWorkspaceSyncLocalFinalizer) saveProgress(ctx context.Context, next taskWorkspaceSyncLocalProgress) error {
 	s := f.source
+	c := s.authority.claim.reference
+	next.Claim = taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
 	value, err := encodeWorkspaceSyncLocalProgress(next)
 	if err != nil {
 		return err
@@ -99,7 +101,12 @@ func (f *taskWorkspaceSyncLocalFinalizer) loadProgress(ctx context.Context) (*mv
 		return nil, errors.Join(ErrIdentityMismatch, err)
 	}
 	c := s.authority.claim.reference
-	if p.Claim.ClaimID != c.ClaimID && (p.Claim.CreateRevision >= c.CreateRevision || points[0].ModRevision >= c.CreateRevision) || p.Claim.ClaimID == c.ClaimID && (p.Claim.CreateRevision != c.CreateRevision || p.Claim.LeaseID != c.LeaseID || points[0].ModRevision <= c.CreateRevision) {
+	if p.Phase == "regular" && p.Claim.ClaimID == c.ClaimID {
+		// Legacy regular GC already occupies all 64 nodes and cannot compare
+		// progress. A genuine fresh claim is its required late-commit fence.
+		return nil, ErrConflict
+	}
+	if p.Claim.ClaimID != c.ClaimID && (p.Claim.CreateRevision >= c.CreateRevision || points[0].ModRevision >= c.CreateRevision) || p.Claim.ClaimID == c.ClaimID && (p.Claim != (taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}) || points[0].ModRevision <= c.CreateRevision) {
 		return nil, ErrConflict
 	}
 	f.progress, f.progressKV = p, points[0]

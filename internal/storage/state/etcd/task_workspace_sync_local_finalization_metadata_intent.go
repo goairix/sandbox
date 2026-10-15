@@ -126,7 +126,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadata(ctx context.Context) e
 			return errors.Join(ErrCorruptRecord, err)
 		}
 		c := s.authority.claim.reference
-		if record.Claim.ClaimID != c.ClaimID && (record.Claim.CreateRevision >= c.CreateRevision || pair[1].CreateRevision >= c.CreateRevision) || record.Claim.ClaimID == c.ClaimID && record.Claim.CreateRevision != c.CreateRevision {
+		if record.Claim.ClaimID != c.ClaimID && (record.Claim.CreateRevision >= c.CreateRevision || pair[1].CreateRevision >= c.CreateRevision) || record.Claim.ClaimID == c.ClaimID && record.Claim != (taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}) {
 			return ErrConflict
 		}
 		f.charge = &taskWorkspaceSyncLocalMetadataCharge{record, intentKey, key, string(pair[1].Value), pair[1].CreateRevision, taskWorkspaceSyncRecyclingGeneration{pair[0].CreateRevision, pair[0].ModRevision, pair[0].Version, string(pair[0].Value)}}
@@ -231,4 +231,28 @@ func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, ev
 	f.progress, f.progressKV = next, &mvccpb.KeyValue{Key: []byte(f.progressKey), Value: []byte(value), CreateRevision: f.progressKV.CreateRevision, ModRevision: r.Header.Revision, Version: f.progressKV.Version + 1}
 	f.charge = nil
 	return s.guard(ctx)
+}
+
+// Preflight maximum retained record/wire encodings before progress or physical
+// effects. These are transient metadata clones, released before traversal.
+func (f *taskWorkspaceSyncLocalFinalizer) preflight() error {
+	s, b := f.source, f.source.authority.backend
+	ref := TaskWorkspaceSyncIntentReference{Task: s.authority.claim.reference.Task, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: s.manifest.Seed.ArchiveCommand, Slot: 63}
+	intentKey, slotKey, err := b.workspaceSyncRecyclingKeys(ref)
+	if err != nil {
+		return err
+	}
+	progress := string(make([]byte, 16384))
+	intent := string(make([]byte, b.workspaceSyncBudget.options.MaxIntentBytes))
+	cmps := append(s.comparisons(nil), clientv3.Compare(clientv3.CreateRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.ModRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(intentKey), "=", intent), clientv3.Compare(clientv3.ModRevision(slotKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(slotKey), "=", string(make([]byte, 512))), clientv3.Compare(clientv3.ModRevision(f.progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(f.progressKey), "=", progress))
+	writes := []Write{{Key: slotKey, Value: []byte(make([]byte, 512))}, {Key: intentKey, Delete: true}, {Key: f.progressKey, Value: []byte(progress)}}
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites(writes)}
+	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{recyclingGCReply(), taskProtoResponse(nil, nil)}); err != nil {
+		return err
+	}
+	complete := string(make([]byte, 8192))
+	cmps = append(s.comparisons(nil), clientv3.Compare(clientv3.ModRevision(f.progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(f.progressKey), "=", progress), clientv3.Compare(clientv3.ModRevision(s.authority.claim.checkpointKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(s.authority.claim.checkpointKey), "=", string(make([]byte, 4096))), clientv3.Compare(clientv3.Version(f.completeKey), "=", 0))
+	keys := []string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key}
+	request = &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(f.progressKey, progress, 0), taskProtoPut(f.completeKey, complete, 0)}, Failure: taskProtoPoints(keys)}
+	return taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{taskProtoPutResponse(2), taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, b.workspaceSyncBudget.value})})
 }

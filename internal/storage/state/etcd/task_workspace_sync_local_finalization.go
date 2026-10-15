@@ -91,6 +91,9 @@ func (b *Backend) FinalizeTaskWorkspaceSyncLocal(ctx context.Context, c *TaskCla
 }
 
 func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (TaskWorkspaceSyncLocalFinalizationResult, error) {
+	if s == nil || s.self != s || !s.fullLocal || s.finalization != nil {
+		return TaskWorkspaceSyncLocalFinalizationResult{}, ErrGuardExpired
+	}
 	f := &taskWorkspaceSyncLocalFinalizer{source: s, transcript: sha256.New()}
 	s.finalization = f
 	var err error
@@ -99,6 +102,9 @@ func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (Ta
 		f.binding, err = s.localFinalizationBinding()
 	}
 	if err != nil {
+		return f.result, err
+	}
+	if err := f.preflight(); err != nil {
 		return f.result, err
 	}
 	if err := s.begin(ctx); err != nil {
@@ -147,11 +153,11 @@ func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (Ta
 	} else {
 		if f.progress.Phase == "metadata" {
 			c := s.authority.claim.reference
-			if f.progress.Claim.ClaimID != c.ClaimID {
-				next := f.progress
-				next.Claim = taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
-				err = f.saveProgress(ctx, next)
-			}
+			// Even an identical current claim must advance the generation before
+			// physical work, fencing an earlier RPC that can still commit late.
+			next := f.progress
+			next.Claim = taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
+			err = f.saveProgress(ctx, next)
 			if err == nil {
 				err = f.reserveMetadata(ctx)
 			}
