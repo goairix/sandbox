@@ -146,8 +146,9 @@ func TestCoherentViewAbsenceNative(t *testing.T) {
 }
 
 func TestCoherentViewWireBudget(t *testing.T) {
-	n, err := NewNamespace("/"+strings.Repeat("p", 250), strings.Repeat("s", 128), strings.Repeat("c", 127))
+	n, err := NewNamespace("/"+strings.Repeat("p", 253), strings.Repeat("s", 128), strings.Repeat("c", 127))
 	require.NoError(t, err)
+	require.Len(t, n.Root(), maxNamespaceRootBytes)
 	identityKey, err := n.Key("meta", "identity")
 	require.NoError(t, err)
 	restoreKey, err := n.Key("meta", "restore_epoch")
