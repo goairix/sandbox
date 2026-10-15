@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +29,45 @@ func TestLocalRuntimeReleaseNativeEffects(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestLocalRuntimeReleaseNativeClose(t *testing.T) { runLocalRuntimeReleaseNative(t, "close-http") }
+
+func localReleaseCloseHTTP(t *testing.T, ctx context.Context, b *state.Backend, claim *state.TaskClaim, destination *ct.TerminationDestination, address string) {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second}
+	defer client.CloseIdleConnections()
+	control := func(path string) {
+		r, err := client.Get(address + path)
+		require.NoError(t, err)
+		_, readErr := io.Copy(io.Discard, r.Body)
+		closeErr := r.Body.Close()
+		require.NoError(t, readErr)
+		require.NoError(t, closeErr)
+		require.Equal(t, http.StatusOK, r.StatusCode)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := b.TerminateTaskRuntimeLocal(ctx, claim, destination); done <- err }()
+	control("/fixture/wait-blocked")
+	select {
+	case err := <-done:
+		t.Fatalf("original Terminate returned before Close: %v", err)
+	default:
+	}
+	require.NoError(t, b.Close())
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("original Terminate did not join after Backend.Close")
+	}
+	control("/fixture/wait-canceled")
+	// The remote fixture handler deliberately remains alive after cancellation;
+	// it is not part of the client's IO ownership. Release and join it separately.
+	control("/fixture/release-handler")
+	_, err := b.ReleaseTaskWorkspaceOwnerLocal(ctx, claim)
+	require.Error(t, err)
+	t.Log("Backend.Close canceled real blocked HTTP, original Terminate joined, closed backend refused release owner admission; remote handler separately released and joined")
 }
 
 // Four distinct exact owned objects, including both Cilium slots. This uses

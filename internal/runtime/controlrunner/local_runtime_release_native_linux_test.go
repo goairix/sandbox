@@ -285,6 +285,10 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 		localReleaseUnknownEffect(t, ctx, b, claim, termination, s, tlsConfig, ns, task)
 		return
 	}
+	if s.Fault == "close-http" {
+		localReleaseCloseHTTP(t, ctx, b, claim, termination, s.ProviderAddress)
+		return
+	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
 	if s.Fault == "ack-reserved" {
 		require.Error(t, err)
@@ -462,6 +466,8 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var proxy *localReleaseNativeProxy
 	var effectErrors []error
 	var effectCounts [7]int
+	blockedHTTP, canceledHTTP, releaseHTTP, joinedHTTP := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseHTTPOnce sync.Once
 	policies := localReleaseNativePolicies(input.SandboxID, podName, podUID)
 	effectIndex := -1
 	if strings.HasPrefix(fault, "http-") {
@@ -489,6 +495,28 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		return true
 	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fault == "close-http" && strings.HasPrefix(r.URL.Path, "/fixture/") {
+			var ready <-chan struct{}
+			switch r.URL.Path {
+			case "/fixture/wait-blocked":
+				ready = blockedHTTP
+			case "/fixture/wait-canceled":
+				ready = canceledHTTP
+			case "/fixture/release-handler":
+				releaseHTTPOnce.Do(func() { close(releaseHTTP) })
+				ready = joinedHTTP
+			default:
+				w.WriteHeader(404)
+				return
+			}
+			select {
+			case <-ready:
+			case <-r.Context().Done():
+				return
+			}
+			w.WriteHeader(200)
+			return
+		}
 		apiMu.Lock()
 		defer apiMu.Unlock()
 		if r.Method != http.MethodGet {
@@ -569,6 +597,14 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 				w.WriteHeader(409)
 				return
 			}
+			if fault == "close-http" {
+				close(blockedHTTP)
+				<-r.Context().Done()
+				close(canceledHTTP)
+				<-releaseHTTP
+				close(joinedHTTP)
+				return
+			}
 			pod.Finalizers = finalizers
 			version, _ := strconv.Atoi(pod.ResourceVersion)
 			pod.ResourceVersion = strconv.Itoa(version + 1)
@@ -604,7 +640,8 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		}
 		w.WriteHeader(405)
 	}))
-	defer api.Close()
+	defer func() { api.Close(); t.Log("original HTTP fixture server and handlers joined") }()
+	defer releaseHTTPOnce.Do(func() { close(releaseHTTP) })
 	uds, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "observer.sock"), Net: "unix"})
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(uds.Addr().String(), 0600))
@@ -707,7 +744,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	workerErr := worker.Wait()
 	t.Logf("original local worker Cmd.Wait=%v", workerErr)
 	require.NoError(t, workerErr)
-	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" || effectIndex == 0 || effectIndex == 1 {
+	if strings.HasPrefix(fault, "enrollment-") || fault == "ack-reserved" || fault == "close-http" || effectIndex == 0 || effectIndex == 1 {
 		require.NoError(t, child.Process.Kill())
 	}
 	childErr := child.Wait()
@@ -749,7 +786,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)
-	} else if fault == "ack-reserved" {
+	} else if fault == "ack-reserved" || fault == "close-http" {
 		require.Equal(t, 1, actualPatch)
 		require.Zero(t, actualDelete)
 		require.False(t, absent)
