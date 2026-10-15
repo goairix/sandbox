@@ -63,15 +63,19 @@ func (c *bridgeConn) begin() error {
 	return nil
 }
 
-func (c *bridgeConn) abort(err error) {
+func (c *bridgeConn) abort(err error) error {
 	c.mu.Lock()
 	if c.abortErr == nil {
 		c.abortErr = err
 		close(c.stop)
 	}
+	firstCause := c.abortErr
 	c.mu.Unlock()
 	// The original raw socket is closed first, including blocked frame writes.
 	c.op.abort()
+	// A deadline may have closed the socket before an entered write failed.
+	// Report that first cause instead of the resulting closed-socket error.
+	return firstCause
 }
 
 func (c *bridgeConn) Close() error {
@@ -145,8 +149,7 @@ func (c *bridgeConn) Write(p []byte) (int, error) {
 		wire := make([]byte, size+1)
 		copy(wire[1:], p[:size])
 		if err := c.ws.WriteMessage(websocket.BinaryMessage, wire); err != nil {
-			c.abort(err)
-			return n, err
+			return n, c.abort(err)
 		}
 		n += size
 		p = p[size:]
@@ -166,8 +169,7 @@ func (c *bridgeConn) CloseWrite() error {
 	}
 	c.writeClosed = true
 	if err := c.ws.WriteMessage(websocket.BinaryMessage, []byte{255, 0}); err != nil {
-		c.abort(err)
-		return err
+		return c.abort(err)
 	}
 	return nil
 }
