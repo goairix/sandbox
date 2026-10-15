@@ -177,7 +177,8 @@ type taskWorkspaceSyncRecoveryCompletionWire struct {
 	Local        taskWorkspaceSyncLocalAttribution `json:"local"`
 	Bytes        int64                             `json:"bytes"`
 	BodySHA256   string                            `json:"body_sha256"`
-	Dev, Ino     uint64
+	Dev          uint64                            `json:"dev"`
+	Ino          uint64                            `json:"ino"`
 }
 
 func (w taskWorkspaceSyncRecoveryCompletionWire) Validate() error {
@@ -198,11 +199,17 @@ func (s *taskWorkspaceSyncRecoverySource) recoveryTerminalValue(q *taskWorkspace
 }
 
 func (s *taskWorkspaceSyncRecoverySource) validCompletion(q *taskWorkspaceSyncRecoveryCompletion) error {
-	if q == nil || q.self != q || q.source != s || q.charge == nil || q.body == nil || q.completed {
+	if q == nil || q.self != q || q.source != s || q.charge == nil || q.body == nil || q.body.completion != q || q.completed {
 		return ErrInvalidRecord
 	}
 	if err := s.validRecoveryBody(q.body, q.charge); err != nil {
 		return err
+	}
+	q.body.mu.Lock()
+	closed := q.body.closed || q.body.ctx.Err() != nil || q.body.active
+	q.body.mu.Unlock()
+	if closed {
+		return ErrGuardExpired
 	}
 	if !q.body.complete || q.physical.bytes != q.charge.record.Size || q.physical.sha256 != q.charge.record.BodySHA256 || q.physical.dev != s.target.pin.Dev || q.physical.ino == 0 {
 		return ErrInvalidRecord

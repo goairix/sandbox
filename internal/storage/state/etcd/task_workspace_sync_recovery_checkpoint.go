@@ -147,6 +147,9 @@ func (s *taskWorkspaceSyncRecoverySource) recycleLocal(ctx context.Context, char
 		return OutcomeUnknown, err
 	}
 	defer s.end()
+	if q != nil && q.self == q && q.source == s && q.charge == charge && q.completed && q.body != nil && q.body.completion == q {
+		return OutcomeCommitted, s.guard(ctx)
+	}
 	if err := s.validCompletion(q); err != nil || q.charge != charge || !q.known {
 		return OutcomeUnknown, errors.Join(ErrInvalidRecord, err)
 	}

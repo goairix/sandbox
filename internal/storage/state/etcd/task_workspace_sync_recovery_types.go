@@ -53,6 +53,7 @@ type taskWorkspaceSyncRecoveryBody struct {
 	hash                              hash.Hash
 	bytes                             int64
 	charge                            *taskWorkspaceSyncRecoveryCharge
+	completion                        *taskWorkspaceSyncRecoveryCompletion
 }
 
 type taskWorkspaceSyncRecoveryCharge struct {

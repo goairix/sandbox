@@ -51,6 +51,7 @@ func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, bo
 	}
 	q := &taskWorkspaceSyncRecoveryCompletion{source: s, body: body, charge: charge, physical: result}
 	q.self = q
+	body.completion = q
 	q.value, err = s.recoveryTerminalValue(q)
 	if err != nil {
 		return nil, err

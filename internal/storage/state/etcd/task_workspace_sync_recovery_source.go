@@ -273,7 +273,11 @@ func (s *taskWorkspaceSyncRecoverySource) native(ctx context.Context, cmps []cli
 	if err := s.local(ctx); err != nil {
 		return nil, err
 	}
-	r, err := workspaceSyncNativeTxn(ctx, a.backend, cmps, success, protoSuccess, reply, emptyFailure)
+	bounded, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	r, err := workspaceSyncNativeTxn(bounded, a.backend, cmps, success, protoSuccess, reply, emptyFailure)
 	return r, errors.Join(err, s.local(ctx))
 }
 
