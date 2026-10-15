@@ -27,6 +27,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/nodeobserver"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"github.com/goairix/sandbox/internal/runtime/controltarget"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/goairix/sandbox/internal/runtime/launcher"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
@@ -60,6 +61,25 @@ type enrolledNativeReply struct {
 	Enrollment p.EnrolledRuntimeEvidence
 }
 
+// Pause the actual Journal.InstallActivation's final clock observation, after
+// its open gate was durably persisted. This is a test clock, not an enrollment
+// or kernel-success callback. Release is explicit even after cancellation so
+// the test can distinguish cancellation from joining the original borrower.
+type enrolledJournalPauseClock struct {
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *enrolledJournalPauseClock) Observe(ctx context.Context) (p.ClockObservation, error) {
+	now := time.Now().UTC()
+	if c.calls.Add(1) == 6 {
+		close(c.entered)
+		<-c.release
+	}
+	return p.ClockObservation{UTC: now, Uncertainty: time.Millisecond}, ctx.Err()
+}
+
 // Same independently sealed private PID/mount/proc/cgroup profile as the tracked
 // observer fixture, now constructing the actual immutable enrolled Supervisor.
 func TestEnrolledSupervisorNativeChild(t *testing.T) {
@@ -90,7 +110,14 @@ func TestEnrolledSupervisorNativeChild(t *testing.T) {
 	require.NoError(t, err)
 	verifier, err := p.NewManagementVerifier(setup.Binding, []ed25519.PublicKey{setup.Root})
 	require.NoError(t, err)
-	s, err := NewEnrolledSupervisor(SupervisorOptions{Kernel: kernel, UID: 1000, GID: 1000, ContractDigest: setup.Contract, Verifier: verifier, Clock: nativeFixtureClock{}, JournalDirectory: filepath.Join(filepath.Dir(path), "supervisor-journal"), Executable: "/fixture/monitor"}, NodeEnrollmentOptions{SocketPath: setup.Socket, NodeUID: setup.NodeUID, NodeBootID: setup.NodeBootID})
+	var clock p.AuthorityClock = nativeFixtureClock{}
+	var paused *enrolledJournalPauseClock
+	if strings.HasPrefix(setup.Mode, "journal-") {
+		paused = &enrolledJournalPauseClock{entered: make(chan struct{}), release: make(chan struct{})}
+		clock = paused
+	}
+	journalDir := filepath.Join(filepath.Dir(path), "supervisor-journal")
+	s, err := NewEnrolledSupervisor(SupervisorOptions{Kernel: kernel, UID: 1000, GID: 1000, ContractDigest: setup.Contract, Verifier: verifier, Clock: clock, JournalDirectory: journalDir, Executable: "/fixture/monitor"}, NodeEnrollmentOptions{SocketPath: setup.Socket, NodeUID: setup.NodeUID, NodeBootID: setup.NodeBootID})
 	require.NoError(t, err)
 	defer s.Close()
 	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: setup.Coordinator, Net: "unix"})
@@ -124,6 +151,89 @@ func TestEnrolledSupervisorNativeChild(t *testing.T) {
 	}
 	require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "pending-no-child"})))
 	command = read()
+	if paused != nil {
+		require.Equal(t, "journal", command.Action)
+		select {
+		case <-paused.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("actual Journal.InstallActivation did not reach final observation")
+		}
+		gateState := func() string {
+			wire, err := os.ReadFile(filepath.Join(journalDir, "gate.json"))
+			require.NoError(t, err)
+			var gate struct {
+				State string `json:"gate_state"`
+			}
+			require.NoError(t, json.Unmarshal(wire, &gate))
+			return gate.State
+		}
+		require.Equal(t, "open", gateState(), "actual persisted gate must precede pause")
+		require.True(t, s.mu.TryLock(), "clock I/O must not hold Supervisor.mu")
+		require.False(t, s.admission)
+		require.Nil(t, s.journal)
+		require.Nil(t, s.activation)
+		owner := s.enrollment
+		s.mu.Unlock()
+		if setup.Mode == "journal-close-admission" {
+			require.NoError(t, s.CloseAdmission(context.Background()))
+			close(paused.release)
+			require.Error(t, <-activated)
+			require.False(t, s.admission)
+			require.Nil(t, s.journal)
+			require.Nil(t, s.activation)
+			require.Equal(t, "closed", gateState())
+			_, err := s.EnrolledPublicationProof(context.Background(), command.Certificate, command.Claim)
+			require.Error(t, err)
+			require.NoError(t, s.Close())
+			require.Equal(t, make([]byte, ed25519.PrivateKeySize), []byte(s.key))
+			require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "journal-seal-cannot-install"})))
+			return
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- s.Close() }()
+		select {
+		case <-owner.context.Done():
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("Close did not cancel original journal owner")
+		}
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned before original journal borrower: %v", err)
+		default:
+		}
+		s.mu.Lock()
+		require.NotEqual(t, make([]byte, ed25519.PrivateKeySize), []byte(s.key))
+		s.mu.Unlock()
+		require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "journal-close-still-joining"})))
+		require.Equal(t, "release-journal", read().Action)
+		close(paused.release)
+		require.Error(t, <-activated)
+		require.NoError(t, <-closed)
+		require.Equal(t, make([]byte, ed25519.PrivateKeySize), []byte(s.key))
+		require.False(t, s.admission)
+		require.Nil(t, s.activation)
+		require.Nil(t, s.journal)
+		_, err := s.EnrolledPublicationProof(context.Background(), command.Certificate, command.Claim)
+		require.ErrorIs(t, err, ErrAdmissionClosed)
+		_, err = s.accept(context.Background(), &authenticatedStart{supervisor: s})
+		require.ErrorIs(t, err, ErrAdmissionClosed)
+		// Cancellation poisons the uninstalled live journal. Its open diagnostic
+		// bytes are retained; the existing cold opener durably closes them and
+		// never reconstructs a fresh activation capability.
+		require.Equal(t, "open", gateState())
+		wire, err := os.ReadFile(filepath.Join(journalDir, "gate.json"))
+		require.NoError(t, err)
+		var manifest controltarget.GateManifest
+		require.NoError(t, json.Unmarshal(wire, &manifest))
+		cold, err := controltarget.OpenClosedJournal(context.Background(), controltarget.JournalOptions{Directory: journalDir, Birth: &s.birth, Verifier: verifier, Clock: nativeFixtureClock{}, Identity: manifest.Identity, DataGateEpoch: a.DataGateEpoch(), ManagementUID: 0})
+		require.NoError(t, err)
+		require.Equal(t, "closed", cold.Status().Gate.GateState)
+		require.Equal(t, "closed", gateState())
+		require.Error(t, cold.InstallActivation(context.Background(), a))
+		require.NoError(t, cold.Close())
+		require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, enrolledNativeReply{State: "journal-close-joined-key-zero"})))
+		return
+	}
 	if setup.Mode == "close" {
 		require.Equal(t, "close", command.Action)
 		require.NoError(t, s.Close())
@@ -175,6 +285,14 @@ func TestEnrolledSupervisorNativeChild(t *testing.T) {
 }
 
 func TestEnrolledSupervisorNative(t *testing.T) {
+	runEnrolledSupervisorNative(t, []string{"active", "close-admission", "close"}, true)
+}
+
+func TestEnrolledSupervisorNativeJournal(t *testing.T) {
+	runEnrolledSupervisorNative(t, []string{"journal-close-admission", "journal-close"}, false)
+}
+
+func runEnrolledSupervisorNative(t *testing.T, modes []string, withBackend bool) {
 	if os.Getenv("SANDBOX_ENROLLED_PUBLICATION_NATIVE") != "1" {
 		t.Skip("requires exact owned enrolled Linux fixture")
 	}
@@ -232,7 +350,7 @@ func TestEnrolledSupervisorNative(t *testing.T) {
 	require.NoError(t, err)
 	issuerCert, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: issuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
-	for _, mode := range []string{"active", "close-admission", "close"} {
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			caseDir := filepath.Join(dir, mode)
 			require.NoError(t, os.Mkdir(caseDir, 0700))
@@ -367,7 +485,17 @@ func TestEnrolledSupervisorNative(t *testing.T) {
 				require.NoError(t, err)
 				require.Empty(t, strings.TrimSpace(string(wire)))
 			}
-			if mode == "close" {
+			if strings.HasPrefix(mode, "journal-") {
+				close(release)
+				send(enrolledNativeCommand{Action: "journal", Certificate: certificate, Claim: claimReference})
+				if mode == "journal-close" {
+					require.Equal(t, "journal-close-still-joining", read().State)
+					send(enrolledNativeCommand{Action: "release-journal"})
+					require.Equal(t, "journal-close-joined-key-zero", read().State)
+				} else {
+					require.Equal(t, "journal-seal-cannot-install", read().State)
+				}
+			} else if mode == "close" {
 				send(enrolledNativeCommand{Action: "close"})
 				require.Equal(t, "closed-joined-key-zero", read().State)
 				close(release)
@@ -401,15 +529,6 @@ func TestEnrolledSupervisorNative(t *testing.T) {
 			t.Logf("original enrolled Supervisor mode=%s Cmd.Wait=exit0; actual cgroup emptiness checked before removal", mode)
 		})
 	}
-	// One independently manifested test ELF shares this actual server using its
-	// own exact-prefix App identity. It does not rerun the physical producer suite.
-	backendTests := exec.Command("/fixture/etcd-tests", "-test.run=^TestEnrolledPublicationNative$", "-test.v", "-test.timeout=60s")
-	backendTests.Env = append(os.Environ(), "ENROLLED_NATIVE_TLS_DIRECTORY="+dir)
-	backendTests.Stdout, backendTests.Stderr = os.Stdout, os.Stderr
-	require.NoError(t, backendTests.Start())
-	err = backendTests.Wait()
-	t.Logf("original enrolled Backend native test ELF Cmd.Wait=%v", err)
-	require.NoError(t, err)
 	// The observer App certificate remains unable to modify its read-only prefix.
 	readOnly, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://127.0.0.1:2379"}, TLS: observerTLS, DialTimeout: time.Second})
 	require.NoError(t, err)
@@ -417,6 +536,17 @@ func TestEnrolledSupervisorNative(t *testing.T) {
 	require.Error(t, err)
 	require.NoError(t, readOnly.Close())
 	require.False(t, bytes.Equal(observerTLS.Certificates[0].Certificate[0], appCertificate.Certificate[0]))
+	if withBackend {
+		// One independently manifested test ELF shares this actual server using its
+		// own exact-prefix App identity. No physical producer matrix is replayed.
+		backendTests := exec.Command("/fixture/etcd-tests", "-test.run=^TestEnrolledPublicationNative$", "-test.v", "-test.timeout=60s")
+		backendTests.Env = append(os.Environ(), "ENROLLED_NATIVE_TLS_DIRECTORY="+dir)
+		backendTests.Stdout, backendTests.Stderr = os.Stdout, os.Stderr
+		require.NoError(t, backendTests.Start())
+		err = backendTests.Wait()
+		t.Logf("original enrolled Backend native test ELF Cmd.Wait=%v", err)
+		require.NoError(t, err)
+	}
 }
 
 // Reuse the same TLS helper for a bounded metadata-only rerun when a new

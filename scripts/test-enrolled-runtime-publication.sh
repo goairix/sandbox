@@ -11,7 +11,7 @@ mode=${1:-run}
 selector=${ENROLLED_PUBLICATION_SELECTOR:-'^TestEnrolledSupervisorNative$'}
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]]
 [[ "$mode" == build || "$mode" == run ]]
-case "$selector" in '^TestEnrolledSupervisorNative$'|'^TestEnrolledPublicationNativeFixture$') ;; *) exit 2;; esac
+case "$selector" in '^TestEnrolledSupervisorNative$'|'^TestEnrolledSupervisorNativeJournal$'|'^TestEnrolledPublicationNativeFixture$') ;; *) exit 2;; esac
 image=sha256:684aa844d79d5b300db6586a25503607838055db7e7f480a50abb7c7ee7b4e32
 etcd="$own/etcd-native-arm64"
 [[ -x "$etcd" ]]
@@ -85,11 +85,15 @@ docker rm "$id"
 id=
 [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]]
 if [[ "$attach_status" != 0 || "$container_status" != 0 ]]; then exit 1; fi
-if [[ "$selector" == '^TestEnrolledSupervisorNative$' ]]; then
+if [[ "$selector" == '^TestEnrolledSupervisorNativeJournal$' ]]; then
+  [[ $(rg -c '^--- PASS: TestEnrolledSupervisorNativeJournal ' "$own/native-$epoch.log") == 1 ]]
+elif [[ "$selector" == '^TestEnrolledSupervisorNative$' ]]; then
   [[ $(rg -c '^--- PASS: TestEnrolledSupervisorNative ' "$own/native-$epoch.log") == 1 ]]
 else
   [[ $(rg -c '^--- PASS: TestEnrolledPublicationNativeFixture ' "$own/native-$epoch.log") == 1 ]]
 fi
-[[ $(rg -c '^--- PASS: TestEnrolledPublicationNative ' "$own/native-$epoch.log") == 1 ]]
+if [[ "$selector" != '^TestEnrolledSupervisorNativeJournal$' ]]; then
+  [[ $(rg -c '^--- PASS: TestEnrolledPublicationNative ' "$own/native-$epoch.log") == 1 ]]
+fi
 ! rg -q '^--- SKIP:' "$own/native-$epoch.log"
 printf 'ENROLLED_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"

@@ -10,6 +10,8 @@
 
 **Spec:** docs/superpowers/specs/2026-10-15-enrolled-runtime-publication-design.md
 
+Final finite journal-install verification pauses the actual final trusted-clock observation after the local open gate was durably persisted. CloseAdmission must prevent installation; Close must cancel but still join the original borrower before key clear. Preserve old poisoned-journal semantics: cancellation may retain diagnostic open bytes, then actual cold OpenClosedJournal must persist CLOSED and refuse a fresh InstallActivation. The two new native modes reuse the existing fixture and do not replay positive/backend matrices or change Journal production code.
+
 ## Global Constraints
 
 - 一个完整 Task、一个 fresh implementer 和唯一 fresh reviewer；内部验证后及时小步提交，不能等待全部完成才大提交。按既有授权连续执行，不重复询问继续。
