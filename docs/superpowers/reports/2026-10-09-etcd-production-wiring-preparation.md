@@ -2,7 +2,7 @@
 
 2026-10-15补充：基分支新增Kubernetes LoadWorkspaceControlKey，main将Redis Store传入，以永久SetNX/Get保存scope级probe签名seed。它是fencing历史，生产etcd接线须明确持久authority/协议替代与旧版本排空；下文早期“未发现credential必须依赖Redis”的研究结论不覆盖这项新增。见2026-10-15-base-fuse-fixes-merge-verification.md。
 
-用户确认研究probe密钥由etcd承载：纳入后续生产接线，当前尚未实施。按状态scope保留永久seed，无Lease/TTL；首次初始化原生CAS，响应丢失后只读查回原值，禁止读取失败生成替代密钥。API启动加载并校验后在内存签名，不随已有sandbox数量逐个读取。Pod只接收公钥；私钥读写限API的TLS/RBAC身份，磁盘与备份也按私钥保护（TLS/RBAC本身不提供静态加密）。迁移须导入现有seed并验证公钥一致，或先完成旧runtime排空再协调轮换；不能删除Redis时丢弃签名历史。具体原生schema、身份/restore屏障、故障恢复和轮换接线仍需独立实现验收。
+本线程probe密钥etcd方案已交付原生准备接口：226b543/dc08b41及验收2026-10-15-etcd-probe-control-key-verification.md。operator显式32字节seed、永久无Lease/TTL、当前identity/restore屏障下CAS，丢ACK只读仲裁，API只读owned key加载，禁止失败后生成替代。main仍用旧Redis loader，启动内存安装、原seed迁移/公钥校验、operator初始化与API只读身份RBAC/TLS、磁盘备份保护及轮换/旧runtime排空尚待接线。Pod仍只接收公钥，不随已有sandbox数量逐个读私钥；不能删除Redis时丢弃签名历史。
 
 这是fresh `etcd_production_wiring_gap_map`对master spec及当前业务代码的只读研究，未实施、未测试，不是生产验收。Root抽查LoadOwner/LoadControl/LoadSnapshot签名、distributedStateEnabled和全量协调器/FUSE检查接点。当前main仍Redis；不能用通用etcd.Store包装保留旧循环来宣称完成迁移。
 
@@ -10,7 +10,7 @@
 
 - `cmd/sandbox/main.go`仍构造Active、ordinary pool、WorkspaceCoordinator、FUSE、Session/Ephemeral、Multipart等Redis仓库；Backend未实现旧Store/AtomicStore/ActiveSandboxRepository/FUSEPoolRepository。永久owner不能照搬旧TTL删除和Keys扫描。
 - CreateSandbox→Manager.GetOrCreate/Create可消费AcquireIntent、CreationClaim、DeclareRuntimeDispatch、BindRuntime/ConsumeRuntimeMount、PublishRuntime及ResolveStage；Manager尚未消费，真实driver的声明/bootstrap/证书/发布证明/可信Destination组合仍缺。
-- GetByWorkspace/Get可复用LoadOwner/Control/Placement/Snapshot；缺owner/control coherent同读的ModRevision view、健康观察后只读Txn确认、snapshot→Sandbox严格编解码和有界LRU。PrepareDestroy需要ExpectedControlRevision，当前LoadControl只返回record，不能让manager拼裸key。
+- GetByWorkspace/Get所需原生ReadWorkspaceView/ReadSandboxView/ConfirmSandboxView已完成并验收，提供同revision owner/fence/placement/control与只读MOD复核；manager尚未消费。仍缺健康/期限准入组合、snapshot→Sandbox严格编解码和有界LRU。PrepareDestroy可用view.ControlRevision，不能让manager拼裸key，也不能将metadata Confirm当健康/副作用许可。
 - Exec/ExecStream可复用BeginOperation/RenewOperation、PrepareExecEffect/DeliverExecEffect/RenewExecDelivery；缺真实driver Destination与结果/SSE映射。CancelOperationCapability仅撤销metadata，不是物理结束。
 - Upload/Download/Read/Glob/List/Edit等文件公共方法尚走旧acquireSandboxOperation，不能因Exec delivery已有便认为覆盖。TTL/network缺capability下领域更新、TTL+due原子重排和真实副作用回执。Mount/Unmount/Sync缺exclusive关闭/排空/修改/epoch/reopen组合入口。
 - Destroy应接PrepareDestroy/CommitStage/ResolveStage及持久TaskClaim/Checkpoint，不能为idle sandbox保留controller。现有ObserveTaskOperationsPage要求真实TaskClaim，不是任意计数API。安全完成/owner释放仍缺。

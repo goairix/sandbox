@@ -6,7 +6,7 @@
 
 已合并feat/workspace-fuse-mount最新c14a52c，merge45ebc70，无冲突；六个受影响普通Go包race、正确标签下Helm限定回归、vet及Linuxarm64构建通过，首批漏Helm标签导致的setup exit1如实保留。详见2026-10-15-base-fuse-fixes-merge-verification.md。
 
-暂停前的bea7f2d已完成限定复审，持久归档与原始归属单元接受，无未解决阻断项；容量M1仍保留。详见2026-10-15-workspace-archive-recovery-storage-verification.md。冷bound archive→fresh claim/认证历史query→旧intent修复/新reserve/checkpoint本地regular-file恢复已落地509632a/d7dc18b/fbe66c1/a46d203，实际两文件、跨claim继续、65文件、partial-write和terminal/GC丢ACK等新分组通过；仍在补必要故障/关闭边界，尚未Task验收，不能称完整sync/安全释放完成。自动进度跟进恢复，每10分钟汇报；整体生产迁移仍未完成。
+暂停前的bea7f2d已完成限定复审，持久归档与原始归属单元接受，无未解决阻断项；容量M1仍保留。详见2026-10-15-workspace-archive-recovery-storage-verification.md。冷bound archive→fresh claim/认证历史query→旧intent修复/新reserve/checkpoint本地regular-file恢复已范围验收，源码509632a/d7dc18b/fbe66c1/a46d203/5a78262及修复f68923a/d8e6eb7。两文件、跨claim继续、65文件、partial-write、terminal/GC丢ACK、物理Close、0000/0444恢复通过；初轮两个Important和Root新增权限缺口均限定复审闭环。见2026-10-15-workspace-sync-local-recovery-verification.md；历史失败Wait缺口如实保留，不称完整sync/安全释放或容量完成。自动进度跟进恢复，每10分钟汇报；整体生产迁移仍未完成。
 
 独立的一致metadata读/只读MOD复核单元已验收970ce46/3b5178f，测试最大namespace修正04ac585；唯一review及限定复审C0/I0/M0，真实三成员限定组与host race通过。见2026-10-15-etcd-coherent-read-view-verification.md。它补齐生产读接口的一部分，尚未接manager/API或替代Redis，不代表性能/容量已验收。
 

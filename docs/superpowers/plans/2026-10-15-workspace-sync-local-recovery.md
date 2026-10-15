@@ -49,11 +49,13 @@
 - source.readCharged(ctx,slot) (*taskWorkspaceSyncRecoveryCharge,error)、reserveNext(ctx,body) (*taskWorkspaceSyncRecoveryCharge,error)、reconcileLocal(ctx,body,charge) (*taskWorkspaceSyncRecoveryCompletion,error)、restoreCheckpoint(ctx) error、settleLocal(ctx,charge,completion) error、recycleLocal(ctx,charge,completion) (Outcome,error)。
 - 可抽私有executeWorkspaceSyncLocalPut(ctx,target,file,read,guard,completed)返回bounded物理结果；机械file/result类型作者固定并说明，不形成公共authority。
 
-- [ ] **Step 1: RED与接点核对。** 新cold bound archive调用在旧代码下拒绝/无法继续，明确记录feature RED而非编译失败。列实际50pin组装和worst wire预算、旧claim/新checkpoint关系、同时live对象≤I+4M；不另做泛化研究或全依赖统计。
-- [ ] **Step 2: fresh history/query/owner。** 实现fixed注册/metadata/TAR guard、newclaim双排空/完整历史及historicalquery的单complete/authEOF/实际Close。focused新host/native guard测试通过即提交feat(etcd): authenticate cold archive recovery under fresh claims。
-- [ ] **Step 3: distinct cursor/target与继续。** 新source/body、stable target/currentworker、旧checkpoint replay验证、机械cursor/local executor共用；不truncate已完成文件，不重建旧指针。用真实新fixture验证冷重启两文件，并仅回归抽取后受影响原始local行为；提交feat(etcd): resume bounded local archives with fresh recovery owners。
-- [ ] **Step 4: charged reconciliation/terminal/GC。** exact旧intent/generation、freshlocalrepair及domain completion、terminal只读unknown仲裁、独立checkpointbuilder atomicGC。新增截断/partialwrite/fsync/terminal/GC丢ACK/repeatcrash和65文件continuation，按源码epoch有限组验证；提交feat(etcd): reconcile charged local intents and advance recovery progress。
-- [ ] **Step 5: 故障/Close/边界。** 真实oldwriter锁阻挡及全部descriptor/postguard/GC实际join、新root/boot/namespace/tamper拒绝、claim失效/BackendClose、actualnative50pins/64nodes/256KiB检查。必要测试单独连贯提交，不留到最后一个大commit。
-- [ ] **Step 6: 验证与一次独立gate。** 新hostrace、Linux本单元native/有限必要compatibility、affectedvet/cross/gofmt-l/bash-n/diffcheck。保留本单元raw/实际Wait/labelcleanup/sourceSHA/binary和失败；同代码不重复。OWN task-1-report.md短列commits、范围/限制、每epoch结果及schema/liveness/wire；稳定必要artifact SHA排除自身/liveledger/report/review。不创建新的统计框架。Root派一fresh scopedreview，实际缺陷在同author/reviewer循环内修正。
+- [x] **Step 1: RED与接点核对。** 新cold bound archive调用在旧代码下拒绝/无法继续，明确记录feature RED而非编译失败。列实际50pin组装和worst wire预算、旧claim/新checkpoint关系、同时live对象≤I+4M；不另做泛化研究或全依赖统计。
+- [x] **Step 2: fresh history/query/owner。** 实现fixed注册/metadata/TAR guard、newclaim双排空/完整历史及historicalquery的单complete/authEOF/实际Close。focused新host/native guard测试通过即提交feat(etcd): authenticate cold archive recovery under fresh claims。
+- [x] **Step 3: distinct cursor/target与继续。** 新source/body、stable target/currentworker、旧checkpoint replay验证、机械cursor/local executor共用；不truncate已完成文件，不重建旧指针。用真实新fixture验证冷重启两文件，并仅回归抽取后受影响原始local行为；提交feat(etcd): resume bounded local archives with fresh recovery owners。
+- [x] **Step 4: charged reconciliation/terminal/GC。** exact旧intent/generation、freshlocalrepair及domain completion、terminal只读unknown仲裁、独立checkpointbuilder atomicGC。新增截断/partialwrite/fsync/terminal/GC丢ACK/repeatcrash和65文件continuation，按源码epoch有限组验证；提交feat(etcd): reconcile charged local intents and advance recovery progress。
+- [x] **Step 5: 故障/Close/边界。** 真实oldwriter锁阻挡及全部descriptor/postguard/GC实际join、新root/boot/namespace/tamper拒绝、claim失效/BackendClose、actualnative50pins/64nodes/256KiB检查。必要测试单独连贯提交，不留到最后一个大commit。
+- [x] **Step 6: 验证与一次独立gate。** 新hostrace、Linux本单元native/有限必要compatibility、affectedvet/cross/gofmt-l/bash-n/diffcheck。保留本单元raw/实际Wait/labelcleanup/sourceSHA/binary和失败；同代码不重复。OWN task-1-report.md短列commits、范围/限制、每epoch结果及schema/liveness/wire；稳定必要artifact SHA排除自身/liveledger/report/review。不创建新的统计框架。Root派一fresh scopedreview，实际缺陷在同author/reviewer循环内修正。
+
+2026-10-15范围验收：七笔源码提交、唯一fresh review及R1/I3限定闭环，见reports/2026-10-15-workspace-sync-local-recovery-verification.md。历史失败原始Wait缺口保持披露，不作为PASS；只接受本地普通文件冷恢复，后续目录/删除/完整sync/安全释放继续。
 
 此plan为master实施细化，完成继续目录/删除/完整同步/安全释放与生产迁移；不结束分支或推送。
