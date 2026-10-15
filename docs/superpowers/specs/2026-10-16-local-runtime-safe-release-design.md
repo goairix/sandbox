@@ -10,6 +10,8 @@
 4. 新 `TaskRuntimeTerminationIssuer` 只有 `Certificate(context.Context)([]byte,error)` 和 `SignRuntimeTermination(context.Context,string,controlprotocol.TaskRuntimeTerminationTicketClaims)([]byte,error)`，作为 Options 的独立可选字段。构造不调用依赖；实际 owner 内复制≤4096 certificate，必须匹配该 Task 原 archive command 已 pin 的 issuer，不添加隐藏比较或接受轮换后的不同 issuer。签名后独立验证固定 ticket，≤8192，窗口≤30s并受当前 claim/issuer/clock 不确定性限制。
 5. 不重复 producer：复用 shared16KiB `TaskRuntimeTerminationIntent` codec、既有 termination ticket/proof verifier、`TerminationDestination.Terminate/Query` 和真实 observer。不要导出任意签名/比较器/成功回调；原 `InfrastructureFencer` bool 不能作为来源。
 
+为真正通过公开入口建立首个空目录同步，允许新增窄编排 `BindTaskWorkspaceArchiveLocal(ctx context.Context,received *ReceivedTaskWorkspaceArchive,plan TaskWorkspaceSyncPlan,worker *launcher.KernelBoundary,root string)(uint32,error)`。它只消费原始received/source，复用现有PrepareTaskWorkspaceSyncSource、readonly本地target opener、bindLocalFinalizationTarget/sealOriginalFinalizationBinding，实际Close/join原source与target后才回slot诊断。原claim/plan/profile/物理root仍经既有guard验证；不修改旧validator/预算、不授予文件效果，不以copiedreceived或slot授权，不在unknown后重开已consumed来源。放在新的task_runtime_termination_local_binding.go，有限wrapper拒绝/关闭测试和真实空目录fullpositive覆盖，不接受privatefixture setup替代公开链路。
+
 ## Retained authority and lifecycle
 
 6. 独立读取、严格验证 sealed local progress、immutable complete、原 manifest/plan/target/checkpoint/evidence、quiescence reservation/receipt/final-sync/archive/issuer 和全部当前 Task 域。重建既有50比较：base4、八域32、当前 claim+guard8、六个历史 MOD6，另保留 whole operations-prefix Version=0。public references 只定位，不构造 capability。

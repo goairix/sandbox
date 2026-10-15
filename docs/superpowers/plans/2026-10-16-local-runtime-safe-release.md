@@ -41,6 +41,7 @@
 - `task_runtime_termination_records.go`：复用sharedintent，strict provider state/历史bindings。
 - `task_runtime_termination_authority.go`：独立cold prerequisite/authentication、完整50pins、complete/两enrollment MOD。
 - `task_runtime_termination.go`：公开TerminateTaskRuntimeLocal、reserve/sign/send/query/terminated/provider顺序。
+- `task_runtime_termination_local_binding.go`：窄public BindTaskWorkspaceArchiveLocal原始received→readonlytarget→原bind→实际Close编排，仅回slot诊断，支持空目录公开fullpositive；不修改旧source/store/validator逻辑。
 - `task_runtime_termination_provider.go`：七slot native写前意图、具体client调用、readonly reconciliation。
 - `task_runtime_termination_read.go`：LoadTaskRuntimeTermination、旧Current与freshclaim恢复。
 - `task_owner_release.go`、`task_owner_release_records.go`、`task_owner_release_read.go`：64节点release及不重建claim的冷receipt。
