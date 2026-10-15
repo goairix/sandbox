@@ -17,7 +17,6 @@ import (
 )
 
 var ErrEnrolledBridge = errors.New("enrolled bridge refused")
-var errEnrolledBridgeUpgradePending = errors.New("enrolled bridge upgrade not implemented")
 
 type EnrolledBridgeOptions struct {
 	Config         *rest.Config
@@ -228,8 +227,4 @@ func (c *EnrolledBridgeClient) checkTarget(ctx context.Context, op *bridgeOperat
 		return ErrEnrolledBridge
 	}
 	return nil
-}
-
-func (c *EnrolledBridgeClient) upgrade(context.Context, *bridgeOperation, EnrolledBridgeTarget) (net.Conn, error) {
-	return nil, errEnrolledBridgeUpgradePending
 }

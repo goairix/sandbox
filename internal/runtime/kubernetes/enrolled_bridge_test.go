@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,10 @@ func TestEnrolledBridgePointChecks(t *testing.T) {
 		mu.Lock()
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			http.Error(w, "fixture refuses upgrade", http.StatusBadRequest)
+			return
+		}
 		require.True(t, r.Close)
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/v1/nodes/"+node.Name {
@@ -57,9 +62,9 @@ func TestEnrolledBridgePointChecks(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 	_, err = c.Dial(context.Background(), target)
-	require.ErrorIs(t, err, errEnrolledBridgeUpgradePending)
+	require.Error(t, err, "the exact candidate reaches the real upgrade request")
 	mu.Lock()
-	require.Equal(t, []string{"GET /api/v1/namespaces/runtimes/pods/" + pod.Name, "GET /api/v1/nodes/" + node.Name}, paths)
+	require.Equal(t, []string{"GET /api/v1/namespaces/runtimes/pods/" + pod.Name, "GET /api/v1/nodes/" + node.Name, "GET /api/v1/namespaces/runtimes/pods/" + pod.Name + "/exec"}, paths)
 	mu.Unlock()
 	for name, mutate := range map[string]func(*EnrolledBridgeTarget){
 		"pod uid":    func(v *EnrolledBridgeTarget) { v.PodUID = "22222222-2222-4222-8222-222222222222" },

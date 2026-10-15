@@ -9,6 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/gorilla/websocket"
 )
 
 const bridgeHeaderLimit = 64 << 10
@@ -20,6 +24,30 @@ type bridgeHeaderConn struct {
 	reader *bufio.Reader
 	header *bytes.Reader
 	parsed bool
+}
+
+func (c *EnrolledBridgeClient) upgrade(ctx context.Context, op *bridgeOperation, target EnrolledBridgeTarget) (net.Conn, error) {
+	u := c.config.origin
+	u.Scheme = "ws"
+	if c.config.origin.Scheme == "https" {
+		u.Scheme = "wss"
+	}
+	u.Path, u.RawPath = "/api/v1/namespaces/"+c.namespace+"/pods/"+target.PodName+"/exec", ""
+	u.RawQuery = url.Values{"container": {"sandbox"}, "command": {"/usr/local/bin/sandbox-launcher", "bridge"}, "stdin": {"true"}, "stdout": {"true"}, "stderr": {"true"}, "tty": {"false"}}.Encode()
+	// Both hooks are private and use our fixed origin, not the callback address.
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) { return c.dialAPI(ctx, op) }
+	dialer := websocket.Dialer{NetDialContext: dial, NetDialTLSContext: dial, Subprotocols: []string{"v5.channel.k8s.io"}, ReadBufferSize: 4096, WriteBufferSize: 32769}
+	request := &http.Request{Header: make(http.Header)}
+	c.config.authorize(request)
+	ws, response, err := dialer.DialContext(ctx, u.String(), request.Header)
+	if err != nil {
+		return nil, err
+	}
+	if len(response.Header.Values("Sec-Websocket-Protocol")) != 1 || response.Header.Get("Sec-Websocket-Protocol") != "v5.channel.k8s.io" || len(response.Header.Values("Upgrade")) != 1 || !strings.EqualFold(response.Header.Get("Upgrade"), "websocket") || len(response.Header.Values("Connection")) != 1 || !strings.EqualFold(response.Header.Get("Connection"), "Upgrade") || response.Header.Get("Sec-Websocket-Extensions") != "" || response.Header.Get("Content-Encoding") != "" {
+		ws.Close()
+		return nil, ErrEnrolledBridge
+	}
+	return newBridgeConn(op, ws), nil
 }
 
 func (c *bridgeHeaderConn) Read(p []byte) (int, error) {
