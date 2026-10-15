@@ -42,7 +42,7 @@ type taskRuntimeProviderCleanupRecord struct {
 
 func (r taskRuntimeProviderCleanupRecord) Validate() error {
 	b := r.Binding
-	if r.Version != 1 || r.Task.Validate() != nil || r.TaskBirth <= 0 || b.Authority.Namespace != r.Task.Namespace || b.Authority.RestoreEpoch != r.Task.RestoreEpoch || !validDomainSegment(b.Authority.AuthorityID) || !validDomainSegment(b.Authority.Target) || b.TaskID != r.Task.TaskID || b.LogicalID != r.Task.SandboxID || !validHexDigest(b.WorkspaceHash) || !validPreparationUUID(b.CreationIntentID) || !validPreparationUUID(b.NodeUID) || !validPreparationUUID(b.NodeBootID) || !validPreparationUUID(b.Runtime.UID) || !validPreparationUUID(b.Runtime.BootID) || !validDomainSegment(b.Runtime.ID) || b.Generation <= 0 || b.DataGateEpoch <= 0 || !validHexDigest(b.EnrollmentDigest) || !validHexDigest(b.ContractDigest) || len(r.Descriptor) == 0 || len(r.Descriptor) > 16384 || !json.Valid(r.Descriptor) {
+	if r.Version != 1 || r.Task.Validate() != nil || r.TaskBirth <= 0 || b.Authority.Namespace != r.Task.Namespace || b.Authority.RestoreEpoch != r.Task.RestoreEpoch || !validDomainSegment(b.Authority.AuthorityID) || !validDomainSegment(b.Authority.Target) || b.TaskID != r.Task.TaskID || b.LogicalID != r.Task.SandboxID || !validHexDigest(b.WorkspaceHash) || !validPreparationUUID(b.CreationIntentID) || !validPreparationUUID(b.NodeUID) || !validPreparationUUID(b.NodeBootID) || !validPreparationUUID(b.Runtime.UID) || !validPreparationUUID(b.Runtime.BootID) || !validDomainSegment(b.Runtime.ID) || b.Generation <= 0 || b.DataGateEpoch <= 0 || !validHexDigest(b.EnrollmentDigest) || !validHexDigest(b.ContractDigest) || len(r.Descriptor) == 0 || len(r.Descriptor) > 16384 {
 		return ErrInvalidRecord
 	}
 	for i, s := range r.Slots {

@@ -84,6 +84,7 @@ func validateLocalRuntimeRelease(o Options) error {
 type taskLocalRuntimeReleaseOwner struct {
 	backend *Backend
 	claim   *TaskClaim
+	task    TaskReference
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -112,7 +113,7 @@ func (b *Backend) beginLocalRuntimeReleasePurpose(ctx context.Context, c *TaskCl
 	}
 	now := time.Now()
 	owned, cancel := context.WithTimeout(ctx, b.localRuntimeRelease.Timeout)
-	owner := &taskLocalRuntimeReleaseOwner{backend: b, claim: c, ctx: owned, cancel: cancel, done: make(chan struct{}), slot: -1}
+	owner := &taskLocalRuntimeReleaseOwner{backend: b, claim: c, task: c.reference.Task, ctx: owned, cancel: cancel, done: make(chan struct{}), slot: -1}
 	b.archiveLife.mu.Lock()
 	c.mu.Lock()
 	unused := purpose == "bind" || purpose == "terminate" && c.runtimeReleaseAttempt == nil || purpose == "release" && c.ownerReleaseAttempt == nil
@@ -120,7 +121,7 @@ func (b *Backend) beginLocalRuntimeReleasePurpose(ctx context.Context, c *TaskCl
 		slot := -1
 		for i := 0; i < int(b.localRuntimeRelease.MaxActive); i++ {
 			active := b.archiveLife.runtimeReleases[i]
-			if active != nil && active.claim.reference.Task == c.reference.Task {
+			if active != nil && active.task == c.reference.Task {
 				slot = -1
 				break
 			}
@@ -145,6 +146,44 @@ func (b *Backend) beginLocalRuntimeReleasePurpose(ctx context.Context, c *TaskCl
 		return nil, ErrConflict
 	}
 	return owner, nil
+}
+
+// Read-only diagnosis has the same fixed admission/Close accounting, but needs
+// neither a surviving owner/control/index nor a reconstructed TaskClaim.
+func (b *Backend) beginLocalRuntimeRead(ctx context.Context, task TaskReference) (*taskLocalRuntimeReleaseOwner, error) {
+	if b == nil || b.localRuntimeRelease.validate() != nil || b.archiveLife == nil {
+		return nil, ErrInvalidConfiguration
+	}
+	if ctx == nil || b.validateTaskReference(task) != nil {
+		return nil, ErrInvalidRecord
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	owned, cancel := context.WithTimeout(ctx, b.localRuntimeRelease.Timeout)
+	o := &taskLocalRuntimeReleaseOwner{backend: b, task: task, ctx: owned, cancel: cancel, done: make(chan struct{}), slot: -1}
+	b.archiveLife.mu.Lock()
+	if !b.archiveLife.closed {
+		for i := 0; i < int(b.localRuntimeRelease.MaxActive); i++ {
+			active := b.archiveLife.runtimeReleases[i]
+			if active != nil && active.task == task {
+				o.slot = -1
+				break
+			}
+			if active == nil && o.slot == -1 {
+				o.slot = i
+			}
+		}
+		if o.slot >= 0 {
+			b.archiveLife.runtimeReleases[o.slot] = o
+		}
+	}
+	b.archiveLife.mu.Unlock()
+	if o.slot < 0 {
+		cancel()
+		return nil, ErrConflict
+	}
+	return o, nil
 }
 
 // The foreground owner calls finish only after all original dependent calls
