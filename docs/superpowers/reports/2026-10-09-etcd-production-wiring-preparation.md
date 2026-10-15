@@ -1,5 +1,7 @@
 # etcd生产接线缺口图
 
+2026-10-16 存量模型补充：只读源码核查发现当前enrolled普通创建路径无重试/GC时有22个持久key，14-key认证证据链还被终止/ownerrelease授权实际消费。主方案8KiB/live只是待采样目标，不能据此声称当前实现可容某个N；不能按创建幂等窗删除仍必需的proof。具体来源及一次小规模序列化采样设计见2026-10-16-etcd-live-footprint-preparation.md。未执行容量测试，不增加完成百分比，后续真实规模验收仍保留。
+
 2026-10-15补充：基分支新增Kubernetes LoadWorkspaceControlKey，main将Redis Store传入，以永久SetNX/Get保存scope级probe签名seed。它是fencing历史，生产etcd接线须明确持久authority/协议替代与旧版本排空；下文早期“未发现credential必须依赖Redis”的研究结论不覆盖这项新增。见2026-10-15-base-fuse-fixes-merge-verification.md。
 
 本线程probe密钥etcd方案已交付原生准备接口：226b543/dc08b41及验收2026-10-15-etcd-probe-control-key-verification.md。operator显式32字节seed、永久无Lease/TTL、当前identity/restore屏障下CAS，丢ACK只读仲裁，API只读owned key加载，禁止失败后生成替代。main仍用旧Redis loader，启动内存安装、原seed迁移/公钥校验、operator初始化与API只读身份RBAC/TLS、磁盘备份保护及轮换/旧runtime排空尚待接线。Pod仍只接收公钥，不随已有sandbox数量逐个读私钥；不能删除Redis时丢弃签名历史。

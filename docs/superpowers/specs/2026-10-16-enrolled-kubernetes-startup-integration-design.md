@@ -6,7 +6,7 @@
 
 当前provision_linux.go只接受control directory root:root 0700/0755；旧profile fixture特意创建0755。Kubernetes v1.35.3 emptydir/empty_dir.go:45、414–434使用0777；memory setupTmpfs:293–314创建目录后mount tmpfs，generateTmpfsMountOptions:530–540只加size/noswap，没有mode覆盖。必须实际挂新tmpfs（size=1m，不指定mode），从内核读实际初始mode，不能继续手工chmod0755制造兼容。
 
-依据：[Kubernetes固定版本源码](https://github.com/kubernetes/kubernetes/blob/v1.35.3/pkg/volume/emptydir/empty_dir.go)，[Linux tmpfs文档](https://docs.kernel.org/filesystems/tmpfs.html)。旧验收只证明其0755 fixture范围，不能补写为默认kubelet已通过。root workspace/tmp EmptyDir初始可写权限也在新native记录实际值；本Task不扩张用户workspace权限或添加未批准cap。
+依据：[Kubernetes固定版本源码](https://github.com/kubernetes/kubernetes/blob/v1.35.3/pkg/volume/emptydir/empty_dir.go)，[Linux tmpfs文档](https://docs.kernel.org/filesystems/tmpfs.html)。旧验收只证明其0755 fixture范围，不能补写为默认kubelet已通过。新Task专用script的/workspace私有tmpfs保持size1MiB，改为root:root/mode0777，记录/tmp实际owner/mode；不再使用旧uid1000/mode0700来声称默认EmptyDir权限。这仅为permission analogue，workspace实际filesystem仍tmpfs而非kubelet磁盘EmptyDir；生产volume/security/caps不变。
 
 ## 安全启动修复
 

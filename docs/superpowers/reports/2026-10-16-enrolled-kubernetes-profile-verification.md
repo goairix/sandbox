@@ -2,6 +2,8 @@
 
 本单元已范围验收。唯一完整审查的I1经原作者补测、同reviewer限定R1复审解决，Approved，无新增问题；M1原日志保留。main仍使用Redis，生产切换0%；功能代码约55%/整体交付约40%的口径暂不因组件提交数上调。
 
+后续实际部署接线预检发现：本记录native使用的初始0755并不代表kubelet默认EmptyDir权限。当前正式provision只接受0700/0755，对实际更宽初始权限存在启动不兼容；已独立纳入2026-10-16-enrolled-kubernetes-startup-integration方案修复。保留本次历史范围和原日志，不倒写为默认kubelet已验收，不重启已关闭pair或重放旧矩阵。
+
 ## 交付
 
 共享原canonical v2公开配置decoder；纯`BuildEnrolledPlainPod`与显式`sandbox-enrolled-plain/v1`严格profile；固定正式`serve-provisioned`仅root/PID1以目录FD/NOFOLLOW/O_EXCL建立原受保护配置，再执行原serve/BootstrapPID1。精确五volumes、固定绝对launcher命令、readonly clock/socket HostPath和root管理/非零用户身份隔离。镜像content digest由新静态ContractDigest绑定原Root-signed Birth/activation；结构自洽不能替代权限。
