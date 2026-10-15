@@ -39,7 +39,9 @@
 
 测试可在本OWN用apply_patch创建四服务image-only compose overlay，统一Root已恢复的精确etcd3.6.15 linuxarm64 digest5ed4e32061aa061f970d6500629213e8579ef17571dcf9789074966acb9afad1；不改sharedscript/源compose，不假tag其他版本。不读取输出真实业务配置，唯一project/labels与原始Docker Wait/清理记录保留。若原fixture现有server版本可直接用，也须如实记录，不能依靠无endpoint SKIP。
 
-- [ ] **Step 1: RED与schema核对。** 新函数最小可编译拒绝入口后，真实同revision/ABA/copy回归证明未实现行为；禁止编译失败冒充RED。列最大合法四record/reply和有限节点数，不改变原有64KiB record cap。
-- [ ] **Step 2: coherent read。** storageidentity/discovery/final4point同revision严格校验、field关联和返回owned records，新增focusedtests通过即小提交feat(etcd): add coherent bounded sandbox read views。
-- [ ] **Step 3: confirmation与鲁棒性。** 同Backend/self/四MOD只读Txn，identity/restore漂移、ABA/取消/错误wire和copy边界；验证后小提交feat(etcd): confirm sandbox read views without state mutations。
-- [ ] **Step 4: gate。** 只跑新增hostrace/真实三成员cases，vet/format/diffcheck，保留原始failed/success epochs/Go版本/源码binary绑定与精确fixture清理。每个通过case源码不变不重跑。OWN task-1-report.md短列commits/caps/结果与限制；Root一个fresh scopedreview。无性能/生产切换claim。
+- [x] **Step 1: RED与schema核对。** 新函数最小可编译拒绝入口后，真实同revision/ABA/copy回归证明未实现行为；禁止编译失败冒充RED。列最大合法四record/reply和有限节点数，不改变原有64KiB record cap。
+- [x] **Step 2: coherent read。** storageidentity/discovery/final4point同revision严格校验、field关联和返回owned records，新增focusedtests通过即小提交feat(etcd): add coherent bounded sandbox read views。
+- [x] **Step 3: confirmation与鲁棒性。** 同Backend/self/四MOD只读Txn，identity/restore漂移、ABA/取消/错误wire和copy边界；验证后小提交feat(etcd): confirm sandbox read views without state mutations。
+- [x] **Step 4: gate。** 只跑新增hostrace/真实三成员cases，vet/format/diffcheck，保留原始failed/success epochs/Go版本/源码binary绑定与精确fixture清理。每个通过case源码不变不重跑。OWN task-1-report.md短列commits/caps/结果与限制；Root一个fresh scopedreview。无性能/生产切换claim。
+
+2026-10-15范围验收：源码970ce46/3b5178f、测试边界修正04ac585；唯一Task review及限定复审通过。见reports/2026-10-15-etcd-coherent-read-view-verification.md。只是原生metadata接口完成，后续业务接线仍需继续；整迁移未完成。

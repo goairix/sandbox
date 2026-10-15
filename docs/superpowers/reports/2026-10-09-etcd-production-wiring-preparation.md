@@ -2,6 +2,8 @@
 
 2026-10-15补充：基分支新增Kubernetes LoadWorkspaceControlKey，main将Redis Store传入，以永久SetNX/Get保存scope级probe签名seed。它是fencing历史，生产etcd接线须明确持久authority/协议替代与旧版本排空；下文早期“未发现credential必须依赖Redis”的研究结论不覆盖这项新增。见2026-10-15-base-fuse-fixes-merge-verification.md。
 
+用户确认研究probe密钥由etcd承载：纳入后续生产接线，当前尚未实施。按状态scope保留永久seed，无Lease/TTL；首次初始化原生CAS，响应丢失后只读查回原值，禁止读取失败生成替代密钥。API启动加载并校验后在内存签名，不随已有sandbox数量逐个读取。Pod只接收公钥；私钥读写限API的TLS/RBAC身份，磁盘与备份也按私钥保护（TLS/RBAC本身不提供静态加密）。迁移须导入现有seed并验证公钥一致，或先完成旧runtime排空再协调轮换；不能删除Redis时丢弃签名历史。具体原生schema、身份/restore屏障、故障恢复和轮换接线仍需独立实现验收。
+
 这是fresh `etcd_production_wiring_gap_map`对master spec及当前业务代码的只读研究，未实施、未测试，不是生产验收。Root抽查LoadOwner/LoadControl/LoadSnapshot签名、distributedStateEnabled和全量协调器/FUSE检查接点。当前main仍Redis；不能用通用etcd.Store包装保留旧循环来宣称完成迁移。
 
 ## 已有能力与真实接点
