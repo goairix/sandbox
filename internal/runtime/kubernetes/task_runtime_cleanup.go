@@ -320,7 +320,7 @@ func (h *PreparedTaskRuntimeCleanup) policy(ctx context.Context, target taskClea
 	if !found {
 		return taskCleanupTarget{Kind: target.Kind, Name: target.Name}, nil
 	}
-	if actual.UID == "" || len(actual.UID) > 128 || actual.RV == "" || len(actual.RV) > 128 || target.UID != "" && target.UID != actual.UID || target.UID == "" && h.pinned {
+	if !taskCleanupUUID(actual.UID) || actual.RV == "" || len(actual.RV) > 128 || target.UID != "" && target.UID != actual.UID || target.UID == "" && h.pinned {
 		return taskCleanupTarget{}, errTaskCleanupRefused
 	}
 	return actual, nil
@@ -413,6 +413,11 @@ func taskCleanupHash(value string) bool {
 	return err == nil && len(decoded) == 32 && strings.ToLower(value) == value
 }
 
+func taskCleanupUUID(value string) bool {
+	id, err := uuid.Parse(value)
+	return err == nil && id != uuid.Nil && id.String() == value
+}
+
 func taskCleanupTargetNames(b TaskRuntimeCleanupBinding, cilium bool) []taskCleanupTarget {
 	targets := make([]taskCleanupTarget, 0, 4)
 	for _, kind := range []string{"NetworkPolicy", "CiliumNetworkPolicy"} {
@@ -439,7 +444,7 @@ func validTaskCleanupTargets(d taskCleanupDescriptor) bool {
 		return false
 	}
 	for i, target := range d.Targets {
-		if target.Kind != expected[i].Kind || target.Name != expected[i].Name || len(target.UID) > 128 || len(target.RV) > 128 || (target.UID == "") != (target.RV == "") {
+		if target.Kind != expected[i].Kind || target.Name != expected[i].Name || target.UID != "" && !taskCleanupUUID(target.UID) || len(target.RV) > 128 || (target.UID == "") != (target.RV == "") {
 			return false
 		}
 	}
