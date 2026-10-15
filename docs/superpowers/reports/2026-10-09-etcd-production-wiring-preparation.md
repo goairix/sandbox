@@ -31,4 +31,6 @@
 
 前3项接口/独立事务及partition work source可在安全释放前准备；不启用新allocator、删除旧保护、自动清理或切main，直到安全释放和对应真实driver链路完成验收。
 
+2026-10-15当前业务读接点核对：`Manager.Get`仍调用旧acquireSandboxOperation，`GetByWorkspace`仍经owner/lease与lookupHistoricalWorkspace回退，不可仅替换底层client后保留这些扫描/旧准入。`marshalActiveSandbox`/`decodeActiveSandboxPhase`持久化完整旧Sandbox JSON；native snapshot目前只是有界、digest校验的任意JSON，尚无严格业务codec与有界payload LRU。后续cache可按单Backend实例+snapshot版本/digest持有不可变payload，不缓存owner/健康/期限授权，不允许失联时用cache放行。现有`runtime.SandboxInfo`只含ID/UID/State等，没有BootID；旧runtime.GetSandbox成功不能替代新协议的boot/certificate/健康观测。业务复用仍需受控时钟、当前可信健康和最后metadata Confirm的组合，不能把metadata view或nil error当准入证明。本次仅源码核对，未新增业务实现或测试。
+
 本次业务用途研究未发现credential/cache/API auth/rate-limit必须依赖Redis：FUSE credentials来自受控文件/内存、API bearer来自配置、ratelimit token bucket在内存；state管理token应变成原生capability。最终删除旧双份Session/Ephemeral、WorkspaceLease、generic pool、Multipart调用和main/config依赖，旧镜像负责drain，新程序明确拒绝旧Redis配置。上述仍需实际实施和单环境验收。
