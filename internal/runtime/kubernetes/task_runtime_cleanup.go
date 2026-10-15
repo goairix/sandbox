@@ -34,6 +34,8 @@ type PreparedTaskRuntimeCleanup struct {
 	busy       bool
 	sent       [7]bool
 	pinned     bool
+	preflight  [7]TaskRuntimeCleanupObservation
+	ready      [7]bool
 }
 
 type taskCleanupTarget struct {
@@ -210,13 +212,6 @@ func (h *PreparedTaskRuntimeCleanup) Observe(ctx context.Context) (TaskRuntimeCl
 	}
 	obs := h.podObservation(pod)
 	obs.Terminal = pod == nil
-	for _, target := range h.descriptor.Targets {
-		current, err := h.policy(opCtx, target)
-		if err != nil {
-			return TaskRuntimeCleanupObservation{}, err
-		}
-		obs.Terminal = obs.Terminal && current.UID == ""
-	}
 	return obs, opCtx.Err()
 }
 
@@ -293,7 +288,7 @@ func (h *PreparedTaskRuntimeCleanup) policy(ctx context.Context, target taskClea
 	if !found {
 		return taskCleanupTarget{Kind: target.Kind, Name: target.Name}, nil
 	}
-	if actual.UID == "" || len(actual.UID) > 128 || actual.RV == "" || len(actual.RV) > 128 || target.UID != "" && (target.UID != actual.UID || target.RV != actual.RV) || target.UID == "" && h.pinned {
+	if actual.UID == "" || len(actual.UID) > 128 || actual.RV == "" || len(actual.RV) > 128 || target.UID != "" && target.UID != actual.UID || target.UID == "" && h.pinned {
 		return taskCleanupTarget{}, errTaskCleanupRefused
 	}
 	return actual, nil
