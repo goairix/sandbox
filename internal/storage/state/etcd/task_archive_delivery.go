@@ -73,6 +73,12 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		// metadata gate or pending durable IO.
 		b.archiveLife.mu.Unlock()
 		r, err = b.archiveStore.reserveRecovery(owned, seed)
+		if err == nil {
+			err = b.refuseWorkspaceSyncLocalFinalization(owned, c)
+			if err != nil {
+				err = errors.Join(err, r.close())
+			}
+		}
 		b.archiveLife.mu.Lock()
 		c.mu.Lock()
 		c.finishArchiveRecoveryInitialization(r, err)

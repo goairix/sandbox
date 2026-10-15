@@ -101,3 +101,11 @@ func TestTaskWorkspaceSyncLocalFinalizationRecords(t *testing.T) {
 	_, err = decodeWorkspaceSyncLocalComplete(ckv)
 	require.Error(t, err, "completion is immutable")
 }
+
+func TestTaskWorkspaceSyncLocalFinalizationArchiveOrder(t *testing.T) {
+	var order taskWorkspaceSyncLocalArchiveOrder
+	for _, e := range []workspaceSyncArchiveEntry{{workspaceSyncLocalFile: workspaceSyncLocalFile{path: "a"}, kind: '5'}, {workspaceSyncLocalFile: workspaceSyncLocalFile{path: "a/x"}, kind: '0'}, {workspaceSyncLocalFile: workspaceSyncLocalFile{path: "b"}, kind: '5'}} {
+		require.NoError(t, order.accept(&e))
+	}
+	require.Error(t, order.accept(&workspaceSyncArchiveEntry{workspaceSyncLocalFile: workspaceSyncLocalFile{path: "a/y"}, kind: '0'}), "a closed producer subtree cannot reopen")
+}

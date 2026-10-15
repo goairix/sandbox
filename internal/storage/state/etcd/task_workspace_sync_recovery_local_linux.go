@@ -36,6 +36,14 @@ func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, bo
 		return nil, err
 	}
 	defer s.target.ops.Done()
+	if s.fullLocal {
+		if s.finalization == nil {
+			return nil, ErrInvalidRecord
+		}
+		if err := s.finalization.repairRegular(ctx, body); err != nil {
+			return nil, err
+		}
+	}
 	permission, err := s.prepareLocalPermission(ctx, body)
 	if err != nil {
 		return nil, err

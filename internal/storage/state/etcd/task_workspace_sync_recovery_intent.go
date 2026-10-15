@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"math"
 
@@ -51,6 +52,15 @@ func (s *taskWorkspaceSyncRecoverySource) readCharged(ctx context.Context, slot 
 	points, err = workspaceSyncPointResponse(b, r, keys)
 	if err != nil {
 		return nil, err
+	}
+	if s.fullLocal {
+		metadata, metadataErr := decodeWorkspaceSyncLocalMetadataIntent(points[1], int(b.workspaceSyncBudget.options.MaxIntentBytes))
+		if metadataErr == nil {
+			if metadata.Reference.Task != ref.Task {
+				return nil, nil
+			}
+			return nil, ErrConflict // phase dispatch must bypass regular-only slots
+		}
 	}
 	record, err := decodeWorkspaceSyncIntent(points[1], int(b.workspaceSyncBudget.options.MaxIntentBytes))
 	if err != nil {
@@ -181,6 +191,20 @@ type taskWorkspaceSyncRecoveryCompletionWire struct {
 	Ino          uint64                            `json:"ino"`
 }
 
+type taskWorkspaceSyncLocalRepairCompletionWire struct {
+	Version          uint32                                  `json:"version"`
+	Domain           string                                  `json:"domain"`
+	Regular          taskWorkspaceSyncRecoveryCompletionWire `json:"regular"`
+	TranscriptDigest string                                  `json:"transcript_digest"`
+}
+
+func (w taskWorkspaceSyncLocalRepairCompletionWire) Validate() error {
+	if w.Version != 1 || w.Domain != "sandbox.workspace-sync-local-full-regular-repair.v1" || w.Regular.Validate() != nil || !validHexDigest(w.TranscriptDigest) {
+		return ErrInvalidRecord
+	}
+	return nil
+}
+
 func (w taskWorkspaceSyncRecoveryCompletionWire) Validate() error {
 	if w.Version != 1 || w.Domain != "sandbox.workspace-sync-local-recovery.v1" || !validHexDigest(w.IntentDigest) || w.IntentBirth <= 0 || w.Claim.Task.Validate() != nil || !validPreparationUUID(w.Claim.ClaimID) || w.Claim.CreateRevision <= 0 || w.Local.Validate() != nil || w.Bytes < 0 || !validHexDigest(w.BodySHA256) || w.Dev != w.Local.Dev || w.Ino == 0 {
 		return ErrInvalidRecord
@@ -192,6 +216,9 @@ func (s *taskWorkspaceSyncRecoverySource) recoveryTerminalValue(q *taskWorkspace
 	c, r, p := s.authority.claim.reference, q.charge.record.Reference, q.physical
 	completion := taskWorkspaceSyncRecoveryCompletionWire{1, "sandbox.workspace-sync-local-recovery.v1", workspaceSyncIntentDigest(q.charge.value), q.charge.birth, taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}, s.target.pin, p.bytes, p.sha256, p.dev, p.ino}
 	value, err := encodeOperationMetadata(completion, 16384)
+	if s.fullLocal && s.finalization != nil {
+		value, err = encodeOperationMetadata(taskWorkspaceSyncLocalRepairCompletionWire{1, "sandbox.workspace-sync-local-full-regular-repair.v1", completion, hex.EncodeToString(s.finalization.transcript.Sum(nil))}, 16384)
+	}
 	if err != nil {
 		return "", err
 	}

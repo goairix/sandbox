@@ -196,6 +196,10 @@ func (s *taskWorkspaceSyncRecoverySource) load(ctx context.Context) error {
 }
 
 func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskClaim, slot uint32, destination *controltransport.Destination, worker *launcher.KernelBoundary) (_ *taskWorkspaceSyncRecoverySource, resultErr error) {
+	return b.prepareTaskWorkspaceSyncRecoveryMode(ctx, c, slot, destination, worker, false)
+}
+
+func (b *Backend) prepareTaskWorkspaceSyncRecoveryMode(ctx context.Context, c *TaskClaim, slot uint32, destination *controltransport.Destination, worker *launcher.KernelBoundary, full bool) (_ *taskWorkspaceSyncRecoverySource, resultErr error) {
 	if b == nil || ctx == nil || !b.validTaskClaim(c) || b.archiveStore == nil || b.archiveStore.recovery == nil || b.workspaceSyncBudget == nil || b.workspaceSyncBudget.profile != 2 || destination == nil || worker == nil {
 		return nil, ErrInvalidRecord
 	}
@@ -206,6 +210,7 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 	if err != nil {
 		return nil, err
 	}
+	s.fullLocal = full
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, s.Close())
@@ -218,6 +223,9 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 	// Current claim/operator/prefix/budget precede metadata IO. Full historical
 	// dual-drain and all 50 pins are acquired separately after parsing.
 	err = b.guardTaskWorkspaceRecoveryClaim(s.ctx, c)
+	if err == nil && !full {
+		err = b.refuseWorkspaceSyncLocalFinalization(s.ctx, c)
+	}
 	if err == nil {
 		err = s.load(s.ctx)
 	}
@@ -244,8 +252,10 @@ func (b *Backend) prepareTaskWorkspaceSyncRecovery(ctx context.Context, c *TaskC
 	if err != nil {
 		return nil, err
 	}
-	if err := s.restoreCheckpoint(s.ctx); err != nil {
-		return nil, err
+	if !full {
+		if err := s.restoreCheckpoint(s.ctx); err != nil {
+			return nil, err
+		}
 	}
 	go s.monitor()
 	return s, nil
@@ -339,6 +349,9 @@ func (s *taskWorkspaceSyncRecoverySource) physical(ctx context.Context) error {
 		return errors.Join(ErrIdentityMismatch, err)
 	}
 	if s.target != nil {
+		if s.effectsSealed {
+			return errors.Join(s.checkFinalizationRoot(ctx), s.local(ctx))
+		}
 		return errors.Join(s.target.check(ctx), s.local(ctx))
 	}
 	return s.local(ctx)

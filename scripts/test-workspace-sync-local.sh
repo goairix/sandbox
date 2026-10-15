@@ -11,6 +11,7 @@ if [[ $# -lt 1 || $# -gt 2 || -z "$1" ]]; then echo 'usage: test-workspace-sync-
 mode=${2:-normal}
 test_run='^TestTaskWorkspaceSync(LocalNative|IntentNativeAtomicRegistration|IntentNativeUnknownCommitted|IntentNativeSameTxnCurrentFences|IntentNativePaired)'
 case "$mode" in
+  finalization-regular) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeRegular$';;
   normal) ;;
 	recovery-execution-cold) test_run='^TestTaskWorkspaceSyncRecoveryNativeCold$';;
 	recovery-execution-authority) test_run='^TestTaskWorkspaceSyncRecoveryNativeAuthority$';;

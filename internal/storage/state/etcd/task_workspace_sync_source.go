@@ -56,7 +56,13 @@ func (b *Backend) PrepareTaskWorkspaceSyncSource(ctx context.Context, r *Receive
 	if err := s.begin(ctx); err != nil {
 		return nil, errors.Join(err, s.Close())
 	}
-	err := s.verify(ctx)
+	var err error
+	if store.recovery != nil {
+		err = b.refuseWorkspaceSyncLocalFinalization(ctx, c)
+	}
+	if err == nil {
+		err = s.verify(ctx)
+	}
 	s.end()
 	if err != nil {
 		return nil, errors.Join(err, s.Close())

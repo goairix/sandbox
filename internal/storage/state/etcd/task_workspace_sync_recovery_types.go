@@ -42,6 +42,9 @@ type taskWorkspaceSyncRecoverySource struct {
 	checkpointKV                   *mvccpb.KeyValue
 	completedFiles, completedBytes uint64
 	localIOComplete                func(string)
+	fullLocal                      bool
+	effectsSealed                  bool
+	finalization                   *taskWorkspaceSyncLocalFinalizer
 }
 
 type taskWorkspaceSyncRecoveryBody struct {
