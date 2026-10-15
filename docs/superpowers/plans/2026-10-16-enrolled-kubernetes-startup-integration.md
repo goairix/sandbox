@@ -31,6 +31,8 @@
 
 **Modify:** cmd/sandbox-launcher/provision_linux.go；按需新增纯mode策略文件/专门测试；internal/runtime/controlrunner/enrolled_launcher_native_linux_test.go及enrolled_profile_native_linux_test.go仅最窄test-only helper抽取，新selector由新文件拥有，旧selectors默认不变。
 
+首个真实组合失败后新增最小范围：internal/runtime/kubernetes/enrolled_bridge_conn.go、internal/runtime/controltransport/destination.go及专用真实TLS回归，解决TLS CloseWrite的底层过期写deadline误杀响应；新startup script裸断言显式失败出口及无Docker回归。原失败和wrapper0/attach1矛盾保留，不重开CLOSED任务；只限定复验实际受影响的旧selectors。
+
 **Create:** internal/runtime/controlrunner/enrolled_kubernetes_startup_native_linux_test.go；scripts/test-enrolled-kubernetes-startup.sh；可另拆test-only固定namespace exec/WS relay helper，避免复制整套服务。
 
 **Interfaces:** 原生产client `NewEnrolledBridgeClient`, `Dial(ctx,target)(net.Conn,error)`；原BuildEnrolledPlainPod、Destination、publication verifier。新增全是私有有限testhelper/固定mode策略，不改原public authority接口。若原fixture无可替换Dial点，作者先报具体最小源级ruling，不复制完整fixture。
@@ -38,7 +40,7 @@
 - [x] Step1 READONLY预检实际fixture接口/路径/原Wait；bridge已937f018范围验收，同HEAD为immutableBASE/START-GO。
 - [x] Step2 新mode策略0777/01777真实RED；独立默认tmpfs实际01777，正式CLI拒绝invalid fresh control directory，原child/attach/container均exit1，原服务退出与exact容器清理齐全；原输入归档保留，不单独提交红态。
 - [x] Step3 ee0bc98：rootFD先0700并Fstat后检查子项，有限mode回归host/race及Linuxvet通过；只提交3个连贯产品/回归文件，不改共享profile/管理权限。
-- [ ] Step4 新freshbuild nativeGREEN经生产WSclient和正式bridge，最多两个1777旧数据负例；原verify/IO/Wait/join/精确清理/all17及ELF绑定，及时提交。
+- [ ] Step4 首次真实组合失败已定位TLS写期限和旧Bash断言问题；新真实TLS/方向性回归RED→最小修复GREEN，脚本显式失败出口验证，再freshbuild nativeGREEN经生产WSclient和正式bridge；原verify/IO/Wait/join/精确清理/all17及ELF绑定，及时提交。不加可选负例拖延主链。
 - [ ] Step5 冻结report/manifest，唯一fresh整Taskreview，同pair修复并tracked验收；继续真正create/quota/manager。
 
 ## Preflight and rulings

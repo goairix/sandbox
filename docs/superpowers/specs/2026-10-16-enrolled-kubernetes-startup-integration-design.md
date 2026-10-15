@@ -37,3 +37,11 @@ host新增mode策略RED→GREEN/race，Linux affected compile/vet和新增native
 两个固定test helper（原PID1启动helper的startup-only分支及新bridge helper）在正式exec之前必须移除SYS_ADMIN/SYS_PTRACE/SYS_CHROOT的bounding位，清空ambient，permitted/effective只保留原四个生产cap、inheritable清零，并实际核验。旧helper在原六cap场景只drop前两项，新增CHROOT不会自动从bounding消失，故startup-only额外drop/核验不可省略。bridge helper仍LockOSThread、unshare(CLONE_FS)、只setns原传入FD，绝不重开任意PID/path。setup错误保留原退出，不能报告集成通过。代价是这个明确记录的测试setup权限例外；正式程序、现有旧selector和部署权限不扩大。
 
 Ruling: 用户持续授权包括修复真实集成缺陷；旧Task已CLOSED，保持原历史证据，独立新完整startup集成Task修复和验证实际行为，不重复申请许可或复用已关闭pair。此前0755假设错误由本Task明确纠正，不能宣称原fixture已代表kubelet。
+
+## 实际组合失败的新增修复范围
+
+首个green-bridge尝试真实失败：正式PID1已从初始01777收紧并启动，但production bridge上的TLS publication约0.18秒返回i/o timeout，原bridge/PID1清理Wait为killed，原attach/container均1且无OOM，exact容器已清除。原脚本却exit0并打印FINISHED，失败日志/退出矛盾均保留；不能据包装器结果验收。
+
+已查明Go1.25.6 crypto/tls/conn.go closeNotify:1481–1485在写出close_notify后将底层write deadline设为now；bridge当前取read/write最早期限并中止整条连接，导致尚需读取响应/发送transport FIN时立即超时。本OPEN Task允许最小修改enrolled_bridge_conn.go及controltransport/destination.go，并新增独立真实TLS→production bridge回归。写方向闲置期限到期不得杀读，恢复本次bounded write deadline后才发送真实transport FIN；方向性、已进入/排队IO、首因/partialn、物理关闭和slot等待仍须验证。不能用延迟deadline、吞错误、提前successstatus或fake transport代替修复。具体私有同步方案以原真实socket/TLS RED→GREEN确认，旧CLOSED OWN/pair不重开；仅受本次行为变动影响的旧selectors可限定复验，禁止无理由重放整套历史矩阵。
+
+Root在本机独立复现/bin/bash3.2的裸[[false]]即使-e仍继续/exit0，显式`|| exit 37`则正确退出37。新startup脚本的必要断言须显式失败出口，保留实际日志、attach/container Wait和预期RED各自原状态；增加不启动Docker的失败出口回归，不能靠errexit或FINISHED字样认定通过。新native build/epoch须独立归档修改后的全部输入，后续具体run另经Root检查。
