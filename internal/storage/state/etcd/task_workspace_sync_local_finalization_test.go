@@ -64,9 +64,14 @@ func TestTaskWorkspaceSyncLocalFinalizationRecords(t *testing.T) {
 	kv := &mvccpb.KeyValue{Key: []byte("progress"), Value: []byte(wire), CreateRevision: 2, ModRevision: 2, Version: 1}
 	_, err = decodeWorkspaceSyncLocalProgress(kv)
 	require.NoError(t, err)
+	exhausted := &taskWorkspaceSyncLocalFinalizer{progressKV: &mvccpb.KeyValue{Version: math.MaxInt64}}
+	require.ErrorIs(t, exhausted.saveProgress(context.Background(), p), ErrConflict)
+	require.ErrorIs(t, exhausted.settleMetadata(context.Background(), strings.Repeat("f", 64)), ErrConflict)
+	require.ErrorIs(t, exhausted.publishCompletion(context.Background()), ErrConflict)
 	for _, mutate := range []func(*mvccpb.KeyValue){
 		func(k *mvccpb.KeyValue) { k.Lease = 1 },
 		func(k *mvccpb.KeyValue) { k.Value = append([]byte(" "), k.Value...) },
+		func(k *mvccpb.KeyValue) { k.Version, k.ModRevision = math.MaxInt64, 3 },
 		func(k *mvccpb.KeyValue) {
 			k.Value = []byte(strings.Replace(wire, `"phase":"regular"`, `"phase":"bogus"`, 1))
 		},
@@ -141,4 +146,23 @@ func TestTaskWorkspaceSyncLocalFinalizationBounds(t *testing.T) {
 	require.Len(t, f.metadataComparisons(true), 62)
 	request.Success = append(request.Success, taskProtoRange(b.identityKey))
 	require.Error(t, taskCheckWire(b.namespace, []*pb.TxnRequest{request}, nil))
+}
+
+func TestTaskWorkspaceSyncLocalFinalizationMetadataGate(t *testing.T) {
+	store := &taskArchiveStore{limits: taskArchiveLimits{Jobs: 1}, recovery: &taskArchiveRecoveryStore{gate: make(chan struct{}, 1)}}
+	store.self = store
+	store.recovery.slots[0].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, State: 3}
+	s, err := store.registerRecovery(context.Background(), 0)
+	require.NoError(t, err)
+	require.NoError(t, s.begin(context.Background()))
+	f := &taskWorkspaceSyncLocalFinalizer{source: s}
+	// Another metadata owner holds the only token. Waiting is still a real
+	// source operation, so Close cancels and joins it before clearing admission.
+	finished := make(chan error, 1)
+	go func() { _, err := f.metadataGate(s.ctx); s.end(); finished <- err }()
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	require.Error(t, <-finished)
+	require.NoError(t, <-closed)
+	require.Nil(t, store.recovery.slots[0].owner)
 }

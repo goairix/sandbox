@@ -418,6 +418,9 @@ func (s *taskWorkspaceSyncRecoverySource) readAt(ctx context.Context, data []byt
 			chunk = chunk[:32768]
 		}
 		n, err := s.file.ReadAt(chunk, offset+int64(total))
+		if s.localArchiveReadComplete != nil {
+			s.localArchiveReadComplete(n)
+		}
 		total += n
 		if after := s.physical(ctx); after != nil {
 			return total, errors.Join(err, after)

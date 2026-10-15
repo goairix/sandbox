@@ -318,6 +318,9 @@ func (f *taskWorkspaceSyncLocalFinalizer) ensureArchiveParents(ctx context.Conte
 			if err := guard(); err != nil {
 				return err
 			}
+			if err := f.metadataParent(parent, full); err != nil {
+				return err
+			}
 			if err := unix.Mkdirat(parent, name, 0700); err != nil {
 				return err
 			}

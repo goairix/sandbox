@@ -92,6 +92,9 @@ func decodeWorkspaceSyncLocalProgress(kv *mvccpb.KeyValue) (taskWorkspaceSyncLoc
 		return p, ErrCorruptRecord
 	}
 	wire, err := encodeWorkspaceSyncLocalProgress(p)
+	if p.Phase != "sealed" && workspaceSyncLocalProgressAdvanceable(kv) != nil {
+		return p, ErrCorruptRecord
+	}
 	if err != nil || wire != string(kv.Value) {
 		return p, ErrCorruptRecord
 	}

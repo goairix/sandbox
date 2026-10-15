@@ -11,6 +11,11 @@ import (
 )
 
 func (f *taskWorkspaceSyncLocalFinalizer) frozenCheckpoint(ctx context.Context) error {
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer release()
 	s := f.source
 	kv, err := s.readCheckpoint(ctx)
 	if err != nil || kv.ModRevision != f.progress.CheckpointRevision || workspaceSyncIntentDigest(string(kv.Value)) != f.progress.CheckpointDigest {
@@ -28,7 +33,16 @@ func (f *taskWorkspaceSyncLocalFinalizer) frozenCheckpoint(ctx context.Context) 
 	return nil
 }
 
-func (f *taskWorkspaceSyncLocalFinalizer) readCompletion(kv *mvccpb.KeyValue) (*TaskWorkspaceSyncLocalCompletionReference, error) {
+func (f *taskWorkspaceSyncLocalFinalizer) readCompletion(ctx context.Context, kv *mvccpb.KeyValue) (*TaskWorkspaceSyncLocalCompletionReference, error) {
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return nil, gateErr
+	}
+	defer release()
+	return f.readCompletionOwned(kv)
+}
+
+func (f *taskWorkspaceSyncLocalFinalizer) readCompletionOwned(kv *mvccpb.KeyValue) (*TaskWorkspaceSyncLocalCompletionReference, error) {
 	p, err := decodeWorkspaceSyncLocalComplete(kv)
 	s := f.source
 	if err != nil || string(kv.Key) != f.completeKey || p.Task != s.manifest.Seed.Task || p.TaskBirth != s.manifest.Seed.TaskBirth || p.Binding != f.binding || p.RootDigest != s.manifest.Binding.TargetDigest || f.progress.Phase != "sealed" || f.progressKV.ModRevision != kv.CreateRevision || workspaceSyncIntentDigest(string(f.progressKV.Value)) != p.ProgressDigest || p.CheckpointRevision != f.progress.CheckpointRevision || p.CheckpointDigest != f.progress.CheckpointDigest || p.EvidenceDigest != f.progress.EvidenceDigest || p.Claim != f.progress.Claim {
@@ -55,6 +69,14 @@ func (f *taskWorkspaceSyncLocalFinalizer) sealEffects(ctx context.Context) error
 }
 
 func (f *taskWorkspaceSyncLocalFinalizer) publishCompletion(ctx context.Context) error {
+	if err := workspaceSyncLocalProgressAdvanceable(f.progressKV); err != nil {
+		return err
+	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer release()
 	s := f.source
 	if !s.effectsSealed || f.progress.Phase != "effects-done" || s.checkpointKV == nil {
 		return ErrInvalidRecord
@@ -82,9 +104,10 @@ func (f *taskWorkspaceSyncLocalFinalizer) publishCompletion(ctx context.Context)
 	}
 	f.progress, f.progressKV = next, &mvccpb.KeyValue{Key: []byte(f.progressKey), Value: []byte(value), CreateRevision: f.progressKV.CreateRevision, ModRevision: r.Header.Revision, Version: f.progressKV.Version + 1}
 	kv := &mvccpb.KeyValue{Key: []byte(f.completeKey), Value: []byte(completion), CreateRevision: r.Header.Revision, ModRevision: r.Header.Revision, Version: 1}
-	f.result.Completion, err = f.readCompletion(kv)
+	f.result.Completion, err = f.readCompletionOwned(kv)
 	if err != nil {
 		return err
 	}
+	release()
 	return s.guard(ctx)
 }

@@ -116,6 +116,9 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataUnlink(parent int, name, path 
 	if err := guard(); err != nil {
 		return err
 	}
+	if err := f.metadataParent(parent, path); err != nil {
+		return err
+	}
 	if err := unix.Fsync(parent); err != nil {
 		return err
 	}

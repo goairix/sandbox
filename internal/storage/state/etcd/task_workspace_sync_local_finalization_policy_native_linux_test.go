@@ -17,7 +17,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-func finalizationNativeCold(t *testing.T, data []byte, entries uint64, exclude []string, deleteExtras bool, before func(string)) (*quiescenceNativeFixture, *deliveryNativeWire, string) {
+func finalizationNativeCold(t *testing.T, data []byte, entries uint64, exclude []string, deleteExtras bool, before func(string), slots ...uint32) (*quiescenceNativeFixture, *deliveryNativeWire, string) {
 	t.Helper()
 	plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: workspaceSyncIdentity(t, "local", "test-storage", "bucket", "team/project/"), Exclude: exclude, DeleteExtraneous: deleteExtras})
 	require.NoError(t, err)
@@ -44,7 +44,11 @@ func finalizationNativeCold(t *testing.T, data []byte, entries uint64, exclude [
 		certificate := preparationCertificate(t, base, dispatch.Entry.Record, root, "plain", RuntimeReference{ID: uuid.NewString(), UID: uuid.NewString(), BootID: uuid.NewString()})
 		return base, raw, input, claim, certificate, root
 	}
-	f, prepared, wire := deliveryNativeFixtureWithRecoveryProfileData(t, 0, func(TaskRecord) TaskFinalSyncPlan { p, err := plan.FinalSyncPlan(); require.NoError(t, err); return p }, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), 1, 4096}, setup, data, entries, true, true, 120*time.Second)
+	budgetSlots := uint32(1)
+	if len(slots) > 0 {
+		budgetSlots = slots[0]
+	}
+	f, prepared, wire := deliveryNativeFixtureWithRecoveryProfileDataPartition(t, 0, func(TaskRecord) TaskFinalSyncPlan { p, err := plan.FinalSyncPlan(); require.NoError(t, err); return p }, &TaskWorkspaceSyncBudgetOptions{uuid.NewString(), budgetSlots, 4096}, setup, data, entries, true, true, budgetSlots == 64, 180*time.Second)
 	done := deliveryBegin(f, prepared)
 	deliveryWaitSent(t, wire, done)
 	close(wire.body)

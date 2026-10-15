@@ -21,6 +21,11 @@ case "$mode" in
   finalization-ledger-deferred) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Ledger|DeferredLedger)$';;
   finalization-faults) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeFaults$';;
   finalization-join) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeJoin$';;
+  finalization-refusal) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Refusal|OriginalRefusal)$';;
+  finalization-bounds) test_run='^TestTaskWorkspaceSyncLocalFinalizationNativeBounds$';;
+  finalization-finalguards) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Refusal|OriginalRefusal|Bounds)$';;
+  finalization-gate) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(Ledger|DeferredLedger|Join)$';;
+  finalization-finalcoverage) test_run='^TestTaskWorkspaceSyncLocalFinalizationNative(DirectoryToRegular|PreparedRefusal)$';;
   normal) ;;
 	recovery-execution-cold) test_run='^TestTaskWorkspaceSyncRecoveryNativeCold$';;
 	recovery-execution-authority) test_run='^TestTaskWorkspaceSyncRecoveryNativeAuthority$';;
@@ -265,6 +270,13 @@ docker ps -aq --filter "label=sandbox.test.project=$project" --filter "label=san
 docker volume ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-volumes.txt"
 docker network ls -q --filter "label=sandbox.test.project=$project" --filter "label=sandbox.test.fixture=$fixture" >"$evidence/pre-networks.txt"
 [[ ! -s "$evidence/pre-containers.txt" && ! -s "$evidence/pre-volumes.txt" && ! -s "$evidence/pre-networks.txt" ]] || { echo 'exact project pre-inventory is not empty' >&2; exit 1; }
+compiler_repo_sources() {
+  python3 -c 'import json,os,sys; raw=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); files=set(); root=os.path.realpath(sys.argv[2])+os.sep
+while raw.strip():
+ p,end=decoder.raw_decode(raw.lstrip()); raw=raw.lstrip()[end:]; directory=p.get("Dir","")
+ if directory.startswith(root): files.update(directory+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[]) if not os.path.isabs(f))
+print("\n".join(sorted(files)))' "$1" "$repo"
+}
 source_files=(
   internal/storage/state/etcd/task_records.go
   internal/storage/state/etcd/task_claim_records.go
@@ -311,19 +323,11 @@ source_files=(
   git status --short -- "${source_files[@]}" >"$evidence/working-source-status.txt"
   git diff -- "${source_files[@]}" >"$evidence/working-source.diff"
   env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -deps -test -json ./internal/storage/state/etcd >"$evidence/compiler-package.json"
-  python3 -c 'import json,os,sys; raw=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); files=set(); root=os.path.realpath(sys.argv[2])+os.sep
-while raw.strip():
- p,end=decoder.raw_decode(raw.lstrip()); raw=raw.lstrip()[end:]; directory=p.get("Dir","")
- if directory.startswith(root): files.update(directory+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[]) if not os.path.isabs(f))
-print("\n".join(sorted(files)))' "$evidence/compiler-package.json" "$repo" >"$evidence/compiler-selected-inputs.txt"
+  compiler_repo_sources "$evidence/compiler-package.json" >"$evidence/compiler-selected-inputs.txt"
   xargs shasum -a 256 <"$evidence/compiler-selected-inputs.txt" >"$evidence/compiler-selected-sha256.txt"
   env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" test -c -o "$evidence/workspace-sync-local.test" ./internal/storage/state/etcd
   env CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go_tool" list -deps -test -json ./internal/storage/state/etcd >"$evidence/compiler-package-after.json"
-  python3 -c 'import json,os,sys; raw=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); files=set(); root=os.path.realpath(sys.argv[2])+os.sep
-while raw.strip():
- p,end=decoder.raw_decode(raw.lstrip()); raw=raw.lstrip()[end:]; directory=p.get("Dir","")
- if directory.startswith(root): files.update(directory+"/"+f for key in ["GoFiles","CgoFiles","TestGoFiles","XTestGoFiles"] for f in p.get(key,[]) if not os.path.isabs(f))
-print("\n".join(sorted(files)))' "$evidence/compiler-package-after.json" "$repo" >"$evidence/compiler-selected-inputs-after.txt"
+  compiler_repo_sources "$evidence/compiler-package-after.json" >"$evidence/compiler-selected-inputs-after.txt"
   cmp "$evidence/compiler-selected-inputs.txt" "$evidence/compiler-selected-inputs-after.txt" >"$evidence/compiler-selected-set-match.txt"
   shasum -a 256 -c "$evidence/source-sha256.txt" >"$evidence/source-build-match.txt"
   shasum -a 256 -c "$evidence/compiler-selected-sha256.txt" >"$evidence/compiler-build-match.txt"

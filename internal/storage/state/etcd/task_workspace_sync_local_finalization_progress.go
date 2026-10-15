@@ -2,8 +2,8 @@ package etcd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -18,16 +18,55 @@ func (s *taskWorkspaceSyncRecoverySource) localFinalizationBinding() (string, er
 	if err := s.manifest.validate(); err != nil {
 		return "", err
 	}
-	wire, err := json.Marshal(s.manifest)
+	// Reuse the admitted canonical codec, including its non-HTML escaping and
+	// fixed53121-byte maximum. A generic JSON clone could expand HTML paths.
+	buf := s.store.recoveryBuffers()
+	wire, err := encodeTaskArchiveRecovery(s.manifest, buf.output[:])
 	if err != nil {
+		s.store.recovery.buffers = nil
 		return "", err
 	}
+	manifestDigest := sha256.Sum256(wire)
+	s.store.recovery.buffers = nil
 	b := s.authority.backend.workspaceSyncBudget
-	d := framedDigest("sandbox.workspace-sync-local-binding.v1", workspaceSyncIntentDigest(string(wire)), b.value, strconv.FormatInt(b.create, 10))
+	d := framedDigest("sandbox.workspace-sync-local-binding.v1", hex.EncodeToString(manifestDigest[:]), b.value, strconv.FormatInt(b.create, 10))
 	return hex.EncodeToString(d[:]), nil
 }
 
 func (f *taskWorkspaceSyncLocalFinalizer) points(ctx context.Context, keys []string, bounds []int) ([]*mvccpb.KeyValue, error) {
+	release, err := f.metadataGate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return f.pointsOwned(ctx, keys, bounds)
+}
+
+func (f *taskWorkspaceSyncLocalFinalizer) metadataGate(ctx context.Context) (func(), error) {
+	s := f.source
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	case <-s.store.recovery.gate:
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			s.store.recovery.gate <- struct{}{}
+		}
+	}
+	if err := errors.Join(ctx.Err(), s.ctx.Err()); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+// Caller owns the shared metadata gate; no physical postguard is nested here.
+func (f *taskWorkspaceSyncLocalFinalizer) pointsOwned(ctx context.Context, keys []string, bounds []int) ([]*mvccpb.KeyValue, error) {
 	s := f.source
 	values := make([]string, len(bounds))
 	for i, bound := range bounds {
@@ -44,7 +83,22 @@ func (f *taskWorkspaceSyncLocalFinalizer) progressComparisons() []clientv3.Cmp {
 	return []clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(f.progressKey), "=", f.progressKV.ModRevision), clientv3.Compare(clientv3.Value(f.progressKey), "=", string(f.progressKV.Value))}
 }
 
+func workspaceSyncLocalProgressAdvanceable(kv *mvccpb.KeyValue) error {
+	if kv != nil && !recyclingCanAdvance(kv.Version) {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (f *taskWorkspaceSyncLocalFinalizer) saveProgress(ctx context.Context, next taskWorkspaceSyncLocalProgress) error {
+	if err := workspaceSyncLocalProgressAdvanceable(f.progressKV); err != nil {
+		return err
+	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer release()
 	s := f.source
 	c := s.authority.claim.reference
 	next.Claim = taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
@@ -59,9 +113,6 @@ func (f *taskWorkspaceSyncLocalFinalizer) saveProgress(ctx context.Context, next
 	if f.progressKV == nil {
 		cmps = append(cmps, clientv3.Compare(clientv3.Version(f.progressKey), "=", 0))
 	} else if f.charge == nil {
-		if !recyclingCanAdvance(f.progressKV.Version) {
-			return ErrConflict
-		}
 		cmps = append(cmps, f.progressComparisons()...)
 	}
 	r, err := s.native(ctx, cmps, []clientv3.Op{clientv3.OpPut(f.progressKey, value)}, []*pb.RequestOp{taskProtoPut(f.progressKey, value, 0)}, taskProtoPutResponse(1), f.charge != nil)
@@ -76,6 +127,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) saveProgress(ctx context.Context, next
 		kv.CreateRevision, kv.Version = f.progressKV.CreateRevision, f.progressKV.Version+1
 	}
 	f.progress, f.progressKV = next, kv
+	release() // physical/postguard paths may acquire the same gate
 	if f.charge != nil {
 		return f.metadataGuard(ctx)
 	}
@@ -96,6 +148,11 @@ func (f *taskWorkspaceSyncLocalFinalizer) loadProgress(ctx context.Context) (*mv
 		f.progress = taskWorkspaceSyncLocalProgress{Version: 1, Task: c.Task, TaskBirth: s.manifest.Seed.TaskBirth, Binding: f.binding, Claim: taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}, Phase: "regular"}
 		return nil, f.saveProgress(ctx, f.progress)
 	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return nil, gateErr
+	}
+	defer release()
 	p, err := decodeWorkspaceSyncLocalProgress(points[0])
 	if err != nil || p.Task != s.manifest.Seed.Task || p.TaskBirth != s.manifest.Seed.TaskBirth || p.Binding != f.binding || points[0].CreateRevision <= s.manifest.Seed.ArchiveRevision {
 		return nil, errors.Join(ErrIdentityMismatch, err)
@@ -141,6 +198,11 @@ func (f *taskWorkspaceSyncLocalFinalizer) freezeCheckpoint(ctx context.Context) 
 			return ErrConflict
 		}
 	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer release()
 	kv, err := s.readCheckpoint(ctx)
 	if err != nil {
 		return err
@@ -150,5 +212,6 @@ func (f *taskWorkspaceSyncLocalFinalizer) freezeCheckpoint(ctx context.Context) 
 	next := f.progress
 	next.Phase, next.CheckpointRevision, next.CheckpointDigest = "metadata", kv.ModRevision, workspaceSyncIntentDigest(string(kv.Value))
 	s.checkpointKV = kv
+	release()
 	return f.saveProgress(ctx, next)
 }

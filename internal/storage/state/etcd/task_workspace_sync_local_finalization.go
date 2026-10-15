@@ -28,6 +28,12 @@ func (b *Backend) refuseWorkspaceSyncLocalFinalization(ctx context.Context, c *T
 	if b.archiveStore == nil || b.archiveStore.recovery == nil {
 		return nil
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.archiveStore.recovery.gate:
+	}
+	defer func() { b.archiveStore.recovery.gate <- struct{}{} }()
 	progress, complete, err := b.namespace.workspaceSyncLocalKeys(c.reference.Task)
 	if err != nil {
 		return err
@@ -98,16 +104,24 @@ func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (Ta
 	s.finalization = f
 	var err error
 	f.progressKey, f.completeKey, err = s.authority.backend.namespace.workspaceSyncLocalKeys(s.authority.claim.reference.Task)
-	if err == nil {
-		f.binding, err = s.localFinalizationBinding()
-	}
 	if err != nil {
 		return f.result, err
 	}
-	if err := f.preflight(); err != nil {
+	if err := s.begin(ctx); err != nil {
 		return f.result, err
 	}
-	if err := s.begin(ctx); err != nil {
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		s.end()
+		return f.result, gateErr
+	}
+	f.binding, err = s.localFinalizationBinding()
+	if err == nil {
+		err = f.preflight()
+	}
+	release()
+	if err != nil {
+		s.end()
 		return f.result, err
 	}
 	err = s.validateLocalArchiveOrder(ctx)
@@ -144,7 +158,7 @@ func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (Ta
 		return f.result, err
 	}
 	if completeKV != nil {
-		f.result.Completion, err = f.readCompletion(completeKV)
+		f.result.Completion, err = f.readCompletion(ctx, completeKV)
 		if err == nil {
 			err = f.sealEffects(ctx)
 		}
@@ -165,10 +179,15 @@ func (s *taskWorkspaceSyncRecoverySource) finalizeLocal(ctx context.Context) (Ta
 				err = f.executeMetadata(ctx)
 			}
 			if err == nil {
+				release, gateErr := f.metadataGate(ctx)
+				if gateErr != nil {
+					return f.result, gateErr
+				}
 				c := s.authority.claim.reference
-				evidence := taskWorkspaceSyncLocalMetadataEvidence{1, "sandbox.workspace-sync-local-metadata-evidence.v1", workspaceSyncIntentDigest(f.charge.value), f.charge.birth, taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}, s.manifest.Binding.TargetDigest, f.progress.CheckpointRevision, f.progress.CheckpointDigest, hex.EncodeToString(f.transcript.Sum(nil)), f.result.CreatedDirectories, f.result.RemovedEntries, f.result.UpdatedDirectoryModes}
+				evidence := taskWorkspaceSyncLocalMetadataEvidence{1, "sandbox.workspace-sync-local-metadata-evidence.v1", workspaceSyncIntentDigest(f.charge.value), f.charge.birth, taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}, s.manifest.Binding.TargetDigest, f.progress.CheckpointRevision, f.progress.CheckpointDigest, hex.EncodeToString(f.transcript.Sum(nil)), f.result.CreatedDirectories, f.result.RemovedEntries, f.result.UpdatedDirectoryModes, "directories,policy,modes"}
 				var value string
 				value, err = encodeOperationMetadata(evidence, 4096)
+				release()
 				if err == nil {
 					err = f.settleMetadata(ctx, workspaceSyncIntentDigest(value))
 				}

@@ -38,3 +38,27 @@ func TestTaskWorkspaceSyncLocalFinalizationNativeRegular(t *testing.T) {
 		require.Equal(t, mode, st.Mode().Perm())
 	}
 }
+
+func TestTaskWorkspaceSyncLocalFinalizationNativeDirectoryToRegular(t *testing.T) {
+	if workspaceSyncLocalNativeWorker == nil {
+		t.Skip("explicit actual Linux worker required")
+	}
+	data := archiveTarBytes(t, []*tar.Header{{Name: "workspace", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/z", Typeflag: tar.TypeDir, Mode: 0700}, {Name: "workspace/z/file", Typeflag: tar.TypeReg, Mode: 0444, Size: 4}}, []string{"", "", "body"})
+	var root string
+	f, wire, slot := recoveryExecutionColdData(t, data, 3, func(_ *PreparedTaskWorkspaceSyncSource, _ *taskWorkspaceSyncBody, target *taskWorkspaceSyncLocalTarget) {
+		root = target.pin.Root
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "z/file/nested"), 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "z/file/nested/old"), []byte("old"), 0600))
+	})
+	r, err := f.b.FinalizeTaskWorkspaceSyncLocal(f.ctx, f.c, slot, wire.destination, workspaceSyncLocalNativeWorker)
+	require.NoError(t, err)
+	require.True(t, r.LocalComplete)
+	require.EqualValues(t, 1, r.CompletedFiles)
+	actual, err := os.ReadFile(filepath.Join(root, "z/file"))
+	require.NoError(t, err)
+	require.Equal(t, "body", string(actual))
+	info, err := os.Stat(filepath.Join(root, "z/file"))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular())
+	require.EqualValues(t, 0444, info.Mode().Perm())
+}

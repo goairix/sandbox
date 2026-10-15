@@ -278,6 +278,10 @@ func deliveryNativeFixtureWithProfileData(t *testing.T, horizon time.Duration, b
 }
 
 func deliveryNativeFixtureWithRecoveryProfileData(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, recycling, recovery bool, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
+	return deliveryNativeFixtureWithRecoveryProfileDataPartition(t, horizon, builder, budget, setup, data, entries, recycling, recovery, false, ttl...)
+}
+
+func deliveryNativeFixtureWithRecoveryProfileDataPartition(t *testing.T, horizon time.Duration, builder func(TaskRecord) TaskFinalSyncPlan, budget *TaskWorkspaceSyncBudgetOptions, setup taskDeliverySetupFactory, data []byte, entries uint64, recycling, recovery, taskPartitionOnly bool, ttl ...time.Duration) (*quiescenceNativeFixture, *PreparedTaskWorkspaceArchive, *deliveryNativeWire) {
 	t.Helper()
 	base := newTaskDeliveryFixtureWithSetup(t, true, builder != nil, setup)
 	archiveTrackCleanup(base.b)
@@ -306,8 +310,11 @@ func deliveryNativeFixtureWithRecoveryProfileData(t *testing.T, horizon time.Dur
 	if recycling && data != nil {
 		// Explicit bounded 65-file recycling proof; default/legacy fixture limits
 		// and production options keep their existing independent admission bounds.
-		require.LessOrEqual(t, entries, uint64(67))
+		require.LessOrEqual(t, entries, uint64(1025))
 		options.Entries = 67
+		if entries > options.Entries {
+			options.Entries = entries
+		}
 		indexBytes, err := taskArchiveIndexBytes(options.Entries)
 		require.NoError(t, err)
 		options.JobIndexBytes = indexBytes
@@ -335,6 +342,9 @@ func deliveryNativeFixtureWithRecoveryProfileData(t *testing.T, horizon time.Dur
 				// Every partition is provisioned; native batches never exceed 64 ops.
 				ops := make([]clientv3.Op, 0, 64)
 				for partition := 0; partition < 256; partition++ {
+					if taskPartitionOnly && partition != int(f.c.reference.Task.Partition) {
+						continue
+					}
 					for slot := uint32(0); slot < budget.SlotsPerPartition; slot++ {
 						ref := f.c.reference.Task
 						ref.Partition = uint8(partition)

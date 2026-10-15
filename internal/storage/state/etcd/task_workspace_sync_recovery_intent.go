@@ -54,7 +54,12 @@ func (s *taskWorkspaceSyncRecoverySource) readCharged(ctx context.Context, slot 
 		return nil, err
 	}
 	if s.fullLocal {
+		release, gateErr := s.finalization.metadataGate(ctx)
+		if gateErr != nil {
+			return nil, gateErr
+		}
 		metadata, metadataErr := decodeWorkspaceSyncLocalMetadataIntent(points[1], int(b.workspaceSyncBudget.options.MaxIntentBytes))
+		release()
 		if metadataErr == nil {
 			if metadata.Reference.Task != ref.Task {
 				return nil, nil
@@ -215,9 +220,17 @@ func (w taskWorkspaceSyncRecoveryCompletionWire) Validate() error {
 func (s *taskWorkspaceSyncRecoverySource) recoveryTerminalValue(q *taskWorkspaceSyncRecoveryCompletion) (string, error) {
 	c, r, p := s.authority.claim.reference, q.charge.record.Reference, q.physical
 	completion := taskWorkspaceSyncRecoveryCompletionWire{1, "sandbox.workspace-sync-local-recovery.v1", workspaceSyncIntentDigest(q.charge.value), q.charge.birth, taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}, s.target.pin, p.bytes, p.sha256, p.dev, p.ino}
-	value, err := encodeOperationMetadata(completion, 16384)
+	var value string
+	var err error
 	if s.fullLocal && s.finalization != nil {
+		release, gateErr := s.finalization.metadataGate(s.ctx)
+		if gateErr != nil {
+			return "", gateErr
+		}
+		defer release()
 		value, err = encodeOperationMetadata(taskWorkspaceSyncLocalRepairCompletionWire{1, "sandbox.workspace-sync-local-full-regular-repair.v1", completion, hex.EncodeToString(s.finalization.transcript.Sum(nil))}, 16384)
+	} else {
+		value, err = encodeOperationMetadata(completion, 16384)
 	}
 	if err != nil {
 		return "", err

@@ -69,15 +69,41 @@ func (f *taskWorkspaceSyncLocalFinalizer) metadataGuard(ctx context.Context) err
 	if err := s.physical(ctx); err != nil {
 		return err
 	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer release()
 	keys := []string{s.authority.backend.identityKey}
 	_, err := s.native(ctx, f.metadataComparisons(false), workspaceSyncPointOps(keys), taskProtoPoints(keys), taskProtoResponse(keys, []string{s.authority.backend.identityValue}), true)
 	if err != nil {
 		return err
 	}
+	release()
 	return s.physical(ctx)
 }
 
 func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadata(ctx context.Context) error {
+	release, err := f.metadataGate(ctx)
+	if err != nil {
+		return err
+	}
+	err = f.reserveMetadataOwned(ctx)
+	release()
+	if err != nil {
+		return err
+	}
+	if f.progress.IntentID == "" {
+		next := f.progress
+		next.IntentID, next.IntentBirth = f.charge.record.Reference.IntentID, f.charge.birth
+		if err := f.saveProgress(ctx, next); err != nil {
+			return err
+		}
+	}
+	return f.metadataGuard(ctx)
+}
+
+func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadataOwned(ctx context.Context) error {
 	s, b := f.source, f.source.authority.backend
 	var freeKV *mvccpb.KeyValue
 	var freeSlot uint32
@@ -87,7 +113,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadata(ctx context.Context) e
 		if err != nil {
 			return err
 		}
-		points, err := f.points(ctx, []string{key}, []int{512})
+		points, err := f.pointsOwned(ctx, []string{key}, []int{512})
 		if err != nil {
 			return err
 		}
@@ -106,7 +132,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadata(ctx context.Context) e
 		if err != nil {
 			return err
 		}
-		pair, err := f.points(ctx, []string{key, intentKey}, []int{512, int(b.workspaceSyncBudget.options.MaxIntentBytes)})
+		pair, err := f.pointsOwned(ctx, []string{key, intentKey}, []int{512, int(b.workspaceSyncBudget.options.MaxIntentBytes)})
 		if err != nil {
 			return err
 		}
@@ -162,37 +188,41 @@ func (f *taskWorkspaceSyncLocalFinalizer) reserveMetadata(ctx context.Context) e
 	if f.progress.IntentID != "" && (f.progress.IntentID != f.charge.record.Reference.IntentID || f.progress.IntentBirth != f.charge.birth) {
 		return ErrConflict
 	}
-	if f.progress.IntentID == "" {
-		next := f.progress
-		next.IntentID, next.IntentBirth = f.charge.record.Reference.IntentID, f.charge.birth
-		if err := f.saveProgress(ctx, next); err != nil {
-			return err
-		}
-	}
-	return f.metadataGuard(ctx)
+	return nil
 }
 
 type taskWorkspaceSyncLocalMetadataEvidence struct {
-	Version                                                   uint32             `json:"version"`
-	Domain                                                    string             `json:"domain"`
-	IntentDigest                                              string             `json:"intent_digest"`
-	IntentBirth                                               int64              `json:"intent_birth"`
-	Claim                                                     taskCloseClaimWire `json:"claim"`
-	RootDigest                                                string             `json:"root_digest"`
-	CheckpointRevision                                        int64              `json:"checkpoint_revision"`
-	CheckpointDigest                                          string             `json:"checkpoint_digest"`
-	TranscriptDigest                                          string             `json:"transcript_digest"`
-	CreatedDirectories, RemovedEntries, UpdatedDirectoryModes uint64
+	Version               uint32             `json:"version"`
+	Domain                string             `json:"domain"`
+	IntentDigest          string             `json:"intent_digest"`
+	IntentBirth           int64              `json:"intent_birth"`
+	Claim                 taskCloseClaimWire `json:"claim"`
+	RootDigest            string             `json:"root_digest"`
+	CheckpointRevision    int64              `json:"checkpoint_revision"`
+	CheckpointDigest      string             `json:"checkpoint_digest"`
+	TranscriptDigest      string             `json:"transcript_digest"`
+	CreatedDirectories    uint64             `json:"created_directories"`
+	RemovedEntries        uint64             `json:"removed_entries"`
+	UpdatedDirectoryModes uint64             `json:"updated_directory_modes"`
+	Phases                string             `json:"phases"`
 }
 
 func (e taskWorkspaceSyncLocalMetadataEvidence) Validate() error {
-	if e.Version != 1 || e.Domain != "sandbox.workspace-sync-local-metadata-evidence.v1" || !validHexDigest(e.IntentDigest) || e.IntentBirth <= 0 || e.Claim.Task.Validate() != nil || !validWorkspaceSyncFinalizationClaim(e.Claim, e.Claim.Task) || !validHexDigest(e.RootDigest) || e.CheckpointRevision <= 0 || !validHexDigest(e.CheckpointDigest) || !validHexDigest(e.TranscriptDigest) {
+	if e.Version != 1 || e.Domain != "sandbox.workspace-sync-local-metadata-evidence.v1" || !validHexDigest(e.IntentDigest) || e.IntentBirth <= 0 || e.Claim.Task.Validate() != nil || !validWorkspaceSyncFinalizationClaim(e.Claim, e.Claim.Task) || !validHexDigest(e.RootDigest) || e.CheckpointRevision <= 0 || !validHexDigest(e.CheckpointDigest) || !validHexDigest(e.TranscriptDigest) || e.Phases != "directories,policy,modes" {
 		return ErrInvalidRecord
 	}
 	return nil
 }
 
 func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, evidence string) error {
+	if err := workspaceSyncLocalProgressAdvanceable(f.progressKV); err != nil {
+		return err
+	}
+	release, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer func() { release() }()
 	s, q := f.source, f.charge
 	ref, g := q.record.Reference, q.generation
 	terminal, err := encodeWorkspaceSyncRecyclingSlot(taskWorkspaceSyncRecyclingSlotRecord{Version: 2, BudgetID: ref.BudgetID, Partition: ref.Task.Partition, Slot: ref.Slot, State: "terminal", IntentID: ref.IntentID, IntentDigest: workspaceSyncIntentDigest(q.value), IntentBirth: q.birth, EvidenceDigest: evidence})
@@ -207,9 +237,15 @@ func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, ev
 		return ErrOutcomeUnknown
 	}
 	q.generation = taskWorkspaceSyncRecyclingGeneration{g.create, r.Header.Revision, g.version + 1, terminal}
+	release()
 	if err := f.metadataGuard(ctx); err != nil {
 		return err
 	}
+	nextRelease, gateErr := f.metadataGate(ctx)
+	if gateErr != nil {
+		return gateErr
+	}
+	release = nextRelease
 	next := f.progress
 	next.Phase, next.EvidenceDigest = "effects-done", evidence
 	value, err := encodeWorkspaceSyncLocalProgress(next)
@@ -230,6 +266,7 @@ func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, ev
 	}
 	f.progress, f.progressKV = next, &mvccpb.KeyValue{Key: []byte(f.progressKey), Value: []byte(value), CreateRevision: f.progressKV.CreateRevision, ModRevision: r.Header.Revision, Version: f.progressKV.Version + 1}
 	f.charge = nil
+	release()
 	return s.guard(ctx)
 }
 
@@ -238,6 +275,24 @@ func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, ev
 func (f *taskWorkspaceSyncLocalFinalizer) preflight() error {
 	s, b := f.source, f.source.authority.backend
 	ref := TaskWorkspaceSyncIntentReference{Task: s.authority.claim.reference.Task, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: s.manifest.Seed.ArchiveCommand, Slot: 63}
+	c := s.authority.claim.reference
+	writer := taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
+	// Validate the prospective schemas with longest revision encodings before
+	// progress or regular repair, not just a protobuf byte-count placeholder.
+	if f.binding != "" {
+		intent := taskWorkspaceSyncLocalMetadataIntent{3, ref, writer, b.workspaceSyncBudget.create, "local_metadata_pass", "local", f.binding, math.MaxInt64 - 1}
+		if _, err := encodeOperationMetadata(intent, int(b.workspaceSyncBudget.options.MaxIntentBytes)); err != nil {
+			return err
+		}
+		projection := taskWorkspaceSyncLocalProgress{Version: 1, Task: c.Task, TaskBirth: s.manifest.Seed.TaskBirth, Binding: f.binding, Claim: writer, Phase: "effects-done", CheckpointRevision: math.MaxInt64 - 1, CheckpointDigest: f.binding, IntentID: ref.IntentID, IntentBirth: math.MaxInt64 - 1, EvidenceDigest: f.binding}
+		if _, err := encodeWorkspaceSyncLocalProgress(projection); err != nil {
+			return err
+		}
+		complete := taskWorkspaceSyncLocalComplete{1, "sandbox.workspace-sync-local-complete.v1", c.Task, s.manifest.Seed.TaskBirth, f.binding, writer, f.binding, f.binding, math.MaxInt64 - 1, f.binding, s.manifest.Binding.TargetDigest}
+		if _, err := encodeOperationMetadata(complete, 8192); err != nil {
+			return err
+		}
+	}
 	intentKey, slotKey, err := b.workspaceSyncRecyclingKeys(ref)
 	if err != nil {
 		return err

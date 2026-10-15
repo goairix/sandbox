@@ -74,7 +74,13 @@ func (b *Backend) ReceiveTaskWorkspaceArchive(ctx context.Context, prepared *Pre
 		b.archiveLife.mu.Unlock()
 		r, err = b.archiveStore.reserveRecovery(owned, seed)
 		if err == nil {
-			err = b.refuseWorkspaceSyncLocalFinalization(owned, c)
+			var bounded context.Context
+			var finish func()
+			bounded, finish, err = r.beginRecoveryMetadata(owned)
+			if err == nil {
+				err = b.refuseWorkspaceSyncLocalFinalization(bounded, c)
+				finish()
+			}
 			if err != nil {
 				err = errors.Join(err, r.close())
 			}

@@ -8,9 +8,28 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+func (f *taskWorkspaceSyncLocalFinalizer) metadataParent(parent int, path string) error {
+	name := "."
+	if at := strings.LastIndexByte(path, '/'); at >= 0 {
+		name = path[:at]
+	}
+	fd, err := workspaceSyncLocalScopedOpen(f.source.target.fd, name, unix.O_PATH|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return err
+	}
+	current, readErr := f.metadataStat(fd)
+	closeErr := unix.Close(fd)
+	held, heldErr := f.metadataStat(parent)
+	if readErr != nil || closeErr != nil || heldErr != nil || current.Ino != held.Ino || current.Dev != held.Dev {
+		return errors.Join(ErrIdentityMismatch, readErr, closeErr, heldErr)
+	}
+	return nil
+}
 
 func (f *taskWorkspaceSyncLocalFinalizer) metadataStat(fd int) (unix.Stat_t, error) {
 	var st unix.Stat_t
