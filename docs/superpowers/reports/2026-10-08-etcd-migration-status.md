@@ -14,13 +14,15 @@
 | 分区调度、FUSE / collector 迁移 | 15% | 0% |
 | 大量已有沙盒容量验证、部署恢复、Redis 移除 | 15% | 0% |
 
-安全链已有排空/归档、本地完整同步和真实物理终止组件，注册发布单元也已范围验收。etcd termination composer、精确 provider 清理和原子安全释放尚需接通，cloud/none/其他运行时也未完成。主程序仍使用 Redis，生产切换完成度为0%。原生组件测试与固定编码/并发界限不计为大N容量或部署完成。
+安全链已有排空/归档、本地完整同步和真实物理终止组件，注册发布单元也已范围验收。etcd termination composer、精确 provider 清理和原子安全释放的本地普通运行时完整正例已接通，尚需新增故障矩阵和完整Task审查；cloud/none/其他运行时也未完成。主程序仍使用 Redis，生产切换完成度为0%。原生组件测试与固定编码/并发界限不计为大N容量或部署完成。
 
 用户进一步要求区分功能代码完成度：当前约 **50%**，估算区间45%–55%。该口径计入已经实现、尚待限定审查的代码，剔除容量/部署/最终验收工作，但仍计入尚未编写的生产接线、分区/FUSE迁移；不能只按基础组件或源码行数计算。后续同时报告“功能代码约50% / 整体交付约35%”。前期协议/组件与验证投入偏多、完整业务链路推进不足，是进度慢的主要原因。
 
 ## 2026-10-15 接续
 
-2026-10-16 新增安全释放实现切片：`6160c36/7a06877/b03dbca` 和消费者身份修复 `cb09c09`，已提交严格记录/有界owner、独立历史权限、本地公开绑定、终止/清理/原子释放编排及只读冷诊断。当前 host 限定测试和64节点 wire投影通过，真实 Supervisor/observer/local sync→release 组合正在构建验证，尚未验收本完整安全释放单元。
+2026-10-16 新增安全释放实现切片：`6160c36/7a06877/b03dbca` 和消费者身份修复 `cb09c09`，已提交严格记录/有界owner、独立历史权限、本地公开绑定、终止/清理/原子释放编排及只读冷诊断。后续 `2895ffc` 修复新consumer对Task类型/optional字段和原编码规则的读取错误，八类型含合法opaque特殊字符与拒绝场景新增回归、Root独立race/vet通过；没有修改原validator或删除fence。
+
+完整正例与脚本已小提交 `4831539`。真实Linux full7通过：genuine Supervisor登记发布→public archive/空localcomplete→observer实际SIGKILL与cgroup排空证明→provider cleanup-complete→换claim保留同一原entry→原子release→newowner→cold原receipt。实际HTTP为2PATCH+1DELETE，四policy absent只计skip。原worker Cmd.Wait nil、Supervisor原Wait为observer SIGKILL、observer Serve nil、etcd原SIGTERM、attach/container Wait0及精确容器清理已核对。实际runner 9,044/monitor 1,980 listed inputs的pre/post文件名+SHA精确一致，Root独立核对当前repo输入、ELF/源码归档/脚本hash；此前fixture/consumer失败和teardown日志保留。下一步是enrollment变更、真实Txn/API丢ACK、Closejoin和未决禁止重发的有限native故障；本完整安全释放Task尚未验收，不计为容量或生产切换完成。
 
 其独立 Kubernetes 精确清理客户端 `1cb993c/2689e5d/402fbc0` 与审查修复 `e2aa59e` 已范围验收：固定七槽、实际一次请求、UID/RV preflight、原body/dial真实join、超界响应硬拒绝。唯一fresh审查的policy UID缺口已由同pair修复闭环；原host source subset/race条件限制保留，新R1匹配条件的完整输入绑定和Linux编译已核对，未执行Linux或真实kubelet。详见 `2026-10-16-task-runtime-cleanup-client-verification.md`。该依赖完成不等于主程序生产迁移完成；百分比口径暂不因组件提交数上调，仍功能代码约50%/整体交付约35%/生产切换0%。
 
