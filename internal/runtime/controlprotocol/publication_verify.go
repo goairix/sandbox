@@ -53,7 +53,7 @@ func (v *PublicationVerifier) verifyCertificate(wire []byte, context Certificate
 	if err != nil {
 		return CertificateEvidence{}, err
 	}
-	return CertificateEvidence{runtime: envelope.Claims.Runtime, workspaceMode: envelope.Claims.WorkspaceMode, wire: normalized, digest: wireDigest(normalized)}, nil
+	return CertificateEvidence{runtime: envelope.Claims.Runtime, workspaceMode: envelope.Claims.WorkspaceMode, publicKey: append(ed25519.PublicKey(nil), envelope.Claims.PublicKey...), wire: normalized, digest: wireDigest(normalized)}, nil
 }
 
 func (v *PublicationVerifier) Verify(wire []byte, context PublicationContext, now time.Time) (PublicationEvidence, error) {

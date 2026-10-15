@@ -98,6 +98,7 @@ type PublicationEvidence struct {
 type CertificateEvidence struct {
 	runtime       RuntimeReference
 	workspaceMode string
+	publicKey     ed25519.PublicKey
 	wire          []byte
 	digest        string
 }
@@ -110,6 +111,9 @@ func (e CertificateEvidence) Runtime() RuntimeReference { return e.runtime }
 func (e CertificateEvidence) WorkspaceMode() string     { return e.workspaceMode }
 func (e CertificateEvidence) Wire() []byte              { return append([]byte(nil), e.wire...) }
 func (e CertificateEvidence) Digest() string            { return e.digest }
+func (e CertificateEvidence) PublicKey() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), e.publicKey...)
+}
 
 type certificateEnvelope struct {
 	Claims    RuntimeCertificateClaims `json:"claims"`
