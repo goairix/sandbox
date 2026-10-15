@@ -298,6 +298,57 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 		return
 	}
 	terminated, err := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+	if s.Fault == "observer-send-ack" {
+		require.Error(t, err, "real Terminate response must have been discarded after observer physical proof")
+		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
+		original, readErr := b.LoadTaskRuntimeTermination(ctx, task)
+		require.NoError(t, readErr)
+		require.Equal(t, "reserved", original.Phase, "observer proof was not yet persisted by Backend")
+		repeated, readErr := b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.NoError(t, readErr)
+		require.Equal(t, state.OutcomeUnknown, repeated.Outcome)
+		require.Equal(t, original, repeated.Entry)
+		raw, openErr := clientv3.New(clientv3.Config{Endpoints: []string{"https://127.0.0.1:2379"}, TLS: tlsConfig, DialTimeout: 2 * time.Second})
+		require.NoError(t, openErr)
+		defer func() { require.NoError(t, raw.Close()) }()
+		terminationKey, keyErr := ns.Key("p", fmt.Sprintf("%02x", task.Partition), "tasks", task.TaskID, "runtime-termination")
+		require.NoError(t, keyErr)
+		providerKey, keyErr := ns.Key("p", fmt.Sprintf("%02x", task.Partition), "tasks", task.TaskID, "runtime-provider-cleanup")
+		require.NoError(t, keyErr)
+		before, readErr := raw.Get(ctx, terminationKey)
+		require.NoError(t, readErr)
+		require.Len(t, before.Kvs, 1)
+		var retained p.TaskRuntimeTerminationIntent
+		require.NoError(t, json.Unmarshal(before.Kvs[0].Value, &retained))
+		require.Equal(t, "reserved", retained.Phase)
+		require.Empty(t, retained.TerminalProof)
+		providerState, readErr := raw.Get(ctx, providerKey)
+		require.NoError(t, readErr)
+		require.Len(t, providerState.Kvs, 1)
+		var slots struct{ Slots []struct{ State string } }
+		require.NoError(t, json.Unmarshal(providerState.Kvs[0].Value, &slots))
+		require.Len(t, slots.Slots, 7)
+		require.Equal(t, "complete", slots.Slots[0].State)
+		require.Equal(t, "complete", slots.Slots[1].State)
+		require.NoError(t, b.ReleaseTaskClaim(ctx, claim))
+		claim, err = b.ClaimTask(ctx, task, "observer-response-recovery", time.Minute)
+		require.NoError(t, err)
+		require.NotEqual(t, retained.Current.ClaimID, claim.Reference().ClaimID)
+		terminated, err = b.TerminateTaskRuntimeLocal(ctx, claim, termination)
+		require.NoError(t, err)
+		require.Equal(t, state.OutcomeCommitted, terminated.Outcome)
+		require.Equal(t, "cleanup-complete", terminated.Entry.Phase)
+		after, readErr := raw.Get(ctx, terminationKey)
+		require.NoError(t, readErr)
+		require.Len(t, after.Kvs, 1)
+		var recoveredIntent p.TaskRuntimeTerminationIntent
+		require.NoError(t, json.Unmarshal(after.Kvs[0].Value, &recoveredIntent))
+		require.Equal(t, retained.Current, recoveredIntent.Current)
+		require.Equal(t, retained.TaskBirth, recoveredIntent.TaskBirth)
+		require.Equal(t, before.Kvs[0].CreateRevision, after.Kvs[0].CreateRevision)
+		require.NotEmpty(t, recoveredIntent.TerminalProof)
+		t.Log("actual observer Terminate response lost after physical proof; Backend reserved+provider slots0/1 complete; same attempt read only; fresh claim Query restored original Current/birth")
+	}
 	if s.Fault == "ack-terminated" {
 		require.Error(t, err)
 		require.Equal(t, state.OutcomeUnknown, terminated.Outcome)
@@ -710,6 +761,10 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	}()
 	setup := localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "empty/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}
 	setup.Fault = fault
+	var observerProxy *localReleaseObserverProxy
+	if fault == "observer-send-ack" {
+		setup.ObserverAddress, observerProxy = newLocalReleaseObserverProxy(t, ctx, setup, observerKey)
+	}
 	if strings.HasPrefix(fault, "ack-") || strings.HasPrefix(fault, "http-") {
 		setup.EtcdAddress, proxy = newLocalReleaseNativeProxy(t, appTLS, fault)
 	}
@@ -792,7 +847,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || effectIndex >= 2 {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" || effectIndex >= 2 {
 		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
 	} else {
 		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
@@ -822,7 +877,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 		}
 		require.Equal(t, effectIndex == 6, absent)
 		t.Logf("actual seven-slot HTTP received total=%d effects=%v; each send independently checked native durable intent and immediately preceding fresh provider MOD guard; four unique configured policies", totalReceived, effectCounts)
-	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" {
+	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)
@@ -843,6 +898,9 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	t.Logf("actual received HTTP mutations patch=%d delete=%d; exact original UID/RV enforced; absent policies are skipped diagnostics", actualPatch, actualDelete)
 	if proxy != nil {
 		proxy.verify(t)
+	}
+	if observerProxy != nil {
+		observerProxy.verify(t)
 	}
 }
 

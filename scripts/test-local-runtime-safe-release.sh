@@ -7,7 +7,7 @@ go_bin=${GO_BIN:-/Users/dysodeng/go/go1.25.6/bin/go}
 epoch=${LOCAL_RELEASE_EPOCH:?set a unique owned epoch}
 mode=${1:-run}
 selector=${LOCAL_RELEASE_SELECTOR:-'^TestLocalRuntimeReleaseNative$'}
-case "$selector" in '^TestLocalRuntimeReleaseNative$'|'^TestLocalRuntimeReleaseNativeFaults$'|'^TestLocalRuntimeReleaseNativeACKs$'|'^TestLocalRuntimeReleaseNativeEffects$'|'^TestLocalRuntimeReleaseNativeClose$'|'^TestLocalRuntimeReleaseNativeBoundaries$'|'^TestLocalRuntimeReleaseNativeRecoveryACKs$') ;; *) exit 2;; esac
+case "$selector" in '^TestLocalRuntimeReleaseNative$'|'^TestLocalRuntimeReleaseNativeFaults$'|'^TestLocalRuntimeReleaseNativeACKs$'|'^TestLocalRuntimeReleaseNativeEffects$'|'^TestLocalRuntimeReleaseNativeClose$'|'^TestLocalRuntimeReleaseNativeBoundaries$'|'^TestLocalRuntimeReleaseNativeRecoveryACKs$'|'^TestLocalRuntimeReleaseNativeObserverACK$') ;; *) exit 2;; esac
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]]
 [[ "$mode" == build || "$mode" == run || "$mode" == host-red || "$mode" == host-green ]]
 # The exact pre-existing approved image; never pull or install.
@@ -160,9 +160,12 @@ elif [[ "$selector" == '^TestLocalRuntimeReleaseNativeClose$' ]]; then
 elif [[ "$selector" == '^TestLocalRuntimeReleaseNativeBoundaries$' ]]; then
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeBoundaries ' "$own/native-$epoch.log") == 1 ]]
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 7 ]]
-else
+elif [[ "$selector" == '^TestLocalRuntimeReleaseNativeRecoveryACKs$' ]]; then
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeRecoveryACKs ' "$own/native-$epoch.log") == 1 ]]
   [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 2 ]]
+else
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeObserverACK ' "$own/native-$epoch.log") == 1 ]]
+  [[ $(rg -c '^--- PASS: TestLocalRuntimeReleaseNativeWorker ' "$own/native-$epoch.log") == 1 ]]
 fi
 ! rg -q '^--- SKIP:' "$own/native-$epoch.log"
 printf 'LOCAL_RELEASE_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"
