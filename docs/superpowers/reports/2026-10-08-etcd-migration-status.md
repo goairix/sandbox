@@ -2,13 +2,29 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
+## 2026-10-16 百分比汇报口径
+
+用户要求后续按百分比汇报。当前整体约 **35%**：采用完整生产交付项加权估算，权重见下表，计算值34.5%，汇报取整；估算误差约±5个百分点。它不是源码行数/提交数/测试数统计，也不是已经上线35%。后续沿用相同权重，仅按实际交付更新。
+
+| 交付项 | 权重 | 当前完成度 |
+| --- | --- | --- |
+| etcd 权威元数据、协议和读基础 | 20% | 90% |
+| 关闭排空、恢复同步、安全回收链路 | 30% | 55% |
+| API / Pool / Docker / Upload 生产接线 | 20% | 0% |
+| 分区调度、FUSE / collector 迁移 | 15% | 0% |
+| 大量已有沙盒容量验证、部署恢复、Redis 移除 | 15% | 0% |
+
+安全链已有排空/归档、本地完整同步和真实物理终止组件，注册发布单元也已范围验收。etcd termination composer、精确 provider 清理和原子安全释放尚需接通，cloud/none/其他运行时也未完成。主程序仍使用 Redis，生产切换完成度为0%。原生组件测试与固定编码/并发界限不计为大N容量或部署完成。
+
+用户进一步要求区分功能代码完成度：当前约 **50%**，估算区间45%–55%。该口径计入已经实现、尚待限定审查的代码，剔除容量/部署/最终验收工作，但仍计入尚未编写的生产接线、分区/FUSE迁移；不能只按基础组件或源码行数计算。后续同时报告“功能代码约50% / 整体交付约35%”。前期协议/组件与验证投入偏多、完整业务链路推进不足，是进度慢的主要原因。
+
 ## 2026-10-15 接续
 
 本地完整同步单元已范围验收：`44673b4/0488e3c/3b1e4e6/30b5fc9` 与复审修复 `ba7a3dc`，接通目录/空目录、类型替换、删除策略与 excluded、临时权限恢复、实际关闭和 immutable complete。初审发现新 claim regular adoption 缺口，已通过真实延迟 GC 的 RED→GREEN 修复；同 reviewer 限定复审 C0/I0/M1 Approved，M1 为保留的 etcd teardown 日志。详见 `2026-10-15-workspace-sync-local-finalization-verification.md`。S64 单 partition 边界测试不是 full-cell 或大 N 容量验收，结果不是 release 权限。
 
 后续运行时关闭生产者已范围验收：十个连贯源码提交至 `2b2e55d`，以及 review 修复 `ec60d6f/2bbcb12/b76ebb8`，实现真实 Supervisor 登记、独立 TLS、固定60节点原生权限、单次 pidfd 终止、实际死亡和原 cgroup 排空、持久 terminal/unknown 的新 OS 进程查询。初审两项 Important 和 R1 引入的共享 TLS 容器竞态均已解决，同 reviewer R2 无新增 C/I/M。实际 Linux 结果、原始失败和物理替换等未强制场景仍明确保留；这不是 provider 清理、安全释放或生产部署验收。见 `2026-10-15-node-observer-physical-termination-verification.md`。
 
-enrolled publication 已小步提交 `2beadb8/beb7e26/c3aa645/b43d9c2/c4a9743`：Supervisor 登记前准入关闭、新签名域、实际64节点原子发布及只读冷仲裁。首轮 Linux genuine 组合链路、晚 ACK/Close 已通过，整轮因最大 namespace fixture 误写513字节失败；修正后的独立 backend 轮次18个叶测试通过，包含真实512 namespace、lost-ACK只读trace、claim/history失效与损坏冷读，原始退出和清理完成。原失败保留。当前补完两个计划内 journal 安装交错检查后做唯一完整 review；本单元尚未验收。这些不是 owner 释放或生产接线完成。接着完成 etcd termination composer、精确 provider 清理和原子安全释放，再接生产业务与调度。当前无外部阻塞，主程序仍连接 Redis。
+enrolled publication 已范围验收：六源码小提交 `2beadb8/beb7e26/c3aa645/b43d9c2/c4a9743/1bd2f30`，以及审查修复 `8906066/491238d`。真实 Supervisor 登记/ready/64节点发布/冷读/用户执行已有组合结果；独立 backend18叶、两个 journal 安装交错和三个消费者认证拒绝通过。完整审查发现的前置超界检查、缺失消费者负例均已解决，同 reviewer R1 无新增 C/I/M；原四 epoch 和后续 nonce 断言失败如实保留。见 `2026-10-15-enrolled-runtime-publication-verification.md`。这些不是 owner 释放或生产接线完成。接着完成 etcd termination composer、精确 provider 清理和原子安全释放，再接生产业务与调度。当前无外部阻塞，主程序仍连接 Redis。
 
 已合并feat/workspace-fuse-mount最新c14a52c，merge45ebc70，无冲突；六个受影响普通Go包race、正确标签下Helm限定回归、vet及Linuxarm64构建通过，首批漏Helm标签导致的setup exit1如实保留。详见2026-10-15-base-fuse-fixes-merge-verification.md。
 
