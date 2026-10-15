@@ -13,8 +13,20 @@ import (
 
 type observedHalfCloser struct {
 	net.Conn
-	calls atomic.Int32
-	fail  error
+	calls    atomic.Int32
+	fail     error
+	writeFIN bool
+}
+
+// Keep the physical FIN control byte outside TLS's legal record read-ahead.
+// The peer still uses the original TCP socket for every read and its final EOF.
+type finiteFINServerConn struct{ net.Conn }
+
+func (c finiteFINServerConn) Read(data []byte) (int, error) {
+	if len(data) > 1 {
+		data = data[:1]
+	}
+	return c.Conn.Read(data)
 }
 
 func (c *observedHalfCloser) CloseWrite() error {
@@ -22,13 +34,18 @@ func (c *observedHalfCloser) CloseWrite() error {
 	if c.fail != nil {
 		return c.fail
 	}
+	if c.writeFIN {
+		if _, err := c.Conn.Write([]byte{255}); err != nil {
+			return err
+		}
+	}
 	return c.Conn.(*net.TCPConn).CloseWrite()
 }
 
 // Actual TLS must terminate its application stream before raw write EOF, while
 // response bytes remain readable. The callback has no payload/credential input.
 func TestSessionFiniteUnderlyingHalfClose(t *testing.T) {
-	for _, mode := range []string{"supported", "unsupported", "error"} {
+	for _, mode := range []string{"supported", "unsupported", "error", "write-FIN"} {
 		t.Run(mode, func(t *testing.T) {
 			options, server, _, _, _, _ := destinationFixture(t)
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -47,6 +64,7 @@ func TestSessionFiniteUnderlyingHalfClose(t *testing.T) {
 					return struct{ net.Conn }{raw}, nil
 				}
 				observed = &observedHalfCloser{Conn: raw}
+				observed.writeFIN = mode == "write-FIN"
 				if mode == "error" {
 					observed.fail = marker
 				}
@@ -65,11 +83,21 @@ func TestSessionFiniteUnderlyingHalfClose(t *testing.T) {
 				}
 				defer raw.Close()
 				raw.SetDeadline(time.Now().Add(time.Second))
-				conn := tls.Server(raw, server)
+				var transport net.Conn = raw
+				if mode == "write-FIN" {
+					transport = finiteFINServerConn{raw}
+				}
+				conn := tls.Server(transport, server)
 				if err = conn.Handshake(); err == nil {
 					_, err = ReadRequest(conn)
 				}
-				if err == nil && mode == "supported" {
+				if err == nil && mode == "write-FIN" {
+					var fin [1]byte
+					if _, err = io.ReadFull(raw, fin[:]); err == nil && fin[0] != 255 {
+						err = errors.New("wrong physical FIN frame")
+					}
+				}
+				if err == nil && (mode == "supported" || mode == "write-FIN") {
 					var b [1]byte
 					var n int
 					n, err = raw.Read(b[:])

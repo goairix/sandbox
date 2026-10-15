@@ -439,7 +439,12 @@ func TestEnrolledBridgeDeadlineAndBlockedIO(t *testing.T) {
 					err = c.SetDeadline(d)
 				}
 				require.NoError(t, err)
-				_, err = c.Read(make([]byte, 1))
+				if mode == "write deadline" {
+					require.NoError(t, c.op.raw.(*net.TCPConn).SetWriteBuffer(1024))
+					_, err = c.Write(make([]byte, 32<<20))
+				} else {
+					_, err = c.Read(make([]byte, 1))
+				}
 				require.True(t, errors.Is(err, os.ErrDeadlineExceeded), "got %v", err)
 				require.NoError(t, c.Close())
 			}

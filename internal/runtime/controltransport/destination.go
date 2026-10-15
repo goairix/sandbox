@@ -208,6 +208,11 @@ func (s *Session) sendMode(ctx context.Context, mode requestMode, write func(io.
 	// stop its input owner without closing the response side. No raw getter is
 	// exposed; unsupported transports retain the existing TLS-only behavior.
 	if half, ok := s.conn.NetConn().(interface{ CloseWrite() error }); ok {
+		// crypto/tls.CloseWrite leaves a past write deadline after close_notify.
+		// Framed transports still need their original bounded budget to send FIN.
+		if err := s.conn.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
 		if err := half.CloseWrite(); err != nil {
 			return err
 		}

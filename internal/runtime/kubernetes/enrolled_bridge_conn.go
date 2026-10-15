@@ -29,6 +29,7 @@ type bridgeConn struct {
 	stdout        chan []byte
 	readDeadline  time.Time
 	writeDeadline time.Time
+	activeWrites  int
 	ioWG          sync.WaitGroup
 	readMu        sync.Mutex
 	pending       []byte
@@ -39,7 +40,7 @@ type bridgeConn struct {
 }
 
 func newBridgeConn(op *bridgeOperation, ws *websocket.Conn) *bridgeConn {
-	c := &bridgeConn{op: op, ws: ws, stop: make(chan struct{}), readerDone: make(chan struct{}), deadlineDone: make(chan struct{}), changed: make(chan struct{}, 1), stdout: make(chan []byte, 16), closeDone: make(chan struct{})}
+	c := &bridgeConn{op: op, ws: ws, stop: make(chan struct{}), readerDone: make(chan struct{}), deadlineDone: make(chan struct{}), changed: make(chan struct{}), stdout: make(chan []byte, 16), closeDone: make(chan struct{})}
 	c.self = c
 	ws.SetReadLimit(64 << 10)
 	// Do not let the protocol's default close handler write an unrequested reply
@@ -61,6 +62,44 @@ func (c *bridgeConn) begin() error {
 	}
 	c.ioWG.Add(1)
 	return nil
+}
+
+// beginWrite counts queued callers as owned I/O before they wait for writeMu.
+// An idle expired write deadline must never terminate the response read side.
+func (c *bridgeConn) beginWrite() error {
+	if c == nil || c.self != c {
+		return ErrEnrolledBridge
+	}
+	c.mu.Lock()
+	if c.abortErr != nil {
+		err := c.abortErr
+		c.mu.Unlock()
+		return err
+	}
+	if !c.writeDeadline.IsZero() && !c.writeDeadline.After(time.Now()) {
+		c.mu.Unlock()
+		return os.ErrDeadlineExceeded
+	}
+	c.ioWG.Add(1)
+	c.activeWrites++
+	c.deadlineChanged()
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *bridgeConn) endWrite() {
+	c.mu.Lock()
+	c.activeWrites--
+	c.deadlineChanged()
+	c.mu.Unlock()
+	c.ioWG.Done()
+}
+
+// All deadline observers receive the same broadcast; a reader cannot consume
+// the writer watcher's notification or vice versa. Caller holds mu.
+func (c *bridgeConn) deadlineChanged() {
+	close(c.changed)
+	c.changed = make(chan struct{})
 }
 
 func (c *bridgeConn) abort(err error) error {
@@ -108,14 +147,48 @@ func (c *bridgeConn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	for len(c.pending) == 0 {
+	for {
+		c.mu.Lock()
+		deadline, changed, aborted := c.readDeadline, c.changed, c.abortErr
+		c.mu.Unlock()
+		if aborted != nil {
+			return 0, aborted
+		}
+		if !deadline.IsZero() && !deadline.After(time.Now()) {
+			return 0, os.ErrDeadlineExceeded
+		}
+		if len(c.pending) != 0 {
+			n := copy(p, c.pending)
+			c.pending = c.pending[n:]
+			return n, nil
+		}
+		var timer *time.Timer
+		var expired <-chan time.Time
+		if !deadline.IsZero() {
+			timer = time.NewTimer(time.Until(deadline))
+			expired = timer.C
+		}
+		stopTimer := func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}
 		select {
 		case <-c.stop:
+			stopTimer()
 			c.mu.Lock()
 			err := c.abortErr
 			c.mu.Unlock()
 			return 0, err
+		case <-changed:
+			stopTimer()
+			continue
+		case <-expired:
+			stopTimer()
+			// Recheck under the next snapshot: replacement can race the timer.
+			continue
 		case data, ok := <-c.stdout:
+			stopTimer()
 			if !ok {
 				c.mu.Lock()
 				err := c.terminal
@@ -128,16 +201,13 @@ func (c *bridgeConn) Read(p []byte) (int, error) {
 			c.pending = data
 		}
 	}
-	n := copy(p, c.pending)
-	c.pending = c.pending[n:]
-	return n, nil
 }
 
 func (c *bridgeConn) Write(p []byte) (int, error) {
-	if err := c.begin(); err != nil {
+	if err := c.beginWrite(); err != nil {
 		return 0, err
 	}
-	defer c.ioWG.Done()
+	defer c.endWrite()
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if c.writeClosed {
@@ -158,10 +228,10 @@ func (c *bridgeConn) Write(p []byte) (int, error) {
 }
 
 func (c *bridgeConn) CloseWrite() error {
-	if err := c.begin(); err != nil {
+	if err := c.beginWrite(); err != nil {
 		return err
 	}
-	defer c.ioWG.Done()
+	defer c.endWrite()
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if c.writeClosed {
@@ -193,20 +263,16 @@ func (c *bridgeConn) setDeadline(t time.Time, read, write bool) error {
 	if write {
 		c.writeDeadline = t
 	}
+	c.deadlineChanged()
 	c.mu.Unlock()
-	select {
-	case c.changed <- struct{}{}:
-	default:
-	}
 	return nil
 }
 
 func (c *bridgeConn) deadline() time.Time {
-	d := c.readDeadline
-	if d.IsZero() || !c.writeDeadline.IsZero() && c.writeDeadline.Before(d) {
-		d = c.writeDeadline
+	if c.activeWrites == 0 {
+		return time.Time{}
 	}
-	return d
+	return c.writeDeadline
 }
 
 func (c *bridgeConn) watchDeadline() {
@@ -222,6 +288,7 @@ func (c *bridgeConn) watchDeadline() {
 		}
 		c.mu.Lock()
 		d := c.deadline()
+		changed := c.changed
 		c.mu.Unlock()
 		var expired <-chan time.Time
 		if !d.IsZero() {
@@ -231,7 +298,7 @@ func (c *bridgeConn) watchDeadline() {
 		select {
 		case <-c.stop:
 			return
-		case <-c.changed:
+		case <-changed:
 		case <-expired:
 			c.mu.Lock()
 			current := c.deadline()
