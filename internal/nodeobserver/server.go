@@ -5,13 +5,18 @@ package nodeobserver
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -69,11 +74,100 @@ type Observer struct {
 	closeErr      error
 }
 
-func copyObserverTLS(config *tls.Config) (*tls.Config, error) {
+// grpc/client Close need not prove that every TLS signer has returned. This
+// narrow owner serializes Sign with clearing, and rejects any later handshake.
+type observerTLSKey struct {
+	mu     sync.Mutex
+	key    crypto.Signer
+	public crypto.PublicKey
+	closed bool
+}
+
+func (k *observerTLSKey) Public() crypto.PublicKey { return k.public }
+func (k *observerTLSKey) Sign(reader io.Reader, digest []byte, options crypto.SignerOpts) ([]byte, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return nil, fmt.Errorf("observer TLS key closed")
+	}
+	return k.key.Sign(reader, digest, options)
+}
+func (k *observerTLSKey) close() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.closed {
+		k.closed = true
+		clearOwnedTLS(&tls.Config{Certificates: []tls.Certificate{{PrivateKey: k.key}}})
+		k.key = nil
+	}
+}
+
+func clearOwnedTLS(config *tls.Config) {
+	if config == nil {
+		return
+	}
+	for i := range config.Certificates {
+		switch key := config.Certificates[i].PrivateKey.(type) {
+		case *observerTLSKey:
+			if key != nil {
+				key.close()
+			}
+		case ed25519.PrivateKey:
+			clear(key)
+		case *ecdsa.PrivateKey:
+			if key != nil && key.D != nil {
+				clear(key.D.Bits())
+				key.D.SetInt64(0)
+				key.D = nil
+			}
+		case *rsa.PrivateKey:
+			if key != nil {
+				if key.D != nil {
+					clear(key.D.Bits())
+					key.D.SetInt64(0)
+					key.D = nil
+				}
+				for _, prime := range key.Primes {
+					if prime != nil {
+						clear(prime.Bits())
+						prime.SetInt64(0)
+					}
+				}
+				key.Primes = nil
+				for _, value := range []*big.Int{key.Precomputed.Dp, key.Precomputed.Dq, key.Precomputed.Qinv} {
+					if value != nil {
+						clear(value.Bits())
+						value.SetInt64(0)
+					}
+				}
+				for _, crt := range key.Precomputed.CRTValues {
+					for _, value := range []*big.Int{crt.Exp, crt.Coeff, crt.R} {
+						if value != nil {
+							clear(value.Bits())
+							value.SetInt64(0)
+						}
+					}
+				}
+				key.Precomputed = rsa.PrecomputedValues{}
+			}
+		}
+		config.Certificates[i] = tls.Certificate{}
+	}
+	config.Certificates = nil
+	config.RootCAs = nil
+	config.ClientCAs = nil
+}
+
+func copyObserverTLS(config *tls.Config) (_ *tls.Config, result error) {
 	if config == nil || config.InsecureSkipVerify || config.RootCAs == nil || config.GetClientCertificate != nil || config.GetCertificate != nil || config.VerifyConnection != nil || config.VerifyPeerCertificate != nil || config.KeyLogWriter != nil {
 		return nil, fmt.Errorf("observer etcd requires pinned concrete TLS credentials")
 	}
 	out := config.Clone()
+	defer func() {
+		if result != nil {
+			clearOwnedTLS(out)
+		}
+	}()
 	out.MinVersion, out.MaxVersion = tls.VersionTLS13, tls.VersionTLS13
 	out.RootCAs = config.RootCAs.Clone()
 	out.Certificates = make([]tls.Certificate, len(config.Certificates))
@@ -82,12 +176,21 @@ func copyObserverTLS(config *tls.Config) (*tls.Config, error) {
 	}
 	for i, certificate := range config.Certificates {
 		out.Certificates[i] = certificate
+		// No cleanup may ever own the caller's key or parsed leaf, including
+		// failures that occur before this iteration adopts a parsed key copy.
+		out.Certificates[i].PrivateKey = nil
+		out.Certificates[i].Leaf = nil
 		out.Certificates[i].Certificate = make([][]byte, len(certificate.Certificate))
 		for j, der := range certificate.Certificate {
 			if len(der) > 8192 {
 				return nil, fmt.Errorf("observer etcd TLS certificate exceeds bound")
 			}
 			out.Certificates[i].Certificate[j] = bytes.Clone(der)
+		}
+		switch certificate.PrivateKey.(type) {
+		case ed25519.PrivateKey, *rsa.PrivateKey, *ecdsa.PrivateKey:
+		default:
+			return nil, fmt.Errorf("observer requires supported owned TLS private key")
 		}
 		encoded, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
 		if err != nil {
@@ -98,7 +201,8 @@ func copyObserverTLS(config *tls.Config) (*tls.Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Certificates[i].PrivateKey = key
+		signer := key.(crypto.Signer)
+		out.Certificates[i].PrivateKey = &observerTLSKey{key: signer, public: signer.Public()}
 	}
 	out.NextProtos = append([]string(nil), config.NextProtos...)
 	out.SessionTicketsDisabled, out.ClientSessionCache = true, nil
@@ -126,10 +230,19 @@ func New(options Options) (_ *Observer, result error) {
 			return nil, fmt.Errorf("observer requires fixed HTTPS etcd endpoints")
 		}
 	}
+	if len(options.KubernetesConfig.CAData)+len(options.KubernetesConfig.CertData)+len(options.KubernetesConfig.KeyData)+len(options.KubernetesConfig.BearerToken) > 128*1024 {
+		return nil, fmt.Errorf("observer Kubernetes credentials exceed bound")
+	}
 	tlsConfig, err := copyObserverTLS(options.EtcdTLS)
 	if err != nil {
 		return nil, err
 	}
+	tlsAdopted := false
+	defer func() {
+		if !tlsAdopted {
+			clearOwnedTLS(tlsConfig)
+		}
+	}()
 	verifier, err := p.NewManagementVerifier(options.Binding, options.Roots)
 	if err != nil {
 		return nil, err
@@ -142,15 +255,13 @@ func New(options Options) (_ *Observer, result error) {
 	options.EtcdIdentity = bytes.Clone(options.EtcdIdentity)
 	options.EtcdEndpoints = append([]string(nil), options.EtcdEndpoints...)
 	options.EtcdTLS, options.Roots = tlsConfig, nil
-	if len(options.KubernetesConfig.CAData)+len(options.KubernetesConfig.CertData)+len(options.KubernetesConfig.KeyData)+len(options.KubernetesConfig.BearerToken) > 128*1024 {
-		return nil, fmt.Errorf("observer Kubernetes credentials exceed bound")
-	}
 	options.KubernetesConfig = rest.CopyConfig(options.KubernetesConfig)
 	options.KubernetesConfig.CAData = bytes.Clone(options.KubernetesConfig.CAData)
 	options.KubernetesConfig.CertData = bytes.Clone(options.KubernetesConfig.CertData)
 	options.KubernetesConfig.KeyData = bytes.Clone(options.KubernetesConfig.KeyData)
 	ctx, cancel := context.WithCancel(context.Background())
 	o := &Observer{options: options, verifier: verifier, ctx: ctx, cancel: cancel, serveDone: make(chan struct{}), connections: make(map[net.Conn]struct{}), rpcs: make(chan struct{}, options.MaxActive), active: make(chan struct{}, options.MaxActive), slots: make([]observerSlot, options.MaxSlots)}
+	tlsAdopted = true
 	defer func() {
 		if result != nil {
 			_ = o.Close()
@@ -397,9 +508,14 @@ func (o *Observer) Close() error {
 		}
 		if o.client != nil {
 			o.closeErr = errors.Join(o.closeErr, o.client.Close())
+			o.client = nil
 		}
 		if o.apiTransport != nil {
 			o.apiTransport.CloseIdleConnections()
+			// Client-go may cache parsed TLS objects: drop its references, do
+			// not mutate library-owned/shared private-key caches.
+			o.apiTransport.TLSClientConfig = nil
+			o.apiTransport = nil
 		}
 		if o.lock != nil {
 			o.closeErr = errors.Join(o.closeErr, o.lock.Close())
@@ -410,6 +526,25 @@ func (o *Observer) Close() error {
 		o.closeErr = errors.Join(o.closeErr, o.credential.Close())
 		clear(o.options.PrivateKey)
 		o.options.PrivateKey = nil
+		clearOwnedTLS(o.options.EtcdTLS)
+		o.options.EtcdTLS = nil
+		if c := o.options.KubernetesConfig; c != nil {
+			clear(c.KeyData)
+			c.KeyData = nil
+			c.CertData = nil
+			c.CAData = nil
+			c.BearerToken = ""
+			c.BearerTokenFile = ""
+			c.Username = ""
+			c.Password = ""
+			c.KeyFile = ""
+			c.CertFile = ""
+			c.CAFile = ""
+		}
+		o.options.KubernetesConfig = nil
+		o.provider.client = nil
+		o.authority.client = nil
+		o.credential = nil
 	})
 	return o.closeErr
 }
