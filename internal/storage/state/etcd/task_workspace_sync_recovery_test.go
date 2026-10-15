@@ -40,6 +40,39 @@ func TestTaskWorkspaceSyncRecoveryOwner(t *testing.T) {
 	require.True(t, s.recovery.slots[0].diagnostic.Occupied)
 }
 
+func TestTaskWorkspaceSyncRecoveryMonitorAdmission(t *testing.T) {
+	store := &taskArchiveStore{limits: taskArchiveLimits{Jobs: 1}, recovery: &taskArchiveRecoveryStore{}}
+	store.self = store
+	store.recovery.slots[0].diagnostic = taskArchiveRecoveryDiagnostic{Occupied: true, State: 3}
+	s, err := store.registerRecovery(context.Background(), 0)
+	require.NoError(t, err)
+	require.True(t, s.beginMonitor())
+	foreground := make(chan error, 1)
+	go func() { foreground <- s.begin(context.Background()) }()
+	select {
+	case err := <-foreground:
+		s.endMonitor()
+		t.Fatalf("foreground crossed admitted monitor: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	s.endMonitor()
+	require.NoError(t, <-foreground)
+	s.end()
+	require.True(t, s.beginMonitor())
+	go func() { foreground <- s.begin(context.Background()) }()
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	require.Error(t, <-foreground, "owner cancellation wakes a waiting foreground admission")
+	select {
+	case err := <-closed:
+		s.endMonitor()
+		t.Fatalf("Close crossed monitor registration: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	s.endMonitor()
+	require.NoError(t, <-closed)
+}
+
 func TestTaskWorkspaceSyncRecoveryCheckpointClaimHistory(t *testing.T) {
 	r := workspaceSyncCheckpointRecordFixture()
 	p := *r.WorkspaceSync

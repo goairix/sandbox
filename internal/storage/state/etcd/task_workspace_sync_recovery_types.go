@@ -23,6 +23,8 @@ type taskWorkspaceSyncRecoverySource struct {
 	done                           chan struct{}
 	mu                             sync.Mutex
 	sealed, busy                   bool
+	monitoring                     bool
+	monitorDone                    chan struct{}
 	ops                            sync.WaitGroup
 	err                            error
 	file                           *os.File
@@ -75,6 +77,7 @@ type taskWorkspaceSyncRecoveryCompletion struct {
 	value                                                      string
 	attempted, denied, known, gcAttempted, gcDenied, completed bool
 	terminal                                                   taskWorkspaceSyncRecyclingGeneration
+	beforeTerminal                                             taskWorkspaceSyncRecyclingGeneration
 	checkpoint                                                 *taskWorkspaceSyncCheckpointAttempt
 	payload                                                    TaskWorkspaceSyncCheckpoint
 }

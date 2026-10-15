@@ -49,7 +49,7 @@ func (s *taskWorkspaceSyncRecoverySource) reconcileLocal(ctx context.Context, bo
 	if !body.complete || body.bytes != charge.record.Size {
 		return nil, ErrInvalidRecord
 	}
-	q := &taskWorkspaceSyncRecoveryCompletion{source: s, body: body, charge: charge, physical: result}
+	q := &taskWorkspaceSyncRecoveryCompletion{source: s, body: body, charge: charge, physical: result, beforeTerminal: charge.generation}
 	q.self = q
 	body.completion = q
 	q.value, err = s.recoveryTerminalValue(q)

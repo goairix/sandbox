@@ -72,14 +72,56 @@ func (s *taskWorkspaceSyncRecoverySource) begin(ctx context.Context) error {
 	if s == nil || s.self != s || ctx == nil {
 		return ErrInvalidRecord
 	}
+	for {
+		s.mu.Lock()
+		if s.sealed || s.ctx.Err() != nil || ctx.Err() != nil {
+			s.mu.Unlock()
+			return ErrGuardExpired
+		}
+		if s.monitoring {
+			done := s.monitorDone
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-s.ctx.Done():
+				return ErrGuardExpired
+			case <-ctx.Done():
+				return ErrGuardExpired
+			}
+		}
+		if s.busy {
+			s.mu.Unlock()
+			return ErrGuardExpired
+		}
+		s.busy = true
+		s.ops.Add(1)
+		s.mu.Unlock()
+		return nil
+	}
+}
+
+// A probe has its own admission marker. Foreground owners wait/cancel while
+// it runs; probes skip an already active foreground owner. Both Add/Wait paths
+// use the same sealing mutex and retain registrations through actual guard IO.
+func (s *taskWorkspaceSyncRecoverySource) beginMonitor() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sealed || s.busy || s.ctx.Err() != nil || ctx.Err() != nil {
-		return ErrGuardExpired
+	if s.sealed || s.busy || s.monitoring || s.ctx.Err() != nil {
+		return false
 	}
-	s.busy = true
+	s.monitoring = true
+	s.monitorDone = make(chan struct{})
 	s.ops.Add(1)
-	return nil
+	return true
+}
+
+func (s *taskWorkspaceSyncRecoverySource) endMonitor() {
+	s.mu.Lock()
+	s.monitoring = false
+	close(s.monitorDone)
+	s.mu.Unlock()
+	s.ops.Done()
 }
 
 func (s *taskWorkspaceSyncRecoverySource) end() {
@@ -239,7 +281,7 @@ func (s *taskWorkspaceSyncRecoverySource) monitor() {
 		case <-s.ctx.Done():
 			return
 		case <-timer.C:
-			if err := s.begin(s.ctx); err != nil {
+			if !s.beginMonitor() {
 				if s.ctx.Err() != nil {
 					return
 				}
@@ -251,7 +293,7 @@ func (s *taskWorkspaceSyncRecoverySource) monitor() {
 				continue
 			}
 			err := s.guard(s.ctx)
-			s.end()
+			s.endMonitor()
 			if err != nil {
 				s.cancel()
 				return

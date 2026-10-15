@@ -231,7 +231,9 @@ func (s *taskWorkspaceSyncRecoverySource) settleLocal(ctx context.Context, charg
 	if q.known {
 		return s.guard(ctx)
 	}
-	g := charge.generation
+	// The current guard generation advances after a terminal ACK; the one-shot
+	// attempt's predecessor must remain fixed even if that ACK's postguard fails.
+	g := q.beforeTerminal
 	if q.attempted {
 		points, err := s.readRecoveryCompletion(ctx, charge, "")
 		if err != nil {
