@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strconv"
@@ -276,12 +277,8 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 	var index RuntimeIndexRecord
 	records := []interface{ Validate() error }{&task, &cleanup, &link, &placement, &control, &owner, &fence, &index}
 	for i, kv := range values {
-		if !fences[i].matches(kv) || !operationPermanentKV(kv) || kv.Version <= 0 || strictPreparationMetadata(kv.Value, reflect.TypeOf(records[i])) != nil || decodeDomainRecord(kv, records[i]) != nil {
-			return nil, ErrCorruptRecord
-		}
-		canonical, err := json.Marshal(records[i])
-		if err != nil || !bytes.Equal(canonical, kv.Value) {
-			return nil, ErrCorruptRecord
+		if decodeLocalRuntimeDomain(fences[i], kv, records[i]) != nil {
+			return nil, fmt.Errorf("local release domain-record[%d]: %w", i, ErrCorruptRecord)
 		}
 	}
 	if task.Reference != c.reference.Task || task.Runtime.Validate() != nil || task.CreationIntentID != index.IntentID || task.Generation != index.Generation || task.Runtime != index.Runtime || cleanup.Task != task || link.Reference != task.Reference || control.Phase != PhaseDestroying || control.MountAttempt != 0 || owner.MountAttempt != 0 || control.Runtime == nil || owner.Runtime == nil || *control.Runtime != task.Runtime || *owner.Runtime != task.Runtime || values[0].CreateRevision != c.birth || values[4].ModRevision != c.birth {
@@ -293,16 +290,16 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 	}
 	checkedControl, err := b.decodeControl(values[4], task.Reference.Partition, task.Reference.SandboxID, checkedPlacement)
 	if err != nil || checkedControl == nil || !reflect.DeepEqual(*checkedControl, control) || control.WorkspaceHash != task.WorkspaceHash || control.IntentID != task.CreationIntentID || control.Generation != task.Generation || control.DataGateEpoch != task.DataGateEpoch || control.Snapshot != task.Snapshot || !control.ExpiresAt.Equal(task.ExpiresAt) || task.ControlRevision >= c.birth || values[4].CreateRevision > task.ControlRevision || values[1].CreateRevision != c.birth || values[2].CreateRevision != c.birth {
-		return nil, errors.Join(ErrCorruptRecord, err)
+		return nil, fmt.Errorf("local release control-binding: %w", errors.Join(ErrCorruptRecord, err))
 	}
 	if !enrolledImmutableKV(values[7]) || owner.RestoreEpoch != task.Reference.RestoreEpoch || fence.RestoreEpoch != task.Reference.RestoreEpoch || index.RestoreEpoch != task.Reference.RestoreEpoch || owner.WorkspaceHash != task.WorkspaceHash || owner.SandboxID != task.Reference.SandboxID || owner.IntentID != task.CreationIntentID || owner.Generation != task.Generation || fence.WorkspaceHash != task.WorkspaceHash || fence.Generation != task.Generation || index.WorkspaceHash != task.WorkspaceHash || index.SandboxID != task.Reference.SandboxID {
-		return nil, ErrCorruptRecord
+		return nil, fmt.Errorf("local release owner-index-binding: %w", ErrCorruptRecord)
 	}
 	a.task = task
 	var binding string
 	a.manifest, binding, err = b.loadLocalRuntimeManifest(ctx, task.Reference)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("local release manifest: %w", err)
 	}
 	m := a.manifest
 	progressKey, completeKey, err := b.namespace.workspaceSyncLocalKeys(task.Reference)
@@ -314,7 +311,7 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 		return nil, err
 	}
 	if _, err := validateLocalRuntimeCompletion(m, binding, points[0], points[1], points[2]); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("local release completion: %w", err)
 	}
 	a.complete = ownTaskFence(points[1])
 	plan, err := m.Binding.Plan.plan()
@@ -341,11 +338,11 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 	var ar RuntimeEnrollmentActivationRecord
 	var publication RuntimeEnrolledPublicationRecord
 	if !enrolledImmutableKV(enrolled[0]) || !enrolledImmutableKV(enrolled[1]) || !enrolledImmutableKV(enrolled[2]) || enrolled[0].CreateRevision != enrolled[1].CreateRevision || enrolled[0].CreateRevision != enrolled[2].CreateRevision || decodeEnrolledRecord(enrolled[2].Value, &publication) != nil || publication != a.publication.Record || decodeEnrolledRecord(enrolled[0].Value, &er) != nil || decodeEnrolledRecord(enrolled[1].Value, &ar) != nil || workspaceSyncIntentDigest(string(enrolled[0].Value)) != a.publication.Record.EnrollmentRecordDigest || workspaceSyncIntentDigest(string(enrolled[1].Value)) != a.publication.Record.ActivationRecordDigest {
-		return nil, ErrCorruptRecord
+		return nil, fmt.Errorf("local release enrollment: %w", ErrCorruptRecord)
 	}
 	a.enrollment = [2]taskFence{ownTaskFence(enrolled[0]), ownTaskFence(enrolled[1])}
 	if err := a.loadHistory(ctx, fences); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("local release history: %w", err)
 	}
 	a.comparisons = append(b.baseComparisons(), cmps...)
 	historyKeys, err := a.stampsKeys()
@@ -373,6 +370,48 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 		return nil, err
 	}
 	return a, a.guard(ctx, a.base())
+}
+
+// Each retained domain keeps its original typed decoder. The exact canonical
+// comparison also rejects duplicate, unknown, omitted and null fields without
+// applying a preparation-only reflection schema to optional runtime pointers.
+func decodeLocalRuntimeDomain(f taskFence, kv *mvccpb.KeyValue, record interface{ Validate() error }) error {
+	if !f.matches(kv) || !operationPermanentKV(kv) || kv.Version <= 0 {
+		return ErrCorruptRecord
+	}
+	var err error
+	var canonical string
+	switch destination := record.(type) {
+	case *TaskRecord:
+		err = decodeTaskRecord(kv, destination)
+		if err == nil {
+			canonical, err = encodeTaskRecord(*destination)
+		}
+	case *CleanupIntentRecord:
+		err = decodeCleanupIntentRecord(kv, destination)
+		if err == nil {
+			canonical, err = encodeCleanupIntentRecord(*destination)
+		}
+	case *TaskLinkRecord:
+		err = decodeTaskLinkRecord(kv, destination)
+		if err == nil {
+			canonical, err = encodeTaskLinkRecord(*destination)
+		}
+	case *SandboxPlacementRecord, *SandboxControlRecord, *WorkspaceOwnerRecord, *WorkspaceFenceRecord, *RuntimeIndexRecord:
+		err = decodeDomainRecord(kv, record)
+		if err == nil {
+			canonical, err = encodeDomainRecord(record)
+		}
+	default:
+		return ErrCorruptRecord
+	}
+	if err != nil {
+		return err
+	}
+	if canonical != string(kv.Value) {
+		return ErrCorruptRecord
+	}
+	return nil
 }
 
 func (a *taskLocalRuntimeAuthority) stampsKeys() (p.TaskRuntimeTerminationKeys, error) {

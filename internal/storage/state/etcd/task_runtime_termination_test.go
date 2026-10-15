@@ -99,6 +99,49 @@ func TestLocalRuntimeReleaseOpaqueBinding(t *testing.T) {
 	}
 }
 
+func TestLocalRuntimeReleaseDomainRecords(t *testing.T) {
+	task, cleanup, link, _ := taskTestRecords()
+	task.Runtime.ID = "opaque/<>&/编号"
+	cleanup.Task = task
+	control := SandboxControlRecord{Version: 1, SandboxID: task.Reference.SandboxID, WorkspaceHash: task.WorkspaceHash, IntentID: task.CreationIntentID, RestoreEpoch: task.Reference.RestoreEpoch, Generation: task.Generation, DataGateEpoch: task.DataGateEpoch, Phase: PhaseDestroying, Snapshot: task.Snapshot, Runtime: &task.Runtime, ExpiresAt: task.ExpiresAt}
+	owner := WorkspaceOwnerRecord{Version: 1, WorkspaceHash: task.WorkspaceHash, SandboxID: task.Reference.SandboxID, IntentID: task.CreationIntentID, RestoreEpoch: task.Reference.RestoreEpoch, Generation: task.Generation, Runtime: &task.Runtime}
+	placement := SandboxPlacementRecord{Version: 1, SandboxID: task.Reference.SandboxID, WorkspaceHash: task.WorkspaceHash, IntentID: task.CreationIntentID, RestoreEpoch: task.Reference.RestoreEpoch, Partition: task.Reference.Partition, Generation: task.Generation}
+	fence := WorkspaceFenceRecord{Version: 1, WorkspaceHash: task.WorkspaceHash, RestoreEpoch: task.Reference.RestoreEpoch, Generation: task.Generation}
+	index := RuntimeIndexRecord{Version: 1, IntentID: task.CreationIntentID, SandboxID: task.Reference.SandboxID, WorkspaceHash: task.WorkspaceHash, RestoreEpoch: task.Reference.RestoreEpoch, Generation: task.Generation, Runtime: task.Runtime}
+	for _, record := range []interface{ Validate() error }{&task, &cleanup, &link, &placement, &control, &owner, &fence, &index} {
+		var wire string
+		var err error
+		switch value := record.(type) {
+		case *TaskRecord:
+			wire, err = encodeTaskRecord(*value)
+		case *CleanupIntentRecord:
+			wire, err = encodeCleanupIntentRecord(*value)
+		case *TaskLinkRecord:
+			wire, err = encodeTaskLinkRecord(*value)
+		default:
+			wire, err = encodeDomainRecord(record)
+		}
+		require.NoError(t, err)
+		kv := &mvccpb.KeyValue{Value: []byte(wire), CreateRevision: 11, ModRevision: 11, Version: 1}
+		original := ownTaskFence(kv)
+		require.NoError(t, decodeLocalRuntimeDomain(original, kv, record))
+		for _, bad := range []string{" " + string(wire), strings.Replace(string(wire), `"version":1`, `"version":1,"version":1`, 1), strings.Replace(string(wire), `"version":1`, `"version":1,"unknown":0`, 1), strings.Replace(string(wire), `"version":1,`, "", 1), strings.Replace(string(wire), `"version":1`, `"version":null`, 1)} {
+			copy := *kv
+			copy.Value = []byte(bad)
+			require.ErrorIs(t, decodeLocalRuntimeDomain(ownTaskFence(&copy), &copy, record), ErrCorruptRecord)
+		}
+		copy := *kv
+		copy.Lease = 1
+		require.ErrorIs(t, decodeLocalRuntimeDomain(ownTaskFence(&copy), &copy, record), ErrCorruptRecord)
+		copy = *kv
+		copy.ModRevision++
+		require.ErrorIs(t, decodeLocalRuntimeDomain(original, &copy, record), ErrCorruptRecord)
+		copy = *kv
+		copy.Version = 0
+		require.ErrorIs(t, decodeLocalRuntimeDomain(original, &copy, record), ErrCorruptRecord)
+	}
+}
+
 func TestLocalRuntimeReleaseOwners(t *testing.T) {
 	b := &Backend{archiveLife: &taskArchiveBackend{}, localRuntimeRelease: &LocalRuntimeReleaseOptions{MaxActive: 1, Timeout: time.Second, Provider: &k.TaskRuntimeCleanupClient{}}}
 	seed := recoveryTestSeed(t)
