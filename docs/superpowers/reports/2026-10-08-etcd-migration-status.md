@@ -2,6 +2,14 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
+## 2026-10-15 接续
+
+已合并feat/workspace-fuse-mount最新c14a52c，merge45ebc70，无冲突；六个受影响普通Go包race、正确标签下Helm限定回归、vet及Linuxarm64构建通过，首批漏Helm标签导致的setup exit1如实保留。详见2026-10-15-base-fuse-fixes-merge-verification.md。
+
+暂停前的bea7f2d已完成限定复审，持久归档与原始归属单元接受，无未解决阻断项；容量M1仍保留。详见2026-10-15-workspace-archive-recovery-storage-verification.md。下一步执行冷bound archive→fresh claim/认证历史query→排除旧writer→旧intent结算/checkpoint继续的本地regular-file恢复单元。自动进度跟进恢复，每10分钟汇报；整体生产迁移仍未完成。
+
+基分支新增Redis持久probe签名key，应纳入etcd生产接线和旧版本排空，不能在移除Redis时直接丢弃fencing历史。
+
 ## 2026-10-09 整体交付状态
 
 | 交付项 | 当前状态 | 还需完成 |
