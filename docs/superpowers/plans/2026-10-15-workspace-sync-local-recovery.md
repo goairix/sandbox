@@ -20,6 +20,7 @@
 - 源码/测试/文档/报告/格式只apply_patch；不cat/heredoc/Python写上述内容、不gofmt-w；工具可生成raw/JSON/binary/brief/diff。
 - 不读任何CLOSED OWN或无关Sentineldoc，不复用旧已完成作者/reviewer，不重跑已验收单元；仅新增/真实受影响兼容回归，源码未变不重复。
 - OPEN OWN/git-commit.lock fcntl LOCK_EX覆盖expectedbranch/HEAD/空index/精确path/add/stagedcheck/commit/postempty；及时小提交，无push/deploy。
+- 两独立Task共享branch时先持.git/codex-etcd-commit.lock，再持各自OPEN OWN锁，提交前与Root协调HEAD；源码保持跨tool边界可编译，不stage另一Task文件。
 
 ## Review Focus
 
@@ -37,6 +38,7 @@
 - Create task_archive_recovery_authority.go、task_archive_recovery_query.go、task_workspace_sync_recovery.go、task_workspace_sync_recovery_types.go、task_workspace_sync_recovery_source.go、task_workspace_sync_recovery_intent.go、task_workspace_sync_recovery_checkpoint.go、task_workspace_sync_recovery_local_linux.go、task_workspace_sync_recovery_local_unsupported.go；分别负责历史pins、认证query、wrapper、私有owners、cursor/body、charge、terminal/GC、物理local执行。
 - 可Create task_workspace_sync_local_io_linux.go、task_workspace_sync_archive_cursor.go、task_workspace_sync_native_wire.go作为所需机械共用段；未需要则不创建，不要求空stub。
 - Modify task_archive_recovery_types.go/store.go、task_archive_spool.go：fixed slot登记和Close integration；task_workspace_sync_local_put_linux.go/types.go、task_workspace_sync_source_cursor.go/body.go：只提取必要机械executor/cursor，不改原sealvalidator。
+- Modify task_workspace_sync_source_types.go/source.go仅安装机械共用cursor字段与初始化，不改原verify/validator/单次body门。
 - 允许为共用native transport提取task_workspace_sync_recycling_settlement.go/gc.go中的非授权wire/response段；预算/原授权/原checkpoint规则保持。
 - Create task_workspace_sync_recovery_test.go及task_workspace_sync_recovery_native_linux_test.go；必要时可拆受控fault/close测试文件。Modify task_archive_delivery_native_test.go仅fixture历史query/freshBackend设置；scripts/test-workspace-sync-local.sh只加本单元selectors。需要其他接点先报Root ruling而非静默扩大。
 
