@@ -10,11 +10,13 @@ import (
 
 func run(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("expected fixed serve, monitor or bridge mode")
+		return fmt.Errorf("expected fixed serve, serve-provisioned, monitor or bridge mode")
 	}
 	switch args[0] {
 	case "serve":
 		return serve()
+	case "serve-provisioned":
+		return serveProvisioned()
 	case "monitor":
 		return monitor()
 	case "bridge":
