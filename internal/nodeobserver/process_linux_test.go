@@ -34,6 +34,12 @@ func TestNodeObserverEnrollmentKernelParsers(t *testing.T) {
 	}
 }
 
+func TestNodeObserverOptionsRejectMissingAuthority(t *testing.T) {
+	if observer, err := New(Options{}); err == nil || observer != nil {
+		t.Fatal("observer accepted missing concrete authority")
+	}
+}
+
 func TestNodeObserverPhysicalKernelChild(t *testing.T) {
 	if os.Getenv("SANDBOX_NODE_OBSERVER_KERNEL_CHILD") != "1" {
 		return

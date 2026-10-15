@@ -143,7 +143,11 @@ func openJournal(path string, slots uint32) (_ *journal, result error) {
 				return nil, err
 			}
 			wire, readErr := io.ReadAll(io.LimitReader(f, maxJournalSlotBytes+1))
-			if err = errors.Join(readErr, f.Close()); err != nil {
+			// Recovery may observe a rename whose previous writer reported an
+			// fsync error. Re-establish actual file durability before promoting
+			// any readable generation, then join the directory sync below.
+			syncErr := f.Sync()
+			if err = errors.Join(readErr, syncErr, f.Close()); err != nil {
 				return nil, err
 			}
 			var g journalGeneration
