@@ -174,7 +174,7 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if err != nil {
 		return err
 	}
-	provider := providerRegistration{Identity: activation.Identity(), Birth: activation.Birth(), CreationIntentID: registration.Provider.CreationIntentID}
+	provider := providerRegistration{Binding: activation.Binding(), Identity: activation.Identity(), Birth: activation.Birth(), CreationIntentID: registration.Provider.CreationIntentID}
 	if _, err := o.provider.observe(ctx, provider, true); err != nil {
 		return err
 	}

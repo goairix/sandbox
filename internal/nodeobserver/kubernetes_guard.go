@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
@@ -18,6 +19,7 @@ const runtimeTerminationFinalizer = "goairix.github.io/sandbox-runtime-terminati
 const creationIntentAnnotation = "sandbox.creation.intent"
 
 type providerRegistration struct {
+	Binding          p.TrustBinding
 	Identity         p.RuntimeIdentityContext
 	Birth            p.BirthContext
 	CreationIntentID string
@@ -57,6 +59,20 @@ func (g *providerGuard) observe(ctx context.Context, registration providerRegist
 	}
 	if pod == nil || pod.Name != registration.Identity.Runtime.ID || pod.Namespace != g.namespace || string(pod.UID) != registration.Identity.Runtime.UID || pod.Spec.NodeName != g.nodeName || len(pod.ResourceVersion) == 0 || len(pod.ResourceVersion) > 128 {
 		return fail("exact retained Pod UID/node unavailable")
+	}
+	enrolled, err := kubecontract.SelectEnrolledPlainPodProfile(pod)
+	if err != nil {
+		return fail("unknown or downgraded launcher profile")
+	}
+	if enrolled {
+		profile, err := kubecontract.InspectEnrolledPlainPod(pod)
+		if err != nil {
+			return fail("invalid enrolled launcher profile")
+		}
+		c := profile.Config
+		if c.TrustBinding() != registration.Binding || profile.LogicalID != registration.Identity.SandboxID || profile.Generation != registration.Identity.Generation || profile.NodeUID != g.nodeUID || profile.NodeBootID != g.nodeBootID || c.UID != registration.Birth.UID || c.GID != registration.Birth.GID || c.NetworkAllowed != registration.Birth.NetworkAllowed || c.ContractDigest != registration.Birth.ContractDigest {
+			return fail("enrolled profile differs from verified activation")
+		}
 	}
 	creation := pod.Annotations[creationIntentAnnotation]
 	id, err := uuid.Parse(creation)

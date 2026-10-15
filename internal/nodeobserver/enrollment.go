@@ -179,7 +179,7 @@ func (o *Observer) handleEnrollment(ctx context.Context, conn *net.UnixConn) err
 	if err != nil {
 		return err
 	}
-	provider := providerRegistration{Identity: activation.Identity(), Birth: activation.Birth()}
+	provider := providerRegistration{Binding: activation.Binding(), Identity: activation.Identity(), Birth: activation.Birth()}
 	observed, err := o.provider.observe(ctx, provider, false)
 	if err != nil {
 		return err

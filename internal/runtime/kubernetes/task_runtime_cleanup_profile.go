@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"slices"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -12,7 +13,17 @@ import (
 // builder. No external workspace source or admission-added container is safe
 // to infer from a signed runtime identity alone.
 func (h *PreparedTaskRuntimeCleanup) validatePod(pod *v1.Pod) error {
+	enrolled, profileErr := kubecontract.SelectEnrolledPlainPodProfile(pod)
+	if profileErr != nil {
+		return errTaskCleanupRefused
+	}
 	b := h.descriptor.Binding
+	if enrolled {
+		profile, err := kubecontract.InspectEnrolledPlainPod(pod)
+		if err != nil || profile.Config.TrustBinding() != b.Authority || profile.LogicalID != b.LogicalID || profile.Generation != b.Generation || profile.CreationIntentID != b.CreationIntentID || profile.NodeUID != b.NodeUID || profile.NodeBootID != b.NodeBootID || profile.Config.ContractDigest != b.ContractDigest {
+			return errTaskCleanupRefused
+		}
+	}
 	if pod.Name != b.Runtime.ID || pod.Namespace != h.client.namespace || string(pod.UID) != b.Runtime.UID || pod.ResourceVersion == "" || len(pod.ResourceVersion) > 128 || len(validation.IsDNS1123Subdomain(pod.Spec.NodeName)) != 0 || h.descriptor.Node != "" && pod.Spec.NodeName != h.descriptor.Node || pod.Annotations["sandbox.creation.intent"] != b.CreationIntentID || pod.Labels["sandbox.managed"] != "true" || len(pod.OwnerReferences) != 0 || pod.Labels["sandbox.workspace.mode"] != "" && pod.Labels["sandbox.workspace.mode"] != "plain" {
 		return errTaskCleanupRefused
 	}
@@ -48,7 +59,7 @@ func (h *PreparedTaskRuntimeCleanup) validatePod(pod *v1.Pod) error {
 	if !taskCleanupResources(container.Resources) || pod.Spec.Resources != nil && !taskCleanupResources(*pod.Spec.Resources) {
 		return errTaskCleanupRefused
 	}
-	if len(pod.Spec.Volumes) != 0 || len(container.VolumeMounts) != 0 {
+	if !enrolled && (len(pod.Spec.Volumes) != 0 || len(container.VolumeMounts) != 0) {
 		if len(pod.Spec.Volumes) != 2 || len(container.VolumeMounts) != 2 {
 			return errTaskCleanupRefused
 		}
