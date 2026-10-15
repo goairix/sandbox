@@ -262,7 +262,14 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	for o := range b.archiveLife.owners {
 		owners = append(owners, o)
 	}
+	enrolled := make([]*runtimeEnrolledPublicationOwner, 0, len(b.archiveLife.enrolled))
+	for o := range b.archiveLife.enrolled {
+		enrolled = append(enrolled, o)
+	}
 	b.archiveLife.mu.Unlock()
+	for _, o := range enrolled {
+		o.cancel()
+	}
 	for _, o := range owners {
 		o.cancel()
 	}
@@ -270,6 +277,9 @@ func (b *Backend) closeTaskArchiveBackend() error {
 		b.archiveStore.sealAndCancel()
 	}
 	for _, o := range owners {
+		<-o.done
+	}
+	for _, o := range enrolled {
 		<-o.done
 	}
 	var err error

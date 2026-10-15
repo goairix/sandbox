@@ -32,6 +32,7 @@ type Options struct {
 	TLS                              *tls.Config
 	AllowInsecureLoopback            bool
 	PublicationTrust                 *RuntimePublicationTrust
+	EnrolledPublication              *EnrolledPublicationOptions
 	Clock                            AuthorityClock
 	ExecIssuer                       ExecCommandIssuer
 	TaskIssuer                       TaskCommandIssuer
@@ -53,6 +54,8 @@ type Backend struct {
 	clusterID                                 uint64
 	requestTimeout                            time.Duration
 	publicationVerifier                       *controlprotocol.PublicationVerifier
+	enrolledPublication                       *EnrolledPublicationOptions
+	enrolledVerifier                          *controlprotocol.ManagementVerifier
 	execIssuer                                ExecCommandIssuer
 	taskIssuer                                TaskCommandIssuer
 	taskQuiescenceIssuer                      TaskQuiescenceIssuer
@@ -70,6 +73,9 @@ type Backend struct {
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if _, err := enrolledPublicationAuthority(o); err != nil {
+		return err
+	}
 	if o.TaskWorkspaceArchiveRecovery != nil {
 		if o.TaskWorkspaceArchiveSpool != nil || o.TaskWorkspaceSyncRecyclingBudget == nil {
 			return invalid("archive recovery requires recycling budget and excludes legacy spool")
@@ -187,6 +193,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
+	if o.EnrolledPublication != nil {
+		owned := *o.EnrolledPublication
+		o.EnrolledPublication = &owned
+	}
 	if o.TaskWorkspaceSyncBudget != nil {
 		owned := *o.TaskWorkspaceSyncBudget
 		o.TaskWorkspaceSyncBudget = &owned
@@ -247,6 +257,8 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	}
 	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout, archiveLife: &taskArchiveBackend{}}
 	b.publicationVerifier = verifier
+	b.enrolledPublication = o.EnrolledPublication
+	b.enrolledVerifier, _ = enrolledPublicationAuthority(o)
 	b.execIssuer = o.ExecIssuer
 	b.taskIssuer = o.TaskIssuer
 	b.taskQuiescenceIssuer = o.TaskQuiescenceIssuer

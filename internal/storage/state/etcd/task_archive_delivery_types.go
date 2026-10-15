@@ -60,6 +60,7 @@ func (o *taskArchiveDelivery) fail(err error) {
 type taskArchiveBackend struct {
 	mu        sync.Mutex
 	owners    map[*taskArchiveDelivery]struct{}
+	enrolled  map[*runtimeEnrolledPublicationOwner]struct{}
 	closed    bool
 	closeDone chan struct{}
 	closeErr  error

@@ -25,6 +25,7 @@ type CreationClaim struct {
 	mu                        sync.Mutex
 	deadline                  time.Time
 	lost                      bool
+	enrolledAttempt           *runtimeEnrolledFrozenAttempt
 }
 
 // CreationClaimReference records attribution without granting mutation authority.

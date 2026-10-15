@@ -30,6 +30,9 @@ type RuntimePublishResult struct {
 // original creation fences. Neither a commit nor a replay authorizes execution.
 func (b *Backend) PublishRuntime(ctx context.Context, c *CreationClaim, proof []byte) (result RuntimePublishResult, err error) {
 	result.Outcome = OutcomeUnknown
+	if b != nil && b.enrolledPublication != nil {
+		return result, ErrInvalidConfiguration
+	}
 	if ctx == nil {
 		return result, ErrInvalidRecord
 	}
