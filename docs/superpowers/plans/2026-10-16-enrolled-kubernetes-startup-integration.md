@@ -41,7 +41,7 @@
 - [x] Step2 新mode策略0777/01777真实RED；独立默认tmpfs实际01777，正式CLI拒绝invalid fresh control directory，原child/attach/container均exit1，原服务退出与exact容器清理齐全；原输入归档保留，不单独提交红态。
 - [x] Step3 ee0bc98：rootFD先0700并Fstat后检查子项，有限mode回归host/race及Linuxvet通过；只提交3个连贯产品/回归文件，不改共享profile/管理权限。
 - [ ] Step4 首次真实组合失败已定位TLS写期限和旧Bash断言问题；新真实TLS/方向性回归RED→最小修复GREEN，脚本显式失败出口验证，再freshbuild nativeGREEN经生产WSclient和正式bridge；原verify/IO/Wait/join/精确清理/all17及ELF绑定，及时提交。不加可选负例拖延主链。
-- [ ] Step5 冻结report/manifest，唯一fresh整Taskreview，同pair修复并tracked验收；继续真正create/quota/manager。
+- [ ] Step5 源码三次小提交ee0bc98/1deb965/ddd2cd3，新native green-bridge-r1真实通过；唯一完整审查C0/I1/M0要求补有限publication的底层transport终态顺序。同pair R1在原boundedctx内先严格TLS EOF、再原raw n0/EOF后成功Close，受控gate新RED→GREEN/取消验证及限定fresh native，随后原reviewer仅复审I1和直接新增破坏、tracked验收；继续真正create/quota/manager。
 
 ## Preflight and rulings
 

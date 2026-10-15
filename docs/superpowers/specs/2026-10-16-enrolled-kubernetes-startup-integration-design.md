@@ -45,3 +45,9 @@ Ruling: 用户持续授权包括修复真实集成缺陷；旧Task已CLOSED，�
 已查明Go1.25.6 crypto/tls/conn.go closeNotify:1481–1485在写出close_notify后将底层write deadline设为now；bridge当前取read/write最早期限并中止整条连接，导致尚需读取响应/发送transport FIN时立即超时。本OPEN Task允许最小修改enrolled_bridge_conn.go及controltransport/destination.go，并新增独立真实TLS→production bridge回归。写方向闲置期限到期不得杀读，恢复本次bounded write deadline后才发送真实transport FIN；方向性、已进入/排队IO、首因/partialn、物理关闭和slot等待仍须验证。不能用延迟deadline、吞错误、提前successstatus或fake transport代替修复。具体私有同步方案以原真实socket/TLS RED→GREEN确认，旧CLOSED OWN/pair不重开；仅受本次行为变动影响的旧selectors可限定复验，禁止无理由重放整套历史矩阵。
 
 Root在本机独立复现/bin/bash3.2的裸[[false]]即使-e仍继续/exit0，显式`|| exit 37`则正确退出37。新startup脚本的必要断言须显式失败出口，保留实际日志、attach/container Wait和预期RED各自原状态；增加不启动Docker的失败出口回归，不能靠errexit或FINISHED字样认定通过。新native build/epoch须独立归档修改后的全部输入，后续具体run另经Root检查。
+
+## 完整审查 I1：有限响应后的原 transport 终态
+
+三次源码小提交后，唯一完整审查确认一个结束顺序缺口：ReadEnrolledPublication验证TLS close_notify便defer Close，而实际bridge exec的Wait/Success/normalclose可能稍后才到；后续requireJoined不能补回已经发生的客户端物理关闭。最终green-bridge-r1的真实Wait0/relaynil仍是有效历史证据，但不是排除该竞态的证明。
+
+本OPEN Task同pair R1允许最小修改runtime_publication_destination.go及专用回归：成功有限publication必须在原boundedctx、readDeadline及物理取消所有权内，先验证现有严格TLS EOF，再确认原底层有限字节通道n0/io.EOF终态，然后才成功返回并Close。对生产WS，该EOF由已有client的实际正常exec status/1000校验产生；错误status、额外字节、超时和取消均不得变成功。可用Session已有私有original raw conn完成读取，不能公开rawgetter/任意callback，也不能在验证TLS close_notify之前绕过strictTLSwrapper。不得sleep、提前Success、吞status/Wait错误或无限graceful等待。真实Destination/TLS受控gate延迟原transport EOF的新RED→GREEN及等待点取消/退出验证必需；生产WS终帧受控检查和新native只做此变动所需的限定验证，原所有历史矩阵不重放。
