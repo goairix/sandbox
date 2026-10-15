@@ -1,13 +1,44 @@
 package nodeobserver
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
+
+func TestNodeObserverAuthorityFreshClockOnlyShrinks(t *testing.T) {
+	now := time.Now().UTC()
+	c := p.TaskRuntimeTerminationTicketClaims{NotBefore: now.Add(-time.Minute), NotAfter: now.Add(30 * time.Second)}
+	s := &authoritySnapshot{cutoff: time.Now().Add(20 * time.Second)}
+	original := s.cutoff
+	if err := s.restrictTicketClock(context.Background(), p.ClockObservation{UTC: now, Uncertainty: time.Millisecond}, c); err != nil {
+		t.Fatal(err)
+	}
+	if s.cutoff != original {
+		t.Fatal("fresh observation extended earlier native/Lease cutoff")
+	}
+	if err := s.restrictTicketClock(context.Background(), p.ClockObservation{UTC: c.NotAfter.Add(-2 * time.Second), Uncertainty: time.Second}, c); err != nil {
+		t.Fatal(err)
+	}
+	shortened := s.cutoff
+	if !shortened.Before(original) {
+		t.Fatal("forward clock/increased uncertainty did not shorten cutoff")
+	}
+	if err := s.restrictTicketClock(context.Background(), p.ClockObservation{UTC: now.Add(-time.Second)}, c); err != nil {
+		t.Fatal(err)
+	}
+	if s.cutoff != shortened {
+		t.Fatal("backward clock/reduced uncertainty extended cutoff")
+	}
+	if err := s.restrictTicketClock(context.Background(), p.ClockObservation{UTC: c.NotAfter.Add(-time.Millisecond), Uncertainty: time.Second}, c); err == nil {
+		t.Fatal("fresh uncertainty overlapping original expiry accepted")
+	}
+}
 
 func TestNodeObserverAuthorityFixedGuard(t *testing.T) {
 	s := &authoritySnapshot{keys: p.TaskRuntimeTerminationKeys{Identity: "/a/b/c/meta/identity", Restore: "/a/b/c/meta/restore_epoch", OperationsPrefix: "/a/b/c/p/00/sandboxes/s/operations/"}}

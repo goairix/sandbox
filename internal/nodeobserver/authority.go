@@ -63,6 +63,40 @@ func (s *authoritySnapshot) live(ctx context.Context) error {
 	return nil
 }
 
+// Each new trusted observation can revoke or shorten the original authority.
+// Its uncertainty is already charged for the actual clock RPC by the caller.
+func (s *authoritySnapshot) restrictTicketClock(ctx context.Context, observation p.ClockObservation, c p.TaskRuntimeTerminationTicketClaims) error {
+	received := time.Now()
+	if observation.UTC.IsZero() || observation.UTC.Location() != time.UTC || observation.Uncertainty < 0 || observation.Uncertainty > time.Second || observation.UTC.Add(-observation.Uncertainty).Before(c.NotBefore) || !observation.UTC.Add(observation.Uncertainty).Before(c.NotAfter) {
+		return fmt.Errorf("fresh observer clock no longer covers original ticket interval")
+	}
+	deadline := received.Add(c.NotAfter.Sub(observation.UTC) - observation.Uncertainty)
+	if deadline.Before(s.cutoff) {
+		s.cutoff = deadline
+	}
+	return s.live(ctx)
+}
+
+func (s *authoritySnapshot) revalidateTicketClock(ctx context.Context, issuer []byte, observation p.ClockObservation) error {
+	c := s.ticket.Claims()
+	// Charge subsequent cryptographic verification against the new deadline,
+	// rather than starting its monotonic budget after that work completes.
+	if err := s.restrictTicketClock(ctx, observation, c); err != nil {
+		return err
+	}
+	if _, err := s.reader.verifier.VerifyTaskRuntimeTerminationTicket(s.ticket.Wire(), issuer, c, observation.UTC); err != nil {
+		return err
+	}
+	// The immutable ticket is bounded by its original issuer interval. Check
+	// both uncertainty edges, rather than just the observation's midpoint.
+	for _, edge := range []time.Time{observation.UTC.Add(-observation.Uncertainty), observation.UTC.Add(observation.Uncertainty)} {
+		if _, err := s.reader.verifier.VerifyCommandIssuerCertificate(issuer, edge); err != nil {
+			return err
+		}
+	}
+	return s.live(ctx)
+}
+
 func exactComparisons(kv *mvccpb.KeyValue) []clientv3.Cmp {
 	k := string(kv.Key)
 	return []clientv3.Cmp{clientv3.Compare(clientv3.CreateRevision(k), "=", kv.CreateRevision), clientv3.Compare(clientv3.ModRevision(k), "=", kv.ModRevision), clientv3.Compare(clientv3.Value(k), "=", string(kv.Value)), clientv3.Compare(clientv3.LeaseValue(k), "=", kv.Lease)}
@@ -224,9 +258,8 @@ func (r *authorityReader) load(ctx context.Context, wire, issuerWire []byte, enr
 	if err != nil {
 		return nil, err
 	}
-	deadline := time.Now().Add(c.NotAfter.Sub(observation.UTC) - observation.Uncertainty)
-	if deadline.Before(s.cutoff) {
-		s.cutoff = deadline
+	if err := s.revalidateTicketClock(ctx, issuerWire, observation); err != nil {
+		return nil, err
 	}
 	a := s.record.Authority
 	keys := []string{s.keys.Task, s.keys.CleanupIntent, s.keys.TaskLink, s.keys.Placement, s.keys.Control, s.keys.Owner, s.keys.Fence, s.keys.RuntimeIndex, s.keys.Quiescence, s.keys.QuiescenceReceipt, s.keys.QuiescenceReservation, s.keys.FinalSync, s.keys.Issuer, s.keys.Archive, s.keys.LocalComplete, s.keys.Claim, s.keys.Guard}

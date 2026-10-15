@@ -287,7 +287,24 @@ func TestNodeObserverPhysicalNativeUnknown(t *testing.T) {
 	runNodeObserverPhysicalNative(t, true)
 }
 
-func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
+type observerReviewClock struct {
+	mu                  sync.Mutex
+	offset, uncertainty time.Duration
+}
+
+func (c *observerReviewClock) Observe(ctx context.Context) (p.ClockObservation, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return p.ClockObservation{UTC: time.Now().UTC().Add(c.offset), Uncertainty: c.uncertainty}, ctx.Err()
+}
+
+func TestNodeObserverPhysicalFreshClock(t *testing.T) {
+	for _, stage := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("stage-%d", stage), func(t *testing.T) { runNodeObserverPhysicalNative(t, false, stage) })
+	}
+}
+
+func runNodeObserverPhysicalNative(t *testing.T, unknown bool, freshClockStage ...int) {
 	if os.Getenv("SANDBOX_NODE_OBSERVER_NATIVE") != "1" {
 		t.Skip("requires exact owned full producer Linux fixture")
 	}
@@ -344,6 +361,9 @@ func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "runtimes", UID: "pod-uid", ResourceVersion: "1", Annotations: map[string]string{"sandbox.creation.intent": creation}, Finalizers: []string{"goairix.github.io/sandbox-runtime-termination"}, DeletionTimestamp: &metav1.Time{Time: now}}, Spec: v1.PodSpec{NodeName: "node-a", RestartPolicy: v1.RestartPolicyNever, SecurityContext: &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}, Containers: []v1.Container{{Name: "sandbox", SecurityContext: &v1.SecurityContext{RunAsUser: &zero, Privileged: &no, AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, Capabilities: &v1.Capabilities{Drop: []v1.Capability{"ALL"}, Add: []v1.Capability{"KILL", "SETUID", "SETGID", "SETPCAP"}}}}}}}
 	node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
 	var providerMu sync.Mutex
+	reviewClock := &observerReviewClock{uncertainty: time.Millisecond}
+	reviewArmed, reviewCalls := false, 0
+	var reviewExpiry time.Time
 	blockProvider, providerCalls := false, 0
 	barrier, release := make(chan struct{}), make(chan struct{})
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -355,6 +375,18 @@ func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
 		case "/api/v1/nodes/node-a":
 			_ = json.NewEncoder(w).Encode(node)
 		case "/api/v1/namespaces/runtimes/pods/pod-a":
+			if reviewArmed {
+				reviewCalls++
+				if reviewCalls == freshClockStage[0] {
+					reviewClock.mu.Lock()
+					reviewClock.offset = 25 * time.Second
+					if freshClockStage[0] == 3 {
+						reviewClock.offset = reviewExpiry.Sub(time.Now().UTC()) - 500*time.Millisecond
+					}
+					reviewClock.uncertainty = 750 * time.Millisecond
+					reviewClock.mu.Unlock()
+				}
+			}
 			if blockProvider {
 				providerCalls++
 				if providerCalls == 2 {
@@ -375,6 +407,9 @@ func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
 	journal := filepath.Join(dir, "observer-journal")
 	require.NoError(t, os.Mkdir(journal, 0700))
 	options := nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: etcdTLS, EtcdClusterID: cluster, EtcdIdentity: identity, KubernetesConfig: &rest.Config{Host: api.URL}, KubernetesNamespace: "runtimes", JournalDirectory: journal, MaxSlots: 2, MaxActive: 2, RequestTimeout: 5 * time.Second, TerminationTimeout: 20 * time.Second}
+	if len(freshClockStage) > 0 {
+		options.Clock = reviewClock
+	}
 	observer, err := nodeobserver.New(options)
 	require.NoError(t, err)
 	serve := func(o *nodeobserver.Observer) (string, chan error) {
@@ -475,6 +510,56 @@ func runNodeObserverPhysicalNative(t *testing.T, unknown bool) {
 		require.NoError(t, json.Unmarshal(ticket, &e))
 		c := e.Claims
 		return p.NodeTerminationQuery{Version: 1, Purpose: "task_runtime_terminate_query", Partition: c.Partition, TaskID: c.Current.TaskID, CommandID: c.Current.CommandID, IntentCreateRevision: c.IntentCreateRevision, IntentDigest: c.IntentDigest, EnrollmentDigest: c.EnrollmentDigest}
+	}
+	if len(freshClockStage) > 0 {
+		providerMu.Lock()
+		reviewArmed = true
+		var original struct {
+			Claims p.TaskRuntimeTerminationTicketClaims `json:"claims"`
+		}
+		require.NoError(t, json.Unmarshal(ticket, &original))
+		reviewExpiry = original.Claims.NotAfter
+		providerMu.Unlock()
+		started := time.Now()
+		result, err := d.Terminate(ctx, ticket, issuerCert)
+		require.NoError(t, err)
+		if freshClockStage[0] == 0 {
+			require.Equal(t, "terminal", result.State)
+			_, err = verifier.VerifyNodeTerminationProof(result.Proof, observerCert, makeQuery())
+			require.NoError(t, err)
+			err = child.Wait()
+			waited = true
+			var exited *exec.ExitError
+			require.True(t, errors.As(err, &exited))
+			require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
+			require.NoError(t, d.Close())
+			require.NoError(t, observer.Close())
+			require.NoError(t, <-served)
+			t.Logf("original Supervisor Cmd.Wait=%v; valid fresh clock permits sole actual signal and durable signed terminal", err)
+			return
+		}
+		require.Less(t, time.Since(started), 5*time.Second, "old monotonic ticket cutoff must still be live")
+		want := "unknown"
+		if freshClockStage[0] == 1 {
+			want = "absent"
+		}
+		require.Equal(t, want, result.State, "fresh UTC+uncertainty already knows original ticket expired")
+		if freshClockStage[0] == 3 {
+			err = child.Wait()
+			waited = true
+			var exited *exec.ExitError
+			require.True(t, errors.As(err, &exited))
+			require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
+			t.Logf("original Supervisor Cmd.Wait=%v; actual death/empty but fresh expiry forbids terminal", err)
+		} else {
+			_, err = os.ReadFile(fmt.Sprintf("/proc/%d/stat", child.Process.Pid))
+			require.NoError(t, err)
+		}
+		require.NoError(t, d.Close())
+		require.NoError(t, observer.Close())
+		require.NoError(t, <-served)
+		t.Logf("fresh-clock stage%d new expiry/uncertainty750ms rejected while old monotonic cutoff live; stage3 UTC midpoint is before expiry but uncertainty overlaps; no terminal proof", freshClockStage[0])
+		return
 	}
 	if unknown {
 		providerMu.Lock()

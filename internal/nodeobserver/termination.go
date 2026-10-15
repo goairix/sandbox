@@ -178,16 +178,8 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if _, err := o.provider.observe(ctx, provider, true); err != nil {
 		return err
 	}
-	now, err := o.observe(ctx)
-	if err != nil {
+	if _, err := o.freshTerminationClock(ctx, snapshot, issuer); err != nil {
 		return err
-	}
-	if _, err := o.verifier.VerifyNodeObserverCertificate(o.options.Certificate, o.options.NodeUID, o.identity.NodeBootID(), now.UTC); err != nil {
-		return err
-	}
-	certificateCutoff := time.Now().Add(o.identity.NotAfter().Sub(now.UTC) - now.Uncertainty)
-	if certificateCutoff.Before(snapshot.cutoff) {
-		snapshot.cutoff = certificateCutoff
 	}
 	anchor := entry.anchor
 	if err := anchor.revalidate(); err != nil {
@@ -227,6 +219,9 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if _, err := o.provider.observe(ctx, provider, true); err != nil {
 		return err
 	}
+	if _, err := o.freshTerminationClock(ctx, snapshot, issuer); err != nil {
+		return err
+	}
 	if err := snapshot.revalidate(ctx); err != nil {
 		return err
 	}
@@ -255,7 +250,7 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if empty, err := anchor.cgroup.empty(); err != nil || !empty {
 		return fmt.Errorf("original cgroup no longer empty")
 	}
-	now, err = o.observe(ctx)
+	now, err := o.freshTerminationClock(ctx, snapshot, issuer)
 	if err != nil {
 		return err
 	}
@@ -281,4 +276,23 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	}
 	o.mu.Unlock()
 	return err
+}
+
+func (o *Observer) freshTerminationClock(ctx context.Context, snapshot *authoritySnapshot, issuer []byte) (p.ClockObservation, error) {
+	observation, err := o.observe(ctx)
+	if err != nil {
+		return p.ClockObservation{}, err
+	}
+	received := time.Now()
+	if err := snapshot.revalidateTicketClock(ctx, issuer, observation); err != nil {
+		return p.ClockObservation{}, err
+	}
+	if _, err := o.verifier.VerifyNodeObserverCertificate(o.options.Certificate, o.options.NodeUID, o.identity.NodeBootID(), observation.UTC); err != nil {
+		return p.ClockObservation{}, err
+	}
+	certificateCutoff := received.Add(o.identity.NotAfter().Sub(observation.UTC) - observation.Uncertainty)
+	if certificateCutoff.Before(snapshot.cutoff) {
+		snapshot.cutoff = certificateCutoff
+	}
+	return observation, snapshot.live(ctx)
 }
