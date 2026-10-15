@@ -91,10 +91,17 @@ type taskLocalRuntimeReleaseOwner struct {
 }
 
 func (b *Backend) beginLocalRuntimeRelease(ctx context.Context, c *TaskClaim) (*taskLocalRuntimeReleaseOwner, error) {
+	return b.beginLocalRuntimeReleasePurpose(ctx, c, "terminate")
+}
+
+func (b *Backend) beginLocalRuntimeReleasePurpose(ctx context.Context, c *TaskClaim, purpose string) (*taskLocalRuntimeReleaseOwner, error) {
 	if b == nil || b.localRuntimeRelease.validate() != nil || b.archiveLife == nil {
 		return nil, ErrInvalidConfiguration
 	}
 	if ctx == nil || !b.validTaskClaim(c) {
+		return nil, ErrInvalidRecord
+	}
+	if purpose != "bind" && purpose != "terminate" && purpose != "release" {
 		return nil, ErrInvalidRecord
 	}
 	if err := ctx.Err(); err != nil {
@@ -108,7 +115,8 @@ func (b *Backend) beginLocalRuntimeRelease(ctx context.Context, c *TaskClaim) (*
 	owner := &taskLocalRuntimeReleaseOwner{backend: b, claim: c, ctx: owned, cancel: cancel, done: make(chan struct{}), slot: -1}
 	b.archiveLife.mu.Lock()
 	c.mu.Lock()
-	if !b.archiveLife.closed && c.runtimeReleaseAttempt == nil && !c.lost && now.Before(c.deadline) {
+	unused := purpose == "bind" || purpose == "terminate" && c.runtimeReleaseAttempt == nil || purpose == "release" && c.ownerReleaseAttempt == nil
+	if !b.archiveLife.closed && unused && !c.lost && now.Before(c.deadline) {
 		slot := -1
 		for i := 0; i < int(b.localRuntimeRelease.MaxActive); i++ {
 			active := b.archiveLife.runtimeReleases[i]
@@ -123,7 +131,11 @@ func (b *Backend) beginLocalRuntimeRelease(ctx context.Context, c *TaskClaim) (*
 		if slot >= 0 {
 			owner.slot = slot
 			b.archiveLife.runtimeReleases[slot] = owner
-			c.runtimeReleaseAttempt = owner
+			if purpose == "terminate" {
+				c.runtimeReleaseAttempt = owner
+			} else if purpose == "release" {
+				c.ownerReleaseAttempt = owner
+			}
 		}
 	}
 	c.mu.Unlock()

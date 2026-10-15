@@ -34,6 +34,7 @@ type TaskClaim struct {
 	archiveDelivery                          *taskArchiveDelivery
 	archiveRecoveryAttempt                   bool // c.mu; charged attempts are never reopened
 	runtimeReleaseAttempt                    *taskLocalRuntimeReleaseOwner
+	ownerReleaseAttempt                      *taskLocalRuntimeReleaseOwner
 }
 
 // Both helpers require c.mu. They are used only by recovery receive admission.
