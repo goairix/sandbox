@@ -40,6 +40,25 @@ func TestNodeObserverOptionsRejectMissingAuthority(t *testing.T) {
 	}
 }
 
+func TestNodeObserverEnrollmentBoundary(t *testing.T) {
+	actual := []byte("NoNewPrivs:\t1\nSeccomp:\t2\nCapEff:\t00000000000000e0\nCapPrm:\t00000000000000e0\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\nCapInh:\t00000000000000e0\n")
+	if err := validateProcessStatus(actual); err != nil {
+		t.Fatalf("genuine Supervisor fixed inheritable set rejected: %v", err)
+	}
+	for _, invalid := range [][]byte{
+		[]byte(strings.Replace(string(actual), "CapInh:\t00000000000000e0", "CapInh:\t00000000002000e0", 1)),
+		[]byte(strings.Replace(string(actual), "CapInh:\t00000000000000e0", "CapInh:\t00000000000001e0", 1)),
+		[]byte(strings.Replace(string(actual), "CapEff:\t00000000000000e0", "CapEff:\t00000000000800e0", 1)),
+		[]byte(strings.Replace(string(actual), "CapBnd:\t0000000000000000", "CapBnd:\t00000000000000e0", 1)),
+		[]byte(strings.Replace(string(actual), "CapAmb:\t0000000000000000", "CapAmb:\t00000000000000e0", 1)),
+		[]byte(strings.Replace(string(actual), "NoNewPrivs:\t1", "NoNewPrivs:\t0", 1)),
+	} {
+		if err := validateProcessStatus(invalid); err == nil {
+			t.Fatal("escape capability or missing NNP accepted")
+		}
+	}
+}
+
 func TestNodeObserverPhysicalKernelChild(t *testing.T) {
 	if os.Getenv("SANDBOX_NODE_OBSERVER_KERNEL_CHILD") != "1" {
 		return

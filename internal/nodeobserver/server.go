@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -335,7 +336,9 @@ func (o *Observer) accept(listener net.Listener, config *tls.Config) error {
 			if config == nil {
 				unixConn, ok := conn.(*net.UnixConn)
 				if ok {
-					_ = o.handleEnrollment(rpc, unixConn)
+					if err := o.handleEnrollment(rpc, unixConn); err != nil {
+						slog.Warn("node observer enrollment refused", "reason", err)
+					}
 				}
 				return
 			}
@@ -362,6 +365,9 @@ func (o *Observer) accept(listener net.Listener, config *tls.Config) error {
 				result, err = o.terminate(rpc, request.Ticket, peer)
 			} else {
 				return
+			}
+			if err != nil {
+				slog.Warn("node observer command refused", "reason", err)
 			}
 			if err == nil {
 				if reply, err := p.EncodeNodeTerminationResult(result); err == nil {

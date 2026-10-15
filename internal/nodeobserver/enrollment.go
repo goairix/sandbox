@@ -60,26 +60,8 @@ func validateProcessBoundary(anchor *processAnchor) error {
 	if err != nil {
 		return err
 	}
-	fields := make(map[string][]string)
-	for _, line := range strings.Split(string(status), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) > 1 {
-			fields[strings.TrimSuffix(parts[0], ":")] = parts[1:]
-		}
-	}
-	if len(fields["NoNewPrivs"]) != 1 || fields["NoNewPrivs"][0] != "1" || len(fields["Seccomp"]) != 1 || fields["Seccomp"][0] != "2" {
-		return fmt.Errorf("enrollment requires actual no_new_privs and seccomp")
-	}
-	allowed := uint64(1<<unix.CAP_KILL | 1<<unix.CAP_SETUID | 1<<unix.CAP_SETGID | 1<<unix.CAP_SETPCAP)
-	for _, name := range []string{"CapEff", "CapPrm", "CapBnd", "CapAmb", "CapInh"} {
-		parts := fields[name]
-		if len(parts) != 1 {
-			return fmt.Errorf("peer capability identity unavailable")
-		}
-		value, err := strconv.ParseUint(parts[0], 16, 64)
-		if err != nil || value&^allowed != 0 || (name == "CapAmb" || name == "CapInh") && value != 0 {
-			return fmt.Errorf("peer can escape protected runtime boundary")
-		}
+	if err := validateProcessStatus(status); err != nil {
+		return err
 	}
 	var own unix.Stat_t
 	if err := unix.Stat("/proc/self/ns/mnt", &own); err != nil || (descriptorIdentity{Device: uint64(own.Dev), Inode: own.Ino}) == anchor.facts.MountNS {
@@ -104,6 +86,34 @@ func validateProcessBoundary(anchor *processAnchor) error {
 	}
 	if !found {
 		return fmt.Errorf("peer cgroup confinement view unavailable")
+	}
+	return nil
+}
+
+func validateProcessStatus(status []byte) error {
+	fields := make(map[string][]string)
+	for _, line := range strings.Split(string(status), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) > 1 {
+			fields[strings.TrimSuffix(parts[0], ":")] = parts[1:]
+		}
+	}
+	if len(fields["NoNewPrivs"]) != 1 || fields["NoNewPrivs"][0] != "1" || len(fields["Seccomp"]) != 1 || fields["Seccomp"][0] != "2" {
+		return fmt.Errorf("enrollment requires actual no_new_privs and seccomp")
+	}
+	for _, name := range []string{"CapEff", "CapPrm", "CapBnd", "CapAmb", "CapInh"} {
+		parts := fields[name]
+		if len(parts) != 1 {
+			return fmt.Errorf("peer capability identity unavailable")
+		}
+		value, err := strconv.ParseUint(parts[0], 16, 64)
+		want := uint64(1<<unix.CAP_KILL | 1<<unix.CAP_SETUID | 1<<unix.CAP_SETGID)
+		if name == "CapAmb" || name == "CapBnd" {
+			want = 0
+		}
+		if err != nil || value != want {
+			return fmt.Errorf("peer can escape protected runtime boundary")
+		}
 	}
 	return nil
 }

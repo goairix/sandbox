@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -146,7 +147,9 @@ func (o *Observer) terminate(ctx context.Context, wire, issuer []byte) (p.NodeTe
 			o.mu.Unlock()
 			<-o.active
 		}()
-		_ = o.executeTermination(uint32(slot), wire, issuer)
+		if err := o.executeTermination(uint32(slot), wire, issuer); err != nil {
+			slog.Warn("node observer termination remains unresolved", "slot", slot, "reason", err)
+		}
 	}()
 	select {
 	case <-done:
