@@ -34,7 +34,7 @@
 
 **Create:** `internal/runtime/launcherconfig/config.go`, `config_test.go`；`internal/kubecontract/enrolled_plain.go`, `enrolled_plain_test.go`（按职责可拆 config/security/volumes 文件）；`internal/runtime/kubernetes/enrolled_plain_pod.go`, `enrolled_plain_pod_test.go`；`cmd/sandbox-launcher/provision.go`, `provision_linux.go`, `provision_unsupported.go`, `provision_test.go`；`internal/runtime/controlrunner/enrolled_profile_native_linux_test.go`；`scripts/test-enrolled-profile.sh`。
 
-**Modify narrowly:** `cmd/sandbox-launcher/protected_config.go` 迁移 decoder为共用wrapper/薄调用、`main.go` 固定 mode分派；`internal/nodeobserver/kubernetes_guard.go` 新profile分支及临时providerRegistration.Binding，`enrollment.go`/`termination.go` 两处仅从原已验证activation.Binding赋值，不改persistedproviderObservation/journalwire；`internal/runtime/kubernetes/task_runtime_cleanup_profile.go` 新profile分支；对应两个消费者新增有限新测试文件，不重写已验收矩阵。其余旧 producer/validator 接点需要先报Root具体矛盾。
+**Modify narrowly:** `cmd/sandbox-launcher/protected_config.go` 迁移 decoder为共用wrapper/薄调用、`main.go` 固定 mode分派；`internal/nodeobserver/kubernetes_guard.go` 新profile分支及临时providerRegistration.Binding，`enrollment.go`/`termination.go` 两处仅从原已验证activation.Binding赋值，不改persistedproviderObservation/journalwire；`internal/runtime/kubernetes/task_runtime_cleanup_profile.go` 新profile分支；对应两个消费者新增有限新测试文件，不重写已验收矩阵。Root另批准test-only窄改`internal/runtime/controlrunner/enrolled_launcher_native_linux_test.go`原runwrapper→privateWithProfile(t,modes,bool)，原selectors固定false，新selector固定true，复用共同真实服务/原Wait/join，只替换明确新profile准备步骤及固定新Exec，避免复制整套fixture。无产品factory/任意program/旧selector重放。其余旧 producer/validator 接点需要先报Root具体矛盾。
 
 **Interfaces:** `launcherconfig.Decode([]byte) (Config,error)` 精确保留原v2字段顺序与规则；`kubecontract.EnrolledPlainProfile = "sandbox-enrolled-plain/v1"` 与 `ValidateEnrolledPlainPod(*corev1.Pod) error`，严格解析 config并核对profilemetadata，不授权；`kubernetes.EnrolledPlainPodRequest{Spec runtime.SandboxSpec, NodeName,NodeUID,NodeBootID,CreationIntentID string, Generation int64, Config []byte}` 与 `BuildEnrolledPlainPod(namespace string, request EnrolledPlainPodRequest) (*corev1.Pod,error)`。固定CLI `serve-provisioned` 从 SANDBOX_LAUNCHER_CONFIG_V2 消费公开配置并移除变量，完成固定受保护文件后调用原serve。
 
@@ -44,8 +44,8 @@
 
 **Image contract:** `kubecontract.EnrolledPlainContractDigest(image string) (string,error)` 以固定domain/profile版本/合法image sha256 digest派生，Inspect要求新config.ContractDigest相等，operator可一次配置原Backend全局contract。新增Step1单独selector验证image+annotation双改/旧合同拒绝；Step2两consumer验证连config/digest也改为自洽但与原trusted Birth/binding不符时拒绝。旧decoder/旧profile不动。
 
-- [ ] Step1 读取实际 v2 config/原 Pod/两个消费者，写最小 config共享与profile RED；报告精确矛盾，不扩张原authority。迁移 config、实现共享严格profile及纯builder，有限host/race/vet通过后小提交。
-- [ ] Step2 正式 provisioning mode 与真实 FD/NOFOLLOW/O_EXCL/root/mode/stale 检查；两个消费者新显式 profile分支，保持旧分支不变。对受控关键字段有限negative和原拒绝条件完成host/race与Linuxcompile/vet，及时小提交。
+- [x] Step1 读取实际 v2 config/原 Pod/两个消费者，写最小 config共享与profile RED；报告精确矛盾，不扩张原authority。迁移 config、实现共享严格profile及纯builder，有限host/race/vet通过后小提交。
+- [x] Step2 正式 provisioning mode 与真实 FD/NOFOLLOW/O_EXCL/root/mode/stale 检查；两个消费者新显式 profile分支，保持旧分支不变。对受控关键字段有限negative和原拒绝条件完成host/race与Linuxcompile/vet，及时小提交。
 - [ ] Step3 新Linux fixture exec正式serve-provisioned PID1，真实readonly socket mounts/初始EmptyDir，原observer签名enrollment/ready认证；同真实GET Pod profile由cleanup Prepare接受。有限stale/foreign-entry拒绝和原Wait/join/cleanup、actualall17源码ELF绑定完成，小提交。
 - [ ] Step4 冻结原始证据/报告，Root唯一fresh完整review，同pair修复、tracked验收并继续创建/发布生产编排。
 

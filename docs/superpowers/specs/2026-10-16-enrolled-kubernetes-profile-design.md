@@ -28,6 +28,8 @@
 
 新增一份 Linux fixture，使用新 OWN 原产物执行正式 `serve-provisioned` PID1，实际模拟 readonly socket bind mounts 和初始0755 EmptyDir，由正式程序创建0600配置/0700目录；真实独立 observer/signed clock→bootstrap activation→management TLS publication→原 verifier 验证。新共享 Pod profile 必须是 observer 实际 GET 所见和 cleanup prepare 实际接受的结构，不能另造弱 fixture Pod。有限 stale-config/non-root/foreign-entry 负例可在同一隔离 fixture 串行执行，不重放旧完整矩阵。真实 kubelet/CRI admission、镜像打包、Node operator/provisioning和主流程尚未部署，应在报告中明确。
 
+为避免复制整套fixture，允许test-only窄提取tracked `internal/runtime/controlrunner/enrolled_launcher_native_linux_test.go`：原run函数保留wrapper→私有WithProfile(t,modes,bool)，原selectors固定false，新文件selector固定true。共同etcd/clock/observer/API/activation/Wait/join复用；true只替换生产builder数据、固定env、真实readonlysocket/clockbind和固定新Exec，exec本OWN ELF映射的`/usr/local/bin/sandbox-launcher serve-provisioned`。不允许任意program/成功factory、不修改产品producer。负例必须证明到达真实CLI并按其预期错误拒绝，不能把wrapper失败或timeout当正确拒绝。Pod声明镜像digest是fixture输入，真实OCI内容打包不由此证明。
+
 沿用仅 apply_patch 编辑、无依赖升级/真实Redis/Kube/secret/fullinspect/push/deploy、每作者≤1/总≤2批准私有 Linux fixture、512MiB/2CPU/256PID/no-network/readonlyroot/NNP/原caps、原 Wait/Close/join/精确清理、全17字段实际GoList环境匹配→测试→独立post filename/SHA→ELF/source绑定、Root exactpaths锁窗口小步提交。不得读 CLOSED OWN 或修改无关 Sentinel。没有按已有 sandbox N 的常驻 map/timer/扫描。
 
 Ruling: 这是 master 已批准真实 launcher 路径的明确受控 profile，用户要求持续执行，不重复寻求执行许可。新 CLI mode 仅收紧和落盘公开配置；失败关闭，不扩大用户管理权限。错误选择的代价是后续真实 kubelet 验收返工；不能将本地 mount fixture 宣称为真实 Kubernetes 验收。
