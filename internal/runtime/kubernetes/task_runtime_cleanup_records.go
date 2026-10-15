@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
 
@@ -61,11 +62,17 @@ type TaskRuntimeCleanupObservation struct {
 
 // The zero value is unusable. Only the concrete constructor installs transport.
 type TaskRuntimeCleanupClient struct {
-	self   *TaskRuntimeCleanupClient
-	mu     sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	closed bool
-	active uint32
-	wg     sync.WaitGroup
+	self      *TaskRuntimeCleanupClient
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closed    bool
+	active    uint32
+	wg        sync.WaitGroup
+	limit     uint32
+	timeout   time.Duration
+	namespace string
+	cilium    bool
+	api       *rest.RESTClient
+	transport *http.Transport
 }
