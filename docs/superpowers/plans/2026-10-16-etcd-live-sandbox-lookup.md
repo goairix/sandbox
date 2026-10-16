@@ -37,8 +37,12 @@
 **Produces:** PlainColdService.Lookup(ctx,id)、同view绑定且caller-owned的publication/dispatch读取结果、有限scalar health exchange。具体DTO/typed错误/locator策略由Step1源代码预检冻结。
 
 - [x] Step1 Root完整接受6c93e1预检：pointer结果/typed notfound与unavailable/v1 nilBusiness+v2owned；原dispatch CreatedAt/private concrete read locator/先后Confirm；health4096含前缀/内部随机nonce/snake_case wire/strictTLS+rawEOF；Journal.ObserveGate TryLock无IO与Supervisor clock前后重验、原service全程准入与最终Close检查。START-GO tests/collectors first，Root审后实际RED，产品随后。
-- [ ] Step2 协议/只读view/service测试RED后实现，host GREEN/race与适当vet，分别提交连贯协议/reader/service切片。
-- [ ] Step3 真实TLS etcd/正式launcher/原bridge Lookup成功与健康、到期、并发变化、关闭等拒绝路径验证；Root完整核对实际输入/ELF/原进程及IO joins，小步提交。
+- [x] Step2 RED后实现，协议b3dc75b、reader4a1a71f、Supervisor8ca3712、servicecf6b5e4分步提交；host/race通过，相关Linux vet通过。外部etcd host case明确skip，由真实native重复验证其公开断言。
+- [x] Step3 真实TLS etcd/正式launcher/原bridge v1/v2 Lookup与拒绝路径通过；native-local03使用当前source的runner05/launcher05，attach/container原始Wait0，所有进程/IO已join且精确容器已删除。测试提交223c2d2。保留原失败；完整来源与容量限制见验收报告。
 - [ ] Step4 唯一fresh reviewer原BASE→finalHEAD审查；同pair修复；tracked验收并关闭OWN，继续HTTP/生产主路径。
 
 Ruling: 本任务是已批准总方案的实际Get/复用前提，不重问用户授权。一次交付完整Lookup，避免只做未消费的健康协议或仅元数据GET；不做新认证模型、HTTP假接线或Redis fallback。
+
+Ruling: Journal新文件实际命名journal_gate_observation.go，职责仍为原批准的无IO TryLock标量观察。Linux vet要求将既有task_archive_native_test.go反射TypeOf(*s)改为TypeOf(s).Elem()，保留实际反射复制断言。原bridge fixture增可选stdoutObserved，仅观察真实child输出来确定取消发生在实际Cmd.Start之后；不创建产品hook。TaskClose测试辅助函数读取原TLS EOF及原raw adapter EOF后才Close，保持普通bridge严格join。
+
+Ruling: 当前desktop-linux缺少旧测试镜像，native-local03固定使用已有Linux/arm64 kindest/node镜像26ad49adcb6923b3faa00ee6654943de9bdda7cfcb1c42a9b9cef334a48dfb33作为外层文件系统；只运行当前正式launcher与etcd绑定，不运行kind服务。此Task不验收生产镜像或容量。GoList的17字段保守清单包含product metadata中的TestGoFiles，故测试修改后另做launcher05来源捕获；其VCS构建元数据与04不同，最终用05双binary实际重跑一次。
