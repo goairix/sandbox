@@ -11,10 +11,20 @@ import (
 	"unicode/utf8"
 )
 
-// WorkspaceIdentity is immutable and does not retain the raw storage identity.
+type WorkspaceIdentityKind uint8
+
+const (
+	WorkspaceIdentityWorkspace WorkspaceIdentityKind = iota
+	WorkspaceIdentityDetached
+)
+
+// WorkspaceIdentity is immutable and does not retain raw storage or request
+// identities. Detached identities have no storage provider, bucket or prefix.
 type WorkspaceIdentity struct {
 	provider, storageIdentityHash, bucket, prefix, hash string
 	partition                                           uint8
+	kind                                                WorkspaceIdentityKind
+	requestHash                                         string
 }
 
 // NewWorkspaceIdentity binds a canonical workspace prefix to its storage authority.
@@ -29,10 +39,14 @@ func NewWorkspaceIdentity(provider, storageIdentity, bucket, prefix string) (Wor
 	w.partition = digest[0]
 	return w, nil
 }
-func (w WorkspaceIdentity) Hash() string     { return w.hash }
-func (w WorkspaceIdentity) Partition() uint8 { return w.partition }
+func (w WorkspaceIdentity) Hash() string                { return w.hash }
+func (w WorkspaceIdentity) Partition() uint8            { return w.partition }
+func (w WorkspaceIdentity) Kind() WorkspaceIdentityKind { return w.kind }
 func (w WorkspaceIdentity) validate() error {
-	if !validOpaque(w.provider, 128) || !validHexDigest(w.storageIdentityHash) || !validOpaque(w.bucket, 256) || !validWorkspacePrefix(w.prefix) {
+	if w.kind == WorkspaceIdentityDetached {
+		return w.validateDetached()
+	}
+	if w.kind != WorkspaceIdentityWorkspace || w.requestHash != "" || !validOpaque(w.provider, 128) || !validHexDigest(w.storageIdentityHash) || !validOpaque(w.bucket, 256) || !validWorkspacePrefix(w.prefix) {
 		return fmt.Errorf("%w: invalid workspace identity", ErrInvalidRecord)
 	}
 	digest := framedDigest(w.provider, w.storageIdentityHash, w.bucket, w.prefix)

@@ -46,7 +46,7 @@ func recoveryPlanWire(p TaskWorkspaceSyncPlan) taskArchiveRecoveryPlanWire {
 }
 
 func (p taskArchiveRecoveryPlanWire) plan() (TaskWorkspaceSyncPlan, error) {
-	w := WorkspaceIdentity{p.Provider, p.StorageIdentityHash, p.Bucket, p.Prefix, p.Hash, p.Partition}
+	w := WorkspaceIdentity{provider: p.Provider, storageIdentityHash: p.StorageIdentityHash, bucket: p.Bucket, prefix: p.Prefix, hash: p.Hash, partition: p.Partition}
 	plan := TaskWorkspaceSyncPlan{w, p.Exclude, p.DeleteExtraneous, p.Digest}
 	if p.Exclude == nil || plan.validate() != nil || !recoverySafeString(p.Provider) || !recoverySafeString(p.Bucket) || !recoverySafeString(p.Prefix) {
 		return TaskWorkspaceSyncPlan{}, errTaskArchive

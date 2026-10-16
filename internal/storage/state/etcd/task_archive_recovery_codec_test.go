@@ -107,7 +107,7 @@ func TestTaskArchiveRecoveryCodecMaximumCanonical(t *testing.T) {
 
 func (b taskArchiveRecoveryBinding) PlanWorkspace() WorkspaceIdentity {
 	p := b.Plan
-	return WorkspaceIdentity{p.Provider, p.StorageIdentityHash, p.Bucket, p.Prefix, p.Hash, p.Partition}
+	return WorkspaceIdentity{provider: p.Provider, storageIdentityHash: p.StorageIdentityHash, bucket: p.Bucket, prefix: p.Prefix, hash: p.Hash, partition: p.Partition}
 }
 
 func TestTaskArchiveRecoveryCodecRejectsAmbiguousWire(t *testing.T) {

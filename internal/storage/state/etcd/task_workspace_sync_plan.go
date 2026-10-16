@@ -61,7 +61,7 @@ func NewTaskWorkspaceSyncPlan(in TaskWorkspaceSyncPlanOptions) (TaskWorkspaceSyn
 }
 
 func validateWorkspaceSyncIdentity(w WorkspaceIdentity) error {
-	if w.validate() != nil {
+	if w.Kind() != WorkspaceIdentityWorkspace || w.validate() != nil {
 		return ErrInvalidRecord
 	}
 	switch storage.StorageProvider(w.provider) {
