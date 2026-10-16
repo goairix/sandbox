@@ -6,7 +6,7 @@ go_bin=/Users/dysodeng/go/go1.25.6/bin/go
 epoch=${COLD_CREATE_EPOCH:?set a unique owned epoch}
 mode=${1:-build}
 fixture=${COLD_CREATE_FIXTURE:-inventory}
-case "$fixture" in inventory) native_name=TestColdPreparationNativeFixture;; attempt) native_name=TestColdCreateAttemptNativeFixture;; attempt-close) native_name=TestColdCreateAttemptCloseNativeFixture;; *) exit 2;; esac
+case "$fixture" in inventory) native_name=TestColdPreparationNativeFixture;; attempt) native_name=TestColdCreateAttemptNativeFixture;; attempt-close) native_name=TestColdCreateAttemptCloseNativeFixture;; settlement) native_name=TestColdPreparationSettlementNativeFixture;; *) exit 2;; esac
 platform=${COLD_CREATE_GOOS:-darwin}
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]] || exit 1
 [[ "$mode" == build || "$mode" == run ]] || exit 1

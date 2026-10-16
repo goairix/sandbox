@@ -25,6 +25,10 @@ func TestColdCreateAttemptCloseNativeFixture(t *testing.T) {
 	coldCreateNativeFixture(t, "^TestColdCreateAttemptClosedBackendNative$")
 }
 
+func TestColdPreparationSettlementNativeFixture(t *testing.T) {
+	coldCreateNativeFixture(t, "^TestColdPreparationSettlementNative$")
+}
+
 func coldCreateNativeFixture(t *testing.T, selector string) {
 	if os.Getenv("SANDBOX_COLD_CREATE_NATIVE") != "1" {
 		t.Skip("requires exact owned cold-create fixture")

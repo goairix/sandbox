@@ -70,12 +70,17 @@ func (x *enrolledNativeTraceTxn) Else(ops ...clientv3.Op) clientv3.Txn {
 // This test ELF covers actual native metadata CAS/reply loss. Its test-issued
 // crypto material does not claim a kernel observation. The separate runner ELF
 // supplies the actual Supervisor + observer + publication chain in this fixture.
-func newEnrolledNativePublicationFixture(t *testing.T, maximum bool) enrolledNativePublicationFixture {
+func newEnrolledNativePublicationFixture(t *testing.T, maximum bool, coldPreparation ...bool) enrolledNativePublicationFixture {
 	t.Helper()
-	if os.Getenv("SANDBOX_ENROLLED_PUBLICATION_NATIVE") != "1" {
+	cold := len(coldPreparation) == 1 && coldPreparation[0]
+	enabled, directory := "SANDBOX_ENROLLED_PUBLICATION_NATIVE", "ENROLLED_NATIVE_TLS_DIRECTORY"
+	if cold {
+		enabled, directory = "SANDBOX_COLD_CREATE_NATIVE", "COLD_CREATE_TLS_DIRECTORY"
+	}
+	if os.Getenv(enabled) != "1" {
 		t.Skip("requires exact owned enrolled TLS fixture")
 	}
-	dir := os.Getenv("ENROLLED_NATIVE_TLS_DIRECTORY")
+	dir := os.Getenv(directory)
 	require.NotEmpty(t, dir)
 	certificate, err := tls.LoadX509KeyPair(filepath.Join(dir, "server.pem"), filepath.Join(dir, "server-key.pem"))
 	require.NoError(t, err)
@@ -91,6 +96,9 @@ func newEnrolledNativePublicationFixture(t *testing.T, maximum bool) enrolledNat
 	status, err := raw.Status(ctx, "https://127.0.0.1:2379")
 	require.NoError(t, err)
 	prefix, scope, cell := "/sandbox/enrolled-native", "fault", uuid.NewString()
+	if cold {
+		prefix = "/sandbox/cold-create-native"
+	}
 	if maximum {
 		prefix, scope, cell = "/sandbox/enrolled-native/"+strings.Repeat("p", 253-len("/sandbox/enrolled-native/")), strings.Repeat("s", 128), strings.Repeat("c", 128)
 	}
@@ -110,9 +118,16 @@ func newEnrolledNativePublicationFixture(t *testing.T, maximum bool) enrolledNat
 	require.NoError(t, err)
 	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
 	options := Options{Endpoints: raw.Endpoints(), Namespace: n, Identity: identity, TLS: tlsConfig, RequestTimeout: time.Second, PublicationTrust: &RuntimePublicationTrust{AuthorityID: identity.RuntimeID, Target: "kubernetes", Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: goodAuthorityClock(), EnrolledPublication: &EnrolledPublicationOptions{ContractDigest: strings.Repeat("b", 64), MaxActive: 4}}
+	if cold {
+		options.PreparationInventory = &PreparationInventoryOptions{}
+		options.PreparationInventory.QuotaSlots[7], options.PreparationInventory.QuotaSlots[8] = 1, 1
+	}
 	b, err := New(ctx, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	if cold {
+		coldNativeInitialize(t, b)
+	}
 	w, err := NewWorkspaceIdentity("s3", identity.StorageID, "bucket", cell+"/")
 	require.NoError(t, err)
 	input := AcquireIntentInput{Workspace: w, Principal: "native", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"html":"<>&中>"}`), Now: time.Now().UTC(), TTL: time.Hour}
@@ -122,10 +137,22 @@ func newEnrolledNativePublicationFixture(t *testing.T, maximum bool) enrolledNat
 	c, err := b.ClaimCreation(ctx, w, input.IntentID, "native-worker", 30*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = b.ReleaseCreationClaim(context.Background(), c) })
+	if cold {
+		reserved, err := b.ReserveColdPreparation(ctx, c, 7)
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, reserved.Outcome)
+	}
 	dispatch, err := b.DeclareRuntimeDispatch(ctx, c, RuntimeDispatchInput{Kind: RuntimeDispatchCreate, Target: "kubernetes", Payload: json.RawMessage(`{"html":"<>&中>"}`)})
 	require.NoError(t, err)
 	runtimeKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, 32))
 	runtime := RuntimeReference{ID: "pod", UID: uuid.NewString(), BootID: uuid.NewString()}
+	if cold {
+		attempt, err := b.BeginColdCreateAttempt(ctx, c)
+		require.NoError(t, err)
+		require.NotNil(t, attempt.Permit)
+		_, err = b.RecordColdCreateObservation(ctx, c, runtime.UID)
+		require.NoError(t, err)
+	}
 	cert := preparationCertificate(t, b, dispatch.Entry.Record, root, "plain", runtime)
 	_, err = b.BindRuntime(ctx, c, cert)
 	require.NoError(t, err)

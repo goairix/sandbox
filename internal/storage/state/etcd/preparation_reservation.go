@@ -111,8 +111,17 @@ func (b *Backend) LoadColdPreparation(ctx context.Context, w WorkspaceIdentity, 
 	if coldDecode(values[0], &r) != nil || coldDecode(values[1], &marker) != nil || !b.validColdReservation(r, w, intent) || marker != (coldPreparationWork{Version: 1, RestoreEpoch: b.restoreEpoch, ProfileDigest: b.preparationDigest, IntentID: intent, Phase: r.Phase}) {
 		return nil, ErrCorruptRecord
 	}
-	if r.Phase != "reserved" {
-		return nil, ErrCorruptRecord
+	if r.Phase == "settled" {
+		history, err := b.loadColdPublicationHistory(ctx, w, intent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := b.verifyColdSettlement(ctx, r, values[0], values[1], history); err != nil {
+			return nil, err
+		}
+		// The original prep and quota may already be safely returned and reused.
+		// The authenticated reservation is history, never current slot authority.
+		return &r, nil
 	}
 	for _, ref := range []ColdSlotReference{r.Quota, r.Preparation} {
 		slotKey, freeKey, err := b.namespace.coldSlotKeys(ref)
@@ -154,7 +163,8 @@ func (b *Backend) validColdSlot(s coldSlotRecord) bool {
 }
 
 func (b *Backend) validColdReservation(r ColdPreparationRecord, w WorkspaceIdentity, intent string) bool {
-	return r.Version == 1 && r.RestoreEpoch == b.restoreEpoch && r.ProfileDigest == b.preparationDigest && r.Owner.IntentID == intent && r.Owner.WorkspaceHash == w.Hash() && r.Owner.Partition == w.Partition() && r.Owner.Generation > 0 && validDomainSegment(r.Owner.RequestID) && validDomainSegment(r.Owner.SandboxID) && r.Quota.Kind == "quota" && r.Quota.ID < b.preparationInventory.QuotaSlots[r.Quota.Partition] && r.Quota.Epoch > 0 && r.Preparation.Kind == "preparation" && r.Preparation.Partition == 0 && r.Preparation.ID < 32 && r.Preparation.Epoch > 0 && r.Settlement == (StageAttemptLocator{})
+	phase := r.Phase == "reserved" && r.Settlement == (StageAttemptLocator{}) || r.Phase == "settled" && r.Settlement.Validate() == nil && r.Settlement.Namespace == b.namespace.Root() && r.Settlement.RestoreEpoch == b.restoreEpoch && r.Settlement.Partition == w.Partition() && r.Settlement.RequestID == r.Owner.RequestID && r.Settlement.StageID == "cold_preparation_settle"
+	return phase && r.Version == 1 && r.RestoreEpoch == b.restoreEpoch && r.ProfileDigest == b.preparationDigest && r.Owner.IntentID == intent && r.Owner.WorkspaceHash == w.Hash() && r.Owner.Partition == w.Partition() && r.Owner.Generation > 0 && validDomainSegment(r.Owner.RequestID) && validDomainSegment(r.Owner.SandboxID) && r.Quota.Kind == "quota" && r.Quota.ID < b.preparationInventory.QuotaSlots[r.Quota.Partition] && r.Quota.Epoch > 0 && r.Preparation.Kind == "preparation" && r.Preparation.Partition == 0 && r.Preparation.ID < 32 && r.Preparation.Epoch > 0
 }
 
 func (b *Backend) coldFreeCandidate(ctx context.Context, prefix string) (*mvccpb.KeyValue, error) {
