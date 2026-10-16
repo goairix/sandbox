@@ -32,11 +32,13 @@
 
 **Produces:** transferspool Options/Open/Reserve/Job Write/Seal/Read/Close/Store.Close；sandboxfiles DownloadRequest/ValidateDownload/StreamDownload及strict Failure codec；普通file-download入口；配置后原GETdownload的单Exec有限spool消费；Gateway.Close error传播。具体签名/CLI quiet-error固定在Step1。
 
-- [ ] Step1 只读预检 exact接口、CLItyped退出与stderr schema、spool身份/锁/stale/close、配置/兼容、单Exec/native有限场景；Root裁定冻结并检查producer/consumer。
-- [ ] Step2 tests-only spool及普通下载helper/CLI最小RED；Root实际执行与审计后实现，targethost/race/Linuxvet；每个可独立使用连贯切片通过即提交。测试含实际childcrash释放flock，不能用Close替代。
-- [ ] Step3 tests-only transfer配置与HTTP接入RED；Root执行后实现可选配置/clone、下载consumer与Close error/CLI生产传播；host/race/Linuxvet及一次受影响旧gateway覆盖后小提交。原终态前无200、预算先于效果、IO/cancel/slowclient/实际join均断言。
-- [ ] Step4 新solelarge-download native实际大于1MiB+空/错误有限场景，原16bridge预算内；运行前后真实source/binary/脚本/容器/Wait清理核对；native与operator说明小提交，不重放旧矩阵。
-- [ ] Step5 唯一freshreview BASE→HEAD，同pair限定fix；tracked范围验收及剩余上传明确记录，关闭OWN/pair继续总迁移。
+- [x] Step1 只读预检 exact接口、CLItyped退出与stderr schema、spool身份/锁/stale/close、配置/兼容、单Exec/native有限场景；Root裁定冻结并检查producer/consumer。
+- [x] Step2 tests-only spool及普通下载helper/CLI最小RED；Root实际执行与审计后实现，targethost/race/Linuxvet；每个可独立使用连贯切片通过即提交。测试含实际childcrash释放flock，不能用Close替代。
+- [x] Step3 tests-only transfer配置与HTTP接入RED；Root执行后实现可选配置/clone、下载consumer与Close error/CLI生产传播；host/race/Linuxvet及一次受影响旧gateway覆盖后小提交。原终态前无200、预算先于效果、IO/cancel/slowclient/实际join均断言。
+- [x] Step4 新solelarge-download native实际大于1MiB+空/错误有限场景，原16bridge预算内；运行前后真实source/binary/脚本/容器/Wait清理核对；native与operator说明小提交，不重放旧矩阵。
+- [x] Step5 唯一freshreview BASE→HEAD，同pair限定fix；tracked范围验收及剩余上传明确记录，关闭OWN/pair继续总迁移。
+
+范围验收：源码切片02e81fc/72c2980/1a45c16/9011501/b6d5176，审查I1修复35d3006。唯一review初轮C0/I1/M1，经同pair R1确认I1解决、无新增C/I且Approved；保留已有native日志M1到整分支收尾。原native2.27秒及修复后新源码native1.89秒通过，各9原bridge实际Wait/IO全join；不是2GiB吞吐、大N或生产迁移验收。详见reports/2026-10-16-etcd-large-download-verification.md。上传仍为明确缺口。
 
 ## Root producer-consumer conflict scan / self-review
 
