@@ -45,6 +45,11 @@ func (b *Backend) readViewPoints(ctx context.Context, keys []string, limits []in
 	if err := b.readViewPreflight(keys, limits, pins); err != nil {
 		return nil, 0, err
 	}
+	return b.readViewDispatch(ctx, keys, limits, pins)
+}
+
+// Callers supply one of the fixed, fully preflighted read-only profiles.
+func (b *Backend) readViewDispatch(ctx context.Context, keys []string, limits []int, pins []clientv3.Cmp) ([]*mvccpb.KeyValue, int64, error) {
 	ops := make([]clientv3.Op, len(keys))
 	for i, key := range keys {
 		ops[i] = clientv3.OpGet(key)

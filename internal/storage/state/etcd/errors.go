@@ -10,4 +10,5 @@ var (
 	ErrOutcomeUnknown       = errors.New("etcd state: outcome unknown")
 	ErrInvalidMutation      = errors.New("etcd state: invalid mutation")
 	ErrCorruptReceipt       = errors.New("etcd state: corrupt receipt")
+	ErrSnapshotReadCapacity = errors.New("etcd state: snapshot read capacity")
 )

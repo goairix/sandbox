@@ -45,6 +45,9 @@ type Options struct {
 	LocalRuntimeRelease              *LocalRuntimeReleaseOptions
 	TaskRuntimeTerminationIssuer     TaskRuntimeTerminationIssuer
 	PreparationInventory             *PreparationInventoryOptions
+	// SnapshotCacheBytes is the retained immutable snapshot budget. Zero uses
+	// 64MiB; explicit budgets must be between 256KiB and 64MiB inclusive.
+	SnapshotCacheBytes uint64
 }
 
 type Backend struct {
@@ -77,10 +80,14 @@ type Backend struct {
 	preparationInventory                      *PreparationInventoryOptions
 	preparationDigest                         string
 	preparationTotal                          uint64
+	snapshotReads                             *snapshotReadCache
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if o.SnapshotCacheBytes != 0 && (o.SnapshotCacheBytes < 256*1024 || o.SnapshotCacheBytes > 64*1024*1024) {
+		return invalid("snapshot cache budget must be 256KiB through 64MiB")
+	}
 	if err := validatePreparationInventory(o.PreparationInventory); err != nil {
 		return err
 	}
@@ -278,6 +285,7 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		return nil, fmt.Errorf("etcd state: create client: %w", err)
 	}
 	b := &Backend{client: client, namespace: o.Namespace, clusterID: o.Identity.ClusterID, restoreEpoch: o.Identity.RestoreEpoch, requestTimeout: o.RequestTimeout, archiveLife: &taskArchiveBackend{}}
+	b.snapshotReads = newSnapshotReadCache(b, o.SnapshotCacheBytes)
 	b.publicationVerifier = verifier
 	b.enrolledPublication = o.EnrolledPublication
 	b.enrolledVerifier, _ = enrolledPublicationAuthority(o)

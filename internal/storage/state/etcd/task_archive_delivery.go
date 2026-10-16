@@ -267,6 +267,18 @@ func (b *Backend) closeTaskArchiveBackend() error {
 		enrolled = append(enrolled, o)
 	}
 	releases := b.archiveLife.runtimeReleases
+	var snapshotCalls []*snapshotReadCall
+	var snapshotMisses []*snapshotReadMiss
+	if b.snapshotReads != nil {
+		for call := range b.snapshotReads.calls {
+			call.cancel()
+			snapshotCalls = append(snapshotCalls, call)
+		}
+		for _, miss := range b.snapshotReads.misses {
+			miss.cancel()
+			snapshotMisses = append(snapshotMisses, miss)
+		}
+	}
 	b.archiveLife.mu.Unlock()
 	for _, o := range releases {
 		if o != nil {
@@ -281,6 +293,19 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	}
 	if b.archiveStore != nil {
 		b.archiveStore.sealAndCancel()
+	}
+	for _, call := range snapshotCalls {
+		<-call.done
+	}
+	for _, miss := range snapshotMisses {
+		<-miss.done
+	}
+	if b.snapshotReads != nil {
+		b.archiveLife.mu.Lock()
+		b.snapshotReads.entries = nil
+		b.snapshotReads.lru.Init()
+		b.snapshotReads.used = 0
+		b.archiveLife.mu.Unlock()
 	}
 	for _, o := range owners {
 		<-o.done
