@@ -8,10 +8,13 @@
 
 现有原生组合测试已有真实链：PrepareDestroy/Commit → ClaimTask → CloseData → QuiesceUsers → dual drain → ReserveWorkspaceSync → archive receive → real KernelBoundary绑定 → local finalization → observer termination → exact provider cleanup → owner release。该测试是接口与证据的参考，生产实现应形成按职责组织的消费者，并保留全部未知结果与恢复约束。
 
+明确Task引用的入口使用既有due actor的小型有界mailbox/内部准入，共用该actor原partition/session和Claim份额，不要求停止due来执行cleanup，也不向调用者外借其私有权限。公共入口可以位于原DueWorker或严格绑定其原owner的executor；确切签名由preflight冻结。本单元仅消费明确引用，cleanup-intent Range/Watch自动发现仍后续接入。
+
 ## Binding constraints
 
 - 沿用已批准的256分区、原worker profile及全cell固定预算：最多4个relist、20MiB/s Range、100claim尝试/s。实际任务最多32个持久inflight slot，不能把每进程semaphore、本地MaxActive或预算Lease当作全cell硬上限。原TaskClaim和worker session分别保留自己的原Lease和实际生命周期。
 - 当前due actor独占自己的原partition/session/份额。执行消费者的预算分配、原权限入口及未来共享调度关系必须在只读preflight明确；不能另建同分区竞争控制器、假设有额外空Relist份额、重借已释放tombstone或复制诊断引用为权限。本单元不新增全量sandbox扫描。
+- 原actor只在已有有限native call/Watch实际停止join后串行处理mailbox准入；原预算计费、slot确认和实际TaskClaim开始的顺序明确。queue与active jobs各有固定上限，最多32实际任务，满时早拒绝；公平轮转和续租不能被新任务淹没。物理job保留原TaskClaim/effect权限，停止时先join全部实际job，再发布actor workDone/原session清理/final done。不能用无界队列、任意授权callback或一Task一session绕过共享原权限。
 - 持久slot不附可自动过期的Lease。exact Task、原birth/attempt、槽位incarnation和恢复身份必须绑定；并发申请不能给同一未决Task重复占不同槽，也不能把旧终态确认用于新occupation。unknown reserve/claim/physical effect/settlement保留原身份和slot，不能以context取消、Lease到期、进程死亡、runtime404或一次空读释放。
 - slot在真实Task执行开始前持久确认，32占满时拒绝或有界等待第33个实际开始；不能先Grant/派发副作用再补记slot。每个后续恢复步骤仍须取得原TaskClaim和相应真实权限；slot不是runtime、filesystem或owner释放权限。
 - 只有确切已确认的任务物理终结/安全释放证据，且实际本地工作已join，才允许返还slot。现有owner release已满64节点，不能直接追加slot归还或候选删除。可采用独立终态结算，但必须精确锚定不可变release receipt、当前occupied slot和原Task身份，抵抗ABA/未知ACK/迟到结算。

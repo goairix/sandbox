@@ -4,7 +4,7 @@
 
 **Goal:** 用真实cleanup消费者消费明确的永久Task引用，在全cell持久32槽约束下完成既有物理关闭、同步、终止、安全释放及确切恢复。
 
-**Architecture:** 永久槽协议属于etcd存储内部，实际阶段编排消费现有原TaskClaim与已验证runtime/worker依赖。只读preflight先决定最小清晰API及包边界、共享预算、终态独立结算和实际join图；之后用完整真实消费者验证这些原语。
+**Architecture:** 永久槽协议属于etcd存储内部，实际阶段编排消费现有原TaskClaim与已验证runtime/worker依赖。明确引用通过原due actor的小型有界mailbox接入，共用其原partition/session/Claim份额；actual jobs与最终关闭同一生命周期，不做自动索引发现。只读preflight先决定最小清晰API及包边界、共享预算、终态独立结算和实际join图；之后用完整真实消费者验证这些原语。
 
 **Tech Stack:** Go1.25.6、etcd3.6.14、原controltransport/launcher KernelBoundary、enrolled runtime与exact Kubernetes cleanup。
 
@@ -30,7 +30,7 @@ Named spec的Binding constraints全部适用。原256分区/4Relist/20MiB/s/100c
 
 **Produces:** 实际明确Task引用消费者与其生命周期结果、持久32执行槽及可恢复终态结算。精确函数名/签名、支持profile、目标配置和原权限关系是Step1强制交付；不是一个未被真实消费者使用的slot API。
 
-- [ ] Step1 read-only preflight：具体输入/已有恢复接口、公共/私有API、包边界、slot格式/ABA/CAS/unknown、claim预算及未来共享发现关系、完整节点/字节表、原生环境与真实join图。Root裁定后先tests-only GO，无产品修改。
+- [ ] Step1 read-only preflight：具体输入/已有恢复接口、公共/私有API、包边界、slot格式/ABA/CAS/unknown、原due actor有界mailbox/claim预算及未来共享发现关系、完整节点/字节表、原生环境与真实join图。Root裁定后先tests-only GO，无产品修改。
 - [ ] Step2 持久槽与真实准入回归先RED；实现原预算下精确占用、确认、恢复和终态独立结算，host/race/Linuxvet，连贯切片及时提交。
 - [ ] Step3 实际cleanup消费者回归先RED；接通原关闭排空/归档同步/终止安全释放，支持profile与未知恢复，绑定真实槽，不跳过效果，不重写原协议；通过针对性验证后小步提交。
 - [ ] Step4 新Linux真实组合与实际etcd32槽争抢；独立新源码/工具/输入/运行与清理核对。不是全部旧矩阵、全Pod32容量或生产环境切换。
