@@ -10,6 +10,8 @@
 
 明确Task引用的入口使用既有due actor的小型有界mailbox/内部准入，共用该actor原partition/session和Claim份额，不要求停止due来执行cleanup，也不向调用者外借其私有权限。公共入口可以位于原DueWorker或严格绑定其原owner的executor；确切签名由preflight冻结。本单元仅消费明确引用，cleanup-intent Range/Watch自动发现仍后续接入。
 
+生产目标来源采用原AcquireIntent原子写入的严格snapshot-envelope v2，保存local workspace描述与sync policy，摘要同时绑定payload和描述。已有显式workspace的PlainColdService.Create捕获原WorkspaceIdentity；旧snapshot1与业务capsule1/2字节/摘要保持兼容，默认捕获后的历史请求重试返回原接受配置、不升级历史快照。新policy冲突必须拒绝。Detached CreateBusiness及无描述历史Task仍明确不支持此本地同步消费者，不能猜测hash前像或用测试参数代替实际producer。版本、配置幂等、深复制与完整缓存计费一并验证。
+
 ## Binding constraints
 
 - 沿用已批准的256分区、原worker profile及全cell固定预算：最多4个relist、20MiB/s Range、100claim尝试/s。实际任务最多32个持久inflight slot，不能把每进程semaphore、本地MaxActive或预算Lease当作全cell硬上限。原TaskClaim和worker session分别保留自己的原Lease和实际生命周期。
