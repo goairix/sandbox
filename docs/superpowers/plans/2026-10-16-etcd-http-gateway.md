@@ -20,10 +20,10 @@
 
 **Produces:** 可实际运行且明确受限的etcd HTTP入口、正确幂等/pending/unknown/wire、真实流断连/关闭和operator文档。
 
-- [ ] Step1 只读预检 exactmanifest/CLI/handler/router/DTO与typederror/status、state语义、body/输出/并发/执行默认值、SSEdeadline/背压/join及native源点；Root裁定冻结。
-- [ ] Step2 tests-only最小RED，再实现。按settings/映射与gateway/CLI等连贯slice，验证即小提交，不等整Task末尾。
-- [ ] Step3 targeted host/race/相关Linuxvet，唯一实际HTTPnative含auth/create/replay/conflict/Get/sync/SSE/disconnect/unknown/unsupported/Close及全部原Wait/IOjoin；不重复32秒/旧矩阵。
-- [ ] Step4 唯一fresh reviewer原BASE→HEAD，同pairfix后tracked验收、关闭OWN，继续其余迁移。
+- [x] Step1 只读预检 exactmanifest/CLI/handler/router/DTO与typederror/status、state语义、body/输出/并发/执行默认值、SSEdeadline/背压/join及native源点；Root裁定冻结（OWN preflight/ledger，09:33UTC）。
+- [x] Step2 tests-only最小RED，再实现。settings/共享命令、gateway、CLI及两个诊断/重放修正均已针对验证并小步提交。
+- [x] Step3 targeted host/race/相关Linuxvet；实际HTTPnative的复用标记缺陷已真实RED→修正→http-03全场景PASS1.77s，无skip，11个原bridge Wait/IO及正式launcher/etcd Wait已核对；不是容量或生产部署验收。
+- [x] Step4 唯一fresh reviewer原BASE→HEAD，初审I1/I2/I3经同pair R1全部解决，无新增Critical/Important，spec/质量Approved；tracked范围验收，保留M1与后续health预算项，关闭OWN后继续其余迁移。
 
 ## Root 初始共享接口检查
 
