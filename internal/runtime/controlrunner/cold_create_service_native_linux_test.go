@@ -28,6 +28,7 @@ import (
 	"github.com/goairix/sandbox/internal/kubecontract"
 	"github.com/goairix/sandbox/internal/nodeobserver"
 	"github.com/goairix/sandbox/internal/provisioning"
+	"github.com/goairix/sandbox/internal/provisioning/deployment"
 	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
@@ -67,10 +68,22 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 }
 
 func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, detached, concurrent bool, liveLookup ...bool) {
-	live := len(liveLookup) == 1 && liveLookup[0]
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{loseACK: loseACK, withBusiness: withBusiness, detached: detached, concurrent: concurrent, live: len(liveLookup) == 1 && liveLookup[0]})
+}
+
+type coldServiceNativeVariant struct {
+	loseACK, withBusiness, detached, concurrent, live, execService bool
+}
+
+func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVariant) {
+	loseACK, withBusiness, detached, concurrent, live := variant.loseACK, variant.withBusiness, variant.detached, variant.concurrent, variant.live
 	var lookupHooks *liveLookupNativeHooks
 	if live {
 		lookupHooks = &liveLookupNativeHooks{}
+	}
+	var execHooks *execServiceNativeHooks
+	if variant.execService {
+		execHooks = &execServiceNativeHooks{}
 	}
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
@@ -90,7 +103,11 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 	require.NoError(t, os.Mkdir("/run/sandbox-node-observer", 0700))
 	require.NoError(t, os.Mkdir(filepath.Dir(ct.ClockSocket), 0700))
 	admin, observerTLS, cluster := observerNativeEtcd(t, dir)
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	timeout := 40 * time.Second
+	if variant.execService {
+		timeout = 100 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	_, root, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -123,9 +140,13 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 	inventory.QuotaSlots[7] = 1
 	binding := p.TrustBinding{Namespace: ns.Root(), AuthorityID: "launcher", Target: "target", RestoreEpoch: "restore"}
 	backendOptions := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: identity, TLS: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: observerTLS.RootCAs, Certificates: []tls.Certificate{certificate}}, RequestTimeout: 2 * time.Second, Clock: nativeFixtureClock{}, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: binding.AuthorityID, Target: binding.Target, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: profileFixtureContract(t), MaxActive: 4}, PreparationInventory: &inventory}
+	var execIssuer *deployment.ExecIssuer
 	backend, err := state.New(ctx, backendOptions)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	t.Cleanup(func() {
+		require.NoError(t, backend.Close())
+		require.NoError(t, execIssuer.Close())
+	})
 	for {
 		progress, err := backend.InitializePreparationInventory(ctx)
 		require.NoError(t, err)
@@ -143,6 +164,16 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
+	if variant.execService {
+		launcher, err := launcherconfig.Decode(config)
+		require.NoError(t, err)
+		execIssuer, err = deployment.NewExecIssuer(ctx, issuerKey, issuerCert, launcher, nativeFixtureClock{})
+		require.NoError(t, err)
+		require.NoError(t, backend.Close())
+		backendOptions.ExecIssuer = execIssuer
+		backend, err = state.New(ctx, backendOptions)
+		require.NoError(t, err)
+	}
 	clockListener, err := net.Listen("unix", ct.ClockSocket)
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(ct.ClockSocket, 0600))
@@ -158,6 +189,9 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 		require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "clock joined: %v", err)
 	})
 	request := provisioning.PlainColdRequest{Principal: "native", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), TTL: time.Minute}
+	if variant.execService {
+		request.TTL = 90 * time.Second
+	}
 	if withBusiness {
 		request.Business, err = sandboxsnapshot.Build(business.CreateSandboxRequest{Mode: "persistent", Resources: &business.ResourceLimits{CPU: "2000m"}}, sandboxsnapshot.Defaults{TimeoutSeconds: 60, Resources: business.ResourceLimits{CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi"}})
 		require.NoError(t, err)
@@ -284,6 +318,10 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 				return
 			}
 			bridge := newStartupBridgeFixture()
+			if execHooks != nil {
+				bridge.timeout = 75 * time.Second
+				execHooks.register(bridge)
+			}
 			bridge.discardStdout = loseACK && execCount.Add(1) == 2
 			err := bridge.bindOriginalMountNamespace(child.Process.Pid)
 			bridges = append(bridges, bridge)
@@ -598,11 +636,18 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 		require.Equal(t, int32(1), postCount.Load(), "Lookup never creates a pod")
 		require.Equal(t, int32(1), startCount.Load(), "Lookup never starts a runtime")
 	}
+	if variant.execService {
+		exerciseExecServiceNative(t, ctx, activeService, backend, admin, options, ns, w, request, result, execHooks)
+		require.Equal(t, int32(1), postCount.Load(), "Exec never creates an extra Pod")
+		require.Equal(t, int32(1), startCount.Load(), "Exec uses the original runtime")
+	}
 	mu.Lock()
 	ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
 	mu.Unlock()
 	for _, bridge := range ownedBridges {
-		if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
+		if execHooks != nil && execHooks.expectedFailure(bridge) {
+			requireExecServiceFailedBridgeJoined(t, bridge)
+		} else if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
 			requireLiveLookupFailedBridgeJoined(t, bridge)
 		} else {
 			bridge.requireJoined(t)

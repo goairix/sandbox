@@ -128,6 +128,8 @@ type startupBridgeFixture struct {
 	stdout    int64
 	waited    bool
 	waitErr   error
+	// Default remains 10s; the long Exec fixture owns a finite 75s bridge.
+	timeout time.Duration
 	// A cold-create fixture may lose the actual activation response after the
 	// formal bridge consumes it. The original startup fixture leaves this false.
 	discardStdout bool
@@ -242,7 +244,11 @@ func (w startupChannelWriter) Write(data []byte) (int, error) {
 }
 
 func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	timeout := f.timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	f.mu.Lock()
 	f.cancel = cancel
@@ -250,7 +256,7 @@ func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
 		cancel()
 	}
 	f.mu.Unlock()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnrolledKubernetesStartupBridgeExec$", "-test.timeout=15s")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnrolledKubernetesStartupBridgeExec$", "-test.timeout="+(timeout+5*time.Second).String())
 	cmd.Env = []string{"ENROLLED_STARTUP_BRIDGE_EXEC=1", "GOMAXPROCS=1"}
 	cmd.ExtraFiles = []*os.File{f.namespace}
 	stdin, err := cmd.StdinPipe()
