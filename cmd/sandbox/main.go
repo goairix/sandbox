@@ -51,6 +51,7 @@ func main() {
 	}()
 
 	configPath := flag.String("config", "", "path to config file")
+	etcdStartup := flag.String("check-etcd-startup", "", "check mounted etcd deployment configuration without starting the API")
 	drainDeployment := flag.String("drain-kubernetes-deployment", "", "scale this in-cluster Deployment to zero and wait for its Pods")
 	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
 	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
@@ -68,6 +69,15 @@ func main() {
 	auditOwners := flag.Bool("audit-workspace-owners", false, "read-only audit of workspace owners; does not start pools or API")
 	recoverOwnerHash := flag.String("recover-workspace-owner", "", "recover only this audited workspace hash after exact runtime/state/lease checks; does not start API")
 	flag.Parse()
+	supplied := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
+	if handled, checkErr := runEtcdStartupCheck(context.Background(), supplied, flag.Args(), *etcdStartup, checkEtcdStartup); handled {
+		if checkErr != nil {
+			log.Fatalf("etcd startup check failed: %v", checkErr)
+		}
+		log.Print("etcd startup check passed")
+		return
+	}
 	if (*auditOwners || *recoverOwnerHash != "") && (*drainRelease || *drainDeployment != "" || *resumeDeployment != "" || *verifyBackendFingerprint) {
 		log.Fatal("workspace owner audit/recovery cannot be combined with deployment drain/resume/verification")
 	}
