@@ -44,6 +44,7 @@ type Options struct {
 	TaskWorkspaceSyncRecyclingBudget *TaskWorkspaceSyncBudgetOptions
 	LocalRuntimeRelease              *LocalRuntimeReleaseOptions
 	TaskRuntimeTerminationIssuer     TaskRuntimeTerminationIssuer
+	PreparationInventory             *PreparationInventoryOptions
 }
 
 type Backend struct {
@@ -73,10 +74,16 @@ type Backend struct {
 	workspaceSyncBudget                       *taskWorkspaceSyncBudgetPin
 	localRuntimeRelease                       *LocalRuntimeReleaseOptions
 	taskRuntimeTerminationIssuer              TaskRuntimeTerminationIssuer
+	preparationInventory                      *PreparationInventoryOptions
+	preparationDigest                         string
+	preparationTotal                          uint64
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validatePreparationInventory(o.PreparationInventory); err != nil {
+		return err
+	}
 	if err := validateLocalRuntimeRelease(o); err != nil {
 		return err
 	}
@@ -200,6 +207,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
+	if o.PreparationInventory != nil {
+		owned := *o.PreparationInventory
+		o.PreparationInventory = &owned
+	}
 	if o.LocalRuntimeRelease != nil {
 		owned := *o.LocalRuntimeRelease
 		o.LocalRuntimeRelease = &owned
@@ -281,6 +292,14 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b.authorityClock = o.Clock
 	b.localRuntimeRelease = o.LocalRuntimeRelease
 	b.taskRuntimeTerminationIssuer = o.TaskRuntimeTerminationIssuer
+	b.preparationInventory = o.PreparationInventory
+	if o.PreparationInventory != nil {
+		b.preparationDigest = preparationProfileDigest(o.Namespace, o.Identity, o.PreparationInventory)
+		b.preparationTotal = 32
+		for _, count := range o.PreparationInventory.QuotaSlots {
+			b.preparationTotal += uint64(count)
+		}
+	}
 	if o.PublicationTrust != nil {
 		b.publicationAuthorityID = o.PublicationTrust.AuthorityID
 		b.publicationTarget = o.PublicationTrust.Target
