@@ -121,17 +121,18 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 		return result, err
 	}
 	defer s.backend.ReleaseCreationClaim(context.Background(), claim)
-	control, err := s.backend.LoadControl(ctx, w.Partition(), i.SandboxID)
+	read, err := s.backend.ReadWorkspaceSnapshot(ctx, w)
 	if err != nil {
 		return result, err
 	}
-	if control == nil || control.IntentID != intent || control.WorkspaceHash != w.Hash() || control.Generation != claim.Reference().Generation {
+	if read == nil || read.View == nil {
 		return result, state.ErrConflict
 	}
-	snapshot, err := s.backend.LoadSnapshot(ctx, w.Partition(), i.SandboxID, control.Snapshot)
-	if err != nil {
-		return result, err
+	control := read.View.Records().Control
+	if control == nil || control.SandboxID != i.SandboxID || control.IntentID != intent || control.WorkspaceHash != w.Hash() || control.Generation != claim.Reference().Generation {
+		return result, state.ErrConflict
 	}
+	snapshot := read.Snapshot
 	if snapshot == nil {
 		return result, state.ErrCorruptRecord
 	}
