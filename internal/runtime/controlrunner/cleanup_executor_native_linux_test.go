@@ -51,8 +51,9 @@ const cleanupExecutorPayload = "cleanup executor archive\n"
 
 type cleanupExecutorSetup struct {
 	localReleaseNativeSetup
-	Role string
-	Task state.TaskReference
+	Role                                     string
+	Task                                     state.TaskReference
+	Recovery, RecoveryStage, WorkerDirectory string
 }
 
 // The child selector has three actual process roles. Only worker drops to the
@@ -165,13 +166,26 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 	require.Zero(t, e)
 	_, _, e = syscall.AllThreadsSyscall(unix.SYS_SETRESUID, 1000, 1000, 1000)
 	require.Zero(t, e)
+	if s.Recovery != "" && s.RecoveryStage == "cleanup" {
+		cleanupExecutorRecoveryRemove(t, s)
+		return
+	}
 	kernel, err := launcher.BootstrapWorkspaceSyncWorker()
 	require.NoError(t, err)
-	dir, err := os.MkdirTemp("/tmp", "cleanup-executor-worker-")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-	for _, name := range []string{"spool", "target", "target/cleanup-executor"} {
-		require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0700))
+	dir := s.WorkerDirectory
+	if dir == "" {
+		dir, err = os.MkdirTemp("/tmp", "cleanup-executor-worker-")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		for _, name := range []string{"spool", "target", "target/cleanup-executor"} {
+			require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0700))
+		}
+	} else if s.Recovery != "" && s.RecoveryStage == "first" {
+		// The container deliberately has neither CHOWN nor DAC_OVERRIDE. The
+		// actual ordinary worker owns the persistent recovery tree from birth.
+		for _, name := range []string{"", "spool", "target", "target/cleanup-executor"} {
+			require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0700))
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
@@ -224,6 +238,10 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 			Storage:  state.LocalCleanupStorage{Identity: s.WorkspaceStorage, Bucket: s.WorkspaceBucket, Directory: filepath.Join(dir, "target")},
 			ClaimTTL: 120 * time.Second, JobTimeout: 90 * time.Second, ArchiveTimeout: 60 * time.Second, MaxActive: 32,
 		},
+	}
+	if s.Recovery != "" {
+		cleanupExecutorRecoveryExecute(t, ctx, s, options, dir, tlsConfig)
+		return
 	}
 	for _, change := range []func(*state.Options){
 		func(o *state.Options) { o.WorkerControl = &state.WorkerControlOptions{SessionTTL: 59 * time.Second} },
@@ -681,10 +699,13 @@ func TestCleanupExecutorNative(t *testing.T) {
 		t.Skip("explicit owned cleanup executor Linux fixture required")
 	}
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
+	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
+	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
 }
 
-func cleanupExecutorNativeCase(t *testing.T) {
+func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	t.Helper()
+	require.LessOrEqual(t, len(recovery), 1)
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
 	dir, err := os.MkdirTemp("/tmp", "cleanup-executor-")
@@ -857,6 +878,9 @@ func cleanupExecutorNativeCase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, outcome)
 	s.Role, s.Task = "worker", task
+	if len(recovery) == 1 {
+		s.Recovery = recovery[0]
+	}
 	s.Runtime, s.RuntimeCertificate, s.RuntimeAddress = ri.Runtime, runtimeCert, reply.Address
 	s.Generation = ri.Generation
 	_, err = admin.Put(ctx, binding.Namespace+"meta/workspace_sync_recycling_budget", fmt.Sprintf(`{"version":2,"budget_id":%q,"slots_per_partition":1,"max_intent_bytes":16384}`, s.BudgetID))
@@ -864,15 +888,19 @@ func cleanupExecutorNativeCase(t *testing.T) {
 	slotKey := fmt.Sprintf("%sp/%02x/workspace-sync-recycling-slots/%s/00", binding.Namespace, task.Partition, s.BudgetID)
 	_, err = admin.Put(ctx, slotKey, fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, task.Partition))
 	require.NoError(t, err)
-	workerPath := filepath.Join(dir, "worker.json")
-	require.NoError(t, os.WriteFile(workerPath, observerNativeJSON(t, s), 0600))
-	worker := exec.Command(os.Args[0], "-test.run=^TestCleanupExecutorWorkerChild$", "-test.v", "-test.timeout=110s")
-	worker.Env = append(os.Environ(), "CLEANUP_EXECUTOR_CHILD_SETUP="+workerPath)
-	worker.Stdout, worker.Stderr = os.Stdout, os.Stderr
-	require.NoError(t, worker.Start())
-	workerErr := worker.Wait()
-	t.Logf("original cleanup worker Wait=%v", workerErr)
-	require.NoError(t, workerErr)
+	if s.Recovery != "" {
+		cleanupExecutorRunRecoveryWorkers(t, ctx, s, admin, apiState)
+	} else {
+		workerPath := filepath.Join(dir, "worker.json")
+		require.NoError(t, os.WriteFile(workerPath, observerNativeJSON(t, s), 0600))
+		worker := exec.Command(os.Args[0], "-test.run=^TestCleanupExecutorWorkerChild$", "-test.v", "-test.timeout=110s")
+		worker.Env = append(os.Environ(), "CLEANUP_EXECUTOR_CHILD_SETUP="+workerPath)
+		worker.Stdout, worker.Stderr = os.Stdout, os.Stderr
+		require.NoError(t, worker.Start())
+		workerErr := worker.Wait()
+		t.Logf("original cleanup worker Wait=%v", workerErr)
+		require.NoError(t, workerErr)
+	}
 	childErr := child.Wait()
 	waited = true
 	var exited *exec.ExitError

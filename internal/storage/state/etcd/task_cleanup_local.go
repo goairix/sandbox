@@ -10,7 +10,12 @@ import (
 // return to the original actor; none recreates a partition/session or bypasses
 // the original Claim and effect gates. Every failure retains its occupation.
 func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
-	err := b.cleanupArchiveAndFinalize(j)
+	var err error
+	if j.boundRecovery {
+		err = b.cleanupResumeBoundArchive(j)
+	} else {
+		err = b.cleanupArchiveAndFinalize(j)
+	}
 	if err == nil {
 		err = b.cleanupTerminateAndRelease(j)
 	}
@@ -26,10 +31,13 @@ func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
 		err = errors.Join(err, j.target.termination.Close())
 	}
 	j.effectsJoined = true
-	cleanup, stop := context.WithTimeout(context.Background(), b.requestTimeout)
-	joinErr := b.joinCleanupRun(cleanup, j)
-	stop()
-	err = errors.Join(err, joinErr)
+	// A failed recovery preflight has not created this process's Run. Never
+	// join the persisted old Run merely because this goroutine has returned.
+	if j.runID != "" {
+		cleanup, stop := context.WithTimeout(context.Background(), b.requestTimeout)
+		err = errors.Join(err, b.joinCleanupRun(cleanup, j))
+		stop()
+	}
 	if err == nil {
 		_, err = j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "settle"})
 	}
@@ -180,11 +188,19 @@ func (b *Backend) cleanupArchiveAndFinalize(j *cleanupLocalJob) (resultErr error
 	if err != nil {
 		return err
 	}
-	stopRenew = b.renewCleanupClaim(j, j.claim)
-	if err = j.progress("", j.pending("finalize", StageReference{}), nil); err != nil {
+	return b.cleanupFinalizeBoundArchive(j, slot)
+}
+
+// Both normal rollover and cold bound recovery arrive with the original
+// managed Claim. Finalize repeats its real historical/dual-drain/source/target
+// checks; a manifest preflight is never substituted for that authority.
+func (b *Backend) cleanupFinalizeBoundArchive(j *cleanupLocalJob, slot uint32) (resultErr error) {
+	stopRenew := b.renewCleanupClaim(j, j.claim)
+	defer func() { resultErr = errors.Join(resultErr, stopRenew()) }()
+	if err := j.progress("", j.pending("finalize", StageReference{}), nil); err != nil {
 		return err
 	}
-	finalized, err := b.FinalizeTaskWorkspaceSyncLocal(ctx, j.claim, slot, target.destination, b.localCleanup.Worker)
+	finalized, err := b.FinalizeTaskWorkspaceSyncLocal(j.ctx, j.claim, slot, j.target.destination, b.localCleanup.Worker)
 	if err != nil || !finalized.LocalComplete {
 		return errors.Join(ErrOutcomeUnknown, err)
 	}

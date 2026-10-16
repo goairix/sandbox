@@ -133,6 +133,10 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 	if err != nil {
 		return nil, err
 	}
+	recoveryOld, recoveryNext, err := cleanupFutureRecoveryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	e := taskFence{key: eKey, value: active, create: math.MaxInt64, mod: math.MaxInt64}
 	s := taskFence{key: sKey, value: slotValue, create: math.MaxInt64, mod: math.MaxInt64}
 	tir := make([]clientv3.Cmp, 0, 12)
@@ -177,6 +181,7 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 		b.cleanupProjection("rotate", appendCopies(worker, (taskFence{key: eKey, value: selecting, create: math.MaxInt64, mod: math.MaxInt64}).comparisons()), put(eKey, selecting), taskProtoPutResponse(1)),
 		b.cleanupProjection("reserve", appendCopies(worker, tir, (taskFence{key: eKey, value: selecting, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), []clientv3.Cmp{clientv3.Compare(clientv3.CreateRevision(sKey), "=", 0)}), []*pb.RequestOp{taskProtoPut(sKey, slotValue, 0), taskProtoPut(eKey, occupied, 0)}, taskProtoPutResponse(2)),
 		b.cleanupProjection("progress", appendCopies(worker, e.comparisons(), s.comparisons()), put(eKey, active), taskProtoPutResponse(1)),
+		b.cleanupProjection("recovery-run", appendCopies(worker, tir, (taskFence{key: eKey, value: recoveryOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, recoveryNext), taskProtoPutResponse(1)),
 	}
 	// The managed creation projection uses the same claim constructor and
 	// creation mutation as public ClaimTask. Extra pins do not enter c.fences.
@@ -209,7 +214,9 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 	return result, nil
 }
 
-func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, settled string, err error) {
+// Maximal canonical fields are only protobuf projections; they never escape
+// inventory construction as a worker, manifest or effect-bearing permission.
+func cleanupFutureExecutionRecord(r cleanupExecutionRecord) cleanupExecutionRecord {
 	id := "ffffffff-ffff-4fff-bfff-ffffffffffff"
 	r.Run = &cleanupExecutionRun{ID: id, Worker: launcher.WorkspaceSyncWorkerReference{Incarnation: id, BootID: id, PID: math.MaxInt32, StartTicks: math.MaxUint64, UID: math.MaxUint32, GID: math.MaxUint32, PIDNamespaceDev: math.MaxUint64, PIDNamespaceIno: math.MaxUint64, MountNamespaceDev: math.MaxUint64, MountNamespaceIno: math.MaxUint64, ExecutableDev: math.MaxUint64, ExecutableIno: math.MaxUint64}}
 	r.Pending = &cleanupExecutionPending{Purpose: "owner-release", ClaimID: id, StageID: strings.Repeat("s", 128), RequestID: strings.Repeat("r", 128), AttemptID: id, Digest: cleanupWirePaddingDigest(), LeaseID: math.MaxInt64}
@@ -217,6 +224,11 @@ func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, set
 	// project that full coordinate width independently of UUID-shaped run IDs.
 	r.Archive = &cleanupExecutionArchive{StoreID: cleanupWirePaddingDigest(), Slot: 63, BindingDigest: cleanupWirePaddingDigest()}
 	r.Confirmed = "owner-released"
+	return r
+}
+
+func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, settled string, err error) {
+	r = cleanupFutureExecutionRecord(r)
 	active, err = encodeCleanupExecution(r)
 	if err != nil {
 		return
@@ -230,5 +242,21 @@ func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, set
 	r.Phase, r.Confirmed = "settled", "settled"
 	r.Release = &cleanupExecutionRelease{CreateRevision: math.MaxInt64, Digest: cleanupWirePaddingDigest()}
 	settled, err = encodeCleanupExecution(r)
+	return
+}
+
+func cleanupFutureRecoveryValues(r cleanupExecutionRecord) (prior, next string, err error) {
+	r = cleanupFutureExecutionRecord(r)
+	r.Confirmed, r.Pending, r.Run.Joined = "archive-bound", nil, true
+	prior, err = encodeCleanupExecution(r)
+	if err != nil {
+		return
+	}
+	// The real transition preserves archive coordinates and occupation, but
+	// installs a distinct current Run and its single pending Claim candidate.
+	id := "eeeeeeee-eeee-4eee-beee-eeeeeeeeeeee"
+	r.Run.ID, r.Run.Worker.Incarnation, r.Run.Joined = id, id, false
+	r.Pending = &cleanupExecutionPending{Purpose: "claim", ClaimID: id}
+	next, err = encodeCleanupExecution(r)
 	return
 }

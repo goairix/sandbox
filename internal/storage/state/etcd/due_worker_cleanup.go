@@ -40,6 +40,12 @@ type cleanupLocalJob struct {
 	// they cannot authorize a cold job or another progress attempt.
 	pendingProgress *cleanupLocalProgress
 
+	// Bound recovery reuses this same registry job and physical goroutine.
+	// Only its completed manifest preflight publishes the finite coordinates;
+	// the actor then owns the single new-Run CAS and original Claim pipeline.
+	boundRecovery bool
+	boundArchive  *cleanupExecutionArchive
+
 	// started/request and registry membership use archiveLife.mu. The physical
 	// owner sets effectsJoined only after all transports/files/renewal/claims
 	// return, before requesting post-work metadata settlement.
@@ -258,6 +264,8 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 	switch request.kind {
 	case "claim":
 		job.step = "rollover"
+	case "resume-bound":
+		job.step = "recovery-run"
 	case "settle":
 		job.step = "release-proof"
 	default:
@@ -332,7 +340,11 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.step = "issuer"
 	case "issuer":
 		err = b.cleanupIssuer(ctx, j.target)
-		if j.state == nil {
+		if j.boundRecovery {
+			// Start the same owned goroutine before obtaining a native owner
+			// for new-Run admission: manifest/tar validation can perform IO.
+			j.step = "physical"
+		} else if j.state == nil {
 			j.step = "initialize"
 		} else if j.state.record.Phase == "selecting" {
 			j.step = "reserve"
@@ -383,6 +395,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		r := j.state.record
 		r.Pending = &cleanupExecutionPending{Purpose: "claim", ClaimID: uuid.NewString()}
 		err = b.updateCleanupRun(owner, j, r)
+		j.step = "claim-bundle"
+	case "recovery-run":
+		err = b.beginCleanupRecoveryRun(owner, j)
 		j.step = "claim-bundle"
 	case "claim-state":
 		j.state, err = b.readCleanupClaimState(owner, j.bundle, j.state)
@@ -435,10 +450,13 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 			if j.started {
 				return ErrConflict
 			}
-			// Without a genuine terminal seal, preserve the original Run/S;
-			// a joined diagnostic alone does not authorize physical recovery.
-			j.result.Reason = "missing-release-proof"
-			j.step = "done"
+			if j.state.record.Confirmed == "archive-bound" && j.state.record.Archive != nil {
+				j.boundRecovery = true
+				j.step = "bundle"
+			} else {
+				j.result.Reason = "missing-release-proof"
+				j.step = "done"
+			}
 		} else {
 			j.step = "terminal-history"
 		}
