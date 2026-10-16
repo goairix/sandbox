@@ -40,7 +40,7 @@
 - [x] Step2 正指数61441实际行为RED后guard补强，9组codec GREEN/race通过，Root提交101082b。identity compile RED后5组GREEN/race通过，Root提交ef92972；原workspace固定hash不变，detached sync拒绝。
 - [x] Step3 business compile RED后完整配置/原IDs恢复/单准入/Close和有限acquire仲裁实现；7组host GREEN/race通过，含实际loopback Backend查询取消/handler/server join（不冒充运行时成功）。Root提交ea1845d。CompareLoss实际unknown+ErrConflict，一次ResolveStage确认Aborted后才恢复竞争请求，unknown保留原参考。
 - [x] Step4 native01原构建18ed87/session74071→0d9afd exit0；Root核对actual17 runner9134/launcher2007、prepost/逐成员/scripts/真实ELF与Go1.25.6 Linuxarm64 CGO0。Root运行1f09c2/session25351→b63639 exit0，3场景PASS/noSkip，3launcher/9bridge IO/3TLS etcd join，attach/container0/noOOM，精确b438e9900905ba76357d772bd1400779eec6b99074ebce91883c95aeae8aba3c删除/inventory空。最终4pkg vet01退出0/raw0B/实际9137输入。Root测试提交4864e09，无大N或新Destroy验收。
-- [ ] Step5 原BASE→最终HEAD唯一wholeTask review，同pair修复；tracked验收/关闭本OWN，继续HTTP/Manager与生产接线，不在Task边界停下。
+- [x] Step5 原BASE36ec725→HEADecb5d4b唯一fresh wholeTask review：Spec compliant / Approved，无Critical或Important。验收记录见docs/superpowers/reports/2026-10-16-etcd-detached-business-acquisition-verification.md；已知取消/关闭诊断保留，native原始日志实际84物理行（此前105行计数有误）。关闭本OWN后继续HTTP/Manager与生产接线。
 
 Ruling: 细化已批准无workspace创建和principal/key幂等，不引入fake storage path。固定资源/部署跨profile路由不纳入当前Task；预检发现原Backend读取或Close契约不足时，Root裁决最小实际接点，不另起重复任务、不重复问用户授权。
 
