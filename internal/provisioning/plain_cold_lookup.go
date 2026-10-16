@@ -52,15 +52,18 @@ func decodeColdDispatch(wire []byte) (plainColdDispatch, error) {
 	return d, nil
 }
 
-// Lookup uses one original admission through metadata, retained history, the
-// authenticated native exchange and final fences. It has no write side effects.
-func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*PlainColdLookupResult, error) {
-	call, err := s.enter(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer s.leave(call)
-	ctx = call.context
+type plainColdLoadedTarget struct {
+	view     *state.SandboxReadView
+	control  *state.SandboxControlRecord
+	capsule  plainColdCapsule
+	dispatch plainColdDispatch
+	history  *state.SandboxRuntimeReadResult
+	business *sandboxsnapshot.Snapshot
+}
+
+// loadColdTarget reads the original fixed deployment profile and retained
+// target history. Its result is private metadata, never execution authority.
+func (s *PlainColdService) loadColdTarget(ctx context.Context, sandboxID string) (*plainColdLoadedTarget, error) {
 	read, err := s.backend.ReadSandboxSnapshot(ctx, sandboxID)
 	if err != nil {
 		return nil, err
@@ -112,6 +115,23 @@ func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*Plain
 			return nil, ErrPlainColdProfile
 		}
 	}
+	return &plainColdLoadedTarget{view: read.View, control: c, capsule: capsule, dispatch: dispatch, history: history, business: business}, nil
+}
+
+// Lookup uses one original admission through metadata, retained history, the
+// authenticated native exchange and final fences. It has no write side effects.
+func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*PlainColdLookupResult, error) {
+	call, err := s.enter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.leave(call)
+	ctx = call.context
+	loaded, err := s.loadColdTarget(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	c, capsule, dispatch, history := loaded.control, loaded.capsule, loaded.dispatch, loaded.history
 	identity := p.RuntimeIdentityContext{SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: p.RuntimeReference(*c.Runtime)}
 	enrollment := history.Publication.Enrollment.Request
 	destination, credential, err := s.destination(s.target(dispatch.Pod, c.Runtime.UID), state.ColdBootstrapMaterial{RuntimeCertificate: enrollment.RuntimeCertificate, IssuerCertificate: enrollment.IssuerCertificate}, identity)
@@ -139,13 +159,13 @@ func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*Plain
 	if err := checkTTL(); err != nil {
 		return nil, err
 	}
-	if err := s.backend.ConfirmSandboxView(ctx, read.View); err != nil {
+	if err := s.backend.ConfirmSandboxView(ctx, loaded.view); err != nil {
 		return nil, err
 	}
 	if err := checkTTL(); err != nil {
 		return nil, err
 	}
-	result := &PlainColdLookupResult{RequestID: capsule.RequestID, IntentID: c.IntentID, SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: identity.Runtime, CreatedAt: dispatch.CreatedAt, ExpiresAt: c.ExpiresAt, Business: business}
+	result := &PlainColdLookupResult{RequestID: capsule.RequestID, IntentID: c.IntentID, SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: identity.Runtime, CreatedAt: dispatch.CreatedAt, ExpiresAt: c.ExpiresAt, Business: loaded.business}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {

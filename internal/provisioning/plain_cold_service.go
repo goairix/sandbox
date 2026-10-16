@@ -205,7 +205,11 @@ func coldHash(wire []byte) string {
 }
 
 func (s *PlainColdService) enter(ctx context.Context) (*plainColdCall, error) {
-	if s == nil || s.self != s || ctx == nil {
+	return s.enterFor(ctx, 20*time.Second)
+}
+
+func (s *PlainColdService) enterFor(ctx context.Context, timeout time.Duration) (*plainColdCall, error) {
+	if s == nil || s.self != s || ctx == nil || timeout <= 0 {
 		return nil, ErrPlainColdProfile
 	}
 	s.mu.Lock()
@@ -217,7 +221,7 @@ func (s *PlainColdService) enter(ctx context.Context) (*plainColdCall, error) {
 		return nil, err
 	}
 	call := &plainColdCall{}
-	call.context, call.cancel = context.WithTimeout(ctx, 20*time.Second)
+	call.context, call.cancel = context.WithTimeout(ctx, timeout)
 	s.active[call] = struct{}{}
 	s.wg.Add(1)
 	return call, nil
