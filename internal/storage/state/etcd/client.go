@@ -50,6 +50,8 @@ type Options struct {
 	SnapshotCacheBytes uint64
 	// WorkerControl opts into a pre-provisioned fixed scheduling profile.
 	WorkerControl *WorkerControlOptions
+	// LocalCleanup opts into bounded known-Task execution on the original actor.
+	LocalCleanup *LocalCleanupOptions
 }
 
 type Backend struct {
@@ -84,10 +86,14 @@ type Backend struct {
 	preparationTotal                          uint64
 	snapshotReads                             *snapshotReadCache
 	workerControl                             *workerBackend
+	localCleanup                              *LocalCleanupOptions
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validateLocalCleanupOptions(o); err != nil {
+		return err
+	}
 	if err := validateWorkerControl(o.WorkerControl); err != nil {
 		return err
 	}
@@ -220,6 +226,11 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
+	cleanupOptions, err := copyLocalCleanupOptions(o)
+	if err != nil {
+		return nil, err
+	}
+	o.LocalCleanup = cleanupOptions
 	if o.WorkerControl != nil {
 		owned := *o.WorkerControl
 		o.WorkerControl = &owned
@@ -309,6 +320,7 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b.execVerifier = execVerifier
 	b.authorityClock = o.Clock
 	b.localRuntimeRelease = o.LocalRuntimeRelease
+	b.localCleanup = o.LocalCleanup
 	b.taskRuntimeTerminationIssuer = o.TaskRuntimeTerminationIssuer
 	b.preparationInventory = o.PreparationInventory
 	if o.PreparationInventory != nil {

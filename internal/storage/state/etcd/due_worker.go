@@ -75,6 +75,13 @@ type DueWorker struct {
 	status              DueWorkerStatus
 	err                 error
 	workDone, done      chan struct{}
+
+	// The fixed mailbox shares this original actor and lifetime lock. Jobs
+	// never retain a native owner while executing physical work outside it.
+	cleanupJobs   [32]*cleanupLocalJob
+	cleanupNext   int
+	cleanupWake   chan struct{}
+	cleanupSealed bool
 }
 
 func copyDueWorkerOptions(options DueWorkerOptions) (DueWorkerOptions, error) {
@@ -133,6 +140,7 @@ func (b *Backend) StartDueWorker(ctx context.Context, options DueWorkerOptions) 
 	owned, cancel := context.WithCancel(s.ctx)
 	w := &DueWorker{backend: b, session: s, ctx: owned, cancel: cancel, options: options, workDone: make(chan struct{}), done: make(chan struct{}), status: DueWorkerStatus{Session: s.Reference(), Running: true, Phase: "starting"}}
 	w.self = w
+	w.cleanupWake = make(chan struct{}, 1)
 
 	// Registration precedes all further native startup work, so Close and
 	// external original releases also join a partially initialized actor.

@@ -207,7 +207,9 @@ func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, set
 	id := "ffffffff-ffff-4fff-bfff-ffffffffffff"
 	r.Run = &cleanupExecutionRun{ID: id, Worker: launcher.WorkspaceSyncWorkerReference{Incarnation: id, BootID: id, PID: math.MaxInt32, StartTicks: math.MaxUint64, UID: math.MaxUint32, GID: math.MaxUint32, PIDNamespaceDev: math.MaxUint64, PIDNamespaceIno: math.MaxUint64, MountNamespaceDev: math.MaxUint64, MountNamespaceIno: math.MaxUint64, ExecutableDev: math.MaxUint64, ExecutableIno: math.MaxUint64}}
 	r.Pending = &cleanupExecutionPending{Purpose: "owner-release", ClaimID: id, StageID: strings.Repeat("s", 128), RequestID: strings.Repeat("r", 128), AttemptID: id, Digest: cleanupWirePaddingDigest(), LeaseID: math.MaxInt64}
-	r.Archive = &cleanupExecutionArchive{StoreID: id, Slot: 63, BindingDigest: cleanupWirePaddingDigest()}
+	// Recovery stores encode their random 32-byte IDs as 64 hex characters;
+	// project that full coordinate width independently of UUID-shaped run IDs.
+	r.Archive = &cleanupExecutionArchive{StoreID: cleanupWirePaddingDigest(), Slot: 63, BindingDigest: cleanupWirePaddingDigest()}
 	r.Confirmed = "owner-released"
 	active, err = encodeCleanupExecution(r)
 	if err != nil {

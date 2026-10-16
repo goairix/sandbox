@@ -205,7 +205,11 @@ func (x *taskLocalRuntimeExecution) applyProvider(ctx context.Context, i int) er
 		x.cleanup.Slots[i] = slot
 		return x.storeProvider(ctx)
 	}
-	if observation.Absent || observation.UID == "" || observation.ResourceVersion == "" || i == 0 && (observation.Deleting || observation.Retained) || i == 1 && (!observation.Retained || observation.Deleting) || i == 6 && (!observation.Retained || !observation.Deleting) {
+	// Production enrolled Pods are born retained. Step zero still records its
+	// intent and consumes Apply's exact preflight; an already retained Pod uses
+	// its guarded no-op and the same real readback below. Existing intents or
+	// unknown results remain rejected above and never receive a resend grant.
+	if observation.Absent || observation.UID == "" || observation.ResourceVersion == "" || i == 0 && observation.Deleting || i == 1 && (!observation.Retained || observation.Deleting) || i == 6 && (!observation.Retained || !observation.Deleting) {
 		return ErrConflict
 	}
 	claim := localRuntimeClaimWire(x.a.claim)

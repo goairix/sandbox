@@ -32,7 +32,7 @@ Named spec的Binding constraints全部适用。原256分区/4Relist/20MiB/s/100c
 
 - [x] Step1 read-only preflight：当前ledger Rulings1–6及精确preflight冻结原actor mailbox、两行CAS持久32、64节点受控claim、run/join及冷未join保留、全部新旧consumer请求128KiB预检，并补齐实际producer/snapshot2、原幂等兼容和缓存记账；源码尚未实现。首次只授权producer tests-only，所有产品冻结至Root RED/audit。
 - [x] Step2 实际producer/snapshot2已实现并定向验证：AcquireIntent可选LocalCleanupPlan、严格版本/双摘要、旧v1默认重试兼容、深复制/完整cacheweight及真实PlainCold显式local workspace接线。Root验证56个状态层+12个创建入口测试组host/race通过、两包Linuxvet通过；真实行为RED后修复opaque null载荷与每位cache读取者的placement绑定，全部输入/工具/归档及测试资源清理已核对。范围和日志限制见2026-10-17-etcd-cleanup-snapshot-verification.md；不代表本Task或物理cleanup消费者完成。
-- [ ] Step3 已实现永久记录、占用/轮转CAS、原预算与Claim流水线复用，并补齐22类旧链操作的142个Txn和5个Lease预检形状。首片19组及本片47组host/race、Linuxvet通过，分别见2026-10-17-etcd-cleanup-slot-verification.md和2026-10-17-etcd-cleanup-wire-verification.md。实际run/join、物理终态独立结算、正向managedGrant仍待后续完成；不能记作完整持久32执行能力。
-- [ ] Step4 实际cleanup消费者与mailbox回归先RED；接通原关闭排空/归档同步/终止安全释放，支持profile与未知恢复，绑定真实槽及原actor最终join，不跳过效果，不重写原协议；通过针对性验证后小步提交。
-- [ ] Step5 新Linux真实组合与实际etcd32槽争抢；独立新源码/工具/输入/运行与清理核对。不是全部旧矩阵、全Pod32容量或生产环境切换。
+- [ ] Step3 永久记录、占用/轮转CAS、原预算与Claim复用和22类142Txn/5Lease预检已实现；在首条真实链中进一步验证了两次正向managedGrant、实际run/join及release proof绑定的独立结算。首片19组、本片47组及消费者44组定向host/race与Linuxvet通过；记录分别见slot、wire、consumer验证报告。跨实例33条真实Task与恢复仍待验收，不能记作完整持久32执行能力。
+- [ ] Step4 明确Task消费者与原actor mailbox已接通关闭排空、归档同步、两Claim、终止、安全释放及真实join；首条Linux complete通过，最终44组host/race与Linuxvet通过，见2026-10-17-etcd-cleanup-consumer-verification.md。cold joined与未知阶段恢复、四个后续native场景及deployment loader仍未完成，不把首片记为整Task完成。
+- [ ] Step5 新Linux complete已通过并核对独立源码/工具/输入/真实退出与清理；bound-recovery、observer-ack-recovery、persistent32/33真实Task及close-join仍必做。不是全部旧矩阵、全Pod32容量或生产环境切换。
 - [ ] Step6 唯一完整Task spec+quality review从immutableBASE覆盖所有切片，same-pair限定修复及范围验收。关闭本Task后继续实际pending发现/共享actor/worker角色与完整迁移，不停止。

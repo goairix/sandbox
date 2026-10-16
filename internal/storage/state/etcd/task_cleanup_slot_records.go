@@ -79,6 +79,8 @@ type cleanupExecutionPending struct {
 }
 
 type cleanupExecutionArchive struct {
+	// StoreID is the recovery store's random 32-byte ID encoded as canonical
+	// lowercase hex. It is a retained-store coordinate, not archive authority.
 	StoreID       string `json:"store_id"`
 	Slot          uint32 `json:"slot"`
 	BindingDigest string `json:"binding_digest"`
@@ -147,7 +149,7 @@ func (r cleanupExecutionRecord) Validate() error {
 	default:
 		return ErrInvalidRecord
 	}
-	if r.Run != nil && (!cleanupRunUUID(r.Run.ID) || r.Run.Worker.Validate() != nil) || r.Pending != nil && !r.Pending.valid() || r.Archive != nil && (!validPreparationUUID(r.Archive.StoreID) || r.Archive.Slot >= 64 || !validHexDigest(r.Archive.BindingDigest)) || r.Release != nil && (r.Release.CreateRevision <= 0 || !validHexDigest(r.Release.Digest)) {
+	if r.Run != nil && (!cleanupRunUUID(r.Run.ID) || r.Run.Worker.Validate() != nil) || r.Pending != nil && !r.Pending.valid() || r.Archive != nil && (!validHexDigest(r.Archive.StoreID) || r.Archive.Slot >= 64 || !validHexDigest(r.Archive.BindingDigest)) || r.Release != nil && (r.Release.CreateRevision <= 0 || !validHexDigest(r.Release.Digest)) {
 		return ErrInvalidRecord
 	}
 	switch r.Phase {

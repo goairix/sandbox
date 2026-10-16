@@ -20,12 +20,24 @@ func (w *DueWorker) loop() error {
 		if err := w.renewIfNeeded(w.ctx); err != nil {
 			return err
 		}
+		cleanupAt, err := w.cleanupTurn()
+		if err != nil {
+			return err
+		}
+		// Cleanup gets only one finite charged turn before original due work.
+		// A received Claim continuation has already joined before renewing.
+		if err := w.renewIfNeeded(w.ctx); err != nil {
+			return err
+		}
 		wake, err := w.turn(w.ctx)
 		if err != nil {
 			return err
 		}
 		if wake.IsZero() {
 			continue
+		}
+		if !cleanupAt.IsZero() && cleanupAt.Before(wake) {
+			wake = cleanupAt
 		}
 
 		// A budget/timer wait cannot postpone renewal of the same original
@@ -47,6 +59,13 @@ func (w *DueWorker) loop() error {
 			}
 			return w.ctx.Err()
 		case <-timer.C:
+		case <-w.cleanupWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
 	}
 }

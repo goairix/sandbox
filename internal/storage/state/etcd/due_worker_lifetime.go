@@ -29,6 +29,9 @@ func (b *Backend) stopDueWorker(s *WorkerSession, p *WorkerPartitionClaim, share
 // can join work without waiting on final done, which itself needs that cleanup.
 func (w *DueWorker) finish(workErr error) {
 	w.cancel()
+	// Seal and refuse unstarted continuations before joining jobs; otherwise
+	// a job waiting on this actor and an actor waiting on that job deadlock.
+	w.stopCleanupJobs()
 	if errors.Is(workErr, context.Canceled) && !errors.Is(workErr, ErrOutcomeUnknown) {
 		workErr = nil
 	}
