@@ -5,7 +5,9 @@ package controlrunner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -279,11 +281,66 @@ func exerciseLiveLookupNative(t *testing.T, ctx context.Context, service *provis
 		require.NoError(t, secondary.Close())
 		requireLiveLookupFailedBridgeJoined(t, b)
 	}
+	rejectLiveLookupUnauthenticatedEOF(t, ctx, options, read.Publication, control, created.Runtime)
 	closeLiveLookupNativeGate(t, ctx, options, read.Publication, control, created.Runtime)
 	got, err = service.Lookup(ctx, request.SandboxID)
 	require.ErrorIs(t, err, provisioning.ErrPlainColdUnavailable, "actual target gate closure overrides active etcd metadata")
 	require.Nil(t, got)
 	t.Log("live Lookup actual v1/v2 metadata, owned history/config, TTL before/after health, final state fence, target gate and Close/IO join verified")
+}
+
+// This calls the original protected Supervisor through the original bridge.
+// A correct authenticated request frame must still send TLS close_notify.
+func rejectLiveLookupUnauthenticatedEOF(t *testing.T, ctx context.Context, o provisioning.PlainColdOptions, publication *state.RuntimeEnrolledPublicationEntry, control state.SandboxControlRecord, runtime p.RuntimeReference) {
+	t.Helper()
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cfg, err := launcherconfig.Decode(o.LauncherConfig)
+	require.NoError(t, err)
+	verifier, err := p.NewManagementVerifier(cfg.TrustBinding(), cfg.Roots)
+	require.NoError(t, err)
+	credential, err := p.NewManagementTLSCredential(o.IssuerPrivateKey, o.IssuerCertificate, "command_issuer")
+	require.NoError(t, err)
+	defer credential.Close()
+	identity := p.RuntimeIdentityContext{SandboxID: control.SandboxID, WorkspaceHash: control.WorkspaceHash, Generation: control.Generation, Runtime: runtime}
+	config, err := p.NewManagementTLSConfig(p.ManagementTLSOptions{Verifier: verifier, Clock: nativeFixtureClock{}, Credential: credential, PeerCertificate: publication.Enrollment.Request.RuntimeCertificate, PeerRuntime: &identity})
+	require.NoError(t, err)
+	bridge, err := kube.NewEnrolledBridgeClient(o.API)
+	require.NoError(t, err)
+	defer bridge.Close()
+	target := kube.EnrolledBridgeTarget{PodName: runtime.ID, PodUID: runtime.UID, NodeName: o.NodeName, NodeUID: o.NodeUID, NodeBootID: o.NodeBootID, LogicalID: control.SandboxID, CreationIntentID: control.IntentID, Generation: control.Generation, Authority: cfg.TrustBinding(), ContractDigest: cfg.ContractDigest, UID: cfg.UID, GID: cfg.GID, NetworkAllowed: cfg.NetworkAllowed}
+	raw, err := bridge.Dial(bounded, target)
+	require.NoError(t, err)
+	defer raw.Close()
+	deadline, _ := bounded.Deadline()
+	require.NoError(t, raw.SetDeadline(deadline))
+	conn := tls.Client(raw, config)
+	defer conn.Close()
+	require.NoError(t, conn.HandshakeContext(bounded))
+	var nonce [32]byte
+	_, err = rand.Read(nonce[:])
+	require.NoError(t, err)
+	request := ct.RuntimeHealthEnvelope{Version: 1, Purpose: ct.RuntimeHealthPurpose, Identity: identity, DataGateEpoch: control.DataGateEpoch, Nonce: hex.EncodeToString(nonce[:])}
+	require.NoError(t, ct.WriteRuntimeHealthRequest(conn, request))
+	half, ok := raw.(interface{ CloseWrite() error })
+	require.True(t, ok)
+	// Deliberately omit conn.CloseWrite: only unauthenticated raw FIN is sent.
+	require.NoError(t, half.CloseWrite())
+	response, healthErr := ct.ReadRuntimeHealthResponse(conn)
+	// Finish the original adapter/status even on the old invalid-success path,
+	// so the RED cause cannot become an auxiliary connection broken pipe.
+	var extra [1]byte
+	n, terminalErr := raw.Read(extra[:])
+	require.Zero(t, n)
+	require.ErrorIs(t, terminalErr, io.EOF)
+	if healthErr == nil {
+		require.Equal(t, identity, response.Identity)
+		require.Equal(t, request.Nonce, response.Nonce)
+		require.Equal(t, "open", response.GateState)
+		t.Log("original protected handler returned valid open health after raw FIN without TLS close_notify")
+	}
+	require.Error(t, healthErr, "original protected health handler must reject unauthenticated request EOF")
+	require.Equal(t, ct.RuntimeHealthResponse{}, response)
 }
 
 func closeLiveLookupNativeGate(t *testing.T, ctx context.Context, o provisioning.PlainColdOptions, publication *state.RuntimeEnrolledPublicationEntry, control state.SandboxControlRecord, runtime p.RuntimeReference) {

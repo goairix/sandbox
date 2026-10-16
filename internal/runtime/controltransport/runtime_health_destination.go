@@ -21,7 +21,7 @@ func (d *Destination) QueryRuntimeHealth(ctx context.Context, gate int64) (Runti
 	e := RuntimeHealthEnvelope{Version: 1, Purpose: RuntimeHealthPurpose, Identity: d.identity, DataGateEpoch: gate, Nonce: hex.EncodeToString(nonce[:])}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	s, err := d.Open(bounded)
+	s, err := d.open(bounded, true)
 	if err != nil {
 		return RuntimeHealthResponse{}, err
 	}

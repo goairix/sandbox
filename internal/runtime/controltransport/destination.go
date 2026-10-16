@@ -73,6 +73,10 @@ func isNil(v any) bool {
 // Open performs only a fresh pinned mutual TLS handshake. The original backend
 // must repeat all current authority fences before sending any application bytes.
 func (d *Destination) Open(ctx context.Context) (*Session, error) {
+	return d.open(ctx, false)
+}
+
+func (d *Destination) open(ctx context.Context, health bool) (*Session, error) {
 	if d == nil || d.self != d || isNil(ctx) {
 		return nil, ErrDestination
 	}
@@ -95,6 +99,11 @@ func (d *Destination) Open(ctx context.Context) (*Session, error) {
 	var transport net.Conn = archiveTransport
 	if half, ok := raw.(interface{ CloseWrite() error }); ok {
 		transport = &archiveHalfTLSConn{archiveTLSConn: archiveTransport, half: half}
+	}
+	if health {
+		// Install before the first handshake read: TLS may otherwise retain
+		// bytes beyond close_notify in its private input buffer.
+		transport = NewFiniteTLSRecordConn(transport)
 	}
 	conn := tls.Client(transport, d.config)
 	stop := closeOnContext(bounded, conn)
@@ -182,7 +191,7 @@ func (s *Session) sendMode(ctx context.Context, mode requestMode, write func(io.
 	}
 	s.sent = true
 	s.mode = mode
-	if mode == requestArchive || mode == requestPublication || mode == requestHealth {
+	if mode == requestArchive || mode == requestPublication {
 		s.archiveTransport.strict.Store(true)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)

@@ -117,7 +117,9 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	s.bootstrapMu.Unlock()
-	archiveDeadline := &archiveDeadlineConn{Conn: raw}
+	// Purpose is encrypted, so finite record reads and authenticated EOF must
+	// precede the handshake. Valid legacy producers already use TLS CloseWrite.
+	archiveDeadline := &archiveDeadlineConn{Conn: t.NewFiniteTLSRecordConn(raw)}
 	conn := tls.Server(archiveDeadline, config)
 	if conn.HandshakeContext(bounded) != nil {
 		return
