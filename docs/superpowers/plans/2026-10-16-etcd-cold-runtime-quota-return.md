@@ -35,8 +35,8 @@
 
 **Produces:** `SettleColdRuntimeQuota(context.Context, WorkspaceIdentity, string, TaskReference) (ColdRuntimeQuotaReturnResult, error)`；结果含 `Outcome`、`Reference StageReference`、typed只读Entry。精确新增记录/entry字段由 Step1 基于实际接口固定，不引入任意factory。
 
-- [ ] Step1 只读预检：列出完整 runtime/TaskBirth/workspace/generation/Node/UID/BootID 归属链、原不可变 release/termination/settlement pins、record及键、读取与42节点预算；确定实际原 safe-release fixture 的可复用源码接点。Root裁决后才 START-GO。
-- [ ] Step2 写新 metadata selector 的缺证/篡改/跨作用域 RED；实现 canonical 记录和独立结算、pre-Grant ref、settled replay。用真实 TLS etcd 两Backend 验证 guard/commit ACK 丢失、原release ACK丢失只读恢复、quota/prep复用、新workspace owner及实际预算。测试只声称其真正覆盖的元数据范围。
+- [x] Step1 只读预检：完整 runtime/TaskBirth/workspace/generation/Node/UID/BootID 归属链、原不可变 release/termination/settlement pins、16KiB canonical record及单点键、42节点预算和原safe-release parent/worker接点已核对。Root接受typed只读Entry/private认证snapshot、slot复用不读取slot的重放；immutableBASE `956536e`，已授权sole作者START-GO。
+- [ ] Step2 写新 metadata selector 的缺证/篡改/跨作用域 RED；实现 canonical 记录和独立结算、pre-Grant ref、settled replay。etcd包负例及host wire/关系/预算限定验证；需要完整死亡证明的正例、两Backend、guard/commit/release ACK丢失、quota/prep复用及新workspace owner由Step3真实fullchain覆盖，不制造虚假终止正例。测试只声称其真正覆盖的范围。
 - [ ] Step3 对新真实 native selector 写 RED→GREEN：初始化并占原双槽，原 publication/prep settlement，再走原真实 archive/fullsync/observer终止/providercleanup/ownerrelease，最后 quota结算及复用重放；所有原 owner 实际join/exact清理。不重跑旧矩阵。构建/运行均有新collector和Root具体检查。
 - [ ] Step4 完成限定 host/race/Linux vet 及 final来源冻结；达到提交条件立即按连贯范围提交，不攒一个最终大提交。新native成功后仅因有新修改/缺口才扩大测试。
 - [ ] Step5 wholeTask报告/新鲜单reviewer spec+quality审查，同pair修复及限定复审；tracked验收/更新plan/关闭本OWN，接续总迁移，不停在本Task。
