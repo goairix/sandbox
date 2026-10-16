@@ -37,12 +37,43 @@ type taskLocalRuntimeAuthority struct {
 }
 
 func (a *taskLocalRuntimeAuthority) base() []clientv3.Cmp {
+	return a.wirePins().base()
+}
+
+func (a *taskLocalRuntimeAuthority) providerComparisons(provider, termination *mvccpb.KeyValue) []clientv3.Cmp {
+	return a.wirePins().providerComparisons(provider, termination)
+}
+
+func (a *taskLocalRuntimeAuthority) terminationReserveComparisons(provider *mvccpb.KeyValue) []clientv3.Cmp {
+	return a.wirePins().terminationReserveComparisons(provider)
+}
+
+func (a *taskLocalRuntimeAuthority) terminationComparisons(termination, provider *mvccpb.KeyValue) []clientv3.Cmp {
+	return a.wirePins().terminationComparisons(termination, provider)
+}
+
+// Wire pins contain copied native dimensions only. They cannot authenticate a
+// TaskClaim or run a provider. The live authority still owns every call and
+// performs its original checks before using these same comparison builders.
+type taskLocalRuntimeWirePins struct {
+	comparisons                 []clientv3.Cmp
+	prefix                      string
+	complete                    taskFence
+	enrollment                  [2]taskFence
+	terminationKey, providerKey string
+}
+
+func (a *taskLocalRuntimeAuthority) wirePins() taskLocalRuntimeWirePins {
+	return taskLocalRuntimeWirePins{a.comparisons, a.prefix, a.complete, a.enrollment, a.terminationKey, a.providerKey}
+}
+
+func (a taskLocalRuntimeWirePins) base() []clientv3.Cmp {
 	cmps := append([]clientv3.Cmp(nil), a.comparisons...)
 	cmps = append(cmps, clientv3.Compare(clientv3.Version(a.prefix), "=", 0).WithRange(clientv3.GetPrefixRangeEnd(a.prefix)))
 	return append(cmps, a.complete.comparisons()...)
 }
 
-func (a *taskLocalRuntimeAuthority) providerComparisons(provider, termination *mvccpb.KeyValue) []clientv3.Cmp {
+func (a taskLocalRuntimeWirePins) providerComparisons(provider, termination *mvccpb.KeyValue) []clientv3.Cmp {
 	cmps := a.base()
 	if termination != nil {
 		cmps = append(cmps, ownTaskFence(termination).comparisons()...)
@@ -54,7 +85,7 @@ func (a *taskLocalRuntimeAuthority) providerComparisons(provider, termination *m
 	return append(cmps, ownTaskFence(provider).comparisons()...)
 }
 
-func (a *taskLocalRuntimeAuthority) terminationReserveComparisons(provider *mvccpb.KeyValue) []clientv3.Cmp {
+func (a taskLocalRuntimeWirePins) terminationReserveComparisons(provider *mvccpb.KeyValue) []clientv3.Cmp {
 	cmps := a.base()
 	for _, e := range a.enrollment {
 		cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(e.key), "=", e.mod))
@@ -63,7 +94,7 @@ func (a *taskLocalRuntimeAuthority) terminationReserveComparisons(provider *mvcc
 	return append(cmps, clientv3.Compare(clientv3.Version(a.terminationKey), "=", 0))
 }
 
-func (a *taskLocalRuntimeAuthority) terminationComparisons(termination, provider *mvccpb.KeyValue) []clientv3.Cmp {
+func (a taskLocalRuntimeWirePins) terminationComparisons(termination, provider *mvccpb.KeyValue) []clientv3.Cmp {
 	cmps := append(a.base(), ownTaskFence(termination).comparisons()...)
 	if provider != nil {
 		cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(a.providerKey), "=", provider.ModRevision))
@@ -72,24 +103,36 @@ func (a *taskLocalRuntimeAuthority) terminationComparisons(termination, provider
 }
 
 func (a *taskLocalRuntimeAuthority) preflightWrite(cmps []clientv3.Cmp, key, value string) error {
-	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites([]Write{{Key: key, Value: []byte(value)}})}
-	success := taskProtoPutResponse(1)
-	return taskCheckWire(a.backend.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{success, taskProtoResponse(nil, nil)})
+	return checkTaskWireProjections(a.backend.namespace, []cleanupWireProjection{taskRuntimeWriteProjection(cmps, key, value)})
+}
+
+func taskRuntimeWriteProjection(cmps []clientv3.Cmp, key, value string) cleanupWireProjection {
+	return cleanupWireProjection{request: &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites([]Write{{Key: key, Value: []byte(value)}})}, success: taskProtoPutResponse(1), failure: taskProtoResponse(nil, nil)}
 }
 
 // This runs before the retained finalizer or any other provider mutation.
 // A future proof uses its entire admitted byte bound, and all native scalars
 // use their maximum wire width. It never treats these projection bytes as proof.
 func (a *taskLocalRuntimeAuthority) preflightTerminationPhases(r p.TaskRuntimeTerminationIntent, provider *mvccpb.KeyValue) error {
-	if r.Phase != "reserved" || provider == nil {
-		return ErrInvalidRecord
-	}
-	reserved, err := p.EncodeTaskRuntimeTerminationIntent(r)
+	projections, err := taskRuntimeTerminationWireProjections(a.wirePins(), r, provider)
 	if err != nil {
 		return err
 	}
+	return checkTaskWireProjections(a.backend.namespace, projections)
+}
+
+// Future proof bytes are codec/size inputs, never a verified terminal proof.
+func taskRuntimeTerminationWireProjections(a taskLocalRuntimeWirePins, r p.TaskRuntimeTerminationIntent, provider *mvccpb.KeyValue) ([]cleanupWireProjection, error) {
+	if r.Phase != "reserved" || provider == nil {
+		return nil, ErrInvalidRecord
+	}
+	reserved, err := p.EncodeTaskRuntimeTerminationIntent(r)
+	if err != nil {
+		return nil, err
+	}
 	previous := &mvccpb.KeyValue{Key: []byte(a.terminationKey), Value: reserved, CreateRevision: math.MaxInt64, ModRevision: math.MaxInt64, Version: 1}
 	r.Phase, r.TerminalProof = "terminated", make([]byte, 4096)
+	var projections []cleanupWireProjection
 	for _, phase := range []string{"terminated", "cleanup-complete"} {
 		r.Phase = phase
 		if phase == "cleanup-complete" {
@@ -97,14 +140,14 @@ func (a *taskLocalRuntimeAuthority) preflightTerminationPhases(r p.TaskRuntimeTe
 		}
 		wire, err := p.EncodeTaskRuntimeTerminationIntent(r)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := a.preflightWrite(a.terminationComparisons(previous, provider), a.terminationKey, string(wire)); err != nil {
-			return err
-		}
+		projection := taskRuntimeWriteProjection(a.terminationComparisons(previous, provider), a.terminationKey, string(wire))
+		projection.name = phase
+		projections = append(projections, projection)
 		previous.Value = wire
 	}
-	return nil
+	return projections, nil
 }
 
 func (a *taskLocalRuntimeAuthority) local(ctx context.Context) error {

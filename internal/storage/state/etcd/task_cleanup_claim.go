@@ -22,13 +22,13 @@ type cleanupLocalWireInventory struct {
 	incarnation, runID, claimID string
 	executionMod, slotMod       int64
 	kernel                      *launcher.KernelBoundary
-	projections                 []cleanupWireProjection
+	families                    []cleanupLocalWireFamily
 	used                        atomic.Bool
 }
 
-// These are complete native-template families, not evidence that this slice
-// implements their producer. The later physical integration must populate and
-// validate each family before it can construct a usable inventory result.
+// The private projection producer must populate every native-template family
+// and exact variant before the physical integration may consume an inventory.
+// The result proves dimensions only; original effect authority remains required.
 var cleanupPhysicalWireFamilies = [...]string{
 	"stage-begin", "stage-commit", "stage-resolve", "quiescence-stage",
 	"task-checkpoint", "task-renew", "task-release", "close", "close-query",
@@ -45,22 +45,7 @@ func (b *Backend) validateCleanupLocalInventory(inventory *cleanupLocalWireInven
 	if err != nil || worker != state.record.Run.Worker {
 		return ErrInvalidConfiguration
 	}
-	seen := make(map[string]bool, len(inventory.projections))
-	for _, projection := range inventory.projections {
-		if seen[projection.name] || validateCleanupWire(projection) != nil {
-			return ErrInvalidConfiguration
-		}
-		seen[projection.name] = true
-	}
-	if len(seen) != len(cleanupPhysicalWireFamilies) {
-		return ErrInvalidConfiguration
-	}
-	for _, name := range cleanupPhysicalWireFamilies {
-		if !seen[name] {
-			return ErrInvalidConfiguration
-		}
-	}
-	return nil
+	return validateCleanupLocalWirePlan(&cleanupLocalWirePlan{families: inventory.families})
 }
 
 func (b *Backend) loadCleanupClaimBundle(owner *workerDueOwner, ref TaskReference) (*taskClaimBundle, error) {

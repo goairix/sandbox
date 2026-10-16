@@ -16,7 +16,13 @@ func localRuntimeClaimWire(c *TaskClaim) taskCloseClaimWire {
 
 func (a *taskLocalRuntimeAuthority) releaseProjection(termination *mvccpb.KeyValue, deleted [3]string, wire string) ([]clientv3.Cmp, *pb.TxnRequest, *pb.TxnResponse, error) {
 	cmps := append(a.terminationComparisons(termination, nil), clientv3.Compare(clientv3.Version(a.releaseKey), "=", 0))
-	writes := []Write{{Key: deleted[0], Delete: true}, {Key: deleted[1], Delete: true}, {Key: deleted[2], Delete: true}, {Key: a.releaseKey, Value: []byte(wire)}}
+	return taskOwnerReleaseWireProjection(a.backend.namespace, cmps, a.releaseKey, deleted, wire)
+}
+
+// This constructor preserves all60 original comparisons and all four writes;
+// terminal slot bookkeeping cannot be appended to the full release transaction.
+func taskOwnerReleaseWireProjection(n Namespace, cmps []clientv3.Cmp, releaseKey string, deleted [3]string, wire string) ([]clientv3.Cmp, *pb.TxnRequest, *pb.TxnResponse, error) {
+	writes := []Write{{Key: deleted[0], Delete: true}, {Key: deleted[1], Delete: true}, {Key: deleted[2], Delete: true}, {Key: releaseKey, Value: []byte(wire)}}
 	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites(writes)}
 	success := taskProtoResponse(nil, nil)
 	for i := 0; i < 3; i++ {
@@ -26,7 +32,7 @@ func (a *taskLocalRuntimeAuthority) releaseProjection(termination *mvccpb.KeyVal
 	if len(cmps) != 60 || len(request.Success) != 4 {
 		return nil, nil, nil, ErrInvalidMutation
 	}
-	if err := taskCheckWire(a.backend.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{success, taskProtoResponse(nil, nil)}); err != nil {
+	if err := taskCheckWire(n, []*pb.TxnRequest{request}, []*pb.TxnResponse{success, taskProtoResponse(nil, nil)}); err != nil {
 		return nil, nil, nil, err
 	}
 	return cmps, request, success, nil

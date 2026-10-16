@@ -509,18 +509,30 @@ func (b *Backend) observeTaskArchiveEmpty(ctx context.Context, c *TaskClaim, d *
 }
 
 func (b *Backend) preflightTaskArchive(cmps []clientv3.Cmp, key, value string) error {
+	projections, err := b.taskArchiveWireProjections(cmps, key, value)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(b.namespace, projections)
+}
+
+// The archive write and readback retain their three diagnostic failure points.
+// Sharing this pure envelope prevents cleanup admission from approximating the
+// full command body or silently dropping one of those native branches.
+func (b *Backend) taskArchiveWireProjections(cmps []clientv3.Cmp, key, value string) ([]cleanupWireProjection, error) {
 	keys := []string{b.identityKey, b.restoreKey, key}
 	values := []string{b.identityValue, b.restoreEpoch, value}
 	for i, k := range keys {
 		if !validNamespaceKey(b.namespace, k) || len(values[i]) > maxRecordBytes {
-			return ErrInvalidMutation
+			return nil, ErrInvalidMutation
 		}
 	}
 	reads := taskProtoPoints(keys)
 	writeCmps := append(append([]clientv3.Cmp(nil), cmps...), clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
 	write := &pb.TxnRequest{Compare: taskProtoComparisons(writeCmps), Success: []*pb.RequestOp{taskProtoPut(key, value, 0)}, Failure: reads}
 	read := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: reads, Failure: reads}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{write, read}, []*pb.TxnResponse{taskProtoPutResponse(1), taskProtoResponse(keys, values)})
+	response := taskProtoResponse(keys, values)
+	return []cleanupWireProjection{{"write", write, taskProtoPutResponse(1), response}, {"read", read, response, response}}, nil
 }
 
 func (b *Backend) readTaskArchivePoints(ctx context.Context, c *TaskClaim, d *taskArchiveDraft, key string) ([]*mvccpb.KeyValue, bool, error) {

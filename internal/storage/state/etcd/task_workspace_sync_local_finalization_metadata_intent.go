@@ -274,40 +274,53 @@ func (f *taskWorkspaceSyncLocalFinalizer) settleMetadata(ctx context.Context, ev
 // effects. These are transient metadata clones, released before traversal.
 func (f *taskWorkspaceSyncLocalFinalizer) preflight() error {
 	s, b := f.source, f.source.authority.backend
-	ref := TaskWorkspaceSyncIntentReference{Task: s.authority.claim.reference.Task, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: s.manifest.Seed.ArchiveCommand, Slot: 63}
-	c := s.authority.claim.reference
+	var targetDigest string
+	if f.binding != "" {
+		targetDigest = s.manifest.Binding.TargetDigest
+	}
+
+	projections, err := b.taskLocalFinalizationWireProjections(s.comparisons(nil), s.authority.claim.reference, s.manifest.Seed.TaskBirth, f.binding, targetDigest, s.manifest.Seed.ArchiveCommand, f.progressKey, f.completeKey, s.authority.claim.checkpointKey)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(b.namespace, projections)
+}
+
+// The same prospective codecs and complete native envelopes are shared by the
+// original finalizer and cleanup admission. Plain comparison data does not
+// reconstruct a source, a metadata gate or filesystem completion evidence.
+func (b *Backend) taskLocalFinalizationWireProjections(base []clientv3.Cmp, c TaskClaimReference, birth int64, binding, targetDigest, command, progressKey, completeKey, checkpointKey string) ([]cleanupWireProjection, error) {
+	ref := TaskWorkspaceSyncIntentReference{Task: c.Task, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: command, Slot: 63}
 	writer := taskCloseClaimWire{c.Task, c.ClaimID, c.WorkerID, c.CreateRevision, c.LeaseID}
 	// Validate the prospective schemas with longest revision encodings before
 	// progress or regular repair, not just a protobuf byte-count placeholder.
-	if f.binding != "" {
-		intent := taskWorkspaceSyncLocalMetadataIntent{3, ref, writer, b.workspaceSyncBudget.create, "local_metadata_pass", "local", f.binding, math.MaxInt64 - 1}
+	if binding != "" {
+		intent := taskWorkspaceSyncLocalMetadataIntent{3, ref, writer, b.workspaceSyncBudget.create, "local_metadata_pass", "local", binding, math.MaxInt64 - 1}
 		if _, err := encodeOperationMetadata(intent, int(b.workspaceSyncBudget.options.MaxIntentBytes)); err != nil {
-			return err
+			return nil, err
 		}
-		projection := taskWorkspaceSyncLocalProgress{Version: 1, Task: c.Task, TaskBirth: s.manifest.Seed.TaskBirth, Binding: f.binding, Claim: writer, Phase: "effects-done", CheckpointRevision: math.MaxInt64 - 1, CheckpointDigest: f.binding, IntentID: ref.IntentID, IntentBirth: math.MaxInt64 - 1, EvidenceDigest: f.binding}
+		projection := taskWorkspaceSyncLocalProgress{Version: 1, Task: c.Task, TaskBirth: birth, Binding: binding, Claim: writer, Phase: "effects-done", CheckpointRevision: math.MaxInt64 - 1, CheckpointDigest: binding, IntentID: ref.IntentID, IntentBirth: math.MaxInt64 - 1, EvidenceDigest: binding}
 		if _, err := encodeWorkspaceSyncLocalProgress(projection); err != nil {
-			return err
+			return nil, err
 		}
-		complete := taskWorkspaceSyncLocalComplete{1, "sandbox.workspace-sync-local-complete.v1", c.Task, s.manifest.Seed.TaskBirth, f.binding, writer, f.binding, f.binding, math.MaxInt64 - 1, f.binding, s.manifest.Binding.TargetDigest}
+		complete := taskWorkspaceSyncLocalComplete{1, "sandbox.workspace-sync-local-complete.v1", c.Task, birth, binding, writer, binding, binding, math.MaxInt64 - 1, binding, targetDigest}
 		if _, err := encodeOperationMetadata(complete, 8192); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	intentKey, slotKey, err := b.workspaceSyncRecyclingKeys(ref)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	progress := string(make([]byte, 16384))
 	intent := string(make([]byte, b.workspaceSyncBudget.options.MaxIntentBytes))
-	cmps := append(s.comparisons(nil), clientv3.Compare(clientv3.CreateRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.ModRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(intentKey), "=", intent), clientv3.Compare(clientv3.ModRevision(slotKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(slotKey), "=", string(make([]byte, 512))), clientv3.Compare(clientv3.ModRevision(f.progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(f.progressKey), "=", progress))
-	writes := []Write{{Key: slotKey, Value: []byte(make([]byte, 512))}, {Key: intentKey, Delete: true}, {Key: f.progressKey, Value: []byte(progress)}}
-	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites(writes)}
-	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{recyclingGCReply(), taskProtoResponse(nil, nil)}); err != nil {
-		return err
-	}
+	cmps := append(append([]clientv3.Cmp(nil), base...), clientv3.Compare(clientv3.CreateRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.ModRevision(intentKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(intentKey), "=", intent), clientv3.Compare(clientv3.ModRevision(slotKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(slotKey), "=", string(make([]byte, 512))), clientv3.Compare(clientv3.ModRevision(progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(progressKey), "=", progress))
+	writes := []Write{{Key: slotKey, Value: []byte(make([]byte, 512))}, {Key: intentKey, Delete: true}, {Key: progressKey, Value: []byte(progress)}}
+	settle := workspaceSyncNativeProjection(b, cmps, taskProtoWrites(writes), recyclingGCReply(), true)
+	settle.name = "metadata-settle"
 	complete := string(make([]byte, 8192))
-	cmps = append(s.comparisons(nil), clientv3.Compare(clientv3.ModRevision(f.progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(f.progressKey), "=", progress), clientv3.Compare(clientv3.ModRevision(s.authority.claim.checkpointKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(s.authority.claim.checkpointKey), "=", string(make([]byte, 4096))), clientv3.Compare(clientv3.Version(f.completeKey), "=", 0))
-	keys := []string{b.identityKey, b.restoreKey, b.workspaceSyncBudget.key}
-	request = &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(f.progressKey, progress, 0), taskProtoPut(f.completeKey, complete, 0)}, Failure: taskProtoPoints(keys)}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{taskProtoPutResponse(2), taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, b.workspaceSyncBudget.value})})
+	cmps = append(append([]clientv3.Cmp(nil), base...), clientv3.Compare(clientv3.ModRevision(progressKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(progressKey), "=", progress), clientv3.Compare(clientv3.ModRevision(checkpointKey), "=", math.MaxInt64-1), clientv3.Compare(clientv3.Value(checkpointKey), "=", string(make([]byte, 4096))), clientv3.Compare(clientv3.Version(completeKey), "=", 0))
+	publish := workspaceSyncNativeProjection(b, cmps, []*pb.RequestOp{taskProtoPut(progressKey, progress, 0), taskProtoPut(completeKey, complete, 0)}, taskProtoPutResponse(2), false)
+	publish.name = "completion-publish"
+	return []cleanupWireProjection{settle, publish}, nil
 }

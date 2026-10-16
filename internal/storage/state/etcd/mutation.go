@@ -100,7 +100,17 @@ func validNamespaceKey(n Namespace, key string) bool {
 
 func reservedStageKey(n Namespace, key string) bool {
 	parts := strings.Split(strings.TrimPrefix(key, n.Root()), "/")
-	return parts[0] == "meta" || parts[0] == "command-issuers" || (parts[0] == "p" && len(parts) >= 3 && (parts[2] == "attempts" || parts[2] == "stages"))
+	if parts[0] == "meta" || parts[0] == "command-issuers" || parts[0] == "cleanup-execution-slots" {
+		return true
+	}
+	if parts[0] != "p" || len(parts) < 3 {
+		return false
+	}
+
+	// Permanent cleanup occupation and execution rows are owned by their
+	// private CAS protocol. Generic Stage writes must not reset that history.
+	return parts[2] == "attempts" || parts[2] == "stages" ||
+		(len(parts) == 5 && parts[2] == "tasks" && parts[4] == "execution")
 }
 
 func validComparison(c clientv3.Cmp) bool {

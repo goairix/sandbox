@@ -125,40 +125,66 @@ func taskWorkspaceSyncEmptyPrefixComparison(n Namespace, c *pb.Compare) bool {
 	return string(c.RangeEnd) == clientv3.GetPrefixRangeEnd(key) && bytes.Compare(c.RangeEnd, []byte(clientv3.GetPrefixRangeEnd(n.Root()))) <= 0
 }
 func (b *Backend) preflightTaskReservation(cmps []clientv3.Cmp, key, value string) error {
-	if len(value) > 8192 {
-		return ErrInvalidMutation
+	projections, err := b.taskReservationWireProjections(cmps, key, value)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(b.namespace, projections)
+}
+
+// Reservation writes and their exact readback share one native wire shape.
+// The last comparison is the original absence check, absent from the read.
+func (b *Backend) taskReservationWireProjections(cmps []clientv3.Cmp, key, value string) ([]cleanupWireProjection, error) {
+	if len(cmps) == 0 || len(value) > 8192 {
+		return nil, ErrInvalidMutation
 	}
 	keys := []string{b.identityKey, b.restoreKey, key}
 	values := []string{b.identityValue, b.restoreEpoch, value}
 	for i, k := range keys {
 		if !validNamespaceKey(b.namespace, k) || len(values[i]) > maxRecordBytes {
-			return ErrInvalidMutation
+			return nil, ErrInvalidMutation
 		}
 	}
 	reads := taskProtoPoints(keys)
 	write := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(key, value, 0)}, Failure: reads}
 	read := &pb.TxnRequest{Compare: taskProtoComparisons(cmps[:len(cmps)-1]), Success: reads, Failure: reads}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{write, read}, []*pb.TxnResponse{taskProtoPutResponse(1), taskProtoResponse(keys, values)})
+	response := taskProtoResponse(keys, values)
+	return []cleanupWireProjection{{"write", write, taskProtoPutResponse(1), response}, {"read", read, response, response}}, nil
 }
+
 func (b *Backend) preflightReservedTaskStage(ref StageReference, m Mutation, guardKey, receiptKey, committed string, pin taskQuiescenceReservationPin) error {
+	projections, err := b.taskStageWireProjections(ref, m, guardKey, receiptKey, committed, &pin)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(b.namespace, projections)
+}
+
+// Stage projections preserve the generic14-node overhead. Only reserved
+// quiescence supplies the additional original reservation Mod pin. No guard,
+// receipt or dimensional future value returned here is a Stage capability.
+func (b *Backend) taskStageWireProjections(ref StageReference, m Mutation, guardKey, receiptKey, committed string, pin *taskQuiescenceReservationPin) ([]cleanupWireProjection, error) {
 	guard, err := json.Marshal(struct {
 		StageReference
 		LeaseID int64 `json:"lease_id"`
 	}{ref, math.MaxInt64})
 	if err != nil {
-		return ErrInvalidMutation
+		return nil, ErrInvalidMutation
 	}
 	if len(guard) > maxRecordBytes || len(committed) > maxRecordBytes || len(b.identityValue) > maxRecordBytes || len(b.restoreEpoch) > maxRecordBytes {
-		return ErrInvalidMutation
+		return nil, ErrInvalidMutation
 	}
 	// Account both receipt outcome envelopes explicitly.
 	aborted, err := encodeReceipt(ref, OutcomeAborted)
 	if err != nil || len(aborted) > maxRecordBytes {
-		return ErrInvalidMutation
+		return nil, ErrInvalidMutation
 	}
 	beginCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
 	begin := &pb.TxnRequest{Compare: taskProtoComparisons(beginCmps), Success: []*pb.RequestOp{taskProtoPut(guardKey, string(guard), math.MaxInt64)}, Failure: taskProtoPoints([]string{b.identityKey, b.restoreKey})}
-	commitCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.Value(guardKey), "=", string(guard)), clientv3.Compare(clientv3.LeaseValue(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0), pin.comparison())
+	commitCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.Value(guardKey), "=", string(guard)), clientv3.Compare(clientv3.LeaseValue(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
+	if pin != nil {
+		commitCmps = append(commitCmps, pin.comparison())
+	}
 	commitCmps = append(commitCmps, m.Comparisons...)
 	ops := append(taskProtoWrites(m.Writes), taskProtoPut(receiptKey, committed, 0))
 	keys := []string{b.identityKey, b.restoreKey, receiptKey, guardKey}
@@ -172,5 +198,9 @@ func (b *Backend) preflightReservedTaskStage(ref StageReference, m Mutation, gua
 			success.Responses[i] = &pb.ResponseOp{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: success.Header, Deleted: 1}}}
 		}
 	}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{begin, commit, resolve}, []*pb.TxnResponse{success, taskProtoPutResponse(1), taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, committed, string(guard)}), taskProtoResponse(keys[:3], []string{b.identityValue, b.restoreEpoch, aborted})})
+	return []cleanupWireProjection{
+		{"begin", begin, taskProtoPutResponse(1), taskProtoResponse(keys[:2], []string{b.identityValue, b.restoreEpoch})},
+		{"commit", commit, success, taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, committed, string(guard)})},
+		{"resolve", resolve, taskProtoPutResponse(1), taskProtoResponse(keys[:3], []string{b.identityValue, b.restoreEpoch, aborted})},
+	}, nil
 }

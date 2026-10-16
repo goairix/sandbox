@@ -82,26 +82,40 @@ func (c *TaskClaim) live(ctx context.Context) error {
 	return nil
 }
 func (c *TaskClaim) permanentComparisons() []clientv3.Cmp {
+	return taskClaimPermanentComparisons(c.fences)
+}
+
+// Plain original fences are shared with dimensional cleanup preflight. They
+// cannot authorize a claim: native entry still requires its original owner.
+func taskClaimPermanentComparisons(fences []taskFence) []clientv3.Cmp {
 	var result []clientv3.Cmp
-	for _, f := range c.fences {
+	for _, f := range fences {
 		result = append(result, f.comparisons()...)
 	}
 	return result
 }
 func (c *TaskClaim) comparisons() []clientv3.Cmp {
-	result := c.permanentComparisons()
-	for _, key := range []string{c.claimKey, c.guardKey} {
-		f := taskFence{key: key, value: c.value, lease: c.reference.LeaseID, create: c.reference.CreateRevision, mod: c.reference.CreateRevision}
+	return taskClaimWireComparisons(c.fences, c.reference, c.claimKey, c.guardKey, c.value)
+}
+
+func taskClaimWireComparisons(fences []taskFence, ref TaskClaimReference, claimKey, guardKey, value string) []clientv3.Cmp {
+	result := taskClaimPermanentComparisons(fences)
+	for _, key := range []string{claimKey, guardKey} {
+		f := taskFence{key: key, value: value, lease: ref.LeaseID, create: ref.CreateRevision, mod: ref.CreateRevision}
 		result = append(result, f.comparisons()...)
 	}
 	return result
 }
 func (c *TaskClaim) creationMutation(checkpoint taskFence) Mutation {
-	cmps := append(c.permanentComparisons(), checkpoint.comparisons()...)
-	for _, key := range []string{c.claimKey, c.guardKey} {
+	return taskClaimCreationMutation(c.fences, checkpoint, c.claimKey, c.guardKey, c.value)
+}
+
+func taskClaimCreationMutation(fences []taskFence, checkpoint taskFence, claimKey, guardKey, value string) Mutation {
+	cmps := append(taskClaimPermanentComparisons(fences), checkpoint.comparisons()...)
+	for _, key := range []string{claimKey, guardKey} {
 		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
 	}
-	return Mutation{Comparisons: cmps, Writes: []Write{{Key: c.claimKey, Value: []byte(c.value)}, {Key: c.guardKey, Value: []byte(c.value)}}}
+	return Mutation{Comparisons: cmps, Writes: []Write{{Key: claimKey, Value: []byte(value)}, {Key: guardKey, Value: []byte(value)}}}
 }
 func (b *Backend) preflightTaskClaim(c *TaskClaim, checkpoint taskFence) error {
 	if _, _, err := prepareMutation(b.namespace, c.creationMutation(checkpoint)); err != nil {

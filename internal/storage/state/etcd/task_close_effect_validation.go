@@ -56,10 +56,17 @@ func taskCloseOriginalTask(c *TaskClaim) (TaskRecord, error) {
 	return r, nil
 }
 func (b *Backend) taskCloseComparisons(c *TaskClaim, d *taskCloseDraft) []clientv3.Cmp {
-	cmps := c.comparisons()
-	if d.issuer != nil {
-		cmps = append(cmps, clientv3.Compare(clientv3.Value(d.issuerKey), "=", d.issuerValue), clientv3.Compare(clientv3.ModRevision(d.issuerKey), "=", d.issuer.Revision), clientv3.Compare(clientv3.LeaseValue(d.issuerKey), "=", 0))
+	if d.issuer == nil {
+		return c.comparisons()
 	}
+	return taskCloseWireComparisons(c.comparisons(), d.issuerKey, d.issuerValue, d.issuer.Revision)
+}
+
+// The issuer is represented by its existing three pins; preflight can share
+// this construction without fabricating a signed ticket or a live TaskClaim.
+func taskCloseWireComparisons(claim []clientv3.Cmp, issuerKey, issuerValue string, issuerRevision int64) []clientv3.Cmp {
+	cmps := append([]clientv3.Cmp(nil), claim...)
+	cmps = append(cmps, clientv3.Compare(clientv3.Value(issuerKey), "=", issuerValue), clientv3.Compare(clientv3.ModRevision(issuerKey), "=", issuerRevision), clientv3.Compare(clientv3.LeaseValue(issuerKey), "=", 0))
 	return cmps
 }
 func (b *Backend) checkTaskCloseFences(ctx context.Context, c *TaskClaim, d *taskCloseDraft, intent *taskFence) error {

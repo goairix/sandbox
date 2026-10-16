@@ -108,6 +108,8 @@ func cleanupCandidate(digest string, selection uint64) uint32 {
 	return uint32((uint64(decoded[0]) + selection%cleanupExecutionSlots) % cleanupExecutionSlots)
 }
 
+// Validate checks the permanent occupation schema and its deterministic Task
+// incarnation; diagnostic attribution alone grants no execution permission.
 func (r cleanupExecutionSlotRecord) Validate() error {
 	if r.Version != 1 || r.Domain != cleanupExecutionSlotDomain || r.Task.Validate() != nil || r.TaskBirth <= 0 || !taskAttemptMatches(r.InitialAttempt, r.Task) || !validHexDigest(r.TaskDigest) || !validHexDigest(r.InitialMutationDigest) || !validHexDigest(r.InitialReceiptDigest) || r.Slot >= cleanupExecutionSlots || r.Slot != cleanupCandidate(r.TaskDigest, r.Selection) {
 		return ErrInvalidRecord
@@ -134,6 +136,8 @@ func (r cleanupExecutionPending) valid() bool {
 	return validDomainSegment(r.StageID) && validDomainSegment(r.RequestID) && validPreparationUUID(r.AttemptID) && validHexDigest(r.Digest)
 }
 
+// Validate checks the execution schema, closed state vocabulary and attribution.
+// A valid record does not prove a native transition or an original run's join.
 func (r cleanupExecutionRecord) Validate() error {
 	if r.Domain != cleanupExecutionDomain || cleanupSlotRecordFromExecution(r).Validate() != nil {
 		return ErrInvalidRecord

@@ -259,12 +259,25 @@ func workspaceSyncPointOps(keys []string) []clientv3.Op {
 }
 
 func (b *Backend) preflightWorkspaceSyncIntent(cmps []clientv3.Cmp, d *taskWorkspaceSyncIntentDraft, keys []string) error {
+	projection, err := b.workspaceSyncIntentWireProjection(cmps, d.intentKey, d.value, d.slotKey, d.slotValue, keys)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(b.namespace, []cleanupWireProjection{projection})
+}
+
+// This accepts inert bytes, not a prepared body or an intent permission. Both
+// native puts and all five failure points remain the original admission shape.
+func (b *Backend) workspaceSyncIntentWireProjection(cmps []clientv3.Cmp, intentKey, value, slotKey, slotValue string, keys []string) (cleanupWireProjection, error) {
 	values := []string{b.identityValue, b.restoreEpoch, b.workspaceSyncBudget.value, string(make([]byte, b.workspaceSyncBudget.options.MaxIntentBytes)), string(make([]byte, 512))}
+	if len(keys) != len(values) {
+		return cleanupWireProjection{}, ErrInvalidMutation
+	}
 	for i, key := range keys {
 		if len(key) > 1024 || len(values[i]) > maxRecordBytes || !validNamespaceKey(b.namespace, key) {
-			return ErrInvalidMutation
+			return cleanupWireProjection{}, ErrInvalidMutation
 		}
 	}
-	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(d.intentKey, d.value, 0), taskProtoPut(d.slotKey, d.slotValue, 0)}, Failure: taskProtoPoints(keys)}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{taskProtoPutResponse(2), taskProtoResponse(keys, values)})
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: []*pb.RequestOp{taskProtoPut(intentKey, value, 0), taskProtoPut(slotKey, slotValue, 0)}, Failure: taskProtoPoints(keys)}
+	return cleanupWireProjection{"intent-write", request, taskProtoPutResponse(2), taskProtoResponse(keys, values)}, nil
 }

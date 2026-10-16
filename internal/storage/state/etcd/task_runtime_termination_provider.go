@@ -115,8 +115,17 @@ func (x *taskLocalRuntimeExecution) storeTermination(ctx context.Context) error 
 }
 
 func (x *taskLocalRuntimeExecution) preflightProvider() error {
-	projected := x.cleanup
-	claim := localRuntimeClaimWire(x.a.claim)
+	projections, err := taskRuntimeProviderWireProjections(x.a.wirePins(), x.cleanup, localRuntimeClaimWire(x.a.claim), x.providerKV, x.intentKV)
+	if err != nil {
+		return err
+	}
+	return checkTaskWireProjections(x.a.backend.namespace, projections)
+}
+
+// Preserve the original canonical seven-slot schema check. The cleanup gate
+// additionally uses the whole record cap, so this representative RV string is
+// not mistaken for a maximum JSON-escaped ResourceVersion or descriptor.
+func taskRuntimeProviderWireProjections(pins taskLocalRuntimeWirePins, projected taskRuntimeProviderCleanupRecord, claim taskCloseClaimWire, provider, termination *mvccpb.KeyValue) ([]cleanupWireProjection, error) {
 	for i, step := range taskRuntimeCleanupSteps {
 		kind := "Pod"
 		if i == 2 || i == 3 {
@@ -128,9 +137,9 @@ func (x *taskLocalRuntimeExecution) preflightProvider() error {
 	}
 	wire, err := encodeTaskRuntimeProviderCleanup(projected)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return x.a.preflightWrite(x.a.providerComparisons(x.providerKV, x.intentKV), x.a.providerKey, wire)
+	return []cleanupWireProjection{taskRuntimeWriteProjection(pins.providerComparisons(provider, termination), pins.providerKey, wire)}, nil
 }
 
 func (x *taskLocalRuntimeExecution) prepareProvider(ctx context.Context) error {
