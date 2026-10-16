@@ -1,0 +1,43 @@
+# etcd Startup Loader Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: subagent-driven-development；一个完整Task，连续推进，不在Task边界停下。
+
+**Goal:** 为现有etcd创建服务提供实际挂载配置装配和只读命令行部署检查。
+
+**Architecture:** 新deployment包严格读取manifest与凭证，复用原Backend/签名时钟/PlainColdService；cmd/sandbox在旧配置及Redis之前显式分流检查模式。
+
+**Tech Stack:** Go1.25.6、现etcd v3/client-go/Ed25519协议；不新增依赖。
+
+**Spec:** docs/superpowers/specs/2026-10-16-etcd-startup-loader-design.md
+
+## Global Constraints
+
+- immutableBASE1161ee4e11150dab03ffa29cc55b3ac80eeed034；前任务OWN/pair CLOSED，无旧artifact访问、无重复实现。
+- apply_patch唯一源码/文档/格式编辑方式；Root唯一Git/实际Docker，精确小提交，禁止Sentinel读写或暂存。
+- manifest64KiB、TLS各64KiB、launcher16384B、issuer8192B、私钥4096B；所有实际读有界，拒绝特殊文件，支持投影Secret链接。
+- 生产HTTPS/mTLS、固定身份/受控签名时钟，禁止本地时间fallback及构造器自动初始化库存/写状态/Grant/POST。
+- Close先Service后Backend，部分失败回收；无每N常驻任务、无新全量扫描。
+- 单author+唯一fresh wholeTask reviewer，无nested。测试新epochs、实际GoList17类输入匹配平台/race、前后归档及脚本；Docker另需Root具体命令preflight/原始Wait和精确cleanup。
+
+## Review Focus
+
+- 缺失/超大/特殊文件或重复JSON字段：有限失败，不泄漏原始凭证。
+- kubeconfig含外部exec/auth插件：明确拒绝，不能在只读检查中执行操作员未授权程序。
+- 旧特殊模式混用/缺参：在任何Redis或runtime动作前拒绝。
+- inventory缺失、身份或证书/时钟错误：沿原构造验证失败，已开资源关闭/join。
+- 构造成功：实际Backend+Service存在、无Pod创建/Lease/状态变化，重复Close安全。
+
+## Task 1: Mounted deployment loader and executable startup check
+
+**Files:** 新internal/provisioning/deployment/{manifest.go,files.go,open.go}与对应tests（职责小幅调整先报告）；新cmd/sandbox/etcd_startup.go及etcd_startup_test.go，main.go仅flag/互斥/早分流。原internal/runtime/controlrunner/cold_create_service_native_linux_test.go可最小增加真实装配验证variant，新增startup_loader_native_linux_test.go。部署样例/说明放docs中本Task命名文件，不读取其他Task OWN。
+
+**Consumes:** state.New/Namespace/Identity/PreparationInventoryOptions/PublicationTrust/EnrolledPublicationOptions、p.NewSignedClockClient、launcherconfig.Decode、client-go配置读取、provisioning.NewPlainColdService与其Close。
+
+**Produces:** deployment.Open(ctx,path) (*Deployment,error)、Deployment.Close() error及Service/Backend受控访问；cmd启动检查早分流。具体DTO/导出访问方式由Step1只读预检冻结。
+
+- [ ] Step1 fresh author只读预检：列出完整manifest DTO、每个字段来源/约束、固定原构造调用与资源关闭顺序、kubeconfig文件/插件/凭证读取预算、命令早分流/退出可测试接点、真实集成方案与测试collector。Root裁决后START-GO；此前不写产品代码、不运行Go/Docker。
+- [ ] Step2 写解析/文件/模式行为RED，Root审collector后实际运行；实现有界loader与真实装配，host GREEN/race，及时提交连贯功能切片。
+- [ ] Step3 真实TLS etcd+签名时钟成功/错误/Close只读集成、最终相关Linux vet；Root核对原始结果与实际输入/归档/进程清理，小步提交。
+- [ ] Step4 唯一fresh reviewer审原BASE→最终HEAD；必要同pair修复；tracked验收、关闭OWN，继续实际HTTP与生产互斥接线。
+
+Ruling: 用户已批准总迁移并明确持续执行；这是已批准生产接线的具体化，沿既有执行方法，不重复索要授权。采用显式检查入口，完整服务切换留在具备所有endpoint能力之后，避免nil旧Manager或Redis fallback。
