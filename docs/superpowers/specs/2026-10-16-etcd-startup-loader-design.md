@@ -12,6 +12,14 @@
 - 检查只消费已有identity/restore/inventory。禁止InitializePreparationInventory、Put/Delete、LeaseGrant、Pod POST、issuer/clock/identity隐式生成；constructor里的读验证和时钟exchange允许。
 - 不修改默认生产路径、Redis数据/依赖、Sentinel文档；本任务不宣称HTTP切换、FUSE/调度或完整迁移完成。
 
+## 预检冻结
+
+Root接受task只读预检的完整DTO：version=1；etcd包含endpoints、显式identity（另含restore_epoch）、TLS文件/server_name、duration字符串和cache预算；preparation包含恰好256个quota_slots与quota_partition；launcher_config_file及root/issuer私钥、issuer_certificate_file；kubernetes包含kubeconfig_file/namespace/max_active/request_timeout；image/node_name/worker_id/resources/business.principal/defaults。manifest路径相对其目录，kubeconfig引用相对kubeconfig目录，无环境或默认路径搜索。
+
+TrustBinding/Roots/ContractDigest/node UID/boot/clock socket、key、audience全部从同一严格launcher配置导出；不新增重复manifest字段。etcd TLS最低1.3，Kubernetes要求HTTPS并沿原staticAPIConfig验证。kubeconfig本身≤64KiB、选中CA/cert/key文件各≤64KiB、token文件≤16KiB，先拒绝所有用户exec/auth插件，再有界内联选中上下文引用并清空路径，之后才调用非交互ClientConfig；不绕过原静态客户端校验。受控打开采用nonblock和实际descriptor普通文件检查，允许投影链接。
+
+导出deployment.Open(ctx,path) (*Deployment,error)，Backend()/Service()只借用，Deployment.Close拥有关闭顺序。检查命令总预算30秒；显式空路径、位置参数、config和所有显式旧特殊模式flag均在任何动作前拒绝。实际Open/Close完成后main才输出固定成功/失败信息。真实集成不必启动launcher：只验证构造和清理，避免无关运行时矩阵。
+
 ## 验收
 
 实际有限文件加载/严格解析、错误和秘密不泄漏、模式互斥与早分流测试；host GREEN/race及Linuxarm64相关vet。真实TLS etcd与真实签名时钟集成验证构造成功/关闭、identity不匹配与inventory未就绪拒绝；检查前后无状态写入、无Lease或Pod创建。可复用原正式nativefixture最小变体，具体Root审查collector/命令后才运行；不得以fake成功代替构造成功。唯一fresh wholeTask reviewer，验证后小步提交。

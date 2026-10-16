@@ -35,7 +35,7 @@
 
 **Produces:** deployment.Open(ctx,path) (*Deployment,error)、Deployment.Close() error及Service/Backend受控访问；cmd启动检查早分流。具体DTO/导出访问方式由Step1只读预检冻结。
 
-- [ ] Step1 fresh author只读预检：列出完整manifest DTO、每个字段来源/约束、固定原构造调用与资源关闭顺序、kubeconfig文件/插件/凭证读取预算、命令早分流/退出可测试接点、真实集成方案与测试collector。Root裁决后START-GO；此前不写产品代码、不运行Go/Docker。
+- [x] Step1 Root接受完整预检9f583b：DTO与单一launcher信任来源、bounded文件/内联kubeconfig、原构造顺序、Close所有权、CLI早分流与真实TLS+clock无写入场景已冻结到spec。检查总预算30秒，etcd TLS最低1.3，config与所有显式旧modeflag拒绝。START-GO tests/collectors first，具体Go仍经Root审collector；native无需启动launcher。
 - [ ] Step2 写解析/文件/模式行为RED，Root审collector后实际运行；实现有界loader与真实装配，host GREEN/race，及时提交连贯功能切片。
 - [ ] Step3 真实TLS etcd+签名时钟成功/错误/Close只读集成、最终相关Linux vet；Root核对原始结果与实际输入/归档/进程清理，小步提交。
 - [ ] Step4 唯一fresh reviewer审原BASE→最终HEAD；必要同pair修复；tracked验收、关闭OWN，继续实际HTTP与生产互斥接线。
