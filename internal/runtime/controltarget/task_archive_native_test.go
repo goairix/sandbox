@@ -183,7 +183,7 @@ func TestTaskArchiveProducerNative(t *testing.T) {
 			case "canceled":
 				cancel()
 			case "copy-source":
-				copy := reflect.New(reflect.TypeOf(*s))
+				copy := reflect.New(reflect.TypeOf(s).Elem())
 				copy.Elem().Set(reflect.ValueOf(s).Elem())
 				s = copy.Interface().(*launcher.WorkspaceArchiveSource)
 			case "used-source":

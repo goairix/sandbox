@@ -152,6 +152,7 @@ type Session struct {
 	archiveComplete   bool
 	archiveEOFChecked bool
 	publicationRead   bool
+	healthRead        bool
 	archiveTransport  *archiveTLSConn
 }
 
@@ -181,7 +182,7 @@ func (s *Session) sendMode(ctx context.Context, mode requestMode, write func(io.
 	}
 	s.sent = true
 	s.mode = mode
-	if mode == requestArchive || mode == requestPublication {
+	if mode == requestArchive || mode == requestPublication || mode == requestHealth {
 		s.archiveTransport.strict.Store(true)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)

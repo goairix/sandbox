@@ -14,6 +14,7 @@ const (
 	requestEvents requestMode = iota
 	requestArchive
 	requestPublication
+	requestHealth
 )
 
 // Go TLS accepts a raw EOF between records as io.EOF without close_notify.

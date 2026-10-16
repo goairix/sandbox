@@ -22,4 +22,5 @@ type RuntimeRequest struct {
 	Quiesce     *TaskQuiesceEnvelope
 	Archive     *TaskWorkspaceArchiveEnvelope
 	Publication *RuntimePublicationEnvelope
+	Health      *RuntimeHealthEnvelope
 }
