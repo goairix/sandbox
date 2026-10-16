@@ -58,6 +58,7 @@ func (s *PlainColdService) replayBusinessEntered(ctx context.Context, w state.Wo
 	}
 	request.Principal, request.IdempotencyKey = s.business.Principal, output.IdempotencyKey
 	output.Business = request.Business
+	output.Reused = true
 	output.PlainColdResult, err = s.createEntered(ctx, w, request)
 	return output, err
 }

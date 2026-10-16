@@ -28,6 +28,7 @@ type PlainColdBusinessResult struct {
 	PlainColdResult
 	IdempotencyKey string
 	Business       *sandboxsnapshot.Snapshot
+	Reused         bool
 }
 
 func ownColdBusiness(backend *state.Backend, input *PlainColdBusinessOptions, cfg launcherconfig.Config, cpu, memory, disk, tmp string) (*PlainColdBusinessOptions, error) {

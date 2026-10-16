@@ -273,7 +273,7 @@ func (g *Gateway) create(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, 201, types.CreateSandboxResponse{SandboxResponse: response, Reused: result.State == provisioning.PlainColdHistorical})
+	writeJSON(w, 201, types.CreateSandboxResponse{SandboxResponse: response, Reused: result.Reused})
 }
 
 func (g *Gateway) lookup(w http.ResponseWriter, r *http.Request, id string) {

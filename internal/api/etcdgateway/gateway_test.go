@@ -158,6 +158,29 @@ func TestGatewayCreateCapacityState(t *testing.T) {
 	}
 }
 
+func TestGatewayCreateReusedIndependentOfCompletionState(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		s := &gatewayServiceFake{
+			create: func(provisioning.PlainColdBusinessInput) (provisioning.PlainColdBusinessResult, error) {
+				return provisioning.PlainColdBusinessResult{Reused: reused, IdempotencyKey: "stable-key", PlainColdResult: provisioning.PlainColdResult{State: provisioning.PlainColdCompleted, SandboxID: gatewaySandboxID}}, nil
+			},
+			lookup: func() (*provisioning.PlainColdLookupResult, error) {
+				return &provisioning.PlainColdLookupResult{SandboxID: gatewaySandboxID, Business: &sandboxsnapshot.Snapshot{Requested: types.CreateSandboxRequest{Mode: "ephemeral"}, Resolved: sandboxsnapshot.Resolved{TTL: sandboxsnapshot.TTL{Kind: "finite", Seconds: 60}}}}, nil
+			},
+		}
+		g := gatewayFixture(t, s)
+		rw := httptest.NewRecorder()
+		g.ServeHTTP(rw, gatewayRequest(http.MethodPost, "/api/v1/sandboxes", `{"mode":"ephemeral"}`))
+		var response types.CreateSandboxResponse
+		if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if rw.Code != 201 || response.Reused != reused || s.lookups.Load() != 1 {
+			t.Fatal("current completion state was incorrectly used as replay attribution")
+		}
+	}
+}
+
 func TestGatewayExecValidationAndResolvedEnvironment(t *testing.T) {
 	s := &gatewayServiceFake{}
 	g := gatewayFixture(t, s)
