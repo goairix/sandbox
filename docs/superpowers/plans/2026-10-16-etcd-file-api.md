@@ -32,9 +32,9 @@
 
 **Produces:** `sandbox-launcher file-operation`普通child、有限Request/Result/Validate/Run/Serve、八条原DTO路由；单一gateway三lane生命周期与新native证据。
 
-- [ ] Step1 只读预检上述源点，给出确切签名、JSON envelope和sanitized error映射、read/lines/glob规则、固定helperpath/权限与test selectors；Root冻结裁定并检查共享接口。所有临时根只由私有test helper注入，不新增生产hostroot参数。
-- [ ] Step2 tests-only sandboxfiles/CLI最小RED，Root执行并审计后实现helper/CLI；host/race目标tests与Linux vet通过即独立提交。测试断言真实FS bytes、symlink/FIFO拒绝、边界10000/512KiB、分页/行/权限/失败不截断，无全量旧suite重跑。
-- [ ] Step3 tests-only新HTTP文件/probe回归RED，Root执行后实现消费者与三lane；目标host/race、Linux vet通过即独立提交。每route descriptor/单Exec/receipt/strictbody/unknown/overflowjoin与health满载Close均有实际行为断言。旧gateway只在共享代码变化影响时执行一次相关覆盖组。
+- [x] Step1 只读预检已冻结 exact Request/Result/Validate/Run/Serve/DecodeResult/ErrorStatus、原DTO、单Exec、三lane与native14bridge；实际parentFD/rawOpenat，不新增生产hostroot参数。
+- [x] Step2 helper/CLI实际RED→实现→host/race及Linuxvet，提交2f0dc3b。Helper各9PASS/1明确Darwin非法文件名SKIP，Linux该例待新native；launcher各2PASS无skip。原EILSEQ失败和Root一次selector漏wrapper记录保留，不把它们称为完整通过。
+- [x] Step3 新HTTP/probe实际RED→实现，全部23项gateway host/race PASS无skip、Linuxvet通过。八route descriptor/单Exec/receipt/strictbody/unknown/overflowjoin和独立health/ready满载Close通过；共享路由/生命周期变化已覆盖原gateway，无旧native矩阵重跑。
 - [ ] Step4 新native TestFileAPINative/SANDBOX_FILE_API_NATIVE=1，原fixture最小variant，实际新路由创建文件/列表/read/行/edit/download。原正式launcher/非特权child/terminal/bridgeWait/IOjoin与精确容器清理；仅新selector，有限新场景，不重放旧矩阵。native测试与operator文档独立小提交。
 - [ ] Step5 唯一fresh reviewer immutableBASE→最终HEAD；同pair fix限定复核；tracked验收和整体状态更新，关闭本OWN/pair，继续大文件/剩余迁移。
 

@@ -35,6 +35,7 @@ type Gateway struct {
 	mu        sync.Mutex
 	closed    bool
 	active    map[*gatewayCall]struct{}
+	lanes     [3]int
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	tokens    float64
@@ -44,7 +45,16 @@ type Gateway struct {
 type gatewayCall struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	lane   admissionLane
 }
+
+type admissionLane uint8
+
+const (
+	businessLane admissionLane = iota
+	healthLane
+	readyLane
+)
 
 func New(service Service, settings *deployment.HTTPSettings) (*Gateway, error) {
 	if service == nil || (reflect.ValueOf(service).Kind() == reflect.Pointer && reflect.ValueOf(service).IsNil()) || settings == nil || len(settings.APIKey) == 0 || len(settings.APIKey) > 4096 || settings.Env == nil || settings.ExecTimeoutSeconds < 1 || settings.ExecTimeoutSeconds > settings.MaxExecTimeoutSeconds || settings.MaxExecTimeoutSeconds > 3600 || settings.MaxActive < 1 || settings.MaxActive > 32 || settings.RequestsPerSecond < 1 || settings.RequestsPerSecond > 10000 {
@@ -67,18 +77,26 @@ func New(service Service, settings *deployment.HTTPSettings) (*Gateway, error) {
 	return &Gateway{service: service, settings: owned, active: make(map[*gatewayCall]struct{}), tokens: float64(owned.RequestsPerSecond), lastToken: time.Now()}, nil
 }
 
-func (g *Gateway) enter(ctx context.Context) (*gatewayCall, int) {
+func (g *Gateway) enter(ctx context.Context, lane admissionLane) (*gatewayCall, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return nil, 503
 	}
-	if len(g.active) >= g.settings.MaxActive {
-		return nil, 429
+	limit, fullStatus := g.settings.MaxActive, 429
+	switch lane {
+	case healthLane:
+		limit, fullStatus = 4, 503
+	case readyLane:
+		limit, fullStatus = 2, 503
 	}
-	call := &gatewayCall{}
+	if g.lanes[lane] >= limit {
+		return nil, fullStatus
+	}
+	call := &gatewayCall{lane: lane}
 	call.ctx, call.cancel = context.WithCancel(ctx)
 	g.active[call] = struct{}{}
+	g.lanes[lane]++
 	g.wg.Add(1)
 	return call, 0
 }
@@ -87,6 +105,7 @@ func (g *Gateway) leave(call *gatewayCall) {
 	call.cancel()
 	g.mu.Lock()
 	delete(g.active, call)
+	g.lanes[call.lane]--
 	g.mu.Unlock()
 	g.wg.Done()
 }
@@ -127,7 +146,16 @@ func (g *Gateway) allow() bool {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	call, status := g.enter(r.Context())
+	lane := businessLane
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/health":
+			lane = healthLane
+		case "/ready":
+			lane = readyLane
+		}
+	}
+	call, status := g.enter(r.Context(), lane)
 	if call == nil {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, status, "unavailable", "HTTP admission unavailable")
@@ -169,7 +197,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) >= 2 && parts[0] == "sandboxes" && parts[1] != "by-workspace" {
-		supported := len(parts) == 2 && r.Method == http.MethodGet || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
+		file := len(parts) == 4 && parts[2] == "files" && fileRoute(r.Method, parts[3])
+		supported := file || len(parts) == 2 && r.Method == http.MethodGet || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
 		if supported {
 			id := parts[1]
 			parsed, err := uuid.Parse(id)
@@ -179,6 +208,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(parts) == 2 {
 				g.lookup(w, r, id)
+			} else if file {
+				g.files(w, r, id, parts[3])
 			} else {
 				g.exec(w, r, id, len(parts) == 4)
 			}

@@ -13,7 +13,7 @@
 - helper JSON stdin 最多1MiB；文件内容读取及编辑前后最多512KiB；helper JSON stdout最多1MiB、stderr64KiB。API沿用2MiB body及≤32活跃业务请求。超限明确413或有限错误，不截断成功。
 - 路径最长4096 UTF-8字节，无NUL、绝对且规范化后属于上述根；拒绝原路径 `..` 组件，不误拒合法含双点文件名。glob pattern最长4096，合法相对 `path.Match` pattern，对相对路径匹配；不允许逃逸。分页默认1/100，page_size上限1000，非法负数拒绝；max_depth0表示递归至工具硬界限64，正数≤64。
 - 一次目录扫描总条目最多10000、深度64；逐批/单项读取目录，不能 ReadDir(-1) 先无界分配。排序及分页仅在上述有限集合内，返回精确 total_count；超限返回错误，不声称完整结果。非递归只直接子项；递归/glob不跟随目录 symlink，文件名含换行/制表符正确 JSON 编码。
-- `files/read` 返回与旧入口相同 text/plain原始内容和X-File-Path；download返回原始bytes、有限安全Content-Disposition；两者均在原 signed terminal 成功后才写成功响应。二进制不会因为JSON字符串转换丢失，helper结果以[]byte编码，API解码后输出原字节。read-lines的JSON字符串及目录项名称遇非法UTF-8明确422，不允许encoding/json静默替换后返回另一内容或路径。
+- `files/read` 返回与旧入口相同 text/plain原始内容和X-File-Path；path含控制字符时X-File-Path使用url.PathEscape并附X-File-Path-Encoding: percent-encoded，普通path保持原值，不能产生非法HTTP header。download返回原始bytes、mime.FormatMediaType生成的安全attachment Content-Disposition；两者均在原 signed terminal 成功后才写成功响应。二进制不会因为JSON字符串转换丢失，helper结果以[]byte编码，API解码后输出原字节。read-lines的JSON字符串及目录项名称遇非法UTF-8明确422，不允许encoding/json静默替换后返回另一内容或路径。
 - read-lines计数包括非空末尾无换行的最后一行；保留空白行；默认start1/end文件结尾，负数/逆序拒绝，越过EOF返回空且保留明确索引。edit替换首个或全部匹配；old_str必须非空，无匹配返回409。edit-lines替换闭区间，end0到EOF；new_content原样拼入前后文本，不隐式补换行；开始超过EOF+1拒绝，EOF+1且end0允许追加。行为差异写operator文档，不能复刻旧 wc/sed 多次执行的竞态。
 - 编辑在一次原Exec中完成：实际读取、有限变换、同一固定父目录创建独占随机临时文件、保留原permission低9位、写全/Sync/Close后原子Rename，再Sync父目录。以根内nonblocking O_DIRECTORY打开实际parent FD，再使用该同一FD的Openat/Renameat/Unlinkat；不对用户路径调用可能先阻塞FIFO的Root.OpenRoot。编辑目标的最终symlink明确拒绝，读操作仍支持根内相对symlink。失败清理已创建的临时文件；不截断原目标，不跨 /tmp 与workspace移动。rename以后失败不能当作“未修改”；所有未知回执不自动重发。并发用户编辑仍可last-writer-wins，不声称文件事务或持久幂等。
 
