@@ -1,0 +1,31 @@
+# 无workspace业务申请与幂等恢复
+
+接续已批准总方案及36ec725e2610609ce043d0e47bded0b91b1f88cb业务快照验收。总方案允许无workspace创建和可选Idempotency-Key；本单元给plain业务路径提供实际入口，恢复原IDs与首次配置。用户要求连续实施、小步提交；这是总方案内接线，不改变生产切换边界。
+
+## 明确的身份
+
+现WorkspaceIdentity使用真实provider/storage/bucket/canonicalprefix构造。新增显式detached identity domain用于无挂载的独立sandbox，仍绑定Backend operator storage authority，按稳定服务端principal及IdempotencyKey确定。不得伪造S3 prefix，不保留原始principal/key或storage secret，不把客户端自称principal当认证身份。
+
+保持原workspace哈希/partition字节完全不变；新kind使用独立length-framed domain，构造和validate均验证完整私有字段、kind/hash/partition，不能改kind或字段重解释成workspace。新identity不是runtime/operation权限。公开identity构造器/Backend绑定入口和kind查询的最小签名由只读预检确认；优先从现Backend身份导出storage binding，避免再让调用方提供可能漂移的storage参数。检查所有依赖WorkspaceIdentity私有字段的接点，detached无真实存储prefix、不能因此获得挂载能力。
+
+## 实际业务入口
+
+在现PlainColdService上新增可选固定business配置（稳定operator Principal、首次解析Defaults），以及CreateBusiness(ctx, input)入口。input只含可选IdempotencyKey和pkg/types.CreateSandboxRequest；principal不由每请求指定。具体类型与名称在预检冻结。配置必须owned/bounded并与固定provider profile兼容，旧PlainColdOptions未配置business时原Create/Resume行为保持。业务方法使用原service一次准入/取消/Close join；不能嵌套公开Create导致双重占槽，也不能在service Close后开始读或返回新成功结果。必要时将原Create已准入主体提取私有函数，保持旧wrapper与结果语义。
+
+key显式提供时遵守原128B principal/256B key有效性；缺key时生成唯一server key，结果始终返回实际key及原PlainColdResult request/intent IDs和pending/unknown分类，便于后续HTTP回传。不得超时后换key重试；单次入口只允许固定次数的恢复读取/冲突接续，无无界CAS重试、轮询、按N扫描或新常驻registry。
+
+新请求：确定detached identity，读取原principal/key request。不存在时用固定defaults构建完整business snapshot，生成稳定请求所需四个canonical UUID，沿原v2 Create/Acquire/正式冷建协议执行，保留原unknown StageReference/IDs，不额外重放非幂等POST。
+
+已存在请求：先核对原request workspace/restore/IDs绑定，经原control或published历史publication取得真实SnapshotReference，再LoadSnapshot并严格解码原v2 capsule和business。核对deployment/principal-key原request归属及capsule所有IDs/ref，恢复原RequestID/IntentID/SandboxID/SnapshotVersion与resolved。比较incoming normalized RequestedDigest，不能先用当前defaults覆盖原resolved；可用原resolved作为Build defaults来计算incoming摘要。不同请求配置返回ErrIdempotencyConflict，无新Grant/POST。相同请求沿原持久intent/安全协议接续，当前owner释放后历史完成仍可重放；不能强制当前coherent owner view存在才找历史结果。
+
+首次并发absent：输家若遇ErrIdempotencyConflict/相应可确认争用，只额外读取一次原request并认证其快照，按同摘要恢复原IDs/resolved或409；不能把任意conflict/unknown当作同请求。没有足够持久证据时返回retryable/unknown或recovery required并保留自身原参考，不能清状态、重复POST或换IDs盲重建。原AcquireIntent配置摘要/事务/receipt/claim/provider能力不削弱。旧v1或不属于此业务入口的记录不能被改写为v2；不兼容/缺失历史配置明确失败，不伪造成功。
+
+结果可带独占business配置供之后HTTP响应映射，不能带执行授权。配置codec不新增CreatedAt到配置digest；完整HTTP CreatedAt/expiry映射、freshhealth、operation gate、可等待Watch、调度/worker恢复均为后续，当前入口成功只表示原service的completed/historical语义。
+
+## 验证与限制
+
+TDD先新限定RED。身份测试涵盖原固定hash保持、detached稳定隔离、principal/key/storage/domain变化、伪造字段和边界拒绝。入口测试涵盖固定principal、可选key回传、无business配置拒绝、配置所有权/上限、错误与未知参考保留、单准入与Close；必须有实际TLS etcd+正式launcher成功及同key重试不增加POST、变配置409、默认值变化仍取旧resolved、两个首发并发只创建一个、ACK丢失后重建service并以原key恢复。尽量扩展现固定native业务fixture，避免复制另一套服务框架；一组唯一selector，实际原Wait/IO/etcd/container joins。
+
+保持Go1.25.6/apply_patch、唯一fresh author/wholeTask reviewer/同pair修复/Root-only精确小提交。每次具体Docker经Root审固定cachedimage/security/resources/binds/原binaryWait和精确清理；新OWN独立collector/epochs，实际17 GoList输入匹配平台/race、prepost/逐成员/scripts/ELF/buildinfo。旧OWN/pair关闭，不读取或复用。限定host/race/最终Linuxvet/实际native，不重跑旧矩阵。无依赖升级、Sentinel改动、外部部署或Redis回退。
+
+本单元完成也不表示Main/HTTP/Manager、workspace/FUSE创建、永久TTL执行、生产迁移或大N容量已完成。固定profile资源/issuer变更的跨部署路由仍需生产接线明确，不把配置默认值冻结等价为任意部署迁移。
