@@ -132,7 +132,7 @@ func (call *workerCall) lose() {
 
 // Release remains an actual owner even after cancellation. Concurrent explicit
 // Release and the existing backend Close share this one original cleanup.
-func (b *Backend) releaseWorkerSession(ctx context.Context, s *WorkerSession) error {
+func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) error {
 	b.archiveLife.mu.Lock()
 	if s.release != nil {
 		r := s.release
@@ -172,7 +172,10 @@ func (b *Backend) releaseWorkerSession(ctx context.Context, s *WorkerSession) er
 	b.archiveLife.mu.Unlock()
 	err := cleanupErr
 	if !cleaned && lease > 0 {
-		err = errors.Join(err, b.workerRevoke(ctx, lease))
+		// Admission already checked the caller context. Its later cancellation
+		// must not cancel the once-only original cleanup after physical joins;
+		// workerRevoke installs its own requestTimeout bound and is joined here.
+		err = errors.Join(err, b.workerRevoke(context.Background(), lease))
 	}
 	b.archiveLife.mu.Lock()
 	s.cleaned, s.released, s.cleanupErr = true, true, err

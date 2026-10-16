@@ -54,6 +54,8 @@ callback 使用接纳时的原 deadline。会话可以在 callback 执行期间�
 
 释放 share/partition 会取消关联 callback，等待实际返回，再进行原 CAS 清理；会话释放和 Backend.Close 同样等待实际 RPC、callback 及已登记的释放调用退出，再清理原 Lease 和关闭 client。若 callback 忽略取消，Close 会继续等待，不能把超时当作退出。
 
+callback 不得同步调用会等待自身退出的 share/partition/session Release 或 Backend.Close，也不得等待一个反过来 join 自身的关闭 goroutine；应先返回，再由外部 owner 执行释放或关闭。
+
 普通本地 callback 错误或本地 ctx 取消会丢弃该次结果，但不直接证明整个 session 失权。实际在途 RPC 取消或响应未知、原 guard/profile/identity/restore/partition/share 不一致，则停止旧权限继续使用。旧结果不得发布到后来会话的缓存。跨进程 Lease 交接可能与旧读取尾部重叠，四个软槽不能解释为严格的全局物理在途上限。
 
 ## 错误、关闭与验证边界

@@ -86,6 +86,72 @@ func TestWorkerRecords(t *testing.T) {
 }
 
 func TestWorkerProfilePin(t *testing.T) {
+	for _, fault := range []string{"zero-outer-revision", "outer-before-profile", "nested-cluster", "nested-revision", "omitted-nested-header"} {
+		t.Run("native-read-header/"+fault, func(t *testing.T) {
+			server, options := workerTestEndpoint(t)
+			key, _ := options.Namespace.Key("meta", "worker_control_budget")
+			hits := 0
+			before := server.revision
+			server.txnReply = func(request *pb.TxnRequest, reply *pb.TxnResponse) {
+				for i, op := range request.Success {
+					read := op.GetRequestRange()
+					if read == nil || string(read.Key) != key {
+						continue
+					}
+					hits++
+					point := reply.Responses[i].GetResponseRange()
+					switch fault {
+					case "zero-outer-revision", "outer-before-profile":
+						revision := int64(0)
+						if fault == "outer-before-profile" {
+							revision = server.values[key].ModRevision - 1
+						}
+						reply.Header.Revision = revision
+						// Match nested revisions to isolate the outer-positive/KV
+						// revision bound from nested-header mismatch detection.
+						for _, response := range reply.Responses {
+							if r := response.GetResponseRange(); r != nil && r.Header != nil {
+								r.Header.Revision = revision
+							}
+						}
+					case "nested-cluster":
+						point.Header.ClusterId++
+					case "nested-revision":
+						point.Header.Revision++
+					case "omitted-nested-header":
+						point.Header = nil
+					}
+				}
+			}
+			b, err := New(context.Background(), options)
+			if b != nil {
+				t.Cleanup(func() { require.NoError(t, b.Close()) })
+			}
+			if fault == "omitted-nested-header" {
+				require.NoError(t, err, "native Txn may legitimately omit operation headers")
+				require.NotNil(t, b)
+			} else {
+				require.Error(t, err, "malformed actual profile response must fail closed in New")
+				require.Nil(t, b)
+			}
+			server.mu.Lock()
+			after, observed := server.revision, hits
+			requests := append([]*pb.TxnRequest(nil), server.requests...)
+			server.mu.Unlock()
+			require.Equal(t, 1, observed, "fault injection is limited to the actual profile read")
+			require.Equal(t, before, after)
+			grants, keeps, revokes := server.counts()
+			require.Equal(t, []int{0, 0, 0}, []int{grants, keeps, revokes})
+			for _, request := range requests {
+				for _, branch := range [][]*pb.RequestOp{request.Success, request.Failure} {
+					for _, op := range branch {
+						require.Nil(t, op.GetRequestPut())
+						require.Nil(t, op.GetRequestDeleteRange())
+					}
+				}
+			}
+		})
+	}
 	t.Run("New-is-read-only-and-options-owned", func(t *testing.T) {
 		server, options := workerTestEndpoint(t)
 		before := server.revision

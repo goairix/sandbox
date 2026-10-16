@@ -25,6 +25,9 @@ type workerRelistOwner struct {
 // partition and relist slot. Cancellation cannot pretend that work returned.
 // Success is a publication gate for this original owner only; callers must not
 // publish canceled/lost results into a replacement session's cache.
+// work must return cooperatively and must not synchronously release its own
+// share/partition/session or call Backend.Close, nor wait for a goroutine doing
+// such a join: it must return before an external owner releases or closes it.
 func (b *Backend) RunWorkerRelist(ctx context.Context, p *WorkerPartitionClaim, share *WorkerBudgetShare, work func(context.Context) error) error {
 	if ctx == nil || work == nil || !b.validWorkerBackend() {
 		return ErrInvalidRecord

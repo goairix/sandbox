@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -21,11 +22,10 @@ func (b *Backend) pinWorkerControl(ctx context.Context, options *WorkerControlOp
 	if err != nil {
 		return err
 	}
-	points, err := b.readDomain(ctx, key)
+	kv, err := b.readWorkerProfile(ctx, key)
 	if err != nil {
 		return err
 	}
-	kv := points[0]
 	var record workerProfileRecord
 	if kv == nil || kv.Lease != 0 || kv.Version != 1 || kv.CreateRevision <= 0 || kv.ModRevision != kv.CreateRevision || string(kv.Key) != key || decodePreparationDomain(kv, &record, workerRecordBytes) != nil {
 		return ErrIdentityMismatch
@@ -40,6 +40,44 @@ func (b *Backend) pinWorkerControl(ctx context.Context, options *WorkerControlOp
 	}
 	b.workerControl = &workerBackend{origin: b, options: owned, profile: ownTaskFence(kv)}
 	return nil
+}
+
+// The profile's actual native reply must survive until its complete header
+// and KV revision checks finish. The generic domain reader intentionally
+// retains its existing contract; this stricter initialization is worker-local.
+func (b *Backend) readWorkerProfile(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
+	failure := []string{b.identityKey, b.restoreKey}
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(b.baseComparisons()), Success: taskProtoPoints([]string{key}), Failure: taskProtoPoints(failure)}
+	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request}, []*pb.TxnResponse{
+		taskProtoResponse([]string{key}, []string{strings.Repeat("x", workerRecordBytes)}),
+		taskProtoResponse(failure, []string{b.identityValue, b.restoreEpoch}),
+	}); err != nil {
+		return nil, err
+	}
+	rpc, cancel := b.requestContext(ctx)
+	r, err := b.client.Txn(rpc).If(b.baseComparisons()...).Then(clientv3.OpGet(key)).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
+	rpcErr := rpc.Err()
+	cancel()
+	if err != nil || rpcErr != nil {
+		return nil, errors.Join(ErrOutcomeUnknown, err, rpcErr)
+	}
+	if err = b.operationResponseHeader(r); err != nil {
+		return nil, errors.Join(ErrIdentityMismatch, err)
+	}
+	if err = taskCheckWire(b.namespace, nil, []*pb.TxnResponse{(*pb.TxnResponse)(r)}); err != nil {
+		return nil, errors.Join(ErrIdentityMismatch, err)
+	}
+	if !r.Succeeded {
+		if _, err = b.workerPoints(r, failure); err != nil {
+			return nil, errors.Join(ErrIdentityMismatch, err)
+		}
+		return nil, ErrIdentityMismatch
+	}
+	points, err := b.workerPoints(r, []string{key})
+	if err != nil {
+		return nil, errors.Join(ErrIdentityMismatch, err)
+	}
+	return points[0], nil
 }
 
 // Requires the existing lifecycle lock. These immutable comparisons remain

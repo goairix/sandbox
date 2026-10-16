@@ -24,6 +24,62 @@ func workerTestReceive[T any](t *testing.T, ch <-chan T) T {
 }
 
 func TestWorkerCloseJoins(t *testing.T) {
+	t.Run("release-canceled-during-callback-join", func(t *testing.T) {
+		b, server := workerTestBackend(t)
+		s, p, share := workerRelistTestClaims(t, b, 0, 0)
+		block := workerRelistTestStart(t, b, context.Background(), p, share)
+		owned := workerTestReceive(t, block.entered)
+		type revokeEntry struct {
+			lease        clientv3.LeaseID
+			err          error
+			at, deadline time.Time
+			bounded      bool
+		}
+		entries := make(chan revokeEntry, 2)
+		original := b.client.Lease
+		b.client.Lease = &workerTestLease{Lease: original, revoke: func(ctx context.Context, lease clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+			// Observe the actual Revoke entry, before workerRevoke's deferred
+			// cancellation can alter the context being inspected.
+			deadline, bounded := ctx.Deadline()
+			entries <- revokeEntry{lease: lease, err: ctx.Err(), at: time.Now(), deadline: deadline, bounded: bounded}
+			return original.Revoke(ctx, lease)
+		}}
+		releaseCtx, cancelRelease := context.WithCancel(context.Background())
+		t.Cleanup(cancelRelease)
+		done := make(chan error, 1)
+		go func() { done <- b.ReleaseWorkerSession(releaseCtx, s) }()
+		workerTestReceive(t, owned.Done())
+		select {
+		case err := <-done:
+			t.Fatalf("Release returned before its actual callback: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		cancelRelease()
+		select {
+		case err := <-done:
+			t.Fatalf("caller cancellation replaced the actual callback join: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		block.unblock()
+		require.Error(t, workerTestReceive(t, block.done))
+		entry := workerTestReceive(t, entries)
+		require.Equal(t, clientv3.LeaseID(s.Reference().LeaseID), entry.lease)
+		require.NoError(t, entry.err, "an admitted original cleanup must not inherit canceled Release context")
+		require.True(t, entry.bounded)
+		require.True(t, entry.deadline.After(entry.at))
+		require.LessOrEqual(t, entry.deadline.Sub(entry.at), b.requestTimeout)
+		require.NoError(t, workerTestReceive(t, done))
+		guard, _ := b.namespace.workerSessionKey(s.Reference().SessionID)
+		partition, _ := b.namespace.workerPartitionKey(0)
+		budget, _ := b.namespace.workerBudgetKey(WorkerBudgetRelist, 0)
+		for _, key := range []string{guard, partition, budget} {
+			require.Nil(t, server.point(key))
+		}
+		require.NoError(t, b.Close())
+		_, _, revokes := server.counts()
+		require.Equal(t, 1, revokes)
+		require.Empty(t, entries, "Close cannot retry the already joined original cleanup")
+	})
 	for _, phase := range []string{"initial-Grant", "original-Renew"} {
 		t.Run(phase, func(t *testing.T) {
 			b, server := workerTestBackend(t)
