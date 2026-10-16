@@ -58,6 +58,43 @@ func (b *Backend) beginDuePage(ctx context.Context, p *WorkerPartitionClaim, sha
 	return o, nil
 }
 
+// The whole generic Stage path inherits this original immutable deadline.
+// Cleanup gets its own bounded context and joins before this owner finishes.
+func (b *Backend) beginExpiredTaskOwner(ctx context.Context, p *WorkerPartitionClaim, share *WorkerBudgetShare) (*workerDueOwner, context.CancelFunc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	b.archiveLife.mu.Lock()
+	defer b.archiveLife.mu.Unlock()
+	if !b.validWorkerPartition(p) || !b.validWorkerBudget(share) || p.session != share.session || share.kind != WorkerBudgetClaim {
+		return nil, nil, ErrInvalidRecord
+	}
+	if b.archiveLife.closed {
+		return nil, nil, context.Canceled
+	}
+	if p.release != nil || p.released || p.lost || share.release != nil || share.released || share.lost || p.session.release != nil {
+		return nil, nil, ErrGuardExpired
+	}
+	if err := p.session.live(); err != nil {
+		return nil, nil, err
+	}
+	if share.dueOwner != nil || p.session.operation != nil {
+		return nil, nil, ErrConflict
+	}
+	if !share.bucket.take(time.Now(), 1) {
+		return nil, nil, ErrConflict
+	}
+	bounded, stop := context.WithDeadline(ctx, p.session.deadline)
+	call, err := b.beginWorkerCallLocked(bounded, p.session)
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	o := &workerDueOwner{call: call, partition: p, share: share, done: make(chan struct{})}
+	share.dueOwner = o
+	return o, stop, nil
+}
+
 func (o *workerDueOwner) finish() {
 	o.call.finish()
 	b := o.share.origin
