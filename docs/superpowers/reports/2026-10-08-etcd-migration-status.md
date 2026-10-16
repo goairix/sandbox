@@ -2,9 +2,9 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
-## 2026-10-16 最新接续：Lookup 已验收，实际 Exec 接线中
+## 2026-10-16 最新接续：Lookup 与实际 Exec 已验收，推进 HTTP 接入
 
-当前工作分支 `codex/etcd-state-management`。Lookup 最新验收提交 `436bef8`，实际执行 service 的方案/边界提交 `af03581`、`7ed36c6`。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。
+当前工作分支 `codex/etcd-state-management`。Lookup 验收提交 `436bef8`，实际执行 service 的四个实现切片为 `2469576`、`6777519`、`7f50806`、`2616a36`，唯一审查 C0/I0/M2 Approved。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。
 
 | 已完成单元 | 验收提交 | 范围 |
 | --- | --- | --- |
@@ -15,14 +15,15 @@
 | detached 业务申请/幂等恢复 | `1161ee4e` | 无 workspace 的请求身份、stable IDs、竞争与原配置恢复 |
 | mounted startup loader | `2106f825` | 文件/key/TLS/kubeconfig 接入及只读启动检查 |
 | 按 ID Lookup 与真实健康 | `436bef8` | 当前 metadata/原 CreatedAt/owned 配置、mTLS 健康、TTL/最终确认/Close；审查发现的两项 TLS EOF 缺陷已复现、修复并复核 |
+| 实际执行与 mounted signer | `2616a36` | service→原 gate/签名/目标执行/续期/Wait/Close；32秒真实命令和失权、取消、关闭验证通过，审查已批准 |
 
-正在做的完整单元是普通 service 的实际 Exec：原 operation gate、签名下发、超过 20 秒的调用期限、实际目标续期、原输出/结果与取消/Close join，以及 mounted signer。预检完成，尚未将其记为代码完成。下一步继续 HTTP 所有操作 gate、固定部署路由与主程序接线。
+实际 Exec 单元已验收，原始 native 实际38.83秒PASS，含32秒命令/目标接受续期/exit7/drain、实际失权、取消/Close、统一预算及原IOjoin。下一步为 HTTP 创建/查询/执行与流的业务接入，再覆盖全部操作 gate、固定部署路由与主程序接线。现有 HTTP/main 仍使用 Redis。
 
 剩余主交付：API/Pool/Docker/Upload 的完整调用路径；分区 due/dirty/Watch 调度；FUSE/helper/collector 与实际远端同步；长期历史/槽位回收及证书维护；大量已有 sandbox 的容量、故障、部署/恢复验收；最终 Redis 移除和整分支审查。Create/Lookup 的 service 单元与只读启动检查，均不等价上述主程序生产接线完成。
 
-百分比暂保留最近公布的粗估口径：**功能代码约55% / 整体交付约40% / 生产切换0%**。这些不是已完成代码行数或提交数；在实际业务接线形成可验收链路之前，不因新增组件和测试次数直接上调。最终 Lookup 的 host/race/Linux vet 及真实 v1/v2 native 通过；这些小规模结果不构成大量已有 sandbox 的性能或容量验收。详情见 `2026-10-16-etcd-live-sandbox-lookup-verification.md`。
+最新粗估：**功能代码约60%（55%–65%）/ 整体交付约40% / 生产切换0%**。功能代码上调依据是冷创建/业务幂等、真实 Lookup 与实际 Exec 已形成可验收的 service 链路，包含 mounted 部署消费；不按代码行数/提交数/测试次数计算。整体交付仍沿下述固定权重，HTTP/main 与其余生产缺口尚未完成，暂不上调。小规模 native 不构成大量已有 sandbox 的性能或容量验收。详情见 `2026-10-16-etcd-live-sandbox-lookup-verification.md` 与 `2026-10-16-etcd-exec-service-verification.md`。
 
-## 2026-10-16 百分比汇报口径
+## 2026-10-16 此前百分比明细（保留历史，最新功能估算见上节）
 
 用户要求后续按百分比汇报。当前整体约 **40%**：采用完整生产交付项加权估算，权重保持不变，计算值39%；估算误差约±5个百分点。它不是源码行数/提交数/测试数统计，也不是已经上线40%。本次上调只来自本地普通运行时安全释放完整单元通过审查验收，不因测试/提交数量上调。
 

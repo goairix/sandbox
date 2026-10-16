@@ -21,9 +21,9 @@
 **Produces:** 实际 streaming-writer Exec service、有限原续期与清理、明确 local terminal/unknown/ref、实际 mounted signer/只读 deployment 接线和 native 证明。
 
 - [x] Step1 源码预检6844fc通过：Exec接收完整ExecutionRequest与writers，结果显式rejected/unknown/local_terminal+原refs/receipt；统一enterFor预算、固定UID/GID/profile、owned signer/只读Open。Root接受窄ErrExecDeliveryTerminal兼容wrap ErrConflict，仅区别已认证终态；真实失权/IO错误不吞。tests-only开始，产品等实际RED。
-- [ ] Step2 新入口最小 RED 后实现；产品按 signer、实际 service 等连贯 slice 验证即提交，不能所有完成才大提交。
-- [ ] Step3 targeted host/race/Linuxvet；真实 native 含超20秒执行/原续期、输出/非零退出、gate/cancel/Close/unknown 和所有原 Wait/IO joins。匹配实际GoList来源/当前binary/脚本，Root具体Docker预检。
-- [ ] Step4 唯一fresh reviewer审原BASE→HEAD，同pair定点修复；tracked验收关闭OWN，立即继续生产业务路径。
+- [x] Step2 最小RED后实现，验证即分四片提交2469576/6777519/7f50806/2616a36。
+- [x] Step3 targeted host/race/Linuxvet及真实32秒执行/目标实际续期/exit7/drain/unknown/gates/原Wait与IOjoin通过。保留3.6.5初始Status权限失败，匹配3.6.14测试server后同binary实际38.83秒PASS；来源/隔离/精确清理已独立核对。
+- [x] Step4 唯一fresh reviewer批准：Spec compliant，C0/I0/M2；minor噪声和建议的确定性交接补测已裁定记录，详见docs/superpowers/reports/2026-10-16-etcd-exec-service-verification.md。关闭本OWN/pair后继续HTTP/生产业务路径。
 
 ## Root 初始接口检查
 
