@@ -30,13 +30,13 @@
 
 ## Task 1: View-bound runtime history, scalar health and actual service Lookup
 
-**Files:** 修改internal/storage/state/etcd/runtime_enrolled_publication_read.go，新增domain_runtime_read.go及对应tests；私有dispatch decoder必要最小调整在runtime_dispatch_read.go，保持公开方法原验证。新增internal/runtime/controltransport/runtime_health_{frame,destination}.go及tests，RuntimeRequest/ReadRuntimeRequest在task_quiesce_types.go/task_close_frame.go增窄typed分支；原Session有限mode/EOF必要最小变更先预检。新增internal/runtime/controlrunner/supervisor_health.go及tests，supervisor_transport.go处理窄分支；新internal/provisioning/plain_cold_lookup.go及tests。实际native只对原cold_create_service_native_linux_test.go增加必要variant，新live_lookup_native_linux_test.go固定selector；不扩大旧全矩阵。
+**Files:** 修改internal/storage/state/etcd/runtime_enrolled_publication_read.go，新增domain_runtime_read.go及对应tests；私有dispatch decoder必要最小调整在runtime_dispatch_read.go，保持公开方法原验证。新增internal/runtime/controltransport/runtime_health_{frame,destination}.go及tests，RuntimeRequest/ReadRuntimeRequest在task_quiesce_types.go/task_close_frame.go增窄typed分支；原Session有限mode/EOF必要最小变更先预检。新增internal/runtime/controltarget/journal_health.go及tests提供无IO的TryLock scalar观察。新增internal/runtime/controlrunner/supervisor_health.go及tests，supervisor_transport.go处理窄分支；新internal/provisioning/plain_cold_lookup.go及tests。实际native只对原cold_create_service_native_linux_test.go增加必要variant，新live_lookup_native_linux_test.go固定selector；不扩大旧全矩阵。
 
 **Consumes:** ReadSandboxSnapshot/原view origin/Confirm、原历史publication/dispatch严格decoder、PlainColdService enter/leave/destination/bridge/pod、受控clock、真实Supervisor.activation/管理TLS/连接所有权。
 
 **Produces:** PlainColdService.Lookup(ctx,id)、同view绑定且caller-owned的publication/dispatch读取结果、有限scalar health exchange。具体DTO/typed错误/locator策略由Step1源代码预检冻结。
 
-- [ ] Step1 fresh author只读预检：冻结完整读→history→capsule→target→health→TTL/Confirm顺序、identity来源/codec版本/原CreatedAt源、Backend private locator最小重用、实际wire/EOF/Supervisor gate与Close契约、验证场景和collector；Root裁决后START-GO。
+- [x] Step1 Root完整接受6c93e1预检：pointer结果/typed notfound与unavailable/v1 nilBusiness+v2owned；原dispatch CreatedAt/private concrete read locator/先后Confirm；health4096含前缀/内部随机nonce/snake_case wire/strictTLS+rawEOF；Journal.ObserveGate TryLock无IO与Supervisor clock前后重验、原service全程准入与最终Close检查。START-GO tests/collectors first，Root审后实际RED，产品随后。
 - [ ] Step2 协议/只读view/service测试RED后实现，host GREEN/race与适当vet，分别提交连贯协议/reader/service切片。
 - [ ] Step3 真实TLS etcd/正式launcher/原bridge Lookup成功与健康、到期、并发变化、关闭等拒绝路径验证；Root完整核对实际输入/ELF/原进程及IO joins，小步提交。
 - [ ] Step4 唯一fresh reviewer原BASE→finalHEAD审查；同pair修复；tracked验收并关闭OWN，继续HTTP/生产主路径。

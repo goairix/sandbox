@@ -12,6 +12,18 @@
 - Supervisor在实际受保护连接处理，验证同一activation/runtime/gate，检查admission/closed/failed/failurePending并有界TryLock；不改变持久gate、不创建进程、不读全量/proc或全N状态。使用既有受控时钟、当前TLS验证和原连接/handler关闭机制，无本地墙钟权威fallback。
 - 服务在健康交换前后按受控UTC保守检查 `now + 1s < expires_at`，最终确认同一owner/fence/placement/control revision未变。Close或context到期不得晚返回新成功。SDK/HTTP/主进程切换不在此Task，不将观察当Exec/file gate。
 
-## 验收
+## 预检冻结
+
+Root接受完整源代码预检。Lookup签名为`Lookup(context.Context,string) (*PlainColdLookupResult,error)`，所有错误返回nil；新增ErrPlainColdNotFound/ErrPlainColdUnavailable，其余配置/Backend/context/transport错误保留。结果含原IDs、WorkspaceHash/Generation/Runtime/CreatedAt/ExpiresAt及owned Business；v1允许nil Business，v2严格解码，无默认合并。
+
+Backend入口`ReadSandboxRuntime(ctx,view) (*SandboxRuntimeReadResult,error)`返回owned Publication与原Dispatch，从已验证preparation bundle取出，不重复读。先后Confirm原view；private具体hash/partition locator仅用于只读decoder，旧公开入口仍验证完整WorkspaceIdentity。当前expiry可不同于历史publication，原CreatedAt+原TTL与原dispatch/publication创建期相符；不按当前expiry倒推。
+
+保留原private WorkspaceIdentity decoder签名，以薄wrapper转发至新的具体locator At核心，避免连带改动preparation等调用者；不复制decoder逻辑，view路径只从真实view取得locator。
+
+健康协议固定purpose runtime_health_query/runtime_health，4096上限包含4字节长度前缀；独立snake_case identity wire DTO，正gate epoch、32随机字节的64位小写hex nonce，响应gate_state=open/closed。Destination.QueryRuntimeHealth(ctx,gate)内部生成nonce，原TLS close_notify加raw adapter EOF/status，read-once有限模式；旧wire bytes不变。
+
+允许新增controltarget/journal_health.go及测试：ObserveGate(ctx)只用TryLock读取实际origin/initialized/closed/poison/accounting-known与scalar gate，Busy立即拒绝；不能改Status为有阻塞的新health路径，不做IO/扫描/写入。Supervisor不持锁等待clock IO，复验实际activation/证书与同指针后再TryLock，核对journal与activation及admission/关闭/失败状态；不凭历史open manifest返回健康。最终service确认顺序及受控now+1s期限沿原预检，返回前原mu检查closed/context。
+
+## 验收记录要求
 
 协议非法/错nonce/错runtime或gate/截断和trailing/取消关闭；view nil/copy/foreign/stale拒绝，原workspace公开方法保持验证；实际服务完整Lookup健康成功、到期/metadata变化/target gate关闭/坏bridge或旧响应失败；单准入/Close join。Host/race与相关Linux vet、真实TLS etcd+正式launcher+原bridge运行时验证。原创建时间来源、owned返回配置及只读无副作用也需证据。唯一fresh wholeTask reviewer，原始失败保留，小步提交，不重跑已验收旧矩阵。
