@@ -127,7 +127,10 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if request.Publication != nil {
+	if request.Health != nil {
+		_ = s.dispatchRuntimeHealth(bounded, conn, *request.Health)
+		return
+	} else if request.Publication != nil {
 		// Publication has its own finite response framing. Refusal closes this
 		// connection without emitting a legacy event or creating new authority.
 		_ = s.dispatchEnrolledPublication(bounded, conn, *request.Publication)
