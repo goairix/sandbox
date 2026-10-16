@@ -29,16 +29,16 @@
 
 ## Task 1: Business configuration snapshot with real cold service consumption
 
-**Files:** 新 internal/sandboxsnapshot/{snapshot.go,codec.go,snapshot_test.go,codec_test.go}；修改 internal/provisioning/plain_cold_request.go、plain_cold_create.go及其对应host tests；必要时新增plain_cold_snapshot.go分离profile/兼容解码；修改原internal/runtime/controlrunner/cold_create_native_linux_test.go最小固定variant，新增business_snapshot_service_native_linux_test.go selector。collector只放本OWN复用tracked scripts/cold-create-native-common.sh。
+**Files:** 新 internal/sandboxsnapshot/{snapshot.go,codec.go,snapshot_test.go,codec_test.go}；修改 internal/provisioning/plain_cold_request.go、plain_cold_create.go及其对应host tests；必要时新增plain_cold_snapshot.go分离profile/兼容解码；修改原internal/runtime/controlrunner/cold_create_service_native_linux_test.go最小固定variant，新增business_snapshot_service_native_linux_test.go selector。collector只放本OWN复用tracked scripts/cold-create-native-common.sh。
 
 **Consumes:** pkg/types.CreateSandboxRequest/ResourceLimits/NetworkConfig/DependencySpec；原plainCold capsule/固定s.spec/claim/coherent恢复/历史LoadSnapshot；原正式launcher/TLS服务fixture。
 
 **Produces:** sandboxsnapshot.Build(request types.CreateSandboxRequest, defaults Defaults) (*Snapshot,error)、Encode(*Snapshot) ([]byte,error)、Decode([]byte) (*Snapshot,error)；PlainColdRequest可选typed配置、严格v1/v2恢复与可验证配置消费。具体字段和最小只读提取接口由Step1冻结，不移动旧Manager类型。
 
-- [ ] Step1 唯一fresh author先只读源预检，明确具体types、旧默认资源/mount语义、bounded输入算法、v1 byte兼容、最终envelope preGrant校验接点与真实native variant；报告Root裁决后START-GO，无预先产品修改/Go/Docker。
-- [ ] Step2 编写codec与consumer测试/限定collector，Root审collector后实际RED；实现codec并限定GREEN/race，Root提交自洽codec小单元。
-- [ ] Step3 v1/v2 capsule/profile预检/进行中及历史恢复实际消费；host negative+compatibility GREEN；Root小提交consumer。
-- [ ] Step4 独立冻结native构建与Root逐项来源/ELF/script检查，Root具体run正常+ACK-loss v2真实成功及必要v1回归，原Wait/IO/transport/etcd/container全部join；最终相关vet，Root小提交tests。
-- [ ] Step5 完整BASE→HEAD一份reviewpackage、唯一fresh spec+quality reviewer，同pair修复；tracked验收后关闭本OWN，连续推进业务幂等和HTTP/Manager接线。
+- [x] Step1 唯一fresh author只读预检，Root接受Snapshot/TTL/Resolved/Defaults及Build/Encode/Decode；60KiB lower-bound budget先检查后clone/marshal，最终exact大小检查；TmpDisk沿用50Mi，其余资源显式defaults；v1 omitted Business/v2完整业务，shared ongoing/history校验。原AcquireIntent已在任何RPC/Grant前编码完整65536B envelope，原样复用。实际native fixture为cold_create_service_native_linux_test.go。START-GO先tests/collector，Root审后实际RED。
+- [x] Step2 新codec/consumer测试经Root审collector；red01在Bash3空数组处提前失败不计RED，red02实际missing-symbol编译RED。codec01六组PASS后补resolved mount字符串独占复制，green02六组codec全PASS；Root提交190e08d53b382e8dabb036fcddeb34150c4718b9。race01包含codec/consumer合计11组PASS无racefinding，实际GoList匹配-race。
+- [x] Step3 v1/v2 capsule/profile预检/进行中及历史恢复实际消费；green01因decoder迁移遗漏原bytes import编译失败后修正，green02五组provisioning全PASS（含12类副作用前拒绝/v1精确字节/v2严格性/原host回归）；Root提交0cac2370d1698707b7bb75b72d1d3d77442879fb。原完整envelope preGrant路径复用，无主入口切换。
+- [x] Step4 native01冻结构建：runner9125/launcher2006实际17类输入、逐成员/prepost/scripts/真实ELF与Go1.25.6 Linuxarm64 CGO0均由Root核对。Root原运行1dc2f9/session39294→26a6ea exit0，两个v2+一个v1兼容场景PASS/noSkip；3launcher/9bridge IO/3TLS etcd均join，attach/container0/noOOM、精确345bffaf646f39f62fa3ca134c8d02fadd83f922cb7182e398ddc5ad868c144e删除/inventory空。最终三包vet02退出0/raw0B/实际9127输入；Root测试小提交6dcfe5225d17618f71ec9b14de6884d98ef2d02c。
+- [x] Step5 原BASE9b2de47→HEAD6dcfe52四提交一份reviewpackage；唯一fresh spec+quality reviewer结论Spec compliant / Approved，无Critical/Important。Root完整读取并接受，Minor原fixture日志噪声分类展示延后，不为日志清洁重跑。tracked验收后关闭本OWN，连续推进无workspace身份与业务幂等；不表示生产切换完成。
 
 Ruling: 此单元细化已批准总方案的业务snapshot/恢复接线，不扩大生产切换范围；使用独立DTO codec避免旧Manager类型搬迁。若实际resource/default或envelope接口与候选冲突，author只读报告Root具体裁决，不重复请求用户授权。
