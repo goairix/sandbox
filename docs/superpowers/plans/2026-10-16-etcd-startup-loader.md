@@ -36,8 +36,8 @@
 **Produces:** deployment.Open(ctx,path) (*Deployment,error)、Deployment.Close() error及Service/Backend受控访问；cmd启动检查早分流。具体DTO/导出访问方式由Step1只读预检冻结。
 
 - [x] Step1 Root接受完整预检9f583b：DTO与单一launcher信任来源、bounded文件/内联kubeconfig、原构造顺序、Close所有权、CLI早分流与真实TLS+clock无写入场景已冻结到spec。检查总预算30秒，etcd TLS最低1.3，config与所有显式旧modeflag拒绝。START-GO tests/collectors first，具体Go仍经Root审collector；native无需启动launcher。
-- [ ] Step2 写解析/文件/模式行为RED，Root审collector后实际运行；实现有界loader与真实装配，host GREEN/race，及时提交连贯功能切片。
-- [ ] Step3 真实TLS etcd+签名时钟成功/错误/Close只读集成、最终相关Linux vet；Root核对原始结果与实际输入/归档/进程清理，小步提交。
+- [x] Step2 实际missingAPI编译RED后实现；修复Unicode JSON别名与child test参数分隔。最终host/race九组PASS，无skip/race报告；Root核对11061/11066实际输入与全部归档。377e627提交loader，3f447df提交命令及说明。
+- [x] Step3 Linux vet及runner/CLI真实ELF构建均退出0；Root核对9141/10769/11284实际输入、全部成员与实际Go1.25.6 buildinfo。native1夹具/run权限失败已保留并清理；仅修改临时目录权限后native2真实TLS etcd/签名clock九项检查通过，四次CLI Wait符合预期，库重复Close成功，KV/revision/Lease不变、所有Kubernetes请求0，clock/etcd进程join、容器退出0无OOM且精确清理。3a6dfb0提交真实集成测试；无容量或HTTP切换声明。
 - [ ] Step4 唯一fresh reviewer审原BASE→最终HEAD；必要同pair修复；tracked验收、关闭OWN，继续实际HTTP与生产互斥接线。
 
 Ruling: 用户已批准总迁移并明确持续执行；这是已批准生产接线的具体化，沿既有执行方法，不重复索要授权。采用显式检查入口，完整服务切换留在具备所有endpoint能力之后，避免nil旧Manager或Redis fallback。
