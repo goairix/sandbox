@@ -145,6 +145,9 @@ func validateFields(request types.CreateSandboxRequest, resolved Resolved) error
 	}
 	actual := resolved.Resources
 	for _, pair := range resourcePairs(&requestedResources, &actual) {
+		if !boundedQuantityExponent(*pair[1]) || !boundedQuantityExponent(*pair[0]) {
+			return errInvalid
+		}
 		quantity, err := resource.ParseQuantity(*pair[1])
 		if err != nil || quantity.Sign() <= 0 {
 			return errInvalid
