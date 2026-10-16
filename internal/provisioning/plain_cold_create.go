@@ -33,6 +33,13 @@ func (s *PlainColdService) Create(ctx context.Context, w state.WorkspaceIdentity
 	if err != nil {
 		return result, err
 	}
+	var capsule plainColdCapsule
+	if err := decodeColdCapsule(wire, &capsule); err != nil {
+		return result, err
+	}
+	if err := s.validateColdBusiness(capsule); err != nil {
+		return result, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return result, err
 	}
@@ -140,8 +147,11 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 	if err := decodeColdCapsule(snapshot.Payload, &capsule); err != nil {
 		return result, err
 	}
-	if capsule.Version != 1 || capsule.Deployment != s.profile || capsule.WorkspaceHash != w.Hash() || capsule.Partition != w.Partition() || capsule.IntentID != intent || capsule.SandboxID != i.SandboxID || capsule.SnapshotVersion != control.Snapshot.Version || capsule.TTL <= 0 || capsule.TTL > 365*24*time.Hour {
+	if capsule.Deployment != s.profile || capsule.WorkspaceHash != w.Hash() || capsule.Partition != w.Partition() || capsule.IntentID != intent || capsule.SandboxID != i.SandboxID || capsule.SnapshotVersion != control.Snapshot.Version {
 		return result, ErrPlainColdProfile
+	}
+	if err := s.validateColdBusiness(capsule); err != nil {
+		return result, err
 	}
 	if result.RequestID != "" && result.RequestID != capsule.RequestID {
 		return result, ErrPlainColdProfile
@@ -300,19 +310,6 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 	return s.completed(ctx, w, result)
 }
 
-func decodeColdCapsule(wire []byte, value any) error {
-	d := json.NewDecoder(bytes.NewReader(wire))
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
-		return err
-	}
-	canonical, err := json.Marshal(value)
-	if err != nil || !bytes.Equal(canonical, wire) {
-		return ErrPlainColdProfile
-	}
-	return nil
-}
-
 func (s *PlainColdService) pod(id, intent string, generation int64) kube.EnrolledPlainPodRequest {
 	spec := s.spec
 	spec.ID = id
@@ -351,9 +348,13 @@ func (s *PlainColdService) completed(ctx context.Context, w state.WorkspaceIdent
 	if err := decodeColdCapsule(snapshot.Payload, &capsule); err != nil {
 		return result, err
 	}
-	if capsule.Version != 1 || capsule.Deployment != s.profile || capsule.WorkspaceHash != w.Hash() || capsule.Partition != w.Partition() || capsule.IntentID != result.IntentID || capsule.SandboxID != entry.Record.SandboxID || result.RequestID != "" && result.RequestID != capsule.RequestID {
+	if capsule.Deployment != s.profile || capsule.WorkspaceHash != w.Hash() || capsule.Partition != w.Partition() || capsule.IntentID != result.IntentID || capsule.SandboxID != entry.Record.SandboxID || capsule.SnapshotVersion != entry.Record.Snapshot.Version || result.RequestID != "" && result.RequestID != capsule.RequestID {
 		result.State = PlainColdRecoveryRequired
 		return result, ErrPlainColdProfile
+	}
+	if err := s.validateColdBusiness(capsule); err != nil {
+		result.State = PlainColdRecoveryRequired
+		return result, err
 	}
 	result.RequestID = capsule.RequestID
 	// Monotonic completion can return a prep slot after Destroy. It cannot

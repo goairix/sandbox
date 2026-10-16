@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/goairix/sandbox/internal/sandboxsnapshot"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/google/uuid"
 )
@@ -17,18 +18,20 @@ var ErrPlainColdProfile = errors.New("unsupported plain cold creation profile")
 type PlainColdRequest struct {
 	Principal, IdempotencyKey, RequestID, IntentID, SandboxID, SnapshotVersion string
 	TTL                                                                        time.Duration
+	Business                                                                   *sandboxsnapshot.Snapshot
 }
 
 type plainColdCapsule struct {
-	Version         int           `json:"version"`
-	Deployment      string        `json:"deployment"`
-	WorkspaceHash   string        `json:"workspace_hash"`
-	Partition       uint8         `json:"partition"`
-	RequestID       string        `json:"request_id"`
-	IntentID        string        `json:"intent_id"`
-	SandboxID       string        `json:"sandbox_id"`
-	SnapshotVersion string        `json:"snapshot_version"`
-	TTL             time.Duration `json:"ttl"`
+	Version         int             `json:"version"`
+	Deployment      string          `json:"deployment"`
+	WorkspaceHash   string          `json:"workspace_hash"`
+	Partition       uint8           `json:"partition"`
+	RequestID       string          `json:"request_id"`
+	IntentID        string          `json:"intent_id"`
+	SandboxID       string          `json:"sandbox_id"`
+	SnapshotVersion string          `json:"snapshot_version"`
+	TTL             time.Duration   `json:"ttl"`
+	Business        json.RawMessage `json:"business,omitempty"`
 }
 
 func coldRequestCapsule(deployment string, w state.WorkspaceIdentity, r PlainColdRequest) (json.RawMessage, error) {
@@ -40,7 +43,15 @@ func coldRequestCapsule(deployment string, w state.WorkspaceIdentity, r PlainCol
 			return nil, ErrPlainColdProfile
 		}
 	}
-	return json.Marshal(plainColdCapsule{Version: 1, Deployment: deployment, WorkspaceHash: w.Hash(), Partition: w.Partition(), RequestID: r.RequestID, IntentID: r.IntentID, SandboxID: r.SandboxID, SnapshotVersion: r.SnapshotVersion, TTL: r.TTL})
+	capsule := plainColdCapsule{Version: 1, Deployment: deployment, WorkspaceHash: w.Hash(), Partition: w.Partition(), RequestID: r.RequestID, IntentID: r.IntentID, SandboxID: r.SandboxID, SnapshotVersion: r.SnapshotVersion, TTL: r.TTL}
+	if r.Business != nil {
+		wire, err := sandboxsnapshot.Encode(r.Business)
+		if err != nil {
+			return nil, ErrPlainColdProfile
+		}
+		capsule.Version, capsule.Business = 2, wire
+	}
+	return json.Marshal(capsule)
 }
 
 func coldDigest(s string) bool {
