@@ -74,6 +74,7 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
 	httpGateway, fileAPI                                           bool
+	largeDownload                                                  bool
 }
 
 func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVariant) {
@@ -83,7 +84,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		lookupHooks = &liveLookupNativeHooks{}
 	}
 	var execHooks *execServiceNativeHooks
-	if variant.execService || variant.httpGateway || variant.fileAPI {
+	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload {
 		execHooks = &execServiceNativeHooks{}
 	}
 	require.Zero(t, os.Geteuid())
@@ -108,7 +109,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	if variant.execService {
 		timeout = 100 * time.Second
 	}
-	if variant.httpGateway || variant.fileAPI {
+	if variant.httpGateway || variant.fileAPI || variant.largeDownload {
 		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -168,7 +169,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
-	if variant.execService || variant.httpGateway || variant.fileAPI {
+	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload {
 		launcher, err := launcherconfig.Decode(config)
 		require.NoError(t, err)
 		execIssuer, err = deployment.NewExecIssuer(ctx, issuerKey, issuerCert, launcher, nativeFixtureClock{})
@@ -592,6 +593,18 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	reservation, err := backend.LoadColdPreparation(ctx, w, request.IntentID)
 	require.NoError(t, err)
 	require.Equal(t, "settled", reservation.Phase)
+	if variant.largeDownload {
+		exerciseLargeDownloadNative(t, ctx, service, request.SandboxID)
+		require.Equal(t, int32(1), postCount.Load(), "large download uses original Pod")
+		require.Equal(t, int32(1), startCount.Load(), "large download uses original formal launcher")
+		mu.Lock()
+		bridgeCount := len(bridges)
+		mu.Unlock()
+		require.Equal(t, 9, bridgeCount, "three original Create, one seed and five download Exec exchanges")
+		joinOriginalBridges()
+		t.Log("large download all nine original bridge Cmd.Wait/IO owners joined; original16 limit unchanged")
+		return
+	}
 	if variant.fileAPI {
 		exerciseFileAPINative(t, ctx, service, request.SandboxID)
 		require.Equal(t, int32(1), postCount.Load(), "file API uses original Pod")
