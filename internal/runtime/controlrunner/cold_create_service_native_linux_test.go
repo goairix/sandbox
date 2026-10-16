@@ -32,7 +32,9 @@ import (
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
 	kube "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
+	"github.com/goairix/sandbox/internal/sandboxsnapshot"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
+	business "github.com/goairix/sandbox/pkg/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -56,6 +58,10 @@ func TestColdCreateServiceNative(t *testing.T) {
 }
 
 func runColdCreateServiceNative(t *testing.T, loseACK bool) {
+	runColdCreateServiceBusinessNative(t, loseACK, false)
+}
+
+func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool) {
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
 	dir, err := os.MkdirTemp("/tmp", "cold-service-")
@@ -142,6 +148,10 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 		require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "clock joined: %v", err)
 	})
 	request := provisioning.PlainColdRequest{Principal: "native", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), TTL: time.Minute}
+	if withBusiness {
+		request.Business, err = sandboxsnapshot.Build(business.CreateSandboxRequest{Mode: "persistent", Resources: &business.ResourceLimits{CPU: "2000m"}}, sandboxsnapshot.Defaults{TimeoutSeconds: 60, Resources: business.ResourceLimits{CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi"}})
+		require.NoError(t, err)
+	}
 	w, err := state.NewWorkspaceIdentity("s3", identity.StorageID, "bucket", uuid.NewString()+"/")
 	require.NoError(t, err)
 	expected, err := kube.BuildEnrolledPlainPod("runtimes", kube.EnrolledPlainPodRequest{Spec: sandboxruntime.SandboxSpec{ID: request.SandboxID, Image: enrolledProfileFixtureImage, CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi", ReadOnlyRootFS: true, RunAsUser: 1000, SeccompProfile: "RuntimeDefault"}, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, CreationIntentID: request.IntentID, Generation: 1, Config: config})
@@ -375,6 +385,21 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 	reservation, err := backend.LoadColdPreparation(ctx, w, request.IntentID)
 	require.NoError(t, err)
 	require.Equal(t, "settled", reservation.Phase)
+	if withBusiness {
+		read, err := backend.ReadWorkspaceSnapshot(ctx, w)
+		require.NoError(t, err)
+		require.NotNil(t, read)
+		require.NotNil(t, read.Snapshot)
+		var capsule struct {
+			Version  int             `json:"version"`
+			Business json.RawMessage `json:"business"`
+		}
+		require.NoError(t, json.Unmarshal(read.Snapshot.Payload, &capsule))
+		require.Equal(t, 2, capsule.Version)
+		restored, err := sandboxsnapshot.Decode(capsule.Business)
+		require.NoError(t, err)
+		require.Equal(t, request.Business, restored, "Create/ACK-loss Resume consume exact frozen v2 business through coherent snapshot read")
+	}
 	completedInput := result
 	completedInput.Runtime = p.RuntimeReference{ID: "foreign-completed", UID: uuid.NewString(), BootID: uuid.NewString()}
 	settledAgain, err := activeService.Resume(ctx, w, completedInput)
