@@ -52,6 +52,7 @@ func main() {
 
 	configPath := flag.String("config", "", "path to config file")
 	etcdStartup := flag.String("check-etcd-startup", "", "check mounted etcd deployment configuration without starting the API")
+	etcdServe := flag.String("serve-etcd", "", "serve the fixed-profile etcd HTTP API using a mounted deployment manifest")
 	drainDeployment := flag.String("drain-kubernetes-deployment", "", "scale this in-cluster Deployment to zero and wait for its Pods")
 	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
 	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
@@ -71,6 +72,14 @@ func main() {
 	flag.Parse()
 	supplied := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
+	if supplied["serve-etcd"] {
+		serveCtx, stopServe := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stopServe()
+		if _, serveErr := runEtcdServe(serveCtx, supplied, flag.Args(), *etcdServe, serveEtcd); serveErr != nil {
+			log.Fatalf("etcd HTTP serve failed: %v", serveErr)
+		}
+		return
+	}
 	if handled, checkErr := runEtcdStartupCheck(context.Background(), supplied, flag.Args(), *etcdStartup, checkEtcdStartup); handled {
 		if checkErr != nil {
 			log.Fatalf("etcd startup check failed: %v", checkErr)

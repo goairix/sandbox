@@ -63,6 +63,16 @@ func positiveDuration(value string) (time.Duration, error) {
 
 // Open consumes existing operator-provisioned metadata and inventory only.
 func Open(ctx context.Context, path string) (*Deployment, error) {
+	return open(ctx, path, false)
+}
+
+// OpenHTTP requires explicit HTTP settings before any credential or Backend
+// initialization. Open preserves compatibility with read-only check manifests.
+func OpenHTTP(ctx context.Context, path string) (*Deployment, error) {
+	return open(ctx, path, true)
+}
+
+func open(ctx context.Context, path string, requireHTTP bool) (*Deployment, error) {
 	if ctx == nil {
 		return nil, errConfiguration
 	}
@@ -76,6 +86,9 @@ func Open(ctx context.Context, path string) (*Deployment, error) {
 	m, err := parseManifest(wire)
 	if err != nil {
 		return nil, err
+	}
+	if requireHTTP && m.HTTP == nil {
+		return nil, fileError("HTTP settings required")
 	}
 	base := filepath.Dir(path)
 	launcherWire, err := boundedFile(relativeFile(base, m.LauncherConfigFile), launcherconfig.MaxBytes, "launcher configuration")
