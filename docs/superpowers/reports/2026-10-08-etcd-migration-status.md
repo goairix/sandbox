@@ -2,7 +2,9 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。默认启动仍连接 Redis，显式 etcd 模式仅开放已验收路由，不能宣称生产切换完成或线上性能已经提升。
 
-2026-10-17 最新代码进展：`1f7f7b6` 已提交实际到期扫描的持久进度、固定版本恢复和申请前原始请求身份保留；`a22f5fc` 已提交原连接上的有界 Watch／缓存、分页与事件衔接、完整参与者验权及实际关闭等待；`6463b5d` 已提交实际常驻循环、原会话续约、多份额预算等待、窗口滚动和两阶段关闭。最新67组针对性 host/race 和 Linux vet 通过，含15组新actor/生命周期测试；故障测试的客户端取消告警如实保留。新三成员组合验证与整个 worker 审查仍未完成，尚未范围验收。随后仍需真实清理执行与持久32槽、完整业务入口、FUSE/collector/远端同步、长期回收和大N容量/部署/Redis移除。功能约70%（65%–75%）、整体45%、生产切换0%暂不变；组件测试不能当性能或容量验收。新仓库规范 `AGENTS.md` 已按用户要求提交，明确关键注释、逻辑分段和包职责审查。
+2026-10-17 最新验收：实际常驻到期 worker 已范围完成，源码 `1f7f7b6/a22f5fc/6463b5d/1017b66`，审查修复 `9a06de9`。唯一完整审查发现的4项 Important 已经真实回归复现、修复并由同一审查员限定复核批准；无新增或未关闭C/I/M。最终71组针对性host/race、Linuxvet/build及新三成员native03通过，后者9.98秒；原故障/取消告警、首次测试及采集脚本失败如实保留。详见 [常驻到期worker验收](2026-10-16-etcd-due-worker-verification.md)。`688748f` 明确有限轮询限制，未实现earliest-expiry timer、不承诺到期时延。
+
+接着推进真实清理执行、持久32槽及共享调度权限；完整业务入口、FUSE/collector/远端同步、长期回收、大N容量/部署和Redis移除仍未完成。功能约70%（65%–75%）、整体45%、生产切换0%暂不变，组件测试不能当性能或容量验收。仓库规范 `AGENTS.md` 已按用户要求单独提交 `a40d73e`，明确关键注释、逻辑分段和包职责审查，本次修复已落实。
 
 ## 2026-10-16 最新接续：显式 HTTP、文件下载、分区 worker 控制与到期发现已范围验收
 
@@ -23,6 +25,7 @@
 | 可选有界大文件下载 | `35d3006` | 六个源码小提交，私有磁盘额度/单原Exec/终态后交付/实际deadline/关闭恢复；原完整gateway33项host/race及修复后spool12、下载消费者10项通过，正式native两轮各9bridge全部Wait/IOjoin。唯一review I1经R1修复复核Approved，无未解决C/I；原日志M1保留。配置上限2GiB，实际native验证1MiB+37，上传/分片和2GiB吞吐未完成 |
 | 分区 worker 控制基础 | `691944c` | 原会话/单Lease、256分区、全cell固定4个relist及20MiB/s、100claim/s软份额，有界桶与实际Close/join。13组host/race、Linuxvet及最终三成员native六场景通过；同reviewer R1全部解决并Approved。实际due/dirty/Watch消费和持久32任务硬槽未完成 |
 | 原子到期发现与metadata任务准入 | `d65c62b` / `ff649e8` / `6350a18` / `4957c9f` | 新v3原子due、原worker118条/256KiB固定R分页、可信时钟/current control/原份额fence提交永久task并消费候选。最终21组host/race及新三成员native7.82秒通过；唯一review Spec compliant / Approved、无开放问题。实际常驻worker/Watch/frontier、历史覆盖和硬32未完成 |
+| 常驻到期worker与可恢复进度 | `1f7f7b6` / `a22f5fc` / `6463b5d` / `1017b66` / `9a06de9` | 真实常驻调度、严格checkpoint/pending恢复、有界原连接Watch/cache、多份额续租/等待及最终关闭登记。最终71组host/race、Linuxvet/build及新三成员9.98秒通过；同reviewer R1批准、无开放C/I/M。有界轮询限制及故障告警已披露，未实现物理执行/硬32/历史覆盖/生产切换或大N容量 |
 
 实际 Exec 单元已验收，原始 native 实际38.83秒PASS，含32秒命令/目标接受续期/exit7/drain、实际失权、取消/Close、统一预算及原IOjoin。显式HTTP原四路由已验收；新增文件单元实际Linux PASS2.06秒无skip，UID/GID1000、控制配置不可读、Linux非法文件名422及八文件路由/二进制/编辑完成，14个健康原bridge Wait/IO与正式PID1/etcd退出均join。23项gateway host/race无skip；helper各9PASS/1明确Darwin文件名skip，Linux相应场景已实际覆盖。唯一审查无C/I，仅日志噪声M1，详见本目录 `2026-10-16-etcd-file-api-verification.md`。默认仍Redis；接续大文件传输与其余生产调用链。
 
