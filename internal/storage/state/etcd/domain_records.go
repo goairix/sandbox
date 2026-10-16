@@ -67,11 +67,18 @@ type SandboxControlRecord struct {
 	MountAttempt  uint8             `json:"mount_attempt"`
 	ExpiresAt     time.Time         `json:"expires_at"`
 }
+
+// SandboxSnapshotRecord is immutable configuration metadata. Version1 retains
+// the historical payload-only digest; version2 also binds LocalCleanup. Neither
+// version grants current workspace or runtime permission.
 type SandboxSnapshotRecord struct {
 	Version   uint32            `json:"version"`
 	SandboxID string            `json:"sandbox_id"`
 	Snapshot  SnapshotReference `json:"snapshot"`
 	Payload   json.RawMessage   `json:"payload"`
+	// LocalCleanup is required in version2 and forbidden in version1. Historical
+	// snapshots are not backfilled when a creation request is replayed.
+	LocalCleanup *LocalCleanupDescriptor `json:"local_cleanup,omitempty"`
 }
 type CreationIntentRecord struct {
 	Version             uint32 `json:"version"`
@@ -161,11 +168,14 @@ func (r SandboxControlRecord) Validate() error {
 	}
 	return nil
 }
+
+// Validate checks the version-specific snapshot digest and cleanup descriptor.
+// Placement and current backend authority require their separate read checks.
 func (r SandboxSnapshotRecord) Validate() error {
-	if r.Version != 1 || !validDomainSegment(r.SandboxID) || r.Snapshot.Validate() != nil {
+	if !validDomainSegment(r.SandboxID) || r.Snapshot.Validate() != nil {
 		return fmt.Errorf("%w: invalid sandbox snapshot", ErrInvalidRecord)
 	}
-	digest, err := snapshotDigest(r.Payload)
+	digest, err := snapshotRecordDigest(r)
 	if err != nil {
 		return err
 	}
@@ -243,9 +253,13 @@ func encodeDomainRecord(record interface{ Validate() error }) (string, error) {
 	if limit == 0 || nilDomainRecord(record) {
 		return "", fmt.Errorf("%w: unsupported or nil domain record", ErrInvalidRecord)
 	}
-	// Own dispatch payload bytes before validation and encoding, preserving their
-	// representation without retaining the caller's RawMessage backing array.
+	// Own payloads and cleanup policy before validation and encoding, preserving
+	// their representation without retaining caller backing arrays.
 	switch r := record.(type) {
+	case SandboxSnapshotRecord:
+		record = *cloneSnapshotRecord(&r)
+	case *SandboxSnapshotRecord:
+		record = *cloneSnapshotRecord(r)
 	case RuntimePublicationProofRecord:
 		r.Payload = append(json.RawMessage(nil), r.Payload...)
 		record = r
@@ -309,7 +323,7 @@ func decodeDomainRecord(kv *mvccpb.KeyValue, record interface{ Validate() error 
 	case *SandboxControlRecord:
 		return decodeTypedDomain(kv, destination, 4096)
 	case *SandboxSnapshotRecord:
-		return decodeTypedDomain(kv, destination, 65536)
+		return decodeLocalCleanupSnapshot(kv, destination)
 	case *CreationIntentRecord:
 		return decodeTypedDomain(kv, destination, 4096)
 	case *CreationRequestRecord:

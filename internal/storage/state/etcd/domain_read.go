@@ -192,10 +192,28 @@ func decodeSnapshot(kv *mvccpb.KeyValue, p uint8, id string, ref SnapshotReferen
 	if err := decodeDomainRecord(kv, record); err != nil {
 		return nil, err
 	}
-	if record.SandboxID != id || record.Snapshot != ref || placement == nil || placement.Partition != p {
-		return nil, ErrCorruptRecord
+	if err := validateSnapshotPlacement(record, p, id, ref, placement); err != nil {
+		return nil, err
 	}
 	return record, nil
+}
+
+// validateSnapshotPlacement binds immutable snapshot attribution to the current
+// caller's routing evidence. Cache hits and shared-miss waiters must perform the
+// same check as a fresh decode; another caller's placement is not transferable.
+func validateSnapshotPlacement(record *SandboxSnapshotRecord, p uint8, id string, ref SnapshotReference, placement *SandboxPlacementRecord) error {
+	if record.SandboxID != id || record.Snapshot != ref || placement == nil || placement.Partition != p {
+		return ErrCorruptRecord
+	}
+	// The version2 digest authenticates a workspace preimage, but routing must
+	// also bind it to this sandbox's original placement. A valid descriptor for
+	// another sandbox or workspace is not interchangeable diagnostic metadata.
+	if d := record.LocalCleanup; d != nil {
+		if placement.SandboxID != record.SandboxID || d.WorkspaceHash != placement.WorkspaceHash || d.Partition != p {
+			return ErrCorruptRecord
+		}
+	}
+	return nil
 }
 
 func (b *Backend) LoadRequest(ctx context.Context, principal, key string) (*CreationRequestRecord, error) {

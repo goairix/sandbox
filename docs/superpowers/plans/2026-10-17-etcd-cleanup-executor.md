@@ -31,7 +31,7 @@ Named spec的Binding constraints全部适用。原256分区/4Relist/20MiB/s/100c
 **Produces:** 实际明确Task引用消费者与其生命周期结果、持久32执行槽及可恢复终态结算。精确函数名/签名、支持profile、目标配置和原权限关系是Step1强制交付；不是一个未被真实消费者使用的slot API。
 
 - [x] Step1 read-only preflight：当前ledger Rulings1–6及精确preflight冻结原actor mailbox、两行CAS持久32、64节点受控claim、run/join及冷未join保留、全部新旧consumer请求128KiB预检，并补齐实际producer/snapshot2、原幂等兼容和缓存记账；源码尚未实现。首次只授权producer tests-only，所有产品冻结至Root RED/audit。
-- [ ] Step2 先验证实际可达producer：新增local_cleanup_snapshot_test.go及provisioning/plain_cold_cleanup_snapshot_test.go，直接回归Acquire/snapshot/read/cache所需窄改测试；Root首次RED如实区分缺API编译失败。实现AcquireIntent可选LocalCleanupPlan、严格snapshot2/双摘要、旧v1默认重试兼容、深复制/完整cacheweight及真实PlainCold显式local workspace接线，针对性host/race/Linuxvet后连贯小提交。
+- [x] Step2 实际producer/snapshot2已实现并定向验证：AcquireIntent可选LocalCleanupPlan、严格版本/双摘要、旧v1默认重试兼容、深复制/完整cacheweight及真实PlainCold显式local workspace接线。Root验证56个状态层+12个创建入口测试组host/race通过、两包Linuxvet通过；真实行为RED后修复opaque null载荷与每位cache读取者的placement绑定，全部输入/工具/归档及测试资源清理已核对。范围和日志限制见2026-10-17-etcd-cleanup-snapshot-verification.md；不代表本Task或物理cleanup消费者完成。
 - [ ] Step3 持久槽与真实原预算准入回归先RED；实现原预算下精确占用、CAS仲裁、确认、恢复和终态独立结算，冻结公平有限turn/不退款计费及receipt证据传递。host/race/Linuxvet，连贯切片及时提交。
 - [ ] Step4 实际cleanup消费者与mailbox回归先RED；接通原关闭排空/归档同步/终止安全释放，支持profile与未知恢复，绑定真实槽及原actor最终join，不跳过效果，不重写原协议；通过针对性验证后小步提交。
 - [ ] Step5 新Linux真实组合与实际etcd32槽争抢；独立新源码/工具/输入/运行与清理核对。不是全部旧矩阵、全Pod32容量或生产环境切换。

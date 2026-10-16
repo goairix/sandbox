@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"math"
 	"strings"
 )
 
@@ -60,7 +61,11 @@ func cloneSnapshotRecord(r *SandboxSnapshotRecord) *SandboxSnapshotRecord {
 	if r == nil {
 		return nil
 	}
-	return &SandboxSnapshotRecord{Version: r.Version, SandboxID: strings.Clone(r.SandboxID), Snapshot: SnapshotReference{Version: strings.Clone(r.Snapshot.Version), Digest: strings.Clone(r.Snapshot.Digest)}, Payload: bytes.Clone(r.Payload)}
+	return &SandboxSnapshotRecord{
+		Version: r.Version, SandboxID: strings.Clone(r.SandboxID),
+		Snapshot: SnapshotReference{Version: strings.Clone(r.Snapshot.Version), Digest: strings.Clone(r.Snapshot.Digest)},
+		Payload:  bytes.Clone(r.Payload), LocalCleanup: cloneLocalCleanupDescriptor(r.LocalCleanup),
+	}
 }
 
 func (c *snapshotReadCache) lookup(key snapshotCacheKey) *SandboxSnapshotRecord {
@@ -79,6 +84,11 @@ func (c *snapshotReadCache) store(key snapshotCacheKey, record *SandboxSnapshotR
 	// Includes retained string/payload bytes and conservative entry, map bucket,
 	// list element, allocation and pointer overhead, even for empty payloads.
 	weight := uint64(512 + 2*(len(key.sandboxID)+len(key.version)+len(key.digest)) + len(record.SandboxID) + len(record.Snapshot.Version) + len(record.Snapshot.Digest) + len(record.Payload))
+	descriptorWeight, ok := localCleanupDescriptorWeight(record.LocalCleanup)
+	if !ok || descriptorWeight > math.MaxUint64-weight {
+		return
+	}
+	weight += descriptorWeight
 	if weight > c.budget {
 		return
 	}
@@ -87,7 +97,7 @@ func (c *snapshotReadCache) store(key snapshotCacheKey, record *SandboxSnapshotR
 		delete(c.entries, key)
 		c.lru.Remove(e)
 	}
-	for c.used+weight > c.budget {
+	for c.used > c.budget-weight {
 		e := c.lru.Back()
 		entry := e.Value.(*snapshotCacheEntry)
 		delete(c.entries, entry.key)
@@ -140,18 +150,33 @@ func (c *snapshotReadCall) finish() {
 
 func (b *Backend) snapshotRecord(call *snapshotReadCall, key snapshotCacheKey, placement SandboxPlacementRecord) (*SandboxSnapshotRecord, error) {
 	record, miss, err := b.startSnapshotRead(call, key, placement)
-	if err != nil || record != nil {
-		return record, err
+	if err != nil {
+		return nil, err
 	}
-	select {
-	case <-call.context.Done():
-		return nil, call.context.Err()
-	case <-miss.done:
-		if err := call.context.Err(); err != nil {
+	if record == nil {
+		select {
+		case <-call.context.Done():
+			return nil, call.context.Err()
+		case <-miss.done:
+			if err := call.context.Err(); err != nil {
+				return nil, err
+			}
+			if miss.err != nil {
+				return nil, miss.err
+			}
+			record = cloneSnapshotRecord(miss.record)
+		}
+	}
+
+	// Coalescing shares only immutable bytes. Each caller retains its own
+	// placement proof, even when the first caller's miss passed validation.
+	if record != nil {
+		ref := SnapshotReference{Version: key.version, Digest: key.digest}
+		if err := validateSnapshotPlacement(record, key.partition, key.sandboxID, ref, &placement); err != nil {
 			return nil, err
 		}
-		return cloneSnapshotRecord(miss.record), miss.err
 	}
+	return record, nil
 }
 
 func (b *Backend) startSnapshotRead(call *snapshotReadCall, key snapshotCacheKey, placement SandboxPlacementRecord) (*SandboxSnapshotRecord, *snapshotReadMiss, error) {

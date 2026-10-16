@@ -60,6 +60,17 @@ func (s *PlainColdService) acquireEntered(ctx context.Context, w state.Workspace
 	if err := s.validateColdBusiness(capsule); err != nil {
 		return result, acquired, err
 	}
+	// Explicit local-workspace callers already supply the immutable preimage.
+	// Capture the plain profile's default policy without changing capsule bytes.
+	// Detached business creation and other storage profiles retain legacy snapshots.
+	var cleanupPlan *state.TaskWorkspaceSyncPlan
+	if w.Kind() == state.WorkspaceIdentityWorkspace && w.Provider() == "local" {
+		plan, err := state.NewTaskWorkspaceSyncPlan(state.TaskWorkspaceSyncPlanOptions{Workspace: w, DeleteExtraneous: true})
+		if err != nil {
+			return result, acquired, err
+		}
+		cleanupPlan = &plan
+	}
 	if err := s.ready(ctx); err != nil {
 		return result, acquired, err
 	}
@@ -67,7 +78,12 @@ func (s *PlainColdService) acquireEntered(ctx context.Context, w state.Workspace
 	if err != nil {
 		return result, acquired, err
 	}
-	acquired, err = s.backend.AcquireIntent(ctx, state.AcquireIntentInput{Workspace: w, Principal: request.Principal, IdempotencyKey: request.IdempotencyKey, RequestID: request.RequestID, IntentID: request.IntentID, SandboxID: request.SandboxID, SnapshotVersion: request.SnapshotVersion, Payload: wire, Now: now, TTL: request.TTL})
+	acquired, err = s.backend.AcquireIntent(ctx, state.AcquireIntentInput{
+		Workspace: w, Principal: request.Principal, IdempotencyKey: request.IdempotencyKey,
+		RequestID: request.RequestID, IntentID: request.IntentID, SandboxID: request.SandboxID,
+		SnapshotVersion: request.SnapshotVersion, Payload: wire, LocalCleanupPlan: cleanupPlan,
+		Now: now, TTL: request.TTL,
+	})
 	result.Stage = acquired.Reference
 	return result, acquired, err
 }

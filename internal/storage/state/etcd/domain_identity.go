@@ -42,6 +42,11 @@ func NewWorkspaceIdentity(provider, storageIdentity, bucket, prefix string) (Wor
 func (w WorkspaceIdentity) Hash() string                { return w.hash }
 func (w WorkspaceIdentity) Partition() uint8            { return w.partition }
 func (w WorkspaceIdentity) Kind() WorkspaceIdentityKind { return w.kind }
+
+// Provider reports the immutable workspace provider for profile selection.
+// Detached identities return an empty string. This grants no storage authority.
+func (w WorkspaceIdentity) Provider() string { return w.provider }
+
 func (w WorkspaceIdentity) validate() error {
 	if w.kind == WorkspaceIdentityDetached {
 		return w.validateDetached()

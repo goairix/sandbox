@@ -12,6 +12,8 @@
 
 生产目标来源采用原AcquireIntent原子写入的严格snapshot-envelope v2，保存local workspace描述与sync policy，摘要同时绑定payload和描述。已有显式workspace的PlainColdService.Create捕获原WorkspaceIdentity；旧snapshot1与业务capsule1/2字节/摘要保持兼容，默认捕获后的历史请求重试返回原接受配置、不升级历史快照。新policy冲突必须拒绝。Detached CreateBusiness及无描述历史Task仍明确不支持此本地同步消费者，不能猜测hash前像或用测试参数代替实际producer。版本、配置幂等、深复制与完整缓存计费一并验证。
 
+Payload继续保存任意合法JSON，包括作为真实载荷参与摘要的`null`；缺少payload与合法null不是同一情况。快照元数据及local_cleanup描述仍拒绝null。缓存命中和共享miss的每位读取者都必须将该描述与其当前placement关联校验，不能继承首位读取者的workspace归属。
+
 ## Binding constraints
 
 - 沿用已批准的256分区、原worker profile及全cell固定预算：最多4个relist、20MiB/s Range、100claim尝试/s。实际任务最多32个持久inflight slot，不能把每进程semaphore、本地MaxActive或预算Lease当作全cell硬上限。原TaskClaim和worker session分别保留自己的原Lease和实际生命周期。

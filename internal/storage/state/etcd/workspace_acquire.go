@@ -16,12 +16,21 @@ import (
 var ErrIdempotencyConflict = errors.New("etcd state: idempotency conflict")
 var ErrGenerationOverflow = errors.New("etcd state: generation overflow")
 
+// AcquireIntentInput describes one atomic creation-metadata acquisition. An
+// optional local cleanup policy is captured in the immutable snapshot; it does
+// not grant storage or runtime effects. Retry configuration must remain exact.
 type AcquireIntentInput struct {
 	Workspace                                                                  WorkspaceIdentity
 	Principal, IdempotencyKey, RequestID, IntentID, SandboxID, SnapshotVersion string
 	Payload                                                                    json.RawMessage
-	Now                                                                        time.Time
-	TTL                                                                        time.Duration
+
+	// LocalCleanupPlan optionally captures an explicit local workspace policy
+	// in snapshot version2. Acquisition copies it before its first RPC; nil
+	// preserves legacy snapshot/configuration bytes and replay semantics.
+	LocalCleanupPlan *TaskWorkspaceSyncPlan
+
+	Now time.Time
+	TTL time.Duration
 }
 type AcquireDisposition string
 
@@ -72,15 +81,32 @@ func (b *Backend) AcquireIntent(ctx context.Context, input AcquireIntentInput) (
 	if err != nil {
 		return result, err
 	}
-	snapshotRef := SnapshotReference{Version: input.SnapshotVersion, Digest: payloadDigest}
-	snapshot := SandboxSnapshotRecord{Version: 1, SandboxID: input.SandboxID, Snapshot: snapshotRef, Payload: payload}
+	descriptor, err := captureLocalCleanupPlan(input.Workspace, input.LocalCleanupPlan)
+	if err != nil {
+		return result, err
+	}
+	snapshot := SandboxSnapshotRecord{Version: 1, SandboxID: input.SandboxID, Payload: payload, LocalCleanup: descriptor}
+	if descriptor != nil {
+		snapshot.Version = 2
+	}
+	combinedDigest, err := snapshotRecordDigest(snapshot)
+	if err != nil {
+		return result, err
+	}
+	snapshotRef := SnapshotReference{Version: input.SnapshotVersion, Digest: combinedDigest}
+	snapshot.Snapshot = snapshotRef
 	// Account for the complete immutable record envelope before allocating a lease.
 	snapshotValue, err := encodeDomainRecord(snapshot)
 	if err != nil {
 		return result, err
 	}
 	digest := framedDigest(input.Workspace.Hash(), payloadDigest, strconv.FormatInt(int64(input.TTL), 10))
-	configurationDigest := hex.EncodeToString(digest[:])
+	legacyConfigurationDigest := hex.EncodeToString(digest[:])
+	configurationDigest := legacyConfigurationDigest
+	if descriptor != nil {
+		digest = framedDigest("sandbox.acquire-configuration.v2", "2", input.Workspace.Hash(), combinedDigest, strconv.FormatInt(int64(input.TTL), 10))
+		configurationDigest = hex.EncodeToString(digest[:])
+	}
 	ownerKey, fenceKey, err := b.namespace.workspaceKeys(input.Workspace)
 	if err != nil {
 		return result, err
@@ -148,7 +174,12 @@ func (b *Backend) AcquireIntent(ctx context.Context, input AcquireIntentInput) (
 		}
 	}
 	if request != nil {
-		if request.ConfigurationDigest != configurationDigest {
+		// Default capture is a deployment upgrade, not a change to an already
+		// accepted legacy request. Only the exact old configuration and default
+		// policy may replay it; no original snapshot is rewritten or synthesized.
+		// Use the owned descriptor, never caller plan backing after the RPC.
+		legacyDefaultReplay := descriptor != nil && len(descriptor.Exclude) == 0 && descriptor.DeleteExtraneous && request.ConfigurationDigest == legacyConfigurationDigest
+		if request.ConfigurationDigest != configurationDigest && !legacyDefaultReplay {
 			return result, ErrIdempotencyConflict
 		}
 		if request.WorkspaceHash != input.Workspace.Hash() {
