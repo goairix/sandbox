@@ -17,6 +17,10 @@ func TestColdPreparationNativeFixture(t *testing.T) {
 	coldCreateNativeFixture(t, "^TestColdPreparationReservation.*Native$")
 }
 
+func TestSnapshotReadNativeFixture(t *testing.T) {
+	coldCreateNativeFixture(t, "^TestSnapshotRead.*Native$")
+}
+
 func TestColdCreateAttemptNativeFixture(t *testing.T) {
 	coldCreateNativeFixture(t, "^TestColdCreateAttempt.*Native$")
 }
