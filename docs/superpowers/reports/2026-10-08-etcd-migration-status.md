@@ -2,7 +2,7 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。默认启动仍连接 Redis，显式 etcd 模式仅开放已验收路由，不能宣称生产切换完成或线上性能已经提升。
 
-## 2026-10-16 最新接续：显式 etcd HTTP、八条文件 API 与大文件下载已范围验收
+## 2026-10-16 最新接续：显式 HTTP、文件下载与分区 worker 控制已范围验收
 
 当前工作分支 `codex/etcd-state-management`。Lookup 验收提交 `436bef8`，实际执行 service 的四个实现切片为 `2469576`、`6777519`、`7f50806`、`2616a36`，唯一审查 C0/I0/M2 Approved。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。
 
@@ -19,10 +19,13 @@
 | 显式 etcd HTTP/CLI | `cdcc859` | `--serve-etcd` 绕过 Redis 初始化，实际创建/查询/同步与SSE执行；唯一审查三项 Important 经 R1 全部解决、Approved。其余业务路由仍501 |
 | 八条文件 API 与独立探针 | `9ba1fbb` | 文件工具/launcher2f0dc3b、HTTP8656106；列表/递归/glob/读取/行读取/两类编辑/下载、独立有限health/ready；23项gateway host/race及实际Linux14bridge通过，审查C0/I0/M1 Approved。内容512KiB，大文件/上传尚未完成 |
 | 可选有界大文件下载 | `35d3006` | 六个源码小提交，私有磁盘额度/单原Exec/终态后交付/实际deadline/关闭恢复；原完整gateway33项host/race及修复后spool12、下载消费者10项通过，正式native两轮各9bridge全部Wait/IOjoin。唯一review I1经R1修复复核Approved，无未解决C/I；原日志M1保留。配置上限2GiB，实际native验证1MiB+37，上传/分片和2GiB吞吐未完成 |
+| 分区 worker 控制基础 | `691944c` | 原会话/单Lease、256分区、全cell固定4个relist及20MiB/s、100claim/s软份额，有界桶与实际Close/join。13组host/race、Linuxvet及最终三成员native六场景通过；同reviewer R1全部解决并Approved。实际due/dirty/Watch消费和持久32任务硬槽未完成 |
 
 实际 Exec 单元已验收，原始 native 实际38.83秒PASS，含32秒命令/目标接受续期/exit7/drain、实际失权、取消/Close、统一预算及原IOjoin。显式HTTP原四路由已验收；新增文件单元实际Linux PASS2.06秒无skip，UID/GID1000、控制配置不可读、Linux非法文件名422及八文件路由/二进制/编辑完成，14个健康原bridge Wait/IO与正式PID1/etcd退出均join。23项gateway host/race无skip；helper各9PASS/1明确Darwin文件名skip，Linux相应场景已实际覆盖。唯一审查无C/I，仅日志噪声M1，详见本目录 `2026-10-16-etcd-file-api-verification.md`。默认仍Redis；接续大文件传输与其余生产调用链。
 
 大文件下载追加验收见本目录 `2026-10-16-etcd-large-download-verification.md`：配置缺省兼容原512KiB路径；显式配置后使用有总额度的磁盘暂存，不扩大原stdin/权限协议或把文件bytes写etcd。审查发现的封存后提前EOF未latch缺口已真实截短RED→修复→host/race/vet/新源码native→同reviewer限定复核闭环。默认仍Redis，生产切换0%；这项有界下载交付不等于整个文件传输或大N容量完成。
+
+分区控制追加验收见本目录 `2026-10-16-etcd-partition-worker-control-verification.md`：控制载体不按已有sandbox数量建立常驻会话，不授予runtime/task权限；跨进程接管仍有旧读取尾部，软份额不能充当实际任务硬槽或严格无突发的全局速率保证。该基础交付不计为完整调度或大N容量验收，百分比保持不变。
 
 剩余主交付：API/Pool/Docker/Upload 的完整调用路径；分区 due/dirty/Watch 调度；FUSE/helper/collector 与实际远端同步；长期历史/槽位回收及证书维护；大量已有 sandbox 的容量、故障、部署/恢复验收；最终 Redis 移除和整分支审查。接续优先分区调度与生产任务接线，上传等缺口继续保留。Create/Lookup 的 service 单元与只读启动检查，均不等价上述主程序生产接线完成。
 

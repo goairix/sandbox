@@ -26,11 +26,11 @@
 
 **Produces:** opaque原worker会话与诊断ref；exact partition CAS归属；fixed profile软预算借用与单调bucket；后续consumer可同Txn验证的原fence接口；有界初始化/操作/Close物理生命周期。具体签名、重复领取/未知ACK/失权与relist guard合同预检冻结。
 
-- [ ] Step1 作者只读预检：exact API/record/key/profile/TTL、guard/fence消费者、Close实际owner、bucket/burst/handoff、finite三member native。Root对照spec裁定冻结并记录共享接点。
-- [ ] Step2 tests-only worker会话/partition/records原契约RED，Root实际执行审计后实现；host/race/Linuxvet，连贯可用切片即时提交。
-- [ ] Step3 tests-only跨副本软预算与bucket/relist owner RED，Root执行后实现；双owner/重复份额/失权、ctx与Close join、每槽限额和边界验证，小步提交。
-- [ ] Step4 Root fresh collector新sole三member实际native，实际进程失效/原Lease/竞争/份额/身份/Wait与精确清理；operator说明及新native小提交，不重放旧矩阵。
-- [ ] Step5 唯一fresh full review BASE→HEAD，同pair限定fix；tracked范围验收明确完整due/dirty/Watch/task硬槽与生产consumer未完成，关闭OWN/pair，继续总迁移。
+- [x] Step1 作者只读预检：exact API/record/key/profile/TTL、guard/fence消费者、Close实际owner、bucket/burst/handoff、finite三member native。Root对照spec裁定冻结并记录共享接点。
+- [x] Step2 tests-only worker会话/partition/records原契约RED，Root实际执行审计后实现；host/race/Linuxvet，连贯可用切片即时提交（9d15dc146cd5d67c208e822e2f3940a1240b880f）。
+- [x] Step3 tests-only跨副本软预算与bucket/relist owner RED，Root执行后实现；双owner/重复份额/失权、ctx与Close join、每槽限额和边界验证，小步提交（75bc9891c2692c6003dfe03128347b1cb9fafeb4）。
+- [x] Step4 Root fresh collector新sole三member实际native，实际进程失效/原Lease/竞争/份额/身份/Wait与精确清理；operator说明及新native小提交（7cc7e8717d9b785c88137432d362acdefcf8926b；首轮原生测试6.73秒通过），不重放旧矩阵。
+- [x] Step5 唯一fresh full review BASE→HEAD，同pair限定fix；691944c修复后R1复核Approved，I1/I2/M1全部解决，无新增问题。tracked范围验收明确完整due/dirty/Watch/task硬槽与生产consumer未完成，关闭OWN/pair，继续总迁移。
 
 ## Root 初检与裁定
 
