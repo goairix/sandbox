@@ -280,6 +280,17 @@ func (s *PlainColdService) ready(ctx context.Context) error {
 	return err
 }
 
+// Ready checks this fixed deployment's original trust and durable ready barrier
+// under the same lifecycle and active-call budget as business operations.
+func (s *PlainColdService) Ready(ctx context.Context) error {
+	call, err := s.enter(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.leave(call)
+	return s.ready(call.context)
+}
+
 // Bootstrap has a physical connection owner and joins its cancellation callback.
 func (s *PlainColdService) bootstrap(ctx context.Context, target kube.EnrolledBridgeTarget, request ct.BootstrapRequest) (ct.BootstrapResponse, error) {
 	var response ct.BootstrapResponse
