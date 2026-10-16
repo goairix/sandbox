@@ -1,0 +1,41 @@
+# 分区 worker 会话与全 cell 预算控制
+
+基线 `afcb7bf96c99eb02fdc1e64bdf53c54623f454af`。这是已批准主方案“分区调度与Watch”的首个完整控制单元：为后续持久due/dirty发现和实际任务consumer提供原生会话、分区归属及跨副本预算载体。不是完整scheduler、默认生产接线或大N容量验收。没有新的数据库，不为每个sandbox建立常驻对象或Lease。
+
+## 现有约束与本单元边界
+
+现有Namespace.Partition固定256分区；backend已有identity/restore fencing、bounded requestContext、opaque原生TaskClaim。当前没有worker-session、partition-claim或cell共享relist/rate预算接口。TaskClaim仍是每个实际活动任务的原生权限，不能把新分区归属或预算当runtime/task授权。
+
+enrolled publication实际commit为54 comparisons+9 success+1 failure，已满64节点，且预算检查冻结46个输入比较/8个业务写。本单元不修改publication、destroy、task授权或扩大64节点限制。due/control/task同事务的接入须后续明确调整发布流程；不能用松散第二次写入声称已经满足原主方案。已有生产配置/默认Redis入口保持原状，后续实际worker必须消费本单元后才能宣称全cell背压生效。
+
+## 原生 worker 会话和分区归属
+
+新增backend所属、不可复制重构的opaque worker session，WorkerID为有限合法segment，incarnation/sessionID每次新建随机且不复用。一个session只持一个原生etcd Lease，承载session guard、最多256个分区claim与所借软预算；不为每个partition另发Lease。会话TTL固定有限范围（预检确定默认/上下界），所有Grant/Txn/KeepAlive/Revoke均有现有requestTimeout、cluster/header/实际TTL检查和单调本地截止；未知结果、guard/fence变更或renew失败不可复活原会话。借用方ctx取消和Backend.Close停止新接纳并物理等待原RPC/续期owner返回。
+
+session guard的value、incarnation、Lease、Create/ModRevision及identity/restore共同约束claim/renew/释放。partition claim用固定key和原session Lease，CAS不存在或核对自身原值；两个worker不能同时取得同一原claim。相同WorkerID的新进程也不能继承旧的活跃claim，诊断reference不能构造新权限。只取消/释放自身精确值，未知ACK只保留原归属作诊断或只读核对，不新建不同claim后冒充成功。失租重建用全新session；原对象永久lost。
+
+单backend最多32个原活跃/初始化会话，单session最多256个partition条目，所有容量在Grant前预检/接纳。不得增加后台全局循环或sandbox map。是否显式Renew还是session拥有一条实际续期goroutine由预检冻结；无论哪种，都必须只有每session有界owner、Close可取消且等待真实返回，不能以超时伪造join。New本身仍只读，不自动分配会话/分区/预算。
+
+## 固定软预算槽
+
+本单元实现跨worker的三类固定有限槽：relist并发4槽；Range带宽20槽，每槽1MiB/s；claim尝试100槽，每槽1次/s。槽key和operator预算profile固定，份额总和不能因API/worker副本数增加而增长；同一session Lease承载软槽，领取同事务绑定原session guard和identity/restore。候选和CAS重试有限，容量不足明确立即拒绝，无无限队列、全slot扫描重试或每HTTP请求etcd计数。
+
+每个rate槽只有原owner的一份本地token bucket，使用单调时间，token容量/借出和归还时机预检冻结并测试。不要声称“每worker各20MiB/s/100次s”等同全cell共享。连接重建、重复Acquire、同WorkerID重启不创建复制份额。失租/guard异常停止新候选工作；消费者必须在真正Range/claim的原事务中重验会话/partition/预算fence，借用对象本身不授权副作用。预检必须冻结如何交给后续消费者这些原fence，不能导出可伪造授权或裸client。
+
+带宽/速率是固定份额与本地bucket的控制，不承诺任意滑动窗口零burst。单次Range仍最多256entries/256KiB，原inflight按最大chunk/原requestTimeout记尾部；会话失效不是原inflight物理结束。relist本地owner占用须持续到真实重建工作结束，不能因为ctx取消便启动无限新的本地relist。若旧分区会话已失效，其结果不能进入新缓存。准确的handoff/burst/原owner释放边界在预检写清楚并进入测试/说明。
+
+32个实际task-start硬槽不是上述leased软预算，必须持久到原工作终结，不能随session Lease自动归还。本单元不假造task硬槽完成；实际任务执行器与持久硬槽留在后续生产worker接线，tracked验收明确该缺口。
+
+## 记录和错误语义
+
+所有新记录严格canonical有限JSON、version/namespace/restore/profile/identity/worker/session/lease/partition或固定槽身份相互核对；检查未知字段、重复、大小、lease与真实key映射、Mod/CreateRevision和cluster/header异常。先检查最坏key/value/Txn节点/bytes预算再Grant/写入，不削弱现有64节点与payload界限，不引入每条sandbox的metadata重写。Options/返回的诊断记录均owned copies；同backend origin/self检查与原权限约定一致。
+
+Close幂等、缓存错误，原初始化/操作/续期的实际RPC owner都已返回后才关闭backend client。释放只撤销原Lease或CAS删除自己精确键，不删除别人新claim；未知结果不能报确定free。失去会话只影响调度接纳，不释放workspace owner、runtime quota、task硬槽或实际工作资源。
+
+## 验证与交付
+
+一个fresh author/reviewer完成此Task，同pair限定fix，小步提交；Root唯一Go/Git/Docker/gofmt，所有编辑apply_patch。禁止Sentinel文档和所有已关闭OWN/pair。预检一次冻结实际接口、生命周期接入、复用原Txn界限、bucket/burst模型及新native finite矩阵。
+
+tests-first覆盖beforeGrant拒绝、bounded bookkeeping、严格记录/真实key/原fence、双worker竞争和WorkerID复用、重复Acquire不重复token/份额、原Lease续期/失权不可复活、取消/Close实际RPC join、relist不提前释放、本地bucket边界以及错误/未知ACK保守归属。Root执行受影响host/race/Linuxvet；达到可独立使用连贯切片即提交。
+
+新sole native selector只验证这个控制单元：受控独立三member真实etcd，两个backend/session竞争固定partition/有限预算、原Lease续期与显式Revoke/实际进程退出后的失效恢复、identity/restore/guard变更拒绝、原Close/子进程Wait、精确清理。具体场景数/TTL/timeout预检冻结，不执行旧权限/运行时矩阵，不从旧OWN取binary/scripts/log。Root新OWN collector与外部核验fixture；不把小规模fixture称为全cell性能/容量验收。完成后tracked范围验收，再继续due/dirty/Watch及实际任务生产消费。
