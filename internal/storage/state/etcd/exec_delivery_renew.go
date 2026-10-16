@@ -3,12 +3,18 @@ package etcd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	t "github.com/goairix/sandbox/internal/runtime/controltransport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
+
+// ErrExecDeliveryTerminal distinguishes a verified local terminal observation
+// from real renewal failure. It preserves the existing ErrConflict contract and
+// never proves business End or turns a failed authority check into success.
+var ErrExecDeliveryTerminal = fmt.Errorf("%w: exec delivery is locally terminal", ErrConflict)
 
 // ExecRenewIssuer is optional: existing start-only providers remain compatible.
 // It signs only the fixed renewal purpose for the exact selected certificate.
@@ -21,6 +27,10 @@ func (b *Backend) RenewExecDelivery(ctx context.Context, h *ExecDeliveryHandle) 
 		return ErrInvalidRecord
 	}
 	h.mu.Lock()
+	if h.terminal && !h.unknown {
+		h.mu.Unlock()
+		return ErrExecDeliveryTerminal
+	}
 	if !h.accepted || h.terminal || h.unknown || h.closed || !h.pending.IsZero() || h.renewing {
 		h.mu.Unlock()
 		return ErrConflict
@@ -113,6 +123,10 @@ func (b *Backend) RenewExecDelivery(ctx context.Context, h *ExecDeliveryHandle) 
 		return err
 	}
 	h.mu.Lock()
+	if h.terminal && !h.unknown {
+		h.mu.Unlock()
+		return ErrExecDeliveryTerminal
+	}
 	if !h.accepted || h.terminal || h.unknown || h.closed || !h.pending.IsZero() || !after.After(h.deadline) {
 		h.mu.Unlock()
 		return ErrConflict
@@ -129,6 +143,14 @@ func (b *Backend) RenewExecDelivery(ctx context.Context, h *ExecDeliveryHandle) 
 	receipt, err := h.observeReceipt(bounded, kind, result)
 	if err != nil {
 		return err
+	}
+	if kind == t.EventReceipt && receipt.State() == "local_terminal" {
+		h.mu.Lock()
+		terminal := h.terminal && !h.unknown
+		h.mu.Unlock()
+		if terminal {
+			return ErrExecDeliveryTerminal
+		}
 	}
 	if kind != t.EventAccepted || receipt.State() != "accepted" || !receipt.AuthorityDeadline().Equal(after) {
 		return ErrDeliveryUnknown
