@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
 	"github.com/goairix/sandbox/internal/nodeobserver"
 	"github.com/goairix/sandbox/internal/provisioning"
 	sandboxruntime "github.com/goairix/sandbox/internal/runtime"
@@ -62,6 +63,10 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 }
 
 func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool) {
+	runColdCreateServiceVariantNative(t, loseACK, withBusiness, false, false)
+}
+
+func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, detached, concurrent bool) {
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
 	dir, err := os.MkdirTemp("/tmp", "cold-service-")
@@ -154,6 +159,11 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 	}
 	w, err := state.NewWorkspaceIdentity("s3", identity.StorageID, "bucket", uuid.NewString()+"/")
 	require.NoError(t, err)
+	if detached {
+		w, err = backend.DetachedIdentity(request.Principal, request.IdempotencyKey)
+		require.NoError(t, err)
+		require.Equal(t, state.WorkspaceIdentityDetached, w.Kind())
+	}
 	expected, err := kube.BuildEnrolledPlainPod("runtimes", kube.EnrolledPlainPodRequest{Spec: sandboxruntime.SandboxSpec{ID: request.SandboxID, Image: enrolledProfileFixtureImage, CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi", ReadOnlyRootFS: true, RunAsUser: 1000, SeccompProfile: "RuntimeDefault"}, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, CreationIntentID: request.IntentID, Generation: 1, Config: config})
 	require.NoError(t, err)
 	expected.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
@@ -182,7 +192,30 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 				return
 			}
 			var actual v1.Pod
-			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 65536)).Decode(&actual); err != nil || !equality.Semantic.DeepEqual(expected, &actual) {
+			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 65536)).Decode(&actual); err != nil {
+				http.Error(rw, "invalid POST JSON", http.StatusBadRequest)
+				return
+			}
+			want := expected
+			if detached {
+				// Only server-generated logical/intent UUIDs vary. Rebuild the
+				// entire original expected body before accepting any POST field.
+				id, intent := actual.Name, actual.Annotations[kubecontract.EnrolledCreationIntentAnnotation]
+				parsedID, idErr := uuid.Parse(id)
+				parsedIntent, intentErr := uuid.Parse(intent)
+				if idErr != nil || intentErr != nil || parsedID == uuid.Nil || parsedIntent == uuid.Nil || parsedID.String() != id || parsedIntent.String() != intent {
+					http.Error(rw, "invalid generated IDs", http.StatusBadRequest)
+					return
+				}
+				var buildErr error
+				want, buildErr = kube.BuildEnrolledPlainPod("runtimes", kube.EnrolledPlainPodRequest{Spec: sandboxruntime.SandboxSpec{ID: id, Image: enrolledProfileFixtureImage, CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi", ReadOnlyRootFS: true, RunAsUser: 1000, SeccompProfile: "RuntimeDefault"}, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, CreationIntentID: intent, Generation: 1, Config: config})
+				if buildErr != nil {
+					http.Error(rw, "invalid generated pod", http.StatusBadRequest)
+					return
+				}
+				want.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
+			}
+			if !equality.Semantic.DeepEqual(want, &actual) {
 				http.Error(rw, "incorrect complete POST body/GVK", http.StatusBadRequest)
 				return
 			}
@@ -232,7 +265,13 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 			rw.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if r.URL.Path == path+"/"+request.SandboxID+"/exec" {
+		mu.Lock()
+		actualName := ""
+		if pod != nil {
+			actualName = pod.Name
+		}
+		mu.Unlock()
+		if actualName != "" && r.URL.Path == path+"/"+actualName+"/exec" {
 			mu.Lock()
 			if child == nil || len(bridges) >= 16 {
 				mu.Unlock()
@@ -258,7 +297,7 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		if r.URL.Path == path+"/"+request.SandboxID && pod != nil {
+		if pod != nil && r.URL.Path == path+"/"+pod.Name {
 			_ = json.NewEncoder(rw).Encode(pod)
 			return
 		}
@@ -311,11 +350,86 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 		}
 	})
 	options := provisioning.PlainColdOptions{Backend: backend, API: kube.EnrolledBridgeOptions{Config: apiConfig, Namespace: "runtimes", MaxActive: 4, RequestTimeout: 5 * time.Second}, Image: enrolledProfileFixtureImage, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, WorkerID: "cold-native", CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi", QuotaPartition: 7, LauncherConfig: config, RootPrivateKey: root, IssuerPrivateKey: issuerKey, IssuerCertificate: issuerCert, Clock: nativeFixtureClock{}}
+	var acquisitionClock *detachedNativeAcquisitionClock
+	if detached {
+		options.Business = &provisioning.PlainColdBusinessOptions{Principal: request.Principal, Defaults: sandboxsnapshot.Defaults{TimeoutSeconds: 60, Resources: business.ResourceLimits{CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi"}}}
+		if concurrent {
+			acquisitionClock = &detachedNativeAcquisitionClock{ready: make(chan struct{})}
+			options.Clock = acquisitionClock
+		}
+	}
 	service, err := provisioning.NewPlainColdService(ctx, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 	activeService := service
-	result, createErr := service.Create(ctx, w, request)
+	var result provisioning.PlainColdResult
+	var createErr error
+	var firstBusiness provisioning.PlainColdBusinessResult
+	businessInput := provisioning.PlainColdBusinessInput{IdempotencyKey: request.IdempotencyKey, Request: business.CreateSandboxRequest{Mode: "persistent", Resources: &business.ResourceLimits{CPU: "2000m"}}}
+	if detached && !loseACK && !concurrent {
+		businessInput.IdempotencyKey = ""
+	}
+	if detached {
+		// Mutating caller-owned options after constructor return cannot change
+		// the service's operator identity or first-use defaults.
+		options.Business.Principal = "mutated-operator"
+		options.Business.Defaults.TimeoutSeconds = 90
+	}
+	if !detached {
+		result, createErr = service.Create(ctx, w, request)
+	} else {
+		if concurrent {
+			acquisitionClock.armed.Store(true)
+			type answer struct {
+				result provisioning.PlainColdBusinessResult
+				err    error
+			}
+			answers := make(chan answer, 2)
+			for n := 0; n < 2; n++ {
+				go func() {
+					value, callErr := service.CreateBusiness(ctx, businessInput)
+					answers <- answer{value, callErr}
+				}()
+			}
+			one, two := <-answers, <-answers
+			if one.err != nil && two.err == nil {
+				one, two = two, one
+			}
+			require.NoError(t, one.err, "one original first caller completes")
+			require.Equal(t, one.result.RequestID, two.result.RequestID, "first-absent loser authenticates original request")
+			require.Equal(t, one.result.IntentID, two.result.IntentID)
+			require.Equal(t, one.result.SandboxID, two.result.SandboxID)
+			if two.err != nil {
+				require.Equal(t, provisioning.PlainColdRetryable, two.result.State)
+			}
+			firstBusiness, createErr = one.result, one.err
+		} else {
+			firstBusiness, createErr = service.CreateBusiness(ctx, businessInput)
+		}
+		result = firstBusiness.PlainColdResult
+		if businessInput.IdempotencyKey == "" {
+			_, err := uuid.Parse(firstBusiness.IdempotencyKey)
+			require.NoError(t, err)
+			businessInput.IdempotencyKey = firstBusiness.IdempotencyKey
+		} else {
+			require.Equal(t, businessInput.IdempotencyKey, firstBusiness.IdempotencyKey)
+		}
+		request.IdempotencyKey = businessInput.IdempotencyKey
+		w, err = backend.DetachedIdentity(request.Principal, request.IdempotencyKey)
+		require.NoError(t, err)
+		require.NotNil(t, firstBusiness.Business)
+		require.Equal(t, int64(60), firstBusiness.Business.Resolved.TTL.Seconds)
+		fixedRequest, err := backend.LoadRequest(ctx, request.Principal, request.IdempotencyKey)
+		require.NoError(t, err)
+		require.NotNil(t, fixedRequest)
+		foreignRequest, err := backend.LoadRequest(ctx, "mutated-operator", request.IdempotencyKey)
+		require.NoError(t, err)
+		require.Nil(t, foreignRequest)
+		options.Business.Principal = request.Principal
+		options.Business.Defaults.TimeoutSeconds = 60
+		request.RequestID, request.IntentID, request.SandboxID = result.RequestID, result.IntentID, result.SandboxID
+		request.Business = firstBusiness.Business
+	}
 	require.Equal(t, int32(1), postCount.Load())
 	require.Equal(t, int32(1), startCount.Load())
 	mu.Lock()
@@ -364,7 +478,17 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 		forged.Runtime = p.RuntimeReference{ID: "foreign-pod", UID: uuid.NewString(), BootID: uuid.NewString()}
 		forged.Attempt = &state.ColdCreateAttemptRecord{Version: 1, OperationID: uuid.NewString()}
 		forged.Publication = &state.RuntimeEnrolledPublicationEntry{}
-		result, createErr = recovered.Resume(ctx, w, forged)
+		if detached {
+			var resumed provisioning.PlainColdBusinessResult
+			resumed, createErr = recovered.CreateBusiness(ctx, businessInput)
+			require.Equal(t, firstBusiness.RequestID, resumed.RequestID)
+			require.Equal(t, firstBusiness.IntentID, resumed.IntentID)
+			require.Equal(t, firstBusiness.SandboxID, resumed.SandboxID)
+			require.Equal(t, firstBusiness.Business, resumed.Business)
+			result = resumed.PlainColdResult
+		} else {
+			result, createErr = recovered.Resume(ctx, w, forged)
+		}
 		require.Equal(t, early.Runtime, result.Runtime)
 		require.Equal(t, early.Attempt, result.Attempt)
 		afterKV, err := admin.Get(ctx, materialKey)
@@ -407,6 +531,33 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 	require.Equal(t, provisioning.PlainColdCompleted, settledAgain.State)
 	require.Equal(t, result.Stage, settledAgain.Stage)
 	require.Equal(t, result.Runtime, settledAgain.Runtime, "completed metadata refreshes copied runtime attribution")
+	if detached {
+		replayed, err := activeService.CreateBusiness(ctx, businessInput)
+		require.NoError(t, err)
+		require.Equal(t, firstBusiness.RequestID, replayed.RequestID)
+		require.Equal(t, firstBusiness.IntentID, replayed.IntentID)
+		require.Equal(t, firstBusiness.SandboxID, replayed.SandboxID)
+		require.Equal(t, firstBusiness.Business, replayed.Business)
+		// A new service resolves new requests differently; this key must still
+		// use the persisted original defaults and capsule.
+		require.NoError(t, activeService.Close())
+		options.Business.Defaults.TimeoutSeconds = 120
+		drifted, err := provisioning.NewPlainColdService(ctx, options)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, drifted.Close()) })
+		replayed, err = drifted.CreateBusiness(ctx, businessInput)
+		require.NoError(t, err)
+		require.Equal(t, firstBusiness.RequestID, replayed.RequestID)
+		require.Equal(t, firstBusiness.IntentID, replayed.IntentID)
+		require.Equal(t, firstBusiness.Business, replayed.Business)
+		require.Equal(t, int64(60), replayed.Business.Resolved.TTL.Seconds)
+		changed := businessInput
+		changed.Request.Timeout = 90
+		_, err = drifted.CreateBusiness(ctx, changed)
+		require.ErrorIs(t, err, state.ErrIdempotencyConflict)
+		require.Equal(t, int32(1), postCount.Load())
+		require.Equal(t, int32(1), startCount.Load())
+	}
 	quotaKey := ns.Root() + fmt.Sprintf("quota/%02x/slots/%08d", reservation.Quota.Partition, reservation.Quota.ID)
 	quota, err := admin.Get(ctx, quotaKey)
 	require.NoError(t, err)
