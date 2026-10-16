@@ -39,7 +39,7 @@
 - [x] Step1 Root完整接受6c93e1预检：pointer结果/typed notfound与unavailable/v1 nilBusiness+v2owned；原dispatch CreatedAt/private concrete read locator/先后Confirm；health4096含前缀/内部随机nonce/snake_case wire/strictTLS+rawEOF；Journal.ObserveGate TryLock无IO与Supervisor clock前后重验、原service全程准入与最终Close检查。START-GO tests/collectors first，Root审后实际RED，产品随后。
 - [x] Step2 RED后实现，协议b3dc75b、reader4a1a71f、Supervisor8ca3712、servicecf6b5e4分步提交；host/race通过，相关Linux vet通过。外部etcd host case明确skip，由真实native重复验证其公开断言。
 - [x] Step3 真实TLS etcd/正式launcher/原bridge v1/v2 Lookup与拒绝路径通过；native-local03使用当前source的runner05/launcher05，attach/container原始Wait0，所有进程/IO已join且精确容器已删除。测试提交223c2d2。保留原失败；完整来源与容量限制见验收报告。
-- [ ] Step4 唯一fresh reviewer原BASE→finalHEAD审查；同pair修复；tracked验收并关闭OWN，继续HTTP/生产主路径。
+- [x] Step4 唯一fresh reviewer原BASE→ab511eb审查发现两项Important；同pair完成实际行为RED、最小修复93f7e4f和targeted/race/Linuxvet/native验证。原reviewer定点复核两项均ADDRESSED，无新增问题；tracked验收见docs/superpowers/reports/2026-10-16-etcd-live-sandbox-lookup-verification.md，关闭本OWN/pair后继续业务操作与生产主路径。
 
 Ruling: 本任务是已批准总方案的实际Get/复用前提，不重问用户授权。一次交付完整Lookup，避免只做未消费的健康协议或仅元数据GET；不做新认证模型、HTTP假接线或Redis fallback。
 
