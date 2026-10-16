@@ -120,12 +120,12 @@ func executionUnknown(result provisioning.PlainExecResult, err error) unknownRes
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		reason = "deadline_exceeded"
-	case errors.Is(err, context.Canceled):
-		reason = "canceled"
 	case errors.Is(err, state.ErrGuardExpired):
 		reason = "guard_expired"
 	case errors.Is(err, state.ErrConflict):
 		reason = "conflict"
+	case errors.Is(err, context.Canceled):
+		reason = "canceled"
 	}
 	response := unknownResponse{Code: "exec_unknown", Message: "execution outcome unknown; do not automatically retry", Reason: reason}
 	if result.Operation.OperationID != "" {
@@ -258,6 +258,18 @@ func (g *Gateway) execStream(w http.ResponseWriter, ctx context.Context, cancel 
 						types.SSEDoneData
 						Reason string `json:"reason"`
 					}{types.SSEDoneData{ExitCode: exit, Elapsed: time.Since(start).Seconds()}, answer.result.Receipt.Reason()}); err != nil {
+						return
+					}
+				} else if answer.result.State == provisioning.PlainExecRejected {
+					failure := classifyServiceError(answer.err)
+					if err := sendEvent(w, rc, "error", struct {
+						Error      string `json:"error"`
+						Code       string `json:"code"`
+						State      string `json:"state"`
+						Reason     string `json:"reason"`
+						Message    string `json:"message"`
+						RetryAfter int    `json:"retry_after,omitempty"`
+					}{failure.code, failure.code, "rejected", failure.code, failure.message, failure.retryAfter}); err != nil {
 						return
 					}
 				} else {

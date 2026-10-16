@@ -252,6 +252,10 @@ func (g *Gateway) create(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, state.ErrPreparationCapacity)
 		return
 	}
+	if result.State == provisioning.PlainColdPending && errors.Is(err, state.ErrConflict) && result.RequestID == "" && result.IntentID == "" && result.SandboxID == "" {
+		writeServiceError(w, state.ErrConflict)
+		return
+	}
 	if err != nil || result.State != provisioning.PlainColdCompleted && result.State != provisioning.PlainColdHistorical {
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, 202, struct {

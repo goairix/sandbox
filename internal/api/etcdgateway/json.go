@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -125,19 +126,32 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	}{code, message})
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+type serviceError struct {
+	status     int
+	code       string
+	message    string
+	retryAfter int
+}
+
+func classifyServiceError(err error) serviceError {
 	switch {
 	case errors.Is(err, provisioning.ErrPlainColdNotFound):
-		writeError(w, 404, "not_found", "sandbox not found")
+		return serviceError{404, "not_found", "sandbox not found", 0}
 	case errors.Is(err, state.ErrIdempotencyConflict):
-		writeError(w, 409, "idempotency_conflict", "idempotency key conflicts with original request")
+		return serviceError{409, "idempotency_conflict", "idempotency key conflicts with original request", 0}
 	case errors.Is(err, provisioning.ErrPlainColdProfile), errors.Is(err, state.ErrInvalidRecord):
-		writeError(w, 400, "unsupported_profile", "unsupported request profile")
+		return serviceError{400, "unsupported_profile", "unsupported request profile", 0}
 	case errors.Is(err, state.ErrPreparationCapacity), errors.Is(err, state.ErrSnapshotReadCapacity):
-		w.Header().Set("Retry-After", "1")
-		writeError(w, 429, "capacity", "service capacity unavailable")
+		return serviceError{429, "capacity", "service capacity unavailable", 1}
 	default:
-		w.Header().Set("Retry-After", "1")
-		writeError(w, 503, "unavailable", "sandbox service unavailable")
+		return serviceError{503, "unavailable", "sandbox service unavailable", 1}
 	}
+}
+
+func writeServiceError(w http.ResponseWriter, err error) {
+	failure := classifyServiceError(err)
+	if failure.retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(failure.retryAfter))
+	}
+	writeError(w, failure.status, failure.code, failure.message)
 }

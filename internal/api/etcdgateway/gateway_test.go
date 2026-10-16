@@ -455,3 +455,122 @@ func TestGatewayUnknownReasonFromActualErrors(t *testing.T) {
 		})
 	}
 }
+
+func gatewayReviewR1ExecWire(t *testing.T, service *gatewayServiceFake, suffix string) (int, http.Header, string) {
+	t.Helper()
+	g := gatewayFixture(t, service)
+	server := httptest.NewServer(g)
+	defer server.Close()
+	r, err := http.NewRequest(http.MethodPost, server.URL+gatewayExecPath+suffix, strings.NewReader(`{"language":"bash","code":"exit 0"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer mounted-secret")
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	wire, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, response.Header, string(wire)
+}
+
+func TestGatewayReviewR1RejectedStream(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		code  string
+		retry bool
+	}{
+		{"missing", provisioning.ErrPlainColdNotFound, "not_found", false},
+		{"capacity", state.ErrPreparationCapacity, "capacity", true},
+		{"admission", state.ErrConflict, "unavailable", true},
+		{"profile", provisioning.ErrPlainColdProfile, "unsupported_profile", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &gatewayServiceFake{exec: func(context.Context, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+				return provisioning.PlainExecResult{State: provisioning.PlainExecRejected}, errors.Join(errors.New("private-key-sentinel"), tc.err)
+			}}
+			status, headers, wire := gatewayReviewR1ExecWire(t, s, "/stream")
+			if status != 200 || headers.Get("Retry-After") != "" || s.execs.Load() != 1 || s.lookups.Load() != 0 {
+				t.Errorf("committed stream changed HTTP status/headers or repeated service work: status=%d body=%s", status, wire)
+			}
+			if !strings.Contains(wire, "event: error") || !strings.Contains(wire, `"state":"rejected"`) || !strings.Contains(wire, `"code":"`+tc.code+`"`) || !strings.Contains(wire, `"reason":"`+tc.code+`"`) {
+				t.Errorf("known original rejection lost its sanitized classification: %s", wire)
+			}
+			for _, forbidden := range []string{"event: done", "exit_code", "operation", "effect", "exec_unknown", "automatically retry", "private-key-sentinel"} {
+				if strings.Contains(wire, forbidden) {
+					t.Errorf("rejected stream contains inappropriate %q: %s", forbidden, wire)
+				}
+			}
+			if strings.Contains(wire, `"retry_after":1`) != tc.retry {
+				t.Errorf("rejected stream lost the classifier's finite retry guidance: %s", wire)
+			}
+		})
+	}
+}
+
+func TestGatewayReviewR1UnknownCausalReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"cancel guard", errors.Join(context.Canceled, state.ErrGuardExpired), "guard_expired"},
+		{"guard cancel", errors.Join(state.ErrGuardExpired, context.Canceled), "guard_expired"},
+		{"cancel conflict", errors.Join(context.Canceled, state.ErrConflict), "conflict"},
+		{"conflict cancel", errors.Join(state.ErrConflict, context.Canceled), "conflict"},
+		{"cancel only", context.Canceled, "canceled"},
+		{"deadline only", context.DeadlineExceeded, "deadline_exceeded"},
+		{"opaque", errors.New("private-key-sentinel"), "outcome_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, suffix := range []string{"", "/stream"} {
+				s := &gatewayServiceFake{exec: func(context.Context, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+					return provisioning.PlainExecResult{State: provisioning.PlainExecUnknown, Operation: state.OperationReference{OperationID: "original-operation"}, Effect: state.ExecEffectReference{CommandID: "original-command"}}, tc.err
+				}}
+				status, headers, wire := gatewayReviewR1ExecWire(t, s, suffix)
+				if !strings.Contains(wire, `"reason":"`+tc.want+`"`) || !strings.Contains(wire, `"code":"exec_unknown"`) || !strings.Contains(wire, "original-operation") || !strings.Contains(wire, "original-command") || !strings.Contains(wire, "do not automatically retry") {
+					t.Errorf("joined cause lost its true typed identity in %q: %s", suffix, wire)
+				}
+				if strings.Contains(wire, "exit_code") || strings.Contains(wire, "event: done") || strings.Contains(wire, "private-key-sentinel") || headers.Get("Retry-After") != "" || s.execs.Load() != 1 {
+					t.Errorf("unknown execution fabricated success, retry guidance or extra work: %s", wire)
+				}
+				if suffix == "" && status != 502 || suffix != "" && (status != 200 || !strings.Contains(wire, "event: error")) {
+					t.Errorf("unknown execution status/event changed: %d %s", status, wire)
+				}
+			}
+		})
+	}
+}
+
+func TestGatewayReviewR1CreateAdmissionVersusPending(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		s := &gatewayServiceFake{create: func(provisioning.PlainColdBusinessInput) (provisioning.PlainColdBusinessResult, error) {
+			result := provisioning.PlainColdBusinessResult{IdempotencyKey: "actual-key", PlainColdResult: provisioning.PlainColdResult{State: provisioning.PlainColdPending}}
+			if pending {
+				result.RequestID, result.IntentID, result.SandboxID = "original-request", "original-intent", gatewaySandboxID
+				return result, state.ErrOutcomeUnknown
+			}
+			return result, state.ErrConflict
+		}}
+		g := gatewayFixture(t, s)
+		rw := httptest.NewRecorder()
+		g.ServeHTTP(rw, gatewayRequest(http.MethodPost, "/api/v1/sandboxes", `{"mode":"ephemeral"}`))
+		wantStatus, wantCode := 503, "unavailable"
+		if pending {
+			wantStatus, wantCode = 202, "create_pending"
+		}
+		body := rw.Body.String()
+		if rw.Code != wantStatus || !strings.Contains(body, `"code":"`+wantCode+`"`) || rw.Header().Get("Retry-After") != "1" || rw.Header().Get("Idempotency-Key") != "actual-key" || s.creates.Load() != 1 || s.lookups.Load() != 0 {
+			t.Errorf("known admission versus genuine pending provenance lost: pending=%t status=%d body=%s", pending, rw.Code, body)
+		}
+		if pending && (!strings.Contains(body, "original-request") || !strings.Contains(body, "original-intent") || !strings.Contains(body, gatewaySandboxID)) {
+			t.Errorf("pending recovery lost original creation IDs: %s", body)
+		}
+	}
+}
