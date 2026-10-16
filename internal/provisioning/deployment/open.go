@@ -23,6 +23,7 @@ import (
 type Deployment struct {
 	service  *provisioning.PlainColdService
 	backend  *state.Backend
+	issuer   *ExecIssuer
 	once     sync.Once
 	closeErr error
 }
@@ -41,6 +42,7 @@ func (d *Deployment) Close() error {
 		if d.backend != nil {
 			d.closeErr = errors.Join(d.closeErr, d.backend.Close())
 		}
+		d.closeErr = errors.Join(d.closeErr, d.issuer.Close())
 	})
 	return d.closeErr
 }
@@ -130,9 +132,13 @@ func Open(ctx context.Context, path string) (*Deployment, error) {
 		return nil, fileError("signed clock")
 	}
 	d := &Deployment{}
-	d.backend, err = state.New(ctx, state.Options{Endpoints: m.Etcd.Endpoints, Namespace: namespace, Identity: state.Identity{SchemaVersion: i.SchemaVersion, Prefix: i.Prefix, AuthorityID: i.AuthorityID, Cell: i.Cell, ClusterID: i.ClusterID, StorageID: i.StorageID, RuntimeID: i.RuntimeID, RestoreEpoch: i.RestoreEpoch}, TLS: tlsConfig, DialTimeout: dialTimeout, RequestTimeout: requestTimeout, SnapshotCacheBytes: m.Etcd.SnapshotCacheBytes, PreparationInventory: &inventory, Clock: clock, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: launcher.Binding.AuthorityID, Target: launcher.Binding.Target, Roots: launcher.Roots}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: launcher.ContractDigest, MaxActive: launcher.MaxActive}})
+	d.issuer, err = NewExecIssuer(ctx, issuer, issuerWire, launcher, clock)
 	if err != nil {
-		return nil, fmt.Errorf("deployment backend: %w", err)
+		return nil, fmt.Errorf("deployment issuer: %w", err)
+	}
+	d.backend, err = state.New(ctx, state.Options{Endpoints: m.Etcd.Endpoints, Namespace: namespace, Identity: state.Identity{SchemaVersion: i.SchemaVersion, Prefix: i.Prefix, AuthorityID: i.AuthorityID, Cell: i.Cell, ClusterID: i.ClusterID, StorageID: i.StorageID, RuntimeID: i.RuntimeID, RestoreEpoch: i.RestoreEpoch}, TLS: tlsConfig, DialTimeout: dialTimeout, RequestTimeout: requestTimeout, SnapshotCacheBytes: m.Etcd.SnapshotCacheBytes, PreparationInventory: &inventory, Clock: clock, ExecIssuer: d.issuer, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: launcher.Binding.AuthorityID, Target: launcher.Binding.Target, Roots: launcher.Roots}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: launcher.ContractDigest, MaxActive: launcher.MaxActive}})
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("deployment backend: %w", err), d.Close())
 	}
 	r, defaults := m.Resources, m.Business.Defaults
 	dr := defaults.Resources

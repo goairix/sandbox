@@ -8,7 +8,7 @@
 
 ## 外部边界
 
-- 新执行入口接收 sandbox ID、调用方稳定 request ID、已经完整解析的 `controlprotocol.ExecutionRequest` 和 stdout/stderr writer。具体 Go 名称/返回 DTO 经源代码预检冻结；保留 exact operation/effect reference 供不确定结果定位，不自动重发或创建新命令。
+- 新执行入口接收 sandbox ID、调用方 request ID、已经完整解析的 `controlprotocol.ExecutionRequest` 和 stdout/stderr writer。request ID 是归属追踪字段，既有 BeginOperation 每次产生新 OperationID，并不提供按 request ID 去重；再次调用是一次新操作，未知结果不得自动重试。本次调用保留 exact operation/effect reference 供后续明确诊断，不自动重发或创建替代命令。具体 Go 名称/返回 DTO 经源代码预检冻结。
 - 本层不猜测镜像默认环境，不继承管理进程环境，不把字符串 shell/HTTP 默认值映射混进底层 descriptor；后续 HTTP adapter 再明确解析旧业务参数。UID/GID 必须匹配固定 launcher 配置；network/TTY/workdir/timeout/输入大小遵循原 descriptor 和目标约束，非法值在危险写入/下发前拒绝。
 - stdout/stderr 流由调用方同步 writer 消费，沿原 handle 有界通道背压，不累计全部输出、不用后台协程伪装任意 writer 可取消。公开说明 writer 必须返回；Close 不把尚未退出的 writer/物理 IO 当作已 join。
 
