@@ -258,6 +258,7 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	}
 	b.archiveLife.closed = true
 	b.archiveLife.closeDone = make(chan struct{})
+	workers := b.stopWorkerControl()
 	owners := make([]*taskArchiveDelivery, 0, len(b.archiveLife.owners))
 	for o := range b.archiveLife.owners {
 		owners = append(owners, o)
@@ -319,8 +320,11 @@ func (b *Backend) closeTaskArchiveBackend() error {
 		}
 	}
 	var err error
+	for _, s := range workers {
+		err = errors.Join(err, b.releaseWorkerSession(context.Background(), s))
+	}
 	if b.archiveStore != nil {
-		err = b.archiveStore.close()
+		err = errors.Join(err, b.archiveStore.close())
 	}
 	if b.client != nil {
 		err = errors.Join(err, b.client.Close())

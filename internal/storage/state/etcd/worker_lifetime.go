@@ -1,0 +1,187 @@
+package etcd
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// The existing archiveLife.mu is the only admission/state lock. No worker
+// lock spans a native call, a callback, cancellation join or client shutdown.
+type workerBackend struct {
+	origin   *Backend
+	options  WorkerControlOptions
+	profile  taskFence
+	sessions [32]*WorkerSession
+}
+
+type workerCall struct {
+	session    *WorkerSession
+	ctx        context.Context
+	cancel     context.CancelFunc
+	done       chan struct{}
+	started    bool
+	stopParent func() bool
+	parentDone chan struct{}
+}
+
+type workerRelease struct {
+	done chan struct{}
+	err  error
+}
+
+func (b *Backend) validWorkerBackend() bool {
+	return b != nil && b.client != nil && b.archiveLife != nil && b.workerControl != nil && b.workerControl.origin == b
+}
+
+// Requires archiveLife.mu. Pointer membership is checked even when the
+// diagnostic fields happen to match a live original session.
+func (b *Backend) validWorkerSession(s *WorkerSession) bool {
+	return b.validWorkerBackend() && s != nil && s.origin == b && s.self == s && s.slot >= 0 && s.slot < len(b.workerControl.sessions) && b.workerControl.sessions[s.slot] == s && s.ctx != nil
+}
+
+func (s *WorkerSession) live() error {
+	if s.lost || s.released {
+		return ErrGuardExpired
+	}
+	if err := s.ctx.Err(); err != nil {
+		s.lost = true
+		return err
+	}
+	if s.reference.LeaseID <= 0 || !time.Now().Before(s.deadline) {
+		s.lost = true
+		s.cancel()
+		return ErrGuardExpired
+	}
+	return nil
+}
+
+func (b *Backend) beginWorkerCall(ctx context.Context, s *WorkerSession) (*workerCall, error) {
+	if ctx == nil || !b.validWorkerBackend() {
+		return nil, ErrInvalidRecord
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b.archiveLife.mu.Lock()
+	defer b.archiveLife.mu.Unlock()
+	if !b.validWorkerSession(s) {
+		return nil, ErrInvalidRecord
+	}
+	if b.archiveLife.closed {
+		return nil, context.Canceled
+	}
+	if s.release != nil {
+		return nil, ErrGuardExpired
+	}
+	if err := s.live(); err != nil {
+		return nil, err
+	}
+	if s.operation != nil {
+		return nil, ErrConflict
+	}
+	owned, cancel := context.WithCancel(ctx)
+	parentDone := make(chan struct{})
+	stop := context.AfterFunc(s.ctx, func() { cancel(); close(parentDone) })
+	call := &workerCall{session: s, ctx: owned, cancel: cancel, done: make(chan struct{}), stopParent: stop, parentDone: parentDone}
+	s.operation = call
+	return call, nil
+}
+
+func (call *workerCall) finish() {
+	s := call.session
+	b := s.origin
+	if call.stopParent != nil && !call.stopParent() {
+		<-call.parentDone
+	}
+	b.archiveLife.mu.Lock()
+	call.cancel()
+	if s.operation == call {
+		s.operation = nil
+	}
+	close(call.done)
+	b.archiveLife.mu.Unlock()
+}
+
+func (call *workerCall) postcheck() error {
+	s := call.session
+	b := s.origin
+	b.archiveLife.mu.Lock()
+	defer b.archiveLife.mu.Unlock()
+	if err := call.ctx.Err(); err != nil {
+		s.lost = true
+		s.cancel()
+		return err
+	}
+	if b.archiveLife.closed {
+		s.lost = true
+		s.cancel()
+		return context.Canceled
+	}
+	return s.live()
+}
+
+func (call *workerCall) lose() {
+	s := call.session
+	s.origin.archiveLife.mu.Lock()
+	s.lost = true
+	s.cancel()
+	s.origin.archiveLife.mu.Unlock()
+}
+
+// Release remains an actual owner even after cancellation. Concurrent explicit
+// Release and the existing backend Close share this one original cleanup.
+func (b *Backend) releaseWorkerSession(ctx context.Context, s *WorkerSession) error {
+	b.archiveLife.mu.Lock()
+	if s.release != nil {
+		r := s.release
+		b.archiveLife.mu.Unlock()
+		<-r.done
+		return r.err
+	}
+	r := &workerRelease{done: make(chan struct{})}
+	s.release = r
+	s.lost = true
+	s.cancel()
+	call := s.operation
+	b.archiveLife.mu.Unlock()
+	if call != nil {
+		<-call.done
+	}
+	b.archiveLife.mu.Lock()
+	cleaned, cleanupErr, lease := s.cleaned, s.cleanupErr, s.reference.LeaseID
+	b.archiveLife.mu.Unlock()
+	err := cleanupErr
+	if !cleaned && lease > 0 {
+		err = errors.Join(err, b.workerRevoke(ctx, lease))
+	}
+	b.archiveLife.mu.Lock()
+	s.cleaned, s.released, s.cleanupErr = true, true, err
+	if b.workerControl.sessions[s.slot] == s {
+		b.workerControl.sessions[s.slot] = nil
+	}
+	r.err = err
+	close(r.done)
+	b.archiveLife.mu.Unlock()
+	return err
+}
+
+// Called under the existing Close admission seal. The returned originals are
+// joined and revoked before its existing client.Close is reached.
+func (b *Backend) stopWorkerControl() []*WorkerSession {
+	if b.workerControl == nil {
+		return nil
+	}
+	var sessions []*WorkerSession
+	for _, s := range b.workerControl.sessions {
+		if s != nil {
+			s.lost = true
+			s.cancel()
+			if s.operation != nil {
+				s.operation.cancel()
+			}
+			sessions = append(sessions, s)
+		}
+	}
+	return sessions
+}

@@ -48,6 +48,8 @@ type Options struct {
 	// SnapshotCacheBytes is the retained immutable snapshot budget. Zero uses
 	// 64MiB; explicit budgets must be between 256KiB and 64MiB inclusive.
 	SnapshotCacheBytes uint64
+	// WorkerControl opts into a pre-provisioned fixed scheduling profile.
+	WorkerControl *WorkerControlOptions
 }
 
 type Backend struct {
@@ -81,10 +83,14 @@ type Backend struct {
 	preparationDigest                         string
 	preparationTotal                          uint64
 	snapshotReads                             *snapshotReadCache
+	workerControl                             *workerBackend
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if err := validateWorkerControl(o.WorkerControl); err != nil {
+		return err
+	}
 	if o.SnapshotCacheBytes != 0 && (o.SnapshotCacheBytes < 256*1024 || o.SnapshotCacheBytes > 64*1024*1024) {
 		return invalid("snapshot cache budget must be 256KiB through 64MiB")
 	}
@@ -213,6 +219,10 @@ func validateOptions(o Options) error {
 func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
+	}
+	if o.WorkerControl != nil {
+		owned := *o.WorkerControl
+		o.WorkerControl = &owned
 	}
 	if o.PreparationInventory != nil {
 		owned := *o.PreparationInventory
@@ -361,6 +371,9 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 		return nil, fmt.Errorf("%w: operator identity or restore epoch differs", ErrIdentityMismatch)
 	}
 	b.identityValue = string(identity.Kvs[0].Value)
+	if err = b.pinWorkerControl(ctx, o.WorkerControl); err != nil {
+		return nil, err
+	}
 	if err = b.pinTaskWorkspaceSyncBudget(ctx, o.TaskWorkspaceSyncBudget); err != nil {
 		return nil, err
 	}
