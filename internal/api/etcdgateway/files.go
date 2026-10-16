@@ -122,6 +122,10 @@ func (g *Gateway) files(w http.ResponseWriter, r *http.Request, id, operation st
 		writeError(w, status, err.Error(), message)
 		return
 	}
+	if operation == "download" && g.transfers != nil {
+		g.download(w, r, id, requestID, request.Path)
+		return
+	}
 	stdin, err := json.Marshal(request)
 	if err != nil || len(stdin) > sandboxfiles.MaxInputBytes {
 		writeError(w, 413, "limit_exceeded", "file request exceeds helper input limit")

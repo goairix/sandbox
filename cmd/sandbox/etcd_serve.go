@@ -43,7 +43,12 @@ func serveEtcd(ctx context.Context, path string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer gateway.Close()
+	defer func() {
+		closeErr := gateway.Close()
+		if closeErr != nil && !errors.Is(err, closeErr) {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	listener, err := net.Listen("tcp", net.JoinHostPort(settings.Host, strconv.Itoa(settings.Port)))
 	if err != nil {
 		return errors.New("etcd HTTP listener unavailable")

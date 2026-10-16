@@ -18,6 +18,7 @@ import (
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/sandboxsnapshot"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
+	"github.com/goairix/sandbox/internal/transferspool"
 	"github.com/goairix/sandbox/pkg/types"
 	"github.com/google/uuid"
 )
@@ -38,6 +39,8 @@ type Gateway struct {
 	lanes     [3]int
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+	closeErr  error
+	transfers *transferspool.Store
 	tokens    float64
 	lastToken time.Time
 }
@@ -74,7 +77,24 @@ func New(service Service, settings *deployment.HTTPSettings) (*Gateway, error) {
 	for name, value := range settings.Env {
 		owned.Env[name] = value
 	}
-	return &Gateway{service: service, settings: owned, active: make(map[*gatewayCall]struct{}), tokens: float64(owned.RequestsPerSecond), lastToken: time.Now()}, nil
+	var transfers *transferspool.Store
+	if settings.FileTransfer != nil {
+		transfer := *settings.FileTransfer
+		transfer.Directory = strings.Clone(transfer.Directory)
+		owned.FileTransfer = &transfer
+		options := transferspool.Options{Directory: transfer.Directory, MaxFileBytes: transfer.MaxFileBytes, MaxTotalBytes: transfer.MaxTotalBytes, MaxActive: transfer.MaxActive}
+		if options.Validate() != nil || transfer.TimeoutSeconds < 1 || transfer.TimeoutSeconds > settings.MaxExecTimeoutSeconds {
+			owned.Zero()
+			return nil, errors.New("invalid HTTP file transfer settings")
+		}
+		var err error
+		transfers, err = transferspool.Open(options)
+		if err != nil {
+			owned.Zero()
+			return nil, errors.New("HTTP file transfer directory unavailable")
+		}
+	}
+	return &Gateway{service: service, settings: owned, transfers: transfers, active: make(map[*gatewayCall]struct{}), tokens: float64(owned.RequestsPerSecond), lastToken: time.Now()}, nil
 }
 
 func (g *Gateway) enter(ctx context.Context, lane admissionLane) (*gatewayCall, int) {
@@ -121,12 +141,16 @@ func (g *Gateway) stop() {
 
 // Close cancels and physically joins admitted handlers, including their original
 // Exec writers. Serve additionally owns socket closure to release HTTP writes.
-func (g *Gateway) Close() {
+func (g *Gateway) Close() error {
 	g.closeOnce.Do(func() {
 		g.stop()
 		g.wg.Wait()
+		if g.transfers != nil {
+			g.closeErr = g.transfers.Close()
+		}
 		g.settings.Zero()
 	})
+	return g.closeErr
 }
 
 func (g *Gateway) allow() bool {
@@ -168,6 +192,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/ready" {
+		if g.transfers != nil && g.transfers.Err() != nil {
+			writeJSON(w, 503, map[string]string{"status": "unavailable"})
+			return
+		}
 		ctx, cancel := context.WithTimeout(call.ctx, 2*time.Second)
 		defer cancel()
 		if err := g.service.Ready(ctx); err != nil {

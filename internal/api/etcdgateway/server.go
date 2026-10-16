@@ -34,9 +34,9 @@ func Serve(ctx context.Context, listener net.Listener, gateway *Gateway) error {
 	if !consumed {
 		serveErr = <-done
 	}
-	gateway.Close()
+	closeErr := gateway.Close()
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		serveErr = nil
 	}
-	return errors.Join(serveErr, shutdownErr)
+	return errors.Join(serveErr, shutdownErr, closeErr)
 }

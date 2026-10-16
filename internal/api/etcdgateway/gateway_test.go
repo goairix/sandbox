@@ -359,7 +359,7 @@ func TestGatewayAdmissionCloseAndGlobalRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(g.Close)
+	t.Cleanup(func() { g.Close() })
 	started, joined := make(chan struct{}), make(chan struct{})
 	s.exec = func(ctx context.Context, _ p.ExecutionRequest, _, _ io.Writer) (provisioning.PlainExecResult, error) {
 		close(started)
