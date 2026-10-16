@@ -17,6 +17,7 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/peer"
 )
 
 // This bounded host protocol model exercises the actual client RPC boundary.
@@ -25,6 +26,7 @@ type workerTestServer struct {
 	pb.UnimplementedKVServer
 	pb.UnimplementedLeaseServer
 	pb.UnimplementedMaintenanceServer
+	pb.UnimplementedWatchServer
 	mu                     sync.Mutex
 	values                 map[string]*mvccpb.KeyValue
 	leases                 map[int64]int64
@@ -34,6 +36,8 @@ type workerTestServer struct {
 	grantReply             func(*pb.LeaseGrantResponse)
 	keepReply              func(*pb.LeaseKeepAliveResponse)
 	txnReply               func(*pb.TxnRequest, *pb.TxnResponse)
+	watch                  func(pb.Watch_WatchServer) error
+	txnPeer, watchPeer     string
 }
 
 func (s *workerTestServer) header() *pb.ResponseHeader {
@@ -132,9 +136,12 @@ func workerTestCompare(c *pb.Compare, kv *mvccpb.KeyValue) bool {
 	return false
 }
 
-func (s *workerTestServer) Txn(_ context.Context, r *pb.TxnRequest) (*pb.TxnResponse, error) {
+func (s *workerTestServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p, ok := peer.FromContext(ctx); ok {
+		s.txnPeer = p.Addr.String()
+	}
 	s.requests = append(s.requests, r)
 	if len(r.Compare)+len(r.Success)+len(r.Failure) > 64 || r.Size() > 256*1024 {
 		return nil, fmt.Errorf("worker Txn exceeded the frozen wire budget")
@@ -208,6 +215,19 @@ func (s *workerTestServer) LeaseGrant(_ context.Context, r *pb.LeaseGrantRequest
 	return out, nil
 }
 
+func (s *workerTestServer) Watch(stream pb.Watch_WatchServer) error {
+	s.mu.Lock()
+	handler := s.watch
+	if p, ok := peer.FromContext(stream.Context()); ok {
+		s.watchPeer = p.Addr.String()
+	}
+	s.mu.Unlock()
+	if handler == nil {
+		return fmt.Errorf("unexpected worker model Watch")
+	}
+	return handler(stream)
+}
+
 func (s *workerTestServer) LeaseKeepAlive(stream pb.Lease_LeaseKeepAliveServer) error {
 	r, err := stream.Recv()
 	if err != nil {
@@ -252,6 +272,7 @@ func workerTestEndpoint(t *testing.T) (*workerTestServer, Options) {
 	pb.RegisterKVServer(server, s)
 	pb.RegisterLeaseServer(server, s)
 	pb.RegisterMaintenanceServer(server, s)
+	pb.RegisterWatchServer(server, s)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
 	t.Cleanup(func() { server.Stop(); _ = listener.Close(); <-done })

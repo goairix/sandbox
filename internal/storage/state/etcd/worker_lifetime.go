@@ -153,6 +153,7 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 	call := s.operation
 	owners := b.stopWorkerRelists(s, nil, nil)
 	dueOwners := b.stopWorkerDueOwners(s, nil, nil)
+	watchOwner := b.stopDueWatchOwner(s, nil, nil)
 	var children []*workerRelease
 	for _, p := range s.partitions {
 		if p != nil && p.release != nil {
@@ -174,6 +175,9 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 	for _, owner := range dueOwners {
 		<-owner.done
 	}
+	if watchOwner != nil {
+		<-watchOwner.done
+	}
 	for _, child := range children {
 		<-child.done
 	}
@@ -189,6 +193,10 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 	}
 	b.archiveLife.mu.Lock()
 	s.cleaned, s.released, s.cleanupErr = true, true, err
+	if s.dueCache != nil {
+		s.dueCache.invalidateLocked("session released")
+		s.dueCache = nil
+	}
 	if b.workerControl.sessions[s.slot] == s {
 		b.workerControl.sessions[s.slot] = nil
 	}
@@ -211,6 +219,7 @@ func (b *Backend) stopWorkerControl() []*WorkerSession {
 			s.cancel()
 			b.stopWorkerRelists(s, nil, nil)
 			b.stopWorkerDueOwners(s, nil, nil)
+			b.stopDueWatchOwner(s, nil, nil)
 			if s.operation != nil {
 				s.operation.cancel()
 			}

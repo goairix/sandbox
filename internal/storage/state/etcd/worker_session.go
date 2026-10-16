@@ -29,6 +29,8 @@ type WorkerSession struct {
 	release                 *workerRelease
 	partitions              [256]*WorkerPartitionClaim
 	budgets                 [124]*WorkerBudgetShare
+	dueCache                *dueWorkerCache
+	dueWatch                *dueWatchOwner
 }
 
 func (s *WorkerSession) Reference() WorkerSessionReference {

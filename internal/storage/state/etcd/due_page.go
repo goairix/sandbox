@@ -10,6 +10,7 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -92,8 +93,9 @@ func (b *Backend) ReadDuePage(ctx context.Context, p *WorkerPartitionClaim, shar
 	}
 	defer o.finish()
 	call := o.call
+	knownCompaction := false
 	defer func() {
-		if resultErr != nil && call.started {
+		if resultErr != nil && call.started && !knownCompaction {
 			call.lose()
 		}
 	}()
@@ -135,6 +137,14 @@ func (b *Backend) ReadDuePage(ctx context.Context, p *WorkerPartitionClaim, shar
 	rpcErr := rpc.Err()
 	cancel()
 	if err != nil || rpcErr != nil {
+		if errors.Is(err, rpctypes.ErrCompacted) && rpcErr == nil {
+			if guardErr := b.workerGuardCheck(call, p, share); guardErr == nil {
+				knownCompaction = true
+				return DuePage{}, rpctypes.ErrCompacted
+			} else {
+				return DuePage{}, errors.Join(err, guardErr)
+			}
+		}
 		return DuePage{}, errors.Join(ErrOutcomeUnknown, err, rpcErr)
 	}
 	if err = b.operationResponseHeader(response); err != nil {

@@ -198,6 +198,7 @@ func (b *Backend) ReleaseWorkerBudget(ctx context.Context, share *WorkerBudgetSh
 	share.release = r
 	owners := b.stopWorkerRelists(share.session, nil, share)
 	dueOwners := b.stopWorkerDueOwners(share.session, nil, share)
+	watchOwner := b.stopDueWatchOwner(share.session, nil, share)
 	b.archiveLife.mu.Unlock()
 	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
 	for _, owner := range owners {
@@ -205,6 +206,9 @@ func (b *Backend) ReleaseWorkerBudget(ctx context.Context, share *WorkerBudgetSh
 	}
 	for _, owner := range dueOwners {
 		<-owner.done
+	}
+	if watchOwner != nil {
+		<-watchOwner.done
 	}
 	call, err := b.beginWorkerCall(ctx, share.session)
 	if err != nil {
