@@ -131,6 +131,9 @@ type startupBridgeFixture struct {
 	// A cold-create fixture may lose the actual activation response after the
 	// formal bridge consumes it. The original startup fixture leaves this false.
 	discardStdout bool
+	// Optional test observer proves a discarded byte came from the original
+	// child stdout after Cmd.Start. It cannot synthesize transport output.
+	stdoutObserved chan struct{}
 }
 
 func newStartupBridgeFixture() *startupBridgeFixture {
@@ -216,6 +219,18 @@ type startupChannelWriter struct {
 	channel byte
 }
 
+type startupObservedDiscard struct {
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (w *startupObservedDiscard) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.once.Do(func() { close(w.observed) })
+	}
+	return len(data), nil
+}
+
 func (w startupChannelWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -289,7 +304,11 @@ func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
 	copyStream := func(source io.Reader, channel byte, done chan copied) {
 		var destination io.Writer = startupChannelWriter{ws, &writeMu, channel}
 		if channel == 1 && f.discardStdout {
-			destination = io.Discard
+			if f.stdoutObserved != nil {
+				destination = &startupObservedDiscard{observed: f.stdoutObserved}
+			} else {
+				destination = io.Discard
+			}
 		}
 		n, err := io.CopyBuffer(destination, source, make([]byte, 32768))
 		if err != nil {

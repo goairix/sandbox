@@ -66,7 +66,12 @@ func runColdCreateServiceBusinessNative(t *testing.T, loseACK, withBusiness bool
 	runColdCreateServiceVariantNative(t, loseACK, withBusiness, false, false)
 }
 
-func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, detached, concurrent bool) {
+func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, detached, concurrent bool, liveLookup ...bool) {
+	live := len(liveLookup) == 1 && liveLookup[0]
+	var lookupHooks *liveLookupNativeHooks
+	if live {
+		lookupHooks = &liveLookupNativeHooks{}
+	}
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
 	dir, err := os.MkdirTemp("/tmp", "cold-service-")
@@ -287,6 +292,12 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 				http.Error(rw, err.Error(), 500)
 				return
 			}
+			if lookupHooks != nil {
+				if err := lookupHooks.beforeBridge(bridge); err != nil {
+					http.Error(rw, err.Error(), 500)
+					return
+				}
+			}
 			bridge.ServeHTTP(rw, r)
 			return
 		}
@@ -350,6 +361,11 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 		}
 	})
 	options := provisioning.PlainColdOptions{Backend: backend, API: kube.EnrolledBridgeOptions{Config: apiConfig, Namespace: "runtimes", MaxActive: 4, RequestTimeout: 5 * time.Second}, Image: enrolledProfileFixtureImage, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, WorkerID: "cold-native", CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi", QuotaPartition: 7, LauncherConfig: config, RootPrivateKey: root, IssuerPrivateKey: issuerKey, IssuerCertificate: issuerCert, Clock: nativeFixtureClock{}}
+	var lookupClock *liveLookupNativeClock
+	if live {
+		lookupClock = &liveLookupNativeClock{}
+		options.Clock = lookupClock
+	}
 	var acquisitionClock *detachedNativeAcquisitionClock
 	if detached {
 		options.Business = &provisioning.PlainColdBusinessOptions{Principal: request.Principal, Defaults: sandboxsnapshot.Defaults{TimeoutSeconds: 60, Resources: business.ResourceLimits{CPU: "2", Memory: "512Mi", Disk: "1Mi", TmpDisk: "50Mi"}}}
@@ -544,6 +560,9 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 		options.Business.Defaults.TimeoutSeconds = 120
 		drifted, err := provisioning.NewPlainColdService(ctx, options)
 		require.NoError(t, err)
+		if live {
+			activeService = drifted
+		}
 		t.Cleanup(func() { require.NoError(t, drifted.Close()) })
 		replayed, err = drifted.CreateBusiness(ctx, businessInput)
 		require.NoError(t, err)
@@ -574,11 +593,20 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 	require.Len(t, free.Kvs, 1)
 	require.Equal(t, int32(1), postCount.Load())
 	require.Equal(t, int32(1), startCount.Load())
+	if live {
+		exerciseLiveLookupNative(t, ctx, activeService, backend, admin, backendOptions, options, ns, w, request, result, lookupHooks, lookupClock)
+		require.Equal(t, int32(1), postCount.Load(), "Lookup never creates a pod")
+		require.Equal(t, int32(1), startCount.Load(), "Lookup never starts a runtime")
+	}
 	mu.Lock()
 	ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
 	mu.Unlock()
 	for _, bridge := range ownedBridges {
-		bridge.requireJoined(t)
+		if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
+			requireLiveLookupFailedBridgeJoined(t, bridge)
+		} else {
+			bridge.requireJoined(t)
+		}
 	}
 	t.Log("cold service actual POST-to-formal-launcher/publication/independent preparation settlement completed")
 }
