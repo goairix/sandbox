@@ -111,7 +111,8 @@ func (b *Backend) PublishRuntimeEnrolled(ctx context.Context, c *CreationClaim, 
 	aDigest, _ := snapshotDigest([]byte(aWire))
 	rc := evidence.EnrollmentReceipt()
 	r := RuntimeEnrolledPublicationRecord{RuntimePublicationRecord: RuntimePublicationRecord{Version: 2, IntentID: d.IntentID, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, RestoreEpoch: d.RestoreEpoch, Generation: d.Generation, DataGateEpoch: c.control.DataGateEpoch, Snapshot: d.Snapshot, ExpiresAt: d.ExpiresAt, OperationID: d.OperationID, PayloadDigest: d.PayloadDigest, ProofDigest: evidence.Digest(), CertificateDigest: bundle.Binding.Record.CertificateDigest, Runtime: RuntimeReference(evidence.Certificate().Runtime()), Claim: preparationClaim(c)}, EnrollmentDigest: rc.EnrollmentDigest, ObserverCertificateDigest: rc.ObserverCertificateDigest, ActivationDigest: rc.ActivationDigest, NodeUID: rc.NodeUID, NodeBootID: rc.NodeBootID, EnrollmentRecordDigest: eDigest, ActivationRecordDigest: aDigest, DispatchAttempt: d.Attempt, BindingAttempt: bundle.Binding.Record.Attempt, MountAttemptLocator: bundle.Mount.Record.Attempt}
-	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: c.reference.Partition, RequestID: c.request.RequestID, StageID: enrolledPublicationStage, AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
+	r.Version = 3
+	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: c.reference.Partition, RequestID: c.request.RequestID, StageID: enrolledDuePublicationStage, AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
 	r.Attempt = locator
 	body := RuntimeEnrolledPublicationProofRecord{RuntimePublicationProofRecord: RuntimePublicationProofRecord{Version: 2, IntentID: d.IntentID, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, RestoreEpoch: d.RestoreEpoch, Generation: d.Generation, ProofDigest: evidence.Digest(), Payload: evidence.Wire()}}
 	ownerKey, _, err := b.namespace.workspaceKeys(c.workspace)
@@ -172,7 +173,17 @@ func (b *Backend) PublishRuntimeEnrolled(ctx context.Context, c *CreationClaim, 
 		}
 		mutation.Writes = append(mutation.Writes, Write{Key: []string{journalKey, proofKey, enrollmentKey, activationKey}[i], Value: []byte(wire)})
 	}
-	mutation, digest, err := prepareEnrolledMutation(b.namespace, mutation)
+	candidate := dueCandidateForControl(c.reference.Partition, control)
+	candidateKey, err := b.namespace.dueCandidateKey(candidate)
+	if err != nil {
+		return result, err
+	}
+	candidateValue, err := encodeDueCandidate(candidate)
+	if err != nil {
+		return result, err
+	}
+	mutation.Writes = append(mutation.Writes, Write{Key: candidateKey, Value: []byte(candidateValue)})
+	mutation, digest, err := prepareEnrolledDueMutation(b.namespace, mutation)
 	if err != nil {
 		return result, err
 	}

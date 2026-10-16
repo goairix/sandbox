@@ -10,12 +10,18 @@ import (
 )
 
 const enrolledPublicationStage = "runtime_publish_enrolled_v2"
+const enrolledDuePublicationStage = "runtime_publish_enrolled_v3"
+
+func supportedEnrolledPublicationStage(stage string) bool {
+	return stage == enrolledPublicationStage || stage == enrolledDuePublicationStage
+}
 
 func (r RuntimeEnrolledPublicationRecord) Validate() error {
 	legacy := r.RuntimePublicationRecord
 	legacy.Version = 1
 	legacy.Attempt.StageID = "runtime_publish"
-	if r.Version != 2 || legacy.Validate() != nil || r.Attempt.StageID != enrolledPublicationStage || r.MountAttempt != 0 || r.MountOperationID != "" || !validHexDigest(r.EnrollmentDigest) || !validHexDigest(r.ObserverCertificateDigest) || !validHexDigest(r.ActivationDigest) || !validHexDigest(r.EnrollmentRecordDigest) || !validHexDigest(r.ActivationRecordDigest) || !validPreparationUUID(r.NodeUID) || !validPreparationUUID(r.NodeBootID) {
+	versionStage := r.Version == 2 && r.Attempt.StageID == enrolledPublicationStage || r.Version == 3 && r.Attempt.StageID == enrolledDuePublicationStage
+	if !versionStage || legacy.Validate() != nil || r.MountAttempt != 0 || r.MountOperationID != "" || !validHexDigest(r.EnrollmentDigest) || !validHexDigest(r.ObserverCertificateDigest) || !validHexDigest(r.ActivationDigest) || !validHexDigest(r.EnrollmentRecordDigest) || !validHexDigest(r.ActivationRecordDigest) || !validPreparationUUID(r.NodeUID) || !validPreparationUUID(r.NodeBootID) {
 		return ErrInvalidRecord
 	}
 	for _, pin := range []struct {

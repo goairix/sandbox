@@ -75,7 +75,11 @@ func encodeColdRuntimeQuotaReturn(r coldRuntimeQuotaReturnRecord) (string, error
 	}{{r.Publication, enrolledPublicationStage}, {r.PreparationSettlement, "cold_preparation_settle"}} {
 		ref := item.ref
 		locator := StageAttemptLocator{Namespace: ref.Namespace, RestoreEpoch: ref.RestoreEpoch, Partition: ref.Partition, RequestID: ref.RequestID, StageID: ref.StageID, AttemptID: ref.AttemptID}
-		if locator.Validate() != nil || ref.Namespace != r.Namespace || ref.RestoreEpoch != r.RestoreEpoch || ref.Partition != owner.Partition || ref.RequestID != owner.RequestID || ref.StageID != item.stage || !validHexDigest(ref.Digest) {
+		stageMatches := ref.StageID == item.stage
+		if item.stage == enrolledPublicationStage {
+			stageMatches = supportedEnrolledPublicationStage(ref.StageID)
+		}
+		if locator.Validate() != nil || ref.Namespace != r.Namespace || ref.RestoreEpoch != r.RestoreEpoch || ref.Partition != owner.Partition || ref.RequestID != owner.RequestID || !stageMatches || !validHexDigest(ref.Digest) {
 			return "", ErrInvalidRecord
 		}
 	}

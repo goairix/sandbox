@@ -73,13 +73,17 @@ func (b *Backend) commitEnrolledStage(ctx context.Context, stage *enrolledNative
 	}
 	compares := append(b.baseComparisons(), stage.mutation.Comparisons...)
 	compares = append(compares, clientv3.Compare(clientv3.Value(stage.guardKey), "=", stage.guardValue), clientv3.Compare(clientv3.LeaseValue(stage.guardKey), "=", int64(stage.lease)), clientv3.Compare(clientv3.CreateRevision(stage.guardKey), "=", stage.guardRevision), clientv3.Compare(clientv3.CreateRevision(stage.receiptKey), "=", 0))
-	ops := make([]clientv3.Op, 0, 9)
+	ops := make([]clientv3.Op, 0, len(stage.mutation.Writes)+1)
 	for _, write := range stage.mutation.Writes {
 		ops = append(ops, clientv3.OpPut(write.Key, string(write.Value)))
 	}
 	ops = append(ops, clientv3.OpPut(stage.receiptKey, stage.committed))
 	bounded, cancel := b.requestContext(ctx)
-	response, err := b.client.Txn(bounded).If(compares...).Then(ops...).Else(clientv3.OpGet(stage.receiptKey)).Commit()
+	transaction := b.client.Txn(bounded).If(compares...).Then(ops...)
+	if stage.reference.StageID == enrolledPublicationStage {
+		transaction = transaction.Else(clientv3.OpGet(stage.receiptKey))
+	}
+	response, err := transaction.Commit()
 	err = errors.Join(err, bounded.Err())
 	cancel()
 	if err != nil {
@@ -92,13 +96,17 @@ func (b *Backend) commitEnrolledStage(ctx context.Context, stage *enrolledNative
 		return OutcomeUnknown, ErrOutcomeUnknown
 	}
 	if response.Succeeded {
-		if !operationPutResponses(response, 9) {
+		if !operationPutResponses(response, len(stage.mutation.Writes)+1) {
 			return OutcomeUnknown, ErrOutcomeUnknown
 		}
 		return OutcomeCommitted, nil
 	}
-	if _, err := b.enrolledCompactReceipt(response, stage.reference); err != nil {
-		return OutcomeUnknown, err
+	if stage.reference.StageID == enrolledPublicationStage {
+		if _, err := b.enrolledCompactReceipt(response, stage.reference); err != nil {
+			return OutcomeUnknown, err
+		}
+	} else if len(response.Responses) != 0 {
+		return OutcomeUnknown, ErrOutcomeUnknown
 	}
 	return b.readRuntimeEnrolledAttempt(ctx, stage.reference)
 }
@@ -113,7 +121,7 @@ func (b *Backend) ReadRuntimeEnrolledPublicationAttempt(ctx context.Context, ref
 }
 
 func (b *Backend) readRuntimeEnrolledAttempt(ctx context.Context, ref StageReference) (Outcome, error) {
-	if ref.StageID != enrolledPublicationStage {
+	if !supportedEnrolledPublicationStage(ref.StageID) {
 		return OutcomeUnknown, ErrInvalidMutation
 	}
 	guard, receipt, err := b.stageKeys(ref)

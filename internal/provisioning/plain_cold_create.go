@@ -105,7 +105,7 @@ func (s *PlainColdService) arbitrate(ctx context.Context, w state.WorkspaceIdent
 		return state.OutcomeUnknown, ErrPlainColdProfile
 	}
 	switch ref.StageID {
-	case "runtime_publish_enrolled_v2":
+	case "runtime_publish_enrolled_v2", "runtime_publish_enrolled_v3":
 		return s.backend.ReadRuntimeEnrolledPublicationAttempt(ctx, ref)
 	case "acquire", "runtime_dispatch", "runtime_bind", "runtime_mount", "cold_preparation_settle":
 		return s.backend.ResolveStage(ctx, ref)
