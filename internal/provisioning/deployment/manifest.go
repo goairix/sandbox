@@ -106,6 +106,9 @@ func strictValueAt(d *json.Decoder, depth int, path string) error {
 	if err != nil {
 		return err
 	}
+	if token == nil && (path == "/http/file_transfer" || strings.HasPrefix(path, "/http/file_transfer/")) {
+		return errConfiguration
+	}
 	delim, container := token.(json.Delim)
 	if !container {
 		return nil

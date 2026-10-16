@@ -10,14 +10,15 @@ import (
 )
 
 type httpManifest struct {
-	Host                  string            `json:"host"`
-	Port                  int               `json:"port"`
-	APIKeyFile            string            `json:"api_key_file"`
-	Env                   map[string]string `json:"env"`
-	ExecTimeoutSeconds    int               `json:"exec_timeout_seconds,omitempty"`
-	MaxExecTimeoutSeconds int               `json:"max_exec_timeout_seconds,omitempty"`
-	MaxActive             int               `json:"max_active,omitempty"`
-	RequestsPerSecond     int               `json:"requests_per_second,omitempty"`
+	Host                  string                `json:"host"`
+	Port                  int                   `json:"port"`
+	APIKeyFile            string                `json:"api_key_file"`
+	Env                   map[string]string     `json:"env"`
+	ExecTimeoutSeconds    int                   `json:"exec_timeout_seconds,omitempty"`
+	MaxExecTimeoutSeconds int                   `json:"max_exec_timeout_seconds,omitempty"`
+	MaxActive             int                   `json:"max_active,omitempty"`
+	RequestsPerSecond     int                   `json:"requests_per_second,omitempty"`
+	FileTransfer          *fileTransferManifest `json:"file_transfer,omitempty"`
 }
 
 // HTTPSettings owns mounted key and execution environment copies. Call Zero
@@ -33,6 +34,7 @@ type HTTPSettings struct {
 	RequestsPerSecond     int
 	UID, GID              uint32
 	NetworkAllowed        bool
+	FileTransfer          *FileTransferSettings
 }
 
 func (s *HTTPSettings) Zero() {
@@ -50,6 +52,11 @@ func (s *HTTPSettings) clone() *HTTPSettings {
 	owned := *s
 	owned.APIKey = bytes.Clone(s.APIKey)
 	owned.Env = cloneHTTPEnvironment(s.Env)
+	if s.FileTransfer != nil {
+		transfer := *s.FileTransfer
+		transfer.Directory = strings.Clone(transfer.Directory)
+		owned.FileTransfer = &transfer
+	}
 	return &owned
 }
 
@@ -85,6 +92,12 @@ func loadHTTPSettings(base string, input *httpManifest, launcher launcherconfig.
 		s.Zero()
 		return nil, fileError("HTTP budgets")
 	}
+	transfer, err := loadFileTransfer(input.FileTransfer, s.MaxExecTimeoutSeconds)
+	if err != nil {
+		s.Zero()
+		return nil, err
+	}
+	s.FileTransfer = transfer
 	// Use the original descriptor's exact environment and credential validation.
 	if _, err := p.NewExecutionDescriptor(p.ExecutionRequest{Argv: []string{"/bin/sh", "-c", ""}, Env: s.Env, UID: s.UID, GID: s.GID, WorkDir: "/workspace", TimeoutSeconds: uint32(s.ExecTimeoutSeconds)}); err != nil {
 		s.Zero()
