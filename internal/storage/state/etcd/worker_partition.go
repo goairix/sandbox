@@ -110,6 +110,18 @@ func (b *Backend) ReleaseWorkerPartition(ctx context.Context, p *WorkerPartition
 		return err
 	}
 	b.archiveLife.mu.Lock()
+	var worker *DueWorker
+	var child *workerRelease
+	if p != nil && p.origin == b && p.self == p && p.session != nil {
+		worker = b.stopDueWorker(p.session, p, nil)
+	}
+	defer func() {
+		if child != nil {
+			b.finishDueWorkerChildRelease(child, resultErr, worker)
+		} else if worker != nil {
+			<-worker.done
+		}
+	}()
 	if !b.validWorkerPartition(p) {
 		b.archiveLife.mu.Unlock()
 		return ErrInvalidRecord
@@ -130,11 +142,14 @@ func (b *Backend) ReleaseWorkerPartition(ctx context.Context, p *WorkerPartition
 	}
 	r := &workerRelease{done: make(chan struct{})}
 	p.release = r
+	child = r
 	owners := b.stopWorkerRelists(p.session, p, nil)
 	dueOwners := b.stopWorkerDueOwners(p.session, p, nil)
 	watchOwner := b.stopDueWatchOwner(p.session, p, nil)
 	b.archiveLife.mu.Unlock()
-	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
+	if worker != nil {
+		<-worker.workDone
+	}
 	for _, owner := range owners {
 		<-owner.done
 	}

@@ -176,6 +176,18 @@ func (b *Backend) ReleaseWorkerBudget(ctx context.Context, share *WorkerBudgetSh
 		return err
 	}
 	b.archiveLife.mu.Lock()
+	var worker *DueWorker
+	var child *workerRelease
+	if share != nil && share.origin == b && share.self == share && share.session != nil {
+		worker = b.stopDueWorker(share.session, nil, share)
+	}
+	defer func() {
+		if child != nil {
+			b.finishDueWorkerChildRelease(child, resultErr, worker)
+		} else if worker != nil {
+			<-worker.done
+		}
+	}()
 	if !b.validWorkerBudget(share) {
 		b.archiveLife.mu.Unlock()
 		return ErrInvalidRecord
@@ -196,11 +208,14 @@ func (b *Backend) ReleaseWorkerBudget(ctx context.Context, share *WorkerBudgetSh
 	}
 	r := &workerRelease{done: make(chan struct{})}
 	share.release = r
+	child = r
 	owners := b.stopWorkerRelists(share.session, nil, share)
 	dueOwners := b.stopWorkerDueOwners(share.session, nil, share)
 	watchOwner := b.stopDueWatchOwner(share.session, nil, share)
 	b.archiveLife.mu.Unlock()
-	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
+	if worker != nil {
+		<-worker.workDone
+	}
 	for _, owner := range owners {
 		<-owner.done
 	}

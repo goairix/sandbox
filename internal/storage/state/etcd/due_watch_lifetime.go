@@ -9,6 +9,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// One original native-operation owner covers all guarded subscriptions. Sender
+// and receiver children are joined before any post-guard or slot release.
 type dueWatchOwner struct {
 	call               *workerCall
 	cache              *dueWorkerCache
@@ -116,6 +118,7 @@ func (o *dueWatchOwner) finish() {
 		<-o.recvDone
 	}
 	if o.stream != nil {
+		// CloseSend never overlaps SendMsg: the sender has physically returned.
 		_ = o.stream.CloseSend()
 	}
 	o.stop()

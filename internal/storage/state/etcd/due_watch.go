@@ -72,6 +72,8 @@ func (o *dueWatchOwner) send() {
 	case <-o.streamCtx.Done():
 		return
 	}
+	// The pinned server drops early progress requests while watchers sync;
+	// after all ACKs, retry finitely rather than assuming a later reply exists.
 	for i := 0; i < 10; i++ {
 		request := &pb.WatchRequest{RequestUnion: &pb.WatchRequest_ProgressRequest{ProgressRequest: &pb.WatchProgressRequest{}}}
 		if err := o.stream.Send(request); err != nil {
@@ -159,6 +161,9 @@ func (o *dueWatchOwner) receive() {
 			fail(ErrCorruptRecord)
 			return
 		}
+		// A genuine all-watch progress certificate proves one complete revision.
+		// Validate against immutable starts, since equal certificates may repeat
+		// after ReplayFrom has already advanced to that revision plus one.
 		if r.WatchId == -1 {
 			if r.Created || r.Fragment || len(r.Events) != 0 || assembly != nil || o.createdCount != len(o.subscriptions) {
 				fail(ErrCorruptRecord)
@@ -270,6 +275,8 @@ func (o *dueWatchOwner) receive() {
 			fail(err)
 			return
 		}
+		// Historical response headers may be newer than these actual events.
+		// Resume at the last whole event revision, never at that header's tail.
 		v.covered = events[len(events)-1].Kv.ModRevision
 		v.sub.ReplayFrom = v.covered + 1
 		v.bridge = true
@@ -296,6 +303,8 @@ func (b *Backend) runDueWatchBatch(ctx context.Context, cache *dueWorkerCache) (
 		result.Partitions = cache.statusLocked().Partitions
 		b.archiveLife.mu.Unlock()
 	}()
+	// PRE is the catch-up goal. POST validates current authority after physical
+	// stream joins; unrelated writes between them are only an observed tail.
 	for start := 0; start < len(o.subscriptions); {
 		end := dueWatchGroupEnd(o.subscriptions, start)
 		revision, err := b.dueWatchGuard(o, o.subscriptions[start:end])

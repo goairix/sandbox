@@ -14,7 +14,9 @@ import (
 // ExpiredTaskResult describes only the original metadata attempt. Neither
 // reference authorizes runtime cleanup, task execution or owner/quota release.
 type ExpiredTaskResult struct {
-	Outcome           Outcome
+	Outcome Outcome
+	// Reference and Task retain the exact attempted identities on an unknown
+	// result; they do not authorize a replacement attempt or task execution.
 	Reference         StageReference
 	Task              TaskReference
 	GuardCleanupError error

@@ -138,12 +138,22 @@ func (call *workerCall) lose() {
 
 // Release remains an actual owner even after cancellation. Concurrent explicit
 // Release and the existing backend Close share this one original cleanup.
-func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) error {
+func (b *Backend) releaseWorkerSession(ctx context.Context, s *WorkerSession) error {
+	return b.releaseWorkerSessionCore(ctx, s, nil)
+}
+
+// self is nonnil only after that original actor has closed workDone. External
+// releases join final done; the actor skips only its own final-done wait.
+func (b *Backend) releaseWorkerSessionCore(_ context.Context, s *WorkerSession, self *DueWorker) error {
 	b.archiveLife.mu.Lock()
+	worker := b.stopDueWorker(s, nil, nil)
 	if s.release != nil {
 		r := s.release
 		b.archiveLife.mu.Unlock()
 		<-r.done
+		if worker != nil && worker != self {
+			<-worker.done
+		}
 		return r.err
 	}
 	r := &workerRelease{done: make(chan struct{})}
@@ -166,6 +176,9 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 		}
 	}
 	b.archiveLife.mu.Unlock()
+	if worker != nil {
+		<-worker.workDone
+	}
 	if call != nil {
 		<-call.done
 	}
@@ -203,6 +216,9 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 	r.err = err
 	close(r.done)
 	b.archiveLife.mu.Unlock()
+	if worker != nil && worker != self {
+		<-worker.done
+	}
 	return err
 }
 
@@ -220,6 +236,7 @@ func (b *Backend) stopWorkerControl() []*WorkerSession {
 			b.stopWorkerRelists(s, nil, nil)
 			b.stopWorkerDueOwners(s, nil, nil)
 			b.stopDueWatchOwner(s, nil, nil)
+			b.stopDueWorker(s, nil, nil)
 			if s.operation != nil {
 				s.operation.cancel()
 			}

@@ -14,6 +14,8 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
+// The v1 row has an 8KiB canonical JSON limit. Its separate 128KiB RPC
+// envelope reserves room for maximal fences and either bounded reply branch.
 const dueCheckpointBytes = 8192
 const dueCheckpointWireBytes = 128 * 1024
 
@@ -21,21 +23,23 @@ const dueCheckpointWireBytes = 128 * 1024
 // ReplayFrom deliberately stays at fixed R+1 for the entire view, including
 // when future entries exist only in the original process's memory.
 type dueCheckpointRecord struct {
-	Version                 uint32            `json:"version"`
-	Namespace               string            `json:"namespace"`
-	RestoreEpoch            string            `json:"restore_epoch"`
-	IdentityDigest          string            `json:"identity_digest"`
-	ProfileID               string            `json:"profile_id"`
-	ProfileDigest           string            `json:"profile_digest"`
-	Partition               uint8             `json:"partition"`
-	WriterSessionID         string            `json:"writer_session_id"`
-	WriterPartitionRevision int64             `json:"writer_partition_revision"`
-	Revision                int64             `json:"revision"`
-	ReplayFrom              int64             `json:"replay_from"`
-	WindowEnd               time.Time         `json:"window_end"`
-	Phase                   string            `json:"phase"`
-	Frontier                string            `json:"frontier"`
-	Pending                 *duePendingRecord `json:"pending"`
+	Version                 uint32    `json:"version"`
+	Namespace               string    `json:"namespace"`
+	RestoreEpoch            string    `json:"restore_epoch"`
+	IdentityDigest          string    `json:"identity_digest"`
+	ProfileID               string    `json:"profile_id"`
+	ProfileDigest           string    `json:"profile_digest"`
+	Partition               uint8     `json:"partition"`
+	WriterSessionID         string    `json:"writer_session_id"`
+	WriterPartitionRevision int64     `json:"writer_partition_revision"`
+	Revision                int64     `json:"revision"`
+	ReplayFrom              int64     `json:"replay_from"`
+	WindowEnd               time.Time `json:"window_end"`
+	Phase                   string    `json:"phase"`
+	Frontier                string    `json:"frontier"`
+	// Pending retains one exact pre-Grant request through every unknown
+	// outcome. It is nullable but mandatory in the canonical v1 wire schema.
+	Pending *duePendingRecord `json:"pending"`
 }
 
 type duePendingRecord struct {

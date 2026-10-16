@@ -29,6 +29,8 @@ type DueCursor struct {
 	used       bool
 }
 
+// DuePage is one bounded fixed-revision discovery page. Candidates confer no
+// metadata authority; Next is usable only once by its original worker owner.
 type DuePage struct {
 	Candidates []DueCandidateRecord
 	Revision   int64

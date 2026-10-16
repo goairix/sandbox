@@ -118,10 +118,12 @@ func (c *dueWorkerCache) less(a, b int) bool {
 	}
 	return left.key < right.key
 }
+
 func (c *dueWorkerCache) swap(a, b int) {
 	c.heap[a], c.heap[b] = c.heap[b], c.heap[a]
 	c.entries[c.heap[a]].heap, c.entries[c.heap[b]].heap = a, b
 }
+
 func (c *dueWorkerCache) up(pos int) {
 	for pos > 0 {
 		parent := (pos - 1) / 2
@@ -132,6 +134,7 @@ func (c *dueWorkerCache) up(pos int) {
 		pos = parent
 	}
 }
+
 func (c *dueWorkerCache) down(pos int) {
 	for {
 		child := pos*2 + 1
@@ -148,6 +151,7 @@ func (c *dueWorkerCache) down(pos int) {
 		pos = child
 	}
 }
+
 func (c *dueWorkerCache) remove(key string) {
 	slot, cell := c.find(key)
 	if slot < 0 {
@@ -170,7 +174,11 @@ func (c *dueWorkerCache) remove(key string) {
 	c.freeCount++
 }
 
-func dueCacheCharge(key, value string) uint64 { return uint64(4*len(key) + 3*len(value) + 1024) }
+// Charge before cloning: retained keys/values, candidate strings and object
+// overhead all belong to the same 40MiB dynamic reservation.
+func dueCacheCharge(key, value string) uint64 {
+	return uint64(4*len(key) + 3*len(value) + 1024)
+}
 
 func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) error {
 	slot, cell := c.find(key)
@@ -249,6 +257,8 @@ func (c *dueWorkerCache) addPage(scan *dueWorkerScan) error {
 	if err := c.session.live(); err != nil {
 		return err
 	}
+	// Only one materialized source page may coexist with cached clones. The
+	// reserved transient allowance covers that page across every partition.
 	if c.pageSource != nil && c.pageSource != scan && len(c.pageSource.page) > 0 {
 		c.invalidateLocked("retained page overflow")
 		return ErrConflict
@@ -298,6 +308,8 @@ func (c *dueWorkerCache) peek() (DueCandidateRecord, bool) {
 	if !c.validLocked() || !c.published || c.count == 0 || c.session.lost || c.session.released || c.session.ctx.Err() != nil || c.session.release != nil || c.origin.archiveLife.closed {
 		return DueCandidateRecord{}, false
 	}
+	// Cache-driven scheduling needs every registered partition's post-guard
+	// publication. Streaming the fixed-R due prefix uses the scan separately.
 	for i := range c.views {
 		if c.views[i].sub.Partition != nil && !c.views[i].synchronized {
 			return DueCandidateRecord{}, false

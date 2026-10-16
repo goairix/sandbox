@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 )
 
 // A finite, serial original consumer. A turn performs one real bounded page
 // refill or one real metadata admission/settlement; it never sleeps or creates
-// authority. The later resident actor owns renewal, cache accounting and waits.
+// authority. The resident actor owns renewal, cache accounting and waits.
 type dueWorkerScan struct {
 	backend    *Backend
 	partition  *WorkerPartitionClaim
@@ -24,6 +25,11 @@ type dueWorkerScan struct {
 	started    bool
 	listed     bool
 	failure    error
+	// A fresh view retains the previous checkpoint CAS handle. frontierBlocked
+	// separates enumeration after an early hole from the settled list prefix.
+	fresh           bool
+	frontierBlocked bool
+	pending         StageReference
 }
 
 func newDueWorkerScan(b *Backend, p *WorkerPartitionClaim, ranges, claims *WorkerBudgetShare, ttl time.Duration) (*dueWorkerScan, error) {
@@ -61,7 +67,7 @@ func (scan *dueWorkerScan) recordForPage(page DuePage) dueCheckpointRecord {
 func (scan *dueWorkerScan) refill(ctx context.Context) error {
 	var page DuePage
 	var err error
-	if !scan.started && scan.checkpoint != nil {
+	if !scan.started && scan.checkpoint != nil && !scan.fresh {
 		page, err = scan.backend.resumeDuePage(ctx, scan.partition, scan.ranges, scan.checkpoint)
 	} else {
 		page, err = scan.backend.ReadDuePage(ctx, scan.partition, scan.ranges, scan.cursor)
@@ -69,7 +75,12 @@ func (scan *dueWorkerScan) refill(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if scan.checkpoint == nil {
+	if scan.fresh && scan.checkpoint != nil && page.WindowEnd.Before(scan.checkpoint.record.WindowEnd) {
+		// A regressed clock cannot replace the older, wider discovery window.
+		// No cursor or durable record from this rejected view is published.
+		return ErrOperationAdmissionClosed
+	}
+	if scan.checkpoint == nil || scan.fresh {
 		next := scan.recordForPage(page)
 		if len(page.Candidates) == 0 && page.Next == nil {
 			next.Phase = "watch"
@@ -77,6 +88,7 @@ func (scan *dueWorkerScan) refill(ctx context.Context) error {
 		if err = scan.save(ctx, next); err != nil {
 			return err
 		}
+		scan.fresh = false
 	}
 	scan.page, scan.index, scan.cursor, scan.started = page.Candidates, 0, page.Next, true
 	if len(page.Candidates) == 0 && page.Next == nil {
@@ -96,7 +108,7 @@ func (scan *dueWorkerScan) step(ctx context.Context) (resultErr error) {
 		return scan.failure
 	}
 	defer func() {
-		if resultErr != nil && !errors.Is(resultErr, ErrConflict) && !errors.Is(resultErr, ErrOperationAdmissionClosed) {
+		if resultErr != nil && !errors.Is(resultErr, ErrConflict) && !errors.Is(resultErr, ErrOperationAdmissionClosed) && !errors.Is(resultErr, rpctypes.ErrCompacted) {
 			scan.failure = resultErr
 		}
 	}()
@@ -111,10 +123,16 @@ func (scan *dueWorkerScan) step(ctx context.Context) (resultErr error) {
 		}
 		return scan.refill(ctx)
 	}
-	candidate := scan.page[scan.index]
+	return scan.admitCandidate(ctx, scan.page[scan.index], true)
+}
+
+// Both fixed-R streaming and proved Watch scheduling use this exact admission
+// and pre-Grant pending protocol. Only a list candidate may settle its frontier.
+func (scan *dueWorkerScan) admitCandidate(ctx context.Context, candidate DueCandidateRecord, listCandidate bool) error {
 	pending := &dueWorkerAdmission{origin: scan.backend, partition: scan.partition, claims: scan.claims, checkpoint: scan.checkpoint}
 	result, err := scan.backend.admitExpiredTask(ctx, scan.partition, scan.claims, candidate, uuid.NewString(), scan.ttl, pending)
 	scan.checkpoint = pending.checkpoint
+	scan.pending = result.Reference
 	if result.GuardCleanupError != nil {
 		return errors.Join(ErrOutcomeUnknown, result.GuardCleanupError, err)
 	}
@@ -122,28 +140,42 @@ func (scan *dueWorkerScan) step(ctx context.Context) (resultErr error) {
 		return err
 	}
 	if err == nil && result.Outcome == OutcomeCommitted {
-		return scan.settle(ctx, candidate)
+		return scan.settleCandidate(ctx, candidate, listCandidate)
 	}
 	if scan.checkpoint.record.Pending != nil {
 		outcome, resolveErr := scan.resolvePending(ctx)
 		if resolveErr != nil {
-			return resolveErr
+			// Even cancellation cannot reinterpret an unresolved persisted
+			// request as a known abort or authorize another Stage attempt.
+			return errors.Join(ErrOutcomeUnknown, resolveErr)
 		}
 		if outcome == OutcomeCommitted {
-			return scan.settle(ctx, candidate)
+			return scan.settleCandidate(ctx, candidate, listCandidate)
 		}
 		// Aborted is a positive exact-reference result, not a retry instruction.
 		// Retain this candidate for a later separately charged turn.
 		return err
 	}
 	if pending.rejected {
-		return scan.settle(ctx, candidate)
+		return scan.settleCandidate(ctx, candidate, listCandidate)
 	}
 	if pending.early {
+		scan.pending = StageReference{}
 		return ErrOperationAdmissionClosed
 	}
 	if err == nil {
 		return ErrOutcomeUnknown
 	}
 	return err
+}
+
+// resetView discards only local continuation. The next fresh Range must CAS
+// the existing record before admission; unresolved requests are never reset.
+func (scan *dueWorkerScan) resetView() {
+	if scan.checkpoint != nil && scan.checkpoint.record.Pending != nil {
+		return
+	}
+	scan.cursor, scan.page, scan.index = nil, nil, 0
+	scan.started, scan.listed, scan.fresh = false, false, true
+	scan.frontierBlocked, scan.failure = false, nil
 }

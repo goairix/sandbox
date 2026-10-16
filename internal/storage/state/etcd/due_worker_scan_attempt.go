@@ -139,7 +139,25 @@ func (scan *dueWorkerScan) resolvePending(ctx context.Context) (Outcome, error) 
 	if err = scan.save(ctx, next); err != nil {
 		return OutcomeUnknown, err
 	}
+	scan.pending = StageReference{}
 	return outcome, nil
+}
+
+func (scan *dueWorkerScan) settleCandidate(ctx context.Context, candidate DueCandidateRecord, listCandidate bool) error {
+	if listCandidate {
+		return scan.settle(ctx, candidate)
+	}
+	// Watch work may arrive below the list frontier. Clearing the same pending
+	// request must never imply that a missing portion of fixed R was enumerated.
+	if scan.checkpoint.record.Pending != nil {
+		next := scan.checkpoint.record
+		next.Pending = nil
+		if err := scan.save(ctx, next); err != nil {
+			return err
+		}
+	}
+	scan.pending = StageReference{}
+	return nil
 }
 
 // One page is retained at a time. The resident actor supplies the global
@@ -151,7 +169,9 @@ func (scan *dueWorkerScan) settle(ctx context.Context, candidate DueCandidateRec
 	}
 	next := scan.checkpoint.record
 	next.Pending = nil
-	next.Frontier = key
+	if !scan.frontierBlocked {
+		next.Frontier = key
+	}
 	if scan.index+1 == len(scan.page) && scan.cursor == nil {
 		next.Phase = "watch"
 	}
@@ -159,5 +179,6 @@ func (scan *dueWorkerScan) settle(ctx context.Context, candidate DueCandidateRec
 		return err
 	}
 	scan.index++
+	scan.pending = StageReference{}
 	return nil
 }

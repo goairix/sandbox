@@ -31,6 +31,7 @@ type WorkerSession struct {
 	budgets                 [124]*WorkerBudgetShare
 	dueCache                *dueWorkerCache
 	dueWatch                *dueWatchOwner
+	dueWorker               *DueWorker
 }
 
 func (s *WorkerSession) Reference() WorkerSessionReference {

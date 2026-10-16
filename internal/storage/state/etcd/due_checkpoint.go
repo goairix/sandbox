@@ -69,12 +69,16 @@ func (b *Backend) readDueCheckpoint(ctx context.Context, p *WorkerPartitionClaim
 			call.lose()
 		}
 	}()
+
+	// The row is permanent evidence. Current original partition/session
+	// fences are read-bearing guards, never authority adopted from its writer.
 	b.archiveLife.mu.Lock()
 	cmps, err := b.workerComparisons(p.session, p, nil)
 	b.archiveLife.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
+
 	key, err := b.namespace.dueCheckpointKey(p.partition)
 	if err != nil {
 		return nil, err
@@ -137,6 +141,8 @@ func (b *Backend) writeDueCheckpoint(call *workerCall, p *WorkerPartitionClaim, 
 	if err != nil {
 		return nil, err
 	}
+	// Retaining this full prior fence is essential when a new window replaces
+	// an old view: a reset never pretends that an existing permanent row is absent.
 	if previous == nil {
 		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
 	} else {
@@ -185,6 +191,9 @@ func (b *Backend) resumeDuePage(ctx context.Context, p *WorkerPartitionClaim, ra
 	if r.Frontier != "" {
 		start = r.Frontier + "\x00"
 	}
+	// Rebuild a new one-use cursor only after a guarded checkpoint read under
+	// these original capabilities. Serialized cursor-like fields alone cannot
+	// be passed to ReadDuePage to gain this authority.
 	cursor := &DueCursor{origin: b, partition: p, share: ranges, start: start, end: prefix + r.WindowEnd.Format(dueTimeLayout) + "0", revision: r.Revision, windowEnd: r.WindowEnd}
 	cursor.self = cursor
 	return b.ReadDuePage(ctx, p, ranges, cursor)

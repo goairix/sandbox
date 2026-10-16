@@ -12,8 +12,12 @@ type dueWatchCodec struct {
 	lastBytes      int
 }
 
-func (c *dueWatchCodec) Name() string { return "proto" }
+// Name selects protobuf for this call-local codec, without global registration.
+func (c *dueWatchCodec) Name() string {
+	return "proto"
+}
 
+// Marshal admits only the bounded native request shape owned by the batch.
 func (c *dueWatchCodec) Marshal(value any) ([]byte, error) {
 	r, ok := value.(*pb.WatchRequest)
 	if !ok || r == nil || r.Size() > maxMutationBytes {
@@ -22,6 +26,8 @@ func (c *dueWatchCodec) Marshal(value any) ([]byte, error) {
 	return r.Marshal()
 }
 
+// Unmarshal bounds both each response and all responses in this finite batch
+// before generated protobuf decoding can allocate repeated tiny event objects.
 func (c *dueWatchCodec) Unmarshal(wire []byte, value any) error {
 	r, ok := value.(*pb.WatchResponse)
 	if !ok || r == nil || len(wire) > maxMutationBytes {
@@ -35,6 +41,7 @@ func (c *dueWatchCodec) Unmarshal(wire []byte, value any) error {
 	c.events += events
 	c.bytes += uint64(len(wire))
 	c.lastBytes = len(wire)
+
 	*r = pb.WatchResponse{}
 	return r.Unmarshal(wire)
 }
