@@ -16,7 +16,7 @@
 
 首次结算仅归还仍由原 owner 和原 epoch 占用的 quota slot，写回其固定 free index，写 quota-return 记录；同一 fresh Stage 写原 committed receipt。fresh Stage 必须在第一次 Grant 前保留 exact StageReference，guard 或 commit 丢 ACK 后仅用原协议只读仲裁。恢复/重放重新认证 return record 及原 receipt；即使原 quota slot 已被新 sandbox 占用，也不能读取新 owner 作为旧退款依据或再次写 slot。
 
-候选完整预算为39节点：协议8 compares +领域23 compares +4成功写 +4失败点读。领域23为 ready3、publication journal/receipt6、reservation3、prep settlement receipt3、安全 release receipt3、原 quota slot3、free index absent1、return record absent1。实现前须基于实际 protobuf 校验并确认所有读取证据的不可变性和提交 pin；如实际接点不满足候选，先记录确切修正，仍不得超过64或削弱原屏障。所有记录限制、canonical wire、revision/Lease 检查遵循现有规则。
+只读预检后固定完整预算为42节点：协议8 compares +领域26 compares +4成功写 +4失败点读。领域26为 ready3、publication journal/receipt6、reservation3、work marker3、prep settlement receipt3、安全 release receipt3、原 quota slot3、free index absent1、return record absent1。原候选39漏掉仍可变的work marker三项pin；保守保持已读证据在提交时一致性，因此增加Mod/Value/Lease比较。实现须基于实际protobuf锁定34 compares/4成功写/4失败点读，仍不得超过64或削弱原屏障。所有记录限制、canonical wire、revision/Lease 检查遵循现有规则。
 
 输出 typed Outcome/Reference/Entry，Entry 是已认证元数据结果，不提供外部执行或死亡能力。缺失证据保守失败/保留预算，恢复不创建新 runtime，不重发 provider cleanup。
 
@@ -32,7 +32,7 @@
 2. 原 release 成功但 ACK 丢失可冷 Backend 读回认证；quota guard/commit 丢 ACK 保留 exact ref，恢复最多归还一次。
 3. 原 workspace 已有新 owner、prep 已复用、quota 随后复用时，旧结算重放不改新 owner/epoch/索引。
 4. 使用原真实进程/observer/cgroup 终止、原 provider 清理、原 owner release 得到正例，再结算 quota。仅 metadata fault 或自签测试 DTO 不冒充真实死亡。复用 tracked fixture 源码但不读取旧 OWN 产物；新 selector 不重跑旧整个矩阵。
-5. 锁定实际39节点（或经记录校正的≤64预算）、固定读取/输入大小，所有原进程/transport/IO 加入退出，精确容器清理。
+5. 锁定实际42节点、固定读取/输入大小，所有原进程/transport/IO 加入退出，精确容器清理。
 
 ## 交付边界
 
