@@ -54,7 +54,11 @@ type PlainColdResult struct {
 	RequestID           string
 	Stage               state.StageReference
 	Attempt             *state.ColdCreateAttemptRecord
-	Publication         *state.RuntimeEnrolledPublicationEntry
+	// Runtime and Attempt are copied diagnostics, never native authority. Early
+	// Resume failures may retain unverified caller copies; actions use Backend
+	// records and refresh these fields as their original evidence is loaded.
+	Runtime     p.RuntimeReference
+	Publication *state.RuntimeEnrolledPublicationEntry
 }
 
 // PlainColdService owns one deployment's bounded active calls and transports.

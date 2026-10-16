@@ -56,7 +56,11 @@ func (s *PlainColdService) Create(ctx context.Context, w state.WorkspaceIdentity
 }
 
 func (s *PlainColdService) Resume(ctx context.Context, w state.WorkspaceIdentity, prior PlainColdResult) (PlainColdResult, error) {
-	result := PlainColdResult{State: PlainColdPending, RequestID: prior.RequestID, IntentID: prior.IntentID, SandboxID: prior.SandboxID, Stage: prior.Stage}
+	result := PlainColdResult{State: PlainColdPending, RequestID: prior.RequestID, IntentID: prior.IntentID, SandboxID: prior.SandboxID, Stage: prior.Stage, Runtime: prior.Runtime}
+	if prior.Attempt != nil {
+		attempt := *prior.Attempt
+		result.Attempt = &attempt
+	}
 	call, err := s.enter(ctx)
 	if err != nil {
 		return result, err
@@ -171,7 +175,9 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 	// The original opaque permit is retained only on this call's stack. Durable
 	// attempt replay, including lost ACK recovery, always follows Inspect.
 	attempt, err := s.backend.BeginColdCreateAttempt(ctx, claim)
-	result.Attempt = attempt.Record
+	if attempt.Record != nil {
+		result.Attempt = attempt.Record
+	}
 	if err != nil {
 		return result, err
 	}
@@ -196,6 +202,7 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 		uid := ""
 		if prior != nil {
 			uid = prior.PodUID
+			result.Runtime.ID, result.Runtime.UID = pod.Spec.ID, uid
 		}
 		observed, err = s.driver.InspectOriginal(ctx, pod, uid)
 	}
@@ -209,6 +216,7 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 	if err != nil {
 		return result, err
 	}
+	result.Runtime.ID, result.Runtime.UID = pod.Spec.ID, observation.PodUID
 	target := s.target(pod, observation.PodUID)
 	stored, err := s.backend.LoadColdBootstrapMaterial(ctx, w, intent)
 	if err != nil {
@@ -235,6 +243,7 @@ func (s *PlainColdService) resume(ctx context.Context, w state.WorkspaceIdentity
 		}
 	}
 	m := stored.Material
+	result.Runtime.BootID = m.Birth.BootID
 	identity := p.RuntimeIdentityContext{SandboxID: i.SandboxID, WorkspaceHash: w.Hash(), Generation: control.Generation, Runtime: p.RuntimeReference{ID: pod.Spec.ID, UID: observation.PodUID, BootID: m.Birth.BootID}}
 	destination, credential, err := s.destination(target, m, identity)
 	if err != nil {
@@ -329,6 +338,7 @@ func (s *PlainColdService) completed(ctx context.Context, w state.WorkspaceIdent
 		return result, state.ErrConflict
 	}
 	result.State, result.Publication = PlainColdHistorical, entry
+	result.Runtime = p.RuntimeReference(entry.Record.Runtime)
 	snapshot, err := s.backend.LoadSnapshot(ctx, w.Partition(), entry.Record.SandboxID, entry.Record.Snapshot)
 	if err != nil {
 		return result, err

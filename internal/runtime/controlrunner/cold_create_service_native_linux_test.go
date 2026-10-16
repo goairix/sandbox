@@ -322,11 +322,24 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 		before, err := backend.LoadColdBootstrapMaterial(ctx, w, request.IntentID)
 		require.NoError(t, err)
 		require.NotNil(t, before)
+		require.NotNil(t, result.Attempt)
+		observation, err := backend.LoadColdCreateObservation(ctx, w, request.IntentID)
+		require.NoError(t, err)
+		require.NotNil(t, observation)
+		require.Equal(t, p.RuntimeReference{ID: request.SandboxID, UID: observation.PodUID, BootID: before.Material.Birth.BootID}, result.Runtime, "pending activation ACK loss carries the authenticated original UID and Birth BootID")
 		materialKey := ns.Root() + fmt.Sprintf("p/%02x/intents/%s/cold-create-attempt-material", w.Partition(), request.IntentID)
 		beforeKV, err := admin.Get(ctx, materialKey)
 		require.NoError(t, err)
 		require.Len(t, beforeKV.Kvs, 1)
 		require.NoError(t, service.Close())
+		early, earlyErr := service.Resume(ctx, w, result)
+		require.Error(t, earlyErr, "closed admission returns diagnostic copies without any action")
+		require.Equal(t, result.Runtime, early.Runtime)
+		require.Equal(t, result.Attempt, early.Attempt)
+		require.NotSame(t, result.Attempt, early.Attempt)
+		require.Equal(t, result.Stage, early.Stage)
+		require.Equal(t, int32(1), postCount.Load())
+		require.Equal(t, int32(1), startCount.Load())
 		require.NoError(t, backend.Close())
 		backend, err = state.New(ctx, backendOptions)
 		require.NoError(t, err)
@@ -335,7 +348,15 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 		activeService = recovered
-		result, createErr = recovered.Resume(ctx, w, result)
+		// Caller-owned diagnostics deliberately name another runtime and attempt.
+		// The original Backend evidence alone selects the target and grants work.
+		forged := early
+		forged.Runtime = p.RuntimeReference{ID: "foreign-pod", UID: uuid.NewString(), BootID: uuid.NewString()}
+		forged.Attempt = &state.ColdCreateAttemptRecord{Version: 1, OperationID: uuid.NewString()}
+		forged.Publication = &state.RuntimeEnrolledPublicationEntry{}
+		result, createErr = recovered.Resume(ctx, w, forged)
+		require.Equal(t, early.Runtime, result.Runtime)
+		require.Equal(t, early.Attempt, result.Attempt)
 		afterKV, err := admin.Get(ctx, materialKey)
 		require.NoError(t, err)
 		require.Equal(t, beforeKV.Kvs, afterKV.Kvs, "exact original immutable material bytes and revisions across service restart; settled history does not reopen pending-material admission")
@@ -348,15 +369,19 @@ func runColdCreateServiceNative(t *testing.T, loseACK bool) {
 	require.NoError(t, createErr)
 	require.Equal(t, provisioning.PlainColdCompleted, result.State)
 	require.Equal(t, request.RequestID, result.RequestID)
+	require.Equal(t, p.RuntimeReference(publication.Record.Runtime), result.Runtime)
 	require.Equal(t, int32(1), postCount.Load())
 	require.Equal(t, int32(1), startCount.Load())
 	reservation, err := backend.LoadColdPreparation(ctx, w, request.IntentID)
 	require.NoError(t, err)
 	require.Equal(t, "settled", reservation.Phase)
-	settledAgain, err := activeService.Resume(ctx, w, result)
+	completedInput := result
+	completedInput.Runtime = p.RuntimeReference{ID: "foreign-completed", UID: uuid.NewString(), BootID: uuid.NewString()}
+	settledAgain, err := activeService.Resume(ctx, w, completedInput)
 	require.NoError(t, err)
 	require.Equal(t, provisioning.PlainColdCompleted, settledAgain.State)
 	require.Equal(t, result.Stage, settledAgain.Stage)
+	require.Equal(t, result.Runtime, settledAgain.Runtime, "completed metadata refreshes copied runtime attribution")
 	quotaKey := ns.Root() + fmt.Sprintf("quota/%02x/slots/%08d", reservation.Quota.Partition, reservation.Quota.ID)
 	quota, err := admin.Get(ctx, quotaKey)
 	require.NoError(t, err)

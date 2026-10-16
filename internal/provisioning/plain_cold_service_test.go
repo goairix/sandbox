@@ -8,11 +8,34 @@ import (
 	"testing"
 	"time"
 
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	kube "github.com/goairix/sandbox/internal/runtime/kubernetes"
+	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/rest"
 )
+
+func TestPlainColdResumeDiagnostics(t *testing.T) {
+	prior := PlainColdResult{
+		State: PlainColdCompleted, RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: "original",
+		Attempt:     &state.ColdCreateAttemptRecord{Version: 1, OperationID: uuid.NewString()},
+		Runtime:     p.RuntimeReference{ID: "original", UID: uuid.NewString(), BootID: uuid.NewString()},
+		Publication: &state.RuntimeEnrolledPublicationEntry{},
+	}
+	var service *PlainColdService
+	result, err := service.Resume(context.Background(), state.WorkspaceIdentity{}, prior)
+	require.Error(t, err, "no service admission or Backend/native action")
+	require.Equal(t, PlainColdPending, result.State)
+	require.Equal(t, prior.RequestID, result.RequestID)
+	require.Equal(t, prior.IntentID, result.IntentID)
+	require.Equal(t, prior.Runtime, result.Runtime)
+	require.Equal(t, prior.Attempt, result.Attempt)
+	require.NotSame(t, prior.Attempt, result.Attempt, "diagnostic record is copied")
+	require.Nil(t, result.Publication, "copied publication cannot become completion")
+	result.Attempt.OperationID = "changed"
+	require.NotEqual(t, result.Attempt.OperationID, prior.Attempt.OperationID)
+}
 
 func TestPlainColdServiceAdmissionClose(t *testing.T) {
 	// This exercises local ownership only, with the original concrete drivers.
