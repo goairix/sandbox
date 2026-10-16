@@ -42,6 +42,7 @@ const (
 	PlainColdCompleted        PlainColdState = "completed"
 	PlainColdHistorical       PlainColdState = "historical-completion"
 	PlainColdCapacity         PlainColdState = "capacity"
+	PlainColdRetryable        PlainColdState = "retryable"
 	PlainColdRecoveryRequired PlainColdState = "recovery-required"
 )
 
@@ -52,6 +53,7 @@ type PlainColdResult struct {
 	IntentID, SandboxID string
 	RequestID           string
 	Stage               state.StageReference
+	Attempt             *state.ColdCreateAttemptRecord
 	Publication         *state.RuntimeEnrolledPublicationEntry
 }
 
@@ -144,7 +146,7 @@ func NewPlainColdService(ctx context.Context, o PlainColdOptions) (*PlainColdSer
 		return nil, err
 	}
 	spec := runtime.SandboxSpec{ID: "profile-check", Image: o.Image, CPU: o.CPU, Memory: o.Memory, Disk: o.Disk, TmpDisk: o.TmpDisk, NetworkEnabled: cfg.NetworkAllowed, ReadOnlyRootFS: true, RunAsUser: int64(cfg.UID), SeccompProfile: "RuntimeDefault"}
-	probe := kube.EnrolledPlainPodRequest{Spec: spec, NodeName: o.NodeName, NodeUID: o.NodeUID, NodeBootID: o.NodeBootID, CreationIntentID: "profile-check", Generation: 1, Config: o.LauncherConfig}
+	probe := kube.EnrolledPlainPodRequest{Spec: spec, NodeName: o.NodeName, NodeUID: o.NodeUID, NodeBootID: o.NodeBootID, CreationIntentID: "00000000-0000-4000-8000-000000000001", Generation: 1, Config: o.LauncherConfig}
 	if _, err := kube.BuildEnrolledPlainPod(o.API.Namespace, probe); err != nil {
 		return nil, err
 	}
