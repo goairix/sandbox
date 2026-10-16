@@ -1,8 +1,8 @@
 # etcd 迁移整体状态
 
-本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
+本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。默认启动仍连接 Redis，显式 etcd 模式仅开放已验收路由，不能宣称生产切换完成或线上性能已经提升。
 
-## 2026-10-16 最新接续：显式 etcd HTTP 创建、查询和执行已范围验收
+## 2026-10-16 最新接续：显式 etcd HTTP 与八条文件 API 已范围验收
 
 当前工作分支 `codex/etcd-state-management`。Lookup 验收提交 `436bef8`，实际执行 service 的四个实现切片为 `2469576`、`6777519`、`7f50806`、`2616a36`，唯一审查 C0/I0/M2 Approved。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。
 
@@ -17,12 +17,13 @@
 | 按 ID Lookup 与真实健康 | `436bef8` | 当前 metadata/原 CreatedAt/owned 配置、mTLS 健康、TTL/最终确认/Close；审查发现的两项 TLS EOF 缺陷已复现、修复并复核 |
 | 实际执行与 mounted signer | `2616a36` | service→原 gate/签名/目标执行/续期/Wait/Close；32秒真实命令和失权、取消、关闭验证通过，审查已批准 |
 | 显式 etcd HTTP/CLI | `cdcc859` | `--serve-etcd` 绕过 Redis 初始化，实际创建/查询/同步与SSE执行；唯一审查三项 Important 经 R1 全部解决、Approved。其余业务路由仍501 |
+| 八条文件 API 与独立探针 | `9ba1fbb` | 文件工具/launcher2f0dc3b、HTTP8656106；列表/递归/glob/读取/行读取/两类编辑/下载、独立有限health/ready；23项gateway host/race及实际Linux14bridge通过，审查C0/I0/M1 Approved。内容512KiB，大文件/上传尚未完成 |
 
-实际 Exec 单元已验收，原始 native 实际38.83秒PASS，含32秒命令/目标接受续期/exit7/drain、实际失权、取消/Close、统一预算及原IOjoin。新增显式 etcd HTTP 模式的初审前 native 实际1.77秒PASS，含真实TLS-etcd、正式launcher、HTTP与11个原bridge Wait/IOjoin；R1修复后14项gateway host/race与Linux vet通过，未再次执行native。默认启动仍使用 Redis，显式模式四条业务路由已接原service；接续文件 API、独立健康探针预算和其余生产调用链。
+实际 Exec 单元已验收，原始 native 实际38.83秒PASS，含32秒命令/目标接受续期/exit7/drain、实际失权、取消/Close、统一预算及原IOjoin。显式HTTP原四路由已验收；新增文件单元实际Linux PASS2.06秒无skip，UID/GID1000、控制配置不可读、Linux非法文件名422及八文件路由/二进制/编辑完成，14个健康原bridge Wait/IO与正式PID1/etcd退出均join。23项gateway host/race无skip；helper各9PASS/1明确Darwin文件名skip，Linux相应场景已实际覆盖。唯一审查无C/I，仅日志噪声M1，详见本目录 `2026-10-16-etcd-file-api-verification.md`。默认仍Redis；接续大文件传输与其余生产调用链。
 
 剩余主交付：API/Pool/Docker/Upload 的完整调用路径；分区 due/dirty/Watch 调度；FUSE/helper/collector 与实际远端同步；长期历史/槽位回收及证书维护；大量已有 sandbox 的容量、故障、部署/恢复验收；最终 Redis 移除和整分支审查。Create/Lookup 的 service 单元与只读启动检查，均不等价上述主程序生产接线完成。
 
-最新粗估：**功能代码约65%（60%–70%）/ 整体交付约45%（固定权重计算43%）/ 生产切换0%**。新增依据是显式 mounted HTTP/CLI 已让四条业务路由实际消费原创建、Lookup、Exec，不按代码行数/提交数/测试次数计算。固定权重保持20/30/20/15/15；对应完成度90/70/20/0/0，加权43%，按约5个百分点汇报。API项20%仅计入显式受限模式，完整Pool/Docker/Upload及默认入口替换仍未完成。小规模native不构成大量已有sandbox的性能或容量验收。详情见本目录 `2026-10-16-etcd-http-gateway-verification.md`、Lookup与Exec验收记录。
+最新粗估：**功能代码约70%（65%–75%）/ 整体交付约45% / 生产切换0%**。新增依据是八条文件业务调用链与独立探针已实现、实际验证并审查通过；不按源码行数/提交数/测试次数计算，也没有把512KiB文件能力记为大文件/上传完成。固定整体权重保持20/30/20/15/15；对应完成度90/70/30/0/0，加权45%。API项30%仍是显式受限模式，完整Pool/Docker/Upload及默认入口替换未完成。小规模native不构成大量已有sandbox的性能或容量验收。详情见本目录HTTP、文件、Lookup与Exec验收记录。
 
 ## 2026-10-16 此前百分比明细（保留历史，最新功能估算见上节）
 
