@@ -14,6 +14,18 @@ import (
 )
 
 func TestColdPreparationNativeFixture(t *testing.T) {
+	coldCreateNativeFixture(t, "^TestColdPreparationReservation.*Native$")
+}
+
+func TestColdCreateAttemptNativeFixture(t *testing.T) {
+	coldCreateNativeFixture(t, "^TestColdCreateAttempt.*Native$")
+}
+
+func TestColdCreateAttemptCloseNativeFixture(t *testing.T) {
+	coldCreateNativeFixture(t, "^TestColdCreateAttemptClosedBackendNative$")
+}
+
+func coldCreateNativeFixture(t *testing.T, selector string) {
 	if os.Getenv("SANDBOX_COLD_CREATE_NATIVE") != "1" {
 		t.Skip("requires exact owned cold-create fixture")
 	}
@@ -29,7 +41,7 @@ func TestColdPreparationNativeFixture(t *testing.T) {
 	require.NoError(t, err)
 	_, err = admin.UserGrantRole(ctx, "server", "cold-create-write")
 	require.NoError(t, err)
-	child := exec.Command("/fixture/etcd-tests", "-test.run=^TestColdPreparationReservation.*Native$", "-test.v", "-test.timeout=60s")
+	child := exec.Command("/fixture/etcd-tests", "-test.run="+selector, "-test.v", "-test.timeout=60s")
 	child.Env = append(os.Environ(), "COLD_CREATE_TLS_DIRECTORY="+dir)
 	child.Stdout, child.Stderr = os.Stdout, os.Stderr
 	require.NoError(t, child.Start())

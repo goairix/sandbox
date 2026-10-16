@@ -5,6 +5,8 @@ own="$repo/.superpowers/sdd/2026-10-16-etcd-cold-create-service"
 go_bin=/Users/dysodeng/go/go1.25.6/bin/go
 epoch=${COLD_CREATE_EPOCH:?set a unique owned epoch}
 mode=${1:-build}
+fixture=${COLD_CREATE_FIXTURE:-inventory}
+case "$fixture" in inventory) native_name=TestColdPreparationNativeFixture;; attempt) native_name=TestColdCreateAttemptNativeFixture;; attempt-close) native_name=TestColdCreateAttemptCloseNativeFixture;; *) exit 2;; esac
 platform=${COLD_CREATE_GOOS:-darwin}
 [[ "$epoch" =~ ^[a-z0-9-]{1,40}$ ]] || exit 1
 [[ "$mode" == build || "$mode" == run ]] || exit 1
@@ -78,12 +80,14 @@ with tarfile.open(sys.argv[1]) as archive:
  assert len(members)==1 and members[0].name==path
  assert hashlib.sha256(archive.extractfile(members[0]).read()).hexdigest()==digest
 PYSCRIPT
-  shasum -a 256 "$own/native-$epoch-script.tar.gz" > "$own/native-$epoch-script-archive.sha256"
+  printf '%s\n' "$fixture" > "$own/native-$epoch-fixture.txt"
+  shasum -a 256 "$own/native-$epoch-script.tar.gz" "$own/native-$epoch-fixture.txt" > "$own/native-$epoch-script-archive.sha256"
   printf 'COLD_CREATE_BUILD_VERIFIED %s\n' "$epoch"
   exit 0
 fi
 if [[ "$mode" == run ]]; then
-  native_selector='^TestColdPreparationNativeFixture$'
+  [[ $(cat "$own/native-$epoch-fixture.txt") == "$fixture" ]] || exit 1
+  native_selector="^$native_name\$"
   image=sha256:684aa844d79d5b300db6586a25503607838055db7e7f480a50abb7c7ee7b4e32
   etcd="$own/etcd-linux-arm64"
   [[ $(shasum -a 256 "$etcd" | awk '{print $1}') == 117cc09981c0f1eb378e7520be6969756c2d6a762f376944e53f7bc9800c0c59 ]] || exit 1
@@ -158,7 +162,7 @@ if [[ "$mode" == run ]]; then
   id=
   [[ -z $(docker ps -aq --filter "label=sandbox.run=$run") ]] || exit 1
   [[ "$attach_status" == 0 && "$container_status" == 0 ]] || exit 1
-  [[ $(rg -c '^--- PASS: TestColdPreparationNativeFixture ' "$own/native-$epoch.log") == 1 ]] || exit 1
+  [[ $(rg -c "^--- PASS: $native_name " "$own/native-$epoch.log") == 1 ]] || exit 1
   ! rg -q '^--- SKIP:' "$own/native-$epoch.log" || exit 1
   printf 'COLD_CREATE_NATIVE_FINISHED %s exact-owned-inventory-empty\n' "$epoch"
   exit 0
