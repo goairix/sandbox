@@ -73,6 +73,7 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 
 type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
+	httpGateway                                                    bool
 }
 
 func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVariant) {
@@ -82,7 +83,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		lookupHooks = &liveLookupNativeHooks{}
 	}
 	var execHooks *execServiceNativeHooks
-	if variant.execService {
+	if variant.execService || variant.httpGateway {
 		execHooks = &execServiceNativeHooks{}
 	}
 	require.Zero(t, os.Geteuid())
@@ -106,6 +107,9 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	timeout := 40 * time.Second
 	if variant.execService {
 		timeout = 100 * time.Second
+	}
+	if variant.httpGateway {
+		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
@@ -164,7 +168,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
-	if variant.execService {
+	if variant.execService || variant.httpGateway {
 		launcher, err := launcherconfig.Decode(config)
 		require.NoError(t, err)
 		execIssuer, err = deployment.NewExecIssuer(ctx, issuerKey, issuerCert, launcher, nativeFixtureClock{})
@@ -415,6 +419,31 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	service, err := provisioning.NewPlainColdService(ctx, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
+	joinOriginalBridges := func() {
+		mu.Lock()
+		ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
+		mu.Unlock()
+		for _, bridge := range ownedBridges {
+			if execHooks != nil && execHooks.expectedFailure(bridge) {
+				requireExecServiceFailedBridgeJoined(t, bridge)
+			} else if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
+				requireLiveLookupFailedBridgeJoined(t, bridge)
+			} else {
+				bridge.requireJoined(t)
+			}
+		}
+	}
+	if variant.httpGateway {
+		exerciseHTTPGatewayNative(t, ctx, service, execHooks, func() {
+			require.Zero(t, postCount.Load())
+			require.Zero(t, startCount.Load())
+		}, func() {
+			require.Equal(t, int32(1), postCount.Load(), "HTTP uses one original Pod")
+			require.Equal(t, int32(1), startCount.Load(), "HTTP uses one original formal launcher")
+		})
+		joinOriginalBridges()
+		return
+	}
 	activeService := service
 	var result provisioning.PlainColdResult
 	var createErr error
@@ -641,17 +670,6 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		require.Equal(t, int32(1), postCount.Load(), "Exec never creates an extra Pod")
 		require.Equal(t, int32(1), startCount.Load(), "Exec uses the original runtime")
 	}
-	mu.Lock()
-	ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
-	mu.Unlock()
-	for _, bridge := range ownedBridges {
-		if execHooks != nil && execHooks.expectedFailure(bridge) {
-			requireExecServiceFailedBridgeJoined(t, bridge)
-		} else if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
-			requireLiveLookupFailedBridgeJoined(t, bridge)
-		} else {
-			bridge.requireJoined(t)
-		}
-	}
+	joinOriginalBridges()
 	t.Log("cold service actual POST-to-formal-launcher/publication/independent preparation settlement completed")
 }
