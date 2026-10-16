@@ -128,6 +128,9 @@ type startupBridgeFixture struct {
 	stdout    int64
 	waited    bool
 	waitErr   error
+	// A cold-create fixture may lose the actual activation response after the
+	// formal bridge consumes it. The original startup fixture leaves this false.
+	discardStdout bool
 }
 
 func newStartupBridgeFixture() *startupBridgeFixture {
@@ -284,7 +287,11 @@ func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
 	var writeMu sync.Mutex
 	outputDone, errorDone := make(chan copied, 1), make(chan copied, 1)
 	copyStream := func(source io.Reader, channel byte, done chan copied) {
-		n, err := io.CopyBuffer(startupChannelWriter{ws, &writeMu, channel}, source, make([]byte, 32768))
+		var destination io.Writer = startupChannelWriter{ws, &writeMu, channel}
+		if channel == 1 && f.discardStdout {
+			destination = io.Discard
+		}
+		n, err := io.CopyBuffer(destination, source, make([]byte, 32768))
 		if err != nil {
 			cancel()
 		}
