@@ -21,6 +21,19 @@ type RuntimeDispatchEntry struct {
 	Reference StageReference
 }
 
+// runtimeHistoryLocator identifies read-only metadata. It cannot authorize an
+// acquisition or operation and is never accepted by a public workspace API.
+type runtimeHistoryLocator struct {
+	hash      string
+	partition uint8
+}
+
+func historyLocator(w WorkspaceIdentity) runtimeHistoryLocator {
+	return runtimeHistoryLocator{hash: w.Hash(), partition: w.Partition()}
+}
+func (w runtimeHistoryLocator) Hash() string     { return w.hash }
+func (w runtimeHistoryLocator) Partition() uint8 { return w.partition }
+
 // LoadRuntimeDispatch uses two bounded, identity-fenced linearizable snapshots.
 // The first locates the exact receipt; the second validates all three permanent
 // records together. Absence carries no evidence about an external runtime.
@@ -59,6 +72,10 @@ func immutableDispatchKV(kv *mvccpb.KeyValue) bool {
 	return kv != nil && kv.Lease == 0 && kv.CreateRevision > 0 && kv.CreateRevision == kv.ModRevision
 }
 func (b *Backend) decodeRuntimeDispatchPair(declaration, input *mvccpb.KeyValue, w WorkspaceIdentity, intentID string) (*RuntimeDispatchRecord, *RuntimeDispatchInputRecord, error) {
+	return b.decodeRuntimeDispatchPairAt(declaration, input, historyLocator(w), intentID)
+}
+
+func (b *Backend) decodeRuntimeDispatchPairAt(declaration, input *mvccpb.KeyValue, w runtimeHistoryLocator, intentID string) (*RuntimeDispatchRecord, *RuntimeDispatchInputRecord, error) {
 	if declaration == nil && input == nil {
 		return nil, nil, nil
 	}
@@ -97,6 +114,10 @@ func (b *Backend) decodeRuntimeDispatchPair(declaration, input *mvccpb.KeyValue,
 	return &r, &i, nil
 }
 func (b *Backend) decodeRuntimeDispatchEntry(values []*mvccpb.KeyValue, w WorkspaceIdentity, intentID, dk, ik, rk string, located StageAttemptLocator) (*RuntimeDispatchEntry, error) {
+	return b.decodeRuntimeDispatchEntryAt(values, historyLocator(w), intentID, dk, ik, rk, located)
+}
+
+func (b *Backend) decodeRuntimeDispatchEntryAt(values []*mvccpb.KeyValue, w runtimeHistoryLocator, intentID, dk, ik, rk string, located StageAttemptLocator) (*RuntimeDispatchEntry, error) {
 	if len(values) != 3 {
 		return nil, ErrCorruptRecord
 	}
@@ -108,7 +129,7 @@ func (b *Backend) decodeRuntimeDispatchEntry(values []*mvccpb.KeyValue, w Worksp
 			return nil, ErrCorruptRecord
 		}
 	}
-	r, i, err := b.decodeRuntimeDispatchPair(values[0], values[1], w, intentID)
+	r, i, err := b.decodeRuntimeDispatchPairAt(values[0], values[1], w, intentID)
 	if err != nil {
 		return nil, err
 	}

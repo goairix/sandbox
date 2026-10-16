@@ -109,6 +109,10 @@ func enrolledDecodeHistory(kv *mvccpb.KeyValue, record interface{ Validate() err
 }
 
 func (b *Backend) decodeEnrolledPreparation(values []*mvccpb.KeyValue, keys []string, w WorkspaceIdentity, intent string, located RuntimeEnrolledPublicationRecord) (*runtimePreparationBundle, error) {
+	return b.decodeEnrolledPreparationAt(values, keys, historyLocator(w), intent, located)
+}
+
+func (b *Backend) decodeEnrolledPreparationAt(values []*mvccpb.KeyValue, keys []string, w runtimeHistoryLocator, intent string, located RuntimeEnrolledPublicationRecord) (*runtimePreparationBundle, error) {
 	if len(values) != 9 || len(keys) != 9 {
 		return nil, ErrCorruptRecord
 	}
@@ -117,7 +121,7 @@ func (b *Backend) decodeEnrolledPreparation(values []*mvccpb.KeyValue, keys []st
 			return nil, ErrCorruptRecord
 		}
 	}
-	dispatch, err := b.decodeRuntimeDispatchEntry(values[:3], w, intent, keys[0], keys[1], keys[2], located.DispatchAttempt)
+	dispatch, err := b.decodeRuntimeDispatchEntryAt(values[:3], w, intent, keys[0], keys[1], keys[2], located.DispatchAttempt)
 	if err != nil || dispatch == nil {
 		return nil, ErrCorruptRecord
 	}
@@ -218,6 +222,14 @@ func (b *Backend) loadRuntimePublicationEnrolled(ctx context.Context, w Workspac
 	if err := b.validateWorkspaceBinding(w); err != nil {
 		return nil, err
 	}
+	result, err := b.loadRuntimePublicationEnrolledAt(ctx, historyLocator(w), intent)
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return result.Publication, nil
+}
+
+func (b *Backend) loadRuntimePublicationEnrolledAt(ctx context.Context, w runtimeHistoryLocator, intent string) (*SandboxRuntimeReadResult, error) {
 	jk, pk, err := b.namespace.runtimePublicationKeys(w.Partition(), intent)
 	if err != nil {
 		return nil, err
@@ -259,10 +271,18 @@ func (b *Backend) loadRuntimePublicationEnrolled(ctx context.Context, w Workspac
 	if err != nil {
 		return nil, err
 	}
-	return b.decodeEnrolledPublicationSnapshot(values, keys, w, intent, record)
+	return b.decodeEnrolledPublicationSnapshotAt(values, keys, w, intent, record)
 }
 
 func (b *Backend) decodeEnrolledPublicationSnapshot(values []*mvccpb.KeyValue, keys []string, w WorkspaceIdentity, intent string, located RuntimeEnrolledPublicationRecord) (*RuntimeEnrolledPublicationEntry, error) {
+	result, err := b.decodeEnrolledPublicationSnapshotAt(values, keys, historyLocator(w), intent, located)
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return result.Publication, nil
+}
+
+func (b *Backend) decodeEnrolledPublicationSnapshotAt(values []*mvccpb.KeyValue, keys []string, w runtimeHistoryLocator, intent string, located RuntimeEnrolledPublicationRecord) (*SandboxRuntimeReadResult, error) {
 	if len(values) != 14 || len(keys) != 14 {
 		return nil, ErrCorruptRecord
 	}
@@ -307,7 +327,7 @@ func (b *Backend) decodeEnrolledPublicationSnapshot(values []*mvccpb.KeyValue, k
 	if string(values[4].Value) != canonicalReceipt {
 		return nil, ErrCorruptReceipt
 	}
-	bundle, err := b.decodeEnrolledPreparation(values[5:], keys[5:], w, intent, r)
+	bundle, err := b.decodeEnrolledPreparationAt(values[5:], keys[5:], w, intent, r)
 	if err != nil {
 		return nil, err
 	}
@@ -324,5 +344,5 @@ func (b *Backend) decodeEnrolledPublicationSnapshot(values []*mvccpb.KeyValue, k
 	if !bytes.Equal(verified.Certificate().Wire(), bundle.Binding.Certificate) || verified.Digest() != r.ProofDigest || verified.Ready().EnrollmentDigest != r.EnrollmentDigest || verified.Ready().ObserverCertificateDigest != r.ObserverCertificateDigest || verified.Ready().ActivationDigest != r.ActivationDigest || verified.EnrollmentReceipt().NodeUID != r.NodeUID || verified.EnrollmentReceipt().NodeBootID != r.NodeBootID {
 		return nil, ErrCorruptRecord
 	}
-	return &RuntimeEnrolledPublicationEntry{Record: r, Proof: bytes.Clone(proof.Payload), Enrollment: e.Clone(), Reference: ref}, nil
+	return &SandboxRuntimeReadResult{Publication: &RuntimeEnrolledPublicationEntry{Record: r, Proof: bytes.Clone(proof.Payload), Enrollment: e.Clone(), Reference: ref}, Dispatch: bundle.Dispatch}, nil
 }
