@@ -36,9 +36,9 @@
 **Produces:** `ReadWorkspaceSnapshot(context.Context, WorkspaceIdentity) (*SandboxSnapshotReadResult,error)`、`ReadSandboxSnapshot(context.Context,string) (*SandboxSnapshotReadResult,error)`；result包含原opaque View与调用者独占Snapshot；`Options.SnapshotCacheBytes`及独立`ErrSnapshotReadCapacity`。
 
 - [x] Step1 Root接受具体result/单Backend私有指针、life.mu唯一锁、16miss/256call、原seal/cancel/join顺序和ongoing-only consumer。现有readEnrolledPoints并非足够严格：Root裁决使用固定snapshot两点profile，提取原view已预检后dispatch+strict shape-before-Size body，旧预检不改；添加最小sharedbody旧view回归。先写新tests/collector，Root审collector并实际RED后写产品，无任意factory。
-- [ ] Step2 实际RED后实现Options校验、weighted LRU/clone、有界共享miss与关闭；限定host/race验证实际行为及16/256硬上限。达到提交要求立即小提交。
-- [ ] Step3 实现两个新coherent读取入口和真实TLS负例/并发/restore/命中trace，限定native按Root具体preflight执行；只读取指定snapshot/placement，不写元数据。验证后小提交。
-- [ ] Step4 接入原cold service进行中恢复，保留历史完成读取；限定service regression及必要native证明新接点确实使用，原claim/capsule/结果语义不变。最终相关vet/来源冻结，及时小提交。
-- [ ] Step5 完整Task报告，固定原BASE→最终HEAD一份reviewpackage，一个fresh spec+quality reviewer；同pair修复/限定复审、tracked验收/关闭本OWN，继续业务接线。
+- [x] Step2 实际missing-symbol RED和deadline行为RED后完成Options/LRU/clone/16miss/256call/Close。8项限定host GREEN及actual-race17输入的race02 PASS；race01执行PASS但collector缺-race，仅保留执行证据。Root小提交9c5490ecd5dfe3685d113e3d47e82d6a3b44fe82。
+- [x] Step3 两个coherent入口及固定65536+4096 profile完成。新TLS metadata02原工具exit0，5组26子case无skip，命中仍12metadata/4calls仅1snapshot，14负例/5fence/2cancel-close/5旧view严格性PASS；原Wait/join/精确清理完整。Root小提交11a4699428420cb436291ce00d351428e2022ccf；native01仅build未run。
+- [x] Step4 ongoing接入完成，原claim/capsule/generation及completed历史LoadSnapshot保留。新限定service01正常+activationACK-loss两case真实成功，2正式launcher/2TLS etcd/6bridge完整join；2项host service回归PASS，相关3pkg Linuxarm64 vet exit0。全部来源冻结，Root小提交1ce8e4a919d06f7ec9d8b2c9834cff5f43e5fdf9。
+- [x] Step5 完整Task报告与原BASE36a5dd1→最终HEAD1ce8e4a五提交reviewpackage，唯一fresh spec+quality reviewer结论Spec compliant / Approved，无Critical/Important。Root完整读取并接受；Minor原始诊断噪声分类展示延期，不为日志清洁重复执行。tracked验收后关闭本OWN并继续业务配置持久化；不表示生产迁移或容量验收完成。
 
 Ruling: 本单元落实总方案已有明确缓存与coherent read设计，不新增生产切换或权限。为避免只写未消费的cache，Task包含现有进行中冷建恢复入口接线；历史完成不强行改用当前owner view。前置已验收，当前文档和只读预检不表示本Task完成。
