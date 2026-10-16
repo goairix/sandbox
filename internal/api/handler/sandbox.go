@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/goairix/sandbox/internal/execcode"
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/telemetry/trace"
@@ -246,18 +246,5 @@ func sandboxToResponse(sb *sandbox.Sandbox) types.SandboxResponse {
 
 // buildCommand wraps raw code with the appropriate interpreter command based on language.
 func buildCommand(lang sandbox.Language, code string) (string, error) {
-	switch lang {
-	case sandbox.LangPython:
-		return "python3 -c " + quoteShellArgument(code), nil
-	case sandbox.LangNodeJS:
-		return "node -e " + quoteShellArgument(code), nil
-	case sandbox.LangBash:
-		return code, nil
-	default:
-		return "", fmt.Errorf("unsupported language: %s", lang)
-	}
-}
-
-func quoteShellArgument(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	return execcode.BuildCommand(string(lang), code)
 }

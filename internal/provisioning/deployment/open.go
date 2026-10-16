@@ -24,6 +24,7 @@ type Deployment struct {
 	service  *provisioning.PlainColdService
 	backend  *state.Backend
 	issuer   *ExecIssuer
+	http     *HTTPSettings
 	once     sync.Once
 	closeErr error
 }
@@ -31,11 +32,16 @@ type Deployment struct {
 func (d *Deployment) Service() *provisioning.PlainColdService { return d.service }
 func (d *Deployment) Backend() *state.Backend                 { return d.backend }
 
+// HTTPSettings returns a caller-owned copy; nil means HTTP was not configured.
+// Accessors, including this one, must not race Deployment.Close.
+func (d *Deployment) HTTPSettings() *HTTPSettings { return d.http.clone() }
+
 func (d *Deployment) Close() error {
 	if d == nil {
 		return nil
 	}
 	d.once.Do(func() {
+		defer d.http.Zero()
 		if d.service != nil {
 			d.closeErr = d.service.Close()
 		}
@@ -80,6 +86,16 @@ func Open(ctx context.Context, path string) (*Deployment, error) {
 	if err != nil {
 		return nil, fileError("launcher configuration")
 	}
+	httpSettings, err := loadHTTPSettings(base, m.HTTP, launcher)
+	if err != nil {
+		return nil, err
+	}
+	httpTransferred := false
+	defer func() {
+		if !httpTransferred {
+			httpSettings.Zero()
+		}
+	}()
 	root, err := signingPrivateKey(relativeFile(base, m.RootPrivateKeyFile), "root signing key")
 	if err != nil {
 		return nil, err
@@ -131,10 +147,11 @@ func Open(ctx context.Context, path string) (*Deployment, error) {
 	if err != nil {
 		return nil, fileError("signed clock")
 	}
-	d := &Deployment{}
+	d := &Deployment{http: httpSettings}
+	httpTransferred = true
 	d.issuer, err = NewExecIssuer(ctx, issuer, issuerWire, launcher, clock)
 	if err != nil {
-		return nil, fmt.Errorf("deployment issuer: %w", err)
+		return nil, errors.Join(fmt.Errorf("deployment issuer: %w", err), d.Close())
 	}
 	d.backend, err = state.New(ctx, state.Options{Endpoints: m.Etcd.Endpoints, Namespace: namespace, Identity: state.Identity{SchemaVersion: i.SchemaVersion, Prefix: i.Prefix, AuthorityID: i.AuthorityID, Cell: i.Cell, ClusterID: i.ClusterID, StorageID: i.StorageID, RuntimeID: i.RuntimeID, RestoreEpoch: i.RestoreEpoch}, TLS: tlsConfig, DialTimeout: dialTimeout, RequestTimeout: requestTimeout, SnapshotCacheBytes: m.Etcd.SnapshotCacheBytes, PreparationInventory: &inventory, Clock: clock, ExecIssuer: d.issuer, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: launcher.Binding.AuthorityID, Target: launcher.Binding.Target, Roots: launcher.Roots}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: launcher.ContractDigest, MaxActive: launcher.MaxActive}})
 	if err != nil {

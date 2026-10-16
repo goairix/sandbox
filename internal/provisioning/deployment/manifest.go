@@ -21,7 +21,8 @@ type resources struct {
 }
 
 type manifest struct {
-	Version int `json:"version"`
+	Version int           `json:"version"`
+	HTTP    *httpManifest `json:"http,omitempty"`
 	Etcd    struct {
 		Endpoints []string `json:"endpoints"`
 		Identity  struct {
@@ -94,6 +95,10 @@ func parseManifest(wire []byte) (manifest, error) {
 // Reject duplicate keys before decoding into structs, where duplicates and case
 // aliases would otherwise silently replace credential and identity settings.
 func strictValue(d *json.Decoder, depth int) error {
+	return strictValueAt(d, depth, "")
+}
+
+func strictValueAt(d *json.Decoder, depth int, path string) error {
 	if depth > 32 {
 		return errConfiguration
 	}
@@ -110,15 +115,20 @@ func strictValue(d *json.Decoder, depth int) error {
 	}
 	seen := make(map[string]bool)
 	for d.More() {
+		childPath := path + "/[]"
 		if delim == '{' {
 			key, err := d.Token()
 			name, ok := key.(string)
-			if err != nil || !ok || seen[name] || strings.ToLower(name) != name || strings.IndexFunc(name, func(r rune) bool { return r > 127 }) >= 0 {
+			if err != nil || !ok || seen[name] {
+				return errConfiguration
+			}
+			if path != "/http/env" && (strings.ToLower(name) != name || strings.IndexFunc(name, func(r rune) bool { return r > 127 }) >= 0) {
 				return errConfiguration
 			}
 			seen[name] = true
+			childPath = path + "/" + name
 		}
-		if err := strictValue(d, depth+1); err != nil {
+		if err := strictValueAt(d, depth+1, childPath); err != nil {
 			return err
 		}
 	}
