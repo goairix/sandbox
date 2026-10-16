@@ -130,6 +130,9 @@ func (b *Backend) readCleanupKnownState(owner *workerDueOwner, prior *cleanupSlo
 }
 
 func (b *Backend) updateCleanupRun(owner *workerDueOwner, j *cleanupLocalJob, next cleanupExecutionRecord) error {
+	if j == nil || j.pendingProgress != nil {
+		return ErrConflict
+	}
 	s := j.state
 	if s == nil || s.slot == nil || s.record.Phase != "occupied" || next.Phase != "occupied" || cleanupSlotRecordFromExecution(next) != cleanupSlotRecordFromExecution(s.record) || next.Run == nil || next.Run.ID != j.runID || next.Run.Joined || b.validateCleanupState(s) != nil {
 		return ErrInvalidRecord
@@ -147,6 +150,10 @@ func (b *Backend) updateCleanupRun(owner *workerDueOwner, j *cleanupLocalJob, ne
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
+	// Capture the sole proposed value before dispatch. Even a successful write
+	// followed by an uncertain read must retain this exact attempt, not permit
+	// another progress submission or infer the server's new revision.
+	j.pendingProgress = &cleanupLocalProgress{execution: s.execution, slot: *s.slot, value: wire}
 	if err = b.cleanupWrite(owner, "progress", cmps, []Write{{Key: s.execution.key, Value: []byte(wire)}}); err != nil {
 		return err
 	}
@@ -158,6 +165,7 @@ func (b *Backend) updateCleanupRun(owner *workerDueOwner, j *cleanupLocalJob, ne
 		return ErrConflict
 	}
 	j.state = observed
+	j.pendingProgress = nil
 	return nil
 }
 
@@ -167,6 +175,9 @@ func (b *Backend) updateCleanupRun(owner *workerDueOwner, j *cleanupLocalJob, ne
 func (b *Backend) joinCleanupRun(ctx context.Context, j *cleanupLocalJob) error {
 	if ctx == nil || j == nil || j.worker == nil || j.worker.backend != b || !j.effectsJoined || j.runID == "" || j.state == nil || j.state.slot == nil || j.state.record.Run == nil || j.state.record.Run.ID != j.runID || j.state.record.Run.Joined || b.validateCleanupState(j.state) != nil {
 		return ErrInvalidRecord
+	}
+	if err := b.reconcileCleanupJoinedState(ctx, j); err != nil {
+		return err
 	}
 	s := j.state
 	r := s.record
@@ -202,6 +213,7 @@ func (b *Backend) joinCleanupRun(ctx context.Context, j *cleanupLocalJob) error 
 	fence := s.execution
 	fence.value, fence.mod = wire, response.Header.Revision
 	j.state = &cleanupSlotState{record: r, execution: fence, slot: s.slot}
+	j.pendingProgress = nil
 	return nil
 }
 

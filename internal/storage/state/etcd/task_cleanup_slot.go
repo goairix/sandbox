@@ -81,14 +81,21 @@ func (b *Backend) cleanupReadPoints(o *workerDueOwner, keys ...string) ([]*mvccp
 	if err = o.postcheck(); err != nil {
 		return nil, 0, err
 	}
-	if err = b.operationResponseHeader(r); err != nil {
+	return b.decodeCleanupPoints(r, keys)
+}
+
+// decodeCleanupPoints preserves the native response envelope before returning
+// owned point values. Typed decoders still enforce each record's lease and
+// immutable-birth rules; this helper alone is not protocol authority.
+func (b *Backend) decodeCleanupPoints(r *clientv3.TxnResponse, keys []string) ([]*mvccpb.KeyValue, int64, error) {
+	if err := b.operationResponseHeader(r); err != nil {
 		return nil, 0, err
 	}
 	if (*pb.TxnResponse)(r).Size() > maxMutationBytes {
 		return nil, 0, ErrCorruptRecord
 	}
 	if !r.Succeeded {
-		if _, err = b.stageEvidencePoints(r, []string{b.identityKey, b.restoreKey}); err != nil {
+		if _, err := b.stageEvidencePoints(r, []string{b.identityKey, b.restoreKey}); err != nil {
 			return nil, 0, err
 		}
 		return nil, 0, ErrIdentityMismatch

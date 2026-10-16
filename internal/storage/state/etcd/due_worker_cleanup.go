@@ -34,6 +34,11 @@ type cleanupLocalJob struct {
 	proof     *localOwnerReleaseProof
 	owner     *workerDueOwner
 
+	// At most one unresolved progress submission is retained. Its owned bytes
+	// and fences let this same registered job resolve a lost ACK before joining;
+	// they cannot authorize a cold job or another progress attempt.
+	pendingProgress *cleanupLocalProgress
+
 	// started/request and registry membership use archiveLife.mu. The physical
 	// owner sets effectsJoined only after all transports/files/renewal/claims
 	// return, before requesting post-work metadata settlement.
