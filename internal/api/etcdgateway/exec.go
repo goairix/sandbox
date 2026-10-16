@@ -108,14 +108,26 @@ func terminalExit(result provisioning.PlainExecResult, err error) (int, bool) {
 }
 
 type unknownResponse struct {
+	Reason    string                     `json:"reason"`
 	Code      string                     `json:"code"`
 	Message   string                     `json:"message"`
 	Operation *state.OperationReference  `json:"operation,omitempty"`
 	Effect    *state.ExecEffectReference `json:"effect,omitempty"`
 }
 
-func executionUnknown(result provisioning.PlainExecResult) unknownResponse {
-	response := unknownResponse{Code: "exec_unknown", Message: "execution outcome unknown; do not automatically retry"}
+func executionUnknown(result provisioning.PlainExecResult, err error) unknownResponse {
+	reason := "outcome_unknown"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		reason = "canceled"
+	case errors.Is(err, state.ErrGuardExpired):
+		reason = "guard_expired"
+	case errors.Is(err, state.ErrConflict):
+		reason = "conflict"
+	}
+	response := unknownResponse{Code: "exec_unknown", Message: "execution outcome unknown; do not automatically retry", Reason: reason}
 	if result.Operation.OperationID != "" {
 		operation := result.Operation
 		response.Operation = &operation
@@ -143,7 +155,7 @@ func (g *Gateway) execSync(w http.ResponseWriter, ctx context.Context, cancel co
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, 502, executionUnknown(result))
+	writeJSON(w, 502, executionUnknown(result, err))
 }
 
 type streamChunk struct {
@@ -249,7 +261,7 @@ func (g *Gateway) execStream(w http.ResponseWriter, ctx context.Context, cancel 
 						return
 					}
 				} else {
-					failure := executionUnknown(answer.result)
+					failure := executionUnknown(answer.result, answer.err)
 					if err := sendEvent(w, rc, "error", struct {
 						Error string `json:"error"`
 						unknownResponse

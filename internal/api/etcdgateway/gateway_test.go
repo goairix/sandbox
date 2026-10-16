@@ -386,3 +386,49 @@ func TestGatewayAdmissionCloseAndGlobalRate(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayUnknownReasonFromActualErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"deadline", context.DeadlineExceeded, "deadline_exceeded"},
+		{"canceled", context.Canceled, "canceled"},
+		{"guard", state.ErrGuardExpired, "guard_expired"},
+		{"conflict", state.ErrConflict, "conflict"},
+		{"opaque", errors.New("private-key-sentinel"), "outcome_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &gatewayServiceFake{exec: func(context.Context, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+				return provisioning.PlainExecResult{State: provisioning.PlainExecUnknown, Operation: state.OperationReference{OperationID: "original-operation"}, Effect: state.ExecEffectReference{CommandID: "original-command"}}, errors.Join(errors.New("private-key-sentinel"), tc.err)
+			}}
+			g := gatewayFixture(t, s)
+			server := httptest.NewServer(g)
+			defer server.Close()
+			for _, suffix := range []string{"", "/stream"} {
+				r, err := http.NewRequest(http.MethodPost, server.URL+gatewayExecPath+suffix, strings.NewReader(`{"language":"bash","code":"exit 0"}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Header.Set("Authorization", "Bearer mounted-secret")
+				response, err := http.DefaultClient.Do(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wire, err := io.ReadAll(response.Body)
+				response.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := string(wire)
+				if !strings.Contains(body, `"reason":"`+tc.want+`"`) || !strings.Contains(body, "original-operation") || !strings.Contains(body, "original-command") || strings.Contains(body, "exit_code") || strings.Contains(body, "private-key-sentinel") || response.Header.Get("Retry-After") != "" {
+					t.Fatalf("unknown %s response lost true error attribution or fabricated success: %s", suffix, body)
+				}
+				if suffix == "" && response.StatusCode != 502 || suffix != "" && (response.StatusCode != 200 || !strings.Contains(body, "event: error") || strings.Contains(body, "event: done")) {
+					t.Fatal("unknown response changed code/state semantics")
+				}
+			}
+		})
+	}
+}
