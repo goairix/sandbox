@@ -150,12 +150,15 @@ func TestDueCheckpointStrictSchemaAndBounds(t *testing.T) {
 		"partition":                  func(r *dueCheckpointRecord) { r.Partition++ },
 		"revision":                   func(r *dueCheckpointRecord) { r.Revision = 0 },
 		"replay-header-substitution": func(r *dueCheckpointRecord) { r.ReplayFrom++ },
-		"revision-overflow":          func(r *dueCheckpointRecord) { r.Revision = math.MaxInt64; r.ReplayFrom = math.MinInt64 },
-		"phase":                      func(r *dueCheckpointRecord) { r.Phase = "healthy" },
-		"writer":                     func(r *dueCheckpointRecord) { r.WriterSessionID = "copied-reference" },
-		"writer-revision":            func(r *dueCheckpointRecord) { r.WriterPartitionRevision = 0 },
-		"frontier-nul":               func(r *dueCheckpointRecord) { r.Frontier += "\x00" },
-		"frontier-other-partition":   func(r *dueCheckpointRecord) { r.Frontier = strings.Replace(r.Frontier, "/p/aa/", "/p/ab/", 1) },
+		"revision-overflow": func(r *dueCheckpointRecord) {
+			r.Revision = math.MaxInt64
+			r.ReplayFrom = math.MinInt64
+		},
+		"phase":                    func(r *dueCheckpointRecord) { r.Phase = "healthy" },
+		"writer":                   func(r *dueCheckpointRecord) { r.WriterSessionID = "copied-reference" },
+		"writer-revision":          func(r *dueCheckpointRecord) { r.WriterPartitionRevision = 0 },
+		"frontier-nul":             func(r *dueCheckpointRecord) { r.Frontier += "\x00" },
+		"frontier-other-partition": func(r *dueCheckpointRecord) { r.Frontier = strings.Replace(r.Frontier, "/p/aa/", "/p/ab/", 1) },
 		"frontier-outside-window": func(r *dueCheckpointRecord) {
 			c := rows[0]
 			c.ExpiresAt = r.WindowEnd.Add(time.Second)

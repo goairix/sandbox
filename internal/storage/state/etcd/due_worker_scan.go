@@ -152,8 +152,13 @@ func (scan *dueWorkerScan) admitCandidate(ctx context.Context, candidate DueCand
 		if outcome == OutcomeCommitted {
 			return scan.settleCandidate(ctx, candidate, listCandidate)
 		}
-		// Aborted is a positive exact-reference result, not a retry instruction.
-		// Retain this candidate for a later separately charged turn.
+		// Aborted settles this exact attempt, not the candidate. Retain the
+		// candidate for a later separately charged, revalidated attempt.
+		if err == nil {
+			// CommitStage may return OutcomeAborted,nil for an existing exact
+			// receipt. Nil here would falsely mean settled to a cache consumer.
+			return ErrConflict
+		}
 		return err
 	}
 	if pending.rejected {

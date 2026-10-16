@@ -320,6 +320,7 @@ func TestDueWorkerActorEarlyTailAndExpiryWithoutWrite(t *testing.T) {
 	dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 121 })
 	key, _ := f.b.namespace.dueCandidateKey(f.candidate)
 	require.Equal(t, key, dueCheckpointTestRaw(t, f.duePageFixture).Frontier)
+	require.Equal(t, "watch", dueCheckpointTestRaw(t, f.duePageFixture).Phase, "the actual final early-tail page must durably complete list phase")
 	require.LessOrEqual(t, w.Status().OwnedBytes, uint64(64<<20))
 
 	// Moving only the trusted clock makes the existing candidate due. No
@@ -527,4 +528,189 @@ func TestDueWorkerActorOriginalFenceLoss(t *testing.T) {
 	require.False(t, w.Status().Synchronized)
 	require.NotEmpty(t, w.Status().LastError)
 	require.Nil(t, f.server.point(s.guard.key))
+}
+
+func TestDueWorkerActorCachedAdmissionPublishesPending(t *testing.T) {
+	f := newDueWorkerActorFixture(t)
+	f.seedActive(t, 0xaa, "cached-pending", f.now.Add(2*time.Second))
+	block := newDueWorkerLifetimeBlock()
+	var armed atomic.Bool
+	original := f.b.client.Lease
+	f.b.client.Lease = &workerTestLease{Lease: original, grant: func(ctx context.Context, ttl int64) (*clientv3.LeaseGrantResponse, error) {
+		if ttl == 30 && armed.Swap(false) {
+			// This is the real Stage Grant after the private binding has
+			// positively persisted pending on the original charged owner.
+			block.hold(ctx)
+		}
+		return original.Grant(ctx, ttl)
+	}}
+	w := f.start(t, dueWorkerActorOptions())
+	t.Cleanup(block.unblock)
+	dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 1 && len(f.tasks()) == 1 })
+	covered := w.Status().Partitions[0].CoveredRevision
+	frontier := dueCheckpointTestRaw(t, f.duePageFixture).Frontier
+	armed.Store(true)
+	f.clock.Store(f.now.Add(3 * time.Second))
+	workerTestReceive(t, block.entered)
+
+	permanent := dueCheckpointTestRaw(t, f.duePageFixture)
+	require.NotNil(t, permanent.Pending)
+	status := w.Status()
+	require.False(t, status.Synchronized, "paused native admission cannot publish current synchronization")
+	require.False(t, status.Partitions[0].Synchronized)
+	require.NotEqual(t, DueWorkerPhase("watching"), status.Phase)
+	require.Equal(t, permanent.Pending.Reference, status.Partitions[0].Pending)
+	require.GreaterOrEqual(t, status.Partitions[0].CoveredRevision, covered, "historical proof survives current publication invalidation")
+	require.Equal(t, 1, status.Queued)
+
+	block.unblock()
+	dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 0 && len(f.tasks()) == 2 })
+	require.Equal(t, StageReference{}, w.Status().Partitions[0].Pending)
+	require.Nil(t, dueCheckpointTestRaw(t, f.duePageFixture).Pending)
+	require.Equal(t, frontier, dueCheckpointTestRaw(t, f.duePageFixture).Frontier)
+}
+
+func TestDueWorkerActorSaturatedWindowExpiry(t *testing.T) {
+	for _, scenario := range []string{"already-due", "future-clock-only"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newDueWorkerActorFixture(t)
+			// Remove only the original fixture's discovery row. This case's
+			// canonical active bundle is independently seeded at the valid
+			// date boundary; authority and session deadlines remain real.
+			oldKey, err := f.b.namespace.dueCandidateKey(f.candidate)
+			require.NoError(t, err)
+			request, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, err = f.b.client.Txn(request).Then(clientv3.OpDelete(oldKey)).Commit()
+			cancel()
+			require.NoError(t, err)
+			observed := time.Date(9999, 12, 31, 23, 59, 45, 0, time.UTC)
+			expiry := observed.Add(-15 * time.Second)
+			if scenario == "future-clock-only" {
+				expiry = observed.Add(10 * time.Second)
+			}
+			candidate := f.seedActive(t, 0xaa, "saturated", expiry)
+			f.clock.Store(observed)
+			w := f.start(t, dueWorkerActorOptions())
+			maximum := time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+			if scenario == "future-clock-only" {
+				dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 1 })
+				require.Empty(t, f.tasks())
+				record := dueCheckpointTestRaw(t, f.duePageFixture)
+				require.Equal(t, maximum, record.WindowEnd)
+				require.Empty(t, record.Frontier)
+				// No candidate/control/checkpoint write makes this input due.
+				f.clock.Store(expiry.Add(time.Second))
+			}
+
+			dueWorkerActorWait(t, func() bool { return len(f.tasks()) == 1 && w.Status().Synchronized && w.Status().Queued == 0 })
+			task := f.tasks()[0]
+			require.Equal(t, candidate.SandboxID, task.Reference.SandboxID)
+			require.Equal(t, expiry, task.ExpiresAt)
+			key, err := f.b.namespace.dueCandidateKey(candidate)
+			require.NoError(t, err)
+			require.Nil(t, f.server.point(key))
+			record := dueCheckpointTestRaw(t, f.duePageFixture)
+			require.Equal(t, maximum, record.WindowEnd)
+			require.Equal(t, record.Revision+1, record.ReplayFrom)
+			if scenario == "already-due" {
+				require.Equal(t, key, record.Frontier)
+			} else {
+				require.Empty(t, record.Frontier, "cache work must preserve the original early hole")
+			}
+		})
+	}
+}
+
+func TestDueWorkerActorCachedKnownAbortRetainsCandidate(t *testing.T) {
+	f := newDueWorkerActorFixture(t)
+	candidate := f.seedActive(t, 0xaa, "known-abort", f.now.Add(2*time.Second))
+	controlKey, _, err := f.b.namespace.sandboxKeys(candidate.Partition, candidate.SandboxID, "read")
+	require.NoError(t, err)
+	type resolution struct {
+		reference StageReference
+		outcome   Outcome
+		err       error
+	}
+	resolved := make(chan resolution, 1)
+	var resolvedOnce atomic.Bool
+	var pages, grants atomic.Int32
+	grantTimes := make(chan time.Time, 3)
+	retryBlock := newDueWorkerLifetimeBlock()
+	originalKV, originalLease := f.b.client.KV, f.b.client.Lease
+	observedKV := &faultKV{KV: originalKV, match: duePageRangeOps, after: func(response *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		pages.Add(1)
+		return response, err
+	}}
+	f.b.client.KV = &faultKV{KV: observedKV, match: putsKey(controlKey), before: func() {
+		if resolvedOnce.Swap(true) {
+			return
+		}
+		kv := f.server.point(dueCheckpointTestKey(f.duePageFixture))
+		var record dueCheckpointRecord
+		if kv == nil || json.Unmarshal(kv.Value, &record) != nil || record.Pending == nil {
+			resolved <- resolution{err: fmt.Errorf("real commit reached without its durable pending")}
+			return
+		}
+		// Exact public arbitration writes the same original receipt while
+		// this actual commit is still undispatched. CommitStage must then
+		// observe OutcomeAborted,nil, not a fabricated transport error.
+		request, cancel := context.WithTimeout(context.Background(), time.Second)
+		outcome, err := f.b.ResolveStage(request, record.Pending.Reference)
+		cancel()
+		resolved <- resolution{reference: record.Pending.Reference, outcome: outcome, err: err}
+	}}
+	f.b.client.Lease = &workerTestLease{Lease: originalLease, grant: func(ctx context.Context, ttl int64) (*clientv3.LeaseGrantResponse, error) {
+		if ttl == 30 {
+			count := grants.Add(1)
+			grantTimes <- time.Now()
+			if count == 3 {
+				retryBlock.hold(ctx)
+			}
+		}
+		return originalLease.Grant(ctx, ttl)
+	}}
+	w := f.start(t, dueWorkerActorOptions())
+	t.Cleanup(retryBlock.unblock)
+	dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 1 && len(f.tasks()) == 1 })
+	baselinePages := pages.Load()
+	frontier := dueCheckpointTestRaw(t, f.duePageFixture).Frontier
+	f.clock.Store(f.now.Add(3 * time.Second))
+	aborted := workerTestReceive(t, resolved)
+	require.NoError(t, aborted.err)
+	require.Equal(t, OutcomeAborted, aborted.outcome)
+	workerTestReceive(t, retryBlock.entered)
+
+	// The independently charged retry is held at its real Grant, so the
+	// candidate and exact new pending can be inspected before it commits.
+	require.Equal(t, int32(3), grants.Load())
+	_ = workerTestReceive(t, grantTimes) // Original fixture's first task.
+	abortAt, retryAt := workerTestReceive(t, grantTimes), workerTestReceive(t, grantTimes)
+	require.GreaterOrEqual(t, retryAt.Sub(abortAt), 800*time.Millisecond)
+	require.Equal(t, baselinePages, pages.Load(), "known abort must retry from retained cache without a fresh Range")
+	require.Equal(t, 1, w.Status().Queued)
+	pending := dueCheckpointTestRaw(t, f.duePageFixture)
+	require.NotNil(t, pending.Pending)
+	require.Equal(t, candidate, pending.Pending.Candidate)
+	require.NotEqual(t, aborted.reference, pending.Pending.Reference)
+	dueKey, err := f.b.namespace.dueCandidateKey(candidate)
+	require.NoError(t, err)
+	require.NotNil(t, f.server.point(dueKey))
+	require.Len(t, f.tasks(), 1)
+	s := f.original(t, w)
+	f.b.archiveLife.mu.Lock()
+	var tokens uint64
+	for _, share := range s.budgets {
+		if share != nil && share.kind == WorkerBudgetClaim {
+			tokens += share.bucket.tokens
+		}
+	}
+	f.b.archiveLife.mu.Unlock()
+	require.Zero(t, tokens, "retry must consume its own earned original claim token")
+
+	retryBlock.unblock()
+	dueWorkerActorWait(t, func() bool { return w.Status().Synchronized && w.Status().Queued == 0 && len(f.tasks()) == 2 })
+	require.Nil(t, f.server.point(dueKey))
+	require.Equal(t, baselinePages, pages.Load())
+	require.Equal(t, frontier, dueCheckpointTestRaw(t, f.duePageFixture).Frontier)
+	require.Equal(t, int32(3), grants.Load())
 }

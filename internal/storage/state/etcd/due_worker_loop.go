@@ -63,6 +63,7 @@ func (w *DueWorker) renewIfNeeded(ctx context.Context) error {
 	if err != nil || time.Now().Before(at) {
 		return err
 	}
+	w.pauseDiscovery("replaying")
 	if err = b.RenewWorkerSession(ctx, w.session); err != nil {
 		return err
 	}
@@ -151,11 +152,13 @@ func (w *DueWorker) turn(ctx context.Context) (time.Time, error) {
 	if candidate, ok := w.cache.peek(); ok {
 		// This observation only decides when to try. The unchanged actual
 		// admission observes the trusted clock again before Grant and commit.
-		window, err := b.observeDueWindow(ctx)
+		// A saturated discovery window cannot be inverted to recover UTC.
+		w.pauseDiscovery("replaying")
+		lower, err := b.observeExpiryLowerBound(ctx)
 		if err != nil {
 			return time.Time{}, err
 		}
-		if !candidate.ExpiresAt.After(window.Add(-60 * time.Second)) {
+		if !candidate.ExpiresAt.After(lower) {
 			share, at := w.readyClaim(time.Now())
 			if share == nil {
 				w.publishStatus("backoff", nil)
@@ -183,7 +186,7 @@ func (w *DueWorker) turn(ctx context.Context) (time.Time, error) {
 	// A finite shared stream is fully stopped/joined by runDueWatchBatch
 	// before this actor can renew or admit. Even an immediate idle bridge
 	// yields 100ms, preventing a hot loop on an unchanged native revision.
-	w.publishStatus("replaying", nil)
+	w.pauseDiscovery("replaying")
 	_, err := b.runDueWatchBatch(ctx, w.cache)
 	if err != nil {
 		return w.rebuild(err)
@@ -199,7 +202,9 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 		}
 		scan.page, scan.index = nil, 0
 		if scan.started && scan.cursor == nil {
-			scan.listed = true
+			if err := scan.completeList(ctx); err != nil {
+				return time.Time{}, err
+			}
 			if err := w.cache.addPage(scan); err != nil {
 				return w.rebuild(err)
 			}
@@ -228,6 +233,11 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 		// An empty actual final page still registers this partition's R and
 		// real list completion, so Watch can establish its initial bridge.
 		if len(scan.page) == 0 {
+			if scan.cursor == nil {
+				if err = scan.completeList(ctx); err != nil {
+					return time.Time{}, err
+				}
+			}
 			if err = w.cache.addPage(scan); err != nil {
 				return w.rebuild(err)
 			}
@@ -237,9 +247,18 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 	}
 
 	candidate := scan.page[scan.index]
-	if scan.frontierBlocked || candidate.ExpiresAt.After(scan.checkpoint.record.WindowEnd.Add(-60*time.Second)) {
+	if scan.frontierBlocked {
+		return w.cacheTail(ctx, scan)
+	}
+	// Scheduling uses an independent trusted lower bound, including at the
+	// maximum valid date. The actual admission still performs its own rechecks.
+	lower, err := w.backend.observeExpiryLowerBound(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if candidate.ExpiresAt.After(lower) {
 		scan.frontierBlocked = true
-		return w.cacheTail(scan)
+		return w.cacheTail(ctx, scan)
 	}
 	share, at := w.readyClaim(time.Now())
 	if share == nil {
@@ -248,7 +267,7 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 	}
 	scan.claims = share
 	before := scan.index
-	err := scan.step(ctx)
+	err = scan.step(ctx)
 	if err == nil {
 		for i := before; i < scan.index; i++ {
 			scan.page[i] = DueCandidateRecord{}
@@ -258,7 +277,7 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 	}
 	if errors.Is(err, ErrOperationAdmissionClosed) {
 		scan.frontierBlocked = true
-		return w.cacheTail(scan)
+		return w.cacheTail(ctx, scan)
 	}
 	if errors.Is(err, ErrConflict) && !errors.Is(err, ErrOutcomeUnknown) {
 		w.publishStatus("backoff", err)
@@ -267,7 +286,7 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 	return time.Time{}, err
 }
 
-func (w *DueWorker) cacheTail(scan *dueWorkerScan) (time.Time, error) {
+func (w *DueWorker) cacheTail(ctx context.Context, scan *dueWorkerScan) (time.Time, error) {
 	// Erase settled prefix records before slicing, so the retained backing
 	// array cannot keep an uncharged source graph alive behind this tail.
 	for i := 0; i < scan.index; i++ {
@@ -280,7 +299,9 @@ func (w *DueWorker) cacheTail(scan *dueWorkerScan) (time.Time, error) {
 		return w.rebuild(err)
 	}
 	if scan.cursor == nil {
-		scan.listed = true
+		if err = scan.completeList(ctx); err != nil {
+			return time.Time{}, err
+		}
 	}
 	w.publishStatus("listing", nil)
 	return time.Time{}, nil

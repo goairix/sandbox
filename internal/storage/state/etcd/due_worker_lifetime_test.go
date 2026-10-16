@@ -246,3 +246,54 @@ func TestDueWorkerLifetimeStartupFailureCleanupJoined(t *testing.T) {
 	require.NoError(t, workerTestReceive(t, closeDone))
 	require.Equal(t, int32(1), cleanupCalls.Load())
 }
+
+func TestDueWorkerLifetimeCloseAfterSessionCleanupBeforeFinalDone(t *testing.T) {
+	f := newDueWorkerActorFixture(t)
+	s, err := f.b.OpenWorkerSession(context.Background(), "controlled-final-publication")
+	require.NoError(t, err)
+	owned, cancel := context.WithCancel(s.ctx)
+	w := &DueWorker{backend: f.b, session: s, ctx: owned, cancel: cancel, workDone: make(chan struct{}), done: make(chan struct{}), status: DueWorkerStatus{Session: s.Reference(), Running: true, Phase: "stopping"}}
+	w.self = w
+	f.b.archiveLife.mu.Lock()
+	s.dueWorker = w
+	close(w.workDone)
+	f.b.archiveLife.mu.Unlock()
+	var finalOnce sync.Once
+	publishFinal := func() {
+		finalOnce.Do(func() {
+			// This controlled same-package fixture holds only final local
+			// publication. Native work and the actual release core are not
+			// replaced; final removal/done use their shared lifecycle lock.
+			f.b.archiveLife.mu.Lock()
+			w.status.Running, w.status.Phase = false, "stopped"
+			if f.b.workerControl.sessions[s.slot] == s {
+				f.b.workerControl.sessions[s.slot] = nil
+			}
+			close(w.done)
+			f.b.archiveLife.mu.Unlock()
+		})
+	}
+	t.Cleanup(publishFinal)
+	_, _, before := f.server.counts()
+	require.NoError(t, f.b.releaseWorkerSessionCore(context.Background(), s, w))
+	workerTestReceive(t, s.release.done)
+	require.Nil(t, f.server.point(s.guard.key))
+	_, _, after := f.server.counts()
+	require.Equal(t, before+1, after, "actual original lease cleanup is already complete")
+	select {
+	case <-w.Done():
+		t.Fatal("controlled final publication completed prematurely")
+	default:
+	}
+
+	// Close enters strictly after the core has returned. It must still find
+	// this original controller and join final done before closing the client.
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- f.b.Close() }()
+	dueWorkerLifetimeStillJoined(t, closeDone)
+	publishFinal()
+	require.NoError(t, workerTestReceive(t, closeDone))
+	workerTestReceive(t, w.Done())
+	_, _, finalRevokes := f.server.counts()
+	require.Equal(t, after, finalRevokes, "late Close joins rather than repeats original cleanup")
+}

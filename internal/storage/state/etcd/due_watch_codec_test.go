@@ -48,8 +48,16 @@ func TestDueWatchCodecCanonicalAndPreallocation(t *testing.T) {
 			return append(append(bytes.Clone(wire), 0x0a, byte(len(h))), h...)
 		},
 		"oversize-frame": func() []byte { return bytes.Repeat([]byte("x"), 262145) },
-		"oversize-key":   func() []byte { r := dueWatchCodecTestFrame(1, 1025, 1); b, _ := r.Marshal(); return b },
-		"oversize-value": func() []byte { r := dueWatchCodecTestFrame(1, 1, 1025); b, _ := r.Marshal(); return b },
+		"oversize-key": func() []byte {
+			r := dueWatchCodecTestFrame(1, 1025, 1)
+			b, _ := r.Marshal()
+			return b
+		},
+		"oversize-value": func() []byte {
+			r := dueWatchCodecTestFrame(1, 1, 1025)
+			b, _ := r.Marshal()
+			return b
+		},
 		"unexpected-prev-kv": func() []byte {
 			r := dueWatchCodecTestFrame(1, 1, 1)
 			r.Events[0].PrevKv = r.Events[0].Kv

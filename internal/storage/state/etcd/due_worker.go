@@ -247,6 +247,28 @@ func dueWorkerError(err error) string {
 	return text
 }
 
+// pauseDiscovery changes current publication, not historical coverage. The
+// serial actor may still revalidate a selected candidate, but another cached
+// turn must obtain a fresh post-guard publication before scheduling again.
+func (w *DueWorker) pauseDiscovery(phase DueWorkerPhase) {
+	w.backend.archiveLife.mu.Lock()
+	w.pauseDiscoveryLocked(phase)
+	w.backend.archiveLife.mu.Unlock()
+}
+
+// Requires archiveLife.mu; also used by the original pre-Grant binding after
+// its pending CAS is positively acknowledged, before native Grant dispatch.
+func (w *DueWorker) pauseDiscoveryLocked(phase DueWorkerPhase) {
+	if w.cache != nil {
+		w.cache.published = false
+	}
+	w.status.Synchronized, w.status.Phase = false, phase
+	for i := range w.status.Partitions {
+		w.status.Partitions[i].Synchronized = false
+		w.status.Partitions[i].Phase = phase
+	}
+}
+
 // Only the serial actor calls this while scans are changing. Cache fields and
 // the published copy are read together under archiveLife.mu; Status never races
 // a scan mutation or returns a borrowed mutable cache/source-page slice.
@@ -291,7 +313,7 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 		if w.cache != nil {
 			v := &w.cache.views[row.Partition]
 			row.ObservedRevision, row.CoveredRevision = v.observed, v.covered
-			row.Synchronized = scan.listed && v.synchronized && w.cache.published
+			row.Synchronized = scan.listed && v.synchronized && w.cache.published && row.Pending == (StageReference{})
 			row.Invalidation = v.invalidation
 			if v.sub.Partition != nil {
 				row.ReplayFrom = v.sub.ReplayFrom

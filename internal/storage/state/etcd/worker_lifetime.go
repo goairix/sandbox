@@ -210,7 +210,9 @@ func (b *Backend) releaseWorkerSessionCore(_ context.Context, s *WorkerSession, 
 		s.dueCache.invalidateLocked("session released")
 		s.dueCache = nil
 	}
-	if b.workerControl.sessions[s.slot] == s {
+	// Controller sessions remain discoverable by a late Close until final
+	// worker publication. Non-controller originals retain immediate removal.
+	if worker == nil && b.workerControl.sessions[s.slot] == s {
 		b.workerControl.sessions[s.slot] = nil
 	}
 	r.err = err

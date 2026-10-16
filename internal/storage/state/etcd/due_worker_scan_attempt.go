@@ -30,6 +30,21 @@ func (pending *dueWorkerAdmission) persist(call *workerCall, candidate DueCandid
 		return err
 	}
 	pending.checkpoint = saved
+
+	// Publish only the positively persisted exact reference. The surrounding
+	// actor has not returned from admission yet, and may now block in Grant;
+	// Status must not wait for that return to reveal the pending request.
+	b := pending.origin
+	b.archiveLife.mu.Lock()
+	if w := pending.partition.session.dueWorker; w != nil && w.self == w && w.backend == b {
+		w.pauseDiscoveryLocked("replaying")
+		for i := range w.status.Partitions {
+			if w.status.Partitions[i].Partition == candidate.Partition {
+				w.status.Partitions[i].Pending = result.Reference
+			}
+		}
+	}
+	b.archiveLife.mu.Unlock()
 	return nil
 }
 
@@ -157,6 +172,24 @@ func (scan *dueWorkerScan) settleCandidate(ctx context.Context, candidate DueCan
 		}
 	}
 	scan.pending = StageReference{}
+	return nil
+}
+
+// A real final page completes durable listing even if an early hole keeps its
+// frontier frozen. This separate CAS preserves replay baseline and pending;
+// failure prevents publishing a completed list or starting its Watch bridge.
+func (scan *dueWorkerScan) completeList(ctx context.Context) error {
+	if scan.checkpoint == nil || scan.checkpoint.record.Pending != nil {
+		return ErrInvalidRecord
+	}
+	if scan.checkpoint.record.Phase != "watch" {
+		next := scan.checkpoint.record
+		next.Phase = "watch"
+		if err := scan.save(ctx, next); err != nil {
+			return err
+		}
+	}
+	scan.listed = true
 	return nil
 }
 

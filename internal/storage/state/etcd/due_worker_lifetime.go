@@ -53,6 +53,11 @@ func (w *DueWorker) finish(workErr error) {
 		w.status.Partitions[i].Synchronized = false
 		w.status.Partitions[i].Phase = w.status.Phase
 	}
+	// Removal and final done are one admission-lock publication. A Close
+	// entering after session cleanup must still discover and join this actor.
+	if b.workerControl.sessions[w.session.slot] == w.session {
+		b.workerControl.sessions[w.session.slot] = nil
+	}
 	close(w.done)
 	b.archiveLife.mu.Unlock()
 }
