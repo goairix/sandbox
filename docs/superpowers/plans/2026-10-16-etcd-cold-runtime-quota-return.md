@@ -36,10 +36,10 @@
 **Produces:** `SettleColdRuntimeQuota(context.Context, WorkspaceIdentity, string, TaskReference) (ColdRuntimeQuotaReturnResult, error)`；结果含 `Outcome`、`Reference StageReference`、typed只读Entry。精确新增记录/entry字段由 Step1 基于实际接口固定，不引入任意factory。
 
 - [x] Step1 只读预检：完整 runtime/TaskBirth/workspace/generation/Node/UID/BootID 归属链、原不可变 release/termination/settlement pins、16KiB canonical record及单点键、42节点预算和原safe-release parent/worker接点已核对。Root接受typed只读Entry/private认证snapshot、slot复用不读取slot的重放；immutableBASE `956536e`，已授权sole作者START-GO。
-- [ ] Step2 写新 metadata selector 的缺证/篡改/跨作用域 RED；实现 canonical 记录和独立结算、pre-Grant ref、settled replay。etcd包负例及host wire/关系/预算限定验证；需要完整死亡证明的正例、两Backend、guard/commit/release ACK丢失、quota/prep复用及新workspace owner由Step3真实fullchain覆盖，不制造虚假终止正例。测试只声称其真正覆盖的范围。
-- [ ] Step3 对新真实 native selector 写 RED→GREEN：初始化并占原双槽，原 publication/prep settlement，再走原真实 archive/fullsync/observer终止/providercleanup/ownerrelease，最后 quota结算及复用重放；所有原 owner 实际join/exact清理。不重跑旧矩阵。构建/运行均有新collector和Root具体检查。
-- [ ] Step4 完成限定 host/race/Linux vet 及 final来源冻结；达到提交条件立即按连贯范围提交，不攒一个最终大提交。新native成功后仅因有新修改/缺口才扩大测试。
-- [ ] Step5 wholeTask报告/新鲜单reviewer spec+quality审查，同pair修复及限定复审；tracked验收/更新plan/关闭本OWN，接续总迁移，不停在本Task。
+- [x] Step2 新metadata协议/record先compile RED后host五项、race、Linuxvet和六个真实TLS etcd负例通过；canonical记录、独立42节点结算、pre-Grant exact ref和重放实现已小提交`3f304f8`。元数据负例不作物理死亡证明；真实正例/故障见Step3。
+- [x] Step3 fixed fullchain-04两case实际PASS：原双槽/publication/prep结算、真实archive/fullsync/observer SIGKILL/provider/原64节点release，再42=34+4+4 quota事务。Grant/guard/commit/release ACK、postread exact-ref、metadata篡改、两Backend、prep/new workspace owner/quota epoch+1复用与无slot读取重放断言通过。02/03仅fixture recovery锁/0700目录setup失败，未计algorithm RED或正例；原证据保留。所有Wait/Serve/IO实际join，exact容器清理及inventory空，未重跑旧矩阵。
+- [x] Step4 原host/race/metadata验证保留；fixture最后改动后fullchain-vet-03 exit0，fullchain-04 actual17/prepost/current/everymember档案和ELF/脚本由Root独立审过，实际run exit0。最终3源码冻结，Slice2已精确小提交`8555578`。
+- [x] Step5 唯一fresh wholeTask reviewer审查BASE956536e→8555578全部4提交，spec compliant / Approved，无Critical/Important；唯一日志展示Minor已分类并留待collector维护，不需代码修复或重跑。Root核对跨单元及运行来源，tracked验收见`docs/superpowers/reports/2026-10-16-etcd-cold-runtime-quota-return-verification.md`；本单元完成，接续总迁移。
 
 ## Preflight relationships
 
