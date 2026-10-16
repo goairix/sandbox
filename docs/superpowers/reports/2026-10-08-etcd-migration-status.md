@@ -8,6 +8,8 @@
 
 清理执行计划Step2已新增真实创建入口的local清理快照：snapshot2版本化摘要、旧v1默认重试兼容、深复制/完整缓存计费及每位读取者placement绑定已实现。56个状态层与12个创建入口测试组host/race、两包Linuxvet通过，三成员测试资源已清理，历史失败及服务日志保留。见 [清理快照验证](2026-10-17-etcd-cleanup-snapshot-verification.md)。这只是后续实际消费者的生产数据来源；持久32槽、物理清理执行及完整Task审查尚未完成，百分比不因这个切片重复上调。
 
+Step3首片已实现槽位永久记录、占用/轮转CAS、原worker预算下的Claim流水线复用与新协议wire预检。19组回归host/race和Linuxvet通过，三成员资源已清理，日志和首次编译失败如实保留。见 [持久槽协议验证](2026-10-17-etcd-cleanup-slot-verification.md)。正向物理准入、真实run/join和终态结算仍未完成，未将32条占用元数据当32个物理任务验收，整体百分比保持不变。
+
 ## 2026-10-16 最新接续：显式 HTTP、文件下载、分区 worker 控制与到期发现已范围验收
 
 当前工作分支 `codex/etcd-state-management`。Lookup 验收提交 `436bef8`，实际执行 service 的四个实现切片为 `2469576`、`6777519`、`7f50806`、`2616a36`，唯一审查 C0/I0/M2 Approved。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。

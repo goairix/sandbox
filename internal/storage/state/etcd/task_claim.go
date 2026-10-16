@@ -117,6 +117,10 @@ func (b *Backend) preflightTaskClaim(c *TaskClaim, checkpoint taskFence) error {
 	_, _, err = prepareMutation(b.namespace, mutation)
 	return err
 }
+
+// ClaimTask obtains one original leased metadata claim from the current Task
+// bundle. It does not reserve a cleanup execution slot or authorize runtime
+// effects; managed cleanup enters through the original worker admission path.
 func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID string, ttl time.Duration) (claim *TaskClaim, err error) {
 	if ctx == nil || !validDomainSegment(workerID) {
 		return nil, ErrInvalidRecord
@@ -131,48 +135,79 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if err != nil {
 		return nil, err
 	}
+	c, checkpoint, err := b.prepareTaskClaim(ctx, bundle, workerID, ttl, uuid.NewString())
+	if err != nil {
+		return nil, err
+	}
+	return b.executeTaskClaim(ctx, c, checkpoint, nil, nil)
+}
+
+// Construction and Grant/create/postcheck are shared with the managed path.
+// Managed pins are transient creation comparisons, never additional c.fences.
+func (b *Backend) prepareTaskClaim(parent context.Context, bundle *taskClaimBundle, workerID string, ttl time.Duration, claimID string) (*TaskClaim, taskFence, error) {
+	if parent == nil || bundle == nil || bundle.checkpoint == nil || len(bundle.fences) != 8 || !validDomainSegment(workerID) || !validPreparationUUID(claimID) || ttl <= 0 || ttl > 24*time.Hour {
+		return nil, taskFence{}, ErrInvalidRecord
+	}
+	ref := bundle.task.Reference
 	seconds := int64(ttl / time.Second)
 	if ttl%time.Second != 0 {
 		seconds++
 	}
 	// Maximal integers here are byte-budget placeholders, never native revisions
 	// or published authority. Checked server values replace both before return.
-	c := &TaskClaim{origin: b, parentCtx: ctx, reference: TaskClaimReference{Task: ref, ClaimID: uuid.NewString(), WorkerID: workerID, LeaseID: math.MaxInt64, CreateRevision: math.MaxInt64}, fences: bundle.fences, birth: bundle.birth, initial: bundle.initial, ttlSeconds: seconds}
+	c := &TaskClaim{origin: b, parentCtx: parent, reference: TaskClaimReference{Task: ref, ClaimID: claimID, WorkerID: workerID, LeaseID: math.MaxInt64, CreateRevision: math.MaxInt64}, fences: append([]taskFence(nil), bundle.fences...), birth: bundle.birth, initial: bundle.initial, ttlSeconds: seconds}
 	c.self = c
+	var err error
 	c.claimKey, err = b.namespace.taskClaimKey(ref)
 	if err != nil {
-		return nil, err
+		return nil, taskFence{}, err
 	}
 	c.guardKey, err = b.namespace.taskGuardKey(ref, c.reference.ClaimID)
 	if err != nil {
-		return nil, err
+		return nil, taskFence{}, err
 	}
 	c.checkpointKey, err = b.namespace.taskCheckpointKey(ref)
 	if err != nil {
-		return nil, err
+		return nil, taskFence{}, err
 	}
 	record := taskClaimRecord{Version: 1, Task: ref, ClaimID: c.reference.ClaimID, WorkerID: workerID, LeaseID: math.MaxInt64}
 	c.value, err = encodeTaskClaimRecord(record)
 	if err != nil {
-		return nil, err
+		return nil, taskFence{}, err
 	}
 	checkpoint := ownTaskFence(bundle.checkpoint)
 	if err = b.preflightTaskClaim(c, checkpoint); err != nil {
-		return nil, err
+		return nil, taskFence{}, err
 	}
+	return c, checkpoint, nil
+}
+
+// A managed call retains ownership through every started RPC and known-Lease
+// cleanup. Its live job context becomes c.parentCtx, while all admission RPCs
+// retain the original charged call context and cannot outlive that authority.
+func (b *Backend) executeTaskClaim(ctx context.Context, c *TaskClaim, checkpoint taskFence, extra []clientv3.Cmp, owner *workerDueOwner) (claim *TaskClaim, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
+	if owner != nil {
+		if _, err = b.cleanupOwnerComparisons(owner); err != nil {
+			return nil, err
+		}
+	}
 	request, cancel := b.requestContext(ctx)
 	sent := time.Now()
-	grant, grantErr := b.client.Grant(request, seconds)
+	grant, grantErr := b.client.Grant(request, c.ttlSeconds)
 	requestErr := request.Err()
 	cancel()
 	known := grant != nil && grant.ResponseHeader != nil && grant.ClusterId == b.clusterID && grant.Revision > 0 && grant.ID > 0
 	if known {
 		defer func() {
 			if claim == nil {
-				cleanup, cancel := b.requestContext(context.Background())
+				parent := context.Background()
+				if owner != nil {
+					parent = owner.call.ctx
+				}
+				cleanup, cancel := b.requestContext(parent)
 				defer cancel()
 				err = errors.Join(err, b.revokeTaskLease(cleanup, grant.ID))
 			}
@@ -192,7 +227,7 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if err = c.live(ctx); err != nil {
 		return nil, err
 	}
-	record.LeaseID = int64(grant.ID)
+	record := taskClaimRecord{Version: 1, Task: c.reference.Task, ClaimID: c.reference.ClaimID, WorkerID: c.reference.WorkerID, LeaseID: int64(grant.ID)}
 	c.value, err = encodeTaskClaimRecord(record)
 	if err != nil {
 		return nil, err
@@ -201,8 +236,15 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if _, _, err = prepareMutation(b.namespace, mutation); err != nil {
 		return nil, err
 	}
+	comparisons := append(b.baseComparisons(), mutation.Comparisons...)
+	comparisons = append(comparisons, extra...)
+	if owner != nil {
+		if err = b.checkCleanupClaimWire(c, comparisons); err != nil {
+			return nil, err
+		}
+	}
 	request, cancel = b.requestContext(ctx)
-	response, err := b.client.Txn(request).If(append(b.baseComparisons(), mutation.Comparisons...)...).Then(clientv3.OpPut(c.claimKey, c.value, clientv3.WithLease(grant.ID)), clientv3.OpPut(c.guardKey, c.value, clientv3.WithLease(grant.ID))).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
+	response, err := b.client.Txn(request).If(comparisons...).Then(clientv3.OpPut(c.claimKey, c.value, clientv3.WithLease(grant.ID)), clientv3.OpPut(c.guardKey, c.value, clientv3.WithLease(grant.ID))).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
 	requestErr = request.Err()
 	cancel()
 	if err != nil || requestErr != nil {
@@ -230,8 +272,14 @@ func (b *Backend) ClaimTask(ctx context.Context, ref TaskReference, workerID str
 	if err = c.live(ctx); err != nil {
 		return nil, err
 	}
+	if owner != nil {
+		if err = owner.postcheck(); err != nil {
+			return nil, err
+		}
+	}
 	return c, nil
 }
+
 func (b *Backend) checkTaskClaimFences(ctx context.Context, c *TaskClaim) error {
 	request, cancel := b.requestContext(ctx)
 	// Both branches contain a linearizable Range; comparison-only transactions

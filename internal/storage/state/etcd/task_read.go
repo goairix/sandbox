@@ -83,6 +83,12 @@ type taskClaimBundle struct {
 }
 
 func (b *Backend) loadTaskClaimBundle(ctx context.Context, ref TaskReference) (*taskClaimBundle, error) {
+	return b.loadTaskClaimBundleForOwner(ctx, ref, nil)
+}
+
+// The managed entry shares every original coherent-bundle check. Only its
+// transport envelope/context is stricter; public ClaimTask keeps its reader.
+func (b *Backend) loadTaskClaimBundleForOwner(ctx context.Context, ref TaskReference, admissionOwner *workerDueOwner) (*taskClaimBundle, error) {
 	if err := b.validateTaskReference(ref); err != nil {
 		return nil, err
 	}
@@ -90,12 +96,15 @@ func (b *Backend) loadTaskClaimBundle(ctx context.Context, ref TaskReference) (*
 	if err != nil {
 		return nil, err
 	}
-	discovered, err := b.readDomain(ctx, taskKey)
+	discovered, err := b.readTaskClaimPoints(ctx, admissionOwner, taskKey)
 	if err != nil {
 		return nil, err
 	}
 	if discovered[0] == nil {
 		return nil, ErrConflict
+	}
+	if admissionOwner != nil && discovered[0].Version != 1 {
+		return nil, ErrCorruptRecord
 	}
 	var routing TaskRecord
 	if err = decodeTaskRecord(discovered[0], &routing); err != nil {
@@ -142,7 +151,7 @@ func (b *Backend) loadTaskClaimBundle(ctx context.Context, ref TaskReference) (*
 		return nil, err
 	}
 	keys := []string{taskKey, intentKey, linkKey, placementKey, controlKey, ownerKey, fenceKey, indexKey, checkpointKey, claimKey}
-	values, err := b.readDomain(ctx, keys...)
+	values, err := b.readTaskClaimPoints(ctx, admissionOwner, keys...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +164,13 @@ func (b *Backend) loadTaskClaimBundle(ctx context.Context, ref TaskReference) (*
 	for _, kv := range values[:8] {
 		if !operationPermanentKV(kv) {
 			return nil, ErrCorruptRecord
+		}
+	}
+	if admissionOwner != nil {
+		for _, kv := range values[:3] {
+			if kv.Version != 1 {
+				return nil, ErrCorruptRecord
+			}
 		}
 	}
 	var task TaskRecord
@@ -210,4 +226,12 @@ func (b *Backend) loadTaskClaimBundle(ctx context.Context, ref TaskReference) (*
 	checkpoint.Key = append([]byte(nil), checkpoint.Key...)
 	checkpoint.Value = append([]byte(nil), checkpoint.Value...)
 	return &taskClaimBundle{task: task, fences: fences, checkpoint: &checkpoint, birth: birth, initial: intent.Attempt}, nil
+}
+
+func (b *Backend) readTaskClaimPoints(ctx context.Context, owner *workerDueOwner, keys ...string) ([]*mvccpb.KeyValue, error) {
+	if owner == nil {
+		return b.readDomain(ctx, keys...)
+	}
+	points, _, err := b.cleanupReadPoints(owner, keys...)
+	return points, err
 }
