@@ -66,6 +66,12 @@ func (b *Backend) beginWorkerCall(ctx context.Context, s *WorkerSession) (*worke
 	}
 	b.archiveLife.mu.Lock()
 	defer b.archiveLife.mu.Unlock()
+	return b.beginWorkerCallLocked(ctx, s)
+}
+
+// Requires archiveLife.mu. Domain consumers reserve their physical owner,
+// original token bucket and session call in this same admission section.
+func (b *Backend) beginWorkerCallLocked(ctx context.Context, s *WorkerSession) (*workerCall, error) {
 	if !b.validWorkerSession(s) {
 		return nil, ErrInvalidRecord
 	}
@@ -146,6 +152,7 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 	s.cancel()
 	call := s.operation
 	owners := b.stopWorkerRelists(s, nil, nil)
+	dueOwners := b.stopWorkerDueOwners(s, nil, nil)
 	var children []*workerRelease
 	for _, p := range s.partitions {
 		if p != nil && p.release != nil {
@@ -162,6 +169,9 @@ func (b *Backend) releaseWorkerSession(_ context.Context, s *WorkerSession) erro
 		<-call.done
 	}
 	for _, owner := range owners {
+		<-owner.done
+	}
+	for _, owner := range dueOwners {
 		<-owner.done
 	}
 	for _, child := range children {
@@ -200,6 +210,7 @@ func (b *Backend) stopWorkerControl() []*WorkerSession {
 			s.lost = true
 			s.cancel()
 			b.stopWorkerRelists(s, nil, nil)
+			b.stopWorkerDueOwners(s, nil, nil)
 			if s.operation != nil {
 				s.operation.cancel()
 			}

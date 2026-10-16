@@ -23,6 +23,7 @@ type WorkerBudgetShare struct {
 	lost, released bool
 	release        *workerRelease
 	owner          *workerRelistOwner
+	dueOwner       *workerDueOwner
 }
 
 func (share *WorkerBudgetShare) Reference() WorkerBudgetReference {
@@ -196,9 +197,13 @@ func (b *Backend) ReleaseWorkerBudget(ctx context.Context, share *WorkerBudgetSh
 	r := &workerRelease{done: make(chan struct{})}
 	share.release = r
 	owners := b.stopWorkerRelists(share.session, nil, share)
+	dueOwners := b.stopWorkerDueOwners(share.session, nil, share)
 	b.archiveLife.mu.Unlock()
 	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
 	for _, owner := range owners {
+		<-owner.done
+	}
+	for _, owner := range dueOwners {
 		<-owner.done
 	}
 	call, err := b.beginWorkerCall(ctx, share.session)

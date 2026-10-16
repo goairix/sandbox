@@ -131,9 +131,13 @@ func (b *Backend) ReleaseWorkerPartition(ctx context.Context, p *WorkerPartition
 	r := &workerRelease{done: make(chan struct{})}
 	p.release = r
 	owners := b.stopWorkerRelists(p.session, p, nil)
+	dueOwners := b.stopWorkerDueOwners(p.session, p, nil)
 	b.archiveLife.mu.Unlock()
 	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
 	for _, owner := range owners {
+		<-owner.done
+	}
+	for _, owner := range dueOwners {
 		<-owner.done
 	}
 	call, err := b.beginWorkerCall(ctx, p.session)
