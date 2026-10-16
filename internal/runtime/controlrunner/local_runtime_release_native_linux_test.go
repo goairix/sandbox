@@ -59,6 +59,7 @@ type localReleaseNativeSetup struct {
 	Generation                                                            int64
 	Fault                                                                 string
 	EtcdAddress                                                           string
+	ColdQuotaReturn                                                       bool
 }
 
 type localReleaseNativeReply struct {
@@ -223,6 +224,9 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	plan, err := state.NewTaskWorkspaceSyncPlan(state.TaskWorkspaceSyncPlanOptions{Workspace: workspace})
 	require.NoError(t, err)
 	o := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: s.Identity, TLS: tlsConfig, RequestTimeout: 2 * time.Second, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: s.Binding.AuthorityID, Target: s.Binding.Target, Roots: []ed25519.PublicKey{s.Root}}, Clock: nativeFixtureClock{}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: s.Contract, MaxActive: 2}, TaskIssuer: issuer, TaskQuiescenceIssuer: issuer, TaskWorkspaceArchiveIssuer: issuer, TaskRuntimeTerminationIssuer: issuer, LocalRuntimeRelease: &state.LocalRuntimeReleaseOptions{MaxActive: 1, Timeout: 30 * time.Second, Provider: provider}, TaskWorkspaceArchiveRecovery: &state.TaskWorkspaceArchiveRecoveryOptions{TaskWorkspaceArchiveSpoolOptions: state.TaskWorkspaceArchiveSpoolOptions{Directory: filepath.Join(s.Directory, "spool"), Jobs: 1, JobBytes: 1 << 20, TotalBytes: 1 << 20, Entries: 16, JobIndexBytes: 1 << 20, TotalIndexBytes: 1 << 20}}, TaskWorkspaceSyncRecyclingBudget: &state.TaskWorkspaceSyncBudgetOptions{BudgetID: s.BudgetID, SlotsPerPartition: 1, MaxIntentBytes: 16384}}
+	if s.ColdQuotaReturn {
+		coldQuotaReturnNativeProfile(&o)
+	}
 	if s.EtcdAddress != "" {
 		o.Endpoints = []string{s.EtcdAddress}
 	}
@@ -428,6 +432,9 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	read, err := cold.LoadTaskOwnerRelease(ctx, task)
 	require.NoError(t, err)
 	require.Equal(t, released.Entry, read)
+	if s.ColdQuotaReturn {
+		coldQuotaReturnAfterRealRelease(t, ctx, cold, o, tlsConfig, workspace, task, s, newInput)
+	}
 	require.NoError(t, cold.Close())
 	t.Logf("public fullchain complete: task=%s physicalproof+cleanup-complete+atomic-release=%d newowner-cold-receipt=true", task.TaskID, released.Entry.CreateRevision)
 }
@@ -464,6 +471,10 @@ func TestLocalRuntimeReleaseNativeACKs(t *testing.T) {
 }
 
 func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
+	runLocalRuntimeReleaseNativeMode(t, fault, false)
+}
+
+func runLocalRuntimeReleaseNativeMode(t *testing.T, fault string, coldQuotaReturn bool) {
 	if os.Getenv("SANDBOX_LOCAL_RELEASE_NATIVE") != "1" {
 		t.Skip("explicit exact owned Linux fixture required")
 	}
@@ -512,9 +523,24 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	require.NoError(t, err)
 	contract := hashBytes([]byte("local-release-genuine-empty-workspace-v1"))
 	options := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: identity, TLS: appTLS, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: binding.AuthorityID, Target: binding.Target, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: nativeFixtureClock{}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: contract, MaxActive: 2}, RequestTimeout: 2 * time.Second}
+	if coldQuotaReturn {
+		coldQuotaReturnNativeProfile(&options)
+	}
 	b, err := state.New(ctx, options)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, b.Close()) }()
+	if coldQuotaReturn {
+		for count := 0; count < 8; count++ {
+			progress, err := b.InitializePreparationInventory(ctx)
+			require.NoError(t, err)
+			if progress.Ready {
+				break
+			}
+		}
+		inventory, err := b.ReadPreparationInventory(ctx)
+		require.NoError(t, err)
+		require.True(t, inventory.Ready)
+	}
 	workspace, err := state.NewWorkspaceIdentity("local", identity.StorageID, "bucket", "empty/")
 	require.NoError(t, err)
 	input := state.AcquireIntentInput{Workspace: workspace, Principal: "fixture", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"mode":"plain"}`), Now: time.Now().UTC(), TTL: time.Hour}
@@ -524,8 +550,18 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	creation, err := b.ClaimCreation(ctx, workspace, input.IntentID, "fullchain-creation", time.Minute)
 	require.NoError(t, err)
 	defer b.ReleaseCreationClaim(context.Background(), creation)
+	if coldQuotaReturn {
+		reserved, err := b.ReserveColdPreparation(ctx, creation, 7)
+		require.NoError(t, err)
+		require.Equal(t, state.OutcomeCommitted, reserved.Outcome)
+	}
 	dispatch, err := b.DeclareRuntimeDispatch(ctx, creation, state.RuntimeDispatchInput{Kind: state.RuntimeDispatchCreate, Target: binding.Target, Payload: json.RawMessage(`{"mode":"plain"}`)})
 	require.NoError(t, err)
+	if coldQuotaReturn {
+		attempt, err := b.BeginColdCreateAttempt(ctx, creation)
+		require.NoError(t, err)
+		require.NoError(t, b.ConsumeColdCreatePermit(creation, attempt.Permit))
+	}
 	now := time.Now().UTC()
 	nb, na := now.Add(-30*time.Second), now.Add(5*time.Minute)
 	observerCert, err := p.SignNodeObserverCertificate(root, p.NodeObserverCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "node_observer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, NodeUID: nodeUID, NodeBootID: boot, PublicKey: observerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
@@ -761,6 +797,7 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	}()
 	setup := localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "empty/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}
 	setup.Fault = fault
+	setup.ColdQuotaReturn = coldQuotaReturn
 	var observerProxy *localReleaseObserverProxy
 	if fault == "observer-send-ack" {
 		setup.ObserverAddress, observerProxy = newLocalReleaseObserverProxy(t, ctx, setup, observerKey)
@@ -803,6 +840,11 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	d := dispatch.Entry.Record
 	certificate, err := p.SignRuntimeCertificate(root, p.RuntimeCertificateClaims{Version: 1, Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IntentID: input.IntentID, SandboxID: input.SandboxID, WorkspaceHash: workspace.Hash(), Generation: ri.Generation, OperationID: d.OperationID, PayloadDigest: d.PayloadDigest, Snapshot: p.SnapshotReference(d.Snapshot), ExpiresAt: d.ExpiresAt, Runtime: ri.Runtime, WorkspaceMode: "plain", PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
+	if coldQuotaReturn {
+		observed, err := b.RecordColdCreateObservation(ctx, creation, podUID)
+		require.NoError(t, err)
+		require.Equal(t, podUID, observed.PodUID)
+	}
 	_, err = b.BindRuntime(ctx, creation, certificate)
 	require.NoError(t, err)
 	_, err = b.ConsumeRuntimeMount(ctx, creation)
@@ -815,6 +857,11 @@ func runLocalRuntimeReleaseNative(t *testing.T, fault string) {
 	published, err := b.PublishRuntimeEnrolled(ctx, creation, reply.Proof, reply.Enrollment)
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, published.Outcome)
+	if coldQuotaReturn {
+		settled, err := b.SettleColdPreparation(ctx, workspace, input.IntentID)
+		require.NoError(t, err)
+		require.Equal(t, state.OutcomeCommitted, settled.Outcome)
+	}
 	controlKey, err := ns.Key("p", fmt.Sprintf("%02x", workspace.Partition()), "controls", input.SandboxID)
 	require.NoError(t, err)
 	control, err := admin.Get(ctx, controlKey)

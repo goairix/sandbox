@@ -39,6 +39,7 @@ type localReleaseNativeProxy struct {
 	providerKey   string
 	lastRequest   *pb.TxnRequest
 	lastSucceeded bool
+	quota         *coldQuotaReturnNativeFault
 }
 
 type localReleaseNativeTransaction struct {
@@ -57,6 +58,9 @@ func newLocalReleaseNativeProxy(t *testing.T, config *tls.Config, fault string) 
 	serverTLS.ClientCAs, serverTLS.ClientAuth = config.RootCAs, tls.RequireAndVerifyClientCert
 	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)), grpc.WaitForHandlers(true))
 	p := &localReleaseNativeProxy{kv: pb.NewKVClient(upstream.ActiveConnection()), lease: pb.NewLeaseClient(upstream.ActiveConnection()), maintenance: pb.NewMaintenanceClient(upstream.ActiveConnection()), fault: fault}
+	if fault == "cold-quota" {
+		p.quota = &coldQuotaReturnNativeFault{}
+	}
 	pb.RegisterKVServer(server, p)
 	pb.RegisterLeaseServer(server, p)
 	pb.RegisterMaintenanceServer(server, p)
@@ -81,7 +85,11 @@ func (p *localReleaseNativeProxy) DeleteRange(ctx context.Context, r *pb.DeleteR
 	return p.kv.DeleteRange(ctx, r)
 }
 func (p *localReleaseNativeProxy) LeaseGrant(ctx context.Context, r *pb.LeaseGrantRequest) (*pb.LeaseGrantResponse, error) {
-	return p.lease.LeaseGrant(ctx, r)
+	response, err := p.lease.LeaseGrant(ctx, r)
+	if p.quota != nil && p.quota.dropGrant(err) {
+		return nil, status.Error(codes.PermissionDenied, "fixture withheld actual upstream Grant ACK")
+	}
+	return response, err
 }
 func (p *localReleaseNativeProxy) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) (*pb.LeaseRevokeResponse, error) {
 	return p.lease.LeaseRevoke(ctx, r)
@@ -92,6 +100,11 @@ func (p *localReleaseNativeProxy) Status(ctx context.Context, r *pb.StatusReques
 
 func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse, error) {
 	label := "other"
+	if p.quota != nil {
+		if err := p.quota.before(r); err != nil {
+			return nil, err
+		}
+	}
 	for _, op := range r.Success {
 		if put := op.GetRequestPut(); put != nil {
 			switch {
@@ -116,6 +129,10 @@ func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*p
 		}
 	}
 	response, err := p.kv.Txn(ctx, r)
+	quotaDrop := false
+	if p.quota != nil {
+		label, quotaDrop = p.quota.after(r, response, err, label)
+	}
 	x := localReleaseNativeTransaction{Label: label, Comparisons: len(r.Compare), Success: len(r.Success), Failure: len(r.Failure), RequestBytes: r.Size()}
 	x.Nodes = x.Comparisons + x.Success + x.Failure
 	if response != nil {
@@ -130,6 +147,9 @@ func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*p
 	p.lastRequest, p.lastSucceeded = r, err == nil && x.Succeeded
 	if err == nil && x.Succeeded && label == strings.TrimPrefix(p.fault, "ack-") && p.dropped == 0 {
 		p.dropped++
+		x.Dropped = true
+	}
+	if quotaDrop {
 		x.Dropped = true
 	}
 	p.transactions = append(p.transactions, x)
