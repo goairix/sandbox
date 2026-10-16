@@ -33,6 +33,7 @@ type PlainColdOptions struct {
 	RootPrivateKey, IssuerPrivateKey               ed25519.PrivateKey
 	IssuerCertificate                              []byte
 	Clock                                          p.AuthorityClock
+	Business                                       *PlainColdBusinessOptions
 }
 
 type PlainColdState string
@@ -77,6 +78,7 @@ type PlainColdService struct {
 	issuerWire                           []byte
 	clock                                p.AuthorityClock
 	verifier                             *p.ManagementVerifier
+	business                             *PlainColdBusinessOptions
 	mu                                   sync.Mutex
 	closed                               bool
 	limit                                int
@@ -104,6 +106,10 @@ func NewPlainColdService(ctx context.Context, o PlainColdOptions) (*PlainColdSer
 	o.API.Config = rest.CopyConfig(o.API.Config)
 	o.API.Config.CAData, o.API.Config.CertData, o.API.Config.KeyData = bytes.Clone(o.API.Config.CAData), bytes.Clone(o.API.Config.CertData), bytes.Clone(o.API.Config.KeyData)
 	cfg, err := launcherconfig.Decode(o.LauncherConfig)
+	if err != nil {
+		return nil, err
+	}
+	business, err := ownColdBusiness(o.Backend, o.Business, cfg, o.CPU, o.Memory, o.Disk, o.TmpDisk)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +182,7 @@ func NewPlainColdService(ctx context.Context, o PlainColdOptions) (*PlainColdSer
 		bridge.Close()
 		return nil, err
 	}
-	s := &PlainColdService{backend: o.Backend, driver: driver, bridge: bridge, config: cfg, configWire: bytes.Clone(o.LauncherConfig), spec: spec, nodeName: o.NodeName, worker: o.WorkerID, namespace: o.API.Namespace, profile: coldHash(publicProfile), quota: o.QuotaPartition, root: bytes.Clone(o.RootPrivateKey), issuer: bytes.Clone(o.IssuerPrivateKey), issuerWire: bytes.Clone(o.IssuerCertificate), clock: o.Clock, verifier: verifier, limit: o.API.MaxActive, active: make(map[*plainColdCall]struct{}), closeDone: make(chan struct{})}
+	s := &PlainColdService{backend: o.Backend, driver: driver, bridge: bridge, config: cfg, configWire: bytes.Clone(o.LauncherConfig), spec: spec, nodeName: o.NodeName, worker: o.WorkerID, namespace: o.API.Namespace, profile: coldHash(publicProfile), quota: o.QuotaPartition, root: bytes.Clone(o.RootPrivateKey), issuer: bytes.Clone(o.IssuerPrivateKey), issuerWire: bytes.Clone(o.IssuerCertificate), clock: o.Clock, verifier: verifier, business: business, limit: o.API.MaxActive, active: make(map[*plainColdCall]struct{}), closeDone: make(chan struct{})}
 	s.self = s
 	return s, nil
 }

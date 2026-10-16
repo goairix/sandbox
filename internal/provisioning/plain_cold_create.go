@@ -28,27 +28,11 @@ func (s *PlainColdService) Create(ctx context.Context, w state.WorkspaceIdentity
 		return result, err
 	}
 	defer s.leave(call)
-	ctx = call.context
-	wire, err := coldRequestCapsule(s.profile, w, request)
-	if err != nil {
-		return result, err
-	}
-	var capsule plainColdCapsule
-	if err := decodeColdCapsule(wire, &capsule); err != nil {
-		return result, err
-	}
-	if err := s.validateColdBusiness(capsule); err != nil {
-		return result, err
-	}
-	if err := s.ready(ctx); err != nil {
-		return result, err
-	}
-	now, err := s.now(ctx)
-	if err != nil {
-		return result, err
-	}
-	acquired, err := s.backend.AcquireIntent(ctx, state.AcquireIntentInput{Workspace: w, Principal: request.Principal, IdempotencyKey: request.IdempotencyKey, RequestID: request.RequestID, IntentID: request.IntentID, SandboxID: request.SandboxID, SnapshotVersion: request.SnapshotVersion, Payload: wire, Now: now, TTL: request.TTL})
-	result.Stage = acquired.Reference
+	return s.createEntered(call.context, w, request)
+}
+
+func (s *PlainColdService) createEntered(ctx context.Context, w state.WorkspaceIdentity, request PlainColdRequest) (PlainColdResult, error) {
+	result, acquired, err := s.acquireEntered(ctx, w, request)
 	if err != nil {
 		return result, err
 	}
@@ -60,6 +44,32 @@ func (s *PlainColdService) Create(ctx context.Context, w state.WorkspaceIdentity
 		return result, state.ErrOutcomeUnknown
 	}
 	return s.resume(ctx, w, result)
+}
+
+func (s *PlainColdService) acquireEntered(ctx context.Context, w state.WorkspaceIdentity, request PlainColdRequest) (PlainColdResult, state.AcquireIntentResult, error) {
+	result := PlainColdResult{State: PlainColdPending, RequestID: request.RequestID, IntentID: request.IntentID, SandboxID: request.SandboxID}
+	acquired := state.AcquireIntentResult{Outcome: state.OutcomeUnknown}
+	wire, err := coldRequestCapsule(s.profile, w, request)
+	if err != nil {
+		return result, acquired, err
+	}
+	var capsule plainColdCapsule
+	if err := decodeColdCapsule(wire, &capsule); err != nil {
+		return result, acquired, err
+	}
+	if err := s.validateColdBusiness(capsule); err != nil {
+		return result, acquired, err
+	}
+	if err := s.ready(ctx); err != nil {
+		return result, acquired, err
+	}
+	now, err := s.now(ctx)
+	if err != nil {
+		return result, acquired, err
+	}
+	acquired, err = s.backend.AcquireIntent(ctx, state.AcquireIntentInput{Workspace: w, Principal: request.Principal, IdempotencyKey: request.IdempotencyKey, RequestID: request.RequestID, IntentID: request.IntentID, SandboxID: request.SandboxID, SnapshotVersion: request.SnapshotVersion, Payload: wire, Now: now, TTL: request.TTL})
+	result.Stage = acquired.Reference
+	return result, acquired, err
 }
 
 func (s *PlainColdService) Resume(ctx context.Context, w state.WorkspaceIdentity, prior PlainColdResult) (PlainColdResult, error) {
