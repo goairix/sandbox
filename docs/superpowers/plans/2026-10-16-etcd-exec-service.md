@@ -20,7 +20,7 @@
 
 **Produces:** 实际 streaming-writer Exec service、有限原续期与清理、明确 local terminal/unknown/ref、实际 mounted signer/只读 deployment 接线和 native 证明。
 
-- [ ] Step1 同一作者只读预检 exact DTO/identity/current target/normal terminal 与 unknown、admission/refactor、续期竞态、signer key 生命周期及实际 native fixture；Root裁定后 frozen tests/collector。
+- [x] Step1 源码预检6844fc通过：Exec接收完整ExecutionRequest与writers，结果显式rejected/unknown/local_terminal+原refs/receipt；统一enterFor预算、固定UID/GID/profile、owned signer/只读Open。Root接受窄ErrExecDeliveryTerminal兼容wrap ErrConflict，仅区别已认证终态；真实失权/IO错误不吞。tests-only开始，产品等实际RED。
 - [ ] Step2 新入口最小 RED 后实现；产品按 signer、实际 service 等连贯 slice 验证即提交，不能所有完成才大提交。
 - [ ] Step3 targeted host/race/Linuxvet；真实 native 含超20秒执行/原续期、输出/非零退出、gate/cancel/Close/unknown 和所有原 Wait/IO joins。匹配实际GoList来源/当前binary/脚本，Root具体Docker预检。
 - [ ] Step4 唯一fresh reviewer审原BASE→HEAD，同pair定点修复；tracked验收关闭OWN，立即继续生产业务路径。
@@ -37,3 +37,5 @@
 | Task1内部 | tests/product/fixture | 一次交付可实际执行的consumer，非孤立signer；长执行native是必需的期限/续期证据 |
 
 Ruling: 用户已批准总方案并要求连续加速；上述为已有协议的实际消费，不重开Redis/etcd选型或请求重复授权。已解析ExecutionRequest避免本层猜镜像环境；HTTP shell/default映射后续单独接线。若错误，成本为adapter接口调整，不影响已有wire或权限协议。
+
+Ruling: RenewExecDelivery原来将已验证终态与真实失权都报ErrConflict。消费层只识别新窄terminal sentinel（仍errors.Is ErrConflict兼容），不得泛吞冲突；终态后停止新tick但join在途boundedrenew并保留其真实错误。若错误，成本为保守unknown或兼容性修正，不授予新能力。实际native命令运行32秒、timeout45，越过原30秒权限窗证明真实续期；只统计签名次数不足验收。
