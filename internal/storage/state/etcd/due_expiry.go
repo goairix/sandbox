@@ -48,6 +48,13 @@ func (b *Backend) observeExpiryLowerBound(ctx context.Context) (time.Time, error
 // consumes its exact due candidate in the same transaction. It never returns
 // a generic Stage that could bypass the original clock/worker rechecks.
 func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim, share *WorkerBudgetShare, candidate DueCandidateRecord, requestID string, ttl time.Duration) (result ExpiredTaskResult, resultErr error) {
+	return b.admitExpiredTask(ctx, p, share, candidate, requestID, ttl, nil)
+}
+
+// The resident consumer persists its exact pending reference using this
+// admission's original charged call before any Stage Grant. Public admission
+// retains its existing signature and has no caller-supplied persistence hook.
+func (b *Backend) admitExpiredTask(ctx context.Context, p *WorkerPartitionClaim, share *WorkerBudgetShare, candidate DueCandidateRecord, requestID string, ttl time.Duration, pending *dueWorkerAdmission) (result ExpiredTaskResult, resultErr error) {
 	result.Outcome = OutcomeUnknown
 	if ctx == nil || !b.validWorkerBackend() || candidate.Validate() != nil || !validDomainSegment(requestID) || candidate.RestoreEpoch != b.restoreEpoch {
 		return result, ErrInvalidRecord
@@ -57,6 +64,9 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 	}
 	if b.publicationVerifier == nil || b.authorityClock == nil {
 		return result, ErrInvalidConfiguration
+	}
+	if pending != nil && (pending.origin != b || pending.partition != p || pending.claims != share || pending.checkpoint == nil || pending.checkpoint.record.Pending != nil) {
+		return result, ErrInvalidRecord
 	}
 	o, stopDeadline, err := b.beginExpiredTaskOwner(ctx, p, share)
 	if err != nil {
@@ -79,6 +89,9 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 		return result, err
 	}
 	if firstBound.Before(candidate.ExpiresAt) {
+		if pending != nil {
+			pending.early = true
+		}
 		return result, ErrOperationAdmissionClosed
 	}
 	// These generic read helpers use this owner's fixed original lease
@@ -87,9 +100,15 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 	bundle, err := b.loadOperationControl(call.ctx, candidate.SandboxID)
 	if err != nil {
 		terminalNativeFailure = !errors.Is(err, ErrConflict) && !errors.Is(err, ErrOperationAdmissionClosed)
+		if pending != nil && errors.Is(err, ErrOperationAdmissionClosed) {
+			pending.rejected = true
+		}
 		return result, err
 	}
 	if bundle.Partition != p.partition || dueCandidateForControl(bundle.Partition, bundle.Control) != candidate {
+		if pending != nil {
+			pending.rejected = true
+		}
 		return result, ErrConflict
 	}
 	dueKey, err := b.namespace.dueCandidateKey(candidate)
@@ -102,6 +121,9 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 		return result, err
 	}
 	if points[0] == nil {
+		if pending != nil {
+			pending.rejected = true
+		}
 		return result, ErrConflict
 	}
 	actual, err := decodeDueCandidate(b.namespace, points[0], points[0].ModRevision)
@@ -110,6 +132,9 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 		return result, err
 	}
 	if actual != candidate {
+		if pending != nil {
+			pending.rejected = true
+		}
 		return result, ErrConflict
 	}
 	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: p.partition, RequestID: requestID, StageID: "destroy", AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
@@ -137,6 +162,12 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 	if err = b.preflightExpiredTask(result.Reference, owned); err != nil {
 		return result, err
 	}
+	if pending != nil {
+		if err = pending.persist(call, candidate, result); err != nil {
+			terminalNativeFailure = true
+			return result, err
+		}
+	}
 	stage, err := b.beginStageWithLocator(call.ctx, locator, ttl, func(StageAttemptLocator) (Mutation, error) { return owned, nil }, nil)
 	if err != nil {
 		terminalNativeFailure = !errors.Is(err, ErrConflict) || errors.Is(err, ErrOutcomeUnknown)
@@ -157,6 +188,9 @@ func (b *Backend) AdmitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 		return result, err
 	}
 	if secondBound.Before(firstBound) || secondBound.Before(candidate.ExpiresAt) {
+		if pending != nil {
+			pending.early = true
+		}
 		return result, ErrOperationAdmissionClosed
 	}
 	if err = o.postcheck(); err != nil {
