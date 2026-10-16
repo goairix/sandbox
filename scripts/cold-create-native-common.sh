@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# Shared only by the two cold-create native collectors. Wrappers own all
+# Shared by the cold lifecycle collectors. Wrappers own all
 # selectors, build targets and literal docker-create security/mount arguments.
 
-inputs() {
-  local artifact=$1 input_target=$2 kind=$3
-  if [[ "$kind" == product ]]; then
-    env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$go_bin" list -deps -compiled -json "$input_target" > "$artifact.json"
-  else
-    env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$go_bin" list -deps -test -compiled -json "$input_target" > "$artifact.json"
-  fi
+native_input_paths() {
+  local artifact=$1
   python3 -c 'import sys,json,os
 s=open(sys.argv[1]).read(); d=json.JSONDecoder(); paths=set(); fields="GoFiles CgoFiles CompiledGoFiles TestGoFiles XTestGoFiles SFiles CFiles CXXFiles MFiles HFiles FFiles SwigFiles SwigCXXFiles SysoFiles EmbedFiles TestEmbedFiles XTestEmbedFiles".split()
 while s.strip():
@@ -16,6 +11,15 @@ while s.strip():
  for field in fields:
   for f in o.get(field,[]): paths.add(f if os.path.isabs(f) else os.path.join(o["Dir"],f))
 for p in sorted(paths): print(p)' "$artifact.json" > "$artifact"
+}
+inputs() {
+  local artifact=$1 input_target=$2 kind=$3
+  if [[ "$kind" == product ]]; then
+    env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$go_bin" list -deps -compiled -json "$input_target" > "$artifact.json"
+  else
+    env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$go_bin" list -deps -test -compiled -json "$input_target" > "$artifact.json"
+  fi
+  native_input_paths "$artifact"
 }
 native_verify_archive() {
   python3 - "$1" "$2" <<'PY'

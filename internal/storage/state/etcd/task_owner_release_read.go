@@ -3,6 +3,9 @@ package etcd
 import (
 	"context"
 	"errors"
+
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 func (b *Backend) LoadTaskOwnerRelease(ctx context.Context, task TaskReference) (*TaskOwnerReleaseEntry, error) {
@@ -15,6 +18,22 @@ func (b *Backend) LoadTaskOwnerRelease(ctx context.Context, task TaskReference) 
 }
 
 func (b *Backend) readLocalOwnerRelease(ctx context.Context, task TaskReference) (*TaskOwnerReleaseEntry, error) {
+	snapshot, err := b.readLocalOwnerReleaseProof(ctx, task)
+	if err != nil || snapshot == nil {
+		return nil, err
+	}
+	return &TaskOwnerReleaseEntry{Task: task, CreateRevision: snapshot.kv.CreateRevision, SHA256: workspaceSyncIntentDigest(string(snapshot.kv.Value))}, nil
+}
+
+// Only this private loader can authenticate a release seal. The public DTO is
+// deliberately a projection and cannot be supplied to quota settlement.
+type localOwnerReleaseProof struct {
+	record      localOwnerReleaseRecord
+	kv          *mvccpb.KeyValue
+	termination p.TaskRuntimeTerminationIntent
+}
+
+func (b *Backend) readLocalOwnerReleaseProof(ctx context.Context, task TaskReference) (*localOwnerReleaseProof, error) {
 	_, _, key, err := b.namespace.localRuntimeReleaseKeys(task)
 	if err != nil {
 		return nil, err
@@ -35,5 +54,5 @@ func (b *Backend) readLocalOwnerRelease(ctx context.Context, task TaskReference)
 	if err != nil || expected != r {
 		return nil, errors.Join(ErrCorruptRecord, err)
 	}
-	return &TaskOwnerReleaseEntry{Task: task, CreateRevision: values[0].CreateRevision, SHA256: workspaceSyncIntentDigest(string(values[0].Value))}, nil
+	return &localOwnerReleaseProof{record: r, kv: values[0], termination: termination}, nil
 }
