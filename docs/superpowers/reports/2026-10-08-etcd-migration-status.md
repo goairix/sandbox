@@ -2,6 +2,26 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。当前主程序仍连接 Redis，不能宣称生产切换完成或线上性能已经提升。
 
+## 2026-10-16 最新接续：Lookup 已验收，实际 Exec 接线中
+
+当前工作分支 `codex/etcd-state-management`。Lookup 最新验收提交 `436bef8`，实际执行 service 的方案/边界提交 `af03581`、`7ed36c6`。以下为当前状态，下方较早接续条目保留历史含义，不代表仍需重做。
+
+| 已完成单元 | 验收提交 | 范围 |
+| --- | --- | --- |
+| 普通冷创建/恢复 consumer | `956536ea` | 固定 plain profile 的真实创建、发布和原请求恢复 |
+| 原冷建配额安全返回 | `36a5dd13` | 原实际 runtime 释放后返还及不确定结果保护 |
+| 有界 snapshot 读 | `9b2de478` | 64MiB 加权缓存、原 view 确认和有界 miss；无 N 全量扫描 |
+| 业务配置 snapshot | `36ec725e` | 严格配置/已解析默认值、v1/v2 实际创建消费 |
+| detached 业务申请/幂等恢复 | `1161ee4e` | 无 workspace 的请求身份、stable IDs、竞争与原配置恢复 |
+| mounted startup loader | `2106f825` | 文件/key/TLS/kubeconfig 接入及只读启动检查 |
+| 按 ID Lookup 与真实健康 | `436bef8` | 当前 metadata/原 CreatedAt/owned 配置、mTLS 健康、TTL/最终确认/Close；审查发现的两项 TLS EOF 缺陷已复现、修复并复核 |
+
+正在做的完整单元是普通 service 的实际 Exec：原 operation gate、签名下发、超过 20 秒的调用期限、实际目标续期、原输出/结果与取消/Close join，以及 mounted signer。预检完成，尚未将其记为代码完成。下一步继续 HTTP 所有操作 gate、固定部署路由与主程序接线。
+
+剩余主交付：API/Pool/Docker/Upload 的完整调用路径；分区 due/dirty/Watch 调度；FUSE/helper/collector 与实际远端同步；长期历史/槽位回收及证书维护；大量已有 sandbox 的容量、故障、部署/恢复验收；最终 Redis 移除和整分支审查。Create/Lookup 的 service 单元与只读启动检查，均不等价上述主程序生产接线完成。
+
+百分比暂保留最近公布的粗估口径：**功能代码约55% / 整体交付约40% / 生产切换0%**。这些不是已完成代码行数或提交数；在实际业务接线形成可验收链路之前，不因新增组件和测试次数直接上调。最终 Lookup 的 host/race/Linux vet 及真实 v1/v2 native 通过；这些小规模结果不构成大量已有 sandbox 的性能或容量验收。详情见 `2026-10-16-etcd-live-sandbox-lookup-verification.md`。
+
 ## 2026-10-16 百分比汇报口径
 
 用户要求后续按百分比汇报。当前整体约 **40%**：采用完整生产交付项加权估算，权重保持不变，计算值39%；估算误差约±5个百分点。它不是源码行数/提交数/测试数统计，也不是已经上线40%。本次上调只来自本地普通运行时安全释放完整单元通过审查验收，不因测试/提交数量上调。
