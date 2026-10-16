@@ -221,11 +221,43 @@ func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proo
 	if ctx == nil || j == nil || j.owner == nil || j.owner.call.ctx != ctx || proof == nil || proof.kv == nil || j.state == nil || j.evidence == nil || j.state.slot == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || j.state.record.Run.ID != j.runID || !j.effectsJoined || proof.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
 		return ErrInvalidRecord
 	}
+	return b.settleCleanupOccupation(j.owner, j, proof, j.terminal)
+}
+
+// settleCleanupOccupation shares the terminal CAS between a joined live Run
+// and cold diagnosis of that exact Run. Cold callers never claim to have joined
+// its physical work: the permanent Joined row and authentic release seal are
+// mandatory. The original actor owns this request until native return/postcheck
+// and only then completes its job; cancellation cannot release S early.
+func (b *Backend) settleCleanupOccupation(owner *workerDueOwner, j *cleanupLocalJob, proof *localOwnerReleaseProof, history *cleanupTerminalEvidence) error {
+	if j == nil || j.worker == nil || j.worker.backend != b || j.owner != owner || owner == nil || proof == nil || proof.kv == nil || j.state == nil || j.state.slot == nil || j.state.record.Phase != "occupied" || j.state.record.Run == nil || !j.state.record.Run.Joined || history == nil || history.record != cleanupSlotRecordFromExecution(j.state.record) || proof.record.Task != j.task || j.state.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
+		return ErrInvalidRecord
+	}
+	b.archiveLife.mu.Lock()
+	registered := false
+	for _, candidate := range j.worker.cleanupJobs {
+		if candidate == j {
+			registered = true
+			break
+		}
+	}
+	b.archiveLife.mu.Unlock()
+	if !registered {
+		return ErrInvalidRecord
+	}
 	s := j.state
 	if err := b.validateCleanupState(s); err != nil {
 		return err
 	}
-	cmps, err := b.cleanupEvidenceComparisons(j.owner, j.evidence)
+	_, _, releaseKey, err := b.namespace.localRuntimeReleaseKeys(j.task)
+	if err != nil {
+		return err
+	}
+	release, err := decodeLocalOwnerRelease(proof.kv)
+	if err != nil || release != proof.record || string(proof.kv.Key) != releaseKey {
+		return ErrCorruptRecord
+	}
+	cmps, err := b.cleanupTerminalComparisons(owner, history)
 	if err != nil {
 		return err
 	}
@@ -246,8 +278,8 @@ func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proo
 	if err = validateCleanupWire(b.cleanupProjection("settle", cmps, taskProtoWrites(writes), success)); err != nil {
 		return err
 	}
-	rpc, cancel := j.owner.call.requestContext()
-	j.owner.call.started = true
+	rpc, cancel := owner.call.requestContext()
+	owner.call.started = true
 	response, err := b.client.Txn(rpc).If(cmps...).Then(clientv3.OpDelete(s.slot.key), clientv3.OpPut(s.execution.key, wire)).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey)).Commit()
 	rpcErr := rpc.Err()
 	cancel()
@@ -263,7 +295,7 @@ func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proo
 	if len(response.Responses) != 2 || response.Responses[0] == nil || response.Responses[1] == nil || response.Responses[0].GetResponseDeleteRange() == nil || response.Responses[0].GetResponseDeleteRange().Deleted != 1 || response.Responses[1].GetResponsePut() == nil || response.Header.Revision <= s.execution.mod || (*pb.TxnResponse)(response).Size() > maxMutationBytes {
 		return ErrOutcomeUnknown
 	}
-	if err = j.owner.postcheck(); err != nil {
+	if err = owner.postcheck(); err != nil {
 		return errors.Join(ErrOutcomeUnknown, err)
 	}
 	fence := s.execution

@@ -33,6 +33,7 @@ type cleanupLocalJob struct {
 	rotations uint32
 	proof     *localOwnerReleaseProof
 	owner     *workerDueOwner
+	terminal  *cleanupTerminalEvidence
 
 	// At most one unresolved progress submission is retained. Its owned bytes
 	// and fences let this same registered job resolve a lost ACK before joining;
@@ -301,10 +302,15 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 			return nil
 		}
 		if j.state != nil && j.state.record.Run != nil {
-			// A cold Run is never this new process's work. Unjoined work is
-			// retained even when its old lease or process no longer exists.
-			j.result.Reason = "retained-run"
-			j.step = "done"
+			// A cold Run is never this process's work. Only an already joined
+			// Run may query the original release seal; this does not start a
+			// new Run or require the three ownership records release deleted.
+			if j.state.record.Run.Joined {
+				j.step = "release-proof"
+			} else {
+				j.result.Reason = "retained-run"
+				j.step = "done"
+			}
 			return nil
 		}
 		j.step = "bundle"
@@ -414,20 +420,41 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		// The existing authenticating loader has three native reads when a
 		// release exists. It is the sole operation in this charged turn.
 		j.proof, err = b.readLocalOwnerReleaseProof(ctx, j.task)
-		if err == nil && j.proof == nil {
-			err = ErrConflict
+		if err != nil {
+			return err
 		}
 		if j.state.record.Phase == "settled" {
-			if err == nil && (j.state.record.Release == nil || j.proof.kv.CreateRevision != j.state.record.Release.CreateRevision || workspaceSyncIntentDigest(string(j.proof.kv.Value)) != j.state.record.Release.Digest) {
-				err = ErrCorruptRecord
+			if j.proof == nil {
+				return ErrConflict
+			}
+			if j.state.record.Release == nil || j.proof.kv.CreateRevision != j.state.record.Release.CreateRevision || workspaceSyncIntentDigest(string(j.proof.kv.Value)) != j.state.record.Release.Digest {
+				return ErrCorruptRecord
 			}
 			j.step = "done"
+		} else if j.proof == nil {
+			if j.started {
+				return ErrConflict
+			}
+			// Without a genuine terminal seal, preserve the original Run/S;
+			// a joined diagnostic alone does not authorize physical recovery.
+			j.result.Reason = "missing-release-proof"
+			j.step = "done"
 		} else {
-			j.step = "settle"
+			j.step = "terminal-history"
 		}
+	case "terminal-history":
+		// Four permanent points occupy their own charged turn. Live and cold
+		// settlement share this proof without reconstructing a claim bundle.
+		j.terminal, err = b.loadCleanupTerminalEvidence(owner, j.state)
+		j.step = "settle"
 	case "settle":
-		err = b.settleCleanupRun(ctx, j, j.proof)
-		j.step = "replied"
+		if j.started {
+			err = b.settleCleanupRun(ctx, j, j.proof)
+			j.step = "replied"
+		} else {
+			err = b.settleCleanupOccupation(owner, j, j.proof, j.terminal)
+			j.step = "done"
+		}
 	default:
 		return ErrInvalidRecord
 	}

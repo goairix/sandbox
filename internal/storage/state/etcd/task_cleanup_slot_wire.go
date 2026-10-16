@@ -162,11 +162,17 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 	}
 	keys = append(keys, string(evidence.bundle.checkpoint.Key), claimKey)
 	values = append(values, cleanupWirePadding(cleanupExecutionBytes), cleanupWirePadding(cleanupExecutionBytes))
+	terminalKeys, err := b.cleanupTerminalHistoryKeys(r)
+	if err != nil {
+		return nil, err
+	}
+	terminalValues := []string{cleanupWirePadding(cleanupExecutionBytes), cleanupWirePadding(cleanupExecutionBytes), cleanupWirePadding(cleanupExecutionBytes), cleanupWirePadding(cleanupExecutionBytes)}
 	result := []cleanupWireProjection{
 		point("point", []string{eKey}, []string{cleanupWirePadding(cleanupExecutionBytes)}),
 		point("bundle", keys, values),
 		point("observe", []string{eKey, sKey}, []string{active, slotValue}),
 		point("claim-observe", []string{eKey, sKey, evidence.receipt.key}, []string{active, slotValue, evidence.receipt.value}),
+		point("terminal-history", terminalKeys, terminalValues),
 		b.cleanupProjection("initialize", appendCopies(worker, tir, []clientv3.Cmp{clientv3.Compare(clientv3.CreateRevision(eKey), "=", 0)}), put(eKey, initial), taskProtoPutResponse(1)),
 		b.cleanupProjection("rotate", appendCopies(worker, (taskFence{key: eKey, value: selecting, create: math.MaxInt64, mod: math.MaxInt64}).comparisons()), put(eKey, selecting), taskProtoPutResponse(1)),
 		b.cleanupProjection("reserve", appendCopies(worker, tir, (taskFence{key: eKey, value: selecting, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), []clientv3.Cmp{clientv3.Compare(clientv3.CreateRevision(sKey), "=", 0)}), []*pb.RequestOp{taskProtoPut(sKey, slotValue, 0), taskProtoPut(eKey, occupied, 0)}, taskProtoPutResponse(2)),
