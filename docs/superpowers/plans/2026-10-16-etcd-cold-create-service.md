@@ -26,7 +26,7 @@
 - [x] Step3 具体owned Create/Inspect driver RED→固定完整spec、一次POST、明确未发送/UID/unknown、GET404不补偿、实际取消/Closejoin；限定host/race/vet通过，已提交 `0d8698e`。
 - [x] Step4 具体service/capsule/公共material持久化及Hello/activation恢复RED→接原Bind/Consume/Read/Publish，不留任意factory；独立prepslot结算与quota保留，稳定typed结果/Resume/workmarker。已分步提交 `8e2afc4`、`b99b7dc`、`2399c8c`、`afbf32a`、`104ba8c`、`4e25b11`。真实元数据验证39节点结算、guard/commit丢ACK、prep复用及历史篡改拒绝；运行配额继续占用。
 - [x] Step5 新真实native：正式POST触发launcher→原observer/bridge/TLS/Backend发布，受控激活ACK丢失后关闭并重建service及Backend，再恢复原intent且不双POST/runtime。`step4-service-green-02` 两case通过，原Wait/Serve/IO及exact清理已核对；不是大N或真实Kubelet验收。
-- [ ] Step6 冻结全部来源/报告，唯一fresh完整Taskreview、同pair限定修复、tracked范围验收；继续warm/FUSE/Docker/业务API/调度与最终切换，不暂停用户的总任务。
+- [x] Step6 冻结全部来源/报告，唯一fresh完整Taskreview发现I1/I2，原pair R1修复已提交 `62752b5`、`ba88a12`；限定复审确认全部处理、无新增Critical/Important。Root独立核对最终两类native、限定host/race/vet及来源后完成tracked范围验收，见 `docs/superpowers/reports/2026-10-16-etcd-cold-create-service-verification.md`。接续runtime quota安全归还及总迁移，不是main切换或容量验收。
 
 ## Preflight relationships and rulings
 
