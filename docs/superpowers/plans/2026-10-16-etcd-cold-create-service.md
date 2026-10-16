@@ -24,11 +24,8 @@
 - [x] Step1 只读预检：原 opaque claim、slot schema/bootstrap、POST owner、activation恢复、满预算结算、plain-empty业务映射及最小接口/有限候选/字面预算已确认。Root裁决复用fresh Stage结算和私有13记录历史验证，仍须前置startup R1验收后设置immutableBASE/START-GO。
 - [x] Step2 新quota/preparation selector RED→显式operator初始化/持久32与runtimequota/原子freeindex+reservation/unknown只读仲裁；两个Backend实际隔离etcd验证，不启动32进程。已提交 `5df6680`、`adcea58`；实际32槽、并发CAS、丢ACK及scope/restore拒绝通过，尚非大N容量验收。
 - [x] Step3 具体owned Create/Inspect driver RED→固定完整spec、一次POST、明确未发送/UID/unknown、GET404不补偿、实际取消/Closejoin；限定host/race/vet通过，已提交 `0d8698e`。
-- [ ] Step4 具体service/capsule/公共material持久化及Hello/activation恢复RED→接原Bind/Consume/Read/Publish，不留任意factory；独立prepslot结算与quota保留，稳定typed结果/Resume/workmarker。限定验证后小提交。
-
-  进行中：首片 `8e2afc4` 已实现原始提交专属一次性POST许可及不可替换UID。真实隔离etcd覆盖58/49节点预算、丢ACK恢复不再发许可、不退款及Backend关闭后拒绝消费；公共材料、完整service与历史结算尚未完成。
-
-- [ ] Step5 新真实native：正式POST触发launcher→原observer/bridge/TLS/Backend发布，受控ACK丢失/原intent恢复且不双POST/runtime；验证预算保留/结算、原所有owner退出/exact清理，逐个具体run经Root检查。不是大N或真实Kubelet验收。
+- [x] Step4 具体service/capsule/公共material持久化及Hello/activation恢复RED→接原Bind/Consume/Read/Publish，不留任意factory；独立prepslot结算与quota保留，稳定typed结果/Resume/workmarker。已分步提交 `8e2afc4`、`b99b7dc`、`2399c8c`、`afbf32a`、`104ba8c`、`4e25b11`。真实元数据验证39节点结算、guard/commit丢ACK、prep复用及历史篡改拒绝；运行配额继续占用。
+- [x] Step5 新真实native：正式POST触发launcher→原observer/bridge/TLS/Backend发布，受控激活ACK丢失后关闭并重建service及Backend，再恢复原intent且不双POST/runtime。`step4-service-green-02` 两case通过，原Wait/Serve/IO及exact清理已核对；不是大N或真实Kubelet验收。
 - [ ] Step6 冻结全部来源/报告，唯一fresh完整Taskreview、同pair限定修复、tracked范围验收；继续warm/FUSE/Docker/业务API/调度与最终切换，不暂停用户的总任务。
 
 ## Preflight relationships and rulings
