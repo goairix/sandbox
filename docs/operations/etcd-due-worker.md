@@ -69,6 +69,8 @@ defer worker.Stop()
 
 Watch 使用原认证连接的有限原生 stream，不使用无界 WatchChan 缓冲。每批先 guard、再订阅、实际停止并 join stream、最后 post-guard。单帧最多 118 个事件及 256 KiB；整批在 protobuf 解码之前限制为 512 帧、10000 个事件及 8 MiB 编码输入。缺少有效 progress 不等于已追赶；Created ACK 本身不提供覆盖证明。空闲批次和本地 credit 不足是正常等待，不会建立新 session。
 
+当前采用有界轮询：单次 stream 最多 500ms，包含 guard 的原操作受 `min(3s, SessionTTL/3, 原 session 剩余期限)` 约束，批次完成后可取消地等待 100ms；每轮先检查原 session 续租。尚未实现按最早 expiry 精确唤醒或按下一续约点进一步截断 stream。未来候选会在后续轮次重新观察受信时间；调度延迟和空闲 stream 开销需要实际测量，这些时限不构成到期处理 SLA。轮询数量受每 cell 最多四个常驻 worker 限制，不随沙盒数量逐个创建 timer。
+
 compaction、事件间隙或 discovery 缓存溢出会使同步状态失效并进行有界重建；不能因此调高缓存、静默丢候选或把过期覆盖标成已同步。旧永久 checkpoint CAS 句柄保留到 fresh `ReadDuePage(nil)` 得到新 R/window 并成功 CAS 替换之后。已完成扫描的窗口最多每 30 秒开始一次新窗口；未完成的健康扫描不会被不断重启。受信窗口倒退时保留原记录并报告等待，不能缩小旧窗口来跳过未来候选。
 
 ## 不确定结果、重启和停止
