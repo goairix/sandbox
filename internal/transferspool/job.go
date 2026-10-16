@@ -17,6 +17,7 @@ type Job struct {
 	name           string
 	identity       fileIdentity
 	written        int64
+	read           int64
 	sealed, closed bool
 	failure        error
 	done           chan struct{}
@@ -106,10 +107,24 @@ func (j *Job) Read(data []byte) (int, error) {
 	if err := j.ctx.Err(); err != nil {
 		return 0, err
 	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	remaining := j.written - j.read
+	if remaining == 0 {
+		return 0, io.EOF
+	}
 	if len(data) > 32<<10 {
 		data = data[:32<<10]
 	}
+	if int64(len(data)) > remaining {
+		data = data[:int(remaining)]
+	}
 	n, err := j.file.Read(data)
+	j.read += int64(n)
+	if err == io.EOF && j.read < j.written {
+		return n, j.fail(io.ErrUnexpectedEOF)
+	}
 	if err != nil && err != io.EOF {
 		return n, j.fail(err)
 	}

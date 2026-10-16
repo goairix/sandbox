@@ -210,6 +210,47 @@ func TestTransferSpoolIOFailureRetainsChargeAndCloseError(t *testing.T) {
 	require.Len(t, entries, 1, "failed cleanup must not pretend bytes were removed")
 }
 
+// A verified length must remain meaningful during delivery: a real early EOF
+// cannot be treated as a healthy read and refunded after ordinary unlink.
+func TestTransferSpoolReadUnexpectedEOFLatchesUnavailable(t *testing.T) {
+	for _, retained := range []int64{0, 3} {
+		t.Run(fmt.Sprintf("retained-%d", retained), func(t *testing.T) {
+			options := spoolOptions(t)
+			s, err := Open(options)
+			require.NoError(t, err)
+			j, err := s.Reserve(context.Background())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = j.Close(); _ = s.Close() })
+			_, err = j.Write([]byte("binary"))
+			require.NoError(t, err)
+			size, err := j.Seal()
+			require.NoError(t, err)
+			require.Equal(t, int64(6), size)
+			require.NoError(t, j.file.Truncate(retained), "mutate the real sealed FD")
+			var buffer [8]byte
+			n, readErr := j.Read(buffer[:])
+			if retained != 0 && readErr == nil {
+				require.Equal(t, 3, n)
+				require.Equal(t, "bin", string(buffer[:n]))
+				_, readErr = j.Read(buffer[:])
+			}
+			require.ErrorIs(t, readErr, io.ErrUnexpectedEOF)
+			require.ErrorIs(t, j.Context().Err(), context.Canceled)
+			require.Error(t, s.Err())
+			closeErr := j.Close()
+			require.ErrorIs(t, closeErr, io.ErrUnexpectedEOF)
+			require.Equal(t, closeErr, j.Close())
+			require.Equal(t, options.MaxFileBytes, s.charged, "a failed sealed read cannot refund the reserved charge")
+			require.Len(t, s.jobs, 1, "retain only bounded failed-job accounting")
+			_, err = s.Reserve(context.Background())
+			require.ErrorIs(t, err, ErrUnavailable)
+			storeErr := s.Close()
+			require.ErrorIs(t, storeErr, io.ErrUnexpectedEOF)
+			require.Equal(t, storeErr, s.Close())
+		})
+	}
+}
+
 // Detects Store.Close closing descriptors or reporting completion before owner join.
 func TestTransferSpoolCloseWaitsForOriginalOwner(t *testing.T) {
 	options := spoolOptions(t)
