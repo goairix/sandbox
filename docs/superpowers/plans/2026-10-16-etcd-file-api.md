@@ -35,7 +35,7 @@
 - [x] Step1 只读预检已冻结 exact Request/Result/Validate/Run/Serve/DecodeResult/ErrorStatus、原DTO、单Exec、三lane与native14bridge；实际parentFD/rawOpenat，不新增生产hostroot参数。
 - [x] Step2 helper/CLI实际RED→实现→host/race及Linuxvet，提交2f0dc3b。Helper各9PASS/1明确Darwin非法文件名SKIP，Linux该例待新native；launcher各2PASS无skip。原EILSEQ失败和Root一次selector漏wrapper记录保留，不把它们称为完整通过。
 - [x] Step3 新HTTP/probe实际RED→实现，全部23项gateway host/race PASS无skip、Linuxvet通过。八route descriptor/单Exec/receipt/strictbody/unknown/overflowjoin和独立health/ready满载Close通过；共享路由/生命周期变化已覆盖原gateway，无旧native矩阵重跑。
-- [ ] Step4 新native TestFileAPINative/SANDBOX_FILE_API_NATIVE=1，原fixture最小variant，实际新路由创建文件/列表/read/行/edit/download。原正式launcher/非特权child/terminal/bridgeWait/IOjoin与精确容器清理；仅新selector，有限新场景，不重放旧矩阵。native测试与operator文档独立小提交。
+- [x] Step4 新TestFileAPINative实际PASS2.06s无skip，真实TLS-etcd/正式launcher/UIDGID1000、Linux非法文件名422及八路由/二进制/行/编辑/下载通过。14个原bridge Wait/IO、正式launcher Wait0、etcd SIGTERM已join；attach/container0、无OOM、精确清理。原警告/teardown日志保留；未重放旧矩阵，不计大N或生产验收。
 - [ ] Step5 唯一fresh reviewer immutableBASE→最终HEAD；同pair fix限定复核；tracked验收和整体状态更新，关闭本OWN/pair，继续大文件/剩余迁移。
 
 ## Root self-review / producer-consumer scan
