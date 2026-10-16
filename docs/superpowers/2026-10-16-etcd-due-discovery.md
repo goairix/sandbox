@@ -1,6 +1,6 @@
 # etcd 到期发现与任务准入
 
-本单元代码与有限三成员原生验证已完成，整体单元 review 尚待完成；本说明不是生产启用记录。默认入口仍使用 Redis。
+本单元代码、有限三成员原生验证及唯一完整单元 review 已通过，无开放问题；范围记录见 `reports/2026-10-16-etcd-due-discovery-verification.md`。本说明不是生产启用记录。默认入口仍使用 Redis。
 
 新 enrolled 发布采用独立 `runtime_publish_enrolled_v3` 协议，原有全部 54 个比较保持，成功分支 10 次写入同时发布 active control 和永久到期候选，失败分支为空，总计仍为 64 个节点。失败后仍须通过当前 identity/restore 下的真实读取仲裁；空失败分支本身不提供任何身份或结果证据。既有 v2 发布记录、receipt、原 digest 与重放保持兼容；签名 proof/enrollment 子记录不改变协议版本。
 

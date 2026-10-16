@@ -11,7 +11,7 @@ Deliver one coherent actual discovery-to-metadata-consumer chain. New focused du
 - [x] Step3 tests-only bounded fixed-revision Range and real budget/lifetime RED; implement, verify twelve focused groups host/race and Linuxvet, commit ff649e831b8356989b3508d3ed6ea0f34022fbcb. Initial failed native-header/model cases retained and corrected with exact evidence.
 - [x] Step4 tests-only Txn-fenced expired metadata-task admission RED; implement, verify21focusedgroups host/race and Linuxvet, commit6350a18003a1c5f69eb4f6b9b82193f356b490ed. Root-discovered normalrefusal/sessionloss defect reproduced andfixed beforecommit. No runtime side effects or hard-slot claim implied.
 - [x] Step5 one fresh finite real three-member chain PASS7.82s, operator record and commit4957c9f2017418ebbd56a2195474326fbd720a05. Atomic publication, original fence rejection/replacement, task+candidate consumption,125rows118+7fixedR,actualcompaction; no old fixture artifact/matrix replay or capacity claim.
-- [ ] Step6 whole Task review BASE→HEAD, same pair scoped fixes, tracked bounded acceptance and closure; continue actual Watch/cache/dirty/task worker and remaining production migration without stopping.
+- [x] Step6 whole Task review BASEf95d100→HEADf8a9d1a: Spec compliant / Approved, no open C/I/M; tracked bounded acceptance2026-10-16-etcd-due-discovery-verification.md. Continue actual Watch/cache/frontier worker under2026-10-16-etcd-due-worker.md and remaining production migration without stopping.
 
 ## Initial interface checks
 
