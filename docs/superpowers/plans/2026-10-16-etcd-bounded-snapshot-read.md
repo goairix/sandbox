@@ -29,13 +29,13 @@
 
 ## Task 1: Bounded coherent snapshot read with cold recovery integration
 
-**Files:** 新 `internal/storage/state/etcd/domain_snapshot_read.go`（入口/结果/校验）、`domain_snapshot_cache.go`（加权LRU/有界共享miss）、对应 `_test.go` 与新 `domain_snapshot_read_native_linux_test.go`；修改 `client.go` Options/构造、原Backend关闭实现接点、`internal/provisioning/plain_cold_create.go` 的进行中恢复读取。新限定验证脚本与native selector放本OWN；可复用tracked collector helper，不复制其逻辑。
+**Files:** 新 `internal/storage/state/etcd/domain_snapshot_read.go`（入口/结果/校验）、`domain_snapshot_read_rpc.go`（固定两点profile预检）、`domain_snapshot_cache.go`（加权LRU/有界共享miss）、对应 `_test.go` 与新 `domain_snapshot_read_native_linux_test.go`；修改 `client.go` Options/构造、`domain_read_view_rpc.go`提取已预检后共享dispatch/strict response body、原Backend关闭实现接点、`internal/provisioning/plain_cold_create.go` 的进行中恢复读取。限定collector放本OWN，native selector位于tracked测试源码；可复用tracked collector helper，不复制其逻辑。
 
-**Consumes:** 原 Backend、ReadWorkspaceView/ReadSandboxView/ConfirmSandboxView、严格bounded point reader/原decodeSnapshot、Backend关闭屏障、原plainCold capsule/claim匹配。
+**Consumes:** 原 Backend、ReadWorkspaceView/ReadSandboxView/ConfirmSandboxView、原readViewResponse严格校验/原decodeSnapshot、Backend关闭屏障、原plainCold capsule/claim匹配。snapshot profile单独预检65536+4096，旧view4096/4点/4pins契约不变，不扩大readEnrolledPoints协议。
 
 **Produces:** `ReadWorkspaceSnapshot(context.Context, WorkspaceIdentity) (*SandboxSnapshotReadResult,error)`、`ReadSandboxSnapshot(context.Context,string) (*SandboxSnapshotReadResult,error)`；result包含原opaque View与调用者独占Snapshot；`Options.SnapshotCacheBytes`及独立`ErrSnapshotReadCapacity`。
 
-- [ ] Step1 只读预检实际字段、原close锁顺序、64KiB记录上界与全部protobuf、原service进行中/历史接点；确定私有cache/worker所有权和固定测试，不造通用store/provider factory。Root裁决后START-GO。
+- [x] Step1 Root接受具体result/单Backend私有指针、life.mu唯一锁、16miss/256call、原seal/cancel/join顺序和ongoing-only consumer。现有readEnrolledPoints并非足够严格：Root裁决使用固定snapshot两点profile，提取原view已预检后dispatch+strict shape-before-Size body，旧预检不改；添加最小sharedbody旧view回归。先写新tests/collector，Root审collector并实际RED后写产品，无任意factory。
 - [ ] Step2 实际RED后实现Options校验、weighted LRU/clone、有界共享miss与关闭；限定host/race验证实际行为及16/256硬上限。达到提交要求立即小提交。
 - [ ] Step3 实现两个新coherent读取入口和真实TLS负例/并发/restore/命中trace，限定native按Root具体preflight执行；只读取指定snapshot/placement，不写元数据。验证后小提交。
 - [ ] Step4 接入原cold service进行中恢复，保留历史完成读取；限定service regression及必要native证明新接点确实使用，原claim/capsule/结果语义不变。最终相关vet/来源冻结，及时小提交。

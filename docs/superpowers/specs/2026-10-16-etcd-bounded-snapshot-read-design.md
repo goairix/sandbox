@@ -18,7 +18,7 @@
 
 全 Backend 同时最多16个不同 key 的 miss worker、256个新读取调用（含等待者）。同 key miss 共用一次只读取数，单个调用取消不取消其他等待者；填充有 Backend request timeout，不能由首个调用者无限续命。达到上限立即返回独立 `ErrSnapshotReadCapacity`，不新建队列或退避 goroutine。该错误供后续 API 映射429/503，不能冒充状态冲突或 not-found。
 
-缓存 miss 用现有严格 bounded point reader 读取原 snapshot/placement并验证实际 response、canonical记录、完整 snapshot digest 和引用关系，不增加前缀 Range/Watch/写事务。命中仍执行原权威 metadata discovery及最终确认，不从缓存授予权限；失效 restore/identity、并发 owner/control变化和 Backend关闭必须拒绝成功返回。
+缓存 miss 用固定两点 profile（snapshot65536B、placement4096B）读取原记录，复用原 coherent view 的严格 flat response/unknown fields/header 校验，在 protobuf Size 遍历前拒绝异常嵌套形状；验证 canonical记录、完整 snapshot digest 和引用关系，不增加前缀 Range/Watch/写事务。只提取原 readViewPoints 已预检后的共享 dispatch/response body，旧 view 的4096B/最多4点/4pins预检契约保持不变；不修改 readEnrolledPoints 的通用协议。命中仍执行原权威 metadata discovery及最终确认，不从缓存授予权限；失效 restore/identity、并发 owner/control变化和 Backend关闭必须拒绝成功返回。
 
 ## 关闭与资源所有权
 
