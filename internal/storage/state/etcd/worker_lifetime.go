@@ -13,6 +13,7 @@ type workerBackend struct {
 	options  WorkerControlOptions
 	profile  taskFence
 	sessions [32]*WorkerSession
+	relists  [4]*workerRelistOwner
 }
 
 type workerCall struct {
@@ -144,9 +145,27 @@ func (b *Backend) releaseWorkerSession(ctx context.Context, s *WorkerSession) er
 	s.lost = true
 	s.cancel()
 	call := s.operation
+	owners := b.stopWorkerRelists(s, nil, nil)
+	var children []*workerRelease
+	for _, p := range s.partitions {
+		if p != nil && p.release != nil {
+			children = append(children, p.release)
+		}
+	}
+	for _, share := range s.budgets {
+		if share != nil && share.release != nil {
+			children = append(children, share.release)
+		}
+	}
 	b.archiveLife.mu.Unlock()
 	if call != nil {
 		<-call.done
+	}
+	for _, owner := range owners {
+		<-owner.done
+	}
+	for _, child := range children {
+		<-child.done
 	}
 	b.archiveLife.mu.Lock()
 	cleaned, cleanupErr, lease := s.cleaned, s.cleanupErr, s.reference.LeaseID
@@ -177,6 +196,7 @@ func (b *Backend) stopWorkerControl() []*WorkerSession {
 		if s != nil {
 			s.lost = true
 			s.cancel()
+			b.stopWorkerRelists(s, nil, nil)
 			if s.operation != nil {
 				s.operation.cancel()
 			}

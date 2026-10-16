@@ -28,6 +28,7 @@ type WorkerSession struct {
 	operation               *workerCall
 	release                 *workerRelease
 	partitions              [256]*WorkerPartitionClaim
+	budgets                 [124]*WorkerBudgetShare
 }
 
 func (s *WorkerSession) Reference() WorkerSessionReference {
@@ -158,7 +159,7 @@ func (b *Backend) OpenWorkerSession(ctx context.Context, workerID string) (resul
 	s.guard.create, s.guard.mod = r.Header.Revision, r.Header.Revision
 	s.reference.CreateRevision = r.Header.Revision
 	b.archiveLife.mu.Unlock()
-	if err = b.workerGuardCheck(call, nil); err != nil {
+	if err = b.workerGuardCheck(call, nil, nil); err != nil {
 		return nil, err
 	}
 	if err = call.postcheck(); err != nil {
@@ -178,7 +179,7 @@ func (b *Backend) RenewWorkerSession(ctx context.Context, s *WorkerSession) (res
 		}
 		call.finish()
 	}()
-	if err = b.workerGuardCheck(call, nil); err != nil {
+	if err = b.workerGuardCheck(call, nil, nil); err != nil {
 		return err
 	}
 	rpc, stop := call.requestContext()
@@ -200,7 +201,7 @@ func (b *Backend) RenewWorkerSession(ctx context.Context, s *WorkerSession) (res
 	if err = call.postcheck(); err != nil {
 		return err
 	}
-	if err = b.workerGuardCheck(call, nil); err != nil {
+	if err = b.workerGuardCheck(call, nil, nil); err != nil {
 		return err
 	}
 	b.archiveLife.mu.Lock()

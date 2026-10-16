@@ -45,7 +45,7 @@ func (b *Backend) pinWorkerControl(ctx context.Context, options *WorkerControlOp
 // Requires the existing lifecycle lock. These immutable comparisons remain
 // private and are composed into the actual original consumer transaction;
 // diagnostic references cannot supply, modify or reconstruct them.
-func (b *Backend) workerComparisons(s *WorkerSession, p *WorkerPartitionClaim) ([]clientv3.Cmp, error) {
+func (b *Backend) workerComparisons(s *WorkerSession, p *WorkerPartitionClaim, share *WorkerBudgetShare) ([]clientv3.Cmp, error) {
 	if !b.validWorkerSession(s) {
 		return nil, ErrInvalidRecord
 	}
@@ -55,10 +55,16 @@ func (b *Backend) workerComparisons(s *WorkerSession, p *WorkerPartitionClaim) (
 	cmps := append(b.baseComparisons(), b.workerControl.profile.comparisons()...)
 	cmps = append(cmps, s.guard.comparisons()...)
 	if p != nil {
-		if !b.validWorkerPartition(p) || p.session != s || p.released || p.lost {
+		if !b.validWorkerPartition(p) || p.session != s || p.released || p.lost || p.release != nil {
 			return nil, ErrInvalidRecord
 		}
 		cmps = append(cmps, p.fence.comparisons()...)
+	}
+	if share != nil {
+		if !b.validWorkerBudget(share) || share.session != s || share.released || share.lost || share.release != nil {
+			return nil, ErrInvalidRecord
+		}
+		cmps = append(cmps, share.fence.comparisons()...)
 	}
 	return cmps, nil
 }
@@ -164,10 +170,10 @@ func (b *Backend) workerTxn(call *workerCall, cmps []clientv3.Cmp, success []cli
 	return response, nil
 }
 
-func (b *Backend) workerGuardCheck(call *workerCall, p *WorkerPartitionClaim) error {
+func (b *Backend) workerGuardCheck(call *workerCall, p *WorkerPartitionClaim, share *WorkerBudgetShare) error {
 	s := call.session
 	b.archiveLife.mu.Lock()
-	cmps, err := b.workerComparisons(s, p)
+	cmps, err := b.workerComparisons(s, p, share)
 	b.archiveLife.mu.Unlock()
 	if err != nil {
 		return err
@@ -185,6 +191,23 @@ func (b *Backend) workerGuardCheck(call *workerCall, p *WorkerPartitionClaim) er
 		return ErrIdentityMismatch
 	}
 	return call.postcheck()
+}
+
+func (b *Backend) workerDelete(call *workerCall, cmps []clientv3.Cmp, key string) error {
+	protoDelete := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{RequestDeleteRange: &pb.DeleteRangeRequest{Key: []byte(key)}}}
+	protoReply := &pb.TxnResponse{Header: taskProtoPutResponse(0).Header, Succeeded: true, Responses: []*pb.ResponseOp{{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: taskProtoPutResponse(0).Header, Deleted: 1}}}}}
+	r, err := b.workerTxn(call, cmps, []clientv3.Op{clientv3.OpDelete(key)}, []*pb.RequestOp{protoDelete}, protoReply)
+	if err != nil {
+		return err
+	}
+	if len(r.Responses) != 1 || r.Responses[0] == nil {
+		return ErrOutcomeUnknown
+	}
+	deleted := r.Responses[0].GetResponseDeleteRange()
+	if deleted == nil || deleted.Deleted != 1 || !operationNestedHeader(deleted.Header, r.Header) {
+		return ErrOutcomeUnknown
+	}
+	return nil
 }
 
 func (b *Backend) workerRevoke(ctx context.Context, lease int64) error {
@@ -224,18 +247,14 @@ func (b *Backend) preflightWorker(s *WorkerSession) error {
 	}
 	partition := taskFence{key: partitionKey, value: partitionValue, lease: math.MaxInt64, create: math.MaxInt64, mod: math.MaxInt64}
 	cmps = append(cmps, partition.comparisons()...)
-	// The later soft-share schema has these exact additional finite fields;
-	// accounting it does not implement allocation or side-effect authority.
-	for _, kind := range []string{"relist", "range", "claim"} {
-		key, err := b.namespace.Key("workers", "budget", kind, "63")
+	for _, kind := range []WorkerBudgetKind{WorkerBudgetRelist, WorkerBudgetRange, WorkerBudgetClaim} {
+		limits, _ := workerBudgetSettings(kind)
+		slot := limits.count - 1
+		key, err := b.namespace.workerBudgetKey(kind, slot)
 		if err != nil {
 			return err
 		}
-		share := struct {
-			workerSessionRecord
-			Kind string `json:"kind"`
-			Slot uint16 `json:"slot"`
-		}{record, kind, 99}
+		share := workerBudgetRecord{workerSessionRecord: record, Kind: limits.name, Slot: slot}
 		shareValue, err := encodeOperationMetadata(share, workerRecordBytes)
 		if err != nil {
 			return err

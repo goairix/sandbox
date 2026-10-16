@@ -17,6 +17,7 @@ type WorkerPartitionClaim struct {
 	partition      uint8
 	fence          taskFence
 	lost, released bool
+	release        *workerRelease
 }
 
 func (p *WorkerPartitionClaim) Reference() WorkerPartitionReference {
@@ -57,14 +58,14 @@ func (b *Backend) ClaimWorkerPartition(ctx context.Context, s *WorkerSession, pa
 	}()
 	b.archiveLife.mu.Lock()
 	if previous := s.partitions[partition]; previous != nil {
-		if previous.released || previous.lost {
+		if previous.released || previous.lost || previous.release != nil {
 			b.archiveLife.mu.Unlock()
 			return nil, ErrConflict
 		}
 		b.archiveLife.mu.Unlock()
 		return previous, nil
 	}
-	cmps, err := b.workerComparisons(s, nil)
+	cmps, err := b.workerComparisons(s, nil, nil)
 	if err != nil {
 		b.archiveLife.mu.Unlock()
 		return nil, err
@@ -95,7 +96,7 @@ func (b *Backend) ClaimWorkerPartition(ctx context.Context, s *WorkerSession, pa
 	b.archiveLife.mu.Lock()
 	p.fence.create, p.fence.mod = r.Header.Revision, r.Header.Revision
 	b.archiveLife.mu.Unlock()
-	if err = b.workerGuardCheck(call, p); err != nil {
+	if err = b.workerGuardCheck(call, p, nil); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -109,10 +110,31 @@ func (b *Backend) ReleaseWorkerPartition(ctx context.Context, p *WorkerPartition
 		return err
 	}
 	b.archiveLife.mu.Lock()
-	valid := b.validWorkerPartition(p)
-	b.archiveLife.mu.Unlock()
-	if !valid {
+	if !b.validWorkerPartition(p) {
+		b.archiveLife.mu.Unlock()
 		return ErrInvalidRecord
+	}
+	if p.release != nil {
+		r := p.release
+		b.archiveLife.mu.Unlock()
+		<-r.done
+		return r.err
+	}
+	if b.archiveLife.closed || p.session.release != nil {
+		b.archiveLife.mu.Unlock()
+		return ErrGuardExpired
+	}
+	if p.released || p.lost {
+		b.archiveLife.mu.Unlock()
+		return ErrConflict
+	}
+	r := &workerRelease{done: make(chan struct{})}
+	p.release = r
+	owners := b.stopWorkerRelists(p.session, p, nil)
+	b.archiveLife.mu.Unlock()
+	defer func() { b.finishWorkerChildRelease(r, resultErr) }()
+	for _, owner := range owners {
+		<-owner.done
 	}
 	call, err := b.beginWorkerCall(ctx, p.session)
 	if err != nil {
@@ -129,25 +151,16 @@ func (b *Backend) ReleaseWorkerPartition(ctx context.Context, p *WorkerPartition
 		b.archiveLife.mu.Unlock()
 		return ErrConflict
 	}
-	cmps, err := b.workerComparisons(p.session, p)
+	cmps, err := b.workerComparisons(p.session, nil, nil)
 	if err != nil {
 		b.archiveLife.mu.Unlock()
 		return err
 	}
+	cmps = append(cmps, p.fence.comparisons()...)
 	p.released = true // Tombstone retained for this original session.
 	b.archiveLife.mu.Unlock()
-	protoDelete := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{RequestDeleteRange: &pb.DeleteRangeRequest{Key: []byte(p.fence.key)}}}
-	protoReply := &pb.TxnResponse{Header: taskProtoPutResponse(0).Header, Succeeded: true, Responses: []*pb.ResponseOp{{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: taskProtoPutResponse(0).Header, Deleted: 1}}}}}
-	r, err := b.workerTxn(call, cmps, []clientv3.Op{clientv3.OpDelete(p.fence.key)}, []*pb.RequestOp{protoDelete}, protoReply)
-	if err != nil {
+	if err = b.workerDelete(call, cmps, p.fence.key); err != nil {
 		return err
 	}
-	if len(r.Responses) != 1 || r.Responses[0] == nil {
-		return ErrOutcomeUnknown
-	}
-	deleted := r.Responses[0].GetResponseDeleteRange()
-	if deleted == nil || deleted.Deleted != 1 || !operationNestedHeader(deleted.Header, r.Header) {
-		return ErrOutcomeUnknown
-	}
-	return b.workerGuardCheck(call, nil)
+	return b.workerGuardCheck(call, nil, nil)
 }
