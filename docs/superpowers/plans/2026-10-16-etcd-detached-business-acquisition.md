@@ -16,6 +16,7 @@
 - 原workspace hash不变；detached独立kind/domain绑定原Backend storage authority，不能虚构存储prefix或授予operation权限。
 - 服务端固定principal，key可选但回传实际key/请求ID；原key同normalized请求沿旧resolved/IDs，不同请求409。
 - 单次准入覆盖全部读取/动作，Close取消并join，无双重占槽/无界循环/常驻N状态；原AcquireIntent摘要/原能力协议不弱化。
+- codec的数值e/E exponent绝对值≤MaxBytes61440，在ParseQuantity前验证，E/Ei后缀兼容；不运行危险巨指数。此为新实际入口的依赖计算预算，不重开旧OWN。
 - apply_patch/Go1.25.6/Root-only精确小提交；唯一author/reviewer/无nested；无Sentinel、依赖升级、部署或Redisfallback。
 - 独立OWN/epochs/actual17匹配平台race/prepost/逐成员/script/真实ELF；每次Docker Root具体preflight/实际joins/精确cleanup。
 
@@ -29,16 +30,18 @@
 
 ## Task 1: Detached identity and idempotent business acquisition consumer
 
-**Files:** 修改 internal/storage/state/etcd/domain_identity.go及对应identity tests，必要时新增domain_detached_identity.go分离最小Backend绑定入口；修改 internal/provisioning/plain_cold_service.go、plain_cold_create.go（单准入主体提取）并新增plain_cold_business.go、plain_cold_business_test.go；按职责必要时新增plain_cold_business_replay.go。不移动旧Manager/API类型。扩展原internal/runtime/controlrunner/cold_create_service_native_linux_test.go最小variant，新增detached_business_service_native_linux_test.go固定selector。collector位于本OWN复用trackedhelper。
+**Files:** 修改 internal/storage/state/etcd/domain_identity.go及对应identity tests，新增domain_detached_identity.go分离最小Backend绑定入口；task_archive_recovery_codec.go仅把原positional WorkspaceIdentity literal转named，task_workspace_sync_plan.go显式拒绝detached kind，不改持久schema/同步协议。修改 internal/provisioning/plain_cold_service.go、plain_cold_create.go（单准入主体提取）并新增plain_cold_business.go、plain_cold_business_test.go；按职责必要时新增plain_cold_business_replay.go。依赖补强可新增internal/sandboxsnapshot/quantity.go及quantity_test.go并将snapshot.go两个ParseQuantity点接入guard。不移动旧Manager/API类型。扩展原internal/runtime/controlrunner/cold_create_service_native_linux_test.go最小variant，新增detached_business_service_native_linux_test.go固定selector。collector位于本OWN复用trackedhelper。
 
 **Consumes:** 原WorkspaceIdentity/Backend身份绑定，LoadRequest、LoadControl/历史publication、LoadSnapshot、strict decodeColdCapsule/validateColdBusiness、snapshot.Build/Encode/Decode、原service enter/leave/Close/Create/Resume与formalnativefixture。
 
 **Produces:** 明确detached identity构造/验证；可选固定business配置与CreateBusiness(ctx,input)业务入口，返回实际key/原request与intent IDs、unknown参考、独占原business配置。具体字段/函数签名和历史ref寻址/首次并发有界算法由Step1冻结。
 
-- [ ] Step1 唯一fresh author只读预检：identity完整消费点、类型/身份绑定、配置owned验证、单准入提取与Close边界、request/control/history寻址及有限冲突恢复、最小实际native测试。Root裁决后START-GO，不提前Go/源修改/Docker。
-- [ ] Step2 新identity/业务host tests与OWNcollector，Root审后实际RED；实现detachedidentity+后端绑定并限定GREEN，Root小提交。
-- [ ] Step3 固定business配置/CreateBusiness/原快照恢复/首次并发接续与错误unknown保留；限定host/race GREEN，Root提交自洽业务代码，不等所有native完成。
-- [ ] Step4 独立冻结构建、Root来源/ELF/script核对、具体native运行验证真实同key/默认漂移/409/并发/ACK恢复；完整joins/cleanup，最终相关Linuxvet，Root测试小提交。
+- [x] Step1 Root接受完整只读预检C1–C7：kind uint8/workspacezero+独立domain，Backend.DetachedIdentity绑定原StorageID；固定Business{Principal,Defaults}/CreateBusiness input{Key,Request}/result{原结果,Key,ownedBusiness}。private acquireEntered保留typed outcome/public旧行为，单准入+最终Close gate；intentpublished或requestcomplete优先历史publication ref，再pendingcontrol/有限fallback；仅首次acquire争用一次认证恢复。exponent guard≤MaxBytes、namedliteral compile兼容和sync kind拒绝纳入最小范围。START-GO tests/collector first，Root审后实际RED。
+- [x] Step2 正指数61441实际行为RED后guard补强，9组codec GREEN/race通过，Root提交101082b。identity compile RED后5组GREEN/race通过，Root提交ef92972；原workspace固定hash不变，detached sync拒绝。
+- [x] Step3 business compile RED后完整配置/原IDs恢复/单准入/Close和有限acquire仲裁实现；7组host GREEN/race通过，含实际loopback Backend查询取消/handler/server join（不冒充运行时成功）。Root提交ea1845d。CompareLoss实际unknown+ErrConflict，一次ResolveStage确认Aborted后才恢复竞争请求，unknown保留原参考。
+- [x] Step4 native01原构建18ed87/session74071→0d9afd exit0；Root核对actual17 runner9134/launcher2007、prepost/逐成员/scripts/真实ELF与Go1.25.6 Linuxarm64 CGO0。Root运行1f09c2/session25351→b63639 exit0，3场景PASS/noSkip，3launcher/9bridge IO/3TLS etcd join，attach/container0/noOOM，精确b438e9900905ba76357d772bd1400779eec6b99074ebce91883c95aeae8aba3c删除/inventory空。最终4pkg vet01退出0/raw0B/实际9137输入。Root测试提交4864e09，无大N或新Destroy验收。
 - [ ] Step5 原BASE→最终HEAD唯一wholeTask review，同pair修复；tracked验收/关闭本OWN，继续HTTP/Manager与生产接线，不在Task边界停下。
 
 Ruling: 细化已批准无workspace创建和principal/key幂等，不引入fake storage path。固定资源/部署跨profile路由不纳入当前Task；预检发现原Backend读取或Close契约不足时，Root裁决最小实际接点，不另起重复任务、不重复问用户授权。
+
+Ruling: 实际编译还需将task_archive_recovery_codec_test.go原测试helper的positional identity literal改named，仅编译兼容，不改持久schema。新增plain_cold_business_lifecycle_test.go将真实查询取消/Close fixture独立为单一职责；属于原计划的生命周期验证范围。private acquireEntered保留public Create原结果语义和typed outcome；原CompareLoss unknown不得直接等同aborted。
