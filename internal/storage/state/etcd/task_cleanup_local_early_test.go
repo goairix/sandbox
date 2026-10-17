@@ -73,6 +73,76 @@ func cleanupEarlyMetadata(t *testing.T, quiescent bool) (*cleanupSlotState, *tas
 }
 
 func TestCleanupLocalEarlyRecoveryHistory(t *testing.T) {
+	t.Run("claimed-pending-close", func(t *testing.T) {
+		// This is only metadata attribution. Actual Load/Query receipts and
+		// the original Claim admission remain required by the native path.
+		for name, change := range map[string]func(*cleanupSlotState, *cleanupEarlyRecovery){
+			"exact-history": nil,
+			"missing-history": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				h.close = nil
+			},
+			"unknown-history": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				h.close.Outcome = OutcomeUnknown
+			},
+			"missing-pending": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending = nil
+			},
+			"wrong-purpose": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.Purpose = "quiescence"
+			},
+			"missing-stage": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.StageID, s.record.Pending.RequestID = "", ""
+				s.record.Pending.AttemptID, s.record.Pending.Digest = "", ""
+			},
+			"wrong-stage": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.StageID = "task_quiesce_users"
+			},
+			"wrong-request": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.RequestID = uuid.NewString()
+			},
+			"wrong-attempt": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.AttemptID = uuid.NewString()
+			},
+			"wrong-digest": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.Digest = strings.Repeat("c", 64)
+			},
+			"missing-claim": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.ClaimID = ""
+			},
+			"wrong-claim": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.ClaimID = uuid.NewString()
+			},
+			"missing-lease": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.LeaseID = 0
+			},
+			"wrong-lease": func(s *cleanupSlotState, h *cleanupEarlyRecovery) {
+				s.record.Pending.LeaseID++
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				s, b, h := cleanupEarlyMetadata(t, false)
+				stage, claim := h.close.Reference.Stage, h.close.Record.Claim
+				s.record.Confirmed = "claimed"
+				s.record.Pending = &cleanupExecutionPending{
+					Purpose: "close", ClaimID: claim.ClaimID, LeaseID: claim.LeaseID,
+					StageID: stage.StageID, RequestID: stage.RequestID,
+					AttemptID: stage.AttemptID, Digest: stage.Digest,
+				}
+				require.NoError(t, s.record.Validate())
+				if change != nil {
+					change(s, h)
+				}
+
+				err := matchCleanupEarlyHistory(s, b, h.close, h.quiescence, h.attempt)
+				if change == nil {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+			})
+		}
+	})
+
 	for _, quiescent := range []bool{false, true} {
 		state, bundle, h := cleanupEarlyMetadata(t, quiescent)
 		require.NoError(t, matchCleanupEarlyHistory(state, bundle, h.close, h.quiescence, h.attempt))

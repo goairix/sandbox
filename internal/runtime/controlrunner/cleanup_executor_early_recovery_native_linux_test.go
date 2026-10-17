@@ -34,15 +34,38 @@ func cleanupExecutorEarlyPhase(scenario string) string {
 		return "closed"
 	case "quiescent-progress-recovery":
 		return "quiescent"
+	case "pending-close-recovery":
+		return "claimed"
+	case "pending-quiescence-recovery":
+		return "closed"
 	default:
 		return ""
 	}
 }
 
-// The fault is a committed etcd progress ACK loss, not a runtime command ACK
-// loss. After its own job joined, the first worker uses the original public
-// Load/Query methods to prove the actual runtime receipt already exists.
-func cleanupExecutorEarlyQuery(t *testing.T, ctx context.Context, s cleanupExecutorSetup, options state.Options, b *state.Backend) *cleanupExecutorEarlyHistory {
+func cleanupExecutorPendingProgress(scenario string) bool {
+	return scenario == "pending-close-recovery" || scenario == "pending-quiescence-recovery"
+}
+
+func cleanupExecutorEarlyProposedPhase(scenario string) string {
+	switch scenario {
+	case "pending-close-recovery":
+		return "closed"
+	case "pending-quiescence-recovery":
+		return "quiescent"
+	default:
+		return cleanupExecutorEarlyPhase(scenario)
+	}
+}
+
+func cleanupExecutorEarlyHasQuiescence(scenario string) bool {
+	return scenario == "quiescent-progress-recovery" || scenario == "pending-quiescence-recovery"
+}
+
+// Both fault kinds occur after the actual business reply. Pending cases do
+// not submit progress upstream; the earlier cases lose its committed ACK.
+// Neither is runtime ACK loss. Original Load/Query proves the real receipt.
+func cleanupExecutorEarlyQuery(t *testing.T, ctx context.Context, s cleanupExecutorSetup, options state.Options, b *state.Backend, row cleanupExecutorRecoveryRow) *cleanupExecutorEarlyHistory {
 	t.Helper()
 	bounded, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -79,12 +102,15 @@ func cleanupExecutorEarlyQuery(t *testing.T, ctx context.Context, s cleanupExecu
 	require.Equal(t, closeEntry.Record.TicketDigest, closed.Receipt.TicketDigest())
 	history := &cleanupExecutorEarlyHistory{Close: closeEntry.Reference}
 	t.Logf("early recovery %s original close Query authenticated command=%s revision=%d receipt_bytes=%d", s.Recovery, closeEntry.Reference.CommandID, closeEntry.Revision, len(closed.Receipt.Wire()))
+	if s.Recovery == "pending-close-recovery" {
+		cleanupExecutorPendingStage(t, row, "close", closeEntry.Reference.Stage, closeEntry.Record.Claim)
+	}
 
 	quiescence, err := b.LoadTaskQuiescence(bounded, s.Task)
 	require.NoError(t, err)
 	attempt, err := b.LoadTaskQuiescenceAttempt(bounded, s.Task)
 	require.NoError(t, err)
-	if s.Recovery == "closed-progress-recovery" {
+	if !cleanupExecutorEarlyHasQuiescence(s.Recovery) {
 		require.Nil(t, quiescence)
 		require.Nil(t, attempt, "the closed-only case has no unresolved quiescence reservation")
 		return history
@@ -101,7 +127,44 @@ func cleanupExecutorEarlyQuery(t *testing.T, ctx context.Context, s cleanupExecu
 	require.Equal(t, quiescence.Reference, quiesced.Reference)
 	history.Quiescence = &quiescence.Reference
 	t.Logf("early recovery %s original quiescence Query authenticated command=%s revision=%d", s.Recovery, quiescence.Reference.CommandID, quiescence.Revision)
+	if s.Recovery == "pending-quiescence-recovery" {
+		cleanupExecutorPendingStage(t, row, "quiescence", quiescence.Reference.Stage, quiescence.Record.Claim)
+	}
 	return history
+}
+
+// The original CAS value is copied from the request that never went upstream.
+// Actual post-work join may change only Run.Joined, retaining every other E
+// field, including the complete original pending Stage and Claim coordinates.
+func cleanupExecutorPendingOriginal(t *testing.T, before string, joined []byte) {
+	t.Helper()
+	require.NotEmpty(t, before)
+	require.LessOrEqual(t, len(before), 4096)
+	var original map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(before), &original))
+	var run map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(original["run"], &run))
+	require.JSONEq(t, "false", string(run["joined"]))
+	run["joined"] = json.RawMessage("true")
+	wire, err := json.Marshal(run)
+	require.NoError(t, err)
+	original["run"] = wire
+	wire, err = json.Marshal(original)
+	require.NoError(t, err)
+	require.JSONEq(t, string(wire), string(joined), "actual join must retain the complete original uncommitted-progress E value")
+}
+
+func cleanupExecutorPendingStage(t *testing.T, row cleanupExecutorRecoveryRow, purpose string, stage state.StageReference, claim state.TaskClaimReference) {
+	t.Helper()
+	require.NotNil(t, row.Pending)
+	require.Equal(t, purpose, row.Pending.Purpose)
+	require.Equal(t, stage.StageID, row.Pending.StageID)
+	require.Equal(t, stage.RequestID, row.Pending.RequestID)
+	require.Equal(t, stage.AttemptID, row.Pending.AttemptID)
+	require.Equal(t, stage.Digest, row.Pending.Digest)
+	require.Equal(t, claim.ClaimID, row.Pending.ClaimID)
+	require.Equal(t, claim.LeaseID, row.Pending.LeaseID)
+	t.Logf("early recovery original pending retained purpose=%s stage=%+v claim=%s", purpose, stage, claim.ClaimID)
 }
 
 // Capture only exact immutable points. The Stage key is the original public
@@ -156,7 +219,7 @@ func cleanupExecutorEarlyWorkers(t *testing.T, ctx context.Context, s cleanupExe
 		immutable = append(immutable, cleanupExecutorEarlyCommand(t, ctx, raw, prefix+"quiesce-users", first.Early.Quiescence.Stage, task)...)
 		immutable = append(immutable, cleanupExecutorRecoveryPoint(t, ctx, raw, prefix+"quiesce-users-attempt"))
 	} else {
-		require.Equal(t, "closed-progress-recovery", s.Recovery)
+		require.Contains(t, []string{"closed-progress-recovery", "pending-close-recovery"}, s.Recovery)
 		cleanupExecutorEarlyAbsent(t, ctx, raw, prefix+"quiesce-users")
 		cleanupExecutorEarlyAbsent(t, ctx, raw, prefix+"quiesce-users-attempt")
 	}
@@ -189,7 +252,7 @@ func cleanupExecutorEarlyWorkers(t *testing.T, ctx context.Context, s cleanupExe
 	}
 	require.NotNil(t, second.Row.Archive)
 	require.Zero(t, second.Stats.ClosePuts)
-	if s.Recovery == "quiescent-progress-recovery" {
+	if cleanupExecutorEarlyHasQuiescence(s.Recovery) {
 		require.Zero(t, second.Stats.QuiescencePuts)
 	} else {
 		require.Len(t, second.Stats.QuiescenceGuards, 1)

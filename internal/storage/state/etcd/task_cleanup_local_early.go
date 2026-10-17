@@ -17,7 +17,7 @@ type cleanupEarlyRecovery struct {
 }
 
 func cleanupEarlyPhase(phase string) bool {
-	return phase == "closed" || phase == "quiescent"
+	return phase == "claimed" || phase == "closed" || phase == "quiescent"
 }
 
 // Diagnostic phase only selects this bounded recovery path. Authentication
@@ -37,8 +37,24 @@ func matchCleanupEarlyHistory(s *cleanupSlotState, bundle *taskClaimBundle, clos
 	if close.Reference.Task != r.Task || close.Record.Task != bundle.task || close.Record.Context.ControlRevision != bundle.birth || close.Revision <= close.Record.Claim.CreateRevision || close.Reference.CommandID != close.Record.Context.CommandID || close.Reference.Stage != close.Record.Attempt.reference(close.Reference.Stage.Digest) {
 		return ErrCorruptRecord
 	}
+
+	// A lost progress write can leave claimed after close actually committed.
+	// Only its complete original pending coordinates may select that history;
+	// the phase alone, or an empty pending field, cannot authorize recovery.
+	if r.Confirmed == "claimed" {
+		stage, claim := close.Reference.Stage, close.Record.Claim
+		want := cleanupExecutionPending{
+			Purpose: "close", ClaimID: claim.ClaimID, LeaseID: claim.LeaseID,
+			StageID: stage.StageID, RequestID: stage.RequestID,
+			AttemptID: stage.AttemptID, Digest: stage.Digest,
+		}
+		if r.Pending == nil || *r.Pending != want {
+			return ErrConflict
+		}
+	}
+
 	if quiescence == nil {
-		if r.Confirmed != "closed" || attempt != nil {
+		if (r.Confirmed != "claimed" && r.Confirmed != "closed") || attempt != nil {
 			return ErrOutcomeUnknown
 		}
 	} else {

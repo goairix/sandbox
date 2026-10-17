@@ -35,7 +35,13 @@ type cleanupExecutorRecoveryRow struct {
 	Phase       string              `json:"phase"`
 	Confirmed   string              `json:"confirmed"`
 	Pending     *struct {
-		Purpose string `json:"purpose"`
+		Purpose   string `json:"purpose"`
+		ClaimID   string `json:"claim_id"`
+		StageID   string `json:"stage_id"`
+		RequestID string `json:"request_id"`
+		AttemptID string `json:"attempt_id"`
+		Digest    string `json:"digest"`
+		LeaseID   int64  `json:"lease_id"`
 	} `json:"pending"`
 	Run *struct {
 		ID     string                                `json:"id"`
@@ -134,9 +140,12 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 		require.Equal(t, "occupied", row.Phase)
 		require.True(t, row.Run.Joined, "original job must reconcile its unknown progress ACK and publish its own actual join; cold workers may not repair this prerequisite")
 		if cleanupExecutorEarlyPhase(s.Recovery) != "" {
-			require.Nil(t, row.Archive, "early progress ACK loss precedes all archive preparation")
+			require.Nil(t, row.Archive, "early progress uncertainty precedes all archive preparation")
 			require.Equal(t, cleanupExecutorEarlyPhase(s.Recovery), row.Confirmed)
-			early = cleanupExecutorEarlyQuery(t, ctx, s, options, b)
+			if cleanupExecutorPendingProgress(s.Recovery) {
+				cleanupExecutorPendingOriginal(t, proxy.snapshot().UnforwardedExecution, rowKV.Value)
+			}
+			early = cleanupExecutorEarlyQuery(t, ctx, s, options, b, row)
 		} else {
 			require.NotNil(t, row.Archive)
 			if s.Recovery == "bound-recovery" {
@@ -231,6 +240,12 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.Zero(t, stats.FaultCommitted)
 			require.Zero(t, stats.FaultJoined)
 			require.Zero(t, stats.FaultRevision)
+		} else if cleanupExecutorPendingProgress(s.Recovery) {
+			require.Equal(t, 1, stats.FaultMatched)
+			require.Equal(t, 1, stats.FaultNotForwarded)
+			require.Zero(t, stats.FaultCommitted)
+			require.Zero(t, stats.FaultRevision)
+			require.Equal(t, 1, stats.FaultJoined)
 		} else {
 			require.Equal(t, 1, stats.FaultMatched)
 			require.Equal(t, 1, stats.FaultCommitted)
@@ -241,7 +256,7 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.Zero(t, stats.ArchivePuts)
 			require.Equal(t, 1, stats.ClosePuts)
 			wantQuiescence := 0
-			if s.Recovery == "quiescent-progress-recovery" {
+			if cleanupExecutorEarlyHasQuiescence(s.Recovery) {
 				wantQuiescence = 1
 			}
 			require.Equal(t, wantQuiescence, stats.QuiescencePuts)
@@ -254,14 +269,14 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.Equal(t, 1, stats.ArchivePuts, "early recovery creates its first archive only after fresh dual-drain")
 			require.Zero(t, stats.ClosePuts, "history cannot reconstruct close dispatch")
 			wantQuiescence := 0
-			if s.Recovery == "closed-progress-recovery" {
+			if !cleanupExecutorEarlyHasQuiescence(s.Recovery) {
 				wantQuiescence = 1
 			}
 			require.Equal(t, wantQuiescence, stats.QuiescencePuts)
 		} else {
 			require.Zero(t, stats.ArchivePuts, "cold recovery cannot prepare/send a replacement archive command")
 		}
-		if s.Recovery == "closed-progress-recovery" {
+		if s.Recovery == "closed-progress-recovery" || s.Recovery == "pending-close-recovery" {
 			// This branch creates its first quiescence command. Its original
 			// Stage guard has one Lease in addition to session and Task Claims.
 			cleanupExecutorEarlyStageGrant(t, s.Task, sessionLease, trace.ids, stats)

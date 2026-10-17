@@ -24,10 +24,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// This proxy has no storage or effect implementation. Every request reaches
-// the original TLS etcd server. Recovery faults withhold one committed native
-// Txn response until its deadline; close coverage holds one actual read until
-// cancellation, explicit fixture release, or its fixed three-second ceiling.
+// This proxy has no storage or effect implementation. Requests reach the
+// original TLS etcd server except one selected pending-progress request, which
+// is withheld until its deadline. Other recovery faults withhold one committed
+// native Txn response; close coverage holds one actual read until cancellation,
+// explicit fixture release, or its fixed three-second ceiling.
 type cleanupExecutorEtcdProxy struct {
 	pb.UnimplementedMaintenanceServer
 	connection *grpc.ClientConn
@@ -60,6 +61,8 @@ type cleanupExecutorProxyStats struct {
 	WatchStreams, KeepAliveStreams            int
 	FaultMatched, FaultCommitted, FaultJoined int
 	FaultRevision                             int64
+	FaultNotForwarded                         int
+	UnforwardedExecution                      string
 	AdmissionReads, CloseReadJoined           int
 }
 
@@ -78,7 +81,7 @@ type cleanupExecutorStageGuard struct {
 
 func newCleanupExecutorEtcdProxy(t *testing.T, tlsConfig *tls.Config, task state.TaskReference, fault string) *cleanupExecutorEtcdProxy {
 	t.Helper()
-	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join", "closed-progress-recovery", "quiescent-progress-recovery"}, fault)
+	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join", "closed-progress-recovery", "quiescent-progress-recovery", "pending-close-recovery", "pending-quiescence-recovery"}, fault)
 	connection, err := grpc.NewClient("127.0.0.1:2379", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())))
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -145,6 +148,27 @@ func (p *cleanupExecutorEtcdProxy) Compact(ctx context.Context, r *pb.Compaction
 }
 
 func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnRequest) (*pb.TxnResponse, error) {
+	// These two cases lose a progress request before it reaches etcd. The
+	// actual business reply has already returned; no successful Txn response
+	// is fabricated, and every other request still reaches the real upstream.
+	p.mu.Lock()
+	prior, hold := p.unforwardedProgress(request)
+	if hold && p.stats.FaultMatched == 0 {
+		p.stats.FaultMatched++
+		p.stats.FaultNotForwarded++
+		p.stats.UnforwardedExecution = prior
+	} else {
+		hold = false
+	}
+	p.mu.Unlock()
+	if hold {
+		<-ctx.Done()
+		p.mu.Lock()
+		p.stats.FaultJoined++
+		p.mu.Unlock()
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+
 	response, err := pb.NewKVClient(p.connection).Txn(ctx, request)
 	if err != nil || response == nil {
 		return response, err
@@ -202,6 +226,33 @@ func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnReque
 	p.stats.FaultJoined++
 	p.mu.Unlock()
 	return nil, status.FromContextError(ctx.Err()).Err()
+}
+
+// Capture only one bounded original E value from the actual CAS comparisons.
+// Proposed phase and retained phase differ deliberately in these two cases.
+func (p *cleanupExecutorEtcdProxy) unforwardedProgress(request *pb.TxnRequest) (string, bool) {
+	if !cleanupExecutorPendingProgress(p.fault) || len(request.Success) != 1 {
+		return "", false
+	}
+	put := request.Success[0].GetRequestPut()
+	if put == nil || string(put.Key) != p.prefix+"execution" || len(put.Value) > 4096 {
+		return "", false
+	}
+	var proposed cleanupExecutorRecoveryRow
+	if json.Unmarshal(put.Value, &proposed) != nil || proposed.Task != p.task || proposed.Phase != "occupied" || proposed.Confirmed != cleanupExecutorEarlyProposedPhase(p.fault) || proposed.Run == nil || proposed.Run.Joined || proposed.Archive != nil {
+		return "", false
+	}
+	for _, comparison := range request.Compare {
+		if comparison == nil || comparison.Target != pb.Compare_VALUE || string(comparison.Key) != p.prefix+"execution" {
+			continue
+		}
+		wire := comparison.GetValue()
+		var original cleanupExecutorRecoveryRow
+		if len(wire) <= 4096 && json.Unmarshal(wire, &original) == nil && original.Task == p.task && original.Phase == "occupied" && original.Confirmed == cleanupExecutorEarlyPhase(p.fault) && original.Run != nil && !original.Run.Joined && original.Run.ID == proposed.Run.ID && original.Pending != nil && original.Pending.AttemptID != "" {
+			return string(wire), true
+		}
+	}
+	return "", false
 }
 
 func (p *cleanupExecutorEtcdProxy) unblockCloseRead() {
@@ -299,7 +350,7 @@ func (p *cleanupExecutorEtcdProxy) matchesFault(request *pb.TxnRequest) bool {
 				return true
 			}
 		}
-		if cleanupExecutorEarlyPhase(p.fault) != "" && string(put.Key) == p.prefix+"execution" {
+		if cleanupExecutorEarlyPhase(p.fault) != "" && !cleanupExecutorPendingProgress(p.fault) && string(put.Key) == p.prefix+"execution" {
 			var row cleanupExecutorRecoveryRow
 			if len(put.Value) <= 4096 && json.Unmarshal(put.Value, &row) == nil && row.Task == p.task && row.Phase == "occupied" && row.Confirmed == cleanupExecutorEarlyPhase(p.fault) && row.Run != nil && !row.Run.Joined && row.Archive == nil {
 				return true
