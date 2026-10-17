@@ -213,8 +213,25 @@ DTO；setup中的ID仅定位材料。原worker UID1000/caps0/NNP、实际进程W
 严格native来源及128/256KiB和64节点预算仍须验证。独立物理组合不得设置原
 SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE，以免启动另一套HTTP fixture。
 旧物理镜像缺失；新fixture改用真实Go用户子进程在ready前退出并Wait，避免外部
-/bin/sleep依赖，后续仍验证真实PID1死亡/cgroupempty。受限入口须实际运行，
-TLS fixture通过不代替PID1、consumer或部署验收。
+/bin/sleep依赖。`1e4d836`已实际通过真实PID1死亡/cgroupempty、observer内部签发proof
+及原七槽complete；辅助和主分支组合、构建/vet、指纹审计及唯一限定审查通过，见
+[物理验证](../reports/2026-10-18-etcd-detached-physical-verification.md)。只关闭该组件；
+原test parking不是managed admission，普通probe在ready前已Wait；完整Task4A仍开放。
+
+### Task 4B/4C 接续边界
+
+4B先实现独立严格v2 seal和纯59cmp+3Delete+1Put的63节点投影，公开v1保持原样；
+这两者不产生删除权限。随后原live job/Claim/Kernel认证、cleanup-complete及七槽
+digest认证后才能执行。Unknown保留原write latch，同Claim只读仲裁，不生成新请求。
+删除仅Owner/Control/RuntimeIndex；新历史reader独立认证13个存活来源，加termination、
+provider、seal共16pins，不能重建已删index或依赖当前E/S。历史发送Claim与新释放Claim
+分别验证，不能因不同而拒绝合法恢复，也不能把历史Claim当当前权限。
+
+4C复用原paid quota/terminal阶段。v2单独13点signed history需分阶段付费，保持v1
+原五RPC路径；原一次性260480/262144字节上界容不下替换后的历史。选用仅定位的
+metadata候选，完整paid认证前不得Grant/TaskClaim/Stage或物理/配额副作用。quota后
+pending release同样分阶段认证，再原stamp CAS删除P。最终terminal v2最多22pins，
+原v1最多18pins不变；原guard/cohort/Unknown/真实join及公平调度规则继续保留。
 
 ### Task 4 消费者的统一内存准入约束
 

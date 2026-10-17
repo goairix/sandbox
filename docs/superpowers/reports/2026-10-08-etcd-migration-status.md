@@ -46,8 +46,11 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 `9c5ad2e`修复实际Unknown调用后owner保留ctx/cancel阻塞冷恢复的问题，保持原marker身份；
 Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短租约回归、
 18项race及Linux构建/vet通过，唯一组件审查通过，见[新Run查询验证](2026-10-18-etcd-detached-query-verification.md)。
-完整七槽/terminal proof仍未完成。HTTP仍501；其后继续owner/terminal/quota、
-实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
+`1e4d836`补真实PID1/cgroup死亡及NodeObserver内部签发proof，原七槽全部complete；
+辅助与主分支实际Linux组合、构建/vet、完整指纹审计及唯一限定审查通过，见
+[物理组件验证](2026-10-18-etcd-detached-physical-verification.md)。测试调度仍有明确fixture
+接缝，不代表managed admission。HTTP仍501；其后继续owner/terminal/quota、自动
+消费者和部署/HTTP组合。完整Task4A、容量及最终替代仍开放。
 `5f540a2`补实际三成员 client/peer TLS fixture，跨成员线性读写、observer权限、
 三个原进程Wait与Linux构建/vet通过，见[TLS3验证](2026-10-18-etcd-detached-tls3-verification.md)。
 `c0735b2`修复真实合法长输入触发128KiB门禁的问题：原门禁内退休冗余已完成缓存，
