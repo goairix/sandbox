@@ -9,37 +9,48 @@ func (b *Backend) validateCleanupBirthEvidence(p *WorkerPartitionClaim, birth *c
 	if !b.validWorkerBackend() || birth == nil || birth.self != birth || birth.origin != b || birth.partition != p {
 		return ErrInvalidRecord
 	}
-	b.archiveLife.mu.Lock()
-	valid := b.validWorkerPartition(p)
-	b.archiveLife.mu.Unlock()
-	if !valid || birth.record.Validate() != nil || birth.record.Reference.Partition != p.partition || birth.birth <= 0 || birth.revision < birth.birth || birth.record.ControlRevision >= birth.birth {
-		return ErrInvalidRecord
-	}
-	keys, caps, err := b.cleanupBirthCohortKeys(birth.record.Reference, birth.initial)
+	keys, digest, err := b.validateCleanupBirthMandatory(p, birth.record, birth.initial, birth.birth, birth.revision, [4]taskFence{birth.task, birth.intent, birth.link, birth.receipt})
 	if err != nil {
 		return err
 	}
-	for i, fence := range []taskFence{birth.task, birth.intent, birth.link, birth.receipt} {
-		if fence.key != keys[i] || fence.lease != 0 || fence.create != birth.birth || fence.mod != birth.birth || len(fence.value) > caps[i] {
-			return ErrInvalidRecord
+	return validateCleanupBirthMetadata(birth, keys, digest)
+}
+
+// Both evidence types revalidate the same immutable mandatory cohort. This
+// helper accepts no optional metadata and grants no seal or terminal authority;
+// each caller must first authenticate its own original evidence pointer.
+func (b *Backend) validateCleanupBirthMandatory(p *WorkerPartitionClaim, record TaskRecord, initial StageAttemptLocator, birth, revision int64, fences [4]taskFence) ([]string, string, error) {
+	b.archiveLife.mu.Lock()
+	valid := b.validWorkerPartition(p)
+	b.archiveLife.mu.Unlock()
+	if !valid || record.Validate() != nil || record.Reference.Partition != p.partition || birth <= 0 || revision < birth || record.ControlRevision >= birth {
+		return nil, "", ErrInvalidRecord
+	}
+	keys, caps, err := b.cleanupBirthCohortKeys(record.Reference, initial)
+	if err != nil {
+		return nil, "", err
+	}
+	for i, fence := range fences {
+		if fence.key != keys[i] || fence.lease != 0 || fence.create != birth || fence.mod != birth || len(fence.value) > caps[i] {
+			return nil, "", ErrInvalidRecord
 		}
 	}
 
-	task, taskErr := encodeTaskRecord(birth.record)
-	intent, intentErr := encodeCleanupIntentRecord(CleanupIntentRecord{Version: 1, Task: birth.record, Attempt: birth.initial})
-	link, linkErr := encodeTaskLinkRecord(TaskLinkRecord{Version: 1, Reference: birth.record.Reference})
-	if taskErr != nil || intentErr != nil || linkErr != nil || task != birth.task.value || intent != birth.intent.value || link != birth.link.value {
-		return ErrInvalidRecord
+	task, taskErr := encodeTaskRecord(record)
+	intent, intentErr := encodeCleanupIntentRecord(CleanupIntentRecord{Version: 1, Task: record, Attempt: initial})
+	link, linkErr := encodeTaskLinkRecord(TaskLinkRecord{Version: 1, Reference: record.Reference})
+	if taskErr != nil || intentErr != nil || linkErr != nil || task != fences[0].value || intent != fences[1].value || link != fences[2].value {
+		return nil, "", ErrInvalidRecord
 	}
 	var receipt stageReceipt
-	if json.Unmarshal([]byte(birth.receipt.value), &receipt) != nil || !validHexDigest(receipt.Digest) || receipt.StageReference != birth.initial.reference(receipt.Digest) || receipt.Outcome != OutcomeCommitted {
-		return ErrInvalidRecord
+	if json.Unmarshal([]byte(fences[3].value), &receipt) != nil || !validHexDigest(receipt.Digest) || receipt.StageReference != initial.reference(receipt.Digest) || receipt.Outcome != OutcomeCommitted {
+		return nil, "", ErrInvalidRecord
 	}
 	wire, err := encodeReceipt(receipt.StageReference, OutcomeCommitted)
-	if err != nil || wire != birth.receipt.value {
-		return ErrInvalidRecord
+	if err != nil || wire != fences[3].value {
+		return nil, "", ErrInvalidRecord
 	}
-	return validateCleanupBirthMetadata(birth, keys, receipt.Digest)
+	return keys, receipt.Digest, nil
 }
 
 // Optional records retain exact bytes and native revision bounds. A preliminary

@@ -16,48 +16,10 @@ import (
 // link/receipt without GC; it is not an audit of arbitrary database writes.
 // EOF permits completion only when this CAS covers every returned row.
 func (b *Backend) cleanupBackfillAdvancePlan(p *WorkerPartitionClaim, page *cleanupLegacyPage, birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence) (cleanupBackfillRecord, bool, error) {
-	if page == nil || page.self != page || page.origin != b {
-		return cleanupBackfillRecord{}, false, ErrInvalidRecord
-	}
-	start, end, err := b.cleanupLegacyBounds(p, page.state, nil)
+	next, legacy, err := b.cleanupBackfillPagePlan(p, page)
 	if err != nil {
 		return cleanupBackfillRecord{}, false, err
 	}
-	prior := page.state.record
-	if page.fence != page.state.fence || page.revision != prior.ReadViewRevision || page.start != start || page.end != end || len(page.rows) > cleanupLegacyPageEntries || page.eof != (page.next == nil) {
-		return cleanupBackfillRecord{}, false, ErrInvalidRecord
-	}
-	if !page.eof && len(page.rows) != cleanupLegacyPageEntries {
-		return cleanupBackfillRecord{}, false, ErrInvalidRecord
-	}
-
-	// Validate all row structure, including the suffix this invocation cannot
-	// cover. A copied/foreign page or continuation never creates a new frontier.
-	last := prior.Frontier
-	legacy := -1
-	covered := len(page.rows)
-	for i, row := range page.rows {
-		if !validPreparationUUID(row.taskID) || row.taskID <= last || row.birth <= 0 || row.birth > page.revision {
-			return cleanupBackfillRecord{}, false, ErrInvalidRecord
-		}
-		last = row.taskID
-		if row.birth <= prior.LegacyCutoffRevision {
-			if legacy < 0 {
-				legacy = i
-			} else if covered == len(page.rows) {
-				covered = i
-			}
-		}
-	}
-	if page.next != nil {
-		nextStart, nextEnd, err := b.cleanupLegacyBounds(p, page.state, page.next)
-		prefix := fmt.Sprintf("%sp/%02x/cleanup-intents/", b.namespace.Root(), p.partition)
-		c := &page.next.cursor
-		if err != nil || nextEnd != end || nextStart != prefix+last+"\x00" || c.self != c || c.origin != b || c.partition != p || c.share != page.ranges {
-			return cleanupBackfillRecord{}, false, ErrInvalidRecord
-		}
-	}
-
 	terminal := false
 	if legacy < 0 {
 		if birth != nil || release != nil {
@@ -84,6 +46,54 @@ func (b *Backend) cleanupBackfillAdvancePlan(p *WorkerPartitionClaim, page *clea
 			terminal = birth.execution == nil || birth.execution.Phase == "settled"
 		}
 	}
+	return next, terminal, nil
+}
+
+// Compute one continuous prefix under the original page/B lineage. Returning
+// a row index grants no coverage: each caller must authenticate that first
+// legacy birth and protect it in the same native CAS that publishes this B.
+func (b *Backend) cleanupBackfillPagePlan(p *WorkerPartitionClaim, page *cleanupLegacyPage) (cleanupBackfillRecord, int, error) {
+	if page == nil || page.self != page || page.origin != b {
+		return cleanupBackfillRecord{}, -1, ErrInvalidRecord
+	}
+	start, end, err := b.cleanupLegacyBounds(p, page.state, nil)
+	if err != nil {
+		return cleanupBackfillRecord{}, -1, err
+	}
+	prior := page.state.record
+	if page.fence != page.state.fence || page.revision != prior.ReadViewRevision || page.start != start || page.end != end || len(page.rows) > cleanupLegacyPageEntries || page.eof != (page.next == nil) {
+		return cleanupBackfillRecord{}, -1, ErrInvalidRecord
+	}
+	if !page.eof && len(page.rows) != cleanupLegacyPageEntries {
+		return cleanupBackfillRecord{}, -1, ErrInvalidRecord
+	}
+
+	// Validate all row structure, including the suffix this invocation cannot
+	// cover. A copied/foreign page or continuation never creates a new frontier.
+	last := prior.Frontier
+	legacy := -1
+	covered := len(page.rows)
+	for i, row := range page.rows {
+		if !validPreparationUUID(row.taskID) || row.taskID <= last || row.birth <= 0 || row.birth > page.revision {
+			return cleanupBackfillRecord{}, -1, ErrInvalidRecord
+		}
+		last = row.taskID
+		if row.birth <= prior.LegacyCutoffRevision {
+			if legacy < 0 {
+				legacy = i
+			} else if covered == len(page.rows) {
+				covered = i
+			}
+		}
+	}
+	if page.next != nil {
+		nextStart, nextEnd, err := b.cleanupLegacyBounds(p, page.state, page.next)
+		prefix := fmt.Sprintf("%sp/%02x/cleanup-intents/", b.namespace.Root(), p.partition)
+		c := &page.next.cursor
+		if err != nil || nextEnd != end || nextStart != prefix+last+"\x00" || c.self != c || c.origin != b || c.partition != p || c.share != page.ranges {
+			return cleanupBackfillRecord{}, -1, ErrInvalidRecord
+		}
+	}
 
 	next := prior
 	if covered > 0 {
@@ -93,9 +103,9 @@ func (b *Backend) cleanupBackfillAdvancePlan(p *WorkerPartitionClaim, page *clea
 		next.Phase = "complete"
 	}
 	if next == prior || next.Validate() != nil {
-		return cleanupBackfillRecord{}, false, ErrInvalidRecord
+		return cleanupBackfillRecord{}, -1, ErrInvalidRecord
 	}
-	return next, terminal, nil
+	return next, legacy, nil
 }
 
 // Admission checks both the original discovery share and the Claim share before

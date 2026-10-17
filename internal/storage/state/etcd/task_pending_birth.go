@@ -159,7 +159,8 @@ func (b *Backend) readCleanupBirth(ctx context.Context, p *WorkerPartitionClaim,
 	}
 
 	// Even a typed refusal audits the original worker fences before allowing
-	// another candidate to use this session. No partial evidence escapes.
+	// another candidate to use this session. Only after both checks may an
+	// optional refusal expose a sealed, separate index-only observation.
 	if err = b.workerGuardCheck(o.call, p, ranges); err != nil {
 		return nil, errors.Join(err, validationErr)
 	}
@@ -167,6 +168,10 @@ func (b *Backend) readCleanupBirth(ctx context.Context, p *WorkerPartitionClaim,
 		return nil, errors.Join(err, validationErr)
 	}
 	if validationErr != nil {
+		var refusal *cleanupBirthOptionalRefusal
+		if errors.As(validationErr, &refusal) && refusal.index != nil {
+			refusal.index.self = refusal.index
+		}
 		guardedRefusal = true
 		return nil, validationErr
 	}
@@ -331,7 +336,18 @@ func (b *Backend) cleanupBirthFromPoints(p *WorkerPartitionClaim, discovered *mv
 		task: ownTaskFence(points[0]), intent: ownTaskFence(points[1]), link: ownTaskFence(points[2]), receipt: ownTaskFence(points[3]),
 	}
 	if err = b.cleanupBirthOptionalEvidence(evidence, points[4:], receipt.Digest); err != nil {
-		return nil, err
+		// All mandatory records and native envelopes above are authentic. Keep
+		// raw P independently: an earlier E refusal must not manufacture P
+		// absence. Its canonical validity is rechecked before indexing.
+		index := &cleanupBirthIndexEvidence{
+			origin: b, partition: p, record: task, initial: routing.Attempt, birth: birth, revision: revision,
+			task: evidence.task, intent: evidence.intent, link: evidence.link, receipt: evidence.receipt,
+		}
+		if points[5] != nil {
+			fence := ownTaskFence(points[5])
+			index.pending = &fence
+		}
+		return nil, &cleanupBirthOptionalRefusal{cause: err, index: index}
 	}
 	evidence.self = evidence
 	return evidence, nil

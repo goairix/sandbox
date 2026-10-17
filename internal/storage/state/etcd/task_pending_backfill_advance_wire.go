@@ -68,6 +68,9 @@ func (b *Backend) cleanupBackfillAdvanceRole(key string) (string, int) {
 			return "release", 8192
 		}
 	}
+	if len(parts) == 5 && parts[2] == "sandboxes" && validDomainSegment(parts[3]) && parts[4] == "cleanup-task" {
+		return "link", 2048
+	}
 	if len(parts) == 7 && parts[2] == "stages" && len(parts[3]) <= 128 && len(parts[4]) <= 128 && validPreparationUUID(parts[5]) && parts[6] == "receipt" {
 		return "receipt", 2048
 	}
@@ -92,11 +95,24 @@ func (b *Backend) preflightCleanupPendingDelete(m Mutation) error {
 // deleteOnly selects fixed wire dimensions and CRUD shape, never permission.
 // Only the concrete caller's signed-proof validator can authorize a deletion.
 func (b *Backend) preflightCleanupPendingMutation(m Mutation, deleteOnly bool) error {
+	return b.preflightCleanupPendingMode(m, deleteOnly, false)
+}
+
+// indexOnly selects the smaller add/preserve-P shape, not a source of proof.
+// Its exact role values plus maximal protobuf framing fit 91136 bytes:
+// 47*1152 + 32896 value/write bytes + 4096 framing. Existing profiles retain
+// their original caps and CRUD rules.
+func (b *Backend) preflightCleanupPendingMode(m Mutation, deleteOnly, indexOnly bool) error {
 	if !b.validWorkerBackend() {
 		return ErrInvalidMutation
 	}
 	nodes, requestBytes, name := 52, 107136, "backfill-advance"
-	if deleteOnly {
+	if indexOnly {
+		nodes, requestBytes, name = 47, 91136, "backfill-index"
+		if deleteOnly || !(len(m.Comparisons) == 41 && len(m.Writes) == 2 || len(m.Comparisons) == 44 && len(m.Writes) == 1) {
+			return ErrInvalidMutation
+		}
+	} else if deleteOnly {
 		nodes, requestBytes, name = 47, 95232, "pending-delete"
 		if len(m.Comparisons) != 41 && len(m.Comparisons) != 44 || len(m.Writes) != 1 {
 			return ErrInvalidMutation
@@ -124,7 +140,13 @@ func (b *Backend) preflightCleanupPendingMutation(m Mutation, deleteOnly bool) e
 	maximumCmps := make([]clientv3.Cmp, len(m.Comparisons))
 	for i, cmp := range m.Comparisons {
 		role, limit := b.cleanupBackfillAdvanceRole(string(cmp.Key))
-		if limit == 0 || deleteOnly && role == "backfill" || !validComparison(cmp) || cmp.Result != pb.Compare_EQUAL || len(cmp.RangeEnd) != 0 {
+		if limit == 0 || !validComparison(cmp) || cmp.Result != pb.Compare_EQUAL || len(cmp.RangeEnd) != 0 {
+			return ErrInvalidMutation
+		}
+		if deleteOnly && role == "backfill" || !indexOnly && role == "link" {
+			return ErrInvalidMutation
+		}
+		if indexOnly && (role == "execution" || role == "release") {
 			return ErrInvalidMutation
 		}
 		maximumCmps[i] = copyComparison(cmp)
@@ -162,6 +184,9 @@ func (b *Backend) preflightCleanupPendingMutation(m Mutation, deleteOnly bool) e
 			return ErrInvalidMutation
 		}
 		if len(write.Value) > limit || write.Delete && len(write.Value) != 0 {
+			return ErrInvalidMutation
+		}
+		if indexOnly && write.Delete {
 			return ErrInvalidMutation
 		}
 		maximumWrites[i] = Write{Key: key, Delete: write.Delete}

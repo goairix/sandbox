@@ -57,6 +57,7 @@ type dueWorkerAutomatic struct {
 	legacy                    *cleanupLegacyPage
 	observation               *cleanupBackfillObservation
 	birth                     *cleanupBirthEvidence
+	indexBirth                *cleanupBirthIndexEvidence
 	release                   *cleanupBirthReleaseEvidence
 	rejected                  uint64
 	lastError                 string
@@ -137,6 +138,7 @@ func (w *DueWorker) automaticTurn(ctx context.Context) (time.Time, error) {
 		switch {
 		case errors.Is(err, rpctypes.ErrCompacted) && a.backfill:
 			a.legacy, a.birth, a.release = nil, nil, nil
+			a.indexBirth = nil
 			a.phase = "backfill-refresh-read"
 		case errors.Is(err, rpctypes.ErrCompacted):
 			part.cursor, part.pendingRevision = nil, 0
@@ -187,6 +189,7 @@ func (w *DueWorker) automaticFinishPhase() {
 	a.preferBackfill = !a.backfill
 	a.phase, a.active = "", -1
 	a.birth, a.release, a.legacy, a.observation = nil, nil, nil, nil
+	a.indexBirth = nil
 	a.candidate = cleanupPendingRecord{}
 }
 
@@ -274,6 +277,22 @@ func (w *DueWorker) automaticRetainedBytes() (uint64, error) {
 // their bounded canonical bytes plus object overhead before another phase.
 func automaticEvidenceBytes(a *dueWorkerAutomatic) (uint64, error) {
 	charge := uint64(64 << 10) // active B observation, two legacy rows and candidate routing
+	if index := a.indexBirth; index != nil {
+		// Index-only evidence replaces the normal birth/release phase. Five
+		// fences at 1024-key/4096-value bytes, four copies plus 4096 overhead
+		// each, and the routing reserve total at most 188416 bytes.
+		if a.birth != nil || a.release != nil {
+			return 0, ErrInvalidRecord
+		}
+		for _, f := range []*taskFence{&index.task, &index.intent, &index.link, &index.receipt, index.pending} {
+			if f != nil {
+				if len(f.key) > maxKeyBytes || len(f.value) > 4096 {
+					return 0, ErrInvalidRecord
+				}
+				charge += uint64(4096 + 4*(len(f.key)+len(f.value)))
+			}
+		}
+	}
 	if birth := a.birth; birth != nil {
 		for _, f := range []*taskFence{&birth.task, &birth.intent, &birth.link, &birth.receipt, birth.executionFence, birth.pending, birth.release} {
 			if f != nil {

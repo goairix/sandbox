@@ -2,6 +2,8 @@ package etcd
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -104,7 +106,17 @@ func (w *DueWorker) automaticBackfillTurn(ctx context.Context) (time.Time, error
 		}
 		birth, err := b.readCleanupBirth(ctx, scan.partition, scan.ranges, taskID)
 		if err != nil {
-			return time.Time{}, err
+			var refusal *cleanupBirthOptionalRefusal
+			if !errors.As(err, &refusal) || !w.automaticHealthy(err) || b.validateCleanupBirthIndexEvidence(scan.partition, refusal.index) != nil {
+				return time.Time{}, fmt.Errorf("legacy birth or pending evidence cannot establish coverage: %w", err)
+			}
+			// The reader still refused execution. Only this legacy domain may
+			// use its separately sealed mandatory birth to add discovery P;
+			// ordinary pending discovery keeps the unchanged strict refusal.
+			a.lastError = dueWorkerError(fmt.Errorf("optional cleanup metadata refused; discovery indexing only: %w", err))
+			a.indexBirth, a.phase = refusal.index, "backfill-index-advance"
+			a.birth, a.release = nil, nil
+			return time.Now(), nil
 		}
 		a.birth, a.phase = birth, "backfill-advance"
 		if birth.release != nil && (birth.execution == nil || birth.execution.Phase == "settled") {
@@ -131,6 +143,17 @@ func (w *DueWorker) automaticBackfillTurn(ctx context.Context) (time.Time, error
 			return at, nil
 		}
 		state, err := b.advanceCleanupBackfill(ctx, scan.partition, share, a.legacy, a.birth, a.release)
+		if err != nil {
+			return time.Time{}, err
+		}
+		part.backfill = state
+		w.automaticFinishPhase()
+	case "backfill-index-advance":
+		share, at := w.readyClaim(time.Now())
+		if share == nil {
+			return at, nil
+		}
+		state, err := b.advanceCleanupBackfillIndex(ctx, scan.partition, share, a.legacy, a.indexBirth)
 		if err != nil {
 			return time.Time{}, err
 		}
