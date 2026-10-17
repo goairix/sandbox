@@ -72,12 +72,49 @@ main `detachedmainlongbuild01` Linux构建9252输入、完整审计通过。
 保留两次前置失败：最初 Runtime.BootID 未满足 activation 额外 UUID 约束；修正后
 完整 activation companion 超8192字节。第二次修改只调整签名前 runtime ID/UID
 的内容，长度各128不变；原 BootUUID、字段约束及全部限制保留。上述是固定合法
-长输入验证，不是全协议绝对最大值、长输入保留对象图、全局内存或大N容量验收。
+长输入验证；下面另行记录该固定形状的保留对象图验证，仍不代表全协议绝对
+最大值、全局内存或大N容量验收。
+
+## 固定合法长输入的完整冷恢复对象图
+
+`c0735b2`（辅助分支 `9e7eb47`）补真实长输入的原 draft 加完整 recovery candidate
+验证。首次实际 `run-21e3d82cc50b45e78f8de7372a05640f` 已获得真实 Joined E/S，
+但被128KiB保留图门禁拒绝。只退休 Q 授权缓存后，`run-71b9ceb9095b46748ea5e8abd5cb6f75`
+两个边界用例通过，long仍失败：原draft单独121079字节，不能据此声称完整候选通过。
+两次失败及对应输入/日志均保留。
+
+修正仅在原 authenticated Joined/job/Run/S、physical joined、owner returned 及
+锁内原 Claim 永久 lost 后退休已 committed/cleaned 的冗余缓存。Q 额外匹配原
+prepared reference，清除已完成发送的 certificate/issuer/claims/ticket/record
+和 prerequisite 中重复 payload；保留 prerequisite 本身和 native坐标。Close
+只清 canonical recordValue，且原 commandID/reference 双匹配真实 Q 的 close
+command；其他 close payload 全保留。退休与 Stage 非空无关，可在前次超限失败后
+幂等重试。原 Claim、none完整draft、prepared、旧E/wire/attempt/latch均保留。
+
+旧 Prepare/Deliver 在 lost Claim 下仍拒绝；none 原写入可以在 live 检查前仲裁，
+因此专门验证其原 native committed 归属加 dead-Claim error，零新 Put/Grant/send。
+native Load/Query 不依赖已退休缓存。未 join/伪造 Joined 时缓存保持原样。
+
+最终实际 `run-ac7e9ddf1b75458aae92f212fe8df8f8` 三项全部 PASS：边界14.19秒、
+退休/仲裁14.12秒、完整 long恢复15.13秒。实际Q16962、fact9163、none5254字节，
+原 draft加完整 recovery graph为129326字节，未扩大131072字节或65536节点上限。
+原51节点actor只写一次新Run，成功回复前原roots仍在；原fact/none完整MVCC未变。
+19项source与ELF前后稳定，三原etcd进程实际join，无SKIP/FAIL/OOM，容器精确删除。
+ELF SHA-256：`51c17b289f63f9ed013b29a0c4f274e99c2dc3c10c40c6f83d8ebb3f03246991`。
+build02/vet02各9246输入及完整审计PASS，唯一reviewer最终限定Spec/Quality PASS。
+
+主分支合并后同三项在 `run-0e9a2a086e3b4c728db8b33f193c147a` 再通过：实际
+Q16964、fact9164、完整图129334字节；65项source及ELF稳定，三原子进程join、
+无SKIP/FAIL/OOM，精确容器已删。主分支Linux构建9254输入及完整审计PASS。
+整合ELF SHA-256：`add5dc60d3718ea4f717a54d64bf105a7c7912fc1ac3732b962c9dc1ae48f723`。
+
+这只关闭上述固定合法长形状；该场景余量较小，不能据此推断其他合法最大值或
+64MiB全局admission、32物理并发、大量已有sandbox容量已通过。
 
 ## 尚未验收
 
-其余合法最大输入与长历史冷恢复保留对象图、worker 全局64MiB admission、32物理并发、
-大 N、provider retained Query、managed消费者、owner/terminal/quota全链路及
+其余合法最大输入与长历史冷恢复组合、worker 全局64MiB admission、32物理并发、
+大 N、managed消费者、owner/terminal/quota全链路及
 HTTP/部署恢复仍开放。默认入口保持 Redis，生产切换0%。
 
 原始输入、命令、日志、失败记录及唯一审查记录保存在 B 工作树

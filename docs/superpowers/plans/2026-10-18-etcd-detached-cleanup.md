@@ -192,6 +192,12 @@ freshClaim/newRun retained Query等待B实际cold gate验收。此组件不能�
 查询接续：`9c5ad2e`完成实际新Run/新Claim下原请求Query与原owner安全退休；
 真实native+18race+Linuxbuild/vet、完整审计及唯一限定审查通过。完整Task4A仍开放。
 
+Task3固定长图接续：`c0735b2`在原native Joined及lost Claim门禁内，退休完成的Q
+发送/授权缓存及精确close canonical cache，保留none/Claim/prepared/E/wire/pins。
+两次真实超限失败保留，最终固定合法长形状完整图129326字节及51节点恢复通过。
+不关闭绝对最大输入、其他长历史组合、全局admission和消费者；不得增加容量上限
+或用共享类型豁免掩盖剩余owned图。
+
 ### Task 4A 物理证明接续
 
 `5f540a2`三成员TLS fixture已实际通过，保留原单成员入口；只关闭该测试资产片。

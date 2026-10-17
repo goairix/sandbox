@@ -50,7 +50,9 @@ Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短�
 实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
 `5f540a2`补实际三成员 client/peer TLS fixture，跨成员线性读写、observer权限、
 三个原进程Wait与Linux构建/vet通过，见[TLS3验证](2026-10-18-etcd-detached-tls3-verification.md)。
-真实合法长输入的完整冷恢复对象图曾触发128KiB限制；窄释放修正仍在验证，尚未验收。
+`c0735b2`修复真实合法长输入触发128KiB门禁的问题：原门禁内退休冗余已完成缓存，
+固定长输入完整draft+recovery图129326字节，三项native及Linuxbuild/vet、限定独立
+审查通过。其他合法最大值、全局容量与消费者未关闭，见上述冷恢复验证报告。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
