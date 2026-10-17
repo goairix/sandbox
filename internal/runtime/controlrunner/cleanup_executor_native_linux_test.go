@@ -200,6 +200,10 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	require.NoError(t, err)
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{cert}}
+	if cleanupColdQuotaAutomaticMode(s.AutomaticMode) {
+		cleanupColdQuotaAutomaticWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certPEM, keyPEM)
+		return
+	}
 	if s.AutomaticMode != "" {
 		cleanupPendingAutomaticWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certPEM, keyPEM)
 		return
@@ -766,7 +770,7 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 		recovery[0] == "automatic-mounted-backlog" || recovery[0] == "automatic-worker-role" ||
 		recovery[0] == "automatic-pending-aba" || recovery[0] == "automatic-pending-ack" ||
 		recovery[0] == "automatic-result-mounted" || recovery[0] == "automatic-result-role" ||
-		recovery[0] == "automatic-persistent-capacity")
+		recovery[0] == "automatic-persistent-capacity" || cleanupColdQuotaAutomaticMode(recovery[0]))
 	if mountedLoader {
 		// The read-only container root stays unchanged. The existing mount
 		// capability provides a private, bounded clock directory owned by the
@@ -822,9 +826,16 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	contract, err := kubecontract.EnrolledPlainContractDigest(image)
 	require.NoError(t, err)
 	options := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: identity, TLS: appTLS, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: binding.AuthorityID, Target: binding.Target, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: nativeFixtureClock{}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: contract, MaxActive: 32}, RequestTimeout: 2 * time.Second}
+	coldQuotaAutomatic := len(recovery) == 1 && cleanupColdQuotaAutomaticMode(recovery[0])
+	if coldQuotaAutomatic {
+		coldQuotaReturnNativeProfile(&options)
+	}
 	b, err := state.New(ctx, options)
 	require.NoError(t, err)
 	defer b.Close()
+	if coldQuotaAutomatic {
+		cleanupColdQuotaAutomaticInventory(t, ctx, b)
+	}
 	workspace, err := state.NewWorkspaceIdentity("local", identity.StorageID, "bucket", "cleanup-executor/")
 	require.NoError(t, err)
 	plan, err := state.NewTaskWorkspaceSyncPlan(state.TaskWorkspaceSyncPlanOptions{Workspace: workspace, DeleteExtraneous: true})
@@ -836,8 +847,16 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	creation, err := b.ClaimCreation(ctx, workspace, input.IntentID, "cleanup-native-create", time.Minute)
 	require.NoError(t, err)
 	defer b.ReleaseCreationClaim(context.Background(), creation)
+	if coldQuotaAutomatic {
+		reserved, err := b.ReserveColdPreparation(ctx, creation, 7)
+		require.NoError(t, err)
+		require.Equal(t, state.OutcomeCommitted, reserved.Outcome)
+	}
 	dispatch, err := b.DeclareRuntimeDispatch(ctx, creation, state.RuntimeDispatchInput{Kind: state.RuntimeDispatchCreate, Target: binding.Target, Payload: input.Payload})
 	require.NoError(t, err)
+	if coldQuotaAutomatic {
+		cleanupColdQuotaAutomaticCreate(t, ctx, b, creation)
+	}
 	nb, na := time.Now().UTC().Add(-30*time.Second), time.Now().UTC().Add(5*time.Minute)
 	observerCert, err := p.SignNodeObserverCertificate(root, p.NodeObserverCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "node_observer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, NodeUID: nodeUID, NodeBootID: boot, PublicKey: observerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
@@ -942,6 +961,11 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	d := dispatch.Entry.Record
 	certificate, err := p.SignRuntimeCertificate(root, p.RuntimeCertificateClaims{Version: 1, Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IntentID: input.IntentID, SandboxID: input.SandboxID, WorkspaceHash: workspace.Hash(), Generation: ri.Generation, OperationID: d.OperationID, PayloadDigest: d.PayloadDigest, Snapshot: p.SnapshotReference(d.Snapshot), ExpiresAt: d.ExpiresAt, Runtime: ri.Runtime, WorkspaceMode: "plain", PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
+	if coldQuotaAutomatic {
+		observed, err := b.RecordColdCreateObservation(ctx, creation, string(pod.UID))
+		require.NoError(t, err)
+		require.Equal(t, string(pod.UID), observed.PodUID)
+	}
 	_, err = b.BindRuntime(ctx, creation, certificate)
 	require.NoError(t, err)
 	_, err = b.ConsumeRuntimeMount(ctx, creation)
@@ -954,6 +978,11 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	published, err := b.PublishRuntimeEnrolled(ctx, creation, reply.Proof, reply.Enrollment)
 	require.NoError(t, err)
 	require.Equal(t, state.OutcomeCommitted, published.Outcome)
+	if coldQuotaAutomatic {
+		settled, err := b.SettleColdPreparation(ctx, workspace, input.IntentID)
+		require.NoError(t, err)
+		require.Equal(t, state.OutcomeCommitted, settled.Outcome)
+	}
 	require.NoError(t, b.ReleaseCreationClaim(ctx, creation))
 	apiState.mu.Lock()
 	apiState.address = reply.Address
