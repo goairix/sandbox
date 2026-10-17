@@ -12,10 +12,22 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// integrationBackendShape selects boundary inputs before the first native
+// identity provisioning. It cannot rewrite an existing Backend or signed wire.
+// Callers own uniqueness of a supplied namespace; defaults remain unchanged.
+type integrationBackendShape struct {
+	namespace    Namespace
+	runtimeID    string
+	restoreEpoch string
+}
+
 // integrationBackend provisions a unique, disposable operator namespace on a
 // real three-member cluster. Production New never performs this provisioning.
-func integrationBackend(t *testing.T) (*Backend, *clientv3.Client) {
+func integrationBackend(t *testing.T, shapes ...integrationBackendShape) (*Backend, *clientv3.Client) {
 	t.Helper()
+	if len(shapes) > 1 {
+		t.Fatal("integration fixture accepts at most one initial identity shape")
+	}
 	endpointsEnv := os.Getenv("TEST_ETCD_ENDPOINTS")
 	if endpointsEnv == "" {
 		t.Skip("set TEST_ETCD_ENDPOINTS to a real three-member etcd cluster")
@@ -69,6 +81,12 @@ func integrationBackend(t *testing.T) (*Backend, *clientv3.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(shapes) == 1 {
+		n = shapes[0].namespace
+		if _, err := NewNamespace(n.prefix, n.scope, n.cell); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -77,6 +95,10 @@ func integrationBackend(t *testing.T) (*Backend, *clientv3.Client) {
 		}
 	})
 	identity := Identity{SchemaVersion: 1, Prefix: n.prefix, AuthorityID: n.scope, Cell: n.cell, ClusterID: members.Header.ClusterId, StorageID: "test-storage", RuntimeID: "test-runtime", RestoreEpoch: "test-epoch"}
+	if len(shapes) == 1 {
+		identity.RuntimeID = shapes[0].runtimeID
+		identity.RestoreEpoch = shapes[0].restoreEpoch
+	}
 	value, err := json.Marshal(identity)
 	if err != nil {
 		t.Fatal(err)

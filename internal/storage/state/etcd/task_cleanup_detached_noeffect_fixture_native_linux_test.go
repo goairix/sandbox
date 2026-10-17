@@ -44,6 +44,19 @@ type cleanupDetachedNoEffectNativeFixture struct {
 	effectCount atomic.Int64
 }
 
+// Source inputs are fixed before native identity provisioning and every root
+// signature. A boundary case cannot rewrite an existing Backend or signed KV.
+type cleanupDetachedNoEffectSourceShape struct {
+	backend integrationBackendShape
+	target  string
+	runtime RuntimeReference
+}
+
+func newCleanupDetachedNoEffectNativeFixtureWithSource(t *testing.T, shape *cleanupDetachedNoEffectSourceShape, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
+	t.Helper()
+	return newCleanupDetachedNoEffectNativeFixtureWithConfiguration(t, shape, 30*time.Second, nil, claimWorker...)
+}
+
 func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
 	t.Helper()
 	return newCleanupDetachedNoEffectNativeFixtureWithOptions(t, nil, claimWorker...)
@@ -62,21 +75,39 @@ func newCleanupDetachedNoEffectNativeFixtureWithOptions(t *testing.T, configure 
 // assign c.deadline or reconstruct a capability from copied lease diagnostics.
 func newCleanupDetachedNoEffectNativeFixtureWithClaimTTL(t *testing.T, claimTTL time.Duration, configure func(*Options, p.EnrolledRuntimeEvidence), claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
 	t.Helper()
+	return newCleanupDetachedNoEffectNativeFixtureWithConfiguration(t, nil, claimTTL, configure, claimWorker...)
+}
+
+// Keep source shaping and pre-New provider wiring in one producer sequence so
+// both profiles retain the original signing, admission and Claim ownership.
+func newCleanupDetachedNoEffectNativeFixtureWithConfiguration(t *testing.T, shape *cleanupDetachedNoEffectSourceShape, claimTTL time.Duration, configure func(*Options, p.EnrolledRuntimeEvidence), claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
+	t.Helper()
 	require.Positive(t, claimTTL)
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("requires the existing explicit original Linux worker TestMain")
 	}
 	require.NotEmpty(t, os.Getenv("TEST_ETCD_ENDPOINTS"), "native writer requires the current real three-member fixture")
-	base, raw := integrationBackend(t)
+	var backendShapes []integrationBackendShape
+	if shape != nil {
+		backendShapes = append(backendShapes, shape.backend)
+	}
+	base, raw := integrationBackend(t, backendShapes...)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	now := time.Now().UTC()
 	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
 	o := integrationOptions(base, raw)
+	target := "target"
+	if shape != nil {
+		// Match the selected initial identity before constructing any producer;
+		// integrationOptions otherwise preserves its historical RuntimeID default.
+		o.Identity.RuntimeID = shape.backend.runtimeID
+		target = shape.target
+	}
 	o.RequestTimeout = time.Second
 	o.WorkerControl = &WorkerControlOptions{SessionTTL: 60 * time.Second}
 	o.Clock = testAuthorityClock(func(ctx context.Context) (ClockObservation, error) { return ClockObservation{UTC: now}, ctx.Err() })
-	o.PublicationTrust = &RuntimePublicationTrust{AuthorityID: o.Identity.RuntimeID, Target: "target", Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}
+	o.PublicationTrust = &RuntimePublicationTrust{AuthorityID: o.Identity.RuntimeID, Target: target, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}
 	contract, err := kubecontract.EnrolledPlainContractDigest(detachedCleanupPlainImageForTest)
 	require.NoError(t, err)
 	o.EnrolledPublication = &EnrolledPublicationOptions{ContractDigest: contract, MaxActive: 4}
@@ -98,9 +129,12 @@ func newCleanupDetachedNoEffectNativeFixtureWithClaimTTL(t *testing.T, claimTTL 
 	creation, err := producer.ClaimCreation(ctx, workspace, input.IntentID, "source", 30*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = producer.ReleaseCreationClaim(context.Background(), creation) })
-	dispatch, err := producer.DeclareRuntimeDispatch(ctx, creation, RuntimeDispatchInput{Kind: RuntimeDispatchCreate, Target: "target", Payload: json.RawMessage(`{"native":"detached plain source"}`)})
+	dispatch, err := producer.DeclareRuntimeDispatch(ctx, creation, RuntimeDispatchInput{Kind: RuntimeDispatchCreate, Target: target, Payload: json.RawMessage(`{"native":"detached plain source"}`)})
 	require.NoError(t, err)
 	runtime := RuntimeReference{ID: "plain-pod", UID: uuid.NewString(), BootID: uuid.NewString()}
+	if shape != nil {
+		runtime = shape.runtime
+	}
 	certificate := preparationCertificate(t, producer, dispatch.Entry.Record, root, "plain", runtime)
 	bound, err := producer.BindRuntime(ctx, creation, certificate)
 	require.NoError(t, err)
