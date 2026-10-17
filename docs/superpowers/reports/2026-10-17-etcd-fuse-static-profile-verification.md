@@ -54,3 +54,9 @@ The initial epochs and archives above remain historical evidence of their origin
 The runner/environment and verification scope remain unchanged; `-race` applied to both list and test. Successful R1 host/race logs contain no SKIP, race warning or test failure. No actual Linux binary execution, FUSE, Kubernetes or object-storage test is claimed.
 
 Current frozen R1 source: `enrolled_fuse.go` (180 lines) SHA256 `c401189169cbc0578a46bc6cb2ce9bffa7aa73f62cf3317c9f02cf673b5c1dbc`; `enrolled_fuse_test.go` (429 lines) `cd107f13093e783243dbe0796e03026c0d23ba1cd1afba1748797dda1040f445`; unchanged renderer `930a6f0e3506961f76bcb1addd63cd8fdaba3baad399bc9704a11ad7f32901ed`. R1 Linux runner SHA256: `58e257e0bf7cf7d3513e38d1ef0a4c939c30817254ca3d7b6f1ed9002bf5c133`. All three Go files still have empty gofmt-d output; R1 adds only two standard-library imports, the endpoint check/comment and two rejection cases.
+
+Root independently audited all four final R1 epochs and reviewed the exact fix.
+The original independent reviewer rechecked only R1 and confirmed the Important
+finding ADDRESSED, Spec PASS and Quality PASS, with no new C/I/M. The two coherent
+source commits are on the migration branch as `d2948b3` and `63756cd`; this closes
+only the inactive static-profile slice, with all runtime/FUSE limits above retained.
