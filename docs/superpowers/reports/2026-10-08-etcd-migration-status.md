@@ -42,6 +42,14 @@ execution/pending摘要绑定及初步release观察；三组定向host/race和Li
 原样保留；尚未验证本读取器的真实签名正例或自动物理链。下一步推进回填进度及终态
 pending事务，整个Task仍未完成，也不因此上调整体粗估或宣称大N容量通过。
 
+回填推进代码现已实现：旧任务pending补建/保留与B进度及完成转换同事务提交，四组27叶
+host、十三组100叶race、Linux编译/vet及共享释放配置模型回归通过，见
+[回填推进验证](2026-10-17-etcd-pending-backfill-advance-verification.md)。仍没有自动actor
+或实际全历史回填验收，新任务终态pending独立删除及真实签名成功分支尚待完成。
+并行生产入口子任务的生命周期观察接口已合入`13475ad`，见
+[worker生命周期验证](2026-10-17-etcd-worker-lifecycle-verification.md)；v2入口仍在隔离分支
+实现，不能算独立自动worker已交付。FUSE增量统计也仍在隔离工作树验证，未切换探针。
+
 ## 2026-10-17 此前切片记录（已由上述完整执行器验收接续）
 
 实际常驻到期 worker 已范围完成，源码 `1f7f7b6/a22f5fc/6463b5d/1017b66`，审查修复 `9a06de9`。唯一完整审查发现的4项 Important 已经真实回归复现、修复并由同一审查员限定复核批准；无新增或未关闭C/I/M。最终71组针对性host/race、Linuxvet/build及新三成员native03通过，后者9.98秒；原故障/取消告警、首次测试及采集脚本失败如实保留。详见 [常驻到期worker验收](2026-10-16-etcd-due-worker-verification.md)。`688748f` 明确有限轮询限制，未实现earliest-expiry timer、不承诺到期时延。

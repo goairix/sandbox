@@ -3,7 +3,6 @@ package etcd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 )
 
@@ -104,90 +103,19 @@ func (b *Backend) readCleanupBirthRelease(ctx context.Context, p *WorkerPartitio
 // read revision or an MVCC version. Canonical encodings must still match its
 // owned fences; only the original birth reader can supply its origin seal.
 func (b *Backend) validateCleanupBirthRelease(p *WorkerPartitionClaim, birth *cleanupBirthEvidence) error {
-	if !b.validWorkerBackend() || birth == nil || birth.self != birth || birth.origin != b || birth.partition != p {
-		return ErrInvalidRecord
-	}
-	b.archiveLife.mu.Lock()
-	valid := b.validWorkerPartition(p)
-	b.archiveLife.mu.Unlock()
-	if !valid || birth.record.Validate() != nil || birth.record.Reference.Partition != p.partition || birth.birth <= 0 || birth.revision < birth.birth || birth.record.ControlRevision >= birth.birth {
-		return ErrInvalidRecord
+	if err := b.validateCleanupBirthEvidence(p, birth); err != nil {
+		return err
 	}
 	if b.enrolledPublication == nil || !validHexDigest(b.enrolledPublication.ContractDigest) || b.enrolledVerifier == nil || b.localRuntimeRelease.validate() != nil {
 		return ErrInvalidConfiguration
 	}
 
-	keys, caps, err := b.cleanupBirthCohortKeys(birth.record.Reference, birth.initial)
-	if err != nil {
-		return err
-	}
-	fences := []taskFence{birth.task, birth.intent, birth.link, birth.receipt}
-	for i, fence := range fences {
-		if fence.key != keys[i] || fence.lease != 0 || fence.create != birth.birth || fence.mod != birth.birth || len(fence.value) > caps[i] {
-			return ErrInvalidRecord
-		}
-	}
-
-	task, taskErr := encodeTaskRecord(birth.record)
-	intent, intentErr := encodeCleanupIntentRecord(CleanupIntentRecord{Version: 1, Task: birth.record, Attempt: birth.initial})
-	link, linkErr := encodeTaskLinkRecord(TaskLinkRecord{Version: 1, Reference: birth.record.Reference})
-	if taskErr != nil || intentErr != nil || linkErr != nil || task != birth.task.value || intent != birth.intent.value || link != birth.link.value {
-		return ErrInvalidRecord
-	}
-
-	var receipt stageReceipt
-	if json.Unmarshal([]byte(birth.receipt.value), &receipt) != nil || !validHexDigest(receipt.Digest) || receipt.StageReference != birth.initial.reference(receipt.Digest) || receipt.Outcome != OutcomeCommitted {
-		return ErrInvalidRecord
-	}
-	wire, err := encodeReceipt(receipt.StageReference, OutcomeCommitted)
-	if err != nil || wire != birth.receipt.value {
-		return ErrInvalidRecord
-	}
-	return validateCleanupBirthReleaseMetadata(birth, keys, receipt.Digest)
-}
-
-// Optional observations stay bound to the same immutable birth. Their canonical
-// values and recorded revision bounds are checked locally; none is reread here
-// or promoted into a signed release proof by a phase label or matching digest.
-func validateCleanupBirthReleaseMetadata(birth *cleanupBirthEvidence, keys []string, mutationDigest string) error {
-	ref := birth.record.Reference
-	digest := workerIdentityDigest(birth.task.value)
-	if (birth.execution == nil) != (birth.executionFence == nil) {
-		return ErrInvalidRecord
-	}
-	if r := birth.execution; r != nil {
-		f := birth.executionFence
-		wire, err := encodeCleanupExecution(*r)
-		if err != nil || f.key != keys[4] || f.lease != 0 || f.create <= birth.birth || f.mod < f.create || f.mod > birth.revision || wire != f.value {
-			return ErrInvalidRecord
-		}
-		if r.Task != ref || r.TaskBirth != birth.birth || r.InitialAttempt != birth.initial || r.TaskDigest != digest || r.InitialMutationDigest != mutationDigest || r.InitialReceiptDigest != workerIdentityDigest(birth.receipt.value) || r.Incarnation != cleanupIncarnation(cleanupSlotRecordFromExecution(*r)) {
-			return ErrInvalidRecord
-		}
-	}
-
-	if f := birth.pending; f != nil {
-		wire, err := encodeCleanupPending(cleanupPendingRecord{Version: 1, Reference: ref, TaskDigest: digest})
-		if err != nil || f.key != keys[5] || f.lease != 0 || f.create < birth.birth || f.mod != f.create || f.mod > birth.revision || wire != f.value {
-			return ErrInvalidRecord
-		}
-	}
-
 	if birth.release == nil || birth.releaseRecord == nil {
 		return ErrInvalidRecord
 	}
-	r, f := birth.releaseRecord, birth.release
-	wire, err := encodeLocalOwnerRelease(*r)
-	if err != nil || f.key != keys[6] || f.lease != 0 || f.create <= birth.birth || f.mod != f.create || f.mod > birth.revision || f.create <= r.Termination.ModRevision || f.create <= r.Claim.CreateRevision || wire != f.value {
-		return ErrInvalidRecord
-	}
-	if r.Task != ref || r.TaskBirth != birth.birth || r.Runtime != birth.record.Runtime || r.WorkspaceHash != birth.record.WorkspaceHash || r.Generation != birth.record.Generation {
-		return ErrInvalidRecord
-	}
-
 	if birth.execution != nil && birth.execution.Release != nil {
 		pin := birth.execution.Release
-		if pin.CreateRevision != f.create || pin.Digest != workspaceSyncIntentDigest(f.value) {
+		if pin.CreateRevision != birth.release.create || pin.Digest != workspaceSyncIntentDigest(birth.release.value) {
 			return ErrInvalidRecord
 		}
 	}

@@ -14,8 +14,8 @@ import (
 const cleanupBackfillBytes = 2048
 
 // Version 1 preserves the original legacy cutoff across view refreshes. The
-// frontier is a canonical Task UUID; this bootstrap slice never advances it
-// or writes complete. Field order is part of the canonical persistent format.
+// frontier is the last UUID covered by an atomic pending/coverage CAS; complete
+// records exhaustion at the stored view. Field order is canonical and stable.
 type cleanupBackfillRecord struct {
 	Version              uint32 `json:"version"`
 	Namespace            string `json:"namespace"`
