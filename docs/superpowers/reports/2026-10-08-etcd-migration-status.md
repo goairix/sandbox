@@ -52,6 +52,15 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [真实public配额验证](2026-10-17-etcd-cold-quota-journal-native-verification.md)。
 这仍未接入自动worker；自动结算、terminal pending删除gate与显式生产配置接线继续开放。
 
+新增 `b228e7f` 验证公开quota协议body的最大尺寸、原RPC顺序和明确反例；
+`9f4714c` 实现离线严格v3配额清单解析，`c954648` 实现原worker双预算原子准入。
+三片均完成各自host/race/Linux检查、证据审计和唯一Task审查，见
+[事务预算基础](2026-10-17-etcd-cold-quota-worker-wire-verification.md)、
+[v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
+[双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
+v3仍未由CLI接受，准入尚未发送实际quota RPC；worker私有有界continuation、metadata计费、
+失败响应/重试预算、保留内存核算及自动consumer仍需完成，不计为配额自动返还已接通。
+
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
 宣称完整销毁API已完成。定向race/Linuxvet通过；`de7a7c0`补齐真实local创建/Exec→

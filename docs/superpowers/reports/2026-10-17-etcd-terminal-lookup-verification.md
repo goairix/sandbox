@@ -98,3 +98,9 @@ is implemented. No old accepted native matrices were replayed. There is no
 10k/100k/1M population, long-soak or full performance/capacity acceptance here.
 Redis remains the default state path; production migration and switch remain
 open. The implementation and shared extraction are submitted separately.
+
+The current live Lookup performs the terminal observer's placement/current
+probe before the original live path, adding two logical metadata RPCs for a
+valid live graph. Its latency and throughput have not been accepted under load;
+capacity work must include that cost rather than infer a performance gain from
+functional correctness or fixed reply bounds.
