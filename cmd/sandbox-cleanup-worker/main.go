@@ -17,11 +17,45 @@ import (
 
 var errCleanupWorkerCommand = errors.New("expected serve and one mounted manifest path")
 
+// cleanupWorkerMode is selected by the command name, never by file contents.
+// Its zero value is invalid so an unrecognized command cannot start a worker.
+type cleanupWorkerMode uint8
+
+const (
+	cleanupWorkerModeAutomatic cleanupWorkerMode = iota + 1
+	cleanupWorkerModeColdQuota
+)
+
 func cleanupWorkerManifestArgument(args []string) (string, error) {
 	if len(args) != 2 || args[0] != "serve" {
 		return "", errCleanupWorkerCommand
 	}
-	path := args[1]
+	return cleanupWorkerManifestPath(args[1])
+}
+
+func cleanupWorkerCommand(args []string) (cleanupWorkerMode, string, error) {
+	if len(args) != 2 {
+		return 0, "", errCleanupWorkerCommand
+	}
+
+	var mode cleanupWorkerMode
+	switch args[0] {
+	case "serve":
+		mode = cleanupWorkerModeAutomatic
+	case "serve-cold-quota":
+		mode = cleanupWorkerModeColdQuota
+	default:
+		return 0, "", errCleanupWorkerCommand
+	}
+
+	path, err := cleanupWorkerManifestPath(args[1])
+	if err != nil {
+		return 0, "", err
+	}
+	return mode, path, nil
+}
+
+func cleanupWorkerManifestPath(path string) (string, error) {
 	// Match the mounted loader's 4096-byte path bound before any irreversible
 	// kernel initialization. Arguments are never interpolated into diagnostics.
 	if path == "" || len(path) > 4096 || !utf8.ValidString(path) || strings.IndexFunc(path, unicode.IsControl) >= 0 {
@@ -31,7 +65,7 @@ func cleanupWorkerManifestArgument(args []string) (string, error) {
 }
 
 func run(ctx context.Context, args []string) error {
-	path, err := cleanupWorkerManifestArgument(args)
+	mode, path, err := cleanupWorkerCommand(args)
 	if err != nil {
 		return err
 	}
@@ -41,7 +75,14 @@ func run(ctx context.Context, args []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return serveCleanupWorker(ctx, path)
+	switch mode {
+	case cleanupWorkerModeAutomatic:
+		return serveCleanupWorker(ctx, path)
+	case cleanupWorkerModeColdQuota:
+		return serveColdQuotaCleanupWorker(ctx, path)
+	default:
+		return errCleanupWorkerCommand
+	}
 }
 
 func cleanupWorkerExitCode(err error, stderr io.Writer) int {
