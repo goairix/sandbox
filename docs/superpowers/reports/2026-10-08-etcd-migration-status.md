@@ -10,7 +10,7 @@
 | 整体交付 | 约45% | 沿用20/30/20/15/15权重和90/70/30/0/0阶段估算，包含容量、故障、部署恢复及最终替代 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
-功能代码未完成：完整API及销毁后终态查询、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
+功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的cold quota结算接线；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
@@ -57,8 +57,12 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 宣称完整销毁API已完成。定向race/Linuxvet通过；`de7a7c0`补齐真实local创建/Exec→
 HTTP202→原自动worker归档/终止/安全释放/P删除/全部join，以及历史detached拒绝场景。
 唯一入口Task审查Spec/Quality通过，无新增C/I/M；二进制时代与未覆盖故障组合见
-[真实入口组合](2026-10-17-etcd-destroy-native-verification.md)。原release保留placement/fence，
-公开删除后终态查询仍未接线；不能将原reader的CorruptRecord当404或完整销毁API。
+[真实入口组合](2026-10-17-etcd-destroy-native-verification.md)。接续 `8f58b50` 提取共享纯校验器，
+`0f4c6c8` 接通已认证释放后的终态GET：真实HTTP GET200→DELETE202→物理释放后GET404，
+实际AcquireIntent复用workspace后旧ID仍404，后继quartet的bytes/MVCC保持不变。host、
+race、Linux检查、实际worker运行及独立Task审查均通过，见
+[终态查询验证](2026-10-17-etcd-terminal-lookup-verification.md)。原四点reader仍严格拒绝不完整状态，
+新结果仅证明旧ID已释放，不授予清理/配额权限；自动quota与detached消费仍未接线。
 FUSE静态合同及endpoint编码修复已合入`d2948b3`/`63756cd`，完整host、定向race及
 Linux检查通过，同一审查员R1确认问题解决。它仍未启用任何生产FUSE/profile选择器，
 不是helper登记、挂载/flush、collector或双进程终止验收。`a83a276` 另接通实际mounter
