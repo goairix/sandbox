@@ -52,6 +52,9 @@ type Options struct {
 	WorkerControl *WorkerControlOptions
 	// LocalCleanup opts into bounded known-Task execution on the original actor.
 	LocalCleanup *LocalCleanupOptions
+	// DetachedCleanup enables source classification for a pinned plain image;
+	// it does not start an execution consumer or authorize cleanup effects.
+	DetachedCleanup *DetachedCleanupOptions
 }
 
 type Backend struct {
@@ -87,10 +90,14 @@ type Backend struct {
 	snapshotReads                             *snapshotReadCache
 	workerControl                             *workerBackend
 	localCleanup                              *LocalCleanupOptions
+	detachedCleanup                           *detachedCleanupConfig
 }
 
 func validateOptions(o Options) error {
 	invalid := func(message string) error { return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message) }
+	if _, err := copyDetachedCleanupOptions(o); err != nil {
+		return err
+	}
 	if err := validateLocalCleanupOptions(o); err != nil {
 		return err
 	}
@@ -226,6 +233,10 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is nil", ErrInvalidConfiguration)
 	}
+	detachedOptions, err := copyDetachedCleanupOptions(o)
+	if err != nil {
+		return nil, err
+	}
 	cleanupOptions, err := copyLocalCleanupOptions(o)
 	if err != nil {
 		return nil, err
@@ -321,6 +332,7 @@ func New(ctx context.Context, o Options) (*Backend, error) {
 	b.authorityClock = o.Clock
 	b.localRuntimeRelease = o.LocalRuntimeRelease
 	b.localCleanup = o.LocalCleanup
+	b.detachedCleanup = detachedOptions
 	b.taskRuntimeTerminationIssuer = o.TaskRuntimeTerminationIssuer
 	b.preparationInventory = o.PreparationInventory
 	if o.PreparationInventory != nil {

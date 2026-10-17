@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -33,18 +34,42 @@ type duePublicationFixture struct {
 // fixture has no Docker prerequisite and cannot silently skip the RED.
 func newDuePublicationFixture(t *testing.T) duePublicationFixture {
 	t.Helper()
+	return newDuePublicationFixtureForSource(t, "s3", nil)
+}
+
+// The optional source profile changes only construction inputs. Original due
+// tests retain the same s3 identity, arbitrary contract and payload-only snapshot.
+func newDuePublicationFixtureForSource(t *testing.T, profile string, detached *DetachedCleanupOptions) duePublicationFixture {
+	t.Helper()
 	server, o := workerTestEndpoint(t)
 	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
 	now := time.Now().UTC()
 	o.PublicationTrust = &RuntimePublicationTrust{AuthorityID: o.Identity.RuntimeID, Target: "target", Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}
 	o.Clock = testAuthorityClock(func(context.Context) (ClockObservation, error) { return ClockObservation{UTC: now}, nil })
 	o.EnrolledPublication = &EnrolledPublicationOptions{ContractDigest: strings.Repeat("b", 64), MaxActive: 4}
+	if detached != nil {
+		contract, err := kubecontract.EnrolledPlainContractDigest(detached.PinnedPlainImage)
+		require.NoError(t, err)
+		o.EnrolledPublication.ContractDigest = contract
+		o.DetachedCleanup = detached
+	}
 	b, err := New(context.Background(), o)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
-	w, err := NewWorkspaceIdentity("s3", o.Identity.StorageID, "bucket", uuid.NewString()+"/")
+	idempotencyKey := uuid.NewString()
+	var w WorkspaceIdentity
+	if profile == "detached" {
+		w, err = b.DetachedIdentity("due-test", idempotencyKey)
+	} else {
+		w, err = NewWorkspaceIdentity(profile, o.Identity.StorageID, "bucket", uuid.NewString()+"/")
+	}
 	require.NoError(t, err)
-	in := AcquireIntentInput{Workspace: w, Principal: "due-test", IdempotencyKey: uuid.NewString(), RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"html":"<>&中>"}`), Now: now, TTL: time.Hour}
+	in := AcquireIntentInput{Workspace: w, Principal: "due-test", IdempotencyKey: idempotencyKey, RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"html":"<>&中>"}`), Now: now, TTL: time.Hour}
+	if profile == "local" {
+		plan, err := NewTaskWorkspaceSyncPlan(TaskWorkspaceSyncPlanOptions{Workspace: w})
+		require.NoError(t, err)
+		in.LocalCleanupPlan = &plan
+	}
 	acquired, err := b.AcquireIntent(context.Background(), in)
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, acquired.Outcome)

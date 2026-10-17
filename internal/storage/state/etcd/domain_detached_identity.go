@@ -15,6 +15,17 @@ func NewDetachedIdentity(storageIdentity, principal, idempotencyKey string) (Wor
 	if err != nil {
 		return WorkspaceIdentity{}, err
 	}
+	return detachedIdentityFromRequestHash(storageIdentity, requestHash)
+}
+
+// detachedIdentityFromRequestHash preserves the original identity formula for
+// historical attribution when only CreationIntent.RequestHash remains. It does
+// not recreate acquisition authority or any raw principal/idempotency value.
+func detachedIdentityFromRequestHash(storageIdentity, requestHash string) (WorkspaceIdentity, error) {
+	if !validOpaque(storageIdentity, 128) || !validHexDigest(requestHash) {
+		return WorkspaceIdentity{}, ErrInvalidRecord
+	}
+
 	storageHash := sha256.Sum256([]byte(storageIdentity))
 	w := WorkspaceIdentity{kind: WorkspaceIdentityDetached, storageIdentityHash: hex.EncodeToString(storageHash[:]), requestHash: requestHash}
 	digest := framedDigest("sandbox.detached-identity.v1", w.storageIdentityHash, w.requestHash)
