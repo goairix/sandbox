@@ -160,13 +160,12 @@ func (b *Backend) coldSettlementBudget(s *Stage) error {
 }
 
 func (b *Backend) verifyColdSettlement(ctx context.Context, r ColdPreparationRecord, reservation, work *mvccpb.KeyValue, history *coldPublicationHistory) (StageReference, error) {
-	if r.Phase != "settled" || history == nil || !coldCompletionMatches(r, history.entry.Record) || reservation == nil || work == nil || reservation.ModRevision != work.ModRevision || reservation.ModRevision <= history.journal.CreateRevision {
-		return StageReference{}, ErrCorruptRecord
+	// Preserve source-error precedence and reject invalid history before the
+	// bounded receipt RPC. The pure decoder shares these same invariants.
+	if err := b.validateColdSettlementSource(r, reservation, work, history); err != nil {
+		return StageReference{}, err
 	}
-	var marker coldPreparationWork
-	if coldDecode(work, &marker) != nil || marker != (coldPreparationWork{Version: 1, RestoreEpoch: b.restoreEpoch, ProfileDigest: b.preparationDigest, IntentID: r.Owner.IntentID, Phase: "settled"}) {
-		return StageReference{}, ErrCorruptRecord
-	}
+
 	key, err := b.runtimeDispatchReceiptKey(r.Settlement)
 	if err != nil {
 		return StageReference{}, err
@@ -175,16 +174,5 @@ func (b *Backend) verifyColdSettlement(ctx context.Context, r ColdPreparationRec
 	if err != nil {
 		return StageReference{}, err
 	}
-	if !enrolledImmutableKV(points[0]) || points[0].CreateRevision != reservation.ModRevision {
-		return StageReference{}, ErrCorruptReceipt
-	}
-	ref, err := decodeRuntimeDispatchReceipt(points[0], r.Settlement)
-	if err != nil {
-		return StageReference{}, err
-	}
-	wire, err := encodeReceipt(ref, OutcomeCommitted)
-	if err != nil || wire != string(points[0].Value) {
-		return StageReference{}, ErrCorruptReceipt
-	}
-	return ref, nil
+	return b.decodeColdSettlement(r, reservation, work, history, points[0])
 }
