@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/launcher"
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -118,9 +119,12 @@ func (b *Backend) prepareCleanupDetachedNoEffectRecovery(ctx context.Context, j 
 // The physical caller has already regained ownership from the original actor
 // and authenticated current native Joined E/S. Once that original Claim is
 // permanently lost, its completed and cleaned Stage mutation trees have no
-// remaining lawful consumer. Drop only those pointers; keep the original
-// Claim, both drafts, prepared drain and uncertain settlement submission.
-// No Stage object is mutated and no guard, receipt or lease is recreated.
+// remaining lawful consumer. Retire those Stage pointers and the completed Q
+// send/authorization payloads and redundant close record cache, keeping both
+// draft identities and native pins.
+// The original Claim, prepared drain and settlement submission remain intact.
+// None's complete draft must survive: its original write can still be queried
+// with a dead Claim. No Stage object is mutated or guard/lease recreated.
 func (b *Backend) retireCleanupDetachedNoEffectStages(j *cleanupLocalJob, h *cleanupDetachedNoEffectHistory) error {
 	if j == nil || j.state == nil {
 		return ErrInvalidRecord
@@ -171,6 +175,36 @@ func (b *Backend) retireCleanupDetachedNoEffectStages(j *cleanupLocalJob, h *cle
 	}
 	if retireQuiescence {
 		quiescenceDraft.stage = nil
+	}
+
+	// Close authorization checks Claim liveness before comparing this cached
+	// record. Its native history remains available independently. Retire only
+	// the redundant canonical value after matching the actual Q's close command;
+	// a prior failed preparation may already have removed the Stage pointer.
+	if closeDraft != nil && closeDraft.outcome == OutcomeCommitted && closeDraft.cleaned &&
+		h.quiescence != nil && h.quiescence.Record != nil &&
+		closeDraft.commandID == h.quiescence.Record.Context.CloseDataContext.CommandID &&
+		closeDraft.reference.CommandID == h.quiescence.Record.Context.CloseDataContext.CommandID {
+		closeDraft.recordValue = ""
+	}
+
+	// An earlier over-cap preparation may already have retired Stage. Payload
+	// retirement is therefore independently idempotent, and requires the exact
+	// authenticated Q reference retained by the original prepared drain.
+	if quiescenceDraft != nil &&
+		quiescenceDraft.outcome == OutcomeCommitted && quiescenceDraft.cleaned &&
+		quiescenceDraft.reference == d.prepared.pin.reference {
+		quiescenceDraft.certificate = nil
+		quiescenceDraft.issuer = nil
+		quiescenceDraft.issuerValue = ""
+		quiescenceDraft.claims = p.TaskUserQuiescenceTicketClaims{}
+		quiescenceDraft.ticket = p.TaskUserQuiescenceEvidence{}
+		quiescenceDraft.recordValue = ""
+		if prior := quiescenceDraft.prior; prior != nil {
+			prior.entry = nil
+			prior.intent.value = ""
+			prior.proof = nil
+		}
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -84,6 +85,12 @@ func cleanupDetachedMakeWriterUnknown(t *testing.T, f *cleanupDetachedNoEffectNa
 
 func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T) {
 	f, draft := cleanupDetachedUnknownRecoveryFixture(t)
+	quiescenceBefore := *draft.claim.quiescenceDraft
+	closeValueBefore := draft.claim.closeDraft.recordValue
+	quiescenceBefore.certificate = bytes.Clone(quiescenceBefore.certificate)
+	priorBefore := *quiescenceBefore.prior
+	priorBefore.proof = bytes.Clone(priorBefore.proof)
+	ticketBefore := quiescenceBefore.ticket.Wire()
 	closeStage, quiescenceStage := draft.claim.closeDraft.stage, draft.claim.quiescenceDraft.stage
 	require.NotNil(t, closeStage)
 	require.NotNil(t, quiescenceStage)
@@ -94,6 +101,10 @@ func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T)
 	require.Same(t, draft, f.job.detachedNoEffect)
 	require.Same(t, closeStage, draft.claim.closeDraft.stage, "lease loss cannot retire an unjoined Run's Stage")
 	require.Same(t, quiescenceStage, draft.claim.quiescenceDraft.stage)
+	require.Equal(t, quiescenceBefore, *draft.claim.quiescenceDraft)
+	require.Equal(t, priorBefore, *draft.claim.quiescenceDraft.prior)
+	require.Equal(t, ticketBefore, draft.claim.quiescenceDraft.ticket.Wire())
+	require.Equal(t, closeValueBefore, draft.claim.closeDraft.recordValue)
 
 	// Deliberately forge a schema-valid diagnostic Joined projection while
 	// leaving native E untouched. This negative DTO supplies no join authority.
@@ -112,15 +123,56 @@ func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T)
 	require.Nil(t, f.job.detachedRecovery)
 	require.Same(t, closeStage, draft.claim.closeDraft.stage, "a diagnostic Joined DTO cannot retire original Stage ownership")
 	require.Same(t, quiescenceStage, draft.claim.quiescenceDraft.stage)
+	require.Equal(t, quiescenceBefore, *draft.claim.quiescenceDraft)
+	require.Equal(t, priorBefore, *draft.claim.quiescenceDraft.prior)
+	require.Equal(t, ticketBefore, draft.claim.quiescenceDraft.ticket.Wire())
+	require.Equal(t, closeValueBefore, draft.claim.closeDraft.recordValue)
 	actual, err := f.raw.Get(f.ctx, original.execution.key)
 	require.NoError(t, err)
 	require.Len(t, actual.Kvs, 1)
 	require.Equal(t, original.execution.value, string(actual.Kvs[0].Value))
 }
 
-// Only completed, cleaned Stage mutation trees may leave the original dead
-// Claim after actual native join. The Unknown writer's original evidence and
-// one-send latch remain until the recovery actor actually replies.
+// These snapshots are assertion-only diagnostics. They never enter a metadata
+// reader, gate, counter or transaction as replacement capability/evidence.
+func requireCleanupDetachedQuiescencePayloadRetired(t *testing.T, q *taskQuiescenceDraft, original taskQuiescenceDraft, prior taskQuiescencePrerequisite) {
+	t.Helper()
+	require.Nil(t, q.certificate)
+	require.Nil(t, q.issuer)
+	require.Empty(t, q.issuerValue)
+	require.Equal(t, p.TaskUserQuiescenceTicketClaims{}, q.claims)
+	require.Empty(t, q.ticket.Wire())
+	require.Empty(t, q.ticket.Digest())
+	require.Empty(t, q.recordValue)
+	require.Same(t, original.prior, q.prior)
+	require.Nil(t, q.prior.entry)
+	require.Empty(t, q.prior.intent.value)
+	require.Empty(t, q.prior.proof)
+
+	require.Equal(t, original.task, q.task)
+	require.Equal(t, original.attemptReference, q.attemptReference)
+	require.Equal(t, original.reservation, q.reservation)
+	require.Equal(t, original.reservationValue, q.reservationValue)
+	require.Equal(t, original.reservationSent, q.reservationSent)
+	require.Equal(t, original.commandID, q.commandID)
+	require.Equal(t, original.reference, q.reference)
+	require.Equal(t, original.deadline, q.deadline)
+	require.Equal(t, original.issuerKey, q.issuerKey)
+	require.Equal(t, original.outcome, q.outcome)
+	require.Equal(t, original.cleaned, q.cleaned)
+	require.Equal(t, original.lost, q.lost)
+	require.Equal(t, original.deliveryAttempted, q.deliveryAttempted)
+	require.Equal(t, prior.intent.key, q.prior.intent.key)
+	require.Equal(t, prior.intent.create, q.prior.intent.create)
+	require.Equal(t, prior.intent.mod, q.prior.intent.mod)
+	require.Equal(t, prior.intent.lease, q.prior.intent.lease)
+	require.Equal(t, prior.receiptKey, q.prior.receiptKey)
+	require.Equal(t, prior.receiptRevision, q.prior.receiptRevision)
+}
+
+// Only completed, cleaned mutation/authorization payloads may leave the dead
+// Claim after actual native join. Original prerequisite, coordinates and the
+// Unknown writer's one-send latch remain until the recovery actor replies.
 func TestCleanupDetachedNoEffectNativeRecoveryRetiresCompletedStagesAfterJoin(t *testing.T) {
 	f := newCleanupDetachedNoEffectNativeFixture(t)
 	claim := f.job.claim
@@ -132,6 +184,8 @@ func TestCleanupDetachedNoEffectNativeRecoveryRetiresCompletedStagesAfterJoin(t 
 	require.NotNil(t, quiescenceResult.Prepared)
 	draft := cleanupDetachedMakeWriterUnknown(t, f)
 	closeDraft, quiescenceDraft := claim.closeDraft, claim.quiescenceDraft
+	quiescenceBefore, priorBefore := *quiescenceDraft, *quiescenceDraft.prior
+	closeBefore := *closeDraft
 	require.NotNil(t, closeDraft.stage)
 	require.NotNil(t, quiescenceDraft.stage)
 	require.Equal(t, OutcomeCommitted, closeDraft.outcome)
@@ -171,6 +225,11 @@ func TestCleanupDetachedNoEffectNativeRecoveryRetiresCompletedStagesAfterJoin(t 
 
 	require.True(t, closeDraft.stage == nil, "actual joined dead Claim must release its completed close Stage tree")
 	require.True(t, quiescenceDraft.stage == nil, "actual joined dead Claim must release its completed quiescence Stage tree")
+	requireCleanupDetachedQuiescencePayloadRetired(t, quiescenceDraft, quiescenceBefore, priorBefore)
+	closeBefore.stage = nil
+	closeBefore.recordValue = ""
+	require.True(t, closeDraft.recordValue == "", "the dead original close authorization record cache must retire")
+	require.Equal(t, closeBefore, *closeDraft, "all other original close payload and coordinates remain intact")
 	require.NoError(t, prepareErr)
 	require.Same(t, gate, f.job.detachedRecovery)
 	require.Same(t, draft, f.job.detachedNoEffect)
@@ -186,6 +245,29 @@ func TestCleanupDetachedNoEffectNativeRecoveryRetiresCompletedStagesAfterJoin(t 
 	require.True(t, draft.writeAttempted)
 	require.Same(t, none, claim.finalSyncDraft)
 	require.Equal(t, noneValue, none.value)
+
+	// None's original uncertain-write path can still diagnose committed native
+	// history with a dead Claim. Retiring Q send caches must not remove the
+	// original none record/value, Claim fences or prepared native history pins.
+	originalKV := f.b.client.KV
+	noneKey, err := f.b.namespace.taskFinalSyncAttemptKey(f.ref)
+	require.NoError(t, err)
+	nonePuts := 0
+	f.b.client.KV = &finalSyncRecordingKV{KV: originalKV, commit: func(ctx context.Context, cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
+		if putsKey(noneKey)(yes) {
+			nonePuts++
+		}
+		return originalKV.Txn(ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+	}}
+	defer func() { f.b.client.KV = originalKV }()
+	noneResult, err := f.b.ReserveTaskFinalSync(f.ctx, claim, prepared, f.destination, none.record.Plan)
+	require.Error(t, err)
+	require.Equal(t, OutcomeCommitted, noneResult.Outcome)
+	require.Equal(t, none.record.reference(), noneResult.Reference)
+	require.Zero(t, nonePuts)
+	require.Zero(t, lease.grants.Load())
+	require.Equal(t, effects, f.effectCount.Load())
+	require.Equal(t, queries, f.queryCount.Load())
 	owned, err := f.b.cleanupDetachedNoEffectOwnedBytes(f.job)
 	require.NoError(t, err)
 	require.LessOrEqual(t, owned, uint64(128<<10))
