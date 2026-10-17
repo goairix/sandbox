@@ -3,7 +3,6 @@ package etcd
 import (
 	"context"
 	"errors"
-	"time"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -30,68 +29,25 @@ func (b *Backend) SettleColdRuntimeQuota(ctx context.Context, w WorkspaceIdentit
 		return result, err
 	}
 	defer o.finish()
-	ctx = o.context
-	if b.localRuntimeRelease.validate() != nil || b.validateTaskReference(task) != nil || b.validateWorkspaceBinding(w) != nil || task.Partition != w.Partition() {
-		return result, ErrInvalidRecord
-	}
-	if _, _, err := b.coldProfile(); err != nil {
+
+	prepared, result, err := b.prepareColdRuntimeQuotaReturn(o, w, intent, task)
+	if err != nil || prepared == nil {
 		return result, err
 	}
-	history, err := b.readColdQuotaReturnHistory(ctx, w, intent, task)
-	if err != nil {
-		return result, err
-	}
-	key, err := b.namespace.coldRuntimeQuotaReturnKey(w.Partition(), intent)
-	if err != nil {
-		return result, err
-	}
-	points, err := b.readEnrolledPoints(ctx, []string{key}, []int{16384})
-	if err != nil {
-		return result, err
-	}
-	if points[0] != nil {
-		result.Reference, result.Entry, err = b.verifyColdQuotaReturn(ctx, history, points[0])
-		if err == nil {
-			result.Outcome = OutcomeCommitted
-		}
-		return result, err
-	}
-	_, ready, err := b.coldReady(ctx)
-	if err != nil {
-		return result, err
-	}
-	slotKey, free, err := b.namespace.coldSlotKeys(history.reservation.Quota)
-	if err != nil {
-		return result, err
-	}
-	slots, err := b.readEnrolledPoints(ctx, []string{slotKey, free}, []int{16384, 16384})
-	if err != nil {
-		return result, err
-	}
-	var slot coldSlotRecord
-	if coldDecode(slots[0], &slot) != nil || !b.validColdSlot(slot) || !slot.Occupied || slot.Owner != history.reservation.Owner || slot.Slot != history.reservation.Quota || slots[1] != nil {
-		return result, ErrConflict
-	}
-	stage, err := b.beginStageWithBuilder(ctx, w.Partition(), history.reservation.Owner.RequestID, "cold_runtime_quota_return", 10*time.Second, func(locator StageAttemptLocator) (Mutation, error) {
-		mutation, err := b.coldQuotaReturnMutation(history, ready, slots[0], key, free, locator)
-		if err != nil {
-			return Mutation{}, err
-		}
-		_, digest, err := prepareMutation(b.namespace, mutation)
-		if err == nil {
-			// beginStageWithBuilder calls this before even its first Grant RPC.
-			result.Reference = locator.reference(digest)
-		}
-		return mutation, err
-	})
-	if err != nil {
-		return result, err
-	}
-	result.Reference = stage.Reference()
+	return b.continueColdRuntimeQuotaReturn(o, prepared)
+}
+
+// commitColdRuntimeQuotaReturn retains the quota protocol's exact projection,
+// permanent transaction and post-commit verification. Cleanup revokes only the
+// original guard after all reads join; uncertainty never replaces its reference.
+func (b *Backend) commitColdRuntimeQuotaReturn(ctx context.Context, prepared *coldQuotaReturnPrepared, stage *Stage) (result ColdRuntimeQuotaReturnResult, resultErr error) {
+	result.Outcome, result.Reference = OutcomeUnknown, prepared.reference
 	defer func() { resultErr = errors.Join(resultErr, b.ReleaseStage(context.Background(), stage)) }()
-	if _, _, err = b.coldQuotaReturnProjection(stage); err != nil {
+	if _, _, err := b.coldQuotaReturnProjection(stage); err != nil {
 		return result, err
 	}
+
+	var err error
 	result.Outcome, err = b.CommitStage(ctx, stage)
 	if err != nil {
 		return result, err
@@ -99,12 +55,13 @@ func (b *Backend) SettleColdRuntimeQuota(ctx context.Context, w WorkspaceIdentit
 	if result.Outcome != OutcomeCommitted {
 		return result, ErrOutcomeUnknown
 	}
-	points, err = b.readEnrolledPoints(ctx, []string{key}, []int{16384})
+
+	points, err := b.readEnrolledPoints(ctx, []string{prepared.returnKey}, []int{16384})
 	if err != nil {
 		result.Outcome = OutcomeUnknown
 		return result, err
 	}
-	ref, entry, err := b.verifyColdQuotaReturn(ctx, history, points[0])
+	ref, entry, err := b.verifyColdQuotaReturn(ctx, prepared.history, points[0])
 	if err != nil {
 		result.Outcome = OutcomeUnknown
 	} else {
