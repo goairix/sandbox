@@ -220,7 +220,8 @@ SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE，以免启动另一套HTTP fixture。
 
 ### Task 4B/4C 接续边界
 
-4B先实现独立严格v2 seal和纯59cmp+3Delete+1Put的63节点投影，公开v1保持原样；
+4B基础片`0c6a009`已完成独立严格v2 seal和纯59cmp+3Delete+1Put的63节点投影，
+原五项RED/GREEN、race/Linuxvet和主分支整合及唯一限定审查通过，公开v1保持原样；
 这两者不产生删除权限。随后原live job/Claim/Kernel认证、cleanup-complete及七槽
 digest认证后才能执行。Unknown保留原write latch，同Claim只读仲裁，不生成新请求。
 删除仅Owner/Control/RuntimeIndex；新历史reader独立认证13个存活来源，加termination、

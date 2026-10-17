@@ -60,6 +60,10 @@ Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短�
 曾再现完整图超限；在原强门禁内退休完整已完成close缓存后，新组合122085字节、
 原长输入117652字节，四项native/build/vet及限定独立审查通过。主分支新组合和
 provider配置hooks整合也通过；全phase及全局64MiB准入仍缺实现，不能作为大N容量结论。
+`0c6a009`补独立严格v2 owner seal、历史Claim归属及63节点纯投影；原五项RED/GREEN、
+race/Linuxvet和主分支整合通过，唯一限定审查通过，见
+[owner基础验证](2026-10-18-etcd-detached-owner-foundation-verification.md)。尚无live删除、
+surviving history认证或consumer接线，不能计为安全释放完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
