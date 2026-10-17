@@ -25,6 +25,22 @@ func TestPrepareSandboxWithoutFUSESpecIsUnsupported(t *testing.T) {
 	require.ErrorIs(t, err, runtime.ErrWorkspaceFUSEUnsupported)
 }
 
+func TestPreparedFUSEPodIntentRejectsLegacyExecReadiness(t *testing.T) {
+	desired, err := buildPreparedFUSEPod("runtime", preparedFUSESpecForTest())
+	require.NoError(t, err)
+	current := desired.DeepCopy()
+	current.UID = "pod-ready-http"
+	require.True(t, preparedPodIntentMatches(current, desired, false))
+	for index := range current.Spec.InitContainers {
+		container := &current.Spec.InitContainers[index]
+		if container.Name == workspaceMounterContainer {
+			container.ReadinessProbe.HTTPGet = nil
+			container.ReadinessProbe.Exec = &corev1.ExecAction{Command: []string{"/usr/local/bin/workspace-mounter", "health", "ready"}}
+		}
+	}
+	require.False(t, preparedPodIntentMatches(current, desired, false), "legacy exec readiness must not satisfy the resident HTTP Pod contract")
+}
+
 func TestCreatePodUsesConfiguredTmpDiskLimit(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
@@ -221,8 +237,13 @@ func TestCreatePodRendersPreparedFUSESidecar(t *testing.T) {
 	assert.Equal(t, int32(1), mounter.StartupProbe.SuccessThreshold)
 	assert.Equal(t, int32(30), mounter.StartupProbe.FailureThreshold)
 	require.NotNil(t, mounter.ReadinessProbe)
-	require.NotNil(t, mounter.ReadinessProbe.Exec)
-	assert.Equal(t, []string{"/usr/local/bin/workspace-mounter", "health", "ready"}, mounter.ReadinessProbe.Exec.Command)
+	require.Nil(t, mounter.ReadinessProbe.Exec)
+	require.NotNil(t, mounter.ReadinessProbe.HTTPGet)
+	assert.Equal(t, "/readyz", mounter.ReadinessProbe.HTTPGet.Path)
+	assert.Equal(t, int32(9808), mounter.ReadinessProbe.HTTPGet.Port.IntVal)
+	assert.Equal(t, corev1.URISchemeHTTP, mounter.ReadinessProbe.HTTPGet.Scheme)
+	assert.Empty(t, mounter.ReadinessProbe.HTTPGet.Host)
+	assert.Empty(t, mounter.ReadinessProbe.HTTPGet.HTTPHeaders)
 	assert.Equal(t, int32(1), mounter.ReadinessProbe.TimeoutSeconds)
 	assert.Equal(t, int32(10), mounter.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(1), mounter.ReadinessProbe.SuccessThreshold)

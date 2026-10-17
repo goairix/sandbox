@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
@@ -384,7 +385,13 @@ func buildPreparedFUSEPod(namespace string, spec runtime.SandboxSpec) (*corev1.P
 						FailureThreshold: 30,
 					},
 					ReadinessProbe: &corev1.Probe{
-						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{mounterBinary, "health", "ready"}}},
+						// Kubelet observes only the resident boolean endpoint; exact
+						// management validation remains on the trusted control path.
+						ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+							Path:   fuseprotocol.MounterReadinessPath,
+							Port:   intstr.FromInt(fuseprotocol.MounterReadinessPort),
+							Scheme: corev1.URISchemeHTTP,
+						}},
 						TimeoutSeconds:   1,
 						PeriodSeconds:    10,
 						SuccessThreshold: 1,

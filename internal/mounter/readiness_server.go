@@ -10,14 +10,16 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 const (
 	// ReadinessPort is the resident, read-only kubelet HTTP port. Management
 	// remains exclusively on the separately authenticated Unix control socket.
-	ReadinessPort = 9808
+	ReadinessPort = fuseprotocol.MounterReadinessPort
 	// ReadinessPath is the only path exposed by the resident HTTP listener.
-	ReadinessPath = "/readyz"
+	ReadinessPath = fuseprotocol.MounterReadinessPath
 
 	// Eight active connections and one-second I/O deadlines bound slow-client
 	// work per helper. net/http adds its fixed 4 KiB parsing buffer allowance

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -187,20 +188,41 @@ func supervise() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	server := mounter.Server{Supervisor: supervisor, SocketPath: filepath.Clean(controlSocket), ExpectedRuntimeUID: expectedUID, IOTimeout: 10 * time.Second}
-	serveCtx, cancelServe := context.WithCancel(ctx)
-	errors := make(chan error, 2)
-	go func() { errors <- server.Serve(serveCtx) }()
-	go func() { errors <- (&mounter.DockerReaperServer{}).Serve(serveCtx) }()
-	serveErr := <-errors
-	cancelServe()
-	<-errors
-	if serveErr != nil {
-		return serveErr
-	}
+	readiness := &mounter.ReadinessServer{Supervisor: supervisor}
+	serveErr := serveMounterServices(
+		ctx,
+		server.Serve,
+		(&mounter.DockerReaperServer{}).Serve,
+		readiness.Serve,
+	)
+
+	// Every original Serve call has returned before process/mount teardown.
+	// A failed listener also takes this path, so partial startup fails closed.
 	teardownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, _ = supervisor.Shutdown(teardownCtx, nil)
-	return nil
+	return serveErr
+}
+
+// serveMounterServices cancels siblings when any server returns, then joins
+// every original Serve call. Cancellation is not proof a blocked local check
+// exited. Preserve all server errors, including uncertain background close.
+func serveMounterServices(ctx context.Context, services ...func(context.Context) error) error {
+	if len(services) == 0 {
+		return fmt.Errorf("mounter services are required")
+	}
+	serveContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(services))
+	for _, serve := range services {
+		go func() { results <- serve(serveContext) }()
+	}
+	result := <-results
+	cancel()
+	for remaining := 1; remaining < len(services); remaining++ {
+		result = errors.Join(result, <-results)
+	}
+	return result
 }
 
 func readBounded(reader io.Reader) ([]byte, error) {
