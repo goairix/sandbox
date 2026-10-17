@@ -60,6 +60,10 @@ type cleanupExecutorSetup struct {
 	PreflightRefusal                         bool
 	LoaderConfig, LoaderKubeCA               []byte
 	LoaderClockKey                           ed25519.PrivateKey
+
+	// DetachedPhysicalUser runs a real, joined ordinary-user boundary probe
+	// before ready. It leaves no descendant across the strict quiescence census.
+	DetachedPhysicalUser bool
 }
 
 // The child selector has three actual process roles. Only worker drops to the
@@ -147,6 +151,9 @@ func cleanupExecutorSupervisor(t *testing.T, path string, s cleanupExecutorSetup
 	require.NoError(t, err)
 	enrollment, err := supervisor.Enrollment()
 	require.NoError(t, err)
+	if s.DetachedPhysicalUser {
+		detachedPhysicalUserBoundary(t)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	require.NoError(t, ct.WriteNodeObserverFrame(conn, observerNativeJSON(t, localReleaseNativeReply{Address: listener.Addr().String(), Proof: proof, Enrollment: enrollment})))
