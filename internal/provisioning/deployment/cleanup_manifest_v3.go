@@ -11,8 +11,8 @@ import (
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 )
 
-// coldQuotaCleanupManifest is the offline configuration for a future v3
-// automatic quota worker. Parsing grants no inventory readiness: its eventual
+// coldQuotaCleanupManifest is the expected configuration for the explicit v3
+// automatic quota worker. Parsing grants no inventory readiness: its
 // consumer must retain the existing storage ready-record, profile-digest and
 // restore-epoch checks. The mounted v1/v2 constructors deliberately reject v3.
 type coldQuotaCleanupManifest struct {
