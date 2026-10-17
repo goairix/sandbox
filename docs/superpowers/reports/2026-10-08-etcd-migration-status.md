@@ -50,8 +50,13 @@ host、十三组100叶race、Linux编译/vet及共享释放配置模型回归通
 [worker生命周期验证](2026-10-17-etcd-worker-lifecycle-verification.md)；v2入口仍在隔离分支
 实现，不能算独立自动worker已交付。FUSE有界增量缓存统计已合入`1f0f4a3`，
 host/race、Linux编译/vet与实际inotify模型通过，见
-[缓存统计验证](2026-10-17-fuse-cache-monitor-verification.md)；常驻就绪及HTTP接线仍在
-隔离工作树实现，未切换探针。
+[缓存统计验证](2026-10-17-fuse-cache-monitor-verification.md)。常驻观察器/只读HTTP已合入
+`02119dd`，启动与Kubernetes探针接线合入`b68d2ae`，见
+[常驻组件验证](2026-10-17-fuse-resident-readiness-verification.md)及
+[接线验证](2026-10-17-fuse-resident-readiness-wiring-verification.md)。健康空闲样本会后台
+刷新，kubelet改读固定布尔HTTP；v7合同避免旧exec探针池复用，共享版本也使普通池缓存
+失效，不直接改写运行Pod。独立支线审查未发现可操作问题，host/race、Linux编译及
+inotify/TCP/服务组/渲染模型通过；真实FUSE/kubelet/CNI、collector及容量仍未完成。
 
 终态pending独立删除也已实现并通过host两组15叶、race六组41叶和Linuxvet，见
 [终态删除验证](2026-10-17-etcd-pending-delete-verification.md)。不改变原物理释放或满64
