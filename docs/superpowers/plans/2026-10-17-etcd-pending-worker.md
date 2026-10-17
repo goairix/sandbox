@@ -32,8 +32,8 @@
 
 **Produces:** 从持久任务自动发现到原执行器的完整可测行为及严格配置、恢复/退避/关闭状态；不是未被消费者使用的索引 API。
 
-- [x] Step1 read-only preflight：已冻结原子 P、due 单 KV 精确版本约束、63 节点 producer、53/35 节点结算、最多52节点回填、80条分页及原预算/关闭。历史停旧 writer、一次固定 R 回填、有限轮询及 Watch/独立角色后续边界已明确。Root已阅读全文并只授权首片原子 producer 的 tests-only 行为 RED；后续切片仍须分别冻结测试和验证。
-- [ ] Step2 原子待办创建已实现，12组47子例 host/race、旧手动形状及 Linux vet 通过，见producer报告；首轮 race 采集选项缺口已披露并只重跑 race。80条固定视图分页已实现，3组40子例 host/race及Linux vet通过，见2026-10-17-etcd-pending-page-verification.md。回填检查点编码、原worker原生读取和初始化/视图更新已实现，见2026-10-17-etcd-pending-backfill-bootstrap-verification.md；平坦intent历史分页已实现，两组34子例host/race及Linuxvet通过，见2026-10-17-etcd-pending-legacy-page-verification.md。历史认证、frontier推进、完成转换或终态移除仍待实现，不能将本步或整个 Task 记为完成。
+- [x] Step1 read-only preflight：已冻结原子pending、原worker预算/关闭、历史兼容和终态认证边界。历史停旧writer、不可变截止点/可更新读取视图/持久frontier、有限轮询及Watch/独立角色后续范围已明确；具体切片接口与原生尺寸须继续源码核对并验证。
+- [ ] Step2 原子pending、80条固定视图分页、回填检查点、平坦intent历史分页及共同出生认证已实现，分别通过定向host/race和Linuxvet，详见2026-10-17-etcd-pending系列验证报告。签名释放调用、frontier推进/完成转换和终态pending移除仍未实现，不能将本步或整个Task记为完成。
 - [ ] Step3 接入原 actor 自动发现与 registry，验证坏任务/容量/预算/续租/due公平性及重建，不新增竞争 session；定向验证后提交。
 - [ ] Step4 真实 Linux 自动发现完整物理链及 restart/ACK故障组合，严格输入/运行时/真实退出/清理审计，保留失败；完成可调用 mounted 自动组合并提交。
 - [ ] Step5 唯一完整 Task spec+quality 审查，原作者修复与限定复核、范围验收；继续下一生产角色/迁移单元。
