@@ -56,6 +56,7 @@ type cleanupExecutorSetup struct {
 	Recovery, RecoveryStage, WorkerDirectory string
 	CloseMode                                string
 	MountedLoader                            bool
+	AutomaticMode                            string
 	PreflightRefusal                         bool
 	LoaderConfig, LoaderKubeCA               []byte
 	LoaderClockKey                           ed25519.PrivateKey
@@ -199,6 +200,10 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	require.NoError(t, err)
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{cert}}
+	if s.AutomaticMode != "" {
+		cleanupPendingAutomaticWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certPEM, keyPEM)
+		return
+	}
 	if s.MountedLoader {
 		cleanupExecutorLoaderWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certPEM, keyPEM)
 		return
@@ -716,6 +721,18 @@ func TestCleanupExecutorNative(t *testing.T) {
 	if os.Getenv("SANDBOX_CLEANUP_EXECUTOR_NATIVE") != "1" {
 		t.Skip("explicit owned cleanup executor Linux fixture required")
 	}
+	t.Run("automatic-mounted-backlog", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-mounted-backlog")
+	})
+	t.Run("automatic-worker-role", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-worker-role")
+	})
+	t.Run("automatic-pending-aba", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-pending-aba")
+	})
+	t.Run("automatic-pending-ack", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-pending-ack")
+	})
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
 	t.Run("mounted-loader", func(t *testing.T) { cleanupExecutorNativeCase(t, "mounted-loader") })
 	t.Run("preflight-refusal", func(t *testing.T) { cleanupExecutorNativeCase(t, "preflight-refusal") })
@@ -739,7 +756,9 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.LessOrEqual(t, len(recovery), 1)
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
-	mountedLoader := len(recovery) == 1 && recovery[0] == "mounted-loader"
+	mountedLoader := len(recovery) == 1 && (recovery[0] == "mounted-loader" ||
+		recovery[0] == "automatic-mounted-backlog" || recovery[0] == "automatic-worker-role" ||
+		recovery[0] == "automatic-pending-aba" || recovery[0] == "automatic-pending-ack")
 	if mountedLoader {
 		// The read-only container root stays unchanged. The existing mount
 		// capability provides a private, bounded clock directory owned by the
@@ -874,6 +893,9 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	s := cleanupExecutorSetup{localReleaseNativeSetup: localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "cleanup-executor/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}, Role: "supervisor"}
 	if mountedLoader {
 		s.MountedLoader = true
+		if recovery[0] != "mounted-loader" {
+			s.AutomaticMode = recovery[0]
+		}
 		s.LoaderConfig = observerNativeJSON(t, config)
 		s.LoaderKubeCA, s.LoaderClockKey = loaderKubeCA, loaderClockKey
 	}
