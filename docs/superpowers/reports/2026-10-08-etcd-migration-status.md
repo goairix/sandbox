@@ -2,7 +2,7 @@
 
 本次目标仍是主方案阶段一至五完整替代；多 cell 是后续扩展。默认启动仍连接 Redis，显式 etcd 模式仅开放已验收路由，不能宣称生产切换完成或线上性能已经提升。
 
-## 当前汇总：2026-10-17
+## 当前汇总：2026-10-18
 
 | 口径 | 进度 | 判断依据 |
 | --- | --- | --- |
@@ -58,8 +58,9 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [事务预算基础](2026-10-17-etcd-cold-quota-worker-wire-verification.md)、
 [v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
 [双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
-v3仍未由CLI接受，worker私有continuation、metadata计费、保留内存核算及自动consumer
-仍需完成，不计为配额自动返还已接通。
+v3仍未由CLI接受。worker私有continuation、metadata计费及分步postread已范围验收，
+完整历史认证、付费恢复仲裁、保留内存核算及自动consumer仍需完成，
+不计为配额自动返还已接通。
 
 `3c3afed` 接通五个私有固定 RPC 的真实 gRPC 通信层：限制每次请求、回复、累计
 protobuf预算和重复发送，取消后仍为原已识别租约保留一次有界回收。host、race、
@@ -72,6 +73,17 @@ host八组、race四十二组、Linux vet及唯一完整Task审查通过，见
 首次新测试辅助代码的客户端关闭顺序失败已如实保留，修复没有放松关闭或业务断言。
 这两片验证的是有界host协议，尚无自动quota结算、已验证quotaCommitted删除gate、
 保留内存容量或真实etcd故障验收；原公开协议和默认启动路径保持原行为。
+
+`c6b0822`/`0707ded` 接通原 Range-only W20 metadata 点读，支持最多14个业务点及
+64KiB history，request/reply 合计不超过原256KiB额度，Claim完全独立；host/race/
+Linux vet及唯一Task审查通过，见[metadata验证](2026-10-17-etcd-cold-quota-worker-metadata-verification.md)。
+`dd4dd64` 提取 compact return/receipt 纯校验，原公开顺序及恢复引用检查保持原样；
+`b620b4c` 接通 worker 提交后的分步确认，每轮只付费读一个点，第二步额度不足保留
+第一步结果，实际receipt必须匹配原完整引用。两片均完成host/race/Linux vet及独立
+Task审查，见[纯校验验证](2026-10-17-etcd-cold-quota-proof-verification.md)与
+[分步确认验证](2026-10-18-etcd-cold-quota-worker-postread-verification.md)。
+原permit仍保留prepared/history，未完成32任务内存验收。这些私有协议尚未接入完整
+自动quota driver，也不表示物理清理或P删除权限；整体粗估百分比保持不变。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
