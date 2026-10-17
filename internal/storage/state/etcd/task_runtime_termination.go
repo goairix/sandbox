@@ -13,25 +13,42 @@ import (
 )
 
 func (a *taskLocalRuntimeAuthority) newTermination() p.TaskRuntimeTerminationIntent {
-	c := a.command.Claims.Context.Current
+	c := a.terminationContext()
 	c.CommandID, c.ClaimID, c.WorkerID = uuid.NewString(), a.claim.reference.ClaimID, a.claim.reference.WorkerID
 	c.ClaimCreateRevision, c.LeaseID = a.claim.reference.CreateRevision, a.claim.reference.LeaseID
 	r := a.publication.Record
-	return p.TaskRuntimeTerminationIntent{Version: 1, Phase: "reserved", Current: c, Partition: a.task.Reference.Partition, TaskBirth: a.claim.birth, CreationIntentID: a.task.CreationIntentID, EnrollmentDigest: r.EnrollmentDigest, ObserverCertificateDigest: r.ObserverCertificateDigest, NodeUID: r.NodeUID, NodeBootID: r.NodeBootID, Action: "kill_pid1_and_observe_cgroup_empty", Authority: a.stamps}
+	intent := p.TaskRuntimeTerminationIntent{Version: 1, Phase: "reserved", Current: c, Partition: a.task.Reference.Partition, TaskBirth: a.claim.birth, CreationIntentID: a.task.CreationIntentID, EnrollmentDigest: r.EnrollmentDigest, ObserverCertificateDigest: r.ObserverCertificateDigest, NodeUID: r.NodeUID, NodeBootID: r.NodeBootID, Action: "kill_pid1_and_observe_cgroup_empty", Authority: a.stamps}
+	if a.detached != nil {
+		effects := a.detached.effects
+		intent.Version, intent.DetachedEffects = 2, &effects
+	}
+	return intent
+}
+
+// The original signed archive or detached quiescence supplies runtime identity.
+// Only the genuine current Claim replaces its historical sender attribution.
+func (a *taskLocalRuntimeAuthority) terminationContext() p.TaskCloseDataContext {
+	if a.detached != nil {
+		return a.detached.current
+	}
+	return a.command.Claims.Context.Current
 }
 
 func (a *taskLocalRuntimeAuthority) matchesTermination(r p.TaskRuntimeTerminationIntent) bool {
-	// Common stamps do not identify the effect profile. This local origin may
-	// never accept a detached tuple, including one with otherwise equal pins.
-	if r.Version != 1 || r.DetachedEffects != nil {
+	// Common stamps do not identify an effect profile. Compare the complete
+	// variant against its authenticated private origin before common identity.
+	if a.detached == nil && (r.Version != 1 || r.DetachedEffects != nil) {
+		return false
+	}
+	if a.detached != nil && (r.Version != 2 || r.DetachedEffects == nil || *r.DetachedEffects != a.detached.effects) {
 		return false
 	}
 	if r.Authority != a.stamps || r.TaskBirth != a.claim.birth || r.CreationIntentID != a.task.CreationIntentID || r.MountAttempt != 0 || r.EnrollmentDigest != a.publication.Record.EnrollmentDigest || r.ObserverCertificateDigest != a.publication.Record.ObserverCertificateDigest || r.NodeUID != a.publication.Record.NodeUID || r.NodeBootID != a.publication.Record.NodeBootID || r.Partition != a.task.Reference.Partition || r.Current.ClaimCreateRevision > a.claim.reference.CreateRevision {
 		return false
 	}
-	// Identity must still equal the original archive, while the termination
+	// Identity must still equal the original signed source, while the termination
 	// sender was chosen once by its reservation and is never rewritten later.
-	original, current := a.command.Claims.Context.Current, r.Current
+	original, current := a.terminationContext(), r.Current
 	current.CommandID, current.ClaimID, current.WorkerID = original.CommandID, original.ClaimID, original.WorkerID
 	current.ClaimCreateRevision, current.LeaseID = original.ClaimCreateRevision, original.LeaseID
 	return current == original

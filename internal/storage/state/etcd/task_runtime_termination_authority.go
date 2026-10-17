@@ -20,7 +20,7 @@ import (
 
 // This is fixed writer-derived authority, not an extensible mutation program.
 // It owns copies of all independently authenticated native values. Comparisons
-// retain the accepted 50 pins and add only the transition-specific fixed pins.
+// retain the profile's fixed pins and add only transition-specific fixed pins.
 type taskLocalRuntimeAuthority struct {
 	backend                                 *Backend
 	claim                                   *TaskClaim
@@ -34,6 +34,9 @@ type taskLocalRuntimeAuthority struct {
 	enrollment                              [2]taskFence
 	stamps                                  p.TerminationAuthorityBindings
 	terminationKey, providerKey, releaseKey string
+	// Detached authority owns a real registered job and authenticated fact.
+	// A nil value preserves every original local/archive prerequisite.
+	detached *taskDetachedRuntimeAuthority
 }
 
 func (a *taskLocalRuntimeAuthority) base() []clientv3.Cmp {
@@ -61,15 +64,26 @@ type taskLocalRuntimeWirePins struct {
 	complete                    taskFence
 	enrollment                  [2]taskFence
 	terminationKey, providerKey string
+	settlement                  taskFence
 }
 
 func (a *taskLocalRuntimeAuthority) wirePins() taskLocalRuntimeWirePins {
-	return taskLocalRuntimeWirePins{a.comparisons, a.prefix, a.complete, a.enrollment, a.terminationKey, a.providerKey}
+	pins := taskLocalRuntimeWirePins{comparisons: a.comparisons, prefix: a.prefix, complete: a.complete, enrollment: a.enrollment, terminationKey: a.terminationKey, providerKey: a.providerKey}
+	if a.detached != nil {
+		pins.settlement = a.detached.settlement
+	}
+	return pins
 }
 
 func (a taskLocalRuntimeWirePins) base() []clientv3.Cmp {
 	cmps := append([]clientv3.Cmp(nil), a.comparisons...)
 	cmps = append(cmps, clientv3.Compare(clientv3.Version(a.prefix), "=", 0).WithRange(clientv3.GetPrefixRangeEnd(a.prefix)))
+	if a.settlement.key != "" {
+		// This positive Mod comes only from the strict native fact reader.
+		// The create-once value's envelope and full history were authenticated
+		// before it replaced the local completion's four exact comparisons.
+		return append(cmps, clientv3.Compare(clientv3.ModRevision(a.settlement.key), "=", a.settlement.mod))
+	}
 	return append(cmps, a.complete.comparisons()...)
 }
 
@@ -157,7 +171,18 @@ func (a *taskLocalRuntimeAuthority) local(ctx context.Context) error {
 	if err := errors.Join(ctx.Err(), a.claim.parentCtx.Err()); err != nil {
 		return err
 	}
+	if a.detached != nil {
+		if err := a.backend.validateDetachedRuntimeOwner(a.detached.job, a.claim); err != nil {
+			return err
+		}
+		if a.detached.job.runID != a.detached.runID || a.detached.job.state.record.Incarnation != a.detached.incarnation {
+			return ErrConflict
+		}
+	}
 	now := time.Now()
+	if a.detached != nil && !now.Before(a.detached.cutoff) {
+		return ErrGuardExpired
+	}
 	a.claim.mu.Lock()
 	valid := !a.claim.lost && now.Before(a.claim.deadline)
 	a.claim.mu.Unlock()
@@ -287,20 +312,32 @@ func (b *Backend) loadLocalRuntimeManifest(ctx context.Context, task TaskReferen
 	return s.manifest, hex.EncodeToString(d[:]), nil
 }
 
-func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (*taskLocalRuntimeAuthority, error) {
-	if !b.validTaskClaim(c) || b.enrolledPublication == nil || b.enrolledVerifier == nil || ctx == nil {
-		return nil, ErrInvalidRecord
+// The two effect profiles share exactly the original eight-domain decoder and
+// forty Claim comparisons. Capture under c.mu, then release it before native
+// IO; the final profile guard independently pins the same captured authority.
+// Preserve the local gate's non-consuming cancellation semantics: canceling a
+// child read must not mark its parent Claim lost. Detached construction applies
+// its stricter c.live policy in its own wrapper before calling this shared read.
+func (b *Backend) loadRuntimeAuthorityDomain(ctx context.Context, c *TaskClaim) (TaskRecord, []taskFence, []clientv3.Cmp, error) {
+	fail := func(err error) (TaskRecord, []taskFence, []clientv3.Cmp, error) {
+		return TaskRecord{}, nil, nil, err
 	}
-	a := &taskLocalRuntimeAuthority{backend: b, claim: c}
-	if err := a.local(ctx); err != nil {
-		return nil, err
+	if !b.validTaskClaim(c) || ctx == nil {
+		return fail(ErrInvalidRecord)
+	}
+	if err := errors.Join(ctx.Err(), c.parentCtx.Err()); err != nil {
+		return fail(err)
 	}
 	c.mu.Lock()
+	if c.lost || !time.Now().Before(c.deadline) {
+		c.mu.Unlock()
+		return fail(ErrGuardExpired)
+	}
 	fences := append([]taskFence(nil), c.fences...)
 	cmps := c.comparisons()
 	c.mu.Unlock()
 	if len(fences) != 8 || len(cmps) != 40 {
-		return nil, ErrCorruptRecord
+		return fail(ErrCorruptRecord)
 	}
 	keys := make([]string, 8)
 	for i, f := range fences {
@@ -308,7 +345,7 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 	}
 	values, err := b.readEnrolledPoints(ctx, keys, []int{4096, 4096, 2048, 4096, 4096, 4096, 4096, 4096})
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	var task TaskRecord
 	var cleanup CleanupIntentRecord
@@ -321,22 +358,37 @@ func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (
 	records := []interface{ Validate() error }{&task, &cleanup, &link, &placement, &control, &owner, &fence, &index}
 	for i, kv := range values {
 		if decodeLocalRuntimeDomain(fences[i], kv, records[i]) != nil {
-			return nil, fmt.Errorf("local release domain-record[%d]: %w", i, ErrCorruptRecord)
+			return fail(fmt.Errorf("local release domain-record[%d]: %w", i, ErrCorruptRecord))
 		}
 	}
 	if task.Reference != c.reference.Task || task.Runtime.Validate() != nil || task.CreationIntentID != index.IntentID || task.Generation != index.Generation || task.Runtime != index.Runtime || cleanup.Task != task || link.Reference != task.Reference || control.Phase != PhaseDestroying || control.MountAttempt != 0 || owner.MountAttempt != 0 || control.Runtime == nil || owner.Runtime == nil || *control.Runtime != task.Runtime || *owner.Runtime != task.Runtime || values[0].CreateRevision != c.birth || values[4].ModRevision != c.birth {
-		return nil, ErrIdentityMismatch
+		return fail(ErrIdentityMismatch)
 	}
 	checkedPlacement, err := b.decodePlacement(values[3], task.Reference.SandboxID)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	checkedControl, err := b.decodeControl(values[4], task.Reference.Partition, task.Reference.SandboxID, checkedPlacement)
 	if err != nil || checkedControl == nil || !reflect.DeepEqual(*checkedControl, control) || control.WorkspaceHash != task.WorkspaceHash || control.IntentID != task.CreationIntentID || control.Generation != task.Generation || control.DataGateEpoch != task.DataGateEpoch || control.Snapshot != task.Snapshot || !control.ExpiresAt.Equal(task.ExpiresAt) || task.ControlRevision >= c.birth || values[4].CreateRevision > task.ControlRevision || values[1].CreateRevision != c.birth || values[2].CreateRevision != c.birth {
-		return nil, fmt.Errorf("local release control-binding: %w", errors.Join(ErrCorruptRecord, err))
+		return fail(fmt.Errorf("local release control-binding: %w", errors.Join(ErrCorruptRecord, err)))
 	}
 	if !enrolledImmutableKV(values[7]) || owner.RestoreEpoch != task.Reference.RestoreEpoch || fence.RestoreEpoch != task.Reference.RestoreEpoch || index.RestoreEpoch != task.Reference.RestoreEpoch || owner.WorkspaceHash != task.WorkspaceHash || owner.SandboxID != task.Reference.SandboxID || owner.IntentID != task.CreationIntentID || owner.Generation != task.Generation || fence.WorkspaceHash != task.WorkspaceHash || fence.Generation != task.Generation || index.WorkspaceHash != task.WorkspaceHash || index.SandboxID != task.Reference.SandboxID {
-		return nil, fmt.Errorf("local release owner-index-binding: %w", ErrCorruptRecord)
+		return fail(fmt.Errorf("local release owner-index-binding: %w", ErrCorruptRecord))
+	}
+	return task, fences, cmps, nil
+}
+
+func (b *Backend) loadLocalRuntimeAuthority(ctx context.Context, c *TaskClaim) (*taskLocalRuntimeAuthority, error) {
+	if !b.validTaskClaim(c) || b.enrolledPublication == nil || b.enrolledVerifier == nil || ctx == nil {
+		return nil, ErrInvalidRecord
+	}
+	a := &taskLocalRuntimeAuthority{backend: b, claim: c}
+	if err := a.local(ctx); err != nil {
+		return nil, err
+	}
+	task, fences, cmps, err := b.loadRuntimeAuthorityDomain(ctx, c)
+	if err != nil {
+		return nil, err
 	}
 	a.task = task
 	var binding string
