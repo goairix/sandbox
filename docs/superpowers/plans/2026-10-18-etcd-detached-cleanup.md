@@ -63,6 +63,10 @@ Task1与Task2可在独立已有工作树并行；没有共享源码文件。两�
 
 ### Task 3 冻结合同：持久 no-effect 与原 Run 恢复
 
+组件接续：`45ed1ca` 已通过 cold/memory 唯一限定审查，实际 native7/graph2、
+原 local43 inventory、race/vet与完整输入审计通过；见冷恢复组件验证记录。
+signed 长输入与完整 Task3 的容量及消费接线仍开放，不重播已验收组件。
+
 唯一共享纯wire类型及Encode/Decode/BindingDigest放在controlprotocol，供etcd与
 独立observer复用；私有etcd adapter保留native及原job权限。原E以有界精确bytes/
 digest保存，不复制全E schema、不预建导出matcher。历史WriterClaim、原none Claim
@@ -101,6 +105,12 @@ owner 消费后才能单次 CAS 新 Run、新 Claim、重新 dual-drain 和新 a
 现有 local archive wrapper 保留所有 profile/inventory 检查；若提取公共 CAS，
 只提取严格 one-candidate E/S 操作，不扩大调用者权限。未接入实际 detached
 inventory/actor 的私有恢复 gate 不计端到端恢复完成，接线仍属Task4。
+
+冷恢复内存修正边界：仅在原registry job、实际E/S Joined及原Run/birth/occupation全验，
+物理effectsJoined、owner已返回、j.claim=nil且旧原Claim在锁内确认lost后，释放旧close/Q
+中OutcomeCommitted并cleaned的Stage指针；不改Stage对象、旧Claim/prepared/E/wire/attempt/
+Unknown latch或none。未Joined/伪Joined不能释放，未cleaned仍保留；旧lost Claim不能因
+stage=nil获得重新构造或发送权限。此释放不增加RPC；128KiB阈值不扩大。
 
 文件按 records、writer、native reader、recovery 分职责；窄改现有 Pending/job
 状态及必要共用 CAS。先测试真实signed来源、copied authority拒绝、Claim/Run/S
