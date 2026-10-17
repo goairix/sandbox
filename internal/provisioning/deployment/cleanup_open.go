@@ -16,8 +16,9 @@ import (
 )
 
 // LocalCleanupDeployment owns one configured original DueWorker and its
-// dependencies. It executes explicit Task references without discovering or
-// provisioning runtimes. The genuine worker KernelBoundary remains borrowed.
+// dependencies. The v1 constructor executes explicit Task references; v2 also
+// discovers permanent pending tasks. Neither provisions runtimes. The genuine
+// worker KernelBoundary remains borrowed.
 type LocalCleanupDeployment struct {
 	mu       sync.Mutex
 	closed   bool
@@ -107,6 +108,19 @@ func (d *LocalCleanupDeployment) Close() error {
 // and archive roots are explicit absolute paths. Partial construction is joined
 // and closed before an error is returned.
 func OpenLocalCleanup(ctx context.Context, path string, worker *launcher.KernelBoundary) (*LocalCleanupDeployment, error) {
+	return openLocalCleanup(ctx, path, worker, 1)
+}
+
+// OpenAutomaticLocalCleanup opens the strict mounted v2 automatic worker. The
+// manifest must explicitly set worker.automatic_cleanup=true; v1 is refused.
+// It borrows the caller's genuine workspace-sync boundary until Close joins,
+// and has the same credential, configuration and partial-close ownership rules
+// as OpenLocalCleanup. It discovers pending tasks without provisioning state.
+func OpenAutomaticLocalCleanup(ctx context.Context, path string, worker *launcher.KernelBoundary) (*LocalCleanupDeployment, error) {
+	return openLocalCleanup(ctx, path, worker, 2)
+}
+
+func openLocalCleanup(ctx context.Context, path string, worker *launcher.KernelBoundary, version int) (*LocalCleanupDeployment, error) {
 	if ctx == nil {
 		return nil, errConfiguration
 	}
@@ -124,7 +138,7 @@ func OpenLocalCleanup(ctx context.Context, path string, worker *launcher.KernelB
 	if err != nil {
 		return nil, err
 	}
-	m, err := parseCleanupManifest(wire)
+	m, err := parseCleanupManifestVersion(wire, version)
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +229,9 @@ func OpenLocalCleanup(ctx context.Context, path string, worker *launcher.KernelB
 		WorkerID: m.Worker.WorkerID, Partitions: m.Worker.Partitions,
 		RangeSlots: m.Worker.RangeSlots, ClaimSlots: m.Worker.ClaimSlots, RelistSlot: m.Worker.RelistSlot,
 		StageTTL: cleanupDuration(m.Worker.StageTTL),
+		// The entry fixes the version and the parser requires v2's explicit
+		// true field. No optional caller flag can reinterpret a v1 manifest.
+		AutomaticCleanup: m.Version == 2,
 	})
 	if err != nil {
 		return fail("worker", err)

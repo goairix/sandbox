@@ -18,9 +18,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// v1 is independent of the create/HTTP manifest: no root private key or
-// provisioning inventory is accepted. Every field is explicit, including
-// durations (Go duration strings) and byte budgets (unsigned integer bytes).
+// Cleanup manifests are independent of the create/HTTP manifest: no root
+// private key or provisioning inventory is accepted. v1 is explicit-only;
+// v2 requires worker.automatic_cleanup=true. Every other field remains explicit,
+// including durations (Go duration strings) and byte budgets (unsigned bytes).
 type cleanupManifest struct {
 	Version               int    `json:"version"`
 	LauncherConfigFile    string `json:"launcher_config_file"`
@@ -64,6 +65,9 @@ type cleanupManifest struct {
 		RelistSlot uint16   `json:"relist_slot"`
 		SessionTTL string   `json:"session_ttl"`
 		StageTTL   string   `json:"stage_ttl"`
+		// Presence distinguishes the unchanged v1 schema from v2's required
+		// automatic mode. false, null and an omitted v2 field are all refused.
+		AutomaticCleanup *bool `json:"automatic_cleanup,omitempty"`
 	} `json:"worker"`
 	Storage struct {
 		Identity   string `json:"identity"`
@@ -120,6 +124,16 @@ func parseCleanupManifest(wire []byte) (cleanupManifest, error) {
 	return m, nil
 }
 
+// The selected constructor fixes the version. Understanding both strict wire
+// schemas must never silently opt an explicit v1 caller into automatic work.
+func parseCleanupManifestVersion(wire []byte, version int) (cleanupManifest, error) {
+	m, err := parseCleanupManifest(wire)
+	if err != nil || m.Version != version {
+		return cleanupManifest{}, errConfiguration
+	}
+	return m, nil
+}
+
 // The separate token pass rejects duplicates/case aliases. This walk binds
 // presence and non-null values to the one fixed struct schema, including zero
 // integer fields whose omission ordinary json.Unmarshal cannot distinguish.
@@ -130,16 +144,32 @@ func cleanupRequiredFields(wire []byte, shape reflect.Type) bool {
 	switch shape.Kind() {
 	case reflect.Struct:
 		var fields map[string]json.RawMessage
-		if json.Unmarshal(wire, &fields) != nil || len(fields) != shape.NumField() {
+		if json.Unmarshal(wire, &fields) != nil || len(fields) > shape.NumField() {
 			return false
 		}
+		presentFields := 0
 		for n := 0; n < shape.NumField(); n++ {
 			field := shape.Field(n)
-			value, present := fields[field.Tag.Get("json")]
+			tag := field.Tag.Get("json")
+			// Only this exact compatibility field may be absent in v1. Do
+			// not make arbitrary omitempty tags weaken required mounted input.
+			optionalAutomatic := tag == "automatic_cleanup,omitempty" && field.Type == reflect.TypeOf((*bool)(nil))
+			name := tag
+			if optionalAutomatic {
+				name = "automatic_cleanup"
+			}
+			value, present := fields[name]
+			if !present && optionalAutomatic {
+				continue
+			}
 			if !present || !cleanupRequiredFields(value, field.Type) {
 				return false
 			}
+			presentFields++
 		}
+		return presentFields == len(fields)
+	case reflect.Pointer:
+		return cleanupRequiredFields(wire, shape.Elem())
 	case reflect.Slice:
 		var values []json.RawMessage
 		if json.Unmarshal(wire, &values) != nil {
@@ -188,8 +218,22 @@ func cleanupDurationWithin(value string, minimum, maximum time.Duration, integra
 }
 
 func (m cleanupManifest) validate() error {
+	automatic := m.Worker.AutomaticCleanup
+	switch m.Version {
+	case 1:
+		if automatic != nil {
+			return errConfiguration
+		}
+	case 2:
+		if automatic == nil || !*automatic {
+			return errConfiguration
+		}
+	default:
+		return errConfiguration
+	}
+
 	i := m.Etcd.Identity
-	if m.Version != 1 || i.SchemaVersion != 1 || i.ClusterID == 0 || !cleanupSegment(i.RestoreEpoch) || strings.TrimSpace(i.StorageID) == "" || len(i.StorageID) > 128 || strings.TrimSpace(i.RuntimeID) == "" || len(i.RuntimeID) > 128 {
+	if i.SchemaVersion != 1 || i.ClusterID == 0 || !cleanupSegment(i.RestoreEpoch) || strings.TrimSpace(i.StorageID) == "" || len(i.StorageID) > 128 || strings.TrimSpace(i.RuntimeID) == "" || len(i.RuntimeID) > 128 {
 		return errConfiguration
 	}
 	if _, err := state.NewNamespace(i.Prefix, i.AuthorityID, i.Cell); err != nil {
