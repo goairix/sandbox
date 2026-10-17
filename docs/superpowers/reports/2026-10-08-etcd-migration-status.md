@@ -11,7 +11,7 @@
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
 功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
-独立自动清理worker的cold quota结算接线；分区due/dirty/Watch的
+独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
 组合已通过四个新native场景；完整Task审查发现的两项代码问题已修复并限定复核关闭，
@@ -20,6 +20,17 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 整体交付另差：大量已有sandbox的容量/延迟/内存与长稳验证、真实故障组合、部署配置、
 备份恢复及权限验收、最终完整审查和切换验收。组件模型通过不能代替这些验收；当前
 没有实测生产性能提升或大N容量结论。上述百分比不按行数、提交数或测试数累计。
+
+新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
+来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
+接通显式 v3 部署与 `serve-cold-quota <manifest>` 独立命令。新 actor host20组、
+相关 race79组及 Linux vet、部署全包 race34组与实际 Linux 命令构建通过，各唯一
+Task 审查发现的问题经修复和限定复核关闭。两个新增真实 Linux 场景已通过：
+mounted 与独立 role 都从启动前真实冷创建积压完成物理清理、Run join、配额归还，
+原 P 在实际 receipt 提交后才删除；实际 Close/Wait 与独立进程信号退出、租约释放
+通过。详见[自动配额及 v3 验证](2026-10-18-etcd-automatic-cold-quota-verification.md)。
+两场各一条 Task，尚未覆盖大 N、32 物理并发或全部替代/Unknown 故障组合；
+全量功能和交付粗估口径不因此按提交数上调，默认生产入口仍为 Redis。
 
 最近小步提交：`c711d8a`补满槽/重复/空位恢复控制回归；`5c92719`接入严格v2自动部署；
 `fae0b5b`新增独立cleanup worker命令。前者host/race通过，后两者host/race/Linux vet
@@ -50,7 +61,8 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 自行仲裁、实际quota槽epoch+1复用及旧请求replay不读或改新槽；两场完整通过、独立审计
 及唯一Task审查通过。首次父fixture分类失败如实保留，未重播旧矩阵，见
 [真实public配额验证](2026-10-17-etcd-cold-quota-journal-native-verification.md)。
-这仍未接入自动worker；自动结算、terminal pending删除gate与显式生产配置接线继续开放。
+当时仍未接入自动 worker；该接线、terminal pending 删除 gate 与显式 v3 配置现由
+`71aa9ad`/`00806a9`/`d16b720` 完成，新增真实组合结果见本节最新记录。
 
 新增 `b228e7f` 验证公开quota协议body的最大尺寸、原RPC顺序和明确反例；
 `9f4714c` 实现离线严格v3配额清单解析，`c954648` 实现原worker双预算原子准入。
@@ -58,9 +70,8 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [事务预算基础](2026-10-17-etcd-cold-quota-worker-wire-verification.md)、
 [v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
 [双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
-v3仍未由CLI接受。worker私有continuation、metadata计费、分步postread、完整历史认证、
-恢复proof读取及ready/slot prepare已分别范围验收；保留内存核算及自动consumer仍需完成，
-不计为配额自动返还已接通。
+这些基础切片验收时 v3 仍未由 CLI 接受；最新 v3 入口、实际自动 consumer 和共享
+保留内存核算现已接通并完成上述范围验证，生产切换与大 N 容量仍未验收。
 
 `3c3afed` 接通五个私有固定 RPC 的真实 gRPC 通信层：限制每次请求、回复、累计
 protobuf预算和重复发送，取消后仍为原已识别租约保留一次有界回收。host、race、
@@ -103,9 +114,9 @@ P2 额度不足保留 P1 ready，合法槽位及原绑定通过后才分配一�
 prepared 指针。host/race、公开协议回归、Linux vet 及独立 Task 审查通过，见
 [分步 prepare 验证](2026-10-18-etcd-cold-quota-worker-prepare-verification.md)。首次验证发现的
 quota/owner 分区等值限制已修正；原协议允许独立 quota 分区，测试数据和断言未放松。
-这些私有 cursor 借用 history，尚未完成全局共享工作区和 32 job 保留内存约束；
-原 job 正向来源、自动结算/P 删除 gate、生产配置及真实 etcd 恢复和大 N 容量验收
-继续开放。功能/整体百分比保持上述粗估，未按私有切片数量增加。
+这些私有 cursor 的共享工作区、32 job 保留内存约束、原 job 正向来源及自动结算/P
+删除 gate 已由 `71aa9ad` 接通；显式 v3 配置及两个真实组合也已验证。真实 etcd
+完整故障恢复和大 N 容量验收仍开放，功能/整体百分比保持上述粗估。
 三项合并后的同包定向 host 回归于隔离工作树通过（2.384s，9119 输入，原始输出
 40460 字节，SHA-256 `28b2aa9e75aed3f7ad42b8874829c1ef9c930345aad0f0e12067f2ce47a45d36`），
 完整输入/工具/源码指纹核对通过；这不是自动 actor 的端到端组合或容量验收。
