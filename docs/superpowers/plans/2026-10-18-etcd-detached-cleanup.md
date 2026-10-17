@@ -181,3 +181,7 @@ fixture；Pod由正式plain builder构造，provider KV只能由原生产writer�
 slot0/1及59节点reserve后，observer显式返回Unknown，检查唯一发送与同Claim不重发。
 不raw种provider、不伪造terminal proof。完整slot2..6正向要真实PID1/cgroup证明；
 freshClaim/newRun retained Query等待B实际cold gate验收。此组件不能计消费者/HTTP完成。
+
+首片接续：`54e3d08` provider reservation/slot0/1及sameClaim诊断组件通过，
+真实native、cutoff续租RED/GREEN、旧v1 race/Linuxvet及唯一限定审查完成。
+后续从已接受的cold gate接续freshClaim/newRun retained Query，保持原请求不重发。

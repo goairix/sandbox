@@ -37,8 +37,11 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 完成Stage安全退休及保留对象图计量；实际七项native、两项graph和定向race/vet通过，
 唯一reviewer组件Spec/Quality通过，见[冷恢复组件验证](2026-10-18-etcd-detached-cold-verification.md)。
 实测85209字节仅属该fixture；signed长输入、全局容量和消费者仍开放。
-生产provider接线继续推进，审查发现续租后操作context越过原capture截止时间，
-真实回归已复现，修复验收尚未完成。HTTP仍501；其后继续owner/terminal/quota、
+`54e3d08`接通生产provider59节点reservation、slot0/1、一次Terminate Unknown及
+同Claim只读诊断不重发；真实TLS/native用例与原v1 race/vet通过，唯一组件审查通过。
+审查发现的续租cutoff问题已真实RED/GREEN关闭，见
+[provider首片验证](2026-10-18-etcd-detached-provider-verification.md)。
+完整七槽/terminal proof及后续Run Query仍未完成。HTTP仍501；其后继续owner/terminal/quota、
 实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
