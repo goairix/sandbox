@@ -155,11 +155,11 @@ func (b *Backend) coldQuotaReturnRecord(h *coldQuotaReturnHistory, locator Stage
 }
 
 func (b *Backend) verifyColdQuotaReturn(ctx context.Context, h *coldQuotaReturnHistory, kv *mvccpb.KeyValue) (StageReference, *ColdRuntimeQuotaReturnEntry, error) {
-	r, err := decodeColdRuntimeQuotaReturn(kv)
-	if err != nil || r != b.coldQuotaReturnRecord(h, r.Attempt) {
-		return StageReference{}, nil, ErrCorruptRecord
+	stamp, err := b.decodeColdQuotaReturnProof(h, kv)
+	if err != nil {
+		return StageReference{}, nil, err
 	}
-	key, err := b.runtimeDispatchReceiptKey(r.Attempt)
+	key, err := b.runtimeDispatchReceiptKey(stamp.attempt)
 	if err != nil {
 		return StageReference{}, nil, err
 	}
@@ -167,18 +167,7 @@ func (b *Backend) verifyColdQuotaReturn(ctx context.Context, h *coldQuotaReturnH
 	if err != nil {
 		return StageReference{}, nil, err
 	}
-	if !enrolledImmutableKV(values[0]) || values[0].CreateRevision != kv.CreateRevision {
-		return StageReference{}, nil, ErrCorruptReceipt
-	}
-	ref, err := decodeRuntimeDispatchReceipt(values[0], r.Attempt)
-	if err != nil {
-		return StageReference{}, nil, err
-	}
-	wire, err := encodeReceipt(ref, OutcomeCommitted)
-	if err != nil || wire != string(values[0].Value) {
-		return StageReference{}, nil, ErrCorruptReceipt
-	}
-	return ref, coldQuotaReturnEntry(r, kv), nil
+	return b.decodeColdQuotaReturnReceipt(stamp, values[0])
 }
 
 func (b *Backend) coldQuotaReturnMutation(h *coldQuotaReturnHistory, ready, slotKV *mvccpb.KeyValue, key, free string, locator StageAttemptLocator) (Mutation, error) {
