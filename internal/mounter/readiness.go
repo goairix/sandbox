@@ -162,7 +162,15 @@ func (o *readinessObserver) ready(now time.Time) bool {
 
 // readinessIdentityLocked reads only resident state and the already-owned child
 // completion channel. It must not call Status, MountInfo or any cache syscall.
+// A native seal invalidates existing samples immediately without changing the
+// mount state that the original Shutdown still needs for cleanup.
 func (s *Supervisor) readinessIdentityLocked() (readinessIdentity, bool) {
+	if s.checkNativeBinding() != nil {
+		return readinessIdentity{}, false
+	}
+	if s.nativeOwner != nil && (s.nativeOwner.revoked || s.nativeOwner.closed) {
+		return readinessIdentity{}, false
+	}
 	if !s.bootstrapped || s.state != StateReady || s.stopping || s.shutdownTried || s.process == nil || s.processDone == nil || s.mountID == 0 || s.auth.LeaseGeneration <= 0 {
 		return readinessIdentity{}, false
 	}

@@ -148,16 +148,18 @@ func validateHealthStatus(command string, status fuseprotocol.MounterStatus) err
 	return nil
 }
 
-func supervise() error {
-	if os.Getpid() != 1 {
-		return fmt.Errorf("supervisor must be container PID 1")
-	}
-	supervisor := mounter.NewSupervisor(mounter.Config{
+func supervise() (result error) {
+	supervisor, err := mounter.NewNativeSupervisor(mounter.NativeConfig{
 		RunDir: runDir, CredentialRoot: credentialRoot, CacheRoot: cacheRoot, MountPath: mountPath,
-		Profiles:  mounter.BundledProfiles(),
-		CheckFuse: mounter.CheckFuseDevice, PrepareAnchor: mounter.PrepareWorkspaceAnchor, CheckAnchor: mounter.CheckWorkspaceAnchor,
-		MountInfo: func() (mounter.Mount, error) { return mounter.ReadEffectiveMount(mountPath) },
-	}, mounter.CommandRunner{})
+	})
+	if err != nil {
+		return err
+	}
+	// Cover bootstrap/environment errors as well as service teardown. A live
+	// original child makes Close pending and retains handles; process exit's
+	// eventual OS reclamation is not a business safe-release proof.
+	defer func() { result = errors.Join(result, supervisor.Close()) }()
+
 	expectedUID := os.Getenv("SANDBOX_RUNTIME_UID")
 	rawBootstrap := os.Getenv("SANDBOX_MOUNTER_BOOTSTRAP")
 	if supervisor.State() == mounter.StateRestartDetected {

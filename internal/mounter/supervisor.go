@@ -53,6 +53,8 @@ type Runner interface {
 	Run(ctx context.Context, argv []string) error
 }
 
+// Config configures the injectable supervisor model. Its callbacks do not
+// establish native kernel ownership; the production entry uses NativeConfig.
 type Config struct {
 	RunDir            string
 	CredentialRoot    string
@@ -66,8 +68,12 @@ type Config struct {
 	MountPollInterval time.Duration
 }
 
+// Supervisor owns one single-use mount attempt and its original child cleanup.
+// Native instances additionally retain a kernel owner through service shutdown
+// and the original child join. A Supervisor must not be copied after use.
 type Supervisor struct {
 	mu               sync.Mutex
+	nativeOwner      *nativeOwner
 	config           Config
 	runner           Runner
 	state            State
@@ -89,6 +95,8 @@ type Supervisor struct {
 	mountDeadline    time.Time
 }
 
+// NewSupervisor constructs the injectable state-machine model. It makes no
+// native process-continuity claim; production uses NewNativeSupervisor.
 func NewSupervisor(config Config, runner Runner) *Supervisor {
 	if config.Profiles == nil {
 		config.Profiles = CompiledProfiles()
@@ -102,11 +110,24 @@ func NewSupervisor(config Config, runner Runner) *Supervisor {
 	return s
 }
 
-func (s *Supervisor) State() State { s.mu.Lock(); defer s.mu.Unlock(); return s.state }
-
-func (s *Supervisor) RecoverRestarted(expected fuseprotocol.BootstrapConfig, expectedRuntimeUID string) error {
+func (s *Supervisor) State() State {
+	if s.checkNativeBinding() != nil {
+		return StateUnhealthy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.state
+}
+
+func (s *Supervisor) RecoverRestarted(expected fuseprotocol.BootstrapConfig, expectedRuntimeUID string) error {
+	if err := s.checkNativeBinding(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateNativeLocked(); err != nil {
+		return err
+	}
 	if s.state != StateRestartDetected || !s.consumed || s.bootstrapped {
 		return fmt.Errorf("supervisor is not awaiting restart recovery")
 	}
@@ -157,8 +178,16 @@ func (s *Supervisor) RecoverRestarted(expected fuseprotocol.BootstrapConfig, exp
 }
 
 func (s *Supervisor) Bootstrap(_ context.Context, bootstrap fuseprotocol.BootstrapConfig, expectedRuntimeUID string) error {
+	if err := s.checkNativeBinding(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlockThread := s.lockNativeThread()
+	defer unlockThread()
+	if err := s.validateNativeLocked(); err != nil {
+		return err
+	}
 	if s.bootstrapped || s.state != StateLocked {
 		return ErrBootstrapConsumed
 	}
@@ -169,6 +198,11 @@ func (s *Supervisor) Bootstrap(_ context.Context, bootstrap fuseprotocol.Bootstr
 	sanitized, err := json.Marshal(bootstrap)
 	if err != nil {
 		return fmt.Errorf("marshal sanitized bootstrap: %w", err)
+	}
+	// Preparation can perform filesystem checks and mutations. Revalidate
+	// immediately before publishing the first persisted bootstrap identity.
+	if err := s.validateNativeLocked(); err != nil {
+		return err
 	}
 	if err := atomicPublish(filepath.Join(s.config.RunDir, "bootstrap.json"), sanitized, 0o600); err != nil {
 		s.state = StateUnhealthy
@@ -247,10 +281,19 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 }
 
 func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeRequest) error {
+	if err := s.checkNativeBinding(); err != nil {
+		auth.Credentials.Zero()
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer auth.Credentials.Zero()
+	unlockThread := s.lockNativeThread()
+	defer unlockThread()
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.validateNativeLocked(); err != nil {
 		return err
 	}
 	if s.consumed || s.state == StateRestartDetected || s.state == StateUnhealthy {
@@ -274,6 +317,9 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 	if err != nil {
 		return fmt.Errorf("build fixed s3fs profile: %w", err)
 	}
+	if err := s.validateNativeLocked(); err != nil {
+		return err
+	}
 	if err := atomicPublish(s.bootstrap.PasswdFile, passwd, 0o600); err != nil {
 		s.state = StateUnhealthy
 		return fmt.Errorf("publish s3fs credential file: %w", err)
@@ -284,6 +330,9 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 			_ = os.Remove(s.bootstrap.PasswdFile)
 		}
 	}()
+	if err := s.validateNativeLocked(); err != nil {
+		return err
+	}
 	durableAuth := auth.Sanitized()
 	s.consumed, s.auth, s.state = true, durableAuth, StateMounting
 	s.mountDeadline = time.Now().Add(time.Duration(s.bootstrap.MountTimeoutSeconds) * time.Second)
@@ -297,6 +346,12 @@ func (s *Supervisor) Authorize(ctx context.Context, auth fuseprotocol.AuthorizeR
 	var environment []string
 	if s.bootstrap.CAFile != "" {
 		environment = []string{"CURL_CA_BUNDLE=" + s.bootstrap.CAFile}
+	}
+	// Once the marker exists this attempt remains consumed even if native
+	// continuity is lost. Retain the marker and refuse any subsequent start.
+	if err := s.validateNativeLocked(); err != nil {
+		s.state = StateUnhealthy
+		return err
 	}
 	process, err := s.runner.Start(context.WithoutCancel(ctx), argv, environment)
 	if err != nil {
@@ -323,9 +378,15 @@ func (s *Supervisor) reap(process Process, done chan struct{}, result chan<- err
 }
 
 func (s *Supervisor) PreparedStatus(ctx context.Context) (fuseprotocol.MounterStatus, error) {
+	if err := s.checkNativeBinding(); err != nil {
+		return fuseprotocol.MounterStatus{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.statusLocked()
+	if err := s.validateNativeLocked(); err != nil {
+		return status, err
+	}
 	if s.state != StatePrepared || s.consumed || s.process != nil {
 		return status, fmt.Errorf("supervisor is not pristine prepared")
 	}
@@ -372,10 +433,16 @@ func (s *Supervisor) checkPreparedLocked() error {
 }
 
 func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatus, error) {
+	if err := s.checkNativeBinding(); err != nil {
+		return fuseprotocol.MounterStatus{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.statusLocked()
 	if err := ctx.Err(); err != nil {
+		return status, err
+	}
+	if err := s.validateNativeLocked(); err != nil {
 		return status, err
 	}
 	if err, exited := s.processExitErrorLocked(); exited {
@@ -504,10 +571,16 @@ func (s *Supervisor) verifyActiveMountLocked(expectedID uint64) error {
 }
 
 func (s *Supervisor) Flush(ctx context.Context, request fuseprotocol.ControlRequest) (fuseprotocol.ControlAck, error) {
+	if err := s.checkNativeBinding(); err != nil {
+		return fuseprotocol.ControlAck{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ack := fuseprotocol.ControlAck{Version: fuseprotocol.Version, RuntimeUID: effectiveRuntimeUID(s.bootstrap), Generation: s.auth.LeaseGeneration}
 	if err := ctx.Err(); err != nil {
+		return ack, err
+	}
+	if err := s.validateNativeLocked(); err != nil {
 		return ack, err
 	}
 	if request.Version != fuseprotocol.Version || request.RuntimeUID != ack.RuntimeUID || request.Generation <= 0 || request.Generation != ack.Generation || s.state != StateReady {
@@ -547,6 +620,11 @@ func (s *Supervisor) flushLocked(ctx context.Context) error {
 }
 
 func (s *Supervisor) Shutdown(ctx context.Context, request *fuseprotocol.ControlRequest) (fuseprotocol.ShutdownAck, error) {
+	// A copy cannot clean up the original owner's process. Native revocation
+	// or pending Close, however, must never block this original cleanup path.
+	if err := s.checkNativeBinding(); err != nil {
+		return fuseprotocol.ShutdownAck{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	generation := s.auth.LeaseGeneration
@@ -742,9 +820,17 @@ func cacheUsageBytes(ctx context.Context, root string) (int64, error) {
 	return total, err
 }
 
+// Status reports local state, returning unhealthy when native ownership cannot
+// be validated. Reporting never changes the state needed by original cleanup.
 func (s *Supervisor) Status() fuseprotocol.MounterStatus {
+	if s.checkNativeBinding() != nil {
+		return fuseprotocol.MounterStatus{Version: fuseprotocol.Version, State: string(StateUnhealthy)}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.validateNativeLocked() != nil {
+		return fuseprotocol.MounterStatus{Version: fuseprotocol.Version, State: string(StateUnhealthy)}
+	}
 	return s.statusLocked()
 }
 
