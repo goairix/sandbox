@@ -433,7 +433,11 @@ func TestLocalRuntimeReleaseNativeWorker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, released.Entry, read)
 	if s.ColdQuotaReturn {
-		coldQuotaReturnAfterRealRelease(t, ctx, cold, o, tlsConfig, workspace, task, s, newInput)
+		if s.Fault == "quota-journal-success" || s.Fault == "quota-journal-ACK" {
+			coldQuotaJournalAfterRealRelease(t, ctx, cold, o, tlsConfig, workspace, task, s, newInput)
+		} else {
+			coldQuotaReturnAfterRealRelease(t, ctx, cold, o, tlsConfig, workspace, task, s, newInput)
+		}
 	}
 	require.NoError(t, cold.Close())
 	t.Logf("public fullchain complete: task=%s physicalproof+cleanup-complete+atomic-release=%d newowner-cold-receipt=true", task.TaskID, released.Entry.CreateRevision)
@@ -894,7 +898,7 @@ func runLocalRuntimeReleaseNativeMode(t *testing.T, fault string, coldQuotaRetur
 	var exited *exec.ExitError
 	require.ErrorAs(t, childErr, &exited)
 	require.Equal(t, syscall.SIGKILL, exited.Sys().(syscall.WaitStatus).Signal())
-	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" || effectIndex >= 2 {
+	if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" || fault == "quota-journal-success" || fault == "quota-journal-ACK" || effectIndex >= 2 {
 		t.Logf("original genuine Supervisor Cmd.Wait=%v (observer SIGKILL)", childErr)
 	} else {
 		t.Logf("original refused-case Supervisor cleanup Cmd.Wait=%v (fixture cleanup, not physical proof)", childErr)
@@ -924,7 +928,7 @@ func runLocalRuntimeReleaseNativeMode(t *testing.T, fault string, coldQuotaRetur
 		}
 		require.Equal(t, effectIndex == 6, absent)
 		t.Logf("actual seven-slot HTTP received total=%d effects=%v; each send independently checked native durable intent and immediately preceding fresh provider MOD guard; four unique configured policies", totalReceived, effectCounts)
-	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" {
+	} else if fault == "" || fault == "ack-cleanup-complete" || fault == "ack-release" || fault == "ack-terminated" || fault == "observer-send-ack" || fault == "quota-journal-success" || fault == "quota-journal-ACK" {
 		require.Equal(t, 2, actualPatch)
 		require.Equal(t, 1, actualDelete)
 		require.True(t, absent)

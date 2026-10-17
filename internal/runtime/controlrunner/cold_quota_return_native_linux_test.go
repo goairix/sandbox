@@ -43,6 +43,11 @@ func TestColdRuntimeQuotaReturnNativeFullchain(t *testing.T) {
 			return
 		}
 	}
+	for _, fault := range []string{"quota-journal-success", "quota-journal-ACK"} {
+		if !t.Run(fault, func(t *testing.T) { runLocalRuntimeReleaseNativeMode(t, fault, true) }) {
+			return
+		}
+	}
 }
 
 func coldQuotaReturnNativeProfile(o *state.Options) {

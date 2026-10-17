@@ -40,6 +40,7 @@ type localReleaseNativeProxy struct {
 	lastRequest   *pb.TxnRequest
 	lastSucceeded bool
 	quota         *coldQuotaReturnNativeFault
+	journal       *coldQuotaJournalNativeObservation
 }
 
 type localReleaseNativeTransaction struct {
@@ -61,6 +62,9 @@ func newLocalReleaseNativeProxy(t *testing.T, config *tls.Config, fault string) 
 	if fault == "cold-quota" {
 		p.quota = &coldQuotaReturnNativeFault{}
 	}
+	if fault == "quota-journal-success" || fault == "quota-journal-ACK" {
+		p.journal = &coldQuotaJournalNativeObservation{dropACK: fault == "quota-journal-ACK"}
+	}
 	pb.RegisterKVServer(server, p)
 	pb.RegisterLeaseServer(server, p)
 	pb.RegisterMaintenanceServer(server, p)
@@ -76,6 +80,9 @@ func newLocalReleaseNativeProxy(t *testing.T, config *tls.Config, fault string) 
 }
 
 func (p *localReleaseNativeProxy) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeResponse, error) {
+	if p.journal != nil {
+		p.journal.observeRead(r)
+	}
 	return p.kv.Range(ctx, r)
 }
 func (p *localReleaseNativeProxy) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse, error) {
@@ -85,6 +92,9 @@ func (p *localReleaseNativeProxy) DeleteRange(ctx context.Context, r *pb.DeleteR
 	return p.kv.DeleteRange(ctx, r)
 }
 func (p *localReleaseNativeProxy) LeaseGrant(ctx context.Context, r *pb.LeaseGrantRequest) (*pb.LeaseGrantResponse, error) {
+	if p.journal != nil {
+		p.journal.observeBeforeGrant(ctx, p.kv)
+	}
 	response, err := p.lease.LeaseGrant(ctx, r)
 	if p.quota != nil && p.quota.dropGrant(err) {
 		return nil, status.Error(codes.PermissionDenied, "fixture withheld actual upstream Grant ACK")
@@ -132,6 +142,9 @@ func (p *localReleaseNativeProxy) Txn(ctx context.Context, r *pb.TxnRequest) (*p
 	quotaDrop := false
 	if p.quota != nil {
 		label, quotaDrop = p.quota.after(r, response, err, label)
+	}
+	if p.journal != nil {
+		label, quotaDrop = p.journal.observeTransaction(r, response, err, label)
 	}
 	x := localReleaseNativeTransaction{Label: label, Comparisons: len(r.Compare), Success: len(r.Success), Failure: len(r.Failure), RequestBytes: r.Size()}
 	x.Nodes = x.Comparisons + x.Success + x.Failure
