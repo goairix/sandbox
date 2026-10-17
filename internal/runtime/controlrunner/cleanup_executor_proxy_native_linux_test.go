@@ -58,6 +58,7 @@ type cleanupExecutorProxyStats struct {
 	ObservationOverflow                       bool
 	ClaimPuts, ArchivePuts                    int
 	ClosePuts, QuiescencePuts                 int
+	TerminationPuts, ProviderPuts             int
 	WatchStreams, KeepAliveStreams            int
 	FaultMatched, FaultCommitted, FaultJoined int
 	FaultRevision                             int64
@@ -81,7 +82,7 @@ type cleanupExecutorStageGuard struct {
 
 func newCleanupExecutorEtcdProxy(t *testing.T, tlsConfig *tls.Config, task state.TaskReference, fault string) *cleanupExecutorEtcdProxy {
 	t.Helper()
-	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join", "closed-progress-recovery", "quiescent-progress-recovery", "pending-close-recovery", "pending-quiescence-recovery"}, fault)
+	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join", "closed-progress-recovery", "quiescent-progress-recovery", "pending-close-recovery", "pending-quiescence-recovery", "owner-held-recovery"}, fault)
 	connection, err := grpc.NewClient("127.0.0.1:2379", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())))
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -148,7 +149,7 @@ func (p *cleanupExecutorEtcdProxy) Compact(ctx context.Context, r *pb.Compaction
 }
 
 func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnRequest) (*pb.TxnResponse, error) {
-	// These two cases lose a progress request before it reaches etcd. The
+	// These cases lose a progress request before it reaches etcd. The
 	// actual business reply has already returned; no successful Txn response
 	// is fabricated, and every other request still reaches the real upstream.
 	p.mu.Lock()
@@ -231,6 +232,9 @@ func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnReque
 // Capture only one bounded original E value from the actual CAS comparisons.
 // Proposed phase and retained phase differ deliberately in these two cases.
 func (p *cleanupExecutorEtcdProxy) unforwardedProgress(request *pb.TxnRequest) (string, bool) {
+	if p.fault == "owner-held-recovery" {
+		return p.unforwardedOwnerProgress(request)
+	}
 	if !cleanupExecutorPendingProgress(p.fault) || len(request.Success) != 1 {
 		return "", false
 	}
@@ -279,6 +283,10 @@ func (p *cleanupExecutorEtcdProxy) observeWrites(request *pb.TxnRequest, respons
 				p.stats.ClosePuts++
 			case p.prefix + "quiesce-users":
 				p.stats.QuiescencePuts++
+			case p.prefix + "runtime-termination":
+				p.stats.TerminationPuts++
+			case p.prefix + "runtime-provider-cleanup":
+				p.stats.ProviderPuts++
 			}
 			if response.Succeeded && i < len(response.Responses) && response.Responses[i].GetResponsePut() != nil {
 				p.observeQuiescenceStageLease(put)

@@ -150,6 +150,8 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.NotNil(t, row.Archive)
 			if s.Recovery == "bound-recovery" {
 				require.Equal(t, "archive-bound", row.Confirmed)
+			} else if s.Recovery == "owner-held-recovery" {
+				cleanupExecutorOwnerCompleted(t, ctx, s, b, raw, prefix, row, rowKV.Value, proxy.snapshot())
 			} else if s.Recovery == "observer-ack-recovery" {
 				require.Equal(t, "local-complete", row.Confirmed)
 				require.NotNil(t, row.Pending)
@@ -205,7 +207,7 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			wantClaims = 0
 		}
 	}
-	if s.Recovery == "observer-ack-recovery" && s.RecoveryStage == "first" {
+	if (s.Recovery == "observer-ack-recovery" || s.Recovery == "owner-held-recovery") && s.RecoveryStage == "first" {
 		wantClaims = 2
 	}
 	if cleanupExecutorEarlyPhase(s.Recovery) != "" && s.RecoveryStage == "second" {
@@ -240,7 +242,7 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.Zero(t, stats.FaultCommitted)
 			require.Zero(t, stats.FaultJoined)
 			require.Zero(t, stats.FaultRevision)
-		} else if cleanupExecutorPendingProgress(s.Recovery) {
+		} else if cleanupExecutorPendingProgress(s.Recovery) || s.Recovery == "owner-held-recovery" {
 			require.Equal(t, 1, stats.FaultMatched)
 			require.Equal(t, 1, stats.FaultNotForwarded)
 			require.Zero(t, stats.FaultCommitted)
@@ -265,6 +267,10 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 		}
 	} else {
 		require.Zero(t, stats.FaultMatched)
+		if s.Recovery == "owner-held-recovery" {
+			require.Zero(t, stats.TerminationPuts)
+			require.Zero(t, stats.ProviderPuts)
+		}
 		if cleanupExecutorEarlyPhase(s.Recovery) != "" {
 			require.Equal(t, 1, stats.ArchivePuts, "early recovery creates its first archive only after fresh dual-drain")
 			require.Zero(t, stats.ClosePuts, "history cannot reconstruct close dispatch")
@@ -363,6 +369,10 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 	prefix := fmt.Sprintf("%sp/%02x/tasks/%s/", s.Binding.Namespace, s.Task.Partition, s.Task.TaskID)
 	if cleanupExecutorEarlyPhase(s.Recovery) != "" {
 		cleanupExecutorEarlyWorkers(t, ctx, s, admin, api, first, run)
+		return
+	}
+	if s.Recovery == "owner-held-recovery" {
+		cleanupExecutorOwnerWorkers(t, ctx, s, admin, api, first, run)
 		return
 	}
 	archiveBefore := cleanupExecutorRecoveryPoint(t, ctx, admin, prefix+"workspace-archive-command")

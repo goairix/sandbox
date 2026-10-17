@@ -54,6 +54,14 @@ func TestCleanupLocalBoundManifest(t *testing.T) {
 		// requires the separately authenticated original observer reservation.
 		require.False(t, cleanupRecoveryPhase("local-complete", nil))
 	})
+	t.Run("terminated-metadata", func(t *testing.T) {
+		f := cleanupBoundMetadata(t)
+		f.state.record.Confirmed = "terminated"
+		f.state.record.Pending = &cleanupExecutionPending{Purpose: "owner-release", ClaimID: uuid.NewString(), LeaseID: 7}
+		require.NoError(t, f.state.record.Validate())
+		require.NoError(t, matchCleanupBoundManifest(f.state, f.target, f.root, f.current, f.manifest))
+		require.False(t, cleanupRecoveryPhase("terminated", nil), "manifest attribution alone cannot select completed recovery")
+	})
 
 	// A real replacement worker has a different PID/incarnation. Only the
 	// original same-boot/namespaces/target rule can admit that copied attribution;
@@ -84,7 +92,6 @@ func TestCleanupLocalBoundManifest(t *testing.T) {
 		},
 		"unjoined":       func(f *cleanupBoundMatchFixture) { f.state.record.Run.Joined = false },
 		"unconfirmed":    func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "claimed" },
-		"terminated":     func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "terminated" },
 		"owner-released": func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "owner-released" },
 		"no-binding":     func(f *cleanupBoundMatchFixture) { f.manifest.Binding = nil },
 		"no-archive":     func(f *cleanupBoundMatchFixture) { f.state.record.Archive = nil },
@@ -131,5 +138,13 @@ func TestCleanupLocalRecoveryPhase(t *testing.T) {
 		t.Run(phase+"-with-reservation", func(t *testing.T) {
 			require.Equal(t, phase == "local-complete", cleanupRecoveryPhase(phase, reservation))
 		})
+		t.Run(phase+"-completed-mode", func(t *testing.T) {
+			job := &cleanupLocalJob{state: &cleanupSlotState{record: cleanupExecutionRecord{Confirmed: phase}}, terminationComplete: &cleanupCompletedTermination{}}
+			require.Equal(t, phase == "local-complete" || phase == "terminated", cleanupJobRecoveryPhase(job))
+			job.terminationReservation = reservation
+			require.False(t, cleanupJobRecoveryPhase(job), "completed and reserved modes are mutually exclusive")
+		})
 	}
+	require.False(t, cleanupJobRecoveryPhase(nil))
+	require.False(t, cleanupJobRecoveryPhase(&cleanupLocalJob{}))
 }

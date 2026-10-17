@@ -57,6 +57,10 @@ type cleanupLocalJob struct {
 	// it never grants a new Terminate send or substitutes for its signed proof.
 	terminationReservation *taskFence
 
+	// The alternative completed mode comes only from authenticated terminal
+	// history. It resumes owner release without observer or provider work.
+	terminationComplete *cleanupCompletedTermination
+
 	// started/request and registry membership use archiveLife.mu. The physical
 	// owner sets effectsJoined only after all transports/files/renewal/claims
 	// return, before requesting post-work metadata settlement.
@@ -416,9 +420,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		err = b.beginCleanupEarlyRun(owner, j)
 		j.step = "claim-bundle"
 	case "termination-history":
-		// The original loader authenticates the reserved intent/provider and
+		// The original loader authenticates reserved or completed history and
 		// fixed historical points in two RPCs, alone in this charged turn.
-		err = b.loadCleanupTerminationReservation(ctx, j)
+		err = b.loadCleanupTerminationRecovery(ctx, j)
 		if err == nil {
 			j.boundRecovery = true
 			j.step = "bundle"
@@ -477,7 +481,7 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 			if j.state.record.Confirmed == "archive-bound" && j.state.record.Archive != nil {
 				j.boundRecovery = true
 				j.step = "bundle"
-			} else if j.state.record.Confirmed == "local-complete" && j.state.record.Archive != nil {
+			} else if (j.state.record.Confirmed == "local-complete" || j.state.record.Confirmed == "terminated") && j.state.record.Archive != nil {
 				j.step = "termination-history"
 			} else if cleanupEarlyPhase(j.state.record.Confirmed) && j.state.record.Archive == nil {
 				j.earlyRecovery = true

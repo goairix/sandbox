@@ -19,7 +19,11 @@ func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
 		err = b.cleanupArchiveAndFinalize(j)
 	}
 	if err == nil {
-		err = b.cleanupTerminateAndRelease(j)
+		if j.terminationComplete != nil {
+			err = b.cleanupReleaseCompletedOwner(j)
+		} else {
+			err = b.cleanupTerminateAndRelease(j)
+		}
 	}
 	// Even cancellation joins the exact Claim cleanup before declaring this
 	// run joined. A late native continuation was already joined by its reply.
@@ -258,6 +262,13 @@ func (b *Backend) cleanupTerminateAndRelease(j *cleanupLocalJob) (resultErr erro
 	if renewErr != nil {
 		return renewErr
 	}
+	return b.cleanupReleaseOwner(j)
+}
+
+// Normal termination and authenticated completed recovery share only this
+// original release call and progress update. Each caller has joined renewal;
+// the common run tail still owns Claim/target cleanup, Run.Joined and settlement.
+func (b *Backend) cleanupReleaseOwner(j *cleanupLocalJob) error {
 	released, err := b.ReleaseTaskWorkspaceOwnerLocal(j.ctx, j.claim)
 	if err != nil || released.Outcome != OutcomeCommitted {
 		return errors.Join(ErrOutcomeUnknown, err)
