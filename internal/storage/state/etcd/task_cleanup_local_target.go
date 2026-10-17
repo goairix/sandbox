@@ -11,6 +11,7 @@ import (
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
 	k "github.com/goairix/sandbox/internal/runtime/kubernetes"
+	"github.com/goairix/sandbox/internal/runtime/launcher"
 )
 
 // A target is constructed only for one admitted Task, from its authenticated
@@ -22,6 +23,9 @@ type cleanupLocalTarget struct {
 	issuer      CommandIssuerEntry
 	plan        TaskWorkspaceSyncPlan
 	root        string
+	// This diagnostic reference supplies only prospective wire dimensions.
+	// Grant revalidates the genuine Kernel and the actual persisted Run.
+	worker      launcher.WorkspaceSyncWorkerReference
 	destination *ct.Destination
 	termination *ct.TerminationDestination
 }
@@ -38,8 +42,10 @@ func (b *Backend) cleanupPhysicalProfile() error {
 }
 
 func (b *Backend) cleanupSnapshot(ctx context.Context, task TaskRecord) (*cleanupLocalTarget, error) {
-	if err := b.cleanupPhysicalProfile(); err != nil {
-		return nil, err
+	// The sole actor owns only native metadata here. Kernel validation and
+	// filesystem opens run in the registered job after its owner is released.
+	if b.localCleanup == nil {
+		return nil, ErrInvalidConfiguration
 	}
 	snapshot, err := b.LoadSnapshot(ctx, task.Reference.Partition, task.Reference.SandboxID, task.Snapshot)
 	if err != nil || snapshot == nil || snapshot.Version != 2 || snapshot.LocalCleanup == nil {
@@ -60,16 +66,52 @@ func (b *Backend) cleanupSnapshot(ctx context.Context, task TaskRecord) (*cleanu
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !validWorkspaceSyncLocalRoot(root) {
 		return nil, ErrInvalidConfiguration
 	}
-	// This read-only open validates actual uid/gid, filesystem, mount and
-	// no-symlink resolution. Bind and finalization repeat their original checks.
-	target, err := openTaskWorkspaceSyncLocalTarget(ctx, c.Worker, plan, root)
+	return &cleanupLocalTarget{snapshot: *snapshot, plan: plan, root: root}, nil
+}
+
+// prepareCleanupLocalTarget belongs to the same bounded registry job as the
+// eventual physical chain. Filesystem calls may outlive context cancellation:
+// Stop/Close must await this goroutine, while the actor remains free to renew.
+// A copied job or an active native owner cannot enter the target check.
+func (b *Backend) prepareCleanupLocalTarget(j *cleanupLocalJob) error {
+	if b == nil || b.archiveLife == nil || j == nil || j.worker == nil || j.worker.backend != b || j.worker.self != j.worker || j.ctx == nil || j.target == nil || j.bundle == nil || j.bundle.task.Reference != j.task {
+		return ErrInvalidRecord
+	}
+	b.archiveLife.mu.Lock()
+	registered := false
+	for _, job := range j.worker.cleanupJobs {
+		if job == j {
+			registered = true
+		}
+	}
+	valid := registered && j.started && j.owner == nil && j.request == nil && j.step == "target"
+	b.archiveLife.mu.Unlock()
+	if !valid {
+		return ErrInvalidRecord
+	}
+	if err := j.ctx.Err(); err != nil {
+		return err
+	}
+	if err := b.cleanupPhysicalProfile(); err != nil {
+		return err
+	}
+	worker, err := b.localCleanup.Worker.WorkspaceSyncWorkerReference()
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	// This read-only open validates actual uid/gid, filesystem, mount and
+	// no-symlink resolution. No slot or Run exists merely because it succeeds.
+	// Bind and finalization still repeat their original authority checks.
+	target, err := openTaskWorkspaceSyncLocalTarget(j.ctx, b.localCleanup.Worker, j.target.plan, j.target.root)
+	if err != nil {
+		return err
 	}
 	if err = target.Close(); err != nil {
-		return nil, err
+		return err
 	}
-	return &cleanupLocalTarget{snapshot: *snapshot, plan: plan, root: root}, nil
+	j.target.worker = worker
+	return nil
 }
 
 func (b *Backend) cleanupPublication(ctx context.Context, task TaskRecord, target *cleanupLocalTarget) error {

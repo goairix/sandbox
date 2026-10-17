@@ -140,7 +140,7 @@ func (w *cleanupLocalWireBuilder) syncRequests() error {
 	metadata := cleanupWireAppend(cleanupWireAppend(charged, slotPins...), progressPins...)
 	w.add("local-progress", "metadata-guard", workspaceSyncNativeProjection(b, metadata, taskProtoPoints([]string{b.identityKey}), taskProtoResponse([]string{b.identityKey}, []string{b.identityValue}), true))
 	w.add("local-progress", "metadata-terminal", workspaceSyncNativeProjection(b, cleanupWireAppend(terminal, progressPins...), []*pb.RequestOp{taskProtoPut(w.slotKey, slot, 0)}, taskProtoPutResponse(1), true))
-	local, err := b.taskLocalFinalizationWireProjections(w.sync, w.claim, w.in.bundle.birth, w.in.plan.digest, w.in.plan.digest, w.in.state.record.Run.ID, w.progressKey, w.completeKey, checkpointKey)
+	local, err := b.taskLocalFinalizationWireProjections(w.sync, w.claim, w.in.bundle.birth, w.in.plan.digest, w.in.plan.digest, w.dimensions.runID, w.progressKey, w.completeKey, checkpointKey)
 	if err != nil {
 		return err
 	}

@@ -27,6 +27,14 @@ type cleanupLocalWireInput struct {
 	claimTTL    time.Duration
 }
 
+// Dimensions describe future wire widths, never an occupied execution or an
+// attempt to persist. Early rejection uses fixed full-width UUIDs; the actual
+// Grant inventory still supplies and validates its real E/S/Run/Claim binding.
+type cleanupLocalWireDimensions struct {
+	runID, claimID string
+	worker         launcher.WorkspaceSyncWorkerReference
+}
+
 // Exactly one concrete protobuf request/response pair represents a Lease RPC.
 // Lease operations are not represented by an empty transaction or counted as
 // Txn nodes. A native error response never represents successful admission.
@@ -209,10 +217,11 @@ func (b *Backend) prepareCleanupLocalWireInventory(input cleanupLocalWireInput, 
 // The assembler retains only owned protobuf and string data. Its fields are
 // dimensional inputs; no native API accepts this object as effect authority.
 type cleanupLocalWireBuilder struct {
-	b     *Backend
-	in    cleanupLocalWireInput
-	plan  cleanupLocalWirePlan
-	claim TaskClaimReference
+	b          *Backend
+	in         cleanupLocalWireInput
+	plan       cleanupLocalWirePlan
+	claim      TaskClaimReference
+	dimensions cleanupLocalWireDimensions
 
 	claimKey, guardKey, claimValue string
 	issuerKey, issuerValue         string
@@ -270,7 +279,33 @@ func (b *Backend) buildCleanupLocalWirePlan(input cleanupLocalWireInput) (*clean
 	if err := b.validateCleanupLocalWireInput(input); err != nil {
 		return nil, err
 	}
-	w := &cleanupLocalWireBuilder{b: b, in: input}
+	r := input.state.record
+	return b.buildCleanupLocalWireDimensions(input, cleanupLocalWireDimensions{runID: r.Run.ID, claimID: r.Pending.ClaimID, worker: r.Run.Worker})
+}
+
+// preflightCleanupLocalWire rejects unsupported metadata/schema/wire profiles
+// before E initialization, slot reservation or any new Run. It returns no
+// reusable inventory or success token. Grant builds and binds a fresh plan.
+func (b *Backend) preflightCleanupLocalWire(input cleanupLocalWireInput, worker launcher.WorkspaceSyncWorkerReference) error {
+	_, err := b.buildCleanupLocalWireDimensions(input, cleanupLocalWireDimensions{
+		runID:   "11111111-1111-4111-8111-111111111111",
+		claimID: "22222222-2222-4222-8222-222222222222", worker: worker,
+	})
+	return err
+}
+
+// All physical request families share this exact assembler. In particular the
+// early path keeps whole-record caps and canonical codecs, without fabricating
+// an occupied record merely to pass the actual inventory's authority checks.
+func (b *Backend) buildCleanupLocalWireDimensions(input cleanupLocalWireInput, dimensions cleanupLocalWireDimensions) (*cleanupLocalWirePlan, error) {
+	if err := b.validateCleanupLocalWireMetadata(input); err != nil {
+		return nil, err
+	}
+	if !validPreparationUUID(dimensions.runID) || !validPreparationUUID(dimensions.claimID) || dimensions.worker.Validate() != nil {
+		return nil, ErrInvalidRecord
+	}
+	input.state = nil
+	w := &cleanupLocalWireBuilder{b: b, in: input, dimensions: dimensions}
 	if err := w.prepare(); err != nil {
 		return nil, fmt.Errorf("%w: cleanup wire profile close-commit preparation: %w", ErrInvalidConfiguration, err)
 	}
@@ -294,11 +329,25 @@ func (b *Backend) buildCleanupLocalWirePlan(input cleanupLocalWireInput) (*clean
 }
 
 func (b *Backend) validateCleanupLocalWireInput(in cleanupLocalWireInput) error {
-	if b == nil || in.bundle == nil || in.state == nil || in.publication == nil || b.enrolledPublication == nil || !validHexDigest(b.enrolledPublication.ContractDigest) || b.workspaceSyncBudget == nil || b.workspaceSyncBudget.profile != 2 || validateTaskWorkspaceSyncBudget(&b.workspaceSyncBudget.options) != nil || in.claimTTL < 30*time.Second || in.claimTTL > 300*time.Second || in.claimTTL%time.Second != 0 || !validDomainSegment(in.workerID) {
+	if err := b.validateCleanupLocalWireMetadata(in); err != nil {
+		return err
+	}
+	state := in.state
+	if state == nil {
 		return ErrInvalidConfiguration
 	}
-	task, state := in.bundle.task, in.state
-	if b.validateTaskReference(task.Reference) != nil || task.Validate() != nil || len(in.bundle.fences) != 8 || in.bundle.checkpoint == nil || state.record.Task != task.Reference || state.record.Phase != "occupied" || state.record.Run == nil || state.record.Run.Joined || state.record.Pending == nil || state.record.Pending.Purpose != "claim" || state.slot == nil || b.validateCleanupState(state) != nil {
+	if state.record.Task != in.bundle.task.Reference || state.record.Phase != "occupied" || state.record.Run == nil || state.record.Run.Joined || state.record.Pending == nil || state.record.Pending.Purpose != "claim" || state.slot == nil || b.validateCleanupState(state) != nil {
+		return ErrInvalidRecord
+	}
+	return nil
+}
+
+func (b *Backend) validateCleanupLocalWireMetadata(in cleanupLocalWireInput) error {
+	if b == nil || in.bundle == nil || in.publication == nil || b.enrolledPublication == nil || !validHexDigest(b.enrolledPublication.ContractDigest) || b.workspaceSyncBudget == nil || b.workspaceSyncBudget.profile != 2 || validateTaskWorkspaceSyncBudget(&b.workspaceSyncBudget.options) != nil || in.claimTTL < 30*time.Second || in.claimTTL > 300*time.Second || in.claimTTL%time.Second != 0 || !validDomainSegment(in.workerID) {
+		return ErrInvalidConfiguration
+	}
+	task := in.bundle.task
+	if b.validateTaskReference(task.Reference) != nil || task.Validate() != nil || len(in.bundle.fences) != 8 || in.bundle.checkpoint == nil {
 		return ErrInvalidRecord
 	}
 	if in.snapshot.Version != 2 || in.snapshot.LocalCleanup == nil || in.snapshot.SandboxID != task.Reference.SandboxID || in.snapshot.Snapshot != task.Snapshot {

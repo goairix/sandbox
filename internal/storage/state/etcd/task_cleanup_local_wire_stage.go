@@ -15,7 +15,7 @@ import (
 func (w *cleanupLocalWireBuilder) prepare() error {
 	b, task := w.b, w.in.bundle.task
 	ref := task.Reference
-	w.claim = TaskClaimReference{Task: ref, ClaimID: w.in.state.record.Pending.ClaimID, WorkerID: w.in.workerID, CreateRevision: math.MaxInt64 - 8, LeaseID: math.MaxInt64}
+	w.claim = TaskClaimReference{Task: ref, ClaimID: w.dimensions.claimID, WorkerID: w.in.workerID, CreateRevision: math.MaxInt64 - 8, LeaseID: math.MaxInt64}
 	var err error
 	w.claimKey, err = b.namespace.taskClaimKey(ref)
 	if err != nil {
@@ -57,7 +57,7 @@ func (w *cleanupLocalWireBuilder) prepare() error {
 	if err != nil {
 		return err
 	}
-	w.intentKey, w.slotKey, err = b.workspaceSyncRecyclingKeys(TaskWorkspaceSyncIntentReference{Task: ref, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: w.in.state.record.Run.ID, Slot: b.workspaceSyncBudget.options.SlotsPerPartition - 1})
+	w.intentKey, w.slotKey, err = b.workspaceSyncRecyclingKeys(TaskWorkspaceSyncIntentReference{Task: ref, BudgetID: b.workspaceSyncBudget.options.BudgetID, IntentID: w.dimensions.runID, Slot: b.workspaceSyncBudget.options.SlotsPerPartition - 1})
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func (w *cleanupLocalWireBuilder) prepare() error {
 		out  *StageReference
 		key  *string
 	}{{"task_close_data", &w.closeStage, &w.closeReceiptKey}, {"task_quiesce_users", &w.quiescenceStage, &w.quiescenceReceiptKey}} {
-		attempt := StageAttemptLocator{Namespace: ref.Namespace, RestoreEpoch: ref.RestoreEpoch, Partition: ref.Partition, RequestID: w.claim.ClaimID, StageID: spec.name, AttemptID: w.in.state.record.Run.ID}
+		attempt := StageAttemptLocator{Namespace: ref.Namespace, RestoreEpoch: ref.RestoreEpoch, Partition: ref.Partition, RequestID: w.claim.ClaimID, StageID: spec.name, AttemptID: w.dimensions.runID}
 		*spec.out = attempt.reference(cleanupWirePaddingDigest())
 		_, *spec.key, err = b.stageKeys(*spec.out)
 		if err != nil {

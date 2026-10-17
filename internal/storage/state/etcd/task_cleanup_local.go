@@ -6,17 +6,29 @@ import (
 	"time"
 )
 
-// One goroutine owns the actual physical chain. Metadata continuations always
-// return to the original actor; none recreates a partition/session or bypasses
-// the original Claim and effect gates. Every failure retains its occupation.
+// One goroutine owns target preparation and the actual physical chain.
+// Metadata continuations return to the original actor; none recreates a
+// partition/session or bypasses
+// the original Claim and effect gates. Failures before reservation consume no
+// permanent slot; later uncertain work retains its original occupation.
 func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
-	var err error
-	if j.earlyRecovery {
-		err = b.cleanupResumeEarly(j)
-	} else if j.boundRecovery {
-		err = b.cleanupResumeBoundArchive(j)
-	} else {
-		err = b.cleanupArchiveAndFinalize(j)
+	err := b.prepareCleanupLocalTarget(j)
+	if err == nil {
+		// An accepted continuation stays joined even if cancellation happens
+		// while the actor owns a native call. Its reply transfers any acquired
+		// Claim on failure too, so the tail cannot lose the cleanup obligation.
+		var reply cleanupLocalReply
+		reply, err = j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "admit"})
+		j.claim = reply.claim
+	}
+	if err == nil {
+		if j.earlyRecovery {
+			err = b.cleanupResumeEarly(j)
+		} else if j.boundRecovery {
+			err = b.cleanupResumeBoundArchive(j)
+		} else {
+			err = b.cleanupArchiveAndFinalize(j)
+		}
 	}
 	if err == nil {
 		if j.terminationComplete != nil {
@@ -33,7 +45,7 @@ func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
 		stop()
 		j.claim = nil
 	}
-	if j.target.termination != nil {
+	if j.target != nil && j.target.termination != nil {
 		err = errors.Join(err, j.target.termination.Close())
 	}
 	j.effectsJoined = true

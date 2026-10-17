@@ -13,7 +13,7 @@ import (
 // remain mandatory; these prospective records cannot be passed as evidence.
 func (w *cleanupLocalWireBuilder) closeContext() p.TaskCloseDataContext {
 	task, ref := w.in.bundle.task, w.claim.Task
-	return p.TaskCloseDataContext{Namespace: ref.Namespace, AuthorityID: w.b.publicationAuthorityID, Target: w.b.publicationTarget, RestoreEpoch: ref.RestoreEpoch, IssuerCertificateID: w.in.issuer.Record.CertificateID, IssuerCertificateDigest: w.in.issuer.Record.CertificateDigest, CommandID: w.in.state.record.Run.ID, TaskID: ref.TaskID, TaskDigest: workspaceSyncIntentDigest(w.in.bundle.fences[0].value), ClaimID: w.claim.ClaimID, WorkerID: w.claim.WorkerID, SandboxID: ref.SandboxID, WorkspaceHash: task.WorkspaceHash, Generation: task.Generation, DataGateEpoch: task.DataGateEpoch, ControlRevision: w.in.bundle.birth, ClaimCreateRevision: w.claim.CreateRevision, LeaseID: w.claim.LeaseID, Runtime: p.RuntimeReference(task.Runtime)}
+	return p.TaskCloseDataContext{Namespace: ref.Namespace, AuthorityID: w.b.publicationAuthorityID, Target: w.b.publicationTarget, RestoreEpoch: ref.RestoreEpoch, IssuerCertificateID: w.in.issuer.Record.CertificateID, IssuerCertificateDigest: w.in.issuer.Record.CertificateDigest, CommandID: w.dimensions.runID, TaskID: ref.TaskID, TaskDigest: workspaceSyncIntentDigest(w.in.bundle.fences[0].value), ClaimID: w.claim.ClaimID, WorkerID: w.claim.WorkerID, SandboxID: ref.SandboxID, WorkspaceHash: task.WorkspaceHash, Generation: task.Generation, DataGateEpoch: task.DataGateEpoch, ControlRevision: w.in.bundle.birth, ClaimCreateRevision: w.claim.CreateRevision, LeaseID: w.claim.LeaseID, Runtime: p.RuntimeReference(task.Runtime)}
 }
 
 func cleanupWireKV(key string, size int) *mvccpb.KeyValue {

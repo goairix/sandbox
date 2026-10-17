@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// A job has one metadata actor and, after admission, one physical goroutine.
+// A job has one metadata actor and one preparation/physical goroutine.
 // The actor alone changes state/bundle/step. A physical continuation transfers
 // ownership through a buffered reply; cancellation never detaches its receiver.
 type cleanupLocalJob struct {
@@ -61,8 +61,11 @@ type cleanupLocalJob struct {
 	// history. It resumes owner release without observer or provider work.
 	terminationComplete *cleanupCompletedTermination
 
-	// started/request and registry membership use archiveLife.mu. The physical
-	// owner sets effectsJoined only after all transports/files/renewal/claims
+	// started/request and registry membership use archiveLife.mu. The same
+	// goroutine owns target preparation before admission and physical work after
+	// its accepted admit continuation returns. Preparation never owns a native
+	// call and remains registered until actual return, even during cancellation.
+	// The physical owner sets effectsJoined after all transports/files/renewal/claims
 	// return, before requesting post-work metadata settlement.
 	started       bool
 	request       *cleanupLocalContinuation
@@ -244,14 +247,16 @@ func (w *DueWorker) cleanupTurnCompleted(job *cleanupLocalJob) {
 		w.backend.finishCleanupJob(job, nil)
 		return
 	}
-	if job.step != "physical" && job.step != "replied" {
+	if job.step != "target" && job.step != "physical" && job.step != "replied" {
 		return
 	}
 	b := w.backend
 	b.archiveLife.mu.Lock()
 	request := job.request
 	job.request = nil
-	start := !job.started
+	// Only target starts the job, after cleanupTurn released the real owner.
+	// Later physical/replied transitions hand the same goroutine its reply.
+	start := job.step == "target" && !job.started
 	if start {
 		job.started = true
 	}
@@ -277,6 +282,8 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 	request.reply = make(chan cleanupLocalReply, 1)
 	job.request = request
 	switch request.kind {
+	case "admit":
+		job.step = "publication"
 	case "claim":
 		job.step = "rollover"
 	case "resume-bound":
@@ -351,15 +358,21 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.step = "snapshot"
 	case "snapshot":
 		j.target, err = b.cleanupSnapshot(ctx, j.bundle.task)
-		j.step = "publication"
+		j.step = "target"
 	case "publication":
 		err = b.cleanupPublication(ctx, j.bundle.task, j.target)
 		j.step = "issuer"
 	case "issuer":
 		err = b.cleanupIssuer(ctx, j.target)
+		j.step = "wire-preflight"
+	case "wire-preflight":
+		// This complete pure plan is discarded before any permanent E/S/Run
+		// mutation. Actual Grant admission later rebuilds and binds it to its
+		// genuine Kernel and exact current execution/slot/Claim coordinates.
+		err = b.preflightCleanupLocalWire(cleanupLocalWireInput{bundle: j.bundle, snapshot: j.target.snapshot, publication: j.target.publication, issuer: j.target.issuer, plan: j.target.plan, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}, j.target.worker)
 		if j.boundRecovery || j.earlyRecovery {
-			// Start the same owned goroutine before obtaining a native owner
-			// for new-Run admission: manifest/tar validation can perform IO.
+			// Reply to the same owned goroutine for authentic recovery IO;
+			// its next continuation admits the one new Run and managed Claim.
 			j.step = "physical"
 		} else if j.state == nil {
 			j.step = "initialize"

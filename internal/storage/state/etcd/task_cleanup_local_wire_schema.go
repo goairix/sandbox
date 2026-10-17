@@ -109,8 +109,8 @@ func (w *cleanupLocalWireBuilder) effectSchemas() error {
 }
 
 func (w *cleanupLocalWireBuilder) syncSchemas() error {
-	plan, worker := w.in.plan, w.in.state.record.Run.Worker
-	ref := TaskWorkspaceSyncIntentReference{Task: w.claim.Task, BudgetID: w.b.workspaceSyncBudget.options.BudgetID, IntentID: w.in.state.record.Run.ID, Slot: w.b.workspaceSyncBudget.options.SlotsPerPartition - 1}
+	plan, worker := w.in.plan, w.dimensions.worker
+	ref := TaskWorkspaceSyncIntentReference{Task: w.claim.Task, BudgetID: w.b.workspaceSyncBudget.options.BudgetID, IntentID: w.dimensions.runID, Slot: w.b.workspaceSyncBudget.options.SlotsPerPartition - 1}
 	// Filesystem diagnostics cannot manufacture an opened target or a witness.
 	local := &taskWorkspaceSyncLocalAttribution{Worker: worker, Root: "/" + strings.Repeat("r", 4095), Dev: math.MaxUint64, Ino: math.MaxUint64, MountID: math.MaxUint64, Filesystem: 0xef53, FilesystemName: "ext4", UID: worker.UID, GID: worker.GID}
 	attribution := taskWorkspaceSyncIntentAttribution{Version: 2, Reference: ref, BudgetRevision: w.b.workspaceSyncBudget.create, Kind: "put_object", FinalSyncAttemptID: ref.IntentID, CommandID: ref.IntentID, TicketDigest: cleanupWirePaddingDigest(), ArchiveSHA256: cleanupWirePaddingDigest(), PlanDigest: plan.digest, WorkspaceHash: plan.workspace.hash, Provider: plan.workspace.provider, StorageIdentityHash: plan.workspace.storageIdentityHash, Bucket: plan.workspace.bucket, Prefix: plan.workspace.prefix, RelativePath: strings.Repeat("f", 4096), Mode: 0777, Size: math.MaxInt64, Offset: math.MaxInt64, BodySHA256: cleanupWirePaddingDigest(), Local: local}

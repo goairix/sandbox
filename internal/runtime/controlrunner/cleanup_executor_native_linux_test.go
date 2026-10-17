@@ -56,6 +56,7 @@ type cleanupExecutorSetup struct {
 	Recovery, RecoveryStage, WorkerDirectory string
 	CloseMode                                string
 	MountedLoader                            bool
+	PreflightRefusal                         bool
 	LoaderConfig, LoaderKubeCA               []byte
 	LoaderClockKey                           ed25519.PrivateKey
 }
@@ -246,6 +247,11 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 			Storage:  state.LocalCleanupStorage{Identity: s.WorkspaceStorage, Bucket: s.WorkspaceBucket, Directory: filepath.Join(dir, "target")},
 			ClaimTTL: 120 * time.Second, JobTimeout: 90 * time.Second, ArchiveTimeout: 60 * time.Second, MaxActive: 32,
 		},
+	}
+	if s.PreflightRefusal {
+		options.TaskWorkspaceSyncRecyclingBudget.MaxIntentBytes = 4096
+		cleanupExecutorPreflightWorker(t, ctx, s, options, tlsConfig)
+		return
 	}
 	if s.CloseMode != "" {
 		cleanupExecutorCloseWorker(t, ctx, s, options, tlsConfig)
@@ -712,6 +718,7 @@ func TestCleanupExecutorNative(t *testing.T) {
 	}
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
 	t.Run("mounted-loader", func(t *testing.T) { cleanupExecutorNativeCase(t, "mounted-loader") })
+	t.Run("preflight-refusal", func(t *testing.T) { cleanupExecutorNativeCase(t, "preflight-refusal") })
 	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
 	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
 	t.Run("observer-ack-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "observer-ack-recovery") })
@@ -935,6 +942,8 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	if len(recovery) == 1 {
 		if mountedLoader {
 			// The mounted loader uses the ordinary one-worker complete parent.
+		} else if recovery[0] == "preflight-refusal" {
+			s.PreflightRefusal = true
 		} else if strings.HasPrefix(recovery[0], "close-join-") {
 			s.CloseMode = strings.TrimPrefix(recovery[0], "close-join-")
 		} else {
@@ -943,11 +952,19 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	}
 	s.Runtime, s.RuntimeCertificate, s.RuntimeAddress = ri.Runtime, runtimeCert, reply.Address
 	s.Generation = ri.Generation
-	_, err = admin.Put(ctx, binding.Namespace+"meta/workspace_sync_recycling_budget", fmt.Sprintf(`{"version":2,"budget_id":%q,"slots_per_partition":1,"max_intent_bytes":16384}`, s.BudgetID))
+	maxIntentBytes := 16384
+	if s.PreflightRefusal {
+		maxIntentBytes = 4096
+	}
+	_, err = admin.Put(ctx, binding.Namespace+"meta/workspace_sync_recycling_budget", fmt.Sprintf(`{"version":2,"budget_id":%q,"slots_per_partition":1,"max_intent_bytes":%d}`, s.BudgetID, maxIntentBytes))
 	require.NoError(t, err)
 	slotKey := fmt.Sprintf("%sp/%02x/workspace-sync-recycling-slots/%s/00", binding.Namespace, task.Partition, s.BudgetID)
 	_, err = admin.Put(ctx, slotKey, fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, task.Partition))
 	require.NoError(t, err)
+	if s.PreflightRefusal {
+		cleanupExecutorPreflightParent(t, ctx, s, admin, apiState, child, &waited)
+		return
+	}
 	if s.CloseMode != "" {
 		cleanupExecutorCloseParent(t, ctx, s, admin, apiState, child, &waited)
 		return
