@@ -62,3 +62,13 @@ host 与 race 均通过三项，无跳过或数据竞争；分别9061/9066份输
 前后核对通过。host 日志 SHA256
 `7dfcb1ccf9d97e9fec87326a3f37516b2f41f09c3b71458fa0324f02ef1f20cc`，race
 `ef638eac8b77a3114b8ecea182dff4492e786e9362ce55dbec4f9944e95e922c`。
+
+## 压缩及 session 更换控制回归
+
+新增四个分支验证 actor 组合：pending 页压缩后清除视图/游标并保留至少30秒冷却；
+同一压缩伴随原 guard 丢失时失败；legacy 压缩后刷新视图且保留已提交的 cutoff/frontier；
+实际释放旧 session 并取得新 session/partition/份额后，从持久 B 续接剩余历史，拒绝旧
+游标且不发RPC。这里的持久提交和会话来自现有gRPC元数据模型，不是实际etcd故障或
+物理清理验收。host/race 四分支均通过，分别9062/9067份输入，完整输入审计通过；
+host 日志 SHA256 `994ecefc7c506523b6b4822925e86e6f25391f6ce7dc354c040cc0c289c005ce`，
+race `311b4e26ac694ef8eab054ffe5b2a230e5b36927604ee998ad12d54f6c425f80`。
