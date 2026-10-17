@@ -58,8 +58,8 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [事务预算基础](2026-10-17-etcd-cold-quota-worker-wire-verification.md)、
 [v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
 [双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
-v3仍未由CLI接受。worker私有continuation、metadata计费及分步postread已范围验收，
-完整历史认证、恢复proof读取、保留内存核算及自动consumer仍需完成，
+v3仍未由CLI接受。worker私有continuation、metadata计费、分步postread、完整历史认证、
+恢复proof读取及ready/slot prepare已分别范围验收；保留内存核算及自动consumer仍需完成，
 不计为配额自动返还已接通。
 
 `3c3afed` 接通五个私有固定 RPC 的真实 gRPC 通信层：限制每次请求、回复、累计
@@ -98,9 +98,17 @@ vet及独立Task审查通过，见[恢复仲裁验证](2026-10-18-etcd-cold-quot
 两项均完成定向 host/race、Linux vet、证据核对和独立 Task 审查，见
 [历史分步认证](2026-10-18-etcd-cold-quota-worker-history-verification.md)与
 [分步恢复](2026-10-18-etcd-cold-quota-worker-recovery-verification.md)。
+`0d30123`/`c9886d9` 共享原 ready/slot/freeze 校验并完成两阶段付费 prepare；
+P2 额度不足保留 P1 ready，合法槽位及原绑定通过后才分配一个 UUID，done 返回原未使用
+prepared 指针。host/race、公开协议回归、Linux vet 及独立 Task 审查通过，见
+[分步 prepare 验证](2026-10-18-etcd-cold-quota-worker-prepare-verification.md)。首次验证发现的
+quota/owner 分区等值限制已修正；原协议允许独立 quota 分区，测试数据和断言未放松。
 这些私有 cursor 借用 history，尚未完成全局共享工作区和 32 job 保留内存约束；
-ready/slot 分步 prepare、原 job 正向来源、自动结算/P 删除 gate、生产配置及真实 etcd
-恢复和大 N 容量验收继续开放。功能/整体百分比保持上述粗估，未按私有切片数量增加。
+原 job 正向来源、自动结算/P 删除 gate、生产配置及真实 etcd 恢复和大 N 容量验收
+继续开放。功能/整体百分比保持上述粗估，未按私有切片数量增加。
+三项合并后的同包定向 host 回归于隔离工作树通过（2.384s，9119 输入，原始输出
+40460 字节，SHA-256 `28b2aa9e75aed3f7ad42b8874829c1ef9c930345aad0f0e12067f2ce47a45d36`），
+完整输入/工具/源码指纹核对通过；这不是自动 actor 的端到端组合或容量验收。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
