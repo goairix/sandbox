@@ -42,8 +42,15 @@ Close/Wait保留失败及正式进程exit1证据，见[结果保留真实验证]
 `8585e2c`修复冷创建receipt identity被业务TTL截断、不能覆盖清理会话的问题；业务
 publication/activation仍受原TTL约束，定向host/race/Linuxvet通过，长期证书更新未完成。
 `b881535`将原quota返还API接到Grant前prepare/一次consume原语，固定原ref且保持
-原34/4/4事务与replay顺序；host/race/Linuxvet及独立Task审查通过。它尚未持久化quota
-checkpoint或接入自动worker，不能算配额自动归还已完成，见[原语验证](2026-10-17-etcd-cold-quota-prepared-verification.md)。
+原34/4/4事务与replay顺序；host/race/Linuxvet及独立Task审查通过，见
+[原语验证](2026-10-17-etcd-cold-quota-prepared-verification.md)。接续 `cdd489e` 将公共API
+接到Grant前持久journal，Unknown仅仲裁原ref、原aborted receipt固定后才替换，host/race/
+Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quota-journal-verification.md)。
+`c929253` 的两个新增真实Linux场景验证成功返还、journal丢ACK后冷Backend由public API
+自行仲裁、实际quota槽epoch+1复用及旧请求replay不读或改新槽；两场完整通过、独立审计
+及唯一Task审查通过。首次父fixture分类失败如实保留，未重播旧矩阵，见
+[真实public配额验证](2026-10-17-etcd-cold-quota-journal-native-verification.md)。
+这仍未接入自动worker；自动结算、terminal pending删除gate与显式生产配置接线继续开放。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
@@ -54,7 +61,12 @@ HTTP202→原自动worker归档/终止/安全释放/P删除/全部join，以及�
 公开删除后终态查询仍未接线；不能将原reader的CorruptRecord当404或完整销毁API。
 FUSE静态合同及endpoint编码修复已合入`d2948b3`/`63756cd`，完整host、定向race及
 Linux检查通过，同一审查员R1确认问题解决。它仍未启用任何生产FUSE/profile选择器，
-不是helper登记、挂载/flush、collector或双进程终止验收。
+不是helper登记、挂载/flush、collector或双进程终止验收。`a83a276` 另接通实际mounter
+生产factory的本地PID1/proc/pidfd/ns/exe身份保持、准入撤销及原进程join后句柄回收。
+host完整112组、定向race/Linux检查及实际Linux PID1验证通过；同一审查员发现的Status
+拷贝阻塞与readiness撤销遗漏已真实RED复现、修复并限定复核关闭，见
+[helper原生身份验证](2026-10-17-fuse-helper-kernel-verification.md)。该本地身份能力仍不
+等于helper到Pod绑定、真实FUSE挂载或远端flush/collector闭环，不上调生产切换比例。
 
 下文为按阶段保留的历史记录，其中“尚未实现”等描述指各条记录当时；当前范围以本节
 及对应最新验收报告为准。
