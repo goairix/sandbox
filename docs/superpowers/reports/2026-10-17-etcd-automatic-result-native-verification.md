@@ -46,4 +46,5 @@
   fixture单端口、simple-token、真实deadline与关闭listener诊断也完整保留。
 - 人工检查注释、逻辑分段与包职责；新helper留在原controlrunner测试包，未扩大产品接口。
   本片每场仅一条Task；不构成持久32/33恢复、大N、生产Kubernetes或完整pending验收。
-  原I2关闭需同一审查员据本片限定复核；I3仍开放。
+  同一原审查员已据本片限定复核：I2 addressed、可以关闭，No actionable findings，
+  无新增C/I/M问题；I1不重开，I3仍开放，不代表完整pending或整个迁移通过。
