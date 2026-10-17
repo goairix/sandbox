@@ -423,30 +423,39 @@ func (s *PlainColdService) material(ctx context.Context, birth ct.Birth, d state
 	if err != nil {
 		return m, err
 	}
-	nb, na := now.Add(-30*time.Second), now.Add(15*time.Minute)
+	// Receipt identity must cover cleanup after business expiry. Keep its
+	// original 15-minute window bounded by the issuer, independently of TTL.
+	// This does not refresh certificates: cleanup beyond that identity window
+	// still requires a separate certificate rotation mechanism.
+	nb, identityAfter := now.Add(-30*time.Second), now.Add(15*time.Minute)
 	if issuer.NotBefore().After(nb) {
 		nb = issuer.NotBefore()
 	}
-	if issuer.NotAfter().Before(na) {
-		na = issuer.NotAfter()
+	if issuer.NotAfter().Before(identityAfter) {
+		identityAfter = issuer.NotAfter()
 	}
-	if d.ExpiresAt.Before(na) {
-		na = d.ExpiresAt
+
+	// Publication and activation authorize business use only within its
+	// original TTL, even while receipt identity remains valid for cleanup.
+	businessAfter := identityAfter
+	if d.ExpiresAt.Before(businessAfter) {
+		businessAfter = d.ExpiresAt
 	}
-	if !now.Add(2 * time.Second).Before(na) {
+	if !now.Add(2 * time.Second).Before(businessAfter) {
 		return m, ErrPlainColdProfile
 	}
+
 	binding := s.config.TrustBinding()
 	runtime := p.RuntimeReference{ID: pod, UID: uid, BootID: birth.BootID}
 	identity := p.RuntimeIdentityContext{SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, Generation: d.Generation, Runtime: runtime}
-	m.RuntimeCertificate, err = p.SignRuntimeIdentityCertificate(s.root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: na, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, Generation: d.Generation, Runtime: runtime})
+	m.RuntimeCertificate, err = p.SignRuntimeIdentityCertificate(s.root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: identityAfter, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, Generation: d.Generation, Runtime: runtime})
 	if err != nil {
 		return m, err
 	}
-	m.PublicationCertificate, err = p.SignRuntimeCertificate(s.root, p.RuntimeCertificateClaims{Version: 1, Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IntentID: d.IntentID, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, Generation: d.Generation, OperationID: d.OperationID, PayloadDigest: d.PayloadDigest, Snapshot: p.SnapshotReference(d.Snapshot), ExpiresAt: d.ExpiresAt, Runtime: runtime, WorkspaceMode: "plain", PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: na})
+	m.PublicationCertificate, err = p.SignRuntimeCertificate(s.root, p.RuntimeCertificateClaims{Version: 1, Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IntentID: d.IntentID, SandboxID: d.SandboxID, WorkspaceHash: d.WorkspaceHash, Generation: d.Generation, OperationID: d.OperationID, PayloadDigest: d.PayloadDigest, Snapshot: p.SnapshotReference(d.Snapshot), ExpiresAt: d.ExpiresAt, Runtime: runtime, WorkspaceMode: "plain", PublicKey: birth.RuntimePublicKey, NotBefore: nb, NotAfter: businessAfter})
 	if err != nil {
 		return m, err
 	}
-	m.Activation, err = p.SignTargetActivation(s.root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: identity, DataGateEpoch: d.DataGateEpoch, UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed, ContractDigest: birth.ContractDigest, RuntimeCertificateDigest: coldHash(m.RuntimeCertificate), IssuerCertificateDigest: coldHash(m.IssuerCertificate), NotBefore: nb, NotAfter: na})
+	m.Activation, err = p.SignTargetActivation(s.root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: identity, DataGateEpoch: d.DataGateEpoch, UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed, ContractDigest: birth.ContractDigest, RuntimeCertificateDigest: coldHash(m.RuntimeCertificate), IssuerCertificateDigest: coldHash(m.IssuerCertificate), NotBefore: nb, NotAfter: businessAfter})
 	return m, err
 }
