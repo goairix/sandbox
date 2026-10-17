@@ -39,10 +39,10 @@ intent CreationIntentRecord, publication *RuntimeEnrolledPublicationEntry)
 (WorkspaceIdentity,error)` 为私有来源分类，普通返回值不授予 effect 权限。
 实现者须在测试前用≤20行冻结必要历史 verifier 调用及精确参数绑定。
 
-- [ ] 真实元数据与错误归属/配置的测试先行；Root确认真正 RED 后实现。
-- [ ] 构造前校验 release image/contract，复制配置并保持原 identity 公式。
-- [ ] 来源精确绑定、签名历史验证或明确复用已有认证入口，拒绝 local/FUSE/错绑定。
-- [ ] 定向 host/race/Linux vet；唯一 Task 审查；连贯提交。不得开放 HTTP/consumer。
+- [x] 真实元数据与错误归属/配置的测试先行；Root确认真正 RED 后实现。
+- [x] 构造前校验 release image/contract，复制配置并保持原 identity 公式。
+- [x] 来源精确绑定、签名历史验证或明确复用已有认证入口，拒绝 local/FUSE/错绑定。
+- [x] 定向 host/race/Linux vet；唯一 Task 审查通过；提交 `361003b`。未开放 HTTP/consumer。
 
 ## Task 2：严格 version2 detached 终止 wire
 
@@ -52,14 +52,54 @@ intent CreationIntentRecord, publication *RuntimeEnrolledPublicationEntry)
 **Interfaces:** spec 中的 DetachedRuntimeEffectBindings 与 intent.DetachedEffects；
 原 Encode/DecodeTaskRuntimeTerminationIntent 签名不变，ticket v1不变。
 
-- [ ] 新 v2 正向、缺 proof/混合 profile、旧 v1精确字节与新完整 digest ticket 测试先行。
-- [ ] Root真正 RED后实现严格variant，保持旧 canonical v1。
-- [ ] 全 controlprotocol host、相关race、Linux检查、唯一Task审查及小步提交。
+- [x] 新 v2 正向、缺 proof/混合 profile、旧 v1精确字节与新完整 digest ticket 测试先行。
+- [x] Root真正 RED后实现严格variant，保持旧 canonical v1。
+- [x] 全 controlprotocol host、相关race、Linux检查、唯一Task审查通过；提交 `9697527`。
 
 Task1与Task2可在独立已有工作树并行；没有共享源码文件。两者共同的profile常量
 以协议spec为准，来源分类不产生协议 settlement 或 signature authority。
 
 ## 后续接续门槛（不能跳过）
+
+### Task 3 冻结合同：持久 no-effect 与原 Run 恢复
+
+独立私有 settlement 键为 `p/<partition>/tasks/<TaskID>/detached-noeffect`，
+lease0、create-once、严格 canonical codec。初始记录上限32KiB，必须用合法最大
+输入实际编码确认；不能为通过预算而截断合法来源。记录保留原 Task/birth、
+WriterClaim、Run/Worker、incarnation、AttemptID/BindingDigest、plain contract、
+quiescence/原 none 及 source fences、原 E canonical+stamp/S stamp。
+普通来源 DTO 和合法 codec 均不授予 native 权限。
+
+原 job/Claim/Kernel/registry 指针、E/S 出生及 Run 认证后，使用真实 signed enrolled
+reader、原 dual-drain revalidation 和 native source 点读。原 `none` reservation
+不得为新 Claim 覆写或重新 Reserve；旧 final-sync Claim 与当前 WriterClaim 分开
+保留。只有最终来源分类与全部 native 历史都通过才能提交。
+
+新 Pending purpose=`detached-noeffect` 复用现有 AttemptID/Digest 标量，必须有
+ClaimID/LeaseID，StageID/RequestID 为空；保持原结构可比较和旧 canonical。
+先固定原 attempt/binding，经原 progress 得到持久 ACK，再固定 E.mod/wire。
+BindingDigest 排除 Pending/E.mod 以避免循环，但最终 settlement digest 覆盖完整
+原 E。draft 自绑定 Backend/job/Claim，复制不能获得提交权限。
+
+写事务原 taskEmptyComparisons53 + E/S/finalSync/snapshot/intent/publication
+六个真实 positiveMod pins + settlement absence =60比较；Then Put1、Else三点，
+总64原生节点。不能复制旧 reservation 的65节点预读。source点读22节点，原
+draft仲裁10节点；所有实际 protobuf 请求/回复仍须验证128KiB/256KiB上限。
+writeAttempted 在 native 发送前不可逆，Unknown只能读仲裁原 draft、不重发；
+absent 单独仍 Unknown，exact committed 在失权后仅返回诊断加 error。
+
+cold recovery 只读认证的真实 E/S 与 Run.Joined=true、E.mod 严格晚于旧原 E，
+才证明原 join CAS 已 fence delayed Put。无 settlement 时也不能靠 lease消失、
+none或 caller Joined 值恢复。新私有 job-bound preflight 保存完整历史；原 actor
+owner 消费后才能单次 CAS 新 Run、新 Claim、重新 dual-drain 和新 attempt。
+现有 local archive wrapper 保留所有 profile/inventory 检查；若提取公共 CAS，
+只提取严格 one-candidate E/S 操作，不扩大调用者权限。未接入实际 detached
+inventory/actor 的私有恢复 gate 不计端到端恢复完成，接线仍属Task4。
+
+文件按 records、writer、native reader、recovery 分职责；窄改现有 Pending/job
+状态及必要共用 CAS。先测试真实signed来源、copied authority拒绝、Claim/Run/S
+ABA、64节点/最大字节、Unknown/丢ACK/原实际join fence与cold恢复，再实现。
+首次运行前必须再冻结 recovery 的实际比较和 native 字节投影，不能把估算当验收。
 
 Task3 为原 dual-drain 后的持久 no-effect settlement 与原 Claim/Run历史认证，
 Task4 为新终止/owner-release authority 与实际 actor/配额/终态 reader 接线，

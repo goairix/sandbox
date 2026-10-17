@@ -21,6 +21,12 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 备份恢复及权限验收、最终完整审查和切换验收。组件模型通过不能代替这些验收；当前
 没有实测生产性能提升或大N容量结论。上述百分比不按行数、提交数或测试数累计。
 
+新增 `361003b` 完成真实signed detached/plain来源分类与显式pinned image配置；
+`9697527` 完成严格v2 termination wire并保留v1字节兼容。两项host/race/Linux vet、
+完整证据核对及各唯一独立Task审查通过，见[detached基础验证](2026-10-18-etcd-detached-foundation-verification.md)。
+消费者仍未完成，HTTP仍501，旧native reader拒绝v2；接续实现持久no-effect和
+原Run恢复，再接实际termination/owner/terminal/quota及部署/HTTP组合。
+
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
 接通显式 v3 部署与 `serve-cold-quota <manifest>` 独立命令。新 actor host20组、

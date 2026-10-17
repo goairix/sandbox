@@ -19,12 +19,16 @@ Task/Run/attempt，不把 token 消失或记录缺失当作外部效果已经终
 
 1. 增加显式 `DetachedCleanupOptions{PinnedPlainImage string}`。构造器调用
    `internal/kubecontract.EnrolledPlainContractDigest` 得到私有预期 digest，并匹配
-   EnrolledPublication 配置。空值、tag-only image、外来 contract 在首个 RPC 前拒绝。
+   EnrolledPublication 配置。image 先限制为4096字节；空值、tag-only image、外来
+   contract 在首个 RPC 前拒绝，保留值独立复制。
    该选项本身不启用 consumer、不赋予终止或 no-effect 权限。
 2. 从原 CreationIntent.RequestHash 与 Backend 不可变 StorageID 重建 detached
    identity，精确绑定 Task、snapshot、intent、namespace/restore、partition、
    generation、runtime 和 gate。签名 publication/enrollment 的历史认证仍独立必需；
    普通身份值、复制的 publication DTO 和分类结果均不能授予 effect 权限。
+   opaque ConfigurationDigest 另含原 acquisition TTL，不能误当 snapshot digest；
+   来源分类不重算它，也不要求当前 Task TTL 等于原历史 certificate TTL。
+   格式合法 TaskID 的持久归属仍由原 Task KV/birth/Claim/Run 认证。
 3. 配额、终止和终态 reader 使用同一来源约束；不能为读取旧 quota 而重建已删除的
    owner/control/runtime-index。配置 pinned image 避免 etcd 导入 provisioning 或
    临时解析 opaque dispatch JSON。历史 dispatch image 的存在不免除原 envelope 认证。
@@ -35,6 +39,8 @@ Task/Run/attempt，不把 token 消失或记录缺失当作外部效果已经终
    字节和全部 local stamps。version2 的 Archive/LocalComplete 必须为精确零值，
    必须另有非空 detached effect bindings；禁止混合两个 profile。
    原 ticket 继续通过完整 IntentDigest 绑定新 intent，无需改变 ticket v1 格式。
+   现有 TaskRuntimeTerminationKeysFor 只实现 local 键集，先明确拒绝 version2；
+   新 native reader/key 分支完成前，不能让旧 observer 以旧键集处理新 profile。
 6. 新 variant 复用原 occupation、Kernel、Run、续 Claim、observer/provider 与实际
    join。只跳过经证据证明不存在的 workspace/archive effect，不跳过 close/drain、
    runtime termination、provider cleanup、原 owner-release CAS 或 quota/P gate。
