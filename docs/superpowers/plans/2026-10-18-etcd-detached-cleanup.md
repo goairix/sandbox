@@ -188,3 +188,6 @@ freshClaim/newRun retained Query等待B实际cold gate验收。此组件不能�
 首片接续：`54e3d08` provider reservation/slot0/1及sameClaim诊断组件通过，
 真实native、cutoff续租RED/GREEN、旧v1 race/Linuxvet及唯一限定审查完成。
 后续从已接受的cold gate接续freshClaim/newRun retained Query，保持原请求不重发。
+
+查询接续：`9c5ad2e`完成实际新Run/新Claim下原请求Query与原owner安全退休；
+真实native+18race+Linuxbuild/vet、完整审计及唯一限定审查通过。完整Task4A仍开放。

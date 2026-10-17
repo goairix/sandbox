@@ -43,7 +43,10 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 同Claim只读诊断不重发；真实TLS/native用例与原v1 race/vet通过，唯一组件审查通过。
 审查发现的续租cutoff问题已真实RED/GREEN关闭，见
 [provider首片验证](2026-10-18-etcd-detached-provider-verification.md)。
-完整七槽/terminal proof及后续Run Query仍未完成。HTTP仍501；其后继续owner/terminal/quota、
+`9c5ad2e`修复实际Unknown调用后owner保留ctx/cancel阻塞冷恢复的问题，保持原marker身份；
+Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短租约回归、
+18项race及Linux构建/vet通过，唯一组件审查通过，见[新Run查询验证](2026-10-18-etcd-detached-query-verification.md)。
+完整七槽/terminal proof仍未完成。HTTP仍501；其后继续owner/terminal/quota、
 实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
