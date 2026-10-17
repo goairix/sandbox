@@ -124,6 +124,15 @@ func (r cleanupExecutionSlotRecord) Validate() error {
 }
 
 func (r cleanupExecutionPending) valid() bool {
+	// The detached settlement is a single native write, not a Stage. Its
+	// complete original coordinates survive a lost ACK so recovery can query
+	// that attempt without inventing a Stage or replacing its Claim/lease.
+	if r.Purpose == "detached-noeffect" {
+		return validPreparationUUID(r.ClaimID) && r.LeaseID > 0 &&
+			validPreparationUUID(r.AttemptID) && validHexDigest(r.Digest) &&
+			r.StageID == "" && r.RequestID == ""
+	}
+
 	switch r.Purpose {
 	case "claim", "close", "quiescence", "final-sync", "archive", "finalize", "termination", "owner-release":
 	default:
