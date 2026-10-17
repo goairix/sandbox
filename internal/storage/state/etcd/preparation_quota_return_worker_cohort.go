@@ -25,6 +25,12 @@ type coldQuotaWorkerCommitPermit struct {
 	owner    *runtimeEnrolledPublicationOwner
 	journal  *coldQuotaWorkerJournalPermit
 
+	// Proof reads stay on the exact cohort's original scheduling members.
+	// Their diagnostic references cannot reconstruct this continuation.
+	session   *WorkerSession
+	partition *WorkerPartitionClaim
+	ranges    *WorkerBudgetShare
+
 	reference StageReference
 	commitACK pb.ResponseHeader
 }
@@ -124,6 +130,7 @@ func (b *Backend) continueColdRuntimeQuotaReturnWorker(o *runtimeEnrolledPublica
 	header := commitACK.Header
 	permit = &coldQuotaWorkerCommitPermit{
 		backend: b, prepared: prepared, owner: o, journal: journal,
+		session: session, partition: partition, ranges: ranges,
 		reference: prepared.reference,
 		commitACK: pb.ResponseHeader{ClusterId: header.ClusterId, MemberId: header.MemberId, Revision: header.Revision, RaftTerm: header.RaftTerm},
 	}
