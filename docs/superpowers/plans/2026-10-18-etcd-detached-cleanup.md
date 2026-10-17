@@ -63,6 +63,12 @@ Task1与Task2可在独立已有工作树并行；没有共享源码文件。两�
 
 ### Task 3 冻结合同：持久 no-effect 与原 Run 恢复
 
+唯一共享纯wire类型及Encode/Decode/BindingDigest放在controlprotocol，供etcd与
+独立observer复用；私有etcd adapter保留native及原job权限。原E以有界精确bytes/
+digest保存，不复制全E schema、不预建导出matcher。历史WriterClaim、原none Claim
+与后续termination Claim可不同；present永久fact不会因后续合法Run失效，absence
+恢复则必须证明原真实Joined fence。共享codec本身不构成权限。
+
 独立私有 settlement 键为 `p/<partition>/tasks/<TaskID>/detached-noeffect`，
 lease0、create-once、严格 canonical codec。初始记录上限32KiB，必须用合法最大
 输入实际编码确认；不能为通过预算而截断合法来源。记录保留原 Task/birth、
@@ -100,6 +106,31 @@ inventory/actor 的私有恢复 gate 不计端到端恢复完成，接线仍属T
 状态及必要共用 CAS。先测试真实signed来源、copied authority拒绝、Claim/Run/S
 ABA、64节点/最大字节、Unknown/丢ACK/原实际join fence与cold恢复，再实现。
 首次运行前必须再冻结 recovery 的实际比较和 native 字节投影，不能把估算当验收。
+
+### Task 4A 并行边界：实际 termination 与 observer
+
+独立复用D工作树，与B的Task3并行；唯一实现者
+`detached_runtime_native_implementation`，合同在其OWN/CONTRACT.md。
+拥有controlprotocol原termination key helper、etcd `task_runtime_termination*`
+及nodeobserver相关实现/测试；不改Task3 shared settlement文件、due worker、
+owner-release、quota、terminal、部署及HTTP。后续4B/4C接后者，不得因此漏项。
+
+保留原KeysFor严格v1包装，新显式DetachedTaskRuntimeTerminationKeysFor只派生
+固定v2键；Snapshot必须先读严格nativeTask后推导，不能caller指定。完整variant
+比较包括Version/DetachedEffects，不能只比较common Authority。新私有
+loadDetachedRuntimeAuthority(ctx,j,c)核原registry job/Claim/Kernel/Run、真实
+永久settlement及signed source/q/none，独立保存真实q context/current certificate，
+不伪造archive DTO。共用原provider/termination状态机与retained Query/no-resend。
+
+observer从persisted canonical intent分支，独立检查native settlement envelope/
+stamp、Task birth、source/q/none及signed publication/activation plain contract，
+原E/S完整语义由唯一严格create-once writer/native adapter保证，不复制schema。
+继续核原domain/Claim/Guard/TTL/prefix/clock/journal/PID1/proof。请求128KiB、
+回复256KiB必须分别验证，保留旧v1实际合法形状。所有静态节点候选仍待实际pb.Size。
+
+先测试v2 fixed keys、foreign variant拒绝和128KiB请求上限，再实际native live
+authority/observer与历史Query。Task3真实writer尚未可用时，不拼签名字段伪造正向
+authority；同一独立Task审查在该子任务实际完成后进行，不能当自动consumer完成。
 
 Task3 为原 dual-drain 后的持久 no-effect settlement 与原 Claim/Run历史认证，
 Task4 为新终止/owner-release authority 与实际 actor/配额/终态 reader 接线，

@@ -24,8 +24,12 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 新增 `361003b` 完成真实signed detached/plain来源分类与显式pinned image配置；
 `9697527` 完成严格v2 termination wire并保留v1字节兼容。两项host/race/Linux vet、
 完整证据核对及各唯一独立Task审查通过，见[detached基础验证](2026-10-18-etcd-detached-foundation-verification.md)。
-消费者仍未完成，HTTP仍501，旧native reader拒绝v2；接续实现持久no-effect和
-原Run恢复，再接实际termination/owner/terminal/quota及部署/HTTP组合。
+`784f760`/`7e1656b`补齐原Pending、唯一settlement codec与64节点事务投影；
+`898cac7`补显式v2固定键、完整profile拒绝及observer请求128KiB/回复256KiB边界。
+这些切片host/race/Linux vet及限定独立审查通过；原短draft回复预算漏算经反例修复，
+合并后定向host通过。持久writer/Unknown/Run恢复与实际v2reader仍在两个独立工作树
+并行实现，HTTP仍501，旧native reader仍拒绝v2；其后继续owner/terminal/quota、
+实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

@@ -44,6 +44,42 @@ schema/domain不变，以完整IntentDigest绑定新tuple。KeysFor仍仅提供l
 
 独立审查员 `detached_termination_wire_review`；辅助提交 `d1bb42c`。
 
+## 持久记录与 native 边界的后续切片
+
+`784f760` 为新 Pending purpose 保留完整原 Claim/lease/attempt/digest，禁止假Stage，
+host回归通过。`7e1656b` 新增唯一纯settlement codec、binding hash及实际protobuf
+投影；独立Task3 reviewer对该切片Spec/Quality PASS。真正RED先于产品，Root另
+发现短draft低估foreign记录回复，补反例得到真实RED后仅修复失败回复按32KiB计量。
+
+| 范围 | host | race | Linux vet |
+| --- | --- | --- | --- |
+| 新settlement协议 | 6顶层/103含子项 PASS1.634s | 同范围 PASS2.110s | PASS |
+| Pending和事务投影 | 5顶层/15含子项 PASS1.252s | 同范围 PASS1.926s | PASS |
+
+合法最大宽度canonical为14,491字节，E4,096字节，上限32KiB。实际protobuf写
+64节点/request102,990/reply最大35,641字节；来源读取22节点/request12,720/
+reply133,594；仲裁10节点/request6,354/reply35,641。非法65节点预读和超128KiB
+请求拒绝。这些是组件投影测量，尚非真实writer RPC或容量验证。
+
+`898cac7` 增显式v2固定键入口，保留原v1入口拒绝v2；local matcher拒绝foreign
+variant；observer请求和实际send限制128KiB，回复/recv仍256KiB。三个真实RED
+分别指向缺新键API、matcher误收、144,976字节请求被旧边界放行。唯一Task4A
+reviewer对该边界切片Spec/Quality PASS，实际v2 reader/authority尚未实现。
+
+| 范围 | host | race | Linux vet |
+| --- | --- | --- | --- |
+| 完整协议/相关终止协议 | 96顶层/2952含子项 PASS8.609s | 8顶层/100含子项 PASS2.490s | PASS |
+| 原local与variant | 19顶层/46含子项 PASS0.844s | 同范围 PASS2.140s | PASS |
+| 完整observer | 12顶层/30含子项 PASS3.679s | 同范围 PASS4.698s | PASS |
+
+以上零skip，每轮完整compact输入/工具/源码审计通过。共享记录与新键/边界合并后，
+D的定向protocol/metadata组合host通过，输入2091/9138，原始SHA分别为
+`fcd5df46eb98b3bc3da3d2e632d6aa9fc697a143c34139706587b35fedd5c6ce` /
+`e1c1ebc858be558c50f7c22e7bd44573a6e7993fe1260d829f9a1276a2e2ba71`，
+完整审计通过。精确各轮命令/指纹/原始日志及两份独立审查在B的
+`2026-10-18-etcd-detached-noeffect`与D的`2026-10-18-etcd-detached-runtime-native`。
+此前失败日志原样保留。Task3 writer/Unknown/Run恢复和Task4A实际consumer均仍OPEN。
+
 ## 证据和界限
 
 真正RED先于产品实现；每个epoch的17类输入、前后源码和工具指纹、compact manifest
