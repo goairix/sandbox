@@ -3,11 +3,9 @@ package etcd
 import (
 	"context"
 	"errors"
-	"math"
 	"time"
 
 	"github.com/google/uuid"
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -154,7 +152,15 @@ func (b *Backend) admitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 	}
 	// Generic Stage already supplies the original four base comparisons.
 	mutation.Comparisons = append(mutation.Comparisons, worker[4:]...)
-	mutation.Comparisons = append(mutation.Comparisons, ownTaskFence(points[0]).comparisons()...)
+	// The canonical permanent due row was decoded above with a positive Mod.
+	// Exact Mod pins its complete observed MVCC incarnation: deletion/recreate,
+	// same-value replacement and lease attachment all change it. Retain exact
+	// Value as well, while leaving every worker and five-authority fence intact.
+	// The two saved nodes fund atomic pending absence+Put within the original64.
+	mutation.Comparisons = append(mutation.Comparisons,
+		clientv3.Compare(clientv3.Value(dueKey), "=", string(points[0].Value)),
+		clientv3.Compare(clientv3.ModRevision(dueKey), "=", points[0].ModRevision),
+	)
 	mutation.Writes = append(mutation.Writes, Write{Key: dueKey, Delete: true})
 	owned, digest, err := prepareMutation(b.namespace, mutation)
 	if err != nil {
@@ -224,33 +230,11 @@ func (b *Backend) admitExpiredTask(ctx context.Context, p *WorkerPartitionClaim,
 	return result, nil
 }
 
-// The existing generic reservation remains fourteen. This closed composition
-// is 44 input compares +6 business operations +14 =64 before any Grant.
+// The generic reservation remains fourteen:43 input comparisons+7 business
+// operations+14=64. Actual commit is51 comparisons+8 success+4 failure=63.
 func (b *Backend) preflightExpiredTask(ref StageReference, mutation Mutation) error {
-	if ref.StageID != "destroy" || len(mutation.Comparisons) != 44 || len(mutation.Writes) != 6 || !mutation.Writes[5].Delete {
+	if ref.StageID != "destroy" || len(mutation.Comparisons) != 43 || len(mutation.Writes) != 7 || !mutation.Writes[6].Delete {
 		return ErrInvalidMutation
 	}
-	guardKey, receiptKey, err := b.stageKeys(ref)
-	if err != nil {
-		return err
-	}
-	guard := enrolledGuard(ref, math.MaxInt64)
-	committed, err := encodeReceipt(ref, OutcomeCommitted)
-	if err != nil {
-		return err
-	}
-	begin := &pb.TxnRequest{Compare: taskProtoComparisons(append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))), Success: []*pb.RequestOp{taskProtoPut(guardKey, guard, math.MaxInt64)}, Failure: taskProtoPoints([]string{b.identityKey, b.restoreKey})}
-	cmps := append(b.baseComparisons(), clientv3.Compare(clientv3.Value(guardKey), "=", guard), clientv3.Compare(clientv3.LeaseValue(guardKey), "=", int64(math.MaxInt64)), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", int64(math.MaxInt64)), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
-	cmps = append(cmps, mutation.Comparisons...)
-	keys := []string{b.identityKey, b.restoreKey, receiptKey, guardKey}
-	commit := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: append(taskProtoWrites(mutation.Writes), taskProtoPut(receiptKey, committed, 0)), Failure: taskProtoPoints(keys)}
-	reads := taskProtoPoints(keys)
-	arbitrate := &pb.TxnRequest{Compare: taskProtoComparisons(b.baseComparisons()), Success: reads, Failure: reads}
-	if len(commit.Compare) != 52 || len(commit.Success) != 7 || len(commit.Failure) != 4 {
-		return ErrInvalidMutation
-	}
-	success := taskProtoPutResponse(7)
-	success.Responses[5] = &pb.ResponseOp{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: success.Header, Deleted: 1}}}
-	replies := []*pb.TxnResponse{taskProtoPutResponse(1), taskProtoResponse(keys[:2], []string{b.identityValue, b.restoreEpoch}), success, taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, committed, guard})}
-	return taskCheckWire(b.namespace, []*pb.TxnRequest{begin, commit, arbitrate}, replies)
+	return b.preflightTaskDestroy(ref, mutation)
 }

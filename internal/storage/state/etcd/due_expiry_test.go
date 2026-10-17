@@ -103,8 +103,8 @@ func TestDueExpiryAtomic(t *testing.T) {
 	}
 	f.server.mu.Unlock()
 	require.NotNil(t, actual)
-	require.Len(t, actual.Compare, 52)
-	require.Len(t, actual.Success, 7)
+	require.Len(t, actual.Compare, 51)
+	require.Len(t, actual.Success, 8)
 	require.Len(t, actual.Failure, 4)
 	require.Equal(t, 63, len(actual.Compare)+len(actual.Success)+len(actual.Failure))
 	require.LessOrEqual(t, actual.Size(), 262144)

@@ -8,6 +8,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// BeginDestroyInput fixes manual cleanup admission to the observed active
+// control revision. A Task reference returned by preparation grants no effects.
 type BeginDestroyInput struct {
 	SandboxID, RequestID    string
 	ExpectedControlRevision int64
@@ -38,12 +40,27 @@ func (b *Backend) PrepareDestroy(ctx context.Context, in BeginDestroyInput, ttl 
 	// an expired active object must still bind its exact current runtime.
 	ref := TaskReference{Namespace: b.namespace.Root(), RestoreEpoch: b.restoreEpoch, TaskID: uuid.NewString(), SandboxID: in.SandboxID, Partition: bundle.Partition}
 	stage, err := b.beginStageWithBuilder(ctx, ref.Partition, in.RequestID, "destroy", ttl, func(attempt StageAttemptLocator) (Mutation, error) {
-		return buildTaskDestroyMutation(b.namespace, bundle, ref, attempt)
+		mutation, err := buildTaskDestroyMutation(b.namespace, bundle, ref, attempt)
+		if err != nil {
+			return Mutation{}, err
+		}
+		owned, digest, err := prepareMutation(b.namespace, mutation)
+		if err != nil {
+			return Mutation{}, err
+		}
+		// The original builder's locator is retained. Full native wire checks
+		// precede its Grant; no second attempt or generic Stage limit changes.
+		if err = b.preflightTaskDestroy(attempt.reference(digest), owned); err != nil {
+			return Mutation{}, err
+		}
+		return owned, nil
 	})
 	return stage, ref, err
 }
 
-// Only PrepareDestroy supplies this already validated, coherently owned bundle.
+// Manual and due admission supply an already validated, coherently owned
+// bundle. Task, intent and pending discovery are born in this one mutation, so
+// an unacknowledged commit remains discoverable after its creator disappears.
 // The native Stage copies the resulting mutation before any Lease allocation.
 func buildTaskDestroyMutation(n Namespace, bundle *operationControlBundle, ref TaskReference, attempt StageAttemptLocator) (Mutation, error) {
 	control := bundle.Control
@@ -56,6 +73,10 @@ func buildTaskDestroyMutation(n Namespace, bundle *operationControlBundle, ref T
 		return Mutation{}, err
 	}
 	taskValue, err := encodeTaskRecord(task)
+	if err != nil {
+		return Mutation{}, err
+	}
+	pendingValue, err := encodeCleanupPending(cleanupPendingRecord{Version: 1, Reference: ref, TaskDigest: workerIdentityDigest(taskValue)})
 	if err != nil {
 		return Mutation{}, err
 	}
@@ -79,7 +100,7 @@ func buildTaskDestroyMutation(n Namespace, bundle *operationControlBundle, ref T
 	for _, record := range []struct {
 		key   func(TaskReference) (string, error)
 		value string
-	}{{n.taskKey, taskValue}, {n.cleanupIntentKey, intentValue}, {n.taskLinkKey, linkValue}, {n.taskCheckpointKey, checkpointValue}} {
+	}{{n.taskKey, taskValue}, {n.cleanupIntentKey, intentValue}, {n.taskLinkKey, linkValue}, {n.taskCheckpointKey, checkpointValue}, {n.cleanupPendingKey, pendingValue}} {
 		key, err := record.key(ref)
 		if err != nil {
 			return Mutation{}, err

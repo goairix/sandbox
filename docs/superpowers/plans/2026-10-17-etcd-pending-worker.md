@@ -6,6 +6,8 @@
 
 **Architecture:** 原子待办证据、固定 revision 有界分页和原 actor 的有限轮次组成单向发现管线；候选不能赋权。保留已验收物理协议和全 cell 原预算。独立进程角色若可独立验收则另立后续任务。
 
+本任务限定有限 pending 轮询，pending Watch R+1 衔接和独立进程角色保留为后续明确交付；不宣称完整调度时延/性能。旧任务回填要求旧写入者已停止，不支持混合旧版持续无索引写入。
+
 **Tech Stack:** Go1.25.6、etcd3.6.14、原 native wire 与 launcher KernelBoundary。
 
 **Spec:** docs/superpowers/specs/2026-10-17-etcd-pending-worker-design.md；沿用已批准主方案。
@@ -30,8 +32,8 @@
 
 **Produces:** 从持久任务自动发现到原执行器的完整可测行为及严格配置、恢复/退避/关闭状态；不是未被消费者使用的索引 API。
 
-- [ ] Step1 read-only preflight：冻结入口/路径/原子键、所有 producer 与结算事务预算、历史兼容、固定 R/游标/重建、缓存计费、退避公平性、Kernel与实际 join 图，Root裁定后才授权测试。
-- [ ] Step2 tests-only 写行为或缺 API RED，Root执行并审计；最小实现原子待办与有界读取，定向 host/race/vet 后小步提交。
+- [x] Step1 read-only preflight：已冻结原子 P、due 单 KV 精确版本约束、63 节点 producer、53/35 节点结算、最多52节点回填、80条分页及原预算/关闭。历史停旧 writer、一次固定 R 回填、有限轮询及 Watch/独立角色后续边界已明确。Root已阅读全文并只授权首片原子 producer 的 tests-only 行为 RED；后续切片仍须分别冻结测试和验证。
+- [ ] Step2 首片原子待办已实现，真实缺 P 行为 RED 后，12组47子例 host/race、旧手动形状定向及 Linux vet 通过，见2026-10-17-etcd-pending-producer-verification.md。首轮 race 采集选项缺口已披露并只重跑 race；分页/历史回填/结算仍待实现，不能将本步或整个 Task 记为完成。
 - [ ] Step3 接入原 actor 自动发现与 registry，验证坏任务/容量/预算/续租/due公平性及重建，不新增竞争 session；定向验证后提交。
 - [ ] Step4 真实 Linux 自动发现完整物理链及 restart/ACK故障组合，严格输入/运行时/真实退出/清理审计，保留失败；完成可调用 mounted 自动组合并提交。
 - [ ] Step5 唯一完整 Task spec+quality 审查，原作者修复与限定复核、范围验收；继续下一生产角色/迁移单元。

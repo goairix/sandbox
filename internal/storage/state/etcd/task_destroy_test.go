@@ -119,15 +119,15 @@ func TestTaskDestroyAtomic(t *testing.T) {
 		}
 		mutation, e := buildTaskDestroyMutation(n, bundle, task.Reference, cp.Attempt)
 		require.NoError(t, e)
-		require.Len(t, mutation.Writes, 5)
-		require.Len(t, mutation.Comparisons, 24)
+		require.Len(t, mutation.Writes, 6)
+		require.Len(t, mutation.Comparisons, 25)
 		for i, kv := range bundle.KVs {
 			for _, want := range []clientv3.Cmp{clientv3.Compare(clientv3.Value(bundle.Keys[i]), "=", string(kv.Value)), clientv3.Compare(clientv3.ModRevision(bundle.Keys[i]), "=", kv.ModRevision), clientv3.Compare(clientv3.CreateRevision(bundle.Keys[i]), "=", kv.CreateRevision), clientv3.Compare(clientv3.LeaseValue(bundle.Keys[i]), "=", 0)} {
 				require.Contains(t, mutation.Comparisons, want)
 			}
 		}
 		expectedKeys := []string{bundle.Keys[1]}
-		for _, f := range []func(TaskReference) (string, error){n.taskKey, n.cleanupIntentKey, n.taskLinkKey, n.taskCheckpointKey} {
+		for _, f := range []func(TaskReference) (string, error){n.taskKey, n.cleanupIntentKey, n.taskLinkKey, n.taskCheckpointKey, n.cleanupPendingKey} {
 			k, e := f(task.Reference)
 			require.NoError(t, e)
 			expectedKeys = append(expectedKeys, k)
