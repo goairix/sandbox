@@ -228,11 +228,24 @@ digest认证后才能执行。Unknown保留原write latch，同Claim只读仲裁
 provider、seal共16pins，不能重建已删index或依赖当前E/S。历史发送Claim与新释放Claim
 分别验证，不能因不同而拒绝合法恢复，也不能把历史Claim当当前权限。
 
+live片固定共享纯接口为`decodeTaskOwnerReleaseProfile`、
+`taskOwnerReleaseHistoryKeys(intent,actualTask)`与`decodeTaskOwnerReleaseProof`，
+返回互斥local/detached私有proof；paid reader复用已读实际Task，standalone把Task并入
+head读，历史重复Task必须全envelope/bytes相等。13点value caps合计208896字节，仍
+须以实际pb核128/256KiB。原owner增加一次赋值的canonical candidate（最多8KiB），
+同Claim丢ACK只认原bytes，finish退休ctx/cancel但保留候选，未来全局账本必须计费。
+纯source校验局部提取保持旧publication Reference门禁，不构造假receipt/index/E/S。
+
 4C复用原paid quota/terminal阶段。v2单独13点signed history需分阶段付费，保持v1
 原五RPC路径；原一次性260480/262144字节上界容不下替换后的历史。选用仅定位的
 metadata候选，完整paid认证前不得Grant/TaskClaim/Stage或物理/配额副作用。quota后
 pending release同样分阶段认证，再原stamp CAS删除P。最终terminal v2最多22pins，
 原v1最多18pins不变；原guard/cohort/Unknown/真实join及公平调度规则继续保留。
+
+可并行的4C基础片仅新增独立v2 quota-return codec与测试，内嵌已接受v2 release；
+原v1嵌套record与字节不改。仍用16KiB上限，需同时有效的最大schema模型及严格
+canonical/envelope/variant测试，不能通过cast或伪Complete接原quota执行链。这片
+不产生refund权限，不改Grant/guard/journal/Resolve/Commit或自动消费者。
 
 ### Task 4 消费者的统一内存准入约束
 
