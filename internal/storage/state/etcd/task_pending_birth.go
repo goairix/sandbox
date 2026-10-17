@@ -181,6 +181,16 @@ func (b *Backend) readCleanupBirth(ctx context.Context, p *WorkerPartitionClaim,
 // Initial discovery has an authenticated native envelope but is still only a
 // route. The cohort re-reads this exact immutable I before retaining evidence.
 func (b *Backend) decodeCleanupBirthRouting(p *WorkerPartitionClaim, taskID string, kv *mvccpb.KeyValue) (CleanupIntentRecord, error) {
+	if p == nil {
+		return CleanupIntentRecord{}, ErrCorruptRecord
+	}
+	return b.decodeCleanupBirthRoute(p.partition, taskID, kv)
+}
+
+// A route authenticates immutable intent bytes only. Keeping the partition
+// value separate lets read-only observations share decoding without creating
+// or borrowing a worker partition capability.
+func (b *Backend) decodeCleanupBirthRoute(partition uint8, taskID string, kv *mvccpb.KeyValue) (CleanupIntentRecord, error) {
 	var r CleanupIntentRecord
 	if kv == nil {
 		return r, ErrConflict
@@ -189,7 +199,7 @@ func (b *Backend) decodeCleanupBirthRouting(p *WorkerPartitionClaim, taskID stri
 		return CleanupIntentRecord{}, ErrCorruptRecord
 	}
 	ref := r.Task.Reference
-	if b.validateTaskReference(ref) != nil || p == nil || ref.Partition != p.partition || ref.TaskID != taskID {
+	if b.validateTaskReference(ref) != nil || ref.Partition != partition || ref.TaskID != taskID {
 		return CleanupIntentRecord{}, ErrCorruptRecord
 	}
 	key, keyErr := b.namespace.cleanupIntentKey(ref)
@@ -278,11 +288,65 @@ func (b *Backend) cleanupBirthFromPoints(p *WorkerPartitionClaim, discovered *mv
 	if !valid {
 		return nil, ErrInvalidRecord
 	}
+	cohort, err := b.cleanupBirthCohortFromPoints(discovered, points[:4], revision)
+	if err != nil {
+		return nil, err
+	}
+	if cohort.record.Reference.Partition != p.partition {
+		return nil, ErrCorruptRecord
+	}
+	keys, caps, err := b.cleanupBirthCohortKeys(cohort.record.Reference, cohort.initial)
+	if err != nil {
+		return nil, err
+	}
+	for i, kv := range points[4:] {
+		if kv != nil && (string(kv.Key) != keys[i+4] || kv.CreateRevision <= 0 || kv.ModRevision < kv.CreateRevision || kv.ModRevision > revision || kv.Version < 1 || (kv.Version == 1) != (kv.CreateRevision == kv.ModRevision) || len(kv.Value) > caps[i+4]) {
+			return nil, ErrCorruptRecord
+		}
+	}
+	evidence := &cleanupBirthEvidence{
+		origin: b, partition: p, record: cohort.record, initial: cohort.initial, birth: cohort.birth, revision: revision,
+		task: cohort.task, intent: cohort.intent, link: cohort.link, receipt: cohort.receipt,
+	}
+	if err = b.cleanupBirthOptionalEvidence(evidence, points[4:], cohort.digest); err != nil {
+		// Preserve the original independently observed pending point on an
+		// optional refusal; mandatory history alone is never release authority.
+		index := &cleanupBirthIndexEvidence{
+			origin: b, partition: p, record: cohort.record, initial: cohort.initial, birth: cohort.birth, revision: revision,
+			task: evidence.task, intent: evidence.intent, link: evidence.link, receipt: evidence.receipt,
+		}
+		if points[5] != nil {
+			fence := ownTaskFence(points[5])
+			index.pending = &fence
+		}
+		return nil, &cleanupBirthOptionalRefusal{cause: err, index: index}
+	}
+	evidence.self = evidence
+	return evidence, nil
+}
+
+// cleanupBirthCohort contains immutable attribution, with no worker ownership,
+// optional execution metadata or self seal that could authorize later work.
+type cleanupBirthCohort struct {
+	record                      TaskRecord
+	initial                     StageAttemptLocator
+	birth                       int64
+	digest                      string
+	task, intent, link, receipt taskFence
+}
+
+// Validate the mandatory canonical four-record cohort independently of worker
+// admission. Every native point must be permanent version one at the same
+// birth, and the committed receipt must identify the intent's exact attempt.
+func (b *Backend) cleanupBirthCohortFromPoints(discovered *mvccpb.KeyValue, points []*mvccpb.KeyValue, revision int64) (*cleanupBirthCohort, error) {
+	if discovered == nil || len(points) != 4 || revision <= 0 {
+		return nil, ErrCorruptRecord
+	}
 	var intent CleanupIntentRecord
 	if decodeCleanupIntentRecord(discovered, &intent) != nil {
 		return nil, ErrCorruptRecord
 	}
-	routing, err := b.decodeCleanupBirthRouting(p, intent.Task.Reference.TaskID, discovered)
+	routing, err := b.decodeCleanupBirthRoute(intent.Task.Reference.Partition, intent.Task.Reference.TaskID, discovered)
 	if err != nil {
 		return nil, err
 	}
@@ -294,15 +358,12 @@ func (b *Backend) cleanupBirthFromPoints(p *WorkerPartitionClaim, discovered *mv
 	birth := discovered.CreateRevision
 	for i, kv := range points {
 		if kv == nil {
-			if i < 4 {
-				return nil, ErrCorruptRecord
-			}
-			continue
+			return nil, ErrCorruptRecord
 		}
 		if string(kv.Key) != keys[i] || kv.CreateRevision <= 0 || kv.ModRevision < kv.CreateRevision || kv.ModRevision > revision || kv.Version < 1 || (kv.Version == 1) != (kv.CreateRevision == kv.ModRevision) || len(kv.Value) > caps[i] {
 			return nil, ErrCorruptRecord
 		}
-		if i < 4 && (kv.Version != 1 || kv.Lease != 0 || kv.CreateRevision != birth || kv.ModRevision != birth) {
+		if kv.Version != 1 || kv.Lease != 0 || kv.CreateRevision != birth || kv.ModRevision != birth {
 			return nil, ErrCorruptRecord
 		}
 	}
@@ -331,26 +392,10 @@ func (b *Backend) cleanupBirthFromPoints(p *WorkerPartitionClaim, discovered *mv
 		return nil, ErrCorruptReceipt
 	}
 
-	evidence := &cleanupBirthEvidence{
-		origin: b, partition: p, record: task, initial: routing.Attempt, birth: birth, revision: revision,
+	return &cleanupBirthCohort{
+		record: task, initial: routing.Attempt, birth: birth, digest: receipt.Digest,
 		task: ownTaskFence(points[0]), intent: ownTaskFence(points[1]), link: ownTaskFence(points[2]), receipt: ownTaskFence(points[3]),
-	}
-	if err = b.cleanupBirthOptionalEvidence(evidence, points[4:], receipt.Digest); err != nil {
-		// All mandatory records and native envelopes above are authentic. Keep
-		// raw P independently: an earlier E refusal must not manufacture P
-		// absence. Its canonical validity is rechecked before indexing.
-		index := &cleanupBirthIndexEvidence{
-			origin: b, partition: p, record: task, initial: routing.Attempt, birth: birth, revision: revision,
-			task: evidence.task, intent: evidence.intent, link: evidence.link, receipt: evidence.receipt,
-		}
-		if points[5] != nil {
-			fence := ownTaskFence(points[5])
-			index.pending = &fence
-		}
-		return nil, &cleanupBirthOptionalRefusal{cause: err, index: index}
-	}
-	evidence.self = evidence
-	return evidence, nil
+	}, nil
 }
 
 // E/P/release are independent observations. In particular a canonical release

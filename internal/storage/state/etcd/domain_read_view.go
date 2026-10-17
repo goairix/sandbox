@@ -163,6 +163,16 @@ func (b *Backend) readViewFinal(ctx context.Context, keys [4]string, pins []clie
 	if err != nil {
 		return nil, err
 	}
+	return b.decodeReadViewPoints(keys, points, revision)
+}
+
+// Decode one already bounded native quartet. Keeping this validation separate
+// lets terminal observation validate a successor in its own final transaction
+// without weakening the original four-point reader or issuing another RPC.
+func (b *Backend) decodeReadViewPoints(keys [4]string, points []*mvccpb.KeyValue, revision int64) (*SandboxReadView, error) {
+	if len(points) != 4 || revision <= 0 {
+		return nil, ErrCorruptRecord
+	}
 	for _, point := range points {
 		if point == nil {
 			return nil, ErrCorruptRecord

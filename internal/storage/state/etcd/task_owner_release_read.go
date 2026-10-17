@@ -31,6 +31,9 @@ type localOwnerReleaseProof struct {
 	record      localOwnerReleaseRecord
 	kv          *mvccpb.KeyValue
 	termination p.TaskRuntimeTerminationIntent
+	// Only terminal observation attaches history until its final MVCC pins.
+	// Existing physical/quota/worker callers retain the original small proof.
+	history *localRuntimeHistorySnapshot
 }
 
 func (b *Backend) readLocalOwnerReleaseProof(ctx context.Context, task TaskReference) (*localOwnerReleaseProof, error) {
@@ -46,13 +49,29 @@ func (b *Backend) readLocalOwnerReleaseProof(ctx context.Context, task TaskRefer
 	if err != nil || r.Task != task {
 		return nil, errors.Join(ErrCorruptRecord, err)
 	}
-	termination, kv, _, err := b.readLocalRuntimeHistory(ctx, task)
-	if err != nil || kv == nil {
+	history, err := b.readLocalRuntimeHistorySnapshot(ctx, task)
+	if err != nil || history == nil {
 		return nil, errors.Join(ErrCorruptRecord, err)
 	}
+	return b.decodeLocalOwnerReleaseProof(task, values[0], history)
+}
+
+// A release record becomes authenticated only by joining its exact canonical
+// bytes to the original signed termination and complete retained history. This
+// pure validator grants neither physical cleanup nor quota/claim authority.
+func (b *Backend) decodeLocalOwnerReleaseProof(task TaskReference, release *mvccpb.KeyValue, history *localRuntimeHistorySnapshot) (*localOwnerReleaseProof, error) {
+	r, err := decodeLocalOwnerRelease(release)
+	if err != nil || r.Task != task {
+		return nil, errors.Join(ErrCorruptRecord, err)
+	}
+	termination, err := b.decodeLocalRuntimeHistory(task, history)
+	if err != nil {
+		return nil, errors.Join(ErrCorruptRecord, err)
+	}
+	kv := history.termination
 	expected, err := newLocalOwnerReleaseRecord(termination, kv.CreateRevision, kv.ModRevision, r.Claim)
 	if err != nil || expected != r {
 		return nil, errors.Join(ErrCorruptRecord, err)
 	}
-	return &localOwnerReleaseProof{record: r, kv: values[0], termination: termination}, nil
+	return &localOwnerReleaseProof{record: r, kv: release, termination: termination}, nil
 }
