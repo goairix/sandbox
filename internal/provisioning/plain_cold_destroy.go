@@ -14,6 +14,10 @@ import (
 // its original ownership changed. A caller must not treat it as cleanup success.
 var ErrPlainColdDestroyConflict = errors.New("plain cold destroy target changed or closing")
 
+// ErrPlainColdDestroyProfile means no cleanup consumer supports this target's
+// immutable snapshot schema. Admission remains open and no Task is prepared.
+var ErrPlainColdDestroyProfile = errors.New("plain cold destroy cleanup profile unsupported")
+
 // PlainColdDestroyState describes admission of metadata cleanup work, never the
 // runtime's physical termination, workspace settlement or quota release.
 type PlainColdDestroyState string
@@ -41,8 +45,10 @@ type PlainColdDestroyResult struct {
 }
 
 // Destroy closes admission and creates the existing permanent cleanup Task in
-// one transaction. It accepts expired active sandboxes without querying runtime
-// health. The deployment's operator-wide authorization is the caller's boundary;
+// one transaction for a version2 local cleanup snapshot. Historical/detached
+// targets without that descriptor are refused before preparing any Stage.
+// It accepts expired active sandboxes without querying runtime health.
+// The deployment's operator-wide authorization is the caller's boundary;
 // this method does not claim tenant or creation-Principal ownership.
 //
 // RequestID is attribution only, not durable HTTP idempotency. Each invocation
@@ -90,6 +96,10 @@ func (s *PlainColdService) Destroy(ctx context.Context, sandboxID, requestID str
 	}
 	result.Generation = loaded.control.Generation
 	result.Runtime = p.RuntimeReference(*loaded.control.Runtime)
+	if err := checkColdDestroyProfile(loaded.snapshot); err != nil {
+		return result, err
+	}
+
 	// The trusted clock is a deployment precondition, not an expiry gate:
 	// manual cleanup must remain legal after the sandbox's original TTL.
 	if _, err := s.now(ctx); err != nil {
@@ -145,6 +155,17 @@ func (s *PlainColdService) Destroy(ctx context.Context, sandboxID, requestID str
 	default:
 		return result, state.ErrOutcomeUnknown
 	}
+}
+
+// checkColdDestroyProfile narrows the already authenticated snapshot to the
+// implemented local cleanup consumer. The domain reader, not this shape check,
+// verifies its digest and exact workspace/placement binding. No descriptor may
+// be invented for detached targets or historical version1 snapshots.
+func checkColdDestroyProfile(snapshot *state.SandboxSnapshotRecord) error {
+	if snapshot == nil || snapshot.Version != 2 || snapshot.LocalCleanup == nil || snapshot.LocalCleanup.Provider != "local" {
+		return ErrPlainColdDestroyProfile
+	}
+	return nil
 }
 
 // Stage request IDs are path segments with a 128-byte protocol limit. Validate

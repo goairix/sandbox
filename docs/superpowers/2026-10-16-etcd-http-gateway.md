@@ -27,14 +27,21 @@ Omitted/zero numeric settings use the defaults shown above. Execution default mu
 | GET /ready | Bounded original service/trust/durable readiness |
 | POST /api/v1/sandboxes | Original plain CreateBusiness and stable key/IDs |
 | GET /api/v1/sandboxes/:id | Original Lookup and authenticated current runtime health |
+| DELETE /api/v1/sandboxes/:id | Asynchronous cleanup admission for supported local snapshots |
 | POST /api/v1/sandboxes/:id/exec | Original execution with bounded combined output |
 | POST /api/v1/sandboxes/:id/exec/stream | Original execution through SSE |
 
-All v1 routes require the configured API key in Authorization, normally `Bearer <key>`. Workspace, file, upload, network/TTL mutation, destroy, oneshot and other unmigrated routes return typed501. This explicit mode does not answer them through legacy Manager or Redis.
+All v1 routes require the configured API key in Authorization, normally `Bearer <key>`. Workspace, file, upload, network/TTL mutation, oneshot and other unmigrated routes return typed501. This explicit mode does not answer them through legacy Manager or Redis.
 
 Creation supports the original plain deployment profile: finite TTL, matching resources/network, no workspace or dependencies. Incompatible requests are rejected. A successful response uses current Lookup metadata, the original CreatedAt and current expiry. `state:running` means an active authenticated healthy runtime; it does not report global user-process busy/idle state.
 
 Creation can omit Idempotency-Key; the service generates one and the response echoes the actual key. Preserve the key and original body. Busy admission before original creation IDs exist returns503/unavailable with Retry-After1 and the actual key. For202/pending or uncertain creation with original IDs, repeat POST with the **same key and original body**.409 means a conflicting idempotent request. There is no request-ID polling index, and a historical creation receipt alone is not a current health proof.
+
+DELETE currently supports only targets whose original immutable version2 snapshot contains a valid local cleanup descriptor. These can be created through the existing local-workspace service entrypoint. HTTP CreateBusiness produces detached targets without that descriptor; their DELETE returns501/unsupported_cleanup_profile before preparing a Stage, closing admission or creating a Task/pending record. Historical version1 and remote profiles are also refused. A future cleanup consumer must implement those profiles before they can be admitted.
+
+For supported targets,202/destroy_pending means that closing metadata admission and writing the original permanent cleanup Task/pending record committed atomically. The response retains sandbox_id, request_id, generation, runtime, task and stage diagnostics; it does not claim runtime termination, workspace settlement or quota return. This new etcd route replaces its former501 and has a different contract from legacy synchronous200 `sandbox destroyed`. Expired active targets are permitted without a runtime health query. An already closing or concurrently replaced target returns409/destroy_conflict; absent targets return404. Access uses the existing fixed operator-wide API key/deployment boundary, without a per-tenant or creation-Principal ownership claim.
+
+DELETE accepts an optional X-Request-ID (1–128 ASCII letters, digits, `.`, `_` or `-`, excluding `.` and `..`); an omitted ID is generated and echoed. This is attribution only: each invocation may create a new attempt. Idempotency-Key is explicitly rejected, and no destroy request polling endpoint exists.503/outcome_unknown preserves the exact original Task/Stage references; retain them for diagnosis and do not automatically issue another DELETE, even with the same request ID. The separate automatic cleanup worker must cover the same namespace, restore epoch, partitions and local storage profile. HTTP does not start a worker, and admission makes no physical completion or timing guarantee.
 
 Each Exec invocation creates a new operation. **Do not automatically resend unknown execution.** Idempotency-Key, including an empty header, is rejected before effects; X-Request-ID is attribution only. Verified nonzero exit is a normal result. Unknown execution returns an explicit error and original diagnostic references where available, never a fabricated exit0 or SSEdone. Client disconnect cancels local consumption and joins its owners; it does not prove remote command termination.
 

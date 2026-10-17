@@ -59,6 +59,9 @@ type plainColdLoadedTarget struct {
 	dispatch plainColdDispatch
 	history  *state.SandboxRuntimeReadResult
 	business *sandboxsnapshot.Snapshot
+	// snapshot retains the same reader-owned immutable envelope as view, so
+	// destroy profile admission never relies on a second, unrelated read.
+	snapshot *state.SandboxSnapshotRecord
 }
 
 // loadColdTarget reads the original fixed deployment profile and retained
@@ -115,7 +118,7 @@ func (s *PlainColdService) loadColdTarget(ctx context.Context, sandboxID string)
 			return nil, ErrPlainColdProfile
 		}
 	}
-	return &plainColdLoadedTarget{view: read.View, control: c, capsule: capsule, dispatch: dispatch, history: history, business: business}, nil
+	return &plainColdLoadedTarget{view: read.View, control: c, capsule: capsule, dispatch: dispatch, history: history, business: business, snapshot: read.Snapshot}, nil
 }
 
 // Lookup uses one original admission through metadata, retained history, the

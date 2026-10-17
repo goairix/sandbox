@@ -27,6 +27,9 @@ type Service interface {
 	CreateBusiness(context.Context, provisioning.PlainColdBusinessInput) (provisioning.PlainColdBusinessResult, error)
 	Lookup(context.Context, string) (*provisioning.PlainColdLookupResult, error)
 	Exec(context.Context, string, string, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error)
+	// Destroy admits asynchronous cleanup for one exact original target. Its
+	// result diagnoses metadata admission, never physical cleanup completion.
+	Destroy(context.Context, string, string) (provisioning.PlainColdDestroyResult, error)
 	Ready(context.Context) error
 }
 
@@ -226,7 +229,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) >= 2 && parts[0] == "sandboxes" && parts[1] != "by-workspace" {
 		file := len(parts) == 4 && parts[2] == "files" && fileRoute(r.Method, parts[3])
-		supported := file || len(parts) == 2 && r.Method == http.MethodGet || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
+		supported := file || len(parts) == 2 && (r.Method == http.MethodGet || r.Method == http.MethodDelete) || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
 		if supported {
 			id := parts[1]
 			parsed, err := uuid.Parse(id)
@@ -234,7 +237,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeError(w, 400, "invalid_request", "invalid sandbox id")
 				return
 			}
-			if len(parts) == 2 {
+			if len(parts) == 2 && r.Method == http.MethodDelete {
+				g.destroy(w, r, id)
+			} else if len(parts) == 2 {
 				g.lookup(w, r, id)
 			} else if file {
 				g.files(w, r, id, parts[3])

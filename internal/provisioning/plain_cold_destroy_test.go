@@ -73,6 +73,34 @@ func TestPlainColdDestroyInvalidIdentityBeforeBackend(t *testing.T) {
 	}
 }
 
+// The domain reader already validates the full immutable digest and placement.
+// This additional gate selects only schemas with an implemented cleanup
+// consumer; legacy/detached data must not create permanently unconsumable Tasks.
+func TestPlainColdDestroyCleanupProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		snapshot *state.SandboxSnapshotRecord
+		allowed  bool
+	}{
+		{"absent", nil, false},
+		{"legacy-or-detached", &state.SandboxSnapshotRecord{Version: 1}, false},
+		{"legacy-with-descriptor", &state.SandboxSnapshotRecord{Version: 1, LocalCleanup: &state.LocalCleanupDescriptor{Provider: "local"}}, false},
+		{"no-descriptor", &state.SandboxSnapshotRecord{Version: 2}, false},
+		{"remote", &state.SandboxSnapshotRecord{Version: 2, LocalCleanup: &state.LocalCleanupDescriptor{Provider: "s3"}}, false},
+		{"unknown-version", &state.SandboxSnapshotRecord{Version: 3, LocalCleanup: &state.LocalCleanupDescriptor{Provider: "local"}}, false},
+		{"validated-local", &state.SandboxSnapshotRecord{Version: 2, LocalCleanup: &state.LocalCleanupDescriptor{Provider: "local"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkColdDestroyProfile(tc.snapshot)
+			if tc.allowed {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrPlainColdDestroyProfile)
+			}
+		})
+	}
+}
+
 // This uses the original concrete Backend RPC path. The endpoint deliberately
 // blocks only the first metadata read and never fabricates an active runtime,
 // committed destroy, signed receipt or physical cleanup success.

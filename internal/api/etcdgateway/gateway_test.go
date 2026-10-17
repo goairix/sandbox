@@ -83,7 +83,7 @@ func TestGatewayAuthUnsupportedAndStrictBody(t *testing.T) {
 		t.Fatal("unauthenticated create reached the service")
 	}
 	unsupported := httptest.NewRecorder()
-	g.ServeHTTP(unsupported, gatewayRequest(http.MethodDelete, "/api/v1/sandboxes/"+gatewaySandboxID, ""))
+	g.ServeHTTP(unsupported, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID, ""))
 	if unsupported.Code != 501 || !strings.Contains(unsupported.Body.String(), `"code":"unsupported"`) {
 		t.Fatal("unmigrated API did not fail with typed unsupported")
 	}
