@@ -34,7 +34,13 @@ Stage不能写入该键家族。定向host/race通过，Linux vet与输入审计
 共同出生认证现已实现：实际intent定位、Task/intent/link/初始已提交回执同一出生版本、
 execution/pending摘要绑定及初步release观察；三组定向host/race和Linuxvet通过，见
 [历史认证验证](2026-10-17-etcd-pending-birth-verification.md)。不依赖已经释放的三个当前键，
-但尚无新签名释放正例、进度提交、pending删除或自动消费。Docker已只读确认可用，未建资源。
+但尚无新签名释放正例、进度提交、pending删除或自动消费。
+
+受控签名释放读取现已实现，host五组34叶例、race六组58叶例和Linuxvet通过；Linux
+正常构造配置的13叶模型验证坏证据拒绝、会话失效与实际Close/Relist等待，容器已清理。
+见[释放读取验证](2026-10-17-etcd-pending-release-verification.md)。故意取消的客户端告警
+原样保留；尚未验证本读取器的真实签名正例或自动物理链。下一步推进回填进度及终态
+pending事务，整个Task仍未完成，也不因此上调整体粗估或宣称大N容量通过。
 
 ## 2026-10-17 此前切片记录（已由上述完整执行器验收接续）
 

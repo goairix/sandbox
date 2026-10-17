@@ -33,7 +33,7 @@
 **Produces:** 从持久任务自动发现到原执行器的完整可测行为及严格配置、恢复/退避/关闭状态；不是未被消费者使用的索引 API。
 
 - [x] Step1 read-only preflight：已冻结原子pending、原worker预算/关闭、历史兼容和终态认证边界。历史停旧writer、不可变截止点/可更新读取视图/持久frontier、有限轮询及Watch/独立角色后续范围已明确；具体切片接口与原生尺寸须继续源码核对并验证。
-- [ ] Step2 原子pending、80条固定视图分页、回填检查点、平坦intent历史分页及共同出生认证已实现，分别通过定向host/race和Linuxvet，详见2026-10-17-etcd-pending系列验证报告。签名释放调用、frontier推进/完成转换和终态pending移除仍未实现，不能将本步或整个Task记为完成。
+- [ ] Step2 原子pending、80条固定视图分页、回填检查点、平坦intent历史分页及共同出生认证已实现，分别通过定向host/race和Linuxvet，详见2026-10-17-etcd-pending系列验证报告。受控签名释放调用及Linux合法配置拒绝/实际关闭等待模型测试也已实现；签名成功正例仍待自动组合。frontier推进/完成转换和终态pending移除仍未实现，不能将本步或整个Task记为完成。
 - [ ] Step3 接入原 actor 自动发现与 registry，验证坏任务/容量/预算/续租/due公平性及重建，不新增竞争 session；定向验证后提交。
 - [ ] Step4 真实 Linux 自动发现完整物理链及 restart/ACK故障组合，严格输入/运行时/真实退出/清理审计，保留失败；完成可调用 mounted 自动组合并提交。
 - [ ] Step5 唯一完整 Task spec+quality 审查，原作者修复与限定复核、范围验收；继续下一生产角色/迁移单元。

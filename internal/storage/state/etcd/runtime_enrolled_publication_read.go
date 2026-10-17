@@ -12,6 +12,15 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// The private marker preserves transport certainty through proof validators
+// that join errors with corruption. Text and underlying Is/As remain unchanged;
+// native envelope and record validation failures never receive this marker.
+type enrolledPointTransportError struct{ cause error }
+
+func (e *enrolledPointTransportError) Error() string { return e.cause.Error() }
+
+func (e *enrolledPointTransportError) Unwrap() error { return e.cause }
+
 // Every read branch contains the same finite points, with current identity and
 // restore explicitly validated before any retained receipt is interpreted.
 func (b *Backend) readEnrolledPoints(ctx context.Context, keys []string, caps []int) ([]*mvccpb.KeyValue, error) {
@@ -43,7 +52,7 @@ func (b *Backend) readEnrolledPoints(ctx context.Context, keys []string, caps []
 	err = errors.Join(err, bounded.Err())
 	cancel()
 	if err != nil {
-		return nil, err
+		return nil, &enrolledPointTransportError{cause: err}
 	}
 	if !enrolledResponseBound(response) {
 		return nil, ErrCorruptRecord

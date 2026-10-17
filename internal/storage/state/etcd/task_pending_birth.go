@@ -36,14 +36,14 @@ type cleanupBirthEvidence struct {
 // Validate real membership and timing under the original lifecycle lock before
 // credit is spent. The second check after admission closes the scheduling gap;
 // that refusal is charged, but performs no native work and receives no refund.
-func (b *Backend) beginCleanupBirthOwner(ctx context.Context, p *WorkerPartitionClaim, ranges *WorkerBudgetShare) (*workerDueOwner, context.CancelFunc, error) {
+func (b *Backend) beginCleanupBirthOwner(ctx context.Context, p *WorkerPartitionClaim, ranges *WorkerBudgetShare, terminal bool) (*workerDueOwner, context.CancelFunc, error) {
 	if ctx == nil || !b.validWorkerBackend() {
 		return nil, nil, ErrInvalidRecord
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	phase, margin, err := cleanupBirthPhaseTiming(b.requestTimeout, false)
+	phase, margin, err := cleanupBirthPhaseTiming(b.requestTimeout, terminal)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -114,7 +114,7 @@ func (b *Backend) readCleanupBirth(ctx context.Context, p *WorkerPartitionClaim,
 	if !validPreparationUUID(taskID) {
 		return nil, ErrInvalidRecord
 	}
-	o, stop, err := b.beginCleanupBirthOwner(ctx, p, ranges)
+	o, stop, err := b.beginCleanupBirthOwner(ctx, p, ranges, false)
 	if err != nil {
 		return nil, err
 	}
