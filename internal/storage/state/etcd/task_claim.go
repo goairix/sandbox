@@ -162,6 +162,10 @@ func (b *Backend) prepareTaskClaim(parent context.Context, bundle *taskClaimBund
 	if parent == nil || bundle == nil || bundle.checkpoint == nil || len(bundle.fences) != 8 || !validDomainSegment(workerID) || !validPreparationUUID(claimID) || ttl <= 0 || ttl > 24*time.Hour {
 		return nil, taskFence{}, ErrInvalidRecord
 	}
+	// A bounded caller string can be a substring of a much larger allocation.
+	// This original Claim and its later prepared/draft references must retain
+	// an independently bounded backing without changing signed/canonical values.
+	workerID = strings.Clone(workerID)
 	ref := bundle.task.Reference
 	seconds := int64(ttl / time.Second)
 	if ttl%time.Second != 0 {

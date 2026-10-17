@@ -43,7 +43,7 @@ type cleanupDetachedNoEffectNativeFixture struct {
 	queryCount  atomic.Int64
 }
 
-func newCleanupDetachedNoEffectNativeFixture(t *testing.T) *cleanupDetachedNoEffectNativeFixture {
+func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
 	t.Helper()
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("requires the existing explicit original Linux worker TestMain")
@@ -174,7 +174,11 @@ func newCleanupDetachedNoEffectNativeFixture(t *testing.T) *cleanupDetachedNoEff
 	// Task3's private writer requires a genuine original capability and exact
 	// native binding, not a claim reconstructed from diagnostics. This public
 	// ClaimTask is deliberately not evidence of managed consumer admission.
-	f.job.claim, err = b.ClaimTask(f.job.ctx, ref, "noeffect-original", 30*time.Second)
+	workerID := "noeffect-original"
+	if len(claimWorker) != 0 {
+		workerID = claimWorker[0]
+	}
+	f.job.claim, err = b.ClaimTask(f.job.ctx, ref, workerID, 30*time.Second)
 	require.NoError(t, err)
 	worker, err := workspaceSyncLocalNativeWorker.WorkspaceSyncWorkerReference()
 	require.NoError(t, err)
