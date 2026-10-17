@@ -21,7 +21,9 @@ type coldQuotaReturnHistory struct {
 
 // SettleColdRuntimeQuota independently returns only the original runtime's
 // occupied quota after authenticating its sealed safe-release history. A task
-// reference is an address, not a termination or refund capability.
+// reference is an address, not a termination or refund capability. Fresh calls
+// persist the original attempt before Grant; recovery arbitrates that pending
+// reference and can replace it only after authenticating its aborted receipt.
 func (b *Backend) SettleColdRuntimeQuota(ctx context.Context, w WorkspaceIdentity, intent string, task TaskReference) (result ColdRuntimeQuotaReturnResult, resultErr error) {
 	result.Outcome = OutcomeUnknown
 	o, err := b.registerEnrolledPublication(ctx)
@@ -30,11 +32,34 @@ func (b *Backend) SettleColdRuntimeQuota(ctx context.Context, w WorkspaceIdentit
 	}
 	defer o.finish()
 
-	prepared, result, err := b.prepareColdRuntimeQuotaReturn(o, w, intent, task)
+	history, key, result, err := b.authenticateColdRuntimeQuotaReturn(o, w, intent, task)
+	if err != nil || history == nil {
+		return result, err
+	}
+	journalKey, err := b.namespace.coldRuntimeQuotaAttemptKey(w.Partition(), intent)
+	if err != nil {
+		return result, err
+	}
+	points, err := b.readEnrolledPoints(o.context, []string{journalKey}, []int{coldQuotaAttemptMaxBytes})
+	if err != nil {
+		return result, err
+	}
+	var aborted *mvccpb.KeyValue
+	if points[0] != nil {
+		result, aborted, err = b.resolveColdRuntimeQuotaAttempt(o, history, points[0])
+		if err != nil || result.Outcome != OutcomeAborted {
+			return result, err
+		}
+	}
+
+	prepared, result, err := b.prepareColdRuntimeQuotaReturnHistory(o, history, key)
 	if err != nil || prepared == nil {
 		return result, err
 	}
-	return b.continueColdRuntimeQuotaReturn(o, prepared)
+	// One CAS per public call: a losing candidate is burned and returned for
+	// diagnostics. A later call may arbitrate the durable winner, but this call
+	// never loops into another candidate or reconstructs its original Stage.
+	return b.journalAndContinueColdRuntimeQuotaReturn(o, prepared, points[0], aborted)
 }
 
 // commitColdRuntimeQuotaReturn retains the quota protocol's exact projection,

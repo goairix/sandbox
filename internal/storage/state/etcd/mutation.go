@@ -106,6 +106,12 @@ func reservedStageKey(n Namespace, key string) bool {
 	if parts[0] != "p" || len(parts) < 3 {
 		return false
 	}
+	// Quota-attempt attribution is owned by its pre-Grant CAS protocol. Keep
+	// this intent family and descendants private without reserving other intent
+	// records, including the immutable quota-return record written by Stage.
+	if len(parts) >= 5 && parts[2] == "intents" && parts[4] == "cold-runtime-quota-attempt" {
+		return true
+	}
 
 	// Permanent cleanup occupation, execution and backfill coverage are owned
 	// by private CAS protocols. Generic Stage must not reset that history.

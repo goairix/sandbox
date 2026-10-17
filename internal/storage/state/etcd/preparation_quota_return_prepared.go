@@ -22,6 +22,10 @@ type coldQuotaReturnPrepared struct {
 	history   *coldQuotaReturnHistory
 	returnKey string
 
+	// journalAttempted admits one journal submitter. Losing duplicate calls
+	// must not consume the successful submitter's in-flight continuation.
+	journalAttempted uint32
+
 	// consumed is claimed before validating the calling binding. Every attempt,
 	// including cancellation or refusal, permanently closes this capability.
 	consumed uint32
@@ -52,36 +56,62 @@ func (b *Backend) coldQuotaReturnOwnerContext(o *runtimeEnrolledPublicationOwner
 // Fresh preparation freezes the exact copied mutation without Grant, guard
 // creation, or business writes; the caller still owns registration and finish.
 func (b *Backend) prepareColdRuntimeQuotaReturn(o *runtimeEnrolledPublicationOwner, w WorkspaceIdentity, intent string, task TaskReference) (*coldQuotaReturnPrepared, ColdRuntimeQuotaReturnResult, error) {
+	history, key, result, err := b.authenticateColdRuntimeQuotaReturn(o, w, intent, task)
+	if err != nil || history == nil {
+		return nil, result, err
+	}
+	return b.prepareColdRuntimeQuotaReturnHistory(o, history, key)
+}
+
+// authenticateColdRuntimeQuotaReturn retains the original history and replay
+// ordering for both callers. A committed replay needs neither the pending
+// journal nor the mutable quota slot, which may belong to a newer incarnation.
+func (b *Backend) authenticateColdRuntimeQuotaReturn(o *runtimeEnrolledPublicationOwner, w WorkspaceIdentity, intent string, task TaskReference) (*coldQuotaReturnHistory, string, ColdRuntimeQuotaReturnResult, error) {
 	result := ColdRuntimeQuotaReturnResult{Outcome: OutcomeUnknown}
 	ctx, err := b.coldQuotaReturnOwnerContext(o)
 	if err != nil {
-		return nil, result, err
+		return nil, "", result, err
 	}
 	if b.localRuntimeRelease.validate() != nil || b.validateTaskReference(task) != nil || b.validateWorkspaceBinding(w) != nil || task.Partition != w.Partition() {
-		return nil, result, ErrInvalidRecord
+		return nil, "", result, ErrInvalidRecord
 	}
 	if _, _, err := b.coldProfile(); err != nil {
-		return nil, result, err
+		return nil, "", result, err
 	}
 
 	history, err := b.readColdQuotaReturnHistory(ctx, w, intent, task)
 	if err != nil {
-		return nil, result, err
+		return nil, "", result, err
 	}
 	key, err := b.namespace.coldRuntimeQuotaReturnKey(w.Partition(), intent)
 	if err != nil {
-		return nil, result, err
+		return nil, "", result, err
 	}
 	points, err := b.readEnrolledPoints(ctx, []string{key}, []int{16384})
 	if err != nil {
-		return nil, result, err
+		return nil, "", result, err
 	}
 	if points[0] != nil {
 		result.Reference, result.Entry, err = b.verifyColdQuotaReturn(ctx, history, points[0])
 		if err == nil {
 			result.Outcome = OutcomeCommitted
 		}
+		return nil, "", result, err
+	}
+	return history, key, result, nil
+}
+
+// Only authenticated history reaches this fresh-attempt builder. Keeping the
+// slot reads here lets public recovery resolve its original journal first;
+// an absent journal read alone never authorizes replacing a pending attempt.
+func (b *Backend) prepareColdRuntimeQuotaReturnHistory(o *runtimeEnrolledPublicationOwner, history *coldQuotaReturnHistory, key string) (*coldQuotaReturnPrepared, ColdRuntimeQuotaReturnResult, error) {
+	result := ColdRuntimeQuotaReturnResult{Outcome: OutcomeUnknown}
+	ctx, err := b.coldQuotaReturnOwnerContext(o)
+	if err != nil {
 		return nil, result, err
+	}
+	if history == nil || !validNamespaceKey(b.namespace, key) {
+		return nil, result, ErrInvalidRecord
 	}
 
 	_, ready, err := b.coldReady(ctx)
@@ -101,7 +131,7 @@ func (b *Backend) prepareColdRuntimeQuotaReturn(o *runtimeEnrolledPublicationOwn
 		return nil, result, ErrConflict
 	}
 
-	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: w.Partition(), RequestID: history.reservation.Owner.RequestID, StageID: "cold_runtime_quota_return", AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
+	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: history.reservation.Owner.Partition, RequestID: history.reservation.Owner.RequestID, StageID: "cold_runtime_quota_return", AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
 	if err := locator.Validate(); err != nil {
 		return nil, result, err
 	}
