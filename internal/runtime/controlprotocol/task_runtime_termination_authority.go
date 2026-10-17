@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+// MaxTaskRuntimeTerminationIntentBytes bounds one canonical termination intent
+// to 16 KiB, including at most 4096 bytes of opaque terminal proof.
 const MaxTaskRuntimeTerminationIntentBytes = 16384
 
 // RecordStamp is a writer-derived pin of one fixed native record. It cannot
@@ -20,6 +22,8 @@ type RecordStamp struct {
 	SHA256         string `json:"sha256"`
 }
 
+// TerminationQuiescenceStage pins the original durable drain attempt and its
+// stage digest; it does not authorize a replacement attempt.
 type TerminationQuiescenceStage struct {
 	RequestID string `json:"request_id"`
 	StageID   string `json:"stage_id"`
@@ -27,6 +31,9 @@ type TerminationQuiescenceStage struct {
 	Digest    string `json:"digest"`
 }
 
+// TerminationAuthorityBindings contains comparable record pins shared by both
+// intent variants. Only local v1 uses Archive and LocalComplete; detached v2
+// requires their exact zero values and carries separate effect bindings.
 type TerminationAuthorityBindings struct {
 	Task                  RecordStamp                `json:"task"`
 	CleanupIntent         RecordStamp                `json:"cleanup_intent"`
@@ -46,6 +53,24 @@ type TerminationAuthorityBindings struct {
 	QuiescenceStage       TerminationQuiescenceStage `json:"quiescence_stage"`
 }
 
+// DetachedRuntimeEffectBindings pins the detached enrolled plain profile's
+// historical no-effect settlement. These copied wire values are not authority:
+// a consumer must authenticate the persisted settlement, original Task/Claim/Run
+// and all runtime, contract and source fences before relying on the profile.
+type DetachedRuntimeEffectBindings struct {
+	// Version is 1 for this tuple schema, independently of intent version 2.
+	Version uint32 `json:"version"`
+	// Profile is exactly detached_enrolled_plain; it does not enable a consumer.
+	Profile string `json:"profile"`
+	// ContractDigest is the lowercase SHA-256 pin of the enrolled plain contract.
+	ContractDigest string `json:"contract_digest"`
+	// Settlement may predate a renewed claim. Historical attribution belongs to
+	// the native authority reader, rather than a wire revision ordering rule.
+	Settlement RecordStamp `json:"settlement"`
+}
+
+// TaskRuntimeTerminationIntent pins a local v1 or detached v2 termination record.
+// Accepting canonical wire does not authenticate its pins or enable a consumer.
 type TaskRuntimeTerminationIntent struct {
 	Version                   uint32                       `json:"version"`
 	Phase                     string                       `json:"phase"`
@@ -62,13 +87,17 @@ type TaskRuntimeTerminationIntent struct {
 	Authority                 TerminationAuthorityBindings `json:"authority"`
 	TerminalProof             []byte                       `json:"terminal_proof,omitempty"`
 	CleanupDigest             string                       `json:"cleanup_digest,omitempty"`
+
+	// DetachedEffects is absent in v1 to preserve its canonical bytes and is
+	// mandatory in v2, where Archive and LocalComplete must remain exactly zero.
+	DetachedEffects *DetachedRuntimeEffectBindings `json:"detached_effects,omitempty"`
 }
 
 func validateTerminationIntent(c TaskRuntimeTerminationIntent) error {
 	if err := validateTaskCloseContext(c.Current); err != nil {
 		return err
 	}
-	if c.Version != 1 || c.TaskBirth <= 0 || c.TaskBirth > c.Current.ClaimCreateRevision || !validUUID(c.CreationIntentID) || c.MountAttempt > 1 || !validHash(c.EnrollmentDigest) || !validHash(c.ObserverCertificateDigest) || !validUUID(c.NodeUID) || !validUUID(c.NodeBootID) || c.Action != "kill_pid1_and_observe_cgroup_empty" {
+	if c.TaskBirth <= 0 || c.TaskBirth > c.Current.ClaimCreateRevision || !validUUID(c.CreationIntentID) || c.MountAttempt > 1 || !validHash(c.EnrollmentDigest) || !validHash(c.ObserverCertificateDigest) || !validUUID(c.NodeUID) || !validUUID(c.NodeBootID) || c.Action != "kill_pid1_and_observe_cgroup_empty" {
 		return fmt.Errorf("invalid runtime termination intent")
 	}
 	if len(c.Current.Namespace) > 512 {
@@ -78,16 +107,41 @@ func validateTerminationIntent(c TaskRuntimeTerminationIntent) error {
 	if len(hash) != sha256.Size || hash[0] != c.Partition {
 		return fmt.Errorf("termination partition mismatch")
 	}
+
 	a := c.Authority
-	for _, s := range []RecordStamp{a.Task, a.CleanupIntent, a.TaskLink, a.Placement, a.Control, a.Owner, a.Fence, a.RuntimeIndex, a.Quiescence, a.QuiescenceReceipt, a.QuiescenceReservation, a.FinalSync, a.Issuer, a.Archive, a.LocalComplete} {
+	stamps := []RecordStamp{a.Task, a.CleanupIntent, a.TaskLink, a.Placement, a.Control, a.Owner, a.Fence, a.RuntimeIndex, a.Quiescence, a.QuiescenceReceipt, a.QuiescenceReservation, a.FinalSync, a.Issuer}
+	// Each version selects one complete effect profile. Zero local stamps are
+	// meaningful only alongside the explicit detached settlement tuple.
+	switch c.Version {
+	case 1:
+		if c.DetachedEffects != nil {
+			return fmt.Errorf("local runtime termination cannot contain detached effects")
+		}
+		stamps = append(stamps, a.Archive, a.LocalComplete)
+	case 2:
+		d := c.DetachedEffects
+		if c.MountAttempt != 0 || a.Archive != (RecordStamp{}) || a.LocalComplete != (RecordStamp{}) || d == nil {
+			return fmt.Errorf("invalid detached runtime termination effect profile")
+		}
+		if d.Version != 1 || d.Profile != "detached_enrolled_plain" || !validHash(d.ContractDigest) {
+			return fmt.Errorf("invalid detached runtime termination effect bindings")
+		}
+		stamps = append(stamps, d.Settlement)
+	default:
+		return fmt.Errorf("invalid runtime termination intent version")
+	}
+
+	for _, s := range stamps {
 		if s.CreateRevision <= 0 || s.ModRevision < s.CreateRevision || !validHash(s.SHA256) {
 			return fmt.Errorf("invalid runtime termination record stamp")
 		}
 	}
+
 	s := a.QuiescenceStage
 	if !validID(s.RequestID) || !validID(s.StageID) || !validUUID(s.AttemptID) || !validHash(s.Digest) {
 		return fmt.Errorf("invalid runtime termination quiescence stage")
 	}
+
 	switch c.Phase {
 	case "reserved":
 		if len(c.TerminalProof) != 0 || c.CleanupDigest != "" {
@@ -157,7 +211,13 @@ func terminationRuntimeIndexDigest(uid string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// TaskRuntimeTerminationKeysFor derives the fixed local v1 native read set.
+// Detached v2 wire is deliberately rejected until its native authority reader
+// exists; the local Archive/LocalComplete keys cannot stand in for settlement.
 func TaskRuntimeTerminationKeysFor(c TaskRuntimeTerminationIntent) (TaskRuntimeTerminationKeys, error) {
+	if c.Version != 1 {
+		return TaskRuntimeTerminationKeys{}, fmt.Errorf("runtime termination native keys require local version 1")
+	}
 	if err := validateTerminationIntent(c); err != nil {
 		return TaskRuntimeTerminationKeys{}, err
 	}
