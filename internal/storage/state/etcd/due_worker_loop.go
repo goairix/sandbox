@@ -123,6 +123,13 @@ func dueWorkerCreditAt(bucket workerBucket, now time.Time, amount uint32) time.T
 }
 
 func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
+	return w.readyClaimFor(now, nil)
+}
+
+// A cold cursor seals one original Claim share across yields. Restricting the
+// normal lane arbitration to that member cannot adopt a different capability
+// merely because another share has credit; all legacy callers still pass nil.
+func (w *DueWorker) readyClaimFor(now time.Time, wanted *WorkerBudgetShare) (*WorkerBudgetShare, time.Time) {
 	if w.options.AutomaticCleanup {
 		w.claimAsked = true
 		if w.claimLane < 0 || w.claimLane >= len(w.claimWaiting) {
@@ -147,6 +154,9 @@ func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
 	for n := 0; n < len(w.claims); n++ {
 		i := (w.claimNext + n) % len(w.claims)
 		share := w.claims[i]
+		if wanted != nil && share != wanted {
+			continue
+		}
 		if !b.validWorkerBudget(share) || share.session != w.session || share.lost || share.released || share.release != nil || share.dueOwner != nil || w.session.operation != nil {
 			continue
 		}
@@ -174,9 +184,9 @@ func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
 // due admission or physical continuations. Explicit mode retains old ordering.
 func (w *DueWorker) beginClaimLane(lane int) {
 	w.claimLane, w.claimAsked = lane, false
-	if w.options.AutomaticCleanup && (lane == 0 || lane == 2) {
+	if rangeLane := w.cleanupRangeLane(lane); w.options.AutomaticCleanup && rangeLane >= 0 {
 		for i := range w.rangeAsked {
-			w.rangeAsked[i][lane/2] = false
+			w.rangeAsked[i][rangeLane] = false
 		}
 	}
 }
@@ -185,8 +195,7 @@ func (w *DueWorker) endClaimLane() {
 	if w.options.AutomaticCleanup && !w.claimAsked {
 		w.claimWaiting[w.claimLane] = false
 	}
-	if w.options.AutomaticCleanup && (w.claimLane == 0 || w.claimLane == 2) {
-		lane := w.claimLane / 2
+	if lane := w.cleanupRangeLane(w.claimLane); w.options.AutomaticCleanup && lane >= 0 {
 		for i := range w.rangeWaiting {
 			if !w.rangeAsked[i][lane] {
 				w.rangeWaiting[i][lane] = false
@@ -195,9 +204,26 @@ func (w *DueWorker) endClaimLane() {
 	}
 }
 
+// The original actor call order is cleanup1, automatic2, due0. Only explicit
+// cold mode gives cleanup its own fixed Range contender; legacy stays at two.
+func (w *DueWorker) cleanupRangeLane(claimLane int) int {
+	switch claimLane {
+	case 0:
+		return 0
+	case 2:
+		return 1
+	case 1:
+		if w.backend.cleanupColdQuotaEnabled() {
+			return 2
+		}
+	}
+	return -1
+}
+
 // Range priority belongs to the original fixed share, so unrelated shares do
-// not block each other. Both continuously waiting lanes receive an available
-// opportunity within two grants. Readiness uses a bucket copy: only the native
+// not block each other. Legacy's two contenders alternate; explicit cold mode's
+// three contenders progress within three available grants. Readiness uses a
+// bucket copy: only the native
 // owner charges credit, and a refusal never creates a refund. A non-Range turn
 // withdraws its request through endClaimLane. Watch keeps its existing finite
 // dispatch: it validates share fences but does not debit this page bucket.
@@ -208,14 +234,27 @@ func (w *DueWorker) readyRangeAt(share *WorkerBudgetShare, lane int) time.Time {
 	now := time.Now()
 	if w.options.AutomaticCleanup {
 		slot := share.slot
-		w.rangeAsked[slot][lane], w.rangeWaiting[slot][lane] = true, true
-		if w.rangeWaiting[slot][1-lane] && int(w.rangeNext[slot]) != lane {
+		lanes := 2
+		if b.cleanupColdQuotaEnabled() {
+			lanes = 3
+		}
+		if lane < 0 || lane >= lanes || int(slot) >= len(w.rangeWaiting) {
 			return now.Add(100 * time.Millisecond)
+		}
+		w.rangeAsked[slot][lane], w.rangeWaiting[slot][lane] = true, true
+		for n := 0; n < lanes; n++ {
+			next := (int(w.rangeNext[slot]) + n) % lanes
+			if w.rangeWaiting[slot][next] {
+				if next != lane {
+					return now.Add(100 * time.Millisecond)
+				}
+				break
+			}
 		}
 		at := dueWorkerCreditAt(share.bucket, now, maxMutationBytes)
 		if !at.After(now) {
 			w.rangeWaiting[slot][lane] = false
-			w.rangeNext[slot] = uint8(1 - lane)
+			w.rangeNext[slot] = uint8((lane + 1) % lanes)
 		}
 		return at
 	}

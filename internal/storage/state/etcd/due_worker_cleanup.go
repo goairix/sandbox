@@ -70,6 +70,9 @@ type cleanupLocalJob struct {
 	started       bool
 	request       *cleanupLocalContinuation
 	effectsJoined bool
+	// Only compact, original-job quota attribution survives actor yields.
+	// All heavy cold history and prepared/permit graphs belong to worker.coldQuota.
+	coldQuota cleanupColdQuotaJob
 }
 
 type cleanupLocalContinuation struct {
@@ -162,10 +165,10 @@ func (w *DueWorker) enqueueCleanupLocal(ctx context.Context, task TaskReference)
 	return job, nil
 }
 
-// Each actor turn spends one original Claim credit, even for metadata-only
-// rejection. A 100-share budget therefore does not mean 100 physical tasks/s.
-// Original reads/writes are split at explicit state boundaries, never 32 slots
-// in one call. A live owner finishes before the next due or renewal operation.
+// Ordinary cleanup admission spends one original Claim credit per turn. Cold
+// metadata instead pays Range only, and cold mutations pay both original
+// shares. Original reads/writes remain split at explicit state boundaries,
+// never 32 slots in one call. Every native call joins before due or renewal.
 func (w *DueWorker) cleanupTurn() (time.Time, error) {
 	b := w.backend
 	b.archiveLife.mu.Lock()
@@ -173,6 +176,12 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 	for n := 0; n < len(w.cleanupJobs); n++ {
 		i := (w.cleanupNext + n) % len(w.cleanupJobs)
 		candidate := w.cleanupJobs[i]
+		// A cold waiter cannot advance while another job owns the workspace.
+		// Skip it in this bounded original scan, preserving round robin among
+		// the workspace owner and ordinary physical metadata continuations.
+		if candidate != nil && w.coldQuota != nil && candidate != w.coldQuota.job && cleanupColdQuotaPhase(candidate.step) {
+			continue
+		}
 		if candidate != nil && (!candidate.started || candidate.request != nil) {
 			job = candidate
 			w.cleanupNext = (i + 1) % len(w.cleanupJobs)
@@ -186,6 +195,20 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 	if err := job.ctx.Err(); err != nil {
 		w.cleanupTurnFailed(job, err)
 		return time.Time{}, nil
+	}
+	if b.cleanupColdQuotaEnabled() {
+		if cleanupColdQuotaPhase(job.step) {
+			return w.cleanupColdQuotaTurn(job)
+		}
+		// The original paid publication phase must seal cold provenance before
+		// wire preflight or any execution occupation/Run mutation can begin.
+		switch job.step {
+		case "wire-preflight", "initialize", "reserve", "run", "recovery-run", "early-run":
+			if err := w.validateCleanupColdQuotaOrigin(job); err != nil {
+				w.cleanupTurnFailed(job, err)
+				return time.Time{}, nil
+			}
+		}
 	}
 	share, at := w.readyClaim(time.Now())
 	if share == nil {
@@ -225,6 +248,10 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 
 func (w *DueWorker) cleanupTurnFailed(job *cleanupLocalJob, err error) {
 	job.inventory = nil
+	// The serial caller has already joined its actual native call. A physical
+	// continuation is still owed its reply; releasing cold metadata never joins
+	// or detaches that separate original goroutine.
+	w.releaseCleanupColdQuota(job)
 	b := w.backend
 	b.archiveLife.mu.Lock()
 	request, started := job.request, job.started
@@ -362,6 +389,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 	case "publication":
 		err = b.cleanupPublication(ctx, j.bundle.task, j.target)
 		j.step = "issuer"
+		if err == nil && b.cleanupColdQuotaEnabled() {
+			j.step = "cold-origin"
+		}
 	case "issuer":
 		err = b.cleanupIssuer(ctx, j.target)
 		j.step = "wire-preflight"
@@ -487,6 +517,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 				return ErrCorruptRecord
 			}
 			j.step = "done"
+			if b.cleanupColdQuotaEnabled() {
+				j.step = "cold-quota-history"
+			}
 		} else if j.proof == nil {
 			if j.started {
 				return ErrConflict
@@ -511,6 +544,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		// settlement share this proof without reconstructing a claim bundle.
 		j.terminal, err = b.loadCleanupTerminalEvidence(owner, j.state)
 		j.step = "settle"
+		if err == nil && b.cleanupColdQuotaEnabled() {
+			j.step = "cold-quota-history"
+		}
 	case "settle":
 		if j.started {
 			err = b.settleCleanupRun(ctx, j, j.proof)

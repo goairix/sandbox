@@ -94,6 +94,9 @@ type DueWorker struct {
 	// retains no original errors/jobs after registry removal; archiveLife.mu
 	// protects publication alongside job.done and all status observations.
 	cleanupResults cleanupJobResult
+	// The serial actor alone owns this one cold metadata workspace. Its
+	// borrowed history/cursors never enter the 32 independent job records.
+	coldQuota *cleanupColdQuotaWorkspace
 
 	// Automatic phases and Claim arbitration belong exclusively to the actor.
 	// Waiting lanes retain priority across token waits, withdrawing on an idle turn.
@@ -105,8 +108,8 @@ type DueWorker struct {
 
 	// Each original Range slot arbitrates due refill and automatic metadata.
 	// Priority changes only on an available opportunity, never on loop parity.
-	rangeWaiting [20][2]bool
-	rangeAsked   [20][2]bool
+	rangeWaiting [20][3]bool
+	rangeAsked   [20][3]bool
 	rangeNext    [20]uint8
 }
 
@@ -157,6 +160,9 @@ func (b *Backend) StartDueWorker(ctx context.Context, options DueWorkerOptions) 
 		return nil, err
 	}
 	if b.workerControl.options.SessionTTL <= 2*b.requestTimeout+time.Second {
+		return nil, ErrInvalidConfiguration
+	}
+	if b.cleanupColdQuotaEnabled() && (!options.AutomaticCleanup || b.preparationInventory == nil || !validHexDigest(b.preparationDigest) || b.preparationTotal < 32) {
 		return nil, ErrInvalidConfiguration
 	}
 	if options.AutomaticCleanup {
@@ -323,6 +329,9 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 	if w.cache != nil {
 		status.OwnedBytes, status.Queued = dueCacheReservedBytes+w.cache.bytes, w.cache.count
 		if w.cache.automatic {
+			status.OwnedBytes += 4 << 20
+		}
+		if w.cache.coldQuota {
 			status.OwnedBytes += 4 << 20
 		}
 	}

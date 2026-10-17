@@ -77,11 +77,16 @@ func (w *DueWorker) initializeAutomatic() error {
 		a.partitions = append(a.partitions, dueWorkerAutomaticPartition{scan: scan})
 	}
 	w.backend.archiveLife.mu.Lock()
-	if !w.cache.validLocked() || w.cache.session != w.session || w.cache.count > 9631 || w.cache.bytes > 36<<20 {
+	keyLimit, byteLimit := 9631, uint64(36<<20)
+	if w.backend.cleanupColdQuotaEnabled() {
+		keyLimit, byteLimit = 9567, 32<<20
+	}
+	if !w.cache.validLocked() || w.cache.session != w.session || w.cache.count > keyLimit || w.cache.bytes > byteLimit {
 		w.backend.archiveLife.mu.Unlock()
 		return ErrInvalidRecord
 	}
 	w.cache.automatic = true
+	w.cache.coldQuota = w.backend.cleanupColdQuotaEnabled()
 	w.backend.archiveLife.mu.Unlock()
 	w.automatic = a
 	_, err := w.automaticRetainedBytes()

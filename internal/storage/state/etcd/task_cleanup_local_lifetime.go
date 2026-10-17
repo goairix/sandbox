@@ -19,6 +19,12 @@ func (w *DueWorker) stopCleanupJobs() {
 		}
 	}
 	b.archiveLife.mu.Unlock()
+	// This is the sole actor's stop tail, after its active native turn returned.
+	// Release cold metadata before replying to physical owners; their eventual
+	// finish must never read or mutate the actor-owned workspace pointer.
+	if w.coldQuota != nil {
+		w.releaseCleanupColdQuota(w.coldQuota.job)
+	}
 	// The sole actor has already returned from its active native turn. No
 	// accepted continuation remains executing while these replies are refused.
 	for _, j := range jobs {
@@ -238,6 +244,9 @@ func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proo
 // mandatory. The original actor owns this request until native return/postcheck
 // and only then completes its job; cancellation cannot release S early.
 func (b *Backend) settleCleanupOccupation(owner *workerDueOwner, j *cleanupLocalJob, proof *localOwnerReleaseProof, history *cleanupTerminalEvidence) error {
+	if b.cleanupColdQuotaEnabled() && (j == nil || j.worker == nil || j.worker.validateCleanupColdQuotaVerified(j) != nil) {
+		return ErrInvalidRecord
+	}
 	if j == nil || j.worker == nil || j.worker.backend != b || j.owner != owner || owner == nil || proof == nil || proof.kv == nil || j.state == nil || j.state.slot == nil || j.state.record.Phase != "occupied" || j.state.record.Run == nil || !j.state.record.Run.Joined || history == nil || history.record != cleanupSlotRecordFromExecution(j.state.record) || proof.record.Task != j.task || j.state.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
 		return ErrInvalidRecord
 	}

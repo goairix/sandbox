@@ -108,6 +108,23 @@ func (w *DueWorker) automaticPendingTurn(ctx context.Context) (time.Time, error)
 		}
 		a.release, a.phase = release, "pending-delete"
 	case "pending-delete":
+		if b.cleanupColdQuotaEnabled() {
+			_, err := w.enqueueCleanupColdQuota(a.birth, a.release)
+			if errors.Is(err, ErrConflict) {
+				duplicate, full := w.automaticRegistry(a.candidate.Reference)
+				if !duplicate && full {
+					w.automaticFinishPhase()
+					return time.Now().Add(100 * time.Millisecond), nil
+				}
+				if !duplicate {
+					return time.Time{}, err
+				}
+			} else if err != nil {
+				return time.Time{}, err
+			}
+			w.automaticAdvancePending()
+			return time.Now(), nil
+		}
 		share, at := w.readyClaim(time.Now())
 		if share == nil {
 			return at, nil

@@ -43,6 +43,9 @@ type dueWorkerCache struct {
 	// Set once before automatic startup. Fixed arrays keep their old capacity;
 	// admissions reserve 369 identities and 4MiB for automatic discovery.
 	automatic bool
+	// Cold mode reserves a further 4MiB and 64 source identities for its one
+	// workspace plus all compact registry additions, independently of discovery.
+	coldQuota bool
 }
 
 type dueWorkerCacheStatus struct {
@@ -193,6 +196,10 @@ func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) er
 	keyLimit, byteLimit := dueCacheKeys, uint64(dueCacheDynamicBytes)
 	if c.automatic {
 		keyLimit -= 369
+		byteLimit -= 4 << 20
+	}
+	if c.coldQuota {
+		keyLimit -= 64
 		byteLimit -= 4 << 20
 	}
 	if cell < 0 || slot < 0 && c.count >= keyLimit || c.bytes-old+charge > byteLimit {
@@ -348,6 +355,9 @@ func (c *dueWorkerCache) settled(candidate DueCandidateRecord) {
 func (c *dueWorkerCache) statusLocked() dueWorkerCacheStatus {
 	status := dueWorkerCacheStatus{OwnedBytes: dueCacheReservedBytes + c.bytes, Keys: c.count, Partitions: make([]dueWatchPartitionResult, 0, 256)}
 	if c.automatic {
+		status.OwnedBytes += 4 << 20
+	}
+	if c.coldQuota {
 		status.OwnedBytes += 4 << 20
 	}
 	for i := range c.views {

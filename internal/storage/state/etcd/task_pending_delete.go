@@ -66,7 +66,14 @@ func (b *Backend) validateCleanupPendingDelete(ctx context.Context, p *WorkerPar
 // One finite original Claim CAS deletes only P. It leaves B, execution, slots
 // and physical cleanup untouched. Unknown outcomes lose the session and require
 // fresh paid observations; finish joins actual native return even during Close.
-func (b *Backend) deleteCleanupPending(ctx context.Context, p *WorkerPartitionClaim, claims *WorkerBudgetShare, birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence) (resultErr error) {
+func (b *Backend) deleteCleanupPending(ctx context.Context, p *WorkerPartitionClaim, claims *WorkerBudgetShare, birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence, jobs ...*cleanupLocalJob) (resultErr error) {
+	// The cold seal is checked before admission. Ordinary signed birth/release
+	// proof and the unchanged full CAS remain necessary after this local gate.
+	if b != nil && b.cleanupColdQuotaEnabled() {
+		if len(jobs) != 1 || b.validateCleanupColdQuotaPending(jobs[0], p, birth, release) != nil {
+			return ErrInvalidRecord
+		}
+	}
 	if err := b.validateCleanupPendingDelete(ctx, p, claims, birth, release); err != nil {
 		return err
 	}

@@ -29,6 +29,11 @@ type LocalCleanupOptions struct {
 	ClaimTTL, JobTimeout, ArchiveTimeout time.Duration
 	// MaxActive bounds queued, admitting and running jobs together, up to 32.
 	MaxActive uint32
+	// ColdRuntimeQuotaReturn makes automatic cleanup verify the original cold
+	// runtime quota return before settling execution or deleting discovery P.
+	// It requires PreparationInventory and AutomaticCleanup at worker startup;
+	// false preserves the existing cleanup protocol for older deployments.
+	ColdRuntimeQuotaReturn bool
 
 	roots   []ed25519.PublicKey
 	binding p.TrustBinding
@@ -132,6 +137,9 @@ func validateLocalCleanupOptions(o Options) error {
 	c := o.LocalCleanup
 	if c == nil {
 		return nil
+	}
+	if c.ColdRuntimeQuotaReturn && o.PreparationInventory == nil {
+		return ErrInvalidConfiguration
 	}
 	if o.WorkerControl == nil || o.WorkerControl.SessionTTL != 60*time.Second || o.RequestTimeout <= 0 || o.RequestTimeout > 3*time.Second || o.EnrolledPublication == nil || o.PublicationTrust == nil || o.Clock == nil || o.TaskIssuer == nil || o.TaskQuiescenceIssuer == nil || o.TaskWorkspaceArchiveIssuer == nil || o.TaskRuntimeTerminationIssuer == nil || o.LocalRuntimeRelease == nil || o.TaskWorkspaceArchiveRecovery == nil || o.TaskWorkspaceSyncRecyclingBudget == nil {
 		return ErrInvalidConfiguration

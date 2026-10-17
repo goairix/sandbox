@@ -43,7 +43,10 @@ func (b *Backend) cleanupBackfillAdvancePlan(p *WorkerPartitionClaim, page *clea
 			if err := matchCleanupBirthReleaseProof(birth, release.proof); err != nil {
 				return cleanupBackfillRecord{}, false, err
 			}
-			terminal = birth.execution == nil || birth.execution.Phase == "settled"
+			// Physical terminal history alone cannot cover cold quota work.
+			// Keep/create P so the original bounded registry verifies quota;
+			// the later original-job P gate owns its eventual deletion.
+			terminal = !b.cleanupColdQuotaEnabled() && (birth.execution == nil || birth.execution.Phase == "settled")
 		}
 	}
 	return next, terminal, nil
