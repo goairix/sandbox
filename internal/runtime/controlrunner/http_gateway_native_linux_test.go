@@ -175,7 +175,7 @@ func exerciseHTTPGatewayNative(t *testing.T, ctx context.Context, realService *p
 	path := "/api/v1/sandboxes/" + first.ID
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), 200, &current)
 	require.Equal(t, first.SandboxResponse, current)
-	unsupported := httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 501, nil)
+	unsupported := httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path, "", nil, true), 501, nil)
 	require.Contains(t, string(unsupported), `"code":"unsupported"`)
 	execPath := path + "/exec"
 	command := types.ExecRequest{Language: "bash", Code: "printf 'http-stdout\\n'; printf 'http-stderr\\n' >&2; exit 7"}

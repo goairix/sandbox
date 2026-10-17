@@ -75,6 +75,7 @@ type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
 	httpGateway, fileAPI                                           bool
 	largeDownload                                                  bool
+	destroyLocal, destroyDetached                                  bool
 }
 
 func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVariant) {
@@ -84,7 +85,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		lookupHooks = &liveLookupNativeHooks{}
 	}
 	var execHooks *execServiceNativeHooks
-	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload {
+	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
 		execHooks = &execServiceNativeHooks{}
 	}
 	require.Zero(t, os.Geteuid())
@@ -111,6 +112,9 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	}
 	if variant.httpGateway || variant.fileAPI || variant.largeDownload {
 		timeout = 60 * time.Second
+	}
+	if variant.destroyLocal || variant.destroyDetached {
+		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
@@ -144,6 +148,9 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	var inventory state.PreparationInventoryOptions
 	inventory.QuotaSlots[7] = 1
 	binding := p.TrustBinding{Namespace: ns.Root(), AuthorityID: "launcher", Target: "target", RestoreEpoch: "restore"}
+	if variant.destroyLocal {
+		binding.Target = "kubernetes"
+	}
 	backendOptions := state.Options{Endpoints: []string{"https://127.0.0.1:2379"}, Namespace: ns, Identity: identity, TLS: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: observerTLS.RootCAs, Certificates: []tls.Certificate{certificate}}, RequestTimeout: 2 * time.Second, Clock: nativeFixtureClock{}, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: binding.AuthorityID, Target: binding.Target, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: profileFixtureContract(t), MaxActive: 4}, PreparationInventory: &inventory}
 	var execIssuer *deployment.ExecIssuer
 	backend, err := state.New(ctx, backendOptions)
@@ -169,7 +176,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
-	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload {
+	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
 		launcher, err := launcherconfig.Decode(config)
 		require.NoError(t, err)
 		execIssuer, err = deployment.NewExecIssuer(ctx, issuerKey, issuerCert, launcher, nativeFixtureClock{})
@@ -203,6 +210,10 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	}
 	w, err := state.NewWorkspaceIdentity("s3", identity.StorageID, "bucket", uuid.NewString()+"/")
 	require.NoError(t, err)
+	if variant.destroyLocal {
+		w, err = state.NewWorkspaceIdentity("local", identity.StorageID, "bucket", "http-destroy/")
+		require.NoError(t, err)
+	}
 	if detached {
 		w, err = backend.DetachedIdentity(request.Principal, request.IdempotencyKey)
 		require.NoError(t, err)
@@ -226,10 +237,22 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	var pod *v1.Pod
 	var postCount, startCount, execCount atomic.Int32
 	var bridges []*startupBridgeFixture
+	bridgeLimit := 16
+	var destroyProvider *httpDestroyNativeProvider
+	if variant.destroyLocal {
+		destroyProvider = &httpDestroyNativeProvider{}
+		// This composition shares Create(3), Exec(1) and cleanup(at least13)
+		// bridges, plus terminal-quiescence queries. Keep a fixed fixture-only
+		// bound; existing variants retain16 and overflow still fails closed.
+		bridgeLimit = 32
+	}
 	// Only this POST handler starts the original formal launcher. GET, service
 	// construction and setup cannot create a runtime or fabricate publication.
 	api := httptest.NewTLSServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		path := "/api/v1/namespaces/runtimes/pods"
+		if destroyProvider != nil && destroyProvider.handle(rw, r, &mu, &pod) {
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == path {
 			if postCount.Add(1) != 1 {
 				http.Error(rw, "duplicate POST", http.StatusConflict)
@@ -317,7 +340,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		mu.Unlock()
 		if actualName != "" && r.URL.Path == path+"/"+actualName+"/exec" {
 			mu.Lock()
-			if child == nil || len(bridges) >= 16 {
+			if child == nil || len(bridges) >= bridgeLimit {
 				mu.Unlock()
 				rw.WriteHeader(http.StatusConflict)
 				return
@@ -397,9 +420,16 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 				err = <-wait
 			}
 			t.Logf("cold service original formal launcher Cmd.Wait=%v", err)
-			require.NoError(t, err)
-			if err == nil {
-				t.Log("cold service original formal launcher Cmd.Wait=exit0")
+			if variant.destroyLocal {
+				var killed *exec.ExitError
+				require.ErrorAs(t, err, &killed)
+				require.Equal(t, syscall.SIGKILL, killed.Sys().(syscall.WaitStatus).Signal())
+				t.Log("HTTP destroy original formal launcher Cmd.Wait=SIGKILL physically joined")
+			} else {
+				require.NoError(t, err)
+				if err == nil {
+					t.Log("cold service original formal launcher Cmd.Wait=exit0")
+				}
 			}
 		}
 	})
@@ -425,7 +455,9 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
 		mu.Unlock()
 		for _, bridge := range ownedBridges {
-			if execHooks != nil && execHooks.expectedFailure(bridge) {
+			if variant.destroyLocal {
+				requireHTTPDestroyNativeBridgeJoined(t, bridge)
+			} else if execHooks != nil && execHooks.expectedFailure(bridge) {
 				requireExecServiceFailedBridgeJoined(t, bridge)
 			} else if lookupHooks != nil && lookupHooks.expectedFailure(bridge) {
 				requireLiveLookupFailedBridgeJoined(t, bridge)
@@ -433,6 +465,15 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 				bridge.requireJoined(t)
 			}
 		}
+	}
+	if variant.destroyLocal || variant.destroyDetached {
+		exerciseHTTPDestroyNative(t, ctx, httpDestroyNativeContext{
+			service: service, backend: backend, raw: admin, options: options,
+			request: request, workspace: w, identity: identity, directory: dir,
+			observerAddress: tcp.Addr().String(), clockKey: clockKey, provider: destroyProvider,
+		}, variant.destroyLocal)
+		joinOriginalBridges()
+		return
 	}
 	if variant.httpGateway {
 		exerciseHTTPGatewayNative(t, ctx, service, execHooks, func() {

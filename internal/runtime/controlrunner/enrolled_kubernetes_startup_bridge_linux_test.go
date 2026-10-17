@@ -128,6 +128,12 @@ type startupBridgeFixture struct {
 	stdout    int64
 	waited    bool
 	waitErr   error
+	// Written only by relay and read after done/wg join. These distinguish
+	// complete original IO and Success delivery from the final Close frame;
+	// result still preserves every original relay error without suppression.
+	ioJoined       bool
+	successWritten bool
+	finalCloseErr  error
 	// Default remains 10s; the long Exec fixture owns a finite 75s bridge.
 	timeout time.Duration
 	// A cold-create fixture may lose the actual activation response after the
@@ -334,12 +340,15 @@ func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
 	if diagnostic.n != 0 {
 		return fmt.Errorf("formal bridge emitted %d stderr bytes", diagnostic.n)
 	}
+	f.ioJoined = true
 	// Success comes solely from the real child exit after all pipe owners join.
 	status := append([]byte{3}, []byte(`{"status":"Success"}`)...)
 	if err := ws.WriteMessage(websocket.BinaryMessage, status); err != nil {
 		return fmt.Errorf("bridge success status: %w", err)
 	}
-	return ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	f.successWritten = true
+	f.finalCloseErr = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	return f.finalCloseErr
 }
 
 func startupBridgeInput(ws *websocket.Conn, stdin io.WriteCloser) error {

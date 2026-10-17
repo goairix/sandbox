@@ -50,6 +50,10 @@ gateway-host-01 是接口 GoDoc 补充前的历史记录；Root 对归档/curren
 
 ## 尚待 Root 集中验收
 
+本节保留原阶段记录。后续 local 正向物理链及 detached 阴性已完成，唯一入口 Task
+Spec/Quality 审查通过；实际范围、历史二进制区别及仍未覆盖的故障组合见
+[真实组合验证](2026-10-17-etcd-destroy-native-verification.md)。不将其扩大为生产切换。
+
 本作者未执行 Docker/native，也未修改 controlrunner/native helper。实际正向须使用
 真实 service.Create(local) ->HTTP DELETE202 ->原自动 worker ->物理释放及 pending 删除；
 HTTP detached 创建须验证 DELETE501 且 control/Task/P/Stage 无变化。已有 cleanup fixture
