@@ -58,8 +58,20 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [事务预算基础](2026-10-17-etcd-cold-quota-worker-wire-verification.md)、
 [v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
 [双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
-v3仍未由CLI接受，准入尚未发送实际quota RPC；worker私有有界continuation、metadata计费、
-失败响应/重试预算、保留内存核算及自动consumer仍需完成，不计为配额自动返还已接通。
+v3仍未由CLI接受，worker私有continuation、metadata计费、保留内存核算及自动consumer
+仍需完成，不计为配额自动返还已接通。
+
+`3c3afed` 接通五个私有固定 RPC 的真实 gRPC 通信层：限制每次请求、回复、累计
+protobuf预算和重复发送，取消后仍为原已识别租约保留一次有界回收。host、race、
+Linux vet及唯一完整Task审查通过，见
+[通信层验证](2026-10-17-etcd-cold-quota-worker-rpc-verification.md)。`8e745f9` 接通
+实际双预算worker journal，保留原引用、全部history/worker比较和54/61节点；
+未知ACK消耗原权限，重复败者不能消耗赢家，实际客户端返回后才完成worker调用。
+host八组、race四十二组、Linux vet及唯一完整Task审查通过，见
+[worker journal验证](2026-10-17-etcd-cold-quota-worker-journal-verification.md)。
+首次新测试辅助代码的客户端关闭顺序失败已如实保留，修复没有放松关闭或业务断言。
+这两片验证的是有界host协议，尚无自动quota结算、已验证quotaCommitted删除gate、
+保留内存容量或真实etcd故障验收；原公开协议和默认启动路径保持原行为。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
