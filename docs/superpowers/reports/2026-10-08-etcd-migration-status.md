@@ -88,8 +88,19 @@ Task审查，见[纯校验验证](2026-10-17-etcd-cold-quota-proof-verification.
 `66036ab` 新增独立双预算 worker Resolve，完整W24/29节点，仅仲裁原journal引用的
 receipt；丢ACK不重发，不申请新Stage，结果仍为普通Outcome。定向host/race、Linux
 vet及独立Task审查通过，见[恢复仲裁验证](2026-10-18-etcd-cold-quota-worker-resolve-verification.md)。
-恢复后的aborted receipt或committed return/receipt仍须另行付费认证；完整历史分步读取、
-共享工作区、自动结算/删除gate及真实etcd恢复组合仍未完成。
+恢复后的aborted receipt或committed return/receipt仍须另行付费认证。
+
+`c3165c7` 提取共享 settlement 纯校验并保持公开读取顺序；`0e53797`/`29cef73` 接通七组
+分别计费的完整历史认证，保留真实 publication/终止签名、原出生和六个 CAS source KV。
+额度不足从当前阶段继续，Claim 不消耗，返回后及 cached done 仍复核原 owner/context/members。
+`b2749da` 的 worker recovery 已实现先检查 committed return、再读原 journal、付费 Resolve 后另付费
+认证 aborted receipt 或 committed return/receipt；Unknown 保留原引用，不生成新的 attempt。
+两项均完成定向 host/race、Linux vet、证据核对和独立 Task 审查，见
+[历史分步认证](2026-10-18-etcd-cold-quota-worker-history-verification.md)与
+[分步恢复](2026-10-18-etcd-cold-quota-worker-recovery-verification.md)。
+这些私有 cursor 借用 history，尚未完成全局共享工作区和 32 job 保留内存约束；
+ready/slot 分步 prepare、原 job 正向来源、自动结算/P 删除 gate、生产配置及真实 etcd
+恢复和大 N 容量验收继续开放。功能/整体百分比保持上述粗估，未按私有切片数量增加。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
