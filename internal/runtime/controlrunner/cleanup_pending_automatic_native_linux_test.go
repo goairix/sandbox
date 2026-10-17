@@ -37,6 +37,8 @@ func cleanupPendingAutomaticWorker(t *testing.T, ctx context.Context, s cleanupE
 		cleanupWorkerRoleNative(t, ctx, s, dir, tlsConfig, ca, certificate, key, "/fixture/cleanup-worker")
 	case "automatic-pending-aba", "automatic-pending-ack":
 		cleanupPendingFaultMounted(t, ctx, s, kernel, dir, tlsConfig, ca, certificate, key)
+	case "automatic-result-mounted", "automatic-result-role":
+		cleanupPendingResultNative(t, ctx, s, kernel, dir, tlsConfig, ca, certificate, key)
 	default:
 		t.Fatal("unknown automatic cleanup native mode")
 	}

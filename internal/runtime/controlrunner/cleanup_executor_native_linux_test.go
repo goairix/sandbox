@@ -733,6 +733,12 @@ func TestCleanupExecutorNative(t *testing.T) {
 	t.Run("automatic-pending-ack", func(t *testing.T) {
 		cleanupExecutorNativeCase(t, "automatic-pending-ack")
 	})
+	t.Run("automatic-result-mounted", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-result-mounted")
+	})
+	t.Run("automatic-result-role", func(t *testing.T) {
+		cleanupExecutorNativeCase(t, "automatic-result-role")
+	})
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
 	t.Run("mounted-loader", func(t *testing.T) { cleanupExecutorNativeCase(t, "mounted-loader") })
 	t.Run("preflight-refusal", func(t *testing.T) { cleanupExecutorNativeCase(t, "preflight-refusal") })
@@ -758,7 +764,8 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
 	mountedLoader := len(recovery) == 1 && (recovery[0] == "mounted-loader" ||
 		recovery[0] == "automatic-mounted-backlog" || recovery[0] == "automatic-worker-role" ||
-		recovery[0] == "automatic-pending-aba" || recovery[0] == "automatic-pending-ack")
+		recovery[0] == "automatic-pending-aba" || recovery[0] == "automatic-pending-ack" ||
+		recovery[0] == "automatic-result-mounted" || recovery[0] == "automatic-result-role")
 	if mountedLoader {
 		// The read-only container root stays unchanged. The existing mount
 		// capability provides a private, bounded clock directory owned by the
