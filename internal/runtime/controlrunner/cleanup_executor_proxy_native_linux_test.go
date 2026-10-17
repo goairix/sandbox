@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,8 +25,9 @@ import (
 )
 
 // This proxy has no storage or effect implementation. Every request reaches
-// the original TLS etcd server. Its only fault withholds one successful native
-// Txn response until the downstream RPC deadline actually expires.
+// the original TLS etcd server. Recovery faults withhold one committed native
+// Txn response until its deadline; close coverage holds one actual read until
+// cancellation, explicit fixture release, or its fixed three-second ceiling.
 type cleanupExecutorEtcdProxy struct {
 	pb.UnimplementedMaintenanceServer
 	connection *grpc.ClientConn
@@ -39,6 +41,13 @@ type cleanupExecutorEtcdProxy struct {
 	task          state.TaskReference
 	prefix, fault string
 	stats         cleanupExecutorProxyStats
+
+	// The close scenario holds one real read response, never a fabricated
+	// response. This remote handler belongs to the fixture, not Backend.Close.
+	closeEntered  chan struct{}
+	closeRelease  chan struct{}
+	closeReturned chan struct{}
+	closeUnblock  sync.Once
 }
 
 type cleanupExecutorProxyStats struct {
@@ -47,11 +56,12 @@ type cleanupExecutorProxyStats struct {
 	WatchStreams, KeepAliveStreams            int
 	FaultMatched, FaultCommitted, FaultJoined int
 	FaultRevision                             int64
+	AdmissionReads, CloseReadJoined           int
 }
 
 func newCleanupExecutorEtcdProxy(t *testing.T, tlsConfig *tls.Config, task state.TaskReference, fault string) *cleanupExecutorEtcdProxy {
 	t.Helper()
-	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery"}, fault)
+	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join"}, fault)
 	connection, err := grpc.NewClient("127.0.0.1:2379", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())))
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -59,6 +69,9 @@ func newCleanupExecutorEtcdProxy(t *testing.T, tlsConfig *tls.Config, task state
 	serverTLS := tlsConfig.Clone()
 	serverTLS.ClientCAs, serverTLS.ClientAuth = tlsConfig.RootCAs, tls.RequireAndVerifyClientCert
 	p := &cleanupExecutorEtcdProxy{connection: connection, listener: listener, served: make(chan error, 1), task: task, prefix: fmt.Sprintf("%sp/%02x/tasks/%s/", task.Namespace, task.Partition, task.TaskID), fault: fault}
+	if fault == "close-join" {
+		p.closeEntered, p.closeRelease, p.closeReturned = make(chan struct{}), make(chan struct{}), make(chan struct{})
+	}
 	p.server = grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)), grpc.WaitForHandlers(true), grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
 	pb.RegisterKVServer(p.server, p)
 	pb.RegisterLeaseServer(p.server, p)
@@ -82,6 +95,7 @@ func (p *cleanupExecutorEtcdProxy) snapshot() cleanupExecutorProxyStats {
 func (p *cleanupExecutorEtcdProxy) close(t *testing.T) {
 	t.Helper()
 	p.closeOnce.Do(func() {
+		p.unblockCloseRead()
 		// Stop cancels downstream streams and joins native handlers. A handler
 		// may return before its blocked downstream Recv wakes; pumps stay owned
 		// here until that real Recv returns. Never wait for Recv before returning
@@ -118,6 +132,20 @@ func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnReque
 	}
 	p.mu.Lock()
 	p.observeWrites(request, response)
+	closeRead := false
+	for _, operation := range request.Success {
+		point := operation.GetRequestRange()
+		if point == nil {
+			continue
+		}
+		key := string(point.Key)
+		if strings.Contains(key, "/tasks/") && strings.HasSuffix(key, "/execution") {
+			p.stats.AdmissionReads++
+			if p.fault == "close-join" && key == p.prefix+"execution" && p.stats.AdmissionReads == 1 && response.Succeeded {
+				closeRead = true
+			}
+		}
+	}
 	drop := response.Succeeded && p.stats.FaultMatched == 0 && p.matchesFault(request)
 	if drop {
 		p.stats.FaultMatched++
@@ -125,6 +153,26 @@ func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnReque
 		p.stats.FaultRevision = response.Header.Revision
 	}
 	p.mu.Unlock()
+	if closeRead {
+		close(p.closeEntered)
+		// The original client q is 3s. A separate ceiling also bounds the
+		// fixture if its peer disappears without cancellation propagation.
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-p.closeRelease:
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		p.mu.Lock()
+		p.stats.CloseReadJoined++
+		p.mu.Unlock()
+		close(p.closeReturned)
+		if ctx.Err() != nil {
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+		return response, nil
+	}
 	if !drop {
 		return response, nil
 	}
@@ -135,6 +183,12 @@ func (p *cleanupExecutorEtcdProxy) Txn(ctx context.Context, request *pb.TxnReque
 	p.stats.FaultJoined++
 	p.mu.Unlock()
 	return nil, status.FromContextError(ctx.Err()).Err()
+}
+
+func (p *cleanupExecutorEtcdProxy) unblockCloseRead() {
+	if p.closeRelease != nil {
+		p.closeUnblock.Do(func() { close(p.closeRelease) })
+	}
 }
 
 // Count only writes in branches selected by the actual native response,

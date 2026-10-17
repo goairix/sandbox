@@ -54,6 +54,7 @@ type cleanupExecutorSetup struct {
 	Role                                     string
 	Task                                     state.TaskReference
 	Recovery, RecoveryStage, WorkerDirectory string
+	CloseMode                                string
 }
 
 // The child selector has three actual process roles. Only worker drops to the
@@ -238,6 +239,10 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 			Storage:  state.LocalCleanupStorage{Identity: s.WorkspaceStorage, Bucket: s.WorkspaceBucket, Directory: filepath.Join(dir, "target")},
 			ClaimTTL: 120 * time.Second, JobTimeout: 90 * time.Second, ArchiveTimeout: 60 * time.Second, MaxActive: 32,
 		},
+	}
+	if s.CloseMode != "" {
+		cleanupExecutorCloseWorker(t, ctx, s, options, tlsConfig)
+		return
 	}
 	if s.Recovery != "" {
 		cleanupExecutorRecoveryExecute(t, ctx, s, options, dir, tlsConfig)
@@ -702,6 +707,11 @@ func TestCleanupExecutorNative(t *testing.T) {
 	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
 	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
 	t.Run("observer-ack-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "observer-ack-recovery") })
+	t.Run("close-join", func(t *testing.T) {
+		for _, mode := range []string{"stop", "backend-close"} {
+			t.Run(mode, func(t *testing.T) { cleanupExecutorNativeCase(t, "close-join-"+mode) })
+		}
+	})
 }
 
 func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
@@ -880,7 +890,11 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.Equal(t, state.OutcomeCommitted, outcome)
 	s.Role, s.Task = "worker", task
 	if len(recovery) == 1 {
-		s.Recovery = recovery[0]
+		if strings.HasPrefix(recovery[0], "close-join-") {
+			s.CloseMode = strings.TrimPrefix(recovery[0], "close-join-")
+		} else {
+			s.Recovery = recovery[0]
+		}
 	}
 	s.Runtime, s.RuntimeCertificate, s.RuntimeAddress = ri.Runtime, runtimeCert, reply.Address
 	s.Generation = ri.Generation
@@ -889,6 +903,10 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	slotKey := fmt.Sprintf("%sp/%02x/workspace-sync-recycling-slots/%s/00", binding.Namespace, task.Partition, s.BudgetID)
 	_, err = admin.Put(ctx, slotKey, fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, task.Partition))
 	require.NoError(t, err)
+	if s.CloseMode != "" {
+		cleanupExecutorCloseParent(t, ctx, s, admin, apiState, child, &waited)
+		return
+	}
 	if s.Recovery != "" {
 		var observerProxy *cleanupExecutorObserverProxy
 		if s.Recovery == "observer-ack-recovery" {
