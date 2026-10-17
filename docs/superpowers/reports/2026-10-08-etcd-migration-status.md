@@ -10,7 +10,8 @@
 | 整体交付 | 约45% | 沿用20/30/20/15/15权重和90/70/30/0/0阶段估算，包含容量、故障、部署恢复及最终替代 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
-功能代码未完成：完整API/Pool/Docker/Upload及默认入口替代；分区due/dirty/Watch的
+功能代码未完成：完整API/Pool/Docker/Upload及默认入口替代、detached销毁消费者及
+独立自动清理worker的cold quota结算接线；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
 组合已通过四个新native场景，但完整Task审查发现两项代码问题与一项真实验收缺口，
@@ -27,9 +28,16 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 [自动组合验证](2026-10-17-etcd-automatic-native-verification.md)。每场一条真实Task，
 不能作为32物理并发或大N容量证明。首次容器配置及新helper数值精度失败日志保留。
 
-唯一完整Task审查尚未批准：首条旧Task的可选E损坏可能阻塞后续历史；自动job错误
-可能从最终Wait/Close丢失；真实etcd分页/压缩/积压接管/32与第33槽恢复等尚需补验。
-两个代码修复分别在主树和隔离工作树推进，DELETE入口在另一工作树接线。
+唯一完整Task审查仍未整体批准。`acda95c`修复可选E损坏阻塞后续历史索引；`fd92f9a`
+以固定摘要保留自动job失败。两片均通过定向host/race及Linux检查，同一审查员限定
+复核确认I1已解决、I2代码问题已解决且无新增代码问题；I2真实物理失败后自动恢复及
+关闭非零证据仍待补，不能提前关闭。I3真实etcd分页/压缩/积压接管/持久32与第33槽
+恢复仍开放，三成员新测试正在运行；没有合法无Run归还永久槽的捷径。
+
+`2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
+返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
+宣称完整销毁API已完成。定向race/Linuxvet通过，真实HTTP与自动物理组合仍待验收，
+见[入口验证及边界](2026-10-17-etcd-destroy-entrypoint-verification.md)。
 FUSE静态合同及endpoint编码修复已合入`d2948b3`/`63756cd`，完整host、定向race及
 Linux检查通过，同一审查员R1确认问题解决。它仍未启用任何生产FUSE/profile选择器，
 不是helper登记、挂载/flush、collector或双进程终止验收。
