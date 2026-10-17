@@ -16,6 +16,9 @@ const (
 	coldQuotaRPCCommit
 	coldQuotaRPCRevoke
 	coldQuotaRPCJournal
+	// Metadata is a sixth independent single-Txn cohort; original phase
+	// values and their fixed transport limits remain unchanged.
+	coldQuotaRPCMetadata
 )
 
 const (
@@ -29,8 +32,9 @@ const (
 	coldQuotaRPCRevokeReserve     = 10
 )
 
-// The existing lifecycle mutex owns this state. Journal is an independent paid
-// cohort; a call may instead perform the fixed Grant/guard/Commit/Revoke cohort.
+// The existing lifecycle mutex owns this state. Journal and metadata each own
+// an independent paid cohort; a call may instead perform the fixed
+// Grant/guard/Commit/Revoke cohort.
 // A failed or locally refused phase is never reset or refunded. busy spans the
 // actual native return, not merely admission or caller-context cancellation.
 // This is transport accounting only: the private caller retains all business
@@ -77,12 +81,12 @@ func (b *Backend) admitColdQuotaWorkerRPC(call *workerCall, phase coldQuotaWorke
 	if state.self != nil && state.self != call || state.busy || state.used&(1<<phase) != 0 {
 		return ErrConflict
 	}
-	if phase == coldQuotaRPCJournal {
+	if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata {
 		if state.cohort != 0 {
 			return ErrConflict
 		}
 	} else {
-		if state.cohort == coldQuotaRPCJournal {
+		if state.cohort == coldQuotaRPCJournal || state.cohort == coldQuotaRPCMetadata {
 			return ErrConflict
 		}
 		switch phase {
@@ -123,15 +127,15 @@ func (b *Backend) admitColdQuotaWorkerRPC(call *workerCall, phase coldQuotaWorke
 	state.self = call
 	if state.cohort == 0 {
 		state.cohort = coldQuotaRPCGrant
-		if phase == coldQuotaRPCJournal {
-			state.cohort = coldQuotaRPCJournal
+		if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata {
+			state.cohort = phase
 		}
 	}
 	state.used |= 1 << phase
 	if shapeErr != nil {
 		return shapeErr
 	}
-	if phase != coldQuotaRPCJournal {
+	if phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata {
 		reserve := coldQuotaRPCRevokeReserve
 		if phase == coldQuotaRPCRevoke {
 			reserve = 0
@@ -189,7 +193,7 @@ func coldQuotaWorkerRPCOptions(codec *coldQuotaWorkerRPCCodec) []grpc.CallOption
 	return []grpc.CallOption{
 		grpc.ForceCodec(codec),
 		grpc.MaxCallSendMsgSize(coldQuotaRPCRequestLimit),
-		grpc.MaxCallRecvMsgSize(coldQuotaWorkerRPCResponseLimit(codec.phase)),
+		grpc.MaxCallRecvMsgSize(codec.responseLimit()),
 		grpc.MaxRetryRPCBufferSize(0),
 	}
 }

@@ -22,6 +22,19 @@ func (c *coldQuotaWorkerRPCCodec) Name() string {
 	return "proto"
 }
 
+// Metadata binds its receive allowance to the exact original request bytes;
+// the two application protobuf envelopes share one 256 KiB Range charge.
+// Existing phases retain their independent fixed response caps unchanged.
+func (c *coldQuotaWorkerRPCCodec) responseLimit() int {
+	if c.phase == coldQuotaRPCMetadata {
+		if c.requestBytes <= 0 || c.requestBytes > coldQuotaRPCRequestLimit {
+			return 0
+		}
+		return maxMutationBytes - c.requestBytes
+	}
+	return coldQuotaWorkerRPCResponseLimit(c.phase)
+}
+
 // Marshal consumes the sole serialization attempt, including an interceptor's
 // reinvocation, and binds the actual flat request to its original paid size.
 func (c *coldQuotaWorkerRPCCodec) Marshal(value any) ([]byte, error) {
@@ -47,7 +60,7 @@ func (c *coldQuotaWorkerRPCCodec) Marshal(value any) ([]byte, error) {
 // Unmarshal checks the fixed phase envelope and finite object graph before
 // generated decoding can allocate responses or change the caller's destination.
 func (c *coldQuotaWorkerRPCCodec) Unmarshal(wire []byte, value any) error {
-	limit := coldQuotaWorkerRPCResponseLimit(c.phase)
+	limit := c.responseLimit()
 	if limit == 0 || len(wire) > limit {
 		return ErrCorruptRecord
 	}
@@ -64,13 +77,13 @@ func (c *coldQuotaWorkerRPCCodec) Unmarshal(wire []byte, value any) error {
 		}
 		kind = coldQuotaWireRevoke
 	case *pb.TxnResponse:
-		if response == nil || c.phase != coldQuotaRPCGuard && c.phase != coldQuotaRPCCommit && c.phase != coldQuotaRPCJournal {
+		if response == nil || c.phase != coldQuotaRPCGuard && c.phase != coldQuotaRPCCommit && c.phase != coldQuotaRPCJournal && c.phase != coldQuotaRPCMetadata {
 			return ErrCorruptRecord
 		}
 	default:
 		return ErrCorruptRecord
 	}
-	counts := coldQuotaWorkerRPCWireCounts{}
+	counts := coldQuotaWorkerRPCWireCounts{metadata: c.phase == coldQuotaRPCMetadata}
 	if err := coldQuotaWorkerRPCWire(wire, kind, &counts); err != nil {
 		return err
 	}
@@ -98,6 +111,7 @@ func (c *coldQuotaWorkerRPCCodec) Unmarshal(wire []byte, value any) error {
 // Reject nested/recursive request graphs before calling any generated Size or
 // Marshal method. At most 64 flat comparison/operation nodes and 128 KiB of
 // protobuf are allowed; point reads/writes/deletes cannot ask for PrevKv graphs.
+// Metadata is narrower: both nonempty branches permit only key-only Ranges.
 func coldQuotaWorkerRPCRequestBytes(phase coldQuotaWorkerRPCPhase, value any) (int, error) {
 	size := 0
 	switch request := value.(type) {
@@ -112,10 +126,13 @@ func coldQuotaWorkerRPCRequestBytes(phase coldQuotaWorkerRPCPhase, value any) (i
 		}
 		size = request.Size()
 	case *pb.TxnRequest:
-		if phase != coldQuotaRPCGuard && phase != coldQuotaRPCCommit && phase != coldQuotaRPCJournal || request == nil || len(request.XXX_unrecognized) != 0 {
+		if phase != coldQuotaRPCGuard && phase != coldQuotaRPCCommit && phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata || request == nil || len(request.XXX_unrecognized) != 0 {
 			return 0, ErrInvalidMutation
 		}
 		if len(request.Compare)+len(request.Success)+len(request.Failure) > 64 {
+			return 0, ErrInvalidMutation
+		}
+		if phase == coldQuotaRPCMetadata && (len(request.Success) == 0 || len(request.Failure) == 0) {
 			return 0, ErrInvalidMutation
 		}
 		for _, comparison := range request.Compare {
@@ -125,7 +142,7 @@ func coldQuotaWorkerRPCRequestBytes(phase coldQuotaWorkerRPCPhase, value any) (i
 		}
 		for _, branch := range [][]*pb.RequestOp{request.Success, request.Failure} {
 			for _, op := range branch {
-				if !coldQuotaWorkerRPCPointOp(op) {
+				if !coldQuotaWorkerRPCPointOp(op) || phase == coldQuotaRPCMetadata && op.GetRequestRange() == nil {
 					return 0, ErrInvalidMutation
 				}
 			}

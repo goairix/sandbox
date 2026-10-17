@@ -17,6 +17,10 @@ const (
 type coldQuotaWorkerRPCWireCounts struct {
 	objects int
 	ops     int
+
+	// Only the fixed metadata codec enables 64 KiB history values. Object,
+	// operation and per-Range bounds remain shared with the original phases.
+	metadata bool
 }
 
 // This is a fixed finite schema, not an untrusted recursive protobuf decoder:
@@ -125,6 +129,9 @@ func coldQuotaWorkerRPCWire(wire []byte, kind coldQuotaWorkerRPCWireKind, counts
 				maxBytes = maxNamespaceKeyBytes
 			case 5:
 				maxBytes = 16384
+				if counts.metadata {
+					maxBytes = maxRecordBytes
+				}
 			case 2, 3, 4, 6:
 				scalar = true
 			default:
