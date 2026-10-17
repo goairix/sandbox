@@ -203,18 +203,9 @@ func (x *taskLocalRuntimeExecution) sign(ctx context.Context) ([]byte, error) {
 	if end, ok := ctx.Deadline(); ok && time.Until(end) < remaining {
 		remaining = time.Until(end)
 	}
-	if remaining > 20*time.Second {
-		remaining = 20 * time.Second
-	}
-	before, after := now.Add(-time.Second), now.Add(remaining-time.Second)
-	if before.Before(issuer.NotBefore()) {
-		before = issuer.NotBefore()
-	}
-	if !after.Before(issuer.NotAfter()) {
-		after = issuer.NotAfter().Add(-time.Second)
-	}
-	if !now.Add(2 * time.Second).Before(after) {
-		return nil, ErrGuardExpired
+	before, after, err := localRuntimeTerminationWindow(now, remaining, issuer)
+	if err != nil {
+		return nil, err
 	}
 	claims := p.TaskRuntimeTerminationTicketClaims{Version: 1, Purpose: "task_runtime_terminate", Current: x.intent.Current, Partition: x.intent.Partition, IntentCreateRevision: x.intentKV.CreateRevision, IntentModRevision: x.intentKV.ModRevision, IntentDigest: workspaceSyncIntentDigest(string(x.intentKV.Value)), EnrollmentDigest: x.intent.EnrollmentDigest, ObserverCertificateDigest: x.intent.ObserverCertificateDigest, NodeUID: x.intent.NodeUID, NodeBootID: x.intent.NodeBootID, NotBefore: before, NotAfter: after}
 	wire, err := b.taskRuntimeTerminationIssuer.SignRuntimeTermination(ctx, issuer.Digest(), claims)
@@ -230,6 +221,28 @@ func (x *taskLocalRuntimeExecution) sign(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	return evidence.Wire(), a.local(ctx)
+}
+
+// The verifier reserves one second at each authentication edge. Independently
+// elapsed-accounted trusted samples can move backward within their bounded
+// one-second sampling budget, so the start also leaves that second of margin.
+// This does not extend the future authority: remaining is already the minimum
+// of the original claim/context lifetimes, and the issuer bounds still apply.
+func localRuntimeTerminationWindow(now time.Time, remaining time.Duration, issuer p.CommandIssuerIdentity) (time.Time, time.Time, error) {
+	if remaining > 20*time.Second {
+		remaining = 20 * time.Second
+	}
+	before, after := now.Add(-2*time.Second), now.Add(remaining-time.Second)
+	if before.Before(issuer.NotBefore()) {
+		before = issuer.NotBefore()
+	}
+	if !after.Before(issuer.NotAfter()) {
+		after = issuer.NotAfter().Add(-time.Second)
+	}
+	if now.Add(-time.Second).Before(before) || !now.Add(2*time.Second).Before(after) {
+		return time.Time{}, time.Time{}, ErrGuardExpired
+	}
+	return before, after, nil
 }
 
 func (x *taskLocalRuntimeExecution) acceptProof(ctx context.Context, result p.NodeTerminationResult) error {
