@@ -77,7 +77,7 @@ func (c *coldQuotaWorkerRPCCodec) Unmarshal(wire []byte, value any) error {
 		}
 		kind = coldQuotaWireRevoke
 	case *pb.TxnResponse:
-		if response == nil || c.phase != coldQuotaRPCGuard && c.phase != coldQuotaRPCCommit && c.phase != coldQuotaRPCJournal && c.phase != coldQuotaRPCMetadata {
+		if response == nil || c.phase != coldQuotaRPCGuard && c.phase != coldQuotaRPCCommit && c.phase != coldQuotaRPCJournal && c.phase != coldQuotaRPCMetadata && c.phase != coldQuotaRPCResolve {
 			return ErrCorruptRecord
 		}
 	default:
@@ -126,7 +126,7 @@ func coldQuotaWorkerRPCRequestBytes(phase coldQuotaWorkerRPCPhase, value any) (i
 		}
 		size = request.Size()
 	case *pb.TxnRequest:
-		if phase != coldQuotaRPCGuard && phase != coldQuotaRPCCommit && phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata || request == nil || len(request.XXX_unrecognized) != 0 {
+		if phase != coldQuotaRPCGuard && phase != coldQuotaRPCCommit && phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata && phase != coldQuotaRPCResolve || request == nil || len(request.XXX_unrecognized) != 0 {
 			return 0, ErrInvalidMutation
 		}
 		if len(request.Compare)+len(request.Success)+len(request.Failure) > 64 {

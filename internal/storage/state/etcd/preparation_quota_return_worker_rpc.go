@@ -19,6 +19,11 @@ const (
 	// Metadata is a sixth independent single-Txn cohort; original phase
 	// values and their fixed transport limits remain unchanged.
 	coldQuotaRPCMetadata
+	// Resolve is a seventh independent one-Txn cohort. Its fixed 16 KiB
+	// reply does not inherit metadata's variable history-read allowance.
+	// Phase seven uses the final bit of coldQuotaWorkerRPCState.used;
+	// adding another phase requires expanding that mask before admission.
+	coldQuotaRPCResolve
 )
 
 const (
@@ -32,8 +37,8 @@ const (
 	coldQuotaRPCRevokeReserve     = 10
 )
 
-// The existing lifecycle mutex owns this state. Journal and metadata each own
-// an independent paid cohort; a call may instead perform the fixed
+// The existing lifecycle mutex owns this state. Journal, metadata and Resolve
+// each own an independent paid cohort; a call may instead perform the fixed
 // Grant/guard/Commit/Revoke cohort.
 // A failed or locally refused phase is never reset or refunded. busy spans the
 // actual native return, not merely admission or caller-context cancellation.
@@ -54,7 +59,7 @@ func coldQuotaWorkerRPCResponseLimit(phase coldQuotaWorkerRPCPhase) int {
 	switch phase {
 	case coldQuotaRPCGrant:
 		return 4096
-	case coldQuotaRPCGuard, coldQuotaRPCCommit, coldQuotaRPCJournal:
+	case coldQuotaRPCGuard, coldQuotaRPCCommit, coldQuotaRPCJournal, coldQuotaRPCResolve:
 		return 16384
 	case coldQuotaRPCRevoke:
 		return 1024
@@ -81,12 +86,12 @@ func (b *Backend) admitColdQuotaWorkerRPC(call *workerCall, phase coldQuotaWorke
 	if state.self != nil && state.self != call || state.busy || state.used&(1<<phase) != 0 {
 		return ErrConflict
 	}
-	if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata {
+	if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata || phase == coldQuotaRPCResolve {
 		if state.cohort != 0 {
 			return ErrConflict
 		}
 	} else {
-		if state.cohort == coldQuotaRPCJournal || state.cohort == coldQuotaRPCMetadata {
+		if state.cohort == coldQuotaRPCJournal || state.cohort == coldQuotaRPCMetadata || state.cohort == coldQuotaRPCResolve {
 			return ErrConflict
 		}
 		switch phase {
@@ -127,7 +132,7 @@ func (b *Backend) admitColdQuotaWorkerRPC(call *workerCall, phase coldQuotaWorke
 	state.self = call
 	if state.cohort == 0 {
 		state.cohort = coldQuotaRPCGrant
-		if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata {
+		if phase == coldQuotaRPCJournal || phase == coldQuotaRPCMetadata || phase == coldQuotaRPCResolve {
 			state.cohort = phase
 		}
 	}
@@ -135,7 +140,7 @@ func (b *Backend) admitColdQuotaWorkerRPC(call *workerCall, phase coldQuotaWorke
 	if shapeErr != nil {
 		return shapeErr
 	}
-	if phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata {
+	if phase != coldQuotaRPCJournal && phase != coldQuotaRPCMetadata && phase != coldQuotaRPCResolve {
 		reserve := coldQuotaRPCRevokeReserve
 		if phase == coldQuotaRPCRevoke {
 			reserve = 0
@@ -251,6 +256,14 @@ func (b *Backend) coldQuotaWorkerCommitRPC(call *workerCall, request *pb.TxnRequ
 // reads. This helper cannot authorize a subsequent Grant on the same call.
 func (b *Backend) coldQuotaWorkerJournalRPC(call *workerCall, request *pb.TxnRequest) (*pb.TxnResponse, error) {
 	return b.coldQuotaWorkerTxnRPC(call, coldQuotaRPCJournal, request)
+}
+
+// coldQuotaWorkerResolveRPC owns one independent paid arbitration transaction.
+// It uses the original registered call, ActiveConnection, single serialization
+// and actual native-return join; no other phase can share this call's cohort.
+// The caller keeps the request graph unchanged until the native return.
+func (b *Backend) coldQuotaWorkerResolveRPC(call *workerCall, request *pb.TxnRequest) (*pb.TxnResponse, error) {
+	return b.coldQuotaWorkerTxnRPC(call, coldQuotaRPCResolve, request)
 }
 
 func (b *Backend) coldQuotaWorkerTxnRPC(call *workerCall, phase coldQuotaWorkerRPCPhase, request *pb.TxnRequest) (*pb.TxnResponse, error) {
