@@ -10,7 +10,7 @@
 | 整体交付 | 约45% | 沿用20/30/20/15/15权重和90/70/30/0/0阶段估算，包含容量、故障、部署恢复及最终替代 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
-功能代码未完成：完整API/Pool/Docker/Upload及默认入口替代、detached销毁消费者及
+功能代码未完成：完整API及销毁后终态查询、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的cold quota结算接线；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
@@ -33,8 +33,17 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 复核确认I1、I2均已解决且无新增问题。`a156a01`补齐真实物理失败后同worker恢复、
 Close/Wait保留失败及正式进程exit1证据，见[结果保留真实验证](2026-10-17-etcd-automatic-result-native-verification.md)。
 `bbeca13`通过真实三成员分页/压缩拒绝/原producer丢ACK后新Backend发现/读取公平性，
-同一审查员认可该元数据范围。I3的持久32/33恢复、真实去重及后继物理进展、负载下
-续租/执行公平性、压缩后完整恢复和实际Close组合仍开放；没有无Run归还永久槽捷径。
+同一审查员认可该元数据范围。`31240d3`补齐31个元数据占槽加1条真实物理清理、满槽
+拒33、原worker安全释放后33恰复用同槽，真实Linux场景与独立审计通过，同一审查员
+认可该持久槽证据项，见[持久容量验证](2026-10-17-etcd-persistent-capacity-native-verification.md)。
+它不是32物理并发或大N验收。I3的真实去重及后继物理进展、负载下执行公平性、压缩后
+完整恢复和其Close组合仍开放；没有无Run归还永久槽捷径。
+
+`8585e2c`修复冷创建receipt identity被业务TTL截断、不能覆盖清理会话的问题；业务
+publication/activation仍受原TTL约束，定向host/race/Linuxvet通过，长期证书更新未完成。
+`b881535`将原quota返还API接到Grant前prepare/一次consume原语，固定原ref且保持
+原34/4/4事务与replay顺序；host/race/Linuxvet及独立Task审查通过。它尚未持久化quota
+checkpoint或接入自动worker，不能算配额自动归还已完成，见[原语验证](2026-10-17-etcd-cold-quota-prepared-verification.md)。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
