@@ -21,6 +21,11 @@ func (a *taskLocalRuntimeAuthority) newTermination() p.TaskRuntimeTerminationInt
 }
 
 func (a *taskLocalRuntimeAuthority) matchesTermination(r p.TaskRuntimeTerminationIntent) bool {
+	// Common stamps do not identify the effect profile. This local origin may
+	// never accept a detached tuple, including one with otherwise equal pins.
+	if r.Version != 1 || r.DetachedEffects != nil {
+		return false
+	}
 	if r.Authority != a.stamps || r.TaskBirth != a.claim.birth || r.CreationIntentID != a.task.CreationIntentID || r.MountAttempt != 0 || r.EnrollmentDigest != a.publication.Record.EnrollmentDigest || r.ObserverCertificateDigest != a.publication.Record.ObserverCertificateDigest || r.NodeUID != a.publication.Record.NodeUID || r.NodeBootID != a.publication.Record.NodeBootID || r.Partition != a.task.Reference.Partition || r.Current.ClaimCreateRevision > a.claim.reference.CreateRevision {
 		return false
 	}

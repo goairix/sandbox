@@ -306,7 +306,7 @@ func New(options Options) (_ *Observer, result error) {
 	if err != nil || rpcErr != nil || node == nil || string(node.UID) != options.NodeUID || node.Status.NodeInfo.BootID != boot || node.DeletionTimestamp != nil {
 		return nil, fmt.Errorf("observer exact current API node unavailable: %v", err)
 	}
-	o.client, err = clientv3.New(clientv3.Config{Endpoints: options.EtcdEndpoints, TLS: options.EtcdTLS, DialTimeout: options.RequestTimeout, MaxCallSendMsgSize: nativeWireLimit, MaxCallRecvMsgSize: nativeWireLimit})
+	o.client, err = clientv3.New(clientv3.Config{Endpoints: options.EtcdEndpoints, TLS: options.EtcdTLS, DialTimeout: options.RequestTimeout, MaxCallSendMsgSize: nativeRequestWireLimit, MaxCallRecvMsgSize: nativeWireLimit})
 	if err != nil {
 		return nil, err
 	}

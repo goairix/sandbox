@@ -198,6 +198,10 @@ type TaskRuntimeTerminationKeys struct {
 	Owner, Fence, RuntimeIndex, Quiescence                 string
 	QuiescenceReceipt, QuiescenceReservation, FinalSync    string
 	Issuer, Archive, OperationsPrefix                      string
+
+	// Detached source keys are populated only by the explicit version 2 entry.
+	// Snapshot is derived later from the authenticated native Task, not a ticket.
+	Settlement, CreationIntent, Publication string
 }
 
 func terminationRuntimeIndexDigest(uid string) string {
@@ -212,8 +216,8 @@ func terminationRuntimeIndexDigest(uid string) string {
 }
 
 // TaskRuntimeTerminationKeysFor derives the fixed local v1 native read set.
-// Detached v2 wire is deliberately rejected until its native authority reader
-// exists; the local Archive/LocalComplete keys cannot stand in for settlement.
+// Detached v2 remains rejected here: consumers must explicitly select its fixed
+// native entry rather than treating local Archive/LocalComplete as settlement.
 func TaskRuntimeTerminationKeysFor(c TaskRuntimeTerminationIntent) (TaskRuntimeTerminationKeys, error) {
 	if c.Version != 1 {
 		return TaskRuntimeTerminationKeys{}, fmt.Errorf("runtime termination native keys require local version 1")
@@ -221,23 +225,58 @@ func TaskRuntimeTerminationKeysFor(c TaskRuntimeTerminationIntent) (TaskRuntimeT
 	if err := validateTerminationIntent(c); err != nil {
 		return TaskRuntimeTerminationKeys{}, err
 	}
+	k := taskRuntimeTerminationCommonKeys(c)
+	t := c.Current.Namespace + fmt.Sprintf("p/%02x/tasks/%s", c.Partition, c.Current.TaskID)
+	k.Archive, k.LocalComplete = t+"/workspace-archive-command", t+"/workspace-sync-local-complete"
+	return validateTaskRuntimeTerminationKeys(c.Current.Namespace, k)
+}
+
+// DetachedTaskRuntimeTerminationKeysFor derives only the fixed detached v2 read
+// set after validating its complete effect variant. Keys and canonical wire are
+// locators, never settlement, source, Claim or runtime termination authority.
+func DetachedTaskRuntimeTerminationKeysFor(c TaskRuntimeTerminationIntent) (TaskRuntimeTerminationKeys, error) {
+	if c.Version != 2 {
+		return TaskRuntimeTerminationKeys{}, fmt.Errorf("detached runtime termination native keys require version 2")
+	}
+	if err := validateTerminationIntent(c); err != nil {
+		return TaskRuntimeTerminationKeys{}, err
+	}
+	k := taskRuntimeTerminationCommonKeys(c)
+	partition := c.Current.Namespace + fmt.Sprintf("p/%02x/", c.Partition)
+	k.Settlement = partition + "tasks/" + c.Current.TaskID + "/detached-noeffect"
+	k.CreationIntent = partition + "intents/" + c.CreationIntentID
+	k.Publication = k.CreationIntent + "/runtime-publication"
+	return validateTaskRuntimeTerminationKeys(c.Current.Namespace, k)
+}
+
+// Only validated variants reach this common derivation. Effect keys are added
+// by their strict wrapper so an unused profile always has exact empty fields.
+func taskRuntimeTerminationCommonKeys(c TaskRuntimeTerminationIntent) TaskRuntimeTerminationKeys {
 	n := c.Current.Namespace
 	p := n + fmt.Sprintf("p/%02x/", c.Partition)
 	t := p + "tasks/" + c.Current.TaskID
 	s := c.Authority.QuiescenceStage
-	k := TaskRuntimeTerminationKeys{
+	return TaskRuntimeTerminationKeys{
 		Identity: n + "meta/identity", Restore: n + "meta/restore_epoch",
-		Intent: t + "/runtime-termination", LocalComplete: t + "/workspace-sync-local-complete", Claim: t + "/claim", Guard: t + "/guards/" + c.Current.ClaimID,
+		Intent: t + "/runtime-termination", Claim: t + "/claim", Guard: t + "/guards/" + c.Current.ClaimID,
 		Task: t, CleanupIntent: p + "cleanup-intents/" + c.Current.TaskID, TaskLink: p + "sandboxes/" + c.Current.SandboxID + "/cleanup-task",
 		Placement: n + "indexes/sandbox/" + c.Current.SandboxID, Control: p + "controls/" + c.Current.SandboxID,
 		Owner: p + "workspaces/" + c.Current.WorkspaceHash + "/owner", Fence: p + "workspaces/" + c.Current.WorkspaceHash + "/fence",
 		RuntimeIndex: n + "indexes/runtime/" + terminationRuntimeIndexDigest(c.Current.Runtime.UID), Quiescence: t + "/quiesce-users",
 		QuiescenceReceipt: p + "stages/" + s.RequestID + "/" + s.StageID + "/" + s.AttemptID + "/receipt", QuiescenceReservation: t + "/quiesce-users-attempt", FinalSync: t + "/final-sync-attempt",
-		Issuer: n + "command-issuers/" + c.Current.IssuerCertificateID, Archive: t + "/workspace-archive-command", OperationsPrefix: p + "sandboxes/" + c.Current.SandboxID + "/operations/",
+		Issuer: n + "command-issuers/" + c.Current.IssuerCertificateID, OperationsPrefix: p + "sandboxes/" + c.Current.SandboxID + "/operations/",
 	}
-	for _, key := range []string{k.Identity, k.Restore, k.Intent, k.LocalComplete, k.Claim, k.Guard, k.Task, k.CleanupIntent, k.TaskLink, k.Placement, k.Control, k.Owner, k.Fence, k.RuntimeIndex, k.Quiescence, k.QuiescenceReceipt, k.QuiescenceReservation, k.FinalSync, k.Issuer, k.Archive, k.OperationsPrefix} {
+}
+
+func validateTaskRuntimeTerminationKeys(n string, k TaskRuntimeTerminationKeys) (TaskRuntimeTerminationKeys, error) {
+	for _, key := range []string{k.Identity, k.Restore, k.Intent, k.Claim, k.Guard, k.Task, k.CleanupIntent, k.TaskLink, k.Placement, k.Control, k.Owner, k.Fence, k.RuntimeIndex, k.Quiescence, k.QuiescenceReceipt, k.QuiescenceReservation, k.FinalSync, k.Issuer, k.OperationsPrefix} {
 		if len(key) > 1024 || !strings.HasPrefix(key, n) {
 			return TaskRuntimeTerminationKeys{}, fmt.Errorf("invalid runtime termination key bound")
+		}
+	}
+	for _, key := range []string{k.Archive, k.LocalComplete, k.Settlement, k.CreationIntent, k.Publication} {
+		if key != "" && (len(key) > 1024 || !strings.HasPrefix(key, n)) {
+			return TaskRuntimeTerminationKeys{}, fmt.Errorf("invalid runtime termination effect key bound")
 		}
 	}
 	return k, nil

@@ -17,7 +17,12 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-const nativeWireLimit = 256 * 1024
+const (
+	// Native requests and replies have independent transport allowances. The
+	// larger reply budget must not authorize a request above 128 KiB.
+	nativeRequestWireLimit = 128 * 1024
+	nativeWireLimit        = 256 * 1024
+)
 
 type authorityEnrollment struct {
 	Identity                                                      p.RuntimeIdentityContext
@@ -143,7 +148,7 @@ func (s *authoritySnapshot) guardRequest() (*pb.TxnRequest, error) {
 		wire := pb.Compare(cmp)
 		request.Compare = append(request.Compare, &wire)
 	}
-	if len(request.Compare) != 59 || len(request.Success)+len(request.Compare) != 60 || request.Size() > nativeWireLimit || pointReplyBudget([]string{s.keys.Identity}, []int{4096}).Size() > nativeWireLimit || pointReplyBudget(nil, nil).Size() > nativeWireLimit {
+	if len(request.Compare) != 59 || len(request.Success)+len(request.Compare) != 60 || request.Size() > nativeRequestWireLimit || pointReplyBudget([]string{s.keys.Identity}, []int{4096}).Size() > nativeWireLimit || pointReplyBudget(nil, nil).Size() > nativeWireLimit {
 		return nil, fmt.Errorf("observer native guard exceeds fixed 59+1/wire budget")
 	}
 	return request, nil
@@ -169,7 +174,7 @@ func (r *authorityReader) points(ctx context.Context, s *authoritySnapshot, keys
 		ops[i] = clientv3.OpGet(key)
 		request.Success = append(request.Success, protoPoint(key))
 	}
-	if request.Size() > nativeWireLimit {
+	if request.Size() > nativeRequestWireLimit {
 		return nil, fmt.Errorf("observer point request exceeds bound")
 	}
 	rpc, cancel := context.WithTimeout(ctx, r.timeout)
