@@ -26,8 +26,10 @@ type coldQuotaReturnPrepared struct {
 	// must not consume the successful submitter's in-flight continuation.
 	journalAttempted uint32
 
-	// consumed is claimed before validating the calling binding. Every attempt,
-	// including cancellation or refusal, permanently closes this capability.
+	// consumed is claimed before binding validation by the public continuation.
+	// The worker continuation validates locally and admits paid credit first;
+	// credit refusal leaves it reusable, but an admitted winner consumes once.
+	// A failed journal submitter also burns it under the journal's existing rule.
 	consumed uint32
 }
 
