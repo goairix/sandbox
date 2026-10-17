@@ -168,7 +168,7 @@ func (o *Observer) executeTermination(slot uint32, wire, issuer []byte) error {
 	if err != nil {
 		return err
 	}
-	enrollment := authorityEnrollment{Identity: activation.Identity(), CreationIntentID: registration.Provider.CreationIntentID, EnrollmentDigest: digest(entry.wire), ObserverCertificateDigest: digest(registration.ObserverCertificate), NodeUID: registration.Provider.NodeUID, NodeBootID: registration.Provider.NodeBootID}
+	enrollment := authorityEnrollment{Identity: activation.Identity(), CreationIntentID: registration.Provider.CreationIntentID, EnrollmentDigest: digest(entry.wire), ObserverCertificateDigest: digest(registration.ObserverCertificate), NodeUID: registration.Provider.NodeUID, NodeBootID: registration.Provider.NodeBootID, ContractDigest: activation.Birth().ContractDigest}
 	cutoff, _ := ctx.Deadline()
 	snapshot, err := o.authority.load(ctx, wire, issuer, enrollment, cutoff)
 	if err != nil {

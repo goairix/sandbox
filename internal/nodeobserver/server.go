@@ -246,6 +246,10 @@ func New(options Options) (_ *Observer, result error) {
 	if err != nil {
 		return nil, err
 	}
+	publicationVerifier, err := p.NewPublicationVerifier(options.Binding, options.Roots)
+	if err != nil {
+		return nil, err
+	}
 	boot, err := bootID()
 	if err != nil {
 		return nil, err
@@ -310,7 +314,7 @@ func New(options Options) (_ *Observer, result error) {
 	if err != nil {
 		return nil, err
 	}
-	o.authority = authorityReader{client: o.client, verifier: verifier, clock: options.Clock, binding: options.Binding, identity: options.EtcdIdentity, clusterID: options.EtcdClusterID, timeout: options.RequestTimeout}
+	o.authority = authorityReader{client: o.client, verifier: verifier, publication: publicationVerifier, clock: options.Clock, binding: options.Binding, identity: options.EtcdIdentity, clusterID: options.EtcdClusterID, timeout: options.RequestTimeout}
 	var stat unix.Stat_t
 	if err := unix.Lstat(options.JournalDirectory, &stat); err != nil || stat.Uid != 0 || stat.Mode&0777 != 0700 || stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return nil, fmt.Errorf("observer journal must be root-owned private directory")

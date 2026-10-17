@@ -28,16 +28,19 @@ type authorityEnrollment struct {
 	Identity                                                      p.RuntimeIdentityContext
 	CreationIntentID, EnrollmentDigest, ObserverCertificateDigest string
 	NodeUID, NodeBootID                                           string
+	// ContractDigest comes only from the verified enrollment activation birth.
+	ContractDigest string
 }
 
 type authorityReader struct {
-	client    *clientv3.Client
-	verifier  *p.ManagementVerifier
-	clock     p.AuthorityClock
-	binding   p.TrustBinding
-	identity  []byte
-	clusterID uint64
-	timeout   time.Duration
+	client      *clientv3.Client
+	verifier    *p.ManagementVerifier
+	publication *p.PublicationVerifier
+	clock       p.AuthorityClock
+	binding     p.TrustBinding
+	identity    []byte
+	clusterID   uint64
+	timeout     time.Duration
 }
 
 type authoritySnapshot struct {
@@ -50,6 +53,7 @@ type authoritySnapshot struct {
 	history           [6]*mvccpb.KeyValue
 	complete, intent  *mvccpb.KeyValue
 	claim, guard      *mvccpb.KeyValue
+	detached          *detachedAuthoritySnapshot
 	cutoff            time.Time
 }
 
@@ -118,10 +122,23 @@ func (s *authoritySnapshot) comparisons() []clientv3.Cmp {
 	for _, kv := range []*mvccpb.KeyValue{s.claim, s.guard} {
 		cmps = append(cmps, exactComparisons(kv)...)
 	}
-	for _, kv := range s.history {
+	history := s.history[:]
+	if s.detached != nil {
+		history = history[:5]
+	}
+	for _, kv := range history {
 		cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(string(kv.Key)), "=", kv.ModRevision))
 	}
-	cmps = append(cmps, exactComparisons(s.complete)...)
+	if s.detached == nil {
+		cmps = append(cmps, exactComparisons(s.complete)...)
+	} else {
+		// The fixed source graph was authenticated before these positive Mod
+		// pins were captured. Proof/enrollment/activation bytes are covered by
+		// the publication's checked digests; no copied stamp creates a pin.
+		for _, kv := range append([]*mvccpb.KeyValue{s.detached.settlement}, s.detached.source[:]...) {
+			cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(string(kv.Key)), "=", kv.ModRevision))
+		}
+	}
 	cmps = append(cmps, exactComparisons(s.intent)...)
 	cmps = append(cmps, clientv3.Compare(clientv3.Version(s.keys.OperationsPrefix), "=", int64(0)).WithRange(clientv3.GetPrefixRangeEnd(s.keys.OperationsPrefix)))
 	return cmps
@@ -142,14 +159,21 @@ func pointReplyBudget(keys []string, limits []int) *pb.TxnResponse {
 }
 
 func (s *authoritySnapshot) guardRequest() (*pb.TxnRequest, error) {
+	if s.record.Version == 2 && s.detached == nil {
+		return nil, fmt.Errorf("observer detached native authority missing")
+	}
 	cmps := s.comparisons()
 	request := &pb.TxnRequest{Success: []*pb.RequestOp{protoPoint(s.keys.Identity)}}
 	for _, cmp := range cmps {
 		wire := pb.Compare(cmp)
 		request.Compare = append(request.Compare, &wire)
 	}
-	if len(request.Compare) != 59 || len(request.Success)+len(request.Compare) != 60 || request.Size() > nativeRequestWireLimit || pointReplyBudget([]string{s.keys.Identity}, []int{4096}).Size() > nativeWireLimit || pointReplyBudget(nil, nil).Size() > nativeWireLimit {
-		return nil, fmt.Errorf("observer native guard exceeds fixed 59+1/wire budget")
+	expected := 59
+	if s.detached != nil {
+		expected = 58
+	}
+	if len(request.Compare) != expected || len(request.Success)+len(request.Compare) != expected+1 || request.Size() > nativeRequestWireLimit || pointReplyBudget([]string{s.keys.Identity}, []int{4096}).Size() > nativeWireLimit || pointReplyBudget(nil, nil).Size() > nativeWireLimit {
+		return nil, fmt.Errorf("observer native guard exceeds fixed profile/wire budget")
 	}
 	return request, nil
 }
@@ -243,7 +267,11 @@ func (r *authorityReader) load(ctx context.Context, wire, issuerWire []byte, enr
 	if err != nil || s.record.Phase != "reserved" || s.record.Current != c.Current || s.record.Partition != c.Partition || s.record.EnrollmentDigest != enrollment.EnrollmentDigest || s.record.ObserverCertificateDigest != enrollment.ObserverCertificateDigest || s.record.NodeUID != enrollment.NodeUID || s.record.NodeBootID != enrollment.NodeBootID || s.record.CreationIntentID != enrollment.CreationIntentID || (p.RuntimeIdentityContext{SandboxID: c.Current.SandboxID, WorkspaceHash: c.Current.WorkspaceHash, Generation: c.Current.Generation, Runtime: c.Current.Runtime}) != enrollment.Identity {
 		return nil, fmt.Errorf("observer reserved intent/enrollment mismatch: %v", err)
 	}
-	s.keys, err = p.TaskRuntimeTerminationKeysFor(s.record)
+	if s.record.Version == 2 {
+		s.keys, err = p.DetachedTaskRuntimeTerminationKeysFor(s.record)
+	} else {
+		s.keys, err = p.TaskRuntimeTerminationKeysFor(s.record)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -269,6 +297,13 @@ func (r *authorityReader) load(ctx context.Context, wire, issuerWire []byte, enr
 	a := s.record.Authority
 	keys := []string{s.keys.Task, s.keys.CleanupIntent, s.keys.TaskLink, s.keys.Placement, s.keys.Control, s.keys.Owner, s.keys.Fence, s.keys.RuntimeIndex, s.keys.Quiescence, s.keys.QuiescenceReceipt, s.keys.QuiescenceReservation, s.keys.FinalSync, s.keys.Issuer, s.keys.Archive, s.keys.LocalComplete, s.keys.Claim, s.keys.Guard}
 	stamps := []p.RecordStamp{a.Task, a.CleanupIntent, a.TaskLink, a.Placement, a.Control, a.Owner, a.Fence, a.RuntimeIndex, a.Quiescence, a.QuiescenceReceipt, a.QuiescenceReservation, a.FinalSync, a.Issuer, a.Archive, a.LocalComplete}
+	if s.record.Version == 2 {
+		if err := r.loadDetachedSettlement(ctx, s); err != nil {
+			return nil, err
+		}
+		keys = append(keys[:13:13], s.keys.Claim, s.keys.Guard)
+		stamps = stamps[:13]
+	}
 	var records []*mvccpb.KeyValue
 	for start := 0; start < len(keys); start += 4 {
 		end := min(start+4, len(keys))
@@ -289,8 +324,13 @@ func (r *authorityReader) load(ctx context.Context, wire, issuerWire []byte, enr
 		}
 	}
 	copy(s.domain[:], records[:8])
-	copy(s.history[:], records[8:14])
-	s.complete, s.claim, s.guard = records[14], records[15], records[16]
+	if s.detached == nil {
+		copy(s.history[:], records[8:14])
+		s.complete, s.claim, s.guard = records[14], records[15], records[16]
+	} else {
+		copy(s.history[:5], records[8:13])
+		s.claim, s.guard = records[13], records[14]
+	}
 	claim, err := p.EncodeTaskRuntimeTerminationClaim(c.Current, c.Partition)
 	if err != nil {
 		return nil, err
@@ -303,6 +343,11 @@ func (r *authorityReader) load(ctx context.Context, wire, issuerWire []byte, enr
 	// Domain semantic matching is mandatory before a snapshot may be guarded.
 	if err := validateAuthorityDomain(s, enrollment, issuerWire); err != nil {
 		return nil, err
+	}
+	if s.detached != nil {
+		if err := r.authenticateDetachedSource(ctx, s, enrollment, issuerWire); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.live(ctx); err != nil {
 		return nil, err
