@@ -45,10 +45,18 @@ pending事务，整个Task仍未完成，也不因此上调整体粗估或宣称
 回填推进代码现已实现：旧任务pending补建/保留与B进度及完成转换同事务提交，四组27叶
 host、十三组100叶race、Linux编译/vet及共享释放配置模型回归通过，见
 [回填推进验证](2026-10-17-etcd-pending-backfill-advance-verification.md)。仍没有自动actor
-或实际全历史回填验收，新任务终态pending独立删除及真实签名成功分支尚待完成。
+或实际全历史回填验收，真实签名成功分支尚待完成。
 并行生产入口子任务的生命周期观察接口已合入`13475ad`，见
 [worker生命周期验证](2026-10-17-etcd-worker-lifecycle-verification.md)；v2入口仍在隔离分支
-实现，不能算独立自动worker已交付。FUSE增量统计也仍在隔离工作树验证，未切换探针。
+实现，不能算独立自动worker已交付。FUSE有界增量缓存统计已合入`1f0f4a3`，
+host/race、Linux编译/vet与实际inotify模型通过，见
+[缓存统计验证](2026-10-17-fuse-cache-monitor-verification.md)；常驻就绪及HTTP接线仍在
+隔离工作树实现，未切换探针。
+
+终态pending独立删除也已实现并通过host两组15叶、race六组41叶和Linuxvet，见
+[终态删除验证](2026-10-17-etcd-pending-delete-verification.md)。不改变原物理释放或满64
+节点owner-release；真实签名成功删除、ABA/丢ACK/关闭等待仍待自动组合。下一主线是
+原actor自动发现与严格v2独立worker接线。功能约70%/整体45%/生产切换0%暂不变。
 
 ## 2026-10-17 此前切片记录（已由上述完整执行器验收接续）
 
