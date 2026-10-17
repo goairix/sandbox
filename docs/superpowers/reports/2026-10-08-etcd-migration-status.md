@@ -47,8 +47,11 @@ checkpoint或接入自动worker，不能算配额自动归还已完成，见[原
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
-宣称完整销毁API已完成。定向race/Linuxvet通过，真实HTTP与自动物理组合仍待验收，
-见[入口验证及边界](2026-10-17-etcd-destroy-entrypoint-verification.md)。
+宣称完整销毁API已完成。定向race/Linuxvet通过；`de7a7c0`补齐真实local创建/Exec→
+HTTP202→原自动worker归档/终止/安全释放/P删除/全部join，以及历史detached拒绝场景。
+唯一入口Task审查Spec/Quality通过，无新增C/I/M；二进制时代与未覆盖故障组合见
+[真实入口组合](2026-10-17-etcd-destroy-native-verification.md)。原release保留placement/fence，
+公开删除后终态查询仍未接线；不能将原reader的CorruptRecord当404或完整销毁API。
 FUSE静态合同及endpoint编码修复已合入`d2948b3`/`63756cd`，完整host、定向race及
 Linux检查通过，同一审查员R1确认问题解决。它仍未启用任何生产FUSE/profile选择器，
 不是helper登记、挂载/flush、collector或双进程终止验收。
