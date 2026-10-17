@@ -93,6 +93,7 @@ func (b *Backend) finishCleanupJob(j *cleanupLocalJob, err error) {
 	}
 	j.inventory = nil
 	j.detachedNoEffect = nil
+	j.detachedRecovery = nil
 	if !j.started && j.runID != "" {
 		j.effectsJoined = true
 		cleanup, stop := context.WithTimeout(context.Background(), b.requestTimeout)

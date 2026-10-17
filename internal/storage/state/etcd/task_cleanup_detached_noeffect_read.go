@@ -26,13 +26,14 @@ type cleanupDetachedNoEffectHistory struct {
 	quiescence  *TaskQuiescenceEntry
 	finalSync   *TaskFinalSyncAttemptEntry
 
-	taskFence        taskFence
-	quiescencePin    taskDualDrainPin
-	snapshotFence    taskFence
-	intentFence      taskFence
-	publicationFence taskFence
-	finalSyncFence   taskFence
-	settlement       *cleanupDetachedNoEffectEntry
+	taskFence                  taskFence
+	quiescencePin              taskDualDrainPin
+	quiescenceReservationFence taskFence
+	snapshotFence              taskFence
+	intentFence                taskFence
+	publicationFence           taskFence
+	finalSyncFence             taskFence
+	settlement                 *cleanupDetachedNoEffectEntry
 }
 
 // Every point is an actual identity-fenced native observation. Bounds are
@@ -132,44 +133,44 @@ func (b *Backend) readCleanupDetachedNoEffectQuiescencePoints(ctx context.Contex
 	return b.readCleanupDetachedNoEffectPoints(ctx, "quiescence", keys, []int{maxRecordBytes, maxRecordBytes, 32768, 4096, 8192})
 }
 
-func (b *Backend) readCleanupDetachedNoEffectQuiescence(ctx context.Context, task TaskRecord, birth int64) (*TaskQuiescenceEntry, taskDualDrainPin, error) {
+func (b *Backend) readCleanupDetachedNoEffectQuiescence(ctx context.Context, task TaskRecord, birth int64) (*TaskQuiescenceEntry, taskDualDrainPin, taskFence, error) {
 	q, err := b.loadTaskQuiescence(ctx, task.Reference, nil)
 	if err != nil {
-		return nil, taskDualDrainPin{}, err
+		return nil, taskDualDrainPin{}, taskFence{}, err
 	}
 	if q == nil || q.Record == nil || q.Record.Task != task || q.Record.Context.Current.ControlRevision != birth || q.reservation == nil {
-		return nil, taskDualDrainPin{}, ErrCorruptRecord
+		return nil, taskDualDrainPin{}, taskFence{}, ErrCorruptRecord
 	}
 	key, err := b.namespace.taskQuiescenceKey(task.Reference)
 	if err != nil {
-		return nil, taskDualDrainPin{}, err
+		return nil, taskDualDrainPin{}, taskFence{}, err
 	}
 	_, receiptKey, err := b.stageKeys(q.Reference.Stage)
 	if err != nil {
-		return nil, taskDualDrainPin{}, err
+		return nil, taskDualDrainPin{}, taskFence{}, err
 	}
 	reservationKey, err := b.namespace.taskQuiescenceAttemptKey(task.Reference)
 	if err != nil {
-		return nil, taskDualDrainPin{}, err
+		return nil, taskDualDrainPin{}, taskFence{}, err
 	}
 	points, _, err := b.readCleanupDetachedNoEffectQuiescencePoints(ctx, []string{b.identityKey, b.restoreKey, key, receiptKey, reservationKey})
 	if err != nil {
-		return nil, taskDualDrainPin{}, err
+		return nil, taskDualDrainPin{}, taskFence{}, err
 	}
 	wire, err := encodeTaskQuiescenceRecord(*q.Record)
 	if err != nil || !enrolledImmutableKV(points[2]) || points[2].CreateRevision != q.Revision || string(points[2].Value) != wire {
-		return nil, taskDualDrainPin{}, ErrCorruptRecord
+		return nil, taskDualDrainPin{}, taskFence{}, ErrCorruptRecord
 	}
 	stage, err := quiescenceCommittedReceipt(points[3], receiptKey, q.Revision, q.Record.Attempt)
 	if err != nil || stage != q.Reference.Stage {
-		return nil, taskDualDrainPin{}, errors.Join(ErrCorruptReceipt, err)
+		return nil, taskDualDrainPin{}, taskFence{}, errors.Join(ErrCorruptReceipt, err)
 	}
 	reservation, err := taskQuiescenceAttemptEntry(points[4], task.Reference)
 	if err != nil || !taskQuiescenceHistoryReservation(*q.Record, q.Revision, reservation) || reservation.Revision != q.reservation.Revision {
-		return nil, taskDualDrainPin{}, errors.Join(ErrCorruptRecord, err)
+		return nil, taskDualDrainPin{}, taskFence{}, errors.Join(ErrCorruptRecord, err)
 	}
 	pin := taskDualDrainPin{reference: q.Reference, task: task, intent: ownTaskFence(points[2]), receipt: ownTaskFence(points[3]), reservation: taskQuiescenceReservationPin{key: reservationKey, revision: points[4].ModRevision}}
-	return q, pin, nil
+	return q, pin, ownTaskFence(points[4]), nil
 }
 
 // readCleanupDetachedNoEffectHistory authenticates only live/pre-release
@@ -184,7 +185,7 @@ func (b *Backend) readCleanupDetachedNoEffectHistory(ctx context.Context, ref Ta
 	if err != nil {
 		return nil, err
 	}
-	q, qpin, err := b.readCleanupDetachedNoEffectQuiescence(ctx, task, taskFence.create)
+	q, qpin, reservationFence, err := b.readCleanupDetachedNoEffectQuiescence(ctx, task, taskFence.create)
 	if err != nil {
 		return nil, err
 	}
@@ -263,6 +264,7 @@ func (b *Backend) readCleanupDetachedNoEffectHistory(ctx context.Context, ref Ta
 	}
 	history := &cleanupDetachedNoEffectHistory{origin: b, task: task, state: state, snapshot: snapshot, intent: intent, publication: read.Publication, quiescence: q, finalSync: finalSync, taskFence: taskFence, quiescencePin: qpin, snapshotFence: ownTaskFence(points[5]), intentFence: ownTaskFence(points[6]), publicationFence: ownTaskFence(points[7]), finalSyncFence: ownTaskFence(points[4]), settlement: entry}
 	history.self = history
+	history.quiescenceReservationFence = reservationFence
 	if entry != nil {
 		if err = b.validateCleanupDetachedNoEffectFact(history, entry); err != nil {
 			return nil, err

@@ -44,6 +44,9 @@ type cleanupLocalJob struct {
 	// Unknown never replaces its Claim/Run/attempt. Its compact pins and wire
 	// are cleared at the actual finish tail, rather than retaining source graphs.
 	detachedNoEffect *cleanupDetachedNoEffectDraft
+	// A Joined native Run permits only this original job's single replacement
+	// candidate. Unknown retains it until the actor replies and is reconciled.
+	detachedRecovery *cleanupDetachedNoEffectRecovery
 
 	// Recovery before or after local completion reuses the same bound archive,
 	// registry job and physical goroutine.
@@ -322,6 +325,8 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 		job.step = "recovery-run"
 	case "resume-early":
 		job.step = "early-run"
+	case "resume-detached-noeffect":
+		job.step = "detached-recovery-run"
 	case "settle":
 		job.step = "release-proof"
 	default:
@@ -332,6 +337,9 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 	// No ctx.Done select: once accepted, the actor owes an actual reply after
 	// its native call and failed-Grant cleanup finish, including during Stop.
 	reply := <-request.reply
+	if request.kind == "resume-detached-noeffect" && reply.err == nil {
+		reply.err = b.acceptCleanupDetachedRecoveryReply(job)
+	}
 	return reply, reply.err
 }
 
@@ -467,6 +475,11 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 	case "early-run":
 		err = b.beginCleanupEarlyRun(owner, j)
 		j.step = "claim-bundle"
+	case "detached-recovery-run":
+		// This finite private gate only creates/reconciles the metadata Run.
+		// Actual managed Claim admission remains outside this Task3 component.
+		err = b.beginCleanupDetachedNoEffectRecoveryRun(owner, j)
+		j.step = "physical"
 	case "termination-history":
 		// The original loader authenticates reserved or completed history and
 		// fixed historical points in two RPCs, alone in this charged turn.

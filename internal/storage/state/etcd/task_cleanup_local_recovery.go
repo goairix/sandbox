@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/goairix/sandbox/internal/runtime/launcher"
 	"github.com/google/uuid"
 )
 
@@ -168,6 +169,13 @@ func (b *Backend) beginCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocal
 // its authentic history preflight. This common finite CAS preserves T/I/R/E/S
 // pins and never retries a Run candidate after an uncertain native result.
 func (b *Backend) commitCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocalJob, projection string) error {
+	return b.commitCleanupRecoveryRunForWorker(owner, j, projection, launcher.WorkspaceSyncWorkerReference{}, nil)
+}
+
+// Local callers retain their original full inventory and 43-node transaction.
+// The detached caller supplies its genuine current Kernel reference and sole
+// job-bound preflight; only that validated gate adds the eight source pins.
+func (b *Backend) commitCleanupRecoveryRunForWorker(owner *workerDueOwner, j *cleanupLocalJob, projection string, worker launcher.WorkspaceSyncWorkerReference, detached *cleanupDetachedNoEffectRecovery) error {
 	s := j.state
 	if err := b.validateCleanupState(s); err != nil {
 		return err
@@ -184,24 +192,50 @@ func (b *Backend) commitCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLoca
 
 	// Project this transition and the existing slot/Claim chain before its
 	// dispatch. claim-state later checks the complete physical inventory too.
-	if _, err = b.cleanupSlotWireInventory(owner, j.evidence, s); err != nil {
-		return err
-	}
-	worker, err := b.localCleanup.Worker.WorkspaceSyncWorkerReference()
-	if err != nil {
-		return err
+	if detached == nil {
+		if _, err = b.cleanupSlotWireInventory(owner, j.evidence, s); err != nil {
+			return err
+		}
+		worker, err = b.localCleanup.Worker.WorkspaceSyncWorkerReference()
+		if err != nil {
+			return err
+		}
+	} else if err = b.validateCleanupDetachedRecoveryOwner(owner, j, detached); err != nil || worker != detached.worker || detached.attempted {
+		return errors.Join(ErrInvalidRecord, err)
 	}
 
-	j.runID = uuid.NewString()
-	r := s.record
-	r.Run = &cleanupExecutionRun{ID: j.runID, Worker: worker}
-	r.Pending = &cleanupExecutionPending{Purpose: "claim", ClaimID: uuid.NewString()}
-	wire, err := encodeCleanupExecution(r)
-	if err != nil {
-		return err
+	var wire string
+	if detached == nil {
+		j.runID = uuid.NewString()
+		r := s.record
+		r.Run = &cleanupExecutionRun{ID: j.runID, Worker: worker}
+		r.Pending = &cleanupExecutionPending{Purpose: "claim", ClaimID: uuid.NewString()}
+		wire, err = encodeCleanupExecution(r)
+		if err != nil {
+			return err
+		}
+	} else {
+		wire = detached.value
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
+	if detached != nil {
+		cmps = append(cmps, cleanupDetachedRecoveryComparisons(detached)...)
+		if len(cmps) != 48 {
+			return ErrInvalidRecord
+		}
+		if _, err = b.cleanupDetachedNoEffectOwnedBytes(j); err != nil {
+			return err
+		}
+		// Preflight before publishing the one-way native-send latch. A local
+		// dimensional refusal cannot turn into an uncertain Run attempt.
+		p := b.cleanupProjection(projection, cmps, taskProtoWrites([]Write{{Key: s.execution.key, Value: []byte(wire)}}), taskProtoPutResponse(1))
+		if err = validateCleanupWire(p); err != nil {
+			return err
+		}
+		j.runID = detached.runID
+		detached.attempted = true
+	}
 	if err = b.cleanupWrite(owner, projection, cmps, []Write{{Key: s.execution.key, Value: []byte(wire)}}); err != nil {
 		return err
 	}
@@ -214,6 +248,9 @@ func (b *Backend) commitCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLoca
 		return ErrConflict
 	}
 	j.state = observed
+	if detached != nil {
+		detached.confirmed = true
+	}
 	return nil
 }
 

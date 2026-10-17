@@ -41,6 +41,7 @@ type cleanupDetachedNoEffectNativeFixture struct {
 	drained     *PreparedTaskQuiescence
 	publication *RuntimeEnrolledPublicationEntry
 	queryCount  atomic.Int64
+	effectCount atomic.Int64
 }
 
 func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
@@ -343,6 +344,7 @@ func (f *cleanupDetachedNoEffectNativeFixture) runtime(t *testing.T, enrolled p.
 				if e := request.CloseData; e != nil {
 					key := e.TicketDigest
 					if e.Purpose == "task_close_data" {
+						f.effectCount.Add(1)
 						evidence, err := f.b.taskVerifier.VerifyTaskCloseDataTicket(e.Ticket, e.IssuerCertificate, e.Context, now)
 						if err != nil || evidence.Digest() != key {
 							return
@@ -359,6 +361,7 @@ func (f *cleanupDetachedNoEffectNativeFixture) runtime(t *testing.T, enrolled p.
 				} else if e := request.Quiesce; e != nil {
 					key := e.TicketDigest
 					if e.Purpose == "task_quiesce_users" {
+						f.effectCount.Add(1)
 						evidence, err := f.b.taskQuiescenceVerifier.VerifyTaskUserQuiescenceTicket(e.Ticket, e.IssuerCertificate, e.Context, now)
 						if err != nil || evidence.Digest() != key || !bytes.Equal(closed[e.Context.CloseDataTicketDigest], e.OriginalCloseDataReceipt) {
 							return
