@@ -701,6 +701,7 @@ func TestCleanupExecutorNative(t *testing.T) {
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
 	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
 	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
+	t.Run("observer-ack-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "observer-ack-recovery") })
 }
 
 func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
@@ -889,7 +890,13 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	_, err = admin.Put(ctx, slotKey, fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, task.Partition))
 	require.NoError(t, err)
 	if s.Recovery != "" {
-		cleanupExecutorRunRecoveryWorkers(t, ctx, s, admin, apiState)
+		var observerProxy *cleanupExecutorObserverProxy
+		if s.Recovery == "observer-ack-recovery" {
+			observerProxy = newCleanupExecutorObserverProxy(t, ctx, s, observerKey)
+			defer observerProxy.close(t)
+			s.ObserverAddress = observerProxy.listener.Addr().String()
+		}
+		cleanupExecutorRunRecoveryWorkers(t, ctx, s, admin, apiState, observerProxy)
 	} else {
 		workerPath := filepath.Join(dir, "worker.json")
 		require.NoError(t, os.WriteFile(workerPath, observerNativeJSON(t, s), 0600))

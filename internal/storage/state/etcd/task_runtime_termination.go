@@ -9,6 +9,7 @@ import (
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/google/uuid"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 func (a *taskLocalRuntimeAuthority) newTermination() p.TaskRuntimeTerminationIntent {
@@ -31,7 +32,20 @@ func (a *taskLocalRuntimeAuthority) matchesTermination(r p.TaskRuntimeTerminatio
 	return current == original
 }
 
+// TerminateTaskRuntimeLocal uses a current genuine Claim to terminate the
+// enrolled runtime through its observer and finish exact provider cleanup.
+// Only a newly confirmed reservation may send Terminate; retained reservations
+// query their original outcome. Unknown replies do not authorize another send
+// or owner release, and all original history/proof/effect guards still apply.
 func (b *Backend) TerminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, destination *controltransport.TerminationDestination) (result TaskRuntimeTerminationResult, resultErr error) {
+	return b.terminateTaskRuntimeLocal(ctx, c, destination, nil)
+}
+
+// A non-nil reservation narrows recovery to querying the original observer
+// intent. It is checked against the actual read before any provider mutation
+// or signature; an absent/recreated intent must never become a new send.
+// Public callers retain the original nil-reservation behavior.
+func (b *Backend) terminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, destination *controltransport.TerminationDestination, reservation *taskFence) (result TaskRuntimeTerminationResult, resultErr error) {
 	result.Outcome = OutcomeUnknown
 	if !b.validTaskClaim(c) || destination == nil {
 		return result, ErrInvalidRecord
@@ -40,6 +54,9 @@ func (b *Backend) TerminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, d
 	repeated := c.runtimeReleaseAttempt != nil
 	c.mu.Unlock()
 	if repeated {
+		if reservation != nil {
+			return result, ErrInvalidRecord
+		}
 		entry, err := b.LoadTaskRuntimeTermination(ctx, c.reference.Task)
 		result.Entry = entry
 		if entry != nil && entry.Phase == "cleanup-complete" && err == nil {
@@ -62,6 +79,11 @@ func (b *Backend) TerminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, d
 		return result, errors.Join(ErrConflict, err)
 	}
 	x.intentKV, x.providerKV = points[0], points[1]
+	if reservation != nil {
+		if err := matchCleanupTerminationReservation(c.reference.Task, c.birth, reservation, x.intentKV); err != nil {
+			return result, err
+		}
+	}
 	if x.intentKV != nil {
 		x.intent, err = decodeLocalRuntimeTermination(x.intentKV)
 		if err != nil || !a.matchesTermination(x.intent) {
@@ -138,6 +160,25 @@ func (b *Backend) TerminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, d
 	}
 	result.Outcome, result.Entry = OutcomeCommitted, localRuntimeTerminationEntry(x.intent, x.intentKV)
 	return result, nil
+}
+
+// This pure check compares a previously authenticated reservation with one
+// actual native point. It creates no proof/Claim authority. The original
+// matchesTermination/authority/provider guards still run after it succeeds.
+func matchCleanupTerminationReservation(task TaskReference, birth int64, expected *taskFence, actual *mvccpb.KeyValue) error {
+	if task.Validate() != nil || birth <= 0 || expected == nil || actual == nil || expected.lease != 0 || expected.create <= 0 || expected.mod != expected.create || actual.Lease != 0 || actual.Version != 1 || actual.CreateRevision != actual.ModRevision || *expected != ownTaskFence(actual) {
+		return ErrConflict
+	}
+
+	intent, err := decodeLocalRuntimeTermination(actual)
+	if err != nil || intent.Phase != "reserved" || localRuntimeTerminationTask(intent) != task || intent.TaskBirth != birth {
+		return errors.Join(ErrCorruptRecord, err)
+	}
+	keys, err := p.TaskRuntimeTerminationKeysFor(intent)
+	if err != nil || keys.Intent != expected.key {
+		return errors.Join(ErrCorruptRecord, err)
+	}
+	return nil
 }
 
 func (x *taskLocalRuntimeExecution) sign(ctx context.Context) ([]byte, error) {

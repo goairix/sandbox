@@ -217,7 +217,10 @@ func (b *Backend) cleanupTerminateAndRelease(j *cleanupLocalJob) (resultErr erro
 	if err := j.progress("", j.pending("termination", StageReference{}), nil); err != nil {
 		return err
 	}
-	terminated, err := b.TerminateTaskRuntimeLocal(j.ctx, j.claim, j.target.termination)
+	// A recovered observer reservation must survive the actual native read.
+	// The private entry rejects its absence/change before any provider mutation
+	// or signing, while a normal run preserves the public nil-fence behavior.
+	terminated, err := b.terminateTaskRuntimeLocal(j.ctx, j.claim, j.target.termination, j.terminationReservation)
 	if err != nil || terminated.Outcome != OutcomeCommitted {
 		return errors.Join(ErrOutcomeUnknown, err)
 	}

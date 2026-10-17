@@ -24,11 +24,58 @@ func (b *Backend) cleanupResumeBoundArchive(j *cleanupLocalJob) error {
 	if err != nil {
 		return err
 	}
+	if j.terminationReservation != nil {
+		// Local completion is already authenticated by the original history.
+		// Never reopen the runtime bridge or repeat Finalize after PID1 died.
+		return nil
+	}
 	return b.cleanupFinalizeBoundArchive(j, bound.Slot)
 }
 
+// The old termination intent must exist before admitting another physical Run.
+// Its original loader authenticates local completion and enrollment as well as
+// the fixed history; absence or an unresolved provider step cannot authorize a
+// new send. The actual termination call repeats this exact reservation check.
+func (b *Backend) loadCleanupTerminationReservation(ctx context.Context, j *cleanupLocalJob) error {
+	if j == nil || j.state == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || j.state.record.Confirmed != "local-complete" || j.started || j.terminationReservation != nil {
+		return ErrInvalidRecord
+	}
+
+	_, intent, provider, err := b.readLocalRuntimeHistory(ctx, j.task)
+	if err != nil {
+		return err
+	}
+	if intent == nil {
+		return ErrOutcomeUnknown
+	}
+	fence := ownTaskFence(intent)
+	if err = matchCleanupTerminationReservation(j.task, j.state.record.TaskBirth, &fence, intent); err != nil {
+		return err
+	}
+	cleanup, err := decodeTaskRuntimeProviderCleanup(provider)
+	if err != nil || cleanup.Slots[0].State != "complete" || cleanup.Slots[1].State != "complete" {
+		return errors.Join(ErrOutcomeUnknown, err)
+	}
+
+	j.terminationReservation = &fence
+	return nil
+}
+
+// The phase selects only one of two fixed continuations. A local-complete
+// diagnostic without its original authenticated reservation remains retained.
+func cleanupRecoveryPhase(confirmed string, reservation *taskFence) bool {
+	switch confirmed {
+	case "archive-bound":
+		return reservation == nil
+	case "local-complete":
+		return reservation != nil
+	default:
+		return false
+	}
+}
+
 func (b *Backend) loadCleanupBoundArchive(ctx context.Context, j *cleanupLocalJob) (_ *cleanupExecutionArchive, resultErr error) {
-	if ctx == nil || j == nil || !j.boundRecovery || j.target == nil || j.state == nil || j.owner != nil || b.cleanupPhysicalProfile() != nil {
+	if ctx == nil || j == nil || !j.boundRecovery || j.target == nil || j.state == nil || !cleanupRecoveryPhase(j.state.record.Confirmed, j.terminationReservation) || j.owner != nil || b.cleanupPhysicalProfile() != nil {
 		return nil, ErrInvalidRecord
 	}
 
@@ -52,7 +99,7 @@ func (b *Backend) loadCleanupBoundArchive(ctx context.Context, j *cleanupLocalJo
 // capability. The caller must have loaded and closed the original recovery
 // source and opened the actual target using its genuine current worker.
 func matchCleanupBoundManifest(state *cleanupSlotState, target *cleanupLocalTarget, root taskArchiveRecoveryRoot, current taskWorkspaceSyncLocalAttribution, manifest taskArchiveRecoveryManifest) error {
-	if state == nil || state.record.Validate() != nil || state.record.Phase != "occupied" || state.record.Confirmed != "archive-bound" || state.record.Run == nil || !state.record.Run.Joined || state.record.Archive == nil || target == nil || target.plan.validate() != nil || target.plan.workspace.provider != "local" || current.Validate() != nil || manifest.validate() != nil || manifest.State != "bound" {
+	if state == nil || state.record.Validate() != nil || state.record.Phase != "occupied" || (state.record.Confirmed != "archive-bound" && state.record.Confirmed != "local-complete") || state.record.Run == nil || !state.record.Run.Joined || state.record.Archive == nil || target == nil || target.plan.validate() != nil || target.plan.workspace.provider != "local" || current.Validate() != nil || manifest.validate() != nil || manifest.State != "bound" {
 		return ErrInvalidRecord
 	}
 	r, bound := state.record, state.record.Archive
@@ -71,7 +118,7 @@ func matchCleanupBoundManifest(state *cleanupSlotState, target *cleanupLocalTarg
 // CAS ACK retains its original candidate and occupation; no alternate Run or
 // Claim is manufactured. This is a finite native turn, with no manifest IO.
 func (b *Backend) beginCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocalJob) error {
-	if j == nil || j.worker == nil || j.worker.backend != b || j.worker.self != j.worker || owner == nil || j.owner != owner || !j.started || !j.boundRecovery || j.boundArchive == nil || j.runID != "" || j.claim != nil || j.pendingProgress != nil || j.state == nil || j.task != j.state.record.Task || j.state.slot == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || j.state.record.Confirmed != "archive-bound" || j.state.record.Archive == nil || *j.boundArchive != *j.state.record.Archive || j.evidence == nil {
+	if j == nil || j.worker == nil || j.worker.backend != b || j.worker.self != j.worker || owner == nil || j.owner != owner || !j.started || !j.boundRecovery || j.boundArchive == nil || j.runID != "" || j.claim != nil || j.pendingProgress != nil || j.state == nil || j.task != j.state.record.Task || j.state.slot == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || !cleanupRecoveryPhase(j.state.record.Confirmed, j.terminationReservation) || j.state.record.Archive == nil || *j.boundArchive != *j.state.record.Archive || j.evidence == nil {
 		return ErrInvalidRecord
 	}
 
@@ -124,7 +171,11 @@ func (b *Backend) beginCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocal
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
-	if err = b.cleanupWrite(owner, "recovery-run", cmps, []Write{{Key: s.execution.key, Value: []byte(wire)}}); err != nil {
+	projection := "recovery-run"
+	if j.terminationReservation != nil {
+		projection = "recovery-termination-run"
+	}
+	if err = b.cleanupWrite(owner, projection, cmps, []Write{{Key: s.execution.key, Value: []byte(wire)}}); err != nil {
 		return err
 	}
 

@@ -133,7 +133,11 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 	if err != nil {
 		return nil, err
 	}
-	recoveryOld, recoveryNext, err := cleanupFutureRecoveryValues(r)
+	recoveryOld, recoveryNext, err := cleanupFutureRecoveryValues(r, "archive-bound")
+	if err != nil {
+		return nil, err
+	}
+	terminationOld, terminationNext, err := cleanupFutureRecoveryValues(r, "local-complete")
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +186,7 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 		b.cleanupProjection("reserve", appendCopies(worker, tir, (taskFence{key: eKey, value: selecting, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), []clientv3.Cmp{clientv3.Compare(clientv3.CreateRevision(sKey), "=", 0)}), []*pb.RequestOp{taskProtoPut(sKey, slotValue, 0), taskProtoPut(eKey, occupied, 0)}, taskProtoPutResponse(2)),
 		b.cleanupProjection("progress", appendCopies(worker, e.comparisons(), s.comparisons()), put(eKey, active), taskProtoPutResponse(1)),
 		b.cleanupProjection("recovery-run", appendCopies(worker, tir, (taskFence{key: eKey, value: recoveryOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, recoveryNext), taskProtoPutResponse(1)),
+		b.cleanupProjection("recovery-termination-run", appendCopies(worker, tir, (taskFence{key: eKey, value: terminationOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, terminationNext), taskProtoPutResponse(1)),
 	}
 	// The managed creation projection uses the same claim constructor and
 	// creation mutation as public ClaimTask. Extra pins do not enter c.fences.
@@ -245,9 +250,19 @@ func cleanupFutureExecutionValues(r cleanupExecutionRecord) (active, joined, set
 	return
 }
 
-func cleanupFutureRecoveryValues(r cleanupExecutionRecord) (prior, next string, err error) {
+func cleanupFutureRecoveryValues(r cleanupExecutionRecord, confirmed string) (prior, next string, err error) {
 	r = cleanupFutureExecutionRecord(r)
-	r.Confirmed, r.Pending, r.Run.Joined = "archive-bound", nil, true
+	r.Confirmed, r.Run.Joined = confirmed, true
+	switch confirmed {
+	case "archive-bound":
+		r.Pending = nil
+	case "local-complete":
+		// A lost observer ACK retains the original pending termination. Keep
+		// all legal future scalar/stage widths from the canonical max record.
+		r.Pending.Purpose = "termination"
+	default:
+		return "", "", ErrInvalidRecord
+	}
 	prior, err = encodeCleanupExecution(r)
 	if err != nil {
 		return

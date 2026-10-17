@@ -40,11 +40,17 @@ type cleanupLocalJob struct {
 	// they cannot authorize a cold job or another progress attempt.
 	pendingProgress *cleanupLocalProgress
 
-	// Bound recovery reuses this same registry job and physical goroutine.
+	// Recovery before or after local completion reuses the same bound archive,
+	// registry job and physical goroutine.
 	// Only its completed manifest preflight publishes the finite coordinates;
 	// the actor then owns the single new-Run CAS and original Claim pipeline.
 	boundRecovery bool
 	boundArchive  *cleanupExecutionArchive
+
+	// A completed local sync may resume only the already reserved observer
+	// request. This copied fence is checked again by the real termination read;
+	// it never grants a new Terminate send or substitutes for its signed proof.
+	terminationReservation *taskFence
 
 	// started/request and registry membership use archiveLife.mu. The physical
 	// owner sets effectsJoined only after all transports/files/renewal/claims
@@ -399,6 +405,14 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 	case "recovery-run":
 		err = b.beginCleanupRecoveryRun(owner, j)
 		j.step = "claim-bundle"
+	case "termination-history":
+		// The original loader authenticates the reserved intent/provider and
+		// fixed historical points in two RPCs, alone in this charged turn.
+		err = b.loadCleanupTerminationReservation(ctx, j)
+		if err == nil {
+			j.boundRecovery = true
+			j.step = "bundle"
+		}
 	case "claim-state":
 		j.state, err = b.readCleanupClaimState(owner, j.bundle, j.state)
 		if err == nil {
@@ -453,6 +467,8 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 			if j.state.record.Confirmed == "archive-bound" && j.state.record.Archive != nil {
 				j.boundRecovery = true
 				j.step = "bundle"
+			} else if j.state.record.Confirmed == "local-complete" && j.state.record.Archive != nil {
+				j.step = "termination-history"
 			} else {
 				j.result.Reason = "missing-release-proof"
 				j.step = "done"

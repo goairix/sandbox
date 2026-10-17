@@ -4,6 +4,7 @@ package controlrunner
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/launcher"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/google/uuid"
@@ -32,7 +34,10 @@ type cleanupExecutorRecoveryRow struct {
 	Slot        uint32              `json:"slot"`
 	Phase       string              `json:"phase"`
 	Confirmed   string              `json:"confirmed"`
-	Run         *struct {
+	Pending     *struct {
+		Purpose string `json:"purpose"`
+	} `json:"pending"`
+	Run *struct {
 		ID     string                                `json:"id"`
 		Worker launcher.WorkspaceSyncWorkerReference `json:"worker"`
 		Joined bool                                  `json:"joined"`
@@ -71,7 +76,7 @@ func cleanupExecutorRecoveryPoint(t *testing.T, ctx context.Context, raw *client
 func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanupExecutorSetup, options state.Options, dir string, tlsConfig *tls.Config) {
 	t.Helper()
 	fault := ""
-	if s.RecoveryStage == "first" {
+	if s.RecoveryStage == "first" && s.Recovery != "observer-ack-recovery" {
 		fault = s.Recovery
 	}
 	proxy := newCleanupExecutorEtcdProxy(t, tlsConfig, s.Task, fault)
@@ -129,6 +134,10 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 		require.NotNil(t, row.Archive)
 		if s.Recovery == "bound-recovery" {
 			require.Equal(t, "archive-bound", row.Confirmed)
+		} else if s.Recovery == "observer-ack-recovery" {
+			require.Equal(t, "local-complete", row.Confirmed)
+			require.NotNil(t, row.Pending)
+			require.Equal(t, "termination", row.Pending.Purpose)
 		} else {
 			require.Equal(t, "terminated", row.Confirmed)
 			release, readErr := b.LoadTaskOwnerRelease(ctx, s.Task)
@@ -179,6 +188,9 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			wantClaims = 0
 		}
 	}
+	if s.Recovery == "observer-ack-recovery" && s.RecoveryStage == "first" {
+		wantClaims = 2
+	}
 	require.Len(t, trace.ids, wantClaims)
 	wantEvents := make([]string, 0, wantClaims*2)
 	for i := 0; i < wantClaims; i++ {
@@ -202,10 +214,18 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 	require.Positive(t, stats.WatchStreams)
 	require.Equal(t, wantClaims, stats.ClaimPuts)
 	if s.RecoveryStage == "first" {
-		require.Equal(t, 1, stats.FaultMatched)
-		require.Equal(t, 1, stats.FaultCommitted)
-		require.Equal(t, 1, stats.FaultJoined)
-		require.Positive(t, stats.FaultRevision)
+		if s.Recovery == "observer-ack-recovery" {
+			// This case faults the actual observer response, never an etcd ACK.
+			require.Zero(t, stats.FaultMatched)
+			require.Zero(t, stats.FaultCommitted)
+			require.Zero(t, stats.FaultJoined)
+			require.Zero(t, stats.FaultRevision)
+		} else {
+			require.Equal(t, 1, stats.FaultMatched)
+			require.Equal(t, 1, stats.FaultCommitted)
+			require.Equal(t, 1, stats.FaultJoined)
+			require.Positive(t, stats.FaultRevision)
+		}
 		require.Equal(t, 1, stats.ArchivePuts)
 	} else {
 		require.Zero(t, stats.FaultMatched)
@@ -245,7 +265,7 @@ func cleanupExecutorRecoveryRemove(t *testing.T, s cleanupExecutorSetup) {
 	}
 }
 
-func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s cleanupExecutorSetup, admin *clientv3.Client, api *cleanupExecutorAPI) {
+func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s cleanupExecutorSetup, admin *clientv3.Client, api *cleanupExecutorAPI, observer *cleanupExecutorObserverProxy) {
 	t.Helper()
 	dir := filepath.Join("/tmp", "cleanup-executor-recovery-"+uuid.NewString())
 	s.WorkerDirectory = dir
@@ -290,6 +310,11 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 	first := run("first")
 	prefix := fmt.Sprintf("%sp/%02x/tasks/%s/", s.Binding.Namespace, s.Task.Partition, s.Task.TaskID)
 	archiveBefore := cleanupExecutorRecoveryPoint(t, ctx, admin, prefix+"workspace-archive-command")
+	var observerHistory *cleanupExecutorObserverHistory
+	if s.Recovery == "observer-ack-recovery" {
+		require.NotNil(t, observer)
+		observerHistory = cleanupExecutorObserverBefore(t, ctx, admin, prefix, observer)
+	}
 	if s.Recovery == "release-settlement-recovery" {
 		wire := cleanupExecutorRecoveryPoint(t, ctx, admin, prefix+"owner-release")
 		var release struct {
@@ -308,6 +333,10 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 	api.mu.Lock()
 	patchesBefore, deletesBefore, bridgesBefore := api.patches, api.deletes, api.upgrades
 	api.mu.Unlock()
+	if s.Recovery == "observer-ack-recovery" {
+		require.Zero(t, patchesBefore)
+		require.Equal(t, 1, deletesBefore, "original provider step 1 already deleted the retained Pod")
+	}
 	second := run("second")
 	archiveAfter := cleanupExecutorRecoveryPoint(t, ctx, admin, prefix+"workspace-archive-command")
 	require.Equal(t, archiveBefore, archiveAfter, "original archive command bytes and immutable revisions survive recovery")
@@ -315,7 +344,7 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 	require.Equal(t, first.Row.Slot, second.Row.Slot)
 	require.Equal(t, first.Row.Archive, second.Row.Archive)
 	require.NotEqual(t, first.SessionLease, second.SessionLease)
-	if s.Recovery == "bound-recovery" {
+	if s.Recovery == "bound-recovery" || s.Recovery == "observer-ack-recovery" {
 		require.NotEqual(t, first.Row.Run.ID, second.Row.Run.ID)
 		require.NotEqual(t, first.Row.Run.Worker.Incarnation, second.Row.Run.Worker.Incarnation)
 		require.NotEqual(t, first.Claims[0], second.Claims[0])
@@ -328,6 +357,113 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 		require.Equal(t, deletesBefore, deletesAfter)
 		require.Equal(t, bridgesBefore, bridgesAfter, "release-only recovery cannot reconnect to the terminated runtime")
 	}
+	if s.Recovery == "observer-ack-recovery" {
+		cleanupExecutorObserverAfter(t, ctx, admin, prefix, observer, observerHistory)
+		api.mu.Lock()
+		patchesAfter, deletesAfter, bridgesAfter := api.patches, api.deletes, api.upgrades
+		api.mu.Unlock()
+		require.Zero(t, patchesBefore)
+		require.Equal(t, 1, deletesBefore)
+		require.Equal(t, 1, patchesAfter)
+		require.Equal(t, 1, deletesAfter)
+		require.Equal(t, bridgesBefore, bridgesAfter, "observer recovery must not reconnect to the already terminated runtime")
+	}
 	// Parent case continues with the original actual supervisor Wait, terminal
 	// E/Run/release, S-empty, provider and cgroup assertions used by complete.
+}
+
+// These observations authenticate no new runtime capability. They retain the
+// exact original metadata and signed reply so recovery cannot silently replace
+// the reservation, finalized files, or already completed provider effects.
+type cleanupExecutorObserverHistory struct {
+	intent        p.TaskRuntimeTerminationIntent
+	termination   *mvccpb.KeyValue
+	completion    *mvccpb.KeyValue
+	providerSlots []json.RawMessage
+}
+
+func cleanupExecutorObserverBefore(t *testing.T, ctx context.Context, raw *clientv3.Client, prefix string, proxy *cleanupExecutorObserverProxy) *cleanupExecutorObserverHistory {
+	t.Helper()
+	stats := proxy.snapshot()
+	t.Logf("observer recovery first worker actual Wait returned; TLS stats=%+v", stats)
+	require.Empty(t, stats.Error)
+	require.Equal(t, 1, stats.Terminate)
+	require.Zero(t, stats.Query)
+	require.Equal(t, 1, stats.TerminalReplies)
+	require.Equal(t, 1, stats.Withheld)
+	require.Equal(t, 1, stats.PeerClosed)
+	require.Equal(t, 1, stats.Joined)
+	require.GreaterOrEqual(t, stats.ConnectionLifetime, 4*time.Second, "original five-second caller deadline must close the connection")
+	require.Less(t, stats.ConnectionLifetime, 10*time.Second)
+
+	termination := cleanupExecutorRecoveryPoint(t, ctx, raw, prefix+"runtime-termination")
+	require.LessOrEqual(t, len(termination.Value), 16384)
+	intent, err := p.DecodeTaskRuntimeTerminationIntent(termination.Value)
+	require.NoError(t, err)
+	require.Equal(t, "reserved", intent.Phase)
+	require.Empty(t, intent.TerminalProof)
+	require.Equal(t, intent.Current.CommandID, stats.Original.CommandID)
+	require.Equal(t, intent.Current.TaskID, stats.Original.TaskID)
+	require.Equal(t, intent.EnrollmentDigest, stats.Original.EnrollmentDigest)
+	require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(termination.Value)), stats.Original.IntentDigest)
+	require.Equal(t, termination.CreateRevision, stats.Original.IntentCreateRevision)
+	require.Equal(t, termination.CreateRevision, termination.ModRevision)
+	keys, err := p.TaskRuntimeTerminationKeysFor(intent)
+	require.NoError(t, err)
+	complete := cleanupExecutorRecoveryPoint(t, ctx, raw, keys.LocalComplete)
+	require.LessOrEqual(t, len(complete.Value), 8192)
+	require.Equal(t, intent.Authority.LocalComplete, p.RecordStamp{CreateRevision: complete.CreateRevision, ModRevision: complete.ModRevision, SHA256: fmt.Sprintf("%x", sha256.Sum256(complete.Value))})
+	provider := cleanupExecutorRecoveryPoint(t, ctx, raw, prefix+"runtime-provider-cleanup")
+	require.LessOrEqual(t, len(provider.Value), 16384)
+	var record struct {
+		Slots []json.RawMessage `json:"slots"`
+	}
+	require.NoError(t, json.Unmarshal(provider.Value, &record))
+	require.Len(t, record.Slots, 7)
+	for index, wire := range record.Slots {
+		var slot struct {
+			State string `json:"state"`
+		}
+		require.NoError(t, json.Unmarshal(wire, &slot))
+		if index < 2 {
+			require.Equal(t, "complete", slot.State)
+		} else {
+			require.Equal(t, "unstarted", slot.State)
+		}
+	}
+	t.Logf("observer recovery actual reserved revision=%d; provider steps 0/1 complete; immutable local completion revision=%d", termination.ModRevision, complete.ModRevision)
+	return &cleanupExecutorObserverHistory{intent: intent, termination: termination, completion: complete, providerSlots: record.Slots}
+}
+
+func cleanupExecutorObserverAfter(t *testing.T, ctx context.Context, raw *clientv3.Client, prefix string, proxy *cleanupExecutorObserverProxy, before *cleanupExecutorObserverHistory) {
+	t.Helper()
+	proxy.close(t)
+	stats := proxy.snapshot()
+	require.Empty(t, stats.Error)
+	require.Equal(t, 1, stats.Terminate, "recovered reservation is Query-only")
+	require.Equal(t, 1, stats.Query)
+	require.Equal(t, 2, stats.TerminalReplies)
+	require.Equal(t, 1, stats.Withheld)
+	require.Equal(t, 1, stats.PeerClosed)
+	require.Equal(t, 1, stats.Joined)
+
+	termination := cleanupExecutorRecoveryPoint(t, ctx, raw, prefix+"runtime-termination")
+	require.LessOrEqual(t, len(termination.Value), 16384)
+	intent, err := p.DecodeTaskRuntimeTerminationIntent(termination.Value)
+	require.NoError(t, err)
+	require.Equal(t, "cleanup-complete", intent.Phase)
+	require.Equal(t, before.termination.CreateRevision, termination.CreateRevision)
+	require.Greater(t, termination.ModRevision, before.termination.ModRevision)
+	intent.Phase, intent.TerminalProof, intent.CleanupDigest = "reserved", nil, ""
+	require.Equal(t, before.intent, intent, "only original phase/proof/cleanup digest may advance")
+	complete := cleanupExecutorRecoveryPoint(t, ctx, raw, string(before.completion.Key))
+	require.Equal(t, before.completion, complete, "observer recovery never repeats local Finalize")
+	provider := cleanupExecutorRecoveryPoint(t, ctx, raw, prefix+"runtime-provider-cleanup")
+	require.LessOrEqual(t, len(provider.Value), 16384)
+	var record struct {
+		Slots []json.RawMessage `json:"slots"`
+	}
+	require.NoError(t, json.Unmarshal(provider.Value, &record))
+	require.Len(t, record.Slots, 7)
+	require.Equal(t, before.providerSlots[:2], record.Slots[:2], "completed retain/delete steps cannot be rewritten or replayed")
 }

@@ -44,6 +44,16 @@ func cleanupBoundMetadata(t *testing.T) cleanupBoundMatchFixture {
 func TestCleanupLocalBoundManifest(t *testing.T) {
 	f := cleanupBoundMetadata(t)
 	require.NoError(t, matchCleanupBoundManifest(f.state, f.target, f.root, f.current, f.manifest))
+	t.Run("local-complete-metadata", func(t *testing.T) {
+		f := cleanupBoundMetadata(t)
+		f.state.record.Confirmed = "local-complete"
+		f.state.record.Pending = &cleanupExecutionPending{Purpose: "termination", ClaimID: uuid.NewString(), LeaseID: 7}
+		require.NoError(t, f.state.record.Validate())
+		require.NoError(t, matchCleanupBoundManifest(f.state, f.target, f.root, f.current, f.manifest))
+		// Matching a manifest is only attribution. The phase gate additionally
+		// requires the separately authenticated original observer reservation.
+		require.False(t, cleanupRecoveryPhase("local-complete", nil))
+	})
 
 	// A real replacement worker has a different PID/incarnation. Only the
 	// original same-boot/namespaces/target rule can admit that copied attribution;
@@ -72,12 +82,14 @@ func TestCleanupLocalBoundManifest(t *testing.T) {
 			f.current.Worker.UID++
 			f.current.UID++
 		},
-		"unjoined":    func(f *cleanupBoundMatchFixture) { f.state.record.Run.Joined = false },
-		"unconfirmed": func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "claimed" },
-		"no-binding":  func(f *cleanupBoundMatchFixture) { f.manifest.Binding = nil },
-		"no-archive":  func(f *cleanupBoundMatchFixture) { f.state.record.Archive = nil },
-		"no-state":    func(f *cleanupBoundMatchFixture) { f.state = nil },
-		"no-target":   func(f *cleanupBoundMatchFixture) { f.target = nil },
+		"unjoined":       func(f *cleanupBoundMatchFixture) { f.state.record.Run.Joined = false },
+		"unconfirmed":    func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "claimed" },
+		"terminated":     func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "terminated" },
+		"owner-released": func(f *cleanupBoundMatchFixture) { f.state.record.Confirmed = "owner-released" },
+		"no-binding":     func(f *cleanupBoundMatchFixture) { f.manifest.Binding = nil },
+		"no-archive":     func(f *cleanupBoundMatchFixture) { f.state.record.Archive = nil },
+		"no-state":       func(f *cleanupBoundMatchFixture) { f.state = nil },
+		"no-target":      func(f *cleanupBoundMatchFixture) { f.target = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := cleanupBoundMetadata(t)
@@ -104,6 +116,20 @@ func TestCleanupLocalBoundManifest(t *testing.T) {
 			require.NoError(t, err)
 			f.target.plan = plan
 			require.Error(t, matchCleanupBoundManifest(f.state, f.target, f.root, f.current, f.manifest))
+		})
+	}
+}
+
+func TestCleanupLocalRecoveryPhase(t *testing.T) {
+	// A non-nil fence here only selects a mode; the actual history/point check
+	// must authenticate it before any new Run or physical recovery is admitted.
+	reservation := &taskFence{}
+	for _, phase := range []string{"reserved", "claimed", "closed", "quiescent", "drained", "archive-bound", "local-complete", "terminated", "owner-released", "settled", ""} {
+		t.Run(phase+"-without-reservation", func(t *testing.T) {
+			require.Equal(t, phase == "archive-bound", cleanupRecoveryPhase(phase, nil))
+		})
+		t.Run(phase+"-with-reservation", func(t *testing.T) {
+			require.Equal(t, phase == "local-complete", cleanupRecoveryPhase(phase, reservation))
 		})
 	}
 }
