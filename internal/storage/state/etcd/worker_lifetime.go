@@ -24,6 +24,10 @@ type workerCall struct {
 	started    bool
 	stopParent func() bool
 	parentDone chan struct{}
+
+	// The original call and archiveLife.mu own quota RPC admission, including
+	// failed phases and the cleanup reservation. Copies cannot recreate it.
+	coldQuotaRPC coldQuotaWorkerRPCState
 }
 
 type workerRelease struct {
