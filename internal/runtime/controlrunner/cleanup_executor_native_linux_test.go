@@ -55,6 +55,9 @@ type cleanupExecutorSetup struct {
 	Task                                     state.TaskReference
 	Recovery, RecoveryStage, WorkerDirectory string
 	CloseMode                                string
+	MountedLoader                            bool
+	LoaderConfig, LoaderKubeCA               []byte
+	LoaderClockKey                           ed25519.PrivateKey
 }
 
 // The child selector has three actual process roles. Only worker drops to the
@@ -195,6 +198,10 @@ func cleanupExecutorWorker(t *testing.T, s cleanupExecutorSetup) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	require.NoError(t, err)
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{cert}}
+	if s.MountedLoader {
+		cleanupExecutorLoaderWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certPEM, keyPEM)
+		return
+	}
 	ns, err := state.NewNamespace("/sandbox", "observer", "v1")
 	require.NoError(t, err)
 	verifier, err := p.NewManagementVerifier(s.Binding, []ed25519.PublicKey{s.Root})
@@ -704,6 +711,7 @@ func TestCleanupExecutorNative(t *testing.T) {
 		t.Skip("explicit owned cleanup executor Linux fixture required")
 	}
 	t.Run("complete", func(t *testing.T) { cleanupExecutorNativeCase(t) })
+	t.Run("mounted-loader", func(t *testing.T) { cleanupExecutorNativeCase(t, "mounted-loader") })
 	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
 	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
 	t.Run("observer-ack-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "observer-ack-recovery") })
@@ -719,6 +727,14 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.LessOrEqual(t, len(recovery), 1)
 	require.Zero(t, os.Geteuid())
 	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
+	mountedLoader := len(recovery) == 1 && recovery[0] == "mounted-loader"
+	if mountedLoader {
+		// The read-only container root stays unchanged. The existing mount
+		// capability provides a private, bounded clock directory owned by the
+		// ordinary worker; no CHOWN or DAC_OVERRIDE is needed.
+		require.NoError(t, unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "size=1048576,mode=0700,uid=1000,gid=1000"))
+		t.Cleanup(func() { require.NoError(t, unix.Unmount("/run", 0)) })
+	}
 	dir, err := os.MkdirTemp("/tmp", "cleanup-executor-")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(dir)) })
@@ -789,6 +805,12 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	issuerCert, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: issuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
 	config := launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding{Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch}, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: contract, ClockSocket: "/run/sandbox-clock/clock.sock", ClockPublicKey: root.Public().(ed25519.PublicKey), ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}}
+	var loaderClockKey ed25519.PrivateKey
+	if mountedLoader {
+		config.ClockPublicKey, loaderClockKey, err = ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		defer clear(loaderClockKey)
+	}
 	pod, err := k.BuildEnrolledPlainPod("runtimes", k.EnrolledPlainPodRequest{Spec: sandboxruntime.SandboxSpec{ID: "cleanup-pod", Image: image, CPU: "500m", Memory: "128Mi", Disk: "1Mi", TmpDisk: "1Mi", ReadOnlyRootFS: true, RunAsUser: 1000, Labels: map[string]string{"sandbox.id": input.SandboxID}}, NodeName: "node-a", NodeUID: nodeUID, NodeBootID: boot, CreationIntentID: input.IntentID, Generation: creation.Reference().Generation, Config: observerNativeJSON(t, config)})
 	require.NoError(t, err)
 	require.Equal(t, []string{kubecontract.EnrolledRetainFinalizer}, pod.Finalizers, "production enrolled Pod starts retained")
@@ -796,7 +818,12 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	pod.UID, pod.ResourceVersion = types.UID(uuid.NewString()), "1"
 	node := &v1.Node{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Node"}, ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
 	apiState := &cleanupExecutorAPI{pod: pod, node: node, connections: make(map[net.Conn]struct{})}
-	api := httptest.NewServer(http.HandlerFunc(apiState.serve))
+	api := httptest.NewUnstartedServer(http.HandlerFunc(apiState.serve))
+	if mountedLoader {
+		api.StartTLS()
+	} else {
+		api.Start()
+	}
 	defer func() {
 		apiState.close()
 		api.Close()
@@ -806,7 +833,13 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.NoError(t, os.Chmod(uds.Addr().String(), 0600))
 	tcp, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	observer, err := nodeobserver.New(nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: observerTLS, EtcdClusterID: cluster, EtcdIdentity: identityWire, KubernetesConfig: &rest.Config{Host: api.URL}, KubernetesNamespace: "runtimes", JournalDirectory: filepath.Join(dir, "observer-journal"), MaxSlots: 1, MaxActive: 2, RequestTimeout: 3 * time.Second, TerminationTimeout: 20 * time.Second})
+	apiConfig := &rest.Config{Host: api.URL}
+	var loaderKubeCA []byte
+	if mountedLoader {
+		loaderKubeCA = cleanupExecutorLoaderCA(api.Certificate())
+		apiConfig.TLSClientConfig.CAData = loaderKubeCA
+	}
+	observer, err := nodeobserver.New(nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: observerTLS, EtcdClusterID: cluster, EtcdIdentity: identityWire, KubernetesConfig: apiConfig, KubernetesNamespace: "runtimes", JournalDirectory: filepath.Join(dir, "observer-journal"), MaxSlots: 1, MaxActive: 2, RequestTimeout: 3 * time.Second, TerminationTimeout: 20 * time.Second})
 	require.NoError(t, err)
 	served := make(chan error, 1)
 	go func() { served <- observer.Serve(ctx, uds, tcp) }()
@@ -827,6 +860,11 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 		require.NoError(t, os.Remove(owned))
 	}()
 	s := cleanupExecutorSetup{localReleaseNativeSetup: localReleaseNativeSetup{Binding: binding, Root: root.Public().(ed25519.PublicKey), IssuerKey: issuerKey, IssuerCertificate: issuerCert, ObserverCertificate: observerCert, Identity: identity, WorkspaceProvider: "local", WorkspaceStorage: identity.StorageID, WorkspaceBucket: "bucket", WorkspacePrefix: "cleanup-executor/", SandboxID: input.SandboxID, IntentID: input.IntentID, Contract: contract, NodeUID: nodeUID, NodeBootID: boot, Directory: dir, Coordinator: coordinator.Addr().String(), EnrollmentSocket: uds.Addr().String(), CgroupMount: mount, ObserverAddress: tcp.Addr().String(), ProviderAddress: api.URL, BudgetID: uuid.NewString()}, Role: "supervisor"}
+	if mountedLoader {
+		s.MountedLoader = true
+		s.LoaderConfig = observerNativeJSON(t, config)
+		s.LoaderKubeCA, s.LoaderClockKey = loaderKubeCA, loaderClockKey
+	}
 	setupPath := filepath.Join(dir, "supervisor.json")
 	require.NoError(t, os.WriteFile(setupPath, observerNativeJSON(t, s), 0600))
 	fd, err := unix.Open(owned, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -890,7 +928,9 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	require.Equal(t, state.OutcomeCommitted, outcome)
 	s.Role, s.Task = "worker", task
 	if len(recovery) == 1 {
-		if strings.HasPrefix(recovery[0], "close-join-") {
+		if mountedLoader {
+			// The mounted loader uses the ordinary one-worker complete parent.
+		} else if strings.HasPrefix(recovery[0], "close-join-") {
 			s.CloseMode = strings.TrimPrefix(recovery[0], "close-join-")
 		} else {
 			s.Recovery = recovery[0]

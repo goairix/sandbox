@@ -1,4 +1,4 @@
-// Package deployment loads mounted credentials into the existing cold-create
+// Package deployment loads mounted credentials into the existing create and cleanup
 // constructors. It never provisions identities, inventory or runtime state.
 package deployment
 
