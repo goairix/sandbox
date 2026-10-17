@@ -11,7 +11,9 @@ import (
 // the original Claim and effect gates. Every failure retains its occupation.
 func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
 	var err error
-	if j.boundRecovery {
+	if j.earlyRecovery {
+		err = b.cleanupResumeEarly(j)
+	} else if j.boundRecovery {
 		err = b.cleanupResumeBoundArchive(j)
 	} else {
 		err = b.cleanupArchiveAndFinalize(j)
@@ -97,40 +99,24 @@ func (b *Backend) cleanupArchiveAndFinalize(j *cleanupLocalJob) (resultErr error
 			resultErr = errors.Join(resultErr, stopRenew())
 		}
 	}()
-	if err := j.progress("", j.pending("close", StageReference{}), nil); err != nil {
+
+	if j.earlyRecovery {
+		// Repeat authentic Load/Query under the new managed Claim's lifetime.
+		// The preflight snapshot is only an expected identity, never authority.
+		if err := b.recheckCleanupEarlyHistory(j); err != nil {
+			return err
+		}
+	} else if err := b.cleanupCloseData(j); err != nil {
 		return err
 	}
-	closeData, err := b.PrepareTaskCloseData(ctx, j.claim)
-	if saveErr := j.progress("", j.pending("close", closeData.Reference.Stage), nil); err != nil || saveErr != nil {
-		return errors.Join(err, saveErr)
+	if !j.earlyRecovery || j.early.quiescence == nil {
+		if err := b.cleanupQuiesceUsers(j); err != nil {
+			return err
+		}
 	}
-	if closeData.Outcome != OutcomeCommitted || closeData.Prepared == nil {
-		return ErrOutcomeUnknown
-	}
-	closed, err := b.DeliverTaskCloseData(ctx, closeData.Prepared, target.destination)
-	if err != nil || closed.Receipt == nil {
-		return errors.Join(ErrDeliveryUnknown, err)
-	}
-	if err = j.progress("closed", j.pending("quiescence", StageReference{}), nil); err != nil {
-		return err
-	}
-	quiescence, err := b.PrepareTaskQuiescence(ctx, j.claim, target.destination)
-	if saveErr := j.progress("", j.pending("quiescence", quiescence.Reference.Stage), nil); err != nil || saveErr != nil {
-		return errors.Join(err, saveErr)
-	}
-	if quiescence.Outcome != OutcomeCommitted || quiescence.Prepared == nil {
-		return ErrOutcomeUnknown
-	}
-	delivered, err := b.DeliverTaskQuiescence(ctx, quiescence.Prepared, target.destination)
-	if err != nil {
-		return err
-	}
-	if err = b.waitCleanupQuiescence(j, delivered); err != nil {
-		return err
-	}
-	if err = j.progress("quiescent", j.pending("final-sync", StageReference{}), nil); err != nil {
-		return err
-	}
+
+	// Both paths require a fresh dual-drain observation. A historical terminal
+	// receipt cannot replace the new whole-operation-prefix empty Range.
 	drained, err := b.PrepareAfterDualDrain(ctx, j.claim, target.destination)
 	if err != nil {
 		return err
@@ -189,6 +175,44 @@ func (b *Backend) cleanupArchiveAndFinalize(j *cleanupLocalJob) (resultErr error
 		return err
 	}
 	return b.cleanupFinalizeBoundArchive(j, slot)
+}
+
+func (b *Backend) cleanupCloseData(j *cleanupLocalJob) error {
+	if err := j.progress("", j.pending("close", StageReference{}), nil); err != nil {
+		return err
+	}
+	prepared, err := b.PrepareTaskCloseData(j.ctx, j.claim)
+	if saveErr := j.progress("", j.pending("close", prepared.Reference.Stage), nil); err != nil || saveErr != nil {
+		return errors.Join(err, saveErr)
+	}
+	if prepared.Outcome != OutcomeCommitted || prepared.Prepared == nil {
+		return ErrOutcomeUnknown
+	}
+	closed, err := b.DeliverTaskCloseData(j.ctx, prepared.Prepared, j.target.destination)
+	if err != nil || closed.Receipt == nil {
+		return errors.Join(ErrDeliveryUnknown, err)
+	}
+	return j.progress("closed", j.pending("quiescence", StageReference{}), nil)
+}
+
+// Only a normal run or an authenticated closed-only history with no original
+// quiescence reservation may enter this original Prepare/Deliver path.
+func (b *Backend) cleanupQuiesceUsers(j *cleanupLocalJob) error {
+	prepared, err := b.PrepareTaskQuiescence(j.ctx, j.claim, j.target.destination)
+	if saveErr := j.progress("", j.pending("quiescence", prepared.Reference.Stage), nil); err != nil || saveErr != nil {
+		return errors.Join(err, saveErr)
+	}
+	if prepared.Outcome != OutcomeCommitted || prepared.Prepared == nil {
+		return ErrOutcomeUnknown
+	}
+	delivered, err := b.DeliverTaskQuiescence(j.ctx, prepared.Prepared, j.target.destination)
+	if err != nil {
+		return err
+	}
+	if err = b.waitCleanupQuiescence(j, delivered); err != nil {
+		return err
+	}
+	return j.progress("quiescent", j.pending("final-sync", StageReference{}), nil)
 }
 
 // Both normal rollover and cold bound recovery arrive with the original

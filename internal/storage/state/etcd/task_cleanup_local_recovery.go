@@ -136,7 +136,17 @@ func (b *Backend) beginCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocal
 	if !registered || b.cleanupPhysicalProfile() != nil {
 		return ErrInvalidRecord
 	}
+	projection := "recovery-run"
+	if j.terminationReservation != nil {
+		projection = "recovery-termination-run"
+	}
+	return b.commitCleanupRecoveryRun(owner, j, projection)
+}
 
+// The phase-specific caller has already checked the same registered job and
+// its authentic history preflight. This common finite CAS preserves T/I/R/E/S
+// pins and never retries a Run candidate after an uncertain native result.
+func (b *Backend) commitCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocalJob, projection string) error {
 	s := j.state
 	if err := b.validateCleanupState(s); err != nil {
 		return err
@@ -171,10 +181,6 @@ func (b *Backend) beginCleanupRecoveryRun(owner *workerDueOwner, j *cleanupLocal
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
-	projection := "recovery-run"
-	if j.terminationReservation != nil {
-		projection = "recovery-termination-run"
-	}
 	if err = b.cleanupWrite(owner, projection, cmps, []Write{{Key: s.execution.key, Value: []byte(wire)}}); err != nil {
 		return err
 	}

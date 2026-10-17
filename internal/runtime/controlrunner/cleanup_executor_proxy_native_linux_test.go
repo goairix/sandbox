@@ -52,16 +52,33 @@ type cleanupExecutorEtcdProxy struct {
 
 type cleanupExecutorProxyStats struct {
 	GrantIDs                                  []int64
+	ClaimLeases                               []cleanupExecutorClaimLease
+	QuiescenceGuards                          []cleanupExecutorStageGuard
+	ObservationOverflow                       bool
 	ClaimPuts, ArchivePuts                    int
+	ClosePuts, QuiescencePuts                 int
 	WatchStreams, KeepAliveStreams            int
 	FaultMatched, FaultCommitted, FaultJoined int
 	FaultRevision                             int64
 	AdmissionReads, CloseReadJoined           int
 }
 
+// These copied observations are never input to a consumer or effect API.
+// Four entries per kind bound even an unexpected repeated-write test failure.
+type cleanupExecutorClaimLease struct {
+	ClaimID string
+	LeaseID int64
+}
+
+type cleanupExecutorStageGuard struct {
+	Key     string
+	LeaseID int64
+	Stage   state.StageReference
+}
+
 func newCleanupExecutorEtcdProxy(t *testing.T, tlsConfig *tls.Config, task state.TaskReference, fault string) *cleanupExecutorEtcdProxy {
 	t.Helper()
-	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join"}, fault)
+	require.Contains(t, []string{"", "bound-recovery", "release-settlement-recovery", "close-join", "closed-progress-recovery", "quiescent-progress-recovery"}, fault)
 	connection, err := grpc.NewClient("127.0.0.1:2379", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())))
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -89,6 +106,8 @@ func (p *cleanupExecutorEtcdProxy) snapshot() cleanupExecutorProxyStats {
 	defer p.mu.Unlock()
 	s := p.stats
 	s.GrantIDs = append([]int64(nil), s.GrantIDs...)
+	s.ClaimLeases = append([]cleanupExecutorClaimLease(nil), s.ClaimLeases...)
+	s.QuiescenceGuards = append([]cleanupExecutorStageGuard(nil), s.QuiescenceGuards...)
 	return s
 }
 
@@ -205,11 +224,66 @@ func (p *cleanupExecutorEtcdProxy) observeWrites(request *pb.TxnRequest, respons
 				p.stats.ClaimPuts++
 			case p.prefix + "workspace-archive-command":
 				p.stats.ArchivePuts++
+			case p.prefix + "close-data":
+				p.stats.ClosePuts++
+			case p.prefix + "quiesce-users":
+				p.stats.QuiescencePuts++
+			}
+			if response.Succeeded && i < len(response.Responses) && response.Responses[i].GetResponsePut() != nil {
+				p.observeQuiescenceStageLease(put)
 			}
 		}
 		if nested := op.GetRequestTxn(); nested != nil && i < len(response.Responses) && response.Responses[i].GetResponseTxn() != nil {
 			p.observeWrites(nested, response.Responses[i].GetResponseTxn())
 		}
+	}
+}
+
+// Attribute only real successful PUTs to this exact Task's observed Claim.
+// A same-partition Stage alone is insufficient: its original RequestID must
+// match a Claim PUT seen by this proxy before the Stage guard was created.
+func (p *cleanupExecutorEtcdProxy) observeQuiescenceStageLease(put *pb.PutRequest) {
+	if len(put.Key) > 4096 || len(put.Value) > 4096 || put.Lease <= 0 {
+		return
+	}
+	if string(put.Key) == p.prefix+"claim" {
+		var claim struct {
+			Task    state.TaskReference `json:"task"`
+			ClaimID string              `json:"claim_id"`
+			LeaseID int64               `json:"lease_id"`
+		}
+		if json.Unmarshal(put.Value, &claim) != nil || claim.Task != p.task || claim.ClaimID == "" || claim.LeaseID != put.Lease {
+			return
+		}
+		if len(p.stats.ClaimLeases) == 4 {
+			p.stats.ObservationOverflow = true
+			return
+		}
+		p.stats.ClaimLeases = append(p.stats.ClaimLeases, cleanupExecutorClaimLease{claim.ClaimID, put.Lease})
+		return
+	}
+
+	var guard struct {
+		state.StageReference
+		LeaseID int64 `json:"lease_id"`
+	}
+	if json.Unmarshal(put.Value, &guard) != nil || guard.LeaseID != put.Lease || guard.Namespace != p.task.Namespace || guard.Partition != p.task.Partition || guard.RestoreEpoch != p.task.RestoreEpoch || guard.StageID != "task_quiesce_users" {
+		return
+	}
+	key := fmt.Sprintf("%sp/%02x/attempts/%s/guard", p.task.Namespace, p.task.Partition, guard.AttemptID)
+	if string(put.Key) != key {
+		return
+	}
+	for _, claim := range p.stats.ClaimLeases {
+		if claim.ClaimID != guard.RequestID {
+			continue
+		}
+		if len(p.stats.QuiescenceGuards) == 4 {
+			p.stats.ObservationOverflow = true
+			return
+		}
+		p.stats.QuiescenceGuards = append(p.stats.QuiescenceGuards, cleanupExecutorStageGuard{Key: key, LeaseID: put.Lease, Stage: guard.StageReference})
+		return
 	}
 }
 
@@ -222,6 +296,12 @@ func (p *cleanupExecutorEtcdProxy) matchesFault(request *pb.TxnRequest) bool {
 		if p.fault == "bound-recovery" && string(put.Key) == p.prefix+"execution" {
 			var row cleanupExecutorRecoveryRow
 			if len(put.Value) <= 4096 && json.Unmarshal(put.Value, &row) == nil && row.Task == p.task && row.Phase == "occupied" && row.Confirmed == "archive-bound" && row.Run != nil && !row.Run.Joined && row.Archive != nil {
+				return true
+			}
+		}
+		if cleanupExecutorEarlyPhase(p.fault) != "" && string(put.Key) == p.prefix+"execution" {
+			var row cleanupExecutorRecoveryRow
+			if len(put.Value) <= 4096 && json.Unmarshal(put.Value, &row) == nil && row.Task == p.task && row.Phase == "occupied" && row.Confirmed == cleanupExecutorEarlyPhase(p.fault) && row.Run != nil && !row.Run.Joined && row.Archive == nil {
 				return true
 			}
 		}

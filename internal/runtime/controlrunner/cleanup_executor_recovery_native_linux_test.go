@@ -59,6 +59,7 @@ type cleanupExecutorRecoveryReport struct {
 	Stats        cleanupExecutorProxyStats
 	Claims       []string
 	SessionLease int64
+	Early        *cleanupExecutorEarlyHistory
 }
 
 func cleanupExecutorRecoveryPoint(t *testing.T, ctx context.Context, raw *clientv3.Client, key string) *mvccpb.KeyValue {
@@ -125,24 +126,31 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 	t.Logf("recovery %s/%s actual E create=%d mod=%d wire=%s", s.Recovery, s.RecoveryStage, rowKV.CreateRevision, rowKV.ModRevision, rowKV.Value)
 	require.NotNil(t, row.Run)
 	require.Equal(t, s.Task, row.Task)
+	var early *cleanupExecutorEarlyHistory
 	if s.RecoveryStage == "first" {
 		require.ErrorIs(t, executeErr, state.ErrOutcomeUnknown)
 		require.True(t, result.Retained)
 		require.NotEqual(t, state.OutcomeCommitted, result.Outcome)
 		require.Equal(t, "occupied", row.Phase)
 		require.True(t, row.Run.Joined, "original job must reconcile its unknown progress ACK and publish its own actual join; cold workers may not repair this prerequisite")
-		require.NotNil(t, row.Archive)
-		if s.Recovery == "bound-recovery" {
-			require.Equal(t, "archive-bound", row.Confirmed)
-		} else if s.Recovery == "observer-ack-recovery" {
-			require.Equal(t, "local-complete", row.Confirmed)
-			require.NotNil(t, row.Pending)
-			require.Equal(t, "termination", row.Pending.Purpose)
+		if cleanupExecutorEarlyPhase(s.Recovery) != "" {
+			require.Nil(t, row.Archive, "early progress ACK loss precedes all archive preparation")
+			require.Equal(t, cleanupExecutorEarlyPhase(s.Recovery), row.Confirmed)
+			early = cleanupExecutorEarlyQuery(t, ctx, s, options, b)
 		} else {
-			require.Equal(t, "terminated", row.Confirmed)
-			release, readErr := b.LoadTaskOwnerRelease(ctx, s.Task)
-			require.NoError(t, readErr)
-			require.NotNil(t, release, "the actual original release committed before its ACK was withheld")
+			require.NotNil(t, row.Archive)
+			if s.Recovery == "bound-recovery" {
+				require.Equal(t, "archive-bound", row.Confirmed)
+			} else if s.Recovery == "observer-ack-recovery" {
+				require.Equal(t, "local-complete", row.Confirmed)
+				require.NotNil(t, row.Pending)
+				require.Equal(t, "termination", row.Pending.Purpose)
+			} else {
+				require.Equal(t, "terminated", row.Confirmed)
+				release, readErr := b.LoadTaskOwnerRelease(ctx, s.Task)
+				require.NoError(t, readErr)
+				require.NotNil(t, release, "the actual original release committed before its ACK was withheld")
+			}
 		}
 		slot := cleanupExecutorRecoveryPoint(t, ctx, raw, fmt.Sprintf("%scleanup-execution-slots/%02d", s.Binding.Namespace, row.Slot))
 		require.Zero(t, slot.Lease)
@@ -191,6 +199,9 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 	if s.Recovery == "observer-ack-recovery" && s.RecoveryStage == "first" {
 		wantClaims = 2
 	}
+	if cleanupExecutorEarlyPhase(s.Recovery) != "" && s.RecoveryStage == "second" {
+		wantClaims = 2
+	}
 	require.Len(t, trace.ids, wantClaims)
 	wantEvents := make([]string, 0, wantClaims*2)
 	for i := 0; i < wantClaims; i++ {
@@ -226,14 +237,40 @@ func cleanupExecutorRecoveryExecute(t *testing.T, ctx context.Context, s cleanup
 			require.Equal(t, 1, stats.FaultJoined)
 			require.Positive(t, stats.FaultRevision)
 		}
-		require.Equal(t, 1, stats.ArchivePuts)
+		if cleanupExecutorEarlyPhase(s.Recovery) != "" {
+			require.Zero(t, stats.ArchivePuts)
+			require.Equal(t, 1, stats.ClosePuts)
+			wantQuiescence := 0
+			if s.Recovery == "quiescent-progress-recovery" {
+				wantQuiescence = 1
+			}
+			require.Equal(t, wantQuiescence, stats.QuiescencePuts)
+		} else {
+			require.Equal(t, 1, stats.ArchivePuts)
+		}
 	} else {
 		require.Zero(t, stats.FaultMatched)
-		require.Zero(t, stats.ArchivePuts, "cold recovery cannot prepare/send a replacement archive command")
-		require.Len(t, stats.GrantIDs, 1+wantClaims, "only original worker session and the required managed Claim may Grant")
+		if cleanupExecutorEarlyPhase(s.Recovery) != "" {
+			require.Equal(t, 1, stats.ArchivePuts, "early recovery creates its first archive only after fresh dual-drain")
+			require.Zero(t, stats.ClosePuts, "history cannot reconstruct close dispatch")
+			wantQuiescence := 0
+			if s.Recovery == "closed-progress-recovery" {
+				wantQuiescence = 1
+			}
+			require.Equal(t, wantQuiescence, stats.QuiescencePuts)
+		} else {
+			require.Zero(t, stats.ArchivePuts, "cold recovery cannot prepare/send a replacement archive command")
+		}
+		if s.Recovery == "closed-progress-recovery" {
+			// This branch creates its first quiescence command. Its original
+			// Stage guard has one Lease in addition to session and Task Claims.
+			cleanupExecutorEarlyStageGrant(t, s.Task, sessionLease, trace.ids, stats)
+		} else {
+			require.Len(t, stats.GrantIDs, 1+wantClaims, "only original worker session and the required managed Claim may Grant")
+		}
 		require.Contains(t, stats.GrantIDs, sessionLease)
 	}
-	report := cleanupExecutorRecoveryReport{Result: result, Row: row, Stats: stats, Claims: trace.ids, SessionLease: sessionLease}
+	report := cleanupExecutorRecoveryReport{Result: result, Row: row, Stats: stats, Claims: trace.ids, SessionLease: sessionLease, Early: early}
 
 	// Only bounded, non-secret observations cross the UID boundary. The report
 	// sits beside the private tree; spool/target permissions remain unchanged.
@@ -309,6 +346,10 @@ func cleanupExecutorRunRecoveryWorkers(t *testing.T, ctx context.Context, s clea
 	}
 	first := run("first")
 	prefix := fmt.Sprintf("%sp/%02x/tasks/%s/", s.Binding.Namespace, s.Task.Partition, s.Task.TaskID)
+	if cleanupExecutorEarlyPhase(s.Recovery) != "" {
+		cleanupExecutorEarlyWorkers(t, ctx, s, admin, api, first, run)
+		return
+	}
 	archiveBefore := cleanupExecutorRecoveryPoint(t, ctx, admin, prefix+"workspace-archive-command")
 	var observerHistory *cleanupExecutorObserverHistory
 	if s.Recovery == "observer-ack-recovery" {

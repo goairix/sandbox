@@ -141,6 +141,10 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 	if err != nil {
 		return nil, err
 	}
+	earlyOld, earlyNext, err := cleanupFutureRecoveryValues(r, "quiescent")
+	if err != nil {
+		return nil, err
+	}
 	e := taskFence{key: eKey, value: active, create: math.MaxInt64, mod: math.MaxInt64}
 	s := taskFence{key: sKey, value: slotValue, create: math.MaxInt64, mod: math.MaxInt64}
 	tir := make([]clientv3.Cmp, 0, 12)
@@ -187,7 +191,13 @@ func (b *Backend) cleanupCandidateWire(worker []clientv3.Cmp, evidence *cleanupS
 		b.cleanupProjection("progress", appendCopies(worker, e.comparisons(), s.comparisons()), put(eKey, active), taskProtoPutResponse(1)),
 		b.cleanupProjection("recovery-run", appendCopies(worker, tir, (taskFence{key: eKey, value: recoveryOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, recoveryNext), taskProtoPutResponse(1)),
 		b.cleanupProjection("recovery-termination-run", appendCopies(worker, tir, (taskFence{key: eKey, value: terminationOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, terminationNext), taskProtoPutResponse(1)),
+		b.cleanupProjection("recovery-early-run", appendCopies(worker, tir, (taskFence{key: eKey, value: earlyOld, create: math.MaxInt64, mod: math.MaxInt64}).comparisons(), s.comparisons()), put(eKey, earlyNext), taskProtoPutResponse(1)),
 	}
+	earlyHistory, _, err := b.cleanupEarlyHistoryProjection(r.Task)
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, earlyHistory)
 	// The managed creation projection uses the same claim constructor and
 	// creation mutation as public ClaimTask. Extra pins do not enter c.fences.
 	c, checkpoint, err := b.prepareTaskClaim(context.Background(), evidence.bundle, strings.Repeat("w", 128), 24*time.Hour, "ffffffff-ffff-4fff-bfff-ffffffffffff")
@@ -260,6 +270,11 @@ func cleanupFutureRecoveryValues(r cleanupExecutionRecord, confirmed string) (pr
 		// A lost observer ACK retains the original pending termination. Keep
 		// all legal future scalar/stage widths from the canonical max record.
 		r.Pending.Purpose = "termination"
+	case "quiescent":
+		// The longer early phase and full pending Stage dimensions also bound
+		// closed-only recovery. Neither early shape contains a bound archive.
+		r.Archive = nil
+		r.Pending.Purpose = "quiescence"
 	default:
 		return "", "", ErrInvalidRecord
 	}
@@ -274,4 +289,22 @@ func cleanupFutureRecoveryValues(r cleanupExecutionRecord, confirmed string) (pr
 	r.Pending = &cleanupExecutionPending{Purpose: "claim", ClaimID: id}
 	next, err = encodeCleanupExecution(r)
 	return
+}
+
+// This is the actual readExecEffectPoints shape: base comparisons and all four
+// fixed points in both branches. Full record caps include a present history
+// that must be refused, rather than projecting only the expected empty reply.
+func (b *Backend) cleanupEarlyHistoryProjection(task TaskReference) (cleanupWireProjection, []string, error) {
+	final, err := b.namespace.taskFinalSyncAttemptKey(task)
+	if err != nil {
+		return cleanupWireProjection{}, nil, err
+	}
+	archive, err := b.namespace.taskWorkspaceArchiveKey(task)
+	if err != nil {
+		return cleanupWireProjection{}, nil, err
+	}
+	keys := []string{b.identityKey, b.restoreKey, final, archive}
+	values := []string{b.identityValue, b.restoreEpoch, cleanupWirePadding(8192), cleanupWirePadding(maxRecordBytes)}
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(b.baseComparisons()), Success: taskProtoPoints(keys), Failure: taskProtoPoints(keys)}
+	return cleanupWireProjection{"early-history", request, taskProtoResponse(keys, values), taskProtoResponse(keys, values)}, keys, nil
 }

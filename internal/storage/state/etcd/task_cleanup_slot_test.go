@@ -449,7 +449,7 @@ func TestCleanupSlotsWire(t *testing.T) {
 	f.turn(t, func(owner *workerDueOwner) {
 		inventory, err := f.b.cleanupSlotWireInventory(owner, f.evidence, state)
 		require.NoError(t, err)
-		want := map[string]int{"point": 7, "bundle": 16, "observe": 8, "claim-observe": 9, "terminal-history": 10, "initialize": 36, "rotate": 27, "reserve": 41, "progress": 31, "recovery-run": 43, "recovery-termination-run": 43, "claim": 64, "claim-postcheck": 46, "joined": 15, "settle": 48}
+		want := map[string]int{"point": 7, "bundle": 16, "observe": 8, "claim-observe": 9, "terminal-history": 10, "initialize": 36, "rotate": 27, "reserve": 41, "progress": 31, "recovery-run": 43, "recovery-termination-run": 43, "recovery-early-run": 43, "early-history": 12, "claim": 64, "claim-postcheck": 46, "joined": 15, "settle": 48}
 		for _, projection := range inventory {
 			nodes, ok := want[projection.name]
 			require.True(t, ok, "unexpected or duplicate projection %s", projection.name)

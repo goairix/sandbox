@@ -715,6 +715,8 @@ func TestCleanupExecutorNative(t *testing.T) {
 	t.Run("bound-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "bound-recovery") })
 	t.Run("release-settlement-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "release-settlement-recovery") })
 	t.Run("observer-ack-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "observer-ack-recovery") })
+	t.Run("closed-progress-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "closed-progress-recovery") })
+	t.Run("quiescent-progress-recovery", func(t *testing.T) { cleanupExecutorNativeCase(t, "quiescent-progress-recovery") })
 	t.Run("close-join", func(t *testing.T) {
 		for _, mode := range []string{"stop", "backend-close"} {
 			t.Run(mode, func(t *testing.T) { cleanupExecutorNativeCase(t, "close-join-"+mode) })

@@ -47,6 +47,11 @@ type cleanupLocalJob struct {
 	boundRecovery bool
 	boundArchive  *cleanupExecutionArchive
 
+	// Early history is loaded and queried by this same job without a native
+	// owner. Its exact original E/Pending/S survives until the new-Run CAS.
+	earlyRecovery bool
+	early         *cleanupEarlyRecovery
+
 	// A completed local sync may resume only the already reserved observer
 	// request. This copied fence is checked again by the real termination read;
 	// it never grants a new Terminate send or substitutes for its signed proof.
@@ -272,6 +277,8 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 		job.step = "rollover"
 	case "resume-bound":
 		job.step = "recovery-run"
+	case "resume-early":
+		job.step = "early-run"
 	case "settle":
 		job.step = "release-proof"
 	default:
@@ -346,7 +353,7 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.step = "issuer"
 	case "issuer":
 		err = b.cleanupIssuer(ctx, j.target)
-		if j.boundRecovery {
+		if j.boundRecovery || j.earlyRecovery {
 			// Start the same owned goroutine before obtaining a native owner
 			// for new-Run admission: manifest/tar validation can perform IO.
 			j.step = "physical"
@@ -404,6 +411,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.step = "claim-bundle"
 	case "recovery-run":
 		err = b.beginCleanupRecoveryRun(owner, j)
+		j.step = "claim-bundle"
+	case "early-run":
+		err = b.beginCleanupEarlyRun(owner, j)
 		j.step = "claim-bundle"
 	case "termination-history":
 		// The original loader authenticates the reserved intent/provider and
@@ -469,6 +479,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 				j.step = "bundle"
 			} else if j.state.record.Confirmed == "local-complete" && j.state.record.Archive != nil {
 				j.step = "termination-history"
+			} else if cleanupEarlyPhase(j.state.record.Confirmed) && j.state.record.Archive == nil {
+				j.earlyRecovery = true
+				j.step = "bundle"
 			} else {
 				j.result.Reason = "missing-release-proof"
 				j.step = "done"
