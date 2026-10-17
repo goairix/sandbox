@@ -15,7 +15,8 @@ type LocalRuntimeReleaseOptions struct {
 	Provider  *kubernetes.TaskRuntimeCleanupClient
 }
 
-// TaskRuntimeTerminationIssuer must select the exact original archive issuer.
+// TaskRuntimeTerminationIssuer must select the original signed source's exact
+// issuer: archive for local, historical quiescence for detached termination.
 // Construction invokes neither method; the dependency is borrowed and must
 // remain immutable, concurrency safe, and honor cancellation.
 type TaskRuntimeTerminationIssuer interface {

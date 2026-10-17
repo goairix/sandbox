@@ -150,7 +150,7 @@ func (x *taskLocalRuntimeExecution) prepareProvider(ctx context.Context) error {
 	if err := x.a.guard(ctx, x.a.base()); err != nil {
 		return err
 	}
-	handle, err := x.a.backend.localRuntimeRelease.Provider.Prepare(ctx, localRuntimeProviderBinding(x.intent, x.a.backend.enrolledPublication.ContractDigest), saved)
+	handle, err := x.a.backend.localRuntimeRelease.Provider.Prepare(ctx, localRuntimeProviderBinding(x.intent, x.a.contractDigest()), saved)
 	if err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (x *taskLocalRuntimeExecution) prepareProvider(ctx context.Context) error {
 		return ErrCorruptRecord
 	}
 	if x.providerKV == nil {
-		x.cleanup = taskRuntimeProviderCleanupRecord{Version: 1, Task: x.a.task.Reference, TaskBirth: x.a.claim.birth, Binding: localRuntimeProviderBinding(x.intent, x.a.backend.enrolledPublication.ContractDigest), Descriptor: descriptor}
+		x.cleanup = taskRuntimeProviderCleanupRecord{Version: 1, Task: x.a.task.Reference, TaskBirth: x.a.claim.birth, Binding: localRuntimeProviderBinding(x.intent, x.a.contractDigest()), Descriptor: descriptor}
 		for i, step := range taskRuntimeCleanupSteps {
 			x.cleanup.Slots[i] = taskRuntimeCleanupSlot{Step: step, State: "unstarted"}
 		}

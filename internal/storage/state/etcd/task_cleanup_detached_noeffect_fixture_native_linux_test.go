@@ -46,6 +46,23 @@ type cleanupDetachedNoEffectNativeFixture struct {
 
 func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
 	t.Helper()
+	return newCleanupDetachedNoEffectNativeFixtureWithOptions(t, nil, claimWorker...)
+}
+
+// Optional component dependencies are installed before the second formal New.
+// The callback receives only the original just-published signed enrollment;
+// existing callers retain precisely their original setup and worker attribution.
+func newCleanupDetachedNoEffectNativeFixtureWithOptions(t *testing.T, configure func(*Options, p.EnrolledRuntimeEvidence), claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
+	t.Helper()
+	return newCleanupDetachedNoEffectNativeFixtureWithClaimTTL(t, 30*time.Second, configure, claimWorker...)
+}
+
+// A short test TTL still goes through the original ClaimTask Grant and native
+// lease checks. Default callers retain thirty seconds; renewal tests never
+// assign c.deadline or reconstruct a capability from copied lease diagnostics.
+func newCleanupDetachedNoEffectNativeFixtureWithClaimTTL(t *testing.T, claimTTL time.Duration, configure func(*Options, p.EnrolledRuntimeEvidence), claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
+	t.Helper()
+	require.Positive(t, claimTTL)
 	if workspaceSyncLocalNativeWorker == nil {
 		t.Skip("requires the existing explicit original Linux worker TestMain")
 	}
@@ -103,6 +120,9 @@ func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string
 	issuer := &taskCloseProvider{wire: bytes.Clone(enrollment.Request.IssuerCertificate), key: issuerKey}
 	quiescence := &quiescenceProvider{old: issuer}
 	o.TaskIssuer, o.TaskQuiescenceIssuer = issuer, quiescence
+	if configure != nil {
+		configure(&o, enrollment)
+	}
 	b, err := New(ctx, o)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
@@ -179,7 +199,7 @@ func newCleanupDetachedNoEffectNativeFixture(t *testing.T, claimWorker ...string
 	if len(claimWorker) != 0 {
 		workerID = claimWorker[0]
 	}
-	f.job.claim, err = b.ClaimTask(f.job.ctx, ref, workerID, 30*time.Second)
+	f.job.claim, err = b.ClaimTask(f.job.ctx, ref, workerID, claimTTL)
 	require.NoError(t, err)
 	worker, err := workspaceSyncLocalNativeWorker.WorkspaceSyncWorkerReference()
 	require.NoError(t, err)

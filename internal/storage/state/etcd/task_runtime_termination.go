@@ -95,70 +95,98 @@ func (b *Backend) terminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, d
 	if err != nil {
 		return result, err
 	}
-	x := &taskLocalRuntimeExecution{a: a, intent: a.newTermination()}
-	points, err := b.readEnrolledPoints(o.ctx, []string{a.terminationKey, a.providerKey, a.releaseKey}, []int{16384, 16384, 8192})
+	x, err := b.loadRuntimeTerminationExecution(o.ctx, a, reservation)
+	if err != nil {
+		return result, err
+	}
+	return b.executeRuntimeTermination(o.ctx, x, destination)
+}
+
+// Reading the original fixed pair creates no new command or sending attempt.
+// Detached same-Claim diagnosis uses this path without entering execution;
+// fresh execution alone allocates a candidate after all actual history passes.
+func (b *Backend) loadRuntimeTerminationExecution(ctx context.Context, a *taskLocalRuntimeAuthority, reservation *taskFence) (*taskLocalRuntimeExecution, error) {
+	x := &taskLocalRuntimeExecution{a: a}
+	points, err := b.readEnrolledPoints(ctx, []string{a.terminationKey, a.providerKey, a.releaseKey}, []int{16384, 16384, 8192})
 	if err != nil || points[2] != nil {
-		return result, errors.Join(ErrConflict, err)
+		return nil, errors.Join(ErrConflict, err)
 	}
 	x.intentKV, x.providerKV = points[0], points[1]
 	if reservation != nil {
-		if err := matchCleanupTerminationReservation(c.reference.Task, c.birth, reservation, x.intentKV); err != nil {
-			return result, err
+		if err := a.matchTerminationReservation(reservation, x.intentKV); err != nil {
+			return nil, err
 		}
 	}
 	if x.intentKV != nil {
 		x.intent, err = decodeLocalRuntimeTermination(x.intentKV)
 		if err != nil || !a.matchesTermination(x.intent) {
-			return result, errors.Join(ErrCorruptRecord, err)
+			return nil, errors.Join(ErrCorruptRecord, err)
 		}
 	}
 	if x.providerKV != nil {
 		x.cleanup, err = decodeTaskRuntimeProviderCleanup(x.providerKV)
-		if err != nil || !localRuntimeProviderMatches(x.cleanup, x.intent, b.enrolledPublication.ContractDigest) {
-			return result, errors.Join(ErrCorruptRecord, err)
+		if err != nil || x.intentKV != nil && !localRuntimeProviderMatches(x.cleanup, x.intent, a.contractDigest()) {
+			return nil, errors.Join(ErrCorruptRecord, err)
 		}
 	} else if x.intentKV != nil {
-		return result, ErrCorruptRecord
+		return nil, ErrCorruptRecord
 	}
 	if x.intentKV != nil && x.intent.Phase != "reserved" {
 		if err := b.verifyLocalRuntimeProof(x.intent, x.intentKV, a.publication.Enrollment.ObserverCertificate); err != nil {
-			return result, err
+			return nil, err
 		}
 		if x.intent.Phase == "cleanup-complete" {
 			if x.intent.CleanupDigest != workspaceSyncIntentDigest(string(x.providerKV.Value)) || !localRuntimeProviderComplete(x.cleanup) {
-				return result, ErrCorruptRecord
+				return nil, ErrCorruptRecord
 			}
-			result.Outcome, result.Entry = OutcomeCommitted, localRuntimeTerminationEntry(x.intent, x.intentKV)
-			return result, nil
 		}
 	}
-	if err := x.prepareProvider(o.ctx); err != nil {
+	return x, nil
+}
+
+// Both authenticated profiles use the original seven-slot provider protocol.
+// Only a definite new reservation ACK enters Sign/Terminate. A retained intent
+// keeps its exact original sender and may only Query; Unknown never grants a
+// replay of an observer request or a durable provider effect intent.
+func (b *Backend) executeRuntimeTermination(ctx context.Context, x *taskLocalRuntimeExecution, destination *controltransport.TerminationDestination) (result TaskRuntimeTerminationResult, resultErr error) {
+	result.Outcome = OutcomeUnknown
+	a := x.a
+	if x.intentKV == nil {
+		x.intent = a.newTermination()
+		if x.providerKV != nil && !localRuntimeProviderMatches(x.cleanup, x.intent, a.contractDigest()) {
+			return result, ErrCorruptRecord
+		}
+	} else if x.intent.Phase == "cleanup-complete" {
+		result.Outcome, result.Entry = OutcomeCommitted, localRuntimeTerminationEntry(x.intent, x.intentKV)
+		return result, nil
+	}
+	if err := x.prepareProvider(ctx); err != nil {
 		return result, err
 	}
 	if x.intentKV == nil {
-		if err := x.applyProvider(o.ctx, 0); err != nil {
+		if err := x.applyProvider(ctx, 0); err != nil {
 			return result, err
 		}
-		if err := x.storeTermination(o.ctx); err != nil {
+		if err := x.storeTermination(ctx); err != nil {
 			return result, err
 		}
 		// Only this foreground owner, after a definite reserve ACK, can obtain
 		// the original ticket and send once. A recovered reservation only queries.
-		ticket, err := x.sign(o.ctx)
+		ticket, err := x.sign(ctx)
 		if err != nil {
 			return result, err
 		}
-		if err := x.applyProvider(o.ctx, 1); err != nil {
+		if err := x.applyProvider(ctx, 1); err != nil {
 			return result, err
 		}
-		if err := a.guard(o.ctx, a.terminationComparisons(x.intentKV, x.providerKV)); err != nil {
+		if err := a.guard(ctx, a.terminationComparisons(x.intentKV, x.providerKV)); err != nil {
 			return result, err
 		}
-		physical, err := destination.Terminate(o.ctx, ticket, a.command.Certificate)
+		physical, err := destination.Terminate(ctx, ticket, a.issuerCertificate())
 		if err != nil {
 			return result, errors.Join(ErrOutcomeUnknown, err)
 		}
-		if err := x.acceptProof(o.ctx, physical); err != nil {
+		if err := x.acceptProof(ctx, physical); err != nil {
 			return result, err
 		}
 	} else if x.intent.Phase == "reserved" {
@@ -169,15 +197,15 @@ func (b *Backend) terminateTaskRuntimeLocal(ctx context.Context, c *TaskClaim, d
 		if err != nil {
 			return result, err
 		}
-		physical, err := destination.Query(o.ctx, query)
+		physical, err := destination.Query(ctx, query)
 		if err != nil {
 			return result, errors.Join(ErrOutcomeUnknown, err)
 		}
-		if err := x.acceptProof(o.ctx, physical); err != nil {
+		if err := x.acceptProof(ctx, physical); err != nil {
 			return result, err
 		}
 	}
-	if err := x.finishProvider(o.ctx); err != nil {
+	if err := x.finishProvider(ctx); err != nil {
 		return result, err
 	}
 	result.Outcome, result.Entry = OutcomeCommitted, localRuntimeTerminationEntry(x.intent, x.intentKV)
@@ -206,7 +234,7 @@ func matchCleanupTerminationReservation(task TaskReference, birth int64, expecte
 func (x *taskLocalRuntimeExecution) sign(ctx context.Context) ([]byte, error) {
 	a, b := x.a, x.a.backend
 	certificate, err := b.taskRuntimeTerminationIssuer.Certificate(ctx)
-	if err != nil || len(certificate) == 0 || len(certificate) > 4096 || !bytes.Equal(certificate, a.command.Certificate) {
+	if err != nil || len(certificate) == 0 || len(certificate) > 4096 || !bytes.Equal(certificate, a.issuerCertificate()) {
 		return nil, errors.Join(ErrIdentityMismatch, err)
 	}
 	certificate = bytes.Clone(certificate)
