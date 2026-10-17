@@ -39,6 +39,8 @@ func cleanupPendingAutomaticWorker(t *testing.T, ctx context.Context, s cleanupE
 		cleanupPendingFaultMounted(t, ctx, s, kernel, dir, tlsConfig, ca, certificate, key)
 	case "automatic-result-mounted", "automatic-result-role":
 		cleanupPendingResultNative(t, ctx, s, kernel, dir, tlsConfig, ca, certificate, key)
+	case "automatic-persistent-capacity":
+		cleanupPendingCapacityWorker(t, ctx, s, kernel, dir, tlsConfig, ca, certificate, key)
 	default:
 		t.Fatal("unknown automatic cleanup native mode")
 	}

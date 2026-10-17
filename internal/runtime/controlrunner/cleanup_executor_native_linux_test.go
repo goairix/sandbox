@@ -765,7 +765,8 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	mountedLoader := len(recovery) == 1 && (recovery[0] == "mounted-loader" ||
 		recovery[0] == "automatic-mounted-backlog" || recovery[0] == "automatic-worker-role" ||
 		recovery[0] == "automatic-pending-aba" || recovery[0] == "automatic-pending-ack" ||
-		recovery[0] == "automatic-result-mounted" || recovery[0] == "automatic-result-role")
+		recovery[0] == "automatic-result-mounted" || recovery[0] == "automatic-result-role" ||
+		recovery[0] == "automatic-persistent-capacity")
 	if mountedLoader {
 		// The read-only container root stays unchanged. The existing mount
 		// capability provides a private, bounded clock directory owned by the
@@ -990,6 +991,10 @@ func cleanupExecutorNativeCase(t *testing.T, recovery ...string) {
 	slotKey := fmt.Sprintf("%sp/%02x/workspace-sync-recycling-slots/%s/00", binding.Namespace, task.Partition, s.BudgetID)
 	_, err = admin.Put(ctx, slotKey, fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, task.Partition))
 	require.NoError(t, err)
+	if s.AutomaticMode == "automatic-persistent-capacity" {
+		cleanupPendingCapacityParent(t, ctx, s, root, admin, apiState, child, &waited)
+		return
+	}
 	if s.PreflightRefusal {
 		cleanupExecutorPreflightParent(t, ctx, s, admin, apiState, child, &waited)
 		return
