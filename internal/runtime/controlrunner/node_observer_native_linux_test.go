@@ -203,6 +203,17 @@ func observerNativeRecord(t *testing.T, names string, values ...any) []byte {
 
 func observerNativeEtcd(t *testing.T, dir string) (*clientv3.Client, *tls.Config, uint64) {
 	t.Helper()
+	return observerNativeEtcdMembers(t, dir, 1)
+}
+
+// observerNativeEtcdMembers owns every original etcd process until Cmd.Wait.
+// The one-member mode preserves the existing fixture's names, paths and HTTP
+// peer URL. Only the explicit three-member mode uses mutually authenticated
+// TLS peers; both modes retain the same namespace-scoped observer read role.
+func observerNativeEtcdMembers(t *testing.T, dir string, members int) (*clientv3.Client, *tls.Config, uint64) {
+	t.Helper()
+	require.Contains(t, []int{1, 3}, members)
+
 	pub, caKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	now := time.Now()
@@ -234,28 +245,78 @@ func observerNativeEtcd(t *testing.T, dir string) (*clientv3.Client, *tls.Config
 	keyDER, err := x509.MarshalPKCS8PrivateKey(server.PrivateKey)
 	require.NoError(t, err)
 	keyPath := write("server-key.pem", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
-	cmd := exec.Command("/fixture/etcd", "--name=observer", "--data-dir="+filepath.Join(dir, "etcd"), "--listen-client-urls=https://127.0.0.1:2379", "--advertise-client-urls=https://127.0.0.1:2379", "--listen-peer-urls=http://127.0.0.1:2380", "--initial-advertise-peer-urls=http://127.0.0.1:2380", "--initial-cluster=observer=http://127.0.0.1:2380", "--cert-file="+certPath, "--key-file="+keyPath, "--trusted-ca-file="+caPath, "--client-cert-auth=true", "--log-level=warn", "--max-txn-ops=64", "--quota-backend-bytes=67108864")
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		err := cmd.Wait()
-		t.Logf("original TLS etcd Cmd.Wait=%v", err)
-		if err != nil {
-			var exited *exec.ExitError
-			require.True(t, errors.As(err, &exited))
-			require.Equal(t, syscall.SIGTERM, exited.Sys().(syscall.WaitStatus).Signal())
+
+	// Start all members before probing readiness: a TLS3 quorum cannot form if
+	// fixture setup blocks waiting for the first process before starting peers.
+	names := make([]string, members)
+	endpoints := make([]string, members)
+	peers := make([]string, members)
+	cluster := make([]string, members)
+	for i := range names {
+		names[i] = "observer"
+		peers[i] = "http://127.0.0.1:2380"
+		if members == 3 {
+			names[i] = fmt.Sprintf("observer%d", i+1)
+			peers[i] = fmt.Sprintf("https://127.0.0.1:%d", 2380+100*i)
 		}
-	})
+		endpoints[i] = fmt.Sprintf("https://127.0.0.1:%d", 2379+100*i)
+		cluster[i] = names[i] + "=" + peers[i]
+	}
+	for i, name := range names {
+		dataDir := filepath.Join(dir, "etcd")
+		if members == 3 {
+			dataDir = filepath.Join(dir, name)
+		}
+		args := []string{
+			"--name=" + name,
+			"--data-dir=" + dataDir,
+			"--listen-client-urls=" + endpoints[i],
+			"--advertise-client-urls=" + endpoints[i],
+			"--listen-peer-urls=" + peers[i],
+			"--initial-advertise-peer-urls=" + peers[i],
+			"--initial-cluster=" + strings.Join(cluster, ","),
+			"--cert-file=" + certPath,
+			"--key-file=" + keyPath,
+			"--trusted-ca-file=" + caPath,
+			"--client-cert-auth=true",
+			"--log-level=warn",
+			"--max-txn-ops=64",
+			"--quota-backend-bytes=67108864",
+		}
+		if members == 3 {
+			args = append(args, "--peer-cert-file="+certPath, "--peer-key-file="+keyPath, "--peer-trusted-ca-file="+caPath, "--peer-client-cert-auth=true")
+		}
+		cmd := exec.Command("/fixture/etcd", args...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		require.NoError(t, cmd.Start())
+		// Register ownership before attempting the next Start, so partial setup
+		// failure also signals and actually joins every successfully started peer.
+		t.Cleanup(func() {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			err := cmd.Wait()
+			t.Logf("original TLS etcd member=%s pid=%d Cmd.Wait=%v", name, cmd.Process.Pid, err)
+			if err != nil {
+				var exited *exec.ExitError
+				require.True(t, errors.As(err, &exited))
+				require.Equal(t, syscall.SIGTERM, exited.Sys().(syscall.WaitStatus).Signal())
+			}
+		})
+	}
+
 	adminTLS := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{root}}
-	admin, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://127.0.0.1:2379"}, TLS: adminTLS, DialTimeout: 2 * time.Second})
+	admin, err := clientv3.New(clientv3.Config{Endpoints: endpoints, TLS: adminTLS, DialTimeout: 2 * time.Second})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, admin.Close()) })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var status *clientv3.StatusResponse
 	for ctx.Err() == nil {
-		status, err = admin.Status(ctx, "https://127.0.0.1:2379")
+		for _, endpoint := range endpoints {
+			status, err = admin.Status(ctx, endpoint)
+			if err != nil {
+				break
+			}
+		}
 		if err == nil {
 			break
 		}
