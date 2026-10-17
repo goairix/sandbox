@@ -32,6 +32,9 @@ func (w *DueWorker) finish(workErr error) {
 	// Seal and refuse unstarted continuations before joining jobs; otherwise
 	// a job waiting on this actor and an actor waiting on that job deadlock.
 	w.stopCleanupJobs()
+	// The serial phase already returned; no native owner can still borrow its
+	// page/proof. Registered physical jobs have now joined as well.
+	w.automatic = nil
 	if errors.Is(workErr, context.Canceled) && !errors.Is(workErr, ErrOutcomeUnknown) {
 		workErr = nil
 	}

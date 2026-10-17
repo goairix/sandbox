@@ -20,7 +20,9 @@ func (w *DueWorker) loop() error {
 		if err := w.renewIfNeeded(w.ctx); err != nil {
 			return err
 		}
+		w.beginClaimLane(1)
 		cleanupAt, err := w.cleanupTurn()
+		w.endClaimLane()
 		if err != nil {
 			return err
 		}
@@ -29,7 +31,21 @@ func (w *DueWorker) loop() error {
 		if err := w.renewIfNeeded(w.ctx); err != nil {
 			return err
 		}
+		var automaticAt time.Time
+		if w.automatic != nil {
+			w.beginClaimLane(2)
+			automaticAt, err = w.automaticTurn(w.ctx)
+			w.endClaimLane()
+			if err != nil {
+				return err
+			}
+			if err = w.renewIfNeeded(w.ctx); err != nil {
+				return err
+			}
+		}
+		w.beginClaimLane(0)
 		wake, err := w.turn(w.ctx)
+		w.endClaimLane()
 		if err != nil {
 			return err
 		}
@@ -38,6 +54,9 @@ func (w *DueWorker) loop() error {
 		}
 		if !cleanupAt.IsZero() && cleanupAt.Before(wake) {
 			wake = cleanupAt
+		}
+		if !automaticAt.IsZero() && automaticAt.Before(wake) {
+			wake = automaticAt
 		}
 
 		// A budget/timer wait cannot postpone renewal of the same original
@@ -104,6 +123,23 @@ func dueWorkerCreditAt(bucket workerBucket, now time.Time, amount uint32) time.T
 }
 
 func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
+	if w.options.AutomaticCleanup {
+		w.claimAsked = true
+		if w.claimLane < 0 || w.claimLane >= len(w.claimWaiting) {
+			return nil, now.Add(100 * time.Millisecond)
+		}
+		w.claimWaiting[w.claimLane] = true
+		for n := 0; n < len(w.claimWaiting); n++ {
+			lane := (w.claimNextLane + n) % len(w.claimWaiting)
+			if !w.claimWaiting[lane] {
+				continue
+			}
+			if lane != w.claimLane {
+				return nil, now.Add(100 * time.Millisecond)
+			}
+			break
+		}
+	}
 	b := w.backend
 	b.archiveLife.mu.Lock()
 	defer b.archiveLife.mu.Unlock()
@@ -117,6 +153,10 @@ func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
 		at := dueWorkerCreditAt(share.bucket, now, 1)
 		if !at.After(now) {
 			w.claimNext = (i + 1) % len(w.claims)
+			if w.options.AutomaticCleanup {
+				w.claimWaiting[w.claimLane] = false
+				w.claimNextLane = (w.claimLane + 1) % len(w.claimWaiting)
+			}
 			return share, now
 		}
 		if earliest.IsZero() || at.Before(earliest) {
@@ -127,6 +167,59 @@ func (w *DueWorker) readyClaim(now time.Time) (*WorkerBudgetShare, time.Time) {
 		earliest = now.Add(100 * time.Millisecond)
 	}
 	return nil, earliest
+}
+
+// Only an actual available grant changes preference. A lane that performed no
+// Claim work this turn withdraws its stale request, so idle lanes cannot block
+// due admission or physical continuations. Explicit mode retains old ordering.
+func (w *DueWorker) beginClaimLane(lane int) {
+	w.claimLane, w.claimAsked = lane, false
+	if w.options.AutomaticCleanup && (lane == 0 || lane == 2) {
+		for i := range w.rangeAsked {
+			w.rangeAsked[i][lane/2] = false
+		}
+	}
+}
+
+func (w *DueWorker) endClaimLane() {
+	if w.options.AutomaticCleanup && !w.claimAsked {
+		w.claimWaiting[w.claimLane] = false
+	}
+	if w.options.AutomaticCleanup && (w.claimLane == 0 || w.claimLane == 2) {
+		lane := w.claimLane / 2
+		for i := range w.rangeWaiting {
+			if !w.rangeAsked[i][lane] {
+				w.rangeWaiting[i][lane] = false
+			}
+		}
+	}
+}
+
+// Range priority belongs to the original fixed share, so unrelated shares do
+// not block each other. Both continuously waiting lanes receive an available
+// opportunity within two grants. Readiness uses a bucket copy: only the native
+// owner charges credit, and a refusal never creates a refund. A non-Range turn
+// withdraws its request through endClaimLane. Watch keeps its existing finite
+// dispatch: it validates share fences but does not debit this page bucket.
+func (w *DueWorker) readyRangeAt(share *WorkerBudgetShare, lane int) time.Time {
+	b := w.backend
+	b.archiveLife.mu.Lock()
+	defer b.archiveLife.mu.Unlock()
+	now := time.Now()
+	if w.options.AutomaticCleanup {
+		slot := share.slot
+		w.rangeAsked[slot][lane], w.rangeWaiting[slot][lane] = true, true
+		if w.rangeWaiting[slot][1-lane] && int(w.rangeNext[slot]) != lane {
+			return now.Add(100 * time.Millisecond)
+		}
+		at := dueWorkerCreditAt(share.bucket, now, maxMutationBytes)
+		if !at.After(now) {
+			w.rangeWaiting[slot][lane] = false
+			w.rangeNext[slot] = uint8(1 - lane)
+		}
+		return at
+	}
+	return dueWorkerCreditAt(share.bucket, now, maxMutationBytes)
 }
 
 func (w *DueWorker) turn(ctx context.Context) (time.Time, error) {
@@ -230,9 +323,7 @@ func (w *DueWorker) scanTurn(ctx context.Context, scan *dueWorkerScan) (time.Tim
 			w.publishStatus("listing", nil)
 			return time.Time{}, nil
 		}
-		w.backend.archiveLife.mu.Lock()
-		at := dueWorkerCreditAt(scan.ranges.bucket, time.Now(), maxMutationBytes)
-		w.backend.archiveLife.mu.Unlock()
+		at := w.readyRangeAt(scan.ranges, 0)
 		if time.Now().Before(at) {
 			w.publishStatus("backoff", nil)
 			return at, nil

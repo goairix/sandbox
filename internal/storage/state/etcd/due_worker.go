@@ -19,6 +19,9 @@ type DueWorkerOptions struct {
 	RelistSlot uint16
 	// StageTTL is integral seconds in [1s,24h]; zero selects 30s.
 	StageTTL time.Duration
+	// AutomaticCleanup discovers pending/legacy Tasks using this same actor.
+	// It requires the complete local physical profile and a 60-second session.
+	AutomaticCleanup bool
 }
 
 // DueWorkerPhase describes local discovery/admission state, not task execution.
@@ -51,6 +54,7 @@ type DueWorkerStatus struct {
 	Queued                int
 	Renewals              uint64
 	LastError             string
+	Cleanup               DueWorkerCleanupStatus
 }
 
 // DueWorker owns one serial resident consumer and its original session. It
@@ -82,6 +86,20 @@ type DueWorker struct {
 	cleanupNext   int
 	cleanupWake   chan struct{}
 	cleanupSealed bool
+
+	// Automatic phases and Claim arbitration belong exclusively to the actor.
+	// Waiting lanes retain priority across token waits, withdrawing on an idle turn.
+	automatic     *dueWorkerAutomatic
+	claimLane     int
+	claimWaiting  [3]bool
+	claimNextLane int
+	claimAsked    bool
+
+	// Each original Range slot arbitrates due refill and automatic metadata.
+	// Priority changes only on an available opportunity, never on loop parity.
+	rangeWaiting [20][2]bool
+	rangeAsked   [20][2]bool
+	rangeNext    [20]uint8
 }
 
 func copyDueWorkerOptions(options DueWorkerOptions) (DueWorkerOptions, error) {
@@ -132,6 +150,11 @@ func (b *Backend) StartDueWorker(ctx context.Context, options DueWorkerOptions) 
 	}
 	if b.workerControl.options.SessionTTL <= 2*b.requestTimeout+time.Second {
 		return nil, ErrInvalidConfiguration
+	}
+	if options.AutomaticCleanup {
+		if b.workerControl.options.SessionTTL != 60*time.Second || b.requestTimeout <= 0 || b.requestTimeout > 3*time.Second || b.cleanupPhysicalProfile() != nil {
+			return nil, ErrInvalidConfiguration
+		}
 	}
 	s, err := b.OpenWorkerSession(ctx, options.WorkerID)
 	if err != nil {
@@ -210,7 +233,7 @@ func (w *DueWorker) initialize() error {
 		}
 		w.scans = append(w.scans, scan)
 	}
-	return nil
+	return w.initializeAutomatic()
 }
 
 // Done closes after actual work, original cleanup and terminal publication.
@@ -241,6 +264,7 @@ func (w *DueWorker) Status() DueWorkerStatus {
 	defer w.backend.archiveLife.mu.Unlock()
 	status := w.status
 	status.Partitions = append([]DueWorkerPartitionStatus(nil), status.Partitions...)
+	status.Cleanup.Partitions = append([]DueWorkerCleanupPartitionStatus(nil), status.Cleanup.Partitions...)
 	return status
 }
 
@@ -290,6 +314,9 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 	}
 	if w.cache != nil {
 		status.OwnedBytes, status.Queued = dueCacheReservedBytes+w.cache.bytes, w.cache.count
+		if w.cache.automatic {
+			status.OwnedBytes += 4 << 20
+		}
 	}
 	// Aggregate the fixed cache once, rather than scanning all entries for
 	// each partition while the shared lifetime lock is held.
@@ -331,4 +358,5 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 		status.Partitions = append(status.Partitions, row)
 	}
 	w.status = status
+	w.status.Cleanup = w.automaticStatusLocked()
 }

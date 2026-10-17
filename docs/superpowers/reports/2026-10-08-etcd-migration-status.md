@@ -11,7 +11,7 @@
 当前推进永久 pending 自动发现，接入原共享 actor/预算及严格 mounted 组合；随后仍需
 独立 worker 角色和主入口接线。完整 API/Pool/Docker/Upload、FUSE/collector/远端同步、
 长期历史维护、大 N 容量与故障、部署恢复及 Redis 移除尚未完成。没有外部阻塞；
-新发现协议已完成源码预检，实际自动消费仍未交付。32 槽仲裁、32/33 请求边界不等于 32 个
+自动发现循环已实现并通过局部验证，真实物理配置的完整自动消费仍未验收。32 槽仲裁、32/33 请求边界不等于 32 个
 物理 Pod 并发。生产切换仍为 0%；下文功能约70%/整体45%是此前粗估，尚未重新核算，
 不能以提交数或重叠测试数量上调。
 
@@ -62,6 +62,12 @@ inotify/TCP/服务组/渲染模型通过；真实FUSE/kubelet/CNI、collector及
 [终态删除验证](2026-10-17-etcd-pending-delete-verification.md)。不改变原物理释放或满64
 节点owner-release；真实签名成功删除、ABA/丢ACK/关闭等待仍待自动组合。下一主线是
 原actor自动发现与严格v2独立worker接线。功能约70%/整体45%/生产切换0%暂不变。
+
+原actor自动发现循环现已实现原pending/回填/签名删除与registry接线，保持原会话/预算，
+并修复单Range份额下回填饿死到期扫描的问题。六组host/race及Linuxvet/build通过，
+见[自动循环验证](2026-10-17-etcd-automatic-actor-verification.md)。真实物理配置启动、
+自动关闭归档/终止、签名成功删除、ABA/ACK丢失及独立命令仍待新的native组合，
+没有将本片算作整个自动worker或生产迁移完成。
 
 ## 2026-10-17 此前切片记录（已由上述完整执行器验收接续）
 

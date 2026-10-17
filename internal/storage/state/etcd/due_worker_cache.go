@@ -40,6 +40,9 @@ type dueWorkerCache struct {
 	views            [256]dueCacheView
 	pageSource       *dueWorkerScan
 	published        bool
+	// Set once before automatic startup. Fixed arrays keep their old capacity;
+	// admissions reserve 369 identities and 4MiB for automatic discovery.
+	automatic bool
 }
 
 type dueWorkerCacheStatus struct {
@@ -187,7 +190,12 @@ func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) er
 	if slot >= 0 {
 		old = c.entries[slot].charge
 	}
-	if cell < 0 || slot < 0 && c.count == dueCacheKeys || c.bytes-old+charge > dueCacheDynamicBytes {
+	keyLimit, byteLimit := dueCacheKeys, uint64(dueCacheDynamicBytes)
+	if c.automatic {
+		keyLimit -= 369
+		byteLimit -= 4 << 20
+	}
+	if cell < 0 || slot < 0 && c.count >= keyLimit || c.bytes-old+charge > byteLimit {
 		return ErrConflict
 	}
 	if slot < 0 {
@@ -339,6 +347,9 @@ func (c *dueWorkerCache) settled(candidate DueCandidateRecord) {
 
 func (c *dueWorkerCache) statusLocked() dueWorkerCacheStatus {
 	status := dueWorkerCacheStatus{OwnedBytes: dueCacheReservedBytes + c.bytes, Keys: c.count, Partitions: make([]dueWatchPartitionResult, 0, 256)}
+	if c.automatic {
+		status.OwnedBytes += 4 << 20
+	}
 	for i := range c.views {
 		v := &c.views[i]
 		if v.sub.Partition == nil {

@@ -34,6 +34,6 @@
 
 - [x] Step1 read-only preflight：已冻结原子pending、原worker预算/关闭、历史兼容和终态认证边界。历史停旧writer、不可变截止点/可更新读取视图/持久frontier、有限轮询及Watch/独立角色后续范围已明确；具体切片接口与原生尺寸须继续源码核对并验证。
 - [ ] Step2 原子pending、80条固定视图分页、回填检查点、平坦intent历史分页及共同出生认证已实现，分别通过定向host/race和Linuxvet，详见2026-10-17-etcd-pending系列验证报告。受控签名释放调用、回填P/B原子推进与完成转换及Linux合法配置模型回归也已实现。新任务终态pending独立删除已实现并通过定向host/race/Linuxvet；签名成功删除、ABA及未知结果真实组合仍待Step4，不能将本步或整个Task记为完成。
-- [ ] Step3 接入原 actor 自动发现与 registry，验证坏任务/容量/预算/续租/due公平性及重建，不新增竞争 session；定向验证后提交。
+- [ ] Step3 原 actor 自动发现/回填/终态删除与 registry 接线已实现；host/race/Linuxvet/build通过，新增并修复单Range饥饿回归。原会话/预算保持复用，见自动循环验证报告。真实物理配置启动、32/33尾部恢复及替代/压缩组合仍待后续验收，不能将本步完整记为通过。
 - [ ] Step4 真实 Linux 自动发现完整物理链及 restart/ACK故障组合，严格输入/运行时/真实退出/清理审计，保留失败；完成可调用 mounted 自动组合并提交。
 - [ ] Step5 唯一完整 Task spec+quality 审查，原作者修复与限定复核、范围验收；继续下一生产角色/迁移单元。
