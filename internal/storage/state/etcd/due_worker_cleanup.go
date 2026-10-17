@@ -40,6 +40,11 @@ type cleanupLocalJob struct {
 	// they cannot authorize a cold job or another progress attempt.
 	pendingProgress *cleanupLocalProgress
 
+	// The original physical owner retains one detached metadata submission.
+	// Unknown never replaces its Claim/Run/attempt. Its compact pins and wire
+	// are cleared at the actual finish tail, rather than retaining source graphs.
+	detachedNoEffect *cleanupDetachedNoEffectDraft
+
 	// Recovery before or after local completion reuses the same bound archive,
 	// registry job and physical goroutine.
 	// Only its completed manifest preflight publishes the finite coordinates;

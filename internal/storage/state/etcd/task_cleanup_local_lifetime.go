@@ -92,6 +92,7 @@ func (b *Backend) finishCleanupJob(j *cleanupLocalJob, err error) {
 		err = errors.Join(err, j.target.termination.Close())
 	}
 	j.inventory = nil
+	j.detachedNoEffect = nil
 	if !j.started && j.runID != "" {
 		j.effectsJoined = true
 		cleanup, stop := context.WithTimeout(context.Background(), b.requestTimeout)
