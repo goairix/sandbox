@@ -1,8 +1,9 @@
-# Cleanup：完整审查 I1/I2 修复验证（待限定复核）
+# Cleanup：完整审查 I1/I2 修复验证（限定复核通过）
 
 基线 `6519d280876f573df4450ebf0f3ec745226f8c70`。唯一完整 Task 审查提出两项
 Important：完整 wire/profile 拒绝晚于永久占槽；目标文件检查占住串行 actor。
-本报告记录修复和定向结果，完整 Task 尚待原审查员限定复核；不代表生产迁移完成。
+本报告记录修复和定向结果。原审查员已完成限定复核：I1/I2 均关闭，Spec Compliance
+与 Task Quality 均 Approved，无新增 Critical、Important 或 Minor；不代表生产迁移完成。
 
 ## 改动
 
@@ -72,5 +73,8 @@ Stop/Backend.Close、job/work/worker Done 均等待解除屏障后的实际返�
 native 各场 3 条 error 为 etcd shutdown（close 两模式共 6 条）；warn 为启动、故障注入和
 清理 lease-not-found，7/8 条（close 共 16 条），无 gRPC WARNING；未静默原错误。
 
-后续限定复核只检查 I1/I2 修复及其影响，不重复完整审查。自动发现、生产接线、FUSE/
+限定复核范围为 `6519d280876f573df4450ebf0f3ec745226f8c70` 至
+`3f5a72a8266780ac0212ee2043a6b26b7a73f611`，只检查 I1/I2 修复及其影响，
+没有重复完整审查或重新执行测试。完整 Task 范围验收见 cleanup-executor-acceptance 报告。
+自动发现、生产接线、FUSE/
 collector、大规模容量、部署恢复及 Redis 移除仍是整体迁移剩余范围。
