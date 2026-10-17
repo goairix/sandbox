@@ -91,14 +91,27 @@ func (b *Backend) coldReady(ctx context.Context) (string, *mvccpb.KeyValue, erro
 	if err != nil {
 		return "", nil, err
 	}
-	if values[0] == nil {
-		return "", nil, ErrPreparationNotReady
-	}
-	var r preparationInventoryRecord
-	if coldDecode(values[0], &r) != nil || !enrolledImmutableKV(values[0]) || !b.validColdInventory(r) || !r.Ready {
-		return "", nil, ErrCorruptRecord
+	if err := b.decodeColdReady(values[0]); err != nil {
+		return "", nil, err
 	}
 	return key, values[0], nil
+}
+
+// decodeColdReady shares the immutable inventory gate between the public
+// loader and separately paid worker reads. Absence means initialization has
+// not completed; malformed or mismatched persisted inventory is corruption.
+// Callers check coldProfile before reading and retain the original ready KV
+// when later mutation comparisons must fence this exact inventory revision.
+func (b *Backend) decodeColdReady(ready *mvccpb.KeyValue) error {
+	if ready == nil {
+		return ErrPreparationNotReady
+	}
+
+	var r preparationInventoryRecord
+	if coldDecode(ready, &r) != nil || !enrolledImmutableKV(ready) || !b.validColdInventory(r) || !r.Ready {
+		return ErrCorruptRecord
+	}
+	return nil
 }
 
 // Called only by the operator's bounded batch, never by allocation or Resume.

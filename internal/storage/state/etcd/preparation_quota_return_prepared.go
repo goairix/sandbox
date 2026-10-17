@@ -128,27 +128,12 @@ func (b *Backend) prepareColdRuntimeQuotaReturnHistory(o *runtimeEnrolledPublica
 	if err != nil {
 		return nil, result, err
 	}
-	var slot coldSlotRecord
-	if coldDecode(slots[0], &slot) != nil || !b.validColdSlot(slot) || !slot.Occupied || slot.Owner != history.reservation.Owner || slot.Slot != history.reservation.Quota || slots[1] != nil {
-		return nil, result, ErrConflict
+	if err := b.validateColdQuotaReturnSlot(history, slots[0], slots[1]); err != nil {
+		return nil, result, err
 	}
 
 	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: history.reservation.Owner.Partition, RequestID: history.reservation.Owner.RequestID, StageID: "cold_runtime_quota_return", AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
-	if err := locator.Validate(); err != nil {
-		return nil, result, err
-	}
-	mutation, err := b.coldQuotaReturnMutation(history, ready, slots[0], key, free, locator)
-	if err != nil {
-		return nil, result, err
-	}
-	mutation, digest, err := prepareMutation(b.namespace, mutation)
-	if err != nil {
-		return nil, result, err
-	}
-	prepared := &coldQuotaReturnPrepared{backend: b, owner: o, reference: locator.reference(digest), mutation: mutation, history: history, returnKey: key}
-	prepared.self = prepared
-	result.Reference = prepared.reference
-	return prepared, result, nil
+	return b.freezeColdQuotaReturnPrepared(o, history, ready, slots[0], slots[1], key, locator)
 }
 
 // continueColdRuntimeQuotaReturn consumes one original prepared attempt. No
