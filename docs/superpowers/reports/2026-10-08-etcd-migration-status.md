@@ -30,8 +30,10 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 合并后定向host通过。`58f38fd`完成持久writer、原draft Unknown仲裁及真实历史读取组件，
 六个真实三成员顶层用例、四个Pending子场景及单独32KiB点读组件通过；Linux构建/vet、
 完整指纹审计及原唯一审查员限定复核通过，见[writer组件验证](2026-10-18-etcd-detached-writer-verification.md)。
-冷新Run门禁与内存核算、实际v2reader仍在两个独立工作树并行推进。HTTP仍501，
-已提交的旧native reader仍拒绝v2；其后继续owner/terminal/quota、
+`809838d`/`bc9dc8a`完成实际writer→native loader→observer读取组件；真实三成员
+正向、四类来源ABA及取消兼容性RED/GREEN通过，唯一Task4A审查限定Spec/Quality通过，
+见[reader组件验证](2026-10-18-etcd-detached-reader-verification.md)。
+冷新Run门禁与内存核算、生产provider接线继续并行推进。HTTP仍501；其后继续owner/terminal/quota、
 实际managed admission和部署/HTTP组合。元数据协议测试不代表PID1或消费者完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job

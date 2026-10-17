@@ -109,6 +109,11 @@ ABA、64节点/最大字节、Unknown/丢ACK/原实际join fence与cold恢复，
 
 ### Task 4A 并行边界：实际 termination 与 observer
 
+读取组件已以 `809838d`/`bc9dc8a` 接受：实际writer→loader→observer、四类来源ABA、
+真实Claim取消RED/GREEN、旧v1定向race、Linux普通/显式tag构建与vet通过；同一唯一
+reviewer限定Spec/Quality PASS。见reader验证报告。只关闭读取组件，生产provider/
+retained Query、laterRun、最大合法预算和完整Task4A仍开放，不重放已验收读取矩阵。
+
 Task3 的 writer/read 连贯单元已以 `58f38fd` 接受并提交：真实三成员六顶层及四个
 子场景、独立有界五点组件、Linux构建/vet与限定审查通过。仅该组件单元关闭，
 本节之前的冷新Run门禁、内存和真实signed最大输入门槛仍开放；见对应验证报告。
