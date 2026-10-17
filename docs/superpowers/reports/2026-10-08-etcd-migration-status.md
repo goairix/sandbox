@@ -64,6 +64,10 @@ provider配置hooks整合也通过；全phase及全局64MiB准入仍缺实现，
 race/Linuxvet和主分支整合通过，唯一限定审查通过，见
 [owner基础验证](2026-10-18-etcd-detached-owner-foundation-verification.md)。尚无live删除、
 surviving history认证或consumer接线，不能计为安全释放完成。
+`0bd7852`新增独立v2 quota-return codec，原v1固定字节回归不变；六项RED/GREEN、
+race/Linuxvet、主分支整合及唯一限定审查通过，见
+[quota编码验证](2026-10-18-etcd-detached-quota-codec-verification.md)。同时最大模型15360字节，
+未接quota writer/消费者，不能计为配额归还完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

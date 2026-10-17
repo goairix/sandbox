@@ -246,6 +246,8 @@ pending release同样分阶段认证，再原stamp CAS删除P。最终terminal v
 原v1嵌套record与字节不改。仍用16KiB上限，需同时有效的最大schema模型及严格
 canonical/envelope/variant测试，不能通过cast或伪Complete接原quota执行链。这片
 不产生refund权限，不改Grant/guard/journal/Resolve/Commit或自动消费者。
+该基础片已以`0bd7852`提交，六项RED/GREEN、race/Linuxvet、整合与唯一限定审查
+通过；同时最大codec模型15360字节，完整quota/consumer仍开放。
 
 ### Task 4 消费者的统一内存准入约束
 
