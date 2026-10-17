@@ -67,6 +67,9 @@ Task1与Task2可在独立已有工作树并行；没有共享源码文件。两�
 原 local43 inventory、race/vet与完整输入审计通过；见冷恢复组件验证记录。
 signed 长输入与完整 Task3 的容量及消费接线仍开放，不重播已验收组件。
 
+固定长输入接续：`7102368`真实signed Q16949及main合并Q16952原链通过，
+唯一限定审查接受；证明该合法场景，不关闭全部最大值、长输入内存与全局容量。
+
 唯一共享纯wire类型及Encode/Decode/BindingDigest放在controlprotocol，供etcd与
 独立observer复用；私有etcd adapter保留native及原job权限。原E以有界精确bytes/
 digest保存，不复制全E schema、不预建导出matcher。历史WriterClaim、原none Claim

@@ -52,9 +52,31 @@ Linux/arm64、CGO=0、实际 etcd3.6.14 三成员；最终 ELF SHA-256：
 实际 ErrInvalidRecord RED `run-52c8eeaf9cbd4c498162eaa848a22e83`。此前超 cap
 而未到达候选分支的失败没有冒充候选行为 RED。
 
+## 固定合法长 signed 输入补验
+
+`7102368`（辅助分支 `ff57b76`）增加三测试文件：只在首次 native identity provisioning 与
+所有签名前设置长字段，仍走原 producer、签名、enrollment 发布、dual drain、
+Pending ACK、64节点单 Put 与真实历史读取。没有修改已签字段或生产上限。
+
+`run-353b5a47def847489fd0363713a9045b` PASS14.19秒：namespace512字节，实际
+quiescence16949、ticket5791、close receipt2972、settlement9136字节。
+19项 source 和 ELF 指纹稳定，三个 etcd 子进程 join、无 SKIP/FAIL/OOM，容器已删。
+build03/vet02 各9246输入，完整审计通过；唯一 reviewer 对固定场景 Spec/Quality PASS。
+
+主分支合并 provider Options/TTL hooks 时共用唯一 producer 序列，默认和新 Source
+入口分开传入参数。相同 main ELF 在 `run-400f358d6a5b49bdbff8f7fbb6439663`
+同时通过长 signed 输入（实际Q16952字节）和原 provider UnknownNoResend；63项
+source及 ELF 指纹稳定，原三子进程 join，无 SKIP/FAIL/OOM，精确容器删除。
+main `detachedmainlongbuild01` Linux构建9252输入、完整审计通过。
+
+保留两次前置失败：最初 Runtime.BootID 未满足 activation 额外 UUID 约束；修正后
+完整 activation companion 超8192字节。第二次修改只调整签名前 runtime ID/UID
+的内容，长度各128不变；原 BootUUID、字段约束及全部限制保留。上述是固定合法
+长输入验证，不是全协议绝对最大值、长输入保留对象图、全局内存或大N容量验收。
+
 ## 尚未验收
 
-真实 signed 大历史与合法长输入、worker 全局64MiB admission、32物理并发、
+其余合法最大输入与长历史冷恢复保留对象图、worker 全局64MiB admission、32物理并发、
 大 N、provider retained Query、managed消费者、owner/terminal/quota全链路及
 HTTP/部署恢复仍开放。默认入口保持 Redis，生产切换0%。
 

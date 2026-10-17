@@ -36,7 +36,9 @@ Redis路径移除。自动清理循环和v2入口、独立worker命令已有实�
 `45ed1ca`完成真实Joined门禁的新Run51节点恢复、Unknown原候选只读协调、
 完成Stage安全退休及保留对象图计量；实际七项native、两项graph和定向race/vet通过，
 唯一reviewer组件Spec/Quality通过，见[冷恢复组件验证](2026-10-18-etcd-detached-cold-verification.md)。
-实测85209字节仅属该fixture；signed长输入、全局容量和消费者仍开放。
+实测85209字节仅属该fixture；全局容量和消费者仍开放。
+`7102368`补固定合法signed长输入：实际Q16949字节经原publish/签名/writer/load全链通过，
+主分支合并同ELF也通过长输入（Q16952）和原provider Unknown；这不是绝对max或长输入内存验收。
 `54e3d08`接通生产provider59节点reservation、slot0/1、一次Terminate Unknown及
 同Claim只读诊断不重发；真实TLS/native用例与原v1 race/vet通过，唯一组件审查通过。
 审查发现的续租cutoff问题已真实RED/GREEN关闭，见
