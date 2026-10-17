@@ -111,6 +111,40 @@ Q16964、fact9164、完整图129334字节；65项source及ELF稳定，三原子�
 这只关闭上述固定合法长形状；该场景余量较小，不能据此推断其他合法最大值或
 64MiB全局admission、32物理并发、大量已有sandbox容量已通过。
 
+## Sandbox/Snapshot 128字节组合补验
+
+`95525f0`（辅助分支 `782d054`）在首次 Acquire 前固定 SandboxID 和
+SnapshotVersion 各128字节。Runtime.ID为104个`<`及24个ASCII字符，其他初始
+长字段不变。三份身份中的Sandbox增长与JSON转义减少合计后，activation companion
+最坏投影为7912+3×92−3×8×5=8068字节；固定宽度签名、公钥、UUID、hash及
+最长UTC时间均纳入。独立reviewer复算一致，真实producer也产出8068字节。
+
+首次 `run-57f1fb0ce9ec483ca834dc759ba83121` 的签名、Bind、Publish和writer全部
+成功，真实Joined E/S后完整候选仍被128KiB门禁拒绝；原draft单根116323字节
+不能代表完整图成功。该真实失败保留，没有将前置失败或门禁拒绝改为PASS。
+
+修正继续沿原全部强门禁，将已完成close的其余certificate/issuer/issuerValue/
+claims/ticket缓存一并退休；原对象身份、native坐标、状态、reference和latch
+仍保留，none/Claim/prepared/E/wire及容量上限不变。旧Deliver因nil issuer拒绝，
+旧Prepare受lost Claim阻断；native Query与none的原仲裁不依赖这些缓存。
+
+`run-f7facfc6105c45578cb8ebb4cbc5e484` 四项实际PASS：新字段组合15.17秒、
+未/伪Joined14.10秒、缓存退休与旧调用/none仲裁14.12秒、原长输入15.13秒。
+新组合Q17561、none5578、fact9307字节，完整图122085字节；原长输入117652字节。
+原actor51节点、成功回复前双根保留、fact/none完整MVCC不变均通过。20项source
+及ELF稳定，三原子进程实际join，无SKIP/FAIL/OOM，精确容器已删。
+ELF：`1f3ffdfae4f36d5e6d48ebc337ee498aa59ba3f582ad90526b4df83302e35e40`。
+build01/vet01各9247输入，完整审计PASS；唯一reviewer限定Spec/Quality PASS。
+
+主分支保留既有Options/TTL配置hooks，在唯一producer序列合入同样的可选字段。
+`run-c438757cde4749f79042d3ed7d395031` 同ELF实际通过新组合及原provider
+UnknownNoResend；完整图122089字节。66项source及ELF稳定，原三进程join，
+无SKIP/FAIL/OOM，精确容器已删。Linux构建9255输入及完整审计PASS；整合ELF：
+`4894abad50b4bf4b48ae1d5a0a2e6b91c9adf05cf8d3d7f926103c6cb7dfd595`。
+
+这仍是一个确定合法字段组合，不是所有协议合法输入的数学最大值证明。全phase
+owned峰值及全局64MiB预留/发布/finish释放尚未接入，不能声称容量验收完成。
+
 ## 尚未验收
 
 其余合法最大输入与长历史冷恢复组合、worker 全局64MiB admission、32物理并发、

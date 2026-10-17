@@ -53,6 +53,10 @@ Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短�
 `c0735b2`修复真实合法长输入触发128KiB门禁的问题：原门禁内退休冗余已完成缓存，
 固定长输入完整draft+recovery图129326字节，三项native及Linuxbuild/vet、限定独立
 审查通过。其他合法最大值、全局容量与消费者未关闭，见上述冷恢复验证报告。
+`95525f0`补SandboxID/SnapshotVersion各128字节的确定组合，真实producer通过后
+曾再现完整图超限；在原强门禁内退休完整已完成close缓存后，新组合122085字节、
+原长输入117652字节，四项native/build/vet及限定独立审查通过。主分支新组合和
+provider配置hooks整合也通过；全phase及全局64MiB准入仍缺实现，不能作为大N容量结论。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

@@ -198,6 +198,11 @@ Task3固定长图接续：`c0735b2`在原native Joined及lost Claim门禁内，�
 不关闭绝对最大输入、其他长历史组合、全局admission和消费者；不得增加容量上限
 或用共享类型豁免掩盖剩余owned图。
 
+确定字段组合接续：`95525f0`补首次Acquire的SandboxID/SnapshotVersion128字节，
+真实companion8068字节及writer通过后再现完整图超限；完整已完成close缓存退休
+使该组合122085字节、原long117652字节，四项native与唯一限定审查通过。
+主分支配置hooks整合通过；该确定组合关闭，普遍最大值和全phase全局容量仍开放。
+
 ### Task 4A 物理证明接续
 
 `5f540a2`三成员TLS fixture已实际通过，保留原单成员入口；只关闭该测试资产片。
@@ -207,4 +212,23 @@ Task3固定长图接续：`c0735b2`在原native Joined及lost Claim门禁内，�
 DTO；setup中的ID仅定位材料。原worker UID1000/caps0/NNP、实际进程Wait、
 严格native来源及128/256KiB和64节点预算仍须验证。独立物理组合不得设置原
 SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE，以免启动另一套HTTP fixture。
-旧物理镜像缺失需要恢复资产；fixture通过不代替PID1、consumer或部署验收。
+旧物理镜像缺失；新fixture改用真实Go用户子进程在ready前退出并Wait，避免外部
+/bin/sleep依赖，后续仍验证真实PID1死亡/cgroupempty。受限入口须实际运行，
+TLS fixture通过不代替PID1、consumer或部署验收。
+
+### Task 4 消费者的统一内存准入约束
+
+独立复核确认，原fixed8MiB+transient16MiB覆盖discovery固定表及单页/Watch/RPC
+暂存；automatic4MiB与coldQuota4MiB已有各自归属，不能重复借给detached。
+冷恢复128KiB只测原draft+candidate，不能外推live/Unknown或32物理job峰值。
+当前enqueue、cache admission、OwnedBytes与finish缺少detached统一收费，尚未验收。
+
+接线前先列各phase同时存活的Claim/Stage、native history、provider/transport、
+重复编码/clone及slice backing上界；单独wire上限不等于整个owned图。signer结果
+在复制前的边界也要核对。没有构造边界证明时，不用猜测常数开启容量承诺。
+原worker账本使用单一detached reservation token：compact enqueue后，首次重图
+构造/Grant/send前取得额度；phase升级预扣旧retained+新构造+暂存的重叠峰值。
+空间不足保留旧phase，Unknown保留原token/attempt；取消或租约消失不代替join。
+仅在原actor reply、transport/renewal/Claim实际join后缩额；finish在原registry锁
+内移除并恰一次归还。cache admission和Status发布同账，自动/冷quota额度独立。
+实际32原job、Unknown留存、finish释放及大N backlog仍需后续验证，不能以模型替代。
