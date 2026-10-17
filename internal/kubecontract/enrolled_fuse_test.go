@@ -290,6 +290,12 @@ func TestEnrolledFUSEStaticRejectsInvalidOriginal(t *testing.T) {
 		"bad bucket":         func(i *kubecontract.EnrolledFUSEPodSpecInput) { i.Bootstrap.Bucket = "../escape" },
 		"bucket oversized":   func(i *kubecontract.EnrolledFUSEPodSpecInput) { i.Bootstrap.Bucket = strings.Repeat("b", 64) },
 		"endpoint http":      func(i *kubecontract.EnrolledFUSEPodSpecInput) { i.Bootstrap.Endpoint = "http://storage.example.test" },
+		"endpoint invalid utf8": func(i *kubecontract.EnrolledFUSEPodSpecInput) {
+			i.Bootstrap.Endpoint = "https://storage\xff.example.test"
+		},
+		"endpoint unicode control": func(i *kubecontract.EnrolledFUSEPodSpecInput) {
+			i.Bootstrap.Endpoint = "https://storage\u0085.example.test"
+		},
 		"endpoint user": func(i *kubecontract.EnrolledFUSEPodSpecInput) {
 			i.Bootstrap.Endpoint = "https://secret@storage.example.test"
 		},

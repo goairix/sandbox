@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/distribution/reference"
 	"github.com/goairix/sandbox/internal/fuseprotocol"
@@ -133,6 +135,16 @@ func enrolledFUSEBootstrap(bootstrap fuseprotocol.BootstrapConfig) ([]byte, erro
 	}
 	if len(bootstrap.Bucket) < 3 || len(bootstrap.Bucket) > 63 || len(validation.IsDNS1123Label(bootstrap.Bucket)) != 0 || len(bootstrap.Region) > 63 || len(validation.IsDNS1123Label(bootstrap.Region)) != 0 || len(bootstrap.Endpoint) > 1024 {
 		return nil, fmt.Errorf("bounded FUSE storage parameters required")
+	}
+	// URL parsing accepts some Unicode controls and invalid UTF-8 in hosts.
+	// Reject them before JSON can replace bytes or disagree with helper input.
+	if !utf8.ValidString(bootstrap.Endpoint) {
+		return nil, fmt.Errorf("FUSE endpoint must contain valid UTF-8")
+	}
+	for _, char := range bootstrap.Endpoint {
+		if unicode.IsControl(char) {
+			return nil, fmt.Errorf("FUSE endpoint contains a control character")
+		}
 	}
 	endpoint, err := url.Parse(bootstrap.Endpoint)
 	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || endpoint.Opaque != "" || endpoint.Path != "" && endpoint.Path != "/" {
