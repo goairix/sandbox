@@ -1,5 +1,12 @@
 # Detached no-effect writer 组件验证
 
+后续独立修复 `154ffb6`：原 Claim 在校验后 Clone 外部 WorkerID，防止短子串保留
+大于128KiB的调用者 backing。真实 Claim→mTLS/drain→draft 的地址回归先失败
+（`run-c82c55be753148788f234771e7802992`），修复后
+`run-53152cebeb324897a1c9300481e0c362`通过；Linux9244输入构建与完整审计通过。
+原三成员实际join、17源码及ELF指纹稳定、无SKIP/FAIL/OOM、自有容器删除；唯一reviewer
+限定Spec/Quality PASS。该三文件修复没有验收cold graph总量或完整Task3。
+
 代码提交：`58f38fd`（独立工作树 `7f738ab`）。仅接受 Task3 的原生 writer、
 历史 reader 及原 attempt 仲裁组件；完整 Task3、自动消费者与生产切换仍未完成。
 

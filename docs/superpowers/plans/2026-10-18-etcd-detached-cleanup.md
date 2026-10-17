@@ -147,3 +147,27 @@ Task5 为显式部署/HTTP及新真实 Linux组合。每项开始前冻结具体
 恢复引用和精确接口到本计划，再测试先行、实现、验收、小步提交；不能用当前
 Task1/2的单元通过把这些门槛记为完成。旧local与已验收quota底层只测必要回归，
 不重放旧完整矩阵或重复创建已完成任务。
+
+### Task 4A 下一片：生产 provider reservation 与一次发送
+
+沿用原唯一实现者/reviewer及D工作树。私有入口
+`terminateTaskRuntimeDetached(ctx,j,c,destination,reservation)`验证原job/Claim，复用
+原bounded runtime owner、Close/join和attempt marker。共享执行只提取固定三点读取
+与原七槽状态机，不接受caller authority或任意比较。旧公开local入口、v1 matcher与
+冷历史reader保持严格；detached重复同Claim仅live-profile只读诊断，不再进入provider。
+
+私有issuer/contract选择器：v1使用原archive/配置，v2仅使用loader认证的certificate/
+settlement contract。原provider Prepare/descriptor、UID/RV、effect ID、槽intent→
+guard→一次Apply→readback→complete顺序保持；原不确定槽不重发。明确reserved历史
+只Query原intent，不Sign/Terminate；错误或丢ACK立即保留原引用并返回Unknown。
+
+三业务点含identity/restore共K5，base4+Then5+Else5=14节点。v2 provider初写56节点、
+intent前59/后60；生产reserve59、terminated/cleanup-complete60。每个实际protobuf
+请求/回复检查128/256KiB、64节点，记录实际Commit及HTTP/observer接收数；候选组成
+不当transport上限。截止时间仍为caller/捕获Claim/owner30s的最小值，每步fresh guard。
+
+首片测试复用真实B writer/job/enrollment，在配置前加入专用TLS Kubernetes API
+fixture；Pod由正式plain builder构造，provider KV只能由原生产writer生成。真实执行
+slot0/1及59节点reserve后，observer显式返回Unknown，检查唯一发送与同Claim不重发。
+不raw种provider、不伪造terminal proof。完整slot2..6正向要真实PID1/cgroup证明；
+freshClaim/newRun retained Query等待B实际cold gate验收。此组件不能计消费者/HTTP完成。
