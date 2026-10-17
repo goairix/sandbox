@@ -119,9 +119,8 @@ func (b *Backend) prepareCleanupDetachedNoEffectRecovery(ctx context.Context, j 
 // The physical caller has already regained ownership from the original actor
 // and authenticated current native Joined E/S. Once that original Claim is
 // permanently lost, its completed and cleaned Stage mutation trees have no
-// remaining lawful consumer. Retire those Stage pointers and the completed Q
-// send/authorization payloads and redundant close record cache, keeping both
-// draft identities and native pins.
+// remaining lawful consumer. Retire those Stage pointers and the completed
+// close/Q send/authorization payloads, keeping both draft identities and pins.
 // The original Claim, prepared drain and settlement submission remain intact.
 // None's complete draft must survive: its original write can still be queried
 // with a dead Claim. No Stage object is mutated or guard/lease recreated.
@@ -177,14 +176,19 @@ func (b *Backend) retireCleanupDetachedNoEffectStages(j *cleanupLocalJob, h *cle
 		quiescenceDraft.stage = nil
 	}
 
-	// Close authorization checks Claim liveness before comparing this cached
-	// record. Its native history remains available independently. Retire only
-	// the redundant canonical value after matching the actual Q's close command;
-	// a prior failed preparation may already have removed the Stage pointer.
+	// Close authorization checks Claim liveness before consuming these caches;
+	// its native history remains available independently. Match the actual Q's
+	// close command before retiring its completed send/authorization payloads.
+	// A prior failed preparation may already have removed the Stage pointer.
 	if closeDraft != nil && closeDraft.outcome == OutcomeCommitted && closeDraft.cleaned &&
 		h.quiescence != nil && h.quiescence.Record != nil &&
 		closeDraft.commandID == h.quiescence.Record.Context.CloseDataContext.CommandID &&
 		closeDraft.reference.CommandID == h.quiescence.Record.Context.CloseDataContext.CommandID {
+		closeDraft.certificate = nil
+		closeDraft.issuer = nil
+		closeDraft.issuerValue = ""
+		closeDraft.claims = p.TaskCloseDataTicketClaims{}
+		closeDraft.ticket = p.TaskCloseDataEvidence{}
 		closeDraft.recordValue = ""
 	}
 

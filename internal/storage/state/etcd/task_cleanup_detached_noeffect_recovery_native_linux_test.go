@@ -86,7 +86,9 @@ func cleanupDetachedMakeWriterUnknown(t *testing.T, f *cleanupDetachedNoEffectNa
 func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T) {
 	f, draft := cleanupDetachedUnknownRecoveryFixture(t)
 	quiescenceBefore := *draft.claim.quiescenceDraft
-	closeValueBefore := draft.claim.closeDraft.recordValue
+	closeBefore := *draft.claim.closeDraft
+	closeBefore.certificate = bytes.Clone(closeBefore.certificate)
+	closeTicketBefore := closeBefore.ticket.Wire()
 	quiescenceBefore.certificate = bytes.Clone(quiescenceBefore.certificate)
 	priorBefore := *quiescenceBefore.prior
 	priorBefore.proof = bytes.Clone(priorBefore.proof)
@@ -104,7 +106,8 @@ func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T)
 	require.Equal(t, quiescenceBefore, *draft.claim.quiescenceDraft)
 	require.Equal(t, priorBefore, *draft.claim.quiescenceDraft.prior)
 	require.Equal(t, ticketBefore, draft.claim.quiescenceDraft.ticket.Wire())
-	require.Equal(t, closeValueBefore, draft.claim.closeDraft.recordValue)
+	require.Equal(t, closeBefore, *draft.claim.closeDraft)
+	require.Equal(t, closeTicketBefore, draft.claim.closeDraft.ticket.Wire())
 
 	// Deliberately forge a schema-valid diagnostic Joined projection while
 	// leaving native E untouched. This negative DTO supplies no join authority.
@@ -126,7 +129,8 @@ func TestCleanupDetachedNoEffectNativeRecoveryRequiresActualJoined(t *testing.T)
 	require.Equal(t, quiescenceBefore, *draft.claim.quiescenceDraft)
 	require.Equal(t, priorBefore, *draft.claim.quiescenceDraft.prior)
 	require.Equal(t, ticketBefore, draft.claim.quiescenceDraft.ticket.Wire())
-	require.Equal(t, closeValueBefore, draft.claim.closeDraft.recordValue)
+	require.Equal(t, closeBefore, *draft.claim.closeDraft)
+	require.Equal(t, closeTicketBefore, draft.claim.closeDraft.ticket.Wire())
 	actual, err := f.raw.Get(f.ctx, original.execution.key)
 	require.NoError(t, err)
 	require.Len(t, actual.Kvs, 1)
@@ -227,9 +231,15 @@ func TestCleanupDetachedNoEffectNativeRecoveryRetiresCompletedStagesAfterJoin(t 
 	require.True(t, quiescenceDraft.stage == nil, "actual joined dead Claim must release its completed quiescence Stage tree")
 	requireCleanupDetachedQuiescencePayloadRetired(t, quiescenceDraft, quiescenceBefore, priorBefore)
 	closeBefore.stage = nil
+	closeBefore.certificate = nil
+	closeBefore.issuer = nil
+	closeBefore.issuerValue = ""
+	closeBefore.claims = p.TaskCloseDataTicketClaims{}
+	closeBefore.ticket = p.TaskCloseDataEvidence{}
 	closeBefore.recordValue = ""
-	require.True(t, closeDraft.recordValue == "", "the dead original close authorization record cache must retire")
-	require.Equal(t, closeBefore, *closeDraft, "all other original close payload and coordinates remain intact")
+	require.Equal(t, closeBefore, *closeDraft, "only completed close send/authorization payloads and Stage may retire")
+	require.Equal(t, closeResult.Reference, closeResult.Prepared.Reference())
+	require.Equal(t, quiescenceResult.Reference, quiescenceResult.Prepared.Reference())
 	require.NoError(t, prepareErr)
 	require.Same(t, gate, f.job.detachedRecovery)
 	require.Same(t, draft, f.job.detachedNoEffect)

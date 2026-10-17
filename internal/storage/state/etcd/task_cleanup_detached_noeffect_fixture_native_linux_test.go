@@ -50,6 +50,8 @@ type cleanupDetachedNoEffectSourceShape struct {
 	backend integrationBackendShape
 	target  string
 	runtime RuntimeReference
+	// Optional initial Acquire inputs. Empty values retain the UUID defaults.
+	sandboxID, snapshotVersion string
 }
 
 func newCleanupDetachedNoEffectNativeFixtureWithSource(t *testing.T, shape *cleanupDetachedNoEffectSourceShape, claimWorker ...string) *cleanupDetachedNoEffectNativeFixture {
@@ -123,6 +125,14 @@ func newCleanupDetachedNoEffectNativeFixtureWithConfiguration(t *testing.T, shap
 	workspace, err := producer.DetachedIdentity("noeffect-native", idempotency)
 	require.NoError(t, err)
 	input := AcquireIntentInput{Workspace: workspace, Principal: "noeffect-native", IdempotencyKey: idempotency, RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"native":"detached plain source"}`), Now: now, TTL: time.Hour}
+	if shape != nil {
+		if shape.sandboxID != "" {
+			input.SandboxID = shape.sandboxID
+		}
+		if shape.snapshotVersion != "" {
+			input.SnapshotVersion = shape.snapshotVersion
+		}
+	}
 	acquired, err := producer.AcquireIntent(ctx, input)
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, acquired.Outcome)
@@ -143,6 +153,20 @@ func newCleanupDetachedNoEffectNativeFixtureWithConfiguration(t *testing.T, shap
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, mounted.Outcome)
 	proof, enrollment := duePublicationMaterial(t, producer, creation, root, certificate, runtime, now)
+	if shape != nil {
+		// Measure the real signed producer output before publication's original
+		// companion validation. These encoders neither seed KV nor skip Publish.
+		enrollmentRecord, activationRecord := enrollmentRecords(dispatch.Entry.Record, enrollment)
+		enrollmentValue, err := json.Marshal(enrollmentRecord)
+		require.NoError(t, err)
+		activationValue, err := json.Marshal(activationRecord)
+		require.NoError(t, err)
+		t.Logf("actual signed source producer bytes: creation-cert=%d ready=%d runtime-cert=%d issuer-cert=%d activation=%d observer-cert=%d enrollment-receipt=%d enrollment-record=%d activation-record=%d", len(certificate), len(proof), len(enrollment.Request.RuntimeCertificate), len(enrollment.Request.IssuerCertificate), len(enrollment.Request.Activation), len(enrollment.ObserverCertificate), len(enrollment.Receipt), len(enrollmentValue), len(activationValue))
+		_, err = encodeEnrolledRecord(enrollmentRecord)
+		require.NoError(t, err, "actual enrollment companion must satisfy its original producer cap")
+		_, err = encodeEnrolledRecord(activationRecord)
+		require.NoError(t, err, "actual activation companion must satisfy its original producer cap")
+	}
 	published, err := producer.PublishRuntimeEnrolled(ctx, creation, proof, enrollment)
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, published.Outcome)
