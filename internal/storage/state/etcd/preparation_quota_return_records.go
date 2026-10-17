@@ -1,7 +1,9 @@
 package etcd
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -96,11 +98,28 @@ func encodeColdRuntimeQuotaReturn(r coldRuntimeQuotaReturnRecord) (string, error
 
 func decodeColdRuntimeQuotaReturn(kv *mvccpb.KeyValue) (coldRuntimeQuotaReturnRecord, error) {
 	var r coldRuntimeQuotaReturnRecord
-	if !enrolledImmutableKV(kv) || coldDecode(kv, &r) != nil {
+	if !enrolledImmutableKV(kv) {
+		return r, ErrCorruptRecord
+	}
+	r, err := decodeColdRuntimeQuotaReturnValue(kv.Value)
+	if err != nil || kv.CreateRevision <= r.PublicationStamp.CreateRevision || kv.CreateRevision <= r.Reservation.ModRevision || kv.CreateRevision <= r.ReleaseStamp.CreateRevision {
+		return r, ErrCorruptRecord
+	}
+	return r, nil
+}
+
+// decodeColdRuntimeQuotaReturnValue validates only canonical record bytes. The
+// prepared worker journal uses it to retain its frozen Attempt locator; this
+// value has no MVCC envelope and grants no historical or physical authority.
+// Persistent readers must use decodeColdRuntimeQuotaReturn, which additionally
+// requires the original immutable KV and its ordering after all source stamps.
+func decodeColdRuntimeQuotaReturnValue(value []byte) (coldRuntimeQuotaReturnRecord, error) {
+	var r coldRuntimeQuotaReturnRecord
+	if len(value) > 16384 || strictPreparationMetadata(value, reflect.TypeOf(&r)) != nil || json.Unmarshal(value, &r) != nil {
 		return r, ErrCorruptRecord
 	}
 	wire, err := encodeColdRuntimeQuotaReturn(r)
-	if err != nil || wire != string(kv.Value) || kv.CreateRevision <= r.PublicationStamp.CreateRevision || kv.CreateRevision <= r.Reservation.ModRevision || kv.CreateRevision <= r.ReleaseStamp.CreateRevision {
+	if err != nil || wire != string(value) {
 		return r, ErrCorruptRecord
 	}
 	return r, nil
