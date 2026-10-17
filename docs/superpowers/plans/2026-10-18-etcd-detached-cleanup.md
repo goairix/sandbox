@@ -109,6 +109,10 @@ ABA、64节点/最大字节、Unknown/丢ACK/原实际join fence与cold恢复，
 
 ### Task 4A 并行边界：实际 termination 与 observer
 
+Task3 的 writer/read 连贯单元已以 `58f38fd` 接受并提交：真实三成员六顶层及四个
+子场景、独立有界五点组件、Linux构建/vet与限定审查通过。仅该组件单元关闭，
+本节之前的冷新Run门禁、内存和真实signed最大输入门槛仍开放；见对应验证报告。
+
 独立复用D工作树，与B的Task3并行；唯一实现者
 `detached_runtime_native_implementation`，合同在其OWN/CONTRACT.md。
 拥有controlprotocol原termination key helper、etcd `task_runtime_termination*`
