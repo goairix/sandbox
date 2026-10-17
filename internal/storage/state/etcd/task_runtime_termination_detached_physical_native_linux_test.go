@@ -187,6 +187,12 @@ func TestDetachedRuntimeTerminationPhysicalWorkerChild(t *testing.T) {
 	_ = detachedPhysicalRead(t, conn, "run")
 	f := detachedPhysicalMetadataRun(t, ctx, b, raw, task, published.Entry, enrolled.RuntimeAddress, kernel)
 	detachedPhysicalTerminate(t, f, setup)
+	// This optional metadata-release component consumes the actual production
+	// observer proof and seven completed slots above. With no env it preserves
+	// the original physical test's assertions and scope exactly.
+	if os.Getenv("SANDBOX_DETACHED_OWNER_RELEASE_PHYSICAL_NATIVE") == "1" {
+		detachedPhysicalOwnerRelease(t, f)
+	}
 	detachedPhysicalWrite(t, conn, detachedPhysicalPhase{Phase: "cleanup-complete"})
 }
 

@@ -117,11 +117,10 @@ func (b *Backend) detachedNoEffectHistoricalOccupation(entry *cleanupDetachedNoE
 // absence recovery may rely on a current actual Joined marker; this validator
 // grants neither a new Run nor effect authority from a copied history tuple.
 func (b *Backend) validateCleanupDetachedNoEffectFact(h *cleanupDetachedNoEffectHistory, entry *cleanupDetachedNoEffectEntry) error {
-	if h == nil || h.self != h || h.origin != b || h.state == nil || h.quiescence == nil || h.quiescence.Record == nil || h.quiescence.reservation == nil || h.quiescence.reservation.Record == nil || h.finalSync == nil || h.finalSync.Record == nil || entry == nil || entry.self != entry || entry.origin != b {
+	if h == nil || h.state == nil {
 		return ErrInvalidRecord
 	}
-	r := entry.record
-	old, err := b.detachedNoEffectHistoricalOccupation(entry, h.task.Reference)
+	old, err := b.validateCleanupDetachedNoEffectSourceBindings(h, entry)
 	if err != nil {
 		return err
 	}
@@ -131,26 +130,42 @@ func (b *Backend) validateCleanupDetachedNoEffectFact(h *cleanupDetachedNoEffect
 	if h.state.slot != nil && (old.slot == nil || *h.state.slot != *old.slot) {
 		return ErrConflict
 	}
+	return nil
+}
+
+// Source attribution is independent of a current E/S: those may be advanced
+// or retired after legitimate termination/release. It validates only the
+// original E sealed in the fact and actual permanent source bindings. The live
+// wrapper separately preserves all original current-occupation fences above.
+func (b *Backend) validateCleanupDetachedNoEffectSourceBindings(h *cleanupDetachedNoEffectHistory, entry *cleanupDetachedNoEffectEntry) (*cleanupSlotState, error) {
+	if b == nil || b.detachedCleanup == nil || h == nil || h.self != h || h.origin != b || h.quiescence == nil || h.quiescence.Record == nil || h.quiescence.reservation == nil || h.quiescence.reservation.Record == nil || h.finalSync == nil || h.finalSync.Record == nil || entry == nil || entry.self != entry || entry.origin != b {
+		return nil, ErrInvalidRecord
+	}
+	old, err := b.detachedNoEffectHistoricalOccupation(entry, h.task.Reference)
+	if err != nil {
+		return nil, err
+	}
+	r := entry.record
 	if r.QuiescenceContext != h.quiescence.Record.Context.Current || r.CreationIntentID != h.task.CreationIntentID || r.ContractDigest != b.detachedCleanup.contractDigest || r.FinalSyncClaim != detachedNoEffectClaim(h.finalSync.Record.Claim) || r.FinalSyncAttemptID != h.finalSync.Record.AttemptID || r.ReceiptDigest != h.finalSync.Record.ReceiptDigest {
-		return ErrCorruptRecord
+		return nil, ErrCorruptRecord
 	}
 	for _, binding := range []struct {
 		stamp p.RecordStamp
 		fence taskFence
 	}{{r.Task, h.taskFence}, {r.Snapshot, h.snapshotFence}, {r.CreationIntent, h.intentFence}, {r.Publication, h.publicationFence}, {r.FinalSync, h.finalSyncFence}, {r.Quiescence, h.quiescencePin.intent}, {r.QuiescenceReceipt, h.quiescencePin.receipt}} {
 		if !detachedNoEffectStampMatches(binding.stamp, binding.fence) {
-			return ErrConflict
+			return nil, ErrConflict
 		}
 	}
 	reservation, err := encodeTaskQuiescenceAttempt(*h.quiescence.reservation.Record)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	reservationStamp := p.RecordStamp{CreateRevision: h.quiescence.reservation.Revision, ModRevision: h.quiescence.reservation.Revision, SHA256: workspaceSyncIntentDigest(reservation)}
 	stage := h.quiescence.Reference.Stage
 	stageBinding := p.TerminationQuiescenceStage{RequestID: stage.RequestID, StageID: stage.StageID, AttemptID: stage.AttemptID, Digest: stage.Digest}
 	if r.QuiescenceReservation != reservationStamp || r.QuiescenceStage != stageBinding {
-		return ErrCorruptRecord
+		return nil, ErrCorruptRecord
 	}
-	return nil
+	return old, nil
 }

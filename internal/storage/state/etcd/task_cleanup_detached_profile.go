@@ -11,6 +11,21 @@ import (
 // absence of external effects; durable writers must authenticate and pin the
 // original native records under their own authority checks.
 func (b *Backend) detachedCleanupSource(task TaskRecord, snapshot SandboxSnapshotRecord, intent CreationIntentRecord, publication *RuntimeEnrolledPublicationEntry) (WorkspaceIdentity, error) {
+	workspace, err := b.detachedCleanupSourceRecords(task, snapshot, intent, publication)
+	if err != nil {
+		return WorkspaceIdentity{}, err
+	}
+	if !validHexDigest(publication.Reference.Digest) || publication.Reference != publication.Record.Attempt.reference(publication.Reference.Digest) {
+		return WorkspaceIdentity{}, ErrInvalidRecord
+	}
+	return workspace, nil
+}
+
+// The surviving-history reader already authenticates actual publication/fact
+// stamps and four native companions. It has no publication Stage receipt, so
+// this common pure records/signature check must neither invent a Reference nor
+// grant authority. The original wrapper retains its full Reference check.
+func (b *Backend) detachedCleanupSourceRecords(task TaskRecord, snapshot SandboxSnapshotRecord, intent CreationIntentRecord, publication *RuntimeEnrolledPublicationEntry) (WorkspaceIdentity, error) {
 	if b == nil || b.detachedCleanup == nil || b.enrolledPublication == nil || b.publicationVerifier == nil || b.detachedCleanup.contractDigest != b.enrolledPublication.ContractDigest {
 		return WorkspaceIdentity{}, ErrInvalidConfiguration
 	}
@@ -37,10 +52,6 @@ func (b *Backend) detachedCleanupSource(task TaskRecord, snapshot SandboxSnapsho
 	if task.Reference.SandboxID != snapshot.SandboxID || task.Reference.SandboxID != intent.SandboxID || task.Reference.SandboxID != r.SandboxID || task.CreationIntentID != intent.IntentID || task.CreationIntentID != r.IntentID || task.Generation != intent.Generation || task.Generation != r.Generation || task.Runtime != r.Runtime || task.DataGateEpoch != r.DataGateEpoch || task.Snapshot != snapshot.Snapshot || task.Snapshot != r.Snapshot {
 		return WorkspaceIdentity{}, ErrInvalidRecord
 	}
-	if !validHexDigest(publication.Reference.Digest) || publication.Reference != r.Attempt.reference(publication.Reference.Digest) {
-		return WorkspaceIdentity{}, ErrInvalidRecord
-	}
-
 	// ConfigurationDigest includes the original acquisition TTL, which is not
 	// recoverable from these copies. Its codec is validated above; it is not a
 	// payload digest. A Task may also have a later expiry after a legal TTL

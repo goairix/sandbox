@@ -90,6 +90,11 @@ type taskLocalRuntimeReleaseOwner struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	slot    int
+
+	// Detached release keeps only its original canonical candidate (<=8KiB)
+	// after finish retires ctx/cancel. It is set once under the original Claim
+	// mutex immediately before native send; retry may only read exact bytes.
+	detachedCandidate string
 }
 
 func (b *Backend) beginLocalRuntimeRelease(ctx context.Context, c *TaskClaim) (*taskLocalRuntimeReleaseOwner, error) {
