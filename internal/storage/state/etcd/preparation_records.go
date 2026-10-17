@@ -19,6 +19,14 @@ type PreparationInventoryOptions struct {
 	QuotaSlots [256]uint32 `json:"quota_slots"`
 }
 
+// Validate checks the fixed quota profile without accessing storage or creating
+// inventory metadata. A nil receiver retains the legacy unconfigured-backend
+// behavior; a non-nil profile requires at least one slot and bounded counts.
+// Validation does not establish that the profile's inventory is ready.
+func (o *PreparationInventoryOptions) Validate() error {
+	return validatePreparationInventory(o)
+}
+
 func validatePreparationInventory(o *PreparationInventoryOptions) error {
 	if o == nil {
 		return nil
