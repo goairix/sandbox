@@ -191,3 +191,14 @@ freshClaim/newRun retained Query等待B实际cold gate验收。此组件不能�
 
 查询接续：`9c5ad2e`完成实际新Run/新Claim下原请求Query与原owner安全退休；
 真实native+18race+Linuxbuild/vet、完整审计及唯一限定审查通过。完整Task4A仍开放。
+
+### Task 4A 物理证明接续
+
+`5f540a2`三成员TLS fixture已实际通过，保留原单成员入口；只关闭该测试资产片。
+下一片复用正式plain builder、真实launcher PID1/cgroup和NodeObserver Serve，
+由observer在真实死亡及cgroup empty后内部签发proof，接真实detached writer与
+原七槽状态机的slot2..6。测试不可直接签terminal proof或传入Claim/Run/authority
+DTO；setup中的ID仅定位材料。原worker UID1000/caps0/NNP、实际进程Wait、
+严格native来源及128/256KiB和64节点预算仍须验证。独立物理组合不得设置原
+SANDBOX_WORKSPACE_SYNC_LOCAL_NATIVE，以免启动另一套HTTP fixture。
+旧物理镜像缺失需要恢复资产；fixture通过不代替PID1、consumer或部署验收。
