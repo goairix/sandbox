@@ -38,6 +38,14 @@ Stop、Backend.Close 先 seal，实际 join actor、原 native 调用和物理 j
 旧任务仅在停止旧写入后，做固定 R、持久游标的一次回填；完成后不周期扫描历史。
 不支持旧版无索引写入者继续运行的混合版本发布，回填保证限于该固定视图和新原子写入。
 
+历史回填细化为不可变 legacy 截止修订、可替换读取视图及已确认 CAS 的单调 frontier。
+压缩使读取游标失效，但不清除已确认进度：重新认证读取视图后，从原 frontier 继续。
+这一兼容证明要求旧 Task/intent/link/初始回执在回填完成前不被 GC、删除或改写；恢复
+epoch 变化不能采用旧检查点。截止点之后的合规任务已有原子 pending，不属于旧集合。
+读取改用平坦 cleanup-intents 家族，避免任务执行后代；每次最多2条 keys-only，并按
+底层额外一条、每条旧通用64KiB上限计入读取预算。不能用 revision 过滤器代替有界读取。
+这避免每次压缩从头回填，不保证无限新任务涌入或始终无法完成一页时的固定完成时间。
+
 ## 生产组合边界
 
 沿用 mounted cleanup 配置、真实 KernelBoundary、已有 issuer 和 transport/provider。

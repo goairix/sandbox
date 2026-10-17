@@ -107,9 +107,10 @@ func reservedStageKey(n Namespace, key string) bool {
 		return false
 	}
 
-	// Permanent cleanup occupation and execution rows are owned by their
-	// private CAS protocol. Generic Stage writes must not reset that history.
+	// Permanent cleanup occupation, execution and backfill coverage are owned
+	// by private CAS protocols. Generic Stage must not reset that history.
 	return parts[2] == "attempts" || parts[2] == "stages" ||
+		parts[2] == "cleanup-pending-backfill" ||
 		(len(parts) == 5 && parts[2] == "tasks" && parts[4] == "execution")
 }
 
