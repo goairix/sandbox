@@ -130,6 +130,13 @@ func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*Plain
 	}
 	defer s.leave(call)
 	ctx = call.context
+	released, err := s.backend.ReadSandboxReleased(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if released != nil {
+		return nil, ErrPlainColdNotFound
+	}
 	loaded, err := s.loadColdTarget(ctx, sandboxID)
 	if err != nil {
 		return nil, err

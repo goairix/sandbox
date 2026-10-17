@@ -76,6 +76,7 @@ type coldServiceNativeVariant struct {
 	httpGateway, fileAPI                                           bool
 	largeDownload                                                  bool
 	destroyLocal, destroyDetached                                  bool
+	destroyTerminal                                                bool
 }
 
 func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVariant) {
@@ -471,6 +472,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 			service: service, backend: backend, raw: admin, options: options,
 			request: request, workspace: w, identity: identity, directory: dir,
 			observerAddress: tcp.Addr().String(), clockKey: clockKey, provider: destroyProvider,
+			terminal: variant.destroyTerminal,
 		}, variant.destroyLocal)
 		joinOriginalBridges()
 		return

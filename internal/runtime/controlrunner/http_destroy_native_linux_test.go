@@ -51,6 +51,10 @@ func TestHTTPDestroyNative(t *testing.T) {
 	t.Run("local-accepted", func(t *testing.T) {
 		runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{destroyLocal: true})
 	})
+	t.Run("local-terminal", func(t *testing.T) {
+		// Public GET renders the real business capsule created by this variant.
+		runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{destroyLocal: true, destroyTerminal: true, withBusiness: true})
+	})
 	t.Run("detached-refused", func(t *testing.T) {
 		runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{detached: true, destroyDetached: true})
 	})
@@ -68,6 +72,7 @@ type httpDestroyNativeContext struct {
 	observerAddress string
 	clockKey        ed25519.PrivateKey
 	provider        *httpDestroyNativeProvider
+	terminal        bool
 }
 
 type httpDestroyNativeResponse struct {
@@ -157,6 +162,12 @@ func exerciseHTTPDestroyNative(t *testing.T, ctx context.Context, f httpDestroyN
 	require.Zero(t, seed.Receipt.RootWaitStatus())
 
 	path := "/api/v1/sandboxes/" + created.SandboxID
+	if f.terminal {
+		var live types.SandboxResponse
+		httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), 200, &live)
+		require.Equal(t, created.SandboxID, live.ID)
+	}
+
 	var accepted httpDestroyNativeResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 202, &accepted)
 	require.Equal(t, "destroy_pending", accepted.Code)
@@ -189,8 +200,8 @@ func exerciseHTTPDestroyNative(t *testing.T, ctx context.Context, f httpDestroyN
 		require.Equal(t, retained[i].Kvs[0], after.Kvs[0], "retained placement/fence bytes and MVCC fields must remain unchanged")
 	}
 	// Release deliberately removes only owner/control/runtime index. Discovery
-	// still sees retained placement, so the current all-four-point reader must
-	// fail closed rather than turn that partial state into a live view or 404.
+	// still sees retained placement, so the all-four-point reader must fail
+	// closed. Only the separate authenticated release reader can establish 404.
 	view, err := f.backend.ReadSandboxView(ctx, created.SandboxID)
 	require.ErrorIs(t, err, state.ErrCorruptRecord)
 	require.Nil(t, view)
@@ -204,7 +215,11 @@ func exerciseHTTPDestroyNative(t *testing.T, ctx context.Context, f httpDestroyN
 	require.Len(t, quota.Kvs, 1)
 	require.Contains(t, string(quota.Kvs[0].Value), `"occupied":true`)
 	t.Log("HTTP DELETE local complete: actual service Create/Exec, atomic Task/P, automatic physical release/Pgone; cold quota remains occupied (separate production wiring gap)")
-	t.Log("public GET-after-delete terminal read model remains a separate wiring gap; retained placement makes ReadSandboxView fail closed, with no 404 claim")
+	if f.terminal {
+		httpTerminalLookupNative(t, ctx, f, client, origin, created.SandboxID, current.Generation)
+	} else {
+		t.Log("this variant does not exercise terminal GET; the original four-point reader remains fail-closed")
+	}
 }
 
 // requireHTTPDestroyNativeBridgeJoined checks the original physical owners
