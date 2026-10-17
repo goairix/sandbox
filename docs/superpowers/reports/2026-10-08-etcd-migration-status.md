@@ -27,6 +27,10 @@ Stage不能写入该键家族。定向host/race通过，Linux vet与输入审计
 [检查点验证](2026-10-17-etcd-pending-backfill-bootstrap-verification.md)。尚未推进历史frontier、
 完成回填或接通自动消费者，不因本片上调整体估算，也不宣称已验证compaction续接。
 
+平坦intent的固定检查点视图读取也已实现，两组34子例host/race及Linuxvet通过，见
+[历史分页验证](2026-10-17-etcd-pending-legacy-page-verification.md)。兼容读取按通用64KiB
+值及额外lookahead预算限2条，尚非历史任务认证、进度提交或完成回填；新pending仍每页80条。
+
 ## 2026-10-17 此前切片记录（已由上述完整执行器验收接续）
 
 实际常驻到期 worker 已范围完成，源码 `1f7f7b6/a22f5fc/6463b5d/1017b66`，审查修复 `9a06de9`。唯一完整审查发现的4项 Important 已经真实回归复现、修复并由同一审查员限定复核批准；无新增或未关闭C/I/M。最终71组针对性host/race、Linuxvet/build及新三成员native03通过，后者9.98秒；原故障/取消告警、首次测试及采集脚本失败如实保留。详见 [常驻到期worker验收](2026-10-16-etcd-due-worker-verification.md)。`688748f` 明确有限轮询限制，未实现earliest-expiry timer、不承诺到期时延。
