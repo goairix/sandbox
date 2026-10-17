@@ -1,7 +1,6 @@
 package etcd
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -182,22 +181,5 @@ func (b *Backend) coldQuotaWorkerJournalComparisons(body, worker []clientv3.Cmp)
 	if b == nil || len(body) != 30 && len(body) != 37 || len(worker) != 24 {
 		return nil, ErrInvalidMutation
 	}
-	base := taskProtoComparisons(b.baseComparisons())
-	for i := range base {
-		expected, err := base[i].Marshal()
-		if err != nil {
-			return nil, ErrInvalidMutation
-		}
-		for _, candidate := range []clientv3.Cmp{body[i], worker[i]} {
-			comparison := pb.Compare(candidate)
-			wire, err := comparison.Marshal()
-			if err != nil || !bytes.Equal(wire, expected) {
-				return nil, ErrInvalidMutation
-			}
-		}
-	}
-	comparisons := make([]clientv3.Cmp, 0, len(body)+len(worker)-len(base))
-	comparisons = append(comparisons, body...)
-	comparisons = append(comparisons, worker[len(base):]...)
-	return comparisons, nil
+	return b.coldQuotaWorkerBaseComparisons(body, worker)
 }
