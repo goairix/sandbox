@@ -267,7 +267,19 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	for o := range b.archiveLife.enrolled {
 		enrolled = append(enrolled, o)
 	}
-	releases := b.archiveLife.runtimeReleases
+	// A foreground finish may retire ctx/cancel after this lock is released.
+	// Snapshot function values and original join channels under the same lock,
+	// rather than retaining owner pointers whose executable fields may change.
+	type releaseWait struct {
+		cancel context.CancelFunc
+		done   <-chan struct{}
+	}
+	releases := make([]releaseWait, 0, len(b.archiveLife.runtimeReleases))
+	for _, owner := range b.archiveLife.runtimeReleases {
+		if owner != nil {
+			releases = append(releases, releaseWait{cancel: owner.cancel, done: owner.done})
+		}
+	}
 	var snapshotCalls []*snapshotReadCall
 	var snapshotMisses []*snapshotReadMiss
 	if b.snapshotReads != nil {
@@ -282,9 +294,7 @@ func (b *Backend) closeTaskArchiveBackend() error {
 	}
 	b.archiveLife.mu.Unlock()
 	for _, o := range releases {
-		if o != nil {
-			o.cancel()
-		}
+		o.cancel()
 	}
 	for _, o := range enrolled {
 		o.cancel()
@@ -315,9 +325,7 @@ func (b *Backend) closeTaskArchiveBackend() error {
 		<-o.done
 	}
 	for _, o := range releases {
-		if o != nil {
-			<-o.done
-		}
+		<-o.done
 	}
 	var err error
 	for _, s := range workers {

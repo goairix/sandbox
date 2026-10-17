@@ -190,11 +190,22 @@ func (b *Backend) beginLocalRuntimeRead(ctx context.Context, task TaskReference)
 // The foreground owner calls finish only after all original dependent calls
 // have returned. Close waits for this signal, never just context cancellation.
 func (o *taskLocalRuntimeReleaseOwner) finish() {
-	o.cancel()
-	o.backend.archiveLife.mu.Lock()
-	if o.backend.archiveLife.runtimeReleases[o.slot] == o {
-		o.backend.archiveLife.runtimeReleases[o.slot] = nil
+	life := o.backend.archiveLife
+	life.mu.Lock()
+	cancel := o.cancel
+	life.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+
+	life.mu.Lock()
+	if life.runtimeReleases[o.slot] == o {
+		life.runtimeReleases[o.slot] = nil
+		// Keep the original Claim attempt marker and owner identity, while
+		// dropping the caller graph and executable closure before publishing
+		// join. Close has already copied any cancel value it still needs.
+		o.ctx, o.cancel = nil, nil
 		close(o.done)
 	}
-	o.backend.archiveLife.mu.Unlock()
+	life.mu.Unlock()
 }

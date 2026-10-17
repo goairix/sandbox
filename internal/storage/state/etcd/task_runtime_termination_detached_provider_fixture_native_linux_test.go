@@ -46,6 +46,8 @@ type detachedTerminationProviderFixture struct {
 	issuer                 *detachedTerminationFixtureIssuer
 	terminates, queries    atomic.Int64
 	destination            *ct.TerminationDestination
+	allowQuery             atomic.Bool
+	peerReturned           chan struct{}
 }
 
 type detachedTerminationFixtureIssuer struct {
@@ -227,6 +229,7 @@ func (h *detachedTerminationProviderFixture) startUnknownObserver(t *testing.T) 
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	h.peerReturned = make(chan struct{}, 4)
 	var joined sync.WaitGroup
 	joined.Add(1)
 	go func() {
@@ -237,7 +240,14 @@ func (h *detachedTerminationProviderFixture) startUnknownObserver(t *testing.T) 
 				return
 			}
 			func() {
-				defer conn.Close()
+				defer func() {
+					_ = conn.Close()
+					select {
+					case h.peerReturned <- struct{}{}:
+					default:
+						t.Error("component peer completion queue exceeded its fixed bound")
+					}
+				}()
 				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 				secure := tls.Server(conn, config)
 				if err := h.unknownRequest(secure); err != nil {
@@ -266,10 +276,16 @@ func (h *detachedTerminationProviderFixture) unknownRequest(conn net.Conn) error
 		return err
 	}
 	request, err := ct.DecodeNodeTerminationRequest(wire)
-	if err == nil && request.Purpose == "task_runtime_terminate_query" {
-		h.queries.Add(1)
+	if err != nil {
+		return err
 	}
-	if err != nil || request.Purpose != "task_runtime_terminate" || !bytes.Equal(request.IssuerCertificate, h.issuer.wire) {
+	query := request.Purpose == "task_runtime_terminate_query"
+	if query {
+		h.queries.Add(1)
+		if !h.allowQuery.Load() {
+			return fmt.Errorf("observer query not enabled for this component case")
+		}
+	} else if request.Purpose != "task_runtime_terminate" || !bytes.Equal(request.IssuerCertificate, h.issuer.wire) {
 		return fmt.Errorf("unexpected observer request: %w", err)
 	}
 	f := h.f
@@ -285,21 +301,30 @@ func (h *detachedTerminationProviderFixture) unknownRequest(conn net.Conn) error
 	if err != nil || intent.Version != 2 || intent.Phase != "reserved" {
 		return fmt.Errorf("actual reserved intent refused: %w", err)
 	}
-	var envelope struct {
-		Claims p.TaskRuntimeTerminationTicketClaims `json:"claims"`
+	if query {
+		// Compare against actual reserved bytes, never a caller expectation.
+		// Query cannot replace old Current or invent a new reservation.
+		expected, err := localRuntimeTerminationQuery(intent, actual.Kvs[0])
+		if err != nil || request.Query == nil || *request.Query != expected {
+			return fmt.Errorf("original persisted observer query mismatch: %w", err)
+		}
+	} else {
+		var envelope struct {
+			Claims p.TaskRuntimeTerminationTicketClaims `json:"claims"`
+		}
+		if json.Unmarshal(request.Ticket, &envelope) != nil {
+			return fmt.Errorf("ticket window missing")
+		}
+		claims := p.TaskRuntimeTerminationTicketClaims{Version: 1, Purpose: "task_runtime_terminate", Current: intent.Current, Partition: intent.Partition, IntentCreateRevision: actual.Kvs[0].CreateRevision, IntentModRevision: actual.Kvs[0].ModRevision, IntentDigest: workspaceSyncIntentDigest(string(actual.Kvs[0].Value)), EnrollmentDigest: intent.EnrollmentDigest, ObserverCertificateDigest: intent.ObserverCertificateDigest, NodeUID: intent.NodeUID, NodeBootID: intent.NodeBootID, NotBefore: envelope.Claims.NotBefore, NotAfter: envelope.Claims.NotAfter}
+		observation, err := f.b.authorityClock.Observe(f.ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := f.b.enrolledVerifier.VerifyTaskRuntimeTerminationTicket(request.Ticket, request.IssuerCertificate, claims, observation.UTC); err != nil {
+			return err
+		}
+		h.terminates.Add(1)
 	}
-	if json.Unmarshal(request.Ticket, &envelope) != nil {
-		return fmt.Errorf("ticket window missing")
-	}
-	claims := p.TaskRuntimeTerminationTicketClaims{Version: 1, Purpose: "task_runtime_terminate", Current: intent.Current, Partition: intent.Partition, IntentCreateRevision: actual.Kvs[0].CreateRevision, IntentModRevision: actual.Kvs[0].ModRevision, IntentDigest: workspaceSyncIntentDigest(string(actual.Kvs[0].Value)), EnrollmentDigest: intent.EnrollmentDigest, ObserverCertificateDigest: intent.ObserverCertificateDigest, NodeUID: intent.NodeUID, NodeBootID: intent.NodeBootID, NotBefore: envelope.Claims.NotBefore, NotAfter: envelope.Claims.NotAfter}
-	observation, err := f.b.authorityClock.Observe(f.ctx)
-	if err != nil {
-		return err
-	}
-	if _, err := f.b.enrolledVerifier.VerifyTaskRuntimeTerminationTicket(request.Ticket, request.IssuerCertificate, claims, observation.UTC); err != nil {
-		return err
-	}
-	h.terminates.Add(1)
 	reply, err := p.EncodeNodeTerminationResult(p.NodeTerminationResult{Version: 1, Purpose: "task_runtime_termination_result", State: "unknown"})
 	if err != nil {
 		return err
