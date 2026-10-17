@@ -97,7 +97,15 @@ func (b *Backend) finishCleanupJob(j *cleanupLocalJob, err error) {
 	if err != nil && j.result.Reason == "" {
 		j.result.Reason = "reconciliation-required"
 	}
+	// Only the original physical/preparation owner reaches this point after
+	// transports, Claims and caller callbacks joined. Snapshot without keeping
+	// its error graph; publish history atomically with registry removal/done.
+	var failure cleanupJobResult
+	if j.worker.options.AutomaticCleanup {
+		failure = cleanupResultFailure(err)
+	}
 	b.archiveLife.mu.Lock()
+	j.worker.recordCleanupResultLocked(failure)
 	for i, candidate := range j.worker.cleanupJobs {
 		if candidate == j {
 			j.worker.cleanupJobs[i] = nil

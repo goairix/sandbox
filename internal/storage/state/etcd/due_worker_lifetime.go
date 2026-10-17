@@ -35,7 +35,7 @@ func (w *DueWorker) finish(workErr error) {
 	// The serial phase already returned; no native owner can still borrow its
 	// page/proof. Registered physical jobs have now joined as well.
 	w.automatic = nil
-	if errors.Is(workErr, context.Canceled) && !errors.Is(workErr, ErrOutcomeUnknown) {
+	if cleanupOnlyCanceled(workErr) {
 		workErr = nil
 	}
 	w.publishStatus("stopping", workErr)
@@ -46,7 +46,10 @@ func (w *DueWorker) finish(workErr error) {
 
 	b := w.backend
 	b.archiveLife.mu.Lock()
-	w.err = errors.Join(workErr, cleanupErr)
+	// All original jobs and callbacks returned before workDone. Include the
+	// fixed historical result even when recovery later succeeded; cancellation
+	// cannot turn a completed unknown/dependency failure into a clean shutdown.
+	w.err = errors.Join(workErr, w.cleanupResultErrorLocked(), cleanupErr)
 	w.status.Running, w.status.Synchronized = false, false
 	w.status.Phase = "stopped"
 	if errors.Is(w.err, ErrOutcomeUnknown) {

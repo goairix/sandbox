@@ -55,6 +55,10 @@ type DueWorkerStatus struct {
 	Renewals              uint64
 	LastError             string
 	Cleanup               DueWorkerCleanupStatus
+	// CleanupFailures is the saturating count of completed non-cancellation
+	// job failures in automatic mode. It includes recovered historical failures
+	// and grants no authority to retry, release slots or declare completion.
+	CleanupFailures uint64
 }
 
 // DueWorker owns one serial resident consumer and its original session. It
@@ -86,6 +90,10 @@ type DueWorker struct {
 	cleanupNext   int
 	cleanupWake   chan struct{}
 	cleanupSealed bool
+	// Completion history shares the existing automatic 4MiB reservation. It
+	// retains no original errors/jobs after registry removal; archiveLife.mu
+	// protects publication alongside job.done and all status observations.
+	cleanupResults cleanupJobResult
 
 	// Automatic phases and Claim arbitration belong exclusively to the actor.
 	// Waiting lanes retain priority across token waits, withdrawing on an idle turn.
@@ -308,7 +316,7 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 	b := w.backend
 	b.archiveLife.mu.Lock()
 	defer b.archiveLife.mu.Unlock()
-	status := DueWorkerStatus{Session: w.session.reference, Running: true, Synchronized: len(w.scans) == len(w.options.Partitions), Phase: phase, Renewals: w.status.Renewals, LastError: w.status.LastError, Partitions: make([]DueWorkerPartitionStatus, 0, len(w.scans))}
+	status := DueWorkerStatus{Session: w.session.reference, Running: true, Synchronized: len(w.scans) == len(w.options.Partitions), Phase: phase, Renewals: w.status.Renewals, LastError: w.status.LastError, CleanupFailures: w.cleanupResults.failures, Partitions: make([]DueWorkerPartitionStatus, 0, len(w.scans))}
 	if workErr != nil {
 		status.LastError = dueWorkerError(workErr)
 	}
