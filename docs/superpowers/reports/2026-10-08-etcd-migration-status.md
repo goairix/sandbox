@@ -59,7 +59,7 @@ Linuxvet和唯一Task审查通过，见[journal验证](2026-10-17-etcd-cold-quot
 [v3配置基础](2026-10-17-etcd-cold-quota-v3-manifest-verification.md)及
 [双预算准入](2026-10-17-etcd-cold-quota-worker-admission-verification.md)。
 v3仍未由CLI接受。worker私有continuation、metadata计费及分步postread已范围验收，
-完整历史认证、付费恢复仲裁、保留内存核算及自动consumer仍需完成，
+完整历史认证、恢复proof读取、保留内存核算及自动consumer仍需完成，
 不计为配额自动返还已接通。
 
 `3c3afed` 接通五个私有固定 RPC 的真实 gRPC 通信层：限制每次请求、回复、累计
@@ -84,6 +84,12 @@ Task审查，见[纯校验验证](2026-10-17-etcd-cold-quota-proof-verification.
 [分步确认验证](2026-10-18-etcd-cold-quota-worker-postread-verification.md)。
 原permit仍保留prepared/history，未完成32任务内存验收。这些私有协议尚未接入完整
 自动quota driver，也不表示物理清理或P删除权限；整体粗估百分比保持不变。
+
+`66036ab` 新增独立双预算 worker Resolve，完整W24/29节点，仅仲裁原journal引用的
+receipt；丢ACK不重发，不申请新Stage，结果仍为普通Outcome。定向host/race、Linux
+vet及独立Task审查通过，见[恢复仲裁验证](2026-10-18-etcd-cold-quota-worker-resolve-verification.md)。
+恢复后的aborted receipt或committed return/receipt仍须另行付费认证；完整历史分步读取、
+共享工作区、自动结算/删除gate及真实etcd恢复组合仍未完成。
 
 `2032c8c`/`626315a`分别接入原Stage销毁service及HTTP DELETE。支持的local v2目标
 返回202仅表示任务提交；当前HTTP创建的detached目标返回501且不写销毁状态，不能
