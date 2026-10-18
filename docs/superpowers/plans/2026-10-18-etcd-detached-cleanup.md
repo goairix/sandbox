@@ -21,9 +21,14 @@
 
 接续记录：`f23fcc4` 已关闭真实退款后 Joined occupation 的安全结算/槽释放，
 `d515e87` 已关闭新 Q 预约先写后提交的孤儿窗口，组件验证与主分支整合通过。
-不重播已关闭单元。当前两条线分别接同原 actor 的严格 v2 hint/paid/refund/settle/P，
-以及原 HTTPDestroyNative/正式 serve-cold-quota 的 managed 全链；后者仍须实际验证
-HTTP成功、运行时退出、配额归还与 S/P 清除，不能用私有物理 fixture 代替交付。
+不重播已关闭单元。`816a73d` 接通严格v2自动发现/退款/settlement/P，`82dc3b6`
+接入正式入口，`c20835c` 修复Observer的原子Q预约兼容，`57cc453` 完成原
+HTTPDestroyNative/正式serve-cold-quota的正常managed全链。真实HTTP成功、运行时
+退出、原配额归还与S/P清除已通过；同二进制local和未配置拒绝回归通过。
+主分支定向测试、构建与9502/9280输入等值集成通过，原生证据来自验证分支。
+接续只推进未关闭的early/Unknown故障组合、真实mounted OpenHTTP原生组合、最大
+输入与容量，以及主方案其余API/FUSE/collector/部署恢复和Redis移除；不把正常链
+通过当成完整迁移完成，也不重播本次三个已通过场景。
 
 ## Global Constraints
 

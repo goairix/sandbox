@@ -6,11 +6,26 @@
 
 | 口径 | 进度 | 判断依据 |
 | --- | --- | --- |
-| 功能代码 | 约70%，粗估范围65%–75% | 已有状态协议、plain创建/查询/执行/文件下载、清理框架；业务与FUSE仍有缺口 |
-| 整体交付 | 约45% | 沿用20/30/20/15/15权重和90/70/30/0/0阶段估算，包含容量、故障、部署恢复及最终替代 |
+| 功能代码 | 约75%，粗估范围70%–80% | plain创建/查询/执行/文件下载及正常销毁链已接通；其余API、FUSE与故障组合仍有缺口 |
+| 整体交付 | 约50% | 沿用20/30/20/15/15权重，阶段粗估90/75/45/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
-最新完成：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
+最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
+正式 cleanup-worker 自动 managed Claim、drain/none、Observer/provider终止和安全释放→
+原配额归还→S/P清除→GET404，原生用例38.30秒通过。同一组二进制的原local完整
+销毁链33.01秒、未配置detached拒绝且无写入1.64秒均通过；这些耗时不是生产SLO。
+`82dc3b6` 已接正式HTTP opener/worker配置与目标认证，`c20835c` 修复Observer对
+Q预约原子提交同revision的兼容。定向host/race、Linux vet和独立审查通过。
+
+三项原生运行分别完成原进程Wait、容器移除及9529个输入/工具核对；首轮失败与
+一次测试说明跨构建变更导致的严格输入审计失败保留，不计通过。主分支新构建与
+验证分支的9502/9280个输入双向等值，未声称在主分支重跑原生测试。真实mounted
+OpenHTTP的原生组合、early/Unknown故障组合、全部最大输入和容量仍开放。
+
+百分比上调来自正常业务链可用；不是按提交数或测试数累计。下面保留组件历史，
+其中旧的pre-E/HTTP501状态以本节最新结果为准。
+
+此前组件：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
 重新申请。实际三成员 TLS/native 三场景、race、Linux vet 和主分支输入等值集成
 通过，见[配额归还组件验收](2026-10-18-etcd-detached-quota-refund-verification.md)。
 自动发现与最终 P 删除、managed Claim 和 HTTP 主链仍开放；本片不单独上调粗估百分比。
@@ -46,7 +61,7 @@ Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除�
 真实 HTTP 用例已成功创建、Exec、查询，随后 DELETE 仍返回501；整链的 managed
 Claim、销毁、退款与 Pending 删除尚未通过原生验证，因此不增加交付百分比。
 
-功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
+功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁故障组合及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
