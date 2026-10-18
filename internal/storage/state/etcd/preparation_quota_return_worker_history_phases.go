@@ -1,7 +1,5 @@
 package etcd
 
-import "errors"
-
 // Each helper owns one complete original loader group. All caps below are
 // value bytes from the closed read-phase delta, not transport frame limits.
 // The paid reader owns W20 and actual native-call joining; helpers reuse the
@@ -155,20 +153,27 @@ func (b *Backend) readColdQuotaWorkerHistoryRelease(state *coldQuotaWorkerHistor
 	if values[0] == nil {
 		return ErrConflict
 	}
-	record, err := decodeLocalOwnerRelease(values[0])
-	if err != nil || record.Task != origin.task {
-		return errors.Join(ErrCorruptRecord, err)
+	profile, err := decodeTaskOwnerReleaseProfile(origin.task, values[0])
+	if err != nil {
+		return err
 	}
 	if err := b.validateColdQuotaWorkerHistoryState(state, origin); err != nil {
 		return err
 	}
 
-	state.releaseKV = values[0]
+	state.releaseProfile, state.releaseKV = profile, values[0]
 	state.phase = coldQuotaWorkerHistoryWantHead
 	return nil
 }
 
 func (b *Backend) readColdQuotaWorkerHistoryHead(state *coldQuotaWorkerHistory, origin coldQuotaWorkerHistoryOrigin) error {
+	if state.releaseProfile == taskOwnerReleaseDetached {
+		return b.readColdQuotaWorkerHistoryDetachedHead(state, origin)
+	}
+	if state.releaseProfile != taskOwnerReleaseLocal {
+		return ErrInvalidRecord
+	}
+
 	termination, provider, _, err := b.namespace.localRuntimeReleaseKeys(origin.task)
 	if err != nil {
 		return err
@@ -191,6 +196,13 @@ func (b *Backend) readColdQuotaWorkerHistoryHead(state *coldQuotaWorkerHistory, 
 }
 
 func (b *Backend) readColdQuotaWorkerHistorySigned(state *coldQuotaWorkerHistory, origin coldQuotaWorkerHistoryOrigin) error {
+	if state.releaseProfile == taskOwnerReleaseDetached {
+		return b.readColdQuotaWorkerHistoryDetachedSigned(state, origin)
+	}
+	if state.releaseProfile != taskOwnerReleaseLocal {
+		return ErrInvalidRecord
+	}
+
 	r, err := b.decodeLocalRuntimeHistoryHead(origin.task, state.snapshot)
 	if err != nil {
 		return err

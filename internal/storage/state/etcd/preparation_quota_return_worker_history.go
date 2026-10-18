@@ -18,6 +18,9 @@ const (
 	coldQuotaWorkerHistoryWantHead
 	coldQuotaWorkerHistoryWantSignedHistory
 	coldQuotaWorkerHistoryDone
+	// A complete v2 proof is retained for the future writer adapter. It must
+	// not escape as a v1 history, and repeated refusals perform no new read.
+	coldQuotaWorkerHistoryDetachedUnsupported
 )
 
 // coldQuotaWorkerHistoryOrigin is fixed by construction. In particular, the
@@ -37,7 +40,9 @@ type coldQuotaWorkerHistoryOrigin struct {
 }
 
 // coldQuotaWorkerHistory authenticates ordinary historical metadata in seven
-// finite paid reads. It conveys no worker, Stage or physical cleanup authority.
+// finite paid reads. Only local v1 can return writer input; authenticated v2
+// remains a stable unsupported handoff. It conveys no worker, Stage or physical
+// cleanup authority.
 // The caller must use one shared workspace and keep the returned history
 // immutable while this cursor/workspace is retained. Neither this component
 // nor its borrowed result permits 32 jobs to retain separate heavy histories;
@@ -55,11 +60,18 @@ type coldQuotaWorkerHistory struct {
 	located RuntimeEnrolledPublicationRecord
 	history *coldQuotaReturnHistory
 
-	// Only the release/head phases retain these temporary points. The nine
-	// signed-history points remain local to their final read and are discarded
-	// after the shared pure validator has authenticated their full stamps.
-	releaseKV *mvccpb.KeyValue
-	snapshot  *localRuntimeHistorySnapshot
+	// The strict native seal selects one profile. Head observations remain
+	// temporary until that profile's pure full-history join succeeds.
+	releaseProfile taskOwnerReleaseProfile
+	releaseKV      *mvccpb.KeyValue
+	snapshot       *localRuntimeHistorySnapshot
+	detachedHead   *detachedRuntimeHistorySnapshot
+	actualTask     *mvccpb.KeyValue
+
+	// This is B's complete private union, never a codec-only seal. Its entire
+	// thirteen-point graph remains in the one cursor/shared workspace and is
+	// counted by the existing owned-root walker. No v1 Complete is synthesized.
+	releaseProof *taskOwnerReleaseProof
 }
 
 // newColdQuotaWorkerHistory performs the public authentication entry's local
@@ -86,9 +98,11 @@ func (b *Backend) newColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner, 
 
 // stepColdQuotaWorkerHistory executes at most one original Range262144/no-Claim
 // W20 read. A successful typed phase publishes partial state and yields nil;
-// only the seventh read returns the borrowed immutable full history. Refusal or
-// error leaves phase and partial state unchanged, so the next paid turn retries
-// that outstanding group. Cached done still requires the original live binding.
+// the seventh local read returns the borrowed immutable full history. A fully
+// authenticated detached read instead enters a cached unsupported handoff;
+// later calls return ErrInvalidConfiguration without paying or dispatching.
+// Other errors leave phase and partial state unchanged for the next paid turn.
+// Both cached states still require the original live binding.
 func (b *Backend) stepColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner, state *coldQuotaWorkerHistory, session *WorkerSession, partition *WorkerPartitionClaim, ranges *WorkerBudgetShare) (*coldQuotaReturnHistory, error) {
 	if state == nil || state.self != state || state.origin.backend != b {
 		return nil, ErrInvalidRecord
@@ -124,6 +138,8 @@ func (b *Backend) stepColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner,
 		err = b.readColdQuotaWorkerHistorySigned(state, origin)
 	case coldQuotaWorkerHistoryDone:
 		return state.history, nil
+	case coldQuotaWorkerHistoryDetachedUnsupported:
+		return nil, ErrInvalidConfiguration
 	default:
 		return nil, ErrInvalidRecord
 	}

@@ -9,10 +9,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -180,21 +182,30 @@ func TestDetachedRuntimeTerminationPhysicalWorkerChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, published.Outcome)
 	require.NotNil(t, published.Entry)
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_HISTORY_PHYSICAL_NATIVE") == "1" {
+		settled, err := b.SettleColdPreparation(ctx, creation.workspace, creation.reference.IntentID)
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, settled.Outcome)
+	}
 	require.NoError(t, b.ReleaseCreationClaim(ctx, creation))
 	creationReleased = true
 	task := detachedPhysicalDestroy(t, ctx, b, raw, source)
 	detachedPhysicalWrite(t, conn, detachedPhysicalPhase{Phase: "task-ready", Task: task})
 	_ = detachedPhysicalRead(t, conn, "run")
 	f := detachedPhysicalMetadataRun(t, ctx, b, raw, task, published.Entry, enrolled.RuntimeAddress, kernel)
-	detachedPhysicalTerminate(t, f, setup)
+	detachedPhysicalTerminate(t, f.cleanupDetachedNoEffectNativeFixture, setup)
 	// This optional metadata-release component consumes the actual production
 	// observer proof and seven completed slots above. With no env it preserves
 	// the original physical test's assertions and scope exactly.
 	switch os.Getenv("SANDBOX_DETACHED_OWNER_RELEASE_PHYSICAL_NATIVE") {
 	case "1":
-		detachedPhysicalOwnerRelease(t, f)
+		detachedPhysicalOwnerRelease(t, f.cleanupDetachedNoEffectNativeFixture)
 	case "absence-recovery":
-		detachedPhysicalOwnerReleaseAbsentRecovery(t, f)
+		detachedPhysicalOwnerReleaseAbsentRecovery(t, f.cleanupDetachedNoEffectNativeFixture)
+	}
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_HISTORY_PHYSICAL_NATIVE") == "1" {
+		require.Equal(t, "1", os.Getenv("SANDBOX_DETACHED_OWNER_RELEASE_PHYSICAL_NATIVE"))
+		detachedPhysicalPaidQuotaHistory(t, f.cleanupDetachedNoEffectNativeFixture, f.finish, creation.workspace)
 	}
 	detachedPhysicalWrite(t, conn, detachedPhysicalPhase{Phase: "cleanup-complete"})
 }
@@ -256,9 +267,27 @@ func detachedPhysicalBackend(t *testing.T, ctx context.Context, s detachedPhysic
 			ClaimTTL: 60 * time.Second, JobTimeout: 120 * time.Second, ArchiveTimeout: 30 * time.Second, MaxActive: 32,
 		},
 	}
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_HISTORY_PHYSICAL_NATIVE") == "1" {
+		// Configure the real cold protocol before New and before any source
+		// signature. The default physical scenario retains its old profile.
+		options.PreparationInventory = &PreparationInventoryOptions{}
+		options.PreparationInventory.QuotaSlots[7] = 1
+	}
 	b, err := New(ctx, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_HISTORY_PHYSICAL_NATIVE") == "1" {
+		ready := false
+		for step := 0; step < 20; step++ {
+			inventory, err := b.InitializePreparationInventory(ctx)
+			require.NoError(t, err)
+			if inventory.Ready {
+				ready = true
+				break
+			}
+		}
+		require.True(t, ready, "bounded operator initialization must finish before acquisition")
+	}
 	raw, err := clientv3.New(clientv3.Config{Endpoints: s.Endpoints, TLS: tlsConfig, DialTimeout: 2 * time.Second})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, raw.Close()) })
@@ -276,6 +305,12 @@ func detachedPhysicalCreateSource(t *testing.T, ctx context.Context, b *Backend)
 	require.Equal(t, OutcomeCommitted, acquired.Outcome)
 	creation, err := b.ClaimCreation(ctx, workspace, input.IntentID, "detached-physical-source", 2*time.Minute)
 	require.NoError(t, err)
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_HISTORY_PHYSICAL_NATIVE") == "1" {
+		reserved, err := b.ReserveColdPreparation(ctx, creation, 7)
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, reserved.Outcome)
+		require.NotNil(t, reserved.Record)
+	}
 	dispatch, err := b.DeclareRuntimeDispatch(ctx, creation, RuntimeDispatchInput{Kind: RuntimeDispatchCreate, Target: b.publicationTarget, Payload: input.Payload})
 	require.NoError(t, err)
 	return detachedPhysicalPhase{Phase: "source-prepared", IntentID: input.IntentID, SandboxID: input.SandboxID, WorkspaceHash: workspace.Hash(), Creation: creation.Reference(), Dispatch: dispatch.Entry.Record}, creation
@@ -298,7 +333,14 @@ func detachedPhysicalDestroy(t *testing.T, ctx context.Context, b *Backend, raw 
 // Reuse B's accepted original queue/charged owner/Run machinery, with no copy
 // of its codec or writer. Parking controls scheduling only; genuine ClaimTask
 // and the live protected supervisor produce all actual drain/source evidence.
-func detachedPhysicalMetadataRun(t *testing.T, ctx context.Context, b *Backend, raw *clientv3.Client, ref TaskReference, publication *RuntimeEnrolledPublicationEntry, address string, kernel *launcher.KernelBoundary) *cleanupDetachedNoEffectNativeFixture {
+// detachedPhysicalMetadataFixture keeps explicit completion and failure cleanup
+// on the same once-only tail, without extending any original job capability.
+type detachedPhysicalMetadataFixture struct {
+	*cleanupDetachedNoEffectNativeFixture
+	finish func()
+}
+
+func detachedPhysicalMetadataRun(t *testing.T, ctx context.Context, b *Backend, raw *clientv3.Client, ref TaskReference, publication *RuntimeEnrolledPublicationEntry, address string, kernel *launcher.KernelBoundary) *detachedPhysicalMetadataFixture {
 	t.Helper()
 	f := &cleanupDetachedNoEffectNativeFixture{cleanupSlotTestFixture: &cleanupSlotTestFixture{b: b, raw: raw, ctx: ctx, ref: ref}, publication: publication}
 	var err error
@@ -333,20 +375,31 @@ func detachedPhysicalMetadataRun(t *testing.T, ctx context.Context, b *Backend, 
 		workerTestReceive(t, f.worker.Done())
 	})
 	f.job = f.park(t)
-	t.Cleanup(func() {
-		if f.job.claim != nil {
-			require.NoError(t, b.ReleaseTaskClaim(context.Background(), f.job.claim))
-			f.job.claim = nil
-		}
-		// Every synchronous runtime/provider call has returned, its original
-		// sessions joined and the termination destination closed before this
-		// cleanup. Only then may the original E join.
-		f.job.effectsJoined = true
-		if f.job.state != nil && f.job.state.record.Run != nil && !f.job.state.record.Run.Joined {
-			require.NoError(t, b.joinCleanupRun(context.Background(), f.job))
-		}
-		b.finishCleanupJob(f.job, nil)
-	})
+	var finishOnce sync.Once
+	finish := func() {
+		finishOnce.Do(func() {
+			var tailErr error
+			// Even a failed metadata cleanup must publish the joined job before
+			// Stop waits for done. Its actual error and durable state remain;
+			// this does not fabricate a successful Run join or release result.
+			defer func() { b.finishCleanupJob(f.job, tailErr) }()
+			if f.job.claim != nil {
+				tailErr = b.ReleaseTaskClaim(context.Background(), f.job.claim)
+				f.job.claim = nil
+			}
+			// All synchronous runtime/provider operations have returned and
+			// joined before this tail; only then may the original E join.
+			f.job.effectsJoined = true
+			if f.job.state != nil && f.job.state.record.Run != nil && !f.job.state.record.Run.Joined {
+				tailErr = errors.Join(tailErr, b.joinCleanupRun(context.Background(), f.job))
+			}
+			require.NoError(t, tailErr)
+		})
+	}
+	// The independent paid-history scenario must join this exact tail before
+	// stopping the old worker. Cleanup and explicit completion share one latch;
+	// finishCleanupJob closes done and must never execute twice.
+	t.Cleanup(finish)
 	f.job.bundle, f.job.evidence = bundle, f.evidence
 	f.startRun(t)
 	f.job.claim, err = b.ClaimTask(f.job.ctx, ref, "detached-physical-original", 60*time.Second)
@@ -374,7 +427,7 @@ func detachedPhysicalMetadataRun(t *testing.T, ctx context.Context, b *Backend, 
 	require.Equal(t, OutcomeCommitted, settlement.Outcome)
 	require.NotNil(t, settlement.Entry)
 	t.Logf("actual protected-runtime dual drain and original native settlement create=%d", settlement.Entry.kv.CreateRevision)
-	return f
+	return &detachedPhysicalMetadataFixture{cleanupDetachedNoEffectNativeFixture: f, finish: finish}
 }
 
 // Only actual writes to the two production termination keys and the exact
