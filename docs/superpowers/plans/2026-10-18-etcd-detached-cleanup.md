@@ -13,8 +13,11 @@
 
 **最新接续点（2026-10-18）：** `e01e233` 已完成 v2 配额返还 writer/公共与 paid
 恢复消费者，实际返还、合法重用和提交后丢响应均通过组件验收。不要重做此前已关闭
-单元。下一片继续自动发现与最终 P 删除；并行 wire/preparation 尚在验证，未开放
-managed Claim。完整 phase 准入、销毁自动消费和 HTTP 接线仍是主链剩余工作。
+单元。随后 `a76d373` 已完成 wire/preparation 组件与实际Kernel交接验证，仍有pre-E
+门禁。下一交付验收必须闭合真实 Claim→销毁→释放→配额归还→Pending清除→HTTP；
+按依赖小步提交，但不再把单独preflight或新增诊断阶段计为业务链路交付。冻结新增
+协议层、平行worker及预算体系，优先复用原实现。managed Claim、完整phase准入、
+自动发现与最终P删除、销毁自动消费和HTTP接线仍是主链剩余工作。
 
 ## Global Constraints
 

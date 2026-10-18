@@ -15,6 +15,16 @@
 通过，见[配额归还组件验收](2026-10-18-etcd-detached-quota-refund-verification.md)。
 自动发现与最终 P 删除、managed Claim 和 HTTP 主链仍开放；本片不单独上调粗估百分比。
 
+`a76d373` 完成原 actor→detached 报文准备及单工作区交接。定向host/race、Linux vet、
+三个真实Kernel测试及主分支22组整合测试通过；9296个Linux输入双向等值。Kernel为真实
+bootstrap，目标元数据仍为有界gRPC模型；不能当作真实etcd销毁或managed Claim验收。
+成功后仍有显式pre-E拒绝，HTTP detached destroy仍501。下一验收单位必须是完整
+Claim→销毁→释放→配额归还→Pending清除→HTTP链路，不再用新增preflight组件代表交付。
+
+范围复核：此时etcd包有583个Go文件，生产301个/52538行、测试282个/74820行。
+存储包已混入调度、运行时和文件操作；冻结新的协议层及平行执行机制，优先复用原actor
+闭合上述主链，之后再将独立运行时/文件职责移回已有边界。百分比仍是粗估，不能作为上线承诺。
+
 功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
