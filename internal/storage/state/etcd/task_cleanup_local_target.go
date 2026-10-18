@@ -149,6 +149,35 @@ func (b *Backend) cleanupPublication(ctx context.Context, task TaskRecord, targe
 	activation := verified.Activation()
 	birth := activation.Birth()
 	bridgeTarget := k.EnrolledBridgeTarget{PodName: r.Runtime.ID, PodUID: r.Runtime.UID, NodeName: node.Name, NodeUID: node.UID, NodeBootID: node.BootID, LogicalID: r.SandboxID, CreationIntentID: r.IntentID, Generation: r.Generation, Authority: activation.Binding(), ContractDigest: birth.ContractDigest, UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed}
+	// Keep original enrollment/termination history immutable. Current TLS may
+	// have changed before Destroy, or a fixed renewal may have installed its
+	// candidate while its metadata outcome remains unknown. Neither observation
+	// authorizes execution or reopens the gate; cleanup still uses its original
+	// task tickets, actual signed responses and owner fences.
+	view, err := b.ReadSandboxView(ctx, task.Reference.SandboxID)
+	if err != nil {
+		return err
+	}
+	if view != nil {
+		control := view.Records().Control
+		if control.Runtime == nil || *control.Runtime != task.Runtime || control.Generation != task.Generation || control.DataGateEpoch != task.DataGateEpoch || control.IntentID != task.CreationIntentID || control.WorkspaceHash != task.WorkspaceHash {
+			return ErrConflict
+		}
+		current, err := b.ReadSandboxTTLCurrent(ctx, view)
+		if err != nil {
+			return err
+		}
+		if current != nil {
+			activation = current.Activation
+		}
+		pending, err := b.ReadSandboxTTLPending(ctx, view)
+		if err != nil {
+			return err
+		}
+		if pending != nil {
+			activation = pending.Activation
+		}
+	}
 	destination, err := ct.NewDestination(ct.DestinationOptions{Identity: activation.Identity(), RuntimeCertificate: activation.RuntimeCertificate(), Credential: c.Credential, Verifier: b.enrolledVerifier, Clock: b.authorityClock, Dial: func(ctx context.Context) (net.Conn, error) {
 		return c.Bridge.Dial(ctx, bridgeTarget)
 	}})
