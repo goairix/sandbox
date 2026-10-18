@@ -203,9 +203,25 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 	}
 	// Twenty fixed original shares fund 256 initial checkpoint turns without
 	// mutating token buckets. Both N tiers receive exactly this same allocation.
-	w, err := b.StartDueWorker(ctx, DueWorkerOptions{WorkerID: fmt.Sprintf("metadata-scale-%d", count), Partitions: partitions, RangeSlots: []uint16{0}, ClaimSlots: claims, RelistSlot: 0, StageTTL: 30 * time.Second})
+	workerOptions := DueWorkerOptions{WorkerID: fmt.Sprintf("metadata-scale-%d", count), Partitions: partitions, RangeSlots: []uint16{0}, ClaimSlots: claims, RelistSlot: 0, StageTTL: 30 * time.Second}
+	w, err := b.StartDueWorker(ctx, workerOptions)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, w.Stop()); <-w.Done() }()
+	originalWorker := w
+	var originalStopError error
+	defer func() {
+		if w != originalWorker {
+			require.NoError(t, w.Stop())
+			<-w.Done()
+		}
+		stopError := originalWorker.Stop()
+		<-originalWorker.Done()
+		if originalStopError == nil {
+			require.NoError(t, stopError)
+		} else {
+			require.True(t, metadataScaleOnlyMemberStopTransport(stopError))
+			require.EqualError(t, stopError, originalStopError.Error(), "shutdown must retain the original measured fault result")
+		}
+	}()
 	start := time.Now()
 	for !w.Status().Synchronized {
 		require.Less(t, time.Since(start), 3*time.Minute, "initial real bounded discovery failed to synchronize")
@@ -232,6 +248,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 			maintenanceStart := time.Now()
 			maintenanceBefore := metadataScaleObservation{transactions.Load(), ranges.Load(), mutations.Load(), controlWrites.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load()}
 			metadataScaleMaintenance(t, ctx, raw, endpoints, children, b, options, count)
+			w = metadataScaleRecoverWorker(t, ctx, raw, b, w, workerOptions, &originalStopError)
 			t.Logf("METADATA_SCALE maintenance-only N=%d elapsed=%s txns=%d ranges=%d mutations=%d control_writes=%d response_pb=%d grants=%d keeps=%d", count, time.Since(maintenanceStart), transactions.Load()-maintenanceBefore.transactions, ranges.Load()-maintenanceBefore.ranges, mutations.Load()-maintenanceBefore.mutations, controlWrites.Load()-maintenanceBefore.controlWrites, responseBytes.Load()-maintenanceBefore.responseBytes, lease.grants.Load()-maintenanceBefore.grants, lease.keeps.Load()-maintenanceBefore.keeps)
 			prior.transactions += transactions.Load() - maintenanceBefore.transactions
 			prior.ranges += ranges.Load() - maintenanceBefore.ranges
@@ -263,6 +280,107 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 	t.Logf("METADATA_SCALE idle N=%d elapsed=%s transaction/range/mutation/control_write/response_pb/grant/keep=%+v heap_alloc=%d heap_sys=%d total_alloc=%d goroutines=%d worker_phase=%s worker_owned=%d worker_queued=%d worker_renewals=%d", count, time.Since(start), result, memory.HeapAlloc, memory.HeapSys, memory.TotalAlloc, runtime.NumGoroutine(), status.Phase, status.OwnedBytes, status.Queued, status.Renewals)
 	metadataScaleMetrics(t, ctx, raw, endpoints, count, "idle-after")
 	return result
+}
+
+// Member failure may conservatively lose a dispatched original guard even when
+// quorum service remains available. Recovery never revives that session: join
+// its original owner, observe actual native retirement, and use the unchanged
+// production acquisition path. All this work belongs to maintenance accounting.
+func metadataScaleRecoverWorker(t *testing.T, ctx context.Context, raw *clientv3.Client, b *Backend, w *DueWorker, options DueWorkerOptions, originalStopError *error) *DueWorker {
+	t.Helper()
+	recovery, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	for {
+		current := w.Status()
+		b.archiveLife.mu.Lock()
+		lost := w.session.lost || w.session.released
+		b.archiveLife.mu.Unlock()
+		if lost {
+			break
+		}
+		require.True(t, current.Running, "%+v", current)
+		require.Empty(t, current.LastError, "a maintenance failure other than the exact original Unknown+member-stop transport cannot be hidden")
+		if current.Synchronized {
+			t.Logf("METADATA_SCALE maintenance worker survived same_session=%s same_lease=%d", current.Session.SessionID, current.Session.LeaseID)
+			return w
+		}
+		partitionWorkerNativePause(t, recovery, 100*time.Millisecond)
+	}
+	select {
+	case <-w.Done():
+	case <-recovery.Done():
+		t.Fatal("lost original worker did not physically join within recovery bound")
+	}
+	stopError := w.Stop()
+	*originalStopError = stopError
+	require.True(t, metadataScaleOnlyMemberStopTransport(stopError), "only the actual Unknown+member-stop transport permits this measured replacement: %v", stopError)
+	oldSession := w.session
+	oldReference := oldSession.Reference()
+	require.ErrorIs(t, b.RenewWorkerSession(recovery, oldSession), ErrInvalidRecord, "the retired original capability must remain unusable")
+	b.archiveLife.mu.Lock()
+	retired := oldSession.lost && oldSession.released
+	joined := oldSession.operation == nil && oldSession.dueWatch == nil
+	oldGuard := oldSession.guard.key
+	b.archiveLife.mu.Unlock()
+	require.True(t, retired)
+	require.True(t, joined, "the original native and Watch owners must be physically retired")
+
+	// A lost response to the original revoke is not a native absence proof.
+	// Bounded linearizable reads must observe both the actual guard absence and
+	// original lease disappearance before a replacement can acquire its slots.
+	retirement, stop := context.WithTimeout(recovery, time.Duration(oldSession.ttlSeconds)*time.Second+5*time.Second)
+	defer stop()
+	for {
+		rpc, finish := partitionWorkerNativeRequest(retirement)
+		guard, err := raw.Get(rpc, oldGuard)
+		finish()
+		require.NoError(t, err)
+		require.NotNil(t, guard.Header)
+		require.Equal(t, b.clusterID, guard.Header.ClusterId)
+		require.Greater(t, guard.Header.Revision, int64(0))
+		require.False(t, guard.More)
+		require.Equal(t, int64(len(guard.Kvs)), guard.Count)
+		require.LessOrEqual(t, len(guard.Kvs), 1)
+		rpc, finish = partitionWorkerNativeRequest(retirement)
+		lease, err := raw.TimeToLive(rpc, clientv3.LeaseID(oldReference.LeaseID))
+		finish()
+		require.NoError(t, err)
+		require.NotNil(t, lease.ResponseHeader)
+		require.Equal(t, b.clusterID, lease.ClusterId)
+		require.Greater(t, lease.Revision, int64(0))
+		require.EqualValues(t, oldReference.LeaseID, lease.ID)
+		if len(guard.Kvs) == 0 && lease.TTL == -1 {
+			break
+		}
+		partitionWorkerNativePause(t, retirement, 100*time.Millisecond)
+	}
+
+	// The replacement retains the original experiment lifetime, not this
+	// bounded wait context which is canceled when maintenance returns.
+	replacement, err := b.StartDueWorker(ctx, options)
+	require.NoError(t, err)
+
+	// Register immediately: failed synchronization must still join this new
+	// actual actor. The enclosing caller also stops it before Backend.Close.
+	t.Cleanup(func() {
+		require.NoError(t, replacement.Stop())
+		<-replacement.Done()
+	})
+	newReference := replacement.session.Reference()
+	require.NotEqual(t, oldReference.SessionID, newReference.SessionID)
+	require.NotEqual(t, oldReference.LeaseID, newReference.LeaseID)
+	for {
+		current := replacement.Status()
+		require.True(t, current.Running, "%+v", current)
+		require.Empty(t, current.LastError)
+		if current.Synchronized {
+			break
+		}
+		partitionWorkerNativePause(t, recovery, 100*time.Millisecond)
+	}
+	require.Equal(t, oldReference, oldSession.Reference(), "a new owner must not mutate or revive the retired original")
+	t.Logf("METADATA_SCALE maintenance worker replacement original_session=%s original_lease=%d original_stop=%v original_done=true original_guard_absent=true original_lease_gone=true new_session=%s new_lease=%d synchronized=true", oldReference.SessionID, oldReference.LeaseID, stopError, newReference.SessionID, newReference.LeaseID)
+	return replacement
 }
 
 // Verification scans are outside idle accounting. Retain at most 118 controls

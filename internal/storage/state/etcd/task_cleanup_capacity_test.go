@@ -20,7 +20,78 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// A member-stop recovery may retire only the original dispatched Unknown plus
+// one of the two exact transport errors observed when killing that member.
+// Inspect every leaf: joined corruption, cancellation or unrelated dependency
+// failure must not become permission to replace the measured owner.
+func metadataScaleOnlyMemberStopTransport(err error) bool {
+	unknown, transport := false, false
+	var inspect func(error) bool
+	inspect = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() []error }:
+			found := false
+			for _, child := range wrapped.Unwrap() {
+				if child == nil {
+					continue
+				}
+				if !inspect(child) {
+					return false
+				}
+				found = true
+			}
+			return found
+		case interface{ Unwrap() error }:
+			return inspect(wrapped.Unwrap())
+		default:
+			if err == ErrOutcomeUnknown {
+				unknown = true
+				return true
+			}
+			if s, ok := status.FromError(err); ok && s.Code() == codes.Unavailable {
+				switch s.Message() {
+				case "error reading from server: EOF", "error reading from server: connection reset by peer":
+					transport = true
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return inspect(err) && unknown && transport
+}
+
+func TestMetadataScaleMemberStopErrorClassification(t *testing.T) {
+	eof := status.Error(codes.Unavailable, "error reading from server: EOF")
+	reset := status.Error(codes.Unavailable, "error reading from server: connection reset by peer")
+	for _, model := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "actual-pair", err: errors.Join(ErrOutcomeUnknown, eof), want: true},
+		{name: "wrapped-pair", err: fmt.Errorf("original guard: %w", errors.Join(ErrOutcomeUnknown, eof)), want: true},
+		{name: "actual-reset-pair", err: errors.Join(ErrOutcomeUnknown, reset), want: true},
+		{name: "nil"},
+		{name: "only-unknown", err: ErrOutcomeUnknown},
+		{name: "only-eof", err: eof},
+		{name: "corruption", err: errors.Join(ErrOutcomeUnknown, eof, ErrCorruptRecord)},
+		{name: "reset-corruption", err: errors.Join(ErrOutcomeUnknown, reset, ErrCorruptRecord)},
+		{name: "canceled", err: errors.Join(ErrOutcomeUnknown, eof, context.Canceled)},
+		{name: "other-unavailable", err: errors.Join(ErrOutcomeUnknown, status.Error(codes.Unavailable, "other dependency failure"))},
+	} {
+		t.Run(model.name, func(t *testing.T) {
+			require.Equal(t, model.want, metadataScaleOnlyMemberStopTransport(model.err))
+		})
+	}
+}
 
 // metadataScaleModel creates the typed metadata subset needed by View/Snapshot
 // and due scheduling: control, snapshot, owner, fence, placement, runtime index,
