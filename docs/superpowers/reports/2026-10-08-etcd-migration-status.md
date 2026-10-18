@@ -98,6 +98,10 @@ quota和自动消费者未接完，整体百分比不按新增测试数上调。
 `38ec47d`验证完整W20付费历史封包的同时最大模型，历史请求加回复261340字节，
 距256KiB门限仅804字节；超限在付费前拒绝。它不代表 quota writer 或退款已完成，
 详见[quota验证补记](2026-10-18-etcd-detached-quota-codec-verification.md)。
+`cb78621`接通原七阶段付费 reader 的完整 detached 签名历史；真实 Linux
+observer/七槽/owner释放/新session场景通过，最终完整图68917字节、含预留36键，
+三次cached拒绝不重复付费，见[付费历史验证](2026-10-18-etcd-detached-paid-history-verification.md)。
+v2仍拒绝尚未接入的 writer；下一步必须完成真实退款，不能把 reader 通过算退款完成。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

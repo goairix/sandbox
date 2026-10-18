@@ -267,6 +267,9 @@ cutoff/Close仍须逐片验证，不能称完整4B关闭。`268cd22`已补实际
 Pending 避让、缓存失效重建、原调用返回后退款及主分支整合通过，见managed-source
 验证记录。只关闭来源阶段；wire inventory、后续重图准入、真实 managed Claim
 仍开放。`38ec47d`已关闭完整W20封包同时最大模型和超限前置拒绝，不能计作退款。
+`cb78621`补齐七阶段 paid cursor 的真实完整 detached 历史认证，原4MiB/64键
+计量和3次无付费 cached refusal通过；真实Linux与唯一限定审查接受。v2 writer、
+journal/Commit/Postread及自动发现/P删除仍须实际接线，不能延用 nil-local 输入。
 
 `75fae0b`先修复三处source严格JSON尾随检查对非法第二值的整树分配；真实
 allocation RED/GREEN、22组race及Linuxvet通过，限定独立审查接受。该错误路径
