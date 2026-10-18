@@ -1,8 +1,9 @@
 # detached owner 释放与幸存历史组件验证
 
 源码 `1049226`（辅助 `0dddd91`）。只接受首次真实63节点释放提交后丢 ACK、原
-Claim 失效后的只读仲裁，以及删除 index 后的独立历史认证。普通/损坏 ACK、发送前
-absence Unknown、新 Claim/Run、cutoff/Close 等矩阵仍开放；完整4B、消费者、quota/
+Claim 失效后的只读仲裁，以及删除 index 后的独立历史认证。后续 `268cd22` 补充
+发送前 absence 和真实新 Claim/Run 恢复。原 Claim 独立普通/损坏 ACK、cutoff/Close
+等矩阵仍开放；完整4B、消费者、quota/
 终态和统一 phase 内存准入未完成。功能约70%、整体约45%、生产切换0%。
 
 私有 writer 验原 registry/job/Kernel/current Claim/Run，捕获原 cutoff 并贯穿所有
@@ -55,3 +56,35 @@ Spec/Quality PASS；注释、逻辑分段和包职责均核对，未增加导出
 state ELF `ab490b9eaf811b72a828ccf7acb67267f30c5b72432267551bfae0d709d044e8`，
 parent `166b12f87e908267b4d744a1a42a40679b020205a06988c81f275edb14251616`。
 此集成保留同一组件的验收边界，不补全开篇列出的恢复和消费者矩阵。
+
+## 发送前 absence 与真实 Claim 接续
+
+测试 `268cd22`（辅助 `acec291`）只改两个原生测试文件，产品未改。独立 mode 在原
+真实物理证明及七槽 complete 后截获旧 Claim 的63节点请求，发送前返回超时；原
+candidate 已锁存但 seal 真实不存在，三 owner/control/index 点仍在。两次重试只能
+只读返回 Unknown，未重发。原 owner.done 及同步 Session/observer 关闭返回后，
+实际释放 Claim、持久化 Joined，调用原 `resume-detached-noeffect` continuation，
+执行51节点 actor CAS；完整 E/S、七来源 Mod 和 present fact Mod 保持原门禁。
+
+实际新 Claim 由原 `ClaimTask` 获取，不复制旧 Current。新 Claim 一次63节点真实
+提交、普通 ACK 后返回 Committed；旧 Claim 不能借新 seal 取得权限，返回 conflict。
+standalone 与 actual Task paid cold13 均通过，13来源及 termination/provider 全
+envelope 不变。原候选在计费根中可达；整个旧图54792字节（128KiB上限）。原候选
+发起一次但未发送，新请求发送一次、actor一次、Grant一次；无额外签名或历史index/
+当前E/S读取。这是原任务组件恢复，尚非 managed inventory/全局phase准入。
+
+辅助实际 `run-44ee636d0d924c3c8774fdc34e1ea6ce` 父19.75s/worker15.35s PASS，
+122源码与四ELF稳定；原worker/PID1/三个etcd Wait、原物理清理均通过，无SKIP/FAIL/
+OOM，确切容器已移除。state ELF
+`9ae28c2147afe141618365a74098fa1d1c342e6e78095c9122cb0f94b28d28c8`，parent与
+前述辅助GREEN相同。Linux state/control build（9264/9469）和 vet（9264）通过，
+逐轮完整证据审计及独立限定 Spec/Quality 通过。首轮曾因测试误调不存在的
+`Destination.Close` 编译失败，修正为原同步 Session 生命周期注释后重建；该失败
+不算产品RED，第一场实际新mode已通过。
+
+主分支 `run-500437206a134425aa47c2b4fc7533eb` 同路径通过：父19.94s/worker15.28s，
+保留旧图54749字节；130源码与四ELF稳定，原Wait及清理断言通过，无SKIP/FAIL/OOM，
+确切容器已移除。主state/control构建9267/9472输入及完整证据审计通过。state ELF
+`2f836321e5f06b836f63c73dc2894dc4d0335ec69c6b889838f913abd2176760`，parent
+`078b8de1e22e3ced473d88dc9bf3d10d3b22be7675e6dda9b37a7aa460466cd2`。
+源码两测试与辅助接受版本相同；集成不增加生产迁移或全局容量结论。

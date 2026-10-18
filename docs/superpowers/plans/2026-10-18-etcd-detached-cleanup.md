@@ -251,7 +251,8 @@ canonical/envelope/variant测试，不能通过cast或伪Complete接原quota执�
 
 4B首个live组件`1049226`已通过真实63CAS提交后丢ACK、dead Claim只读仲裁和冷13
 认证，以及Host9/race14/Linuxbuild-vet与唯一限定审查。只关闭该组合；普通/损坏ACK、
-pre-send absence、新Claim/Run和cutoff/Close仍须逐片验证，不能称完整4B关闭。
+cutoff/Close仍须逐片验证，不能称完整4B关闭。`268cd22`已补实际pre-send absence、
+原Joined/actor51、新Claim/普通ACK63及cold13组合；独立普通/损坏ACK仍开放。
 
 4C传输组件`9328ab4`补齐13点历史/22 pin新profile，单请求128KiB、单回复256KiB、
 八次总回复512KiB独立校验及原flat parser验证通过；原v1维度不变。只关闭传输基础，
