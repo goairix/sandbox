@@ -609,6 +609,31 @@ func (b *Backend) readSandboxTTLRecord(ctx context.Context, view *SandboxReadVie
 	}
 	keys := []string{publishReceipt}
 	refs := []StageReference{publishRef}
+	outcomes := []Outcome{OutcomeCommitted}
+	publishBirth := kv.ModRevision
+	if !pending {
+		publishBirth = r.PendingRevision
+	}
+	if r.recovery != nil {
+		// A recovery rewrite changes only pending's Mod. Publication remains
+		// bound to the original v1 birth and its unchanged original digest.
+		publishBirth = r.recovery.OriginalBirth
+		original, err := r.recovery.original()
+		if err != nil {
+			return r, nil, err
+		}
+		_, oldFinal, err := b.sandboxTTLStage(original, publishBirth)
+		if err != nil {
+			return r, nil, err
+		}
+		_, oldReceipt, err := b.stageKeys(oldFinal)
+		if err != nil {
+			return r, nil, err
+		}
+		keys, refs, outcomes = append(keys, oldReceipt), append(refs, oldFinal), append(outcomes, OutcomeAborted)
+	}
+	births := make([]int64, len(keys))
+	births[0] = publishBirth
 	if !pending {
 		_, finalRef, err := b.sandboxTTLStage(r, r.PendingRevision)
 		if err != nil {
@@ -619,6 +644,7 @@ func (b *Backend) readSandboxTTLRecord(ctx context.Context, view *SandboxReadVie
 			return r, nil, err
 		}
 		keys, refs = append(keys, finalReceipt), append(refs, finalRef)
+		outcomes, births = append(outcomes, OutcomeCommitted), append(births, kv.ModRevision)
 	}
 	caps := make([]int, len(keys))
 	for i := range caps {
@@ -630,14 +656,13 @@ func (b *Backend) readSandboxTTLRecord(ctx context.Context, view *SandboxReadVie
 	}
 	for i, ref := range refs {
 		outcome, err := decodeReceipt(receipts[i], ref)
-		if err != nil || outcome != OutcomeCommitted {
+		if err != nil || outcome != outcomes[i] {
 			return r, nil, errors.Join(ErrCorruptReceipt, err)
 		}
-		birth := kv.ModRevision
-		if !pending && i == 0 {
-			birth = r.PendingRevision
+		if births[i] > 0 && receipts[i].CreateRevision != births[i] {
+			return r, nil, ErrCorruptReceipt
 		}
-		if receipts[i].CreateRevision != birth {
+		if outcomes[i] == OutcomeAborted && receipts[i].CreateRevision >= r.recovery.reservedMod {
 			return r, nil, ErrCorruptReceipt
 		}
 	}

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -278,5 +282,186 @@ func TestSandboxTTLExpiredCapturedDeadlineRejectsBeforeRPC(t *testing.T) {
 		require.False(t, c.ttlDraft.publishTried)
 		require.False(t, c.ttlDraft.sent)
 		require.False(t, c.ttlDraft.finalTried)
+	}
+}
+
+// This is only a canonical record/transaction model. Its opaque certification
+// bytes cannot pass the actual reader or authorize a runtime query or recovery.
+// The original publication is embedded verbatim; recovery coordinates are a
+// separate envelope and must never alter the original Stage digest.
+type sandboxTTLRecoveryWireModel struct {
+	Version         uint32              `json:"version"`
+	OriginalRaw     json.RawMessage     `json:"original_raw"`
+	OriginalBirth   int64               `json:"original_birth"`
+	PriorMod        int64               `json:"prior_mod"`
+	PreviousFinal   *StageReference     `json:"previous_final,omitempty"`
+	RecoveryFinal   StageAttemptLocator `json:"recovery_final"`
+	PendingRevision int64               `json:"pending_revision"`
+}
+
+func sandboxTTLRecoveryKVModel(t *testing.T, b *Backend, original sandboxTTLRecord) (*mvccpb.KeyValue, sandboxTTLRecoveryWireModel) {
+	t.Helper()
+	wire, err := encodeSandboxTTL(original)
+	require.NoError(t, err)
+	final := original.Final
+	// Canonical field framing plus a purpose domain binds one cold locator to
+	// exactly this candidate and native predecessor. This is identity only.
+	digest := sha256.Sum256(original.Activation)
+	framing, err := json.Marshal(struct {
+		Domain          string          `json:"domain"`
+		CandidateDigest string          `json:"candidate_digest"`
+		PriorMod        int64           `json:"prior_mod"`
+		PreviousFinal   *StageReference `json:"previous_final"`
+	}{"goairix/sandbox/ttl-recovery-final/v1", hex.EncodeToString(digest[:]), 44, nil})
+	require.NoError(t, err)
+	final.StageID, final.AttemptID = "ttl_recover", uuid.NewSHA1(uuid.NameSpaceOID, framing).String()
+	envelope := sandboxTTLRecoveryWireModel{Version: 2, OriginalRaw: json.RawMessage(wire), OriginalBirth: 44, PriorMod: 44, RecoveryFinal: final}
+	value, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	pending, _, err := b.sandboxTTLKeys(original.Operation.Reference.Partition, original.Control.SandboxID)
+	require.NoError(t, err)
+	return &mvccpb.KeyValue{Key: []byte(pending), Value: value, CreateRevision: 44, ModRevision: 80, Version: 2}, envelope
+}
+
+func TestSandboxTTLRecoveryEnvelopePreservesOriginalPublication(t *testing.T) {
+	b, original := sandboxTTLRecordModel(t)
+	legacyWire, err := encodeSandboxTTL(original)
+	require.NoError(t, err)
+	legacy, err := decodeSandboxTTL(&mvccpb.KeyValue{Value: []byte(legacyWire), CreateRevision: 44, ModRevision: 44, Version: 1}, true)
+	require.NoError(t, err)
+	_, publish, err := b.sandboxTTLStage(legacy, 0)
+	require.NoError(t, err)
+	_, oldFinal, err := b.sandboxTTLStage(legacy, 44)
+	require.NoError(t, err)
+	kv, envelope := sandboxTTLRecoveryKVModel(t, b, original)
+	recovered, err := decodeSandboxTTL(kv, true)
+	require.NoError(t, err, "an explicit recovery envelope may advance Mod without rewriting the original publication")
+	_, rebuilt, err := b.sandboxTTLStage(recovered, 0)
+	require.NoError(t, err)
+	require.Equal(t, publish, rebuilt)
+	legacyAgain, err := encodeSandboxTTL(legacy)
+	require.NoError(t, err)
+	require.Equal(t, legacyWire, legacyAgain, "legacy v1 bytes and their original digest remain unchanged")
+
+	mutation, recoveryFinal, err := b.sandboxTTLStage(recovered, kv.ModRevision)
+	require.NoError(t, err)
+	require.Equal(t, envelope.RecoveryFinal.AttemptID, recoveryFinal.AttemptID)
+	require.Equal(t, "ttl_recover", recoveryFinal.StageID)
+	require.NotEqual(t, oldFinal, recoveryFinal, "recovery must not re-grant the original Final Stage")
+	_, currentKey, err := b.sandboxTTLKeys(original.Operation.Reference.Partition, original.Control.SandboxID)
+	require.NoError(t, err)
+	var currentEnvelope sandboxTTLRecoveryWireModel
+	require.NoError(t, json.Unmarshal(mutation.Writes[1].Value, &currentEnvelope))
+	require.Equal(t, envelope.OriginalRaw, currentEnvelope.OriginalRaw)
+	require.Equal(t, envelope.OriginalBirth, currentEnvelope.OriginalBirth)
+	require.Equal(t, kv.ModRevision, currentEnvelope.PendingRevision)
+	current, err := decodeSandboxTTL(&mvccpb.KeyValue{Key: []byte(currentKey), Value: mutation.Writes[1].Value, CreateRevision: 90, ModRevision: 90, Version: 1}, false)
+	require.NoError(t, err)
+	_, rebuiltRecovery, err := b.sandboxTTLStage(current, currentEnvelope.PendingRevision)
+	require.NoError(t, err)
+	require.Equal(t, recoveryFinal, rebuiltRecovery)
+	_, rebuiltPublish, err := b.sandboxTTLStage(current, 0)
+	require.NoError(t, err)
+	require.Equal(t, publish, rebuiltPublish)
+}
+
+func TestSandboxTTLRecoveryEnvelopeRejectsForeignCoordinates(t *testing.T) {
+	b, original := sandboxTTLRecordModel(t)
+	for _, change := range []func(*mvccpb.KeyValue, *sandboxTTLRecoveryWireModel){
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.OriginalBirth++ },
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.PriorMod = r.OriginalBirth - 1 },
+		func(kv *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.PriorMod = kv.ModRevision },
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.RecoveryFinal = original.Final },
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.RecoveryFinal.AttemptID = uuid.NewString() },
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.RecoveryFinal.Partition++ },
+		func(_ *mvccpb.KeyValue, r *sandboxTTLRecoveryWireModel) { r.PendingRevision = 80 },
+		func(kv *mvccpb.KeyValue, _ *sandboxTTLRecoveryWireModel) { kv.Lease = 1 },
+		func(kv *mvccpb.KeyValue, _ *sandboxTTLRecoveryWireModel) { kv.Version = 1 },
+	} {
+		kv, envelope := sandboxTTLRecoveryKVModel(t, b, original)
+		change(kv, &envelope)
+		var err error
+		kv.Value, err = json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = decodeSandboxTTL(kv, true)
+		require.Error(t, err)
+	}
+}
+
+func TestSandboxTTLRecoveryStagePinsDeadOperationAndExactSources(t *testing.T) {
+	for _, sameDue := range []bool{false, true} {
+		b, original := sandboxTTLRecordModel(t)
+		if sameDue {
+			original.Control.ExpiresAt = original.ExpiresAt
+			original.Operation.ExpiresAt = original.ExpiresAt
+		}
+		kv, _ := sandboxTTLRecoveryKVModel(t, b, original)
+		r, err := decodeSandboxTTL(kv, true)
+		require.NoError(t, err)
+		mutation, ref, err := b.sandboxTTLStage(r, kv.ModRevision)
+		require.NoError(t, err)
+		wantComparisons, wantWrites, wantNodes := 25, 5, 43
+		if sameDue {
+			wantComparisons, wantWrites, wantNodes = 24, 3, 40
+		}
+		require.Len(t, mutation.Comparisons, wantComparisons)
+		require.Len(t, mutation.Writes, wantWrites)
+		sources, err := b.sandboxTTLAuthorityKeys(original)
+		require.NoError(t, err)
+		for i, key := range sources {
+			require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.ModRevision(key), "=", original.SourceMods[i]), "Destroy or a foreign source incarnation must win its CAS")
+			require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.LeaseValue(key), "=", 0))
+		}
+		token, oldGuard, receipt, sharedMutation, err := b.namespace.operationKeys(original.Operation.Reference)
+		require.NoError(t, err)
+		for _, key := range []string{token, oldGuard, receipt, sharedMutation} {
+			require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.CreateRevision(key), "=", 0), "neither the old operation nor a new mutation may coexist with recovery")
+		}
+		_, originalFinal, err := b.sandboxTTLStage(original, kv.CreateRevision)
+		require.NoError(t, err)
+		finalGuard, finalReceipt, err := b.stageKeys(originalFinal)
+		require.NoError(t, err)
+		aborted, err := encodeReceipt(originalFinal, OutcomeAborted)
+		require.NoError(t, err)
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.Value(finalReceipt), "=", aborted))
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.LeaseValue(finalReceipt), "=", 0))
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.CreateRevision(finalGuard), "=", 0))
+		_, originalPublish, err := b.sandboxTTLStage(original, 0)
+		require.NoError(t, err)
+		_, publishReceipt, err := b.stageKeys(originalPublish)
+		require.NoError(t, err)
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.ModRevision(publishReceipt), "=", kv.CreateRevision), "the original publication receipt retains its original native birth")
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.LeaseValue(publishReceipt), "=", 0))
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.CreateRevision(string(kv.Key)), "=", kv.CreateRevision))
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.ModRevision(string(kv.Key)), "=", kv.ModRevision))
+		require.Contains(t, mutation.Comparisons, clientv3.Compare(clientv3.LeaseValue(string(kv.Key)), "=", 0))
+		seen := make(map[string]bool)
+		for _, write := range mutation.Writes {
+			require.False(t, seen[write.Key], "same-due cannot delete and recreate the same key")
+			seen[write.Key] = true
+		}
+
+		// This is the actual CommitStage envelope shape, not a count of an
+		// invented DTO. Maximum-width guard coordinates cover the native lease.
+		guard, recoveryReceipt, err := b.stageKeys(ref)
+		require.NoError(t, err)
+		guardWire, err := json.Marshal(struct {
+			StageReference
+			LeaseID int64 `json:"lease_id"`
+		}{ref, math.MaxInt64})
+		require.NoError(t, err)
+		committed, err := encodeReceipt(ref, OutcomeCommitted)
+		require.NoError(t, err)
+		compares := append(b.baseComparisons(), operationEnvelopeComparisons(guard, string(guardWire), math.MaxInt64, math.MaxInt64)[:3]...)
+		compares = append(compares, clientv3.Compare(clientv3.CreateRevision(recoveryReceipt), "=", 0))
+		compares = append(compares, mutation.Comparisons...)
+		writes := append(append([]Write(nil), mutation.Writes...), Write{Key: recoveryReceipt, Value: []byte(committed)})
+		failureKeys := []string{b.identityKey, b.restoreKey, recoveryReceipt, guard}
+		request := &pb.TxnRequest{Compare: taskProtoComparisons(compares), Success: taskProtoWrites(writes), Failure: taskProtoPoints(failureKeys)}
+		require.Equal(t, wantNodes, len(request.Compare)+len(request.Success)+len(request.Failure))
+		require.LessOrEqual(t, request.Size(), 128<<10)
+		failure := taskProtoResponse(failureKeys, []string{b.identityValue, b.restoreEpoch, strings.Repeat("x", maxRecordBytes), strings.Repeat("x", maxRecordBytes)})
+		require.LessOrEqual(t, failure.Size(), 256<<10)
+		t.Logf("TTL recovery component same_due=%t nodes=%d request_pb=%d failure_pb=%d", sameDue, wantNodes, request.Size(), failure.Size())
 	}
 }

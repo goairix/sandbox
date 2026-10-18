@@ -2,12 +2,15 @@ package etcd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
 	"time"
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"github.com/google/uuid"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -71,6 +74,26 @@ type sandboxTTLRecord struct {
 	IssuerCert      json.RawMessage      `json:"issuer_certificate"`
 	Publish         StageAttemptLocator  `json:"publish"`
 	Final           StageAttemptLocator  `json:"final"`
+
+	// The normalized v1 projection never serializes recovery coordinates.
+	// Original publish/Final digests therefore remain byte-for-byte stable.
+	recovery *sandboxTTLRecoveryRecord
+}
+
+// Version 2 wraps, rather than rewrites, the original v1 pending value. A
+// pending row gets its reserved revision from the actual KV; only current stores
+// that revision, avoiding a self-referential future commit revision in the wire.
+// This is a pure record. It grants neither Query nor metadata-write permission.
+type sandboxTTLRecoveryRecord struct {
+	Version         uint32              `json:"version"`
+	OriginalRaw     json.RawMessage     `json:"original_raw"`
+	OriginalBirth   int64               `json:"original_birth"`
+	PriorMod        int64               `json:"prior_mod"`
+	PreviousFinal   *StageReference     `json:"previous_final,omitempty"`
+	RecoveryFinal   StageAttemptLocator `json:"recovery_final"`
+	PendingRevision int64               `json:"pending_revision"`
+
+	reservedMod int64
 }
 
 func (r sandboxTTLRecord) Validate() error {
@@ -125,7 +148,13 @@ func encodeSandboxTTL(r sandboxTTLRecord) (string, error) {
 
 func decodeSandboxTTL(kv *mvccpb.KeyValue, pending bool) (sandboxTTLRecord, error) {
 	var r sandboxTTLRecord
-	if !operationPermanentKV(kv) || kv.Version <= 0 || len(kv.Value) > maxRecordBytes || pending && (kv.CreateRevision != kv.ModRevision || kv.Version != 1) || json.Unmarshal(kv.Value, &r) != nil || r.Validate() != nil || pending != (r.PendingRevision == 0) {
+	if !operationPermanentKV(kv) || kv.Version <= 0 || len(kv.Value) > maxRecordBytes || json.Unmarshal(kv.Value, &r) != nil {
+		return r, ErrCorruptRecord
+	}
+	if r.Version == 2 {
+		return decodeSandboxTTLRecovery(kv, pending)
+	}
+	if pending && (kv.CreateRevision != kv.ModRevision || kv.Version != 1) || r.Validate() != nil || pending != (r.PendingRevision == 0) {
 		return r, ErrCorruptRecord
 	}
 	// Exact canonical bytes reject unknown/missing/duplicate/null fields and
@@ -136,6 +165,97 @@ func decodeSandboxTTL(kv *mvccpb.KeyValue, pending bool) (sandboxTTLRecord, erro
 		return sandboxTTLRecord{}, ErrCorruptRecord
 	}
 	return r, nil
+}
+
+func sandboxTTLRecoveryLocator(r sandboxTTLRecord, priorMod int64, previous *StageReference) (StageAttemptLocator, error) {
+	digest := sha256.Sum256(r.Activation)
+	framing, err := json.Marshal(struct {
+		Domain          string          `json:"domain"`
+		CandidateDigest string          `json:"candidate_digest"`
+		PriorMod        int64           `json:"prior_mod"`
+		PreviousFinal   *StageReference `json:"previous_final"`
+	}{"goairix/sandbox/ttl-recovery-final/v1", hex.EncodeToString(digest[:]), priorMod, previous})
+	if err != nil {
+		return StageAttemptLocator{}, ErrInvalidRecord
+	}
+	locator := r.Final
+	locator.StageID, locator.AttemptID = "ttl_recover", uuid.NewSHA1(uuid.NameSpaceOID, framing).String()
+	if locator.AttemptID == r.Final.AttemptID || locator.AttemptID == r.Publish.AttemptID {
+		return StageAttemptLocator{}, ErrInvalidRecord
+	}
+	return locator, nil
+}
+
+func (r sandboxTTLRecoveryRecord) original() (sandboxTTLRecord, error) {
+	var original sandboxTTLRecord
+	if r.Version != 2 || len(r.OriginalRaw) == 0 || len(r.OriginalRaw) > maxRecordBytes || r.OriginalBirth <= 0 || r.PriorMod < r.OriginalBirth || r.PendingRevision < 0 || r.PendingRevision != 0 && r.PendingRevision <= r.PriorMod || json.Unmarshal(r.OriginalRaw, &original) != nil || original.Validate() != nil || original.PendingRevision != 0 {
+		return original, ErrInvalidRecord
+	}
+	wire, err := encodeSandboxTTL(original)
+	if err != nil || wire != string(r.OriginalRaw) {
+		return sandboxTTLRecord{}, ErrInvalidRecord
+	}
+	if (r.PriorMod == r.OriginalBirth) != (r.PreviousFinal == nil) {
+		return sandboxTTLRecord{}, ErrInvalidRecord
+	}
+	if previous := r.PreviousFinal; previous != nil {
+		if !validHexDigest(previous.Digest) || previous.StageID != "ttl_recover" || previous.Namespace != original.Final.Namespace || previous.Partition != original.Final.Partition || previous.RestoreEpoch != original.Final.RestoreEpoch || previous.RequestID != original.Final.RequestID || previous.AttemptID == original.Final.AttemptID || previous.AttemptID == original.Publish.AttemptID {
+			return sandboxTTLRecord{}, ErrInvalidRecord
+		}
+		if id, err := uuid.Parse(previous.AttemptID); err != nil || id.String() != previous.AttemptID || id == uuid.Nil {
+			return sandboxTTLRecord{}, ErrInvalidRecord
+		}
+	}
+	locator, err := sandboxTTLRecoveryLocator(original, r.PriorMod, r.PreviousFinal)
+	if err != nil || locator != r.RecoveryFinal {
+		return sandboxTTLRecord{}, ErrInvalidRecord
+	}
+	return original, nil
+}
+
+func encodeSandboxTTLRecovery(r sandboxTTLRecoveryRecord) (string, error) {
+	if _, err := r.original(); err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(r); err != nil {
+		return "", ErrInvalidRecord
+	}
+	wire := bytes.TrimSuffix(out.Bytes(), []byte("\n"))
+	if len(wire) > maxRecordBytes {
+		return "", ErrInvalidRecord
+	}
+	return string(wire), nil
+}
+
+func decodeSandboxTTLRecovery(kv *mvccpb.KeyValue, pending bool) (sandboxTTLRecord, error) {
+	var envelope sandboxTTLRecoveryRecord
+	if json.Unmarshal(kv.Value, &envelope) != nil {
+		return sandboxTTLRecord{}, ErrCorruptRecord
+	}
+	original, err := envelope.original()
+	if err != nil || pending != (envelope.PendingRevision == 0) {
+		return sandboxTTLRecord{}, ErrCorruptRecord
+	}
+	if pending {
+		if kv.CreateRevision != envelope.OriginalBirth || kv.ModRevision <= envelope.PriorMod || kv.Version < 2 {
+			return sandboxTTLRecord{}, ErrCorruptRecord
+		}
+		envelope.reservedMod = kv.ModRevision
+	} else {
+		if envelope.PendingRevision <= envelope.PriorMod || kv.ModRevision <= envelope.PendingRevision {
+			return sandboxTTLRecord{}, ErrCorruptRecord
+		}
+		envelope.reservedMod = envelope.PendingRevision
+	}
+	wire, err := encodeSandboxTTLRecovery(envelope)
+	if err != nil || wire != string(kv.Value) {
+		return sandboxTTLRecord{}, ErrCorruptRecord
+	}
+	original.PendingRevision, original.recovery = envelope.PendingRevision, &envelope
+	return original, nil
 }
 
 func (b *Backend) sandboxTTLKeys(partition uint8, sandboxID string) (pending, current string, err error) {
@@ -213,6 +333,17 @@ func (b *Backend) sandboxTTLMutation(r sandboxTTLRecord, pendingRevision int64) 
 	if err != nil {
 		return Mutation{}, err
 	}
+	wire, err := encodeSandboxTTL(r)
+	if err != nil {
+		return Mutation{}, err
+	}
+	return b.sandboxTTLBusinessMutation(r, pendingRevision, compares, wire)
+}
+
+// Live and recovered commits share exactly the control/current/due mutation.
+// Only the private caller supplies different, independently checked permission
+// comparisons and the appropriate record wire. Same-due never duplicates a key.
+func (b *Backend) sandboxTTLBusinessMutation(r sandboxTTLRecord, pendingRevision int64, compares []clientv3.Cmp, wire string) (Mutation, error) {
 	pending, current, err := b.sandboxTTLKeys(r.Operation.Reference.Partition, r.Control.SandboxID)
 	if err != nil {
 		return Mutation{}, err
@@ -237,10 +368,6 @@ func (b *Backend) sandboxTTLMutation(r sandboxTTLRecord, pendingRevision int64) 
 	compares = append(compares, clientv3.Compare(clientv3.ModRevision(oldDueKey), "=", r.DueRevision))
 	if oldDueKey != newDueKey {
 		compares = append(compares, clientv3.Compare(clientv3.CreateRevision(newDueKey), "=", 0))
-	}
-	wire, err := encodeSandboxTTL(r)
-	if err != nil {
-		return Mutation{}, err
 	}
 	if pendingRevision == 0 {
 		compares = append(compares, clientv3.Compare(clientv3.CreateRevision(pending), "=", 0))
@@ -273,6 +400,13 @@ func (b *Backend) sandboxTTLMutation(r sandboxTTLRecord, pendingRevision int64) 
 // original generic protocol reserves fourteen nodes; its actual Commit uses
 // thirteen. Lease/revision placeholders maximize varints, not authority.
 func (b *Backend) sandboxTTLStage(r sandboxTTLRecord, pendingRevision int64) (Mutation, StageReference, error) {
+	if r.recovery != nil && pendingRevision != 0 {
+		mutation, err := b.sandboxTTLRecoveryMutation(r, pendingRevision)
+		if err != nil {
+			return Mutation{}, StageReference{}, err
+		}
+		return b.preflightSandboxTTLStage(r.recovery.RecoveryFinal, mutation)
+	}
 	mutation, err := b.sandboxTTLMutation(r, pendingRevision)
 	if err != nil {
 		return Mutation{}, StageReference{}, err
@@ -282,6 +416,75 @@ func (b *Backend) sandboxTTLStage(r sandboxTTLRecord, pendingRevision int64) (Mu
 		locator = r.Final
 	}
 	return b.preflightSandboxTTLStage(locator, mutation)
+}
+
+// This builder does not grant a Stage. It prepares only the fixed candidate's
+// metadata repair, excluding all expired operation authority. The runtime Query
+// and actual authenticated reads must independently authorize its future caller.
+// The source/control pins prevent cleanup or a new mutation from being revived.
+func (b *Backend) sandboxTTLRecoveryMutation(r sandboxTTLRecord, reservedMod int64) (Mutation, error) {
+	if r.recovery == nil || reservedMod <= r.recovery.PriorMod || reservedMod != r.recovery.reservedMod {
+		return Mutation{}, ErrInvalidRecord
+	}
+	envelope := *r.recovery
+	original, err := envelope.original()
+	if err != nil {
+		return Mutation{}, err
+	}
+	projection := r
+	projection.PendingRevision, projection.recovery = 0, nil
+	wire, err := encodeSandboxTTL(projection)
+	if err != nil || wire != string(envelope.OriginalRaw) {
+		return Mutation{}, ErrInvalidRecord
+	}
+	keys, err := b.sandboxTTLAuthorityKeys(original)
+	if err != nil {
+		return Mutation{}, err
+	}
+	var compares []clientv3.Cmp
+	for i, key := range keys {
+		compares = append(compares, clientv3.Compare(clientv3.ModRevision(key), "=", original.SourceMods[i]), clientv3.Compare(clientv3.LeaseValue(key), "=", 0))
+	}
+	token, guard, receipt, mutation, err := b.namespace.operationKeys(original.Operation.Reference)
+	if err != nil {
+		return Mutation{}, err
+	}
+	for _, key := range []string{token, guard, receipt, mutation} {
+		compares = append(compares, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
+	}
+	_, publishRef, err := b.sandboxTTLStage(original, 0)
+	if err != nil {
+		return Mutation{}, err
+	}
+	_, publishReceipt, err := b.stageKeys(publishRef)
+	if err != nil {
+		return Mutation{}, err
+	}
+	compares = append(compares, clientv3.Compare(clientv3.ModRevision(publishReceipt), "=", envelope.OriginalBirth), clientv3.Compare(clientv3.LeaseValue(publishReceipt), "=", 0))
+	_, oldFinal, err := b.sandboxTTLStage(original, envelope.OriginalBirth)
+	if err != nil {
+		return Mutation{}, err
+	}
+	oldGuard, oldReceipt, err := b.stageKeys(oldFinal)
+	if err != nil {
+		return Mutation{}, err
+	}
+	aborted, err := encodeReceipt(oldFinal, OutcomeAborted)
+	if err != nil {
+		return Mutation{}, err
+	}
+	compares = append(compares, clientv3.Compare(clientv3.Value(oldReceipt), "=", aborted), clientv3.Compare(clientv3.LeaseValue(oldReceipt), "=", 0), clientv3.Compare(clientv3.CreateRevision(oldGuard), "=", 0))
+	pending, _, err := b.sandboxTTLKeys(original.Operation.Reference.Partition, original.Control.SandboxID)
+	if err != nil {
+		return Mutation{}, err
+	}
+	compares = append(compares, clientv3.Compare(clientv3.CreateRevision(pending), "=", envelope.OriginalBirth), clientv3.Compare(clientv3.LeaseValue(pending), "=", 0))
+	envelope.PendingRevision = reservedMod
+	wire, err = encodeSandboxTTLRecovery(envelope)
+	if err != nil {
+		return Mutation{}, err
+	}
+	return b.sandboxTTLBusinessMutation(original, reservedMod, compares, wire)
 }
 
 // A complete, authenticated no-effect rejection can retire only this pending
