@@ -71,6 +71,116 @@ func TestDueWorkerColdQuotaPendingDeleteRejectsCopiedVerifiedJob(t *testing.T) {
 	require.NotNil(t, f.server.point(f.birthSeed.keys[5]))
 }
 
+// A canonical v2 hint enters only the original bounded metadata registry. The
+// host model deliberately has no signed detached history, so it must not open
+// physical admission, a quota writer or the final P gate.
+func TestDueWorkerColdQuotaDetachedHintEnqueuesMetadataOnly(t *testing.T) {
+	f := newCleanupColdQuotaFixture(t)
+	f.b.finishCleanupJob(f.job, nil)
+	r := cleanupBirthTestDetachedRelease(t, f.birthSeed)
+	wire, err := encodeDetachedOwnerRelease(r)
+	require.NoError(t, err)
+	_, err = f.b.client.Txn(f.w.ctx).Then(clientv3.OpDelete(f.releaseKey)).Commit()
+	require.NoError(t, err)
+	f.server.put(f.releaseKey, wire, 0)
+	_, err = decodeDetachedOwnerRelease(f.server.point(f.releaseKey))
+	require.NoError(t, err, "only the immutable hint codec is a positive precondition")
+	pending := f.server.point(f.birthSeed.keys[5])
+	f.w.automatic = &dueWorkerAutomatic{
+		active: 0, pendingPart: -1, phase: "pending-birth",
+		partitions: []dueWorkerAutomaticPartition{{scan: f.w.scans[0]}},
+		candidate:  cleanupPendingRecord{Version: 1, Reference: f.task, TaskDigest: workerIdentityDigest(f.birthSeed.wires[0])},
+	}
+	grants, keeps, revokes := f.server.counts()
+	f.fund()
+	before := len(f.requests())
+	_, err = f.w.automaticPendingTurn(f.w.ctx)
+	require.NoError(t, err, "strict v2 preliminary metadata must reach the original automatic registry path")
+	require.NotNil(t, f.w.automatic.birth)
+	birth := f.w.automatic.birth
+	require.Nil(t, f.w.automatic.release)
+	require.Len(t, f.requests()[before:], 4)
+	before = len(f.requests())
+	_, err = f.w.automaticPendingTurn(f.w.ctx)
+	require.NoError(t, err)
+	require.Len(t, f.requests(), before, "metadata enqueue cannot run the old signed loader or spend Claim")
+	var queued *cleanupLocalJob
+	for _, job := range f.w.cleanupJobs {
+		if job != nil {
+			require.Nil(t, queued)
+			queued = job
+		}
+	}
+	require.NotNil(t, queued)
+	require.Same(t, queued, queued.coldQuota.self)
+	require.True(t, queued.coldQuota.quotaOnly)
+	require.Equal(t, f.birthSeed.task, queued.coldQuota.record)
+	require.Equal(t, f.birthSeed.birth, queued.coldQuota.birth)
+	require.Equal(t, "cold-quota-task", queued.step)
+	require.False(t, queued.started)
+	require.Empty(t, queued.runID)
+	require.Nil(t, queued.claim)
+	require.Nil(t, queued.proof)
+	require.Nil(t, queued.state)
+	require.Nil(t, queued.bundle)
+	require.Nil(t, queued.target)
+	require.Nil(t, queued.coldQuota.verified)
+	require.False(t, queued.coldQuota.sealed)
+	require.Zero(t, queued.coldQuota.workspace)
+	require.Nil(t, f.w.coldQuota)
+	require.Equal(t, pending, f.server.point(f.birthSeed.keys[5]))
+	err = f.b.deleteCleanupPending(f.w.ctx, f.part, f.claims, birth, nil, queued)
+	require.Error(t, err, "unverified hint cannot delete P")
+	require.Len(t, f.requests(), before)
+	afterGrants, afterKeeps, afterRevokes := f.server.counts()
+	require.Equal(t, []int{grants, keeps, revokes}, []int{afterGrants, afterKeeps, afterRevokes})
+}
+
+// Joined coordinates are refusal metadata, not a successful physical join.
+// Even the existing v1 authenticated model/refund cannot substitute occupied
+// Joined E for settled E, or replace the exact verified release seal.
+func TestDueWorkerColdQuotaPendingRejectsJoinedOnlyAndWrongSeal(t *testing.T) {
+	for _, fault := range []string{"joined-only", "wrong-seal"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newCleanupColdQuotaFixture(t)
+			f.verify(t)
+			if fault == "joined-only" {
+				r := cleanupBirthTestExecution(f.birthSeed)
+				r.Phase, r.Confirmed = "occupied", "owner-released"
+				r.Run = &cleanupExecutionRun{
+					ID: "44444444-4444-4444-8444-444444444444", Joined: true,
+					Worker: launcher.WorkspaceSyncWorkerReference{
+						Incarnation: "55555555-5555-4555-8555-555555555555", BootID: f.history.publication.entry.Record.Runtime.BootID,
+						PID: 7, StartTicks: 1, UID: 1, GID: 1,
+						PIDNamespaceDev: 1, PIDNamespaceIno: 2, MountNamespaceDev: 1, MountNamespaceIno: 3, ExecutableDev: 1, ExecutableIno: 4,
+					},
+				}
+				wire, err := encodeCleanupExecution(r)
+				require.NoError(t, err)
+				f.server.put(f.birthSeed.keys[4], wire, 0)
+			}
+			birth, release := cleanupColdQuotaBirthRelease(t, f)
+			if fault == "wrong-seal" {
+				// Keep the original evidence's self/member seals and mutate only
+				// its owned reply copy; the native source remains unchanged.
+				release.proof.kv.Value = append([]byte(nil), release.proof.kv.Value...)
+				release.proof.kv.Value[0] ^= 1
+			}
+			f.fund()
+			before := len(f.requests())
+			pending := f.server.point(f.birthSeed.keys[5])
+			err := f.b.deleteCleanupPending(f.w.ctx, f.part, f.claims, birth, release, f.job)
+			require.Error(t, err)
+			require.Len(t, f.requests(), before)
+			require.Equal(t, pending, f.server.point(f.birthSeed.keys[5]))
+			f.b.archiveLife.mu.Lock()
+			credits := f.claims.bucket.tokens
+			f.b.archiveLife.mu.Unlock()
+			require.Equal(t, uint64(1), credits)
+		})
+	}
+}
+
 // The actual pending-delete actor branch must enqueue quota-only work in its
 // original registry, then return to due/renewal work. Missing E/S cannot start a
 // physical Run or cause reads of ownership records that signed release deleted.

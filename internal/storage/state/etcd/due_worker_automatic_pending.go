@@ -90,6 +90,22 @@ func (w *DueWorker) automaticPendingTurn(ctx context.Context) (time.Time, error)
 		}
 		a.birth = birth
 		a.phase = "pending-enqueue"
+		if birth.detachedReleaseRecord != nil {
+			// A v2 value is a metadata hint, never signed release permission.
+			// Only the cold registry path may authenticate it in paid turns;
+			// an unfinished Run retains P without entering physical admission.
+			if !b.cleanupColdQuotaEnabled() || !cleanupDetachedBirthCandidate(birth) {
+				refusal := ErrInvalidRecord
+				if !b.cleanupColdQuotaEnabled() {
+					refusal = ErrInvalidConfiguration
+				}
+				a.lastError = dueWorkerError(refusal)
+				w.automaticAdvancePending()
+				return time.Now(), nil
+			}
+			a.phase = "pending-delete"
+			return time.Now(), nil
+		}
 		if birth.release != nil && (birth.execution == nil || birth.execution.Phase == "settled") {
 			a.phase = "pending-release"
 		}

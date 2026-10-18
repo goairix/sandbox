@@ -134,6 +134,132 @@ func cleanupBirthTestRelease(t *testing.T, s cleanupBirthTestSeed) string {
 	return wire
 }
 
+// This is unsigned preliminary metadata only. Its synthetic historical stamps
+// satisfy the seal codec but have no terminal/provider/source records behind
+// them. Birth discovery may retain the same-cohort hint, never a signed proof.
+func cleanupBirthTestDetachedRelease(t *testing.T, s cleanupBirthTestSeed) detachedOwnerReleaseRecord {
+	t.Helper()
+	stamp := p.RecordStamp{CreateRevision: s.birth, ModRevision: s.birth, SHA256: strings.Repeat("a", 64)}
+	r := detachedOwnerReleaseRecord{
+		Version: 2, Domain: "sandbox.task-owner-release.v2", Task: s.task.Reference, TaskBirth: s.birth,
+		Claim:   taskCloseClaimWire{Task: s.task.Reference, ClaimID: taskClaimTestID, WorkerID: "metadata-hint-only", CreateRevision: s.birth + 1, LeaseID: 1},
+		Runtime: s.task.Runtime, WorkspaceHash: s.task.WorkspaceHash, Generation: s.task.Generation,
+		NodeUID: "11111111-1111-4111-8111-111111111111", NodeBootID: "22222222-2222-4222-8222-222222222222",
+		Termination:   p.RecordStamp{CreateRevision: s.birth + 2, ModRevision: s.birth + 2, SHA256: strings.Repeat("b", 64)},
+		CleanupDigest: strings.Repeat("c", 64),
+		DetachedEffects: p.DetachedRuntimeEffectBindings{
+			Version: 1, Profile: "detached_enrolled_plain", ContractDigest: strings.Repeat("d", 64), Settlement: stamp,
+		},
+	}
+	for i, key := range detachedOwnerReleaseDeletedKeys(r) {
+		r.Deleted[i] = localOwnerReleasedKey{Key: key, Stamp: stamp}
+	}
+	_, err := encodeDetachedOwnerRelease(r)
+	require.NoError(t, err)
+	return r
+}
+
+func TestCleanupBirthDetachedPreliminaryHint(t *testing.T) {
+	f := newBackfillBootstrapFixture(t, 60*time.Second)
+	s := seedCleanupBirth(t, f)
+	r := cleanupBirthTestDetachedRelease(t, s)
+	wire, err := encodeDetachedOwnerRelease(r)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		f.server.put(f.b.namespace.Root()+"detached-hint-observation", "later", 0)
+	}
+	f.server.put(s.keys[6], wire, 0)
+	pending, err := encodeCleanupPending(cleanupPendingRecord{Version: 1, Reference: s.task.Reference, TaskDigest: workerIdentityDigest(s.wires[0])})
+	require.NoError(t, err)
+	f.server.put(s.keys[5], pending, 0)
+	seal := f.server.point(s.keys[6])
+	_, err = decodeDetachedOwnerRelease(seal)
+	require.NoError(t, err, "precondition is a canonical permanent v2 hint, not terminal authentication")
+	before := len(backfillBootstrapRequests(f))
+	grants, keeps, revokes := f.server.counts()
+	backfillBootstrapCredit(f.b, f.ranges, 262144)
+	birth, err := f.b.readCleanupBirth(context.Background(), f.partition, f.ranges, s.task.Reference.TaskID)
+	require.NoError(t, err, "the original guarded birth cohort must accept a strict v2 preliminary hint")
+	require.NotNil(t, birth)
+	require.NoError(t, f.b.validateCleanupBirthEvidence(f.partition, birth))
+	require.NotNil(t, birth.release)
+	require.Equal(t, ownTaskFence(seal), *birth.release)
+	require.Nil(t, birth.releaseRecord, "a detached hint cannot fabricate the old local Complete/archive record")
+	require.Len(t, backfillBootstrapRequests(f)[before:], 4)
+
+	// This fixture has no terminal trust or authenticated release history.
+	// Neither discovery nor present P can admit a delete or consume its Claim.
+	before = len(backfillBootstrapRequests(f))
+	release, err := f.b.readCleanupBirthRelease(context.Background(), f.partition, f.ranges, birth)
+	require.ErrorIs(t, err, ErrInvalidConfiguration)
+	require.Nil(t, release)
+	err = f.b.deleteCleanupPending(context.Background(), f.partition, f.claims, birth, nil)
+	require.Error(t, err)
+	require.Len(t, backfillBootstrapRequests(f), before)
+	require.NotNil(t, f.server.point(s.keys[5]))
+	afterGrants, afterKeeps, afterRevokes := f.server.counts()
+	require.Equal(t, []int{grants, keeps, revokes}, []int{afterGrants, afterKeeps, afterRevokes})
+}
+
+// These are refused native reply models, not alternative valid histories.
+// Every mandatory point still comes from the original same-birth transaction.
+func TestCleanupBirthDetachedHintRefusals(t *testing.T) {
+	f := newBackfillBootstrapFixture(t, 60*time.Second)
+	s := seedCleanupBirth(t, f)
+	r := cleanupBirthTestDetachedRelease(t, s)
+	wire, err := encodeDetachedOwnerRelease(r)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		f.server.put(f.b.namespace.Root()+"detached-hint-observation", "later", 0)
+	}
+	f.server.put(s.keys[6], wire, 0)
+	f.server.put(f.b.namespace.Root()+"detached-hint-observation", "after-release", 0)
+	read, err := f.b.client.Txn(context.Background()).Then(clientv3.OpGet(s.keys[6])).Commit()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		change func([]*mvccpb.KeyValue)
+	}{
+		{"foreign-key", func(v []*mvccpb.KeyValue) {
+			v[6].Key = []byte(f.b.namespace.Root() + "foreign-release")
+		}},
+		{"leased", func(v []*mvccpb.KeyValue) {
+			v[6].Lease = 1
+		}},
+		{"mutable", func(v []*mvccpb.KeyValue) {
+			v[6].Version = 2
+			v[6].ModRevision++
+		}},
+		{"noncanonical", func(v []*mvccpb.KeyValue) {
+			v[6].Value = append(v[6].Value, ' ')
+		}},
+		{"wrong-task-birth", func(v []*mvccpb.KeyValue) {
+			other := r
+			other.TaskBirth--
+			value, encodeErr := encodeDetachedOwnerRelease(other)
+			require.NoError(t, encodeErr)
+			v[6].Value = []byte(value)
+		}},
+		{"foreign-task", func(v []*mvccpb.KeyValue) {
+			other := r
+			other.Task.TaskID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+			other.Claim.Task = other.Task
+			value, encodeErr := encodeDetachedOwnerRelease(other)
+			require.NoError(t, encodeErr)
+			v[6].Value = []byte(value)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			points := cleanupBirthTestPoints(f, s)
+			tc.change(points)
+			birth, err := f.b.cleanupBirthFromPoints(f.partition, f.server.point(s.keys[1]), points, read.Header.Revision)
+			require.Error(t, err)
+			require.Nil(t, birth)
+			require.Equal(t, wire, string(f.server.point(s.keys[6]).Value))
+		})
+	}
+}
+
 func cleanupBirthCohortOps(ops []clientv3.Op) bool {
 	return len(ops) == 9 && ops[0].IsGet()
 }

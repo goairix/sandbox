@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 // This private result retains the original signed loader's proof and the exact
@@ -15,6 +17,9 @@ type cleanupBirthReleaseEvidence struct {
 	partition *WorkerPartitionClaim
 	birth     *cleanupBirthEvidence
 	proof     *localOwnerReleaseProof
+	// Only the fresh paid cursor supplies this v2 branch. It aliases that
+	// shared graph; preliminary birth bytes cannot construct the union.
+	profile *taskOwnerReleaseProof
 }
 
 // A validation refusal may only attempt the final worker audit. In particular,
@@ -40,6 +45,11 @@ func (b *Backend) readCleanupBirthRelease(ctx context.Context, p *WorkerPartitio
 	}
 	if err := b.validateCleanupBirthRelease(p, birth); err != nil {
 		return nil, err
+	}
+	// Preserve the old five-RPC/260480-byte v1 group. Detached history must
+	// be authenticated in separately paid cursor turns, never stuffed here.
+	if birth.detachedReleaseRecord != nil {
+		return nil, ErrInvalidRecord
 	}
 	o, stop, err := b.beginCleanupBirthOwner(ctx, p, ranges, true)
 	if err != nil {
@@ -110,7 +120,7 @@ func (b *Backend) validateCleanupBirthRelease(p *WorkerPartitionClaim, birth *cl
 		return ErrInvalidConfiguration
 	}
 
-	if birth.release == nil || birth.releaseRecord == nil {
+	if birth.release == nil || birth.releaseRecord == nil && birth.detachedReleaseRecord == nil {
 		return ErrInvalidRecord
 	}
 	if birth.execution != nil && birth.execution.Release != nil {
@@ -125,7 +135,7 @@ func (b *Backend) validateCleanupBirthRelease(p *WorkerPartitionClaim, birth *cl
 // This join uses only the original private signed loader result. A missing or
 // changed release, or a terminal proof for different Task bytes, stays refused.
 func matchCleanupBirthReleaseProof(birth *cleanupBirthEvidence, proof *localOwnerReleaseProof) error {
-	if proof == nil || !birth.release.matches(proof.kv) || proof.record != *birth.releaseRecord || localRuntimeTerminationTask(proof.termination) != birth.record.Reference || proof.termination.TaskBirth != birth.birth || proof.termination.Authority.Task != localRuntimeFenceStamp(birth.task) {
+	if birth == nil || birth.release == nil || birth.releaseRecord == nil || birth.detachedReleaseRecord != nil || proof == nil || !birth.release.matches(proof.kv) || proof.record != *birth.releaseRecord || localRuntimeTerminationTask(proof.termination) != birth.record.Reference || proof.termination.TaskBirth != birth.birth || proof.termination.Authority.Task != localRuntimeFenceStamp(birth.task) {
 		return ErrCorruptRecord
 	}
 	if birth.execution != nil && birth.execution.Release != nil {
@@ -135,6 +145,43 @@ func matchCleanupBirthReleaseProof(birth *cleanupBirthEvidence, proof *localOwne
 		}
 	}
 	return nil
+}
+
+// matchCleanupBirthReleaseEvidence joins the freshly observed cohort to one
+// actual paid proof. Its returned KV is used only after this exact comparison;
+// the helper creates no worker, mutation or replacement authority.
+func matchCleanupBirthReleaseEvidence(birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence) (*mvccpb.KeyValue, error) {
+	if birth == nil || release == nil {
+		return nil, ErrCorruptRecord
+	}
+	if release.profile == nil {
+		if err := matchCleanupBirthReleaseProof(birth, release.proof); err != nil {
+			return nil, err
+		}
+		return release.proof.kv, nil
+	}
+	profile := release.profile
+	if release.proof != nil || profile.local != nil || profile.detached == nil || birth.release == nil || birth.releaseRecord != nil || birth.detachedReleaseRecord == nil {
+		return nil, ErrCorruptRecord
+	}
+	d := profile.detached
+	nativeRecord, err := decodeDetachedOwnerRelease(d.kv)
+	if err != nil || nativeRecord != d.record {
+		return nil, ErrCorruptRecord
+	}
+	if d.history == nil || !birth.release.matches(d.kv) || d.record != *birth.detachedReleaseRecord || localRuntimeTerminationTask(d.termination) != birth.record.Reference || d.termination.TaskBirth != birth.birth || d.termination.Authority.Task != localRuntimeFenceStamp(birth.task) {
+		return nil, ErrCorruptRecord
+	}
+	if !enrolledImmutableKV(d.history.history[0]) || !birth.task.matches(d.history.history[0]) {
+		return nil, ErrCorruptRecord
+	}
+	if birth.execution != nil && birth.execution.Release != nil {
+		pin := birth.execution.Release
+		if pin.CreateRevision != d.kv.CreateRevision || pin.Digest != workspaceSyncIntentDigest(string(d.kv.Value)) {
+			return nil, ErrCorruptRecord
+		}
+	}
+	return d.kv, nil
 }
 
 // Before dispatch, account for all original signed-loader branches using the

@@ -397,6 +397,9 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		if err != nil {
 			return err
 		}
+		if handled, routeErr := j.worker.routeCleanupDetachedQuotaOccupation(j); handled {
+			return routeErr
+		}
 		if j.state != nil && j.state.record.Phase == "settled" {
 			j.step = "release-proof"
 			return nil
@@ -598,7 +601,13 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.terminal, err = b.loadCleanupTerminalEvidence(owner, j.state)
 		j.step = "settle"
 		if err == nil && b.cleanupColdQuotaEnabled() {
-			j.step = "cold-quota-history"
+			if s := j.worker.coldQuota; j.coldQuota.quotaOnly && s != nil && s.job == j && s.history != nil && s.history.profileRelease != nil {
+				// This same job already authenticated its refund. Retain its
+				// opaque proof for settlement instead of looping through refund.
+				_, err = b.detachedCleanupOccupationProof(j)
+			} else {
+				j.step = "cold-quota-history"
+			}
 		}
 	case "settle":
 		if j.started {
@@ -607,6 +616,11 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		} else {
 			err = b.settleCleanupOccupation(owner, j, j.proof, j.terminal)
 			j.step = "done"
+			if err == nil && j.coldQuota.quotaOnly && j.worker.coldQuota != nil && j.worker.coldQuota.job == j && j.worker.coldQuota.history != nil && j.worker.coldQuota.history.profileRelease != nil {
+				// Keep the original registry identity through fresh birth/proof
+				// and P deletion. Settlement alone cannot finish discovery work.
+				j.step = "cold-quota-pending-birth"
+			}
 		}
 	default:
 		return ErrInvalidRecord

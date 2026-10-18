@@ -156,21 +156,48 @@ func (w *DueWorker) validateCleanupColdQuotaVerified(j *cleanupLocalJob) error {
 }
 
 func (b *Backend) validateCleanupColdQuotaPending(j *cleanupLocalJob, p *WorkerPartitionClaim, birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence) error {
-	if j == nil || j.worker == nil || j.worker.backend != b || j.partition != p || j.worker.validateCleanupColdQuotaVerified(j) != nil || birth == nil || release == nil || release.proof == nil || release.proof.kv == nil {
+	if j == nil || j.worker == nil || j.worker.backend != b || j.partition != p || j.worker.validateCleanupColdQuotaVerified(j) != nil || birth == nil || release == nil || release.self != release || release.origin != b || release.partition != p || release.birth != birth {
 		return ErrInvalidRecord
 	}
+	var kv *mvccpb.KeyValue
+	if release.profile == nil && release.proof != nil {
+		kv = release.proof.kv
+	} else if release.proof == nil && release.profile != nil && release.profile.local == nil && release.profile.detached != nil {
+		kv = release.profile.detached.kv
+	}
 	c := &j.coldQuota
-	if birth.record != c.record || birth.birth != c.birth || release.proof.kv.CreateRevision != c.verified.release.CreateRevision || workspaceSyncIntentDigest(string(release.proof.kv.Value)) != c.verified.release.Digest {
+	if kv == nil || birth.record != c.record || birth.birth != c.birth || kv.CreateRevision != c.verified.release.CreateRevision || workspaceSyncIntentDigest(string(kv.Value)) != c.verified.release.Digest {
 		return ErrInvalidRecord
 	}
 	return nil
 }
 
-// enqueueCleanupColdQuota copies only the authenticated original Task/birth.
-// Signed proof is checked now and reread in the one shared workspace later;
-// neither the automatic discovery batch nor each job retains a history clone.
+// This predicate selects bounded metadata work only. A permanent joined row
+// cannot be interpreted as settled E, a physical join by this process or a
+// signed release proof; the later actor must authenticate all of those facts.
+func cleanupDetachedBirthCandidate(birth *cleanupBirthEvidence) bool {
+	if birth == nil || birth.detachedReleaseRecord == nil || birth.releaseRecord != nil || birth.release == nil || birth.pending == nil {
+		return false
+	}
+	r := birth.execution
+	return r == nil || r.Phase == "settled" || r.Phase == "occupied" && r.Run != nil && r.Run.Joined
+}
+
+// enqueueCleanupColdQuota copies only the original guarded Task/birth. V1
+// retains its original signed-proof entry; v2 accepts only a strict preliminary
+// hint and defers all source authentication to the shared paid workspace.
+// Neither the discovery batch nor each job retains a full history clone.
 func (w *DueWorker) enqueueCleanupColdQuota(birth *cleanupBirthEvidence, release *cleanupBirthReleaseEvidence) (*cleanupLocalJob, error) {
-	if birth == nil || release == nil || w.backend.validateCleanupBirthEvidence(birth.partition, birth) != nil || release.self != release || release.origin != w.backend || release.birth != birth || release.partition != birth.partition || matchCleanupBirthReleaseProof(birth, release.proof) != nil || birth.pending == nil || birth.execution != nil && birth.execution.Phase != "settled" {
+	if birth == nil || w.backend.validateCleanupBirthEvidence(birth.partition, birth) != nil || birth.pending == nil {
+		return nil, ErrInvalidRecord
+	}
+	if birth.detachedReleaseRecord != nil {
+		// No proof is manufactured from this hint. Enqueue retains only the
+		// original Task/birth and must authenticate all paid sources later.
+		if release != nil || !w.backend.cleanupColdQuotaEnabled() || !cleanupDetachedBirthCandidate(birth) {
+			return nil, ErrInvalidRecord
+		}
+	} else if release == nil || release.self != release || release.origin != w.backend || release.birth != birth || release.partition != birth.partition || matchCleanupBirthReleaseProof(birth, release.proof) != nil || birth.execution != nil && birth.execution.Phase != "settled" {
 		return nil, ErrInvalidRecord
 	}
 	j, err := w.enqueueCleanupLocal(w.ctx, birth.record.Reference)

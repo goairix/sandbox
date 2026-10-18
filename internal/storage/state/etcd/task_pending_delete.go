@@ -30,7 +30,7 @@ func (b *Backend) validateCleanupPendingDelete(ctx context.Context, p *WorkerPar
 	if err := b.validateCleanupBirthRelease(p, birth); err != nil {
 		return err
 	}
-	if err := matchCleanupBirthReleaseProof(birth, release.proof); err != nil {
+	if _, err := matchCleanupBirthReleaseEvidence(birth, release); err != nil {
 		return err
 	}
 	if b.requestTimeout <= 0 || b.requestTimeout > 3*time.Second {

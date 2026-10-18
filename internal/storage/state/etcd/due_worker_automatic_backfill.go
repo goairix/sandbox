@@ -119,7 +119,7 @@ func (w *DueWorker) automaticBackfillTurn(ctx context.Context) (time.Time, error
 			return time.Now(), nil
 		}
 		a.birth, a.phase = birth, "backfill-advance"
-		if birth.release != nil && (birth.execution == nil || birth.execution.Phase == "settled") {
+		if birth.releaseRecord != nil && (birth.execution == nil || birth.execution.Phase == "settled") {
 			a.phase = "backfill-release"
 		}
 	case "backfill-release":

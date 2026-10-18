@@ -173,24 +173,50 @@ func (w *DueWorker) stepCleanupColdQuota(j *cleanupLocalJob, s *cleanupColdQuota
 			return err
 		}
 		return w.publishCleanupColdQuota(j, s, entry)
+	case "cold-quota-intent":
+		return w.readCleanupColdQuotaDetachedIntent(j, s)
 	case "cold-quota-pending-birth":
 		birth, err := b.readCleanupBirth(j.ctx, j.partition, s.ranges, j.task.TaskID)
 		if err == nil {
 			if birth.record != j.coldQuota.record || birth.birth != j.coldQuota.birth || birth.pending == nil {
 				return ErrConflict
 			}
+			if birth.detachedReleaseRecord != nil && birth.execution != nil && birth.execution.Phase != "settled" {
+				return ErrInvalidRecord
+			}
 			s.birth, j.step = birth, "cold-quota-pending-release"
 		}
 		return err
 	case "cold-quota-pending-release":
+		if s.birth != nil && s.birth.detachedReleaseRecord != nil {
+			if err := b.validateCleanupBirthRelease(j.partition, s.birth); err != nil {
+				return err
+			}
+			// All earlier protocol calls and identified cleanup already joined.
+			// Keep only the compact verified attribution plus fresh birth while
+			// replacing this graph: two thirteen-point histories cannot coexist.
+			s.history, s.cursor = nil, nil
+			s.recovery, s.recovered = nil, nil
+			s.prepare, s.prepared = nil, nil
+			s.journal, s.permit, s.postread = nil, nil, nil
+			s.release = nil
+			j.step = "cold-quota-pending-profile"
+			return nil
+		}
 		release, err := b.readCleanupBirthRelease(j.ctx, j.partition, s.ranges, s.birth)
 		if err == nil {
 			s.release, j.step = release, "cold-quota-pending-delete"
 		}
 		return err
+	case "cold-quota-pending-profile":
+		return w.readCleanupColdQuotaPendingProfile(j, s)
 	case "cold-quota-pending-delete":
 		if err := b.deleteCleanupPending(j.ctx, j.partition, s.claims, s.birth, s.release, j); err != nil {
 			return err
+		}
+		if s.release.profile != nil {
+			pin := j.coldQuota.verified.release
+			j.result.Release = &TaskOwnerReleaseEntry{Task: j.task, CreateRevision: pin.CreateRevision, SHA256: pin.Digest}
 		}
 		w.releaseCleanupColdQuota(j)
 		j.result.Outcome, j.result.Reason, j.step = OutcomeCommitted, "complete", "done"
@@ -243,7 +269,20 @@ func (w *DueWorker) readCleanupColdQuotaSnapshot(j *cleanupLocalJob, s *cleanupC
 		return err
 	}
 	snapshot, err := decodeSnapshot(points[0], j.task.Partition, j.task.SandboxID, task.Snapshot, placement)
-	if err != nil || snapshot == nil || snapshot.LocalCleanup == nil {
+	if err != nil || snapshot == nil {
+		return ErrCorruptRecord
+	}
+	if snapshot.Version == 1 && snapshot.LocalCleanup == nil {
+		if b.detachedCleanup == nil {
+			return ErrInvalidConfiguration
+		}
+		// This classifies metadata only. The next separately paid intent read
+		// derives ordinary identity; the full signed cursor still authenticates
+		// Task/snapshot/intent/publication before any refund or settlement.
+		j.step = "cold-quota-intent"
+		return nil
+	}
+	if snapshot.LocalCleanup == nil {
 		return ErrCorruptRecord
 	}
 	workspace, err := snapshot.LocalCleanup.workspace()
@@ -251,6 +290,109 @@ func (w *DueWorker) readCleanupColdQuotaSnapshot(j *cleanupLocalJob, s *cleanupC
 		return ErrCorruptRecord
 	}
 	j.coldQuota.workspace, j.step = workspace, "cold-quota-history"
+	return nil
+}
+
+// The original immutable Task selects this actual mutable permanent intent.
+// Its RequestHash derives an ordinary detached identity, never an effect token.
+// Paid full history must still authenticate all of these source bindings.
+func (w *DueWorker) readCleanupColdQuotaDetachedIntent(j *cleanupLocalJob, s *cleanupColdQuotaWorkspace) error {
+	b, task := w.backend, j.coldQuota.record
+	key, err := b.namespace.intentKey(j.task.Partition, task.CreationIntentID)
+	if err != nil {
+		return err
+	}
+	points, err := b.readColdQuotaWorkerPoints(s.owner, w.session, j.partition, s.ranges, []string{key}, []int{4096})
+	if err != nil {
+		return err
+	}
+	kv := points[0]
+	var record CreationIntentRecord
+	if !operationPermanentKV(kv) || kv.Version <= 0 || (kv.Version == 1) != (kv.CreateRevision == kv.ModRevision) || decodeDomainRecord(kv, &record) != nil {
+		return ErrCorruptRecord
+	}
+	wire, err := encodeDomainRecord(&record)
+	if err != nil || wire != string(kv.Value) {
+		return ErrCorruptRecord
+	}
+	identity, err := decodeIdentity(b.identityValue, b.namespace)
+	if err != nil {
+		return err
+	}
+	workspace, err := detachedIdentityFromRequestHash(identity.StorageID, record.RequestHash)
+	if err != nil {
+		return err
+	}
+	intent, err := b.decodeCreationIntent(kv, workspace, task.CreationIntentID)
+	if err != nil || intent == nil || intent.Phase != "published" || intent.SandboxID != j.task.SandboxID || intent.Generation != task.Generation || workspace.Partition() != j.task.Partition || workspace.Hash() != task.WorkspaceHash {
+		return ErrCorruptRecord
+	}
+	j.coldQuota.workspace, j.step = workspace, "cold-quota-history"
+	return nil
+}
+
+// A verified detached refund rejoins the original actor's exact E/S read.
+// This route cannot start a Run, claim its physical work, or load the deleted
+// owner/control/index. Unjoined/changed E remains a refusal with P intact.
+func (w *DueWorker) routeCleanupDetachedQuotaOccupation(j *cleanupLocalJob) (bool, error) {
+	s := w.coldQuota
+	if !j.coldQuota.quotaOnly || s == nil || s.job != j || s.history == nil || s.history.profileRelease == nil {
+		return false, nil
+	}
+	if _, err := w.backend.detachedCleanupOccupationProof(j); err != nil {
+		return true, err
+	}
+	if j.state == nil {
+		j.step = "cold-quota-pending-birth"
+		return true, nil
+	}
+	r := j.state.record
+	if r.Phase == "settled" {
+		if r.Release == nil || *r.Release != j.coldQuota.verified.release {
+			return true, ErrCorruptRecord
+		}
+		j.step = "cold-quota-pending-birth"
+		return true, nil
+	}
+	if r.Phase != "occupied" || r.Run == nil || !r.Run.Joined {
+		return true, ErrInvalidRecord
+	}
+	j.step = "terminal-history"
+	return true, nil
+}
+
+// Reuse the original seven paid groups with the same original owner/members.
+// No standalone loader RPC or old mutable slot read is hidden in this phase.
+// The fresh union is joined to both birth and the same job's verified refund
+// before it can supply the existing pending-delete CAS.
+func (w *DueWorker) readCleanupColdQuotaPendingProfile(j *cleanupLocalJob, s *cleanupColdQuotaWorkspace) error {
+	b := w.backend
+	if s.birth == nil || s.birth.detachedReleaseRecord == nil || w.validateCleanupColdQuotaVerified(j) != nil {
+		return ErrInvalidRecord
+	}
+	if s.cursor == nil {
+		cursor, err := b.newColdQuotaWorkerHistory(s.owner, j.coldQuota.workspace, j.coldQuota.record.CreationIntentID, j.task, w.session, j.partition, s.ranges)
+		if err != nil {
+			return err
+		}
+		s.cursor, s.history = cursor, cursor.history
+	}
+	history, err := b.stepColdQuotaWorkerHistory(s.owner, s.cursor, w.session, j.partition, s.ranges)
+	if err != nil || history == nil {
+		return err
+	}
+	if err := w.captureCleanupColdQuotaOrigin(j, history); err != nil {
+		return err
+	}
+	release := &cleanupBirthReleaseEvidence{origin: b, partition: j.partition, birth: s.birth, profile: history.profileRelease}
+	release.self = release
+	if _, err := matchCleanupBirthReleaseEvidence(s.birth, release); err != nil {
+		return err
+	}
+	if err := b.validateCleanupColdQuotaPending(j, j.partition, s.birth, release); err != nil {
+		return err
+	}
+	s.release, j.step = release, "cold-quota-pending-delete"
 	return nil
 }
 
@@ -271,11 +413,12 @@ func (w *DueWorker) publishCleanupColdQuota(j *cleanupLocalJob, s *cleanupColdQu
 		return err
 	}
 	if j.coldQuota.quotaOnly {
-		// Detached refunds are usable, but the original pending gate still
-		// requires its v1 birth/release evidence. Do not route a v2 result into
-		// that five-RPC group or publish final P cleanup as completed.
 		if binding.detached != nil {
-			return ErrInvalidConfiguration
+			// Retain this original opaque proof while the same actor reads and
+			// settles any Joined occupation. P requires its later fresh birth
+			// and separately paid reauthentication, not this initial hint/proof.
+			j.step = "observe"
+			return nil
 		}
 		j.step = "cold-quota-pending-birth"
 		return nil

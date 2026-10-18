@@ -79,11 +79,28 @@ func validateCleanupBirthMetadata(birth *cleanupBirthEvidence, keys []string, mu
 		}
 	}
 
-	if (birth.release == nil) != (birth.releaseRecord == nil) {
-		return ErrInvalidRecord
-	}
 	if birth.release == nil {
+		if birth.releaseRecord != nil || birth.detachedReleaseRecord != nil {
+			return ErrInvalidRecord
+		}
 		return nil
+	}
+	if birth.detachedReleaseRecord != nil {
+		if birth.releaseRecord != nil {
+			return ErrInvalidRecord
+		}
+		r, f := birth.detachedReleaseRecord, birth.release
+		wire, err := encodeDetachedOwnerRelease(*r)
+		if err != nil || f.key != keys[6] || f.lease != 0 || f.create <= birth.birth || f.mod != f.create || f.mod > birth.revision || f.create <= r.Termination.ModRevision || f.create <= r.Claim.CreateRevision || wire != f.value {
+			return ErrInvalidRecord
+		}
+		if r.Task != ref || r.TaskBirth != birth.birth || r.Runtime != birth.record.Runtime || r.WorkspaceHash != birth.record.WorkspaceHash || r.Generation != birth.record.Generation {
+			return ErrInvalidRecord
+		}
+		return nil
+	}
+	if birth.releaseRecord == nil {
+		return ErrInvalidRecord
 	}
 	r, f := birth.releaseRecord, birth.release
 	wire, err := encodeLocalOwnerRelease(*r)

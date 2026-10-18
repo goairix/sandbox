@@ -31,6 +31,9 @@ type cleanupBirthEvidence struct {
 	execution                        *cleanupExecutionRecord
 	executionFence, pending, release *taskFence
 	releaseRecord                    *localOwnerReleaseRecord
+	// A strict v2 value is still only a preliminary hint. Its full opaque
+	// signed history lives later in the single paid cold workspace, not here.
+	detachedReleaseRecord *detachedOwnerReleaseRecord
 }
 
 // Validate real membership and timing under the original lifecycle lock before
@@ -420,12 +423,25 @@ func (b *Backend) cleanupBirthOptionalEvidence(e *cleanupBirthEvidence, points [
 		e.pending = &fence
 	}
 	if kv := points[2]; kv != nil {
-		r, err := decodeLocalOwnerRelease(kv)
-		if err != nil || r.Task != ref || r.TaskBirth != e.birth || r.Runtime != e.record.Runtime || r.WorkspaceHash != e.record.WorkspaceHash || r.Generation != e.record.Generation {
+		profile, err := decodeTaskOwnerReleaseProfile(ref, kv)
+		if err != nil {
 			return ErrCorruptRecord
 		}
+		if profile == taskOwnerReleaseLocal {
+			r, err := decodeLocalOwnerRelease(kv)
+			if err != nil || r.Task != ref || r.TaskBirth != e.birth || r.Runtime != e.record.Runtime || r.WorkspaceHash != e.record.WorkspaceHash || r.Generation != e.record.Generation {
+				return ErrCorruptRecord
+			}
+			e.releaseRecord = &r
+		} else {
+			r, err := decodeDetachedOwnerRelease(kv)
+			if err != nil || r.Task != ref || r.TaskBirth != e.birth || r.Runtime != e.record.Runtime || r.WorkspaceHash != e.record.WorkspaceHash || r.Generation != e.record.Generation {
+				return ErrCorruptRecord
+			}
+			e.detachedReleaseRecord = &r
+		}
 		fence := ownTaskFence(kv)
-		e.release, e.releaseRecord = &fence, &r
+		e.release = &fence
 	}
 	return nil
 }
