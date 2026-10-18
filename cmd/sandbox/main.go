@@ -53,6 +53,7 @@ func main() {
 	configPath := flag.String("config", "", "path to config file")
 	etcdStartup := flag.String("check-etcd-startup", "", "check mounted etcd deployment configuration without starting the API")
 	etcdServe := flag.String("serve-etcd", "", "serve the fixed-profile etcd HTTP API using a mounted deployment manifest")
+	etcdInventory := flag.String("initialize-etcd-inventory", "", "explicitly initialize preparation inventory from a mounted etcd deployment manifest without starting the API")
 	drainDeployment := flag.String("drain-kubernetes-deployment", "", "scale this in-cluster Deployment to zero and wait for its Pods")
 	drainNamespace := flag.String("drain-kubernetes-namespace", "", "namespace containing the Deployment to drain")
 	drainHPA := flag.String("drain-kubernetes-hpa", "", "optional HPA to delete before draining the Deployment")
@@ -72,6 +73,15 @@ func main() {
 	flag.Parse()
 	supplied := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
+	if supplied["initialize-etcd-inventory"] {
+		initializeCtx, stopInitialize := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stopInitialize()
+		if _, initializeErr := runEtcdInventoryInitialization(initializeCtx, supplied, flag.Args(), *etcdInventory); initializeErr != nil {
+			log.Fatalf("etcd inventory initialization failed: %v", initializeErr)
+		}
+		log.Print("etcd inventory initialization passed")
+		return
+	}
 	if supplied["serve-etcd"] {
 		serveCtx, stopServe := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stopServe()

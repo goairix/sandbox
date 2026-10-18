@@ -63,16 +63,73 @@ func positiveDuration(value string) (time.Duration, error) {
 
 // Open consumes existing operator-provisioned metadata and inventory only.
 func Open(ctx context.Context, path string) (*Deployment, error) {
-	return open(ctx, path, false)
+	return open(ctx, path, openService)
 }
 
 // OpenHTTP requires explicit HTTP settings before any credential or Backend
 // initialization. Open preserves compatibility with read-only check manifests.
 func OpenHTTP(ctx context.Context, path string) (*Deployment, error) {
-	return open(ctx, path, true)
+	return open(ctx, path, openHTTP)
 }
 
-func open(ctx context.Context, path string, requireHTTP bool) (*Deployment, error) {
+// InitializeInventory is an explicit operator action on the mounted deployment's
+// original preparation profile. Identity and trust must already be provisioned.
+// It never starts a Service, worker or runtime. Each original CAS creates at most
+// eight slots; an error, including an unknown write result, ends this invocation
+// without retry. A later explicit invocation resumes the durable progress.
+// The 30-second total deadline bounds loading and initialization; all owned
+// resources are physically closed before returning, including on cancellation.
+func InitializeInventory(ctx context.Context, path string) (err error) {
+	if ctx == nil {
+		return errConfiguration
+	}
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	d, err := open(bounded, path, openInventory)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := d.Close()
+		err = errors.Join(err, closeErr, bounded.Err())
+	}()
+
+	var maxCalls uint64
+	for calls := uint64(0); ; calls++ {
+		if err := bounded.Err(); err != nil {
+			return err
+		}
+		progress, err := d.backend.InitializePreparationInventory(bounded)
+		if err != nil {
+			return err
+		}
+		if progress.Ready {
+			return bounded.Err()
+		}
+		if calls == 0 {
+			// Original initialization has one initial progress CAS, at most
+			// ceil(Total/8) slot batches, and one final ready CAS. Total is
+			// authenticated by the original fixed-profile progress decoder.
+			maxCalls = 2 + (progress.Total+7)/8
+		}
+		if calls+1 >= maxCalls {
+			return state.ErrPreparationNotReady
+		}
+	}
+}
+
+// The inventory path shares the complete mounted loader through Backend.New,
+// then returns before constructing the Service that requires inventory ready.
+// Neither ordinary loader mode can enter the operator's mutation loop.
+type openMode uint8
+
+const (
+	openService openMode = iota
+	openHTTP
+	openInventory
+)
+
+func open(ctx context.Context, path string, mode openMode) (*Deployment, error) {
 	if ctx == nil {
 		return nil, errConfiguration
 	}
@@ -87,7 +144,7 @@ func open(ctx context.Context, path string, requireHTTP bool) (*Deployment, erro
 	if err != nil {
 		return nil, err
 	}
-	if requireHTTP && m.HTTP == nil {
+	if mode == openHTTP && m.HTTP == nil {
 		return nil, fileError("HTTP settings required")
 	}
 	base := filepath.Dir(path)
@@ -197,6 +254,10 @@ func open(ctx context.Context, path string, requireHTTP bool) (*Deployment, erro
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("deployment backend: %w", err), d.Close())
 	}
+	if mode == openInventory {
+		return d, nil
+	}
+
 	r, defaults := m.Resources, m.Business.Defaults
 	dr := defaults.Resources
 	d.service, err = provisioning.NewPlainColdService(ctx, provisioning.PlainColdOptions{Backend: d.backend, API: kube.EnrolledBridgeOptions{Config: api, Namespace: m.Kubernetes.Namespace, MaxActive: m.Kubernetes.MaxActive, RequestTimeout: apiTimeout}, Image: m.Image, NodeName: m.NodeName, NodeUID: launcher.Enrollment.NodeUID, NodeBootID: launcher.Enrollment.NodeBootID, WorkerID: m.WorkerID, CPU: r.CPU, Memory: r.Memory, Disk: r.Disk, TmpDisk: r.TmpDisk, QuotaPartition: m.Preparation.QuotaPartition, LauncherConfig: launcherWire, RootPrivateKey: root, IssuerPrivateKey: issuer, IssuerCertificate: issuerWire, Clock: clock, Business: &provisioning.PlainColdBusinessOptions{Principal: m.Business.Principal, Defaults: sandboxsnapshot.Defaults{TimeoutSeconds: defaults.TimeoutSeconds, Resources: types.ResourceLimits{CPU: dr.CPU, Memory: dr.Memory, Disk: dr.Disk, TmpDisk: dr.TmpDisk}}}})
