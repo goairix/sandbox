@@ -15,14 +15,20 @@ import (
 )
 
 const (
-	MaxInputBytes   = 1 << 20
-	MaxOutputBytes  = 1 << 20
-	MaxStderrBytes  = 64 << 10
+	MaxInputBytes  = 1 << 20
+	MaxOutputBytes = 1 << 20
+	MaxStderrBytes = 64 << 10
+	// MaxContentBytes limits individual file payloads to 512 KiB. Binary upload
+	// uses JSON base64 within MaxInputBytes (1 MiB), also the signed Exec stdin
+	// ceiling; neither this helper nor HTTP admission offers a large-file stream.
 	MaxContentBytes = 512 << 10
 	MaxEntries      = 10000
 	MaxDepth        = 64
 )
 
+// Request is one finite unprivileged file operation. It conveys no control,
+// ownership or reusable execution capability; the original signed Exec binds
+// its complete encoded bytes before the helper can access the filesystem.
 type Request struct {
 	Operation  string `json:"operation"`
 	Path       string `json:"path"`
@@ -36,6 +42,9 @@ type Request struct {
 	NewStr     string `json:"new_str,omitempty"`
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 	NewContent string `json:"new_content,omitempty"`
+	// Content is binary input for upload only. JSON encodes it as base64; an
+	// absent value on upload denotes an empty file, not an omitted operation.
+	Content []byte `json:"content,omitempty"`
 }
 
 type Failure struct {
@@ -103,7 +112,7 @@ func Validate(req Request) error {
 		return invalid
 	}
 	switch req.Operation {
-	case "list", "list-recursive", "glob", "read", "download", "read-lines", "edit", "edit-lines":
+	case "list", "list-recursive", "glob", "read", "download", "read-lines", "edit", "edit-lines", "upload":
 	default:
 		return invalid
 	}
@@ -118,6 +127,15 @@ func Validate(req Request) error {
 	}
 	if len(req.OldStr) > MaxContentBytes || len(req.NewStr) > MaxContentBytes || len(req.NewContent) > MaxContentBytes {
 		return failureCode("limit_exceeded")
+	}
+	if len(req.Content) > MaxContentBytes {
+		return failureCode("limit_exceeded")
+	}
+	if req.Operation != "upload" && len(req.Content) != 0 {
+		return invalid
+	}
+	if req.Operation == "upload" && (req.Pattern != "" || req.MaxDepth != 0 || req.Page != 0 || req.PageSize != 0 || req.StartLine != 0 || req.EndLine != 0 || req.OldStr != "" || req.NewStr != "" || req.ReplaceAll || req.NewContent != "") {
+		return invalid
 	}
 	if req.Operation == "glob" {
 		if req.Pattern == "" || len(req.Pattern) > 4096 || !utf8.ValidString(req.Pattern) || strings.ContainsRune(req.Pattern, 0) || path.IsAbs(req.Pattern) {

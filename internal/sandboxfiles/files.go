@@ -76,6 +76,9 @@ func runAt(req Request, root *os.Root) Result {
 	if req.Operation == "edit" || req.Operation == "edit-lines" {
 		return edit(req, root, rel)
 	}
+	if req.Operation == "upload" {
+		return upload(req, root, rel)
+	}
 	file, err := root.OpenFile(rel, os.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return failure(err)
@@ -326,18 +329,71 @@ func edit(req Request, root *os.Root, rel string) Result {
 	if err != nil {
 		return failure(err)
 	}
+	return publishFile(parent, base, output, info.Mode().Perm())
+}
+
+// upload creates or replaces without reading the prior file. Every parent is
+// opened relative to the preceding pinned FD with no symlink traversal, and
+// the final no-follow stat rejects directories/FIFOs without opening them.
+// Missing parents are created as the same unprivileged helper user; no ambient
+// path is reopened between staging and publication.
+func upload(req Request, root *os.Root, rel string) Result {
+	if rel == "." {
+		return failed("unsupported_type")
+	}
+	parent, err := root.OpenFile(".", os.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return failure(err)
+	}
+	defer func() { _ = parent.Close() }()
+	for _, component := range strings.Split(path.Dir(rel), "/") {
+		if component == "." {
+			continue
+		}
+		if err := unix.Mkdirat(int(parent.Fd()), component, 0755); err != nil && !errors.Is(err, unix.EEXIST) {
+			return failure(err)
+		}
+		next, err := openChildDirectory(parent, component)
+		if err != nil {
+			return failure(err)
+		}
+		previous := parent
+		parent = next
+		if err := previous.Close(); err != nil {
+			return failure(err)
+		}
+	}
+
+	base := path.Base(rel)
+	var target unix.Stat_t
+	err = unix.Fstatat(int(parent.Fd()), base, &target, unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return failure(err)
+	}
+	if err == nil && target.Mode&unix.S_IFMT != unix.S_IFREG {
+		return failed("unsupported_type")
+	}
+	return publishFile(parent, base, req.Content, 0644)
+}
+
+// publishFile publishes complete bytes through one already pinned parent FD.
+// Edit supplies its original permissions; upload supplies 0644. Every failure
+// before rename leaves the old inode untouched and removes the staging name.
+// Once rename succeeds, a failed parent Sync is publication uncertainty, never
+// an assertion that the old file survived or permission to retry automatically.
+func publishFile(parent *os.File, base string, output []byte, mode os.FileMode) Result {
 	var random [16]byte
-	if _, err = rand.Read(random[:]); err != nil {
+	if _, err := rand.Read(random[:]); err != nil {
 		return failure(err)
 	}
 	tmp := ".sandbox-file-" + hex.EncodeToString(random[:])
-	fd, err = unix.Openat(int(parent.Fd()), tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	fd, err := unix.Openat(int(parent.Fd()), tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return failure(err)
 	}
 	defer unix.Unlinkat(int(parent.Fd()), tmp, 0)
 	staged := os.NewFile(uintptr(fd), tmp)
-	if err = staged.Chmod(info.Mode().Perm()); err == nil {
+	if err = staged.Chmod(mode.Perm()); err == nil {
 		var n int
 		n, err = staged.Write(output)
 		if err == nil && n != len(output) {

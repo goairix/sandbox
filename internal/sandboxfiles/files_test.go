@@ -2,6 +2,7 @@ package sandboxfiles
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -45,6 +46,165 @@ func fileFailure(t *testing.T, result Result, code string) {
 	t.Helper()
 	if result.Error == nil || result.Error.Code != code {
 		t.Fatalf("want %s, got %+v", code, result)
+	}
+}
+
+// Use the existing JSON boundary so these tests compile before the upload
+// branch exists. They exercise real rooted filesystem changes, not a writer
+// replacement or a claimed execution/ownership receipt.
+func fileUploadRequest(t *testing.T, path string, content []byte) Request {
+	t.Helper()
+	wire, err := json.Marshal(struct {
+		Operation string `json:"operation"`
+		Path      string `json:"path"`
+		Content   []byte `json:"content"`
+	}{"upload", path, content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request Request
+	if err := json.Unmarshal(wire, &request); err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func TestSandboxFilesUploadCreatesParentsAndReplacesAtomically(t *testing.T) {
+	dir, root := filesFixture(t)
+	content := bytes.Repeat([]byte{0, 255, 128, 'x'}, MaxContentBytes/4)
+	fileOK(t, root, fileUploadRequest(t, "/workspace/new/parent/payload.bin", content))
+	name := filepath.Join(dir, "new", "parent", "payload.bin")
+	got, err := os.ReadFile(name)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("bounded binary create failed: length=%d err=%v", len(got), err)
+	}
+	info, err := os.Stat(name)
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatal("upload did not create mode 0644", info, err)
+	}
+	if err := os.Chmod(name, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	fileOK(t, root, fileUploadRequest(t, "/workspace/new/parent/payload.bin", []byte("replacement")))
+	got, err = os.ReadFile(name)
+	if err != nil || string(got) != "replacement" {
+		t.Fatal("replacement failed", string(got), err)
+	}
+	info, err = os.Stat(name)
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatal("upload unexpectedly preserved old permissions", info, err)
+	}
+	previous := make([]byte, len(content))
+	n, err := original.Read(previous)
+	if err != nil || n != len(content) || !bytes.Equal(previous, content) {
+		t.Fatal("upload modified the original inode before publication", n, err)
+	}
+
+	// Upload replaces without reading the old file, unlike text edit. A large
+	// existing destination therefore cannot impose the edit read-size limit.
+	fileWrite(t, filepath.Dir(name), "large-old", bytes.Repeat([]byte{'x'}, MaxContentBytes+1), 0600)
+	fileOK(t, root, fileUploadRequest(t, "/workspace/new/parent/large-old", []byte("small")))
+	fileOK(t, root, fileUploadRequest(t, "/workspace/new/parent/empty", nil))
+	info, err = os.Stat(filepath.Join(dir, "new", "parent", "empty"))
+	if err != nil || info.Size() != 0 {
+		t.Fatal("empty upload failed", info, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(name))
+	if err != nil || len(entries) != 3 {
+		t.Fatal("upload leaked staging files", entries, err)
+	}
+}
+
+func TestSandboxFilesUploadRejectsUnsafeTargetsAndOversize(t *testing.T) {
+	dir, root := filesFixture(t)
+	fileWrite(t, dir, "original", []byte("untouched"), 0600)
+	if err := os.Symlink("original", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(dir, "fifo"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "directory"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "real-parent"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real-parent", filepath.Join(dir, "parent-link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"link", "fifo", "directory", "parent-link/child"} {
+		t.Run(name, func(t *testing.T) {
+			request := fileUploadRequest(t, "/workspace/"+name, []byte("bad"))
+			done := make(chan Result, 1)
+			go func() { done <- runAt(request, root) }()
+			select {
+			case result := <-done:
+				fileFailure(t, result, "unsupported_type")
+			case <-time.After(time.Second):
+				t.Fatal("special upload destination blocked before refusal")
+			}
+		})
+	}
+	fileFailure(t, runAt(fileUploadRequest(t, "/workspace/original", bytes.Repeat([]byte{'x'}, MaxContentBytes+1)), root), "limit_exceeded")
+	fileFailure(t, runAt(fileUploadRequest(t, "/workspace/../outside", []byte("bad")), root), "invalid_request")
+	got, err := os.ReadFile(filepath.Join(dir, "original"))
+	if err != nil || string(got) != "untouched" {
+		t.Fatal("refused upload changed the destination", string(got), err)
+	}
+	if info, err := os.Lstat(filepath.Join(dir, "link")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("refused upload replaced the symlink", info, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 6 {
+		t.Fatal("refused upload leaked staging files", entries, err)
+	}
+	children, err := os.ReadDir(filepath.Join(dir, "real-parent"))
+	if err != nil || len(children) != 0 {
+		t.Fatal("upload followed a parent symlink", children, err)
+	}
+}
+
+// Linux O_PATH directory descriptors support *at publication but reject fsync.
+// This induces a real post-rename Sync failure without a global syscall hook or
+// fake success. The failure must report uncertainty even though bytes changed.
+func TestSandboxFilesUploadPublishUncertain(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux O_PATH parent descriptor semantics")
+	}
+	dir, _ := filesFixture(t)
+	fileWrite(t, dir, "target", []byte("old"), 0600)
+	original, err := os.Open(filepath.Join(dir, "target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	// O_PATH is 0x200000 on the supported Linux amd64/arm64 platforms. Keep
+	// the literal local so this existing cross-platform test file also builds.
+	const linuxOpenPath = 0x200000
+	fd, err := unix.Open(dir, linuxOpenPath|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := os.NewFile(uintptr(fd), dir)
+	defer parent.Close()
+	fileFailure(t, publishFile(parent, "target", []byte("new"), 0644), "publish_uncertain")
+	got, err := os.ReadFile(filepath.Join(dir, "target"))
+	if err != nil || string(got) != "new" {
+		t.Fatal("test did not reach actual publication before Sync failure", string(got), err)
+	}
+	old := make([]byte, 3)
+	if n, err := original.Read(old); err != nil || n != 3 || string(old) != "old" {
+		t.Fatal("publication modified the original inode", n, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("uncertain publication leaked staging data", entries, err)
 	}
 }
 
