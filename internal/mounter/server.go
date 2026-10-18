@@ -169,7 +169,10 @@ func (s *Server) dispatch(ctx context.Context, command string, input []byte) ([]
 		if command == "health-prepared" {
 			status, err = s.Supervisor.PreparedStatus(ctx)
 		} else {
-			status, err = s.Supervisor.ReadyStatus(ctx)
+			// First mount establishment still uses the original concrete check.
+			// Once ready, this read-only RPC consumes the same resident sample
+			// as HTTP readiness instead of spawning another filesystem scan.
+			status, err = s.Supervisor.readyStatus(ctx, true)
 		}
 		if err != nil {
 			return nil, err

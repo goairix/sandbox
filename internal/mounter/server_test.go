@@ -141,6 +141,91 @@ func TestOperationMayOutliveFramingDeadline(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// This exercises the existing dispatcher with its actual resident observer.
+// The injected accounting model deliberately differs from the empty directory:
+// a request that walks the directory again returns zero instead of this sample.
+func TestServerReadyConsumesResidentSample(t *testing.T) {
+	supervisor, observer := residentControlObserver(t)
+	usage := observer.cache.Load().Snapshot()
+	usage.Bytes = 37
+	observer.cache.Load().usage.Store(&usage)
+	server := &Server{Supervisor: supervisor}
+	output, err := server.dispatch(context.Background(), "health-ready", []byte(`{}`))
+	require.NoError(t, err)
+	var status fuseprotocol.MounterStatus
+	require.NoError(t, fuseprotocol.DecodeExact(output, &status))
+	require.Equal(t, "ready", status.State)
+	require.Equal(t, "uid-a", status.RuntimeUID)
+	require.Equal(t, validAuthorization().LeaseGeneration, status.Generation)
+	require.Equal(t, int64(37), status.CacheBytes, "the request must use the resident incremental accounting sample")
+	require.Equal(t, usage.LimitBytes, status.CacheLimitBytes)
+}
+
+// Canonical local state can change while an earlier observation is retained.
+// A ready-shaped reply from a fresh filesystem check must not replace missing,
+// old or differently bound resident evidence in this read-only request path.
+func TestServerReadyRefusesChangedResidentSample(t *testing.T) {
+	for _, fault := range []string{"sample-age", "cache-age", "generation", "runtime-uid", "mount-id", "process", "unknown-cache"} {
+		t.Run(fault, func(t *testing.T) {
+			supervisor, observer := residentControlObserver(t)
+			switch fault {
+			case "sample-age":
+				sample := *observer.sample.Load()
+				sample.observedAt = time.Now().Add(-4 * time.Second)
+				observer.sample.Store(&sample)
+			case "cache-age":
+				usage := observer.cache.Load().Snapshot()
+				usage.ObservedAt = time.Now().Add(-4 * time.Second)
+				observer.cache.Load().usage.Store(&usage)
+			case "unknown-cache":
+				observer.cache.Load().usage.Store(&CacheUsage{})
+			default:
+				supervisor.mu.Lock()
+				switch fault {
+				case "generation":
+					supervisor.auth.LeaseGeneration++
+				case "runtime-uid":
+					supervisor.bootstrap.RuntimeUID = "successor-uid"
+				case "mount-id":
+					supervisor.mountID++
+				case "process":
+					supervisor.processDone = make(chan struct{})
+				}
+				supervisor.mu.Unlock()
+			}
+			_, err := (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{}`))
+			require.Error(t, err, "a request cannot manufacture a replacement positive observation")
+		})
+	}
+}
+
+// The ordinary injectable supervisor/observer is the model boundary. Accounting
+// has an explicit joined lifetime, so no periodic producer can overwrite a
+// deliberately stale or unknown observation during these request assertions.
+func residentControlObserver(t *testing.T) (*Supervisor, *readinessObserver) {
+	t.Helper()
+	supervisor, _ := residentReadySupervisor(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	observer := newReadinessObserver(ctx, supervisor, func(parent context.Context, config CacheMonitorConfig) (*CacheMonitor, error) {
+		cacheContext, stop := context.WithCancel(parent)
+		cache := &CacheMonitor{ctx: cacheContext, cancel: stop, done: make(chan struct{})}
+		cache.usage.Store(&CacheUsage{Known: true, LimitBytes: config.LimitBytes, ObservedAt: time.Now()})
+		go func() {
+			defer close(cache.done)
+			<-cacheContext.Done()
+		}()
+		return cache, nil
+	})
+	joined := make(chan error, 1)
+	go func() { joined <- observer.run() }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-joined)
+	})
+	waitResidentReady(t, observer)
+	return supervisor, observer
+}
+
 func TestServerClientPreservesSafeReadyDiagnostic(t *testing.T) {
 	runner := &fakeRunner{process: &fakeProcess{exit: make(chan error, 1)}}
 	supervisor, _ := newTestSupervisor(t, runner)

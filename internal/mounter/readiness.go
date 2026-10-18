@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 const (
@@ -20,6 +22,8 @@ const (
 )
 
 type readinessIdentity struct {
+	runtimeUID  string
+	poolKey     string
 	generation  int64
 	mountID     uint64
 	processDone chan struct{}
@@ -51,12 +55,39 @@ func newReadinessObserver(ctx context.Context, supervisor *Supervisor, startCach
 }
 
 func (o *readinessObserver) run() (result error) {
+	// The original resident loop is also the Unix health consumer's owner.
+	// Retain registration until its syscall and cache backend have actually
+	// joined: cancellation must not allow a replacement probe to reuse the slot.
+	s := o.supervisor
+	if err := s.checkNativeBinding(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.readiness != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("resident readiness observer is already running")
+	}
+	s.readiness = o
+	s.mu.Unlock()
 	defer func() {
 		o.sample.Store(nil)
 		if cache := o.cache.Load(); cache != nil {
-			result = errors.Join(result, cache.Close())
+			closeErr := cache.Close()
+			result = errors.Join(result, closeErr)
+			if closeErr != nil {
+				// A failed backend Close does not certify its reader joined.
+				// Retain this stopped owner so a replacement observer cannot
+				// reuse the original accounting slot after uncertain teardown.
+				return
+			}
 		}
+		s.mu.Lock()
+		if s.readiness == o {
+			s.readiness = nil
+		}
+		s.mu.Unlock()
 	}()
+
 	for {
 		if o.ctx.Err() != nil {
 			return nil
@@ -141,23 +172,42 @@ func (o *readinessObserver) refresh() (bool, error) {
 }
 
 func (o *readinessObserver) ready(now time.Time) bool {
-	if o.ctx.Err() != nil {
-		return false
-	}
-	sample := o.sample.Load()
-	if sample == nil || !readinessFresh(sample.observedAt, now) {
-		return false
-	}
-	cache := o.cache.Load()
-	if cache == nil || !cacheReady(cache.Snapshot(), sample.identity.cacheLimit, now) {
-		return false
-	}
 	if !o.supervisor.mu.TryLock() {
 		return false
 	}
+	defer o.supervisor.mu.Unlock()
+	_, err := o.statusLocked(now)
+	return err == nil
+}
+
+// statusLocked returns only a resident observation bound to this exact mount
+// and process completion channel. The caller holds Supervisor.mu. It performs
+// no filesystem work, never extends sample age and grants no flush or release
+// authority. An in-flight probe has already cleared sample before its syscall.
+func (o *readinessObserver) statusLocked(now time.Time) (fuseprotocol.MounterStatus, error) {
+	if o.ctx.Err() != nil {
+		return fuseprotocol.MounterStatus{}, fmt.Errorf("resident readiness is stopped")
+	}
+	sample := o.sample.Load()
+	if sample == nil || !readinessFresh(sample.observedAt, now) {
+		return fuseprotocol.MounterStatus{}, fmt.Errorf("resident readiness sample is unknown")
+	}
+	cache := o.cache.Load()
+	if cache == nil {
+		return fuseprotocol.MounterStatus{}, fmt.Errorf("resident cache sample is unknown")
+	}
+	usage := cache.Snapshot()
+	if !cacheReady(usage, sample.identity.cacheLimit, now) {
+		return fuseprotocol.MounterStatus{}, fmt.Errorf("resident cache sample is unknown")
+	}
 	current, ready := o.supervisor.readinessIdentityLocked()
-	o.supervisor.mu.Unlock()
-	return ready && current == sample.identity
+	if !ready || current != sample.identity {
+		return fuseprotocol.MounterStatus{}, fmt.Errorf("resident readiness identity changed")
+	}
+	status := o.supervisor.statusLocked()
+	status.CacheBytes, status.CacheLimitBytes = usage.Bytes, usage.LimitBytes
+	status.CacheExceeded = usage.Bytes >= usage.LimitBytes
+	return status, nil
 }
 
 // readinessIdentityLocked reads only resident state and the already-owned child
@@ -171,7 +221,7 @@ func (s *Supervisor) readinessIdentityLocked() (readinessIdentity, bool) {
 	if s.nativeOwner != nil && (s.nativeOwner.revoked || s.nativeOwner.closed) {
 		return readinessIdentity{}, false
 	}
-	if !s.bootstrapped || s.state != StateReady || s.stopping || s.shutdownTried || s.process == nil || s.processDone == nil || s.mountID == 0 || s.auth.LeaseGeneration <= 0 {
+	if !s.bootstrapped || s.state != StateReady || s.stopping || s.shutdownTried || s.process == nil || s.processDone == nil || s.mountID == 0 || s.auth.LeaseGeneration <= 0 || s.bootstrap.RuntimeUID == "" || s.bootstrap.PoolKey == "" {
 		return readinessIdentity{}, false
 	}
 	select {
@@ -180,6 +230,8 @@ func (s *Supervisor) readinessIdentityLocked() (readinessIdentity, bool) {
 	default:
 	}
 	return readinessIdentity{
+		runtimeUID:  s.bootstrap.RuntimeUID,
+		poolKey:     s.bootstrap.PoolKey,
 		generation:  s.auth.LeaseGeneration,
 		mountID:     s.mountID,
 		processDone: s.processDone,

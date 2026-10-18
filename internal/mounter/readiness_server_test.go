@@ -129,8 +129,12 @@ func TestReadinessHTTPCancellationClosesListenerButRetainsBlockedObserver(t *tes
 	entered, release := make(chan struct{}), make(chan struct{})
 	var unblock sync.Once
 	defer unblock.Do(func() { close(release) })
+	var calls atomic.Int32
 	supervisor.mu.Lock()
 	supervisor.config.MountInfo = func() (Mount, error) {
+		if calls.Add(1) != 1 {
+			return Mount{}, errors.New("health request launched a second mount check")
+		}
 		close(entered)
 		<-release
 		return mount, nil
@@ -148,7 +152,13 @@ func TestReadinessHTTPCancellationClosesListenerButRetainsBlockedObserver(t *tes
 	case <-time.After(time.Second):
 		t.Fatal("mount syscall slot did not begin")
 	}
+	_, err = (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{}`))
+	require.Error(t, err, "the blocked original probe leaves readiness unknown")
+	require.Equal(t, int32(1), calls.Load(), "a request cannot borrow a second syscall slot")
 	cancel()
+	_, err = (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{}`))
+	require.Error(t, err, "cancellation cannot restart mount checks while Close is joining the original observer")
+	require.Equal(t, int32(1), calls.Load())
 	select {
 	case <-joined:
 		t.Fatal("HTTP server returned while its original observer was still blocked")
@@ -222,6 +232,14 @@ func TestReadinessHTTPRetainsCacheBackendCloseFailure(t *testing.T) {
 	}
 	cancel()
 	require.ErrorIs(t, <-joined, want)
+	supervisor.mu.Lock()
+	retained := supervisor.readiness
+	supervisor.mu.Unlock()
+	require.NotNil(t, retained, "uncertain cache teardown must retain the original observer slot")
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	replacement := newReadinessObserver(stopped, supervisor, nil)
+	require.Error(t, replacement.run(), "even a canceled replacement cannot acquire an uncertified accounting slot")
 }
 
 func TestReadinessHTTPCancellationDuringCacheStartupIsNormal(t *testing.T) {

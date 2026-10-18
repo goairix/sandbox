@@ -93,6 +93,10 @@ type Supervisor struct {
 	shutdownSignaled bool
 	mountID          uint64
 	mountDeadline    time.Time
+
+	// readiness is the one resident sampler, registered until its original
+	// mount check and cache backend join. Supervisor.mu owns this association.
+	readiness *readinessObserver
 }
 
 // NewSupervisor constructs the injectable state-machine model. It makes no
@@ -432,7 +436,18 @@ func (s *Supervisor) checkPreparedLocked() error {
 	return nil
 }
 
+// ReadyStatus establishes the initial mount and performs exact management-time
+// mount/cache checks. Read-only control polling uses the shared resident sample
+// after establishment; neither result is remote-settlement or release evidence.
 func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatus, error) {
+	return s.readyStatus(ctx, false)
+}
+
+// The management entry retains its exact mount/cache checks. Only the existing
+// read-only health-ready dispatcher selects resident mode. Selection happens
+// under the original mutex, so concurrent first-health requests cannot both
+// observe mounting and then perform independent full-cache scans after ready.
+func (s *Supervisor) readyStatus(ctx context.Context, resident bool) (fuseprotocol.MounterStatus, error) {
 	if err := s.checkNativeBinding(); err != nil {
 		return fuseprotocol.MounterStatus{}, err
 	}
@@ -444,6 +459,12 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 	}
 	if err := s.validateNativeLocked(); err != nil {
 		return status, err
+	}
+	if resident && s.state == StateReady {
+		if s.readiness == nil || s.readiness.supervisor != s {
+			return status, fmt.Errorf("resident readiness observer is unavailable")
+		}
+		return s.readiness.statusLocked(time.Now())
 	}
 	if err, exited := s.processExitErrorLocked(); exited {
 		s.state = StateUnhealthy
