@@ -41,8 +41,16 @@ type observerSlot struct {
 	wire         []byte
 	anchor       *processAnchor
 	ownerDone    chan struct{}
-	running      bool
-	pending      []byte
+
+	// The helper is a read-only side owner, never the termination anchor.
+	// Retain its identity/window across connection loss so reconnecting the
+	// same sequence cannot buy a fresh validity interval or replace PID1.
+	mounter       *mounterHealthChannel
+	mounterBound  bool
+	mounterKernel processFacts
+	mounterWindow mounterSampleWindow
+	running       bool
+	pending       []byte
 }
 
 type Observer struct {
@@ -61,6 +69,7 @@ type Observer struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	enroll        *net.UnixListener
+	mounter       *net.UnixListener
 	commands      net.Listener
 	connections   map[net.Conn]struct{}
 	rpcs          chan struct{}
@@ -350,12 +359,43 @@ func (o *Observer) stop() {
 	if o.commands != nil {
 		_ = o.commands.Close()
 	}
+	if o.mounter != nil {
+		_ = o.mounter.Close()
+	}
 	for conn := range o.connections {
 		_ = conn.Close()
 	}
 }
 
+// Serve retains the original enrollment/termination surface without enabling
+// the optional FUSE helper channel or increasing its descriptor requirement.
 func (o *Observer) Serve(ctx context.Context, enroll *net.UnixListener, commands net.Listener) error {
+	return o.serve(ctx, enroll, commands, nil)
+}
+
+// ServeWithMounter additionally serves the fixed root-only FUSE health socket.
+// It joins original helper IO before retiring any process anchors. Diagnostics
+// remain separate from the enrollment and termination command surfaces.
+func (o *Observer) ServeWithMounter(ctx context.Context, enroll *net.UnixListener, commands net.Listener, mounter *net.UnixListener) error {
+	if mounter == nil {
+		if enroll != nil {
+			_ = enroll.Close()
+		}
+		if commands != nil {
+			_ = commands.Close()
+		}
+		return fmt.Errorf("missing mounter health listener")
+	}
+	return o.serve(ctx, enroll, commands, mounter)
+}
+
+func (o *Observer) serve(ctx context.Context, enroll *net.UnixListener, commands net.Listener, mounter *net.UnixListener) error {
+	adopted := false
+	defer func() {
+		if !adopted && mounter != nil {
+			_ = mounter.Close()
+		}
+	}()
 	if o == nil || ctx == nil || enroll == nil || commands == nil {
 		if enroll != nil {
 			_ = enroll.Close()
@@ -372,6 +412,24 @@ func (o *Observer) Serve(ctx context.Context, enroll *net.UnixListener, commands
 		_ = commands.Close()
 		return fmt.Errorf("observer enrollment socket/parent must be root-owned 0600/0700")
 	}
+	if mounter != nil {
+		// Six launcher and six helper handles plus one resident connection per
+		// slot; at most MaxActive registrations can hold six temporary handles
+		// and a socket before admission. Keep the original fixed 64-FD reserve.
+		var limits unix.Rlimit
+		healthPath := mounter.Addr().String()
+		budget := uint64(o.options.MaxSlots)*13 + uint64(o.options.MaxActive)*7 + 64
+		if unix.Getrlimit(unix.RLIMIT_NOFILE, &limits) != nil || limits.Cur < budget {
+			_ = enroll.Close()
+			_ = commands.Close()
+			return fmt.Errorf("observer mounter descriptor budget unavailable")
+		}
+		if healthPath != "/run/sandbox-node-observer/mounter-health/roothealth.sock" || unix.Lstat(healthPath, &socket) != nil || socket.Mode&unix.S_IFMT != unix.S_IFSOCK || socket.Mode&0777 != 0600 || socket.Uid != 0 || unix.Lstat(filepath.Dir(healthPath), &parent) != nil || parent.Mode&unix.S_IFMT != unix.S_IFDIR || parent.Mode&0777 != 0700 || parent.Uid != 0 {
+			_ = enroll.Close()
+			_ = commands.Close()
+			return fmt.Errorf("observer mounter socket/parent must be fixed root-owned 0600/0700")
+		}
+	}
 	o.mu.Lock()
 	if o.served || o.stopping {
 		o.mu.Unlock()
@@ -380,6 +438,8 @@ func (o *Observer) Serve(ctx context.Context, enroll *net.UnixListener, commands
 		return fmt.Errorf("observer already served or closed")
 	}
 	o.served, o.enroll, o.commands = true, enroll, commands
+	o.mounter = mounter
+	adopted = true
 	o.mu.Unlock()
 	defer close(o.serveDone)
 	stopped := make(chan struct{})
@@ -396,16 +456,25 @@ func (o *Observer) Serve(ctx context.Context, enroll *net.UnixListener, commands
 	if err != nil {
 		return err
 	}
-	results := make(chan error, 2)
+	listeners := 2
+	if mounter != nil {
+		listeners++
+	}
+	results := make(chan error, listeners)
 	go func() { results <- o.accept(enroll, nil) }()
 	go func() { results <- o.accept(commands, config) }()
-	first := <-results
+	if mounter != nil {
+		go func() { results <- o.acceptMounter(mounter) }()
+	}
+	result := <-results
 	o.stop()
-	second := <-results
+	for remaining := 1; remaining < listeners; remaining++ {
+		result = errors.Join(result, <-results)
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
-	return errors.Join(first, second)
+	return result
 }
 
 func (o *Observer) accept(listener net.Listener, config *tls.Config) error {

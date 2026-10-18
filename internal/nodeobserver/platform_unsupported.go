@@ -6,6 +6,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
 
 type Observer struct{}
@@ -25,3 +28,16 @@ func (*Observer) Serve(_ context.Context, enroll *net.UnixListener, commands net
 }
 
 func (*Observer) Close() error { return nil }
+
+// ServeWithMounter cannot authenticate native process anchors on this kernel.
+func (o *Observer) ServeWithMounter(ctx context.Context, enroll *net.UnixListener, commands net.Listener, mounter *net.UnixListener) error {
+	if mounter != nil {
+		_ = mounter.Close()
+	}
+	return o.Serve(ctx, enroll, commands)
+}
+
+// ReadMounterReadiness returns no positive observation without native support.
+func (*Observer) ReadMounterReadiness(context.Context, p.RuntimeIdentityContext, string, int64, uint8) (fuseprotocol.MounterReadiness, error) {
+	return fuseprotocol.MounterReadiness{}, fmt.Errorf("unsupported node observer kernel")
+}

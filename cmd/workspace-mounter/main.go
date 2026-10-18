@@ -191,12 +191,26 @@ func supervise() (result error) {
 	defer stop()
 	server := mounter.Server{Supervisor: supervisor, SocketPath: filepath.Clean(controlSocket), ExpectedRuntimeUID: expectedUID, IOTimeout: 10 * time.Second}
 	readiness := &mounter.ReadinessServer{Supervisor: supervisor}
-	serveErr := serveMounterServices(
-		ctx,
+	services := []func(context.Context) error{
 		server.Serve,
 		(&mounter.DockerReaperServer{}).Serve,
 		readiness.Serve,
-	)
+	}
+	// Only the enrolled FUSE Version2 template supplies this complete group.
+	// Old Docker/manager deployments keep their original three services. The
+	// channel is a sibling owner: all original IO must join before Shutdown.
+	channel := &mounter.ReadinessChannel{
+		Supervisor:     supervisor,
+		SocketPath:     os.Getenv("SANDBOX_MOUNTER_OBSERVER_SOCKET"),
+		PodName:        os.Getenv("SANDBOX_MOUNTER_POD_NAME"),
+		NodeUID:        os.Getenv("SANDBOX_MOUNTER_NODE_UID"),
+		NodeBootID:     os.Getenv("SANDBOX_MOUNTER_NODE_BOOT_ID"),
+		ContractDigest: os.Getenv("SANDBOX_MOUNTER_CONTRACT_DIGEST"),
+	}
+	if channel.SocketPath != "" || channel.PodName != "" || channel.NodeUID != "" || channel.NodeBootID != "" || channel.ContractDigest != "" {
+		services = append(services, channel.Serve)
+	}
+	serveErr := serveMounterServices(ctx, services...)
 
 	// Every original Serve call has returned before process/mount teardown.
 	// A failed listener also takes this path, so partial startup fails closed.

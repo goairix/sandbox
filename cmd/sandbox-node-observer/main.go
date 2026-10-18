@@ -27,31 +27,36 @@ import (
 // This root-owned operator configuration has no management signer. Runtime
 // enrollment and native command authorization remain separate protocol inputs.
 type config struct {
-	Version                  uint32              `json:"version"`
-	Binding                  p.TrustBinding      `json:"binding"`
-	Roots                    []ed25519.PublicKey `json:"roots"`
-	NodeName                 string              `json:"node_name"`
-	NodeUID                  string              `json:"node_uid"`
-	Certificate              []byte              `json:"certificate"`
-	PrivateKey               ed25519.PrivateKey  `json:"private_key"`
-	ClockSocket              string              `json:"clock_socket"`
-	ClockPublicKey           ed25519.PublicKey   `json:"clock_public_key"`
-	ClockAudience            string              `json:"clock_audience"`
-	EtcdEndpoints            []string            `json:"etcd_endpoints"`
-	EtcdClusterID            uint64              `json:"etcd_cluster_id"`
-	EtcdIdentity             []byte              `json:"etcd_identity"`
-	EtcdCA                   []byte              `json:"etcd_ca"`
-	EtcdClientCertificate    []byte              `json:"etcd_client_certificate"`
-	EtcdClientKey            []byte              `json:"etcd_client_key"`
-	Kubeconfig               string              `json:"kubeconfig"`
-	KubernetesNamespace      string              `json:"kubernetes_namespace"`
-	JournalDirectory         string              `json:"journal_directory"`
-	EnrollmentSocket         string              `json:"enrollment_socket"`
-	CommandAddress           string              `json:"command_address"`
-	MaxSlots                 uint32              `json:"max_slots"`
-	MaxActive                uint32              `json:"max_active"`
-	RequestTimeoutMillis     uint32              `json:"request_timeout_millis"`
-	TerminationTimeoutMillis uint32              `json:"termination_timeout_millis"`
+	Version               uint32              `json:"version"`
+	Binding               p.TrustBinding      `json:"binding"`
+	Roots                 []ed25519.PublicKey `json:"roots"`
+	NodeName              string              `json:"node_name"`
+	NodeUID               string              `json:"node_uid"`
+	Certificate           []byte              `json:"certificate"`
+	PrivateKey            ed25519.PrivateKey  `json:"private_key"`
+	ClockSocket           string              `json:"clock_socket"`
+	ClockPublicKey        ed25519.PublicKey   `json:"clock_public_key"`
+	ClockAudience         string              `json:"clock_audience"`
+	EtcdEndpoints         []string            `json:"etcd_endpoints"`
+	EtcdClusterID         uint64              `json:"etcd_cluster_id"`
+	EtcdIdentity          []byte              `json:"etcd_identity"`
+	EtcdCA                []byte              `json:"etcd_ca"`
+	EtcdClientCertificate []byte              `json:"etcd_client_certificate"`
+	EtcdClientKey         []byte              `json:"etcd_client_key"`
+	Kubeconfig            string              `json:"kubeconfig"`
+	KubernetesNamespace   string              `json:"kubernetes_namespace"`
+	JournalDirectory      string              `json:"journal_directory"`
+	EnrollmentSocket      string              `json:"enrollment_socket"`
+
+	// Optional only for the inactive enrolled FUSE Version2 template. Omitting
+	// it preserves the original canonical Version1 operator config bytes.
+	MounterHealthSocket string `json:"mounter_health_socket,omitempty"`
+
+	CommandAddress           string `json:"command_address"`
+	MaxSlots                 uint32 `json:"max_slots"`
+	MaxActive                uint32 `json:"max_active"`
+	RequestTimeoutMillis     uint32 `json:"request_timeout_millis"`
+	TerminationTimeoutMillis uint32 `json:"termination_timeout_millis"`
 }
 
 func decodeConfig(wire []byte) (config, error) {
@@ -72,6 +77,9 @@ func decodeConfig(wire []byte) (config, error) {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return config{}, fmt.Errorf("observer config requires fixed absolute paths")
 		}
+	}
+	if c.MounterHealthSocket != "" && c.MounterHealthSocket != "/run/sandbox-node-observer/mounter-health/roothealth.sock" {
+		return config{}, fmt.Errorf("observer requires fixed mounter health socket")
 	}
 	return c, nil
 }
@@ -146,6 +154,24 @@ func run(path string) error {
 	defer commands.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if c.MounterHealthSocket != "" {
+		// The operator provisions this protected Directory HostPath. Do not
+		// mkdir/chmod an untrusted existing path or unlink another server's
+		// socket during startup. ServeWithMounter independently checks owner,
+		// modes and its combined descriptor budget before accepting anything.
+		if _, err := os.Lstat(c.MounterHealthSocket); !os.IsNotExist(err) {
+			return fmt.Errorf("observer mounter health socket already exists")
+		}
+		health, err := net.ListenUnix("unix", &net.UnixAddr{Name: c.MounterHealthSocket, Net: "unix"})
+		if err != nil {
+			return err
+		}
+		defer health.Close()
+		if err := os.Chmod(c.MounterHealthSocket, 0600); err != nil {
+			return err
+		}
+		return observer.ServeWithMounter(ctx, uds, commands, health)
+	}
 	return observer.Serve(ctx, uds, commands)
 }
 

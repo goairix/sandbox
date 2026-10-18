@@ -8,6 +8,7 @@ import (
 
 	"github.com/goairix/sandbox/internal/kubecontract"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,17 +61,39 @@ func (g *providerGuard) observe(ctx context.Context, registration providerRegist
 	if pod == nil || pod.Name != registration.Identity.Runtime.ID || pod.Namespace != g.namespace || string(pod.UID) != registration.Identity.Runtime.UID || pod.Spec.NodeName != g.nodeName || len(pod.ResourceVersion) == 0 || len(pod.ResourceVersion) > 128 {
 		return fail("exact retained Pod UID/node unavailable")
 	}
-	enrolled, err := kubecontract.SelectEnrolledPlainPodProfile(pod)
-	if err != nil {
-		return fail("unknown or downgraded launcher profile")
-	}
-	if enrolled {
-		profile, err := kubecontract.InspectEnrolledPlainPod(pod)
+	// FUSE is an explicit, fully inspected profile. Only its fixed restartable
+	// trusted helper is admitted; all launcher process/capability checks below
+	// remain identical to plain enrollment. Inspection is compared with the
+	// original verified activation, never promoted into replacement authority.
+	fuse := pod.Annotations[kubecontract.EnrolledProfileAnnotation] == kubecontract.EnrolledFUSEProfile
+	var config *launcherconfig.Config
+	if fuse {
+		profile, err := kubecontract.InspectEnrolledFUSEPod(pod)
 		if err != nil {
-			return fail("invalid enrolled launcher profile")
+			return fail("invalid enrolled FUSE profile")
 		}
-		c := profile.Config
-		if c.TrustBinding() != registration.Binding || profile.LogicalID != registration.Identity.SandboxID || profile.Generation != registration.Identity.Generation || profile.NodeUID != g.nodeUID || profile.NodeBootID != g.nodeBootID || c.UID != registration.Birth.UID || c.GID != registration.Birth.GID || c.NetworkAllowed != registration.Birth.NetworkAllowed || c.ContractDigest != registration.Birth.ContractDigest {
+		if profile.LogicalID != registration.Identity.SandboxID || profile.Generation != registration.Identity.Generation || profile.NodeUID != g.nodeUID || profile.NodeBootID != g.nodeBootID {
+			return fail("enrolled profile differs from verified activation")
+		}
+		config = &profile.Config
+	} else {
+		enrolled, err := kubecontract.SelectEnrolledPlainPodProfile(pod)
+		if err != nil {
+			return fail("unknown or downgraded launcher profile")
+		}
+		if enrolled {
+			profile, err := kubecontract.InspectEnrolledPlainPod(pod)
+			if err != nil {
+				return fail("invalid enrolled launcher profile")
+			}
+			if profile.LogicalID != registration.Identity.SandboxID || profile.Generation != registration.Identity.Generation || profile.NodeUID != g.nodeUID || profile.NodeBootID != g.nodeBootID {
+				return fail("enrolled profile differs from verified activation")
+			}
+			config = &profile.Config
+		}
+	}
+	if config != nil {
+		if config.TrustBinding() != registration.Binding || config.UID != registration.Birth.UID || config.GID != registration.Birth.GID || config.NetworkAllowed != registration.Birth.NetworkAllowed || config.ContractDigest != registration.Birth.ContractDigest {
 			return fail("enrolled profile differs from verified activation")
 		}
 	}
@@ -79,7 +102,7 @@ func (g *providerGuard) observe(ctx context.Context, registration providerRegist
 	if err != nil || id == uuid.Nil || id.String() != creation || (registration.CreationIntentID != "" && registration.CreationIntentID != creation) {
 		return fail("observed creation identity missing or changed")
 	}
-	if pod.Spec.RestartPolicy != v1.RestartPolicyNever || pod.Spec.HostPID || pod.Spec.HostIPC || pod.Spec.HostNetwork || pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace || pod.Spec.HostUsers != nil && !*pod.Spec.HostUsers || len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 || len(pod.Spec.EphemeralContainers) != 0 {
+	if pod.Spec.RestartPolicy != v1.RestartPolicyNever || pod.Spec.HostPID || pod.Spec.HostIPC || pod.Spec.HostNetwork || pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace || pod.Spec.HostUsers != nil && !*pod.Spec.HostUsers || len(pod.Spec.Containers) != 1 || !fuse && len(pod.Spec.InitContainers) != 0 || fuse && len(pod.Spec.InitContainers) != 1 || len(pod.Spec.EphemeralContainers) != 0 {
 		return fail("Pod is not a private single-use Never runtime")
 	}
 	container := pod.Spec.Containers[0]

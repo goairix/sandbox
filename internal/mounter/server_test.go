@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,181 @@ import (
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
+
+// This is a transport component fixture: the original injectable mount/cache
+// model supplies the sample. It neither attests a native PID1 nor registers an
+// Observer slot; the receiving Observer must independently authenticate both.
+// The private loop is also called by Serve after its fixed root-peer check;
+// these ordinary host tests do not replace that check with a callback.
+func TestReadinessChannelPullsOriginalResidentSampleAndJoins(t *testing.T) {
+	supervisor, observer := residentV2ControlSample(t)
+	sample := observer.sample.Load()
+	usage := observer.cache.Load().Snapshot()
+	supervisor.mu.Lock()
+	supervisor.config.MountInfo = func() (Mount, error) { panic("channel started a new mount probe") }
+	supervisor.mu.Unlock()
+
+	socketDir, err := os.MkdirTemp("/tmp", "wm-health-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "roothealth.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	require.NoError(t, listener.SetDeadline(time.Now().Add(time.Second)))
+	ctx, cancel := context.WithCancel(context.Background())
+	joined := make(chan error, 1)
+	channel := &ReadinessChannel{
+		Supervisor:     supervisor,
+		SocketPath:     socket,
+		PodName:        "pod-a",
+		NodeUID:        "22222222-2222-4222-8222-222222222222",
+		NodeBootID:     "33333333-3333-4333-8333-333333333333",
+		ContractDigest: strings.Repeat("a", 64),
+	}
+	go func() {
+		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			joined <- err
+			return
+		}
+		defer conn.Close()
+		joined <- channel.serveConnection(ctx, conn)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-joined:
+			require.True(t, err == nil || errors.Is(err, context.Canceled), "original channel join: %v", err)
+		case <-time.After(time.Second):
+			t.Error("channel returned without joining its original Unix IO")
+		}
+	})
+	conn, err := listener.AcceptUnix()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cancel()
+		_ = conn.Close()
+	})
+	require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+
+	hello, err := readFrame(conn)
+	require.NoError(t, err)
+	var registration fuseprotocol.SocketRequest
+	require.NoError(t, fuseprotocol.DecodeExact(hello, &registration))
+	require.Equal(t, fuseprotocol.Version, registration.Version)
+	require.Equal(t, "register-readiness", registration.Command)
+	require.JSONEq(t, `{"version":2,"runtime_uid":"uid-a","pod_name":"pod-a","node_uid":"22222222-2222-4222-8222-222222222222","node_boot_id":"33333333-3333-4333-8333-333333333333","contract_digest":"`+channel.ContractDigest+`"}`, string(registration.Input))
+	require.NoError(t, writeResponse(conn, []byte(`{"version":2,"accepted":true}`), ""))
+
+	var previous fuseprotocol.MounterReadiness
+	for i := 0; i < 2; i++ {
+		request, err := json.Marshal(fuseprotocol.SocketRequest{Version: fuseprotocol.Version, Command: "health-ready", Input: json.RawMessage(`{"version":2}`)})
+		require.NoError(t, err)
+		anchor := time.Now()
+		require.NoError(t, writeFrame(conn, request))
+		wire, err := readFrame(conn)
+		require.NoError(t, err)
+		var response fuseprotocol.SocketResponse
+		require.NoError(t, fuseprotocol.DecodeExact(wire, &response))
+		require.True(t, response.OK)
+		require.Empty(t, response.ErrorCode)
+		status, err := fuseprotocol.DecodeMounterReadiness(response.Output)
+		require.NoError(t, err)
+		require.Equal(t, sample.sequence, status.SampleSequence)
+		require.Equal(t, sample.observedAt.UTC(), status.SampledAt)
+		require.Equal(t, usage.ObservedAt.UTC(), status.CacheObservedAt)
+		require.True(t, time.Now().Before(anchor.Add(time.Duration(status.ValidForNanoseconds))))
+		if i > 0 {
+			require.Less(t, status.ValidForNanoseconds, previous.ValidForNanoseconds, "polling must not refresh the source sample")
+		}
+		previous = status
+	}
+
+	// A now-unknown original accounting observation cannot be hidden by the
+	// positive response already sent over this same persistent connection.
+	observer.cache.Load().usage.Store(&CacheUsage{})
+	request, err := json.Marshal(fuseprotocol.SocketRequest{Version: fuseprotocol.Version, Command: "health-ready", Input: json.RawMessage(`{"version":2}`)})
+	require.NoError(t, err)
+	require.NoError(t, writeFrame(conn, request))
+	wire, err := readFrame(conn)
+	require.NoError(t, err)
+	var response fuseprotocol.SocketResponse
+	require.NoError(t, fuseprotocol.DecodeExact(wire, &response))
+	require.False(t, response.OK)
+	require.Equal(t, fuseprotocol.MounterErrorRejected, response.ErrorCode)
+	require.JSONEq(t, `{}`, string(response.Output), "the original strict response envelope represents no output with an empty object")
+}
+
+func TestReadinessChannelRejectsManagementFrames(t *testing.T) {
+	for _, command := range []string{"authorize", "flush", "shutdown", "health-prepared", "health-ready"} {
+		t.Run(command, func(t *testing.T) {
+			supervisor, _ := residentV2ControlSample(t)
+			before := supervisor.State()
+			runner := supervisor.runner.(*fakeRunner)
+			runner.mu.Lock()
+			starts, runs := runner.starts, len(runner.runs)
+			runner.mu.Unlock()
+			socketDir, err := os.MkdirTemp("/tmp", "wm-health-")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+			socket := filepath.Join(socketDir, "roothealth.sock")
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			require.NoError(t, err)
+			defer listener.Close()
+			require.NoError(t, listener.SetDeadline(time.Now().Add(time.Second)))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			joined := make(chan error, 1)
+			channel := &ReadinessChannel{Supervisor: supervisor, SocketPath: socket, PodName: "pod-a", NodeUID: "22222222-2222-4222-8222-222222222222", NodeBootID: "33333333-3333-4333-8333-333333333333", ContractDigest: strings.Repeat("a", 64)}
+			go func() {
+				conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+				if err != nil {
+					joined <- err
+					return
+				}
+				defer conn.Close()
+				joined <- channel.serveConnection(ctx, conn)
+			}()
+			defer func() {
+				cancel()
+				select {
+				case <-joined:
+				case <-time.After(time.Second):
+					t.Error("rejected frame retained original channel IO")
+				}
+			}()
+			conn, err := listener.AcceptUnix()
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+			_, err = readFrame(conn)
+			require.NoError(t, err)
+			require.NoError(t, writeResponse(conn, []byte(`{"version":2,"accepted":true}`), ""))
+			input := json.RawMessage(`{}`)
+			if command == "flush" || command == "shutdown" {
+				input, err = json.Marshal(fuseprotocol.ControlRequest{Version: fuseprotocol.Version, RuntimeUID: "uid-a", Generation: validAuthorization().LeaseGeneration})
+				require.NoError(t, err)
+			}
+			request, err := json.Marshal(fuseprotocol.SocketRequest{Version: fuseprotocol.Version, Command: command, Input: input})
+			require.NoError(t, err)
+			require.NoError(t, writeFrame(conn, request))
+			wire, err := readFrame(conn)
+			require.NoError(t, err)
+			var response fuseprotocol.SocketResponse
+			require.NoError(t, fuseprotocol.DecodeExact(wire, &response))
+			require.False(t, response.OK)
+			require.Equal(t, fuseprotocol.MounterErrorRejected, response.ErrorCode)
+			require.JSONEq(t, `{}`, string(response.Output))
+			require.Equal(t, before, supervisor.State(), "the read-only channel must never enter the management dispatcher")
+			runner.mu.Lock()
+			afterStarts, afterRuns := runner.starts, len(runner.runs)
+			runner.mu.Unlock()
+			require.Equal(t, starts, afterStarts)
+			require.Equal(t, runs, afterRuns, "a structurally valid flush request must still never execute")
+		})
+	}
+}
 
 type shortWriter struct{ bytes.Buffer }
 
