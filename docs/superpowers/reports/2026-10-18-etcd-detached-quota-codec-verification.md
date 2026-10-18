@@ -34,3 +34,16 @@ etcd 包、复用纯 validator，无新导出能力、传输依赖或反向依�
 
 后续接 owner 的真实释放/幸存历史、独立付费 quota reader 和 v2 终态传输 profiles；
 现有 quota 执行底层不重写。全局 phase 内存准入、容量、部署恢复和 Redis 移除仍开放。
+
+## 完整 W20 付费历史封包补记
+
+`38ec47d`使用原20比较请求生成器及实际 Task 派生的13键，覆盖 namespace/root、
+restore/worker、snapshot与locator合法长度和最大标量，逐点计入全部比较键和回复。
+Head请求25034、回复44430字节；历史请求37638、回复223702字节，合计261340，
+保留原262144门限，仅余804字节。未增加上限、删伴随点或增加隐藏读取。
+
+`detachedquotawireprobe02`、`detachedquotawirerace01`、Linux vet及主分支
+`mainquotawire01`通过，完整17输入和归档指纹审计通过，唯一限定审查接受。
+超限实际 reader 在 credit/native 准入前拒绝；该运输模型不能证明完整 paid cursor、
+实际签名来源、quota writer、退款或容量。首次 locator/stage 测试编译错误保留，
+不当作产品 RED。

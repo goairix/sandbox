@@ -91,6 +91,14 @@ quota和自动消费者未接完，整体百分比不按新增测试数上调。
 独立审查通过，见[source解码验证](2026-10-18-etcd-source-json-tail-verification.md)。
 这是无效输入处理优化，不能作为合法业务吞吐、大N容量或source workspace完成的依据。
 
+`4fd2a15`已将完整 detached 来源认证接入原 actor，原动态额度内取得串行
+24MiB/20键工作区，Pending 安全避让及实际调用返回后退款通过；18组race、Linuxvet、
+主分支9组整合与唯一限定审查通过，见[来源接线验证](2026-10-18-etcd-managed-source-verification.md)。
+当前成功停在来源认证阶段，完整 wire inventory、phase准入和 managed Claim 尚未接通。
+`38ec47d`验证完整W20付费历史封包的同时最大模型，历史请求加回复261340字节，
+距256KiB门限仅804字节；超限在付费前拒绝。它不代表 quota writer 或退款已完成，
+详见[quota验证补记](2026-10-18-etcd-detached-quota-codec-verification.md)。
+
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
 接通显式 v3 部署与 `serve-cold-quota <manifest>` 独立命令。新 actor host20组、

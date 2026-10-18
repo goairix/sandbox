@@ -263,6 +263,11 @@ cutoff/Close仍须逐片验证，不能称完整4B关闭。`268cd22`已补实际
 
 ### Task 4 消费者的统一内存准入约束
 
+`4fd2a15`已接通原 actor 的 detached source 认证和串行24MiB/20键预留；完整
+Pending 避让、缓存失效重建、原调用返回后退款及主分支整合通过，见managed-source
+验证记录。只关闭来源阶段；wire inventory、后续重图准入、真实 managed Claim
+仍开放。`38ec47d`已关闭完整W20封包同时最大模型和超限前置拒绝，不能计作退款。
+
 `75fae0b`先修复三处source严格JSON尾随检查对非法第二值的整树分配；真实
 allocation RED/GREEN、22组race及Linuxvet通过，限定独立审查接受。该错误路径
 优化不代替下述workspace或phase准入，详见source-json-tail验证记录。
