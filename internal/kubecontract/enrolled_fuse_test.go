@@ -2,6 +2,8 @@ package kubecontract_test
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -105,17 +107,27 @@ func TestEnrolledFUSEStaticProtectedShape(t *testing.T) {
 		{Name: "workspace", MountPath: "/workspace", MountPropagation: &bidirectional},
 		{Name: "fuse-cache", MountPath: "/var/cache/s3fs"}, {Name: "dev-fuse", MountPath: "/dev/fuse"},
 		{Name: "mounter-run", MountPath: "/run/s3fs"},
+		{Name: "mounter-health", MountPath: "/run/sandbox-node-observer/mounter-health", ReadOnly: true},
 	}, helper.VolumeMounts)
-	require.Len(t, helper.Env, 2)
+	require.Len(t, helper.Env, 7)
 	require.Equal(t, v1.EnvVar{Name: "SANDBOX_RUNTIME_UID", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}}, helper.Env[0])
 	bootstrap, err := json.Marshal(input.Bootstrap)
 	require.NoError(t, err)
 	require.Equal(t, v1.EnvVar{Name: "SANDBOX_MOUNTER_BOOTSTRAP", Value: string(bootstrap)}, helper.Env[1])
+	var launcherConfig launcherconfig.Config
+	require.NoError(t, json.Unmarshal(input.LauncherConfig, &launcherConfig))
+	require.Equal(t, []v1.EnvVar{
+		{Name: "SANDBOX_MOUNTER_OBSERVER_SOCKET", Value: "/run/sandbox-node-observer/mounter-health/roothealth.sock"},
+		{Name: "SANDBOX_MOUNTER_POD_NAME", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}},
+		{Name: "SANDBOX_MOUNTER_NODE_UID", Value: launcherConfig.Enrollment.NodeUID},
+		{Name: "SANDBOX_MOUNTER_NODE_BOOT_ID", Value: launcherConfig.Enrollment.NodeBootID},
+		{Name: "SANDBOX_MOUNTER_CONTRACT_DIGEST", Value: launcherConfig.ContractDigest},
+	}, helper.Env[2:])
 	require.Equal(t, &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{"/usr/local/bin/workspace-mounter", "health", "prepared"}}}, PeriodSeconds: 2, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 30}, helper.StartupProbe)
 	require.Equal(t, &v1.Probe{ProbeHandler: v1.ProbeHandler{HTTPGet: &v1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt(9808), Scheme: v1.URISchemeHTTP}}, PeriodSeconds: 10, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 3}, helper.ReadinessProbe)
 	require.Equal(t, &v1.Lifecycle{PreStop: &v1.LifecycleHandler{Exec: &v1.ExecAction{Command: []string{"/usr/local/bin/workspace-mounter", "shutdown"}}}}, helper.Lifecycle)
 
-	require.Len(t, spec.Volumes, 8)
+	require.Len(t, spec.Volumes, 9)
 	require.Equal(t, v1.StorageMediumMemory, spec.Volumes[0].EmptyDir.Medium)
 	require.Equal(t, int64(64<<20), spec.Volumes[0].EmptyDir.SizeLimit.Value())
 	require.Equal(t, int64(32<<20), spec.Volumes[1].EmptyDir.SizeLimit.Value())
@@ -134,9 +146,126 @@ func TestEnrolledFUSEStaticProtectedShape(t *testing.T) {
 	require.Equal(t, "dev-fuse", spec.Volumes[7].Name)
 	require.Equal(t, "/dev/fuse", spec.Volumes[7].HostPath.Path)
 	require.Equal(t, v1.HostPathCharDev, *spec.Volumes[7].HostPath.Type)
+	directory := v1.HostPathDirectory
+	require.Equal(t, v1.Volume{Name: "mounter-health", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/run/sandbox-node-observer/mounter-health", Type: &directory}}}, spec.Volumes[8])
 	wire, err := json.Marshal(spec)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(wire), 65536)
+}
+
+func TestEnrolledFUSEV2HealthChannelPinsTemplateVersion(t *testing.T) {
+	input := fuseProfileInput(t)
+	require.Equal(t, "sandbox-enrolled-fuse/v2", kubecontract.EnrolledFUSEProfile)
+	actual, err := kubecontract.EnrolledFUSEContractDigest(input.LauncherImage, input.MounterImage, input.MounterAppArmorProfile)
+	require.NoError(t, err)
+	legacy := sha256.Sum256([]byte("goairix/sandbox/enrolled-fuse-contract/v1\x00sandbox-enrolled-fuse/v1\x00sha256:" + strings.Repeat("b", 64) + "\x00sha256:" + strings.Repeat("c", 64) + "\x00" + input.MounterAppArmorProfile))
+	expected := sha256.Sum256([]byte("goairix/sandbox/enrolled-fuse-contract/v2\x00sandbox-enrolled-fuse/v2\x00sha256:" + strings.Repeat("b", 64) + "\x00sha256:" + strings.Repeat("c", 64) + "\x00" + input.MounterAppArmorProfile))
+	require.NotEqual(t, hex.EncodeToString(legacy[:]), actual, "the new host directory and helper environment must not reuse v1 signed contracts")
+	require.Equal(t, hex.EncodeToString(expected[:]), actual)
+}
+
+func TestEnrolledFUSEV2HealthChannelRejectsMutation(t *testing.T) {
+	input := fuseProfileInput(t)
+	spec, err := kubecontract.EnrolledFUSEPodSpec(input)
+	require.NoError(t, err)
+	require.Len(t, spec.Volumes, 9)
+	require.Len(t, spec.InitContainers[0].VolumeMounts, 5)
+	require.Len(t, spec.InitContainers[0].Env, 7)
+	for name, mutate := range map[string]func(*v1.PodSpec){
+		"writable-health": func(s *v1.PodSpec) { s.InitContainers[0].VolumeMounts[4].ReadOnly = false },
+		"health-subpath":  func(s *v1.PodSpec) { s.InitContainers[0].VolumeMounts[4].SubPath = "roothealth.sock" },
+		"health-propagation": func(s *v1.PodSpec) {
+			mode := v1.MountPropagationHostToContainer
+			s.InitContainers[0].VolumeMounts[4].MountPropagation = &mode
+		},
+		"foreign-health-directory": func(s *v1.PodSpec) { s.Volumes[8].HostPath.Path = "/run/foreign" },
+		"inode-pinned-socket":      func(s *v1.PodSpec) { *s.Volumes[8].HostPath.Type = v1.HostPathSocket },
+		"directory-create":         func(s *v1.PodSpec) { *s.Volumes[8].HostPath.Type = v1.HostPathDirectoryOrCreate },
+		"launcher-health-access": func(s *v1.PodSpec) {
+			s.Containers[0].VolumeMounts = append(s.Containers[0].VolumeMounts, s.InitContainers[0].VolumeMounts[4])
+		},
+		"foreign-observer-socket": func(s *v1.PodSpec) { s.InitContainers[0].Env[2].Value = "/run/other.sock" },
+		"self-reported-pod-name": func(s *v1.PodSpec) {
+			s.InitContainers[0].Env[3] = v1.EnvVar{Name: "SANDBOX_MOUNTER_POD_NAME", Value: "claimed"}
+		},
+		"foreign-node-uid":  func(s *v1.PodSpec) { s.InitContainers[0].Env[4].Value = "55555555-5555-4555-8555-555555555555" },
+		"foreign-node-boot": func(s *v1.PodSpec) { s.InitContainers[0].Env[5].Value = "55555555-5555-4555-8555-555555555555" },
+		"foreign-contract":  func(s *v1.PodSpec) { s.InitContainers[0].Env[6].Value = strings.Repeat("f", 64) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := spec.DeepCopy()
+			mutate(changed)
+			require.Error(t, kubecontract.ValidateEnrolledFUSEPodSpec(*changed, input))
+		})
+	}
+}
+
+// These API objects are structural models, never kernel peer or enrollment
+// proof. The inspector must return diagnostics for callers to compare against
+// an independently verified registration; it cannot activate a plain consumer.
+func TestEnrolledFUSEV2InspectorRemainsDiagnosticAndStrict(t *testing.T) {
+	input := fuseProfileInput(t)
+	pod := fuseV2ProfilePod(t, input)
+	before, err := json.Marshal(pod)
+	require.NoError(t, err)
+	identity, err := kubecontract.InspectEnrolledFUSEPod(pod)
+	require.NoError(t, err)
+	config, err := launcherconfig.Decode(input.LauncherConfig)
+	require.NoError(t, err)
+	require.Equal(t, config, identity.Config)
+	require.Equal(t, input.Bootstrap, identity.Bootstrap)
+	require.Equal(t, input.MounterImage, identity.MounterImage)
+	require.Equal(t, input.MounterAppArmorProfile, identity.MounterAppArmorProfile)
+	require.Equal(t, pod.Labels["sandbox.id"], identity.LogicalID)
+	require.Equal(t, pod.Annotations[kubecontract.EnrolledCreationIntentAnnotation], identity.CreationIntentID)
+	require.Equal(t, config.Enrollment.NodeUID, identity.NodeUID)
+	require.Equal(t, config.Enrollment.NodeBootID, identity.NodeBootID)
+	require.EqualValues(t, 1, identity.Generation)
+	after, err := json.Marshal(pod)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	_, err = kubecontract.SelectEnrolledPlainPodProfile(pod)
+	require.Error(t, err, "FUSE recognition must not weaken the plain selector")
+	for name, mutate := range map[string]func(*v1.Pod){
+		"old-version":    func(p *v1.Pod) { p.Annotations[kubecontract.EnrolledProfileAnnotation] = "sandbox-enrolled-fuse/v1" },
+		"missing-marker": func(p *v1.Pod) { delete(p.Annotations, kubecontract.EnrolledProfileAnnotation) },
+		"wrong-mode":     func(p *v1.Pod) { p.Labels["sandbox.workspace.mode"] = "plain" },
+		"foreign-node": func(p *v1.Pod) {
+			p.Annotations[kubecontract.EnrolledNodeUIDAnnotation] = "55555555-5555-4555-8555-555555555555"
+		},
+		"foreign-boot": func(p *v1.Pod) {
+			p.Annotations[kubecontract.EnrolledNodeBootIDAnnotation] = "55555555-5555-4555-8555-555555555555"
+		},
+		"foreign-helper-image": func(p *v1.Pod) {
+			p.Spec.InitContainers[0].Image = "example.test/mounter@sha256:" + strings.Repeat("f", 64)
+		},
+		"unconfined-helper": func(p *v1.Pod) {
+			p.Spec.InitContainers[0].SecurityContext.AppArmorProfile.Type = v1.AppArmorProfileTypeUnconfined
+		},
+		"launcher-health-access": func(p *v1.Pod) {
+			p.Spec.Containers[0].VolumeMounts = append(p.Spec.Containers[0].VolumeMounts, p.Spec.InitContainers[0].VolumeMounts[4])
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := pod.DeepCopy()
+			mutate(changed)
+			_, err := kubecontract.InspectEnrolledFUSEPod(changed)
+			require.Error(t, err)
+		})
+	}
+}
+
+func fuseV2ProfilePod(t *testing.T, input kubecontract.EnrolledFUSEPodSpecInput) *v1.Pod {
+	t.Helper()
+	pod := profilePod(t)
+	var err error
+	pod.Spec, err = kubecontract.EnrolledFUSEPodSpec(input)
+	require.NoError(t, err)
+	pod.Labels["sandbox.workspace.mode"] = "fuse"
+	pod.Annotations[kubecontract.EnrolledProfileAnnotation] = "sandbox-enrolled-fuse/v2"
+	digest := sha256.Sum256(input.LauncherConfig)
+	pod.Annotations[kubecontract.EnrolledConfigDigestAnnotation] = hex.EncodeToString(digest[:])
+	return pod
 }
 
 // Every mutation represents an added privilege, foreign executable/device,

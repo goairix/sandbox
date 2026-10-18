@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -12,11 +13,20 @@ import (
 
 // EnrolledFUSEPodSpec renders an inactive, fixed structural template with owned
 // output. The privileged helper is a trusted system component, not a confined
-// user process. This function does no I/O and grants no production admission;
+// user process: Kubernetes privileged mode ignores AppArmor confinement, so
+// its policy name binds deployment intent only. This function does no I/O and
+// grants no production admission;
 // authenticated helper/runtime association, mount/flush evidence and cleanup
 // authority remain prerequisites for any future production profile consumer.
 func EnrolledFUSEPodSpec(input EnrolledFUSEPodSpecInput) (v1.PodSpec, error) {
 	bootstrap, err := validateEnrolledFUSEInput(input)
+	if err != nil {
+		return v1.PodSpec{}, err
+	}
+	// validateEnrolledFUSEInput already decoded this bounded canonical config.
+	// These public values locate the original operator identity at registration;
+	// the observer must independently authenticate its kernel peer and API Pod.
+	config, err := launcherconfig.Decode(input.LauncherConfig)
 	if err != nil {
 		return v1.PodSpec{}, err
 	}
@@ -41,12 +51,18 @@ func EnrolledFUSEPodSpec(input EnrolledFUSEPodSpecInput) (v1.PodSpec, error) {
 		Env: []v1.EnvVar{
 			{Name: "SANDBOX_RUNTIME_UID", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
 			{Name: "SANDBOX_MOUNTER_BOOTSTRAP", Value: string(bootstrap)},
+			{Name: "SANDBOX_MOUNTER_OBSERVER_SOCKET", Value: enrolledFUSEHealthSocket},
+			{Name: "SANDBOX_MOUNTER_POD_NAME", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}},
+			{Name: "SANDBOX_MOUNTER_NODE_UID", Value: config.Enrollment.NodeUID},
+			{Name: "SANDBOX_MOUNTER_NODE_BOOT_ID", Value: config.Enrollment.NodeBootID},
+			{Name: "SANDBOX_MOUNTER_CONTRACT_DIGEST", Value: config.ContractDigest},
 		},
 		VolumeMounts: []v1.VolumeMount{
 			{Name: "workspace", MountPath: "/workspace", MountPropagation: &toHost},
 			{Name: "fuse-cache", MountPath: "/var/cache/s3fs"},
 			{Name: "dev-fuse", MountPath: "/dev/fuse"},
 			{Name: "mounter-run", MountPath: "/run/s3fs"},
+			{Name: "mounter-health", MountPath: enrolledFUSEHealthDirectory, ReadOnly: true},
 		},
 		StartupProbe: &v1.Probe{
 			ProbeHandler:  v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{fuseprotocol.MounterBinary, "health", "prepared"}}},
@@ -80,6 +96,7 @@ func enrolledFUSEVolumes(input EnrolledFUSEPodSpecInput) []v1.Volume {
 		enrolledFUSEEmptyDir("fuse-cache", v1.StorageMediumDefault, input.Bootstrap.CacheLimitBytes),
 		enrolledFUSEEmptyDir("mounter-run", v1.StorageMediumMemory, 16<<20),
 		{Name: "dev-fuse", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/dev/fuse", Type: &device}}},
+		{Name: "mounter-health", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: enrolledFUSEHealthDirectory, Type: &directory}}},
 	}
 }
 

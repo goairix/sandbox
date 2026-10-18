@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -15,6 +16,7 @@ import (
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/imageref"
 	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
+	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -22,13 +24,17 @@ import (
 // EnrolledFUSEProfile names an inactive structural contract. Rendering or
 // validating it grants no enrollment, mount, flush, cleanup or user admission.
 // Existing production selectors deliberately do not accept this profile.
-const EnrolledFUSEProfile = "sandbox-enrolled-fuse/v1"
+const EnrolledFUSEProfile = "sandbox-enrolled-fuse/v2"
 
 const (
 	// Public configuration budgets precede JSON encoding. The complete returned
 	// PodSpec also has a 64 KiB wire cap, independent of Kubernetes API limits.
 	enrolledFUSEBootstrapBytes = 4096
 	enrolledFUSESpecBytes      = 65536
+	// Mount the directory, not one socket inode: an observer restart can bind
+	// its replacement socket without remounting the trusted mounter container.
+	enrolledFUSEHealthDirectory = "/run/sandbox-node-observer/mounter-health"
+	enrolledFUSEHealthSocket    = enrolledFUSEHealthDirectory + "/roothealth.sock"
 )
 
 // EnrolledFUSEPodSpecInput is caller-retained original structural intent, not
@@ -51,8 +57,10 @@ type EnrolledFUSEPodSpecInput struct {
 }
 
 // EnrolledFUSEContractDigest binds executable image content, the immutable
-// AppArmor policy name and this fixed template version. It does not attest that
-// the kernel loaded a policy or that either image/process is currently running.
+// AppArmor deployment policy name and this fixed template version. Kubernetes
+// privileged containers ignore AppArmor confinement; this name is intent only,
+// not a kernel security assertion. Neither the digest nor the template attests
+// that either image/process is currently running.
 func EnrolledFUSEContractDigest(launcherImage, mounterImage, appArmorProfile string) (string, error) {
 	launcher, err := enrolledFUSEImageDigest(launcherImage)
 	if err != nil {
@@ -65,7 +73,7 @@ func EnrolledFUSEContractDigest(launcherImage, mounterImage, appArmorProfile str
 	if !strings.HasPrefix(appArmorProfile, "sandbox-fuse-") || !enrolledFUSEHex(strings.TrimPrefix(appArmorProfile, "sandbox-fuse-")) {
 		return "", fmt.Errorf("immutable FUSE AppArmor policy name required")
 	}
-	digest := sha256.Sum256([]byte("goairix/sandbox/enrolled-fuse-contract/v1\x00" + EnrolledFUSEProfile + "\x00" + launcher + "\x00" + mounter + "\x00" + appArmorProfile))
+	digest := sha256.Sum256([]byte("goairix/sandbox/enrolled-fuse-contract/v2\x00" + EnrolledFUSEProfile + "\x00" + launcher + "\x00" + mounter + "\x00" + appArmorProfile))
 	return hex.EncodeToString(digest[:]), nil
 }
 
@@ -177,4 +185,118 @@ func ValidateEnrolledFUSEPodSpec(actual v1.PodSpec, original EnrolledFUSEPodSpec
 		return fmt.Errorf("FUSE Pod differs from original fixed structural intent")
 	}
 	return nil
+}
+
+// EnrolledFUSEPodIdentity contains copied structural diagnostics. Config's root
+// list and contract are public assertions, not independently trusted authority.
+// Consumers must bind these fields to their original verified registration and
+// authenticate the actual helper kernel peer before consuming its observations.
+type EnrolledFUSEPodIdentity struct {
+	Config    launcherconfig.Config
+	Bootstrap fuseprotocol.BootstrapConfig
+
+	LogicalID, CreationIntentID, NodeUID, NodeBootID string
+	Generation                                       int64
+	MounterImage, MounterAppArmorProfile             string
+}
+
+// InspectEnrolledFUSEPod checks the complete Version2 shape and its internal
+// public configuration consistency. Reconstructing a render input below only
+// detects extra/malformed observed fields; it does not recover original intent
+// or grant the supplied config roots, Pod, helper or image any effect authority.
+func InspectEnrolledFUSEPod(pod *v1.Pod) (EnrolledFUSEPodIdentity, error) {
+	var result EnrolledFUSEPodIdentity
+	if pod == nil || pod.Annotations[EnrolledProfileAnnotation] != EnrolledFUSEProfile {
+		return result, fmt.Errorf("enrolled FUSE Version2 profile required")
+	}
+	if len(validation.IsDNS1123Label(pod.Namespace)) != 0 || len(validation.IsDNS1123Subdomain(pod.Name)) != 0 || len(pod.Name) > 128 || pod.GenerateName != "" || len(pod.OwnerReferences) != 0 || len(pod.Finalizers) > 1 || len(pod.Finalizers) == 1 && pod.Finalizers[0] != EnrolledRetainFinalizer {
+		return result, fmt.Errorf("invalid enrolled FUSE Pod identity")
+	}
+	result.LogicalID = pod.Labels["sandbox.id"]
+	if len(validation.IsDNS1123Subdomain(result.LogicalID)) != 0 || len(result.LogicalID) > 128 || pod.Labels["sandbox.managed"] != "true" || pod.Labels["sandbox.workspace.mode"] != "fuse" {
+		return result, fmt.Errorf("invalid enrolled FUSE logical identity")
+	}
+	for key, value := range pod.Labels {
+		if len(validation.IsQualifiedName(key)) != 0 || len(validation.IsValidLabelValue(value)) != 0 || strings.HasPrefix(key, "sandbox.pool") || strings.HasPrefix(key, "sandbox.claim") {
+			return result, fmt.Errorf("invalid enrolled FUSE label")
+		}
+	}
+	keys := []string{EnrolledProfileAnnotation, EnrolledGenerationAnnotation, EnrolledNodeUIDAnnotation, EnrolledNodeBootIDAnnotation, EnrolledConfigDigestAnnotation, EnrolledImageDigestAnnotation, EnrolledCreationIntentAnnotation}
+	if len(pod.Annotations) != len(keys) {
+		return result, fmt.Errorf("unknown enrolled FUSE annotation")
+	}
+	for _, key := range keys {
+		if pod.Annotations[key] == "" {
+			return result, fmt.Errorf("missing enrolled FUSE annotation")
+		}
+	}
+	var err error
+	result.Generation, err = strconv.ParseInt(pod.Annotations[EnrolledGenerationAnnotation], 10, 64)
+	if err != nil || result.Generation <= 0 || strconv.FormatInt(result.Generation, 10) != pod.Annotations[EnrolledGenerationAnnotation] {
+		return result, fmt.Errorf("invalid enrolled FUSE generation")
+	}
+	result.CreationIntentID, result.NodeUID, result.NodeBootID = pod.Annotations[EnrolledCreationIntentAnnotation], pod.Annotations[EnrolledNodeUIDAnnotation], pod.Annotations[EnrolledNodeBootIDAnnotation]
+	for _, value := range []string{result.CreationIntentID, result.NodeUID, result.NodeBootID} {
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return result, fmt.Errorf("invalid enrolled FUSE UUID")
+		}
+	}
+
+	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 1 || len(pod.Spec.Volumes) != 9 {
+		return result, fmt.Errorf("fixed enrolled FUSE containers and volumes required")
+	}
+	launcher, helper := &pod.Spec.Containers[0], &pod.Spec.InitContainers[0]
+	if len(launcher.Env) != 1 || launcher.Env[0].Name != launcherconfig.Environment || launcher.Env[0].ValueFrom != nil || len(helper.Env) != 7 || helper.Env[1].Name != "SANDBOX_MOUNTER_BOOTSTRAP" || helper.Env[1].ValueFrom != nil || helper.SecurityContext == nil || helper.SecurityContext.AppArmorProfile == nil || helper.SecurityContext.AppArmorProfile.LocalhostProfile == nil {
+		return result, fmt.Errorf("fixed enrolled FUSE public configuration required")
+	}
+	result.Config, err = launcherconfig.Decode([]byte(launcher.Env[0].Value))
+	if err != nil {
+		return result, err
+	}
+	if result.Config.Enrollment.NodeUID != result.NodeUID || result.Config.Enrollment.NodeBootID != result.NodeBootID {
+		return result, fmt.Errorf("enrolled FUSE node and configuration differ")
+	}
+	if err := fuseprotocol.Decode([]byte(helper.Env[1].Value), &result.Bootstrap); err != nil {
+		return result, err
+	}
+	result.MounterImage, result.MounterAppArmorProfile = helper.Image, *helper.SecurityContext.AppArmorProfile.LocalhostProfile
+	configDigest := sha256.Sum256([]byte(launcher.Env[0].Value))
+	imageDigest, err := enrolledFUSEImageDigest(launcher.Image)
+	if err != nil || pod.Annotations[EnrolledConfigDigestAnnotation] != hex.EncodeToString(configDigest[:]) || pod.Annotations[EnrolledImageDigestAnnotation] != strings.TrimPrefix(imageDigest, "sha256:") {
+		return result, fmt.Errorf("enrolled FUSE configuration or image digest differs")
+	}
+	for _, index := range []int{0, 1} {
+		volume := pod.Spec.Volumes[index]
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil {
+			return result, fmt.Errorf("bounded enrolled FUSE volume required")
+		}
+	}
+	input := EnrolledFUSEPodSpecInput{
+		NodeName: pod.Spec.NodeName, LauncherImage: launcher.Image, MounterImage: helper.Image,
+		MounterAppArmorProfile: result.MounterAppArmorProfile, LauncherConfig: []byte(launcher.Env[0].Value), Bootstrap: result.Bootstrap,
+		LauncherResources: *launcher.Resources.DeepCopy(), MounterResources: *helper.Resources.DeepCopy(),
+		WorkspaceBytes: pod.Spec.Volumes[0].EmptyDir.SizeLimit.Value(), TmpBytes: pod.Spec.Volumes[1].EmptyDir.SizeLimit.Value(),
+	}
+	if err := ValidateEnrolledFUSEPodSpec(pod.Spec, input); err != nil {
+		return result, err
+	}
+
+	// Pending status may be absent during creation. A live channel separately
+	// requires the exact running init ContainerID and actual kernel association;
+	// structural inspection never treats an API status as a process proof.
+	if len(pod.Status.ContainerStatuses) > 1 || len(pod.Status.InitContainerStatuses) > 1 || len(pod.Status.EphemeralContainerStatuses) != 0 {
+		return result, fmt.Errorf("foreign enrolled FUSE container status")
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != "sandbox" || status.RestartCount != 0 {
+			return result, fmt.Errorf("restarted or foreign enrolled FUSE launcher")
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name != "workspace-mounter" || status.RestartCount != 0 {
+			return result, fmt.Errorf("restarted or foreign enrolled FUSE helper")
+		}
+	}
+	return result, nil
 }
