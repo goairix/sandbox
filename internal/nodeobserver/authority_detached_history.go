@@ -99,7 +99,10 @@ func (r *authorityReader) authenticateDetachedQuiescence(s *authoritySnapshot, t
 		Outcome string `json:"outcome"`
 	}
 	var reservation detachedQuiescenceReservation
-	if canonicalEnrolledNative(s.history[1].Value, &receipt) != nil || receipt.Version != 1 || receipt.Outcome != "committed" || receipt.detachedStageReference != stage || s.history[1].CreateRevision != s.history[0].CreateRevision || canonicalEnrolledNative(s.history[2].Value, &reservation) != nil || reservation.Version != 1 || reservation.Task != task || reservation.Claim != q.Claim || reservation.DestroyingRevision != fact.TaskBirth || reservation.CommandID != c.CommandID || reservation.Attempt != q.Attempt || s.history[2].CreateRevision <= c.ClaimCreateRevision || s.history[2].CreateRevision >= s.history[0].CreateRevision {
+	// Legacy standalone reservations precede Q; the atomic producer commits
+	// reservation, Q and the original Stage receipt at the same revision. Both
+	// layouts retain the exact historical Task/Claim/command/attempt binding.
+	if canonicalEnrolledNative(s.history[1].Value, &receipt) != nil || receipt.Version != 1 || receipt.Outcome != "committed" || receipt.detachedStageReference != stage || s.history[1].CreateRevision != s.history[0].CreateRevision || canonicalEnrolledNative(s.history[2].Value, &reservation) != nil || reservation.Version != 1 || reservation.Task != task || reservation.Claim != q.Claim || reservation.DestroyingRevision != fact.TaskBirth || reservation.CommandID != c.CommandID || reservation.Attempt != q.Attempt || s.history[2].CreateRevision <= c.ClaimCreateRevision || s.history[2].CreateRevision > s.history[0].CreateRevision {
 		return fmt.Errorf("observer detached original quiescence reservation/receipt invalid")
 	}
 	var final detachedFinalSyncRecord

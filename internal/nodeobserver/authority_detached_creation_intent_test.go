@@ -111,3 +111,62 @@ func TestNodeObserverDetachedCreationIntentEnvelopeRejectsInvalidNativePoint(t *
 	// the CreationIntent-specific boundary accepts its historical mutation.
 	require.False(t, permanentAuthorityPoint(good))
 }
+
+// This is only the historical attribution matcher, not a signed source or
+// effect capability. The actual HTTP native chain supplies the original Q
+// producer, signature verification, runtime drain and observer termination.
+func TestNodeObserverDetachedQuiescenceReservationBirth(t *testing.T) {
+	for _, name := range []string{"legacy-before", "same-birth", "future", "receipt-birth", "receipt-attempt", "reservation-attempt", "reservation-claim"} {
+		t.Run(name, func(t *testing.T) {
+			issuer := []byte(`{"certificate":"attribution-only"}`)
+			current := p.TaskCloseDataContext{Namespace: "/observer/quiescence/v1/", RestoreEpoch: "restore", TaskID: uuid.NewString(), SandboxID: uuid.NewString(), ClaimID: uuid.NewString(), WorkerID: "original-worker", ClaimCreateRevision: 20, LeaseID: 21, ControlRevision: 10, CommandID: uuid.NewString(), IssuerCertificateID: uuid.NewString(), IssuerCertificateDigest: digest(issuer)}
+			ref := authorityTaskReference{current.Namespace, current.RestoreEpoch, current.TaskID, current.SandboxID, 7}
+			task := authorityTaskRecord{Version: 1, Reference: ref, Kind: "cleanup", Generation: 1, DataGateEpoch: 1, ControlRevision: 5, ExpiresAt: time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)}
+			claim := detachedHistoricalClaim{ref, current.ClaimID, current.WorkerID, current.ClaimCreateRevision, current.LeaseID}
+			stage := detachedStageReference{current.Namespace, ref.Partition, current.ClaimID, "task_quiesce_users", uuid.NewString(), strings.Repeat("a", 64), current.RestoreEpoch}
+			attempt := authorityStage{stage.Namespace, stage.Partition, stage.RequestID, stage.StageID, stage.AttemptID, stage.RestoreEpoch}
+			q := detachedQuiescenceRecord{Version: 1, Task: task, Claim: claim, Context: p.TaskUserQuiescenceContext{Current: current, CloseDataIntentRevision: 25}, IssuerCertificateID: current.IssuerCertificateID, IssuerCertificateDigest: digest(issuer), IssuerRevision: 5, Ticket: json.RawMessage(`{"ticket":"attribution-only"}`), CloseDataReceipt: json.RawMessage(`{"receipt":"attribution-only"}`), Attempt: attempt}
+			q.TicketDigest = digest(q.Ticket)
+			q.Context.CloseDataReceiptDigest = digest(q.CloseDataReceipt)
+			reservation := detachedQuiescenceReservation{1, task, claim, 10, current.CommandID, attempt}
+			receipt := struct {
+				Version uint32 `json:"version"`
+				detachedStageReference
+				Outcome string `json:"outcome"`
+			}{1, stage, "committed"}
+			fact := p.DetachedNoEffectSettlement{TaskBirth: 10, QuiescenceContext: current, FinalSyncClaim: p.DetachedNoEffectClaim{ClaimID: claim.ClaimID, WorkerID: claim.WorkerID, CreateRevision: claim.CreateRevision, LeaseID: claim.LeaseID}, ReceiptDigest: strings.Repeat("b", 64), FinalSyncAttemptID: uuid.NewString()}
+			final := detachedFinalSyncRecord{Version: 1, Task: task, Claim: claim, DestroyingRevision: 10, QuiescenceRevision: 30, ReceiptDigest: fact.ReceiptDigest, AttemptID: fact.FinalSyncAttemptID}
+			final.Quiescence.Task, final.Quiescence.CommandID, final.Quiescence.Stage = ref, current.CommandID, stage
+			final.Plan.Mode, final.Plan.Digest = "none", strings.Repeat("c", 64)
+			reservationBirth, receiptBirth := int64(30), int64(30)
+			switch name {
+			case "legacy-before":
+				reservationBirth = 29
+			case "future":
+				reservationBirth = 31
+			case "receipt-birth":
+				receiptBirth = 29
+			case "receipt-attempt":
+				receipt.AttemptID = uuid.NewString()
+			case "reservation-attempt":
+				reservation.Attempt.AttemptID = uuid.NewString()
+			case "reservation-claim":
+				reservation.Claim.ClaimID = uuid.NewString()
+			}
+			point := func(value any, birth int64) *mvccpb.KeyValue {
+				wire, err := json.Marshal(value)
+				require.NoError(t, err)
+				return &mvccpb.KeyValue{Value: wire, CreateRevision: birth, ModRevision: birth, Version: 1}
+			}
+			snapshot := &authoritySnapshot{record: p.TaskRuntimeTerminationIntent{Current: current, Partition: ref.Partition, Authority: p.TerminationAuthorityBindings{QuiescenceStage: p.TerminationQuiescenceStage{RequestID: stage.RequestID, StageID: stage.StageID, AttemptID: stage.AttemptID, Digest: stage.Digest}}}, detached: &detachedAuthoritySnapshot{record: fact}}
+			snapshot.history[0], snapshot.history[1], snapshot.history[2] = point(q, 30), point(receipt, receiptBirth), point(reservation, reservationBirth)
+			snapshot.history[3], snapshot.history[4] = point(final, 40), point(struct{}{}, 5)
+			err := (&authorityReader{}).authenticateDetachedQuiescence(snapshot, task, issuer)
+			if name == "legacy-before" || name == "same-birth" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "original quiescence reservation/receipt invalid")
+			}
+		})
+	}
+}
