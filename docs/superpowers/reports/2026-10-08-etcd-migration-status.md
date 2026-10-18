@@ -51,6 +51,22 @@ Linux UID1000的13项实际测试覆盖，包括真实发布后Sync失败。验�
 单成员TLS-etcd的Wait/IO清理；不是同一组输入重跑的声明。早期夹具数量/连接收尾失败
 和一次混构建输入拒绝保留，不计通过。大文件/分片上传仍开放，百分比暂不调整。
 
+`9241f35` 接好可选 TTL HTTP 能力边界：严格旧DTO、原请求归属、单次调用及Unknown
+优先级；48项Gateway回归、TTL定向race、Linux vet及主分支TTL回归通过。实际服务
+尚未实现该能力，PUT仍501。真实Linux用例已成功创建并在PUT处得到501，原进程及
+容器清理、9522项输入核对完成；这是有效失败基线，不是完整续期通过。
+
+`ee1c303` 增加原live journal的持久激活替换：固定前驱/候选、后签发时间防回滚，
+允许缩短期限；仅替换activation文件，关闭gate后拒绝，不重写原command记录，持久化
+不确定后poison。原包111项回归、4项新增测试的race、Linux vet、Linux容器内4项
+真实文件测试及2301项输入核对通过；独立审查通过。单元使用受控测试时钟，不代表
+实际等待跨TTL的launcher正例。Supervisor/TLS换证、当前凭证读取及etcd原子提交
+仍在实现，不能仅修改ExpiresAt后宣称TTL可用；功能/交付百分比不调整。
+
+FUSE缺口复核：产品尚无节点健康collector，当前每sandbox五秒的Pod GET/exec及
+Begin/End操作仍在；resident样本只减少helper内部扫描。enrolled FUSE合同尚未实际
+启用，须先打通同Pod/boot/generation的helper→节点观察→消费者链，才能退役旧保护。
+
 此前组件：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
 重新申请。实际三成员 TLS/native 三场景、race、Linux vet 和主分支输入等值集成
 通过，见[配额归还组件验收](2026-10-18-etcd-detached-quota-refund-verification.md)。
