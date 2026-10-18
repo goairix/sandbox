@@ -190,8 +190,11 @@ func TestDetachedRuntimeTerminationPhysicalWorkerChild(t *testing.T) {
 	// This optional metadata-release component consumes the actual production
 	// observer proof and seven completed slots above. With no env it preserves
 	// the original physical test's assertions and scope exactly.
-	if os.Getenv("SANDBOX_DETACHED_OWNER_RELEASE_PHYSICAL_NATIVE") == "1" {
+	switch os.Getenv("SANDBOX_DETACHED_OWNER_RELEASE_PHYSICAL_NATIVE") {
+	case "1":
 		detachedPhysicalOwnerRelease(t, f)
+	case "absence-recovery":
+		detachedPhysicalOwnerReleaseAbsentRecovery(t, f)
 	}
 	detachedPhysicalWrite(t, conn, detachedPhysicalPhase{Phase: "cleanup-complete"})
 }

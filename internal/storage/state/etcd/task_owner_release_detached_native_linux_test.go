@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -221,4 +222,225 @@ func detachedPhysicalOwnerRelease(t *testing.T, f *cleanupDetachedNoEffectNative
 	require.NoError(t, err)
 	require.Equal(t, head[:2], finalHead)
 	t.Log("actual proof+7 slots; one release CAS committed with lost ACK; dead original Claim readonly/cold13 survives deleted index; no managed/quota/global-admission claim")
+}
+
+// This independent mode preserves a genuine pre-send absence. Recovery uses
+// only the original registered metadata worker and actual native Joined E; the
+// target PID1 is already dead and its control destination is actually closed.
+// The new public Claim proves this component, not managed inventory admission.
+func detachedPhysicalOwnerReleaseAbsentRecovery(t *testing.T, f *cleanupDetachedNoEffectNativeFixture) {
+	t.Helper()
+	b, oldClaim := f.b, f.job.claim
+	require.NotNil(t, oldClaim)
+	oldDraft, oldRun := f.job.detachedNoEffect, f.job.runID
+	require.NotNil(t, oldDraft)
+	require.Same(t, oldClaim, oldDraft.claim)
+	terminationKey, providerKey, releaseKey, err := b.namespace.localRuntimeReleaseKeys(f.ref)
+	require.NoError(t, err)
+	taskKey, err := b.namespace.taskKey(f.ref)
+	require.NoError(t, err)
+	head, err := b.readEnrolledPoints(f.ctx, []string{terminationKey, providerKey, releaseKey, taskKey}, []int{16384, 16384, 8192, 4096})
+	require.NoError(t, err)
+	require.Nil(t, head[2])
+	intent, err := decodeLocalRuntimeTermination(head[0])
+	require.NoError(t, err)
+	require.Equal(t, "cleanup-complete", intent.Phase)
+	require.NoError(t, b.verifyLocalRuntimeProof(intent, head[0], f.publication.Enrollment.ObserverCertificate))
+	historyKeys := detachedOwnerHistoryModelKeys(t, b, intent, head[3])
+	historyCaps := []int{4096, 32768, 4096, 8192, 8192, 8192, 32768, 65536, 4096, 8192, 16384, 8192, 8192}
+	historyBefore, err := b.readEnrolledPoints(f.ctx, historyKeys, historyCaps)
+	require.NoError(t, err)
+	oldRecord, err := newDetachedOwnerReleaseRecord(intent, head[0].CreateRevision, head[0].ModRevision, localRuntimeClaimWire(oldClaim))
+	require.NoError(t, err)
+	oldWire, err := encodeDetachedOwnerRelease(oldRecord)
+	require.NoError(t, err)
+	deleted := [3]string{oldRecord.Deleted[0].Key, oldRecord.Deleted[1].Key, oldRecord.Deleted[2].Key}
+	index, execution, slot := deleted[2], f.job.state.execution.key, f.job.state.slot.key
+
+	original := b.client.KV
+	lease := &creationFaultLease{Lease: b.client.Lease}
+	b.client.Lease = lease
+	defer func() {
+		b.client.KV = original
+		b.client.Lease = lease.Lease
+	}()
+	issuer := b.taskRuntimeTerminationIssuer.(*detachedTerminationFixtureIssuer)
+	certificates, signatures := issuer.certificates.Load(), issuer.signatures.Load()
+	var readonly, newAttempt atomic.Bool
+	var submissions, dispatches, runWrites, indexReads, executionReads, slotReads atomic.Int64
+	forbidden := [][]byte{[]byte(index), []byte(execution), []byte(slot)}
+	counts := []*atomic.Int64{&indexReads, &executionReads, &slotReads}
+	newWire := ""
+	var joined taskFence
+	b.client.KV = &finalSyncRecordingKV{KV: original, commit: func(ctx context.Context, cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
+		if readonly.Load() {
+			assertDetachedOwnerReadOnly(t, yes, forbidden, counts)
+			assertDetachedOwnerReadOnly(t, no, forbidden, counts)
+		}
+		if len(yes) == 4 && yes[3].IsPut() && string(yes[3].KeyBytes()) == releaseKey {
+			submissions.Add(1)
+			require.False(t, readonly.Load())
+			require.Len(t, cmps, 59)
+			require.Empty(t, no)
+			for i, key := range deleted {
+				require.Empty(t, yes[i].RangeBytes())
+				require.True(t, reflect.DeepEqual(clientv3.OpDelete(key), yes[i]))
+			}
+			expected := oldWire
+			if newAttempt.Load() {
+				expected = newWire
+			}
+			require.True(t, reflect.DeepEqual(clientv3.OpPut(releaseKey, expected), yes[3]))
+			if !newAttempt.Load() {
+				// No native request is sent: the resulting absence is genuine.
+				return nil, context.DeadlineExceeded
+			}
+			dispatches.Add(1)
+			request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites([]Write{{Key: deleted[0], Delete: true}, {Key: deleted[1], Delete: true}, {Key: deleted[2], Delete: true}, {Key: releaseKey, Value: yes[3].ValueBytes()}})}
+			require.Equal(t, 63, len(request.Compare)+len(request.Success)+len(request.Failure))
+			require.LessOrEqual(t, request.Size(), 128<<10)
+			response, err := original.Txn(ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+			require.NoError(t, err)
+			require.True(t, response.Succeeded)
+			require.LessOrEqual(t, (*pb.TxnResponse)(response).Size(), 256<<10)
+			return response, nil
+		}
+		if len(cmps) == 48 && len(yes) == 1 && yes[0].IsPut() && string(yes[0].KeyBytes()) == execution {
+			runWrites.Add(1)
+			require.False(t, readonly.Load())
+			require.Len(t, no, 2)
+			require.Equal(t, 51, len(cmps)+len(yes)+len(no))
+			for _, expected := range append(joined.comparisons(), f.job.state.slot.comparisons()...) {
+				require.Contains(t, cmps, expected)
+			}
+			for _, i := range []int{1, 2, 3, 4, 7, 8, 9} {
+				require.Contains(t, cmps, clientv3.Compare(clientv3.ModRevision(string(historyBefore[i].Key)), "=", historyBefore[i].ModRevision))
+			}
+			require.Contains(t, cmps, clientv3.Compare(clientv3.ModRevision(string(historyBefore[6].Key)), "=", historyBefore[6].ModRevision), "present fact remains a positive original Mod pin")
+			projection := b.cleanupProjection("detached-recovery-run", cmps, taskProtoWrites([]Write{{Key: execution, Value: yes[0].ValueBytes()}}), taskProtoPutResponse(1))
+			require.NoError(t, validateCleanupWire(projection))
+		}
+		return original.Txn(ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+	}}
+
+	unknown, err := b.releaseTaskWorkspaceOwnerDetached(f.ctx, f.job, oldClaim)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	require.Equal(t, OutcomeUnknown, unknown.Outcome)
+	require.Nil(t, unknown.Entry)
+	require.EqualValues(t, 1, submissions.Load())
+	require.Zero(t, dispatches.Load())
+	oldClaim.mu.Lock()
+	oldOwner := oldClaim.ownerReleaseAttempt
+	oldCandidate := ""
+	if oldOwner != nil {
+		oldCandidate = oldOwner.detachedCandidate
+	}
+	oldClaim.mu.Unlock()
+	require.NotNil(t, oldOwner)
+	require.Equal(t, oldWire, oldCandidate)
+	select {
+	case <-oldOwner.done:
+	default:
+		t.Fatal("pre-send Unknown owner has not really returned")
+	}
+	readonly.Store(true)
+	for i := 0; i < 2; i++ {
+		repeated, err := b.releaseTaskWorkspaceOwnerDetached(f.ctx, f.job, oldClaim)
+		require.ErrorIs(t, err, ErrOutcomeUnknown)
+		require.Equal(t, OutcomeUnknown, repeated.Outcome)
+		require.Nil(t, repeated.Entry)
+	}
+	readonly.Store(false)
+	stillOwned, err := b.readEnrolledPoints(f.ctx, []string{deleted[0], deleted[1], deleted[2], releaseKey}, []int{4096, 4096, 4096, 8192})
+	require.NoError(t, err)
+	for _, point := range stillOwned[:3] {
+		require.NotNil(t, point)
+	}
+	require.Nil(t, stillOwned[3])
+	require.EqualValues(t, 1, submissions.Load())
+	require.Zero(t, lease.grants.Load())
+
+	// Destination is immutable TLS configuration, not a session owner. The
+	// synchronous Deliver/Query calls already ran their Session.Close defers,
+	// and detachedPhysicalTerminate returned through TerminationDestination.Close.
+	// With those calls and the original owner returned, release the actual Claim
+	// and join the native Run; no copied Joined projection is installed.
+	require.NoError(t, b.ReleaseTaskClaim(f.ctx, oldClaim))
+	f.job.claim = nil
+	f.job.effectsJoined = true
+	require.NoError(t, b.joinCleanupRun(f.ctx, f.job))
+	require.True(t, f.job.state.record.Run.Joined)
+	joined = f.job.state.execution
+	gate := prepareCleanupDetachedRecoveryForTest(t, f)
+	require.Same(t, gate, f.job.detachedRecovery)
+	require.Same(t, oldDraft, f.job.detachedNoEffect)
+	require.Same(t, oldOwner, oldDraft.claim.ownerReleaseAttempt)
+	require.Equal(t, oldWire, oldDraft.claim.ownerReleaseAttempt.detachedCandidate)
+	owned, err := b.cleanupDetachedNoEffectOwnedBytes(f.job)
+	require.NoError(t, err)
+	require.LessOrEqual(t, owned, uint64(128<<10), "complete original graph includes the old release candidate")
+	_, err = f.worker.cleanupContinuation(f.job, &cleanupLocalContinuation{kind: "resume-detached-noeffect"})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, runWrites.Load())
+	require.NotEqual(t, oldRun, f.job.runID)
+	require.False(t, f.job.state.record.Run.Joined)
+	require.Equal(t, joined.create, f.job.state.execution.create)
+	require.Nil(t, f.job.detachedRecovery)
+	require.Nil(t, f.job.detachedNoEffect)
+
+	f.job.claim, err = b.ClaimTask(f.job.ctx, f.ref, "detached-owner-recovery", 60*time.Second)
+	require.NoError(t, err)
+	newClaim := f.job.claim
+	require.NotSame(t, oldClaim, newClaim)
+	require.NotEqual(t, oldClaim.reference.ClaimID, newClaim.reference.ClaimID)
+	require.Greater(t, newClaim.reference.CreateRevision, head[0].ModRevision)
+	require.EqualValues(t, 1, lease.grants.Load())
+	newRecord, err := newDetachedOwnerReleaseRecord(intent, head[0].CreateRevision, head[0].ModRevision, localRuntimeClaimWire(newClaim))
+	require.NoError(t, err)
+	newWire, err = encodeDetachedOwnerRelease(newRecord)
+	require.NoError(t, err)
+	newAttempt.Store(true)
+	committed, err := b.releaseTaskWorkspaceOwnerDetached(f.ctx, f.job, newClaim)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, committed.Outcome)
+	require.NotNil(t, committed.Entry)
+	require.EqualValues(t, 2, submissions.Load())
+	require.EqualValues(t, 1, dispatches.Load())
+	deletedNow, err := b.readEnrolledPoints(f.ctx, []string{deleted[0], deleted[1], deleted[2], releaseKey}, []int{4096, 4096, 4096, 8192})
+	require.NoError(t, err)
+	for _, point := range deletedNow[:3] {
+		require.Nil(t, point)
+	}
+	require.Equal(t, []byte(newWire), deletedNow[3].Value)
+
+	readonly.Store(true)
+	oldResult, err := b.releaseTaskWorkspaceOwnerDetached(f.ctx, f.job, oldClaim)
+	require.ErrorIs(t, err, ErrConflict)
+	require.Equal(t, OutcomeUnknown, oldResult.Outcome)
+	require.Nil(t, oldResult.Entry)
+	for _, actualTask := range []*mvccpb.KeyValue{nil, head[3]} {
+		readOwner, err := b.beginLocalRuntimeRead(f.ctx, f.ref)
+		require.NoError(t, err)
+		proof, err := b.readTaskOwnerReleaseProof(readOwner.ctx, f.ref, actualTask)
+		readOwner.finish()
+		require.NoError(t, err)
+		require.NotNil(t, proof.detached)
+		require.Nil(t, proof.local)
+		require.Equal(t, intent.Current, proof.detached.termination.Current, "old signed Current is retained exactly")
+		require.Equal(t, localRuntimeClaimWire(newClaim), proof.detached.record.Claim)
+		require.Equal(t, historyBefore, proof.detached.history.history[:])
+	}
+	readonly.Store(false)
+	require.EqualValues(t, 2, submissions.Load())
+	require.EqualValues(t, 1, dispatches.Load())
+	require.EqualValues(t, 1, lease.grants.Load())
+	require.Zero(t, indexReads.Load())
+	require.Zero(t, executionReads.Load())
+	require.Zero(t, slotReads.Load())
+	require.Equal(t, certificates, issuer.certificates.Load())
+	require.Equal(t, signatures, issuer.signatures.Load())
+	finalHead, err := b.readEnrolledPoints(f.ctx, []string{terminationKey, providerKey}, []int{16384, 16384})
+	require.NoError(t, err)
+	require.Equal(t, head[:2], finalHead)
+	t.Logf("pre-send absence preserved; original Joined→actor51→genuine Claim→ordinary ACK63→cold13; retained original graph=%d bytes; no managed/quota/global-admission claim", owned)
 }
