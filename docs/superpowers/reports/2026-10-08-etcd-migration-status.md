@@ -86,6 +86,10 @@ quota和自动消费者未接完，整体百分比不按新增测试数上调。
 旧OwnedBytes/Queued；新回归真实RED/GREEN、八组race、Linuxvet和主整合通过，见
 [cache账目验证](2026-10-18-etcd-cache-accounting-verification.md)。不是job phase准入
 或完整64MiB/RSS证明，未启用新的detached重图入口。
+`75fae0b`修复三处source严格JSON校验对非法第二值的整树分配，真实回归由
+8273/8227降至56/13次分配，原拒绝及原子赋值语义不变；22组race/Linuxvet与限定
+独立审查通过，见[source解码验证](2026-10-18-etcd-source-json-tail-verification.md)。
+这是无效输入处理优化，不能作为合法业务吞吐、大N容量或source workspace完成的依据。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
