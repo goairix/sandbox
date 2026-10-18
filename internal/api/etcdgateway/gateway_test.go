@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,6 +72,168 @@ func gatewayRequest(method, path, body string) *http.Request {
 	r.Header.Set("Authorization", "Bearer mounted-secret")
 	r.Header.Set("Content-Type", "application/json")
 	return r
+}
+
+// This test-only optional capability fixes the existing HTTP DTO boundary.
+// It does not replace runtime credential installation or prove internal Stage
+// arbitration; those remain the real service and Native fixture's responsibility.
+type gatewayTTLService struct {
+	*gatewayServiceFake
+	ttlCalls atomic.Int32
+	ttl      func(context.Context, string, string, int) (types.UpdateTTLResponse, error)
+}
+
+func (s *gatewayTTLService) UpdateTTL(ctx context.Context, id, requestID string, seconds int) (types.UpdateTTLResponse, error) {
+	s.ttlCalls.Add(1)
+	return s.ttl(ctx, id, requestID, seconds)
+}
+
+func ttlGatewayFixture(t *testing.T, fn func(context.Context, string, string, int) (types.UpdateTTLResponse, error)) (*Gateway, *gatewayTTLService) {
+	t.Helper()
+	s := &gatewayTTLService{gatewayServiceFake: &gatewayServiceFake{
+		lookup: func() (*provisioning.PlainColdLookupResult, error) { return nil, provisioning.ErrPlainColdUnavailable },
+	}, ttl: fn}
+	g, err := New(s, gatewaySettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	return g, s
+}
+
+func TestGatewayTTLUsesOriginalDTOAndSingleServiceCall(t *testing.T) {
+	for _, seconds := range []int{1, 30, 365 * 24 * 60 * 60} {
+		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
+			expires := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC).Add(time.Duration(seconds) * time.Second)
+			want := types.UpdateTTLResponse{Timeout: seconds, ExpiresAt: expires}
+			g, service := ttlGatewayFixture(t, func(ctx context.Context, id, requestID string, timeout int) (types.UpdateTTLResponse, error) {
+				if ctx == nil || ctx.Err() != nil || id != gatewaySandboxID || requestID != "ttl-original-request" || timeout != seconds {
+					t.Fatalf("wrong TTL input: id=%s request=%s timeout=%d", id, requestID, timeout)
+				}
+				return want, nil
+			})
+			body, err := json.Marshal(types.UpdateTTLRequest{Timeout: seconds})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", string(body))
+			r.Header.Set("X-Request-ID", "ttl-original-request")
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, r)
+			var got types.UpdateTTLResponse
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil || got.Timeout != want.Timeout || !got.ExpiresAt.Equal(want.ExpiresAt) {
+				t.Fatalf("TTL response: status=%d body=%s", w.Code, w.Body.String())
+			}
+			if w.Header().Get("X-Request-ID") != "ttl-original-request" || service.ttlCalls.Load() != 1 || service.execs.Load() != 0 {
+				t.Fatal("TTL request lost attribution, retried the service or executed user code")
+			}
+		})
+	}
+}
+
+func TestGatewayTTLRejectsInvalidBodyBeforeService(t *testing.T) {
+	for _, body := range []string{`{}`, `{"timeout":0}`, `{"timeout":-1}`, `{"timeout":1.5}`, `{"timeout":"30"}`, `{"timeout":30,"timeout":31}`, `{"timeout":30,"unknown":true}`, `{"timeout":30} {}`} {
+		t.Run(body, func(t *testing.T) {
+			g, service := ttlGatewayFixture(t, func(context.Context, string, string, int) (types.UpdateTTLResponse, error) {
+				t.Error("invalid TTL body reached service")
+				return types.UpdateTTLResponse{}, state.ErrInvalidRecord
+			})
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", body))
+			if w.Code != http.StatusBadRequest || service.ttlCalls.Load() != 0 {
+				t.Fatalf("invalid TTL body: status=%d calls=%d body=%s", w.Code, service.ttlCalls.Load(), w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGatewayTTLExpiredAndUnknownDoNotRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"expired", state.ErrOperationAdmissionClosed, "unavailable"},
+		{"unknown", state.ErrOutcomeUnknown, "outcome_unknown"},
+		{"unknown-before-not-found", errors.Join(state.ErrOutcomeUnknown, provisioning.ErrPlainColdNotFound), "outcome_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, service := ttlGatewayFixture(t, func(context.Context, string, string, int) (types.UpdateTTLResponse, error) {
+				// A plausible success payload must not conceal failed/unknown work.
+				return types.UpdateTTLResponse{Timeout: 30, ExpiresAt: time.Now().UTC().Add(30 * time.Second)}, tc.err
+			})
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", `{"timeout":30}`))
+			if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) || strings.Contains(w.Body.String(), `"expires_at"`) {
+				t.Fatalf("failed TTL must remain a failure: status=%d body=%s", w.Code, w.Body.String())
+			}
+			if service.ttlCalls.Load() != 1 || service.execs.Load() != 0 {
+				t.Fatalf("HTTP retried TTL or started user execution: calls=%d execs=%d", service.ttlCalls.Load(), service.execs.Load())
+			}
+		})
+	}
+}
+
+func TestGatewayTTLRequiresCompleteServiceCapability(t *testing.T) {
+	service := &gatewayServiceFake{
+		lookup: func() (*provisioning.PlainColdLookupResult, error) { return nil, provisioning.ErrPlainColdUnavailable },
+		exec: func(context.Context, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+			return provisioning.PlainExecResult{}, state.ErrOutcomeUnknown
+		},
+	}
+	g := gatewayFixture(t, service)
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", `{"timeout":30}`))
+	if w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), `"code":"unsupported"`) || service.lookups.Load() != 0 || service.execs.Load() != 0 {
+		t.Fatalf("missing TTL capability must not synthesize renewal: status=%d lookup=%d exec=%d body=%s", w.Code, service.lookups.Load(), service.execs.Load(), w.Body.String())
+	}
+}
+
+func TestGatewayTTLAdmissionAndHeadersBeforeService(t *testing.T) {
+	for _, name := range []string{"auth", "uuid", "duplicate-request-id", "empty-request-id", "idempotency"} {
+		t.Run(name, func(t *testing.T) {
+			g, service := ttlGatewayFixture(t, func(context.Context, string, string, int) (types.UpdateTTLResponse, error) {
+				t.Error("rejected TTL request reached service")
+				return types.UpdateTTLResponse{}, state.ErrInvalidRecord
+			})
+			r := gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", `{"timeout":30}`)
+			status := http.StatusBadRequest
+			switch name {
+			case "auth":
+				r.Header.Del("Authorization")
+				status = http.StatusUnauthorized
+			case "uuid":
+				r.URL.Path = "/api/v1/sandboxes/not-a-uuid/ttl"
+			case "duplicate-request-id":
+				r.Header["X-Request-ID"] = []string{"first", "second"}
+			case "empty-request-id":
+				r.Header["X-Request-ID"] = []string{""}
+			case "idempotency":
+				r.Header.Set("Idempotency-Key", "not-a-renewal-attempt")
+			}
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, r)
+			if w.Code != status || service.ttlCalls.Load() != 0 {
+				t.Fatalf("TTL admission failed: status=%d calls=%d body=%s", w.Code, service.ttlCalls.Load(), w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGatewayTTLDoesNotRepairInvalidSuccess(t *testing.T) {
+	for _, result := range []types.UpdateTTLResponse{
+		{Timeout: 30},
+		{Timeout: 31, ExpiresAt: time.Now().UTC().Add(time.Minute)},
+	} {
+		g, service := ttlGatewayFixture(t, func(context.Context, string, string, int) (types.UpdateTTLResponse, error) {
+			return result, nil
+		})
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID+"/ttl", `{"timeout":30}`))
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"outcome_unknown"`) || service.ttlCalls.Load() != 1 || service.lookups.Load() != 0 || service.execs.Load() != 0 {
+			t.Fatalf("invalid TTL success was retried or repaired: status=%d calls=%d body=%s", w.Code, service.ttlCalls.Load(), w.Body.String())
+		}
+	}
 }
 
 // These exercise real handler validation: malformed input must cause no service effects.

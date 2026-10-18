@@ -33,6 +33,13 @@ type Service interface {
 	Ready(context.Context) error
 }
 
+// ttlService is optional until a service supports the complete trusted runtime
+// credential renewal and metadata commit. A nil error promises that both have
+// completed; updating display metadata alone must never implement this contract.
+type ttlService interface {
+	UpdateTTL(context.Context, string, string, int) (types.UpdateTTLResponse, error)
+}
+
 type Gateway struct {
 	service   Service
 	settings  deployment.HTTPSettings
@@ -229,7 +236,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) >= 2 && parts[0] == "sandboxes" && parts[1] != "by-workspace" {
 		file := len(parts) == 4 && parts[2] == "files" && fileRoute(r.Method, parts[3])
-		supported := file || len(parts) == 2 && (r.Method == http.MethodGet || r.Method == http.MethodDelete) || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
+		ttl := len(parts) == 3 && parts[2] == "ttl" && r.Method == http.MethodPut
+		supported := file || ttl || len(parts) == 2 && (r.Method == http.MethodGet || r.Method == http.MethodDelete) || r.Method == http.MethodPost && (len(parts) == 3 && parts[2] == "exec" || len(parts) == 4 && parts[2] == "exec" && parts[3] == "stream")
 		if supported {
 			id := parts[1]
 			parsed, err := uuid.Parse(id)
@@ -237,7 +245,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeError(w, 400, "invalid_request", "invalid sandbox id")
 				return
 			}
-			if len(parts) == 2 && r.Method == http.MethodDelete {
+			if ttl {
+				g.updateTTL(w, r, id)
+			} else if len(parts) == 2 && r.Method == http.MethodDelete {
 				g.destroy(w, r, id)
 			} else if len(parts) == 2 {
 				g.lookup(w, r, id)
@@ -356,6 +366,60 @@ func (g *Gateway) lookup(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	writeJSON(w, 200, response)
+}
+
+// updateTTL retains the original authenticated business-call lifetime. The
+// capability owns the trusted clock, original attempt and runtime installation;
+// the HTTP boundary cannot extend expiry itself or retry an uncertain outcome.
+func (g *Gateway) updateTTL(w http.ResponseWriter, r *http.Request, id string) {
+	service, supported := g.service.(ttlService)
+	if !supported {
+		writeError(w, 501, "unsupported", "TTL renewal is not implemented in etcd mode")
+		return
+	}
+	for name := range r.Header {
+		if strings.EqualFold(name, "Idempotency-Key") {
+			writeError(w, 400, "invalid_request", "Idempotency-Key is not supported for TTL renewal")
+			return
+		}
+	}
+	requestID, valid := validHeaderValue(r.Header, "X-Request-ID", 128, true)
+	if !valid {
+		writeError(w, 400, "invalid_request", "invalid X-Request-ID")
+		return
+	}
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	w.Header().Set("X-Request-ID", requestID)
+
+	var request types.UpdateTTLRequest
+	if !readRequest(w, r, &request) {
+		return
+	}
+	// Seconds retain the old positive timeout DTO. The finite upper bound is
+	// the same 365-day limit used by plain business creation and its snapshot.
+	if request.Timeout < 1 || request.Timeout > 365*24*60*60 {
+		writeError(w, 400, "invalid_request", "invalid TTL timeout")
+		return
+	}
+
+	result, err := service.UpdateTTL(r.Context(), id, requestID, request.Timeout)
+	if errors.Is(err, state.ErrOutcomeUnknown) {
+		writeError(w, 503, "outcome_unknown", "TTL renewal outcome is unknown")
+		return
+	}
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	// Invalid success output cannot be repaired by a new Lookup or renewal:
+	// either would lose the original attempt's outcome and TTL baseline.
+	if result.Timeout != request.Timeout || result.ExpiresAt.IsZero() || result.ExpiresAt.Location() != time.UTC || result.ExpiresAt.Year() < 1 || result.ExpiresAt.Year() > 9999 {
+		writeError(w, 503, "outcome_unknown", "TTL renewal returned an invalid result")
+		return
+	}
+	writeJSON(w, 200, result)
 }
 
 func sandboxResponse(current *provisioning.PlainColdLookupResult) (types.SandboxResponse, error) {
