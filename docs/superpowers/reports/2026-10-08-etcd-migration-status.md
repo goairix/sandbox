@@ -33,9 +33,20 @@ OpenHTTP的原生组合、early/Unknown故障组合、全部最大输入和容�
 实际10k/60秒 pilot02通过：9类 typed metadata 共90000键，键值105787528字节；
 观测期没有模型control写入或新沙盒租约。原三个进程Wait、容器/磁盘卷清理和9303个
 输入/工具核对通过；首轮配置失败保留。Linux vet、模型边界测试及独立限定审查通过。
-1万→10万、每档1小时加维护/单成员恢复的正式长测正在运行，尚未验收；fixture使用
+1万→10万、每档1小时加维护/单成员恢复的正式长测尚未验收：首轮在维护半程
+停成员后新建Backend，被原逐端点启动校验拒绝；原进程及卷清理、9303个输入核对
+完成。正在改为检验故障前已建立的API客户端，先跑含维护/重启的短程验证；保留
+产品启动校验，不声称降级新启动成功。fixture使用
 私有明文环回连接。这是View/Snapshot/调度元数据子集，不是完整B_live或同数量可用
 sandbox、Pod、FUSE容量，也没有生产HTTP延迟或相对Redis性能结论。百分比暂不调整。
+
+`9c43ed9`/`bebf671` 两步提交有限单文件上传：完整有界multipart及HTTP body EOF
+校验后，走原签名Exec完成rooted父目录创建、0644原子写入及覆盖；文件最多512KiB。
+Gateway42项host/race、helper17项host/race及Linux vet通过；本机两项平台skip由
+Linux UID1000的13项实际测试覆盖，包括真实发布后Sync失败。验证分支FileAPI原生
+3.15秒、主分支新构建原生4.08秒均通过，分别核对9522个输入/工具及原21桥、launcher、
+单成员TLS-etcd的Wait/IO清理；不是同一组输入重跑的声明。早期夹具数量/连接收尾失败
+和一次混构建输入拒绝保留，不计通过。大文件/分片上传仍开放，百分比暂不调整。
 
 此前组件：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
 重新申请。实际三成员 TLS/native 三场景、race、Linux vet 和主分支输入等值集成
@@ -73,7 +84,7 @@ Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除�
 真实 HTTP 用例已成功创建、Exec、查询，随后 DELETE 仍返回501；整链的 managed
 Claim、销毁、退款与 Pending 删除尚未通过原生验证，因此不增加交付百分比。
 
-功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁故障组合及
+功能代码未完成：其余API、Pool/Docker、大文件/分片上传及默认入口替代、detached销毁故障组合及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
