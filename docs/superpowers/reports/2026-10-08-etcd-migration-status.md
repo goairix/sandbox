@@ -6,8 +6,8 @@
 
 | 口径 | 进度 | 判断依据 |
 | --- | --- | --- |
-| 功能代码 | 约78%，粗估范围75%–80% | plain创建/查询/执行、有限上传/下载、正常销毁及正常TTL续期链已接通；其余API、FUSE与故障组合仍有缺口 |
-| 整体交付 | 约52% | 沿用20/30/20/15/15权重，阶段粗估90/80/50/0/0；容量、部署恢复及最终替代未完成 |
+| 功能代码 | 约79%，粗估范围75%–80% | plain创建/查询/执行、有限上传/下载、正常销毁及TTL正常/安装后失确认冷恢复链已接通；其余API、FUSE与故障组合仍有缺口 |
+| 整体交付 | 约53% | 沿用20/30/20/15/15权重，阶段粗估90/80/55/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
 本周期新增 `538fda7` / `2f415ed`：六个既有文件接通显式 v2 resident 健康样本，
@@ -17,13 +17,32 @@ host、race、受影响旧接口回归、Linux vet 与独立审查通过；各�
 
 `733a607` 增加续期冷恢复的 v2 固定记录及事务构建，原 v1 publication/digest 保持不变；
 恢复事务只允许旧操作消失、原 Final 已持久 Aborted、源记录与 pending 修订均未改变。
-10组 host/race、Linux vet 和独立审查通过。该提交没有接通冷恢复入口；实际 Query、
-恢复预留 CAS、固定新 Stage 及丢确认后重建服务的原生业务链正在实施，不能计为已交付。
+10组 host/race、Linux vet 和独立审查通过。随后 `5230274` 接通具体 Query、恢复预留 CAS
+和固定新 Stage；14组 host/race、Linux vet 和独立审查通过。预留丢确认只读回并保留
+Unknown，不分配 Stage；下一请求先仲裁固定 attempt，再允许一次新的元数据修复。
 
-正式容量 FULL04 仍运行。1万档维护已实际触发旧 worker Unknown/失权退出，在确认旧
+`15d823f` 的真实 Linux 冷恢复用例14.85秒通过：Create10秒→实际安装续期后丢失 v5
+最终确认→HTTP503并保持原 metadata/pending→完整退出旧 HTTP/service/Backend，创建
+新 Gateway/service/Backend→实际旧期限+2秒→同一候选续期200、pending清除→GET、
+Create重放和同一 runtime/gen/gate 的签名 Exec 退出7。读取原 launcher 私有 journal
+证明候选确已安装，修复元数据前后 journal 全字节不变。原10个 bridge、launcher、
+TLS-etcd成员 Wait、无OOM、容器清理和9530项输入/工具核对完成。首次503失败基线
+保留，测试重启生命周期的两项审查问题已修复；未将组件模型当作该原生正例。
+该次实际运行在验证工作树，产品及目标用例已合入主分支；另有独立容量/FUSE测试差异，
+未声称主分支所有输入等值或重跑。换叶证书、关闭竞争与长期凭证自动维护仍待验收。
+
+`4c506c7` 固定 FUSE v2 专用只读目录/env及严格结构 Inspector；全组 host、Linux vet
+与独立审查通过。它只提供结构诊断，实际 peer/cgroup/ContainerID 认证通道及消费者仍在实现。
+
+正式容量 FULL04 已失败，不能作为10万通过。1万档维护实际触发旧 worker Unknown/失权退出，在确认旧
 guard/lease 消失后由正式 API 建立新 session/lease 并恢复同步；维护共72.65秒单列。
-这只证明本次长测中的接管分支，整档一小时和10万档尚无验收结论。
-百分比本周期不调整，默认 Redis、生产切换及部署恢复状态均不变。
+1万档一小时观测完成，control写入及新租约均为0，worker自报占用24MiB，末次Go heap
+约19.8MB。补到10万后，初始发现未在3分钟内同步；Txn/Revoke先发生超时并失权。
+原四个Wait、无OOM、容器/卷清理及9303项核对完成。`725b14d` 仅增加独立启动诊断
+模式，保留10k→100k旧checkpoint并跳过一小时idle；原3分钟、所有权及资源阈值不变。
+模式边界host、Linux vet/构建通过，实际有限复现进行中；历史Watch追赶与资源压力
+仍是待证假设。它不替代全容量长测，更不代表同数量实际Pod/FUSE sandbox容量。
+本次小幅上调只来自真实TTL冷恢复业务闭合；默认Redis、生产切换及部署恢复状态不变。
 
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
 正式 cleanup-worker 自动 managed Claim、drain/none、Observer/provider终止和安全释放→
@@ -64,7 +83,7 @@ Txn遇EOF而触发原worker不可逆失权，未通过；正在补测真实新se
 lease消失后才用原API获取新session，恢复成本单列，所有idle/N/64MiB/1小时断言保留。
 严格错误叶分类host、Linux检查及独立审查通过。fault-pilot04实际225.12秒通过，维护
 66.45秒；本次原owner存活并重同步，尚未证明replacement分支。原四个Wait、无OOM、
-容器/卷清理及9303项输入核对通过。FULL04已启动1万/10万各一小时正式长测，尚无结论；
+容器/卷清理及9303项输入核对通过。FULL04随后完成1万观测、10万启动失败，见本节最新记录；
 全部原失败记录保留，不把短测当容量验收。
 保留产品启动校验，不声称降级新启动成功。fixture使用
 私有明文环回连接。这是View/Snapshot/调度元数据子集，不是完整B_live或同数量可用
@@ -102,8 +121,8 @@ drain正确，Runtime UID/Boot、generation/gate不变，仍只有一个Pod/laun
 launcher、TLS-etcd成员实际Wait、无OOM及容器清理完成；9530项输入/工具核对通过。
 该次运行在验证工作树，1174个实际编译仓库输入与主分支逐字节一致；未声称主分支重跑。
 独立Spec/Quality审查通过，首次501失败基线保留。上调粗估来自可用正常TTL业务链闭合，
-不是按提交/测试数量累计；丢ACK、进程重启后的未完成续期自动收敛、实际换叶证书的
-业务组合及故障/容量仍待验，不能宣称整个TTL恢复或生产迁移完成。
+不是按提交/测试数量累计。此后安装失确认及冷重启恢复已由本节新用例闭合；实际换叶证书、
+关闭竞争、长期凭证维护及其他故障/容量仍待验，不能宣称整个TTL恢复或生产迁移完成。
 
 `dd366fc` 再验证同目标的正常续期后销毁：Create10秒→PUT90秒→实际跨旧期限→签名Exec→
 DELETE202→原正式worker清理和配额归还→GET404。真实Linux用例50.01秒通过，原worker、
@@ -153,7 +172,7 @@ Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除�
 真实 HTTP 用例已成功创建、Exec、查询，随后 DELETE 仍返回501；整链的 managed
 Claim、销毁、退款与 Pending 删除尚未通过原生验证，因此不增加交付百分比。
 
-功能代码未完成：TTL冷恢复与换叶证书故障组合、网络更新等API、Pool/Docker、大文件/分片上传及默认入口替代、detached销毁故障组合及
+功能代码未完成：TTL其余故障/换叶证书组合与长期凭证维护、网络更新等API、Pool/Docker、大文件/分片上传及默认入口替代、detached销毁故障组合及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
