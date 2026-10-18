@@ -44,6 +44,9 @@ func TestMetadataScaleNative(t *testing.T) {
 	if os.Getenv("SANDBOX_METADATA_SCALE_NATIVE") != "1" {
 		t.Skip("explicit owned disk-backed three-member metadata scale fixture required")
 	}
+	pilot := os.Getenv("SANDBOX_METADATA_SCALE_PILOT") == "1"
+	faultPilot := os.Getenv("SANDBOX_METADATA_SCALE_FAULT_PILOT") == "1"
+	require.False(t, faultPilot && !pilot, "fault pilot requires explicit pilot mode; it cannot replace a full capacity tier")
 	root := os.Getenv("SANDBOX_METADATA_SCALE_DATA")
 	require.True(t, filepath.IsAbs(root), "runner must provide an absolute owned disk-backed data directory")
 	var disk syscall.Statfs_t
@@ -53,7 +56,6 @@ func TestMetadataScaleNative(t *testing.T) {
 	data, err := os.MkdirTemp(root, "metadata-scale-")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(data)) })
-	pilot := os.Getenv("SANDBOX_METADATA_SCALE_PILOT") == "1"
 	duration := time.Hour
 	tiers := []int{10000, 100000}
 	if pilot {
@@ -141,7 +143,7 @@ func TestMetadataScaleNative(t *testing.T) {
 		}
 		t.Logf("METADATA_SCALE seed N=%d added=%d subset_keys=%d B_model_subset_added_key_value_bytes=%d request_protobuf_bytes=%d seed_sha256=%x elapsed=%s", count, count-previous, 9*(count-previous), seedBytes, requestBytes, digest.Sum(nil), time.Since(seedStart))
 		before := metadataScaleControlDigest(t, ctx, raw, seed.namespace, count)
-		observation := metadataScaleIdle(t, ctx, raw, options, count, duration, pilot, children, endpoints)
+		observation := metadataScaleIdle(t, ctx, raw, options, count, duration, pilot, faultPilot, children, endpoints)
 		require.Equal(t, before, metadataScaleControlDigest(t, ctx, raw, seed.namespace, count), "idle/maintenance must not rewrite any model control or its native envelope")
 		if previous != 0 {
 			require.LessOrEqual(t, observation.transactions, baseline.transactions*2+1024, "10xN must not produce10x short-period worker transactions; long audit/source reads are reported separately")
@@ -149,7 +151,9 @@ func TestMetadataScaleNative(t *testing.T) {
 		}
 		baseline, previous = observation, count
 	}
-	if pilot {
+	if faultPilot {
+		t.Log("METADATA_SCALE FAULT PILOT ONLY:10k/60s idle plus real maintenance/member restart harness; not1h/100k capacity or degraded startup acceptance")
+	} else if pilot {
 		t.Log("METADATA_SCALE PILOT ONLY:10k/60s harness; no1h tier, maintenance/fault,100k, Pod/FUSE or HTTP SLO acceptance")
 	} else {
 		t.Log("METADATA_SCALE View/Snapshot/scheduling typed subset10k/100k tiers finished; not completeB_live/cellcapacity,1M/multi-cell/24h, actualN sandboxes/Pods/FUSE, creation throughput or HTTP SLO evidence")
@@ -162,7 +166,7 @@ type metadataScaleObservation struct {
 
 // This observer never changes a result or a request. Unary response bytes are
 // exact protobuf bytes; Watch/network totals come from the real server metrics.
-func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, options Options, count int, duration time.Duration, pilot bool, children []*partitionWorkerNativeProcess, endpoints []string) metadataScaleObservation {
+func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, options Options, count int, duration time.Duration, pilot, faultPilot bool, children []*partitionWorkerNativeProcess, endpoints []string) metadataScaleObservation {
 	t.Helper()
 	b, err := New(ctx, options)
 	require.NoError(t, err)
@@ -224,7 +228,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 		require.Empty(t, status.LastError)
 		require.LessOrEqual(t, status.OwnedBytes, uint64(64<<20))
 		require.LessOrEqual(t, status.Queued, 10000)
-		if !pilot && !maintained && time.Since(start) >= duration/2 {
+		if (!pilot || faultPilot) && !maintained && time.Since(start) >= duration/2 {
 			maintenanceStart := time.Now()
 			maintenanceBefore := metadataScaleObservation{transactions.Load(), ranges.Load(), mutations.Load(), controlWrites.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load()}
 			metadataScaleMaintenance(t, ctx, raw, endpoints, children, b, options, count)
@@ -242,6 +246,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 			maintained = true
 		}
 	}
+	require.Equal(t, !pilot || faultPilot, maintained, "full tiers and the explicit fault pilot must execute real maintenance and member recovery")
 	result := metadataScaleObservation{transactions.Load() - prior.transactions, ranges.Load() - prior.ranges, mutations.Load() - prior.mutations, controlWrites.Load() - prior.controlWrites, responseBytes.Load() - prior.responseBytes, lease.grants.Load() - prior.grants, lease.keeps.Load() - prior.keeps}
 	require.Zero(t, result.controlWrites)
 	require.Zero(t, result.grants, "idle cannot grant sandbox leases")
@@ -298,6 +303,16 @@ func metadataScaleControlDigest(t *testing.T, ctx context.Context, raw *clientv3
 
 func metadataScaleSample(t *testing.T, ctx context.Context, b *Backend, options Options, count int) {
 	t.Helper()
+	api := metadataScaleSampleBackend(t, ctx, b, options)
+	defer api.Close()
+	metadataScaleSampleWithBackend(t, ctx, api, count)
+}
+
+// Startup remains fail closed: New authenticates all configured endpoints while
+// all members are available. Fault sampling reuses this original client; it
+// does not claim that a new Backend can start with an unavailable endpoint.
+func metadataScaleSampleBackend(t *testing.T, ctx context.Context, b *Backend, options Options) *Backend {
+	t.Helper()
 	identity, err := decodeIdentity(b.identityValue, b.namespace)
 	require.NoError(t, err)
 	identity.RestoreEpoch = b.restoreEpoch
@@ -309,7 +324,13 @@ func metadataScaleSample(t *testing.T, ctx context.Context, b *Backend, options 
 	apiOptions.Clock, apiOptions.WorkerControl = b.authorityClock, nil
 	api, err := New(ctx, apiOptions)
 	require.NoError(t, err)
-	defer api.Close()
+	return api
+}
+
+// One sample owns its observation wrappers and original operation leases. No
+// worker connection or endpoint configuration is replaced during member loss.
+func metadataScaleSampleWithBackend(t *testing.T, ctx context.Context, api *Backend, count int) {
+	t.Helper()
 	lease := &creationFaultLease{Lease: api.client.Lease}
 	api.client.Lease = lease
 	txns, responseBytes := 0, 0
@@ -325,7 +346,7 @@ func metadataScaleSample(t *testing.T, ctx context.Context, b *Backend, options 
 	start := time.Now()
 	var first string
 	for _, ordinal := range []int{0, count / 3, count - 1} {
-		_, id, err := metadataScaleModel(b.namespace, ordinal, time.Now().UTC().Add(time.Hour))
+		_, id, err := metadataScaleModel(api.namespace, ordinal, time.Now().UTC().Add(time.Hour))
 		require.NoError(t, err)
 		view, err := api.ReadSandboxView(ctx, id)
 		require.NoError(t, err)
@@ -451,8 +472,13 @@ func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.C
 	original, err := raw.Status(bounded, endpoints[i])
 	stop()
 	require.NoError(t, err)
+	// Complete the original strict startup validation before stopping a member.
+	// The tested availability property is quorum service on an existing client,
+	// not successful all-endpoint validation during a degraded fresh startup.
+	api := metadataScaleSampleBackend(t, ctx, b, options)
+	defer api.Close()
 	children[i].stop()
-	metadataScaleSample(t, ctx, b, options, count)
+	metadataScaleSampleWithBackend(t, ctx, api, count)
 	command := exec.Command(children[i].cmd.Path, children[i].cmd.Args[1:]...)
 	children[i] = startPartitionWorkerNativeProcess(t, command)
 	bounded, stop = partitionWorkerNativeRequest(ctx)
