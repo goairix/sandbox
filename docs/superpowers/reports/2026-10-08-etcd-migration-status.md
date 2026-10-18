@@ -62,8 +62,8 @@ Close改为锁内快照cancel/done。真实newRun/newClaim retained Query、短�
 provider配置hooks整合也通过；全phase及全局64MiB准入仍缺实现，不能作为大N容量结论。
 `0c6a009`补独立严格v2 owner seal、历史Claim归属及63节点纯投影；原五项RED/GREEN、
 race/Linuxvet和主分支整合通过，唯一限定审查通过，见
-[owner基础验证](2026-10-18-etcd-detached-owner-foundation-verification.md)。尚无live删除、
-surviving history认证或consumer接线，不能计为安全释放完成。
+[owner基础验证](2026-10-18-etcd-detached-owner-foundation-verification.md)。该基础片未包含
+live删除、surviving history认证或consumer接线，不能单独计为安全释放完成。
 `0bd7852`新增独立v2 quota-return codec，原v1固定字节回归不变；六项RED/GREEN、
 race/Linuxvet、主分支整合及唯一限定审查通过，见
 [quota编码验证](2026-10-18-etcd-detached-quota-codec-verification.md)。同时最大模型15360字节，
@@ -76,7 +76,10 @@ cutoff/Close矩阵仍缺，自动消费者和全局准入未接完。后续`268c
 absence→原Joined/actor51→新Claim/普通ACK63→cold13验证；独立普通/损坏ACK仍开放。
 `9328ab4`补齐终态v2的13点历史/22 pin有限传输profile，Host/race/Linuxvet、主分支
 整合与证据审计通过，见[传输验证](2026-10-18-etcd-detached-terminal-transport-verification.md)。
-旧v1维度不变；新profile尚未由终态消费者选用，不能计为公开终态查询接通。
+旧v1维度不变。后续`12af159`已接通后端`ReadSandboxReleased`实际v2正向，八次RPC
+与全部21 pin通过；主整合验证及完整输入等值复用通过，见
+[终态首片验证](2026-10-18-etcd-detached-terminal-consumer-verification.md)。四companion/
+认证后真实ABA/v2后继物理矩阵仍开放；HTTP、quota和自动消费者未接完。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
