@@ -38,7 +38,9 @@ import (
 // Native scale is opt-in and covers only the View/Snapshot/scheduling typed
 // metadata subset. Pilot mode validates the harness for 60 seconds at 10k;
 // tier evidence requires one hour of idle observation plus maintenance and
-// member recovery. These rows neither model complete B_live nor authorize
+// member recovery. The separate startup pilot retains 10k-to-100k checkpoint
+// history without the idle interval and is diagnostic evidence only.
+// These rows neither model complete B_live nor authorize
 // Pod/FUSE/runtime side effects or describe N actually usable sandboxes.
 func TestMetadataScaleNative(t *testing.T) {
 	if os.Getenv("SANDBOX_METADATA_SCALE_NATIVE") != "1" {
@@ -46,7 +48,9 @@ func TestMetadataScaleNative(t *testing.T) {
 	}
 	pilot := os.Getenv("SANDBOX_METADATA_SCALE_PILOT") == "1"
 	faultPilot := os.Getenv("SANDBOX_METADATA_SCALE_FAULT_PILOT") == "1"
-	require.False(t, faultPilot && !pilot, "fault pilot requires explicit pilot mode; it cannot replace a full capacity tier")
+	startupPilot := os.Getenv("SANDBOX_METADATA_SCALE_STARTUP_PILOT") == "1"
+	duration, tiers, err := metadataScaleRunPlan(pilot, faultPilot, startupPilot)
+	require.NoError(t, err)
 	root := os.Getenv("SANDBOX_METADATA_SCALE_DATA")
 	require.True(t, filepath.IsAbs(root), "runner must provide an absolute owned disk-backed data directory")
 	var disk syscall.Statfs_t
@@ -56,11 +60,6 @@ func TestMetadataScaleNative(t *testing.T) {
 	data, err := os.MkdirTemp(root, "metadata-scale-")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(data)) })
-	duration := time.Hour
-	tiers := []int{10000, 100000}
-	if pilot {
-		duration, tiers = time.Minute, []int{10000}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(tiers))*duration+time.Hour)
 	t.Cleanup(cancel)
 	endpoints, children := startPartitionWorkerNativeClusterWithData(t, ctx, data, 4<<30)
@@ -142,16 +141,21 @@ func TestMetadataScaleNative(t *testing.T) {
 			require.Len(t, response.Responses, len(writes))
 		}
 		t.Logf("METADATA_SCALE seed N=%d added=%d subset_keys=%d B_model_subset_added_key_value_bytes=%d request_protobuf_bytes=%d seed_sha256=%x elapsed=%s", count, count-previous, 9*(count-previous), seedBytes, requestBytes, digest.Sum(nil), time.Since(seedStart))
+		if startupPilot {
+			metadataScaleResourceDiagnostics(t, count, "seeded", children)
+		}
 		before := metadataScaleControlDigest(t, ctx, raw, seed.namespace, count)
-		observation := metadataScaleIdle(t, ctx, raw, options, count, duration, pilot, faultPilot, children, endpoints)
+		observation := metadataScaleIdle(t, ctx, raw, options, count, duration, pilot, faultPilot, startupPilot, children, endpoints)
 		require.Equal(t, before, metadataScaleControlDigest(t, ctx, raw, seed.namespace, count), "idle/maintenance must not rewrite any model control or its native envelope")
-		if previous != 0 {
+		if previous != 0 && !startupPilot {
 			require.LessOrEqual(t, observation.transactions, baseline.transactions*2+1024, "10xN must not produce10x short-period worker transactions; long audit/source reads are reported separately")
 			require.LessOrEqual(t, observation.keeps, baseline.keeps*2+8, "worker session renewal must not become per-sandbox renewal")
 		}
 		baseline, previous = observation, count
 	}
-	if faultPilot {
+	if startupPilot {
+		t.Log("METADATA_SCALE STARTUP PILOT ONLY:10k sync/Stop then100k with original checkpoints and3min sync bound; no1h idle, maintenance/fault or full capacity acceptance")
+	} else if faultPilot {
 		t.Log("METADATA_SCALE FAULT PILOT ONLY:10k/60s idle plus real maintenance/member restart harness; not1h/100k capacity or degraded startup acceptance")
 	} else if pilot {
 		t.Log("METADATA_SCALE PILOT ONLY:10k/60s harness; no1h tier, maintenance/fault,100k, Pod/FUSE or HTTP SLO acceptance")
@@ -164,13 +168,105 @@ type metadataScaleObservation struct {
 	transactions, ranges, mutations, controlWrites, responseBytes, grants, keeps int64
 }
 
+// Report a copied, fixed-size worker snapshot without iterating native model
+// rows or touching the actor's private scan state. Revision gaps distinguish
+// unfinished Range/checkpoint work from an old Watch replay baseline.
+func metadataScaleStartupStatus(t *testing.T, count int, elapsed time.Duration, status DueWorkerStatus) {
+	t.Helper()
+	synchronized, checkpointed := 0, 0
+	var minimumReplay, maximumReplay, minimumCovered, maximumCovered int64
+	var largestGap DueWorkerPartitionStatus
+	for i, partition := range status.Partitions {
+		if partition.Synchronized {
+			synchronized++
+		}
+		if partition.Revision > 0 {
+			checkpointed++
+		}
+		if i == 0 {
+			minimumReplay, minimumCovered = partition.ReplayFrom, partition.CoveredRevision
+		}
+		minimumReplay, maximumReplay = min(minimumReplay, partition.ReplayFrom), max(maximumReplay, partition.ReplayFrom)
+		minimumCovered, maximumCovered = min(minimumCovered, partition.CoveredRevision), max(maximumCovered, partition.CoveredRevision)
+		if i == 0 || partition.ObservedRevision-partition.CoveredRevision > largestGap.ObservedRevision-largestGap.CoveredRevision {
+			largestGap = partition
+		}
+	}
+	t.Logf("METADATA_SCALE startup progress N=%d elapsed=%s running=%t synchronized=%t phase=%s partitions=%d synced=%d checkpointed=%d replay_from=%d..%d covered=%d..%d renewals=%d owned=%d queued=%d error=%q largest_gap=%+v", count, elapsed, status.Running, status.Synchronized, status.Phase, len(status.Partitions), synchronized, checkpointed, minimumReplay, maximumReplay, minimumCovered, maximumCovered, status.Renewals, status.OwnedBytes, status.Queued, status.LastError, largestGap)
+}
+
+// The original process buffers have no live-reader lock, so only read fixed
+// kernel files here. Each resource class has a 64 KiB aggregate payload cap;
+// diagnostic failures are logged and never replace the measured worker error.
+func metadataScaleResourceDiagnostics(t *testing.T, count int, phase string, children []*partitionWorkerNativeProcess) {
+	t.Helper()
+	cgroups := []string{
+		"/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.swap.current",
+		"/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory.stat", "/sys/fs/cgroup/memory.pressure",
+		"/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/cpu.pressure", "/sys/fs/cgroup/io.stat", "/sys/fs/cgroup/io.pressure",
+	}
+	processes := []string{"/proc/self/status", "/proc/self/io"}
+	for _, child := range children {
+		for _, name := range []string{"status", "stat", "io"} {
+			processes = append(processes, fmt.Sprintf("/proc/%d/%s", child.cmd.Process.Pid, name))
+		}
+	}
+	for _, class := range []struct {
+		name  string
+		paths []string
+	}{{"cgroup", cgroups}, {"process", processes}} {
+		remaining := 64 << 10
+		for _, path := range class.paths {
+			if remaining == 0 {
+				t.Logf("METADATA_SCALE diagnostic N=%d phase=%s class=%s payload_cap_reached=true", count, phase, class.name)
+				break
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Logf("METADATA_SCALE diagnostic N=%d phase=%s class=%s path=%s open_error=%v", count, phase, class.name, path, err)
+				continue
+			}
+			wire, readErr := io.ReadAll(io.LimitReader(file, int64(remaining)+1))
+			closeErr := file.Close()
+			truncated := len(wire) > remaining
+			if truncated {
+				wire = wire[:remaining]
+			}
+			remaining -= len(wire)
+			t.Logf("METADATA_SCALE diagnostic N=%d phase=%s class=%s path=%s truncated=%t read_error=%v close_error=%v data=%q", count, phase, class.name, path, truncated, readErr, closeErr, wire)
+		}
+	}
+}
+
 // This observer never changes a result or a request. Unary response bytes are
 // exact protobuf bytes; Watch/network totals come from the real server metrics.
-func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, options Options, count int, duration time.Duration, pilot, faultPilot bool, children []*partitionWorkerNativeProcess, endpoints []string) metadataScaleObservation {
+func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, options Options, count int, duration time.Duration, pilot, faultPilot, startupPilot bool, children []*partitionWorkerNativeProcess, endpoints []string) metadataScaleObservation {
 	t.Helper()
 	b, err := New(ctx, options)
 	require.NoError(t, err)
 	defer b.Close()
+	// Register before the worker's Stop defer. Failure diagnostics run only
+	// after that original owner joined; member.stop retains its sole Cmd.Wait.
+	// The existing member output buffers must never be read while writers live.
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		metadataScaleResourceDiagnostics(t, count, "failure-before-member-stop", children)
+		for _, child := range children {
+			child.stop()
+			for name, output := range map[string]*partitionWorkerNativeOutput{"stdout": &child.stdout, "stderr": &child.stderr} {
+				wire := output.buffer.Bytes()
+				if len(wire) > 8<<10 {
+					wire = wire[len(wire)-(8<<10):]
+				}
+				// The original buffer retains its first 64 KiB. If it dropped
+				// output, this is only that retained prefix's tail, not a claim
+				// that we recovered later bytes from the actual member process.
+				t.Logf("METADATA_SCALE joined member N=%d pid=%d %s_retained_prefix_tail=%q dropped=%d", count, child.cmd.Process.Pid, name, wire, output.dropped)
+			}
+		}
+	}()
 	var transactions, ranges, mutations, controlWrites, responseBytes atomic.Int64
 	b.client.KV = &faultKV{KV: b.client.KV, match: func(ops []clientv3.Op) bool {
 		transactions.Add(1)
@@ -223,9 +319,34 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 		}
 	}()
 	start := time.Now()
-	for !w.Status().Synchronized {
-		require.Less(t, time.Since(start), 3*time.Minute, "initial real bounded discovery failed to synchronize")
+	nextDiagnostic := start
+	for {
+		status := w.Status()
+		if !status.Running {
+			terminalErr := w.Stop()
+			t.Logf("METADATA_SCALE startup stopped N=%d elapsed=%s status=%+v terminal_error=%v txns=%d ranges=%d mutations=%d response_pb=%d grants=%d keeps=%d", count, time.Since(start), status, terminalErr, transactions.Load(), ranges.Load(), mutations.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load())
+			require.True(t, status.Running, "original startup owner terminated; terminal error remains a failure: %v", terminalErr)
+		}
+		require.LessOrEqual(t, status.OwnedBytes, uint64(64<<20))
+		require.LessOrEqual(t, status.Queued, 10000)
+		if status.Synchronized {
+			require.Empty(t, status.LastError)
+			break
+		}
+		if !time.Now().Before(nextDiagnostic) || time.Since(start) >= 3*time.Minute {
+			metadataScaleStartupStatus(t, count, time.Since(start), status)
+			t.Logf("METADATA_SCALE startup RPC N=%d txns=%d ranges=%d mutations=%d response_pb=%d grants=%d keeps=%d", count, transactions.Load(), ranges.Load(), mutations.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load())
+			nextDiagnostic = time.Now().Add(5 * time.Second)
+		}
+		require.Less(t, time.Since(start), 3*time.Minute, "initial real bounded discovery failed to synchronize; phase=%s running=%t error=%s", status.Phase, status.Running, status.LastError)
 		partitionWorkerNativePause(t, ctx, 100*time.Millisecond)
+	}
+	if startupPilot {
+		metadataScaleStartupStatus(t, count, time.Since(start), w.Status())
+		result := metadataScaleObservation{transactions.Load(), ranges.Load(), mutations.Load(), controlWrites.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load()}
+		require.Zero(t, result.controlWrites)
+		t.Logf("METADATA_SCALE startup-only N=%d elapsed=%s original_checkpoint_retained=true observation=%+v; original Stop/join follows before the next seed tier", count, time.Since(start), result)
+		return result
 	}
 	metadataScaleSample(t, ctx, b, options, count)
 	t.Logf("METADATA_SCALE startup/sample N=%d elapsed=%s txns=%d grants=%d keeps=%d", count, time.Since(start), transactions.Load(), lease.grants.Load(), lease.keeps.Load())

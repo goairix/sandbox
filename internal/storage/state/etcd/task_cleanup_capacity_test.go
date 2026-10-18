@@ -93,6 +93,50 @@ func TestMetadataScaleMemberStopErrorClassification(t *testing.T) {
 	}
 }
 
+// Startup diagnosis retains both cardinalities and their shared checkpoint
+// history, but cannot select either full idle acceptance or the fault pilot.
+func metadataScaleRunPlan(pilot, faultPilot, startupPilot bool) (time.Duration, []int, error) {
+	if faultPilot && !pilot || startupPilot && (pilot || faultPilot) {
+		return 0, nil, fmt.Errorf("metadata scale pilot modes must be selected independently")
+	}
+	if startupPilot {
+		return 0, []int{10000, 100000}, nil
+	}
+	if pilot {
+		return time.Minute, []int{10000}, nil
+	}
+	return time.Hour, []int{10000, 100000}, nil
+}
+
+func TestMetadataScaleRunPlanPreservesFullAndStartupBoundaries(t *testing.T) {
+	for _, model := range []struct {
+		name                       string
+		pilot, faultPilot, startup bool
+		duration                   time.Duration
+		tiers                      []int
+		invalid                    bool
+	}{
+		{name: "full", duration: time.Hour, tiers: []int{10000, 100000}},
+		{name: "pilot", pilot: true, duration: time.Minute, tiers: []int{10000}},
+		{name: "fault-pilot", pilot: true, faultPilot: true, duration: time.Minute, tiers: []int{10000}},
+		{name: "startup-only", startup: true, tiers: []int{10000, 100000}},
+		{name: "fault-without-pilot", faultPilot: true, invalid: true},
+		{name: "startup-and-pilot", pilot: true, startup: true, invalid: true},
+		{name: "startup-and-fault", pilot: true, faultPilot: true, startup: true, invalid: true},
+	} {
+		t.Run(model.name, func(t *testing.T) {
+			duration, tiers, err := metadataScaleRunPlan(model.pilot, model.faultPilot, model.startup)
+			if model.invalid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, model.duration, duration)
+			require.Equal(t, model.tiers, tiers)
+		})
+	}
+}
+
 // metadataScaleModel creates the typed metadata subset needed by View/Snapshot
 // and due scheduling: control, snapshot, owner, fence, placement, runtime index,
 // creation intent, creation request and due candidate. It omits signed runtime
