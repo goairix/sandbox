@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +18,79 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+// TestNativeMounterReadinessChannelPID1 authenticates an actual independent
+// helper process. Only its mount/process backend is the existing model: this
+// proves neither a /dev/fuse mount nor access to an object store. Samples are
+// produced by the original resident refresh/cache owners, never injected.
+func TestNativeMounterReadinessChannelPID1(t *testing.T) {
+	if os.Getenv("SANDBOX_MOUNTER_CHANNEL_PID1") != "1" {
+		t.Skip("requires original enrolled launcher and independent native helper fixture")
+	}
+	require.Equal(t, 1, os.Getpid())
+	require.NoError(t, unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
+	require.NoError(t, unix.Unmount("/proc", unix.MNT_DETACH))
+	require.NoError(t, unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""))
+	uid := os.Getenv("SANDBOX_MOUNTER_CHANNEL_UID")
+	require.NotEmpty(t, uid)
+	root := t.TempDir()
+	for _, dir := range []string{"run", "secrets", "cache/tmp", "workspace"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0700))
+	}
+	bootstrap := validBootstrap(root)
+	bootstrap.RuntimeUID, bootstrap.CacheLimitBytes = uid, 128<<20
+	runner := &fakeRunner{}
+	var ready bool
+	supervisor := NewSupervisor(Config{
+		RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"), CacheRoot: filepath.Join(root, "cache"), MountPath: bootstrap.MountPath,
+		CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil },
+		MountInfo: func() (Mount, error) {
+			kind, id := "tmpfs", uint64(0)
+			if ready {
+				kind, id = "fuse.s3fs", 41
+			}
+			return Mount{ID: id, MountPoint: bootstrap.MountPath, FilesystemType: kind}, nil
+		},
+	}, runner)
+	attachTestNativeOwner(t, supervisor)
+	require.NoError(t, supervisor.Bootstrap(context.Background(), bootstrap, uid))
+	authorization := validAuthorization()
+	authorization.RuntimeUID = uid
+	// The modeled mount still names the workspace in the original signed slot.
+	authorization.WorkspaceHash = strings.Repeat("a", 64)
+	require.NoError(t, supervisor.Authorize(context.Background(), authorization))
+	ready = true
+	_, err := supervisor.ReadyStatus(context.Background())
+	require.NoError(t, err)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+	ctx, deadline := context.WithTimeout(ctx, 55*time.Second)
+	defer deadline()
+	channel := &ReadinessChannel{Supervisor: supervisor, SocketPath: readinessObserverSocket, PodName: os.Getenv("SANDBOX_MOUNTER_CHANNEL_POD"), NodeUID: os.Getenv("SANDBOX_MOUNTER_CHANNEL_NODE"), NodeBootID: os.Getenv("SANDBOX_MOUNTER_CHANNEL_BOOT"), ContractDigest: os.Getenv("SANDBOX_MOUNTER_CHANNEL_CONTRACT")}
+	readiness := &ReadinessServer{Supervisor: supervisor, Address: "127.0.0.1:0"}
+	joined := make(chan error, 2)
+	go func() { joined <- readiness.Serve(ctx) }()
+	go func() { joined <- channel.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		var joinedErr error
+		for range 2 {
+			joinedErr = errors.Join(joinedErr, <-joined)
+		}
+		// End only the explicitly modeled filesystem child after all actual
+		// channel/sampler IO has returned; native PID1 handles remain owned.
+		runner.process.exit <- nil
+		<-supervisor.processDone
+		ready = false
+		shutdown, finish := context.WithTimeout(context.Background(), 3*time.Second)
+		defer finish()
+		_, err := supervisor.Shutdown(shutdown, nil)
+		closeErr := supervisor.Close()
+		require.NoError(t, errors.Join(joinedErr, err, closeErr), "original channel/readiness/cache/model child owners joined before native close")
+	})
+	<-ctx.Done()
+	require.NotEqual(t, context.DeadlineExceeded, ctx.Err(), "parent must explicitly retire the original helper")
+}
 
 // TestNativeKernelPID1 requires the test binary itself to be PID1. Root runs
 // this selector in a fresh Linux PID namespace; host model tests are not a

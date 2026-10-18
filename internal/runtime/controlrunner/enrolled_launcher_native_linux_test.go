@@ -19,12 +19,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/goairix/sandbox/internal/fuseprotocol"
+	"github.com/goairix/sandbox/internal/kubecontract"
 	"github.com/goairix/sandbox/internal/nodeobserver"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
@@ -33,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -102,13 +106,54 @@ func runEnrolledLauncherNativeWithProfile(t *testing.T, modes []string, enrolled
 	runEnrolledLauncherFixture(t, modes, enrolledProfile, false)
 }
 
-func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, startup bool) {
+func TestEnrolledLauncherMounterChannelNative(t *testing.T) {
+	runEnrolledLauncherFixture(t, []string{"mounter-channel"}, false, false, true)
+}
+
+// The API is the existing bounded provider model, not a kubelet or OCI image
+// verification. Its complete production-rendered intent is fixed before root
+// signing. The independently started helper must still match actual kernel
+// PID1/namespaces/cgroup and this exact init ContainerID at registration.
+func mounterChannelNativePod(t *testing.T, config []byte, creation, nodeUID, boot, name, uid, helperID, mode string) *v1.Pod {
+	t.Helper()
+	resources := v1.ResourceRequirements{
+		Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("250m"), v1.ResourceMemory: resource.MustParse("256Mi")},
+		Requests: v1.ResourceList{v1.ResourceCPU: resource.MustParse("100m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+	}
+	spec, err := kubecontract.EnrolledFUSEPodSpec(kubecontract.EnrolledFUSEPodSpecInput{
+		NodeName: "node-a", LauncherImage: enrolledProfileFixtureImage, MounterImage: "fixture.invalid/mounter@sha256:" + strings.Repeat("c", 64), MounterAppArmorProfile: "sandbox-fuse-" + strings.Repeat("e", 64), LauncherConfig: config,
+		LauncherResources: resources, MounterResources: resources, WorkspaceBytes: 64 << 20, TmpBytes: 32 << 20,
+		Bootstrap: fuseprotocol.BootstrapConfig{
+			Version: 1, Provider: "minio", Bucket: "workspaces", Endpoint: "https://storage.example.test", Region: "us-east-1", Profile: "minio-sigv4-path-style-v1",
+			PasswdFile: "/run/s3fs/passwd-s3fs", CacheDir: "/var/cache/s3fs", MountPath: "/workspace", CacheLimitBytes: 128 << 20, PoolKey: strings.Repeat("a", 64), MountTimeoutSeconds: 30, FlushTimeoutSeconds: 30, UnmountTimeoutSeconds: 15,
+		},
+	})
+	require.NoError(t, err)
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "runtimes", UID: types.UID(uid), ResourceVersion: "1",
+		Labels: map[string]string{"sandbox.managed": "true", "sandbox.id": "sandbox-" + mode, "sandbox.workspace.mode": "fuse"},
+		Annotations: map[string]string{
+			kubecontract.EnrolledProfileAnnotation:    kubecontract.EnrolledFUSEProfile,
+			kubecontract.EnrolledGenerationAnnotation: "1", kubecontract.EnrolledNodeUIDAnnotation: nodeUID, kubecontract.EnrolledNodeBootIDAnnotation: boot,
+			kubecontract.EnrolledConfigDigestAnnotation: hashBytes(config), kubecontract.EnrolledImageDigestAnnotation: strings.Split(enrolledProfileFixtureImage, "sha256:")[1], kubecontract.EnrolledCreationIntentAnnotation: creation,
+		},
+	}, Spec: spec, Status: v1.PodStatus{InitContainerStatuses: []v1.ContainerStatus{{Name: "workspace-mounter", ContainerID: "containerd://" + helperID, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Now()}}}}}}
+	_, err = kubecontract.InspectEnrolledFUSEPod(pod)
+	require.NoError(t, err)
+	return pod
+}
+
+func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, startup bool, mounterChannel ...bool) {
+	fuseChannel := len(mounterChannel) == 1 && mounterChannel[0]
 	enabled := "SANDBOX_ENROLLED_LAUNCHER_NATIVE"
 	if enrolledProfile {
 		enabled = "SANDBOX_ENROLLED_PROFILE_NATIVE"
 	}
 	if startup {
 		enabled = "SANDBOX_ENROLLED_KUBERNETES_STARTUP_NATIVE"
+	}
+	if fuseChannel {
+		enabled = "SANDBOX_ENROLLED_MOUNTER_CHANNEL_NATIVE"
 	}
 	if os.Getenv(enabled) != "1" {
 		t.Skip("requires exact owned enrolled launcher Linux fixture")
@@ -159,6 +204,12 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 	if enrolledProfile {
 		contract = profileFixtureContract(t)
 	}
+	if fuseChannel {
+		var err error
+		contract, err = kubecontract.EnrolledFUSEContractDigest(enrolledProfileFixtureImage, "fixture.invalid/mounter@sha256:"+strings.Repeat("c", 64), "sandbox-fuse-"+strings.Repeat("e", 64))
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll("/run/sandbox-node-observer/mounter-health", 0700))
+	}
 	bootWire, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	require.NoError(t, err)
 	boot, nodeUID := strings.TrimSpace(string(bootWire)), uuid.NewString()
@@ -193,10 +244,20 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			require.NoError(t, os.Mkdir(caseDir, 0700))
 			creation, podUID := uuid.NewString(), uuid.NewString()
 			podName := "launcher-" + mode
+			helperID := strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")
+			var fuseConfig []byte
+			if fuseChannel {
+				bindingWire := observerNativeRecord(t, "namespace,authority_id,target,restore_epoch", binding.Namespace, binding.AuthorityID, binding.Target, binding.RestoreEpoch)
+				enrollmentWire := observerNativeRecord(t, "node_uid,node_boot_id", nodeUID, boot)
+				fuseConfig = observerNativeRecord(t, "version,binding,roots,uid,gid,network_allowed,contract_digest,clock_socket,clock_public_key,clock_audience,max_active,enrollment", 2, json.RawMessage(bindingWire), []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, 1000, 1000, false, contract, ct.ClockSocket, clockPublic, "launcher", 4, json.RawMessage(enrollmentWire))
+			}
 			zero, no, yes := int64(0), false, true
 			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: "runtimes", UID: types.UID(podUID), ResourceVersion: "1", Annotations: map[string]string{"sandbox.creation.intent": creation}}, Spec: v1.PodSpec{NodeName: "node-a", RestartPolicy: v1.RestartPolicyNever, SecurityContext: &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}, Containers: []v1.Container{{Name: "sandbox", SecurityContext: &v1.SecurityContext{RunAsUser: &zero, Privileged: &no, AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, Capabilities: &v1.Capabilities{Drop: []v1.Capability{"ALL"}, Add: []v1.Capability{"KILL", "SETUID", "SETGID", "SETPCAP"}}}}}}}
 			if enrolledProfile {
 				pod = profileFixturePod(t, binding, root.Public().(ed25519.PublicKey), clockPublic, nodeUID, boot, creation, podName, podUID, mode)
+			}
+			if fuseChannel {
+				pod = mounterChannelNativePod(t, fuseConfig, creation, nodeUID, boot, podName, podUID, helperID, mode)
 			}
 			node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID(nodeUID)}, Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{BootID: boot, OperatingSystem: "linux", Architecture: runtime.GOARCH}}}
 			var bridge *startupBridgeFixture
@@ -212,7 +273,9 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 				})
 			}
 			var podReads atomic.Int32
+			var apiCalls atomic.Int32
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				apiCalls.Add(1)
 				if r.Method != http.MethodGet {
 					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
@@ -238,13 +301,21 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			observer, err := nodeobserver.New(nodeobserver.Options{Binding: binding, Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, NodeName: "node-a", NodeUID: nodeUID, Certificate: observerCert, PrivateKey: observerKey, Clock: nativeFixtureClock{}, EtcdEndpoints: []string{"https://127.0.0.1:2379"}, EtcdTLS: observerTLS, EtcdClusterID: cluster, EtcdIdentity: identity, KubernetesConfig: &rest.Config{Host: api.URL}, KubernetesNamespace: "runtimes", JournalDirectory: journal, MaxSlots: 1, MaxActive: 2, RequestTimeout: 5 * time.Second, TerminationTimeout: 20 * time.Second})
 			require.NoError(t, err)
 			var observerDone chan error
-			t.Cleanup(func() {
-				require.NoError(t, observer.Close())
-				if observerDone != nil {
-					err := <-observerDone
-					require.True(t, err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed), "original observer Serve join: %v", err)
-				}
-			})
+			var observerOnce sync.Once
+			stopObserver := func() {
+				observerOnce.Do(func() {
+					if err := observer.Close(); err != nil {
+						t.Errorf("original observer Close: %v", err)
+					}
+					if observerDone != nil {
+						err := <-observerDone
+						if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+							t.Errorf("original observer Serve join: %v", err)
+						}
+					}
+				})
+			}
+			t.Cleanup(stopObserver)
 			enrollmentSocket := ct.EnrollmentSocket
 			if enrolledProfile {
 				enrollmentSocket = "/run/sandbox-node-observer/enrollment.sock"
@@ -259,8 +330,20 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			tcp, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = tcp.Close() })
-			observerDone = make(chan error, 1)
-			go func() { observerDone <- observer.Serve(ctx, uds, tcp) }()
+			if fuseChannel {
+				healthPath := "/run/sandbox-node-observer/mounter-health/roothealth.sock"
+				health, err := net.ListenUnix("unix", &net.UnixAddr{Name: healthPath, Net: "unix"})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = health.Close() })
+				require.NoError(t, os.Chmod(healthPath, 0600))
+				// Publish the join handle only after all fallible listener setup;
+				// failed setup must not wait for a Serve goroutine never started.
+				observerDone = make(chan error, 1)
+				go func() { observerDone <- observer.ServeWithMounter(ctx, uds, tcp, health) }()
+			} else {
+				observerDone = make(chan error, 1)
+				go func() { observerDone <- observer.Serve(ctx, uds, tcp) }()
+			}
 			configuredNode := nodeUID
 			if mode == "wrong-node" {
 				configuredNode = uuid.NewString()
@@ -268,6 +351,9 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			bindingWire := observerNativeRecord(t, "namespace,authority_id,target,restore_epoch", binding.Namespace, binding.AuthorityID, binding.Target, binding.RestoreEpoch)
 			enrollmentWire := observerNativeRecord(t, "node_uid,node_boot_id", configuredNode, boot)
 			config := observerNativeRecord(t, "version,binding,roots,uid,gid,network_allowed,contract_digest,clock_socket,clock_public_key,clock_audience,max_active,enrollment", 2, json.RawMessage(bindingWire), []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, 1000, 1000, false, contract, ct.ClockSocket, clockPublic, "launcher", 4, json.RawMessage(enrollmentWire))
+			if fuseChannel {
+				require.Equal(t, fuseConfig, config)
+			}
 			if enrolledProfile {
 				require.Equal(t, string(config), pod.Spec.Containers[0].Env[0].Value)
 				if !startup {
@@ -366,6 +452,45 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			require.NoError(t, err)
 			require.Equal(t, "closed_hello", hello.Purpose)
 			require.NotNil(t, hello.Birth)
+			if fuseChannel {
+				// This is a second actual PID1/cgroup, not a copied native owner.
+				// Its API ContainerID locates this exact terminal kernel leaf.
+				helperLeaf := filepath.Join(mount, helperID)
+				require.NoError(t, os.Mkdir(helperLeaf, 0700))
+				t.Cleanup(func() {
+					wire, err := os.ReadFile(filepath.Join(helperLeaf, "cgroup.events"))
+					require.NoError(t, err)
+					require.Contains(t, string(wire), "populated 0\n")
+					require.NoError(t, os.Remove(helperLeaf))
+				})
+				helperFD, err := unix.Open(helperLeaf, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+				require.NoError(t, err)
+				helper := exec.Command("/fixture/mounter-test", "-test.run=^TestNativeMounterReadinessChannelPID1$", "-test.v", "-test.timeout=65s")
+				helper.Env = append(os.Environ(), "SANDBOX_MOUNTER_CHANNEL_PID1=1", "SANDBOX_MOUNTER_CHANNEL_UID="+podUID, "SANDBOX_MOUNTER_CHANNEL_POD="+podName, "SANDBOX_MOUNTER_CHANNEL_NODE="+nodeUID, "SANDBOX_MOUNTER_CHANNEL_BOOT="+boot, "SANDBOX_MOUNTER_CHANNEL_CONTRACT="+contract)
+				helper.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWNS, UseCgroupFD: true, CgroupFD: helperFD}
+				helper.Stdout, helper.Stderr = os.Stdout, os.Stderr
+				startErr := helper.Start()
+				closeErr := unix.Close(helperFD)
+				require.NoError(t, startErr)
+				helperWait := make(chan error, 1)
+				go func() { helperWait <- helper.Wait() }()
+				t.Cleanup(func() {
+					// Observer Close joins actual channel IO before either PID1's
+					// retained anchors or its empty cgroup may be retired.
+					stopObserver()
+					signalErr := helper.Process.Signal(syscall.SIGTERM)
+					select {
+					case err := <-helperWait:
+						t.Logf("original helper Cmd.Wait=%v", err)
+						require.NoError(t, errors.Join(signalErr, err), "original helper Cmd.Wait")
+					case <-time.After(8 * time.Second):
+						_ = helper.Process.Kill()
+						err := <-helperWait
+						t.Fatalf("original helper did not join after retirement: %v", err)
+					}
+				})
+				require.NoError(t, closeErr)
+			}
 			ri := p.RuntimeIdentityContext{SandboxID: "sandbox-" + mode, WorkspaceHash: strings.Repeat("a", 64), Generation: 1, Runtime: p.RuntimeReference{ID: podName, UID: podUID, BootID: hello.Birth.BootID}}
 			runtimeCert, err := p.SignRuntimeIdentityCertificate(root, p.RuntimeIdentityCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "runtime_receipt", Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: hello.Birth.RuntimePublicKey, NotBefore: nb, NotAfter: na, SandboxID: ri.SandboxID, WorkspaceHash: ri.WorkspaceHash, Generation: ri.Generation, Runtime: ri.Runtime})
 			require.NoError(t, err)
@@ -379,6 +504,42 @@ func runEnrolledLauncherFixture(t *testing.T, modes []string, enrolledProfile, s
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, "activated", activated.Purpose)
+				if fuseChannel {
+					// Activation completed genuine signed enrollment into the
+					// original slot. Do not call the plain-only publication API
+					// and present this filesystem model as a ready FUSE mount.
+					var sample fuseprotocol.MounterReadiness
+					require.Eventually(t, func() bool {
+						sample, err = observer.ReadMounterReadiness(ctx, ri, strings.Repeat("a", 64), 1, 1)
+						return err == nil
+					}, 8*time.Second, 50*time.Millisecond, "actual root Unix peer must bind the original helper PID1 to the enrolled slot")
+					require.Equal(t, podUID, sample.RuntimeUID)
+					require.Positive(t, sample.SampleSequence)
+					require.Positive(t, sample.ValidForNanoseconds)
+					apiBefore, podBefore := apiCalls.Load(), podReads.Load()
+					revisionBefore, err := admin.Get(ctx, binding.Namespace+"meta/identity")
+					require.NoError(t, err)
+					for range 3 {
+						anchor := time.Now()
+						next, err := observer.ReadMounterReadiness(ctx, ri, strings.Repeat("a", 64), 1, 1)
+						require.NoError(t, err)
+						require.GreaterOrEqual(t, next.SampleSequence, sample.SampleSequence)
+						require.Equal(t, sample.MountID, next.MountID)
+						require.True(t, time.Now().Before(anchor.Add(time.Duration(next.ValidForNanoseconds))))
+						sample = next
+					}
+					revisionAfter, err := admin.Get(ctx, binding.Namespace+"meta/identity")
+					require.NoError(t, err)
+					require.Equal(t, revisionBefore.Header.Revision, revisionAfter.Header.Revision, "diagnostic pulls create no Begin/End metadata writes")
+					require.Equal(t, apiBefore, apiCalls.Load(), "stable pulls perform no Pod/Node GET or exec")
+					require.Equal(t, podBefore, podReads.Load())
+					t.Log("actual signed launcher enrollment + independent root PID1 helper + authenticated channel; filesystem backend remains a model")
+					stopObserver()
+					require.NoError(t, child.Process.Signal(syscall.SIGTERM))
+					require.NoError(t, waitChild())
+					t.Log("original formal launcher Cmd.Wait=exit0 after authenticated channel IO joined")
+					return
+				}
 				claims := p.RuntimeCertificateClaims{Version: 1, Namespace: binding.Namespace, AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, IntentID: creation, SandboxID: ri.SandboxID, WorkspaceHash: ri.WorkspaceHash, Generation: 1, OperationID: uuid.NewString(), PayloadDigest: strings.Repeat("b", 64), Snapshot: p.SnapshotReference{Version: "snapshot", Digest: strings.Repeat("c", 64)}, ExpiresAt: na, Runtime: ri.Runtime, WorkspaceMode: "plain", PublicKey: hello.Birth.RuntimePublicKey, NotBefore: nb, NotAfter: na}
 				certificate, err := p.SignRuntimeCertificate(root, claims)
 				require.NoError(t, err)
