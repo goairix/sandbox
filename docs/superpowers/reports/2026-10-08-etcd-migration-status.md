@@ -25,6 +25,18 @@ OpenHTTP的原生组合、early/Unknown故障组合、全部最大输入和容�
 百分比上调来自正常业务链可用；不是按提交数或测试数累计。下面保留组件历史，
 其中旧的pre-E/HTTP501状态以本节最新结果为准。
 
+`3fd31bd` 让已 ready 的 mounter 健康 RPC 复用原 resident observer 的原子采样，
+保留首次真实挂载检查和过期/未知拒绝；114项 host/race、Linux vet、独立审查及
+主分支114项回归通过。这只完成本地采样消费，collector、etcd FUSE业务与旧轮询退休仍开放。
+
+`8d2b47b` 增加有界、磁盘承载的三成员 etcd 元数据规模测试，仅修改三个既有测试文件。
+实际10k/60秒 pilot02通过：9类 typed metadata 共90000键，键值105787528字节；
+观测期没有模型control写入或新沙盒租约。原三个进程Wait、容器/磁盘卷清理和9303个
+输入/工具核对通过；首轮配置失败保留。Linux vet、模型边界测试及独立限定审查通过。
+1万→10万、每档1小时加维护/单成员恢复的正式长测正在运行，尚未验收；fixture使用
+私有明文环回连接。这是View/Snapshot/调度元数据子集，不是完整B_live或同数量可用
+sandbox、Pod、FUSE容量，也没有生产HTTP延迟或相对Redis性能结论。百分比暂不调整。
+
 此前组件：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
 重新申请。实际三成员 TLS/native 三场景、race、Linux vet 和主分支输入等值集成
 通过，见[配额归还组件验收](2026-10-18-etcd-detached-quota-refund-verification.md)。
