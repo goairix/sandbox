@@ -14,6 +14,25 @@ type coldQuotaReturnProofStamp struct {
 // decodeColdQuotaReturnProof authenticates the immutable return record against
 // its complete original history before any receipt read is attempted.
 func (b *Backend) decodeColdQuotaReturnProof(h *coldQuotaReturnHistory, kv *mvccpb.KeyValue) (coldQuotaReturnProofStamp, error) {
+	binding, err := coldQuotaReturnRelease(h)
+	if err != nil {
+		return coldQuotaReturnProofStamp{}, ErrCorruptRecord
+	}
+	if binding.detached != nil {
+		r, err := decodeDetachedColdRuntimeQuotaReturn(kv)
+		if err != nil || r != b.detachedColdQuotaReturnRecord(h, r.Attempt, binding.detached) {
+			return coldQuotaReturnProofStamp{}, ErrCorruptRecord
+		}
+		return coldQuotaReturnProofStamp{
+			attempt: r.Attempt,
+			birth:   kv.CreateRevision,
+			entry: ColdRuntimeQuotaReturnEntry{
+				Task: r.Release.Task, TaskBirth: r.Release.TaskBirth, Owner: r.Owner, Quota: r.Quota,
+				Runtime: r.Runtime, NodeUID: r.NodeUID, NodeBootID: r.NodeBootID,
+				CreateRevision: kv.CreateRevision, SHA256: workspaceSyncIntentDigest(string(kv.Value)),
+			},
+		}, nil
+	}
 	r, err := decodeColdRuntimeQuotaReturn(kv)
 	if err != nil || r != b.coldQuotaReturnRecord(h, r.Attempt) {
 		return coldQuotaReturnProofStamp{}, ErrCorruptRecord

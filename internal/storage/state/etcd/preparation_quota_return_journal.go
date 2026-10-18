@@ -30,7 +30,10 @@ func (b *Backend) journalAndContinueColdRuntimeQuotaReturn(o *runtimeEnrolledPub
 			atomic.StoreUint32(&prepared.consumed, 1)
 		}
 	}()
-	if prepared.self != prepared || prepared.backend != b || prepared.owner != o || prepared.history == nil || prepared.history.release == nil || prepared.history.release.kv == nil || prepared.returnKey == "" || atomic.LoadUint32(&prepared.consumed) != 0 {
+	if prepared.self != prepared || prepared.backend != b || prepared.owner != o || prepared.history == nil || prepared.returnKey == "" || atomic.LoadUint32(&prepared.consumed) != 0 {
+		return result, ErrInvalidRecord
+	}
+	if _, err := coldQuotaReturnRelease(prepared.history); err != nil {
 		return result, ErrInvalidRecord
 	}
 	ctx, err := b.coldQuotaReturnOwnerContext(o)
@@ -40,6 +43,9 @@ func (b *Backend) journalAndContinueColdRuntimeQuotaReturn(o *runtimeEnrolledPub
 	_, digest, err := prepareMutation(b.namespace, prepared.mutation)
 	if err != nil || digest != prepared.reference.Digest {
 		return result, ErrInvalidMutation
+	}
+	if err := b.validateColdQuotaReturnFrozenValue(prepared); err != nil {
+		return result, err
 	}
 	key, err := b.namespace.coldRuntimeQuotaAttemptKey(prepared.history.reservation.Owner.Partition, prepared.history.reservation.Owner.IntentID)
 	if err != nil {
@@ -100,11 +106,15 @@ func (b *Backend) journalAndContinueColdRuntimeQuotaReturn(o *runtimeEnrolledPub
 // mutation: this CAS never refunds or changes those domain records itself.
 func (b *Backend) coldQuotaAttemptComparisons(prepared *coldQuotaReturnPrepared, key string, previous, aborted *mvccpb.KeyValue) ([]clientv3.Cmp, error) {
 	h := prepared.history
-	if h.publication == nil {
+	if h == nil || h.publication == nil {
 		return nil, ErrInvalidRecord
 	}
+	sources, err := coldQuotaReturnHistorySources(h)
+	if err != nil {
+		return nil, err
+	}
 	comparisons := b.baseComparisons()
-	for _, kv := range []*mvccpb.KeyValue{h.publication.journal, h.publication.receipt, h.reservedKV, h.workKV, h.settledKV, h.release.kv} {
+	for _, kv := range sources {
 		if !operationPermanentKV(kv) || kv.Version <= 0 {
 			return nil, ErrCorruptRecord
 		}

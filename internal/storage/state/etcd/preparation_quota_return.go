@@ -13,10 +13,16 @@ type coldQuotaReturnHistory struct {
 	reservation ColdPreparationRecord
 	publication *coldPublicationHistory
 	release     *localOwnerReleaseProof
-	settlement  StageReference
-	reservedKV  *mvccpb.KeyValue
-	workKV      *mvccpb.KeyValue
-	settledKV   *mvccpb.KeyValue
+
+	// Exactly one release variant is available after full authentication.
+	// V1 retains its original field; only B's detached union may occupy this
+	// second branch. Cursors/permits borrow one shared graph rather than clones.
+	profileRelease *taskOwnerReleaseProof
+
+	settlement StageReference
+	reservedKV *mvccpb.KeyValue
+	workKV     *mvccpb.KeyValue
+	settledKV  *mvccpb.KeyValue
 }
 
 // SettleColdRuntimeQuota independently returns only the original runtime's
@@ -131,14 +137,23 @@ func (b *Backend) readColdQuotaReturnHistory(ctx context.Context, w WorkspaceIde
 	if err != nil || !enrolledImmutableKV(receipts[0]) || receipts[0].CreateRevision != values[0].ModRevision || string(receipts[0].Value) != wire {
 		return nil, ErrCorruptReceipt
 	}
-	release, err := b.readLocalOwnerReleaseProof(ctx, task)
+	release, err := b.readTaskOwnerReleaseProof(ctx, task, nil)
 	if err != nil {
 		return nil, err
 	}
-	if release == nil || !coldQuotaReturnOriginMatches(r, history.entry.Record, release) {
+	if release == nil {
 		return nil, ErrConflict
 	}
-	return &coldQuotaReturnHistory{reservation: r, publication: history, release: release, settlement: settlement, reservedKV: values[0], workKV: values[1], settledKV: receipts[0]}, nil
+	result := &coldQuotaReturnHistory{reservation: r, publication: history, settlement: settlement, reservedKV: values[0], workKV: values[1], settledKV: receipts[0]}
+	if release.local != nil && release.detached == nil {
+		result.release = release.local
+	} else {
+		result.profileRelease = release
+	}
+	if !coldQuotaReturnHistoryOriginMatches(result) {
+		return nil, ErrConflict
+	}
+	return result, nil
 }
 
 func coldQuotaReturnOriginMatches(r ColdPreparationRecord, publication RuntimeEnrolledPublicationRecord, release *localOwnerReleaseProof) bool {
@@ -171,13 +186,12 @@ func (b *Backend) verifyColdQuotaReturn(ctx context.Context, h *coldQuotaReturnH
 }
 
 func (b *Backend) coldQuotaReturnMutation(h *coldQuotaReturnHistory, ready, slotKV *mvccpb.KeyValue, key, free string, locator StageAttemptLocator) (Mutation, error) {
-	r := b.coldQuotaReturnRecord(h, locator)
-	wire, err := encodeColdRuntimeQuotaReturn(r)
+	wire, err := b.coldQuotaReturnWire(h, locator)
 	if err != nil {
 		return Mutation{}, err
 	}
 	var slot coldSlotRecord
-	if coldDecode(slotKV, &slot) != nil || !b.validColdSlot(slot) || !slot.Occupied || slot.Owner != r.Owner || slot.Slot != r.Quota {
+	if coldDecode(slotKV, &slot) != nil || !b.validColdSlot(slot) || !slot.Occupied || slot.Owner != h.reservation.Owner || slot.Slot != h.reservation.Quota {
 		return Mutation{}, ErrConflict
 	}
 	slot.Occupied, slot.Owner = false, ColdSlotOwner{}
@@ -185,8 +199,13 @@ func (b *Backend) coldQuotaReturnMutation(h *coldQuotaReturnHistory, ready, slot
 	if err != nil {
 		return Mutation{}, err
 	}
+	sources, err := coldQuotaReturnHistorySources(h)
+	if err != nil {
+		return Mutation{}, err
+	}
 	var cmps []clientv3.Cmp
-	for _, kv := range []*mvccpb.KeyValue{ready, h.publication.journal, h.publication.receipt, h.reservedKV, h.workKV, h.settledKV, h.release.kv, slotKV} {
+	points := append(append([]*mvccpb.KeyValue{ready}, sources[:]...), slotKV)
+	for _, kv := range points {
 		if kv == nil {
 			return Mutation{}, ErrCorruptRecord
 		}

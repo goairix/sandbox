@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -157,8 +156,12 @@ func (b *Backend) validateColdQuotaWorkerContinuation(o *runtimeEnrolledPublicat
 		return err
 	}
 	history := prepared.history
-	if history.publication == nil || history.release == nil || partition == nil || partition.partition != prepared.reference.Partition || partition.partition != history.reservation.Owner.Partition || prepared.reference.StageID != "cold_runtime_quota_return" {
+	if history.publication == nil || partition == nil || partition.partition != prepared.reference.Partition || partition.partition != history.reservation.Owner.Partition || prepared.reference.StageID != "cold_runtime_quota_return" {
 		return ErrInvalidRecord
+	}
+	sources, err := coldQuotaReturnHistorySources(history)
+	if err != nil {
+		return err
 	}
 	if _, _, err := b.stageKeys(prepared.reference); err != nil {
 		return err
@@ -170,7 +173,7 @@ func (b *Backend) validateColdQuotaWorkerContinuation(o *runtimeEnrolledPublicat
 	if !b.coldQuotaWorkerRPCHeader(&journal.journalACK) {
 		return ErrInvalidRecord
 	}
-	for _, point := range []*mvccpb.KeyValue{history.publication.journal, history.publication.receipt, history.reservedKV, history.workKV, history.settledKV, history.release.kv} {
+	for _, point := range sources {
 		if point == nil || point.ModRevision <= 0 || journal.journalACK.Revision < point.ModRevision {
 			return ErrInvalidRecord
 		}

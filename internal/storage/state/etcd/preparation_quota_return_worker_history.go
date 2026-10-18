@@ -18,9 +18,6 @@ const (
 	coldQuotaWorkerHistoryWantHead
 	coldQuotaWorkerHistoryWantSignedHistory
 	coldQuotaWorkerHistoryDone
-	// A complete v2 proof is retained for the future writer adapter. It must
-	// not escape as a v1 history, and repeated refusals perform no new read.
-	coldQuotaWorkerHistoryDetachedUnsupported
 )
 
 // coldQuotaWorkerHistoryOrigin is fixed by construction. In particular, the
@@ -40,9 +37,9 @@ type coldQuotaWorkerHistoryOrigin struct {
 }
 
 // coldQuotaWorkerHistory authenticates ordinary historical metadata in seven
-// finite paid reads. Only local v1 can return writer input; authenticated v2
-// remains a stable unsupported handoff. It conveys no worker, Stage or physical
-// cleanup authority.
+// finite paid reads. The returned history retains exactly one authenticated
+// release profile for the original quota writer, without conveying worker,
+// Stage or physical-cleanup authority by itself.
 // The caller must use one shared workspace and keep the returned history
 // immutable while this cursor/workspace is retained. Neither this component
 // nor its borrowed result permits 32 jobs to retain separate heavy histories;
@@ -98,11 +95,9 @@ func (b *Backend) newColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner, 
 
 // stepColdQuotaWorkerHistory executes at most one original Range262144/no-Claim
 // W20 read. A successful typed phase publishes partial state and yields nil;
-// the seventh local read returns the borrowed immutable full history. A fully
-// authenticated detached read instead enters a cached unsupported handoff;
-// later calls return ErrInvalidConfiguration without paying or dispatching.
-// Other errors leave phase and partial state unchanged for the next paid turn.
-// Both cached states still require the original live binding.
+// the seventh read returns the borrowed immutable full history. Errors leave
+// phase and partial state unchanged for the next paid turn. Cached done still
+// requires the original live binding and the selected detached proof identity.
 func (b *Backend) stepColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner, state *coldQuotaWorkerHistory, session *WorkerSession, partition *WorkerPartitionClaim, ranges *WorkerBudgetShare) (*coldQuotaReturnHistory, error) {
 	if state == nil || state.self != state || state.origin.backend != b {
 		return nil, ErrInvalidRecord
@@ -138,8 +133,6 @@ func (b *Backend) stepColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner,
 		err = b.readColdQuotaWorkerHistorySigned(state, origin)
 	case coldQuotaWorkerHistoryDone:
 		return state.history, nil
-	case coldQuotaWorkerHistoryDetachedUnsupported:
-		return nil, ErrInvalidConfiguration
 	default:
 		return nil, ErrInvalidRecord
 	}
@@ -158,6 +151,14 @@ func (b *Backend) stepColdQuotaWorkerHistory(o *runtimeEnrolledPublicationOwner,
 func (b *Backend) validateColdQuotaWorkerHistoryState(state *coldQuotaWorkerHistory, origin coldQuotaWorkerHistoryOrigin) error {
 	if state == nil || state.self != state || state.origin != origin || state.history == nil {
 		return ErrInvalidRecord
+	}
+	if state.phase == coldQuotaWorkerHistoryDone && state.releaseProfile == taskOwnerReleaseDetached {
+		if state.releaseProof == nil || state.history.profileRelease != state.releaseProof {
+			return ErrInvalidRecord
+		}
+		if _, err := coldQuotaReturnRelease(state.history); err != nil {
+			return err
+		}
 	}
 	return b.validateColdQuotaWorkerHistoryOrigin(origin)
 }

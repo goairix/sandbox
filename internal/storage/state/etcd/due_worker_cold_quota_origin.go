@@ -113,8 +113,11 @@ func (w *DueWorker) captureCleanupColdQuotaOrigin(j *cleanupLocalJob, h *coldQuo
 	if j.state != nil && (j.state.record.Task != j.task || j.state.record.TaskBirth != birth) {
 		return ErrInvalidRecord
 	}
-	if h.release != nil && (h.release.record.Task != j.task || h.release.record.TaskBirth != birth || !coldQuotaReturnOriginMatches(h.reservation, p, h.release)) {
-		return ErrInvalidRecord
+	if h.release != nil || h.profileRelease != nil {
+		binding, err := coldQuotaReturnRelease(h)
+		if err != nil || binding.task != j.task || binding.birth != birth || !coldQuotaReturnHistoryOriginMatches(h) {
+			return ErrInvalidRecord
+		}
 	}
 	c := &j.coldQuota
 	if c.sealed && (c.self != j || c.record != task || c.birth != birth || c.workspace != workspace || c.owner != owner || c.quota != h.reservation.Quota) {

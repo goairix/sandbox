@@ -255,18 +255,28 @@ func (w *DueWorker) readCleanupColdQuotaSnapshot(j *cleanupLocalJob, s *cleanupC
 }
 
 func (w *DueWorker) publishCleanupColdQuota(j *cleanupLocalJob, s *cleanupColdQuotaWorkspace, entry *ColdRuntimeQuotaReturnEntry) error {
-	if s != w.coldQuota || s.job != j || entry == nil || s.history == nil || s.history.release == nil || s.history.release.kv == nil {
+	if s != w.coldQuota || s.job != j || entry == nil || s.history == nil {
 		return ErrInvalidRecord
+	}
+	binding, err := coldQuotaReturnRelease(s.history)
+	if err != nil {
+		return err
 	}
 	if err := w.captureCleanupColdQuotaOrigin(j, s.history); err != nil {
 		return err
 	}
-	j.coldQuota.verified = &cleanupColdQuotaVerified{job: j, entry: *entry, release: cleanupColdQuotaReleaseStamp(s.history.release.kv)}
+	j.coldQuota.verified = &cleanupColdQuotaVerified{job: j, entry: *entry, release: cleanupColdQuotaReleaseStamp(binding.kv)}
 	if err := w.validateCleanupColdQuotaVerified(j); err != nil {
 		j.coldQuota.verified = nil
 		return err
 	}
 	if j.coldQuota.quotaOnly {
+		// Detached refunds are usable, but the original pending gate still
+		// requires its v1 birth/release evidence. Do not route a v2 result into
+		// that five-RPC group or publish final P cleanup as completed.
+		if binding.detached != nil {
+			return ErrInvalidConfiguration
+		}
 		j.step = "cold-quota-pending-birth"
 		return nil
 	}

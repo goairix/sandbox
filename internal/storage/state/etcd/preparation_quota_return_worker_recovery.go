@@ -85,12 +85,16 @@ func (b *Backend) newColdQuotaWorkerRecovery(o *runtimeEnrolledPublicationOwner,
 	if err != nil {
 		return nil, err
 	}
+	binding, err := coldQuotaReturnRelease(h)
+	if err != nil {
+		return nil, err
+	}
 
 	state := &coldQuotaWorkerRecovery{
 		backend: b, owner: o, ownerContext: ctx, history: h,
 		session: session, partition: partition, ranges: ranges, claims: claims,
 		returnKey: returnKey, journalKey: journalKey,
-		task: h.release.record.Task, taskBirth: h.release.record.TaskBirth,
+		task: binding.task, taskBirth: binding.birth,
 		quotaOwner: h.reservation.Owner,
 	}
 	state.self = state
@@ -276,7 +280,11 @@ func (b *Backend) validateColdQuotaWorkerRecoveryState(o *runtimeEnrolledPublica
 	if err != nil {
 		return err
 	}
-	if state.returnKey != returnKey || state.journalKey != journalKey || state.task != h.release.record.Task || state.taskBirth != h.release.record.TaskBirth || state.quotaOwner != h.reservation.Owner {
+	binding, err := coldQuotaReturnRelease(h)
+	if err != nil {
+		return err
+	}
+	if state.returnKey != returnKey || state.journalKey != journalKey || state.task != binding.task || state.taskBirth != binding.birth || state.quotaOwner != h.reservation.Owner {
 		return ErrInvalidRecord
 	}
 	return nil
@@ -286,16 +294,20 @@ func (b *Backend) validateColdQuotaWorkerRecoveryState(o *runtimeEnrolledPublica
 // remains the caller's preceding responsibility; no metadata is fetched here.
 // Six borrowed snapshots must exist because later typed decoders consume them.
 func (b *Backend) coldQuotaWorkerRecoveryKeys(h *coldQuotaReturnHistory, partition *WorkerPartitionClaim) (string, string, error) {
-	if h == nil || h.publication == nil || h.publication.entry == nil || h.release == nil || partition == nil {
+	if h == nil || h.publication == nil || h.publication.entry == nil || partition == nil {
 		return "", "", ErrInvalidRecord
 	}
-	for _, point := range []*mvccpb.KeyValue{h.publication.journal, h.publication.receipt, h.reservedKV, h.workKV, h.settledKV, h.release.kv} {
+	binding, err := coldQuotaReturnRelease(h)
+	if err != nil {
+		return "", "", err
+	}
+	for _, point := range []*mvccpb.KeyValue{h.publication.journal, h.publication.receipt, h.reservedKV, h.workKV, h.settledKV, binding.kv} {
 		if !operationPermanentKV(point) || point.Version <= 0 {
 			return "", "", ErrInvalidRecord
 		}
 	}
-	owner, task := h.reservation.Owner, h.release.record.Task
-	if owner.Partition != partition.partition || task.Partition != owner.Partition || task.Namespace != b.namespace.Root() || task.RestoreEpoch != b.restoreEpoch || task.SandboxID != owner.SandboxID || task.Validate() != nil || h.release.record.TaskBirth <= 0 {
+	owner, task := h.reservation.Owner, binding.task
+	if owner.Partition != partition.partition || task.Partition != owner.Partition || task.Namespace != b.namespace.Root() || task.RestoreEpoch != b.restoreEpoch || task.SandboxID != owner.SandboxID || task.Validate() != nil || binding.birth <= 0 {
 		return "", "", ErrInvalidRecord
 	}
 	for _, ref := range []StageReference{h.publication.entry.Reference, h.settlement} {

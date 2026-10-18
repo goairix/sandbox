@@ -36,7 +36,14 @@ func (n Namespace) coldRuntimeQuotaAttemptKey(partition uint8, intent string) (s
 
 func (b *Backend) coldQuotaAttemptRecord(prepared *coldQuotaReturnPrepared) coldRuntimeQuotaAttemptRecord {
 	h := prepared.history
-	return coldRuntimeQuotaAttemptRecord{Version: 1, Domain: "sandbox.cold-runtime-quota-attempt.v1", Namespace: b.namespace.Root(), RestoreEpoch: b.restoreEpoch, ProfileDigest: b.preparationDigest, Owner: h.reservation.Owner, Quota: h.reservation.Quota, Task: h.release.record.Task, TaskBirth: h.release.record.TaskBirth, ReleaseStamp: localRuntimeStamp(h.release.kv), Reference: prepared.reference}
+	binding, err := coldQuotaReturnRelease(h)
+	if err != nil {
+		// This data-only builder retains its original signature. Invalid input
+		// yields an invalid record, which the mandatory encoder must refuse;
+		// no default record can authorize journal admission or continuation.
+		return coldRuntimeQuotaAttemptRecord{}
+	}
+	return coldRuntimeQuotaAttemptRecord{Version: 1, Domain: "sandbox.cold-runtime-quota-attempt.v1", Namespace: b.namespace.Root(), RestoreEpoch: b.restoreEpoch, ProfileDigest: b.preparationDigest, Owner: h.reservation.Owner, Quota: h.reservation.Quota, Task: binding.task, TaskBirth: binding.birth, ReleaseStamp: localRuntimeStamp(binding.kv), Reference: prepared.reference}
 }
 
 func encodeColdRuntimeQuotaAttempt(r coldRuntimeQuotaAttemptRecord) (string, error) {
@@ -64,7 +71,10 @@ func encodeColdRuntimeQuotaAttempt(r coldRuntimeQuotaAttemptRecord) (string, err
 // cannot recreate a prepared mutation or authorize another continuation.
 func (b *Backend) decodeColdRuntimeQuotaAttempt(h *coldQuotaReturnHistory, kv *mvccpb.KeyValue) (coldRuntimeQuotaAttemptRecord, error) {
 	var r coldRuntimeQuotaAttemptRecord
-	if b == nil || h == nil || h.release == nil || h.release.kv == nil || kv == nil || kv.Version <= 0 || len(kv.Value) > coldQuotaAttemptMaxBytes || coldDecode(kv, &r) != nil {
+	if b == nil || h == nil || kv == nil || kv.Version <= 0 || len(kv.Value) > coldQuotaAttemptMaxBytes || coldDecode(kv, &r) != nil {
+		return r, ErrCorruptRecord
+	}
+	if _, err := coldQuotaReturnRelease(h); err != nil {
 		return r, ErrCorruptRecord
 	}
 	wire, err := encodeColdRuntimeQuotaAttempt(r)

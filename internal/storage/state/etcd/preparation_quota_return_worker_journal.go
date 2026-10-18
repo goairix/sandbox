@@ -45,7 +45,10 @@ func (b *Backend) journalColdRuntimeQuotaReturnWorker(o *runtimeEnrolledPublicat
 			atomic.StoreUint32(&prepared.consumed, 1)
 		}
 	}()
-	if prepared.self != prepared || prepared.backend != b || prepared.owner != o || prepared.history == nil || prepared.history.release == nil || prepared.history.release.kv == nil || prepared.returnKey == "" || atomic.LoadUint32(&prepared.consumed) != 0 {
+	if prepared.self != prepared || prepared.backend != b || prepared.owner != o || prepared.history == nil || prepared.returnKey == "" || atomic.LoadUint32(&prepared.consumed) != 0 {
+		return nil, ErrInvalidRecord
+	}
+	if _, err := coldQuotaReturnRelease(prepared.history); err != nil {
 		return nil, ErrInvalidRecord
 	}
 	if _, err := b.coldQuotaReturnOwnerContext(o); err != nil {
@@ -135,21 +138,8 @@ func (b *Backend) coldQuotaWorkerJournalBody(prepared *coldQuotaReturnPrepared, 
 	if err != nil || digest != prepared.reference.Digest {
 		return nil, ErrInvalidMutation
 	}
-	ref := prepared.reference
-	locator := StageAttemptLocator{Namespace: ref.Namespace, Partition: ref.Partition, RequestID: ref.RequestID, StageID: ref.StageID, AttemptID: ref.AttemptID, RestoreEpoch: ref.RestoreEpoch}
-	matched := false
-	for _, write := range prepared.mutation.Writes {
-		if write.Key != prepared.returnKey {
-			continue
-		}
-		record, err := decodeColdRuntimeQuotaReturnValue(write.Value)
-		if matched || write.Delete || err != nil || record.Attempt != locator {
-			return nil, ErrInvalidMutation
-		}
-		matched = true
-	}
-	if !matched {
-		return nil, ErrInvalidMutation
+	if err := b.validateColdQuotaReturnFrozenValue(prepared); err != nil {
+		return nil, err
 	}
 
 	key, err := b.namespace.coldRuntimeQuotaAttemptKey(prepared.history.reservation.Owner.Partition, prepared.history.reservation.Owner.IntentID)

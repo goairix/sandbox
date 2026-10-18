@@ -160,27 +160,32 @@ func detachedPhysicalPaidQuotaHistory(t *testing.T, f *cleanupDetachedNoEffectNa
 	defer owner.finish()
 	cursor, err := b.newColdQuotaWorkerHistory(owner, workspace, intentID, f.ref, session, partition, ranges)
 	require.NoError(t, err)
+	if os.Getenv("SANDBOX_DETACHED_QUOTA_REFUND_PHYSICAL_NATIVE") == "1" {
+		detachedPhysicalPaidQuotaRefund(t, f, cursor, sourceKeys, before)
+		return
+	}
 	originalOrigin := cursor.origin
 	for phase := 0; phase < 7; phase++ {
 		detachedPhysicalQuotaHistoryRangeReady(t, f.ctx, b, ranges)
 		history, err := b.stepColdQuotaWorkerHistory(owner, cursor, session, partition, ranges)
+		require.NoError(t, err)
 		if phase < 6 {
-			require.NoError(t, err, "logical paid phase %d", phase+1)
+			require.Nil(t, history)
 		} else {
-			require.ErrorIs(t, err, ErrInvalidConfiguration, "authenticated v2 cannot enter the unconnected quota writer")
+			require.Same(t, cursor.history, history)
 		}
-		require.Nil(t, history)
 		b.archiveLife.mu.Lock()
 		tokens, operation := ranges.bucket.tokens, session.operation
 		b.archiveLife.mu.Unlock()
 		require.Zero(t, tokens, "only actual admission spends each naturally earned Range")
 		require.Nil(t, operation, "each original native call must return before its turn yields")
 	}
-	require.Equal(t, coldQuotaWorkerHistoryDetachedUnsupported, cursor.phase)
+	require.Equal(t, coldQuotaWorkerHistoryDone, cursor.phase)
 	require.NotNil(t, cursor.releaseProof)
 	require.Nil(t, cursor.releaseProof.local)
 	require.NotNil(t, cursor.releaseProof.detached)
 	require.NotNil(t, cursor.releaseProof.detached.history)
+	require.Same(t, cursor.releaseProof, cursor.history.profileRelease)
 	require.Nil(t, cursor.history.release)
 	require.Nil(t, cursor.releaseKV)
 	require.Nil(t, cursor.detachedHead)
@@ -214,8 +219,8 @@ func detachedPhysicalPaidQuotaHistory(t *testing.T, f *cleanupDetachedNoEffectNa
 	proof, originalContext := cursor.releaseProof, owner.context
 	for attempt := 0; attempt < 3; attempt++ {
 		history, err := b.stepColdQuotaWorkerHistory(owner, cursor, session, partition, ranges)
-		require.ErrorIs(t, err, ErrInvalidConfiguration)
-		require.Nil(t, history)
+		require.NoError(t, err)
+		require.Same(t, cursor.history, history)
 		require.Same(t, proof, cursor.releaseProof)
 		require.Same(t, originalContext, owner.context)
 		require.Equal(t, originalOrigin, cursor.origin)
@@ -223,10 +228,10 @@ func detachedPhysicalPaidQuotaHistory(t *testing.T, f *cleanupDetachedNoEffectNa
 		afterBucket, afterOperation := ranges.bucket, session.operation
 		_, stillRegistered := b.archiveLife.enrolled[owner]
 		b.archiveLife.mu.Unlock()
-		require.Equal(t, bucket, afterBucket, "cached refusal cannot even move the bucket's earning origin")
+		require.Equal(t, bucket, afterBucket, "cached done cannot even move the bucket's earning origin")
 		require.Nil(t, afterOperation)
 		require.True(t, stillRegistered)
 	}
 	require.Equal(t, before, detachedPhysicalQuotaHistoryPoints(t, f, sourceKeys))
-	t.Logf("actual detached paid-reader component: seven logical paid turns, retained=%d bytes keys+reservation=%d; cached handoff refused three times; wire dispatch/retry counts unmeasured", counter.bytes, len(counter.keys)+cleanupColdQuotaGroupKeys)
+	t.Logf("actual detached paid-reader component: seven logical paid turns, retained=%d bytes keys+reservation=%d; cached done returned the same history three times; wire dispatch/retry counts unmeasured", counter.bytes, len(counter.keys)+cleanupColdQuotaGroupKeys)
 }

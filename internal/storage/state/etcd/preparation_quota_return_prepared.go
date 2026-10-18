@@ -152,6 +152,9 @@ func (b *Backend) continueColdRuntimeQuotaReturn(o *runtimeEnrolledPublicationOw
 	if prepared.self != prepared || prepared.backend != b || prepared.owner != o || prepared.history == nil || prepared.returnKey == "" {
 		return result, ErrInvalidRecord
 	}
+	if _, err := coldQuotaReturnRelease(prepared.history); err != nil {
+		return result, ErrInvalidRecord
+	}
 	ctx, err := b.coldQuotaReturnOwnerContext(o)
 	if err != nil {
 		return result, err

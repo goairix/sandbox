@@ -38,8 +38,9 @@ func (b *Backend) readColdQuotaWorkerHistoryDetachedHead(state *coldQuotaWorkerH
 // The full thirteen-point join is B's existing pure native/signed history
 // decoder. Its union is retained only after cold reservation/publication origin
 // matching and the original post-return owner/member/context revalidation.
-// Until the v2 quota writer is connected, publishing this proof changes only
-// the cursor's stable refusal state: it cannot return a nil-local writer input.
+// The cursor and the returned history borrow the same union. Every downstream
+// writer selects that opaque profile explicitly; none treats a nil local proof
+// as permission to invent a v1 Complete or use an unsupported record builder.
 func (b *Backend) readColdQuotaWorkerHistoryDetachedSigned(state *coldQuotaWorkerHistory, origin coldQuotaWorkerHistoryOrigin) error {
 	intent, err := b.decodeDetachedRuntimeHistoryHead(origin.task, state.detachedHead)
 	if err != nil {
@@ -65,9 +66,10 @@ func (b *Backend) readColdQuotaWorkerHistoryDetachedSigned(state *coldQuotaWorke
 	}
 
 	state.releaseProof = proof
+	state.history.profileRelease = proof
 	state.releaseKV, state.detachedHead, state.actualTask = nil, nil, nil
-	state.phase = coldQuotaWorkerHistoryDetachedUnsupported
-	return ErrInvalidConfiguration
+	state.phase = coldQuotaWorkerHistoryDone
+	return nil
 }
 
 // Match the already authenticated v2 branch to the independently paid cold

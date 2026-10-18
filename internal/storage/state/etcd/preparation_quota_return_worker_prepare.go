@@ -62,6 +62,10 @@ func (b *Backend) newColdQuotaWorkerPrepare(o *runtimeEnrolledPublicationOwner, 
 	if err != nil {
 		return nil, err
 	}
+	binding, err := coldQuotaReturnRelease(history)
+	if err != nil {
+		return nil, err
+	}
 	key, err := b.namespace.coldRuntimeQuotaReturnKey(history.reservation.Owner.Partition, history.reservation.Owner.IntentID)
 	if err != nil {
 		return nil, err
@@ -78,7 +82,7 @@ func (b *Backend) newColdQuotaWorkerPrepare(o *runtimeEnrolledPublicationOwner, 
 	state := &coldQuotaWorkerPrepare{
 		backend: b, owner: o, ownerContext: ctx, history: history,
 		session: session, partition: partition, ranges: ranges,
-		task: history.release.record.Task, taskBirth: history.release.record.TaskBirth,
+		task: binding.task, taskBirth: binding.birth,
 		slotOwner: history.reservation.Owner, quota: history.reservation.Quota,
 		readyKey: ready, slotKey: slot, freeKey: free, returnKey: key,
 	}
@@ -174,17 +178,21 @@ func (b *Backend) validateColdQuotaWorkerPrepareInput(o *runtimeEnrolledPublicat
 	if _, _, err := b.coldProfile(); err != nil {
 		return nil, err
 	}
-	if history == nil || history.publication == nil || history.publication.entry == nil || history.release == nil || history.release.record.TaskBirth <= 0 {
+	if history == nil || history.publication == nil || history.publication.entry == nil {
 		return nil, ErrInvalidRecord
 	}
-	task, owner := history.release.record.Task, history.reservation.Owner
+	binding, err := coldQuotaReturnRelease(history)
+	if err != nil {
+		return nil, ErrInvalidRecord
+	}
+	task, owner := binding.task, history.reservation.Owner
 	// Quota allocation has its own partition; the original quota may legally
 	// differ from the task/worker owner partition. Its exact reference and slot
 	// keys remain sealed separately rather than equating those two domains.
 	if b.validateTaskReference(task) != nil || partition.partition != owner.Partition || task.Partition != owner.Partition || task.SandboxID != owner.SandboxID {
 		return nil, ErrInvalidRecord
 	}
-	for _, point := range []*mvccpb.KeyValue{history.publication.journal, history.publication.receipt, history.reservedKV, history.workKV, history.settledKV, history.release.kv} {
+	for _, point := range []*mvccpb.KeyValue{history.publication.journal, history.publication.receipt, history.reservedKV, history.workKV, history.settledKV, binding.kv} {
 		if point == nil || point.ModRevision <= 0 {
 			return nil, ErrInvalidRecord
 		}
@@ -204,7 +212,11 @@ func (b *Backend) validateColdQuotaWorkerPrepareState(o *runtimeEnrolledPublicat
 	if err != nil {
 		return err
 	}
-	if ctx != state.ownerContext || history.release.record.Task != state.task || history.release.record.TaskBirth != state.taskBirth || history.reservation.Owner != state.slotOwner || history.reservation.Quota != state.quota {
+	binding, err := coldQuotaReturnRelease(history)
+	if err != nil {
+		return err
+	}
+	if ctx != state.ownerContext || binding.task != state.task || binding.birth != state.taskBirth || history.reservation.Owner != state.slotOwner || history.reservation.Quota != state.quota {
 		return ErrInvalidRecord
 	}
 	key, err := b.namespace.coldRuntimeQuotaReturnKey(state.slotOwner.Partition, state.slotOwner.IntentID)
