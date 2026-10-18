@@ -219,7 +219,11 @@ func (b *Backend) loadTaskQuiescence(ctx context.Context, task TaskReference, c 
 }
 
 func taskQuiescenceHistoryReservation(record TaskQuiescenceRecord, birth int64, reservation *TaskQuiescenceAttemptEntry) bool {
-	if reservation == nil || reservation.Record == nil || reservation.Revision <= 0 || reservation.Revision >= birth {
+	// Historical standalone reservations precede Q. The atomic producer puts
+	// reservation, Q and its committed Stage receipt at the same revision. Both
+	// remain immutable native records with the same exact original Claim/attempt;
+	// a present old orphan is never adopted by a replacement Claim.
+	if reservation == nil || reservation.Record == nil || reservation.Revision <= 0 || reservation.Revision > birth {
 		return false
 	}
 	r := reservation.Record

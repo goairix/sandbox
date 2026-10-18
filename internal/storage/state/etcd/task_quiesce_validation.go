@@ -20,15 +20,21 @@ type taskQuiescenceDraft struct {
 	certificate            []byte
 	issuer                 *CommandIssuerEntry
 	issuerKey, issuerValue string
-	claims                 controlprotocol.TaskUserQuiescenceTicketClaims
-	ticket                 controlprotocol.TaskUserQuiescenceEvidence
-	reference              TaskQuiescenceReference
-	recordValue            string
-	stage                  *Stage
-	outcome                Outcome
-	cleaned, lost          bool
-	deliveryAttempted      bool
-	prior                  *taskQuiescencePrerequisite
+	// Set only after the actual native issuer read authenticated its immutable
+	// envelope and exact canonical certificate. This is not a DTO revision.
+	issuerMod         int64
+	claims            controlprotocol.TaskUserQuiescenceTicketClaims
+	ticket            controlprotocol.TaskUserQuiescenceEvidence
+	reference         TaskQuiescenceReference
+	recordValue       string
+	stage             *Stage
+	outcome           Outcome
+	cleaned, lost     bool
+	deliveryAttempted bool
+	// Irreversible before the original Stage business submission. Retry uses
+	// its receipt resolver, retaining the Stage for original Lease cleanup.
+	commitAttempted bool
+	prior           *taskQuiescencePrerequisite
 }
 
 func (b *Backend) taskQuiescenceContext(ctx context.Context, c *TaskClaim, d *taskQuiescenceDraft) (context.Context, context.CancelFunc) {

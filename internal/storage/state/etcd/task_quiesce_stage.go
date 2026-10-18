@@ -28,6 +28,40 @@ func (b *Backend) beginReservedTaskQuiescenceStage(ctx context.Context, l StageA
 	}
 	return b.beginStageWithLocator(ctx, l, ttl, build, &pin)
 }
+
+// Atomic Q has no permanent reservation before Commit. Check each real Stage
+// variant before the guard Grant, then use the unchanged generic Stage path.
+// This preflight lends dimensions only; build retains the original Claim and
+// authenticated issuer/prerequisite checks on the actual mutation capability.
+func (b *Backend) beginAtomicTaskQuiescenceStage(ctx context.Context, l StageAttemptLocator, ttl time.Duration, build func(StageAttemptLocator) (Mutation, error)) (*Stage, error) {
+	m, err := build(l)
+	if err != nil {
+		return nil, err
+	}
+	_, digest, err := prepareMutation(b.namespace, m)
+	if err != nil {
+		return nil, err
+	}
+	ref := l.reference(digest)
+	guard, receipt, err := b.stageKeys(ref)
+	if err != nil {
+		return nil, err
+	}
+	committed, err := encodeReceipt(ref, OutcomeCommitted)
+	if err != nil {
+		return nil, err
+	}
+	for _, variant := range []string{"begin", "commit", "resolve"} {
+		p, err := b.taskStageWireProjection(variant, ref, m, guard, receipt, committed, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err = validateCleanupWire(p); err != nil {
+			return nil, err
+		}
+	}
+	return b.beginStageWithLocator(ctx, l, ttl, build, nil)
+}
 func taskProtoComparisons(cmps []clientv3.Cmp) []*pb.Compare {
 	result := make([]*pb.Compare, len(cmps))
 	for i, c := range cmps {

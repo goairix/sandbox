@@ -2,7 +2,6 @@ package etcd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -115,8 +114,17 @@ func (b *Backend) reserveTaskQuiescenceAttempt(ctx context.Context, c *TaskClaim
 	if err != nil {
 		return err
 	}
-	if kv != nil || d.reservationSent {
+	if kv != nil {
 		return b.pinOriginalTaskQuiescenceAttempt(c, d, key, kv)
+	}
+	if d.reservationSent {
+		// The original candidate is fixed before Stage Begin. Absence is
+		// expected until that same Stage atomically commits reservation + Q;
+		// it never authorizes another command/locator or business resubmission.
+		if d.reservation.revision != 0 {
+			return ErrOutcomeUnknown
+		}
+		return nil
 	}
 	locator := StageAttemptLocator{Namespace: b.namespace.Root(), Partition: c.reference.Task.Partition, RequestID: c.reference.ClaimID, StageID: "task_quiesce_users", AttemptID: uuid.NewString(), RestoreEpoch: b.restoreEpoch}
 	record := TaskQuiescenceAttemptRecord{Version: 1, Task: d.task, Claim: c.reference, DestroyingRevision: c.birth, CommandID: d.commandID, Attempt: locator}
@@ -124,47 +132,11 @@ func (b *Backend) reserveTaskQuiescenceAttempt(ctx context.Context, c *TaskClaim
 	if err != nil {
 		return err
 	}
-	cmps := append(b.baseComparisons(), c.comparisons()...)
-	cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
-	if err = b.preflightTaskReservation(cmps, key, value); err != nil {
-		return err
-	}
 	d.attemptReference = record.reference()
 	d.reservationValue = value
-	if err = taskQuiescenceLive(ctx, c, d); err != nil {
-		return err
-	}
-	d.reservationSent = true // irrevocable before sending any RPC bytes
-	response, err := b.client.Txn(ctx).If(cmps...).Then(clientv3.OpPut(key, value)).Else(clientv3.OpGet(b.identityKey), clientv3.OpGet(b.restoreKey), clientv3.OpGet(key)).Commit()
-	if live := taskQuiescenceLive(ctx, c, d); live != nil {
-		return live
-	}
-	if err != nil {
-		return fmt.Errorf("%w: reserve task quiescence: %w", ErrOutcomeUnknown, err)
-	}
-	if err = b.operationResponseHeader(response); err != nil {
-		return errors.Join(ErrOutcomeUnknown, err)
-	}
-	if response.Succeeded {
-		if !operationPutResponses(response, 1) {
-			return ErrOutcomeUnknown
-		}
-	} else {
-		points, e := b.stageEvidencePoints(response, []string{b.identityKey, b.restoreKey, key})
-		if e != nil {
-			return e
-		}
-		if points[2] == nil {
-			c.lost = true
-			return ErrConflict
-		}
-		if e = b.pinOriginalTaskQuiescenceAttempt(c, d, key, points[2]); e != nil {
-			return e
-		}
-	}
-	kv, err = b.readOriginalTaskQuiescenceAttempt(ctx, c, d, key)
-	if err != nil {
-		return err
-	}
-	return b.pinOriginalTaskQuiescenceAttempt(c, d, key, kv)
+	d.reservation = taskQuiescenceReservationPin{key: key}
+	// Despite the legacy field name, this now latches candidate identity only.
+	// No permanent reservation exists before the original Stage Commit.
+	d.reservationSent = true
+	return nil
 }

@@ -142,8 +142,7 @@ func (w *cleanupLocalWireBuilder) stages() error {
 	w.add("task-renew", "renew-after", claimGuard)
 
 	pin := taskQuiescenceReservationPin{key: w.reservationKey, revision: math.MaxInt64 - 5}
-	qMutation := Mutation{Comparisons: cleanupWireAppend(w.quiescence, clientv3.Compare(clientv3.CreateRevision(w.quiescenceKey), "=", 0)), Writes: []Write{{Key: w.quiescenceKey, Value: make([]byte, 32768)}}}
-	qStage, err := w.stageProjection(w.quiescenceStage, qMutation, &pin)
+	qStage, err := w.stageProjection(w.quiescenceStage, w.atomicQuiescenceMutation(), nil)
 	if err != nil {
 		return err
 	}
@@ -163,6 +162,16 @@ func (w *cleanupLocalWireBuilder) stages() error {
 	w.add("quiescence", "quiescence-committed-guard", w.guard(cleanupWireAppend(qGuard, cleanupWireFence(w.quiescenceKey, 32768).comparisons()...), false))
 	w.effectReads(pin)
 	return w.drainRequests(pin)
+}
+
+// Pure future dimensions mirror the actual atomic Q producer. The positive
+// issuer Mod here is only a width witness; live production obtains it from the
+// original native issuer reader before constructing its own Stage mutation.
+func (w *cleanupLocalWireBuilder) atomicQuiescenceMutation() Mutation {
+	cmps := cleanupWireAppend(w.live, clientv3.Compare(clientv3.ModRevision(w.issuerKey), "=", math.MaxInt64))
+	cmps = append(cmps, cleanupWireFence(w.closeKey, 16384).comparisons()...)
+	cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(w.closeReceiptKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(w.quiescenceKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(w.reservationKey), "=", 0))
+	return Mutation{Comparisons: cmps, Writes: []Write{{Key: w.quiescenceKey, Value: make([]byte, 32768)}, {Key: w.reservationKey, Value: make([]byte, 8192)}}}
 }
 
 func (w *cleanupLocalWireBuilder) effectReads(pin taskQuiescenceReservationPin) {

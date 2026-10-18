@@ -94,8 +94,8 @@ func quiescenceNativeSuccess(t *testing.T) {
 	require.NoError(t, r.Reference.Validate())
 	d := f.c.quiescenceDraft
 	require.Greater(t, d.claims.Context.Current.ClaimCreateRevision, d.claims.Context.CloseDataContext.ClaimCreateRevision)
-	require.Len(t, d.stage.mutation.Comparisons, 49)
-	require.Len(t, d.stage.mutation.Writes, 1)
+	require.Len(t, d.stage.mutation.Comparisons, 48)
+	require.Len(t, d.stage.mutation.Writes, 2)
 	require.Equal(t, 64, len(d.stage.mutation.Comparisons)+len(d.stage.mutation.Writes)+stageProtocolOperations)
 	require.True(t, d.task.ExpiresAt.Before(f.now))
 	deadline, command, ticket, stage := d.deadline, d.commandID, d.ticket.Wire(), d.stage

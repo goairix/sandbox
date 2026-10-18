@@ -2,7 +2,6 @@ package etcd
 
 import (
 	"context"
-	"errors"
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -12,7 +11,8 @@ import (
 )
 
 // Outgoing boundary accounting only: this unsealed model never returns native
-// authority. Removing reservationSent would permit the forbidden second Put.
+// authority. Candidate identity is fixed across absent reads; no standalone
+// permanent Put is permitted before its original Stage business submission.
 func TestTaskQuiesceMetadataAttemptNoResend(t *testing.T) {
 	b, c, d := quiescenceBuilderFixture(t)
 	c.birth = d.claims.Context.Current.ControlRevision
@@ -27,15 +27,10 @@ func TestTaskQuiesceMetadataAttemptNoResend(t *testing.T) {
 	b.requestTimeout = time.Second
 	key, _ := b.namespace.taskQuiescenceAttemptKey(c.reference.Task)
 	writes, reads := 0, 0
-	stop := errors.New("reservation reply lost")
 	b.client = &clientv3.Client{KV: &quiescenceIssuerRecordingKV{commit: func(cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
 		if len(yes) == 1 && yes[0].IsPut() {
 			writes++
-			require.Equal(t, key, string(yes[0].KeyBytes()))
-			require.Equal(t, 49, len(cmps)+len(yes)+len(no))
-			require.Len(t, cmps, 45)
-			require.Equal(t, c.comparisons(), cmps[4:44])
-			return nil, stop
+			t.Fatal("candidate preparation must not send a standalone reservation Put")
 		}
 		reads++
 		require.Equal(t, 50, len(cmps)+len(yes)+len(no))
@@ -58,14 +53,14 @@ func TestTaskQuiesceMetadataAttemptNoResend(t *testing.T) {
 		return r, nil
 	}}}
 	err := b.reserveTaskQuiescenceAttempt(context.Background(), c, d)
-	require.ErrorIs(t, err, stop)
+	require.NoError(t, err)
 	require.True(t, d.reservationSent)
-	require.Equal(t, 1, writes)
+	require.Zero(t, writes)
 	original := d.attemptReference
 	for i := 0; i < 2; i++ {
-		require.ErrorIs(t, b.reserveTaskQuiescenceAttempt(context.Background(), c, d), ErrOutcomeUnknown)
+		require.NoError(t, b.reserveTaskQuiescenceAttempt(context.Background(), c, d))
 	}
-	require.Equal(t, 1, writes)
+	require.Zero(t, writes)
 	require.Equal(t, 3, reads)
 	require.Equal(t, original, d.attemptReference)
 	require.Zero(t, d.reservation.revision)
@@ -94,7 +89,7 @@ func TestTaskQuiesceMetadataAttemptHistoryAssociation(t *testing.T) {
 			case "destroying":
 				reservation.Record.DestroyingRevision++
 			}
-			require.Equal(t, fault == "valid", taskQuiescenceHistoryReservation(record, 50, reservation))
+			require.Equal(t, fault == "valid" || fault == "same-birth", taskQuiescenceHistoryReservation(record, 50, reservation))
 		})
 	}
 }

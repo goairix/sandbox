@@ -3,6 +3,9 @@ package etcd
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	tr "github.com/goairix/sandbox/internal/runtime/controltransport"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -10,6 +13,169 @@ import (
 	"testing"
 	"time"
 )
+
+// The original signed CloseData prerequisite and real Stage machinery must not
+// leave a permanent Q reservation when its business transaction never ran.
+// This isolates the producer bug; it is not managed admission or PID1 proof.
+func TestTaskQuiesceNativeAtomicReservationPrecommitCut(t *testing.T) {
+	f := newQuiescenceNativeFixture(t)
+	b := f.b
+	qkey, err := b.namespace.taskQuiescenceKey(f.c.reference.Task)
+	require.NoError(t, err)
+	reservationKey, err := b.namespace.taskQuiescenceAttemptKey(f.c.reference.Task)
+	require.NoError(t, err)
+	original := b.client.KV
+	t.Cleanup(func() { b.client.KV = original })
+	commits, standaloneReservations := 0, 0
+	b.client.KV = &quiescenceIssuerRecordingKV{KV: original, commit: func(cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
+		if putsKey(qkey)(yes) {
+			commits++
+			// Cut before sending this exact Stage Commit, after its original
+			// signed ticket, Stage guard and immutable mutation actually exist.
+			return nil, context.DeadlineExceeded
+		}
+		if putsKey(reservationKey)(yes) {
+			standaloneReservations++
+		}
+		return original.Txn(f.ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+	}}
+	prepared, err := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	require.Nil(t, prepared.Prepared)
+	require.Equal(t, 1, commits, "must reach the actual Q Stage Commit boundary")
+	require.NotNil(t, f.c.quiescenceDraft.stage)
+	require.NoError(t, prepared.Reference.Validate())
+	q, err := f.raw.Get(f.ctx, qkey)
+	require.NoError(t, err)
+	require.Empty(t, q.Kvs)
+	reservation, err := f.raw.Get(f.ctx, reservationKey)
+	require.NoError(t, err)
+	require.Empty(t, reservation.Kvs, "a precommit cut must not strand a permanent old-Claim reservation")
+	require.Zero(t, standaloneReservations, "reservation belongs to the same business commit as Q")
+	b.client.KV = original
+	entry, err := b.LoadTaskQuiescenceAttempt(f.ctx, f.c.reference.Task)
+	require.NoError(t, err)
+	require.Nil(t, entry)
+}
+
+// Both ordinary ACK and ACK loss must preserve the original Claim/attempt and
+// commit Q, its one reservation and its receipt at one actual native revision.
+// Readback/Query cannot manufacture a replacement Stage or resend business Put.
+func TestTaskQuiesceNativeAtomicReservationCommitRecovery(t *testing.T) {
+	for _, lostACK := range []bool{false, true} {
+		name := "ordinary-ack"
+		if lostACK {
+			name = "lost-ack"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newQuiescenceNativeFixture(t)
+			b := f.b
+			qkey, err := b.namespace.taskQuiescenceKey(f.c.reference.Task)
+			require.NoError(t, err)
+			reservationKey, err := b.namespace.taskQuiescenceAttemptKey(f.c.reference.Task)
+			require.NoError(t, err)
+			original := b.client.KV
+			t.Cleanup(func() { b.client.KV = original })
+			lease := &creationFaultLease{Lease: b.client.Lease}
+			b.client.Lease = lease
+			commits, standaloneReservations := 0, 0
+			b.client.KV = &quiescenceIssuerRecordingKV{KV: original, commit: func(cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
+				business := putsKey(qkey)(yes)
+				if business {
+					commits++
+					require.True(t, putsKey(reservationKey)(yes), "the same original Stage must put the reservation and Q")
+					require.Len(t, yes, 3, "Q, original reservation, committed Stage receipt")
+					require.LessOrEqual(t, len(cmps)+len(yes)+len(no), 64)
+					require.Contains(t, cmps, clientv3.Compare(clientv3.CreateRevision(qkey), "=", int64(0)))
+					require.Contains(t, cmps, clientv3.Compare(clientv3.CreateRevision(reservationKey), "=", int64(0)))
+					stage := f.c.quiescenceDraft.stage
+					require.Len(t, stage.mutation.Writes, 2)
+					for i, write := range stage.mutation.Writes {
+						require.False(t, write.Delete)
+						require.Equal(t, clientv3.OpPut(write.Key, string(write.Value)), yes[i], "measure the complete original native options")
+					}
+					require.Equal(t, clientv3.OpPut(stage.receiptKey, stage.committedValue), yes[2])
+					failureKeys := []string{b.identityKey, b.restoreKey, stage.receiptKey, stage.guardKey}
+					require.Len(t, no, len(failureKeys))
+					for i, key := range failureKeys {
+						require.Equal(t, clientv3.OpGet(key), no[i])
+					}
+					// Measure the actual native operations, retaining original
+					// keys/values and both real response branches.
+					projection := b.cleanupProjection("atomic-quiescence", cmps, taskProtoWrites(stage.mutation.Writes), taskProtoPutResponse(3))
+					projection.request.Success = append(projection.request.Success, taskProtoPut(stage.receiptKey, stage.committedValue, 0))
+					projection.request.Failure = taskProtoPoints(failureKeys)
+					projection.failure = taskProtoResponse(failureKeys, []string{b.identityValue, b.restoreEpoch, stage.committedValue, stage.guardValue})
+					require.NoError(t, validateCleanupWire(projection))
+				} else if putsKey(reservationKey)(yes) {
+					standaloneReservations++
+				}
+				r, callErr := original.Txn(f.ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+				if business {
+					require.NoError(t, callErr)
+					require.True(t, r.Succeeded)
+					if lostACK {
+						return nil, context.DeadlineExceeded
+					}
+				}
+				return r, callErr
+			}}
+			first, err := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+			if lostACK {
+				require.ErrorIs(t, err, ErrOutcomeUnknown)
+				require.Nil(t, first.Prepared)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, OutcomeCommitted, first.Outcome)
+			}
+			originalStage := f.c.quiescenceDraft.stage
+			claim := f.c.reference
+			retry, err := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+			require.NoError(t, err)
+			require.Equal(t, OutcomeCommitted, retry.Outcome)
+			require.NotNil(t, retry.Prepared)
+			require.Equal(t, first.Reference, retry.Reference)
+			require.Equal(t, first.AttemptReference, retry.AttemptReference)
+			require.Same(t, originalStage, f.c.quiescenceDraft.stage)
+			require.Equal(t, claim, f.c.reference)
+			require.Equal(t, 1, commits, "lost ACK must resolve the original Stage without another business submission")
+			require.Zero(t, standaloneReservations)
+			require.Equal(t, int64(1), lease.grants.Load())
+			b.client.KV = original
+			q, err := f.raw.Get(f.ctx, qkey)
+			require.NoError(t, err)
+			reservation, err := f.raw.Get(f.ctx, reservationKey)
+			require.NoError(t, err)
+			receipt, err := f.raw.Get(f.ctx, originalStage.receiptKey)
+			require.NoError(t, err)
+			require.Len(t, q.Kvs, 1)
+			require.Len(t, reservation.Kvs, 1)
+			require.Len(t, receipt.Kvs, 1)
+			for _, point := range append(q.Kvs, reservation.Kvs[0], receipt.Kvs[0]) {
+				require.Equal(t, q.Kvs[0].CreateRevision, point.CreateRevision)
+				require.Equal(t, point.CreateRevision, point.ModRevision)
+				require.Equal(t, int64(1), point.Version)
+				require.Zero(t, point.Lease)
+			}
+			cold := quiescenceColdBackend(t, f, true)
+			loaded, err := cold.LoadTaskQuiescence(f.ctx, claim.Task)
+			require.NoError(t, err)
+			require.NotNil(t, loaded)
+			require.Equal(t, retry.Reference, loaded.Reference)
+			reserved, err := cold.LoadTaskQuiescenceAttempt(f.ctx, claim.Task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.Equal(t, claim, reserved.Record.Claim)
+			require.Equal(t, loaded.Revision, reserved.Revision)
+			target := newQuiescenceWireTarget(t, f, retry.Prepared, tr.EventReceipt)
+			queried, err := cold.QueryTaskQuiescence(f.ctx, claim.Task, target.destination)
+			require.NoError(t, err)
+			require.NotNil(t, queried.Receipt)
+			require.Zero(t, target.effects.Load(), "historical recovery only queries the real pinned mTLS peer")
+			require.Positive(t, target.queries.Load())
+		})
+	}
+}
 
 func quiescenceColdBackend(t *testing.T, f *quiescenceNativeFixture, configured bool) *Backend {
 	t.Helper()
@@ -32,22 +198,25 @@ func TestTaskQuiesceNativeReservationReconcile(t *testing.T) {
 	for _, fault := range []string{"reply-loss", "absent-unknown", "malformed-reply", "competing"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newQuiescenceNativeFixture(t)
-			b := f.b
-			original := b.client.KV
+			b, original := f.b, f.b.client.KV
 			defer func() { b.client.KV = original }()
-			key, e := b.namespace.taskQuiescenceAttemptKey(f.c.reference.Task)
-			require.NoError(t, e)
+			key, err := b.namespace.taskQuiescenceAttemptKey(f.c.reference.Task)
+			require.NoError(t, err)
+			qkey, err := b.namespace.taskQuiescenceKey(f.c.reference.Task)
+			require.NoError(t, err)
 			lease := &creationFaultLease{Lease: b.client.Lease}
 			b.client.Lease = lease
 			writes := 0
-			b.client.KV = &quiescenceIssuerRecordingKV{commit: func(cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
-				if putsKey(key)(yes) {
+			b.client.KV = &quiescenceIssuerRecordingKV{KV: original, commit: func(cmps []clientv3.Cmp, yes, no []clientv3.Op) (*clientv3.TxnResponse, error) {
+				business := putsKey(qkey)(yes)
+				if business {
 					writes++
-					require.Equal(t, 49, len(cmps)+len(yes)+len(no))
-					require.Equal(t, f.c.comparisons(), cmps[4:44])
-					require.Zero(t, f.issuer.old.certCalls)
-					require.Zero(t, f.issuer.calls)
-					require.Zero(t, lease.grants.Load())
+					require.True(t, putsKey(key)(yes))
+					require.Equal(t, 63, len(cmps)+len(yes)+len(no))
+					require.Equal(t, f.c.comparisons(), cmps[8:48])
+					require.Equal(t, 1, f.issuer.old.certCalls)
+					require.Equal(t, 1, f.issuer.calls)
+					require.Equal(t, int64(1), lease.grants.Load())
 					if fault == "absent-unknown" {
 						return nil, context.DeadlineExceeded
 					}
@@ -55,15 +224,15 @@ func TestTaskQuiesceNativeReservationReconcile(t *testing.T) {
 						d := f.c.quiescenceDraft
 						l := d.attemptReference.Attempt
 						l.AttemptID = uuid.NewString()
-						value, x := encodeTaskQuiescenceAttempt(TaskQuiescenceAttemptRecord{Version: 1, Task: d.task, Claim: f.c.reference, DestroyingRevision: f.c.birth, CommandID: uuid.NewString(), Attempt: l})
-						require.NoError(t, x)
-						_, x = f.raw.Put(f.ctx, key, value)
-						require.NoError(t, x)
+						value, err := encodeTaskQuiescenceAttempt(TaskQuiescenceAttemptRecord{Version: 1, Task: d.task, Claim: f.c.reference, DestroyingRevision: f.c.birth, CommandID: uuid.NewString(), Attempt: l})
+						require.NoError(t, err)
+						_, err = f.raw.Put(f.ctx, key, value) // actual foreign negative only
+						require.NoError(t, err)
 					}
 				}
-				r, e := original.Txn(f.ctx).If(cmps...).Then(yes...).Else(no...).Commit()
-				if putsKey(key)(yes) && fault != "competing" {
-					require.NoError(t, e)
+				r, err := original.Txn(f.ctx).If(cmps...).Then(yes...).Else(no...).Commit()
+				if business && fault != "competing" {
+					require.NoError(t, err)
 					require.True(t, r.Succeeded)
 					if fault == "malformed-reply" {
 						r.Responses = nil
@@ -71,59 +240,79 @@ func TestTaskQuiesceNativeReservationReconcile(t *testing.T) {
 					}
 					return nil, context.DeadlineExceeded
 				}
-				return r, e
+				return r, err
 			}}
-			first, e := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
-			require.Error(t, e)
+			first, err := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+			require.Error(t, err)
 			require.Nil(t, first.Prepared)
 			require.NoError(t, first.AttemptReference.Validate())
 			require.Equal(t, 1, writes)
-			require.Zero(t, f.issuer.old.certCalls)
-			require.Zero(t, f.issuer.calls)
-			require.Zero(t, lease.grants.Load())
 			if fault == "competing" {
-				require.ErrorIs(t, e, ErrConflict)
+				require.ErrorIs(t, err, ErrConflict)
 				return
 			}
 			for i := 0; i < 2; i++ {
-				retry, e := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+				retry, err := b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+				require.NoError(t, err)
 				require.Equal(t, first.AttemptReference, retry.AttemptReference)
-				require.Equal(t, 1, writes)
-				if fault == "absent-unknown" {
-					require.ErrorIs(t, e, ErrOutcomeUnknown)
-					require.Nil(t, retry.Prepared)
-					require.Zero(t, lease.grants.Load())
-					require.Zero(t, f.issuer.old.certCalls)
-					continue
-				}
-				require.NoError(t, e)
-				require.NotNil(t, retry.Prepared)
-				require.Equal(t, OutcomeCommitted, retry.Outcome)
-				require.Equal(t, first.AttemptReference.Attempt, retry.Prepared.draft.attemptReference.Attempt)
+				require.Equal(t, 1, writes, "only receipt arbitration follows the original business submission")
 				require.Equal(t, int64(1), lease.grants.Load())
 				require.Equal(t, 1, f.issuer.calls)
+				if fault == "absent-unknown" {
+					// The actual Stage resolver now supplies an aborted receipt;
+					// unlike a bare absent reservation, this is terminal evidence.
+					require.Equal(t, OutcomeAborted, retry.Outcome)
+					require.Nil(t, retry.Prepared)
+				} else {
+					require.NotNil(t, retry.Prepared)
+					require.Equal(t, OutcomeCommitted, retry.Outcome)
+				}
 			}
 			cold := quiescenceColdBackend(t, f, false)
-			entry, e := cold.LoadTaskQuiescenceAttempt(f.ctx, f.c.reference.Task)
-			require.NoError(t, e)
+			entry, err := cold.LoadTaskQuiescenceAttempt(f.ctx, f.c.reference.Task)
+			require.NoError(t, err)
 			if fault == "absent-unknown" {
 				require.Nil(t, entry)
 			} else {
 				require.Equal(t, first.AttemptReference, entry.Reference)
 				require.Positive(t, entry.Revision)
 				entry.Record.CommandID = "mutated"
-				again, e := cold.LoadTaskQuiescenceAttempt(f.ctx, f.c.reference.Task)
-				require.NoError(t, e)
+				again, err := cold.LoadTaskQuiescenceAttempt(f.ctx, f.c.reference.Task)
+				require.NoError(t, err)
 				require.Equal(t, first.AttemptReference.CommandID, again.Record.CommandID)
 			}
 		})
 	}
 }
+
+// Recreate the old standalone reservation producer through its original live
+// Claim/identity/absence CAS. These are explicit legacy compatibility cases,
+// not copied reservation DTOs used to authorize a new Claim or runtime send.
+func quiescenceLegacyReservation(t *testing.T, f *quiescenceNativeFixture) {
+	t.Helper()
+	stop := errors.New("legacy fixture before Stage")
+	f.issuer.sign = func(context.Context, string, p.TaskUserQuiescenceTicketClaims) ([]byte, error) { return nil, stop }
+	_, err := f.b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
+	f.issuer.sign = nil
+	require.ErrorIs(t, err, stop)
+	d := f.c.quiescenceDraft
+	require.NotNil(t, d)
+	require.Nil(t, d.stage)
+	require.Zero(t, d.reservation.revision)
+	cmps := append(f.b.baseComparisons(), f.c.comparisons()...)
+	cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(d.reservation.key), "=", 0))
+	r, err := f.b.client.Txn(f.ctx).If(cmps...).Then(clientv3.OpPut(d.reservation.key, d.reservationValue)).Else(clientv3.OpGet(f.b.identityKey), clientv3.OpGet(f.b.restoreKey), clientv3.OpGet(d.reservation.key)).Commit()
+	require.NoError(t, err)
+	require.NoError(t, f.b.operationResponseHeader(r))
+	require.True(t, r.Succeeded)
+}
+
 func TestTaskQuiesceNativeReservationNoReplacement(t *testing.T) {
 	for _, state := range []string{"abort", "begin", "commit"} {
 		for _, mode := range []string{"new-claim", "cold"} {
 			t.Run(state+"/"+mode, func(t *testing.T) {
 				f := newQuiescenceNativeFixture(t)
+				quiescenceLegacyReservation(t, f)
 				b := f.b
 				original := b.client.KV
 				defer func() { b.client.KV = original }()
@@ -200,6 +389,7 @@ func TestTaskQuiesceNativeReservationFence(t *testing.T) {
 	for _, fault := range []string{"same-bytes", "delete", "lease", "recreate", "restore"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newQuiescenceNativeFixture(t)
+			quiescenceLegacyReservation(t, f)
 			original := f.b.client.KV
 			defer func() { f.b.client.KV = original }()
 			key, _ := f.b.namespace.taskQuiescenceKey(f.c.reference.Task)
@@ -266,7 +456,7 @@ func TestTaskQuiesceNativeReservationDelayedPacket(t *testing.T) {
 			first, e := f.b.PrepareTaskQuiescence(f.ctx, f.c, f.target.destination)
 			require.ErrorIs(t, e, ErrOutcomeUnknown)
 			require.NotEmpty(t, savedCmps)
-			require.Zero(t, f.issuer.old.certCalls)
+			require.Equal(t, 1, f.issuer.old.certCalls)
 			f.b.client.KV = original
 			_, e = f.raw.Revoke(f.ctx, clientv3.LeaseID(f.c.reference.LeaseID))
 			require.NoError(t, e)
@@ -288,10 +478,10 @@ func TestTaskQuiesceNativeReservationDelayedPacket(t *testing.T) {
 			require.NoError(t, e)
 			if fault == "revoke" {
 				require.Nil(t, entry)
-				require.Zero(t, f.issuer.calls)
+				require.Equal(t, 1, f.issuer.calls)
 			} else {
 				require.Equal(t, winner, entry.Reference)
-				require.Equal(t, 1, f.issuer.calls)
+				require.Equal(t, 2, f.issuer.calls)
 			}
 		})
 	}

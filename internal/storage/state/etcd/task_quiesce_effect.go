@@ -54,7 +54,7 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 		return result, err
 	}
 	if d.outcome == OutcomeUnknown {
-		if d.reference.Stage.AttemptID != "" && d.stage == nil {
+		if d.reference.Stage.AttemptID != "" && (d.stage == nil || d.commitAttempted) {
 			d.outcome, err = b.ResolveStage(bounded, d.reference.Stage)
 			if err != nil {
 				return result, err
@@ -77,7 +77,15 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 				if err = b.verifyTaskQuiescenceRuntime(bounded, c, d, destination); err != nil {
 					return result, err
 				}
-				d.stage, err = b.beginReservedTaskQuiescenceStage(bounded, d.attemptReference.Attempt, d.reservation, time.Until(d.deadline), func(l StageAttemptLocator) (Mutation, error) { return b.buildTaskQuiescence(c, d, l) })
+				build := func(l StageAttemptLocator) (Mutation, error) { return b.buildTaskQuiescence(c, d, l) }
+				if d.reservation.revision > 0 {
+					// Existing v1 reservations retain their original Mod fence.
+					d.stage, err = b.beginReservedTaskQuiescenceStage(bounded, d.attemptReference.Attempt, d.reservation, time.Until(d.deadline), build)
+				} else {
+					// The business mutation itself contains the original key's
+					// absence check and Put. No native pin is invented precommit.
+					d.stage, err = b.beginAtomicTaskQuiescenceStage(bounded, d.attemptReference.Attempt, time.Until(d.deadline), build)
+				}
 				if err != nil {
 					var fail *stageBeginFailure
 					if errors.As(err, &fail) {
@@ -96,6 +104,7 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 			if err = b.verifyTaskQuiescenceRuntime(bounded, c, d, destination); err != nil {
 				return result, err
 			}
+			d.commitAttempted = true
 			d.outcome, err = b.CommitStage(bounded, d.stage)
 			if err != nil {
 				return result, err
@@ -111,6 +120,16 @@ func (b *Backend) PrepareTaskQuiescence(ctx context.Context, c *TaskClaim, desti
 	}
 	if d.outcome != OutcomeCommitted {
 		return result, taskQuiescenceLive(bounded, c, d)
+	}
+	if d.reservation.revision == 0 {
+		// Only actual postcommit readback supplies the permanent native pin.
+		kv, readErr := b.readOriginalTaskQuiescenceAttempt(bounded, c, d, d.reservation.key)
+		if readErr != nil {
+			return result, readErr
+		}
+		if err = b.pinOriginalTaskQuiescenceAttempt(c, d, d.reservation.key, kv); err != nil {
+			return result, err
+		}
 	}
 	if err = b.authorizePreparedTaskQuiescence(bounded, c, d); err != nil {
 		return result, err
@@ -136,7 +155,21 @@ func (b *Backend) buildTaskQuiescence(c *TaskClaim, d *taskQuiescenceDraft, l St
 		return Mutation{}, err
 	}
 	cmps := append(b.taskQuiescenceComparisons(c, d), clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
-	mutation, digest, err := prepareMutation(b.namespace, Mutation{Comparisons: cmps, Writes: []Write{{Key: key, Value: []byte(value)}}})
+	writes := []Write{{Key: key, Value: []byte(value)}}
+	if d.reservationSent && d.reservation.revision == 0 {
+		if d.issuer == nil || d.issuerMod <= 0 || d.issuerMod != d.issuer.Revision || d.reservationValue == "" || d.attemptReference.Attempt != l {
+			return Mutation{}, ErrInvalidRecord
+		}
+		// Actual issuer readback pins its full immutable envelope by positive
+		// Mod, rather than spending three redundant value/lease/mod predicates.
+		// 40 Claim +1 issuer +4 close +1 receipt +2 absences, plus two writes,
+		// fits the unchanged 50-operation generic mutation budget.
+		cmps = append(c.comparisons(), clientv3.Compare(clientv3.ModRevision(d.issuerKey), "=", d.issuerMod))
+		cmps = append(cmps, d.prior.intent.comparisons()...)
+		cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(d.prior.receiptKey), "=", d.prior.receiptRevision), clientv3.Compare(clientv3.CreateRevision(key), "=", 0), clientv3.Compare(clientv3.CreateRevision(d.reservation.key), "=", 0))
+		writes = append(writes, Write{Key: d.reservation.key, Value: []byte(d.reservationValue)})
+	}
+	mutation, digest, err := prepareMutation(b.namespace, Mutation{Comparisons: cmps, Writes: writes})
 	if err != nil {
 		return Mutation{}, err
 	}

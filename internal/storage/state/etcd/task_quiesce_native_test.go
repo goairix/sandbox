@@ -122,12 +122,20 @@ func (t *quiescenceCaptureTxn) Commit() (*clientv3.TxnResponse, error) {
 	key, _ := t.k.b.namespace.taskQuiescenceKey(t.k.c.reference.Task)
 	if putsKey(key)(t.yes) {
 		t.k.commits++
-		require.Len(t.k.t, t.cmps, 58)
-		require.Len(t.k.t, t.yes, 2)
+		require.Len(t.k.t, t.cmps, 56)
+		require.Len(t.k.t, t.yes, 3)
 		require.Len(t.k.t, t.no, 4)
-		require.Equal(t.k.t, 64, len(t.cmps)+len(t.yes)+len(t.no))
-		require.Equal(t.k.t, t.k.c.comparisons(), t.cmps[9:49])
-		require.Equal(t.k.t, 64, len(t.cmps[9:])+1+stageProtocolOperations)
+		require.Equal(t.k.t, 63, len(t.cmps)+len(t.yes)+len(t.no))
+		require.Equal(t.k.t, t.k.c.comparisons(), t.cmps[8:48])
+		require.Equal(t.k.t, 64, len(t.cmps[8:])+2+stageProtocolOperations)
+		// Atomic reservation and Q consume the same original Claim fences and
+		// Stage receipt; no standalone reservation write or leased business Put.
+		d := t.k.c.quiescenceDraft
+		require.Contains(t.k.t, t.cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", int64(0)))
+		require.Contains(t.k.t, t.cmps, clientv3.Compare(clientv3.CreateRevision(d.reservation.key), "=", int64(0)))
+		require.Equal(t.k.t, clientv3.OpPut(key, d.recordValue), t.yes[0])
+		require.Equal(t.k.t, clientv3.OpPut(d.reservation.key, d.reservationValue), t.yes[1])
+		require.Equal(t.k.t, clientv3.OpPut(d.stage.receiptKey, d.stage.committedValue), t.yes[2])
 	}
 	if len(t.cmps) == 53 && len(t.yes) == 1 && len(t.yes[0].RangeBytes()) > 0 {
 		t.k.emptyReads++

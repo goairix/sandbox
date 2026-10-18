@@ -117,5 +117,10 @@ func (b *Backend) registerTaskQuiescenceIssuer(ctx context.Context, c *TaskClaim
 	if string(kv.Value) != value {
 		return nil, ErrConflict
 	}
+	// decodeCommandIssuer has authenticated lease0 and birth==mod>0 together
+	// with the complete canonical certificate. In the same MVCC cluster, any
+	// later value/lease/recreation changes ModRevision. Its exact positive mod
+	// therefore pins all three facts for the subsequent atomic Stage mutation.
+	d.issuerMod = kv.ModRevision
 	return entry, nil
 }

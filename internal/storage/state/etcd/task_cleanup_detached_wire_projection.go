@@ -176,6 +176,7 @@ func (d *cleanupDetachedWireBuilder) stageProjection(family, variant string) (cl
 	w := &d.w
 	ref, cmps, key, cap := w.closeStage, w.close, w.closeKey, 16384
 	var pin *taskQuiescenceReservationPin
+	atomicQuiescence := false
 	stageVariant := "commit"
 	if strings.Contains(variant, "checkpoint") || variant == "generic-begin" {
 		ref.StageID = strings.Repeat("s", 128)
@@ -183,7 +184,7 @@ func (d *cleanupDetachedWireBuilder) stageProjection(family, variant string) (cl
 		cmps = cleanupWireAppend(w.live, cleanupWireFence(key, 4096).comparisons()...)
 	} else if strings.Contains(variant, "quiescence") || family == "quiescence-stage" {
 		ref, cmps, key, cap = w.quiescenceStage, w.quiescence, w.quiescenceKey, 32768
-		pin = &taskQuiescenceReservationPin{key: w.reservationKey, revision: math.MaxInt64 - 13}
+		atomicQuiescence = true
 	}
 	if strings.HasSuffix(variant, "begin") {
 		stageVariant = "begin"
@@ -202,7 +203,11 @@ func (d *cleanupDetachedWireBuilder) stageProjection(family, variant string) (cl
 	if key == w.closeKey || key == w.quiescenceKey {
 		cmps = cleanupWireAppend(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
 	}
-	return d.b.taskStageWireProjection(stageVariant, ref, Mutation{Comparisons: cmps, Writes: []Write{{Key: key, Value: make([]byte, cap)}}}, guard, receipt, committed, pin)
+	m := Mutation{Comparisons: cmps, Writes: []Write{{Key: key, Value: make([]byte, cap)}}}
+	if atomicQuiescence {
+		m = w.atomicQuiescenceMutation()
+	}
+	return d.b.taskStageWireProjection(stageVariant, ref, m, guard, receipt, committed, pin)
 }
 
 func (d *cleanupDetachedWireBuilder) drainProjection(variant string, live, empty []clientv3.Cmp) cleanupWireProjection {

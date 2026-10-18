@@ -37,8 +37,18 @@ func TestTaskQuiesceNativeDelayedClaim(t *testing.T) {
 				ops = o
 				d := f.c.quiescenceDraft
 				require.Equal(t, d.attemptReference.Attempt.reference(d.reference.Stage.Digest), d.stage.Reference())
-				require.Contains(t, c, d.reservation.comparison())
-				require.Len(t, c, 58)
+				// The first reservation has no native revision before Commit.
+				// Capture its actual absence predicate and both original business
+				// writes; delayed replay must still fail all40 original Claim fences.
+				require.Zero(t, d.reservation.revision)
+				require.Contains(t, c, clientv3.Compare(clientv3.CreateRevision(d.reservation.key), "=", int64(0)))
+				require.Contains(t, c, clientv3.Compare(clientv3.CreateRevision(key), "=", int64(0)))
+				require.Len(t, c, 56)
+				require.Equal(t, f.c.comparisons(), c[8:48])
+				require.Len(t, o, 3)
+				require.Equal(t, clientv3.OpPut(key, d.recordValue), o[0])
+				require.Equal(t, clientv3.OpPut(d.reservation.key, d.reservationValue), o[1])
+				require.Equal(t, clientv3.OpPut(d.stage.receiptKey, d.stage.committedValue), o[2])
 				if fault == "expiry" {
 					stage := f.c.quiescenceDraft.stage
 					require.NotNil(t, stage)
