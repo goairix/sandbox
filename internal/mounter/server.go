@@ -159,7 +159,19 @@ func (s *Server) dispatch(ctx context.Context, command string, input []byte) ([]
 		return marshalBounded(fuseprotocol.ControlAck{Version: fuseprotocol.Version, Accepted: true, RuntimeUID: request.RuntimeUID, Generation: request.LeaseGeneration})
 	case "health-prepared", "health-ready":
 		if string(input) != "{}" {
-			return nil, fmt.Errorf("health request payload is invalid")
+			// Opt-in Version2 is a read-only resident leaf. Legacy empty input
+			// keeps its exact Version1 schema and original first-mount path.
+			var request struct {
+				Version int `json:"version"`
+			}
+			if command != "health-ready" || fuseprotocol.DecodeExact(input, &request) != nil || request.Version != fuseprotocol.MounterReadinessVersion {
+				return nil, fmt.Errorf("health request payload is invalid")
+			}
+			status, err := s.Supervisor.residentReadiness(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return marshalBounded(status)
 		}
 		var status fuseprotocol.MounterStatus
 		var err error

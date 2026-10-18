@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -159,6 +160,179 @@ func TestServerReadyConsumesResidentSample(t *testing.T) {
 	require.Equal(t, validAuthorization().LeaseGeneration, status.Generation)
 	require.Equal(t, int64(37), status.CacheBytes, "the request must use the resident incremental accounting sample")
 	require.Equal(t, usage.LimitBytes, status.CacheLimitBytes)
+}
+
+// Use the original injectable mount/cache fixture without a periodic writer,
+// so a request cannot race a new sample into either fixed timestamp assertion.
+// This component fixture does not claim an OS-backed mounter identity.
+func residentV2ControlSample(t *testing.T) (*Supervisor, *readinessObserver) {
+	t.Helper()
+	supervisor, _ := residentReadySupervisor(t)
+	observer := sampledResidentObserver(supervisor)
+	usage := observer.cache.Load().Snapshot()
+	usage.ObservedAt = time.Now().Add(-time.Second)
+	observer.cache.Load().usage.Store(&usage)
+	_, err := observer.refresh()
+	require.NoError(t, err)
+	require.NotNil(t, observer.sample.Load(), "the actual refresh must publish this sample")
+	supervisor.mu.Lock()
+	supervisor.readiness = observer
+	supervisor.mu.Unlock()
+	return supervisor, observer
+}
+
+func TestServerReadinessV2PreservesSampleTimesAndLegacyBytes(t *testing.T) {
+	supervisor, observer := residentV2ControlSample(t)
+	sample := observer.sample.Load()
+	usage := observer.cache.Load().Snapshot()
+	supervisor.mu.Lock()
+	mountID := supervisor.mountID
+	auth := supervisor.auth.Sanitized()
+	supervisor.config.MountInfo = func() (Mount, error) { panic("read-only request started another probe") }
+	supervisor.mu.Unlock()
+	server := &Server{Supervisor: supervisor}
+	legacy, err := server.dispatch(context.Background(), "health-ready", []byte(`{}`))
+	require.NoError(t, err)
+	expectedLegacy := fmt.Sprintf(`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"%s","mount_type":"fuse","generation":1,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":%d,"cache_exceeded":false}`, auth.PoolKey, usage.LimitBytes)
+	require.Equal(t, expectedLegacy, string(legacy), "Version1 bytes must remain unchanged")
+	var previous fuseprotocol.MounterReadiness
+	for i := 0; i < 2; i++ {
+		before := time.Now()
+		wire, err := server.dispatch(context.Background(), "health-ready", []byte(`{"version":2}`))
+		require.NoError(t, err)
+		after := time.Now()
+		status, err := fuseprotocol.DecodeMounterReadiness(wire)
+		require.NoError(t, err)
+		require.Equal(t, auth.RuntimeUID, status.RuntimeUID)
+		require.Equal(t, auth.PoolKey, status.PoolKey)
+		require.Equal(t, auth.LeaseGeneration, status.Generation)
+		require.Equal(t, auth.MountAttempt, status.MountAttempt)
+		require.Equal(t, mountID, status.MountID)
+		require.Positive(t, status.SampleSequence)
+		require.Equal(t, sample.observedAt.UTC(), status.SampledAt)
+		require.Equal(t, usage.ObservedAt.UTC(), status.CacheObservedAt)
+		require.Positive(t, status.ValidForNanoseconds)
+		require.LessOrEqual(t, status.ValidForNanoseconds, int64(readinessMaximumAge))
+		beforeRemaining := min(readinessMaximumAge-before.Sub(sample.observedAt), readinessMaximumAge-before.Sub(usage.ObservedAt))
+		afterRemaining := min(readinessMaximumAge-after.Sub(sample.observedAt), readinessMaximumAge-after.Sub(usage.ObservedAt))
+		require.LessOrEqual(t, status.ValidForNanoseconds, int64(beforeRemaining), "the older cache sample must shorten the mount sample's validity")
+		require.GreaterOrEqual(t, status.ValidForNanoseconds, int64(afterRemaining))
+		if i > 0 {
+			require.Less(t, status.ValidForNanoseconds, previous.ValidForNanoseconds, "polling cannot renew an unchanged sample's remaining duration")
+			fixed := status
+			fixed.ValidForNanoseconds = previous.ValidForNanoseconds
+			require.Equal(t, previous, fixed, "polling must preserve sequence, identity and both diagnostic UTC timestamps")
+		}
+		previous = status
+	}
+
+	t.Run("sample-shorter", func(t *testing.T) {
+		supervisor, observer := residentV2ControlSample(t)
+		sample := *observer.sample.Load()
+		sample.observedAt = time.Now().Add(-2 * time.Second)
+		observer.sample.Store(&sample)
+		usage := observer.cache.Load().Snapshot()
+		before := time.Now()
+		wire, err := (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{"version":2}`))
+		require.NoError(t, err)
+		after := time.Now()
+		status, err := fuseprotocol.DecodeMounterReadiness(wire)
+		require.NoError(t, err)
+		require.LessOrEqual(t, status.ValidForNanoseconds, int64(min(readinessMaximumAge-before.Sub(sample.observedAt), readinessMaximumAge-before.Sub(usage.ObservedAt))))
+		require.GreaterOrEqual(t, status.ValidForNanoseconds, int64(min(readinessMaximumAge-after.Sub(sample.observedAt), readinessMaximumAge-after.Sub(usage.ObservedAt))))
+		require.Positive(t, status.ValidForNanoseconds, "the older mount sample must shorten the cache sample's validity")
+	})
+
+	for _, fault := range []string{"refresh-failure", "sequence-exhaustion"} {
+		t.Run(fault, func(t *testing.T) {
+			supervisor, observer := residentV2ControlSample(t)
+			supervisor.mu.Lock()
+			previousSequence := supervisor.readinessSequence
+			if fault == "sequence-exhaustion" {
+				previousSequence = ^uint64(0)
+				supervisor.readinessSequence = previousSequence
+			} else {
+				supervisor.config.MountInfo = func() (Mount, error) {
+					return Mount{}, fmt.Errorf("controlled mount observation failure")
+				}
+			}
+			supervisor.mu.Unlock()
+			_, err := observer.refresh()
+			if fault == "sequence-exhaustion" {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err, "an unavailable mount remains an unknown observation")
+			}
+			require.Nil(t, observer.sample.Load(), "neither failed observation nor exhausted sequence may publish readiness")
+			supervisor.mu.Lock()
+			currentSequence := supervisor.readinessSequence
+			supervisor.mu.Unlock()
+			require.Equal(t, previousSequence, currentSequence, "failed refresh must not advance or wrap the original supervisor sequence")
+			_, err = (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{"version":2}`))
+			require.Error(t, err)
+		})
+	}
+
+	for _, fault := range []string{"aged", "future", "unknown", "mount-attempt"} {
+		t.Run(fault, func(t *testing.T) {
+			supervisor, observer := residentV2ControlSample(t)
+			sample := *observer.sample.Load()
+			switch fault {
+			case "aged":
+				sample.observedAt = time.Now().Add(-4 * time.Second)
+				observer.sample.Store(&sample)
+			case "future":
+				sample.observedAt = time.Now().Add(time.Second)
+				observer.sample.Store(&sample)
+			case "unknown":
+				observer.sample.Store(nil)
+			case "mount-attempt":
+				supervisor.mu.Lock()
+				supervisor.auth.MountAttempt++
+				supervisor.mu.Unlock()
+			}
+			_, err := (&Server{Supervisor: supervisor}).dispatch(context.Background(), "health-ready", []byte(`{"version":2}`))
+			require.Error(t, err, "a request must not replace unavailable or differently bound evidence")
+		})
+	}
+}
+
+func TestServerReadinessV2SequenceSurvivesObserverReplacement(t *testing.T) {
+	supervisor, _ := residentReadySupervisor(t)
+	server := &Server{Supervisor: supervisor}
+	var last uint64
+	for owner := 0; owner < 2; owner++ {
+		observer, cancel, joined := runTestReadinessObserver(supervisor)
+		physicallyJoined := false
+		t.Cleanup(func() {
+			cancel()
+			if !physicallyJoined {
+				require.NoError(t, <-joined)
+			}
+		})
+		waitResidentReady(t, observer)
+		for observation := 0; observation < 2; observation++ {
+			var status fuseprotocol.MounterReadiness
+			require.Eventually(t, func() bool {
+				wire, err := server.dispatch(context.Background(), "health-ready", []byte(`{"version":2}`))
+				if err != nil {
+					return false
+				}
+				status, err = fuseprotocol.DecodeMounterReadiness(wire)
+				return err == nil && status.SampleSequence > last
+			}, 3*time.Second, 5*time.Millisecond, "only another successful original refresh may advance the sequence")
+			require.Greater(t, status.SampleSequence, last)
+			last = status.SampleSequence
+		}
+		cancel()
+		result := <-joined
+		physicallyJoined = true
+		require.NoError(t, result)
+		supervisor.mu.Lock()
+		retired := supervisor.readiness == nil
+		supervisor.mu.Unlock()
+		require.True(t, retired, "replacement starts only after the original observer/cache actually joined")
+	}
 }
 
 // Canonical local state can change while an earlier observation is retained.

@@ -97,6 +97,9 @@ type Supervisor struct {
 	// readiness is the one resident sampler, registered until its original
 	// mount check and cache backend join. Supervisor.mu owns this association.
 	readiness *readinessObserver
+	// The original supervisor retains the publication sequence across joined
+	// observer replacements. mu owns increments; exhaustion never wraps to zero.
+	readinessSequence uint64
 }
 
 // NewSupervisor constructs the injectable state-machine model. It makes no
