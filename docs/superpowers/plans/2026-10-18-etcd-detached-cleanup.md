@@ -257,7 +257,9 @@ cutoff/Close仍须逐片验证，不能称完整4B关闭。`268cd22`已补实际
 4C传输组件`9328ab4`补齐13点历史/22 pin新profile，单请求128KiB、单回复256KiB、
 八次总回复512KiB独立校验及原flat parser验证通过；原v1维度不变。只关闭传输基础，
 完整终态合同、quota writer/paid cursor及统一内存准入仍开放。后续`12af159`实际后端
-终态正向与actual Task绑定已通过；四companion拒绝、真实ABA和v2后继物理仍开放。
+终态正向与actual Task绑定已通过。`366869d`补齐四companion各四类拒绝及认证后
+真实activation同值ABA；原八次RPC/21pins、原生实际Else及零effects通过，主整合
+完整输入等值复用已核对。v2合法后继物理仍开放，不能伪造申请/来源关闭该项。
 
 ### Task 4 消费者的统一内存准入约束
 

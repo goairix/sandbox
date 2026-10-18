@@ -38,6 +38,36 @@ Spec/Quality PASS，注释、分段及包职责均通过。
 `.superpowers/sdd/2026-10-18-etcd-detached-cleanup/terminal-consumer-native-input-equivalence.json`，
 原生证据在D工作树对应目录；没有把子集hash核对当完整输入等值。
 
-仅接受实际后端终态正向接线与actual Task绑定。四个新增companions的拒绝矩阵、
-认证后真实same-value ABA、v2合法后继物理正向仍开放；不关闭完整terminal合同、
-quota归还、自动detached消费者、统一phase准入、HTTP/部署或大N性能容量验收。
+后续测试提交 `366869d`（辅助 `f9a4888`）补齐四个 companions 各四种拒绝：
+缺失、foreign key、非零 lease，以及自身 codec 合法但 sandbox 绑定错误。
+每例均先读取真实原生历史，只替换一份克隆回复；公开方法返回 corrupt/nil，
+恰好七次只读 RPC、一次注入，不进入最终读取。16例结束后，全部13来源及
+seal/head 的实际字节与 MVCC envelope 不变，Grant、额外签名及当前 E/S 读取均零。
+
+真实 post-auth ABA 在第八次 API 请求提交前发生，此时完整历史认证与 cohort
+匹配已经结束。原始 client 用身份/restore 及 activation 的 Create/Mod/Value/
+Lease/Version 比较提交一次同值 Put，实际 MOD 从20推进至77。原最终事务真实
+选择两点 metadata Else，公开方法返回 conflict/nil；postread 确认仅该点 Version
+加一、Mod 推进，值/Create/lease 不变，没有恢复旧 MVCC 或伪造历史。
+
+实际 `run-12b1dd6eb9fc4472929aff05abb580c0` 父19.39s/worker14.62s通过，原正向
+仍八次 RPC/21 pin，回复合计51610字节。16拒绝和真实ABA全部通过；136源码与
+四ELF前后稳定，原worker/PID1/三个etcd Wait返回，无SKIP/FAIL/OOM且容器确切移除。
+日志 SHA256 `26fd96560cace69c26a7a5d699f36dba41b37317712fe44946f1fc9a7614a70e`。
+Linux state/control/vet 输入9270/9475/9270，逐轮完整17项输入及源码/工具归档
+审计通过。唯一审查员限定 Spec/Quality PASS，注释、逻辑分段及包边界通过。
+
+前两次 native 失败如实保留，定位为测试全局计数被仍运行的 worker 后台事务污染，
+不能当作产品放过错误历史的 RED。修正仅用私有 context 标记隔离本次 API 计数，
+后台事务原样委托；没有停止 actor、放宽断言或修改产品。该隔离也不构成原生
+race-detector 或共享 client 字段安装同步的证明。
+
+主分支 fresh Linux 两构建及完整输入审计通过；与上述辅助输入做完整双向路径集合、
+逐项 SHA、环境和模块语义核对后相等，记录在主仓库
+`.superpowers/sdd/2026-10-18-etcd-detached-cleanup/terminal-negative-native-input-equivalence.json`。
+仅复用同输入原生证据，主分支未另跑 native；Linux-only 测试增补没有重复旧 Host 组。
+
+已接受实际后端终态正向、actual Task绑定、四 companion 拒绝及真实认证后ABA。
+v2合法后继物理正向仍开放：现有真实申请生产者无法在同一合法detached workspace
+产生后继请求，不能靠删除原请求、手写四伴随或伪造身份补出正例。不关闭完整
+terminal合同、quota归还、自动detached消费者、统一phase准入、HTTP/部署或大N容量验收。

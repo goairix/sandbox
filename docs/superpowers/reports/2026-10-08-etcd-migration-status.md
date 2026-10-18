@@ -78,8 +78,10 @@ absence→原Joined/actor51→新Claim/普通ACK63→cold13验证；独立普通
 整合与证据审计通过，见[传输验证](2026-10-18-etcd-detached-terminal-transport-verification.md)。
 旧v1维度不变。后续`12af159`已接通后端`ReadSandboxReleased`实际v2正向，八次RPC
 与全部21 pin通过；主整合验证及完整输入等值复用通过，见
-[终态首片验证](2026-10-18-etcd-detached-terminal-consumer-verification.md)。四companion/
-认证后真实ABA/v2后继物理矩阵仍开放；HTTP、quota和自动消费者未接完。
+[终态首片验证](2026-10-18-etcd-detached-terminal-consumer-verification.md)。后续`366869d`
+补齐四companion共16拒绝及认证后真实activation同值ABA，实际公开API、最终原生
+Else和全部21pin通过；主整合完整输入等值复用通过。v2合法后继物理仍开放；HTTP、
+quota和自动消费者未接完，整体百分比不按新增测试数上调。
 `f32f5bd`统一现有cache/automatic/cold容量公式，并修复cache变化未publish时Status
 旧OwnedBytes/Queued；新回归真实RED/GREEN、八组race、Linuxvet和主整合通过，见
 [cache账目验证](2026-10-18-etcd-cache-accounting-verification.md)。不是job phase准入
