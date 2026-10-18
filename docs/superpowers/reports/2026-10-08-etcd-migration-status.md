@@ -68,6 +68,11 @@ surviving history认证或consumer接线，不能计为安全释放完成。
 race/Linuxvet、主分支整合及唯一限定审查通过，见
 [quota编码验证](2026-10-18-etcd-detached-quota-codec-verification.md)。同时最大模型15360字节，
 未接quota writer/消费者，不能计为配额归还完成。
+`1049226`接通原job/Claim下的63节点owner释放和删除index后的独立13点认证；实际
+提交后丢ACK、死Claim两次只读仲裁、standalone/paid冷读通过，race十四项及Linux
+build/vet、指纹审计和唯一限定审查通过，见
+[owner原生组件验证](2026-10-18-etcd-detached-owner-native-verification.md)。普通/损坏ACK、
+发送前absence、新Claim/Run及cutoff/Close矩阵仍缺，自动消费者和全局准入未接完。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

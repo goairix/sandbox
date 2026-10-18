@@ -249,6 +249,10 @@ canonical/envelope/variant测试，不能通过cast或伪Complete接原quota执�
 该基础片已以`0bd7852`提交，六项RED/GREEN、race/Linuxvet、整合与唯一限定审查
 通过；同时最大codec模型15360字节，完整quota/consumer仍开放。
 
+4B首个live组件`1049226`已通过真实63CAS提交后丢ACK、dead Claim只读仲裁和冷13
+认证，以及Host9/race14/Linuxbuild-vet与唯一限定审查。只关闭该组合；普通/损坏ACK、
+pre-send absence、新Claim/Run和cutoff/Close仍须逐片验证，不能称完整4B关闭。
+
 ### Task 4 消费者的统一内存准入约束
 
 独立复核确认，原fixed8MiB+transient16MiB覆盖discovery固定表及单页/Watch/RPC
