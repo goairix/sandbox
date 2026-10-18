@@ -58,6 +58,9 @@ func TestHTTPDestroyNative(t *testing.T) {
 	t.Run("detached-refused", func(t *testing.T) {
 		runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{detached: true, destroyDetached: true})
 	})
+	t.Run("detached-terminal", func(t *testing.T) {
+		runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{detached: true, withBusiness: true, destroyDetached: true, destroyTerminal: true})
+	})
 }
 
 type httpDestroyNativeContext struct {
@@ -73,6 +76,7 @@ type httpDestroyNativeContext struct {
 	clockKey        ed25519.PrivateKey
 	provider        *httpDestroyNativeProvider
 	terminal        bool
+	detached        bool
 }
 
 type httpDestroyNativeResponse struct {
@@ -105,7 +109,11 @@ func exerciseHTTPDestroyNative(t *testing.T, ctx context.Context, f httpDestroyN
 	defer client.CloseIdleConnections()
 	origin := "http://" + listener.Addr().String()
 	if !local {
-		httpDestroyNativeDetached(t, ctx, f, client, origin)
+		if f.detached {
+			httpDestroyNativeDetachedTerminal(t, ctx, f, client, origin)
+		} else {
+			httpDestroyNativeDetached(t, ctx, f, client, origin)
+		}
 		return
 	}
 
@@ -182,7 +190,7 @@ func exerciseHTTPDestroyNative(t *testing.T, ctx context.Context, f httpDestroyN
 	httpDestroyNativeBirth(t, ctx, f, accepted)
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 409, nil)
 
-	httpDestroyNativeAutomatic(t, ctx, f, accepted, *read.Snapshot.LocalCleanup)
+	httpDestroyNativeAutomatic(t, ctx, f, accepted, read.Snapshot.LocalCleanup)
 	owner, err := f.backend.LoadOwner(ctx, f.workspace)
 	require.NoError(t, err)
 	require.Nil(t, owner)
@@ -270,6 +278,131 @@ func httpDestroyNativeDetached(t *testing.T, ctx context.Context, f httpDestroyN
 	require.Equal(t, 7, result.ExitCode)
 	require.Equal(t, "still-open", result.Stdout)
 	t.Logf("HTTP DELETE detached refusal: complete bounded namespace unchanged (%d records), subsequent authenticated GET and actual Exec exit7 passed", len(before))
+}
+
+// One original business creation and DELETE produce the sole Task/P. The
+// mounted production worker must discover that Task itself, acquire its managed
+// Claim, join real runtime effects and refund the original quota before P goes.
+// Native rows below are assertions only; none is fed back as effect authority.
+func httpDestroyNativeDetachedTerminal(t *testing.T, ctx context.Context, f httpDestroyNativeContext, client *http.Client, origin string) {
+	t.Helper()
+	idempotency := uuid.NewString()
+	var created types.CreateSandboxResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, "/api/v1/sandboxes", idempotency, types.CreateSandboxRequest{Mode: "persistent"}, true), 201, &created)
+	read, err := f.backend.ReadSandboxSnapshot(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, read)
+	require.NotNil(t, read.Snapshot)
+	require.NotNil(t, read.View)
+	require.EqualValues(t, 1, read.Snapshot.Version)
+	require.Nil(t, read.Snapshot.LocalCleanup)
+	current := read.View.Records().Control
+	require.NotNil(t, current)
+	require.NotNil(t, current.Runtime)
+	f.workspace, err = f.backend.DetachedIdentity(f.options.Business.Principal, idempotency)
+	require.NoError(t, err)
+	require.Equal(t, f.workspace.Hash(), current.WorkspaceHash)
+	f.request.IntentID, f.request.SandboxID = current.IntentID, created.ID
+	ns, err := state.NewNamespace(f.identity.Prefix, f.identity.AuthorityID, f.identity.Cell)
+	require.NoError(t, err)
+	retainedKeys := []string{ns.Root() + "indexes/sandbox/" + created.ID, fmt.Sprintf("%sp/%02x/workspaces/%s/fence", ns.Root(), f.workspace.Partition(), f.workspace.Hash())}
+	retained := make([]*clientv3.GetResponse, len(retainedKeys))
+	for i, key := range retainedKeys {
+		retained[i], err = httpDestroyNativeGet(ctx, f.raw, key, clientv3.WithRev(read.View.Revision()))
+		require.NoError(t, err)
+		require.Len(t, retained[i].Kvs, 1)
+	}
+	indices, err := httpDestroyNativeGet(ctx, f.raw, ns.Root()+"indexes/runtime/", clientv3.WithPrefix(), clientv3.WithLimit(2))
+	require.NoError(t, err)
+	require.Len(t, indices.Kvs, 1)
+	indexKey := string(indices.Kvs[0].Key)
+	var stdout, stderr bytes.Buffer
+	executed, err := f.service.Exec(ctx, created.ID, uuid.NewString(), p.ExecutionRequest{Argv: []string{"/bin/sh", "-c", "printf 'detached user before destroy\\n'"}, Env: map[string]string{"PATH": "/usr/bin:/bin"}, UID: 1000, GID: 1000, WorkDir: "/workspace", TimeoutSeconds: 5}, &stdout, &stderr)
+	require.NoError(t, err, "%s", stderr.String())
+	require.Equal(t, provisioning.PlainExecLocalTerminal, executed.State)
+	require.NotNil(t, executed.Receipt)
+	require.True(t, executed.Receipt.DrainConfirmed())
+	require.Zero(t, executed.Receipt.RootWaitStatus())
+	path := "/api/v1/sandboxes/" + created.ID
+	var live types.SandboxResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), 200, &live)
+	require.Equal(t, created.ID, live.ID)
+	var accepted httpDestroyNativeResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 202, &accepted)
+	require.Equal(t, "destroy_pending", accepted.Code)
+	require.Equal(t, provisioning.PlainColdDestroyPending, accepted.State)
+	require.Equal(t, created.ID, accepted.SandboxID)
+	require.Equal(t, current.Generation, accepted.Generation)
+	require.Equal(t, p.RuntimeReference(*current.Runtime), accepted.Runtime)
+	require.NoError(t, accepted.Task.Validate())
+	httpDestroyNativeBirth(t, ctx, f, accepted)
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 409, nil)
+	// Detached history has no local descriptor. The original worker gets only
+	// its deployment storage configuration, never a manufactured local target.
+	httpDestroyNativeAutomatic(t, ctx, f, accepted, nil)
+	owner, err := f.backend.LoadOwner(ctx, f.workspace)
+	require.NoError(t, err)
+	require.Nil(t, owner)
+	for _, key := range []string{fmt.Sprintf("%sp/%02x/controls/%s", ns.Root(), accepted.Task.Partition, created.ID), indexKey} {
+		point, err := httpDestroyNativeGet(ctx, f.raw, key)
+		require.NoError(t, err)
+		require.Empty(t, point.Kvs)
+	}
+	for i, key := range retainedKeys {
+		after, err := httpDestroyNativeGet(ctx, f.raw, key)
+		require.NoError(t, err)
+		require.Equal(t, retained[i].Kvs, after.Kvs, "release preserves actual placement/fence bytes and MVCC")
+	}
+	base := fmt.Sprintf("%sp/%02x/tasks/%s/", ns.Root(), accepted.Task.Partition, accepted.Task.TaskID)
+	fact := coldQuotaReadOne(t, ctx, f.raw, base+"detached-noeffect")
+	settlement, err := p.DecodeDetachedNoEffectSettlement(fact.Value)
+	require.NoError(t, err)
+	require.Equal(t, accepted.Task.TaskID, settlement.QuiescenceContext.TaskID)
+	termination := coldQuotaReadOne(t, ctx, f.raw, base+"runtime-termination")
+	intent, err := p.DecodeTaskRuntimeTerminationIntent(termination.Value)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, intent.Version)
+	require.Equal(t, "cleanup-complete", intent.Phase)
+	require.NotEmpty(t, intent.TerminalProof)
+	require.NotNil(t, intent.DetachedEffects)
+	require.Equal(t, hashBytes(fact.Value), intent.DetachedEffects.Settlement.SHA256)
+	seal := coldQuotaReadOne(t, ctx, f.raw, base+"owner-release")
+	var released struct {
+		Version uint32              `json:"version"`
+		Task    state.TaskReference `json:"task"`
+	}
+	require.NoError(t, json.Unmarshal(seal.Value, &released))
+	require.EqualValues(t, 2, released.Version)
+	require.Equal(t, accepted.Task, released.Task)
+	provider := coldQuotaReadOne(t, ctx, f.raw, base+"runtime-provider-cleanup")
+	var cleanup struct {
+		Slots []struct {
+			State string `json:"state"`
+		} `json:"slots"`
+	}
+	require.NoError(t, json.Unmarshal(provider.Value, &cleanup))
+	require.Len(t, cleanup.Slots, 7)
+	for i, slot := range cleanup.Slots {
+		if i >= 2 && i <= 5 {
+			require.Contains(t, []string{"complete", "skipped"}, slot.State)
+		} else {
+			require.Equal(t, "complete", slot.State)
+		}
+	}
+	for _, suffix := range []string{"workspace-archive-command", "workspace-sync-local-progress", "workspace-sync-local-complete"} {
+		point, err := httpDestroyNativeGet(ctx, f.raw, base+suffix)
+		require.NoError(t, err)
+		require.Empty(t, point.Kvs)
+	}
+	require.Positive(t, f.provider.patches.Load())
+	require.EqualValues(t, 1, f.provider.deletes.Load())
+	var absent types.ErrorResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), 404, &absent)
+	require.Equal(t, "not_found", absent.Code)
+	proof, err := f.backend.ReadSandboxReleased(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, proof, "original production history reader authenticates the worker's v2 release")
+	t.Log("HTTP detached Create201→DELETE202→original automatic managed Claim/drain/none/observer/provider/release→quota refund→S/P gone→GET404; all original workers/processes joined")
 }
 
 // The fixture has a fixed inventory, not arbitrary resident N. A complete
@@ -403,15 +536,25 @@ func (a *httpDestroyNativeProvider) handle(w http.ResponseWriter, r *http.Reques
 type httpDestroyNativeWorkerSetup struct {
 	Cleanup              cleanupExecutorSetup
 	CA, Certificate, Key []byte
+	// Configuration only. The child opens the original v3 production worker;
+	// no Claim, Run, effect capability or success outcome crosses this seam.
+	Detached bool
 }
 
-func httpDestroyNativeAutomatic(t *testing.T, ctx context.Context, f httpDestroyNativeContext, accepted httpDestroyNativeResponse, descriptor state.LocalCleanupDescriptor) {
+func httpDestroyNativeAutomatic(t *testing.T, ctx context.Context, f httpDestroyNativeContext, accepted httpDestroyNativeResponse, descriptor *state.LocalCleanupDescriptor) {
 	t.Helper()
 	config, err := launcherconfig.Decode(f.options.LauncherConfig)
 	require.NoError(t, err)
+	// Storage deployment is required by the existing worker manifest even when
+	// detached cleanup never opens an archive. Only local history supplies a
+	// workspace prefix; nil remains nil in the detached snapshot and Task.
+	bucket, prefix := "bucket", ""
+	if descriptor != nil {
+		bucket, prefix = descriptor.Bucket, descriptor.Prefix
+	}
 	s := cleanupExecutorSetup{localReleaseNativeSetup: localReleaseNativeSetup{
 		Binding: config.TrustBinding(), Identity: f.identity, Root: config.Roots[0], IssuerKey: f.options.IssuerPrivateKey,
-		IssuerCertificate: f.options.IssuerCertificate, WorkspaceStorage: f.identity.StorageID, WorkspaceBucket: descriptor.Bucket, WorkspacePrefix: descriptor.Prefix,
+		IssuerCertificate: f.options.IssuerCertificate, WorkspaceStorage: f.identity.StorageID, WorkspaceBucket: bucket, WorkspacePrefix: prefix,
 		SandboxID: accepted.SandboxID, IntentID: f.request.IntentID, Runtime: accepted.Runtime, Generation: accepted.Generation,
 		NodeUID: f.options.NodeUID, NodeBootID: f.options.NodeBootID, ObserverAddress: f.observerAddress, ProviderAddress: f.options.API.Config.Host, BudgetID: uuid.NewString(),
 	}, Task: accepted.Task, LoaderConfig: f.options.LauncherConfig, LoaderKubeCA: f.options.API.Config.CAData, LoaderClockKey: f.clockKey}
@@ -430,7 +573,19 @@ func httpDestroyNativeAutomatic(t *testing.T, ctx context.Context, f httpDestroy
 	require.NoError(t, err)
 	_, err = httpDestroyNativePut(ctx, f.raw, fmt.Sprintf("%sp/%02x/workspace-sync-recycling-slots/%s/00", accepted.Task.Namespace, accepted.Task.Partition, s.BudgetID), fmt.Sprintf(`{"version":2,"budget_id":%q,"partition":%d,"slot":0,"state":"free","intent_id":"","intent_digest":"","intent_birth":0,"evidence_digest":""}`, s.BudgetID, accepted.Task.Partition))
 	require.NoError(t, err)
-	setup := httpDestroyNativeWorkerSetup{Cleanup: s}
+	setup := httpDestroyNativeWorkerSetup{Cleanup: s, Detached: f.detached}
+	var coldHistory cleanupColdQuotaAutomaticHistory
+	var retired <-chan cleanupColdQuotaAutomaticRetirement
+	if f.detached {
+		coldHistory = cleanupColdQuotaAutomaticBefore(t, ctx, f.raw, s)
+		var stopWatch context.CancelFunc
+		retired, stopWatch = cleanupColdQuotaAutomaticWatch(t, ctx, f.raw, coldHistory.pending)
+		defer func() {
+			stopWatch()
+			for range retired {
+			}
+		}()
+	}
 	setup.CA, err = os.ReadFile(filepath.Join(f.directory, "ca.pem"))
 	require.NoError(t, err)
 	setup.Certificate, err = os.ReadFile(filepath.Join(f.directory, "server.pem"))
@@ -468,7 +623,19 @@ func httpDestroyNativeAutomatic(t *testing.T, ctx context.Context, f httpDestroy
 		t.Fatal(ctx.Err())
 	}
 	require.Contains(t, stdout.String(), "HTTP destroy production worker PID=")
-	require.Contains(t, stdout.String(), "archive/modes verified; Pgone=true; physical worker Wait=exit0")
+	if f.detached {
+		require.Contains(t, stdout.String(), "detached cold quota verified; Pgone=true; physical worker Wait=exit0")
+		select {
+		case event := <-retired:
+			require.NoError(t, event.err)
+			require.NotNil(t, event.event)
+			cleanupColdQuotaAutomaticReturned(t, ctx, f.raw, s, coldHistory, event.event)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	} else {
+		require.Contains(t, stdout.String(), "archive/modes verified; Pgone=true; physical worker Wait=exit0")
+	}
 	partition := fmt.Sprintf("%sp/%02x/", accepted.Task.Namespace, accepted.Task.Partition)
 	for _, key := range []string{
 		partition + "cleanup-pending/" + accepted.Task.TaskID,
@@ -531,7 +698,11 @@ func TestHTTPDestroyNativeWorkerChild(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "http-destroy-worker-")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
-	for _, name := range []string{"spool", "target", "target/" + strings.TrimSuffix(setup.Cleanup.WorkspacePrefix, "/")} {
+	directories := []string{"spool", "target"}
+	if !setup.Detached {
+		directories = append(directories, "target/"+strings.TrimSuffix(setup.Cleanup.WorkspacePrefix, "/"))
+	}
+	for _, name := range directories {
 		require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0700))
 	}
 	httpDestroyNativeWorkerRun(t, setup, dir)
@@ -575,6 +746,13 @@ func httpDestroyNativeWorkerRun(t *testing.T, setup httpDestroyNativeWorkerSetup
 	workerID := "http-destroy-" + uuid.NewString()
 	worker["worker_id"] = observerNativeJSON(t, workerID)
 	mounted["worker"] = observerNativeJSON(t, worker)
+	if setup.Detached {
+		mounted["version"] = json.RawMessage("3")
+		var inventory state.PreparationInventoryOptions
+		inventory.QuotaSlots[7] = 1 // exact original operator profile, not readiness
+		mounted["preparation"] = observerNativeJSON(t, inventory)
+		mounted["detached"] = observerNativeJSON(t, map[string]string{"pinned_plain_image": enrolledProfileFixtureImage})
+	}
 	require.NoError(t, os.WriteFile(manifest, observerNativeJSON(t, mounted), 0600))
 
 	pool := x509.NewCertPool()
@@ -584,7 +762,11 @@ func httpDestroyNativeWorkerRun(t *testing.T, setup httpDestroyNativeWorkerSetup
 	raw, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://127.0.0.1:2379"}, TLS: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{certificate}}, DialTimeout: 2 * time.Second})
 	require.NoError(t, err)
 	defer raw.Close()
-	command := exec.Command("/fixture/cleanup-worker", "serve", manifest)
+	mode := "serve"
+	if setup.Detached {
+		mode = "serve-cold-quota" // original production v3 entry, no test bypass
+	}
+	command := exec.Command("/fixture/cleanup-worker", mode, manifest)
 	command.Env = []string{"GOMAXPROCS=2"}
 	var stdout, stderr cleanupWorkerRoleOutput
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -628,13 +810,19 @@ func httpDestroyNativeWorkerRun(t *testing.T, setup httpDestroyNativeWorkerSetup
 		case <-ticker.C:
 		}
 	}
-	content, err := os.ReadFile(filepath.Join(dir, "target", setup.Cleanup.WorkspacePrefix, "nested/data"))
-	require.NoError(t, err)
-	require.Equal(t, "HTTP delete archive\n", string(content))
-	for name, mode := range map[string]os.FileMode{"nested": 0750, "nested/data": 0640} {
-		info, err := os.Stat(filepath.Join(dir, "target", setup.Cleanup.WorkspacePrefix, name))
+	if setup.Detached {
+		entries, err := os.ReadDir(filepath.Join(dir, "target"))
 		require.NoError(t, err)
-		require.Equal(t, mode, info.Mode().Perm())
+		require.Empty(t, entries, "detached cleanup must not manufacture a local archive target")
+	} else {
+		content, err := os.ReadFile(filepath.Join(dir, "target", setup.Cleanup.WorkspacePrefix, "nested/data"))
+		require.NoError(t, err)
+		require.Equal(t, "HTTP delete archive\n", string(content))
+		for name, mode := range map[string]os.FileMode{"nested": 0750, "nested/data": 0640} {
+			info, err := os.Stat(filepath.Join(dir, "target", setup.Cleanup.WorkspacePrefix, name))
+			require.NoError(t, err)
+			require.Equal(t, mode, info.Mode().Perm())
+		}
 	}
 	require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 	select {
@@ -653,7 +841,11 @@ func httpDestroyNativeWorkerRun(t *testing.T, setup httpDestroyNativeWorkerSetup
 	cancelTTL()
 	require.NoError(t, err)
 	require.EqualValues(t, -1, ttl.TTL)
-	t.Logf("HTTP destroy production worker PID=%d UID=%d zeroCaps=true archive/modes verified; Pgone=true; physical worker Wait=exit0", command.Process.Pid, os.Geteuid())
+	if setup.Detached {
+		t.Logf("HTTP destroy production worker PID=%d UID=%d zeroCaps=true detached cold quota verified; Pgone=true; physical worker Wait=exit0", command.Process.Pid, os.Geteuid())
+	} else {
+		t.Logf("HTTP destroy production worker PID=%d UID=%d zeroCaps=true archive/modes verified; Pgone=true; physical worker Wait=exit0", command.Process.Pid, os.Geteuid())
+	}
 }
 
 // These test-side observations and operator setup writes have a per-RPC bound

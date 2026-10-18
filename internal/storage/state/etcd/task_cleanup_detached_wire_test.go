@@ -57,7 +57,7 @@ func cleanupDetachedWireExpected() map[string][]string {
 		"final-sync-none":   strings.Fields("final-sync-read final-sync-reserve"),
 		"execution":         strings.Fields("point bundle observe claim-observe initialize rotate reserve progress claim claim-postcheck joined settle terminal-history"),
 		"detached-noeffect": strings.Fields("locate quiescence source arbitration write"),
-		"detached-recovery": strings.Fields("new-run arbitration"),
+		"detached-recovery": strings.Fields("early-history early-new-run new-run arbitration"),
 		"termination":       strings.Fields("authority-history-read.domain authority-history-read.publication-initial authority-history-read.publication-complete authority-history-read.none-locate authority-history-read.none-quiescence authority-history-read.none-source authority-history-read.supplement termination-read provider-read reserve reserved-guard terminated-write terminated-guard cleanup-complete-write cleanup-complete-guard"),
 		"owner-release":     strings.Fields("release-proof-read release-history-read.head-with-task release-history-read.head-paid-task release-history-read.retained13 release release-arbitration"),
 		"provider":          strings.Fields("provider-initial provider-before-termination provider-after-termination"),

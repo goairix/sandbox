@@ -314,6 +314,13 @@ func (w *DueWorker) cleanupTurnCompleted(job *cleanupLocalJob) {
 		return
 	}
 	b := w.backend
+	if job.step == "replied" && job.detachedTarget != nil && job.effectsJoined {
+		// The terminal CAS and refund have returned. Copy the bounded result
+		// while this actor still owns its opaque cold proof, then retire the
+		// heavy history before handing control back to the physical tail.
+		job.result = b.cleanupResult(job)
+		w.releaseCleanupColdQuota(job)
+	}
 	b.archiveLife.mu.Lock()
 	request := job.request
 	job.request = nil
@@ -349,6 +356,13 @@ func (w *DueWorker) cleanupContinuation(job *cleanupLocalJob, request *cleanupLo
 		job.step = "publication"
 	case "claim":
 		job.step = "rollover"
+	case "claim-detached":
+		if job.detachedTarget == nil || job.state == nil || job.state.record.Run == nil || job.state.record.Run.Joined || job.state.record.Run.ID != job.runID || job.state.record.Pending == nil || job.state.record.Pending.Purpose != "claim" || job.claim != nil {
+			job.request = nil
+			b.archiveLife.mu.Unlock()
+			return cleanupLocalReply{}, ErrInvalidRecord
+		}
+		job.step = "claim-bundle"
 	case "resume-bound":
 		job.step = "recovery-run"
 	case "resume-early":
@@ -450,7 +464,11 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		// This complete pure plan is discarded before any permanent E/S/Run
 		// mutation. Actual Grant admission later rebuilds and binds it to its
 		// genuine Kernel and exact current execution/slot/Claim coordinates.
-		err = b.preflightCleanupLocalWire(cleanupLocalWireInput{bundle: j.bundle, snapshot: j.target.snapshot, publication: j.target.publication, issuer: j.target.issuer, plan: j.target.plan, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}, j.target.worker)
+		if j.detachedTarget != nil {
+			_, err = b.visitCleanupDetachedWire(b.cleanupDetachedInput(j), cleanupLocalWireDimensions{runID: "11111111-1111-4111-8111-111111111111", claimID: "22222222-2222-4222-8222-222222222222", worker: j.target.worker}, func(cleanupDetachedWireEmission) error { return nil })
+		} else {
+			err = b.preflightCleanupLocalWire(cleanupLocalWireInput{bundle: j.bundle, snapshot: j.target.snapshot, publication: j.target.publication, issuer: j.target.issuer, plan: j.target.plan, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}, j.target.worker)
+		}
 		if j.boundRecovery || j.earlyRecovery {
 			// Reply to the same owned goroutine for authentic recovery IO;
 			// its next continuation admits the one new Run and managed Claim.
@@ -529,7 +547,11 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 	case "claim-state":
 		j.state, err = b.readCleanupClaimState(owner, j.bundle, j.state)
 		if err == nil {
-			j.inventory, err = b.prepareCleanupLocalWireInventory(cleanupLocalWireInput{bundle: j.bundle, state: j.state, snapshot: j.target.snapshot, publication: j.target.publication, issuer: j.target.issuer, plan: j.target.plan, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}, b.localCleanup.Worker)
+			if j.detachedTarget != nil {
+				j.inventory, err = b.prepareCleanupDetachedInventory(j)
+			} else {
+				j.inventory, err = b.prepareCleanupLocalWireInventory(cleanupLocalWireInput{bundle: j.bundle, state: j.state, snapshot: j.target.snapshot, publication: j.target.publication, issuer: j.target.issuer, plan: j.target.plan, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}, b.localCleanup.Worker)
+			}
 		}
 		j.step = "claim"
 	case "claim":
@@ -559,6 +581,22 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		err = b.updateCleanupRun(owner, j, r)
 		j.step = "replied"
 	case "release-proof":
+		if j.detachedTarget != nil {
+			// This live physical owner has joined its Claim and Run. The shared
+			// profile reader authenticates the permanent v2 seal without a local
+			// archive DTO; refund and settlement still use the original paid
+			// history cursor and the same registered job below.
+			var proof *taskOwnerReleaseProof
+			proof, err = b.readTaskOwnerReleaseProof(ctx, j.task, nil)
+			if err != nil {
+				return err
+			}
+			if proof == nil || proof.detached == nil || proof.local != nil {
+				return ErrOutcomeUnknown
+			}
+			j.step = "terminal-history"
+			return nil
+		}
 		// The existing authenticating loader has three native reads when a
 		// release exists. It is the sole operation in this charged turn.
 		j.proof, err = b.readLocalOwnerReleaseProof(ctx, j.task)
@@ -580,7 +618,12 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 			if j.started {
 				return ErrConflict
 			}
-			if j.state.record.Confirmed == "archive-bound" && j.state.record.Archive != nil {
+			if b.detachedCleanup != nil && j.state.record.Archive == nil && (j.state.record.Confirmed == "reserved" || j.state.record.Confirmed == "drained" || j.state.record.Confirmed == "terminated" || j.state.record.Confirmed == "owner-released") {
+				// This only routes to the real snapshot/source classifier. A local
+				// snapshot retains its old stricter early recovery checks.
+				j.earlyRecovery = true
+				j.step = "bundle"
+			} else if j.state.record.Confirmed == "archive-bound" && j.state.record.Archive != nil {
 				j.boundRecovery = true
 				j.step = "bundle"
 			} else if (j.state.record.Confirmed == "local-complete" || j.state.record.Confirmed == "terminated") && j.state.record.Archive != nil {

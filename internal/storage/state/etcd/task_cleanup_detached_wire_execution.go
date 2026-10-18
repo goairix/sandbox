@@ -223,6 +223,12 @@ func (d *cleanupDetachedWireBuilder) recoveryProjection(variant string) (cleanup
 	if variant == "arbitration" {
 		return d.executionProjection("observe")
 	}
+	earlyKeys := []string{d.w.closeKey, d.w.quiescenceKey, d.w.reservationKey, d.w.finalKey, d.factKey, d.w.claimKey}
+	if variant == "early-history" {
+		keys := append([]string{d.b.identityKey, d.b.restoreKey}, earlyKeys...)
+		values := []string{d.b.identityValue, d.b.restoreEpoch, cleanupWirePadding(32768), cleanupWirePadding(32768), cleanupWirePadding(8192), cleanupWirePadding(8192), cleanupWirePadding(32768), cleanupWirePadding(4096)}
+		return cleanupWirePointProjection(d.b.baseComparisons(), keys, values), nil
+	}
 	worker, err := d.workerDimensions()
 	if err != nil {
 		return cleanupWireProjection{}, err
@@ -239,7 +245,11 @@ func (d *cleanupDetachedWireBuilder) recoveryProjection(variant string) (cleanup
 	if err != nil {
 		return cleanupWireProjection{}, err
 	}
-	for _, key := range []string{d.w.quiescenceKey, d.w.quiescenceReceiptKey, d.w.reservationKey, d.w.finalKey, keys[5], keys[6], keys[7], d.factKey} {
+	pins := []string{d.w.quiescenceKey, d.w.quiescenceReceiptKey, d.w.reservationKey, d.w.finalKey, keys[5], keys[6], keys[7], d.factKey}
+	if variant == "early-new-run" {
+		pins = earlyKeys
+	}
+	for _, key := range pins {
 		cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(key), "=", math.MaxInt64))
 	}
 	return d.b.cleanupProjection(variant, cmps, []*pb.RequestOp{taskProtoPut(e, cleanupWirePadding(4096), 0)}, taskProtoPutResponse(1)), nil

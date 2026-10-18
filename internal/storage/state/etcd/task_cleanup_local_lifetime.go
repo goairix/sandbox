@@ -133,6 +133,17 @@ func (b *Backend) finishCleanupJob(j *cleanupLocalJob, err error) {
 		failure = cleanupResultFailure(err)
 	}
 	b.archiveLife.mu.Lock()
+	if s := j.worker.managedSource; s != nil && s.job == j {
+		// This original preparation/physical owner has joined all callbacks,
+		// transports, Claim cleanup and accepted continuations. Retire its
+		// exclusive source/target graph before refunding the workspace. A
+		// copied job or cancellation callback never reaches this ownership tail.
+		j.target = nil
+		j.bundle, j.evidence, j.early = nil, nil, nil
+		j.worker.managedSource = nil
+		j.worker.cache.managedSource = false
+		j.worker.cache.managedSourceKeys = 0
+	}
 	j.worker.recordCleanupResultLocked(failure)
 	for i, candidate := range j.worker.cleanupJobs {
 		if candidate == j {
@@ -254,7 +265,17 @@ func (b *Backend) joinCleanupRun(ctx context.Context, j *cleanupLocalJob) error 
 }
 
 func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proof *localOwnerReleaseProof) error {
-	if ctx == nil || j == nil || j.owner == nil || j.owner.call.ctx != ctx || proof == nil || proof.kv == nil || j.state == nil || j.evidence == nil || j.state.slot == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || j.state.record.Run.ID != j.runID || !j.effectsJoined || proof.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
+	if ctx == nil || j == nil || j.owner == nil || j.owner.call.ctx != ctx || j.state == nil || j.evidence == nil || j.state.slot == nil || j.state.record.Run == nil || !j.state.record.Run.Joined || j.state.record.Run.ID != j.runID || !j.effectsJoined {
+		return ErrInvalidRecord
+	}
+	if proof == nil {
+		if j.detachedTarget == nil {
+			return ErrInvalidRecord
+		}
+		if _, err := b.detachedCleanupOccupationProof(j); err != nil {
+			return err
+		}
+	} else if proof.kv == nil || proof.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
 		return ErrInvalidRecord
 	}
 	return b.settleCleanupOccupation(j.owner, j, proof, j.terminal)

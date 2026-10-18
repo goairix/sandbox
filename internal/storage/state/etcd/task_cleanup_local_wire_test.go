@@ -384,7 +384,9 @@ func TestCleanupLocalWireOrdinaryProfile(t *testing.T) {
 		family, variant string
 		nodes           int
 	}{
-		{"quiescence-stage", "reserved-commit", 64},
+		// The original Stage now commits its reservation and Q together;
+		// the authenticated immutable issuer uses its exact Mod pin.
+		{"quiescence-stage", "reserved-commit", 63},
 		{"task-checkpoint", "claim-create", 46},
 		{"task-checkpoint", "claim-post-fence", 46},
 		{"local-progress", "metadata-settle", 64},

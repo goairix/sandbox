@@ -22,7 +22,10 @@ type cleanupLocalTarget struct {
 	publication *RuntimeEnrolledPublicationEntry
 	issuer      CommandIssuerEntry
 	plan        TaskWorkspaceSyncPlan
-	root        string
+	// Detached targets retain their authentic ordinary identity separately;
+	// no local/archive plan is manufactured for that profile.
+	detachedWorkspace WorkspaceIdentity
+	root              string
 	// This diagnostic reference supplies only prospective wire dimensions.
 	// Grant revalidates the genuine Kernel and the actual persisted Run.
 	worker      launcher.WorkspaceSyncWorkerReference
@@ -115,7 +118,7 @@ func (b *Backend) prepareCleanupLocalTarget(j *cleanupLocalJob) error {
 }
 
 func (b *Backend) cleanupPublication(ctx context.Context, task TaskRecord, target *cleanupLocalTarget) error {
-	read, err := b.loadRuntimePublicationEnrolledAt(ctx, historyLocator(target.plan.workspace), task.CreationIntentID)
+	read, err := b.loadRuntimePublicationEnrolledAt(ctx, historyLocator(target.workspaceIdentity()), task.CreationIntentID)
 	if err != nil || read == nil || read.Publication == nil || read.Dispatch == nil {
 		return errors.Join(ErrInvalidConfiguration, err)
 	}
@@ -160,15 +163,26 @@ func (b *Backend) cleanupPublication(ctx context.Context, task TaskRecord, targe
 	return nil
 }
 
+func (t *cleanupLocalTarget) workspaceIdentity() WorkspaceIdentity {
+	if t.detachedWorkspace.Kind() == WorkspaceIdentityDetached {
+		return t.detachedWorkspace
+	}
+	return t.plan.workspace
+}
+
 // All four fixed signing roles must use the configured credential. This
 // bounded registration is at most two native RPCs under the original owner.
 func (b *Backend) cleanupIssuer(ctx context.Context, target *cleanupLocalTarget) error {
 	bounded, cancel := b.requestContext(ctx)
 	defer cancel()
 	var certificate []byte
-	for _, issuer := range []interface {
+	issuers := []interface {
 		Certificate(context.Context) ([]byte, error)
-	}{b.taskIssuer, b.taskQuiescenceIssuer, b.taskWorkspaceArchiveIssuer, b.taskRuntimeTerminationIssuer} {
+	}{b.taskIssuer, b.taskQuiescenceIssuer, b.taskRuntimeTerminationIssuer}
+	if target.detachedWorkspace.Kind() != WorkspaceIdentityDetached {
+		issuers = append(issuers, b.taskWorkspaceArchiveIssuer)
+	}
+	for _, issuer := range issuers {
 		wire, err := issuer.Certificate(bounded)
 		if err != nil || !b.localCleanup.Credential.MatchesCertificate(wire) || certificate != nil && !bytes.Equal(certificate, wire) {
 			return errors.Join(ErrInvalidConfiguration, err)

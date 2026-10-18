@@ -37,6 +37,12 @@ func (b *Backend) runCleanupLocal(j *cleanupLocalJob) {
 			err = b.cleanupTerminateAndRelease(j)
 		}
 	}
+	b.finishCleanupPhysical(j, err)
+}
+
+// Both profiles use this same original job tail. Effects, renewal and accepted
+// continuations have returned before Claim cleanup, Run.Joined and settlement.
+func (b *Backend) finishCleanupPhysical(j *cleanupLocalJob, err error) {
 	// Even cancellation joins the exact Claim cleanup before declaring this
 	// run joined. A late native continuation was already joined by its reply.
 	if j.claim != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // The same registered job owns these loader results. They pin original
@@ -14,6 +16,9 @@ type cleanupEarlyRecovery struct {
 	close      *TaskCloseDataEntry
 	quiescence *TaskQuiescenceEntry
 	attempt    *TaskQuiescenceAttemptEntry
+	// Detached recovery additionally fences every old effect key and the
+	// absence of the prior task Claim. Mod pins come only from native reads.
+	detachedPins []cleanupDetachedNoEffectPin
 }
 
 func cleanupEarlyPhase(phase string) bool {
@@ -199,7 +204,17 @@ func (b *Backend) recheckCleanupEarlyHistory(j *cleanupLocalJob) error {
 	if j == nil || j.early == nil || j.claim == nil {
 		return ErrInvalidRecord
 	}
-	observed, err := b.readCleanupEarlyHistory(j.ctx, j, &j.early.state)
+	var observed *cleanupEarlyRecovery
+	var err error
+	if j.detachedTarget != nil {
+		if len(j.early.detachedPins) == 0 {
+			observed, err = b.readCleanupDetachedCompletedDrain(j)
+		} else {
+			observed, err = b.readCleanupDetachedEarlyHistory(j)
+		}
+	} else {
+		observed, err = b.readCleanupEarlyHistory(j.ctx, j, &j.early.state)
+	}
 	if err != nil {
 		return err
 	}
@@ -235,11 +250,219 @@ func (b *Backend) beginCleanupEarlyRun(owner *workerDueOwner, j *cleanupLocalJob
 	if j.evidence == nil || b.cleanupPhysicalProfile() != nil {
 		return ErrInvalidRecord
 	}
-	if err := matchCleanupEarlyHistory(j.state, j.bundle, j.early.close, j.early.quiescence, j.early.attempt); err != nil {
-		return err
+	if j.detachedTarget == nil {
+		if err := matchCleanupEarlyHistory(j.state, j.bundle, j.early.close, j.early.quiescence, j.early.attempt); err != nil {
+			return err
+		}
+	} else if len(j.early.detachedPins) != 6 {
+		return ErrInvalidRecord
 	}
 	// The common transition generates exactly one candidate, validates its
-	// complete slot wire inventory, writes 43 nodes and confirms exact E/S.
+	// complete slot wire inventory and confirms exact E/S. Local retains its
+	// original43 nodes; detached additionally pins six native effect/Claim keys.
 	// Unknown keeps that candidate; the old Run is never marked by this job.
 	return b.commitCleanupRecoveryRun(owner, j, "recovery-early-run")
+}
+
+// Detached recovery uses the existing Stage/history/Query protocol. An absent
+// close is retryable only after actual Joined E/S, actual Claim absence and a
+// same-CAS absence fence on every effect key. A committed but unreceived close
+// remains Query-Unknown; a legacy orphan Q reservation is never overwritten.
+func (b *Backend) readCleanupDetachedEarlyHistory(j *cleanupLocalJob) (*cleanupEarlyRecovery, error) {
+	if j == nil || j.detachedTarget == nil || j.owner != nil || !j.earlyRecovery || j.target == nil || j.bundle == nil {
+		return nil, ErrInvalidRecord
+	}
+	original := j.state
+	if j.early != nil {
+		original = &j.early.state
+	}
+	if original == nil || original.slot == nil || original.record.Run == nil || !original.record.Run.Joined || original.record.Archive != nil || original.record.Release != nil || original.record.Task != j.task || original.record.TaskBirth != j.bundle.birth {
+		return nil, ErrInvalidRecord
+	}
+	closeKey, err := b.namespace.taskCloseDataKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	qKey, err := b.namespace.taskQuiescenceKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	reservationKey, err := b.namespace.taskQuiescenceAttemptKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	noneKey, err := b.namespace.taskFinalSyncAttemptKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	factKey, err := b.namespace.taskDetachedNoEffectKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	claimKey, err := b.namespace.taskClaimKey(j.task)
+	if err != nil {
+		return nil, err
+	}
+	keys := []string{b.identityKey, b.restoreKey, closeKey, qKey, reservationKey, noneKey, factKey, claimKey}
+	points, _, err := b.readCleanupDetachedNoEffectPoints(j.ctx, "early-history", keys, []int{maxRecordBytes, 256, 32768, 32768, 8192, 8192, 32768, 4096})
+	if err != nil {
+		return nil, err
+	}
+	if points[5] != nil || points[6] != nil {
+		return nil, ErrOutcomeUnknown
+	}
+	if j.claim == nil {
+		if points[7] != nil {
+			return nil, ErrConflict
+		}
+	} else if points[7] == nil || string(points[7].Value) != j.claim.value || points[7].Lease != j.claim.reference.LeaseID || points[7].CreateRevision != j.claim.reference.CreateRevision {
+		return nil, ErrConflict
+	}
+	h := &cleanupEarlyRecovery{state: *original}
+	for i, kv := range points[2:] {
+		pin := cleanupDetachedNoEffectPin{key: keys[i+2]}
+		if kv != nil {
+			pin.stamp = detachedNoEffectStamp(ownTaskFence(kv))
+		}
+		h.detachedPins = append(h.detachedPins, pin)
+	}
+	h.close, err = b.LoadTaskCloseData(j.ctx, j.task)
+	if err != nil {
+		return nil, err
+	}
+	h.attempt, err = b.LoadTaskQuiescenceAttempt(j.ctx, j.task)
+	if err != nil {
+		return nil, err
+	}
+	h.quiescence, err = b.LoadTaskQuiescence(j.ctx, j.task)
+	if err != nil {
+		return nil, err
+	}
+	if h.close == nil {
+		if points[2] != nil || h.quiescence != nil || points[3] != nil || h.attempt != nil || points[4] != nil || (original.record.Confirmed != "reserved" && original.record.Confirmed != "claimed") {
+			return nil, ErrOutcomeUnknown
+		}
+	} else {
+		c := h.close
+		if points[2] == nil || c.Record == nil || c.Outcome != OutcomeCommitted || c.Revision != points[2].ModRevision || c.Record.Task != j.bundle.task || c.Record.Context.ControlRevision != j.bundle.birth {
+			return nil, ErrCorruptRecord
+		}
+		closed, err := b.QueryTaskCloseData(j.ctx, c.Reference, j.target.destination)
+		if err != nil || closed.Receipt == nil {
+			return nil, errors.Join(ErrOutcomeUnknown, err)
+		}
+	}
+	if h.quiescence == nil {
+		if points[3] != nil || h.attempt != nil || points[4] != nil || original.record.Confirmed == "quiescent" || original.record.Confirmed == "drained" {
+			return nil, ErrOutcomeUnknown
+		}
+	} else {
+		q := h.quiescence
+		if h.close == nil || points[3] == nil || points[4] == nil || q.Record == nil || q.Outcome != OutcomeCommitted || q.Revision != points[3].ModRevision || q.Record.Task != j.bundle.task || q.Record.Context.CloseDataContext != h.close.Record.Context || q.Record.Context.CloseDataIntentRevision != h.close.Revision || q.Record.Context.CloseDataTicketDigest != h.close.Record.TicketDigest || !taskQuiescenceHistoryReservation(*q.Record, q.Revision, h.attempt) || h.attempt.Revision != points[4].ModRevision {
+			return nil, ErrCorruptRecord
+		}
+		queried, err := b.QueryTaskQuiescence(j.ctx, j.task, j.target.destination)
+		if err != nil {
+			return nil, err
+		}
+		if err = b.waitCleanupQuiescence(j, queried); err != nil {
+			return nil, err
+		}
+	}
+	if pending := original.record.Pending; pending != nil && pending.AttemptID != "" {
+		ref := StageReference{Namespace: j.task.Namespace, RestoreEpoch: j.task.RestoreEpoch, Partition: j.task.Partition, StageID: pending.StageID, RequestID: pending.RequestID, AttemptID: pending.AttemptID, Digest: pending.Digest}
+		if h.close != nil && ref == h.close.Reference.Stage || h.quiescence != nil && ref == h.quiescence.Reference.Stage {
+			return h, nil
+		}
+		// Only the original abandoned Stage may be resolved. A new UUID does
+		// not replace its uncertain receipt, and resolution never sends a command.
+		outcome, err := b.ResolveStage(j.ctx, ref)
+		if err != nil || outcome != OutcomeAborted {
+			return nil, errors.Join(ErrOutcomeUnknown, err)
+		}
+	}
+	return h, nil
+}
+
+func (b *Backend) resumeCleanupDetached(j *cleanupLocalJob) error {
+	none, err := b.LoadTaskFinalSyncAttempt(j.ctx, j.task)
+	if err != nil {
+		return err
+	}
+	if none != nil {
+		// Existing none is permanent and belongs to its historical Claim. A
+		// replacement Claim never re-reserves it. Absent settlement still needs
+		// original read-only close/Q queries and a fresh current dual drain.
+		history, err := b.readCleanupDetachedNoEffectHistory(j.ctx, j.task)
+		if err != nil {
+			return err
+		}
+		if history.settlement == nil {
+			j.early, err = b.readCleanupDetachedCompletedDrain(j)
+			if err != nil {
+				return err
+			}
+		}
+		if _, err = b.prepareCleanupDetachedNoEffectRecovery(j.ctx, j); err != nil {
+			return err
+		}
+		if _, err = j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "resume-detached-noeffect"}); err != nil {
+			return err
+		}
+		var reply cleanupLocalReply
+		reply, err = j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "claim-detached"})
+		j.claim = reply.claim
+		return err
+	}
+	j.early, err = b.readCleanupDetachedEarlyHistory(j)
+	if err != nil {
+		return err
+	}
+	reply, err := j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "resume-early"})
+	j.claim = reply.claim
+	return err
+}
+
+// None is already authenticated but is not itself an effect settlement. Query
+// only the original close/Q, preserving their Stage/Claim/attempt identity.
+// The new managed Claim must still obtain a fresh dual-drain observation.
+func (b *Backend) readCleanupDetachedCompletedDrain(j *cleanupLocalJob) (*cleanupEarlyRecovery, error) {
+	history, err := b.readCleanupDetachedNoEffectHistory(j.ctx, j.task)
+	if err != nil {
+		return nil, err
+	}
+	closed, err := b.LoadTaskCloseData(j.ctx, j.task)
+	if err != nil || closed == nil || closed.Record == nil || closed.Outcome != OutcomeCommitted || closed.Record.Task != j.bundle.task || history.quiescence.Record.Context.CloseDataContext != closed.Record.Context || history.quiescence.Record.Context.CloseDataIntentRevision != closed.Revision {
+		return nil, errors.Join(ErrCorruptRecord, err)
+	}
+	result, err := b.QueryTaskCloseData(j.ctx, closed.Reference, j.target.destination)
+	if err != nil || result.Receipt == nil {
+		return nil, errors.Join(ErrOutcomeUnknown, err)
+	}
+	quiescence, err := b.QueryTaskQuiescence(j.ctx, j.task, j.target.destination)
+	if err != nil {
+		return nil, err
+	}
+	if err = b.waitCleanupQuiescence(j, quiescence); err != nil {
+		return nil, err
+	}
+	attempt, err := b.LoadTaskQuiescenceAttempt(j.ctx, j.task)
+	if err != nil {
+		return nil, err
+	}
+	return &cleanupEarlyRecovery{state: *j.state, close: closed, quiescence: history.quiescence, attempt: attempt}, nil
+}
+
+// Kept here with early recovery rather than granting a generic absent-key
+// inventory API. All six pins belong to this one original history preflight.
+func cleanupDetachedEarlyComparisons(h *cleanupEarlyRecovery) []clientv3.Cmp {
+	cmps := make([]clientv3.Cmp, 0, len(h.detachedPins))
+	for _, pin := range h.detachedPins {
+		if pin.stamp.ModRevision == 0 {
+			cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(pin.key), "=", 0))
+		} else {
+			cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(pin.key), "=", pin.stamp.ModRevision))
+		}
+	}
+	return cmps
 }

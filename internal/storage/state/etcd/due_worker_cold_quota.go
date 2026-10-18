@@ -79,7 +79,7 @@ func (w *DueWorker) stepCleanupColdQuota(j *cleanupLocalJob, s *cleanupColdQuota
 			}
 			workspace := j.coldQuota.workspace
 			if j.target != nil {
-				workspace = j.target.plan.workspace
+				workspace = j.target.workspaceIdentity()
 			}
 			task, _, err := w.cleanupColdQuotaTask(j)
 			if err != nil {

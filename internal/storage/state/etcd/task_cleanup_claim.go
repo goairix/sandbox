@@ -23,7 +23,11 @@ type cleanupLocalWireInventory struct {
 	executionMod, slotMod       int64
 	kernel                      *launcher.KernelBoundary
 	families                    []cleanupLocalWireFamily
-	used                        atomic.Bool
+	// Detached admission retains a compact closed-manifest report, bound to
+	// this original registered job and its exclusive source workspace.
+	detachedJob    *cleanupLocalJob
+	detachedReport cleanupDetachedWireReport
+	used           atomic.Bool
 }
 
 // The private projection producer must populate every native-template family
@@ -44,6 +48,22 @@ func (b *Backend) validateCleanupLocalInventory(inventory *cleanupLocalWireInven
 	worker, err := inventory.kernel.WorkspaceSyncWorkerReference()
 	if err != nil || worker != state.record.Run.Worker {
 		return ErrInvalidConfiguration
+	}
+	if j := inventory.detachedJob; j != nil {
+		if j.worker == nil || j.worker.self != j.worker || j.worker.backend != b {
+			return ErrInvalidConfiguration
+		}
+		b.archiveLife.mu.Lock()
+		defer b.archiveLife.mu.Unlock()
+		registered := false
+		for _, original := range j.worker.cleanupJobs {
+			registered = registered || original == j
+		}
+		s := j.worker.managedSource
+		if !registered || j.worker.backend != b || j.state != state || j.inventory != inventory || j.owner == nil || j.detachedTarget == nil || s == nil || s.job != j || !s.preparing || s.source == nil || !inventory.detachedReport.complete || len(inventory.families) != 0 || inventory.kernel != b.localCleanup.Worker {
+			return ErrInvalidConfiguration
+		}
+		return nil
 	}
 	return validateCleanupLocalWirePlan(&cleanupLocalWirePlan{families: inventory.families})
 }

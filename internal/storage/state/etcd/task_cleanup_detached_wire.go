@@ -36,8 +36,8 @@ type cleanupDetachedWireReport struct {
 }
 
 // Visit one complete closed manifest without retaining a protobuf plan. The
-// production preparation caller remains behind its pre-E admission boundary;
-// this compact report does not manufacture a live inventory or permission.
+// preparation and current-E/S inventory callers share this pure producer;
+// this compact report alone never manufactures a live inventory or permission.
 func (b *Backend) visitCleanupDetachedWire(in cleanupDetachedWireInput, dimensions cleanupLocalWireDimensions, emit func(cleanupDetachedWireEmission) error) (cleanupDetachedWireReport, error) {
 	if emit == nil {
 		return cleanupDetachedWireReport{}, ErrInvalidRecord

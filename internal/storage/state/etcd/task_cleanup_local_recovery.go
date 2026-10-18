@@ -219,6 +219,13 @@ func (b *Backend) commitCleanupRecoveryRunForWorker(owner *workerDueOwner, j *cl
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
+	if detached == nil && j.detachedTarget != nil && j.early != nil {
+		// Joined alone never proves a missing command safe. The original Claim
+		// is absent, and every close/Q/reservation/none/fact observation must
+		// remain unchanged in this same new-Run CAS. Delayed old Claim writes
+		// cannot pass their original claim/guard comparisons after this fence.
+		cmps = append(cmps, cleanupDetachedEarlyComparisons(j.early)...)
+	}
 	if detached != nil {
 		cmps = append(cmps, cleanupDetachedRecoveryComparisons(detached)...)
 		if len(cmps) != 48 {

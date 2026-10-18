@@ -70,12 +70,20 @@ func (b *Backend) prepareCleanupDetachedNoEffectRecovery(ctx context.Context, j 
 		return nil, err
 	}
 	s := h.state
-	if s == nil || s.slot == nil || s.record.Phase != "occupied" || s.record.Confirmed != "drained" || s.record.Run == nil || !s.record.Run.Joined || s.record.Archive != nil || s.record.Release != nil || s.execution != j.state.execution || j.state.slot == nil || *s.slot != *j.state.slot || j.runID != "" && j.runID != s.record.Run.ID || j.evidence == nil {
+	if s == nil || s.slot == nil || s.record.Phase != "occupied" || s.record.Run == nil || !s.record.Run.Joined || s.record.Archive != nil || s.record.Release != nil || s.execution != j.state.execution || j.state.slot == nil || *s.slot != *j.state.slot || j.runID != "" && j.runID != s.record.Run.ID || j.evidence == nil {
+		return nil, ErrConflict
+	}
+	// Only an authenticated present fact permits post-drain termination phases
+	// to resume with a new live Claim. An absent fact keeps the original strict
+	// drained requirement and all Q/none pins. Present history grants no new
+	// runtime send: the existing reservation consumer remains Query-only.
+	if s.record.Confirmed != "drained" && (h.settlement == nil || j.detachedTarget == nil || s.record.Confirmed != "terminated" && s.record.Confirmed != "owner-released") {
 		return nil, ErrConflict
 	}
 	if p := s.record.Pending; p != nil {
 		empty := p.StageID == "" && p.RequestID == "" && p.AttemptID == "" && p.Digest == ""
-		if !(empty && (p.Purpose == "final-sync" || p.Purpose == "claim") || p.Purpose == "detached-noeffect" && p.valid()) {
+		postFact := h.settlement != nil && j.detachedTarget != nil && empty && (p.Purpose == "termination" || p.Purpose == "owner-release")
+		if !(empty && (p.Purpose == "final-sync" || p.Purpose == "claim") || p.Purpose == "detached-noeffect" && p.valid() || postFact) {
 			return nil, ErrConflict
 		}
 	}

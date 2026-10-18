@@ -105,7 +105,7 @@ func (w *DueWorker) captureCleanupColdQuotaOrigin(j *cleanupLocalJob, h *coldQuo
 	}
 	workspace := j.coldQuota.workspace
 	if j.target != nil {
-		workspace = j.target.plan.workspace
+		workspace = j.target.workspaceIdentity()
 	}
 	if w.backend.validateWorkspaceBinding(workspace) != nil || workspace.Hash() != task.WorkspaceHash || workspace.Partition() != j.task.Partition {
 		return ErrInvalidRecord
@@ -138,7 +138,7 @@ func (w *DueWorker) validateCleanupColdQuotaOrigin(j *cleanupLocalJob) error {
 	if c.self != j || !c.sealed || c.record != task || c.birth != birth || c.owner.IntentID != task.CreationIntentID || c.owner.WorkspaceHash != task.WorkspaceHash || c.owner.Generation != task.Generation || c.workspace.Hash() != task.WorkspaceHash || c.workspace.Partition() != task.Reference.Partition {
 		return ErrInvalidRecord
 	}
-	if j.target != nil && j.target.plan.workspace != c.workspace {
+	if j.target != nil && j.target.workspaceIdentity() != c.workspace {
 		return ErrInvalidRecord
 	}
 	return nil

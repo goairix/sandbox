@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	"github.com/goairix/sandbox/internal/runtime/launcher"
 )
 
@@ -75,22 +76,30 @@ func (w *DueWorker) beginCleanupDetachedPreparation(j *cleanupLocalJob) error {
 
 func (b *Backend) runCleanupDetachedPreparation(j *cleanupLocalJob) {
 	err := b.prepareCleanupDetachedTarget(j)
-	// Full wire dimensions do not yet admit physical effects or a new Run.
-	// Keeping this gate before E avoids an early Joined Run with no Q/none
-	// history that the existing detached cold recovery cannot yet resume.
 	if err == nil {
 		j.result.Reason = "detached-wire-verified"
-		err = ErrInvalidConfiguration
+		// Source classification and pure preflight remain usable without a
+		// refund consumer. Physical admission requires that consumer before
+		// E/Run/Grant: killing and releasing first would otherwise strand the
+		// occupation with no verified quota return available for settlement.
+		if !b.cleanupColdQuotaEnabled() {
+			err = ErrInvalidConfiguration
+		} else {
+			var reply cleanupLocalReply
+			reply, err = j.worker.cleanupContinuation(j, &cleanupLocalContinuation{kind: "admit"})
+			j.claim = reply.claim
+		}
 	}
-	b.archiveLife.mu.Lock()
-	s := j.worker.managedSource
-	if s != nil && s.job == j && s.preparing {
-		j.worker.managedSource = nil
-		j.worker.cache.managedSource = false
-		j.worker.cache.managedSourceKeys = 0
+	if err == nil && j.earlyRecovery {
+		err = b.resumeCleanupDetached(j)
 	}
-	b.archiveLife.mu.Unlock()
-	b.finishCleanupJob(j, err)
+	if err == nil {
+		err = b.cleanupDetachedExecute(j)
+	}
+	// The same original registry owner keeps the source reservation through
+	// transport, renewal, Claim and native Run joins. Cancellation cannot
+	// refund a blocked callback or an accepted actor continuation early.
+	b.finishCleanupPhysical(j, err)
 }
 
 // Callbacks and Kernel checks belong to this same registered preparation
@@ -134,6 +143,121 @@ func (b *Backend) prepareCleanupDetachedTarget(j *cleanupLocalJob) error {
 		return err
 	}
 	j.detachedTarget.worker, j.detachedTarget.report = worker, report
+	j.target = &cleanupLocalTarget{snapshot: source.snapshot, publication: source.publication, detachedWorkspace: source.workspace, worker: worker}
+	return nil
+}
+
+// A compact inventory is rebuilt from the original serial source and current
+// E/S on the charged actor. No complete protobuf tree survives the visitor.
+// The independent private inventory binds the actual pending Claim and Kernel;
+// a diagnostic report or a public ClaimTask cannot enter this pipeline.
+func (b *Backend) prepareCleanupDetachedInventory(j *cleanupLocalJob) (*cleanupLocalWireInventory, error) {
+	s := j.worker.managedSource
+	if s == nil || s.job != j || !s.preparing || s.source == nil || j.owner == nil || j.state == nil || j.state.slot == nil || j.state.record.Run == nil || j.state.record.Run.Joined || j.state.record.Pending == nil || j.state.record.Pending.Purpose != "claim" || j.target == nil || j.detachedTarget == nil {
+		return nil, ErrInvalidRecord
+	}
+	worker, err := b.localCleanup.Worker.WorkspaceSyncWorkerReference()
+	if err != nil || worker != j.state.record.Run.Worker {
+		return nil, errors.Join(ErrInvalidRecord, err)
+	}
+	report, err := b.visitCleanupDetachedWire(b.cleanupDetachedInput(j), cleanupLocalWireDimensions{runID: j.state.record.Run.ID, claimID: j.state.record.Pending.ClaimID, worker: worker}, func(cleanupDetachedWireEmission) error { return nil })
+	if err != nil {
+		return nil, err
+	}
+	i := &cleanupLocalWireInventory{origin: b, task: j.task, incarnation: j.state.record.Incarnation, runID: j.state.record.Run.ID, claimID: j.state.record.Pending.ClaimID, executionMod: j.state.execution.mod, slotMod: j.state.slot.mod, kernel: b.localCleanup.Worker, detachedJob: j, detachedReport: report}
+	i.self = i
+	return i, nil
+}
+
+func (b *Backend) cleanupDetachedInput(j *cleanupLocalJob) cleanupDetachedWireInput {
+	source := j.worker.managedSource.source
+	return cleanupDetachedWireInput{bundle: j.bundle, snapshot: source.snapshot, intent: source.intent, workspace: source.workspace, publication: source.publication, issuer: j.target.issuer, workerID: j.worker.options.WorkerID, claimTTL: b.localCleanup.ClaimTTL}
+}
+
+// The original managed Claim owns every effect. Detached cleanup follows the
+// existing close/Q/drain protocol but never creates an archive or local plan.
+// Renewal is joined before owner release intentionally deletes its fences.
+func (b *Backend) cleanupDetachedExecute(j *cleanupLocalJob) (resultErr error) {
+	stopRenew := b.renewCleanupClaim(j, j.claim)
+	defer func() {
+		if stopRenew != nil {
+			resultErr = errors.Join(resultErr, stopRenew())
+		}
+	}()
+	factKey, err := b.namespace.taskDetachedNoEffectKey(j.task)
+	if err != nil {
+		return err
+	}
+	// A fresh Task has no Q/none history yet. Probe only the fixed fact point;
+	// present bytes must pass the full authenticating reader before skipping
+	// runtime drain. Absence itself grants no effect authority.
+	points, _, err := b.readCleanupDetachedNoEffectPoints(j.ctx, "arbitration", []string{b.identityKey, b.restoreKey, factKey}, []int{maxRecordBytes, maxRecordBytes, p.MaxDetachedNoEffectSettlementBytes})
+	if err != nil {
+		return err
+	}
+	if points[2] == nil {
+		if err = b.cleanupDetachedSettleEffects(j); err != nil {
+			return err
+		}
+	} else {
+		fact, err := b.loadTaskDetachedNoEffect(j.ctx, j.task)
+		if err != nil || fact == nil {
+			return errors.Join(ErrConflict, err)
+		}
+	}
+	if err = j.progress("drained", j.pending("termination", StageReference{}), nil); err != nil {
+		return err
+	}
+	terminated, err := b.terminateTaskRuntimeDetached(j.ctx, j, j.claim, j.target.termination, nil)
+	if err != nil || terminated.Outcome != OutcomeCommitted {
+		return errors.Join(ErrOutcomeUnknown, err)
+	}
+	if err = j.progress("terminated", j.pending("owner-release", StageReference{}), nil); err != nil {
+		return err
+	}
+	renewErr := stopRenew()
+	stopRenew = nil
+	if renewErr != nil {
+		return renewErr
+	}
+	released, err := b.releaseTaskWorkspaceOwnerDetached(j.ctx, j, j.claim)
+	if err != nil || released.Outcome != OutcomeCommitted {
+		return errors.Join(ErrOutcomeUnknown, err)
+	}
+	return j.progress("owner-released", nil, nil)
+}
+
+func (b *Backend) cleanupDetachedSettleEffects(j *cleanupLocalJob) error {
+	if j.earlyRecovery && j.early != nil {
+		if err := b.recheckCleanupEarlyHistory(j); err != nil {
+			return err
+		}
+	}
+	if j.early == nil || j.early.close == nil {
+		if err := b.cleanupCloseData(j); err != nil {
+			return err
+		}
+	}
+	if j.early == nil || j.early.quiescence == nil {
+		if err := b.cleanupQuiesceUsers(j); err != nil {
+			return err
+		}
+	}
+	drained, err := b.PrepareAfterDualDrain(j.ctx, j.claim, j.target.destination)
+	if err != nil {
+		return err
+	}
+	if err = j.progress("drained", j.pending("final-sync", StageReference{}), nil); err != nil {
+		return err
+	}
+	draft, err := b.prepareCleanupDetachedNoEffect(j.ctx, j, drained, j.target.destination)
+	if err != nil {
+		return err
+	}
+	settled, err := b.commitCleanupDetachedNoEffect(j.ctx, j, draft)
+	if err != nil || settled.Outcome != OutcomeCommitted {
+		return errors.Join(ErrOutcomeUnknown, err)
+	}
 	return nil
 }
 

@@ -44,8 +44,9 @@ func (i *managedPreparationIssuer) Certificate(ctx context.Context) ([]byte, err
 // The original metadata producers and registry actor use the bounded gRPC
 // server, while New validates a genuine native Kernel and complete deployment
 // configuration. Kubernetes clients are real configured clients, with zero
-// requests expected before the deliberately closed pre-E gate. This proves
-// preparation ownership, not physical cleanup or managed Claim admission.
+// requests expected: this component fixture does not enable cold quota return.
+// Preparation must finish and the consumer must reject it before E/Grant. This
+// proves preparation ownership, not physical cleanup or managed Claim admission.
 func managedPreparationFixture(t *testing.T, blocked bool) (detachedCleanupSourceFixture, *managedPreparationIssuer) {
 	t.Helper()
 	if workspaceSyncLocalNativeWorker == nil {
@@ -166,7 +167,7 @@ func TestCleanupDetachedPreparationNativeMixedDispatcher(t *testing.T) {
 	j, err := w.enqueueCleanupLocal(ctx, f.task.Reference)
 	require.NoError(t, err)
 	managedPreparationReceive(t, w, j.done)
-	require.ErrorIs(t, j.err, ErrInvalidConfiguration, "production E/Grant remains closed")
+	require.ErrorIs(t, j.err, ErrInvalidConfiguration, "a consumer without cold quota return cannot admit E/Grant")
 	require.Equal(t, "detached-wire-verified", j.result.Reason)
 	require.NotNil(t, j.detachedTarget)
 	require.True(t, j.detachedTarget.report.complete)
