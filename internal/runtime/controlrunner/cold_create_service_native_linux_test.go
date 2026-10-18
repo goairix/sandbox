@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +75,7 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
 	httpGateway, ttlGateway, fileAPI                               bool
+	ttlRecovery                                                    bool
 	largeDownload                                                  bool
 	destroyLocal, destroyDetached                                  bool
 	destroyTerminal                                                bool
@@ -245,6 +247,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	var pod *v1.Pod
 	var postCount, startCount, execCount atomic.Int32
 	var bridges []*startupBridgeFixture
+	var loseNextCompletion atomic.Bool
 	bridgeLimit := 16
 	var destroyProvider *httpDestroyNativeProvider
 	if physicalDestroy {
@@ -359,6 +362,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 				return
 			}
 			bridge := newStartupBridgeFixture()
+			bridge.loseCompletion = loseNextCompletion.Swap(false)
 			if execHooks != nil {
 				bridge.timeout = 75 * time.Second
 				execHooks.register(bridge)
@@ -468,7 +472,19 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
 		mu.Unlock()
 		for _, bridge := range ownedBridges {
-			if physicalDestroy || variant.fileAPI {
+			if bridge.loseCompletion {
+				// The application response came from the original child. Only its
+				// final adapter status is lost, after all original owners joined.
+				<-bridge.done
+				bridge.wg.Wait()
+				require.True(t, bridge.waited && bridge.ioJoined && bridge.stdinEOF)
+				require.NoError(t, bridge.waitErr)
+				require.Positive(t, bridge.stdout)
+				require.True(t, bridge.completionFaultWritten)
+				require.False(t, bridge.successWritten)
+				require.NoError(t, errors.Join(bridge.result, bridge.finalCloseErr))
+				t.Log("TTL completion fault followed actual bridge Wait/IO/EOF and original TLS response")
+			} else if physicalDestroy || variant.fileAPI {
 				// File clients also close after the authenticated response. Reuse
 				// the exact final-Close EPIPE classification: original Wait/IO
 				// and the Success frame must already have completed successfully.
@@ -505,6 +521,56 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		return
 	}
 	if variant.ttlGateway {
+		var recovery *httpNativeTTLRecovery
+		if variant.ttlRecovery {
+			var installedJournal []byte
+			recovery = &httpNativeTTLRecovery{
+				arm: func() { require.False(t, loseNextCompletion.Swap(true)) },
+				checkInstalled: func(candidate *state.SandboxTTLPending) {
+					// Inspect only the original launcher's actual private journal;
+					// these test diagnostics are never supplied as commit authority.
+					mu.Lock()
+					pid := child.Process.Pid
+					mu.Unlock()
+					file, err := os.Open(fmt.Sprintf("/proc/%d/root%s/journal/activation.json", pid, ct.ControlDirectory))
+					require.NoError(t, err)
+					wire, readErr := io.ReadAll(io.LimitReader(file, 16385))
+					require.NoError(t, errors.Join(readErr, file.Close()))
+					require.LessOrEqual(t, len(wire), 16384)
+					var actual struct {
+						Version            uint32 `json:"version"`
+						Digest             string `json:"digest"`
+						PreviousDigest     string `json:"previous_digest"`
+						Wire               []byte `json:"wire"`
+						RuntimeCertificate []byte `json:"runtime_certificate"`
+						IssuerCertificate  []byte `json:"issuer_certificate"`
+					}
+					require.NoError(t, json.Unmarshal(wire, &actual))
+					require.Equal(t, uint32(2), actual.Version)
+					require.Equal(t, candidate.Activation.Digest(), actual.Digest)
+					require.Equal(t, candidate.PreviousDigest, actual.PreviousDigest)
+					require.Equal(t, candidate.Activation.Wire(), actual.Wire)
+					require.Equal(t, candidate.Activation.RuntimeCertificate(), actual.RuntimeCertificate)
+					require.Equal(t, candidate.Activation.IssuerCertificate(), actual.IssuerCertificate)
+					if installedJournal == nil {
+						installedJournal = append([]byte(nil), wire...)
+					} else {
+						require.Equal(t, installedJournal, wire, "metadata recovery leaves the original runtime journal unchanged")
+					}
+				},
+				restart: func() (*provisioning.PlainColdService, *state.Backend) {
+					require.NoError(t, service.Close())
+					require.NoError(t, backend.Close())
+					backend, err = state.New(ctx, backendOptions)
+					require.NoError(t, err)
+					options.Backend = backend
+					resumed, err := provisioning.NewPlainColdService(ctx, options)
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, resumed.Close()) })
+					return resumed, backend
+				},
+			}
+		}
 		var destroy *httpDestroyNativeContext
 		if detachedTerminal {
 			// This optional continuation reuses the same formal source and
@@ -519,7 +585,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		exerciseHTTPGatewayTTLNative(t, ctx, service, backend, func() {
 			require.Equal(t, int32(1), postCount.Load(), "TTL renewal retains the original Pod")
 			require.Equal(t, int32(1), startCount.Load(), "TTL renewal retains the original formal launcher")
-		}, destroy)
+		}, destroy, recovery)
 		joinOriginalBridges()
 		return
 	}

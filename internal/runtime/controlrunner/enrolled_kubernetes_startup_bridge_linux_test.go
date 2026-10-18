@@ -142,6 +142,12 @@ type startupBridgeFixture struct {
 	// Optional test observer proves a discarded byte came from the original
 	// child stdout after Cmd.Start. It cannot synthesize transport output.
 	stdoutObserved chan struct{}
+	// Completion loss is injected only after the original child and every pipe
+	// have joined. TLS/HTTP response bytes remain genuine; the v5 adapter's final
+	// status becomes a failure, so a successful application response cannot be
+	// mistaken for a completely acknowledged exchange.
+	loseCompletion         bool
+	completionFaultWritten bool
 }
 
 func newStartupBridgeFixture() *startupBridgeFixture {
@@ -341,6 +347,15 @@ func (f *startupBridgeFixture) relay(ws *websocket.Conn) error {
 		return fmt.Errorf("formal bridge emitted %d stderr bytes", diagnostic.n)
 	}
 	f.ioJoined = true
+	if f.loseCompletion {
+		status := append([]byte{3}, []byte(`{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"1"}]},"message":"fixture lost completion after original bridge exit"}`)...)
+		if err := ws.WriteMessage(websocket.BinaryMessage, status); err != nil {
+			return fmt.Errorf("bridge injected completion status: %w", err)
+		}
+		f.completionFaultWritten = true
+		f.finalCloseErr = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		return f.finalCloseErr
+	}
 	// Success comes solely from the real child exit after all pipe owners join.
 	status := append([]byte{3}, []byte(`{"status":"Success"}`)...)
 	if err := ws.WriteMessage(websocket.BinaryMessage, status); err != nil {

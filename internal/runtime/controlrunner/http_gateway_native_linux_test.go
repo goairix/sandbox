@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +45,13 @@ func TestHTTPGatewayTTLDestroyNative(t *testing.T) {
 		t.Skip("requires exact owned HTTP TTL renewal and detached destroy Linux fixture")
 	}
 	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, detached: true, destroyDetached: true, destroyTerminal: true})
+}
+
+func TestHTTPGatewayTTLRecoveryNative(t *testing.T) {
+	if os.Getenv("SANDBOX_HTTP_TTL_RECOVERY_NATIVE") != "1" {
+		t.Skip("requires exact owned HTTP TTL completion-loss and cold-recovery Linux fixture")
+	}
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, ttlRecovery: true, detached: true})
 }
 
 // Observe the real service return without replacing any runtime, bridge, Wait,
@@ -302,32 +310,45 @@ func exerciseHTTPGatewayNative(t *testing.T, ctx context.Context, realService *p
 // mTLS credentials, activation and signed Exec path must survive the old TTL.
 // Waiting uses the actual clock shared with the signed clock server; the test
 // never injects a replacement activation or advances a fixture-only clock.
-func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService *provisioning.PlainColdService, backend *state.Backend, onePod func(), destroy *httpDestroyNativeContext) {
+type httpNativeTTLRecovery struct {
+	arm            func()
+	restart        func() (*provisioning.PlainColdService, *state.Backend)
+	checkInstalled func(*state.SandboxTTLPending)
+}
+
+func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService *provisioning.PlainColdService, backend *state.Backend, onePod func(), destroy *httpDestroyNativeContext, recovery *httpNativeTTLRecovery) {
 	t.Helper()
 	service := &httpNativeService{PlainColdService: realService, results: make(chan execServiceNativeAnswer, 1)}
-	settings := &deployment.HTTPSettings{APIKey: []byte("native-http-key"), Env: map[string]string{"PATH": "/usr/bin:/bin"}, ExecTimeoutSeconds: 5, MaxExecTimeoutSeconds: 15, MaxActive: 4, RequestsPerSecond: 100, UID: 1000, GID: 1000}
-	gateway, err := etcdgateway.New(service, settings)
-	require.NoError(t, err)
-	settings.Zero()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	serverCtx, cancelServer := context.WithCancel(ctx)
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- etcdgateway.Serve(serverCtx, listener, gateway) }()
-	t.Cleanup(func() {
-		cancelServer()
-		require.NoError(t, <-serverDone, "original HTTP handler owners joined")
-	})
+	startServer := func() (string, func()) {
+		// Serve permanently closes its Gateway on return. A cold restart owns
+		// a new Gateway and fresh copied settings, never a reopened old gate.
+		settings := &deployment.HTTPSettings{APIKey: []byte("native-http-key"), Env: map[string]string{"PATH": "/usr/bin:/bin"}, ExecTimeoutSeconds: 5, MaxExecTimeoutSeconds: 15, MaxActive: 4, RequestsPerSecond: 100, UID: 1000, GID: 1000}
+		gateway, err := etcdgateway.New(service, settings)
+		require.NoError(t, err)
+		settings.Zero()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		serverCtx, cancelServer := context.WithCancel(ctx)
+		serverDone := make(chan error, 1)
+		go func() { serverDone <- etcdgateway.Serve(serverCtx, listener, gateway) }()
+		var once sync.Once
+		return "http://" + listener.Addr().String(), func() {
+			once.Do(func() {
+				cancelServer()
+				require.NoError(t, <-serverDone, "original HTTP handler owners joined")
+			})
+		}
+	}
+	origin, stopServer := startServer()
+	t.Cleanup(func() { stopServer() })
 	client := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{MaxIdleConns: 2, MaxIdleConnsPerHost: 2}}
 	t.Cleanup(client.CloseIdleConnections)
-	origin := "http://" + listener.Addr().String()
 
-	// The original ten-second expiry is crossed in both variants. Only the
-	// destroy continuation uses a ninety-second new TTL and the existing
-	// physical fixture's 120-second context, leaving real cleanup time after
-	// the same original runtime has authenticated a command beyond its old TTL.
+	// Every variant crosses the original ten-second expiry. Cold recovery and
+	// destroy use ninety seconds for the new TTL; their fixture contexts remain
+	// sixty and 120 seconds respectively. Ordinary renewal keeps thirty seconds.
 	renewalSeconds := 30
-	if destroy != nil {
+	if destroy != nil || recovery != nil {
 		renewalSeconds = 90
 	}
 	create := types.CreateSandboxRequest{Mode: "persistent", Timeout: 10}
@@ -347,7 +368,57 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 
 	started := time.Now().UTC()
 	var renewed types.UpdateTTLResponse
+	var candidate *state.SandboxTTLPending
+	if recovery != nil {
+		recovery.arm()
+		var unknown map[string]any
+		httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: renewalSeconds}, true), http.StatusServiceUnavailable, &unknown)
+		require.Equal(t, "outcome_unknown", unknown["code"])
+		pendingView, err := backend.ReadSandboxView(ctx, first.ID)
+		require.NoError(t, err)
+		require.True(t, pendingView.Records().Control.ExpiresAt.Equal(originalExpiry), "missing completion must not silently commit old metadata")
+		candidate, err = backend.ReadSandboxTTLPending(ctx, pendingView)
+		require.NoError(t, err)
+		require.NotNil(t, candidate)
+		require.Equal(t, renewalSeconds, candidate.Timeout)
+		recovery.checkInstalled(candidate)
+
+		// Both service and Backend objects are replaced. Let actual old business
+		// authority expire before retry: only the already-installed candidate may
+		// authorize narrow metadata convergence; the old capability stays dead.
+		// Stop and join every old HTTP handler before replacing the service
+		// pointer. Closing only the business service would not synchronize the
+		// Gateway's promoted methods with this cold restart.
+		stopServer()
+		service.PlainColdService, backend = recovery.restart()
+		origin, stopServer = startServer()
+		wait := time.Until(originalExpiry.Add(2 * time.Second))
+		require.Positive(t, wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			t.Fatal("original TTL did not elapse before cold recovery")
+		}
+		timer.Stop()
+		onePod()
+	}
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: renewalSeconds}, true), http.StatusOK, &renewed)
+	if candidate != nil {
+		require.True(t, renewed.ExpiresAt.Equal(candidate.ExpiresAt))
+		renewedView, err := backend.ReadSandboxView(ctx, first.ID)
+		require.NoError(t, err)
+		pending, err := backend.ReadSandboxTTLPending(ctx, renewedView)
+		require.NoError(t, err)
+		require.Nil(t, pending)
+		current, err := backend.ReadSandboxTTLCurrent(ctx, renewedView)
+		require.NoError(t, err)
+		require.NotNil(t, current)
+		require.Equal(t, candidate.Activation.Digest(), current.Activation.Digest(), "cold recovery cannot sign or select a replacement candidate")
+		require.Equal(t, candidate.Baseline, current.Baseline)
+		recovery.checkInstalled(candidate)
+	}
 	finished := time.Now().UTC()
 	require.Equal(t, renewalSeconds, renewed.Timeout)
 	require.True(t, renewed.ExpiresAt.After(originalExpiry))
@@ -368,7 +439,12 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 	// Two seconds exceed the protocol's one-second authority margin. Every
 	// subsequent health check, handshake and command runs after the old bound.
 	wait := time.Until(originalExpiry.Add(2 * time.Second))
-	require.Positive(t, wait, "the successful renewal must precede the old expiry")
+	if recovery == nil {
+		require.Positive(t, wait, "the successful renewal must precede the old expiry")
+	}
+	if wait < 0 {
+		wait = 0
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
