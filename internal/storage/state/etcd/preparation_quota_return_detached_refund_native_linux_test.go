@@ -301,6 +301,9 @@ func detachedPhysicalPaidQuotaRefund(t *testing.T, f *cleanupDetachedNoEffectNat
 	require.Equal(t, receipt, detachedPhysicalQuotaHistoryPoints(t, f, []string{receiptKey}))
 	require.Equal(t, reused, detachedPhysicalQuotaHistoryPoints(t, f, []string{slotKey, freeKey}))
 	t.Log("actual v2 refund: paid recovery/prepare/journal/Stage/original-Revoke/postread, public committed replay, genuine quota reuse and paid replay; all retained phases metered; P deletion/managed admission and wire dispatch counts are not proved")
+	if os.Getenv("SANDBOX_DETACHED_OCCUPATION_SETTLE_PHYSICAL_NATIVE") == "1" {
+		detachedPhysicalSettleOccupation(t, f, roots, sourceKeys)
+	}
 }
 
 func detachedPhysicalQuotaRefundReuse(t *testing.T, f *cleanupDetachedNoEffectNativeFixture, quota ColdSlotReference) {

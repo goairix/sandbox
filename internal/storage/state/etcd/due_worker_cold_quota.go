@@ -280,10 +280,16 @@ func (w *DueWorker) publishCleanupColdQuota(j *cleanupLocalJob, s *cleanupColdQu
 		j.step = "cold-quota-pending-birth"
 		return nil
 	}
-	w.releaseCleanupColdQuota(j)
 	if j.state != nil && j.state.record.Phase == "occupied" {
+		// The cold detached settlement consumes this same opaque release after
+		// its next charged terminal/settlement turn. Keep the one shared graph
+		// until finishCleanupJob runs after the actual native owner has joined.
+		if binding.detached == nil {
+			w.releaseCleanupColdQuota(j)
+		}
 		j.step = "settle"
 	} else {
+		w.releaseCleanupColdQuota(j)
 		// A terminal occupation needs no further physical settlement. Publish
 		// its compact verified state before the next actor turn finishes it.
 		j.step = "cold-quota-complete"

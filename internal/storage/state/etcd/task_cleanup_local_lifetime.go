@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -72,10 +73,18 @@ func (b *Backend) cleanupResult(j *cleanupLocalJob) CleanupLocalResult {
 			result.Pending.StoreID, result.Pending.ArchiveSlot = r.Archive.StoreID, r.Archive.Slot
 		}
 	}
-	if r.Phase == "settled" && r.Release != nil && j.proof != nil && j.proof.record.Task == r.Task && j.proof.kv.CreateRevision == r.Release.CreateRevision && workspaceSyncIntentDigest(string(j.proof.kv.Value)) == r.Release.Digest {
-		result.Outcome = OutcomeCommitted
-		result.Release = &TaskOwnerReleaseEntry{Task: r.Task, CreateRevision: r.Release.CreateRevision, SHA256: r.Release.Digest}
-		result.Reason = "complete"
+	if r.Phase == "settled" && r.Release != nil {
+		var released *mvccpb.KeyValue
+		if j.proof != nil && j.proof.record.Task == r.Task {
+			released = j.proof.kv
+		} else if profile, err := b.detachedCleanupOccupationProof(j); err == nil {
+			released = profile.detached.kv
+		}
+		if released != nil && released.CreateRevision == r.Release.CreateRevision && workspaceSyncIntentDigest(string(released.Value)) == r.Release.Digest {
+			result.Outcome = OutcomeCommitted
+			result.Release = &TaskOwnerReleaseEntry{Task: r.Task, CreateRevision: r.Release.CreateRevision, SHA256: r.Release.Digest}
+			result.Reason = "complete"
+		}
 	}
 	return result
 }
@@ -105,6 +114,14 @@ func (b *Backend) finishCleanupJob(j *cleanupLocalJob, err error) {
 	}
 	j.stopCaller()
 	j.result, j.err = b.cleanupResult(j), err
+
+	// A cold metadata job reaches this tail only after cleanupTurn has joined
+	// its native owner. Retain detached history through that owner, then retire
+	// it on the same actor before removing the original registry identity.
+	// Physical jobs keep their separate continuation/join ownership unchanged.
+	if !j.started && j.owner == nil {
+		j.worker.releaseCleanupColdQuota(j)
+	}
 	if err != nil && j.result.Reason == "" {
 		j.result.Reason = "reconciliation-required"
 	}
@@ -243,6 +260,31 @@ func (b *Backend) settleCleanupRun(ctx context.Context, j *cleanupLocalJob, proo
 	return b.settleCleanupOccupation(j.owner, j, proof, j.terminal)
 }
 
+// detachedCleanupOccupationProof selects only the opaque history retained by
+// this original job's shared cold workspace. A union alone is insufficient:
+// the actual returned quota entry, original Task/birth and release stamp must
+// all agree. This is also usable for terminal diagnostic publication after
+// cancellation; effect admission remains the charged owner's responsibility.
+func (b *Backend) detachedCleanupOccupationProof(j *cleanupLocalJob) (*taskOwnerReleaseProof, error) {
+	if j == nil || j.worker == nil || j.worker.backend != b || j.proof != nil || j.worker.validateCleanupColdQuotaVerified(j) != nil {
+		return nil, ErrInvalidRecord
+	}
+	s := j.worker.coldQuota
+	if s == nil || s.job != j || s.history == nil || s.history.release != nil || !coldQuotaReturnHistoryOriginMatches(s.history) {
+		return nil, ErrInvalidRecord
+	}
+	profile := s.history.profileRelease
+	if profile == nil || profile.local != nil || profile.detached == nil {
+		return nil, ErrInvalidRecord
+	}
+	d := profile.detached
+	verified := j.coldQuota.verified
+	if d.kv == nil || d.record.Task != j.task || d.record.TaskBirth != j.coldQuota.birth || cleanupColdQuotaReleaseStamp(d.kv) != verified.release {
+		return nil, ErrInvalidRecord
+	}
+	return profile, nil
+}
+
 // settleCleanupOccupation shares the terminal CAS between a joined live Run
 // and cold diagnosis of that exact Run. Cold callers never claim to have joined
 // its physical work: the permanent Joined row and authentic release seal are
@@ -252,9 +294,38 @@ func (b *Backend) settleCleanupOccupation(owner *workerDueOwner, j *cleanupLocal
 	if b.cleanupColdQuotaEnabled() && (j == nil || j.worker == nil || j.worker.validateCleanupColdQuotaVerified(j) != nil) {
 		return ErrInvalidRecord
 	}
-	if j == nil || j.worker == nil || j.worker.backend != b || j.owner != owner || owner == nil || proof == nil || proof.kv == nil || j.state == nil || j.state.slot == nil || j.state.record.Phase != "occupied" || j.state.record.Run == nil || !j.state.record.Run.Joined || history == nil || history.record != cleanupSlotRecordFromExecution(j.state.record) || proof.record.Task != j.task || j.state.record.Task != j.task || proof.record.TaskBirth != j.state.record.TaskBirth {
+	if j == nil || j.worker == nil || j.worker.backend != b || j.owner != owner || owner == nil || j.state == nil || j.state.slot == nil || j.state.record.Phase != "occupied" || j.state.record.Run == nil || !j.state.record.Run.Joined || history == nil || history.record != cleanupSlotRecordFromExecution(j.state.record) || j.state.record.Task != j.task {
 		return ErrInvalidRecord
 	}
+
+	// Keep the original local entry and signature. Only the same job's fully
+	// authenticated detached union plus verified refund may select v2; nil
+	// local proof on an ordinary caller remains invalid, never default success.
+	profile := &taskOwnerReleaseProof{local: proof}
+	if proof == nil {
+		var err error
+		profile, err = b.detachedCleanupOccupationProof(j)
+		if err != nil {
+			return err
+		}
+	} else if s := j.worker.coldQuota; s != nil && s.job == j && s.history != nil && s.history.profileRelease != nil {
+		return ErrInvalidRecord
+	}
+	var releaseKV *mvccpb.KeyValue
+	if local := profile.local; local != nil && profile.detached == nil {
+		if local.kv == nil || local.record.Task != j.task || local.record.TaskBirth != j.state.record.TaskBirth {
+			return ErrInvalidRecord
+		}
+		releaseKV = local.kv
+	} else if detached := profile.detached; detached != nil && profile.local == nil {
+		if detached.kv == nil || detached.record.Task != j.task || detached.record.TaskBirth != j.state.record.TaskBirth || detached.termination.Authority.Task != localRuntimeFenceStamp(history.task) {
+			return ErrInvalidRecord
+		}
+		releaseKV = detached.kv
+	} else {
+		return ErrInvalidRecord
+	}
+
 	b.archiveLife.mu.Lock()
 	registered := false
 	for _, candidate := range j.worker.cleanupJobs {
@@ -275,9 +346,19 @@ func (b *Backend) settleCleanupOccupation(owner *workerDueOwner, j *cleanupLocal
 	if err != nil {
 		return err
 	}
-	release, err := decodeLocalOwnerRelease(proof.kv)
-	if err != nil || release != proof.record || string(proof.kv.Key) != releaseKey {
+	if string(releaseKV.Key) != releaseKey {
 		return ErrCorruptRecord
+	}
+	if profile.local != nil {
+		release, err := decodeLocalOwnerRelease(releaseKV)
+		if err != nil || release != profile.local.record {
+			return ErrCorruptRecord
+		}
+	} else {
+		release, err := decodeDetachedOwnerRelease(releaseKV)
+		if err != nil || release != profile.detached.record {
+			return ErrCorruptRecord
+		}
 	}
 	cmps, err := b.cleanupTerminalComparisons(owner, history)
 	if err != nil {
@@ -285,14 +366,14 @@ func (b *Backend) settleCleanupOccupation(owner *workerDueOwner, j *cleanupLocal
 	}
 	r := s.record
 	r.Phase, r.Confirmed, r.Pending = "settled", "settled", nil
-	r.Release = &cleanupExecutionRelease{CreateRevision: proof.kv.CreateRevision, Digest: workspaceSyncIntentDigest(string(proof.kv.Value))}
+	r.Release = &cleanupExecutionRelease{CreateRevision: releaseKV.CreateRevision, Digest: workspaceSyncIntentDigest(string(releaseKV.Value))}
 	wire, err := encodeCleanupExecution(r)
 	if err != nil {
 		return err
 	}
 	cmps = append(cmps, s.execution.comparisons()...)
 	cmps = append(cmps, s.slot.comparisons()...)
-	cmps = append(cmps, ownTaskFence(proof.kv).comparisons()...)
+	cmps = append(cmps, ownTaskFence(releaseKV).comparisons()...)
 	success := taskProtoResponse(nil, nil)
 	success.Responses = append(success.Responses, &pb.ResponseOp{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: success.Header, Deleted: 1}}})
 	success.Responses = append(success.Responses, taskProtoPutResponse(1).Responses...)
