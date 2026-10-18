@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,10 +15,144 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
+
+// metadataScaleModel creates the typed metadata subset needed by View/Snapshot
+// and due scheduling: control, snapshot, owner, fence, placement, runtime index,
+// creation intent, creation request and due candidate. It omits signed runtime
+// publication/dispatch, quota and terminal histories. Its encoded footprint is
+// B_model_subset, not a complete B_live or an estimate of usable cell capacity.
+// Operator seeding grants no effects and represents no actual Pods or mounts.
+func metadataScaleModel(n Namespace, ordinal int, expiry time.Time) ([]Write, string, error) {
+	if ordinal < 0 || ordinal >= 100000 || !validDomainExpiry(expiry) {
+		return nil, "", ErrInvalidRecord
+	}
+	id := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("metadata-scale-sandbox/%d", ordinal))).String()
+	intent := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("metadata-scale-intent/%d", ordinal))).String()
+	w, err := NewWorkspaceIdentity("s3", "test-storage", "bucket", fmt.Sprintf("metadata-scale/%08d/", ordinal))
+	if err != nil {
+		return nil, "", err
+	}
+	payload := json.RawMessage(`{"model":"metadata-only","body":"` + strings.Repeat("x", []int{2048, 6144, 10240}[ordinal%3]) + `"}`)
+	digest, err := snapshotDigest(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	runtime := RuntimeReference{ID: id, UID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("runtime/"+id)).String(), BootID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("boot/"+id)).String()}
+	snapshot := SnapshotReference{Version: "model-v1", Digest: digest}
+	control := SandboxControlRecord{Version: 1, SandboxID: id, WorkspaceHash: w.Hash(), IntentID: intent, RestoreEpoch: "test-epoch", Generation: 1, DataGateEpoch: 1, Phase: PhaseActive, Snapshot: snapshot, Runtime: &runtime, ExpiresAt: expiry}
+	requestHash := workerIdentityDigest("metadata-scale-request/" + id)
+	var writes []Write
+	add := func(parts []string, record interface{ Validate() error }) {
+		if err != nil {
+			return
+		}
+		var key, value string
+		key, err = n.Key(parts...)
+		if err == nil {
+			value, err = encodeDomainRecord(record)
+		}
+		if err == nil {
+			writes = append(writes, Write{Key: key, Value: []byte(value)})
+		}
+	}
+	prefix := []string{"p", fmt.Sprintf("%02x", w.Partition())}
+	add(append(append([]string(nil), prefix...), "controls", id), control)
+	add(append(append([]string(nil), prefix...), "snapshots", id, snapshot.Version), SandboxSnapshotRecord{Version: 1, SandboxID: id, Snapshot: snapshot, Payload: payload})
+	add(append(append([]string(nil), prefix...), "workspaces", w.Hash(), "owner"), WorkspaceOwnerRecord{1, w.Hash(), id, intent, control.RestoreEpoch, 1, &runtime, 0})
+	add(append(append([]string(nil), prefix...), "workspaces", w.Hash(), "fence"), WorkspaceFenceRecord{1, w.Hash(), control.RestoreEpoch, 1})
+	add([]string{"indexes", "sandbox", id}, SandboxPlacementRecord{1, id, w.Hash(), intent, control.RestoreEpoch, w.Partition(), 1})
+	indexKey, indexErr := n.runtimeIndexKey(runtime.UID)
+	if indexErr != nil {
+		return nil, "", indexErr
+	}
+	index := RuntimeIndexRecord{1, intent, id, w.Hash(), control.RestoreEpoch, 1, runtime}
+	value, indexErr := encodeDomainRecord(index)
+	if indexErr != nil {
+		return nil, "", indexErr
+	}
+	writes = append(writes, Write{Key: indexKey, Value: []byte(value)})
+	add(append(append([]string(nil), prefix...), "intents", intent), CreationIntentRecord{1, intent, id, w.Hash(), requestHash, digest, control.RestoreEpoch, 1, "published"})
+	add([]string{"requests", requestHash}, CreationRequestRecord{1, "model-request", requestHash, digest, intent, id, w.Hash(), control.RestoreEpoch, 1, "completed"})
+	due := dueCandidateForControl(w.Partition(), control)
+	dueKey, dueErr := n.dueCandidateKey(due)
+	if dueErr != nil {
+		return nil, "", dueErr
+	}
+	value, dueErr = encodeDueCandidate(due)
+	if dueErr != nil {
+		return nil, "", dueErr
+	}
+	writes = append(writes, Write{Key: dueKey, Value: []byte(value)})
+	return writes, id, err
+}
+
+// At most three complete nine-key models share one atomic seed transaction.
+// Both actual native branches and the identity/restore comparisons count:
+// base4 + absent27 + Put27 + Else2 =60 nodes. Byte limits use actual protobuf.
+func metadataScaleSeedRequest(b *Backend, writes []Write) (*pb.TxnRequest, error) {
+	if b == nil || len(writes) == 0 || len(writes) > 27 || len(writes)%9 != 0 {
+		return nil, ErrInvalidRecord
+	}
+	bytes := 0
+	cmps := b.baseComparisons()
+	for i, write := range writes {
+		if !validNamespaceKey(b.namespace, write.Key) || write.Delete || len(write.Value) > 65536 || bytes > (100<<10)-len(write.Value) {
+			return nil, ErrInvalidRecord
+		}
+		for _, prior := range writes[:i] {
+			if prior.Key == write.Key {
+				return nil, ErrInvalidRecord
+			}
+		}
+		bytes += len(write.Value)
+		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(write.Key), "=", 0))
+	}
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(cmps), Success: taskProtoWrites(writes), Failure: taskProtoPoints([]string{b.identityKey, b.restoreKey})}
+	if len(request.Compare)+len(request.Success)+len(request.Failure) > 64 || request.Size() > 128<<10 {
+		return nil, ErrInvalidRecord
+	}
+	return request, nil
+}
+
+func TestMetadataScaleModelCanonicalAndBatchBounds(t *testing.T) {
+	n, err := NewNamespace("/scale-test", "metadata", "v1")
+	require.NoError(t, err)
+	b := &Backend{namespace: n, identityValue: `{"schema_version":1}`, restoreEpoch: "test-epoch"}
+	b.identityKey, err = n.Key("meta", "identity")
+	require.NoError(t, err)
+	b.restoreKey, err = n.Key("meta", "restore_epoch")
+	require.NoError(t, err)
+	var batch []Write
+	for _, ordinal := range []int{0, 1, 99998} {
+		writes, id, err := metadataScaleModel(n, ordinal, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+		require.NoError(t, err)
+		require.Len(t, writes, 9)
+		var control SandboxControlRecord
+		var snapshot SandboxSnapshotRecord
+		require.NoError(t, decodeDomainRecord(&mvccpb.KeyValue{Value: writes[0].Value}, &control))
+		require.NoError(t, decodeDomainRecord(&mvccpb.KeyValue{Value: writes[1].Value}, &snapshot))
+		require.Equal(t, id, control.SandboxID)
+		require.Equal(t, control.Snapshot, snapshot.Snapshot)
+		require.Equal(t, "test-epoch", control.RestoreEpoch)
+		batch = append(batch, writes...)
+	}
+	request, err := metadataScaleSeedRequest(b, batch)
+	require.NoError(t, err)
+	require.Equal(t, 60, len(request.Compare)+len(request.Success)+len(request.Failure))
+	require.LessOrEqual(t, request.Size(), 128<<10)
+	_, err = metadataScaleSeedRequest(b, append(batch, batch[:9]...))
+	require.Error(t, err)
+	bad := append([]Write(nil), batch...)
+	bad[0].Value = make([]byte, 65537)
+	_, err = metadataScaleSeedRequest(b, bad)
+	require.Error(t, err)
+}
 
 // A peer owns one real session and partition. Its sole test goroutine rotates
 // over 25 disjoint original Claim shares; readiness never changes a bucket.

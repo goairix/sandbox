@@ -101,7 +101,15 @@ func partitionWorkerNativePause(t *testing.T, ctx context.Context, delay time.Du
 
 func startPartitionWorkerNativeCluster(t *testing.T, ctx context.Context) []string {
 	t.Helper()
-	root := t.TempDir()
+	endpoints, _ := startPartitionWorkerNativeClusterWithData(t, ctx, t.TempDir(), 0)
+	return endpoints
+}
+
+// Scale tests use a runner-owned disk path and explicit backend quota. The
+// original small native fixtures retain their default temp directory/quota.
+// Every child is still joined by its original process owner before data removal.
+func startPartitionWorkerNativeClusterWithData(t *testing.T, ctx context.Context, root string, quota int64) ([]string, []*partitionWorkerNativeProcess) {
+	t.Helper()
 	clientURLs := []string{"http://127.0.0.1:23791", "http://127.0.0.1:23792", "http://127.0.0.1:23793"}
 	peerURLs := []string{"http://127.0.0.1:23801", "http://127.0.0.1:23802", "http://127.0.0.1:23803"}
 	var members []string
@@ -112,6 +120,9 @@ func startPartitionWorkerNativeCluster(t *testing.T, ctx context.Context) []stri
 	var children []*partitionWorkerNativeProcess
 	for i := range clientURLs {
 		cmd := exec.Command("/fixture/etcd", "--name", fmt.Sprintf("worker-etcd-%d", i+1), "--data-dir", filepath.Join(root, fmt.Sprintf("member-%d", i+1)), "--listen-client-urls", clientURLs[i], "--advertise-client-urls", clientURLs[i], "--listen-peer-urls", peerURLs[i], "--initial-advertise-peer-urls", peerURLs[i], "--initial-cluster", strings.Join(members, ","), "--initial-cluster-state", "new", "--initial-cluster-token", token, "--logger", "zap", "--log-level", "error")
+		if quota > 0 {
+			cmd.Args = append(cmd.Args, fmt.Sprintf("--quota-backend-bytes=%d", quota))
+		}
 		children = append(children, startPartitionWorkerNativeProcess(t, cmd))
 	}
 	raw, err := clientv3.New(clientv3.Config{Endpoints: clientURLs, DialTimeout: time.Second, Logger: zap.NewNop()})
@@ -146,7 +157,7 @@ func startPartitionWorkerNativeCluster(t *testing.T, ctx context.Context) []stri
 			}
 		}
 		if ready && len(seen) == 3 {
-			return clientURLs
+			return clientURLs, children
 		}
 		if startup.Err() != nil {
 			t.Fatalf("three actual etcd 3.6.14 members did not become ready: %v", startup.Err())
