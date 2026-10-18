@@ -346,6 +346,222 @@ func TestDueCheckpointNewOwnerActualPageResume(t *testing.T) {
 	require.Equal(t, pb.RangeRequest_NONE, actual.SortOrder)
 }
 
+func TestDueCheckpointReplacementWatchStartsFreshView(t *testing.T) {
+	f := newDuePageFixture(t)
+	claims, err := f.b.AcquireWorkerBudget(context.Background(), f.session, WorkerBudgetClaim, 0)
+	require.NoError(t, err)
+	watched := &dueWatchTestFixture{dueExpiryFixture: &dueExpiryFixture{duePageFixture: f, claimShare: claims}}
+	watched.scan = dueCheckpointTestScan(t, watched.dueExpiryFixture)
+	f.earn()
+	require.NoError(t, watched.scan.refill(context.Background()))
+	require.Equal(t, "watch", watched.scan.checkpoint.record.Phase)
+	require.Nil(t, watched.scan.checkpoint.record.Pending)
+	watched.cache, err = newDueWorkerCache(f.b, f.session)
+	require.NoError(t, err)
+	require.NoError(t, watched.cache.addPage(watched.scan))
+	watched.progress(1)
+	require.True(t, watched.run(t).Partitions[0].Synchronized)
+	before := f.server.point(dueCheckpointTestKey(f))
+	oldRecord := dueCheckpointTestRaw(t, f)
+	oldSession := f.session.Reference()
+
+	// The completed checkpoint is not a reason for the same live owner to
+	// discard its view. Only a genuinely replaced owner needs the rebase.
+	sameOwner := dueCheckpointTestScan(t, watched.dueExpiryFixture)
+	f.earn()
+	require.NoError(t, sameOwner.refill(context.Background()))
+	require.Equal(t, oldRecord.Revision, sameOwner.checkpoint.record.Revision)
+	require.Equal(t, before, f.server.point(dueCheckpointTestKey(f)))
+
+	dueCheckpointTestReopenExpiry(t, watched.dueExpiryFixture)
+	require.NotEqual(t, oldSession.SessionID, f.session.Reference().SessionID)
+	// Model unrelated writes between owners without fabricating a revision or
+	// a cursor. The replacement must not replay this history at the old R.
+	for i := 0; i < 8; i++ {
+		f.server.put(f.b.namespace.Root()+"replacement-history/"+strings.Repeat("x", i+1), "unrelated", 0)
+	}
+	f.b.authorityClock = testAuthorityClock(func(context.Context) (ClockObservation, error) {
+		return ClockObservation{UTC: f.now.Add(2 * time.Second)}, nil
+	})
+	watched.scan = dueCheckpointTestScan(t, watched.dueExpiryFixture)
+	var actual pb.RangeRequest
+	f.mutate = func(request *pb.RangeRequest, _ *pb.RangeResponse) { actual = *request }
+	f.earn()
+	require.NoError(t, watched.scan.refill(context.Background()))
+	require.Equal(t, int64(0), actual.Revision, "a replacement with a completed, non-pending view takes a current fixed Range")
+	require.Equal(t, f.b.namespace.Root()+"p/aa/due/", string(actual.Key))
+	after := f.server.point(dueCheckpointTestKey(f))
+	require.Equal(t, before.CreateRevision, after.CreateRevision, "fresh enumeration retains the original checkpoint CAS birth")
+	require.Greater(t, after.ModRevision, before.ModRevision)
+	fresh := dueCheckpointTestRaw(t, f)
+	require.Greater(t, fresh.Revision, oldRecord.Revision)
+	require.Equal(t, fresh.Revision+1, fresh.ReplayFrom)
+	require.Equal(t, f.session.Reference().SessionID, fresh.WriterSessionID)
+	require.Equal(t, f.partition.fence.create, fresh.WriterPartitionRevision)
+	require.Empty(t, fresh.Frontier)
+	require.Nil(t, fresh.Pending)
+	require.Equal(t, "watch", fresh.Phase)
+	require.True(t, fresh.WindowEnd.After(oldRecord.WindowEnd))
+
+	watched.cache, err = newDueWorkerCache(f.b, f.session)
+	require.NoError(t, err)
+	require.NoError(t, watched.cache.addPage(watched.scan))
+	require.False(t, watched.cache.snapshot().Partitions[0].Synchronized)
+	created := make(chan []*pb.WatchCreateRequest, 1)
+	watched.install(func(stream pb.Watch_WatchServer) error {
+		requests, err := dueWatchTestCreates(stream, 1, dueWatchTestHeader(f.server))
+		if err != nil {
+			return err
+		}
+		created <- requests
+		for {
+			if _, err := stream.Recv(); err != nil {
+				return nil
+			}
+		}
+	})
+	createdOnly := watched.run(t)
+	require.False(t, createdOnly.Partitions[0].Synchronized, "a new Range and Created ACK are not a Watch coverage bridge")
+	requests := workerTestReceive(t, created)
+	require.Len(t, requests, 1)
+	require.Equal(t, fresh.ReplayFrom, requests[0].StartRevision)
+	watched.progress(1)
+	require.True(t, watched.run(t).Partitions[0].Synchronized, "only actual progress on the replacement's original connection publishes the fresh view")
+}
+
+func TestDueCheckpointReplacementWatchRetainsCASAndClockFence(t *testing.T) {
+	for _, change := range []string{"same-value-rewrite", "recreated", "partition", "profile", "clock-regression"} {
+		t.Run(change, func(t *testing.T) {
+			f := newDuePageFixture(t)
+			claims, err := f.b.AcquireWorkerBudget(context.Background(), f.session, WorkerBudgetClaim, 0)
+			require.NoError(t, err)
+			expiry := &dueExpiryFixture{duePageFixture: f, claimShare: claims}
+			scan := dueCheckpointTestScan(t, expiry)
+			f.earn()
+			require.NoError(t, scan.refill(context.Background()))
+			require.Equal(t, "watch", scan.checkpoint.record.Phase)
+			dueCheckpointTestReopenExpiry(t, expiry)
+			scan = dueCheckpointTestScan(t, expiry)
+			key := dueCheckpointTestKey(f)
+			before := f.server.point(key)
+			switch change {
+			case "same-value-rewrite":
+				f.server.put(key, string(before.Value), 0)
+			case "recreated":
+				f.server.mu.Lock()
+				delete(f.server.values, key)
+				f.server.mu.Unlock()
+				f.server.put(key, string(before.Value), 0)
+			case "partition", "profile":
+				fence := f.partition.fence
+				if change == "profile" {
+					fence = f.b.workerControl.profile
+				}
+				f.server.put(fence.key, fence.value, fence.lease)
+			case "clock-regression":
+				f.b.authorityClock = testAuthorityClock(func(context.Context) (ClockObservation, error) {
+					return ClockObservation{UTC: f.now.Add(-time.Second)}, nil
+				})
+			}
+			expected := f.server.point(key)
+			f.earn()
+			err = scan.refill(context.Background())
+			if change == "clock-regression" {
+				require.ErrorIs(t, err, ErrOperationAdmissionClosed)
+			} else {
+				require.Error(t, err, "fresh rebase must retain the original full checkpoint and owner fences")
+			}
+			require.Equal(t, expected, f.server.point(key), "rejected fresh views cannot replace the durable checkpoint")
+			require.False(t, scan.started)
+			require.False(t, scan.listed)
+			require.Empty(t, scan.page)
+		})
+	}
+}
+
+func TestDueCheckpointReplacementWatchPendingRetainsOriginalView(t *testing.T) {
+	for _, fault := range []string{"Grant", "commit"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newDueExpiryFixture(t)
+			key, err := f.b.namespace.dueCandidateKey(f.candidate)
+			require.NoError(t, err)
+			candidate := f.server.point(key)
+			// First complete an actually empty fixed view. A later real model
+			// PUT enters through the original Watch before admission, so Pending
+			// genuinely originates from watch work, not a fabricated checkpoint.
+			f.server.mu.Lock()
+			delete(f.server.values, key)
+			f.server.mu.Unlock()
+			scan := dueCheckpointTestScan(t, f)
+			f.earn()
+			require.NoError(t, scan.refill(context.Background()))
+			require.Equal(t, "watch", scan.checkpoint.record.Phase)
+			cache, err := newDueWorkerCache(f.b, f.session)
+			require.NoError(t, err)
+			require.NoError(t, cache.addPage(scan))
+			f.server.put(key, string(candidate.Value), 0)
+			candidate = f.server.point(key)
+			watched := &dueWatchTestFixture{dueExpiryFixture: f, cache: cache, scan: scan}
+			watched.install(func(stream pb.Watch_WatchServer) error {
+				creates, err := dueWatchTestCreates(stream, 1, dueWatchTestHeader(f.server))
+				if err != nil {
+					return err
+				}
+				if err := stream.Send(&pb.WatchResponse{Header: dueWatchTestHeader(f.server), WatchId: creates[0].WatchId, Events: []*mvccpb.Event{{Type: mvccpb.PUT, Kv: candidate}}}); err != nil {
+					return err
+				}
+				return dueWatchTestProgress(stream, f.server, 0)
+			})
+			require.True(t, watched.run(t).Partitions[0].Synchronized)
+			queued, ok := cache.peek()
+			require.True(t, ok)
+			require.Equal(t, f.candidate, queued)
+
+			originalKV, originalLease := f.b.client.KV, f.b.client.Lease
+			if fault == "Grant" {
+				f.b.client.Lease = &workerTestLease{Lease: originalLease, grant: func(ctx context.Context, ttl int64) (*clientv3.LeaseGrantResponse, error) {
+					_, err := originalLease.Grant(ctx, ttl)
+					require.NoError(t, err)
+					return nil, context.DeadlineExceeded
+				}}
+			} else {
+				f.b.client.KV = &faultKV{KV: originalKV, match: putsKey(f.keys[1]), after: func(r *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+					require.NoError(t, err)
+					require.True(t, r.Succeeded)
+					return nil, context.DeadlineExceeded
+				}}
+			}
+			f.earnClaim()
+			require.ErrorIs(t, scan.admitCandidate(context.Background(), queued, false), ErrOutcomeUnknown)
+			pending := dueCheckpointTestRaw(t, f.duePageFixture)
+			require.Equal(t, "watch", pending.Phase)
+			require.NotNil(t, pending.Pending)
+			f.b.client.KV, f.b.client.Lease = originalKV, originalLease
+
+			dueCheckpointTestReopenExpiry(t, f)
+			before, _, _ := f.server.counts()
+			restarted := dueCheckpointTestScan(t, f)
+			require.False(t, restarted.fresh, "initial Pending must not become a fresh-view candidate after arbitration clears it")
+			var actual pb.RangeRequest
+			f.mutate = func(request *pb.RangeRequest, _ *pb.RangeResponse) { actual = *request }
+			f.earn()
+			require.NoError(t, restarted.refill(context.Background()))
+			require.Equal(t, pending.Revision, actual.Revision)
+			require.Equal(t, pending.Revision, restarted.checkpoint.record.Revision)
+			require.Nil(t, restarted.checkpoint.record.Pending)
+			after, _, _ := f.server.counts()
+			require.Equal(t, before, after, "recovery only arbitrates the original attempt; it cannot Grant a new one")
+			outcome, err := f.b.ResolveStage(context.Background(), pending.Pending.Reference)
+			require.NoError(t, err)
+			expected := OutcomeAborted
+			if fault == "commit" {
+				expected = OutcomeCommitted
+			}
+			require.Equal(t, expected, outcome)
+		})
+	}
+}
+
 func TestDueCheckpointFutureFrontierSurvivesRestart(t *testing.T) {
 	f := newDueExpiryFixture(t)
 	// Keep the full authoritative metadata coherent while moving expiry into

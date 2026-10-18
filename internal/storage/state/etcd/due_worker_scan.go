@@ -55,6 +55,14 @@ func newDueWorkerScan(b *Backend, p *WorkerPartitionClaim, ranges, claims *Worke
 		if _, err = scan.resolvePending(ctx); err != nil {
 			return nil, err
 		}
+	} else if saved != nil && saved.record.Phase == "watch" && (saved.record.WriterSessionID != p.session.reference.SessionID || saved.record.WriterPartitionRevision != p.fence.create) {
+		// A replacement owner needs a current fixed view, rather than replaying
+		// arbitrarily old unrelated history from a completed predecessor view.
+		// Keep the original checkpoint handle: refill must still CAS every old
+		// fence and preserve its birth before a new Watch bridge can publish.
+		// An initially pending attempt takes the branch above even if resolving
+		// it clears Pending; that arbitration must retain its original fixed R.
+		scan.resetView()
 	}
 	return scan, nil
 }
