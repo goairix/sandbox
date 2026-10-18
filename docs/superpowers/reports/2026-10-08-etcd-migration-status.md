@@ -10,6 +10,21 @@
 | 整体交付 | 约52% | 沿用20/30/20/15/15权重，阶段粗估90/80/50/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
+本周期新增 `538fda7` / `2f415ed`：六个既有文件接通显式 v2 resident 健康样本，
+保留 v1 wire，成功采样推进序号，读取仅返回原 sample/cache 的 monotonic 剩余有效期。
+host、race、受影响旧接口回归、Linux vet 与独立审查通过；各轮实际 Go 的17类输入、
+工具及归档逐项核对。它仍只是本地样本接口，认证 helper→observer 通道与 collector 未完成。
+
+`733a607` 增加续期冷恢复的 v2 固定记录及事务构建，原 v1 publication/digest 保持不变；
+恢复事务只允许旧操作消失、原 Final 已持久 Aborted、源记录与 pending 修订均未改变。
+10组 host/race、Linux vet 和独立审查通过。该提交没有接通冷恢复入口；实际 Query、
+恢复预留 CAS、固定新 Stage 及丢确认后重建服务的原生业务链正在实施，不能计为已交付。
+
+正式容量 FULL04 仍运行。1万档维护已实际触发旧 worker Unknown/失权退出，在确认旧
+guard/lease 消失后由正式 API 建立新 session/lease 并恢复同步；维护共72.65秒单列。
+这只证明本次长测中的接管分支，整档一小时和10万档尚无验收结论。
+百分比本周期不调整，默认 Redis、生产切换及部署恢复状态均不变。
+
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
 正式 cleanup-worker 自动 managed Claim、drain/none、Observer/provider终止和安全释放→
 原配额归还→S/P清除→GET404，原生用例38.30秒通过。同一组二进制的原local完整
@@ -138,16 +153,16 @@ Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除�
 真实 HTTP 用例已成功创建、Exec、查询，随后 DELETE 仍返回501；整链的 managed
 Claim、销毁、退款与 Pending 删除尚未通过原生验证，因此不增加交付百分比。
 
-功能代码未完成：TTL完整续期、网络更新等API、Pool/Docker、大文件/分片上传及默认入口替代、detached销毁故障组合及
+功能代码未完成：TTL冷恢复与换叶证书故障组合、网络更新等API、Pool/Docker、大文件/分片上传及默认入口替代、detached销毁故障组合及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
 Redis路径移除。自动清理循环和v2入口、独立worker命令已有实现与局部验证，但真实
 组合已通过四个新native场景；完整Task审查发现的两项代码问题已修复并限定复核关闭，
 容量与恢复组合仍在补验，不能计为自动清理完整交付。
 
-TTL不是仅缺HTTP路由：当前activation、receipt/mTLS及journal只接受原凭证，单改
-control.ExpiresAt后仍会在原签名截止时间拒绝Exec。下一可用单元必须补完整受信凭证
-安装/恢复与原TTL/due原子提交，并实际验证跨旧期限后的Exec；不以元数据延期代替续期。
+TTL正常链现已包含受信凭证安装、原TTL/due原子提交，以及实际跨旧期限后的Exec。
+剩余验收集中在安装后丢确认、服务与Backend重建后的自动收敛、证书换叶和关闭/销毁
+竞争，不能以正常链通过推断这些故障组合已完成。
 
 整体交付另差：大量已有sandbox的容量/延迟/内存与长稳验证、真实故障组合、部署配置、
 备份恢复及权限验收、最终完整审查和切换验收。组件模型通过不能代替这些验收；当前
