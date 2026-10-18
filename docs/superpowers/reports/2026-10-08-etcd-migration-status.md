@@ -40,8 +40,14 @@ guard/lease 消失后由正式 API 建立新 session/lease 并恢复同步；维
 约19.8MB。补到10万后，初始发现未在3分钟内同步；Txn/Revoke先发生超时并失权。
 原四个Wait、无OOM、容器/卷清理及9303项核对完成。`725b14d` 仅增加独立启动诊断
 模式，保留10k→100k旧checkpoint并跳过一小时idle；原3分钟、所有权及资源阈值不变。
-模式边界host、Linux vet/构建通过，实际有限复现进行中；历史Watch追赶与资源压力
-仍是待证假设。它不替代全容量长测，更不代表同数量实际Pod/FUSE sandbox容量。
+模式边界host、Linux vet/构建通过。首轮有限复现仍在约80.8秒失权；
+`c1a7006` 仅让新实际owner对初始无Pending、已完成watch的checkpoint重建当前视图，
+保留原CAS、birth、时钟/profile/partition fencing；未决操作仍仲裁原attempt，新的Watch
+bridge完成前不报告同步。全checkpoint host/race、Linux vet和独立审查通过。
+随后启动pilot02在相同2核/4GiB、原3分钟上限下通过：1万约64.8秒、10万约66.3秒
+完成256分区同步；原进程Wait、无OOM、容器/卷清理和9308项输入/工具核对通过。
+这是已修复启动路径的有限实证，不替代全容量长测，更不代表同数量实际Pod/FUSE
+sandbox容量。正式FULL05已用同一构建启动，仍待1万/10万各一小时及维护验收。
 本次小幅上调只来自真实TTL冷恢复业务闭合；默认Redis、生产切换及部署恢复状态不变。
 
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
