@@ -1,13 +1,98 @@
 package fuseprotocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// This leaf is a copied local observation, not a mount, execution or release
+// capability. Existing strict Version1 consumers must reject its distinct wire.
+func TestMounterReadinessV2StrictLeafAndLegacyWire(t *testing.T) {
+	observed := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	model := MounterReadiness{
+		Version: 2, RuntimeUID: "uid-a", PoolKey: strings.Repeat("a", 64),
+		Generation: 1, MountAttempt: 1, MountID: 41, SampleSequence: 7,
+		SampledAt: observed, CacheObservedAt: observed.Add(-time.Second),
+		ValidForNanoseconds: int64(time.Second),
+	}
+	wire, err := json.Marshal(model)
+	require.NoError(t, err)
+	decoded, err := DecodeMounterReadiness(wire)
+	require.NoError(t, err)
+	require.Equal(t, model, decoded)
+	maximum := model
+	maximum.ValidForNanoseconds = int64(3 * time.Second)
+	maximumWire, err := json.Marshal(maximum)
+	require.NoError(t, err)
+	_, err = DecodeMounterReadiness(maximumWire)
+	require.NoError(t, err)
+	var legacy MounterStatus
+	require.Error(t, DecodeExact(wire, &legacy))
+	legacyWire := []byte(`{"version":1,"state":"ready","runtime_uid":"uid-a","pool_key":"` + strings.Repeat("a", 64) + `","mount_type":"fuse","generation":1,"restart_detected":false,"cache_bytes":0,"cache_limit_bytes":64,"cache_exceeded":false}`)
+	require.NoError(t, DecodeExact(legacyWire, &legacy))
+	_, err = DecodeMounterReadiness(legacyWire)
+	require.Error(t, err)
+
+	for _, fault := range []string{"version", "sequence", "mount-attempt", "mount-id", "runtime", "pool", "generation", "sample-time", "cache-time", "valid-for-zero", "valid-for-negative", "valid-for-overcap", "missing", "duplicate", "unknown", "null", "trailing", "oversized"} {
+		t.Run(fault, func(t *testing.T) {
+			changed := model
+			switch fault {
+			case "version":
+				changed.Version = 1
+			case "sequence":
+				changed.SampleSequence = 0
+			case "mount-attempt":
+				changed.MountAttempt = 2
+			case "mount-id":
+				changed.MountID = 0
+			case "runtime":
+				changed.RuntimeUID = ""
+			case "pool":
+				changed.PoolKey = "foreign"
+			case "generation":
+				changed.Generation = 0
+			case "sample-time":
+				changed.SampledAt = time.Time{}
+			case "cache-time":
+				changed.CacheObservedAt = time.Time{}
+			case "valid-for-zero":
+				changed.ValidForNanoseconds = 0
+			case "valid-for-negative":
+				changed.ValidForNanoseconds = -1
+			case "valid-for-overcap":
+				changed.ValidForNanoseconds = int64(3*time.Second) + 1
+			}
+			bad, err := json.Marshal(changed)
+			require.NoError(t, err)
+			switch fault {
+			case "missing":
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(bad, &fields))
+				delete(fields, "sample_sequence")
+				bad, err = json.Marshal(fields)
+				require.NoError(t, err)
+			case "duplicate":
+				bad = bytes.Replace(bad, []byte(`"version":2`), []byte(`"version":2,"version":2`), 1)
+			case "unknown":
+				bad = append([]byte(`{"unknown":true,`), bad[1:]...)
+			case "null":
+				bad = bytes.Replace(bad, []byte(`"sample_sequence":7`), []byte(`"sample_sequence":null`), 1)
+			case "trailing":
+				bad = append(bad, []byte(` {}`)...)
+			case "oversized":
+				bad = []byte(strings.Repeat("x", MaxJSONBytes+1))
+			}
+			_, err = DecodeMounterReadiness(bad)
+			require.Error(t, err)
+		})
+	}
+}
 
 func TestControlDTOsUseOneStrictVersionedSchema(t *testing.T) {
 	auth := AuthorizeRequest{
