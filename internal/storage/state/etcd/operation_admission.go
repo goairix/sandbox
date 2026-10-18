@@ -22,6 +22,7 @@ const operationLeaseTTL int64 = 30
 // OperationCapability authorizes one admitted operation under its original
 // request context and Lease. Public metadata cannot reconstruct this capability.
 type OperationCapability struct {
+	self                                        *OperationCapability
 	origin                                      *Backend
 	parentCtx                                   context.Context
 	record                                      OperationRecord
@@ -35,6 +36,9 @@ type OperationCapability struct {
 	deadline                                    time.Time
 	lost                                        bool
 	execDraft                                   *execEffectDraft
+	// ttlDraft retains one fixed renewal through actual transport return and
+	// metadata arbitration; the same mutex prevents cancellation from replacing it.
+	ttlDraft *sandboxTTLDraft
 }
 
 func (c *OperationCapability) Reference() OperationReference {
@@ -131,6 +135,7 @@ func (b *Backend) BeginOperation(ctx context.Context, in BeginOperationInput) (r
 		return result, err
 	}
 	c := &OperationCapability{origin: b, parentCtx: ctx, record: record, control: control, fences: fences, tokenKey: token, guardKey: guard, receiptKey: receipt, mutationKey: mutation, guardRevision: math.MaxInt64}
+	c.self = c
 	// Own the Runtime pointer separately from the loader and every public copy.
 	c.control = c.Control()
 	if err = b.preflightOperation(c, wire); err != nil {
