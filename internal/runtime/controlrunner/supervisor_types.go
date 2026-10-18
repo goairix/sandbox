@@ -53,6 +53,10 @@ type Supervisor struct {
 	journal                   *controltarget.Journal
 	credential                *controlprotocol.ManagementTLSCredential
 	tlsConfig                 *tls.Config
+	tlsOwner                  *supervisorTLSOwner
+	renewalInFlight           *supervisorRenewalAttempt
+	renewalRejectedBefore     time.Time
+	renewalUncertain          bool
 	active                    map[string]*Execution
 	admission, closed, failed bool
 	failurePending            atomic.Bool

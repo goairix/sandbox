@@ -106,6 +106,10 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 	}
 	config := s.tlsConfig
 	closed := s.closed || s.failed || s.failurePending.Load()
+	var tlsOwner *supervisorTLSOwner
+	if !closed && config != nil {
+		tlsOwner = s.borrowTLSLocked()
+	}
 	s.mu.Unlock()
 	if closed {
 		s.bootstrapMu.Unlock()
@@ -116,6 +120,7 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		s.bootstrapMu.Unlock()
 		return
 	}
+	defer s.releaseTLS(tlsOwner)
 	s.bootstrapMu.Unlock()
 	// Purpose is encrypted, so finite record reads and authenticated EOF must
 	// precede the handshake. Valid legacy producers already use TLS CloseWrite.
@@ -129,7 +134,13 @@ func (s *Supervisor) serveConnection(ctx context.Context, raw net.Conn) {
 		return
 	}
 	// Only this real handshake owner constructs private authenticatedStart.
-	if request.Health != nil {
+	if request.Renewal != nil {
+		// Keep the original finite bound even when TLS CloseWrite installs its
+		// own close_notify deadline after journal persistence consumed time.
+		archiveDeadline.seal(deadline)
+		_ = s.dispatchRuntimeRenewal(bounded, conn, *request.Renewal)
+		return
+	} else if request.Health != nil {
 		_ = s.dispatchRuntimeHealth(bounded, conn, *request.Health)
 		return
 	} else if request.Publication != nil {
