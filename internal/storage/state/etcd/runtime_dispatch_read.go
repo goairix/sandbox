@@ -166,9 +166,15 @@ func decodeRuntimeDispatchReceipt(kv *mvccpb.KeyValue, l StageAttemptLocator) (S
 	}
 	decoder := json.NewDecoder(bytes.NewReader(kv.Value))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&receipt) != nil ||
-		decoder.Decode(new(any)) != io.EOF ||
-		receipt.Version != 1 ||
+	if decoder.Decode(&receipt) != nil {
+		return StageReference{}, ErrCorruptReceipt
+	}
+	// Reject another value at its first token, before expanding its graph.
+	if _, err := decoder.Token(); err != io.EOF {
+		return StageReference{}, ErrCorruptReceipt
+	}
+
+	if receipt.Version != 1 ||
 		receipt.Outcome != OutcomeCommitted ||
 		!validHexDigest(receipt.Digest) ||
 		receipt.StageReference != l.reference(receipt.Digest) {

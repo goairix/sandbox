@@ -177,7 +177,9 @@ func strictPreparationMetadata(wire []byte, typ reflect.Type) error {
 	if _, err = dec.Token(); err != nil || len(seen) != len(fields) {
 		return ErrCorruptRecord
 	}
-	if dec.Decode(new(any)) != io.EOF {
+	// A second value is forbidden. Reading only its first token avoids
+	// allocating an arbitrary map/slice tree merely to reject trailing input.
+	if _, err = dec.Token(); err != io.EOF {
 		return ErrCorruptRecord
 	}
 	return nil

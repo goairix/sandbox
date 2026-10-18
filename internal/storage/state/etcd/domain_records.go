@@ -345,7 +345,9 @@ func decodeTypedDomain[T interface{ Validate() error }](kv *mvccpb.KeyValue, des
 	if err := decoder.Decode(&fresh); err != nil {
 		return fmt.Errorf("%w: invalid domain JSON", ErrCorruptRecord)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
+	// Do not materialize a forbidden second JSON value as a generic tree.
+	// Whitespace reaches EOF; any token or malformed suffix is refused.
+	if _, err := decoder.Token(); err != io.EOF {
 		return fmt.Errorf("%w: trailing domain JSON", ErrCorruptRecord)
 	}
 	if err := fresh.Validate(); err != nil {
