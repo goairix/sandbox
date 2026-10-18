@@ -83,6 +83,17 @@ Defrag、原成员Wait及数据重启、固定37次Txn的API检查完成，但wo
 加两个精确DeadlineExceeded；原fixture仅允许EOF/reset，恢复分类拒绝后尚未执行旧
 guard/Lease缺失及新session接管验证。原四个Wait、无OOM、容器/卷清理与9308项核对
 完成。当前仅在有限fault-pilot增加维护phase和原worker RPC诊断，原判定与资源不变。
+`d42ff39` 的两份既有测试加入有界诊断，host、Linux vet/构建及独立审查通过。
+实际fault-diag01在124.51秒失败：第三成员Defrag期间，原worker的identity点读Txn
+在原2秒RPC截止后约7毫秒返回精确DeadlineExceeded，RPC context同样超时，实验父
+context仍有效；原worker不可逆失权并完成Revoke。恢复fixture仍仅接受EOF/reset，
+因此在验证旧guard/lease消失和新session接管前拒绝；未把该失败当作恢复成功。
+原四个Wait、无OOM、容器/卷清理及9308项输入/工具核对完成。后续只修正有真实
+维护RPC归因的测试恢复分支，不放宽产品超时、所有权或实际接管验证。
+
+`835aaa0` 补充最终镜像内的cleanup-worker，并从Docker构建上下文排除本地
+`.superpowers`产物。Docker buildx检查被DockerHub认证连接重置阻断；尚无镜像构建
+或部署通过结论。此项和诊断改动均未上调完成度。
 本次小幅上调只来自真实TTL冷恢复业务闭合；默认Redis、生产切换及部署恢复状态不变。
 
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
