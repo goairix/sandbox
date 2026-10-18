@@ -270,6 +270,7 @@ func (w *DueWorker) Stop() error {
 }
 
 // Status returns an owned bounded copy under the original lifetime lock.
+// Cache accounting is current even between serial actor publications.
 func (w *DueWorker) Status() DueWorkerStatus {
 	if w == nil || w.self != w || w.backend == nil {
 		return DueWorkerStatus{}
@@ -277,6 +278,9 @@ func (w *DueWorker) Status() DueWorkerStatus {
 	w.backend.archiveLife.mu.Lock()
 	defer w.backend.archiveLife.mu.Unlock()
 	status := w.status
+	if w.cache != nil {
+		status.OwnedBytes, status.Queued = w.cache.ownedBytesLocked(), w.cache.count
+	}
 	status.Partitions = append([]DueWorkerPartitionStatus(nil), status.Partitions...)
 	status.Cleanup.Partitions = append([]DueWorkerCleanupPartitionStatus(nil), status.Cleanup.Partitions...)
 	return status
@@ -327,13 +331,7 @@ func (w *DueWorker) publishStatus(phase DueWorkerPhase, workErr error) {
 		status.LastError = dueWorkerError(workErr)
 	}
 	if w.cache != nil {
-		status.OwnedBytes, status.Queued = dueCacheReservedBytes+w.cache.bytes, w.cache.count
-		if w.cache.automatic {
-			status.OwnedBytes += 4 << 20
-		}
-		if w.cache.coldQuota {
-			status.OwnedBytes += 4 << 20
-		}
+		status.OwnedBytes, status.Queued = w.cache.ownedBytesLocked(), w.cache.count
 	}
 	// Aggregate the fixed cache once, rather than scanning all entries for
 	// each partition while the shared lifetime lock is held.

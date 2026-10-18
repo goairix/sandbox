@@ -186,6 +186,39 @@ func dueCacheCharge(key, value string) uint64 {
 	return uint64(4*len(key) + 3*len(value) + 1024)
 }
 
+// Discovery and cold metadata reserve space from the original dynamic cache
+// allowance. Startup uses prospective modes; live admission uses installed
+// modes, so both paths must derive exactly the same byte and key limits.
+func dueCacheLimits(automatic, cold bool) (int, uint64) {
+	keys, bytes := dueCacheKeys, uint64(dueCacheDynamicBytes)
+	if automatic {
+		// Original discovery allowance: 256 partitions, 80 page candidates,
+		// 32 registry identities and one active evidence phase within 4MiB.
+		keys -= 369
+		bytes -= 4 << 20
+	}
+	if cold {
+		// The existing cold workspace and compact registry additions reserve
+		// 64 source identities and another 4MiB independently of discovery.
+		keys -= 64
+		bytes -= 4 << 20
+	}
+	return keys, bytes
+}
+
+// Requires archiveLife.mu. Count each installed reservation once alongside the
+// current cache bytes. An invalid internal counter saturates diagnostics rather
+// than wrapping into a deceptively small value; it grants no admission capacity.
+func (c *dueWorkerCache) ownedBytesLocked() uint64 {
+	_, limit := dueCacheLimits(c.automatic, c.coldQuota)
+	base := uint64(dueCacheReservedBytes) + uint64(dueCacheDynamicBytes) - limit
+	maximum := ^uint64(0)
+	if c.bytes > maximum-base {
+		return maximum
+	}
+	return base + c.bytes
+}
+
 func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) error {
 	slot, cell := c.find(key)
 	charge := dueCacheCharge(key, value)
@@ -193,16 +226,13 @@ func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) er
 	if slot >= 0 {
 		old = c.entries[slot].charge
 	}
-	keyLimit, byteLimit := dueCacheKeys, uint64(dueCacheDynamicBytes)
-	if c.automatic {
-		keyLimit -= 369
-		byteLimit -= 4 << 20
+	keyLimit, byteLimit := dueCacheLimits(c.automatic, c.coldQuota)
+	if cell < 0 || slot < 0 && c.count >= keyLimit {
+		return ErrConflict
 	}
-	if c.coldQuota {
-		keyLimit -= 64
-		byteLimit -= 4 << 20
-	}
-	if cell < 0 || slot < 0 && c.count >= keyLimit || c.bytes-old+charge > byteLimit {
+	// Subtract only after checking both operands. A corrupt counter or a huge
+	// replacement cannot wrap the admission sum before the owned clones exist.
+	if charge > byteLimit || c.bytes < old || c.bytes-old > byteLimit-charge {
 		return ErrConflict
 	}
 	if slot < 0 {
@@ -353,13 +383,7 @@ func (c *dueWorkerCache) settled(candidate DueCandidateRecord) {
 }
 
 func (c *dueWorkerCache) statusLocked() dueWorkerCacheStatus {
-	status := dueWorkerCacheStatus{OwnedBytes: dueCacheReservedBytes + c.bytes, Keys: c.count, Partitions: make([]dueWatchPartitionResult, 0, 256)}
-	if c.automatic {
-		status.OwnedBytes += 4 << 20
-	}
-	if c.coldQuota {
-		status.OwnedBytes += 4 << 20
-	}
+	status := dueWorkerCacheStatus{OwnedBytes: c.ownedBytesLocked(), Keys: c.count, Partitions: make([]dueWatchPartitionResult, 0, 256)}
 	for i := range c.views {
 		v := &c.views[i]
 		if v.sub.Partition == nil {
