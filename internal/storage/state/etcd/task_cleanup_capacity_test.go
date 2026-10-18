@@ -68,8 +68,200 @@ func metadataScaleOnlyMemberStopTransport(err error) bool {
 	return inspect(err) && unknown && transport
 }
 
-// Diagnostic leaves preserve error identity and gRPC status without granting
-// recovery permission. The original member-stop classifier above is unchanged.
+// This compact test observation is retained from the first failed RPC, never
+// reconstructed from logs. A later cleanup failure cannot replace its cause.
+// Session fields are locators for the original test owner, not capabilities.
+type metadataScaleMaintenanceRPCFailure struct {
+	session WorkerSessionReference
+	method  string
+	defrags [3]metadataScaleDefragInterval
+
+	sent, deadline, returned, sessionDeadline time.Time
+	completed                                 bool
+	sendContextErr, rpcErr, requestErr        error
+	parentBefore, parentAfter                 error
+}
+
+// Exactly three actual member calls form this fixture's finite maintenance
+// evidence. Epoch is their invocation order; member is the original index.
+type metadataScaleDefragInterval struct {
+	epoch          uint64
+	member         int
+	started, ended time.Time
+}
+
+// The existing diagnostic mutex must own this update. Cleanup observes the
+// same original cause; it cannot turn a later matching timeout into first loss.
+func metadataScaleKeepFirstFailure(first *metadataScaleMaintenanceRPCFailure, observed metadataScaleMaintenanceRPCFailure) *metadataScaleMaintenanceRPCFailure {
+	if first != nil {
+		return first
+	}
+	return &observed
+}
+
+func metadataScaleOnlyDeadlineLeaves(err error, requireUnknown bool) bool {
+	leaves, truncated := metadataScaleDiagnosticErrorLeaves(err)
+	if truncated || len(leaves) == 0 {
+		return false
+	}
+	unknown, deadline := false, false
+	for _, leaf := range leaves {
+		if !leaf.Unknown && !leaf.Deadline {
+			return false
+		}
+		unknown = unknown || leaf.Unknown
+		deadline = deadline || leaf.Deadline
+	}
+	return deadline && unknown == requireUnknown
+}
+
+// Defrag can block a dispatched worker transaction past its original deadline.
+// Permit only the measured loss, not arbitrary timeout recovery: the first RPC
+// must start inside an actual Defragment call, then exhaust its deadline and
+// return inside that call or one later actual member call. Gaps are excluded.
+// The caller still joins the old owner and proves guard/Lease absence before
+// acquiring any replacement. Product session ownership remains unchanged.
+func metadataScaleObservedDefragDeadline(err error, original WorkerSessionReference, observed *metadataScaleMaintenanceRPCFailure) bool {
+	if observed == nil || original.SessionID == "" || original.LeaseID <= 0 || observed.session != original || observed.method != "Txn" || !observed.completed {
+		return false
+	}
+	if observed.sendContextErr != nil || observed.parentBefore != nil || observed.parentAfter != nil || observed.rpcErr != context.DeadlineExceeded || !metadataScaleOnlyDeadlineLeaves(observed.requestErr, false) || !metadataScaleOnlyDeadlineLeaves(err, true) {
+		return false
+	}
+	if observed.sent.IsZero() || !observed.deadline.After(observed.sent) || observed.returned.Before(observed.deadline) || !observed.sessionDeadline.After(observed.returned) {
+		return false
+	}
+	sentInterval, returnedInterval, members := -1, -1, uint8(0)
+	for i, interval := range observed.defrags {
+		if interval.epoch != uint64(i+1) || interval.member < 0 || interval.member >= 3 || interval.started.IsZero() || !interval.ended.After(interval.started) || i > 0 && observed.defrags[i-1].ended.After(interval.started) {
+			return false
+		}
+		bit := uint8(1) << interval.member
+		if members&bit != 0 {
+			return false
+		}
+		members |= bit
+		if !observed.sent.Before(interval.started) && observed.sent.Before(interval.ended) {
+			sentInterval = i
+		}
+		if !observed.deadline.Before(interval.started) && !observed.returned.After(interval.ended) {
+			returnedInterval = i
+		}
+	}
+	return sentInterval >= 0 && returnedInterval >= sentInterval
+}
+
+func TestMetadataScaleObservedDefragDeadline(t *testing.T) {
+	now := time.Now()
+	original := WorkerSessionReference{SessionID: "original", LeaseID: 1}
+	terminal := errors.Join(ErrOutcomeUnknown, context.DeadlineExceeded, context.DeadlineExceeded)
+	valid := metadataScaleMaintenanceRPCFailure{
+		session: original, method: "Txn",
+		sent: now, deadline: now.Add(2 * time.Second), returned: now.Add(2*time.Second + time.Millisecond),
+		sessionDeadline: now.Add(time.Minute), completed: true,
+		rpcErr: context.DeadlineExceeded, requestErr: context.DeadlineExceeded,
+		defrags: [3]metadataScaleDefragInterval{
+			{epoch: 1, member: 0, started: now.Add(-time.Second), ended: now.Add(3 * time.Second)},
+			{epoch: 2, member: 1, started: now.Add(4 * time.Second), ended: now.Add(7 * time.Second)},
+			{epoch: 3, member: 2, started: now.Add(8 * time.Second), ended: now.Add(11 * time.Second)},
+		},
+	}
+	deep := error(context.DeadlineExceeded)
+	for range 40 {
+		deep = fmt.Errorf("original request: %w", deep)
+	}
+	many := make([]error, 16)
+	for i := range many {
+		many[i] = context.DeadlineExceeded
+	}
+	for _, model := range []struct {
+		name   string
+		change func(*metadataScaleMaintenanceRPCFailure)
+		err    error
+		want   bool
+	}{
+		{name: "actual-defrag-rpc", err: terminal, want: true},
+		{name: "cross-ordered-members", err: terminal, want: true, change: func(p *metadataScaleMaintenanceRPCFailure) {
+			p.defrags[0].ended = now.Add(time.Second)
+			p.defrags[1].started = now.Add(1500 * time.Millisecond)
+		}},
+		{name: "mixed-corrupt", err: errors.Join(terminal, ErrCorruptRecord)},
+		{name: "mixed-canceled", err: errors.Join(terminal, context.Canceled)},
+		{name: "missing-unknown", err: context.DeadlineExceeded},
+		{name: "missing-terminal", err: nil},
+		{name: "deep-terminal", err: errors.Join(ErrOutcomeUnknown, deep)},
+		{name: "truncated-terminal", err: errors.Join(ErrOutcomeUnknown, errors.Join(many...))},
+		{name: "outside-defrag", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[0].started = now.Add(time.Millisecond) }},
+		{name: "foreign-epoch", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[1].epoch = 4 }},
+		{name: "foreign-member", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[1].member = 3 }},
+		{name: "duplicate-member", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[1].member = 0 }},
+		{name: "backward-intervals", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) {
+			p.defrags[1].started, p.defrags[2].started = p.defrags[2].started, p.defrags[1].started
+			p.defrags[1].ended, p.defrags[2].ended = p.defrags[2].ended, p.defrags[1].ended
+		}},
+		{name: "overlapping-intervals", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[1].started = now }},
+		{name: "deadline-in-gap", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) {
+			p.defrags[0].ended = now.Add(time.Second)
+			p.defrags[1].started = p.deadline.Add(time.Microsecond)
+		}},
+		{name: "parent-expired", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.parentAfter = context.DeadlineExceeded }},
+		{name: "parent-canceled-before-send", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.parentBefore = context.Canceled }},
+		{name: "canceled-before-send", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.sendContextErr = context.Canceled }},
+		{name: "locally-expired-before-call", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.sendContextErr = context.DeadlineExceeded }},
+		{name: "no-original-session", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.session = WorkerSessionReference{} }},
+		{name: "foreign-session", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.session.SessionID = "foreign" }},
+		{name: "foreign-lease", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.session.LeaseID++ }},
+		{name: "incomplete-rpc", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.completed = false }},
+		{name: "invalid-deadline", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.deadline = p.sent }},
+		{name: "deadline-passed-at-call", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.sent = p.deadline.Add(time.Nanosecond) }},
+		{name: "session-expired-first", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.sessionDeadline = p.deadline }},
+		{name: "session-expired-at-return", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.sessionDeadline = p.returned }},
+		{name: "returned-before-deadline", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.returned = p.sent }},
+		{name: "returned-after-defrag", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[0].ended = p.returned.Add(-time.Microsecond) }},
+		{name: "no-completed-defrag", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.defrags[0].ended = time.Time{} }},
+		{name: "canceled-rpc", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.rpcErr = context.Canceled }},
+		{name: "mixed-request", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) {
+			p.requestErr = errors.Join(context.DeadlineExceeded, ErrCorruptRecord)
+		}},
+		{name: "missing-request", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.requestErr = nil }},
+		{name: "deep-request", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.requestErr = deep }},
+		{name: "truncated-request", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.requestErr = errors.Join(many...) }},
+		{name: "cleanup-rpc", err: terminal, change: func(p *metadataScaleMaintenanceRPCFailure) { p.method = "Revoke" }},
+	} {
+		t.Run(model.name, func(t *testing.T) {
+			proof := valid
+			if model.change != nil {
+				model.change(&proof)
+			}
+			require.Equal(t, model.want, metadataScaleObservedDefragDeadline(model.err, original, &proof))
+		})
+	}
+	require.False(t, metadataScaleObservedDefragDeadline(terminal, original, nil))
+
+	// Actual completion, not delayed observer publication, bounds Defrag.
+	// The RPC returned between those two moments and therefore must fail.
+	late := valid
+	late.defrags[0].ended = late.returned.Add(-time.Millisecond)
+	published := late.returned.Add(time.Millisecond)
+	require.True(t, late.defrags[0].ended.Before(late.returned))
+	require.True(t, late.returned.Before(published))
+	require.False(t, metadataScaleObservedDefragDeadline(terminal, original, &late))
+
+	outside := valid
+	outside.defrags[0].started = outside.sent.Add(time.Millisecond)
+	first := metadataScaleKeepFirstFailure(nil, outside)
+	require.Same(t, first, metadataScaleKeepFirstFailure(first, valid))
+	require.False(t, metadataScaleObservedDefragDeadline(terminal, original, first), "a later matching failure must not replace the first outside-phase cause")
+	first = metadataScaleKeepFirstFailure(nil, valid)
+	cleanup := valid
+	cleanup.method = "Revoke"
+	require.Same(t, first, metadataScaleKeepFirstFailure(first, cleanup))
+	require.True(t, metadataScaleObservedDefragDeadline(terminal, original, first))
+}
+
+// Diagnostic leaves preserve error identity and gRPC status. They are not
+// sufficient recovery evidence: the checker above also requires the original
+// owner and exact Defrag/RPC lifetime. Truncated trees always fail that check.
 // The small tree/leaf/text limits also bound malformed or cyclic test errors.
 type metadataScaleErrorLeaf struct {
 	Type, Code, Message         string

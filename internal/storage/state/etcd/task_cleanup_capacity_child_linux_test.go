@@ -248,6 +248,9 @@ type metadataScaleMaintenanceDiagnostics struct {
 	active                      bool
 	phase                       string
 	sequence                    uint64
+	defragSequence              uint64
+	defrags                     [3]metadataScaleDefragInterval
+	firstFailure                *metadataScaleMaintenanceRPCFailure
 	normalBytes, errorBytes     int
 	normalDropped, errorDropped int
 }
@@ -283,6 +286,42 @@ func (d *metadataScaleMaintenanceDiagnostics) bind(w *DueWorker) {
 	d.mu.Lock()
 	d.worker = w
 	d.mu.Unlock()
+}
+
+// These markers enclose only the actual Defragment invocation, excluding the
+// surrounding admin Status calls and all formatted phase/log descriptions.
+func (d *metadataScaleMaintenanceDiagnostics) beginDefrag() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.defragSequence++
+	return d.defragSequence
+}
+
+func (d *metadataScaleMaintenanceDiagnostics) endDefrag(epoch uint64, member int, started, ended time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if epoch == 0 || epoch > uint64(len(d.defrags)) {
+		return
+	}
+	// Both actual call anchors precede observer locking. Keeping all three
+	// ordered intervals allows a dispatched RPC to cross adjacent members,
+	// without treating the unmeasured gaps or publication delay as Defrag.
+	d.defrags[epoch-1] = metadataScaleDefragInterval{epoch: epoch, member: member, started: started, ended: ended}
+	if d.firstFailure != nil {
+		d.firstFailure.defrags = d.defrags
+	}
+}
+
+func (d *metadataScaleMaintenanceDiagnostics) permitsLoss(err error, original WorkerSessionReference) bool {
+	if d.parent.Err() != nil {
+		return false
+	}
+	if metadataScaleOnlyMemberStopTransport(err) {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return metadataScaleObservedDefragDeadline(err, original, d.firstFailure)
 }
 
 func (d *metadataScaleMaintenanceDiagnostics) state(event string, elapsed time.Duration) {
@@ -322,26 +361,45 @@ func (d *metadataScaleMaintenanceDiagnostics) runPhase(name string, work func())
 func (d *metadataScaleMaintenanceDiagnostics) request(ctx context.Context, method, shape string) func(error) {
 	d.mu.Lock()
 	active, phase := d.active, d.phase
+	w := d.worker
 	d.sequence++
 	sequence := d.sequence
 	d.mu.Unlock()
-	if !active {
-		return func(error) {}
+	observation := metadataScaleMaintenanceRPCFailure{method: method}
+	if w != nil {
+		w.backend.archiveLife.mu.Lock()
+		observation.session, observation.sessionDeadline = w.session.reference, w.session.deadline
+		w.backend.archiveLife.mu.Unlock()
 	}
-	started := time.Now()
+	// Complete observer/lifecycle locking before sampling the actual call
+	// boundary. Logging is deferred until return, so it cannot consume the
+	// original deadline and then be mistaken for dispatched native work.
 	deadline, hasDeadline := ctx.Deadline()
-	before, beforeTruncated := metadataScaleDiagnosticErrorLeaves(ctx.Err())
-	d.log(false, "event=rpc-send sequence=%d method=%s shape=%s phase=%s at=%s has_deadline=%t deadline=%s ctx_leaves=%+v ctx_truncated=%t", sequence, method, shape, phase, started.UTC().Format(time.RFC3339Nano), hasDeadline, deadline.UTC().Format(time.RFC3339Nano), before, beforeTruncated)
+	observation.deadline = deadline
+	observation.parentBefore, observation.sendContextErr = d.parent.Err(), ctx.Err()
+	started := time.Now()
+	observation.sent = started
 	return func(err error) {
 		// Observe before the original caller cancels its RPC context. Both its
 		// error and the returned error survive independently as typed leaves.
-		leaves, truncated := metadataScaleDiagnosticErrorLeaves(err)
-		ctxLeaves, ctxTruncated := metadataScaleDiagnosticErrorLeaves(ctx.Err())
-		parentLeaves, parentTruncated := metadataScaleDiagnosticErrorLeaves(d.parent.Err())
+		observation.completed, observation.returned = true, time.Now()
+		observation.requestErr, observation.rpcErr, observation.parentAfter = err, ctx.Err(), d.parent.Err()
 		d.mu.Lock()
+		observation.defrags = d.defrags
+		if err != nil || observation.rpcErr != nil {
+			d.firstFailure = metadataScaleKeepFirstFailure(d.firstFailure, observation)
+		}
 		returnedPhase := d.phase
 		d.mu.Unlock()
-		d.log(err != nil || ctx.Err() != nil, "event=rpc-return sequence=%d method=%s shape=%s sent_phase=%s returned_phase=%s sent=%s returned=%s elapsed=%s deadline=%s error_leaves=%+v error_truncated=%t ctx_leaves=%+v ctx_truncated=%t parent_leaves=%+v parent_truncated=%t", sequence, method, shape, phase, returnedPhase, started.UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), time.Since(started), deadline.UTC().Format(time.RFC3339Nano), leaves, truncated, ctxLeaves, ctxTruncated, parentLeaves, parentTruncated)
+		if !active {
+			return
+		}
+		before, beforeTruncated := metadataScaleDiagnosticErrorLeaves(observation.sendContextErr)
+		leaves, truncated := metadataScaleDiagnosticErrorLeaves(err)
+		ctxLeaves, ctxTruncated := metadataScaleDiagnosticErrorLeaves(observation.rpcErr)
+		parentLeaves, parentTruncated := metadataScaleDiagnosticErrorLeaves(observation.parentAfter)
+		d.log(false, "event=rpc-send sequence=%d method=%s shape=%s phase=%s at=%s has_deadline=%t deadline=%s ctx_leaves=%+v ctx_truncated=%t emission=after-rpc-return", sequence, method, shape, phase, started.UTC().Format(time.RFC3339Nano), hasDeadline, deadline.UTC().Format(time.RFC3339Nano), before, beforeTruncated)
+		d.log(err != nil || observation.rpcErr != nil, "event=rpc-return sequence=%d method=%s shape=%s sent_phase=%s returned_phase=%s sent=%s returned=%s elapsed=%s deadline=%s error_leaves=%+v error_truncated=%t ctx_leaves=%+v ctx_truncated=%t parent_leaves=%+v parent_truncated=%t", sequence, method, shape, phase, returnedPhase, started.UTC().Format(time.RFC3339Nano), observation.returned.UTC().Format(time.RFC3339Nano), observation.returned.Sub(started), deadline.UTC().Format(time.RFC3339Nano), leaves, truncated, ctxLeaves, ctxTruncated, parentLeaves, parentTruncated)
 	}
 }
 
@@ -487,7 +545,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 	lease := &creationFaultLease{Lease: b.client.Lease}
 	diagnostics := &metadataScaleMaintenanceDiagnostics{t: t, parent: ctx}
 	b.client.Lease = lease
-	if faultPilot {
+	if !startupPilot && (!pilot || faultPilot) {
 		b.client.KV = &metadataScaleDiagnosticKV{KV: b.client.KV, diagnostics: diagnostics}
 		b.client.Lease = &metadataScaleDiagnosticLease{Lease: lease, diagnostics: diagnostics}
 	}
@@ -523,7 +581,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 		if originalStopError == nil {
 			require.NoError(t, stopError)
 		} else {
-			require.True(t, metadataScaleOnlyMemberStopTransport(stopError))
+			require.True(t, diagnostics.permitsLoss(stopError, originalWorker.session.Reference()))
 			require.EqualError(t, stopError, originalStopError.Error(), "shutdown must retain the original measured fault result")
 		}
 	}()
@@ -582,7 +640,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 			diagnostics.phase = "worker-recovery"
 			diagnostics.mu.Unlock()
 			diagnostics.state("recovery-start", 0)
-			w = metadataScaleRecoverWorker(t, ctx, raw, b, w, workerOptions, &originalStopError)
+			w = metadataScaleRecoverWorker(t, ctx, raw, b, w, workerOptions, &originalStopError, diagnostics)
 			diagnostics.bind(w)
 			diagnostics.state("recovery-end", 0)
 			diagnostics.mu.Lock()
@@ -621,11 +679,11 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 	return result
 }
 
-// Member failure may conservatively lose a dispatched original guard even when
-// quorum service remains available. Recovery never revives that session: join
-// its original owner, observe actual native retirement, and use the unchanged
-// production acquisition path. All this work belongs to maintenance accounting.
-func metadataScaleRecoverWorker(t *testing.T, ctx context.Context, raw *clientv3.Client, b *Backend, w *DueWorker, options DueWorkerOptions, originalStopError *error) *DueWorker {
+// Member failure or an attributed Defrag RPC timeout may conservatively lose a
+// dispatched original guard even when quorum service remains available. Never
+// revive that session: join its owner, observe actual native retirement, then
+// use the unchanged acquisition path. This is all maintenance accounting.
+func metadataScaleRecoverWorker(t *testing.T, ctx context.Context, raw *clientv3.Client, b *Backend, w *DueWorker, options DueWorkerOptions, originalStopError *error, diagnostics *metadataScaleMaintenanceDiagnostics) *DueWorker {
 	t.Helper()
 	recovery, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -638,7 +696,7 @@ func metadataScaleRecoverWorker(t *testing.T, ctx context.Context, raw *clientv3
 			break
 		}
 		require.True(t, current.Running, "%+v", current)
-		require.Empty(t, current.LastError, "a maintenance failure other than the exact original Unknown+member-stop transport cannot be hidden")
+		require.Empty(t, current.LastError, "an unattributed maintenance failure cannot be hidden; replacement still requires exact original-owner transport or Defrag evidence")
 		if current.Synchronized {
 			t.Logf("METADATA_SCALE maintenance worker survived same_session=%s same_lease=%d", current.Session.SessionID, current.Session.LeaseID)
 			return w
@@ -652,7 +710,7 @@ func metadataScaleRecoverWorker(t *testing.T, ctx context.Context, raw *clientv3
 	}
 	stopError := w.Stop()
 	*originalStopError = stopError
-	require.True(t, metadataScaleOnlyMemberStopTransport(stopError), "only the actual Unknown+member-stop transport permits this measured replacement: %v", stopError)
+	require.True(t, diagnostics.permitsLoss(stopError, w.session.Reference()), "only original Unknown+member-stop transport or the attributed ordered-Defrag RPC deadline permits this measured replacement: %v", stopError)
 	oldSession := w.session
 	oldReference := oldSession.Reference()
 	require.ErrorIs(t, b.RenewWorkerSession(recovery, oldSession), ErrInvalidRecord, "the retired original capability must remain unusable")
@@ -926,7 +984,13 @@ func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.C
 	for _, i := range order {
 		diagnostics.runPhase(fmt.Sprintf("defrag-member-%d", i), func() {
 			bounded, stop = context.WithTimeout(ctx, 2*time.Minute)
-			_, err = raw.Defragment(bounded, endpoints[i])
+			func() {
+				epoch := diagnostics.beginDefrag()
+				started := time.Now()
+				_, err = raw.Defragment(bounded, endpoints[i])
+				ended := time.Now()
+				diagnostics.endDefrag(epoch, i, started, ended)
+			}()
 			stop()
 			require.NoError(t, err)
 			bounded, stop = partitionWorkerNativeRequest(ctx)
