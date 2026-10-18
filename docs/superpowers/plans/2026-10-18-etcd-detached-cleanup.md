@@ -11,6 +11,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-18-etcd-detached-cleanup-design.md`；继承已批准主方案。
 
+**最新接续点（2026-10-18）：** `e01e233` 已完成 v2 配额返还 writer/公共与 paid
+恢复消费者，实际返还、合法重用和提交后丢响应均通过组件验收。不要重做此前已关闭
+单元。下一片继续自动发现与最终 P 删除；并行 wire/preparation 尚在验证，未开放
+managed Claim。完整 phase 准入、销毁自动消费和 HTTP 接线仍是主链剩余工作。
+
 ## Global Constraints
 
 256分区/4 Relist/20MiB/s Range/100 claim-s/32永久任务；64 native节点、128KiB请求、

@@ -10,6 +10,11 @@
 | 整体交付 | 约45% | 沿用20/30/20/15/15权重和90/70/30/0/0阶段估算，包含容量、故障、部署恢复及最终替代 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
+最新完成：`e01e233` 接通 detached v2 的真实配额归还、提交后丢响应恢复和归还后
+重新申请。实际三成员 TLS/native 三场景、race、Linux vet 和主分支输入等值集成
+通过，见[配额归还组件验收](2026-10-18-etcd-detached-quota-refund-verification.md)。
+自动发现与最终 P 删除、managed Claim 和 HTTP 主链仍开放；本片不单独上调粗估百分比。
+
 功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
