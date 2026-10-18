@@ -226,3 +226,28 @@ func (j *Journal) RenewActivation(ctx context.Context, previousDigest string, ne
 	j.activation = &verified
 	return nil
 }
+
+// QueryActivationRenewal confirms only the last durable replacement on this
+// original live handle. It is independent of business expiry and gate closure,
+// but never blesses poisoned, cold or externally replaced journal bytes. An
+// unknown pair is an error, not evidence that an installation was never sent.
+func (j *Journal) QueryActivationRenewal(ctx context.Context, previousDigest, candidateDigest string) (bool, error) {
+	if j == nil || j.self != j {
+		return false, ErrJournalUnavailable
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if err := j.checkLocked(ctx, true); err != nil {
+		return false, err
+	}
+	if !j.fresh || j.birth == nil || j.activation == nil || !journalHash(previousDigest) || !journalHash(candidateDigest) || previousDigest == candidateDigest {
+		return false, ErrJournalUnavailable
+	}
+	if j.activationPreviousDigest != previousDigest || j.activation.Digest() != candidateDigest {
+		return false, ErrConflict
+	}
+	if err := j.confirmActivationLocked(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}

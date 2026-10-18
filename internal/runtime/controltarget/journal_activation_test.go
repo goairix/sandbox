@@ -586,3 +586,45 @@ func TestLiveJournalRenewActivationPersistenceFailurePoisons(t *testing.T) {
 		t.Fatal("uncertain renewal admitted a command")
 	}
 }
+
+func TestLiveJournalQueryActivationRenewalExactAndClosed(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	ctx := context.Background()
+	if err := j.InstallActivation(ctx, f.activation); err != nil {
+		t.Fatal(err)
+	}
+	next := f.nextActivation(t, nil)
+	if installed, err := j.QueryActivationRenewal(ctx, f.activation.Digest(), next.Digest()); err == nil || installed {
+		t.Fatal("uninstalled candidate is not an authenticated absence", installed, err)
+	}
+	if err := j.RenewActivation(ctx, f.activation.Digest(), next); err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := j.QueryActivationRenewal(ctx, f.activation.Digest(), next.Digest()); err != nil || !installed {
+		t.Fatal("original installed pair was not confirmed", installed, err)
+	}
+	if installed, err := j.QueryActivationRenewal(ctx, strings.Repeat("f", 64), next.Digest()); err == nil || installed {
+		t.Fatal("foreign predecessor was confirmed", installed, err)
+	}
+	if _, err := j.CloseGate(ctx, f.o.DataGateEpoch); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.now = next.NotAfter().Add(time.Minute)
+	before := f.clock.calls
+	if installed, err := j.QueryActivationRenewal(ctx, f.activation.Digest(), next.Digest()); err != nil || !installed {
+		t.Fatal("closed/expired business activation hid the original installation", installed, err)
+	}
+	if f.clock.calls != before || j.Status().Gate.GateState != "closed" {
+		t.Fatal("diagnostic query refreshed authority or reopened the gate")
+	}
+	j.Close()
+	cold, err := OpenClosedJournal(ctx, f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cold.Close()
+	if installed, err := cold.QueryActivationRenewal(ctx, f.activation.Digest(), next.Digest()); err == nil || installed {
+		t.Fatal("cold history became live installation evidence", installed, err)
+	}
+}
