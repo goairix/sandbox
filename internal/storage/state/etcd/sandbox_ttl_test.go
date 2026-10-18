@@ -5,10 +5,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
+	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -464,4 +469,336 @@ func TestSandboxTTLRecoveryStagePinsDeadOperationAndExactSources(t *testing.T) {
 		require.LessOrEqual(t, failure.Size(), 256<<10)
 		t.Logf("TTL recovery component same_due=%t nodes=%d request_pb=%d failure_pb=%d", sameDue, wantNodes, request.Size(), failure.Size())
 	}
+}
+
+type sandboxTTLColdProtocolFixture struct {
+	duePublicationFixture
+	view        *SandboxReadView
+	activation  p.TargetActivationEvidence
+	original    sandboxTTLRecord
+	pending     *mvccpb.KeyValue
+	destination *ct.Destination
+	queries     atomic.Int32
+	installs    atomic.Int32
+	querySeen   chan struct{}
+	queryReply  chan struct{}
+}
+
+// The existing signed publication producer and actual Backend/Stage/KV paths
+// establish all metadata here. The mTLS peer is a protocol model reporting its
+// selected installed pair, not evidence of a real Supervisor/journal install.
+// No response DTO or authorization callback is injected into the Backend.
+func newSandboxTTLColdProtocolFixture(t *testing.T, blockQuery bool) *sandboxTTLColdProtocolFixture {
+	t.Helper()
+	f := &sandboxTTLColdProtocolFixture{duePublicationFixture: newDuePublicationFixture(t), querySeen: make(chan struct{}, 4), queryReply: make(chan struct{})}
+	ctx := context.Background()
+	published, err := f.b.PublishRuntimeEnrolled(ctx, f.claim, f.proof, f.enrollment)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, published.Outcome)
+	f.view, err = f.b.ReadSandboxView(ctx, f.claim.reference.SandboxID)
+	require.NoError(t, err)
+	initial, err := f.b.sandboxTTLInitialActivation(ctx, f.view)
+	require.NoError(t, err)
+	birth, binding := initial.Birth(), initial.Binding()
+	runtimeDigest, issuerDigest := sha256.Sum256(initial.RuntimeCertificate()), sha256.Sum256(initial.IssuerCertificate())
+	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
+	wire, err := p.SignTargetActivation(root, p.TargetActivationClaims{Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: binding, Identity: initial.Identity(), DataGateEpoch: initial.DataGateEpoch(), UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed, ContractDigest: birth.ContractDigest, RuntimeCertificateDigest: hex.EncodeToString(runtimeDigest[:]), IssuerCertificateDigest: hex.EncodeToString(issuerDigest[:]), NotBefore: f.now.Add(-time.Second), NotAfter: f.now.Add(4 * time.Minute)})
+	require.NoError(t, err)
+	f.activation, err = f.b.enrolledVerifier.VerifyTargetActivation(wire, initial.RuntimeCertificate(), initial.IssuerCertificate(), birth, f.now)
+	require.NoError(t, err)
+	admitted, err := f.b.BeginOperation(ctx, BeginOperationInput{SandboxID: initial.Identity().SandboxID, RequestID: "ttl-cold-model", Kind: OperationMutation})
+	require.NoError(t, err)
+	require.Equal(t, OperationCommitted, admitted.Outcome)
+	require.NotNil(t, admitted.Capability)
+	c := admitted.Capability
+	c.mu.Lock()
+	draft, err := f.b.prepareSandboxTTL(ctx, c, f.view, f.now, 120, f.activation)
+	if err == nil {
+		err = f.b.publishSandboxTTL(ctx, c, draft)
+	}
+	c.mu.Unlock()
+	require.NoError(t, err)
+	f.original = draft.record
+	require.NoError(t, f.b.CancelOperationCapability(ctx, c))
+	pendingKey, _, err := f.b.sandboxTTLKeys(c.record.Reference.Partition, c.record.Reference.SandboxID)
+	require.NoError(t, err)
+	f.pending = f.server.point(pendingKey)
+	require.NotNil(t, f.pending)
+	require.True(t, enrolledImmutableKV(f.pending))
+	token, guard, receipt, mutation, err := f.b.namespace.operationKeys(c.record.Reference)
+	require.NoError(t, err)
+	for _, key := range []string{token, guard, receipt, mutation} {
+		require.Nil(t, f.server.point(key), "actual original Lease revoke retires all four operation envelopes")
+	}
+
+	runtimeKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, 32))
+	issuerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, 32))
+	runtimeCredential, err := p.NewManagementTLSCredential(runtimeKey, initial.RuntimeCertificate(), "runtime_receipt")
+	require.NoError(t, err)
+	issuerCredential, err := p.NewManagementTLSCredential(issuerKey, initial.IssuerCertificate(), "command_issuer")
+	require.NoError(t, err)
+	config, err := p.NewManagementTLSConfig(p.ManagementTLSOptions{Verifier: f.b.enrolledVerifier, Clock: f.b.authorityClock, Credential: runtimeCredential, PeerCertificate: initial.IssuerCertificate(), Server: true})
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	f.destination, err = ct.NewDestination(ct.DestinationOptions{Identity: initial.Identity(), RuntimeCertificate: f.activation.RuntimeCertificate(), Credential: issuerCredential, Verifier: f.b.enrolledVerifier, Clock: f.b.authorityClock, Dial: func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+	}})
+	require.NoError(t, err)
+	if !blockQuery {
+		close(f.queryReply)
+	}
+	serverCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			raw, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			func() {
+				defer raw.Close()
+				_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+				conn := tls.Server(raw, config)
+				request, err := ct.ReadRuntimeRequest(conn)
+				if err != nil || request.Renewal == nil {
+					return
+				}
+				e := request.Renewal
+				if e.Purpose != ct.RuntimeRenewalQueryPurpose {
+					f.installs.Add(1)
+					return
+				}
+				f.queries.Add(1)
+				if e.Identity != f.activation.Identity() || e.DataGateEpoch != f.activation.DataGateEpoch() || e.PreviousDigest != f.original.PreviousDigest || e.CandidateDigest != f.activation.Digest() {
+					return
+				}
+				select {
+				case f.querySeen <- struct{}{}:
+				case <-serverCtx.Done():
+					return
+				}
+				select {
+				case <-f.queryReply:
+				case <-serverCtx.Done():
+					return
+				}
+				response := ct.RuntimeRenewalResponse{Version: 1, Purpose: "runtime_activation_renewed", Identity: e.Identity, DataGateEpoch: e.DataGateEpoch, Nonce: e.Nonce, PreviousDigest: e.PreviousDigest, CandidateDigest: e.CandidateDigest, Installed: true, GateState: "open"}
+				if ct.WriteRuntimeRenewalResponse(conn, response) == nil {
+					_ = conn.CloseWrite()
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, listener.Close())
+		<-done
+		require.NoError(t, issuerCredential.Close())
+		require.NoError(t, runtimeCredential.Close())
+	})
+	return f
+}
+
+func (f *sandboxTTLColdProtocolFixture) recover(ctx context.Context) (SandboxTTLResult, error) {
+	return f.b.RenewSandboxTTL(ctx, nil, f.view, f.original.Baseline, f.original.Timeout, f.activation, f.destination)
+}
+
+func TestSandboxTTLColdHandlerCommitsInstalledCandidateAfterOriginalAbort(t *testing.T) {
+	f := newSandboxTTLColdProtocolFixture(t, false)
+	lease := &creationFaultLease{Lease: f.b.client.Lease}
+	f.b.client.Lease = lease
+	result, err := f.recover(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.Equal(t, "ttl_recover", result.Stage.StageID)
+	require.Equal(t, int32(1), f.queries.Load())
+	require.Zero(t, f.installs.Load())
+	require.EqualValues(t, 1, lease.grants.Load(), "only a fresh metadata Stage may be granted")
+	require.Nil(t, f.server.point(string(f.pending.Key)))
+	view, err := f.b.ReadSandboxView(context.Background(), f.original.Control.SandboxID)
+	require.NoError(t, err)
+	current, err := f.b.ReadSandboxTTLCurrent(context.Background(), view)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, f.activation.Wire(), current.Activation.Wire())
+	require.Equal(t, f.original.Baseline, current.Baseline)
+	_, oldFinal, err := f.b.sandboxTTLStage(f.original, f.pending.CreateRevision)
+	require.NoError(t, err)
+	outcome, err := f.b.ResolveStage(context.Background(), oldFinal)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeAborted, outcome)
+}
+
+func TestSandboxTTLColdHandlerLostCommitACKOnlyArbitratesSameRecovery(t *testing.T) {
+	f := newSandboxTTLColdProtocolFixture(t, false)
+	controlKey, _, err := f.b.namespace.sandboxKeys(f.original.Operation.Reference.Partition, f.original.Control.SandboxID, "read")
+	require.NoError(t, err)
+	lease := &creationFaultLease{Lease: f.b.client.Lease}
+	f.b.client.Lease = lease
+	dropped := 0
+	f.b.client.KV = &faultKV{KV: f.b.client.KV, match: putsKey(controlKey), after: func(response *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		if err == nil && response.Succeeded && dropped == 0 {
+			dropped++
+			return nil, errors.New("lost actual recovery commit acknowledgement")
+		}
+		return response, err
+	}}
+	first, err := f.recover(context.Background())
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	require.Equal(t, 1, dropped, "the original server must have committed before losing its response")
+	require.Nil(t, f.server.point(string(f.pending.Key)))
+	_, currentKey, err := f.b.sandboxTTLKeys(f.original.Operation.Reference.Partition, f.original.Control.SandboxID)
+	require.NoError(t, err)
+	committed := f.server.point(currentKey)
+	require.NotNil(t, committed)
+	f.view, err = f.b.ReadSandboxView(context.Background(), f.original.Control.SandboxID)
+	require.NoError(t, err)
+	_, originalReceipt, err := f.b.stageKeys(first.Stage)
+	require.NoError(t, err)
+	f.b.client.KV = &faultKV{KV: f.b.client.KV, match: func(ops []clientv3.Op) bool {
+		for _, op := range ops {
+			require.False(t, op.IsDelete(), "arbitration must not resubmit any business mutation")
+			if op.IsPut() {
+				require.Equal(t, originalReceipt, string(op.KeyBytes()), "only the original Stage resolver may propose an aborted receipt")
+			}
+		}
+		return false
+	}}
+	second, err := f.recover(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, second.Outcome)
+	require.Equal(t, first.Stage, second.Stage)
+	require.Equal(t, committed, f.server.point(currentKey), "receipt arbitration cannot rewrite the committed candidate")
+	require.EqualValues(t, 1, lease.grants.Load())
+	require.Zero(t, f.installs.Load())
+}
+
+func TestSandboxTTLColdHandlerLostReservationACKRetainsFixedAttempt(t *testing.T) {
+	f := newSandboxTTLColdProtocolFixture(t, false)
+	lease := &creationFaultLease{Lease: f.b.client.Lease}
+	f.b.client.Lease = lease
+	reservations := 0
+	f.b.client.KV = &faultKV{KV: f.b.client.KV, match: putsKey(string(f.pending.Key)), after: func(response *clientv3.TxnResponse, err error) (*clientv3.TxnResponse, error) {
+		if err == nil && response.Succeeded {
+			reservations++
+			if reservations == 1 {
+				return nil, errors.New("lost actual pending reservation acknowledgement")
+			}
+		}
+		return response, err
+	}}
+	_, err := f.recover(context.Background())
+	require.ErrorIs(t, err, ErrOutcomeUnknown)
+	require.Equal(t, 1, reservations)
+	require.Zero(t, lease.grants.Load(), "an unacknowledged reservation cannot return a metadata Stage owner")
+	reservedKV := f.server.point(string(f.pending.Key))
+	require.NotNil(t, reservedKV)
+	require.Equal(t, f.pending.CreateRevision, reservedKV.CreateRevision)
+	require.Greater(t, reservedKV.ModRevision, f.pending.ModRevision)
+	reserved, err := decodeSandboxTTL(reservedKV, true)
+	require.NoError(t, err)
+	require.Equal(t, string(f.pending.Value), string(reserved.recovery.OriginalRaw))
+	_, firstRef, err := f.b.sandboxTTLStage(reserved, reservedKV.ModRevision)
+	require.NoError(t, err)
+
+	// The next cold request cannot re-grant this abandoned Stage. It must
+	// actually seal Aborted, then make one new metadata-only reservation.
+	result, err := f.recover(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.NotEqual(t, firstRef, result.Stage)
+	require.Equal(t, 2, reservations, "each request advances at most one fixed reservation")
+	require.EqualValues(t, 1, lease.grants.Load())
+	_, oldReceipt, err := f.b.stageKeys(firstRef)
+	require.NoError(t, err)
+	outcome, err := decodeReceipt(f.server.point(oldReceipt), firstRef)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeAborted, outcome)
+	_, currentKey, err := f.b.sandboxTTLKeys(f.original.Operation.Reference.Partition, f.original.Control.SandboxID)
+	require.NoError(t, err)
+	current, err := decodeSandboxTTL(f.server.point(currentKey), false)
+	require.NoError(t, err)
+	require.Equal(t, string(f.pending.Value), string(current.recovery.OriginalRaw))
+	require.Equal(t, &firstRef, current.recovery.PreviousFinal)
+	require.Equal(t, f.pending.CreateRevision, current.recovery.OriginalBirth)
+	require.Zero(t, f.installs.Load())
+	oldGuard, _, err := f.b.stageKeys(firstRef)
+	require.NoError(t, err)
+	aborted, err := encodeReceipt(firstRef, OutcomeAborted)
+	require.NoError(t, err)
+	f.server.mu.Lock()
+	requests := append([]*pb.TxnRequest(nil), f.server.requests...)
+	f.server.mu.Unlock()
+	var rotated *pb.TxnRequest
+	for _, request := range requests {
+		for _, op := range request.Success {
+			put := op.GetRequestPut()
+			if put == nil || string(put.Key) != string(f.pending.Key) {
+				continue
+			}
+			var envelope sandboxTTLRecoveryRecord
+			if json.Unmarshal(put.Value, &envelope) == nil && envelope.PreviousFinal != nil && *envelope.PreviousFinal == firstRef {
+				rotated = request
+			}
+		}
+	}
+	require.NotNil(t, rotated)
+	for _, compare := range taskProtoComparisons([]clientv3.Cmp{clientv3.Compare(clientv3.Value(oldReceipt), "=", aborted), clientv3.Compare(clientv3.LeaseValue(oldReceipt), "=", 0), clientv3.Compare(clientv3.CreateRevision(oldGuard), "=", 0)}) {
+		require.Contains(t, rotated.Compare, compare, "the actual reservation CAS must fence the prior attempt's durable abort and absent guard")
+	}
+	require.Equal(t, 37, len(rotated.Compare)+len(rotated.Success)+len(rotated.Failure))
+	require.LessOrEqual(t, rotated.Size(), 128<<10)
+}
+
+func TestSandboxTTLColdHandlerDestroyWinsDuringOriginalQuery(t *testing.T) {
+	f := newSandboxTTLColdProtocolFixture(t, true)
+	lease := &creationFaultLease{Lease: f.b.client.Lease}
+	f.b.client.Lease = lease
+	type answer struct {
+		result SandboxTTLResult
+		err    error
+	}
+	done := make(chan answer, 1)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(f.queryReply) }) }
+	joined := false
+	t.Cleanup(func() {
+		release()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("original cold handler did not join during failure cleanup")
+			}
+		}
+	})
+	go func() {
+		result, err := f.recover(context.Background())
+		done <- answer{result, err}
+	}()
+	select {
+	case <-f.querySeen:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the actual concrete TLS query did not reach its original peer")
+	}
+	stage, _ := taskDestroyPrepare(t, f.b, context.Background(), BeginDestroyInput{SandboxID: f.original.Control.SandboxID, RequestID: uuid.NewString(), ExpectedControlRevision: f.view.ControlRevision()})
+	outcome, err := f.b.CommitStage(context.Background(), stage)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, outcome)
+	require.NoError(t, f.b.ReleaseStage(context.Background(), stage))
+	grantsAfterDestroy := lease.grants.Load()
+	release()
+	select {
+	case got := <-done:
+		joined = true
+		require.Error(t, got.err)
+		require.NotEqual(t, OutcomeCommitted, got.result.Outcome)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the original cold handler did not return after its TLS query joined")
+	}
+	require.Equal(t, f.pending, f.server.point(string(f.pending.Key)), "Destroy's changed source cannot be repaired back to Active")
+	require.Equal(t, grantsAfterDestroy, lease.grants.Load())
+	require.Zero(t, f.installs.Load())
 }

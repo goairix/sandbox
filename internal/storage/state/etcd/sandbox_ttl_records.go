@@ -52,9 +52,10 @@ type SandboxTTLResult struct {
 
 // These records use two fixed business points, not a replacement operation or
 // Stage protocol. Existing OperationRecord/Stage v1 bytes remain unchanged.
-// PendingRevision is zero in ttl-pending and its exact immutable native birth in
-// ttl-current. Persisting a locator, rather than its mutation digest, avoids a
-// self-referential hash; both original Stage digests are rebuilt deterministically.
+// PendingRevision is zero in ttl-pending. A v1 current stores the original
+// pending birth; a normalized v2 current stores its recovery reservation Mod.
+// Version 2 keeps the original birth separately and never alters the v1 bytes.
+// Persisting locators avoids self-referential Stage mutation digests.
 type sandboxTTLRecord struct {
 	Version         uint32               `json:"version"`
 	Operation       OperationRecord      `json:"operation"`
@@ -485,6 +486,80 @@ func (b *Backend) sandboxTTLRecoveryMutation(r sandboxTTLRecord, reservedMod int
 		return Mutation{}, err
 	}
 	return b.sandboxTTLBusinessMutation(original, reservedMod, compares, wire)
+}
+
+// Reserve only one deterministic metadata attempt. The actual caller must first
+// complete its concrete Query and Resolve the predecessor to Aborted. Every
+// relevant absence/value is still checked atomically by the returned mutation;
+// this pure preparation is not permission to Grant, install, or revive a Stage.
+func (b *Backend) sandboxTTLRecoveryReservation(r sandboxTTLRecord, pendingKV *mvccpb.KeyValue, previous *StageReference) (sandboxTTLRecord, Mutation, error) {
+	if !operationPermanentKV(pendingKV) {
+		return sandboxTTLRecord{}, Mutation{}, ErrInvalidRecord
+	}
+	original := r
+	original.PendingRevision, original.recovery = 0, nil
+	originalRaw := pendingKV.Value
+	if r.recovery != nil {
+		if previous == nil {
+			return sandboxTTLRecord{}, Mutation{}, ErrInvalidRecord
+		}
+		_, oldFinal, err := b.sandboxTTLStage(r, pendingKV.ModRevision)
+		if err != nil || oldFinal != *previous {
+			return sandboxTTLRecord{}, Mutation{}, ErrInvalidRecord
+		}
+		originalRaw = r.recovery.OriginalRaw
+	} else if previous != nil || !enrolledImmutableKV(pendingKV) {
+		return sandboxTTLRecord{}, Mutation{}, ErrInvalidRecord
+	}
+	locator, err := sandboxTTLRecoveryLocator(original, pendingKV.ModRevision, previous)
+	if err != nil {
+		return sandboxTTLRecord{}, Mutation{}, err
+	}
+	envelope := &sandboxTTLRecoveryRecord{Version: 2, OriginalRaw: bytes.Clone(originalRaw), OriginalBirth: pendingKV.CreateRevision, PriorMod: pendingKV.ModRevision, RecoveryFinal: locator, reservedMod: math.MaxInt64}
+	if previous != nil {
+		owned := *previous
+		envelope.PreviousFinal = &owned
+	}
+	candidate := original
+	candidate.recovery = envelope
+	// The complete future Stage is measured at the maximum native revision
+	// width before the reservation Put or any metadata Stage allocation.
+	plan, _, err := b.sandboxTTLStage(candidate, math.MaxInt64)
+	if err != nil {
+		return sandboxTTLRecord{}, Mutation{}, err
+	}
+	pending, _, err := b.sandboxTTLKeys(original.Operation.Reference.Partition, original.Control.SandboxID)
+	if err != nil || string(pendingKV.Key) != pending {
+		return sandboxTTLRecord{}, Mutation{}, ErrInvalidRecord
+	}
+	replaced := false
+	for i, compare := range plan.Comparisons {
+		if string(compare.Key) == pending && compare.Target == pb.Compare_MOD {
+			plan.Comparisons[i] = clientv3.Compare(clientv3.ModRevision(pending), "=", pendingKV.ModRevision)
+			replaced = true
+		}
+	}
+	if !replaced {
+		return sandboxTTLRecord{}, Mutation{}, ErrInvalidMutation
+	}
+	if previous != nil {
+		guard, receipt, err := b.stageKeys(*previous)
+		if err != nil {
+			return sandboxTTLRecord{}, Mutation{}, err
+		}
+		aborted, err := encodeReceipt(*previous, OutcomeAborted)
+		if err != nil {
+			return sandboxTTLRecord{}, Mutation{}, err
+		}
+		plan.Comparisons = append(plan.Comparisons, clientv3.Compare(clientv3.Value(receipt), "=", aborted), clientv3.Compare(clientv3.LeaseValue(receipt), "=", 0), clientv3.Compare(clientv3.CreateRevision(guard), "=", 0))
+	}
+	envelope.reservedMod = 0
+	wire, err := encodeSandboxTTLRecovery(*envelope)
+	if err != nil {
+		return sandboxTTLRecord{}, Mutation{}, err
+	}
+	plan.Writes = []Write{{Key: pending, Value: []byte(wire)}}
+	return candidate, plan, nil
 }
 
 // A complete, authenticated no-effect rejection can retire only this pending

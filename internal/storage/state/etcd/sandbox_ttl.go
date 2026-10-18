@@ -45,9 +45,11 @@ type sandboxTTLDraft struct {
 // RenewSandboxTTL fixes one native candidate before contacting the exact runtime
 // through a concrete authenticated Destination. It never accepts an ACK DTO as
 // commit permission. A retry must provide that candidate's pinned Destination;
-// it queries instead of resending installation. A nil operation is allowed only
-// to diagnose an existing native pending candidate, using Query/Resolve; a dead
-// Stage is never re-granted and this cold path cannot complete a new mutation.
+// it queries instead of resending installation. A nil operation may repair only
+// an already installed native candidate after an actual authenticated Query and
+// durable abort of the predecessor. It fixes a new metadata-only Stage under
+// the original source fences; it never restores the old capability, re-grants
+// an old Stage, re-signs certification, or sends another installation.
 // Baseline is the caller's fixed controlled UTC observation, not a retry's now.
 func (b *Backend) RenewSandboxTTL(ctx context.Context, c *OperationCapability, view *SandboxReadView, baseline time.Time, seconds int, next p.TargetActivationEvidence, destination *ct.Destination) (result SandboxTTLResult, resultErr error) {
 	result.Outcome = OutcomeUnknown
@@ -58,7 +60,7 @@ func (b *Backend) RenewSandboxTTL(ctx context.Context, c *OperationCapability, v
 		return result, err
 	}
 	if c == nil {
-		return b.querySandboxTTLPending(ctx, view, destination)
+		return b.querySandboxTTLPending(ctx, view, baseline, seconds, next, destination)
 	}
 	if c.self != c || c.origin != b || c.parentCtx == nil || c.record.Reference.Kind != OperationMutation {
 		return result, ErrInvalidRecord
@@ -631,6 +633,16 @@ func (b *Backend) readSandboxTTLRecord(ctx context.Context, view *SandboxReadVie
 			return r, nil, err
 		}
 		keys, refs, outcomes = append(keys, oldReceipt), append(refs, oldFinal), append(outcomes, OutcomeAborted)
+		if previous := r.recovery.PreviousFinal; previous != nil {
+			// Rotation keeps only the immediate predecessor locator. Its exact
+			// immutable abort was fenced by the reservation CAS and must remain
+			// attributable when reading either pending or committed current.
+			_, previousReceipt, err := b.stageKeys(*previous)
+			if err != nil {
+				return r, nil, err
+			}
+			keys, refs, outcomes = append(keys, previousReceipt), append(refs, *previous), append(outcomes, OutcomeAborted)
+		}
 	}
 	births := make([]int64, len(keys))
 	births[0] = publishBirth
@@ -705,25 +717,245 @@ func (b *Backend) authenticateSandboxTTL(ctx context.Context, view *SandboxReadV
 	return a, nil
 }
 
-func (b *Backend) querySandboxTTLPending(ctx context.Context, view *SandboxReadView, destination *ct.Destination) (SandboxTTLResult, error) {
-	result := SandboxTTLResult{Outcome: OutcomeUnknown}
-	pending, err := b.ReadSandboxTTLPending(ctx, view)
-	if err != nil || pending == nil {
-		return result, errors.Join(ErrOutcomeUnknown, err)
+func (b *Backend) querySandboxTTLPending(ctx context.Context, view *SandboxReadView, baseline time.Time, seconds int, next p.TargetActivationEvidence, destination *ct.Destination) (result SandboxTTLResult, resultErr error) {
+	// Cold retries select native state, not a caller capability or response DTO.
+	// Once this branch is selected, errors are uncertain TTL outcomes even if
+	// the original Stage has been definitively aborted in metadata.
+	result.Outcome = OutcomeUnknown
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(ErrOutcomeUnknown, resultErr)
+		}
+	}()
+	r, pendingKV, err := b.readSandboxTTLRecord(ctx, view, true)
+	if err != nil {
+		return result, err
 	}
-	result.Stage, result.Baseline, result.ExpiresAt, result.Timeout = pending.Stage, pending.Baseline, pending.ExpiresAt, pending.Timeout
-	if destination.Identity() != pending.Activation.Identity() || !bytes.Equal(destination.RuntimeCertificate(), pending.Activation.RuntimeCertificate()) {
+	if pendingKV == nil {
+		return b.resolveSandboxTTLCurrent(ctx, view, baseline, seconds, next, destination)
+	}
+	activation, err := b.authenticateSandboxTTL(ctx, view, r)
+	if err != nil {
+		return result, err
+	}
+	if !r.Baseline.Equal(baseline) || r.Timeout != seconds || next.Digest() != activation.Digest() || !bytes.Equal(next.Wire(), activation.Wire()) || destination.Identity() != activation.Identity() || !bytes.Equal(destination.RuntimeCertificate(), activation.RuntimeCertificate()) {
 		return result, ErrInvalidRecord
 	}
-	response, err := destination.QueryRuntimeActivationRenewal(ctx, pending.Activation.DataGateEpoch(), pending.PreviousDigest, pending.Activation.Digest())
-	if err != nil || !response.Installed || response.GateState != "open" || response.Identity != pending.Activation.Identity() || response.DataGateEpoch != pending.Activation.DataGateEpoch() || response.PreviousDigest != pending.PreviousDigest || response.CandidateDigest != pending.Activation.Digest() {
+	_, result.Stage, err = b.sandboxTTLStage(r, pendingKV.ModRevision)
+	result.Baseline, result.ExpiresAt, result.Timeout = r.Baseline, r.ExpiresAt, r.Timeout
+	if err != nil {
+		return result, err
+	}
+	response, err := destination.QueryRuntimeActivationRenewal(ctx, activation.DataGateEpoch(), r.PreviousDigest, activation.Digest())
+	if err != nil || !response.Installed || response.Rejected || response.GateState != "open" || response.Identity != activation.Identity() || response.DataGateEpoch != activation.DataGateEpoch() || response.PreviousDigest != r.PreviousDigest || response.CandidateDigest != activation.Digest() {
 		return result, errors.Join(ErrOutcomeUnknown, err)
 	}
-	// Resolve may durably abort the original metadata attempt. That never
-	// rolls back installed runtime certification or authorizes a new Stage.
-	result.Outcome, err = b.ResolveStage(ctx, pending.Stage)
+
+	// Anchor before trusted I/O: a delayed observation may only shorten the
+	// remaining window. Recovery finishes an existing effect; old business TTL
+	// and the revoked operation do not become a new admission authority.
+	anchor := time.Now()
+	now, err := b.observePublicationClock(ctx)
+	if err != nil {
+		return result, err
+	}
+	deadline := sandboxTTLEffectDeadline(anchor, now, anchor.Add(time.Duration(operationLeaseTTL)*time.Second), r.ExpiresAt, activation.NotAfter())
+	effectCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	deadline, _ = effectCtx.Deadline()
+	if err := effectCtx.Err(); err != nil {
+		return result, err
+	}
+	if _, err := b.enrolledVerifier.VerifyTargetActivation(activation.Wire(), activation.RuntimeCertificate(), activation.IssuerCertificate(), activation.Birth(), now); err != nil {
+		return result, err
+	}
+	if view.records.Control.Phase != PhaseActive || !reflect.DeepEqual(*view.records.Control, r.Control) {
+		return result, ErrConflict
+	}
+	if err := b.ConfirmSandboxView(effectCtx, view); err != nil {
+		return result, err
+	}
+
+	original := r
+	original.PendingRevision, original.recovery = 0, nil
+	birth := pendingKV.CreateRevision
+	if r.recovery != nil {
+		birth = r.recovery.OriginalBirth
+	}
+	_, originalFinal, err := b.sandboxTTLStage(original, birth)
+	if err != nil {
+		return result, err
+	}
+	outcome, err := b.ResolveStage(effectCtx, originalFinal)
+	if err != nil {
+		return result, err
+	}
+	if outcome == OutcomeCommitted {
+		return b.resolveSandboxTTLCurrentFresh(ctx, view, baseline, seconds, next, destination)
+	}
+	if outcome != OutcomeAborted {
+		return result, ErrOutcomeUnknown
+	}
+	var previous *StageReference
+	if r.recovery != nil {
+		_, priorFinal, err := b.sandboxTTLStage(r, pendingKV.ModRevision)
+		if err != nil {
+			return result, err
+		}
+		outcome, err = b.ResolveStage(effectCtx, priorFinal)
+		if err != nil {
+			return result, err
+		}
+		if outcome == OutcomeCommitted {
+			return b.resolveSandboxTTLCurrentFresh(ctx, view, baseline, seconds, next, destination)
+		}
+		if outcome != OutcomeAborted {
+			return result, ErrOutcomeUnknown
+		}
+		previous = &priorFinal
+	}
+	// Exactly one new reservation can be proposed by this invocation. Unknown
+	// reservation dispatch returns after diagnostic readback, without Grant.
+	candidate, reservation, err := b.sandboxTTLRecoveryReservation(r, pendingKV, previous)
+	if err != nil {
+		return result, err
+	}
+	reserved, err := b.reserveSandboxTTLRecovery(effectCtx, view, candidate, reservation)
+	if reserved.recovery != nil {
+		// Even an uncertain reservation may report its exact native identity;
+		// only the acknowledged path below can allocate its original Stage.
+		_, diagnostic, diagnosticErr := b.sandboxTTLStage(reserved, reserved.recovery.reservedMod)
+		if diagnosticErr == nil {
+			result.Stage = diagnostic
+		}
+	}
+	if err != nil {
+		return result, err
+	}
+	mutation, ref, err := b.sandboxTTLStage(reserved, reserved.recovery.reservedMod)
+	if err != nil {
+		return result, err
+	}
+	result.Stage = ref
+	if err := effectCtx.Err(); err != nil {
+		return result, err
+	}
+	stage, err := b.beginStageWithLocator(effectCtx, reserved.recovery.RecoveryFinal, time.Until(deadline), func(StageAttemptLocator) (Mutation, error) { return mutation, nil }, nil)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		cleanup, finish := b.requestContext(context.Background())
+		result.GuardCleanupError = b.ReleaseStage(cleanup, stage)
+		finish()
+		if result.GuardCleanupError != nil {
+			resultErr = errors.Join(ErrOutcomeUnknown, resultErr, result.GuardCleanupError)
+		}
+	}()
+	if stage.reference != ref {
+		return result, ErrInvalidMutation
+	}
+	if err := effectCtx.Err(); err != nil {
+		return result, err
+	}
+	result.Outcome, err = b.CommitStage(effectCtx, stage)
+	if err != nil || result.Outcome != OutcomeCommitted {
+		return result, errors.Join(ErrOutcomeUnknown, err)
+	}
+	return result, effectCtx.Err()
+}
+
+// A committed native current and its exact final receipt are sufficient for
+// diagnostics after a lost ACK. This path has no Query, Grant or business Put.
+func (b *Backend) resolveSandboxTTLCurrent(ctx context.Context, view *SandboxReadView, baseline time.Time, seconds int, next p.TargetActivationEvidence, destination *ct.Destination) (SandboxTTLResult, error) {
+	result := SandboxTTLResult{Outcome: OutcomeUnknown}
+	r, kv, err := b.readSandboxTTLRecord(ctx, view, false)
+	if err != nil || kv == nil {
+		return result, errors.Join(ErrOutcomeUnknown, err)
+	}
+	a, err := b.authenticateSandboxTTL(ctx, view, r)
+	if err != nil {
+		return result, err
+	}
+	if !r.Baseline.Equal(baseline) || r.Timeout != seconds || next.Digest() != a.Digest() || !bytes.Equal(next.Wire(), a.Wire()) || destination.Identity() != a.Identity() || !bytes.Equal(destination.RuntimeCertificate(), a.RuntimeCertificate()) {
+		return result, ErrInvalidRecord
+	}
+	_, result.Stage, err = b.sandboxTTLStage(r, r.PendingRevision)
+	result.Baseline, result.ExpiresAt, result.Timeout = r.Baseline, r.ExpiresAt, r.Timeout
+	if err != nil {
+		return result, err
+	}
+	result.Outcome, err = b.ResolveStage(ctx, result.Stage)
 	if err != nil || result.Outcome != OutcomeCommitted {
 		return result, errors.Join(ErrOutcomeUnknown, err)
 	}
 	return result, nil
+}
+
+func (b *Backend) resolveSandboxTTLCurrentFresh(ctx context.Context, prior *SandboxReadView, baseline time.Time, seconds int, next p.TargetActivationEvidence, destination *ct.Destination) (SandboxTTLResult, error) {
+	view, err := b.ReadSandboxView(ctx, prior.records.Control.SandboxID)
+	if err != nil || view == nil {
+		return SandboxTTLResult{Outcome: OutcomeUnknown}, errors.Join(ErrOutcomeUnknown, err)
+	}
+	return b.resolveSandboxTTLCurrent(ctx, view, baseline, seconds, next, destination)
+}
+
+// Reservation is a domain-specific CAS of the existing pending point. It owns
+// no runtime effect and allocates no lease. Its deterministic locator remains
+// recoverable even when dispatch loses its response; readback never Grants.
+func (b *Backend) reserveSandboxTTLRecovery(ctx context.Context, view *SandboxReadView, candidate sandboxTTLRecord, mutation Mutation) (sandboxTTLRecord, error) {
+	if candidate.recovery == nil || len(mutation.Writes) != 1 || mutation.Writes[0].Delete {
+		return sandboxTTLRecord{}, ErrInvalidRecord
+	}
+	pending, current, err := b.sandboxTTLKeys(candidate.Operation.Reference.Partition, candidate.Control.SandboxID)
+	if err != nil || mutation.Writes[0].Key != pending {
+		return sandboxTTLRecord{}, ErrInvalidRecord
+	}
+	keys := []string{b.identityKey, b.restoreKey, pending, current}
+	compares := append(b.baseComparisons(), mutation.Comparisons...)
+	request := &pb.TxnRequest{Compare: taskProtoComparisons(compares), Success: taskProtoWrites(mutation.Writes), Failure: taskProtoPoints(keys)}
+	maximum := string(bytes.Repeat([]byte{'x'}, maxRecordBytes))
+	reply := taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, maximum, maximum})
+	if len(request.Compare)+len(request.Success)+len(request.Failure) > 64 || request.Size() > 128<<10 || reply.Size() > 256<<10 {
+		return sandboxTTLRecord{}, ErrInvalidMutation
+	}
+	if err := ctx.Err(); err != nil {
+		return sandboxTTLRecord{}, err
+	}
+	rpc, finish := b.requestContext(ctx)
+	response, dispatchErr := b.client.Txn(rpc).If(compares...).Then(clientv3.OpPut(pending, string(mutation.Writes[0].Value))).Else(clientv3.OpGet(keys[0]), clientv3.OpGet(keys[1]), clientv3.OpGet(keys[2]), clientv3.OpGet(keys[3])).Commit()
+	dispatchErr = errors.Join(dispatchErr, rpc.Err())
+	finish()
+	if dispatchErr != nil {
+		// Diagnostic readback is bounded and keeps the exact deterministic
+		// candidate. Even a matching committed value cannot create a Stage
+		// owner in this unknown invocation; the next request must Resolve it.
+		points, readErr := b.readEnrolledPoints(ctx, []string{pending}, []int{maxRecordBytes})
+		var observed sandboxTTLRecord
+		if readErr == nil && len(points) == 1 && points[0] != nil {
+			if bytes.Equal(points[0].Value, mutation.Writes[0].Value) {
+				observed, readErr = decodeSandboxTTL(points[0], true)
+			} else {
+				readErr = ErrConflict
+			}
+		}
+		return observed, errors.Join(ErrOutcomeUnknown, dispatchErr, readErr)
+	}
+	if err := b.operationResponseHeader(response); err != nil {
+		return sandboxTTLRecord{}, errors.Join(ErrOutcomeUnknown, err)
+	}
+	if !response.Succeeded {
+		if _, err := b.stageEvidencePoints(response, keys); err != nil {
+			return sandboxTTLRecord{}, err
+		}
+		return sandboxTTLRecord{}, ErrConflict
+	}
+	if !operationPutResponses(response, 1) {
+		return sandboxTTLRecord{}, ErrOutcomeUnknown
+	}
+	r, kv, err := b.readSandboxTTLRecord(ctx, view, true)
+	if err != nil || kv == nil || !bytes.Equal(kv.Value, mutation.Writes[0].Value) || kv.ModRevision != response.Header.Revision || r.recovery == nil || r.recovery.RecoveryFinal != candidate.recovery.RecoveryFinal {
+		return sandboxTTLRecord{}, errors.Join(ErrOutcomeUnknown, err)
+	}
+	return r, nil
 }
