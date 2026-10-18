@@ -261,6 +261,10 @@ cutoff/Close仍须逐片验证，不能称完整4B关闭。`268cd22`已补实际
 
 ### Task 4 消费者的统一内存准入约束
 
+`f32f5bd`已独立关闭原cache容量公式重复和Status未publish时漏记新cache的问题，
+原automatic/cold预留不变；定向验收通过。仅作现有账目基础，不关闭下述job token、
+phase重叠及退款要求，不把metadata模型回归当全局物理任务容量证明。
+
 独立复核确认，原fixed8MiB+transient16MiB覆盖discovery固定表及单页/Watch/RPC
 暂存；automatic4MiB与coldQuota4MiB已有各自归属，不能重复借给detached。
 冷恢复128KiB只测原draft+candidate，不能外推live/Unknown或32物理job峰值。

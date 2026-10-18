@@ -80,6 +80,10 @@ absence→原Joined/actor51→新Claim/普通ACK63→cold13验证；独立普通
 与全部21 pin通过；主整合验证及完整输入等值复用通过，见
 [终态首片验证](2026-10-18-etcd-detached-terminal-consumer-verification.md)。四companion/
 认证后真实ABA/v2后继物理矩阵仍开放；HTTP、quota和自动消费者未接完。
+`f32f5bd`统一现有cache/automatic/cold容量公式，并修复cache变化未publish时Status
+旧OwnedBytes/Queued；新回归真实RED/GREEN、八组race、Linuxvet和主整合通过，见
+[cache账目验证](2026-10-18-etcd-cache-accounting-verification.md)。不是job phase准入
+或完整64MiB/RSS证明，未启用新的detached重图入口。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`
