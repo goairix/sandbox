@@ -83,6 +83,30 @@ func TestColdQuotaCleanupOpenOptionsOwnProfile(t *testing.T) {
 	require.Equal(t, 30*time.Second, worker.StageTTL)
 }
 
+// Configuration is projected before Backend.New; it cannot be injected into
+// an already running worker or inferred merely from enabling cold quotas.
+func TestColdQuotaCleanupOpenOptionsOwnDetachedProfile(t *testing.T) {
+	base := coldQuotaCleanupManifestTestWire(coldQuotaCleanupTestCounts())
+	image := "registry.example/sandbox:v1@sha256:" + strings.Repeat("a", 64)
+	wire := []byte(strings.Replace(base, `"version":3`, `"version":3,"detached":{"pinned_plain_image":"`+image+`"}`, 1))
+	m, err := parseCleanupOpenManifest(wire, 3)
+	require.NoError(t, err)
+	clear(wire)
+	first := m.backendOptions(state.Namespace{}, launcherconfig.Config{}, nil, nil, &LocalCleanupDeployment{})
+	second := m.backendOptions(state.Namespace{}, launcherconfig.Config{}, nil, nil, &LocalCleanupDeployment{})
+	require.NotNil(t, first.DetachedCleanup)
+	require.NotNil(t, second.DetachedCleanup)
+	require.Equal(t, image, first.DetachedCleanup.PinnedPlainImage)
+	first.DetachedCleanup.PinnedPlainImage = "changed"
+	require.Equal(t, image, second.DetachedCleanup.PinnedPlainImage, "each open owns its option value")
+	require.True(t, second.LocalCleanup.ColdRuntimeQuotaReturn)
+	require.True(t, m.workerOptions().AutomaticCleanup)
+
+	local, err := parseCleanupOpenManifest([]byte(base), 3)
+	require.NoError(t, err)
+	require.Nil(t, local.backendOptions(state.Namespace{}, launcherconfig.Config{}, nil, nil, &LocalCleanupDeployment{}).DetachedCleanup)
+}
+
 func TestLegacyCleanupOpenOptionsDisableColdQuota(t *testing.T) {
 	for version, wire := range map[int]string{1: cleanupManifestTestWire, 2: automaticCleanupManifestTestWire()} {
 		m, err := parseCleanupOpenManifest([]byte(wire), version)

@@ -74,8 +74,9 @@ func TestPlainColdDestroyInvalidIdentityBeforeBackend(t *testing.T) {
 }
 
 // The domain reader already validates the full immutable digest and placement.
-// This additional gate selects only schemas with an implemented cleanup
-// consumer; legacy/detached data must not create permanently unconsumable Tasks.
+// This shape gate selects the original local schema only. Detached payload-only
+// candidates still require the Backend's separately authenticated capability;
+// this table must not grant them permission merely from a version number.
 func TestPlainColdDestroyCleanupProfile(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

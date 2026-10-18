@@ -13,6 +13,7 @@ import (
 type cleanupOpenManifest struct {
 	cleanupManifest
 	Inventory *state.PreparationInventoryOptions
+	Detached  *state.DetachedCleanupOptions
 }
 
 func parseCleanupOpenManifest(wire []byte, version int) (cleanupOpenManifest, error) {
@@ -29,7 +30,7 @@ func parseCleanupOpenManifest(wire []byte, version int) (cleanupOpenManifest, er
 			return cleanupOpenManifest{}, err
 		}
 		inventory := m.Inventory
-		return cleanupOpenManifest{cleanupManifest: m.Cleanup, Inventory: &inventory}, nil
+		return cleanupOpenManifest{cleanupManifest: m.Cleanup, Inventory: &inventory, Detached: m.Detached}, nil
 	default:
 		return cleanupOpenManifest{}, errConfiguration
 	}
@@ -44,6 +45,13 @@ func (m cleanupOpenManifest) backendOptions(namespace state.Namespace, config la
 		inventory := *m.Inventory
 		options.PreparationInventory = &inventory
 		options.LocalCleanup.ColdRuntimeQuotaReturn = true
+		if m.Detached != nil {
+			// The common opener passes this owned configuration to Backend.New
+			// before starting the original automatic consumer. HTTP admission
+			// separately authenticates each actual target against this pin.
+			detached := *m.Detached
+			options.DetachedCleanup = &detached
+		}
 	}
 	return options
 }

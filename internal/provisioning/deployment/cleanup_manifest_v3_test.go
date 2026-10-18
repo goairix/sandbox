@@ -49,6 +49,44 @@ func TestColdQuotaCleanupManifestProfile(t *testing.T) {
 	require.NoError(t, err, "one slot in the final partition is a nonempty profile")
 }
 
+// Detached cleanup is an explicit v3 deployment option. Merely requesting the
+// cold quota worker must keep the historical mounted/local configuration valid.
+func TestColdQuotaCleanupManifestDetachedProfile(t *testing.T) {
+	base := coldQuotaCleanupManifestTestWire(coldQuotaCleanupTestCounts())
+	image := "registry.example/sandbox:v1@sha256:" + strings.Repeat("a", 64)
+	detached := `"detached":{"pinned_plain_image":"` + image + `"}`
+	wire := strings.Replace(base, `"version":3`, `"version":3,`+detached, 1)
+	_, err := parseColdQuotaCleanupManifest([]byte(wire))
+	require.NoError(t, err, "an explicit digest-pinned plain profile must reach the existing v3 opener")
+
+	for _, legacy := range []string{cleanupManifestTestWire, automaticCleanupManifestTestWire()} {
+		bad := strings.Replace(legacy, `"launcher_config_file":`, detached+`,"launcher_config_file":`, 1)
+		_, err := parseCleanupManifest([]byte(bad))
+		require.ErrorIs(t, err, errConfiguration, "v1/v2 must not opt into detached cleanup")
+	}
+
+	for name, replacement := range map[string]string{
+		"null":             `"detached":null`,
+		"missing-image":    `"detached":{}`,
+		"null-image":       `"detached":{"pinned_plain_image":null}`,
+		"empty-image":      `"detached":{"pinned_plain_image":""}`,
+		"mutable-image":    `"detached":{"pinned_plain_image":"registry.example/sandbox:latest"}`,
+		"uppercase-image":  `"detached":{"pinned_plain_image":"registry.example/sandbox:v1@sha256:` + strings.Repeat("A", 64) + `"}`,
+		"oversized-image":  `"detached":{"pinned_plain_image":"` + strings.Repeat("x", 4097) + `"}`,
+		"extra-field":      `"detached":{"pinned_plain_image":"` + image + `","enabled":true}`,
+		"wrong-image-case": `"detached":{"Pinned_plain_image":"` + image + `"}`,
+		"wrong-root-case":  `"Detached":{"pinned_plain_image":"` + image + `"}`,
+		"duplicate-image":  `"detached":{"pinned_plain_image":"` + image + `","pinned_plain_image":"` + image + `"}`,
+		"duplicate-root":   detached + `,` + detached,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := strings.Replace(wire, detached, replacement, 1)
+			_, err := parseColdQuotaCleanupManifest([]byte(bad))
+			require.ErrorIs(t, err, errConfiguration)
+		})
+	}
+}
+
 func TestColdQuotaCleanupManifestStrictShape(t *testing.T) {
 	wire := coldQuotaCleanupManifestTestWire(coldQuotaCleanupTestCounts())
 	profile := `"preparation":{"quota_slots":[` + strings.Join(coldQuotaCleanupTestCounts(), ",") + `]}`

@@ -166,7 +166,34 @@ func open(ctx context.Context, path string, requireHTTP bool) (*Deployment, erro
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("deployment issuer: %w", err), d.Close())
 	}
-	d.backend, err = state.New(ctx, state.Options{Endpoints: m.Etcd.Endpoints, Namespace: namespace, Identity: state.Identity{SchemaVersion: i.SchemaVersion, Prefix: i.Prefix, AuthorityID: i.AuthorityID, Cell: i.Cell, ClusterID: i.ClusterID, StorageID: i.StorageID, RuntimeID: i.RuntimeID, RestoreEpoch: i.RestoreEpoch}, TLS: tlsConfig, DialTimeout: dialTimeout, RequestTimeout: requestTimeout, SnapshotCacheBytes: m.Etcd.SnapshotCacheBytes, PreparationInventory: &inventory, Clock: clock, ExecIssuer: d.issuer, PublicationTrust: &state.RuntimePublicationTrust{AuthorityID: launcher.Binding.AuthorityID, Target: launcher.Binding.Target, Roots: launcher.Roots}, EnrolledPublication: &state.EnrolledPublicationOptions{ContractDigest: launcher.ContractDigest, MaxActive: launcher.MaxActive}})
+	// The same digest-pinned image defines this deployment's only plain
+	// producer and detached cleanup contract. Backend.New checks the pin against
+	// enrolled publication before admission; the consumer remains a separately
+	// configured automatic worker using that same image. No second image setting
+	// or caller-supplied cleanup capability can bypass target authentication.
+	options := state.Options{
+		Endpoints: m.Etcd.Endpoints,
+		Namespace: namespace,
+		Identity: state.Identity{
+			SchemaVersion: i.SchemaVersion, Prefix: i.Prefix,
+			AuthorityID: i.AuthorityID, Cell: i.Cell, ClusterID: i.ClusterID,
+			StorageID: i.StorageID, RuntimeID: i.RuntimeID, RestoreEpoch: i.RestoreEpoch,
+		},
+
+		TLS: tlsConfig, DialTimeout: dialTimeout, RequestTimeout: requestTimeout,
+		SnapshotCacheBytes:   m.Etcd.SnapshotCacheBytes,
+		PreparationInventory: &inventory,
+
+		Clock: clock, ExecIssuer: d.issuer,
+		PublicationTrust: &state.RuntimePublicationTrust{
+			AuthorityID: launcher.Binding.AuthorityID, Target: launcher.Binding.Target, Roots: launcher.Roots,
+		},
+		EnrolledPublication: &state.EnrolledPublicationOptions{
+			ContractDigest: launcher.ContractDigest, MaxActive: launcher.MaxActive,
+		},
+		DetachedCleanup: &state.DetachedCleanupOptions{PinnedPlainImage: m.Image},
+	}
+	d.backend, err = state.New(ctx, options)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("deployment backend: %w", err), d.Close())
 	}

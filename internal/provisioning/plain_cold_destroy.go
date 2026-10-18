@@ -45,8 +45,9 @@ type PlainColdDestroyResult struct {
 }
 
 // Destroy closes admission and creates the existing permanent cleanup Task in
-// one transaction for a version2 local cleanup snapshot. Historical/detached
-// targets without that descriptor are refused before preparing any Stage.
+// one transaction for a local snapshot or an authenticated detached/plain
+// target with explicitly configured cleanup support. Unsupported historical
+// profiles are refused before preparing any Stage.
 // It accepts expired active sandboxes without querying runtime health.
 // The deployment's operator-wide authorization is the caller's boundary;
 // this method does not claim tenant or creation-Principal ownership.
@@ -97,7 +98,19 @@ func (s *PlainColdService) Destroy(ctx context.Context, sandboxID, requestID str
 	result.Generation = loaded.control.Generation
 	result.Runtime = p.RuntimeReference(*loaded.control.Runtime)
 	if err := checkColdDestroyProfile(loaded.snapshot); err != nil {
-		return result, err
+		// A payload-only v1 snapshot is only a candidate, never proof of a
+		// detached target. The original Backend reauthenticates this reader's
+		// view and signed creation/publication history against its immutable
+		// configured pin. Its asynchronous worker may run in another process.
+		if loaded.snapshot == nil || loaded.snapshot.Version != 1 || loaded.snapshot.LocalCleanup != nil {
+			return result, err
+		}
+		if err := s.backend.ConfirmDetachedCleanupTarget(ctx, loaded.view); err != nil {
+			if errors.Is(err, state.ErrInvalidConfiguration) {
+				return result, ErrPlainColdDestroyProfile
+			}
+			return result, coldDestroyTargetError(err)
+		}
 	}
 
 	// The trusted clock is a deployment precondition, not an expiry gate:
@@ -157,10 +170,10 @@ func (s *PlainColdService) Destroy(ctx context.Context, sandboxID, requestID str
 	}
 }
 
-// checkColdDestroyProfile narrows the already authenticated snapshot to the
-// implemented local cleanup consumer. The domain reader, not this shape check,
-// verifies its digest and exact workspace/placement binding. No descriptor may
-// be invented for detached targets or historical version1 snapshots.
+// checkColdDestroyProfile selects the original local consumer only. A failed
+// shape check cannot grant detached admission: Destroy separately authenticates
+// a candidate's actual history with the configured Backend. The domain reader
+// verifies the snapshot digest and exact workspace/placement binding.
 func checkColdDestroyProfile(snapshot *state.SandboxSnapshotRecord) error {
 	if snapshot == nil || snapshot.Version != 2 || snapshot.LocalCleanup == nil || snapshot.LocalCleanup.Provider != "local" {
 		return ErrPlainColdDestroyProfile

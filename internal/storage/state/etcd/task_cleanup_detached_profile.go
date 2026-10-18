@@ -1,8 +1,70 @@
 package etcd
 
 import (
+	"context"
+
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 )
+
+// ConfirmDetachedCleanupTarget checks that this Backend's immutable pinned
+// plain profile supports the target of an original current read view. It reads
+// and authenticates native snapshot, intent and enrolled history independently
+// of caller DTOs. It grants neither a TaskClaim nor permission to send effects;
+// an external automatic worker must still obtain its own managed authority.
+func (b *Backend) ConfirmDetachedCleanupTarget(ctx context.Context, view *SandboxReadView) error {
+	if b == nil || ctx == nil || b.detachedCleanup == nil || b.enrolledPublication == nil || b.detachedCleanup.contractDigest != b.enrolledPublication.ContractDigest {
+		return ErrInvalidConfiguration
+	}
+	if err := b.ConfirmSandboxView(ctx, view); err != nil {
+		return err
+	}
+	c, placement := view.records.Control, view.records.Placement
+	snapshot, err := b.LoadSnapshot(ctx, placement.Partition, c.SandboxID, c.Snapshot)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil || snapshot.Version != 1 || snapshot.LocalCleanup != nil {
+		return ErrInvalidConfiguration
+	}
+	history, err := b.ReadSandboxRuntime(ctx, view)
+	if err != nil {
+		return err
+	}
+	if history == nil || history.Publication == nil || history.Dispatch == nil || history.Publication.Record.MountAttempt != 0 {
+		return ErrInvalidConfiguration
+	}
+	key, err := b.namespace.intentKey(placement.Partition, c.IntentID)
+	if err != nil {
+		return err
+	}
+	points, err := b.readEnrolledPoints(ctx, []string{key}, []int{4096})
+	if err != nil {
+		return err
+	}
+	var intent CreationIntentRecord
+	if points[0] == nil || points[0].Lease != 0 || decodeDomainRecord(points[0], &intent) != nil {
+		return ErrCorruptRecord
+	}
+	identity, err := decodeIdentity(b.identityValue, b.namespace)
+	if err != nil {
+		return err
+	}
+	workspace, err := detachedIdentityFromRequestHash(identity.StorageID, intent.RequestHash)
+	if err != nil {
+		return err
+	}
+	if _, err = b.decodeCreationIntent(points[0], workspace, c.IntentID); err != nil {
+		return err
+	}
+	r := history.Publication.Record
+	if workspace.Hash() != c.WorkspaceHash || workspace.Partition() != placement.Partition || intent.Phase != "published" || intent.SandboxID != c.SandboxID || intent.Generation != c.Generation || intent.WorkspaceHash != c.WorkspaceHash || intent.IntentID != c.IntentID || r.SandboxID != snapshot.SandboxID || r.Snapshot != snapshot.Snapshot {
+		return ErrInvalidConfiguration
+	}
+	if err := b.authenticateDetachedCleanupPublication(history.Publication); err != nil {
+		return err
+	}
+	return b.ConfirmSandboxView(ctx, view)
+}
 
 // detachedCleanupSource classifies copied historical metadata and reconstructs
 // only an ordinary detached identity. It authenticates the original signed

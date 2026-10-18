@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/goairix/sandbox/internal/kubecontract"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 )
 
@@ -18,6 +19,7 @@ import (
 type coldQuotaCleanupManifest struct {
 	Cleanup   cleanupManifest
 	Inventory state.PreparationInventoryOptions
+	Detached  *state.DetachedCleanupOptions
 }
 
 // A slice preserves the wire length until every count has been checked. Direct
@@ -27,11 +29,19 @@ type coldQuotaCleanupProfile struct {
 	QuotaSlots []uint32 `json:"quota_slots"`
 }
 
+// This optional v3-only pin selects an implemented detached/plain consumer.
+// Backend.New still authenticates its contract against enrolled publication;
+// parsing an image neither starts a worker nor authorizes a particular target.
+type coldQuotaCleanupDetached struct {
+	PinnedPlainImage string `json:"pinned_plain_image"`
+}
+
 // The embedded legacy schema keeps the common mounted fields identical without
 // allowing preparation into the original v1/v2 parser or its constructors.
 type coldQuotaCleanupManifestWire struct {
 	cleanupManifest
-	Preparation coldQuotaCleanupProfile `json:"preparation"`
+	Preparation coldQuotaCleanupProfile   `json:"preparation"`
+	Detached    *coldQuotaCleanupDetached `json:"detached,omitempty"`
 }
 
 func parseColdQuotaCleanupManifest(wire []byte) (coldQuotaCleanupManifest, error) {
@@ -75,6 +85,16 @@ func parseColdQuotaCleanupManifest(wire []byte) (coldQuotaCleanupManifest, error
 	if result.Inventory.Validate() != nil {
 		return coldQuotaCleanupManifest{}, errConfiguration
 	}
+	if input.Detached != nil {
+		image := input.Detached.PinnedPlainImage
+		if len(image) == 0 || len(image) > 4096 {
+			return coldQuotaCleanupManifest{}, errConfiguration
+		}
+		if _, err := kubecontract.EnrolledPlainContractDigest(image); err != nil {
+			return coldQuotaCleanupManifest{}, errConfiguration
+		}
+		result.Detached = &state.DetachedCleanupOptions{PinnedPlainImage: image}
+	}
 
 	result.Cleanup = common
 	return result, nil
@@ -88,7 +108,17 @@ func parseColdQuotaCleanupManifest(wire []byte) (coldQuotaCleanupManifest, error
 func coldQuotaCleanupRequiredFields(wire []byte) bool {
 	var fields map[string]json.RawMessage
 	shape := reflect.TypeOf(cleanupManifest{})
-	if json.Unmarshal(wire, &fields) != nil || len(fields) != shape.NumField()+1 {
+	if json.Unmarshal(wire, &fields) != nil {
+		return false
+	}
+	expected := shape.NumField() + 1
+	if detached, present := fields["detached"]; present {
+		expected++
+		if !cleanupRequiredFields(detached, reflect.TypeOf(coldQuotaCleanupDetached{})) {
+			return false
+		}
+	}
+	if len(fields) != expected {
 		return false
 	}
 
