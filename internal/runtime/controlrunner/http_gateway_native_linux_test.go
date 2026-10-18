@@ -19,6 +19,7 @@ import (
 	"github.com/goairix/sandbox/internal/provisioning"
 	"github.com/goairix/sandbox/internal/provisioning/deployment"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/goairix/sandbox/pkg/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -29,6 +30,13 @@ func TestHTTPGatewayNative(t *testing.T) {
 		t.Skip("requires exact owned HTTP gateway Linux fixture")
 	}
 	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{httpGateway: true, detached: true})
+}
+
+func TestHTTPGatewayTTLNative(t *testing.T) {
+	if os.Getenv("SANDBOX_HTTP_TTL_NATIVE") != "1" {
+		t.Skip("requires exact owned HTTP TTL renewal Linux fixture")
+	}
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, detached: true})
 }
 
 // Observe the real service return without replacing any runtime, bridge, Wait,
@@ -281,4 +289,101 @@ func exerciseHTTPGatewayNative(t *testing.T, ctx context.Context, realService *p
 	onePod()
 	require.Empty(t, service.results)
 	t.Log("HTTP actual TLS-etcd/formal-launcher create/replay/conflict/current health/sync exit7/SSE terminal/disconnect/bridge unknown/shutdown joined")
+}
+
+// A metadata-only expiry update cannot satisfy this test: the real launcher,
+// mTLS credentials, activation and signed Exec path must survive the old TTL.
+// Waiting uses the actual clock shared with the signed clock server; the test
+// never injects a replacement activation or advances a fixture-only clock.
+func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService *provisioning.PlainColdService, backend *state.Backend, onePod func()) {
+	t.Helper()
+	service := &httpNativeService{PlainColdService: realService, results: make(chan execServiceNativeAnswer, 1)}
+	settings := &deployment.HTTPSettings{APIKey: []byte("native-http-key"), Env: map[string]string{"PATH": "/usr/bin:/bin"}, ExecTimeoutSeconds: 5, MaxExecTimeoutSeconds: 15, MaxActive: 4, RequestsPerSecond: 100, UID: 1000, GID: 1000}
+	gateway, err := etcdgateway.New(service, settings)
+	require.NoError(t, err)
+	settings.Zero()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serverCtx, cancelServer := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- etcdgateway.Serve(serverCtx, listener, gateway) }()
+	t.Cleanup(func() {
+		cancelServer()
+		require.NoError(t, <-serverDone, "original HTTP handler owners joined")
+	})
+	client := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{MaxIdleConns: 2, MaxIdleConnsPerHost: 2}}
+	t.Cleanup(client.CloseIdleConnections)
+	origin := "http://" + listener.Addr().String()
+
+	// Ten seconds leaves time for actual publication and immediate renewal,
+	// while crossing the old expiry stays within the launcher's 30-second test
+	// process bound and the shared fixture's 60-second context.
+	create := types.CreateSandboxRequest{Mode: "persistent", Timeout: 10}
+	key := uuid.NewString()
+	var first types.CreateSandboxResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, "/api/v1/sandboxes", key, create, true), http.StatusCreated, &first)
+	require.Equal(t, 10, first.Timeout)
+	require.NotNil(t, first.ExpiresAt)
+	originalExpiry := *first.ExpiresAt
+	path := "/api/v1/sandboxes/" + first.ID
+	before, err := backend.ReadSandboxView(ctx, first.ID)
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	original := before.Records().Control
+	require.NotNil(t, original.Runtime)
+	onePod()
+
+	started := time.Now().UTC()
+	var renewed types.UpdateTTLResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: 30}, true), http.StatusOK, &renewed)
+	finished := time.Now().UTC()
+	require.Equal(t, 30, renewed.Timeout)
+	require.True(t, renewed.ExpiresAt.After(originalExpiry))
+	var current types.SandboxResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), http.StatusOK, &current)
+	require.Equal(t, first.ID, current.ID)
+	require.Equal(t, 30, current.Timeout)
+	require.NotNil(t, current.ExpiresAt)
+	require.True(t, current.ExpiresAt.Equal(renewed.ExpiresAt))
+	require.True(t, current.CreatedAt.Add(30*time.Second).Equal(renewed.ExpiresAt), "old API resets its TTL baseline")
+	require.False(t, current.CreatedAt.Before(started))
+	require.False(t, current.CreatedAt.After(finished))
+	var replay types.CreateSandboxResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, "/api/v1/sandboxes", key, create, true), http.StatusCreated, &replay)
+	require.True(t, replay.Reused)
+	require.Equal(t, current, replay.SandboxResponse, "Create replay displays renewed TTL without changing original request identity")
+
+	// Two seconds exceed the protocol's one-second authority margin. Every
+	// subsequent health check, handshake and command runs after the old bound.
+	wait := time.Until(originalExpiry.Add(2 * time.Second))
+	require.Positive(t, wait, "the successful renewal must precede the old expiry")
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		t.Fatal("original TTL did not elapse within the fixture lifetime")
+	}
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), http.StatusOK, &current)
+	require.Equal(t, 30, current.Timeout)
+	command := types.ExecRequest{Language: "bash", Code: "printf 'ttl-renewed-stdout\\n'; printf 'ttl-renewed-stderr\\n' >&2; exit 7"}
+	var executed types.ExecResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, path+"/exec", "", command, true), http.StatusOK, &executed)
+	require.Equal(t, 7, executed.ExitCode)
+	require.Equal(t, "ttl-renewed-stdout\n", executed.Stdout)
+	require.Equal(t, "ttl-renewed-stderr\n", executed.Stderr)
+	terminal := requireHTTPNativeExec(t, ctx, service, true)
+	require.Equal(t, uint32(7<<8), terminal.Receipt.RootWaitStatus())
+	require.Equal(t, p.RuntimeReference(*original.Runtime), terminal.Receipt.Context().Runtime)
+	after, err := backend.ReadSandboxView(ctx, first.ID)
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	updated := after.Records().Control
+	require.Equal(t, *original.Runtime, *updated.Runtime)
+	require.Equal(t, original.Generation, updated.Generation)
+	require.Equal(t, original.DataGateEpoch, updated.DataGateEpoch)
+	require.True(t, updated.ExpiresAt.Equal(renewed.ExpiresAt))
+	onePod()
+	require.Empty(t, service.results)
+	t.Log("HTTP actual PUT/GET/Create replay crossed original TTL; same runtime signed Exec exited7 with original Wait/IO drain")
 }

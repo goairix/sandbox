@@ -73,7 +73,7 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 
 type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
-	httpGateway, fileAPI                                           bool
+	httpGateway, ttlGateway, fileAPI                               bool
 	largeDownload                                                  bool
 	destroyLocal, destroyDetached                                  bool
 	destroyTerminal                                                bool
@@ -88,7 +88,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		lookupHooks = &liveLookupNativeHooks{}
 	}
 	var execHooks *execServiceNativeHooks
-	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
+	if variant.execService || variant.httpGateway || variant.ttlGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
 		execHooks = &execServiceNativeHooks{}
 	}
 	require.Zero(t, os.Geteuid())
@@ -113,7 +113,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	if variant.execService {
 		timeout = 100 * time.Second
 	}
-	if variant.httpGateway || variant.fileAPI || variant.largeDownload {
+	if variant.httpGateway || variant.ttlGateway || variant.fileAPI || variant.largeDownload {
 		timeout = 60 * time.Second
 	}
 	if variant.destroyLocal || variant.destroyDetached {
@@ -184,7 +184,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
-	if variant.execService || variant.httpGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
+	if variant.execService || variant.httpGateway || variant.ttlGateway || variant.fileAPI || variant.largeDownload || variant.destroyLocal || variant.destroyDetached {
 		launcher, err := launcherconfig.Decode(config)
 		require.NoError(t, err)
 		execIssuer, err = deployment.NewExecIssuer(ctx, issuerKey, issuerCert, launcher, nativeFixtureClock{})
@@ -500,6 +500,14 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		}, func() {
 			require.Equal(t, int32(1), postCount.Load(), "HTTP uses one original Pod")
 			require.Equal(t, int32(1), startCount.Load(), "HTTP uses one original formal launcher")
+		})
+		joinOriginalBridges()
+		return
+	}
+	if variant.ttlGateway {
+		exerciseHTTPGatewayTTLNative(t, ctx, service, backend, func() {
+			require.Equal(t, int32(1), postCount.Load(), "TTL renewal retains the original Pod")
+			require.Equal(t, int32(1), startCount.Load(), "TTL renewal retains the original formal launcher")
 		})
 		joinOriginalBridges()
 		return
