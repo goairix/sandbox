@@ -141,6 +141,13 @@ func ReadRuntimeRequest(r io.Reader) (RuntimeRequest, error) {
 		}
 		return RuntimeRequest{Health: &e}, nil
 	}
+	if purpose.Purpose == RuntimeRenewalPurpose || purpose.Purpose == RuntimeRenewalQueryPurpose {
+		e, err := readRuntimeRenewalHeader(r, header)
+		if err != nil {
+			return RuntimeRequest{}, err
+		}
+		return RuntimeRequest{Renewal: &e}, nil
+	}
 	if purpose.Purpose == "task_quiesce_users" || purpose.Purpose == "task_quiesce_users_query" {
 		e, err := readTaskQuiesceHeader(r, header)
 		if err != nil {

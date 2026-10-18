@@ -15,6 +15,7 @@ const (
 	requestArchive
 	requestPublication
 	requestHealth
+	requestRenewal
 )
 
 // Go TLS accepts a raw EOF between records as io.EOF without close_notify.

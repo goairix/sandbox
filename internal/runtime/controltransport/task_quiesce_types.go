@@ -23,4 +23,5 @@ type RuntimeRequest struct {
 	Archive     *TaskWorkspaceArchiveEnvelope
 	Publication *RuntimePublicationEnvelope
 	Health      *RuntimeHealthEnvelope
+	Renewal     *RuntimeRenewalEnvelope
 }

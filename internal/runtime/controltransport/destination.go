@@ -19,6 +19,10 @@ var ErrDestination = errors.New("invalid control destination")
 type DestinationOptions struct {
 	Identity           p.RuntimeIdentityContext
 	RuntimeCertificate []byte
+	// ReceiptCertificate optionally retains the original command's certificate
+	// when TLS uses a renewed current certificate. Absence preserves the original
+	// single-certificate behavior; original receipt freshness checks are unchanged.
+	ReceiptCertificate []byte
 	Credential         *p.ManagementTLSCredential
 	Verifier           *p.ManagementVerifier
 	Clock              p.AuthorityClock
@@ -33,14 +37,15 @@ type DestinationOptions struct {
 // Destination binds an immutable exact target, trust, clock and TLS credential.
 // It is origin-sealed: zero and copied values cannot open a connection.
 type Destination struct {
-	self        *Destination
-	identity    p.RuntimeIdentityContext
-	certificate []byte
-	credential  *p.ManagementTLSCredential
-	verifier    *p.ManagementVerifier
-	clock       p.AuthorityClock
-	config      *tls.Config
-	dial        func(context.Context) (net.Conn, error)
+	self               *Destination
+	identity           p.RuntimeIdentityContext
+	certificate        []byte
+	receiptCertificate []byte
+	credential         *p.ManagementTLSCredential
+	verifier           *p.ManagementVerifier
+	clock              p.AuthorityClock
+	config             *tls.Config
+	dial               func(context.Context) (net.Conn, error)
 }
 
 func NewDestination(o DestinationOptions) (*Destination, error) {
@@ -51,9 +56,33 @@ func NewDestination(o DestinationOptions) (*Destination, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Destination{identity: o.Identity, certificate: bytes.Clone(o.RuntimeCertificate), credential: o.Credential, verifier: o.Verifier, clock: o.Clock, config: config, dial: o.Dial}
+	receiptCertificate := o.ReceiptCertificate
+	if len(receiptCertificate) == 0 {
+		receiptCertificate = o.RuntimeCertificate
+	}
+	if len(receiptCertificate) > 8192 {
+		return nil, ErrDestination
+	}
+	d := &Destination{identity: o.Identity, certificate: bytes.Clone(o.RuntimeCertificate), receiptCertificate: bytes.Clone(receiptCertificate), credential: o.Credential, verifier: o.Verifier, clock: o.Clock, config: config, dial: o.Dial}
 	d.self = d
 	return d, nil
+}
+
+// Identity returns copied target attribution, never an operation capability.
+func (d *Destination) Identity() p.RuntimeIdentityContext {
+	if d == nil || d.self != d {
+		return p.RuntimeIdentityContext{}
+	}
+	return d.identity
+}
+
+// RuntimeCertificate returns the exact copied TLS pin. Callers must authenticate
+// its trusted source and use this original Destination for the actual exchange.
+func (d *Destination) RuntimeCertificate() []byte {
+	if d == nil || d.self != d {
+		return nil
+	}
+	return bytes.Clone(d.certificate)
 }
 func (d *Destination) Match(c p.ExecStartContext, issuer []byte) bool {
 	return d != nil && d.self == d && d.identity == (p.RuntimeIdentityContext{SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: c.Runtime}) && d.credential.MatchesCertificate(issuer)
@@ -148,7 +177,7 @@ func (d *Destination) VerifyReceipt(ctx context.Context, wire []byte, c p.ExecSt
 	if o.UTC.IsZero() || o.UTC.Location() != time.UTC || o.Uncertainty < 0 || o.Uncertainty > time.Second || elapsed > time.Second-o.Uncertainty {
 		return p.LocalExecReceiptEvidence{}, ErrDestination
 	}
-	return d.verifier.VerifyLocalExecReceipt(wire, d.certificate, c, descriptor, ticket, before, after, deadline, o.UTC.Add(elapsed))
+	return d.verifier.VerifyLocalExecReceipt(wire, d.receiptCertificate, c, descriptor, ticket, before, after, deadline, o.UTC.Add(elapsed))
 }
 
 // Session carries one finite request and its response. It owns no payload buffer.
@@ -162,6 +191,7 @@ type Session struct {
 	archiveEOFChecked bool
 	publicationRead   bool
 	healthRead        bool
+	renewalRead       bool
 	archiveTransport  *archiveTLSConn
 }
 
@@ -191,7 +221,7 @@ func (s *Session) sendMode(ctx context.Context, mode requestMode, write func(io.
 	}
 	s.sent = true
 	s.mode = mode
-	if mode == requestArchive || mode == requestPublication {
+	if mode == requestArchive || mode == requestPublication || mode == requestRenewal {
 		s.archiveTransport.strict.Store(true)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
