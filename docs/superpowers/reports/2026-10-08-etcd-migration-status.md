@@ -41,6 +41,11 @@ present 预约兼容；旧版已遗留孤儿继续保守拒绝，不声称可以
 Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除，以及复用原 Gateway、
 正式 cleanup-worker serve-cold-quota 的真实 HTTP 全链测试；不新增并行 worker 或协议层。
 
+`816a73d` 将严格 v2 来源接入原自动发现、认证退款/占用结算及 Pending 删除路径；
+定向 race、Linux vet 和主分支 race/构建通过，独立审查仅接受开发分支组件。
+真实 HTTP 用例已成功创建、Exec、查询，随后 DELETE 仍返回501；整链的 managed
+Claim、销毁、退款与 Pending 删除尚未通过原生验证，因此不增加交付百分比。
+
 功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；
