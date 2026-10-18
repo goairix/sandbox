@@ -238,6 +238,203 @@ func metadataScaleResourceDiagnostics(t *testing.T, count int, phase string, chi
 	}
 }
 
+// Maintenance diagnosis below wraps only this original worker's Backend, not
+// the raw/admin client or the separate fixed-API sample Backend.
+type metadataScaleMaintenanceDiagnostics struct {
+	mu                          sync.Mutex
+	t                           *testing.T
+	parent                      context.Context
+	worker                      *DueWorker
+	active                      bool
+	phase                       string
+	sequence                    uint64
+	normalBytes, errorBytes     int
+	normalDropped, errorDropped int
+}
+
+// Each lane retains at most 64 KiB of payload, reserving a separate lane for
+// phase boundaries and errors after ordinary RPC traffic fills its allowance.
+// A line is at most 4 KiB; the summary explicitly counts any dropped lines.
+// These logs are observations only; no context, timeout or result is replaced.
+func (d *metadataScaleMaintenanceDiagnostics) log(failure bool, format string, arguments ...any) {
+	line := fmt.Sprintf(format, arguments...)
+	if len(line) > 4096 {
+		line = line[:4085] + "[truncated]"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	used := &d.normalBytes
+	if failure {
+		used = &d.errorBytes
+	}
+	if *used+len(line) > 64<<10 {
+		if failure {
+			d.errorDropped++
+		} else {
+			d.normalDropped++
+		}
+		return
+	}
+	*used += len(line)
+	d.t.Logf("METADATA_SCALE maintenance_diagnostic owner_scope=original-due-worker %s", line)
+}
+
+func (d *metadataScaleMaintenanceDiagnostics) bind(w *DueWorker) {
+	d.mu.Lock()
+	d.worker = w
+	d.mu.Unlock()
+}
+
+func (d *metadataScaleMaintenanceDiagnostics) state(event string, elapsed time.Duration) {
+	d.mu.Lock()
+	w, phase := d.worker, d.phase
+	d.mu.Unlock()
+	if w == nil {
+		return
+	}
+	status := w.Status()
+	w.backend.archiveLife.mu.Lock()
+	lost, released := w.session.lost, w.session.released
+	deadline := w.session.deadline
+	operation, watch := w.session.operation != nil, w.session.dueWatch != nil
+	w.backend.archiveLife.mu.Unlock()
+	parentLeaves, parentTruncated := metadataScaleDiagnosticErrorLeaves(d.parent.Err())
+	d.log(true, "event=%s phase=%s at=%s elapsed=%s running=%t synchronized=%t worker_phase=%s session=%s lease=%d lost=%t released=%t session_deadline=%s operation=%t watch=%t last_error=%q parent_leaves=%+v parent_truncated=%t", event, phase, time.Now().UTC().Format(time.RFC3339Nano), elapsed, status.Running, status.Synchronized, status.Phase, status.Session.SessionID, status.Session.LeaseID, lost, released, deadline.UTC().Format(time.RFC3339Nano), operation, watch, status.LastError, parentLeaves, parentTruncated)
+}
+
+// Only the existing serial fixture calls runPhase. The defer records failure
+// exits too; Require's Goexit must not erase which real maintenance call ran.
+func (d *metadataScaleMaintenanceDiagnostics) runPhase(name string, work func()) {
+	d.mu.Lock()
+	d.active, d.phase = true, name
+	d.mu.Unlock()
+	started := time.Now()
+	d.state("phase-start", 0)
+	defer func() {
+		d.state("phase-end", time.Since(started))
+		d.mu.Lock()
+		d.phase = "after-" + name
+		d.mu.Unlock()
+	}()
+	work()
+}
+
+func (d *metadataScaleMaintenanceDiagnostics) request(ctx context.Context, method, shape string) func(error) {
+	d.mu.Lock()
+	active, phase := d.active, d.phase
+	d.sequence++
+	sequence := d.sequence
+	d.mu.Unlock()
+	if !active {
+		return func(error) {}
+	}
+	started := time.Now()
+	deadline, hasDeadline := ctx.Deadline()
+	before, beforeTruncated := metadataScaleDiagnosticErrorLeaves(ctx.Err())
+	d.log(false, "event=rpc-send sequence=%d method=%s shape=%s phase=%s at=%s has_deadline=%t deadline=%s ctx_leaves=%+v ctx_truncated=%t", sequence, method, shape, phase, started.UTC().Format(time.RFC3339Nano), hasDeadline, deadline.UTC().Format(time.RFC3339Nano), before, beforeTruncated)
+	return func(err error) {
+		// Observe before the original caller cancels its RPC context. Both its
+		// error and the returned error survive independently as typed leaves.
+		leaves, truncated := metadataScaleDiagnosticErrorLeaves(err)
+		ctxLeaves, ctxTruncated := metadataScaleDiagnosticErrorLeaves(ctx.Err())
+		parentLeaves, parentTruncated := metadataScaleDiagnosticErrorLeaves(d.parent.Err())
+		d.mu.Lock()
+		returnedPhase := d.phase
+		d.mu.Unlock()
+		d.log(err != nil || ctx.Err() != nil, "event=rpc-return sequence=%d method=%s shape=%s sent_phase=%s returned_phase=%s sent=%s returned=%s elapsed=%s deadline=%s error_leaves=%+v error_truncated=%t ctx_leaves=%+v ctx_truncated=%t parent_leaves=%+v parent_truncated=%t", sequence, method, shape, phase, returnedPhase, started.UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), time.Since(started), deadline.UTC().Format(time.RFC3339Nano), leaves, truncated, ctxLeaves, ctxTruncated, parentLeaves, parentTruncated)
+	}
+}
+
+type metadataScaleDiagnosticKV struct {
+	clientv3.KV
+	diagnostics *metadataScaleMaintenanceDiagnostics
+}
+
+func (kv *metadataScaleDiagnosticKV) Get(ctx context.Context, key string, options ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+	finish := kv.diagnostics.request(ctx, "Range", metadataScaleOperationShape([]clientv3.Op{clientv3.OpGet(key, options...)}))
+	response, err := kv.KV.Get(ctx, key, options...)
+	finish(err)
+	return response, err
+}
+
+func (kv *metadataScaleDiagnosticKV) Txn(ctx context.Context) clientv3.Txn {
+	return &metadataScaleDiagnosticTxn{Txn: kv.KV.Txn(ctx), ctx: ctx, diagnostics: kv.diagnostics}
+}
+
+type metadataScaleDiagnosticTxn struct {
+	clientv3.Txn
+	ctx         context.Context
+	diagnostics *metadataScaleMaintenanceDiagnostics
+	comparisons int
+	shape       string
+}
+
+func (txn *metadataScaleDiagnosticTxn) If(comparisons ...clientv3.Cmp) clientv3.Txn {
+	txn.comparisons = len(comparisons)
+	txn.Txn = txn.Txn.If(comparisons...)
+	return txn
+}
+
+func (txn *metadataScaleDiagnosticTxn) Then(operations ...clientv3.Op) clientv3.Txn {
+	txn.shape = metadataScaleOperationShape(operations)
+	txn.Txn = txn.Txn.Then(operations...)
+	return txn
+}
+
+func (txn *metadataScaleDiagnosticTxn) Else(operations ...clientv3.Op) clientv3.Txn {
+	txn.Txn = txn.Txn.Else(operations...)
+	return txn
+}
+
+func (txn *metadataScaleDiagnosticTxn) Commit() (*clientv3.TxnResponse, error) {
+	finish := txn.diagnostics.request(txn.ctx, "Txn", fmt.Sprintf("comparisons=%d %s", txn.comparisons, txn.shape))
+	response, err := txn.Txn.Commit()
+	finish(err)
+	return response, err
+}
+
+// Shape retains at most four key locators, never values or full source graphs.
+func metadataScaleOperationShape(operations []clientv3.Op) string {
+	shape := fmt.Sprintf("operations=%d", len(operations))
+	for _, op := range operations[:min(len(operations), 4)] {
+		key, kind := string(op.KeyBytes()), "other"
+		if len(key) > 128 {
+			key = key[:128] + "[truncated]"
+		}
+		if op.IsGet() {
+			kind = "Range"
+		} else if op.IsPut() {
+			kind = "Put"
+		} else if op.IsDelete() {
+			kind = "Delete"
+		}
+		shape += fmt.Sprintf(" %s(%q,range=%t)", kind, key, len(op.RangeBytes()) != 0)
+	}
+	return shape
+}
+
+// KeepAlive and once-only cleanup share the same concrete worker client. These
+// two observations distinguish renewal from guard/discovery timeouts without
+// changing the existing lease counters or intercepting maintenance/admin RPCs.
+type metadataScaleDiagnosticLease struct {
+	clientv3.Lease
+	diagnostics *metadataScaleMaintenanceDiagnostics
+}
+
+func (lease *metadataScaleDiagnosticLease) KeepAliveOnce(ctx context.Context, id clientv3.LeaseID) (*clientv3.LeaseKeepAliveResponse, error) {
+	finish := lease.diagnostics.request(ctx, "KeepAliveOnce", fmt.Sprintf("lease=%d", id))
+	response, err := lease.Lease.KeepAliveOnce(ctx, id)
+	finish(err)
+	return response, err
+}
+
+func (lease *metadataScaleDiagnosticLease) Revoke(ctx context.Context, id clientv3.LeaseID) (*clientv3.LeaseRevokeResponse, error) {
+	finish := lease.diagnostics.request(ctx, "Revoke", fmt.Sprintf("lease=%d", id))
+	response, err := lease.Lease.Revoke(ctx, id)
+	finish(err)
+	return response, err
+}
+
 // This observer never changes a result or a request. Unary response bytes are
 // exact protobuf bytes; Watch/network totals come from the real server metrics.
 func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, options Options, count int, duration time.Duration, pilot, faultPilot, startupPilot bool, children []*partitionWorkerNativeProcess, endpoints []string) metadataScaleObservation {
@@ -288,7 +485,18 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 		return response, err
 	}}
 	lease := &creationFaultLease{Lease: b.client.Lease}
+	diagnostics := &metadataScaleMaintenanceDiagnostics{t: t, parent: ctx}
 	b.client.Lease = lease
+	if faultPilot {
+		b.client.KV = &metadataScaleDiagnosticKV{KV: b.client.KV, diagnostics: diagnostics}
+		b.client.Lease = &metadataScaleDiagnosticLease{Lease: lease, diagnostics: diagnostics}
+	}
+	defer func() {
+		diagnostics.state("fixture-return", 0)
+		diagnostics.mu.Lock()
+		defer diagnostics.mu.Unlock()
+		t.Logf("METADATA_SCALE maintenance_diagnostic payload_bytes=%d phase_error_payload_bytes=%d normal_dropped=%d phase_error_dropped=%d hard_payload_cap=131072", diagnostics.normalBytes, diagnostics.errorBytes, diagnostics.normalDropped, diagnostics.errorDropped)
+	}()
 	partitions := make([]uint8, 256)
 	for i := range partitions {
 		partitions[i] = uint8(i)
@@ -302,6 +510,7 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 	workerOptions := DueWorkerOptions{WorkerID: fmt.Sprintf("metadata-scale-%d", count), Partitions: partitions, RangeSlots: []uint16{0}, ClaimSlots: claims, RelistSlot: 0, StageTTL: 30 * time.Second}
 	w, err := b.StartDueWorker(ctx, workerOptions)
 	require.NoError(t, err)
+	diagnostics.bind(w)
 	originalWorker := w
 	var originalStopError error
 	defer func() {
@@ -368,8 +577,17 @@ func metadataScaleIdle(t *testing.T, ctx context.Context, raw *clientv3.Client, 
 		if (!pilot || faultPilot) && !maintained && time.Since(start) >= duration/2 {
 			maintenanceStart := time.Now()
 			maintenanceBefore := metadataScaleObservation{transactions.Load(), ranges.Load(), mutations.Load(), controlWrites.Load(), responseBytes.Load(), lease.grants.Load(), lease.keeps.Load()}
-			metadataScaleMaintenance(t, ctx, raw, endpoints, children, b, options, count)
+			metadataScaleMaintenance(t, ctx, raw, endpoints, children, b, options, count, diagnostics)
+			diagnostics.mu.Lock()
+			diagnostics.phase = "worker-recovery"
+			diagnostics.mu.Unlock()
+			diagnostics.state("recovery-start", 0)
 			w = metadataScaleRecoverWorker(t, ctx, raw, b, w, workerOptions, &originalStopError)
+			diagnostics.bind(w)
+			diagnostics.state("recovery-end", 0)
+			diagnostics.mu.Lock()
+			diagnostics.active = false
+			diagnostics.mu.Unlock()
 			t.Logf("METADATA_SCALE maintenance-only N=%d elapsed=%s txns=%d ranges=%d mutations=%d control_writes=%d response_pb=%d grants=%d keeps=%d", count, time.Since(maintenanceStart), transactions.Load()-maintenanceBefore.transactions, ranges.Load()-maintenanceBefore.ranges, mutations.Load()-maintenanceBefore.mutations, controlWrites.Load()-maintenanceBefore.controlWrites, responseBytes.Load()-maintenanceBefore.responseBytes, lease.grants.Load()-maintenanceBefore.grants, lease.keeps.Load()-maintenanceBefore.keeps)
 			prior.transactions += transactions.Load() - maintenanceBefore.transactions
 			prior.ranges += ranges.Load() - maintenanceBefore.ranges
@@ -670,16 +888,25 @@ func metadataScaleMetrics(t *testing.T, ctx context.Context, raw *clientv3.Clien
 // Real maintenance runs serially, follower before leader. A single stopped
 // member is physically waited and restarted with its original data/arguments;
 // the remaining quorum must serve the same API/operation sample during fault.
-func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.Client, endpoints []string, children []*partitionWorkerNativeProcess, b *Backend, options Options, count int) {
+func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.Client, endpoints []string, children []*partitionWorkerNativeProcess, b *Backend, options Options, count int, diagnostics *metadataScaleMaintenanceDiagnostics) {
 	t.Helper()
+	diagnostics.mu.Lock()
+	diagnostics.active, diagnostics.phase = true, "maintenance-entry"
+	diagnostics.mu.Unlock()
+	started := time.Now()
+	diagnostics.state("maintenance-start", 0)
+	defer func() { diagnostics.state("maintenance-return", time.Since(started)) }()
+
 	bounded, stop := partitionWorkerNativeRequest(ctx)
 	point, err := raw.Get(bounded, b.identityKey)
 	stop()
 	require.NoError(t, err)
-	bounded, stop = context.WithTimeout(ctx, time.Minute)
-	_, err = raw.Compact(bounded, point.Header.Revision, clientv3.WithCompactPhysical())
-	stop()
-	require.NoError(t, err)
+	diagnostics.runPhase("compact", func() {
+		bounded, stop = context.WithTimeout(ctx, time.Minute)
+		_, err = raw.Compact(bounded, point.Header.Revision, clientv3.WithCompactPhysical())
+		stop()
+		require.NoError(t, err)
+	})
 	order := make([]int, 0, 3)
 	leader := -1
 	for i, endpoint := range endpoints {
@@ -697,14 +924,16 @@ func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.C
 	require.GreaterOrEqual(t, leader, 0)
 	order = append(order, leader)
 	for _, i := range order {
-		bounded, stop = context.WithTimeout(ctx, 2*time.Minute)
-		_, err = raw.Defragment(bounded, endpoints[i])
-		stop()
-		require.NoError(t, err)
-		bounded, stop = partitionWorkerNativeRequest(ctx)
-		_, err = raw.Status(bounded, endpoints[i])
-		stop()
-		require.NoError(t, err)
+		diagnostics.runPhase(fmt.Sprintf("defrag-member-%d", i), func() {
+			bounded, stop = context.WithTimeout(ctx, 2*time.Minute)
+			_, err = raw.Defragment(bounded, endpoints[i])
+			stop()
+			require.NoError(t, err)
+			bounded, stop = partitionWorkerNativeRequest(ctx)
+			_, err = raw.Status(bounded, endpoints[i])
+			stop()
+			require.NoError(t, err)
+		})
 	}
 	i := order[0]
 	bounded, stop = partitionWorkerNativeRequest(ctx)
@@ -714,27 +943,36 @@ func metadataScaleMaintenance(t *testing.T, ctx context.Context, raw *clientv3.C
 	// Complete the original strict startup validation before stopping a member.
 	// The tested availability property is quorum service on an existing client,
 	// not successful all-endpoint validation during a degraded fresh startup.
-	api := metadataScaleSampleBackend(t, ctx, b, options)
+	var api *Backend
+	diagnostics.runPhase("fixed-api-startup", func() {
+		api = metadataScaleSampleBackend(t, ctx, b, options)
+	})
 	defer api.Close()
-	children[i].stop()
-	metadataScaleSampleWithBackend(t, ctx, api, count)
-	command := exec.Command(children[i].cmd.Path, children[i].cmd.Args[1:]...)
-	children[i] = startPartitionWorkerNativeProcess(t, command)
-	bounded, stop = partitionWorkerNativeRequest(ctx)
-	reference, err := raw.Status(bounded, endpoints[leader])
-	stop()
-	require.NoError(t, err)
-	deadline := time.Now().Add(30 * time.Second)
-	for {
+	diagnostics.runPhase(fmt.Sprintf("kill-member-%d", i), func() {
+		children[i].stop()
+	})
+	diagnostics.runPhase("fixed-api-degraded", func() {
+		metadataScaleSampleWithBackend(t, ctx, api, count)
+	})
+	diagnostics.runPhase(fmt.Sprintf("restart-member-%d", i), func() {
+		command := exec.Command(children[i].cmd.Path, children[i].cmd.Args[1:]...)
+		children[i] = startPartitionWorkerNativeProcess(t, command)
 		bounded, stop = partitionWorkerNativeRequest(ctx)
-		status, err := raw.Status(bounded, endpoints[i])
+		reference, err := raw.Status(bounded, endpoints[leader])
 		stop()
-		if err == nil && status.Header != nil && status.Header.ClusterId == original.Header.ClusterId && status.Header.MemberId == original.Header.MemberId && status.Leader != 0 && status.RaftAppliedIndex >= reference.RaftAppliedIndex {
-			break
+		require.NoError(t, err)
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			bounded, stop = partitionWorkerNativeRequest(ctx)
+			status, err := raw.Status(bounded, endpoints[i])
+			stop()
+			if err == nil && status.Header != nil && status.Header.ClusterId == original.Header.ClusterId && status.Header.MemberId == original.Header.MemberId && status.Leader != 0 && status.RaftAppliedIndex >= reference.RaftAppliedIndex {
+				break
+			}
+			require.True(t, time.Now().Before(deadline), "restarted original member did not recover: %v", err)
+			partitionWorkerNativePause(t, ctx, 100*time.Millisecond)
 		}
-		require.True(t, time.Now().Before(deadline), "restarted original member did not recover: %v", err)
-		partitionWorkerNativePause(t, ctx, 100*time.Millisecond)
-	}
+	})
 	t.Logf("METADATA_SCALE maintenance N=%d compact_revision=%d defrag_order=%v fault_member=%d originalWait=true restart_original_data=true", count, point.Header.Revision, order, i)
 }
 

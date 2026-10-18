@@ -68,6 +68,88 @@ func metadataScaleOnlyMemberStopTransport(err error) bool {
 	return inspect(err) && unknown && transport
 }
 
+// Diagnostic leaves preserve error identity and gRPC status without granting
+// recovery permission. The original member-stop classifier above is unchanged.
+// The small tree/leaf/text limits also bound malformed or cyclic test errors.
+type metadataScaleErrorLeaf struct {
+	Type, Code, Message         string
+	Unknown, Deadline, Canceled bool
+}
+
+func metadataScaleDiagnosticErrorLeaves(err error) (leaves []metadataScaleErrorLeaf, truncated bool) {
+	nodes := 0
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil || truncated {
+			return
+		}
+		nodes++
+		if nodes > 32 || len(leaves) >= 8 {
+			truncated = true
+			return
+		}
+		switch wrapped := current.(type) {
+		case interface{ Unwrap() []error }:
+			for _, child := range wrapped.Unwrap() {
+				visit(child)
+				if truncated {
+					return
+				}
+			}
+		case interface{ Unwrap() error }:
+			visit(wrapped.Unwrap())
+		default:
+			message := current.Error()
+			if len(message) > 256 {
+				message = message[:256] + "[truncated]"
+			}
+			leaf := metadataScaleErrorLeaf{
+				Type: fmt.Sprintf("%T", current), Message: message,
+				Unknown:  current == ErrOutcomeUnknown,
+				Deadline: current == context.DeadlineExceeded,
+				Canceled: current == context.Canceled,
+			}
+			if grpc, ok := status.FromError(current); ok {
+				leaf.Code = grpc.Code().String()
+			}
+			leaves = append(leaves, leaf)
+		}
+	}
+	visit(err)
+	return leaves, truncated
+}
+
+func TestMetadataScaleDiagnosticErrorLeaves(t *testing.T) {
+	joined := errors.Join(ErrOutcomeUnknown, context.DeadlineExceeded, context.DeadlineExceeded)
+	leaves, truncated := metadataScaleDiagnosticErrorLeaves(joined)
+	require.False(t, truncated)
+	require.Len(t, leaves, 3)
+	require.True(t, leaves[0].Unknown)
+	require.True(t, leaves[1].Deadline)
+	require.True(t, leaves[2].Deadline)
+	require.NotEmpty(t, leaves[1].Type)
+	require.False(t, metadataScaleOnlyMemberStopTransport(joined), "diagnosis must not broaden the original recovery permission")
+
+	mixed := errors.Join(ErrOutcomeUnknown, status.Error(codes.Unavailable, "error reading from server: EOF"), context.Canceled, ErrCorruptRecord)
+	leaves, truncated = metadataScaleDiagnosticErrorLeaves(mixed)
+	require.False(t, truncated)
+	require.Len(t, leaves, 4)
+	require.Equal(t, codes.Unavailable.String(), leaves[1].Code)
+	require.True(t, leaves[2].Canceled)
+	require.False(t, metadataScaleOnlyMemberStopTransport(mixed))
+
+	large := make([]error, 16)
+	for i := range large {
+		large[i] = errors.New(strings.Repeat("x", 512))
+	}
+	leaves, truncated = metadataScaleDiagnosticErrorLeaves(errors.Join(large...))
+	require.True(t, truncated)
+	require.Len(t, leaves, 8)
+	for _, leaf := range leaves {
+		require.LessOrEqual(t, len(leaf.Message), 267)
+	}
+}
+
 func TestMetadataScaleMemberStopErrorClassification(t *testing.T) {
 	eof := status.Error(codes.Unavailable, "error reading from server: EOF")
 	reset := status.Error(codes.Unavailable, "error reading from server: connection reset by peer")
