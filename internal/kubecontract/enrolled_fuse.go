@@ -23,7 +23,9 @@ import (
 
 // EnrolledFUSEProfile names an inactive structural contract. Rendering or
 // validating it grants no enrollment, mount, flush, cleanup or user admission.
-// Existing production selectors deliberately do not accept this profile.
+// Business creation selectors deliberately do not activate this profile. The
+// Observer's explicit diagnostic branch still requires original enrollment and
+// independently authenticated kernel peers; inspection alone grants nothing.
 const EnrolledFUSEProfile = "sandbox-enrolled-fuse/v2"
 
 const (
@@ -176,12 +178,31 @@ func enrolledFUSEBootstrap(bootstrap fuseprotocol.BootstrapConfig) ([]byte, erro
 // ValidateEnrolledFUSEPodSpec compares every field with retained original
 // structural intent. It does not infer that intent from observed fields, accept
 // admission mutations, mutate either input, or attest running/kernel state.
+// Only the five EmptyDir byte limits ignore Quantity's JSON representation;
+// their numeric values must be exact. All other fields retain strict equality.
 func ValidateEnrolledFUSEPodSpec(actual v1.PodSpec, original EnrolledFUSEPodSpecInput) error {
 	expected, err := EnrolledFUSEPodSpec(original)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(actual, expected) {
+	if len(actual.Volumes) != len(expected.Volumes) {
+		return fmt.Errorf("FUSE Pod differs from original fixed structural intent")
+	}
+	// NewQuantity and API JSON decoding can represent the same byte count
+	// differently internally. Normalize only these known template fields in
+	// an owned copy after exact Cmp, never after Value's integer rounding.
+	// Do not use global API semantic equality: nil/empty fields and every
+	// other structural/security difference must still fail closed below.
+	checked := actual.DeepCopy()
+	for _, index := range []int{0, 1, 2, 5, 6} {
+		volume := checked.Volumes[index].EmptyDir
+		limit := expected.Volumes[index].EmptyDir.SizeLimit
+		if volume == nil || volume.SizeLimit == nil || volume.SizeLimit.Cmp(*limit) != 0 {
+			return fmt.Errorf("FUSE Pod differs from original fixed structural intent")
+		}
+		volume.SizeLimit = limit
+	}
+	if !reflect.DeepEqual(*checked, expected) {
 		return fmt.Errorf("FUSE Pod differs from original fixed structural intent")
 	}
 	return nil

@@ -153,6 +153,67 @@ func TestEnrolledFUSEStaticProtectedShape(t *testing.T) {
 	require.LessOrEqual(t, len(wire), 65536)
 }
 
+// A Kubernetes response necessarily parses Quantity's JSON representation.
+// Numeric equality must survive that transport without treating omitted/empty
+// fields, additional capabilities or different byte limits as equivalent.
+func TestEnrolledFUSEJSONRoundTripKeepsStrictStructure(t *testing.T) {
+	input := fuseProfileInput(t)
+	original := fuseV2ProfilePod(t, input)
+	wire, err := json.Marshal(original)
+	require.NoError(t, err)
+	var actual v1.Pod
+	require.NoError(t, json.Unmarshal(wire, &actual))
+	for _, index := range []int{0, 1, 2, 5, 6} {
+		before := original.Spec.Volumes[index].EmptyDir.SizeLimit
+		after := actual.Spec.Volumes[index].EmptyDir.SizeLimit
+		require.Zero(t, before.Cmp(*after), "the real JSON roundtrip preserved each byte limit")
+		t.Logf("volume %s source=%#v parsed=%#v", actual.Spec.Volumes[index].Name, *before, *after)
+	}
+	_, err = kubecontract.InspectEnrolledFUSEPod(&actual)
+	require.NoError(t, err, "the complete Inspector must accept a legal API JSON response")
+	require.NoError(t, kubecontract.ValidateEnrolledFUSEPodSpec(actual.Spec, input))
+
+	// Compare each changed quantity against retained original intent. In
+	// particular, Value() rounding must not erase a fractional-byte change.
+	for _, index := range []int{0, 1, 2, 5, 6} {
+		for _, delta := range []string{"1", "-1", "1m"} {
+			t.Run(actual.Spec.Volumes[index].Name+"/"+delta, func(t *testing.T) {
+				changed := actual.DeepCopy()
+				quantity := changed.Spec.Volumes[index].EmptyDir.SizeLimit
+				quantity.Add(resource.MustParse(delta))
+				require.NotZero(t, quantity.Cmp(*actual.Spec.Volumes[index].EmptyDir.SizeLimit))
+				require.Error(t, kubecontract.ValidateEnrolledFUSEPodSpec(changed.Spec, input))
+				if delta == "1m" || index != 0 && index != 1 {
+					// Workspace/tmp integer sizes are diagnostic inputs to the
+					// Inspector, so only original-intent validation binds them.
+					// A fractional value is never an exact template byte count.
+					_, err := kubecontract.InspectEnrolledFUSEPod(changed)
+					require.Error(t, err)
+				}
+			})
+		}
+	}
+	for name, mutate := range map[string]func(*v1.PodSpec){
+		"missing-limit": func(s *v1.PodSpec) { s.Volumes[0].EmptyDir.SizeLimit = nil },
+		"different-memory": func(s *v1.PodSpec) {
+			quantity := s.Containers[0].Resources.Limits[v1.ResourceMemory]
+			quantity.Add(resource.MustParse("1"))
+			s.Containers[0].Resources.Limits[v1.ResourceMemory] = quantity
+		},
+		"empty-ports":    func(s *v1.PodSpec) { s.Containers[0].Ports = []v1.ContainerPort{} },
+		"empty-overhead": func(s *v1.PodSpec) { s.Overhead = v1.ResourceList{} },
+		"launcher-escape": func(s *v1.PodSpec) {
+			s.Containers[0].SecurityContext.Capabilities.Add = append(s.Containers[0].SecurityContext.Capabilities.Add, "SYS_ADMIN")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := actual.Spec.DeepCopy()
+			mutate(changed)
+			require.Error(t, kubecontract.ValidateEnrolledFUSEPodSpec(*changed, input))
+		})
+	}
+}
+
 func TestEnrolledFUSEV2HealthChannelPinsTemplateVersion(t *testing.T) {
 	input := fuseProfileInput(t)
 	require.Equal(t, "sandbox-enrolled-fuse/v2", kubecontract.EnrolledFUSEProfile)
