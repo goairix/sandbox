@@ -162,3 +162,47 @@ func TestPlainColdMaterialWindowsRespectIssuer(t *testing.T) {
 		})
 	}
 }
+
+// These are certification-window tests, not evidence of runtime installation.
+// The real HTTP TTL fixture must separately cross the original wall-clock TTL.
+func TestPlainColdTTLActivationReusesValidReceiptIdentity(t *testing.T) {
+	s, birth, dispatch, now := plainColdMaterialFixture(t, 30*time.Minute)
+	m, err := s.material(context.Background(), birth, dispatch, "pod", "pod-uid")
+	require.NoError(t, err)
+	current, err := s.verifier.VerifyTargetActivation(m.Activation, m.RuntimeCertificate, m.IssuerCertificate, p.BirthContext(birth), now)
+	require.NoError(t, err)
+	baseline := now.Add(time.Second)
+	expires := baseline.Add(30 * time.Second)
+	next, err := s.ttlActivation(baseline, expires, current)
+	require.NoError(t, err)
+	require.Equal(t, current.RuntimeCertificate(), next.RuntimeCertificate(), "ordinary short TTL updates must not rotate a usable TLS pin")
+	require.Equal(t, current.Identity(), next.Identity())
+	require.Equal(t, current.Birth(), next.Birth())
+	require.Equal(t, current.DataGateEpoch(), next.DataGateEpoch())
+	require.True(t, next.NotBefore().After(current.NotBefore()))
+	require.True(t, next.NotAfter().Equal(expires))
+	require.True(t, next.NotAfter().Before(current.NotAfter()), "a new baseline may legally shorten the old business deadline")
+	_, err = s.ttlActivation(current.NotAfter().Add(2*time.Second), expires.Add(time.Hour), current)
+	require.Error(t, err, "an expired activation cannot be revived by signing a fresh candidate")
+}
+
+func TestPlainColdTTLActivationRefreshesSameKeyWithinIssuer(t *testing.T) {
+	s, birth, dispatch, now := plainColdMaterialFixture(t, 30*time.Minute)
+	m, err := s.material(context.Background(), birth, dispatch, "pod", "pod-uid")
+	require.NoError(t, err)
+	current, err := s.verifier.VerifyTargetActivation(m.Activation, m.RuntimeCertificate, m.IssuerCertificate, p.BirthContext(birth), now)
+	require.NoError(t, err)
+	baseline := now.Add(2 * time.Second)
+	next, err := s.ttlActivation(baseline, baseline.Add(time.Hour), current)
+	require.NoError(t, err)
+	require.NotEqual(t, current.RuntimeCertificate(), next.RuntimeCertificate())
+	original, err := s.verifier.VerifyRuntimeIdentityCertificate(current.RuntimeCertificate(), current.Identity(), baseline)
+	require.NoError(t, err)
+	renewed, err := s.verifier.VerifyRuntimeIdentityCertificate(next.RuntimeCertificate(), next.Identity(), baseline)
+	require.NoError(t, err)
+	require.Equal(t, original.PublicKey(), renewed.PublicKey())
+	require.True(t, original.NotBefore().Equal(renewed.NotBefore()), "fixed candidate pin must also cover the original TLS leaf")
+	require.True(t, renewed.NotAfter().Equal(baseline.Add(15*time.Minute)))
+	require.True(t, next.NotAfter().Equal(renewed.NotAfter()))
+	require.Equal(t, current.IssuerCertificate(), next.IssuerCertificate())
+}

@@ -427,5 +427,9 @@ func sandboxResponse(current *provisioning.PlainColdLookupResult) (types.Sandbox
 		return types.SandboxResponse{}, provisioning.ErrPlainColdUnavailable
 	}
 	expires := current.ExpiresAt
-	return types.SandboxResponse{ID: current.SandboxID, Mode: current.Business.Requested.Mode, State: "running", RuntimeID: current.Runtime.ID, CreatedAt: current.CreatedAt, Timeout: int(current.Business.Resolved.TTL.Seconds), ExpiresAt: &expires}, nil
+	timeout := int(current.Business.Resolved.TTL.Seconds)
+	if current.TimeoutSeconds > 0 {
+		timeout = current.TimeoutSeconds
+	}
+	return types.SandboxResponse{ID: current.SandboxID, Mode: current.Business.Requested.Mode, State: "running", RuntimeID: current.Runtime.ID, CreatedAt: current.CreatedAt, Timeout: timeout, ExpiresAt: &expires}, nil
 }

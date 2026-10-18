@@ -25,7 +25,10 @@ type PlainColdLookupResult struct {
 	Generation                     int64
 	Runtime                        p.RuntimeReference
 	CreatedAt, ExpiresAt           time.Time
-	Business                       *sandboxsnapshot.Snapshot
+	// TimeoutSeconds is the current TTL display value after a renewal. Zero
+	// retains the immutable creation snapshot's legacy display baseline.
+	TimeoutSeconds int
+	Business       *sandboxsnapshot.Snapshot
 }
 
 func checkPlainColdLookupTTL(now, expiry time.Time) error {
@@ -61,7 +64,9 @@ type plainColdLoadedTarget struct {
 	business *sandboxsnapshot.Snapshot
 	// snapshot retains the same reader-owned immutable envelope as view, so
 	// destroy profile admission never relies on a second, unrelated read.
-	snapshot *state.SandboxSnapshotRecord
+	snapshot   *state.SandboxSnapshotRecord
+	ttlCurrent *state.SandboxTTLCurrent
+	ttlPending *state.SandboxTTLPending
 }
 
 // loadColdTarget reads the original fixed deployment profile and retained
@@ -118,7 +123,15 @@ func (s *PlainColdService) loadColdTarget(ctx context.Context, sandboxID string)
 			return nil, ErrPlainColdProfile
 		}
 	}
-	return &plainColdLoadedTarget{view: read.View, control: c, capsule: capsule, dispatch: dispatch, history: history, business: business, snapshot: read.Snapshot}, nil
+	ttlCurrent, err := s.backend.ReadSandboxTTLCurrent(ctx, read.View)
+	if err != nil {
+		return nil, err
+	}
+	ttlPending, err := s.backend.ReadSandboxTTLPending(ctx, read.View)
+	if err != nil {
+		return nil, err
+	}
+	return &plainColdLoadedTarget{view: read.View, control: c, capsule: capsule, dispatch: dispatch, history: history, business: business, snapshot: read.Snapshot, ttlCurrent: ttlCurrent, ttlPending: ttlPending}, nil
 }
 
 // Lookup uses one original admission through metadata, retained history, the
@@ -141,9 +154,16 @@ func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*Plain
 	if err != nil {
 		return nil, err
 	}
+	if loaded.ttlPending != nil {
+		return nil, state.ErrOutcomeUnknown
+	}
 	c, capsule, dispatch, history := loaded.control, loaded.capsule, loaded.dispatch, loaded.history
 	identity := p.RuntimeIdentityContext{SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: p.RuntimeReference(*c.Runtime)}
 	enrollment := history.Publication.Enrollment.Request
+	if loaded.ttlCurrent != nil {
+		a := loaded.ttlCurrent.Activation
+		enrollment.RuntimeCertificate, enrollment.IssuerCertificate = a.RuntimeCertificate(), a.IssuerCertificate()
+	}
 	destination, credential, err := s.destination(s.target(dispatch.Pod, c.Runtime.UID), state.ColdBootstrapMaterial{RuntimeCertificate: enrollment.RuntimeCertificate, IssuerCertificate: enrollment.IssuerCertificate}, identity)
 	if err != nil {
 		return nil, err
@@ -176,6 +196,9 @@ func (s *PlainColdService) Lookup(ctx context.Context, sandboxID string) (*Plain
 		return nil, err
 	}
 	result := &PlainColdLookupResult{RequestID: capsule.RequestID, IntentID: c.IntentID, SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: identity.Runtime, CreatedAt: dispatch.CreatedAt, ExpiresAt: c.ExpiresAt, Business: loaded.business}
+	if loaded.ttlCurrent != nil {
+		result.CreatedAt, result.TimeoutSeconds = loaded.ttlCurrent.Baseline, loaded.ttlCurrent.Timeout
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {

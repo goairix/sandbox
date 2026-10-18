@@ -58,6 +58,9 @@ func (s *PlainColdService) Exec(ctx context.Context, sandboxID, requestID string
 	if err != nil {
 		return result, err
 	}
+	if loaded.ttlPending != nil {
+		return result, state.ErrOutcomeUnknown
+	}
 	now, err := s.now(ctx)
 	if err != nil {
 		return result, err
@@ -106,6 +109,10 @@ func (s *PlainColdService) Exec(ctx context.Context, sandboxID, requestID string
 	c := loaded.control
 	identity := p.RuntimeIdentityContext{SandboxID: c.SandboxID, WorkspaceHash: c.WorkspaceHash, Generation: c.Generation, Runtime: p.RuntimeReference(*c.Runtime)}
 	enrollment := loaded.history.Publication.Enrollment.Request
+	if loaded.ttlCurrent != nil {
+		a := loaded.ttlCurrent.Activation
+		enrollment.RuntimeCertificate, enrollment.IssuerCertificate = a.RuntimeCertificate(), a.IssuerCertificate()
+	}
 	destination, credential, err := s.destination(s.target(loaded.dispatch.Pod, c.Runtime.UID), state.ColdBootstrapMaterial{RuntimeCertificate: enrollment.RuntimeCertificate, IssuerCertificate: enrollment.IssuerCertificate}, identity)
 	if err != nil {
 		return result, err
