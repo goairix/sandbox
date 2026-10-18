@@ -73,6 +73,9 @@ race/Linuxvet、主分支整合及唯一限定审查通过，见
 build/vet、指纹审计和唯一限定审查通过，见
 [owner原生组件验证](2026-10-18-etcd-detached-owner-native-verification.md)。普通/损坏ACK、
 发送前absence、新Claim/Run及cutoff/Close矩阵仍缺，自动消费者和全局准入未接完。
+`9328ab4`补齐终态v2的13点历史/22 pin有限传输profile，Host/race/Linuxvet、主分支
+整合与证据审计通过，见[传输验证](2026-10-18-etcd-detached-terminal-transport-verification.md)。
+旧v1维度不变；新profile尚未由终态消费者选用，不能计为公开终态查询接通。
 
 新增 `2a6c46d`/`71aa9ad` 完成实际自动 cold quota actor、单共享工作区、原 job
 来源与配额确认门禁、quota-only 终态消费及 P 保留/删除接线；`00806a9`/`d16b720`

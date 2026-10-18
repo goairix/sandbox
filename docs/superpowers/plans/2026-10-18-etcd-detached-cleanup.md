@@ -253,6 +253,10 @@ canonical/envelope/variant测试，不能通过cast或伪Complete接原quota执�
 认证，以及Host9/race14/Linuxbuild-vet与唯一限定审查。只关闭该组合；普通/损坏ACK、
 pre-send absence、新Claim/Run和cutoff/Close仍须逐片验证，不能称完整4B关闭。
 
+4C传输组件`9328ab4`补齐13点历史/22 pin新profile，单请求128KiB、单回复256KiB、
+八次总回复512KiB独立校验及原flat parser验证通过；原v1维度不变。只关闭传输基础，
+真实proof/终态消费者、quota writer/paid cursor及统一内存准入仍开放。
+
 ### Task 4 消费者的统一内存准入约束
 
 独立复核确认，原fixed8MiB+transient16MiB覆盖discovery固定表及单页/Watch/RPC
