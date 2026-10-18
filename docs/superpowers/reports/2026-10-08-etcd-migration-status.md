@@ -25,6 +25,22 @@ Claim→销毁→释放→配额归还→Pending清除→HTTP链路，不再用�
 存储包已混入调度、运行时和文件操作；冻结新的协议层及平行执行机制，优先复用原actor
 闭合上述主链，之后再将独立运行时/文件职责移回已有边界。百分比仍是粗估，不能作为上线承诺。
 
+`f23fcc4` 接通真实 detached 退款后的 occupation settlement：原 actor 完成四点历史读，
+保留原 Task/intent/receipt、E/S 和 release seal 比较，一次48节点事务写 settled E、删 S，
+结果发布为 Committed。实际 TLS/native 正向、原 local/slot ABA 回归、race/vet及主分支
+输入等值集成通过。四点读中的永久 link 继续沿原合同认证，不能描述成四点全部逐项 CAS。
+该组件仍有明确测试调度接缝，不代表自动发现、P 删除或 managed admission 完成。
+
+`d515e87` 修复 Q 预约先于 intent 提交产生旧 Claim 孤儿的窗口：同原 Stage 原子提交
+预约和 intent，提交丢响应仍只仲裁原 receipt，不重发业务写入。原 key/schema 与旧
+present 预约兼容；旧版已遗留孤儿继续保守拒绝，不声称可以自动恢复。受影响实际原生
+验证分前8组、合并前项后3组执行，分别保留输入与进程清理记录；不是同一输入的11组
+全跑。定向 race、最终 Linux vet、主分支构建及9297个输入等值核对通过。
+
+这两项分别关闭真实恢复阻断，没有开放 HTTP detached destroy（仍501）或切换默认
+Redis。当前接续为同原 actor 的自动发现/退款/settlement/P 清除，以及复用原 Gateway、
+正式 cleanup-worker serve-cold-quota 的真实 HTTP 全链测试；不新增并行 worker 或协议层。
+
 功能代码未完成：其余API、Pool/Docker/Upload及默认入口替代、detached销毁消费者及
 独立自动清理worker的其余故障/恢复组合；分区due/dirty/Watch的
 剩余调度；etcd FUSE创建/挂载/flush/双进程终止证明与collector；长期历史及证书维护；

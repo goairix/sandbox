@@ -19,6 +19,12 @@
 协议层、平行worker及预算体系，优先复用原实现。managed Claim、完整phase准入、
 自动发现与最终P删除、销毁自动消费和HTTP接线仍是主链剩余工作。
 
+接续记录：`f23fcc4` 已关闭真实退款后 Joined occupation 的安全结算/槽释放，
+`d515e87` 已关闭新 Q 预约先写后提交的孤儿窗口，组件验证与主分支整合通过。
+不重播已关闭单元。当前两条线分别接同原 actor 的严格 v2 hint/paid/refund/settle/P，
+以及原 HTTPDestroyNative/正式 serve-cold-quota 的 managed 全链；后者仍须实际验证
+HTTP成功、运行时退出、配额归还与 S/P 清除，不能用私有物理 fixture 代替交付。
+
 ## Global Constraints
 
 256分区/4 Relist/20MiB/s Range/100 claim-s/32永久任务；64 native节点、128KiB请求、
