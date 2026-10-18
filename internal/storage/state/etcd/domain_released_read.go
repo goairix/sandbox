@@ -39,6 +39,12 @@ func (b *Backend) ReadSandboxReleased(ctx context.Context, sandboxID string) (*S
 	if err = releasedReadBudget(); err != nil {
 		return nil, err
 	}
+	// The variant is discovered only after the first retained reads. Preflight
+	// both immutable dimension tables before any admission or native dispatch;
+	// this checks no source and does not cache a release conclusion.
+	if err = releasedDetachedReadBudget(); err != nil {
+		return nil, err
+	}
 
 	// Bound only this API's admitted lifetime. Original snapshot callers retain
 	// their existing deadline behavior, and cancellation never substitutes for
@@ -113,7 +119,7 @@ func (b *Backend) readSandboxReleased(ctx context.Context, sandboxID, placementK
 	if err != nil {
 		return nil, err
 	}
-	proof, err := b.readReleasedProof(ctx, cohort.record.Reference)
+	proof, err := b.readReleasedProof(ctx, cohort.record.Reference, cohortPoints[0])
 	if err != nil {
 		return nil, err
 	}

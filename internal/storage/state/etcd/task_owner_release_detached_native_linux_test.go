@@ -5,6 +5,7 @@ package etcd
 import (
 	"bytes"
 	"context"
+	"os"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -222,6 +223,12 @@ func detachedPhysicalOwnerRelease(t *testing.T, f *cleanupDetachedNoEffectNative
 	require.NoError(t, err)
 	require.Equal(t, head[:2], finalHead)
 	t.Log("actual proof+7 slots; one release CAS committed with lost ACK; dead original Claim readonly/cold13 survives deleted index; no managed/quota/global-admission claim")
+
+	// Terminal observation separately confirms the deleted index is absent.
+	// Run it only after the cold-history zero-index-read assertions above.
+	if os.Getenv("SANDBOX_DETACHED_TERMINAL_PHYSICAL_NATIVE") == "1" {
+		detachedPhysicalReleasedRead(t, f)
+	}
 }
 
 // This independent mode preserves a genuine pre-send absence. Recovery uses

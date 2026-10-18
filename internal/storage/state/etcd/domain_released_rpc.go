@@ -66,9 +66,9 @@ func releasedReadCaps(profile releasedReadProfile) []int {
 	case releasedSuccessorFinal:
 		return []int{4096, 1024, 4096, 4096, 4096, 4096, 4096}
 	case releasedDetachedHistory:
-		// This finite transport allowance mirrors B's frozen thirteen-point
-		// source graph; it neither decodes those records nor proves release.
-		return []int{4096, 32768, 4096, 8192, 8192, 8192, 32768, 65536, 4096, 8192, 16384, 8192, 8192}
+		// Reuse the accepted thirteen-point allowance so routing and transport
+		// cannot drift. The caps neither decode history nor prove release.
+		return detachedRuntimeHistoryCaps()
 	case releasedDetachedFinal:
 		return []int{4096, 1024, 4096, 4096, 4096}
 	case releasedDetachedSuccessorFinal:
