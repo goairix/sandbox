@@ -482,7 +482,7 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 			}
 		}
 	}
-	if variant.destroyLocal || variant.destroyDetached {
+	if (variant.destroyLocal || variant.destroyDetached) && !variant.ttlGateway {
 		exerciseHTTPDestroyNative(t, ctx, httpDestroyNativeContext{
 			service: service, backend: backend, raw: admin, options: options,
 			request: request, workspace: w, identity: identity, directory: dir,
@@ -505,10 +505,21 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		return
 	}
 	if variant.ttlGateway {
+		var destroy *httpDestroyNativeContext
+		if detachedTerminal {
+			// This optional continuation reuses the same formal source and
+			// operator setup; it never creates a second sandbox after renewal.
+			destroy = &httpDestroyNativeContext{
+				service: service, backend: backend, raw: admin, options: options,
+				request: request, workspace: w, identity: identity, directory: dir,
+				observerAddress: tcp.Addr().String(), clockKey: clockKey, provider: destroyProvider,
+				terminal: true, detached: true,
+			}
+		}
 		exerciseHTTPGatewayTTLNative(t, ctx, service, backend, func() {
 			require.Equal(t, int32(1), postCount.Load(), "TTL renewal retains the original Pod")
 			require.Equal(t, int32(1), startCount.Load(), "TTL renewal retains the original formal launcher")
-		})
+		}, destroy)
 		joinOriginalBridges()
 		return
 	}

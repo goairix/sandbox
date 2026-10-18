@@ -39,6 +39,13 @@ func TestHTTPGatewayTTLNative(t *testing.T) {
 	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, detached: true})
 }
 
+func TestHTTPGatewayTTLDestroyNative(t *testing.T) {
+	if os.Getenv("SANDBOX_HTTP_TTL_DESTROY_NATIVE") != "1" {
+		t.Skip("requires exact owned HTTP TTL renewal and detached destroy Linux fixture")
+	}
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, detached: true, destroyDetached: true, destroyTerminal: true})
+}
+
 // Observe the real service return without replacing any runtime, bridge, Wait,
 // credential, admission or writer operation. Each bounded scenario consumes it.
 type httpNativeService struct {
@@ -295,7 +302,7 @@ func exerciseHTTPGatewayNative(t *testing.T, ctx context.Context, realService *p
 // mTLS credentials, activation and signed Exec path must survive the old TTL.
 // Waiting uses the actual clock shared with the signed clock server; the test
 // never injects a replacement activation or advances a fixture-only clock.
-func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService *provisioning.PlainColdService, backend *state.Backend, onePod func()) {
+func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService *provisioning.PlainColdService, backend *state.Backend, onePod func(), destroy *httpDestroyNativeContext) {
 	t.Helper()
 	service := &httpNativeService{PlainColdService: realService, results: make(chan execServiceNativeAnswer, 1)}
 	settings := &deployment.HTTPSettings{APIKey: []byte("native-http-key"), Env: map[string]string{"PATH": "/usr/bin:/bin"}, ExecTimeoutSeconds: 5, MaxExecTimeoutSeconds: 15, MaxActive: 4, RequestsPerSecond: 100, UID: 1000, GID: 1000}
@@ -315,9 +322,14 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 	t.Cleanup(client.CloseIdleConnections)
 	origin := "http://" + listener.Addr().String()
 
-	// Ten seconds leaves time for actual publication and immediate renewal,
-	// while crossing the old expiry stays within the launcher's 30-second test
-	// process bound and the shared fixture's 60-second context.
+	// The original ten-second expiry is crossed in both variants. Only the
+	// destroy continuation uses a ninety-second new TTL and the existing
+	// physical fixture's 120-second context, leaving real cleanup time after
+	// the same original runtime has authenticated a command beyond its old TTL.
+	renewalSeconds := 30
+	if destroy != nil {
+		renewalSeconds = 90
+	}
 	create := types.CreateSandboxRequest{Mode: "persistent", Timeout: 10}
 	key := uuid.NewString()
 	var first types.CreateSandboxResponse
@@ -335,17 +347,17 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 
 	started := time.Now().UTC()
 	var renewed types.UpdateTTLResponse
-	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: 30}, true), http.StatusOK, &renewed)
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: renewalSeconds}, true), http.StatusOK, &renewed)
 	finished := time.Now().UTC()
-	require.Equal(t, 30, renewed.Timeout)
+	require.Equal(t, renewalSeconds, renewed.Timeout)
 	require.True(t, renewed.ExpiresAt.After(originalExpiry))
 	var current types.SandboxResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), http.StatusOK, &current)
 	require.Equal(t, first.ID, current.ID)
-	require.Equal(t, 30, current.Timeout)
+	require.Equal(t, renewalSeconds, current.Timeout)
 	require.NotNil(t, current.ExpiresAt)
 	require.True(t, current.ExpiresAt.Equal(renewed.ExpiresAt))
-	require.True(t, current.CreatedAt.Add(30*time.Second).Equal(renewed.ExpiresAt), "old API resets its TTL baseline")
+	require.True(t, current.CreatedAt.Add(time.Duration(renewalSeconds)*time.Second).Equal(renewed.ExpiresAt), "old API resets its TTL baseline")
 	require.False(t, current.CreatedAt.Before(started))
 	require.False(t, current.CreatedAt.After(finished))
 	var replay types.CreateSandboxResponse
@@ -365,7 +377,7 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 		t.Fatal("original TTL did not elapse within the fixture lifetime")
 	}
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), http.StatusOK, &current)
-	require.Equal(t, 30, current.Timeout)
+	require.Equal(t, renewalSeconds, current.Timeout)
 	command := types.ExecRequest{Language: "bash", Code: "printf 'ttl-renewed-stdout\\n'; printf 'ttl-renewed-stderr\\n' >&2; exit 7"}
 	var executed types.ExecResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, path+"/exec", "", command, true), http.StatusOK, &executed)
@@ -386,4 +398,45 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 	onePod()
 	require.Empty(t, service.results)
 	t.Log("HTTP actual PUT/GET/Create replay crossed original TTL; same runtime signed Exec exited7 with original Wait/IO drain")
+	if destroy != nil {
+		httpGatewayTTLDestroyNative(t, ctx, *destroy, client, origin, key, first, updated)
+		onePod()
+	}
+}
+
+// Continue only the sandbox created, renewed and executed above. Ordinary
+// fixture inputs locate its actual source; the existing production worker must
+// authenticate everything itself. Its original quota/P watch verifies refund
+// before retirement, without a test-only Settle call or replacement sandbox.
+func httpGatewayTTLDestroyNative(t *testing.T, ctx context.Context, f httpDestroyNativeContext, client *http.Client, origin, idempotency string, created types.CreateSandboxResponse, current *state.SandboxControlRecord) {
+	t.Helper()
+	var err error
+	f.workspace, err = f.backend.DetachedIdentity(f.options.Business.Principal, idempotency)
+	require.NoError(t, err)
+	require.Equal(t, f.workspace.Hash(), current.WorkspaceHash)
+	f.request.IntentID, f.request.SandboxID = current.IntentID, created.ID
+	path := "/api/v1/sandboxes/" + created.ID
+	var accepted httpDestroyNativeResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), http.StatusAccepted, &accepted)
+	require.Equal(t, "destroy_pending", accepted.Code)
+	require.Equal(t, provisioning.PlainColdDestroyPending, accepted.State)
+	require.Equal(t, created.ID, accepted.SandboxID)
+	require.Equal(t, current.Generation, accepted.Generation)
+	require.Equal(t, p.RuntimeReference(*current.Runtime), accepted.Runtime)
+	require.NoError(t, accepted.Task.Validate())
+	httpDestroyNativeBirth(t, ctx, f, accepted)
+	httpDestroyNativeAutomatic(t, ctx, f, accepted, nil)
+
+	owner, err := f.backend.LoadOwner(ctx, f.workspace)
+	require.NoError(t, err)
+	require.Nil(t, owner)
+	var absent types.ErrorResponse
+	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), http.StatusNotFound, &absent)
+	require.Equal(t, "not_found", absent.Code)
+	proof, err := f.backend.ReadSandboxReleased(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, proof, "the original release reader must authenticate cleanup of the renewed runtime")
+	require.Positive(t, f.provider.patches.Load())
+	require.EqualValues(t, 1, f.provider.deletes.Load())
+	t.Logf("HTTP same sandbox=%s old TTL crossed→signed Exec→DELETE202→original managed cleanup/refund/Pgone→GET404; runtime UID=%s BootID=%s", created.ID, current.Runtime.UID, current.Runtime.BootID)
 }
