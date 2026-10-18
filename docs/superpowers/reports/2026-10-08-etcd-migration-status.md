@@ -6,8 +6,8 @@
 
 | 口径 | 进度 | 判断依据 |
 | --- | --- | --- |
-| 功能代码 | 约75%，粗估范围70%–80% | plain创建/查询/执行/文件下载及正常销毁链已接通；其余API、FUSE与故障组合仍有缺口 |
-| 整体交付 | 约50% | 沿用20/30/20/15/15权重，阶段粗估90/75/45/0/0；容量、部署恢复及最终替代未完成 |
+| 功能代码 | 约78%，粗估范围75%–80% | plain创建/查询/执行、有限上传/下载、正常销毁及正常TTL续期链已接通；其余API、FUSE与故障组合仍有缺口 |
+| 整体交付 | 约52% | 沿用20/30/20/15/15权重，阶段粗估90/80/50/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
@@ -38,8 +38,15 @@ OpenHTTP的原生组合、early/Unknown故障组合、全部最大输入和容�
 完成。`a933320` 将维护检查改为使用故障前建立的API客户端，实际10k/60秒故障pilot
 159.91秒通过：Compact、逐成员Defrag、原follower Wait、既有API原读写、原数据重启
 及追平全部完成，维护时间5.58秒单列，四个原Wait和容器/卷清理及9303项输入核对通过。
-Linux vet及独立限定审查通过；最新代码的新构建已重新启动正式长测，尚无1小时/100k
-结论。保留产品启动校验，不声称降级新启动成功。fixture使用
+Linux vet及独立限定审查通过。正式长测FULL03在1897.79秒失败：维护及原API检查已完成，
+worker仍Running，但历史LastError含corrupt record；没有1小时/100k通过结论。四个原Wait、
+无OOM、容器/卷清理及9303项输入核对完成。4.4秒真实三成员复现定位为合法compaction
+取消帧Header.Revision=0被误报损坏。`e1227a5` 限定修复已通过定向host、全DueWatch回归、
+Linux vet及真实三成员短测；普通帧仍严格校验，混合错误不当作compaction。短测原进程
+Wait、无OOM、容器清理及9303项输入核对通过。后续fault-pilot02在维护完成后因已发送
+Txn遇EOF而触发原worker不可逆失权，未通过；正在补测真实新session接管，禁止复活旧owner。
+全部容量断言和原失败记录保留，完整长测未重跑。
+保留产品启动校验，不声称降级新启动成功。fixture使用
 私有明文环回连接。这是View/Snapshot/调度元数据子集，不是完整B_live或同数量可用
 sandbox、Pod、FUSE容量，也没有生产HTTP延迟或相对Redis性能结论。百分比暂不调整。
 
@@ -52,16 +59,31 @@ Linux UID1000的13项实际测试覆盖，包括真实发布后Sync失败。验�
 和一次混构建输入拒绝保留，不计通过。大文件/分片上传仍开放，百分比暂不调整。
 
 `9241f35` 接好可选 TTL HTTP 能力边界：严格旧DTO、原请求归属、单次调用及Unknown
-优先级；48项Gateway回归、TTL定向race、Linux vet及主分支TTL回归通过。实际服务
-尚未实现该能力，PUT仍501。真实Linux用例已成功创建并在PUT处得到501，原进程及
+优先级；48项Gateway回归、TTL定向race、Linux vet及主分支TTL回归通过。初始实际服务
+未实现该能力，真实Linux用例已成功创建并在PUT处得到501，原进程及
 容器清理、9522项输入核对完成；这是有效失败基线，不是完整续期通过。
 
 `ee1c303` 增加原live journal的持久激活替换：固定前驱/候选、后签发时间防回滚，
 允许缩短期限；仅替换activation文件，关闭gate后拒绝，不重写原command记录，持久化
 不确定后poison。原包111项回归、4项新增测试的race、Linux vet、Linux容器内4项
 真实文件测试及2301项输入核对通过；独立审查通过。单元使用受控测试时钟，不代表
-实际等待跨TTL的launcher正例。Supervisor/TLS换证、当前凭证读取及etcd原子提交
-仍在实现，不能仅修改ExpiresAt后宣称TTL可用；功能/交付百分比不调整。
+实际等待跨TTL的launcher正例。`b343bc6`/`a0c9026`/`3552725` 分步接通有限TLS续期、
+持久前驱/候选查询和原Supervisor中的换证：关闭不重开，原连接借用的密钥保留到实际
+退出；并发拒绝以不可回退签发时间阻止迟到安装。传输全量host、定向race、Supervisor
+五组host/race及Linux vet通过，独立审查通过。`b594a68` 用原Operation/Stage持久固定
+candidate并原子更新Control/current/due，未知结果仅查询仲裁；固定monotonic截止限制实际
+Install，截止后只读仲裁不恢复写权限。`fdcdb26` 接业务续期和当前凭证读取，`6f8cf94` 接
+原销毁目标的当前TLS。元数据7组host/race、PlainCold全组host/race、Linux vet及独立
+审查通过，Gateway全量回归通过。
+
+`ed1e42d` 正常TTL链的真实Linux用例13.38秒通过：Create10秒→PUT30秒→GET及原Create键
+重放显示新期限→实际等待旧ExpiresAt+2秒→GET及签名Exec，退出7、stdout/stderr及原Wait/IO
+drain正确，Runtime UID/Boot、generation/gate不变，仍只有一个Pod/launcher。原9个bridge、
+launcher、TLS-etcd成员实际Wait、无OOM及容器清理完成；9530项输入/工具核对通过。
+该次运行在验证工作树，1174个实际编译仓库输入与主分支逐字节一致；未声称主分支重跑。
+独立Spec/Quality审查通过，首次501失败基线保留。上调粗估来自可用正常TTL业务链闭合，
+不是按提交/测试数量累计；丢ACK、进程重启后的未完成续期自动收敛、换证后Destroy组合
+及故障/容量仍待验，不能宣称整个TTL恢复或生产迁移完成。
 
 FUSE缺口复核：产品尚无节点健康collector，当前每sandbox五秒的Pod GET/exec及
 Begin/End操作仍在；resident样本只减少helper内部扫描。enrolled FUSE合同尚未实际
