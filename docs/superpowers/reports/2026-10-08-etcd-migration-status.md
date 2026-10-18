@@ -45,7 +45,12 @@ worker仍Running，但历史LastError含corrupt record；没有1小时/100k通�
 Linux vet及真实三成员短测；普通帧仍严格校验，混合错误不当作compaction。短测原进程
 Wait、无OOM、容器清理及9303项输入核对通过。后续fault-pilot02在维护完成后因已发送
 Txn遇EOF而触发原worker不可逆失权，未通过；正在补测真实新session接管，禁止复活旧owner。
-全部容量断言和原失败记录保留，完整长测未重跑。
+`eb65fae` 仅调整两个既有测试文件：维护期原owner若失权，必须实际join、确认旧guard及
+lease消失后才用原API获取新session，恢复成本单列，所有idle/N/64MiB/1小时断言保留。
+严格错误叶分类host、Linux检查及独立审查通过。fault-pilot04实际225.12秒通过，维护
+66.45秒；本次原owner存活并重同步，尚未证明replacement分支。原四个Wait、无OOM、
+容器/卷清理及9303项输入核对通过。FULL04已启动1万/10万各一小时正式长测，尚无结论；
+全部原失败记录保留，不把短测当容量验收。
 保留产品启动校验，不声称降级新启动成功。fixture使用
 私有明文环回连接。这是View/Snapshot/调度元数据子集，不是完整B_live或同数量可用
 sandbox、Pod、FUSE容量，也没有生产HTTP延迟或相对Redis性能结论。百分比暂不调整。
@@ -82,8 +87,16 @@ drain正确，Runtime UID/Boot、generation/gate不变，仍只有一个Pod/laun
 launcher、TLS-etcd成员实际Wait、无OOM及容器清理完成；9530项输入/工具核对通过。
 该次运行在验证工作树，1174个实际编译仓库输入与主分支逐字节一致；未声称主分支重跑。
 独立Spec/Quality审查通过，首次501失败基线保留。上调粗估来自可用正常TTL业务链闭合，
-不是按提交/测试数量累计；丢ACK、进程重启后的未完成续期自动收敛、换证后Destroy组合
-及故障/容量仍待验，不能宣称整个TTL恢复或生产迁移完成。
+不是按提交/测试数量累计；丢ACK、进程重启后的未完成续期自动收敛、实际换叶证书的
+业务组合及故障/容量仍待验，不能宣称整个TTL恢复或生产迁移完成。
+
+`dd366fc` 再验证同目标的正常续期后销毁：Create10秒→PUT90秒→实际跨旧期限→签名Exec→
+DELETE202→原正式worker清理和配额归还→GET404。真实Linux用例50.01秒通过，原worker、
+bridge、launcher及TLS-etcd成员实际退出、无OOM及容器清理完成，9539项输入/工具核对通过。
+收尾bridge的broken-pipe日志保留，没有宣称零日志告警。首次缺worker二进制失败、随后
+行为通过但旧构建脚本工具路径审计失败均保留，不计正式验收；改用正确记录实际工具的
+构建脚本后通过。独立Spec/Quality审查通过。该次实际运行位于验证工作树，生产代码及
+目标用例已合入主分支；两树另有独立容量测试差异，未声称主分支全部输入等值或native重跑。
 
 FUSE缺口复核：产品尚无节点健康collector，当前每sandbox五秒的Pod GET/exec及
 Begin/End操作仍在；resident样本只减少helper内部扫描。enrolled FUSE合同尚未实际
