@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,13 +32,16 @@ func fileRoute(method, operation string) bool {
 		return false
 	}
 	switch operation {
-	case "list-recursive", "glob", "read", "read-lines", "edit", "edit-lines":
+	case "list-recursive", "glob", "read", "read-lines", "edit", "edit-lines", "upload":
 		return true
 	}
 	return false
 }
 
 func fileRequest(w http.ResponseWriter, r *http.Request, operation string) (sandboxfiles.Request, bool) {
+	if operation == "upload" {
+		return uploadRequest(w, r)
+	}
 	request := sandboxfiles.Request{Operation: operation}
 	if r.Method == http.MethodGet {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1))
@@ -93,6 +97,148 @@ func fileRequest(w http.ResponseWriter, r *http.Request, operation string) (sand
 			return request, false
 		}
 		request.Path, request.StartLine, request.EndLine, request.NewContent = dto.Path, dto.StartLine, dto.EndLine, dto.NewContent
+	}
+	return request, true
+}
+
+// uploadRequest fully validates one finite multipart request before Exec can
+// create an operation or touch the target. The file cap is 512 KiB; an extra
+// 64 KiB bounds multipart headers/framing and the optional 4096-byte path.
+// Binary JSON encoding then remains below the original 1 MiB signed stdin cap.
+// This is not the legacy large-file stream or a durable multipart upload job.
+func uploadRequest(w http.ResponseWriter, r *http.Request) (sandboxfiles.Request, bool) {
+	request := sandboxfiles.Request{Operation: "upload"}
+	size, valid := validHeaderValue(r.Header, "X-Sandbox-File-Size", 20, true)
+	if !valid {
+		writeError(w, 400, "invalid_request", "invalid X-Sandbox-File-Size")
+		return request, false
+	}
+	declared := int64(-1)
+	if size != "" {
+		var err error
+		declared, err = strconv.ParseInt(size, 10, 64)
+		if err != nil || declared < 0 {
+			writeError(w, 400, "invalid_request", "invalid X-Sandbox-File-Size")
+			return request, false
+		}
+		if declared > sandboxfiles.MaxContentBytes {
+			writeError(w, 413, "limit_exceeded", "upload exceeds 512 KiB file limit")
+			return request, false
+		}
+	}
+
+	if len(r.URL.RawQuery) > 3*4096+100 {
+		writeError(w, 400, "invalid_request", "invalid upload path query")
+		return request, false
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(query) > 1 || len(query) == 1 && len(query["path"]) != 1 {
+		writeError(w, 400, "invalid_request", "invalid upload path query")
+		return request, false
+	}
+	request.Path = query.Get("path")
+	if declared >= 0 && request.Path == "" {
+		writeError(w, 400, "invalid_request", "declared upload requires path query parameter")
+		return request, false
+	}
+	if request.Path == "" {
+		request.Path = "/workspace/"
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, sandboxfiles.MaxContentBytes+(64<<10))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeError(w, 400, "invalid_request", "multipart form data is required")
+		return request, false
+	}
+	var fileSeen, pathSeen bool
+	var filename string
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			var limit *http.MaxBytesError
+			if errors.As(err, &limit) {
+				writeError(w, 413, "limit_exceeded", "upload framing exceeds limit")
+			} else {
+				writeError(w, 400, "invalid_request", "incomplete multipart upload")
+			}
+			return request, false
+		}
+
+		switch part.FormName() {
+		case "file":
+			if fileSeen || part.FileName() == "" {
+				writeError(w, 400, "invalid_request", "exactly one file part is required")
+				return request, false
+			}
+			fileSeen, filename = true, path.Base(part.FileName())
+			if filename == "." || filename == ".." || filename == "/" {
+				writeError(w, 400, "invalid_request", "invalid upload filename")
+				return request, false
+			}
+			request.Content, err = io.ReadAll(io.LimitReader(part, sandboxfiles.MaxContentBytes+1))
+			if len(request.Content) > sandboxfiles.MaxContentBytes {
+				writeError(w, 413, "limit_exceeded", "upload exceeds 512 KiB file limit")
+				return request, false
+			}
+		case "path":
+			if declared >= 0 || pathSeen || part.FileName() != "" {
+				writeError(w, 400, "invalid_request", "invalid multipart path field")
+				return request, false
+			}
+			pathSeen = true
+			var value []byte
+			value, err = io.ReadAll(io.LimitReader(part, 4097))
+			if len(value) == 0 || len(value) > 4096 {
+				writeError(w, 400, "invalid_request", "invalid multipart path field")
+				return request, false
+			}
+			// Preserve legacy small-request compatibility: one form path may
+			// precede/follow the file and overrides a query path. No target is
+			// acted on until all remaining parts have also been validated.
+			request.Path = string(value)
+		default:
+			writeError(w, 400, "invalid_request", "unexpected multipart field")
+			return request, false
+		}
+		if err != nil {
+			var limit *http.MaxBytesError
+			if errors.As(err, &limit) {
+				writeError(w, 413, "limit_exceeded", "upload framing exceeds limit")
+			} else {
+				writeError(w, 400, "invalid_request", "incomplete multipart upload")
+			}
+			return request, false
+		}
+		if err := part.Close(); err != nil {
+			writeError(w, 400, "invalid_request", "incomplete multipart upload")
+			return request, false
+		}
+	}
+
+	// MIME's closing boundary may precede HTTP-body EOF. Its internal read-ahead
+	// was already charged through MaxBytesReader; drain the remaining original
+	// body as well before admitting Exec. A short legal epilogue is harmless,
+	// but oversized or truncated trailing input cannot escape the total cap.
+	if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		var limit *http.MaxBytesError
+		if errors.As(err, &limit) {
+			writeError(w, 413, "limit_exceeded", "upload framing exceeds limit")
+		} else {
+			writeError(w, 400, "invalid_request", "incomplete multipart upload")
+		}
+		return request, false
+	}
+
+	if !fileSeen || declared >= 0 && int64(len(request.Content)) != declared {
+		writeError(w, 400, "invalid_request", "file is missing or differs from declared size")
+		return request, false
+	}
+	if strings.HasSuffix(request.Path, "/") {
+		request.Path += filename
 	}
 	return request, true
 }
@@ -203,7 +349,7 @@ func fileResultMatches(request sandboxfiles.Request, result sandboxfiles.Result)
 	switch request.Operation {
 	case "read", "download":
 		clean.Content = nil
-	case "edit", "edit-lines":
+	case "edit", "edit-lines", "upload":
 	case "list", "list-recursive", "glob":
 		if len(result.Files) > result.TotalCount {
 			return false
@@ -285,5 +431,7 @@ func writeFileResult(w http.ResponseWriter, request sandboxfiles.Request, result
 		writeJSON(w, 200, types.ReadFileLinesResponse{Lines: result.Lines, StartLine: result.StartLine, EndLine: result.EndLine, TotalLines: result.TotalLines})
 	case "edit", "edit-lines":
 		writeJSON(w, 200, types.EditFileResponse{Message: "ok"})
+	case "upload":
+		writeJSON(w, 200, types.FileUploadResponse{Path: request.Path, Size: int64(len(request.Content))})
 	}
 }

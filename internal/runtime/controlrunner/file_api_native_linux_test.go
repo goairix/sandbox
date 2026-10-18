@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +197,51 @@ printf 'uid1000 gid1000 control-unreadable files-created\n'
 	require.Equal(t, "beta\nmiddle\nomega", string(httpNativeRead(t, response, 200, nil)))
 	terminal()
 	require.Equal(t, 9, service.fileCalls, "eight successful file routes plus actual invalid-name rejection")
+
+	// Extend the original fixture with two genuine uploads, rather than a
+	// signed model result: the same enrolled launcher consumes binary stdin,
+	// publishes the file and returns its actual terminal/drain receipt.
+	uploadPath := dir + "/upload/child/payload.bin"
+	for index, content := range [][]byte{{0, 255, 128, 'x'}, bytes.Repeat([]byte{0, 255, 128, 'x'}, (512<<10)/4)} {
+		if index == 1 {
+			runOriginal("chmod 600 -- " + uploadPath)
+		}
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("file", "payload.bin")
+		require.NoError(t, err)
+		_, err = part.Write(content)
+		require.NoError(t, err)
+		route := base + "upload"
+		if index == 0 {
+			// Legacy small requests may place the path after the file. All
+			// multipart validation must complete before this target can run.
+			require.NoError(t, writer.WriteField("path", uploadPath))
+		} else {
+			route += "?path=" + url.QueryEscape(uploadPath)
+		}
+		require.NoError(t, writer.Close())
+		request, err := http.NewRequest(http.MethodPost, origin+route, &body)
+		require.NoError(t, err)
+		request.Header.Set("Authorization", "Bearer native-http-key")
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		if index == 1 {
+			request.Header.Set("X-Sandbox-File-Size", strconv.Itoa(len(content)))
+		}
+		response, err := client.Do(request)
+		require.NoError(t, err)
+		var uploaded types.FileUploadResponse
+		httpNativeRead(t, response, http.StatusOK, &uploaded)
+		terminal()
+		require.Equal(t, uploadPath, uploaded.Path)
+		require.Equal(t, int64(len(content)), uploaded.Size)
+		response = fileNativeRequest(t, client, origin, "GET", base+"download?path="+url.QueryEscape(uploadPath), nil)
+		actual := httpNativeRead(t, response, http.StatusOK, nil)
+		require.True(t, bytes.Equal(content, actual), "uploaded binary differs: expected=%d actual=%d bytes", len(content), len(actual))
+		terminal()
+		require.Equal(t, "1000:1000:644\n", runOriginal("stat -c '%u:%g:%a' -- "+uploadPath))
+	}
+	require.Equal(t, 13, service.fileCalls, "original nine routes plus two real upload/download pairs")
 	require.Empty(t, service.results)
 	cancelServer()
 	select {
@@ -204,5 +251,5 @@ printf 'uid1000 gid1000 control-unreadable files-created\n'
 	case <-ctx.Done():
 		t.Fatal("file API HTTP handlers did not physically join")
 	}
-	t.Log("file API actual TLS-etcd/formal-launcher UID/GID1000 protected-control denial, Linux invalid-name422, eight routes, binary/line/edit bytes, signed terminal/drain and original Wait/IO joined")
+	t.Log("file API actual TLS-etcd/formal-launcher UID/GID1000 protected-control denial, Linux invalid-name422, eight original routes, binary/line/edit bytes, binary upload/create/0644 overwrite at 512KiB, signed terminal/drain and original Wait/IO joined")
 }

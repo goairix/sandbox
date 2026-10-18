@@ -401,9 +401,11 @@ func TestGatewayAdmissionCloseAndGlobalRate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rateLimited.Close()
+	// PUT remains unsupported after DELETE gained a real destroy handler. Use
+	// it to isolate the shared token bucket from service destroy availability.
 	for i, want := range []int{501, 429} {
 		rw = httptest.NewRecorder()
-		rateLimited.ServeHTTP(rw, gatewayRequest(http.MethodDelete, "/api/v1/sandboxes/"+gatewaySandboxID, ""))
+		rateLimited.ServeHTTP(rw, gatewayRequest(http.MethodPut, "/api/v1/sandboxes/"+gatewaySandboxID, ""))
 		if rw.Code != want {
 			t.Fatalf("global token bucket request %d status=%d want=%d", i, rw.Code, want)
 		}

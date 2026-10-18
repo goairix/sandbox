@@ -1,12 +1,16 @@
 package etcdgateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +28,225 @@ import (
 )
 
 const gatewayFilesPath = "/api/v1/sandboxes/" + gatewaySandboxID + "/files/"
+
+type gatewayUploadPart struct {
+	field, filename string
+	data            []byte
+}
+
+func gatewayUploadMultipart(t *testing.T, parts ...gatewayUploadPart) (string, string) {
+	t.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	for _, part := range parts {
+		var output io.Writer
+		var err error
+		if part.filename != "" {
+			output, err = w.CreateFormFile(part.field, part.filename)
+		} else {
+			output, err = w.CreateFormField(part.field)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := output.Write(part.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.String(), w.FormDataContentType()
+}
+
+// These socket tests establish admission and descriptor binding only. The
+// service deliberately returns Unknown, never a fabricated terminal success;
+// the original Linux native fixture verifies actual upload and signed drain.
+func TestGatewayUploadAdmitsOneBoundedDescriptor(t *testing.T) {
+	binary := []byte{0, 255, 128, 'x'}
+	file := gatewayUploadPart{field: "file", filename: "payload.bin", data: binary}
+	path := gatewayUploadPart{field: "path", data: []byte("/workspace/nested/payload.bin")}
+	for _, test := range []struct {
+		name, query, declared, target string
+		parts                         []gatewayUploadPart
+		data                          []byte
+	}{
+		{"path-before", "", "", "/workspace/nested/payload.bin", []gatewayUploadPart{path, file}, binary},
+		{"path-after", "?path=/tmp/overridden.bin", "", "/workspace/nested/payload.bin", []gatewayUploadPart{file, path}, binary},
+		{"declared-query", "?path=/tmp/", "4", "/tmp/payload.bin", []gatewayUploadPart{file}, binary},
+		{"default-directory", "", "", "/workspace/payload.bin", []gatewayUploadPart{file}, binary},
+		{"exact-limit", "?path=/workspace/limit.bin", "524288", "/workspace/limit.bin", []gatewayUploadPart{{field: "file", filename: "limit.bin", data: bytes.Repeat([]byte{255}, 512<<10)}}, bytes.Repeat([]byte{255}, 512<<10)},
+		{"empty", "?path=/workspace/empty", "0", "/workspace/empty", []gatewayUploadPart{{field: "file", filename: "empty"}}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan p.ExecutionRequest, 1)
+			service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+			service.execCall = func(_ context.Context, _, _ string, request p.ExecutionRequest, stdout, _ io.Writer) (provisioning.PlainExecResult, error) {
+				requests <- request
+				_, _ = stdout.Write([]byte(`{}`))
+				return provisioning.PlainExecResult{State: provisioning.PlainExecUnknown, Operation: state.OperationReference{OperationID: "upload-original-operation"}, Effect: state.ExecEffectReference{CommandID: "upload-original-command"}}, state.ErrDeliveryUnknown
+			}
+			_, client, origin := fileGatewaySocket(t, service, 4)
+			body, contentType := gatewayUploadMultipart(t, test.parts...)
+			if test.name == "declared-query" {
+				body += "bounded legal MIME epilogue"
+			}
+			headers := http.Header{"Content-Type": {contentType}, "X-Request-Id": {"upload-attribution"}}
+			if test.declared != "" {
+				headers.Set("X-Sandbox-File-Size", test.declared)
+			}
+			status, _, wire := fileHTTPRequest(t, client, origin, "POST", gatewayFilesPath+"upload"+test.query, body, headers)
+			if status != 502 || !strings.Contains(string(wire), `"code":"exec_unknown"`) || service.execs.Load() != 1 {
+				t.Fatalf("bounded upload did not reach exactly one original Exec: status=%d calls=%d body=%s", status, service.execs.Load(), wire)
+			}
+			request := <-requests
+			if len(request.Argv) != 2 || request.Argv[0] != "/usr/local/bin/sandbox-launcher" || request.Argv[1] != "file-operation" || request.WorkDir != "/workspace" || request.RequiresNetwork || request.TTY || len(request.Stdin) > 1<<20 {
+				t.Fatal("upload bypassed the existing bounded helper descriptor")
+			}
+			var input struct {
+				Operation string `json:"operation"`
+				Path      string `json:"path"`
+				Content   []byte `json:"content"`
+			}
+			if err := json.Unmarshal(request.Stdin, &input); err != nil || input.Operation != "upload" || input.Path != test.target || !bytes.Equal(input.Content, test.data) {
+				t.Fatalf("descriptor lost exact binary payload/path: operation=%s path=%s bytes=%d err=%v", input.Operation, input.Path, len(input.Content), err)
+			}
+			if !strings.Contains(string(wire), "upload-original-operation") || !strings.Contains(string(wire), "upload-original-command") || !strings.Contains(string(wire), "do not automatically retry") {
+				t.Fatal("unknown upload lost original attribution/no-retry semantics", string(wire))
+			}
+		})
+	}
+}
+
+func TestGatewayUploadRejectsMultipartBeforeExec(t *testing.T) {
+	file := gatewayUploadPart{field: "file", filename: "a.bin", data: []byte("data")}
+	path := gatewayUploadPart{field: "path", data: []byte("/workspace/a.bin")}
+	for _, test := range []struct {
+		name, query, declared string
+		parts                 []gatewayUploadPart
+		truncate              bool
+		status                int
+	}{
+		{"over-limit", "", "", []gatewayUploadPart{{field: "file", filename: "large", data: bytes.Repeat([]byte{'x'}, (512<<10)+1)}}, false, 413},
+		{"declared-over-limit", "?path=/workspace/a", "524289", []gatewayUploadPart{file}, false, 413},
+		{"shorter", "?path=/workspace/a", "5", []gatewayUploadPart{file}, false, 400},
+		{"longer", "?path=/workspace/a", "3", []gatewayUploadPart{file}, false, 400},
+		{"declared-no-query", "", "4", []gatewayUploadPart{file}, false, 400},
+		{"declared-path-before", "?path=/workspace/a", "4", []gatewayUploadPart{path, file}, false, 400},
+		{"declared-path-after", "?path=/workspace/a", "4", []gatewayUploadPart{file, path}, false, 400},
+		{"two-files", "", "", []gatewayUploadPart{file, file}, false, 400},
+		{"declared-two-files", "?path=/workspace/a", "4", []gatewayUploadPart{file, file}, false, 400},
+		{"duplicate-path", "", "", []gatewayUploadPart{path, file, path}, false, 400},
+		{"truncated", "", "", []gatewayUploadPart{file}, true, 400},
+		{"no-file", "", "", []gatewayUploadPart{path}, false, 400},
+		{"escaped-path", "", "", []gatewayUploadPart{file, {field: "path", data: []byte("/workspace/../outside")}}, false, 400},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+			_, client, origin := fileGatewaySocket(t, service, 4)
+			body, contentType := gatewayUploadMultipart(t, test.parts...)
+			if test.truncate {
+				body = body[:len(body)-8]
+			}
+			headers := http.Header{"Content-Type": {contentType}}
+			if test.declared != "" {
+				headers.Set("X-Sandbox-File-Size", test.declared)
+			}
+			status, _, wire := fileHTTPRequest(t, client, origin, "POST", gatewayFilesPath+"upload"+test.query, body, headers)
+			if status != test.status || service.execs.Load() != 0 {
+				t.Fatalf("invalid multipart reached execution: status=%d calls=%d body=%s", status, service.execs.Load(), wire)
+			}
+		})
+	}
+}
+
+// A terminal enum and helper-looking stdout are deliberately not signed
+// evidence. Only the existing verified receipt/drain path can acknowledge an
+// upload, even when no transport error accompanied this refused model result.
+func TestGatewayUploadRejectsUnverifiedTerminal(t *testing.T) {
+	service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+	service.execCall = func(_ context.Context, _, _ string, _ p.ExecutionRequest, stdout, _ io.Writer) (provisioning.PlainExecResult, error) {
+		_, _ = stdout.Write([]byte(`{}`))
+		return provisioning.PlainExecResult{State: provisioning.PlainExecLocalTerminal}, nil
+	}
+	_, client, origin := fileGatewaySocket(t, service, 4)
+	body, contentType := gatewayUploadMultipart(t, gatewayUploadPart{field: "file", filename: "a", data: []byte("data")})
+	status, _, wire := fileHTTPRequest(t, client, origin, "POST", gatewayFilesPath+"upload", body, http.Header{"Content-Type": {contentType}})
+	if status != 502 || !strings.Contains(string(wire), `"code":"exec_unknown"`) || service.execs.Load() != 1 {
+		t.Fatalf("unverified terminal bypassed original receipt admission: status=%d calls=%d body=%s", status, service.execs.Load(), wire)
+	}
+}
+
+func TestGatewayUploadRejectsAmbiguousSizeHeaders(t *testing.T) {
+	for name, values := range map[string][]string{
+		"duplicate":  {"4", "4"},
+		"empty":      {""},
+		"negative":   {"-1"},
+		"false-zero": {"0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+			_, client, origin := fileGatewaySocket(t, service, 4)
+			body, contentType := gatewayUploadMultipart(t, gatewayUploadPart{field: "file", filename: "a", data: []byte("data")})
+			status, _, wire := fileHTTPRequest(t, client, origin, "POST", gatewayFilesPath+"upload?path=/workspace/a", body, http.Header{"Content-Type": {contentType}, "X-Sandbox-File-Size": values})
+			if status != 400 || service.execs.Load() != 0 {
+				t.Fatalf("invalid size header reached execution: status=%d calls=%d body=%s", status, service.execs.Load(), wire)
+			}
+		})
+	}
+}
+
+// MIME completion is not HTTP-body completion. The original socket request
+// must also reach a bounded clean body EOF before an operation can be created.
+func TestGatewayUploadRejectsOversizeEpilogueBeforeExec(t *testing.T) {
+	t.Run("oversize-epilogue", func(t *testing.T) {
+		service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+		service.execCall = func(context.Context, string, string, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+			return provisioning.PlainExecResult{State: provisioning.PlainExecUnknown}, state.ErrDeliveryUnknown
+		}
+		_, client, origin := fileGatewaySocket(t, service, 4)
+		body, contentType := gatewayUploadMultipart(t, gatewayUploadPart{field: "file", filename: "a", data: []byte("data")})
+		body += strings.Repeat("x", (512<<10)+(64<<10))
+		status, _, wire := fileHTTPRequest(t, client, origin, "POST", gatewayFilesPath+"upload", body, http.Header{"Content-Type": {contentType}})
+		if status != 413 || service.execs.Load() != 0 {
+			t.Fatalf("oversized trailing body reached execution: status=%d calls=%d body=%s", status, service.execs.Load(), wire)
+		}
+	})
+	t.Run("truncated-content-length", func(t *testing.T) {
+		service := &fileServiceFake{gatewayServiceFake: &gatewayServiceFake{}}
+		service.execCall = func(context.Context, string, string, p.ExecutionRequest, io.Writer, io.Writer) (provisioning.PlainExecResult, error) {
+			return provisioning.PlainExecResult{State: provisioning.PlainExecUnknown}, state.ErrDeliveryUnknown
+		}
+		_, _, origin := fileGatewaySocket(t, service, 4)
+		body, contentType := gatewayUploadMultipart(t, gatewayUploadPart{field: "file", filename: "a", data: []byte("data")})
+		address := strings.TrimPrefix(origin, "http://")
+		connection, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		_, err = fmt.Fprintf(connection, "POST %supload HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer mounted-secret\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", gatewayFilesPath, address, contentType, len(body)+1, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Half-close only input: the server must observe unexpected body EOF
+		// after a valid MIME closing boundary, while its response stays readable.
+		if err := connection.(*net.TCPConn).CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 400 || service.execs.Load() != 0 {
+			t.Fatalf("truncated body reached execution: status=%d calls=%d", response.StatusCode, service.execs.Load())
+		}
+	})
+}
 
 type fileServiceFake struct {
 	*gatewayServiceFake

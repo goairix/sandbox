@@ -253,6 +253,11 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		// bridges, plus terminal-quiescence queries. Keep a fixed fixture-only
 		// bound; existing variants retain16 and overflow still fails closed.
 		bridgeLimit = 32
+	} else if variant.fileAPI {
+		// Create(3), setup(2), the original file calls(9), two upload/download
+		// pairs(4), stat(2) and chmod(1) require exactly21 original bridges.
+		// Only this expanded fixture changes; production admission is intact.
+		bridgeLimit = 21
 	}
 	// Only this POST handler starts the original formal launcher. GET, service
 	// construction and setup cannot create a runtime or fabricate publication.
@@ -463,7 +468,10 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
 		mu.Unlock()
 		for _, bridge := range ownedBridges {
-			if physicalDestroy {
+			if physicalDestroy || variant.fileAPI {
+				// File clients also close after the authenticated response. Reuse
+				// the exact final-Close EPIPE classification: original Wait/IO
+				// and the Success frame must already have completed successfully.
 				requireHTTPDestroyNativeBridgeJoined(t, bridge)
 			} else if execHooks != nil && execHooks.expectedFailure(bridge) {
 				requireExecServiceFailedBridgeJoined(t, bridge)
@@ -663,9 +671,9 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		mu.Lock()
 		bridgeCount := len(bridges)
 		mu.Unlock()
-		require.Equal(t, 14, bridgeCount, "three original Create exchanges and eleven original file/seed Exec exchanges")
+		require.Equal(t, 21, bridgeCount, "three Create, two setup, thirteen file and three permission-check Exec exchanges")
 		joinOriginalBridges()
-		t.Log("file API original formal launcher and all fourteen physical bridge/Wait/IO owners joined")
+		t.Log("file API original formal launcher and all twenty-one physical bridge/Wait/IO owners joined")
 		return
 	}
 	if withBusiness {
