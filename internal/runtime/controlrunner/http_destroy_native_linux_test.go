@@ -284,8 +284,9 @@ func httpDestroyNativeDetached(t *testing.T, ctx context.Context, f httpDestroyN
 // mounted production worker must discover that Task itself, acquire its managed
 // Claim, join real runtime effects and refund the original quota before P goes.
 // Native rows below are assertions only; none is fed back as effect authority.
-func httpDestroyNativeDetachedTerminal(t *testing.T, ctx context.Context, f httpDestroyNativeContext, client *http.Client, origin string) {
+func httpDestroyNativeDetachedTerminal(t *testing.T, ctx context.Context, f httpDestroyNativeContext, client *http.Client, origin string, beforeDestroy ...func(string)) {
 	t.Helper()
+	require.LessOrEqual(t, len(beforeDestroy), 1)
 	idempotency := uuid.NewString()
 	var created types.CreateSandboxResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, "/api/v1/sandboxes", idempotency, types.CreateSandboxRequest{Mode: "persistent"}, true), 201, &created)
@@ -327,6 +328,12 @@ func httpDestroyNativeDetachedTerminal(t *testing.T, ctx context.Context, f http
 	var live types.SandboxResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodGet, path, "", nil, true), 200, &live)
 	require.Equal(t, created.ID, live.ID)
+	// The inventory variant adds one explicit real HTTP Exec here, while the
+	// original target is still active. Other variants pass no step and retain
+	// the original sequence; HTTP transport never injects extra operations.
+	if len(beforeDestroy) == 1 {
+		beforeDestroy[0](path)
+	}
 	var accepted httpDestroyNativeResponse
 	httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodDelete, path, "", nil, true), 202, &accepted)
 	require.Equal(t, "destroy_pending", accepted.Code)
@@ -778,14 +785,22 @@ func httpDestroyNativeWorkerRun(t *testing.T, setup httpDestroyNativeWorkerSetup
 		close(exited)
 	}()
 	joined := false
+	var observedLease clientv3.LeaseID
 	defer func() {
 		if !joined {
 			_ = command.Process.Kill()
 			t.Logf("HTTP destroy production worker failure cleanup Wait=%v", <-waited)
 		}
 		t.Logf("HTTP destroy production worker bounded stdout=%q stderr=%q", stdout.String(), stderr.String())
+		if t.Failed() {
+			// The failed original command has been physically joined above.
+			// Diagnose retained native phases without restarting a worker,
+			// resolving a Stage or exposing signed payload/private material.
+			cleanupHTTPInventoryNativeFailure(t, raw, setup.Cleanup, observedLease, dir)
+		}
 	}()
 	session := cleanupWorkerRoleSession(t, ctx, raw, setup.Cleanup.Binding.Namespace, workerID, exited)
+	observedLease = clientv3.LeaseID(session.Lease)
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", command.Process.Pid))
 	require.NoError(t, err)
 	for _, capability := range []string{"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"} {

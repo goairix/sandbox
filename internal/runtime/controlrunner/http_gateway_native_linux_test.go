@@ -6,11 +6,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +26,13 @@ import (
 	"github.com/goairix/sandbox/internal/provisioning"
 	"github.com/goairix/sandbox/internal/provisioning/deployment"
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
+	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/goairix/sandbox/pkg/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 func TestHTTPGatewayNative(t *testing.T) {
@@ -31,6 +40,332 @@ func TestHTTPGatewayNative(t *testing.T) {
 		t.Skip("requires exact owned HTTP gateway Linux fixture")
 	}
 	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{httpGateway: true, detached: true})
+}
+
+func TestHTTPGatewayInventoryNative(t *testing.T) {
+	if os.Getenv("SANDBOX_HTTP_INVENTORY_NATIVE") != "1" {
+		t.Skip("requires exact owned mounted inventory and HTTP detached destroy Linux fixture")
+	}
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{inventoryGateway: true, detached: true, destroyDetached: true, destroyTerminal: true})
+}
+
+// Build the same mounted inputs consumed by production, retaining the fixture's
+// original root/issuer, signed clock, TLS-etcd and Kubernetes bridge. Only this
+// variant leaves inventory absent before calling the actual operator API.
+func initializeHTTPInventoryNative(t *testing.T, ctx context.Context, f httpDestroyNativeContext) *deployment.Deployment {
+	t.Helper()
+	directory := filepath.Join(f.directory, "inventory-mounted")
+	require.NoError(t, os.Mkdir(directory, 0700))
+	write := func(name string, wire []byte) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(directory, name), wire, 0600))
+	}
+	for _, key := range []struct {
+		name  string
+		value any
+	}{{"root-key.pem", f.options.RootPrivateKey}, {"issuer-key.pem", f.options.IssuerPrivateKey}} {
+		der, err := x509.MarshalPKCS8PrivateKey(key.value)
+		require.NoError(t, err)
+		wire := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		write(key.name, wire)
+		clear(der)
+		clear(wire)
+	}
+	for _, name := range []string{"ca.pem", "server.pem", "server-key.pem"} {
+		wire, err := os.ReadFile(filepath.Join(f.directory, name))
+		require.NoError(t, err)
+		write(name, wire)
+		clear(wire)
+	}
+	write("launcher.json", f.options.LauncherConfig)
+	write("issuer.json", f.options.IssuerCertificate)
+	write("api-ca.pem", f.options.API.Config.CAData)
+	write("api-key", []byte("native-http-key"))
+	write("kubeconfig", []byte("apiVersion: v1\nkind: Config\ncurrent-context: selected\ncontexts:\n- name: selected\n  context:\n    cluster: cluster\n    user: user\nclusters:\n- name: cluster\n  cluster:\n    server: "+f.options.API.Config.Host+"\n    certificate-authority: api-ca.pem\nusers:\n- name: user\n  user:\n    token: INVENTORY-NATIVE\n"))
+	var inventory state.PreparationInventoryOptions
+	inventory.QuotaSlots[7] = 1
+	resources := map[string]any{"cpu": f.options.CPU, "memory": f.options.Memory, "disk": f.options.Disk, "tmp_disk": f.options.TmpDisk}
+	i := f.identity
+	manifest := map[string]any{
+		"version": 1,
+		"etcd": map[string]any{
+			"endpoints":    []string{"https://127.0.0.1:2379"},
+			"identity":     map[string]any{"schema_version": i.SchemaVersion, "prefix": i.Prefix, "authority_id": i.AuthorityID, "cell": i.Cell, "cluster_id": i.ClusterID, "storage_id": i.StorageID, "runtime_id": i.RuntimeID, "restore_epoch": i.RestoreEpoch},
+			"tls":          map[string]any{"ca_file": "ca.pem", "cert_file": "server.pem", "key_file": "server-key.pem"},
+			"dial_timeout": "2s", "request_timeout": "2s", "snapshot_cache_bytes": 262144,
+		},
+		"preparation":          map[string]any{"quota_slots": inventory.QuotaSlots, "quota_partition": f.options.QuotaPartition},
+		"launcher_config_file": "launcher.json", "root_private_key_file": "root-key.pem", "issuer_private_key_file": "issuer-key.pem", "issuer_certificate_file": "issuer.json",
+		"kubernetes": map[string]any{"kubeconfig_file": "kubeconfig", "namespace": f.options.API.Namespace, "max_active": f.options.API.MaxActive, "request_timeout": "5s"},
+		"image":      f.options.Image, "node_name": f.options.NodeName, "worker_id": f.options.WorkerID, "resources": resources,
+		"business": map[string]any{"principal": f.options.Business.Principal, "defaults": map[string]any{"timeout_seconds": 60, "resources": resources}},
+		"http":     map[string]any{"host": "127.0.0.1", "port": 8080, "api_key_file": "api-key", "env": map[string]string{"PATH": "/usr/bin:/bin"}, "exec_timeout_seconds": 5, "max_exec_timeout_seconds": 15, "max_active": 4, "requests_per_second": 100},
+	}
+	write("deployment.json", observerNativeJSON(t, manifest))
+	path := filepath.Join(directory, "deployment.json")
+	actualNamespace, err := state.NewNamespace(i.Prefix, i.AuthorityID, i.Cell)
+	require.NoError(t, err)
+	namespace := actualNamespace.Root()
+	read := func() *clientv3.GetResponse {
+		t.Helper()
+		response, err := f.raw.Get(ctx, namespace, clientv3.WithPrefix(), clientv3.WithLimit(512))
+		require.NoError(t, err)
+		require.False(t, response.More)
+		require.EqualValues(t, len(response.Kvs), response.Count)
+		require.Equal(t, i.ClusterID, response.Header.ClusterId)
+		var bytes int
+		for _, kv := range response.Kvs {
+			bytes += len(kv.Key) + len(kv.Value)
+		}
+		require.LessOrEqual(t, bytes, 1<<20, "a no-write proof must cover all original rows, not a truncated snapshot")
+		return response
+	}
+	// Observe the original server counter as well as retained leases: a
+	// Grant/Revoke pair could otherwise disappear between two lease listings.
+	ca, err := os.ReadFile(filepath.Join(directory, "ca.pem"))
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	require.True(t, roots.AppendCertsFromPEM(ca))
+	certificate, err := tls.LoadX509KeyPair(filepath.Join(directory, "server.pem"), filepath.Join(directory, "server-key.pem"))
+	require.NoError(t, err)
+	metrics := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, Certificates: []tls.Certificate{certificate}}}}
+	defer metrics.CloseIdleConnections()
+	grants := func() uint64 {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1:2379/metrics", nil)
+		require.NoError(t, err)
+		response, err := metrics.Do(request)
+		require.NoError(t, err)
+		wire, readErr := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
+		closeErr := response.Body.Close()
+		require.NoError(t, readErr)
+		require.NoError(t, closeErr)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.LessOrEqual(t, len(wire), 2<<20)
+		for _, line := range strings.Split(string(wire), "\n") {
+			if strings.HasPrefix(line, "grpc_server_started_total{") && strings.Contains(line, `grpc_method="LeaseGrant"`) && strings.Contains(line, `grpc_service="etcdserverpb.Lease"`) {
+				fields := strings.Fields(line)
+				require.Len(t, fields, 2)
+				value, err := strconv.ParseUint(fields[1], 10, 64)
+				require.NoError(t, err)
+				return value
+			}
+		}
+		t.Fatal("original etcd LeaseGrant counter missing; cannot establish no-Grant startup")
+		return 0
+	}
+	before := read()
+	grantsBefore := grants()
+	leasesBefore, err := f.raw.Leases(ctx)
+	require.NoError(t, err)
+	refused, err := deployment.OpenHTTP(ctx, path)
+	require.ErrorIs(t, err, state.ErrPreparationNotReady)
+	require.Nil(t, refused)
+	afterRefusal := read()
+	require.Equal(t, before.Kvs, afterRefusal.Kvs, "failed OpenHTTP cannot create or rewrite original metadata")
+	require.Equal(t, before.Header.Revision, afterRefusal.Header.Revision)
+	require.Equal(t, grantsBefore, grants(), "not-ready OpenHTTP cannot dispatch a transient Grant")
+	leasesAfter, err := f.raw.Leases(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, leasesBefore.Leases, leasesAfter.Leases, "failed startup retains the exact original lease set")
+
+	require.NoError(t, deployment.InitializeInventory(ctx, path))
+	ready, err := f.backend.ReadPreparationInventory(ctx)
+	require.NoError(t, err)
+	require.True(t, ready.Ready)
+	require.EqualValues(t, 33, ready.Total, "32 original preparation slots plus one configured quota slot")
+	require.Equal(t, ready.Total, ready.Next)
+	initialized := read()
+	require.Greater(t, initialized.Header.Revision, before.Header.Revision)
+	grantsInitialized := grants()
+	require.NoError(t, deployment.InitializeInventory(ctx, path))
+	repeated := read()
+	require.Equal(t, initialized.Kvs, repeated.Kvs, "repeated ready initialization preserves Value/Create/Mod/Lease of every row")
+	require.Equal(t, initialized.Header.Revision, repeated.Header.Revision, "ready re-entry performs no hidden state write")
+	require.Equal(t, grantsInitialized, grants(), "ready re-entry cannot dispatch and revoke a hidden lease")
+	leasesAfter, err = f.raw.Leases(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, leasesBefore.Leases, leasesAfter.Leases)
+
+	owner, err := deployment.OpenHTTP(ctx, path)
+	require.NoError(t, err)
+	require.NotNil(t, owner)
+	require.NotNil(t, owner.Service())
+	t.Cleanup(func() { require.NoError(t, owner.Close()) })
+	opened := read()
+	require.Equal(t, repeated.Kvs, opened.Kvs)
+	require.Equal(t, repeated.Header.Revision, opened.Header.Revision)
+	t.Logf("actual mounted operator initialized Total=%d; repeated Ready retained exact rows and revision=%d; formal OpenHTTP succeeded", ready.Total, repeated.Header.Revision)
+	return owner
+}
+
+func exerciseHTTPGatewayInventoryNative(t *testing.T, ctx context.Context, owner *deployment.Deployment, f httpDestroyNativeContext, bridgeCount func() int) {
+	t.Helper()
+	settings := owner.HTTPSettings()
+	require.NotNil(t, settings)
+	service := &httpNativeService{PlainColdService: owner.Service(), results: make(chan execServiceNativeAnswer, 1)}
+	gateway, err := etcdgateway.New(service, settings)
+	settings.Zero()
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serverCtx, stopServer := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- etcdgateway.Serve(serverCtx, listener, gateway) }()
+	defer func() {
+		stopServer()
+		require.NoError(t, <-serverDone, "mounted Gateway sockets and handlers physically joined before Deployment.Close")
+	}()
+	transport := &http.Transport{MaxIdleConns: 2, MaxIdleConnsPerHost: 2}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 15 * time.Second, Transport: transport}
+	origin := "http://" + listener.Addr().String()
+	httpExec := false
+	beforeDestroy := func(path string) {
+		require.True(t, strings.HasPrefix(path, "/api/v1/sandboxes/"))
+		id := strings.TrimPrefix(path, "/api/v1/sandboxes/")
+		before, err := f.backend.ReadSandboxSnapshot(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, before)
+		bridges := bridgeCount()
+		var executed types.ExecResponse
+		httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPost, path+"/exec", "", types.ExecRequest{Language: "bash", Code: "printf 'inventory-http-out\\n'; printf 'inventory-http-err\\n' >&2; exit 7"}, true), 200, &executed)
+		require.Equal(t, 7, executed.ExitCode)
+		require.Equal(t, "inventory-http-out\n", executed.Stdout)
+		require.Equal(t, "inventory-http-err\n", executed.Stderr)
+		terminal := requireHTTPNativeExec(t, ctx, service, true)
+		require.Equal(t, "local_terminal", terminal.Receipt.State())
+		originalControl := before.View.Records().Control
+		require.NotNil(t, originalControl)
+		require.NotNil(t, originalControl.Runtime)
+		require.Equal(t, uint32(7<<8), terminal.Receipt.RootWaitStatus())
+		require.Equal(t, p.RuntimeReference(*originalControl.Runtime), terminal.Receipt.Context().Runtime)
+		require.Equal(t, originalControl.Generation, terminal.Receipt.Context().Generation)
+		require.Equal(t, originalControl.DataGateEpoch, terminal.Receipt.Context().DataGateEpoch)
+		require.Equal(t, bridges+1, bridgeCount(), "the added HTTP operation owns exactly one actual bridge; the fixture's original cap is unchanged")
+		after, err := f.backend.ReadSandboxSnapshot(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, after)
+		require.Equal(t, before.View.Records().Control, after.View.Records().Control, "HTTP Exec retains the same runtime/generation/data gate before original DELETE")
+		httpExec = true
+	}
+	httpDestroyNativeDetachedTerminal(t, ctx, f, client, origin, beforeDestroy)
+	require.True(t, httpExec, "the complete destroy path must include the mounted Gateway's actual HTTP Exec route")
+	t.Log("mounted operator→OpenHTTP→original HTTP Create/Exec/DELETE→production worker quota refund→GET404")
+}
+
+// Failure diagnostics are read only after the original production command's
+// Wait. Fixed known Task points and scalar phase fields keep logs bounded and
+// cannot mint recovery authority or turn the original failed run into success.
+func cleanupHTTPInventoryNativeFailure(t *testing.T, raw *clientv3.Client, setup cleanupExecutorSetup, lease clientv3.LeaseID, directory string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if lease != 0 {
+		ttl, err := raw.TimeToLive(ctx, lease, clientv3.WithAttachedKeys())
+		if err != nil {
+			t.Logf("joined cleanup failure original session TTL grpc_code=%s", grpcstatus.Code(err))
+		} else {
+			t.Logf("joined cleanup failure original session lease=%d TTL_seconds=%d attached_guards=%d", lease, ttl.TTL, len(ttl.Keys))
+		}
+	}
+	base := fmt.Sprintf("%sp/%02x/tasks/%s", setup.Binding.Namespace, setup.Task.Partition, setup.Task.TaskID)
+	for _, suffix := range []string{"", "/execution", "/checkpoint", "/claim", "/runtime-quiescence", "/runtime-termination", "/runtime-provider-cleanup", "/owner-release"} {
+		response, err := raw.Get(ctx, base+suffix, clientv3.WithLimit(1))
+		if err != nil {
+			t.Logf("joined cleanup failure native point=%s grpc_code=%s", suffix, grpcstatus.Code(err))
+			continue
+		}
+		if len(response.Kvs) == 0 {
+			t.Logf("joined cleanup failure native point=%s absent header=%d", suffix, response.Header.Revision)
+			continue
+		}
+		kv := response.Kvs[0]
+		if len(kv.Value) > 256<<10 {
+			t.Logf("joined cleanup failure native point=%s value exceeds diagnostic bound", suffix)
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(kv.Value, &fields) != nil {
+			t.Logf("joined cleanup failure native point=%s non-object bytes=%d birth=%d mod=%d lease=%d", suffix, len(kv.Value), kv.CreateRevision, kv.ModRevision, kv.Lease)
+			continue
+		}
+		var phase, confirmed, state string
+		_ = json.Unmarshal(fields["phase"], &phase)
+		_ = json.Unmarshal(fields["confirmed"], &confirmed)
+		_ = json.Unmarshal(fields["state"], &state)
+		var run struct {
+			Joined bool `json:"joined"`
+			Worker struct {
+				PID int `json:"pid"`
+			} `json:"worker"`
+		}
+		_ = json.Unmarshal(fields["run"], &run)
+		t.Logf("joined cleanup failure native point=%s phase=%.64s confirmed=%.64s state=%.64s run_joined=%t worker_pid=%d bytes=%d birth=%d mod=%d lease=%d", suffix, phase, confirmed, state, run.Joined, run.Worker.PID, len(kv.Value), kv.CreateRevision, kv.ModRevision, kv.Lease)
+	}
+	config, err := launcherconfig.Decode(setup.LoaderConfig)
+	if err == nil {
+		clock, clockErr := p.NewSignedClockClient(p.SignedClockClientOptions{
+			Binding: config.TrustBinding(), PublicKey: config.ClockPublicKey, Audience: config.ClockAudience,
+			Dial: func(ctx context.Context) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", config.ClockSocket)
+			},
+		})
+		if clockErr == nil {
+			start := time.Now()
+			observed, observeErr := clock.Observe(ctx)
+			t.Logf("joined cleanup failure original signed clock audience=%.64s UTC=%s uncertainty_ns=%d elapsed_ns=%d failed=%t", config.ClockAudience, observed.UTC.Format(time.RFC3339Nano), observed.Uncertainty.Nanoseconds(), time.Since(start).Nanoseconds(), observeErr != nil)
+		}
+	}
+
+	ca, err := os.ReadFile(filepath.Join(directory, "ca.pem"))
+	if err != nil {
+		t.Log("joined cleanup failure metrics CA unavailable")
+		return
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		t.Log("joined cleanup failure metrics CA invalid")
+		return
+	}
+	certificate, err := tls.LoadX509KeyPair(filepath.Join(directory, "server.pem"), filepath.Join(directory, "server-key.pem"))
+	if err != nil {
+		t.Log("joined cleanup failure metrics credential unavailable")
+		return
+	}
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, Certificates: []tls.Certificate{certificate}}}}
+	defer client.CloseIdleConnections()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1:2379/metrics", nil)
+	if err != nil {
+		t.Log("joined cleanup failure metrics request invalid")
+		return
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Log("joined cleanup failure metrics transport failed")
+		return
+	}
+	wire, readErr := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || len(wire) > 2<<20 {
+		t.Logf("joined cleanup failure metrics refused status=%d bytes=%d read_failed=%t close_failed=%t", response.StatusCode, len(wire), readErr != nil, closeErr != nil)
+		return
+	}
+	logged := 0
+	for _, line := range strings.Split(string(wire), "\n") {
+		if !strings.HasPrefix(line, "grpc_server_handled_total{") || strings.Contains(line, `grpc_code="OK"`) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		count, err := strconv.ParseUint(fields[1], 10, 64)
+		if err == nil && count > 0 && len(line) <= 512 && logged < 16 {
+			t.Logf("joined cleanup failure native RPC %s", line)
+			logged++
+		}
+	}
 }
 
 func TestHTTPGatewayTTLNative(t *testing.T) {

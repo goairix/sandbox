@@ -76,6 +76,7 @@ type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
 	httpGateway, ttlGateway, fileAPI                               bool
 	ttlRecovery, ttlRotation                                       bool
+	inventoryGateway                                               bool
 	largeDownload                                                  bool
 	destroyLocal, destroyDetached                                  bool
 	destroyTerminal                                                bool
@@ -163,17 +164,22 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		backendOptions.DetachedCleanup = &state.DetachedCleanupOptions{PinnedPlainImage: enrolledProfileFixtureImage}
 	}
 	var execIssuer *deployment.ExecIssuer
+	var mountedOwner *deployment.Deployment
 	backend, err := state.New(ctx, backendOptions)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, backend.Close())
+		if mountedOwner == nil {
+			require.NoError(t, backend.Close())
+		}
 		require.NoError(t, execIssuer.Close())
 	})
-	for {
-		progress, err := backend.InitializePreparationInventory(ctx)
-		require.NoError(t, err)
-		if progress.Ready {
-			break
+	if !variant.inventoryGateway {
+		for {
+			progress, err := backend.InitializePreparationInventory(ctx)
+			require.NoError(t, err)
+			if progress.Ready {
+				break
+			}
 		}
 	}
 	bootWire, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
@@ -471,9 +477,24 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 			options.Clock = acquisitionClock
 		}
 	}
-	service, err := provisioning.NewPlainColdService(ctx, options)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, service.Close()) })
+	var service *provisioning.PlainColdService
+	if variant.inventoryGateway {
+		// Only this opt-in case omits the fixture's direct initialization. The
+		// formal mounted operator and OpenHTTP own the actual replacement
+		// Backend/issuer/Service; borrowed resources are closed through that owner.
+		mountedOwner = initializeHTTPInventoryNative(t, ctx, httpDestroyNativeContext{
+			backend: backend, raw: admin, options: options, identity: identity, directory: dir,
+		})
+		require.Zero(t, postCount.Load(), "not-ready OpenHTTP, inventory initialization and ready startup never create a Pod")
+		require.Zero(t, startCount.Load(), "operator setup never starts a runtime")
+		require.NoError(t, backend.Close())
+		backend, service = mountedOwner.Backend(), mountedOwner.Service()
+		options.Backend = backend
+	} else {
+		service, err = provisioning.NewPlainColdService(ctx, options)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, service.Close()) })
+	}
 	joinOriginalBridges := func() {
 		mu.Lock()
 		ownedBridges := append([]*startupBridgeFixture(nil), bridges...)
@@ -504,6 +525,22 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 				bridge.requireJoined(t)
 			}
 		}
+	}
+	if variant.inventoryGateway {
+		exerciseHTTPGatewayInventoryNative(t, ctx, mountedOwner, httpDestroyNativeContext{
+			service: service, backend: backend, raw: admin, options: options,
+			request: request, workspace: w, identity: identity, directory: dir,
+			observerAddress: tcp.Addr().String(), clockKey: clockKey, provider: destroyProvider,
+			terminal: true, detached: true,
+		}, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(bridges)
+		})
+		require.Equal(t, int32(1), postCount.Load(), "mounted inventory business uses one actual Pod")
+		require.Equal(t, int32(1), startCount.Load(), "mounted inventory business uses one actual formal launcher")
+		joinOriginalBridges()
+		return
 	}
 	if (variant.destroyLocal || variant.destroyDetached) && !variant.ttlGateway {
 		exerciseHTTPDestroyNative(t, ctx, httpDestroyNativeContext{
