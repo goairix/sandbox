@@ -19,6 +19,12 @@ func (j *Journal) persistNewCommandLocked(context.Context, ExecJournalRecord) er
 func (j *Journal) persistActivationLocked(context.Context, []byte) error {
 	return ErrInvalidConfiguration
 }
+func (j *Journal) confirmActivationLocked(context.Context) error {
+	return ErrInvalidConfiguration
+}
+func (j *Journal) replaceActivationLocked(context.Context, []byte) error {
+	return ErrInvalidConfiguration
+}
 func (j *Journal) persistOpenGateLocked(context.Context) error { return ErrInvalidConfiguration }
 func (j *Journal) replaceCommandLocked(context.Context, ExecJournalRecord, ExecJournalRecord, bool) error {
 	return ErrInvalidConfiguration

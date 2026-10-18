@@ -33,14 +33,17 @@ type journalFiles struct {
 // Its constructor origin, lock and pinned descriptors live
 // until Close. The mutex also protects Status and all private command helpers.
 type Journal struct {
-	self                                           *Journal
-	mu                                             sync.Mutex
-	birth                                          *controlprotocol.BirthContext
-	verifier                                       *controlprotocol.ManagementVerifier
-	clock                                          controlprotocol.AuthorityClock
-	fresh                                          bool
-	activation                                     *controlprotocol.TargetActivationEvidence
-	activationBytes                                int64
+	self            *Journal
+	mu              sync.Mutex
+	birth           *controlprotocol.BirthContext
+	verifier        *controlprotocol.ManagementVerifier
+	clock           controlprotocol.AuthorityClock
+	fresh           bool
+	activation      *controlprotocol.TargetActivationEvidence
+	activationBytes int64
+	// activationPreviousDigest pins the last live renewal's predecessor. It is
+	// never reconstructed from cold history or used to reopen the data gate.
+	activationPreviousDigest                       string
 	taskCloseBytes                                 int64
 	taskQuiescenceBytes                            int64
 	taskArchiveBytes                               int64

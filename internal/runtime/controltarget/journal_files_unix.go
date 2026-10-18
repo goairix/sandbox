@@ -468,6 +468,55 @@ func (j *Journal) persistNewCommandLocked(ctx context.Context, r ExecJournalReco
 	return nil
 }
 
+// confirmActivationLocked compares one bounded disk record with this original
+// live handle. A cold or externally replaced record cannot become authority.
+func (j *Journal) confirmActivationLocked(ctx context.Context) error {
+	if j.activation == nil || !j.accountingKnown || j.activationBytes == 0 {
+		return ErrJournalUnavailable
+	}
+	a := j.activation
+	version := uint32(1)
+	if j.activationPreviousDigest != "" {
+		version = 2
+	}
+	expected := journalActivationBundle{Version: version, Identity: j.gate.Identity, DataGateEpoch: j.gate.DataGateEpoch, Digest: a.Digest(), Wire: a.Wire(), RuntimeCertificate: a.RuntimeCertificate(), IssuerCertificate: a.IssuerCertificate(), PreviousDigest: j.activationPreviousDigest}
+	want, err := encodeJournalWireLimit(expected, maxJournalActivationBytes)
+	if err != nil {
+		return j.poison(err)
+	}
+	actual, err := j.files.readFileLimit(ctx, j.root, "activation.json", maxJournalActivationBytes)
+	if err != nil {
+		return j.poison(err)
+	}
+	if int64(len(actual)) != j.activationBytes || !bytes.Equal(actual, want) {
+		return j.poison(ErrConflict)
+	}
+	return nil
+}
+
+// replaceActivationLocked accounts the peak old+new bytes and temporary file,
+// then uses the same fsync/rename/dirsync boundary as other journal replacements.
+// It never writes gate.json, and any uncertain disk effect poisons admission.
+func (j *Journal) replaceActivationLocked(ctx context.Context, b []byte) error {
+	if err := j.confirmActivationLocked(ctx); err != nil {
+		return err
+	}
+	peak := j.logicalBytes + int64(len(b))
+	if peak*100 >= j.maxBytes*85 || j.contentFilesLocked()+1 > maxJournalContentFiles {
+		return ErrCapacity
+	}
+	nonce, err := journalNonce()
+	if err != nil {
+		return err
+	}
+	if err := j.files.persistFile(ctx, j.root, "activation.json", ".activation."+nonce+".tmp", b); err != nil {
+		return j.poison(err)
+	}
+	j.logicalBytes += int64(len(b)) - j.activationBytes
+	j.activationBytes = int64(len(b))
+	return nil
+}
+
 func (j *Journal) persistActivationLocked(ctx context.Context, b []byte) error {
 	if j.activationBytes != 0 {
 		return ErrConflict

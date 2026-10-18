@@ -34,6 +34,7 @@ type liveFixture struct {
 	clock      *liveClock
 	activation controlprotocol.TargetActivationEvidence
 	e          controlprotocol.ExecStartEvidence
+	rootKey    ed25519.PrivateKey
 	issuerKey  ed25519.PrivateKey
 	runtimeKey ed25519.PrivateKey
 	issuerWire []byte
@@ -101,7 +102,7 @@ func liveSetup(t *testing.T) liveFixture {
 	o.Birth = &birth
 	o.Verifier = v
 	o.Clock = clock
-	return liveFixture{o: o, clock: clock, activation: a, e: e, issuerKey: ik, runtimeKey: runtimeKey, issuerWire: iw, descriptor: d, claims: claims}
+	return liveFixture{o: o, clock: clock, activation: a, e: e, rootKey: rk, issuerKey: ik, runtimeKey: runtimeKey, issuerWire: iw, descriptor: d, claims: claims}
 }
 func (f liveFixture) create(t *testing.T) *Journal {
 	t.Helper()
@@ -339,5 +340,249 @@ func TestLiveJournalActivationBundleBounds(t *testing.T) {
 	b.RuntimeCertificate = bytes.Repeat([]byte("x"), 8193)
 	if err = b.validate(); err == nil {
 		t.Fatal("individual certificate limit")
+	}
+}
+
+// This optional test interface keeps the existing package compilable before
+// the leaf method exists. Absence is a failing behavior assertion, not a test
+// skip or a substitute implementation of journal renewal.
+type journalActivationRenewer interface {
+	RenewActivation(context.Context, string, controlprotocol.TargetActivationEvidence) error
+}
+
+func requireJournalActivationRenewer(t *testing.T, j *Journal) journalActivationRenewer {
+	t.Helper()
+	renewer, ok := any(j).(journalActivationRenewer)
+	if !ok {
+		t.Fatal("live Journal must support origin-bound RenewActivation")
+	}
+	return renewer
+}
+
+// Each candidate is authenticated by the existing root verifier against its
+// explicit independent birth. Negative candidates can be genuinely signed for
+// another gate/birth; the receiving journal must still reject that rebinding.
+func (f liveFixture) nextActivation(t *testing.T, mutate func(*controlprotocol.TargetActivationClaims, *controlprotocol.BirthContext)) controlprotocol.TargetActivationEvidence {
+	t.Helper()
+	a := f.activation
+	birth := a.Birth()
+	runtimeDigest := sha256.Sum256(a.RuntimeCertificate())
+	issuerDigest := sha256.Sum256(a.IssuerCertificate())
+	claims := controlprotocol.TargetActivationClaims{
+		Version: 1, Role: "target_activation", ActivationID: "81111111-1111-4111-8111-111111111111",
+		Binding: a.Binding(), Identity: a.Identity(), DataGateEpoch: a.DataGateEpoch(),
+		UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed, ContractDigest: birth.ContractDigest,
+
+		RuntimeCertificateDigest: hex.EncodeToString(runtimeDigest[:]), IssuerCertificateDigest: hex.EncodeToString(issuerDigest[:]),
+
+		NotBefore: a.NotBefore().Add(10 * time.Second), NotAfter: a.NotAfter().Add(5 * time.Minute),
+	}
+	if mutate != nil {
+		mutate(&claims, &birth)
+	}
+	wire, err := controlprotocol.SignTargetActivation(f.rootKey, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.o.Verifier.VerifyTargetActivation(wire, a.RuntimeCertificate(), a.IssuerCertificate(), birth, f.clock.now)
+	if err != nil {
+		t.Fatal("candidate must independently authenticate before journal admission", err)
+	}
+	return next
+}
+
+func TestLiveJournalRenewActivationRetainsOriginalCommands(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	ctx := context.Background()
+	if err := j.InstallActivation(ctx, f.activation); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := j.AcceptExecution(ctx, f.e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := accepted.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := f.nextActivation(t, nil)
+	renewer := requireJournalActivationRenewer(t, j)
+	if err := renewer.RenewActivation(ctx, f.activation.Digest(), next); err != nil {
+		t.Fatal("renew open journal", err)
+	}
+	wire, err := os.ReadFile(filepath.Join(f.o.Directory, "activation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := decodeJournalActivation(wire)
+	if err != nil || bundle.Digest != next.Digest() || !bytes.Equal(bundle.RuntimeCertificate, next.RuntimeCertificate()) {
+		t.Fatal("renewal did not persist the selected activation", err)
+	}
+
+	// Lost acknowledgement retries identify the original predecessor/candidate
+	// pair. An idempotent retry must not replace any file a second time.
+	writes := 0
+	j.files.hook = func(operation, _ string, _ bool) error {
+		if operation == "file-sync" || operation == "rename" || operation == "dir-sync" {
+			writes++
+			return fmt.Errorf("duplicate renewal must not persist again")
+		}
+		return nil
+	}
+	err = renewer.RenewActivation(ctx, f.activation.Digest(), next)
+	j.files.hook = nil
+	if err != nil || writes != 0 {
+		t.Fatal("same original renewal was not an idempotent observation", writes, err)
+	}
+	if err := renewer.RenewActivation(ctx, strings.Repeat("f", 64), next); err == nil {
+		t.Fatal("matching current digest cannot excuse a foreign predecessor")
+	}
+
+	// Advance only the trusted test clock. The old activation is expired under
+	// the real verifier while a newly signed command is within the replacement's
+	// live interval. This journal unit is not real elapsed-time/PID1 evidence.
+	f.clock.now = f.activation.NotAfter().Add(2 * time.Second)
+	if _, err := f.o.Verifier.VerifyTargetActivation(f.activation.Wire(), f.activation.RuntimeCertificate(), f.activation.IssuerCertificate(), f.activation.Birth(), f.clock.now); err == nil {
+		t.Fatal("fixture did not cross the original activation cutoff")
+	}
+	claims := f.claims
+	claims.Context.CommandID = "91111111-1111-4111-8111-111111111111"
+	claims.Context.OperationID = "a1111111-1111-4111-8111-111111111111"
+	claims.Context.ExpiresAt = next.NotAfter()
+	claims.NotBefore = f.clock.now.Add(-2 * time.Second)
+	claims.NotAfter = f.clock.now.Add(20 * time.Second)
+	issuer, err := f.o.Verifier.VerifyCommandIssuerCertificate(f.issuerWire, f.clock.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := controlprotocol.SignExecStartTicket(f.issuerKey, issuer, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := f.o.Verifier.VerifyExecStartTicket(ticket, f.issuerWire, claims.Context, f.descriptor, f.clock.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.AcceptExecution(ctx, evidence); err != nil {
+		t.Fatal("replacement must authorize a fresh journal acceptance past the old cutoff", err)
+	}
+	retained, err := j.Lookup(ctx, original.Context.CommandID)
+	if err != nil || retained == nil || *retained != original {
+		t.Fatal("renewal changed the already admitted command's original evidence", retained, err)
+	}
+}
+
+func TestLiveJournalRenewActivationCanShorten(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	ctx := context.Background()
+	if err := j.InstallActivation(ctx, f.activation); err != nil {
+		t.Fatal(err)
+	}
+	next := f.nextActivation(t, func(claims *controlprotocol.TargetActivationClaims, _ *controlprotocol.BirthContext) {
+		claims.NotAfter = f.activation.NotAfter().Add(-time.Minute)
+	})
+	if err := requireJournalActivationRenewer(t, j).RenewActivation(ctx, f.activation.Digest(), next); err != nil {
+		t.Fatal("later-issued activation may legally shorten business TTL", err)
+	}
+	if j.Status().Gate.GateState != "open" {
+		t.Fatal("valid replacement unexpectedly closed the live journal")
+	}
+	wire, err := os.ReadFile(filepath.Join(f.o.Directory, "activation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := decodeJournalActivation(wire)
+	if err != nil || bundle.Digest != next.Digest() {
+		t.Fatal("shortened activation was not persisted", err)
+	}
+}
+
+func TestLiveJournalRenewActivationRefusesRebindingAndRollback(t *testing.T) {
+	for _, kind := range []string{"previous", "gate", "birth", "closed", "rollback"} {
+		t.Run(kind, func(t *testing.T) {
+			f := liveSetup(t)
+			j := f.create(t)
+			ctx := context.Background()
+			if err := j.InstallActivation(ctx, f.activation); err != nil {
+				t.Fatal(err)
+			}
+			previous := f.activation.Digest()
+			next := f.nextActivation(t, func(claims *controlprotocol.TargetActivationClaims, birth *controlprotocol.BirthContext) {
+				switch kind {
+				case "gate":
+					claims.DataGateEpoch++
+				case "birth":
+					claims.UID++
+					birth.UID++
+				}
+			})
+			renewer := requireJournalActivationRenewer(t, j)
+			switch kind {
+			case "previous":
+				previous = strings.Repeat("f", 64)
+			case "closed":
+				if _, err := j.CloseGate(ctx, f.o.DataGateEpoch); err != nil {
+					t.Fatal(err)
+				}
+			case "rollback":
+				if err := renewer.RenewActivation(ctx, previous, next); err != nil {
+					t.Fatal(err)
+				}
+				previous = next.Digest()
+				next = f.nextActivation(t, func(claims *controlprotocol.TargetActivationClaims, _ *controlprotocol.BirthContext) {
+					claims.ActivationID = "b1111111-1111-4111-8111-111111111111"
+					claims.NotBefore = f.activation.NotBefore().Add(5 * time.Second)
+				})
+			}
+			before, err := os.ReadFile(filepath.Join(f.o.Directory, "activation.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := j.Status()
+			if err := renewer.RenewActivation(ctx, previous, next); err == nil {
+				t.Fatal("renewal accepted a foreign binding, closed gate or older issuance")
+			}
+			after, err := os.ReadFile(filepath.Join(f.o.Directory, "activation.json"))
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("refused renewal replaced durable activation", err)
+			}
+			current := j.Status()
+			if current.Gate != status.Gate || current.Poisoned || !current.AccountingKnown || current.LogicalBytes != status.LogicalBytes {
+				t.Fatal("refused renewal changed the gate or accounting", status, current)
+			}
+		})
+	}
+}
+
+func TestLiveJournalRenewActivationPersistenceFailurePoisons(t *testing.T) {
+	f := liveSetup(t)
+	j := f.create(t)
+	ctx := context.Background()
+	if err := j.InstallActivation(ctx, f.activation); err != nil {
+		t.Fatal(err)
+	}
+	next := f.nextActivation(t, nil)
+	renewer := requireJournalActivationRenewer(t, j)
+	hit := false
+	j.files.hook = func(operation, _ string, after bool) error {
+		if operation == "dir-sync" && after {
+			hit = true
+			return fmt.Errorf("renewal directory sync acknowledgement lost")
+		}
+		return nil
+	}
+	err := renewer.RenewActivation(ctx, f.activation.Digest(), next)
+	j.files.hook = nil
+	status := j.Status()
+	if !hit || err == nil || !status.Poisoned || status.AccountingKnown || status.Gate.GateState != "closed" {
+		t.Fatal("uncertain durable replacement must poison and close admission", hit, err, status)
+	}
+	if err := renewer.RenewActivation(ctx, f.activation.Digest(), next); err == nil {
+		t.Fatal("retry revived an uncertain journal replacement")
+	}
+	if _, err := j.AcceptExecution(ctx, f.e); err == nil {
+		t.Fatal("uncertain renewal admitted a command")
 	}
 }
