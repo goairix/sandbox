@@ -21,6 +21,23 @@ func (s *PlainColdService) UpdateTTL(ctx context.Context, sandboxID, requestID s
 	if seconds < 1 || seconds > 365*24*60*60 {
 		return response, state.ErrInvalidRecord
 	}
+	return s.renewTTL(ctx, sandboxID, requestID, seconds, false)
+}
+
+// RefreshCredentials refreshes one live runtime's finite certification without
+// extending its business lifetime or changing its displayed Timeout. It uses
+// the same root signer, mutation admission and fixed-candidate transport as
+// UpdateTTL. An unresolved user TTL change is not incidental maintenance: only
+// an exact preserved business interval may be queried or repaired here.
+// This entry point does not schedule automatic credential maintenance.
+func (s *PlainColdService) RefreshCredentials(ctx context.Context, sandboxID, requestID string) (types.UpdateTTLResponse, error) {
+	return s.renewTTL(ctx, sandboxID, requestID, 0, true)
+}
+
+// renewTTL owns one service lifetime across selection, actual authenticated
+// transport and Stage return. The preserving branch changes only how the fixed
+// business interval is selected; it never grants a separate runtime authority.
+func (s *PlainColdService) renewTTL(ctx context.Context, sandboxID, requestID string, seconds int, preserveExpiry bool) (response types.UpdateTTLResponse, err error) {
 	call, err := s.enter(ctx)
 	if err != nil {
 		return response, err
@@ -48,6 +65,13 @@ func (s *PlainColdService) UpdateTTL(ctx context.Context, sandboxID, requestID s
 	if err != nil {
 		return response, err
 	}
+	var baseline time.Time
+	if preserveExpiry {
+		baseline, seconds, err = credentialRefreshParameters(loaded)
+		if err != nil {
+			return response, err
+		}
+	}
 	if loaded.ttlPending != nil {
 		pending := loaded.ttlPending
 		if pending.Timeout != seconds {
@@ -72,6 +96,9 @@ func (s *PlainColdService) UpdateTTL(ctx context.Context, sandboxID, requestID s
 	}
 	if err := checkPlainColdLookupTTL(now, loaded.control.ExpiresAt); err != nil {
 		return response, err
+	}
+	if !preserveExpiry {
+		baseline = now
 	}
 	admitted, err := s.backend.BeginOperation(ctx, state.BeginOperationInput{SandboxID: sandboxID, RequestID: requestID, Kind: state.OperationMutation})
 	if err != nil {
@@ -98,7 +125,7 @@ func (s *PlainColdService) UpdateTTL(ctx context.Context, sandboxID, requestID s
 	if err != nil {
 		return response, err
 	}
-	next, err := s.ttlActivation(now, now.Add(time.Duration(seconds)*time.Second), current)
+	next, err := s.ttlActivation(now, baseline.Add(time.Duration(seconds)*time.Second), current)
 	if err != nil {
 		return response, err
 	}
@@ -109,9 +136,42 @@ func (s *PlainColdService) UpdateTTL(ctx context.Context, sandboxID, requestID s
 		return response, err
 	}
 	defer credential.Close()
-	result, err := s.backend.RenewSandboxTTL(ctx, capability, loaded.view, now, seconds, next, destination)
+	result, err := s.backend.RenewSandboxTTL(ctx, capability, loaded.view, baseline, seconds, next, destination)
 	ttlCommitted = result.Outcome == state.OutcomeCommitted
 	return ttlResponse(result, err)
+}
+
+// credentialRefreshParameters selects only from already authenticated loader
+// output. It grants no operation or install permission. Rejecting an unrelated
+// pending interval here precedes the clock, admission, signing and transport;
+// maintenance must not finish a caller's requested business TTL change.
+func credentialRefreshParameters(loaded *plainColdLoadedTarget) (time.Time, int, error) {
+	if loaded == nil || loaded.control == nil || loaded.control.Phase != state.PhaseActive || loaded.control.Runtime == nil {
+		return time.Time{}, 0, ErrPlainColdUnavailable
+	}
+	seconds := 0
+	if current := loaded.ttlCurrent; current != nil {
+		seconds = current.Timeout
+	} else {
+		// Legacy capsules retain a duration, unlike the integer TTL API. A
+		// fractional second cannot be silently rounded into a new lifetime.
+		if loaded.capsule.TTL%time.Second != 0 {
+			return time.Time{}, 0, state.ErrInvalidRecord
+		}
+		seconds = int(loaded.capsule.TTL / time.Second)
+	}
+	if seconds < 1 || seconds > 365*24*60*60 {
+		return time.Time{}, 0, state.ErrInvalidRecord
+	}
+	expires := loaded.control.ExpiresAt
+	baseline := expires.Add(-time.Duration(seconds) * time.Second)
+	if current := loaded.ttlCurrent; current != nil && (!current.ExpiresAt.Equal(expires) || !current.Baseline.Equal(baseline)) {
+		return time.Time{}, 0, state.ErrConflict
+	}
+	if pending := loaded.ttlPending; pending != nil && (pending.Timeout != seconds || !pending.ExpiresAt.Equal(expires) || !pending.Baseline.Equal(baseline)) {
+		return time.Time{}, 0, state.ErrOutcomeUnknown
+	}
+	return baseline, seconds, nil
 }
 
 func ttlResponse(result state.SandboxTTLResult, err error) (types.UpdateTTLResponse, error) {
@@ -144,8 +204,9 @@ func (s *PlainColdService) currentTTLActivation(loaded *plainColdLoadedTarget, n
 	return a, nil
 }
 
-// ttlActivation signs once from the fixed trusted baseline. Receipt identity is
-// refreshed only when its current interval cannot cover the next finite window;
+// ttlActivation signs once from the actual trusted observation, independently
+// of the preserved business baseline. Receipt identity is refreshed only when
+// its current interval cannot cover the next finite window;
 // keeping its original NotBefore also pins a lost-ACK query to both TLS states.
 // Business authority stays within 15 minutes, the issuer, and the requested TTL.
 func (s *PlainColdService) ttlActivation(now, expires time.Time, current p.TargetActivationEvidence) (p.TargetActivationEvidence, error) {

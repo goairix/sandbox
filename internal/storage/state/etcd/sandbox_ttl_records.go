@@ -52,9 +52,12 @@ type SandboxTTLResult struct {
 
 // These records use two fixed business points, not a replacement operation or
 // Stage protocol. Existing OperationRecord/Stage v1 bytes remain unchanged.
-// PendingRevision is zero in ttl-pending. A v1 current stores the original
+// PendingRevision is zero in ttl-pending. A core v1/v3 current stores the original
 // pending birth; a normalized v2 current stores its recovery reservation Mod.
-// Version 2 keeps the original birth separately and never alters the v1 bytes.
+// Version 2 keeps the original birth separately and never alters its core bytes.
+// Newly prepared cores use v3's fixed authentication observation independently
+// of the business display baseline. Older binaries reject v3 safely; rolling
+// back writers requires compatible readers rather than an old-binary fallback.
 // Persisting locators avoids self-referential Stage mutation digests.
 type sandboxTTLRecord struct {
 	Version         uint32               `json:"version"`
@@ -67,21 +70,27 @@ type sandboxTTLRecord struct {
 	DueRevision     int64                `json:"due_revision"`
 	PendingRevision int64                `json:"pending_revision"`
 	Baseline        time.Time            `json:"baseline"`
-	Timeout         int                  `json:"timeout"`
-	ExpiresAt       time.Time            `json:"expires_at"`
-	PreviousDigest  string               `json:"previous_digest"`
-	Activation      json.RawMessage      `json:"activation"`
-	RuntimeCert     json.RawMessage      `json:"runtime_certificate"`
-	IssuerCert      json.RawMessage      `json:"issuer_certificate"`
-	Publish         StageAttemptLocator  `json:"publish"`
-	Final           StageAttemptLocator  `json:"final"`
 
-	// The normalized v1 projection never serializes recovery coordinates.
+	// AuthenticatedAt is nil in exact legacy v1 bytes. Version 3 records the
+	// first prepare's trusted observation, never a retry's clock or an effect
+	// deadline. Recovery preserves it inside the exact original core bytes.
+	AuthenticatedAt *time.Time `json:"authenticated_at,omitempty"`
+
+	Timeout        int                 `json:"timeout"`
+	ExpiresAt      time.Time           `json:"expires_at"`
+	PreviousDigest string              `json:"previous_digest"`
+	Activation     json.RawMessage     `json:"activation"`
+	RuntimeCert    json.RawMessage     `json:"runtime_certificate"`
+	IssuerCert     json.RawMessage     `json:"issuer_certificate"`
+	Publish        StageAttemptLocator `json:"publish"`
+	Final          StageAttemptLocator `json:"final"`
+
+	// The normalized core projection never serializes recovery coordinates.
 	// Original publish/Final digests therefore remain byte-for-byte stable.
 	recovery *sandboxTTLRecoveryRecord
 }
 
-// Version 2 wraps, rather than rewrites, the original v1 pending value. A
+// Version 2 wraps, rather than rewrites, the original v1 or v3 pending value. A
 // pending row gets its reserved revision from the actual KV; only current stores
 // that revision, avoiding a self-referential future commit revision in the wire.
 // This is a pure record. It grants neither Query nor metadata-write permission.
@@ -98,7 +107,20 @@ type sandboxTTLRecoveryRecord struct {
 }
 
 func (r sandboxTTLRecord) Validate() error {
-	if r.Version != 1 || r.Operation.Validate() != nil || r.Operation.Reference.Kind != OperationMutation || r.Control.Validate() != nil || r.Control.Phase != PhaseActive || r.Control.Runtime == nil || r.Timeout < 1 || r.Timeout > 365*24*60*60 || !validDomainExpiry(r.Baseline) || r.Baseline.Location() != time.UTC || !validDomainExpiry(r.ExpiresAt) || r.ExpiresAt.Location() != time.UTC || !r.ExpiresAt.Equal(r.Baseline.Add(time.Duration(r.Timeout)*time.Second)) || !validHexDigest(r.PreviousDigest) {
+	if r.Operation.Validate() != nil || r.Operation.Reference.Kind != OperationMutation || r.Control.Validate() != nil || r.Control.Phase != PhaseActive || r.Control.Runtime == nil || r.Timeout < 1 || r.Timeout > 365*24*60*60 || !validDomainExpiry(r.Baseline) || r.Baseline.Location() != time.UTC || !validDomainExpiry(r.ExpiresAt) || r.ExpiresAt.Location() != time.UTC || !r.ExpiresAt.Equal(r.Baseline.Add(time.Duration(r.Timeout)*time.Second)) || !validHexDigest(r.PreviousDigest) {
+		return ErrInvalidRecord
+	}
+	switch r.Version {
+	case 1:
+		if r.AuthenticatedAt != nil {
+			return ErrInvalidRecord
+		}
+	case 3:
+		at := r.AuthenticatedAt
+		if at == nil || !validDomainExpiry(*at) || at.Location() != time.UTC || at.Before(r.Baseline) || !at.Before(r.ExpiresAt) || !at.Before(r.Control.ExpiresAt) {
+			return ErrInvalidRecord
+		}
+	default:
 		return ErrInvalidRecord
 	}
 	o, c := r.Operation, r.Control

@@ -50,7 +50,9 @@ type sandboxTTLDraft struct {
 // durable abort of the predecessor. It fixes a new metadata-only Stage under
 // the original source fences; it never restores the old capability, re-grants
 // an old Stage, re-signs certification, or sends another installation.
-// Baseline is the caller's fixed controlled UTC observation, not a retry's now.
+// Baseline fixes the business display interval and may precede this operation
+// when only credentials are refreshed. New records separately retain prepare's
+// actual trusted authentication observation; neither clock is moved on retry.
 func (b *Backend) RenewSandboxTTL(ctx context.Context, c *OperationCapability, view *SandboxReadView, baseline time.Time, seconds int, next p.TargetActivationEvidence, destination *ct.Destination) (result SandboxTTLResult, resultErr error) {
 	result.Outcome = OutcomeUnknown
 	if b == nil || ctx == nil || destination == nil || view == nil || view.self != view || view.origin != b || view.records.Control == nil {
@@ -282,7 +284,7 @@ func (b *Backend) prepareSandboxTTL(ctx context.Context, c *OperationCapability,
 	if !validDomainExpiry(expires) || !now.Add(time.Second).Before(expires) {
 		return nil, ErrOperationAdmissionClosed
 	}
-	r := sandboxTTLRecord{Version: 1, Operation: c.record, Control: c.control, GuardRevision: c.guardRevision, AdmitRevision: c.admitRevision, Baseline: baseline, Timeout: seconds, ExpiresAt: expires, PreviousDigest: prior.Digest(), Activation: verified.Wire(), RuntimeCert: verified.RuntimeCertificate(), IssuerCert: verified.IssuerCertificate()}
+	r := sandboxTTLRecord{Version: 3, Operation: c.record, Control: c.control, GuardRevision: c.guardRevision, AdmitRevision: c.admitRevision, Baseline: baseline, AuthenticatedAt: &now, Timeout: seconds, ExpiresAt: expires, PreviousDigest: prior.Digest(), Activation: verified.Wire(), RuntimeCert: verified.RuntimeCertificate(), IssuerCert: verified.IssuerCertificate()}
 	r.Publish = StageAttemptLocator{Namespace: b.namespace.Root(), Partition: c.record.Reference.Partition, RestoreEpoch: b.restoreEpoch, RequestID: c.record.Reference.RequestID, StageID: "ttl_prepare", AttemptID: uuid.NewString()}
 	r.Final = r.Publish
 	r.Final.StageID, r.Final.AttemptID = "ttl_commit", verified.ActivationID()
@@ -618,7 +620,7 @@ func (b *Backend) readSandboxTTLRecord(ctx context.Context, view *SandboxReadVie
 	}
 	if r.recovery != nil {
 		// A recovery rewrite changes only pending's Mod. Publication remains
-		// bound to the original v1 birth and its unchanged original digest.
+		// bound to the original core birth and its unchanged original digest.
 		publishBirth = r.recovery.OriginalBirth
 		original, err := r.recovery.original()
 		if err != nil {
@@ -707,7 +709,16 @@ func (b *Backend) authenticateSandboxTTL(ctx context.Context, view *SandboxReadV
 	if err != nil {
 		return p.TargetActivationEvidence{}, err
 	}
-	a, err := b.enrolledVerifier.VerifyTargetActivation(r.Activation, r.RuntimeCert, r.IssuerCert, initial.Birth(), r.Baseline)
+	if err := r.Validate(); err != nil {
+		return p.TargetActivationEvidence{}, err
+	}
+	// Historical authentication uses the observation fixed by the original
+	// guarded prepare. It does not refresh any live admission or write cutoff.
+	at := r.Baseline
+	if r.AuthenticatedAt != nil {
+		at = *r.AuthenticatedAt
+	}
+	a, err := b.enrolledVerifier.VerifyTargetActivation(r.Activation, r.RuntimeCert, r.IssuerCert, initial.Birth(), at)
 	if err != nil {
 		return p.TargetActivationEvidence{}, err
 	}

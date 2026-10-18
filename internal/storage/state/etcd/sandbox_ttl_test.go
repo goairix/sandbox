@@ -159,6 +159,116 @@ func TestSandboxTTLStrictRecordsAndWireBounds(t *testing.T) {
 	}
 }
 
+// Extend the existing canonical v1 model at the business/authentication time
+// boundary. This is wire input to the real decoder, not a reconstructed grant.
+// The optional field follows Baseline; omitting it preserves every v1 byte.
+func sandboxTTLAuthenticatedWireModel(t *testing.T, original sandboxTTLRecord, authenticated any) []byte {
+	t.Helper()
+	// Production now prepares v3. Reconstruct only this test's legacy-shaped
+	// input before adding the separately selected authentication observation.
+	original.Version, original.AuthenticatedAt = 1, nil
+	wire, err := encodeSandboxTTL(original)
+	require.NoError(t, err)
+	baseline, err := json.Marshal(original.Baseline)
+	require.NoError(t, err)
+	value, err := json.Marshal(authenticated)
+	require.NoError(t, err)
+	wire = strings.Replace(wire, `"version":1`, `"version":3`, 1)
+	return []byte(strings.Replace(wire, `"baseline":`+string(baseline), `"baseline":`+string(baseline)+`,"authenticated_at":`+string(value), 1))
+}
+
+func TestSandboxTTLAuthenticatedClockStrictVersion3(t *testing.T) {
+	_, original := sandboxTTLRecordModel(t)
+	authenticated := original.Baseline.Add(10 * time.Second)
+	wire := sandboxTTLAuthenticatedWireModel(t, original, authenticated)
+	kv := &mvccpb.KeyValue{Value: wire, CreateRevision: 44, ModRevision: 44, Version: 1}
+	r, err := decodeSandboxTTL(kv, true)
+	require.NoError(t, err, "a fixed authentication observation may follow the preserved business baseline")
+	require.EqualValues(t, 3, r.Version)
+	require.Equal(t, original.Baseline, r.Baseline)
+	require.Equal(t, original.Timeout, r.Timeout)
+	require.Equal(t, original.ExpiresAt, r.ExpiresAt)
+	reencoded, err := encodeSandboxTTL(r)
+	require.NoError(t, err)
+	require.Equal(t, string(wire), reencoded)
+
+	for name, value := range map[string]any{
+		"null":                     nil,
+		"before-business-baseline": original.Baseline.Add(-time.Nanosecond),
+		"at-new-expiry":            original.ExpiresAt,
+		"after-old-expiry":         original.Control.ExpiresAt.Add(time.Second),
+		"non-utc":                  authenticated.Format("2006-01-02T15:04:05-07:00"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := *kv
+			bad.Value = sandboxTTLAuthenticatedWireModel(t, original, value)
+			_, err := decodeSandboxTTL(&bad, true)
+			require.Error(t, err)
+		})
+	}
+	for _, value := range [][]byte{
+		bytes.Replace(wire, []byte(`,"authenticated_at":"`+authenticated.Format(time.RFC3339Nano)+`"`), nil, 1),
+		bytes.Replace(wire, []byte(`"version":3`), []byte(`"version":1`), 1),
+		bytes.Replace(wire, []byte(`"authenticated_at":`), []byte(`"authenticated_at":null,"authenticated_at":`), 1),
+	} {
+		bad := *kv
+		bad.Value = value
+		_, err := decodeSandboxTTL(&bad, true)
+		require.Error(t, err, "missing, version-mixed and duplicate clocks are not canonical")
+	}
+	longer := original
+	longer.Timeout = 600
+	longer.ExpiresAt = longer.Baseline.Add(600 * time.Second)
+	bad := *kv
+	bad.Value = sandboxTTLAuthenticatedWireModel(t, longer, original.Control.ExpiresAt)
+	_, err = decodeSandboxTTL(&bad, true)
+	require.Error(t, err, "authentication must also precede the old expiry when the new business expiry is later")
+}
+
+func TestSandboxTTLAuthenticatedClockPreservesLegacyAndRecovery(t *testing.T) {
+	for _, sameDue := range []bool{false, true} {
+		b, original := sandboxTTLRecordModel(t)
+		if sameDue {
+			original.Control.ExpiresAt = original.ExpiresAt
+			original.Operation.ExpiresAt = original.ExpiresAt
+		}
+		legacy, err := encodeSandboxTTL(original)
+		require.NoError(t, err)
+		legacyModel, err := json.Marshal(original)
+		require.NoError(t, err)
+		require.Equal(t, string(legacyModel), legacy, "nil optional clock must preserve exact original v1 bytes")
+		_, err = decodeSandboxTTL(&mvccpb.KeyValue{Value: []byte(legacy), CreateRevision: 44, ModRevision: 44, Version: 1}, true)
+		require.NoError(t, err)
+
+		wire := sandboxTTLAuthenticatedWireModel(t, original, original.Baseline.Add(10*time.Second))
+		r, err := decodeSandboxTTL(&mvccpb.KeyValue{Value: wire, CreateRevision: 44, ModRevision: 44, Version: 1}, true)
+		require.NoError(t, err)
+		_, publish, err := b.sandboxTTLStage(r, 0)
+		require.NoError(t, err, "normal publish must pass the original native preflight caps")
+		mutation, final, err := b.sandboxTTLStage(r, 44)
+		require.NoError(t, err, "normal/same-due commit must pass original native preflight caps")
+		if sameDue {
+			require.Len(t, mutation.Writes, 3, "credential refresh preserves the exact due point")
+		}
+		kv, envelope := sandboxTTLRecoveryKVModel(t, b, original)
+		envelope.OriginalRaw = bytes.Clone(wire)
+		kv.Value, err = json.Marshal(envelope)
+		require.NoError(t, err)
+		recovered, err := decodeSandboxTTL(kv, true)
+		require.NoError(t, err, "v2 recovery wraps the exact v3 original without rewriting it")
+		_, rebuiltPublish, err := b.sandboxTTLStage(recovered, 0)
+		require.NoError(t, err)
+		require.Equal(t, publish, rebuiltPublish)
+		repair, repaired, err := b.sandboxTTLStage(recovered, kv.ModRevision)
+		require.NoError(t, err, "recovery must retain the original 64-node/128-KiB/256-KiB preflight")
+		require.NotEqual(t, final, repaired)
+		var committed sandboxTTLRecoveryWireModel
+		require.NoError(t, json.Unmarshal(repair.Writes[1].Value, &committed))
+		require.Equal(t, json.RawMessage(wire), committed.OriginalRaw)
+		require.EqualValues(t, 44, committed.OriginalBirth)
+	}
+}
+
 func TestSandboxTTLRejectsCopiedCapabilitiesBeforeRPC(t *testing.T) {
 	b, r := sandboxTTLRecordModel(t)
 	c := &OperationCapability{origin: b, parentCtx: context.Background(), record: r.Operation, control: r.Control}
@@ -482,6 +592,46 @@ type sandboxTTLColdProtocolFixture struct {
 	installs    atomic.Int32
 	querySeen   chan struct{}
 	queryReply  chan struct{}
+}
+
+// The original signed publication authenticates birth here. This test changes
+// only an uncommitted input record; it proves historical verification, not a
+// runtime install, public acknowledgement or metadata-write permission.
+func TestSandboxTTLAuthenticatedClockUsesActualObservation(t *testing.T) {
+	f := newSandboxTTLColdProtocolFixture(t, false)
+	require.EqualValues(t, 3, f.original.Version, "the actual original prepare produces a v3 core")
+	require.NotNil(t, f.original.AuthenticatedAt)
+	ctx := context.Background()
+	initial, err := f.b.sandboxTTLInitialActivation(ctx, f.view)
+	require.NoError(t, err)
+	authenticated := f.now.Add(10 * time.Second)
+	birth := initial.Birth()
+	runtimeDigest := sha256.Sum256(initial.RuntimeCertificate())
+	issuerDigest := sha256.Sum256(initial.IssuerCertificate())
+	wire, err := p.SignTargetActivation(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)), p.TargetActivationClaims{
+		Version: 1, Role: "target_activation", ActivationID: uuid.NewString(), Binding: initial.Binding(), Identity: initial.Identity(),
+		DataGateEpoch: initial.DataGateEpoch(), UID: birth.UID, GID: birth.GID, NetworkAllowed: birth.NetworkAllowed, ContractDigest: birth.ContractDigest,
+		RuntimeCertificateDigest: hex.EncodeToString(runtimeDigest[:]), IssuerCertificateDigest: hex.EncodeToString(issuerDigest[:]),
+		NotBefore: authenticated.Add(-time.Second), NotAfter: f.original.ExpiresAt,
+	})
+	require.NoError(t, err)
+	candidate, err := f.b.enrolledVerifier.VerifyTargetActivation(wire, initial.RuntimeCertificate(), initial.IssuerCertificate(), birth, authenticated)
+	require.NoError(t, err)
+	_, err = f.b.enrolledVerifier.VerifyTargetActivation(wire, initial.RuntimeCertificate(), initial.IssuerCertificate(), birth, f.original.Baseline)
+	require.Error(t, err, "the preserved old business baseline cannot authenticate a newly issued activation")
+	original := f.original
+	original.Activation, original.RuntimeCert, original.IssuerCert = candidate.Wire(), candidate.RuntimeCertificate(), candidate.IssuerCertificate()
+	original.Final.AttemptID = candidate.ActivationID()
+	value := sandboxTTLAuthenticatedWireModel(t, original, authenticated)
+	r, err := decodeSandboxTTL(&mvccpb.KeyValue{Value: value, CreateRevision: 90, ModRevision: 90, Version: 1}, true)
+	require.NoError(t, err)
+	verified, err := f.b.authenticateSandboxTTL(ctx, f.view, r)
+	require.NoError(t, err, "history must use the fixed actual observation, not the business display baseline")
+	require.Equal(t, candidate.Digest(), verified.Digest())
+	require.Equal(t, f.original.ExpiresAt, r.ExpiresAt)
+	require.Equal(t, f.original.Timeout, r.Timeout)
+	require.Equal(t, int32(0), f.installs.Load())
+	require.Equal(t, int32(0), f.queries.Load())
 }
 
 // The existing signed publication producer and actual Backend/Stage/KV paths

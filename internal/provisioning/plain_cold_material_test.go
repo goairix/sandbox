@@ -5,16 +5,21 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	p "github.com/goairix/sandbox/internal/runtime/controlprotocol"
 	ct "github.com/goairix/sandbox/internal/runtime/controltransport"
+	kube "github.com/goairix/sandbox/internal/runtime/kubernetes"
 	"github.com/goairix/sandbox/internal/runtime/launcherconfig"
 	state "github.com/goairix/sandbox/internal/storage/state/etcd"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"google.golang.org/grpc"
+	"k8s.io/client-go/rest"
 )
 
 // plainColdMaterialFixture reuses the business request and trusted UTC clock
@@ -205,4 +210,149 @@ func TestPlainColdTTLActivationRefreshesSameKeyWithinIssuer(t *testing.T) {
 	require.True(t, renewed.NotAfter().Equal(baseline.Add(15*time.Minute)))
 	require.True(t, next.NotAfter().Equal(renewed.NotAfter()))
 	require.Equal(t, current.IssuerCertificate(), next.IssuerCertificate())
+}
+
+// A credential refresh preserves a prior user TTL decision. These signed
+// material assertions do not stand in for installation or a service operation;
+// the Backend's v3 tests cover the separate persisted authentication clock.
+func TestPlainColdTTLRefreshPreservesPriorUserExpiry(t *testing.T) {
+	s, birth, dispatch, now := plainColdMaterialFixture(t, 45*time.Minute)
+	m, err := s.material(context.Background(), birth, dispatch, "pod", "pod-uid")
+	require.NoError(t, err)
+	initial, err := s.verifier.VerifyTargetActivation(m.Activation, m.RuntimeCertificate, m.IssuerCertificate, p.BirthContext(birth), now)
+	require.NoError(t, err)
+	userBaseline, timeout := now.Add(2*time.Second), 1800
+	expires := userBaseline.Add(time.Duration(timeout) * time.Second)
+	current, err := s.ttlActivation(userBaseline, expires, initial)
+	require.NoError(t, err)
+	refreshAt := userBaseline.Add(10 * time.Second)
+	refreshed, err := s.ttlActivation(refreshAt, expires, current)
+	require.NoError(t, err)
+	require.Equal(t, current.Identity(), refreshed.Identity())
+	require.Equal(t, current.Birth(), refreshed.Birth())
+	require.Equal(t, current.DataGateEpoch(), refreshed.DataGateEpoch())
+	require.True(t, refreshed.NotBefore().After(current.NotBefore()))
+	require.True(t, refreshed.NotAfter().After(current.NotAfter()), "only the finite credential window advances")
+	preservedBaseline := expires.Add(-time.Duration(timeout) * time.Second)
+	require.Equal(t, userBaseline, preservedBaseline)
+	require.Equal(t, expires, preservedBaseline.Add(time.Duration(timeout)*time.Second))
+	require.NotEqual(t, expires, refreshAt.Add(time.Duration(timeout)*time.Second), "UpdateTTL(oldTimeout) would incorrectly slide the business TTL")
+	_, err = s.verifier.VerifyTargetActivation(refreshed.Wire(), refreshed.RuntimeCertificate(), refreshed.IssuerCertificate(), refreshed.Birth(), preservedBaseline)
+	require.Error(t, err, "historical authentication must not reuse the preserved business baseline")
+	_, err = s.verifier.VerifyTargetActivation(refreshed.Wire(), refreshed.RuntimeCertificate(), refreshed.IssuerCertificate(), refreshed.Birth(), refreshAt)
+	require.NoError(t, err)
+}
+
+// Selection consumes only loader-authenticated metadata in production. These
+// private DTO cases test interval policy, never installation or admission.
+func TestPlainColdCredentialRefreshIntervalSelection(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	control := &state.SandboxControlRecord{Phase: state.PhaseActive, Runtime: &state.RuntimeReference{ID: "pod"}, ExpiresAt: now.Add(time.Hour)}
+	loaded := &plainColdLoadedTarget{control: control, capsule: plainColdCapsule{TTL: time.Hour}}
+	baseline, seconds, err := credentialRefreshParameters(loaded)
+	require.NoError(t, err)
+	require.Equal(t, now, baseline)
+	require.Equal(t, 3600, seconds)
+
+	// An intervening user TTL change overrides the original capsule's timeout.
+	loaded.ttlCurrent = &state.SandboxTTLCurrent{Baseline: now.Add(30 * time.Minute), Timeout: 1800, ExpiresAt: control.ExpiresAt}
+	baseline, seconds, err = credentialRefreshParameters(loaded)
+	require.NoError(t, err)
+	require.Equal(t, loaded.ttlCurrent.Baseline, baseline)
+	require.Equal(t, loaded.ttlCurrent.Timeout, seconds)
+	loaded.ttlPending = &state.SandboxTTLPending{Baseline: baseline, Timeout: seconds, ExpiresAt: control.ExpiresAt}
+	_, _, err = credentialRefreshParameters(loaded)
+	require.NoError(t, err, "only the exact preserved pending interval is selectable for query")
+	for name, change := range map[string]func(*state.SandboxTTLPending){
+		"user-timeout":  func(r *state.SandboxTTLPending) { r.Timeout++ },
+		"user-expiry":   func(r *state.SandboxTTLPending) { r.ExpiresAt = r.ExpiresAt.Add(time.Second) },
+		"user-baseline": func(r *state.SandboxTTLPending) { r.Baseline = r.Baseline.Add(time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			pending := *loaded.ttlPending
+			change(&pending)
+			input := *loaded
+			input.ttlPending = &pending
+			_, _, err := credentialRefreshParameters(&input)
+			require.ErrorIs(t, err, state.ErrOutcomeUnknown)
+		})
+	}
+	loaded.ttlCurrent, loaded.ttlPending = nil, nil
+	loaded.capsule.TTL = time.Hour + time.Nanosecond
+	_, _, err = credentialRefreshParameters(loaded)
+	require.ErrorIs(t, err, state.ErrInvalidRecord, "legacy fractional timeout must not be rounded")
+	loaded.control.Phase = state.PhaseDestroying
+	_, _, err = credentialRefreshParameters(loaded)
+	require.ErrorIs(t, err, ErrPlainColdUnavailable)
+}
+
+func TestPlainColdCredentialRefreshAdmissionAndClose(t *testing.T) {
+	var missing *PlainColdService
+	_, err := missing.RefreshCredentials(context.Background(), "sandbox", "request")
+	require.ErrorIs(t, err, ErrPlainColdProfile)
+	s, _, _ := coldBusinessFixture(t)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = s.RefreshCredentials(canceled, "sandbox", "request")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, s.active)
+
+	// Reuse the original cancellation-only native KV endpoint. No publication,
+	// signer, lease or runtime model exists here, so this cannot prove install.
+	ns, err := state.NewNamespace("/sandbox", "business", "cell")
+	require.NoError(t, err)
+	identity := state.Identity{SchemaVersion: 1, Prefix: "/sandbox", AuthorityID: "business", Cell: "cell", ClusterID: 1, StorageID: "storage", RuntimeID: "launcher", RestoreEpoch: "restore"}
+	wire, err := json.Marshal(identity)
+	require.NoError(t, err)
+	endpoint := &businessLookupCancellationServer{identity: wire, root: ns.Root(), entered: make(chan struct{}), joined: make(chan struct{})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	rpc := grpc.NewServer()
+	pb.RegisterKVServer(rpc, endpoint)
+	pb.RegisterMaintenanceServer(rpc, endpoint)
+	served := make(chan error, 1)
+	go func() { served <- rpc.Serve(listener) }()
+	t.Cleanup(func() {
+		rpc.Stop()
+		require.NoError(t, <-served)
+	})
+	backend, err := state.New(context.Background(), state.Options{Endpoints: []string{"http://" + listener.Addr().String()}, Namespace: ns, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	api := kube.EnrolledBridgeOptions{Config: &rest.Config{Host: "https://127.0.0.1:1"}, Namespace: "runtimes", MaxActive: 1, RequestTimeout: time.Second}
+	s.driver, err = kube.NewEnrolledCreateClient(kube.EnrolledCreateOptions{API: api, Image: "registry.example/sandbox:v1@sha256:" + strings.Repeat("a", 64), NodeName: "node", NodeUID: uuid.NewString(), NodeBootID: uuid.NewString()})
+	require.NoError(t, err)
+	s.bridge, err = kube.NewEnrolledBridgeClient(api)
+	require.NoError(t, err)
+	s.backend, s.closeDone = backend, make(chan struct{})
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.RefreshCredentials(context.Background(), "sandbox", "request")
+		done <- err
+	}()
+	select {
+	case <-endpoint.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("credential refresh did not enter its original Backend lookup")
+	}
+	_, err = s.RefreshCredentials(context.Background(), "sandbox", "other")
+	require.ErrorIs(t, err, state.ErrConflict, "refresh shares the original finite service admission")
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not retire the original refresh call")
+	}
+	require.NoError(t, <-closed)
+	select {
+	case <-endpoint.joined:
+	case <-time.After(time.Second):
+		t.Fatal("original Backend RPC did not join after cancellation")
+	}
+	_, err = s.RefreshCredentials(context.Background(), "sandbox", "after-close")
+	require.ErrorIs(t, err, state.ErrConflict)
+	require.Empty(t, s.active)
 }
