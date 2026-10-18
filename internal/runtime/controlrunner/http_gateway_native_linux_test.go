@@ -54,6 +54,15 @@ func TestHTTPGatewayTTLRecoveryNative(t *testing.T) {
 	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, ttlRecovery: true, detached: true})
 }
 
+func TestHTTPGatewayTTLRotationRecoveryNative(t *testing.T) {
+	if os.Getenv("SANDBOX_HTTP_TTL_ROTATION_RECOVERY_NATIVE") != "1" {
+		t.Skip("requires exact owned HTTP TTL receipt-leaf rotation and cold-recovery Linux fixture")
+	}
+	// This proves an actual replacement leaf and fixed-candidate recovery, not
+	// automatic fifteen-minute maintenance or a thirty-minute lifetime run.
+	runColdCreateServiceFixtureNative(t, coldServiceNativeVariant{ttlGateway: true, ttlRecovery: true, ttlRotation: true, detached: true})
+}
+
 // Observe the real service return without replacing any runtime, bridge, Wait,
 // credential, admission or writer operation. Each bounded scenario consumes it.
 type httpNativeService struct {
@@ -313,6 +322,8 @@ func exerciseHTTPGatewayNative(t *testing.T, ctx context.Context, realService *p
 type httpNativeTTLRecovery struct {
 	arm            func()
 	restart        func() (*provisioning.PlainColdService, *state.Backend)
+	rotation       bool
+	checkOriginal  func(*state.SandboxReadView)
 	checkInstalled func(*state.SandboxTTLPending)
 }
 
@@ -346,10 +357,15 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 
 	// Every variant crosses the original ten-second expiry. Cold recovery and
 	// destroy use ninety seconds for the new TTL; their fixture contexts remain
-	// sixty and 120 seconds respectively. Ordinary renewal keeps thirty seconds.
+	// sixty and 120 seconds respectively. Rotation requests thirty minutes so
+	// the new activation extends beyond the original fifteen-minute leaf and
+	// production must issue a replacement. It still waits only the old ten seconds.
 	renewalSeconds := 30
 	if destroy != nil || recovery != nil {
 		renewalSeconds = 90
+	}
+	if recovery != nil && recovery.rotation {
+		renewalSeconds = 1800
 	}
 	create := types.CreateSandboxRequest{Mode: "persistent", Timeout: 10}
 	key := uuid.NewString()
@@ -370,6 +386,9 @@ func exerciseHTTPGatewayTTLNative(t *testing.T, ctx context.Context, realService
 	var renewed types.UpdateTTLResponse
 	var candidate *state.SandboxTTLPending
 	if recovery != nil {
+		if recovery.checkOriginal != nil {
+			recovery.checkOriginal(before)
+		}
 		recovery.arm()
 		var unknown map[string]any
 		httpNativeRead(t, httpNativeRequest(t, client, origin, http.MethodPut, path+"/ttl", "", types.UpdateTTLRequest{Timeout: renewalSeconds}, true), http.StatusServiceUnavailable, &unknown)

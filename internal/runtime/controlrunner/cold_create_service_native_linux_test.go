@@ -75,7 +75,7 @@ func runColdCreateServiceVariantNative(t *testing.T, loseACK, withBusiness, deta
 type coldServiceNativeVariant struct {
 	loseACK, withBusiness, detached, concurrent, live, execService bool
 	httpGateway, ttlGateway, fileAPI                               bool
-	ttlRecovery                                                    bool
+	ttlRecovery, ttlRotation                                       bool
 	largeDownload                                                  bool
 	destroyLocal, destroyDetached                                  bool
 	destroyTerminal                                                bool
@@ -182,7 +182,14 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 	nb, na := time.Now().UTC().Add(-time.Minute), time.Now().UTC().Add(5*time.Minute)
 	observerCert, err := p.SignNodeObserverCertificate(root, p.NodeObserverCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "node_observer", Namespace: ns.Root(), AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, NodeUID: nodeUID, NodeBootID: boot, PublicKey: observerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
 	require.NoError(t, err)
-	issuerCert, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: ns.Root(), AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: issuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: na})
+	issuerAfter := na
+	if variant.ttlRotation {
+		// Only this scenario removes the original five-minute issuer ceiling.
+		// Create still obtains its production fifteen-minute receipt leaf; the
+		// later thirty-minute TTL request must renew that leaf on the same key.
+		issuerAfter = time.Now().UTC().Add(45 * time.Minute)
+	}
+	issuerCert, err := p.SignCommandIssuerCertificate(root, p.CommandIssuerCertificateClaims{Version: 1, CertificateID: uuid.NewString(), Role: "command_issuer", Namespace: ns.Root(), AuthorityID: binding.AuthorityID, Target: binding.Target, RestoreEpoch: binding.RestoreEpoch, PublicKey: issuerKey.Public().(ed25519.PublicKey), NotBefore: nb, NotAfter: issuerAfter})
 	require.NoError(t, err)
 	config, err := json.Marshal(launcherconfig.Config{Version: 2, Binding: launcherconfig.Binding(binding), Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}, UID: 1000, GID: 1000, ContractDigest: profileFixtureContract(t), ClockSocket: ct.ClockSocket, ClockPublicKey: clockPublic, ClockAudience: "launcher", MaxActive: 4, Enrollment: launcherconfig.Enrollment{NodeUID: nodeUID, NodeBootID: boot}})
 	require.NoError(t, err)
@@ -524,34 +531,55 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 		var recovery *httpNativeTTLRecovery
 		if variant.ttlRecovery {
 			var installedJournal []byte
+			type activationJournal struct {
+				Version            uint32 `json:"version"`
+				Digest             string `json:"digest"`
+				PreviousDigest     string `json:"previous_digest"`
+				Wire               []byte `json:"wire"`
+				RuntimeCertificate []byte `json:"runtime_certificate"`
+				IssuerCertificate  []byte `json:"issuer_certificate"`
+			}
+			readJournal := func() (activationJournal, []byte) {
+				// These bounded reads inspect only the original launcher's journal
+				// and never feed authority or replacement material to production.
+				mu.Lock()
+				pid := child.Process.Pid
+				mu.Unlock()
+				file, err := os.Open(fmt.Sprintf("/proc/%d/root%s/journal/activation.json", pid, ct.ControlDirectory))
+				require.NoError(t, err)
+				wire, readErr := io.ReadAll(io.LimitReader(file, 16385))
+				require.NoError(t, errors.Join(readErr, file.Close()))
+				require.LessOrEqual(t, len(wire), 16384)
+				var actual activationJournal
+				require.NoError(t, json.Unmarshal(wire, &actual))
+				return actual, wire
+			}
+			var originalReceipt p.RuntimeReceiptIdentity
+			verifier, err := p.NewManagementVerifier(binding, []ed25519.PublicKey{root.Public().(ed25519.PublicKey)})
+			require.NoError(t, err)
 			recovery = &httpNativeTTLRecovery{
-				arm: func() { require.False(t, loseNextCompletion.Swap(true)) },
+				rotation: variant.ttlRotation,
+				arm:      func() { require.False(t, loseNextCompletion.Swap(true)) },
 				checkInstalled: func(candidate *state.SandboxTTLPending) {
-					// Inspect only the original launcher's actual private journal;
-					// these test diagnostics are never supplied as commit authority.
-					mu.Lock()
-					pid := child.Process.Pid
-					mu.Unlock()
-					file, err := os.Open(fmt.Sprintf("/proc/%d/root%s/journal/activation.json", pid, ct.ControlDirectory))
-					require.NoError(t, err)
-					wire, readErr := io.ReadAll(io.LimitReader(file, 16385))
-					require.NoError(t, errors.Join(readErr, file.Close()))
-					require.LessOrEqual(t, len(wire), 16384)
-					var actual struct {
-						Version            uint32 `json:"version"`
-						Digest             string `json:"digest"`
-						PreviousDigest     string `json:"previous_digest"`
-						Wire               []byte `json:"wire"`
-						RuntimeCertificate []byte `json:"runtime_certificate"`
-						IssuerCertificate  []byte `json:"issuer_certificate"`
-					}
-					require.NoError(t, json.Unmarshal(wire, &actual))
+					actual, wire := readJournal()
 					require.Equal(t, uint32(2), actual.Version)
 					require.Equal(t, candidate.Activation.Digest(), actual.Digest)
 					require.Equal(t, candidate.PreviousDigest, actual.PreviousDigest)
 					require.Equal(t, candidate.Activation.Wire(), actual.Wire)
 					require.Equal(t, candidate.Activation.RuntimeCertificate(), actual.RuntimeCertificate)
 					require.Equal(t, candidate.Activation.IssuerCertificate(), actual.IssuerCertificate)
+					if variant.ttlRotation {
+						renewed, err := verifier.VerifyRuntimeIdentityCertificate(actual.RuntimeCertificate, candidate.Activation.Identity(), time.Now().UTC())
+						require.NoError(t, err)
+						require.NotEmpty(t, originalReceipt.CertificateID())
+						require.NotEqual(t, originalReceipt.Wire(), renewed.Wire())
+						require.NotEqual(t, originalReceipt.CertificateID(), renewed.CertificateID())
+						require.True(t, renewed.NotAfter().After(originalReceipt.NotAfter()))
+						require.True(t, candidate.Activation.NotAfter().After(originalReceipt.NotAfter()), "the old leaf cannot cover this activation")
+						require.Equal(t, originalReceipt.NotBefore(), renewed.NotBefore())
+						require.Equal(t, originalReceipt.Context(), renewed.Context())
+						require.Equal(t, originalReceipt.PublicKey(), renewed.PublicKey())
+					}
 					if installedJournal == nil {
 						installedJournal = append([]byte(nil), wire...)
 					} else {
@@ -569,6 +597,27 @@ func runColdCreateServiceFixtureNative(t *testing.T, variant coldServiceNativeVa
 					t.Cleanup(func() { require.NoError(t, resumed.Close()) })
 					return resumed, backend
 				},
+			}
+			if variant.ttlRotation {
+				recovery.checkOriginal = func(view *state.SandboxReadView) {
+					actual, _ := readJournal()
+					require.Equal(t, uint32(1), actual.Version)
+					require.Empty(t, actual.PreviousDigest)
+					history, err := backend.ReadSandboxRuntime(ctx, view)
+					require.NoError(t, err)
+					require.NotNil(t, history)
+					require.NotNil(t, history.Publication)
+					request := history.Publication.Enrollment.Request
+					activation, err := verifier.VerifyNodeEnrollmentRequest(request, time.Now().UTC())
+					require.NoError(t, err)
+					require.Equal(t, activation.Digest(), actual.Digest)
+					require.Equal(t, activation.Wire(), actual.Wire)
+					require.Equal(t, activation.RuntimeCertificate(), actual.RuntimeCertificate)
+					require.Equal(t, activation.IssuerCertificate(), actual.IssuerCertificate)
+					originalReceipt, err = verifier.VerifyRuntimeIdentityCertificate(actual.RuntimeCertificate, activation.Identity(), time.Now().UTC())
+					require.NoError(t, err)
+					require.True(t, originalReceipt.NotAfter().Equal(originalReceipt.NotBefore().Add(15*time.Minute+30*time.Second)), "Create retains its original fifteen-minute receipt window")
+				}
 			}
 		}
 		var destroy *httpDestroyNativeContext
