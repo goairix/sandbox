@@ -6,8 +6,8 @@
 
 | 口径 | 进度 | 判断依据 |
 | --- | --- | --- |
-| 功能代码 | 约79%，粗估范围75%–80% | plain创建/查询/执行、有限上传/下载、正常销毁及TTL正常/安装后失确认冷恢复链已接通；其余API、FUSE与故障组合仍有缺口 |
-| 整体交付 | 约53% | 沿用20/30/20/15/15权重，阶段粗估90/80/55/0/0；容量、部署恢复及最终替代未完成 |
+| 功能代码 | 约80%，粗估范围75%–82% | 正式库存初始化已接通plain HTTP创建/执行/销毁退款；正常TTL及换叶冷恢复可用，其余API、FUSE、自动维护与故障组合仍有缺口 |
+| 整体交付 | 约54% | 沿用20/30/20/15/15权重，阶段粗估90/80/60/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
 新增已提交：`0474d13` 修复 FUSE Pod 经真实 API JSON 往返后的 Quantity 表示误拒绝，
@@ -15,8 +15,11 @@
 `253c104` 接上 root Unix 的有限健康 pull、原 observer slot 和实际 peer/cgroup 校验入口，
 保留跨重连的样本时效；审查发现的 launcher FD 关闭竞争和首次 socket Close 错误丢失
 已修复。host/race、Linux vet、Linux Unix/时效/拒绝组件测试和独立审查通过。
-完整双 PID1 认证正向仍在验证，不能把这些组件测试当作真实 FUSE 挂载、collector 或
-FUSE业务创建完成；旧每sandbox轮询及Begin/End保护仍保留。
+随后 `e57e2e8` 的双 PID1 认证正向实际4.14秒通过：原正式launcher签名enrollment、
+独立helper PID1/root peer、公开channel与原slot实际连通；重复pull无API调用或etcd修订，
+原进程Wait、无OOM、容器清理与9534项核对通过。首轮夹具多授SYS_CHROOT被产品正确
+拒绝，修正夹具后通过；产品权限校验没有放宽。挂载/进程后端仍明确为模型，不能当作
+真实FUSE挂载、collector或FUSE业务创建完成；旧每sandbox轮询及Begin/End保护仍保留。
 
 `fae9914` 的真实换叶冷恢复用例14.18秒通过：15分钟原receipt后请求1800秒续期，
 确认实际新证书ID、wire及截止变化，密钥和runtime identity不变；安装后丢最终确认，
@@ -27,7 +30,12 @@ FUSE业务创建完成；旧每sandbox轮询及Begin/End保护仍保留。
 `db16a7a` 增加正式 `--initialize-etcd-inventory=<manifest>` operator命令，复用原挂载
 校验及每次最多八槽的CAS，有总30秒期限和有限调用次数；错误或Unknown立即停止，
 所有资源关闭后返回。CLI拒绝边界、配置/取消测试、Linux vet和独立审查通过。
-正式 mounted 初始化后接 HTTP 创建/执行/销毁的原生正例仍在实现，尚不计部署验收。
+`6fcd96d` 随后在主分支实际43.35秒通过正式mounted链：未ready的OpenHTTP拒绝且无
+KV/Grant/运行时效果→InitializeInventory共33槽→重复ready全KV与修订/Grant计数不变→
+OpenHTTP→HTTP创建与签名Exec退出7→正式cleanup-worker managed Claim、销毁、退款→
+GET404。原进程Wait、无OOM、容器清理及9540项输入/工具核对通过。首轮worker提前
+退出导致未完成销毁；第二轮未复现，未宣称该故障已经修复，恢复组合仍开放。
+本次粗估上调来自正式初始化业务链闭合，不来自测试数，也不等同实际镜像或集群部署。
 
 功能未完成项仍包括：FUSE业务与collector、长期凭证自动维护、其余API/模式；交付还差
 正式长测、完整生产部署与恢复、Redis退役。现due索引只有业务ExpiresAt，不能在凭证
@@ -70,7 +78,11 @@ bridge完成前不报告同步。全checkpoint host/race、Linux vet和独立审
 随后启动pilot02在相同2核/4GiB、原3分钟上限下通过：1万约64.8秒、10万约66.3秒
 完成256分区同步；原进程Wait、无OOM、容器/卷清理和9308项输入/工具核对通过。
 这是已修复启动路径的有限实证，不替代全容量长测，更不代表同数量实际Pod/FUSE
-sandbox容量。正式FULL05已用同一构建启动，仍待1万/10万各一小时及维护验收。
+sandbox容量。正式FULL05在1934.17秒失败，未完成1万/10万各一小时：维护Compact/
+Defrag、原成员Wait及数据重启、固定37次Txn的API检查完成，但worker失权为Unknown
+加两个精确DeadlineExceeded；原fixture仅允许EOF/reset，恢复分类拒绝后尚未执行旧
+guard/Lease缺失及新session接管验证。原四个Wait、无OOM、容器/卷清理与9308项核对
+完成。当前仅在有限fault-pilot增加维护phase和原worker RPC诊断，原判定与资源不变。
 本次小幅上调只来自真实TTL冷恢复业务闭合；默认Redis、生产切换及部署恢复状态不变。
 
 最新完成：`57cc453` 接通真实 HTTP detached 正常销毁链：Create201→DELETE202→
