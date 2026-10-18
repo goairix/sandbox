@@ -27,9 +27,9 @@ type detachedCleanupSourceFixture struct {
 // Every positive source comes from original detached acquisition and actual
 // signed publication, then the ordinary destroy transaction creates its Task.
 // This host fixture asserts metadata authentication, never physical cleanup.
-func newDetachedCleanupSourceFixture(t *testing.T, profile string, options *DetachedCleanupOptions) detachedCleanupSourceFixture {
+func newDetachedCleanupSourceFixture(t *testing.T, profile string, options *DetachedCleanupOptions, configure ...func(*Options)) detachedCleanupSourceFixture {
 	t.Helper()
-	f := newDuePublicationFixtureForSource(t, profile, options)
+	f := newDuePublicationFixtureForSource(t, profile, options, configure...)
 	ctx := context.Background()
 	published, err := f.b.PublishRuntimeEnrolled(ctx, f.claim, f.proof, f.enrollment)
 	require.NoError(t, err)

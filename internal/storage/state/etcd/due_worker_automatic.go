@@ -78,7 +78,7 @@ func (w *DueWorker) initializeAutomatic() error {
 	}
 	w.backend.archiveLife.mu.Lock()
 	cold := w.backend.cleanupColdQuotaEnabled()
-	keyLimit, byteLimit := dueCacheLimits(true, cold)
+	keyLimit, byteLimit := w.cache.limitsLocked(true, cold)
 	if !w.cache.validLocked() || w.cache.session != w.session || w.cache.count > keyLimit || w.cache.bytes > byteLimit {
 		w.backend.archiveLife.mu.Unlock()
 		return ErrInvalidRecord

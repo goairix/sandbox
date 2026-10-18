@@ -239,6 +239,13 @@ func (b *Backend) loadRuntimePublicationEnrolled(ctx context.Context, w Workspac
 }
 
 func (b *Backend) loadRuntimePublicationEnrolledAt(ctx context.Context, w runtimeHistoryLocator, intent string) (*SandboxRuntimeReadResult, error) {
+	return b.readRuntimePublicationEnrolledAt(ctx, w, intent, nil)
+}
+
+// observe sees only the original authenticated native points, during this
+// bounded read. It must not retain the response graph or confer effect rights.
+// The ordinary public reader keeps exactly its existing DTO lifetime.
+func (b *Backend) readRuntimePublicationEnrolledAt(ctx context.Context, w runtimeHistoryLocator, intent string, observe func([]*mvccpb.KeyValue)) (*SandboxRuntimeReadResult, error) {
 	jk, pk, err := b.namespace.runtimePublicationKeys(w.Partition(), intent)
 	if err != nil {
 		return nil, err
@@ -280,7 +287,11 @@ func (b *Backend) loadRuntimePublicationEnrolledAt(ctx context.Context, w runtim
 	if err != nil {
 		return nil, err
 	}
-	return b.decodeEnrolledPublicationSnapshotAt(values, keys, w, intent, record)
+	result, err := b.decodeEnrolledPublicationSnapshotAt(values, keys, w, intent, record)
+	if err == nil && observe != nil {
+		observe(values)
+	}
+	return result, err
 }
 
 func (b *Backend) decodeEnrolledPublicationSnapshot(values []*mvccpb.KeyValue, keys []string, w WorkspaceIdentity, intent string, located RuntimeEnrolledPublicationRecord) (*RuntimeEnrolledPublicationEntry, error) {

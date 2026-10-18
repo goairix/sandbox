@@ -97,6 +97,9 @@ type DueWorker struct {
 	// The serial actor alone owns this one cold metadata workspace. Its
 	// borrowed history/cursors never enter the 32 independent job records.
 	coldQuota *cleanupColdQuotaWorkspace
+	// Only the serial actor borrows source scratch. No registry job retains a
+	// source graph, and cancellation does not retire an active native call.
+	managedSource *cleanupManagedSourceWorkspace
 
 	// Automatic phases and Claim arbitration belong exclusively to the actor.
 	// Waiting lanes retain priority across token waits, withdrawing on an idle turn.

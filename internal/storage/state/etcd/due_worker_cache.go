@@ -46,6 +46,9 @@ type dueWorkerCache struct {
 	// Cold mode reserves a further 4MiB and 64 source identities for its one
 	// workspace plus all compact registry additions, independently of discovery.
 	coldQuota bool
+	// Serial source/preflight scratch is charged before any source allocation.
+	// It borrows dynamic cache capacity, never the original transient reserve.
+	managedSource bool
 }
 
 type dueWorkerCacheStatus struct {
@@ -206,11 +209,23 @@ func dueCacheLimits(automatic, cold bool) (int, uint64) {
 	return keys, bytes
 }
 
+func (c *dueWorkerCache) limitsLocked(automatic, cold bool) (int, uint64) {
+	keys, bytes := dueCacheLimits(automatic, cold)
+	if c.managedSource {
+		// Four locating points are a subset of the full fourteen. Snapshot,
+		// placement, intent, identity and restore add five: 19 unique keys,
+		// rounded conservatively to the fixed twenty-slot source root table.
+		keys -= cleanupManagedWorkspaceKeys
+		bytes -= cleanupManagedWorkspaceBytes
+	}
+	return keys, bytes
+}
+
 // Requires archiveLife.mu. Count each installed reservation once alongside the
 // current cache bytes. An invalid internal counter saturates diagnostics rather
 // than wrapping into a deceptively small value; it grants no admission capacity.
 func (c *dueWorkerCache) ownedBytesLocked() uint64 {
-	_, limit := dueCacheLimits(c.automatic, c.coldQuota)
+	_, limit := c.limitsLocked(c.automatic, c.coldQuota)
 	base := uint64(dueCacheReservedBytes) + uint64(dueCacheDynamicBytes) - limit
 	maximum := ^uint64(0)
 	if c.bytes > maximum-base {
@@ -226,7 +241,7 @@ func (c *dueWorkerCache) put(key, value string, candidate DueCandidateRecord) er
 	if slot >= 0 {
 		old = c.entries[slot].charge
 	}
-	keyLimit, byteLimit := dueCacheLimits(c.automatic, c.coldQuota)
+	keyLimit, byteLimit := c.limitsLocked(c.automatic, c.coldQuota)
 	if cell < 0 || slot < 0 && c.count >= keyLimit {
 		return ErrConflict
 	}

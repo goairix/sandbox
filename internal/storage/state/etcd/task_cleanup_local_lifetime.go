@@ -25,6 +25,9 @@ func (w *DueWorker) stopCleanupJobs() {
 	if w.coldQuota != nil {
 		w.releaseCleanupColdQuota(w.coldQuota.job)
 	}
+	if w.managedSource != nil {
+		w.releaseCleanupManagedSource(w.managedSource.job)
+	}
 	// The sole actor has already returned from its active native turn. No
 	// accepted continuation remains executing while these replies are refused.
 	for _, j := range jobs {

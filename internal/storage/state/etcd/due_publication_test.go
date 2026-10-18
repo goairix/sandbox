@@ -39,7 +39,7 @@ func newDuePublicationFixture(t *testing.T) duePublicationFixture {
 
 // The optional source profile changes only construction inputs. Original due
 // tests retain the same s3 identity, arbitrary contract and payload-only snapshot.
-func newDuePublicationFixtureForSource(t *testing.T, profile string, detached *DetachedCleanupOptions) duePublicationFixture {
+func newDuePublicationFixtureForSource(t *testing.T, profile string, detached *DetachedCleanupOptions, configure ...func(*Options)) duePublicationFixture {
 	t.Helper()
 	server, o := workerTestEndpoint(t)
 	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
@@ -52,6 +52,11 @@ func newDuePublicationFixtureForSource(t *testing.T, profile string, detached *D
 		require.NoError(t, err)
 		o.EnrolledPublication.ContractDigest = contract
 		o.DetachedCleanup = detached
+	}
+	// Actor-specific controls are selected before New owns/validates options.
+	// Existing publication/classification tests retain their original defaults.
+	for _, apply := range configure {
+		apply(&o)
 	}
 	b, err := New(context.Background(), o)
 	require.NoError(t, err)

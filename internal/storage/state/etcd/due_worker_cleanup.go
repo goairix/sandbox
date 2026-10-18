@@ -204,6 +204,14 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 		w.cleanupTurnFailed(job, err)
 		return time.Time{}, nil
 	}
+	ready, sourceErr := w.acquireCleanupManagedSource(job)
+	if sourceErr != nil {
+		w.cleanupTurnFailed(job, sourceErr)
+		return time.Time{}, nil
+	}
+	if !ready {
+		return time.Now().Add(100 * time.Millisecond), nil
+	}
 	if b.cleanupColdQuotaEnabled() {
 		if cleanupColdQuotaPhase(job.step) {
 			return w.cleanupColdQuotaTurn(job)
@@ -246,6 +254,7 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 	job.owner = nil
 	owner.finish()
 	stop()
+	w.releaseCleanupManagedSource(job)
 	if err != nil {
 		w.cleanupTurnFailed(job, err)
 	} else {
@@ -260,6 +269,7 @@ func (w *DueWorker) cleanupTurnFailed(job *cleanupLocalJob, err error) {
 	// continuation is still owed its reply; releasing cold metadata never joins
 	// or detaches that separate original goroutine.
 	w.releaseCleanupColdQuota(job)
+	w.releaseCleanupManagedSource(job)
 	b := w.backend
 	b.archiveLife.mu.Lock()
 	request, started := job.request, job.started
@@ -397,6 +407,13 @@ func (b *Backend) runCleanupAdmission(owner *workerDueOwner, j *cleanupLocalJob)
 		j.evidence, err = b.loadCleanupSlotEvidence(owner, j.bundle)
 		j.step = "snapshot"
 	case "snapshot":
+		if b.detachedCleanup != nil {
+			var detached bool
+			detached, err = b.cleanupManagedSource(ctx, j)
+			if err != nil || detached {
+				return err
+			}
+		}
 		j.target, err = b.cleanupSnapshot(ctx, j.bundle.task)
 		j.step = "target"
 	case "publication":
