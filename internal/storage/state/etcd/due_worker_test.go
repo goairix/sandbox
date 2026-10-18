@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -499,6 +502,58 @@ func TestDueWorkerActorWindowRollover(t *testing.T) {
 	}
 	f.server.mu.Unlock()
 	require.Equal(t, 2, fresh, "rollover must actually call ReadDuePage(nil)")
+}
+
+// Exercise the serial actor's existing rebuild decision without a concurrent
+// actor mutating its scans. Real same-session Range/Watch recovery is covered by
+// the native compaction fixture; this isolates the historical-error contract.
+func TestDueWorkerCompactionRelistPreservesUnexpectedHistory(t *testing.T) {
+	f := newDueWatchTestFixture(t)
+	w := &DueWorker{backend: f.b, session: f.session, ctx: context.Background(), options: DueWorkerOptions{Partitions: []uint8{0xaa}}, scans: []*dueWorkerScan{f.scan}, cache: f.cache}
+	w.self = w
+	original := f.session.Reference()
+	wake, err := w.rebuild(rpctypes.ErrCompacted)
+	require.NoError(t, err)
+	require.False(t, wake.IsZero())
+	status := w.Status()
+	require.True(t, status.Running)
+	require.False(t, status.Synchronized)
+	require.Equal(t, DueWorkerPhase("compacted"), status.Phase)
+	require.Empty(t, status.LastError)
+	require.Len(t, status.Partitions, 1)
+	require.Equal(t, "compacted discovery", status.Partitions[0].Invalidation)
+	require.True(t, f.scan.fresh)
+	require.Equal(t, original, status.Session)
+	for _, expected := range []error{
+		errors.Join(nil, rpctypes.ErrCompacted),
+		fmt.Errorf("original watch: %w", rpctypes.ErrCompacted),
+		errors.Join(rpctypes.ErrCompacted, fmt.Errorf("original range: %w", rpctypes.ErrCompacted)),
+	} {
+		_, err = w.rebuild(expected)
+		require.NoError(t, err)
+		require.Empty(t, w.Status().LastError)
+		require.Equal(t, DueWorkerPhase("compacted"), w.Status().Phase)
+	}
+	for _, mixed := range []error{
+		errors.Join(rpctypes.ErrCompacted, io.ErrUnexpectedEOF),
+		fmt.Errorf("original watch/post-guard: %w", errors.Join(rpctypes.ErrCompacted, ErrInvalidRecord)),
+	} {
+		_, err = w.rebuild(mixed)
+		require.NoError(t, err)
+		require.Equal(t, mixed.Error(), w.Status().LastError, "joined unexpected leaves must remain diagnostic failures")
+		require.Equal(t, DueWorkerPhase("invalid"), w.Status().Phase)
+		_, err = w.rebuild(rpctypes.ErrCompacted)
+		require.NoError(t, err)
+		require.Equal(t, mixed.Error(), w.Status().LastError, "a later pure compaction must retain the mixed failure")
+	}
+
+	_, err = w.rebuild(ErrCorruptRecord)
+	require.NoError(t, err)
+	require.Equal(t, ErrCorruptRecord.Error(), w.Status().LastError)
+	_, err = w.rebuild(rpctypes.ErrCompacted)
+	require.NoError(t, err)
+	require.Equal(t, ErrCorruptRecord.Error(), w.Status().LastError, "expected relist cannot erase prior corruption")
+	require.Equal(t, DueWorkerPhase("compacted"), w.Status().Phase)
 }
 
 func TestDueWorkerActorNoCreditBackoffAndRenewal(t *testing.T) {

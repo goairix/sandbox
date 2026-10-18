@@ -2,7 +2,9 @@ package etcd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -558,6 +560,91 @@ func TestDueWatchFragmentOrderGapCompactionAndOversize(t *testing.T) {
 				_, ok := f.cache.peek()
 				require.False(t, ok)
 				require.NotNil(t, f.server.point(dueCheckpointTestKey(f.duePageFixture)))
+			}
+		})
+	}
+}
+
+// Compaction ends coverage for one actual subscription; it does not establish
+// malformed data or retire its original session. Paired malformed responses
+// must remain corruption rather than gaining a generic cancellation bypass.
+func TestDueWatchCompactionClassificationRetainsOriginalOwner(t *testing.T) {
+	for _, scenario := range []string{"compacted", "compacted-zero-header", "wrong-cluster", "unknown-watch-id", "missing-compaction", "not-canceled", "events", "fragment", "zero-header-wrong-cluster", "zero-header-missing-member", "zero-header-missing-term", "before-replay", "cancel-reason", "zero-header-progress"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newDueWatchTestFixture(t)
+			joined := make(chan struct{})
+			f.install(func(stream pb.Watch_WatchServer) error {
+				defer close(joined)
+				header := dueWatchTestHeader(f.server)
+				creates, err := dueWatchTestCreates(stream, 1, header)
+				if err != nil {
+					return err
+				}
+				reply := &pb.WatchResponse{Header: header, WatchId: creates[0].WatchId, Canceled: true, CompactRevision: header.Revision}
+				if strings.HasPrefix(scenario, "zero-header-") || scenario == "compacted-zero-header" {
+					copy := *header
+					copy.Revision = 0
+					reply.Header = &copy
+				}
+				switch scenario {
+				case "wrong-cluster", "zero-header-wrong-cluster":
+					copy := *reply.Header
+					copy.ClusterId++
+					reply.Header = &copy
+				case "unknown-watch-id":
+					reply.WatchId++
+				case "missing-compaction":
+					reply.CompactRevision = 0
+				case "not-canceled":
+					reply.Canceled = false
+				case "events":
+					reply.Events = []*mvccpb.Event{dueWatchTestCandidate(t, f, "unexpected-compaction-event", header.Revision)}
+				case "fragment":
+					reply.Fragment = true
+				case "zero-header-missing-member":
+					reply.Header.MemberId = 0
+				case "zero-header-missing-term":
+					reply.Header.RaftTerm = 0
+				case "before-replay":
+					reply.CompactRevision = creates[0].StartRevision - 1
+				case "cancel-reason":
+					reply.CancelReason = "unrecognized cancellation"
+				case "zero-header-progress":
+					reply.Canceled, reply.CompactRevision = false, 0
+				}
+				if err := stream.Send(reply); err != nil {
+					return err
+				}
+				for {
+					if _, err := stream.Recv(); err != nil {
+						return nil
+					}
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			result, err := f.b.runDueWatchBatch(ctx, f.cache)
+			require.True(t, result.Invalidated)
+			require.Zero(t, f.cache.snapshot().Keys)
+			_, available := f.cache.peek()
+			require.False(t, available)
+			select {
+			case <-joined:
+			case <-ctx.Done():
+				t.Fatal("original raw Watch handler did not join")
+			}
+			f.b.archiveLife.mu.Lock()
+			live := f.session.live()
+			owned := f.b.validWorkerBudget(f.share) && !f.share.lost && f.session.operation == nil && f.session.dueWatch == nil
+			f.b.archiveLife.mu.Unlock()
+			require.NoError(t, live)
+			require.True(t, owned, "no replacement session/share or native owner may be adopted")
+			if scenario == "compacted" || scenario == "compacted-zero-header" {
+				require.ErrorIs(t, err, rpctypes.ErrCompacted)
+				require.False(t, errors.Is(err, ErrCorruptRecord), "a legal same-subscription compaction is an expected relist")
+			} else {
+				require.ErrorIs(t, err, ErrCorruptRecord)
+				require.False(t, errors.Is(err, rpctypes.ErrCompacted))
 			}
 		})
 	}

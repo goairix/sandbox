@@ -456,6 +456,33 @@ func (w *DueWorker) cacheTail(ctx context.Context, scan *dueWorkerScan) (time.Ti
 	return time.Time{}, nil
 }
 
+// dueWorkerOnlyCompacted accepts only trees whose actual nonnil error leaves
+// are the expected compaction sentinel. errors.Is alone would also accept a
+// joined post-guard/transport failure and hide that unexpected diagnostic.
+func dueWorkerOnlyCompacted(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		found := false
+		for _, child := range wrapped.Unwrap() {
+			if child == nil {
+				continue
+			}
+			if !dueWorkerOnlyCompacted(child) {
+				return false
+			}
+			found = true
+		}
+		return found
+	case interface{ Unwrap() error }:
+		return dueWorkerOnlyCompacted(wrapped.Unwrap())
+	default:
+		return err == rpctypes.ErrCompacted
+	}
+}
+
 func (w *DueWorker) rebuild(cause error) (time.Time, error) {
 	b := w.backend
 	b.archiveLife.mu.Lock()
@@ -469,7 +496,12 @@ func (w *DueWorker) rebuild(cause error) (time.Time, error) {
 	if !errors.Is(cause, rpctypes.ErrCompacted) && errors.Is(cause, context.Canceled) {
 		return time.Time{}, cause
 	}
-	w.cache.invalidate("discovery rebuild")
+	expectedCompaction := dueWorkerOnlyCompacted(cause)
+	reason := "discovery rebuild"
+	if expectedCompaction {
+		reason = "compacted discovery"
+	}
+	w.cache.invalidate(reason)
 	for _, scan := range w.scans {
 		if scan.checkpoint != nil && scan.checkpoint.record.Pending != nil {
 			return time.Time{}, errors.Join(ErrOutcomeUnknown, cause)
@@ -479,6 +511,14 @@ func (w *DueWorker) rebuild(cause error) (time.Time, error) {
 	b.archiveLife.mu.Lock()
 	w.windowAt = time.Time{}
 	b.archiveLife.mu.Unlock()
-	w.publishStatus("invalid", cause)
+	if expectedCompaction {
+		// Compaction is normal loss of discovery coverage, visible through its
+		// phase and partition invalidation until a new Range/Watch synchronizes.
+		// Passing nil preserves any earlier unexpected LastError; it never
+		// erases corruption or turns a malformed cancellation into normality.
+		w.publishStatus("compacted", nil)
+	} else {
+		w.publishStatus("invalid", cause)
+	}
 	return time.Now().Add(time.Second), nil
 }

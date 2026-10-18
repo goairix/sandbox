@@ -21,6 +21,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 // One fresh finite three-member chain. Synthetic pagination records below
@@ -289,6 +290,137 @@ func TestDueDiscoveryNative(t *testing.T) {
 	require.Nil(t, invalid.Next)
 	t.Logf("due native expected compaction error=%v", err)
 	t.Logf("due native fixed_revision=%d returned_pages=118+7 concurrent_extra_excluded=1 compacted_view=%d", first.Revision, compactView.Revision)
+}
+
+// A compact between the fixed Range and its original Watch deterministically
+// exercises the maintenance race without a 30-minute idle interval or synthetic
+// sandbox population. The raw observation logs the actual etcd cancellation
+// shape before the production receiver must classify that same stale coverage.
+func TestDueWatchCompactionNative(t *testing.T) {
+	if os.Getenv("SANDBOX_DUE_DISCOVERY_NATIVE") != "1" {
+		t.Skip("requires the fresh owned three-member due fixture")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	endpoints := startPartitionWorkerNativeCluster(t, ctx)
+	raw, err := clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: time.Second, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, raw.Close()) })
+	rpc, stop := partitionWorkerNativeRequest(ctx)
+	members, err := raw.MemberList(rpc)
+	stop()
+	require.NoError(t, err)
+	require.Len(t, members.Members, 3)
+	n, err := NewNamespace("/sandbox/due-compaction-native", "authority", uuid.NewString())
+	require.NoError(t, err)
+	identity := Identity{SchemaVersion: 1, Prefix: n.prefix, AuthorityID: n.scope, Cell: n.cell, ClusterID: members.Header.ClusterId, StorageID: "due-storage", RuntimeID: "due-runtime", RestoreEpoch: "due-restore"}
+	identityWire, err := json.Marshal(identity)
+	require.NoError(t, err)
+	_, root, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	options := Options{Endpoints: endpoints, Namespace: n, Identity: identity, AllowInsecureLoopback: true, RequestTimeout: 3 * time.Second, WorkerControl: &WorkerControlOptions{SessionTTL: 15 * time.Second}, PublicationTrust: &RuntimePublicationTrust{AuthorityID: identity.RuntimeID, Target: "target", Roots: []ed25519.PublicKey{root.Public().(ed25519.PublicKey)}}, Clock: goodAuthorityClock()}
+	identityKey, _ := n.Key("meta", "identity")
+	restoreKey, _ := n.Key("meta", "restore_epoch")
+	profileKey, _ := n.Key("meta", "worker_control_budget")
+	for _, value := range []struct{ key, value string }{{identityKey, string(identityWire)}, {restoreKey, identity.RestoreEpoch}, {profileKey, workerTestProfile(options)}} {
+		rpc, stop := partitionWorkerNativeRequest(ctx)
+		_, err := raw.Put(rpc, value.key, value.value)
+		stop()
+		require.NoError(t, err)
+	}
+	b, err := New(ctx, options)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	session, err := b.OpenWorkerSession(ctx, "original-compaction-worker")
+	require.NoError(t, err)
+	originalSession := session.Reference()
+	partition, err := b.ClaimWorkerPartition(ctx, session, 0xaa)
+	require.NoError(t, err)
+	ranges, err := b.AcquireWorkerBudget(ctx, session, WorkerBudgetRange, 0)
+	require.NoError(t, err)
+	claims, err := b.AcquireWorkerBudget(ctx, session, WorkerBudgetClaim, 0)
+	require.NoError(t, err)
+	scan, err := newDueWorkerScan(b, partition, ranges, claims, 30*time.Second)
+	require.NoError(t, err)
+	cache, err := newDueWorkerCache(b, session)
+	require.NoError(t, err)
+	// Earn the original fixed Range/Claim credits; no bucket or owner is edited.
+	partitionWorkerNativePause(t, ctx, 1100*time.Millisecond)
+	require.NoError(t, scan.refill(ctx))
+	require.True(t, scan.listed)
+	require.NoError(t, cache.addPage(scan))
+	subscription := cache.views[partition.partition].sub
+	rpc, stop = partitionWorkerNativeRequest(ctx)
+	marker, err := raw.Put(rpc, n.Root()+"fixture-compaction-marker", "test-only")
+	stop()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, marker.Header.Revision, subscription.ReplayFrom)
+	rpc, stop = partitionWorkerNativeRequest(ctx)
+	_, err = raw.Compact(rpc, marker.Header.Revision, clientv3.WithCompactPhysical())
+	stop()
+	require.NoError(t, err)
+
+	// This separate read-only raw stream observes the server; it cannot repair
+	// the original cache or manufacture a classified production response.
+	probeCtx, stopProbe := context.WithTimeout(ctx, 3*time.Second)
+	defer stopProbe()
+	codec := &dueWatchCodec{}
+	stream, err := pb.NewWatchClient(raw.ActiveConnection()).Watch(probeCtx, grpc.MaxCallRecvMsgSize(maxMutationBytes), grpc.MaxCallSendMsgSize(maxMutationBytes), grpc.ForceCodec(codec))
+	require.NoError(t, err)
+	defer func() { stopProbe(); _ = stream.CloseSend() }()
+	prefix := fmt.Sprintf("%sp/%02x/due/", n.Root(), partition.partition)
+	watchID := int64(partition.partition) + 1
+	require.NoError(t, stream.Send(&pb.WatchRequest{RequestUnion: &pb.WatchRequest_CreateRequest{CreateRequest: &pb.WatchCreateRequest{Key: []byte(prefix), RangeEnd: []byte(prefix + subscription.WindowEnd.Format(dueTimeLayout) + "0"), StartRevision: subscription.ReplayFrom, WatchId: watchID, ProgressNotify: true, Fragment: true}}}))
+	var compacted *pb.WatchResponse
+	for i := 0; i < 2; i++ {
+		reply, err := stream.Recv()
+		require.NoError(t, err)
+		t.Logf("due native raw compaction frame header=%+v watch_id=%d created=%t canceled=%t compact_revision=%d reason=%q fragment=%t events=%d original_replay=%d actual_compacted=%d", reply.Header, reply.WatchId, reply.Created, reply.Canceled, reply.CompactRevision, reply.CancelReason, reply.Fragment, len(reply.Events), subscription.ReplayFrom, marker.Header.Revision)
+		if reply.Canceled {
+			compacted = reply
+			break
+		}
+	}
+	require.NotNil(t, compacted)
+	require.NotNil(t, compacted.Header)
+	require.Equal(t, b.clusterID, compacted.Header.ClusterId)
+	require.Equal(t, watchID, compacted.WatchId)
+	require.Equal(t, marker.Header.Revision, compacted.CompactRevision)
+	require.Empty(t, compacted.Events)
+	require.False(t, compacted.Fragment)
+	stopProbe()
+	require.NoError(t, stream.CloseSend())
+	_, receiveErr := stream.Recv()
+	require.Error(t, receiveErr, "the original raw probe must physically return before production recovery")
+
+	result, err := b.runDueWatchBatch(ctx, cache)
+	require.True(t, result.Invalidated)
+	_, available := cache.peek()
+	require.False(t, available)
+	b.archiveLife.mu.Lock()
+	live := session.live()
+	joined := session.operation == nil && session.dueWatch == nil && b.validWorkerBudget(ranges) && !ranges.lost
+	b.archiveLife.mu.Unlock()
+	require.NoError(t, live)
+	require.True(t, joined, "production Watch sender/receiver and native owner have actually joined")
+	t.Logf("due native production compaction result=%v original_session=%s original_lease=%d original_partition=%d", err, originalSession.SessionID, originalSession.LeaseID, partition.partition)
+	require.ErrorIs(t, err, rpctypes.ErrCompacted)
+	require.False(t, errors.Is(err, ErrCorruptRecord))
+
+	// Only a fresh fixed Range replaces invalid coverage. Recovery retains the
+	// original permanent checkpoint CAS, session Lease, partition and Range share.
+	scan.resetView()
+	partitionWorkerNativePause(t, ctx, 300*time.Millisecond)
+	require.NoError(t, scan.refill(ctx))
+	require.NoError(t, cache.addPage(scan))
+	recovered, err := b.runDueWatchBatch(ctx, cache)
+	require.NoError(t, err)
+	require.False(t, recovered.Invalidated)
+	require.Len(t, recovered.Partitions, 1)
+	require.True(t, recovered.Partitions[0].Synchronized)
+	require.Equal(t, originalSession, session.Reference())
+	require.NoError(t, b.RenewWorkerSession(ctx, session))
+	t.Logf("due native compaction recovery synchronized=true same_session=true same_lease=%d replay_from=%d", originalSession.LeaseID, recovered.Partitions[0].ReplayFrom)
 }
 
 func dueNativeSample(t *testing.T, ctx context.Context, raw *clientv3.Client, n Namespace, label string) {

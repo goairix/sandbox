@@ -10,6 +10,7 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"google.golang.org/grpc"
 )
 
@@ -155,6 +156,32 @@ func (o *dueWatchOwner) receive() {
 			} else if o.streamCtx.Err() == nil {
 				fail(err)
 			}
+			return
+		}
+		if r.Canceled && r.CompactRevision > 0 {
+			// Native etcd compaction cancellation carries revision zero, unlike
+			// event/progress headers. It ends only this already-created original
+			// subscription's coverage; every other identity and frame constraint
+			// remains mandatory before treating it as an expected fresh relist.
+			h := r.Header
+			headerValid := h != nil && h.ClusterId == b.clusterID && h.MemberId > 0 && h.RaftTerm > 0 &&
+				h.Revision >= 0 && h.Revision < math.MaxInt64 && len(h.XXX_unrecognized) == 0
+			cancelValid := len(r.XXX_unrecognized) == 0 && !r.Created && !r.Fragment && len(r.Events) == 0 &&
+				assembly == nil && r.CancelReason == "" && r.WatchId > 0 && r.WatchId <= 256 && r.CompactRevision < math.MaxInt64
+			if !headerValid || !cancelValid {
+				fail(ErrCorruptRecord)
+				return
+			}
+			partition := uint8(r.WatchId - 1)
+			b.archiveLife.mu.Lock()
+			view := &o.cache.views[partition]
+			valid := view.sub.Partition != nil && view.sub.Partition.partition == partition && view.created && r.CompactRevision >= view.sub.ReplayFrom
+			b.archiveLife.mu.Unlock()
+			if !valid {
+				fail(ErrCorruptRecord)
+				return
+			}
+			fail(rpctypes.ErrCompacted)
 			return
 		}
 		if !o.headerValid(r.Header) || r.Canceled || r.CompactRevision != 0 || r.CancelReason != "" {
