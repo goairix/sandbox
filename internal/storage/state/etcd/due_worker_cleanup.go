@@ -22,18 +22,22 @@ type cleanupLocalJob struct {
 	result     CleanupLocalResult
 	err        error
 
-	step      string
-	state     *cleanupSlotState
-	bundle    *taskClaimBundle
-	evidence  *cleanupSlotEvidence
-	target    *cleanupLocalTarget
-	inventory *cleanupLocalWireInventory
-	claim     *TaskClaim
-	runID     string
-	rotations uint32
-	proof     *localOwnerReleaseProof
-	owner     *workerDueOwner
-	terminal  *cleanupTerminalEvidence
+	step           string
+	state          *cleanupSlotState
+	bundle         *taskClaimBundle
+	evidence       *cleanupSlotEvidence
+	target         *cleanupLocalTarget
+	inventory      *cleanupLocalWireInventory
+	claim          *TaskClaim
+	runID          string
+	rotations      uint32
+	proof          *localOwnerReleaseProof
+	owner          *workerDueOwner
+	terminal       *cleanupTerminalEvidence
+	detachedTarget *cleanupDetachedTarget
+	// The explicit public local API cannot opt into the private mixed actor
+	// profile. This immutable routing restriction is installed before enqueue.
+	localOnly bool
 
 	// At most one unresolved progress submission is retained. Its owned bytes
 	// and fences let this same registered job resolve a lost ACK before joining;
@@ -103,7 +107,7 @@ func (w *DueWorker) ExecuteCleanupLocal(ctx context.Context, task TaskReference)
 	if w == nil || w.self != w || ctx == nil || w.backend.cleanupPhysicalProfile() != nil {
 		return CleanupLocalResult{Task: task, Outcome: OutcomeUnknown}, ErrInvalidConfiguration
 	}
-	job, err := w.enqueueCleanupLocal(ctx, task)
+	job, err := w.enqueueCleanupLocalProfile(ctx, task, true)
 	if err != nil {
 		return CleanupLocalResult{Task: task, Outcome: OutcomeUnknown}, err
 	}
@@ -119,6 +123,10 @@ func (w *DueWorker) wakeCleanup() {
 }
 
 func (w *DueWorker) enqueueCleanupLocal(ctx context.Context, task TaskReference) (*cleanupLocalJob, error) {
+	return w.enqueueCleanupLocalProfile(ctx, task, false)
+}
+
+func (w *DueWorker) enqueueCleanupLocalProfile(ctx context.Context, task TaskReference, localOnly bool) (*cleanupLocalJob, error) {
 	if w == nil || w.self != w || ctx == nil || w.backend.validateTaskReference(task) != nil || w.backend.localCleanup == nil || w.backend.localCleanup.MaxActive < 1 || w.backend.localCleanup.MaxActive > 32 {
 		return nil, ErrInvalidRecord
 	}
@@ -156,7 +164,7 @@ func (w *DueWorker) enqueueCleanupLocal(ctx context.Context, task TaskReference)
 		timeout = 5 * time.Minute
 	}
 	owned, cancel := context.WithTimeout(w.ctx, timeout)
-	job := &cleanupLocalJob{worker: w, task: task, partition: partition, ctx: owned, cancel: cancel, done: make(chan struct{}), step: "observe", result: CleanupLocalResult{Task: task, Outcome: OutcomeUnknown}}
+	job := &cleanupLocalJob{worker: w, task: task, partition: partition, ctx: owned, cancel: cancel, done: make(chan struct{}), step: "observe", result: CleanupLocalResult{Task: task, Outcome: OutcomeUnknown}, localOnly: localOnly}
 	callerDone := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		defer close(callerDone)
@@ -254,7 +262,9 @@ func (w *DueWorker) cleanupTurn() (time.Time, error) {
 	job.owner = nil
 	owner.finish()
 	stop()
-	w.releaseCleanupManagedSource(job)
+	if err != nil || job.step != "detached-target" {
+		w.releaseCleanupManagedSource(job)
+	}
 	if err != nil {
 		w.cleanupTurnFailed(job, err)
 	} else {
@@ -288,6 +298,14 @@ func (w *DueWorker) cleanupTurnFailed(job *cleanupLocalJob, err error) {
 }
 
 func (w *DueWorker) cleanupTurnCompleted(job *cleanupLocalJob) {
+	if job.step == "detached-target" {
+		if err := w.beginCleanupDetachedPreparation(job); err != nil {
+			w.cleanupTurnFailed(job, err)
+			return
+		}
+		go w.backend.runCleanupDetachedPreparation(job)
+		return
+	}
 	if job.step == "done" {
 		w.backend.finishCleanupJob(job, nil)
 		return

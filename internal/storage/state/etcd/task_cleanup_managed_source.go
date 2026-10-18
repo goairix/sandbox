@@ -51,6 +51,9 @@ func (b *Backend) cleanupManagedSource(ctx context.Context, j *cleanupLocalJob) 
 	if snapshot.Version != 1 || snapshot.LocalCleanup != nil || points[0].Lease != 0 {
 		return false, ErrCorruptRecord
 	}
+	if j.localOnly {
+		return true, ErrInvalidConfiguration
+	}
 	s.pins[0] = managedSourcePin(points[0])
 	key, err := b.namespace.intentKey(task.Reference.Partition, task.CreationIntentID)
 	if err != nil {
@@ -95,9 +98,17 @@ func (b *Backend) cleanupManagedSource(ctx context.Context, j *cleanupLocalJob) 
 	if _, err = b.detachedCleanupSource(task, *snapshot, intent, publication.Publication); err != nil {
 		return false, err
 	}
-	// All native source authentication ran, but the complete detached wire
-	// manifest and physical phase have not been admitted. This diagnostic must
-	// never be interpreted as a capability by a later job or consumer.
+	// All native source authentication ran. Incomplete deployment configuration
+	// stops here; a complete configuration transfers this same workspace to the
+	// registered preparation goroutine. This diagnostic is never a capability.
 	j.result.Reason = "detached-source-verified"
-	return true, ErrInvalidConfiguration
+	if b.cleanupDetachedPreparationProfile() != nil {
+		return true, ErrInvalidConfiguration
+	}
+	// Only one worker workspace retains this decoded source. The actor's
+	// completion tail transfers it after returning the actual native owner.
+	s.source = &cleanupDetachedSource{snapshot: *snapshot, intent: intent, workspace: workspace, publication: publication.Publication}
+	j.detachedTarget = &cleanupDetachedTarget{}
+	j.step = "detached-target"
+	return true, nil
 }

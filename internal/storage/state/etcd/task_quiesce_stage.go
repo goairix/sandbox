@@ -164,33 +164,57 @@ func (b *Backend) preflightReservedTaskStage(ref StageReference, m Mutation, gua
 // quiescence supplies the additional original reservation Mod pin. No guard,
 // receipt or dimensional future value returned here is a Stage capability.
 func (b *Backend) taskStageWireProjections(ref StageReference, m Mutation, guardKey, receiptKey, committed string, pin *taskQuiescenceReservationPin) ([]cleanupWireProjection, error) {
+	var projections []cleanupWireProjection
+	for _, variant := range []string{"begin", "commit", "resolve"} {
+		projection, err := b.taskStageWireProjection(variant, ref, m, guardKey, receiptKey, committed, pin)
+		if err != nil {
+			return nil, err
+		}
+		projections = append(projections, projection)
+	}
+	return projections, nil
+}
+
+// The single native constructor serves both the original generic slice API
+// and cleanup's streaming visitor. Generic256KiB semantics stay unchanged;
+// the cleanup caller separately checks its tighter128KiB allocation/wire cap.
+func (b *Backend) taskStageWireProjection(variant string, ref StageReference, m Mutation, guardKey, receiptKey, committed string, pin *taskQuiescenceReservationPin) (cleanupWireProjection, error) {
+	if variant != "begin" && variant != "commit" && variant != "resolve" {
+		return cleanupWireProjection{}, ErrInvalidMutation
+	}
 	guard, err := json.Marshal(struct {
 		StageReference
 		LeaseID int64 `json:"lease_id"`
 	}{ref, math.MaxInt64})
 	if err != nil {
-		return nil, ErrInvalidMutation
+		return cleanupWireProjection{}, ErrInvalidMutation
 	}
 	if len(guard) > maxRecordBytes || len(committed) > maxRecordBytes || len(b.identityValue) > maxRecordBytes || len(b.restoreEpoch) > maxRecordBytes {
-		return nil, ErrInvalidMutation
+		return cleanupWireProjection{}, ErrInvalidMutation
 	}
 	// Account both receipt outcome envelopes explicitly.
 	aborted, err := encodeReceipt(ref, OutcomeAborted)
 	if err != nil || len(aborted) > maxRecordBytes {
-		return nil, ErrInvalidMutation
+		return cleanupWireProjection{}, ErrInvalidMutation
 	}
-	beginCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
-	begin := &pb.TxnRequest{Compare: taskProtoComparisons(beginCmps), Success: []*pb.RequestOp{taskProtoPut(guardKey, string(guard), math.MaxInt64)}, Failure: taskProtoPoints([]string{b.identityKey, b.restoreKey})}
+	keys := []string{b.identityKey, b.restoreKey, receiptKey, guardKey}
+	if variant == "begin" {
+		beginCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
+		begin := &pb.TxnRequest{Compare: taskProtoComparisons(beginCmps), Success: []*pb.RequestOp{taskProtoPut(guardKey, string(guard), math.MaxInt64)}, Failure: taskProtoPoints([]string{b.identityKey, b.restoreKey})}
+		return cleanupWireProjection{"begin", begin, taskProtoPutResponse(1), taskProtoResponse(keys[:2], []string{b.identityValue, b.restoreEpoch})}, nil
+	}
+	if variant == "resolve" {
+		resolveCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
+		resolve := &pb.TxnRequest{Compare: taskProtoComparisons(resolveCmps), Success: []*pb.RequestOp{taskProtoPut(receiptKey, aborted, 0)}, Failure: taskProtoPoints(keys[:3])}
+		return cleanupWireProjection{"resolve", resolve, taskProtoPutResponse(1), taskProtoResponse(keys[:3], []string{b.identityValue, b.restoreEpoch, aborted})}, nil
+	}
 	commitCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.Value(guardKey), "=", string(guard)), clientv3.Compare(clientv3.LeaseValue(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(guardKey), "=", math.MaxInt64), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
 	if pin != nil {
 		commitCmps = append(commitCmps, pin.comparison())
 	}
 	commitCmps = append(commitCmps, m.Comparisons...)
 	ops := append(taskProtoWrites(m.Writes), taskProtoPut(receiptKey, committed, 0))
-	keys := []string{b.identityKey, b.restoreKey, receiptKey, guardKey}
 	commit := &pb.TxnRequest{Compare: taskProtoComparisons(commitCmps), Success: ops, Failure: taskProtoPoints(keys)}
-	resolveCmps := append(b.baseComparisons(), clientv3.Compare(clientv3.CreateRevision(receiptKey), "=", 0))
-	resolve := &pb.TxnRequest{Compare: taskProtoComparisons(resolveCmps), Success: []*pb.RequestOp{taskProtoPut(receiptKey, aborted, 0)}, Failure: taskProtoPoints(keys[:3])}
 	// Include every possible success envelope (Delete replies too) and full point branches.
 	success := taskProtoPutResponse(len(m.Writes) + 1)
 	for i, w := range m.Writes {
@@ -198,9 +222,5 @@ func (b *Backend) taskStageWireProjections(ref StageReference, m Mutation, guard
 			success.Responses[i] = &pb.ResponseOp{Response: &pb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: &pb.DeleteRangeResponse{Header: success.Header, Deleted: 1}}}
 		}
 	}
-	return []cleanupWireProjection{
-		{"begin", begin, taskProtoPutResponse(1), taskProtoResponse(keys[:2], []string{b.identityValue, b.restoreEpoch})},
-		{"commit", commit, success, taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, committed, string(guard)})},
-		{"resolve", resolve, taskProtoPutResponse(1), taskProtoResponse(keys[:3], []string{b.identityValue, b.restoreEpoch, aborted})},
-	}, nil
+	return cleanupWireProjection{"commit", commit, success, taskProtoResponse(keys, []string{b.identityValue, b.restoreEpoch, committed, string(guard)})}, nil
 }

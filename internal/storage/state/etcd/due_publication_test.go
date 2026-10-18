@@ -61,12 +61,24 @@ func newDuePublicationFixtureForSource(t *testing.T, profile string, detached *D
 	b, err := New(context.Background(), o)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	return duePublicationSourceOnBackend(t, b, server, profile, now)
+}
+
+// Repeated sources use the same original Backend and trust configuration. This
+// producer seam stops before publication/destroy and never constructs a Claim
+// or cleanup execution on behalf of a worker.
+func duePublicationSourceOnBackend(t *testing.T, b *Backend, server *workerTestServer, profile string, now time.Time) duePublicationFixture {
+	t.Helper()
+	root := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
 	idempotencyKey := uuid.NewString()
 	var w WorkspaceIdentity
+	var err error
 	if profile == "detached" {
 		w, err = b.DetachedIdentity("due-test", idempotencyKey)
 	} else {
-		w, err = NewWorkspaceIdentity(profile, o.Identity.StorageID, "bucket", uuid.NewString()+"/")
+		identity, identityErr := decodeIdentity(b.identityValue, b.namespace)
+		require.NoError(t, identityErr)
+		w, err = NewWorkspaceIdentity(profile, identity.StorageID, "bucket", uuid.NewString()+"/")
 	}
 	require.NoError(t, err)
 	in := AcquireIntentInput{Workspace: w, Principal: "due-test", IdempotencyKey: idempotencyKey, RequestID: uuid.NewString(), IntentID: uuid.NewString(), SandboxID: uuid.NewString(), SnapshotVersion: uuid.NewString(), Payload: json.RawMessage(`{"html":"<>&中>"}`), Now: now, TTL: time.Hour}

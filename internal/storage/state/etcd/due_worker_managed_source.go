@@ -13,6 +13,10 @@ type cleanupManagedSourceWorkspace struct {
 	// Compact native observations are diagnostics, never Claim/Run authority.
 	pins  [16]cleanupManagedSourcePin
 	count int
+	// Handoff is under archiveLife.mu. Only one actor/preparation holder may
+	// access source; Stop cannot refund a preparation goroutine still running.
+	preparing bool
+	source    *cleanupDetachedSource
 }
 
 // acquireCleanupManagedSource runs only on the original serial actor, before
@@ -51,6 +55,7 @@ func (w *DueWorker) acquireCleanupManagedSource(j *cleanupLocalJob) (bool, error
 		return false, ErrInvalidConfiguration
 	}
 	w.cache.managedSource = true
+	w.cache.managedSourceKeys = cleanupManagedWorkspaceKeys
 	keys, limit := w.cache.limitsLocked(w.cache.automatic, w.cache.coldQuota)
 	if w.cache.bytes > limit || w.cache.count > keys {
 		// This is an expiry heap, not an LRU. Rebuild complete coverage rather
@@ -72,8 +77,9 @@ func (w *DueWorker) acquireCleanupManagedSource(j *cleanupLocalJob) (bool, error
 func (w *DueWorker) releaseCleanupManagedSource(j *cleanupLocalJob) {
 	w.backend.archiveLife.mu.Lock()
 	defer w.backend.archiveLife.mu.Unlock()
-	if w.managedSource != nil && w.managedSource.job == j && j.owner == nil {
+	if w.managedSource != nil && w.managedSource.job == j && j.owner == nil && !w.managedSource.preparing {
 		w.managedSource = nil
 		w.cache.managedSource = false
+		w.cache.managedSourceKeys = 0
 	}
 }

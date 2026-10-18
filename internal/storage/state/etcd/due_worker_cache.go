@@ -48,7 +48,8 @@ type dueWorkerCache struct {
 	coldQuota bool
 	// Serial source/preflight scratch is charged before any source allocation.
 	// It borrows dynamic cache capacity, never the original transient reserve.
-	managedSource bool
+	managedSource     bool
+	managedSourceKeys int
 }
 
 type dueWorkerCacheStatus struct {
@@ -215,7 +216,7 @@ func (c *dueWorkerCache) limitsLocked(automatic, cold bool) (int, uint64) {
 		// Four locating points are a subset of the full fourteen. Snapshot,
 		// placement, intent, identity and restore add five: 19 unique keys,
 		// rounded conservatively to the fixed twenty-slot source root table.
-		keys -= cleanupManagedWorkspaceKeys
+		keys -= max(cleanupManagedWorkspaceKeys, c.managedSourceKeys)
 		bytes -= cleanupManagedWorkspaceBytes
 	}
 	return keys, bytes

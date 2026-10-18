@@ -30,6 +30,11 @@ type detachedCleanupSourceFixture struct {
 func newDetachedCleanupSourceFixture(t *testing.T, profile string, options *DetachedCleanupOptions, configure ...func(*Options)) detachedCleanupSourceFixture {
 	t.Helper()
 	f := newDuePublicationFixtureForSource(t, profile, options, configure...)
+	return detachedCleanupSourceOnPublication(t, f)
+}
+
+func detachedCleanupSourceOnPublication(t *testing.T, f duePublicationFixture) detachedCleanupSourceFixture {
+	t.Helper()
 	ctx := context.Background()
 	published, err := f.b.PublishRuntimeEnrolled(ctx, f.claim, f.proof, f.enrollment)
 	require.NoError(t, err)
