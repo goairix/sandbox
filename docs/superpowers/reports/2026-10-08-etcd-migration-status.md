@@ -10,6 +10,29 @@
 | 整体交付 | 约53% | 沿用20/30/20/15/15权重，阶段粗估90/80/55/0/0；容量、部署恢复及最终替代未完成 |
 | 生产切换 | 0% | 默认入口仍Redis，没有执行切换或部署 |
 
+新增已提交：`0474d13` 修复 FUSE Pod 经真实 API JSON 往返后的 Quantity 表示误拒绝，
+只在五个固定 EmptyDir 数值精确相等后规范化副本，其余结构与安全字段仍严格比较。
+`253c104` 接上 root Unix 的有限健康 pull、原 observer slot 和实际 peer/cgroup 校验入口，
+保留跨重连的样本时效；审查发现的 launcher FD 关闭竞争和首次 socket Close 错误丢失
+已修复。host/race、Linux vet、Linux Unix/时效/拒绝组件测试和独立审查通过。
+完整双 PID1 认证正向仍在验证，不能把这些组件测试当作真实 FUSE 挂载、collector 或
+FUSE业务创建完成；旧每sandbox轮询及Begin/End保护仍保留。
+
+`fae9914` 的真实换叶冷恢复用例14.18秒通过：15分钟原receipt后请求1800秒续期，
+确认实际新证书ID、wire及截止变化，密钥和runtime identity不变；安装后丢最终确认，
+完整重启Gateway/service/Backend，跨旧10秒期限后同候选恢复并签名Exec退出7。
+原进程Wait、无OOM、容器清理及9532项输入/工具核对通过。运行位于验证工作树，
+不声称主分支全部输入等值重跑，也不代表15分钟自动维护或30分钟真实存活验收。
+
+`db16a7a` 增加正式 `--initialize-etcd-inventory=<manifest>` operator命令，复用原挂载
+校验及每次最多八槽的CAS，有总30秒期限和有限调用次数；错误或Unknown立即停止，
+所有资源关闭后返回。CLI拒绝边界、配置/取消测试、Linux vet和独立审查通过。
+正式 mounted 初始化后接 HTTP 创建/执行/销毁的原生正例仍在实现，尚不计部署验收。
+
+功能未完成项仍包括：FUSE业务与collector、长期凭证自动维护、其余API/模式；交付还差
+正式长测、完整生产部署与恢复、Redis退役。现due索引只有业务ExpiresAt，不能在凭证
+截止前自动发现长期目标，手工PUT续期及本次换叶正例不能替代这项功能。
+
 本周期新增 `538fda7` / `2f415ed`：六个既有文件接通显式 v2 resident 健康样本，
 保留 v1 wire，成功采样推进序号，读取仅返回原 sample/cache 的 monotonic 剩余有效期。
 host、race、受影响旧接口回归、Linux vet 与独立审查通过；各轮实际 Go 的17类输入、
