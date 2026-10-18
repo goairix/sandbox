@@ -22,7 +22,27 @@ const (
 	releasedHistory
 	releasedFinal
 	releasedSuccessorFinal
+
+	// Detached profiles are independent transport dimensions. No existing
+	// consumer selects them before the separate opaque-proof integration.
+	releasedDetachedHistory
+	releasedDetachedFinal
+	releasedDetachedSuccessorFinal
 )
+
+// The original profiles retain their eighteen-pin allowance. Only the new
+// detached final profiles can retain twenty-two native points; this dimension
+// is checked before dispatch and grants no authority.
+func releasedReadPinLimit(profile releasedReadProfile) int {
+	switch profile {
+	case releasedPlacement, releasedCurrent, releasedIntent, releasedCohort, releasedSeal, releasedTermination, releasedHistory, releasedFinal, releasedSuccessorFinal, releasedDetachedHistory:
+		return 18
+	case releasedDetachedFinal, releasedDetachedSuccessorFinal:
+		return 22
+	default:
+		return 0
+	}
+}
 
 // These are the complete finite profiles, in RPC order. The successor's extra
 // two points belong to the same final transaction, never another discovery
@@ -45,6 +65,14 @@ func releasedReadCaps(profile releasedReadProfile) []int {
 		return []int{4096, 1024, 4096, 4096, 4096}
 	case releasedSuccessorFinal:
 		return []int{4096, 1024, 4096, 4096, 4096, 4096, 4096}
+	case releasedDetachedHistory:
+		// This finite transport allowance mirrors B's frozen thirteen-point
+		// source graph; it neither decodes those records nor proves release.
+		return []int{4096, 32768, 4096, 8192, 8192, 8192, 32768, 65536, 4096, 8192, 16384, 8192, 8192}
+	case releasedDetachedFinal:
+		return []int{4096, 1024, 4096, 4096, 4096}
+	case releasedDetachedSuccessorFinal:
+		return []int{4096, 1024, 4096, 4096, 4096, 4096, 4096}
 	default:
 		return nil
 	}
@@ -54,6 +82,36 @@ func releasedReadCaps(profile releasedReadProfile) []int {
 // signed proofs or terminal conclusions. High-frequency active reads must not
 // allocate all eight maximal reply projections on every request.
 var releasedReadBudget = sync.OnceValue(checkReleasedReadBudget)
+
+// The detached eight-RPC envelope has its own cached dimension check, never
+// cached metadata or proof. The original v1 budget remains independent.
+var releasedDetachedReadBudget = sync.OnceValue(checkReleasedDetachedReadBudget)
+
+// Charge maximal keys/scalars and identity/restore on every reply, just as the
+// original envelope does. Successor final dominates the alternative final in
+// the same eighth RPC; neither history discovery nor a ninth RPC is added.
+func checkReleasedDetachedReadBudget() error {
+	profiles := []releasedReadProfile{
+		releasedPlacement, releasedCurrent, releasedIntent, releasedCohort,
+		releasedSeal, releasedTermination, releasedDetachedHistory, releasedDetachedSuccessorFinal,
+	}
+	total := 0
+	for _, profile := range profiles {
+		caps := releasedReadCaps(profile)
+		if len(caps) == 0 {
+			return ErrInvalidMutation
+		}
+		reply := cleanupBirthPointReply(append([]int{maxIdentityJSONBytes, maxNamespaceComponentBytes}, caps...))
+		if reply.Size() > maxMutationBytes {
+			return ErrInvalidMutation
+		}
+		total += reply.Size()
+	}
+	if total > 512*1024 {
+		return ErrInvalidMutation
+	}
+	return nil
+}
 
 // Maximal 1024-byte keys, protobuf scalars and identity/restore bytes are
 // charged for every reply, even when its successful branch omits metadata.
@@ -77,7 +135,7 @@ func checkReleasedReadBudget() error {
 
 func (b *Backend) readReleasedPoints(ctx context.Context, profile releasedReadProfile, keys []string, pins []clientv3.Cmp) ([]*mvccpb.KeyValue, int64, error) {
 	caps := releasedReadCaps(profile)
-	if len(caps) == 0 || len(keys) != len(caps) || len(pins) > 18 {
+	if len(caps) == 0 || len(keys) != len(caps) || len(pins) > releasedReadPinLimit(profile) {
 		return nil, 0, ErrInvalidRecord
 	}
 	for _, key := range keys {
@@ -97,6 +155,18 @@ func (b *Backend) readReleasedPoints(ctx context.Context, profile releasedReadPr
 	maximum.Compare = b.maximumCleanupBirthComparisons(request.Compare)
 	if err := taskCheckWire(b.namespace, []*pb.TxnRequest{request, &maximum}, []*pb.TxnResponse{cleanupBirthPointReply(caps), cleanupBirthPointReply([]int{maxIdentityJSONBytes, maxNamespaceComponentBytes})}); err != nil {
 		return nil, 0, err
+	}
+	switch profile {
+	case releasedDetachedHistory, releasedDetachedFinal, releasedDetachedSuccessorFinal:
+		// New profiles retain the stricter request budget independently of the
+		// original v1 transport. Both actual and maximum identity/scalar forms
+		// must fit before the original client is allowed to dispatch anything.
+		if request.Size() > 128*1024 || maximum.Size() > 128*1024 {
+			return nil, 0, ErrInvalidMutation
+		}
+		if err := releasedDetachedReadBudget(); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// readViewDispatch validates the flat response and every nested header
