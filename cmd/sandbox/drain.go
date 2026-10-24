@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/goairix/sandbox/internal/config"
 	"github.com/goairix/sandbox/internal/kubecontract"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,6 +24,21 @@ const (
 	drainProtocolAnnotation      = kubecontract.DrainProtocolAnnotation
 	cleanupProtocolAnnotation    = kubecontract.CleanupProtocolAnnotation
 )
+
+// drainKubernetesRelease validates the installed API configuration before any
+// Deployment or HPA mutation. A failed pre-upgrade Job must leave the serving
+// replicas available for an operator to correct the configuration.
+func drainKubernetesRelease(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName, configPath string, pollInterval time.Duration) (*config.Config, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("load installed API configuration before drain: %w", err)
+	}
+
+	if err := drainKubernetesDeployment(ctx, client, namespace, deploymentName, hpaName, pollInterval); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
 func drainKubernetesDeployment(ctx context.Context, client kubernetes.Interface, namespace, deploymentName, hpaName string, pollInterval time.Duration) error {
 	if client == nil || namespace == "" || deploymentName == "" || pollInterval <= 0 {

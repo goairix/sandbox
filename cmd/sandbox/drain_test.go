@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,6 +20,29 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 )
+
+func TestDrainReleaseInvalidConfigLeavesAPIDeploymentRunning(t *testing.T) {
+	replicas := int32(2)
+	client := kubefake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-api", Namespace: "sandbox-fuse"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "sandbox"}},
+		},
+	})
+
+	_, err := drainKubernetesRelease(
+		context.Background(), client, "sandbox-fuse", "sandbox-api", "", filepath.Join(t.TempDir(), "missing.yaml"), time.Millisecond,
+	)
+	require.ErrorContains(t, err, "read file")
+	deployment, getErr := client.AppsV1().Deployments("sandbox-fuse").Get(context.Background(), "sandbox-api", metav1.GetOptions{})
+	require.NoError(t, getErr)
+	assert.Equal(t, int32(2), *deployment.Spec.Replicas)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "update", action.GetVerb(), "invalid configuration must not scale the API")
+		assert.NotEqual(t, "delete", action.GetVerb(), "invalid configuration must not remove the HPA")
+	}
+}
 
 func TestDrainMetadataAnnotationsUseProjectNamespace(t *testing.T) {
 	require.Equal(t, "goairix.github.io/sandbox-backend-fingerprint", backendFingerprintAnnotation)

@@ -128,6 +128,7 @@ func main() {
 		}
 		return
 	}
+	var cfg *config.Config
 	if *drainDeployment != "" {
 		if *drainNamespace == "" || *drainTimeout <= 0 {
 			log.Fatal("drain-kubernetes-namespace and a positive drain-timeout are required")
@@ -176,7 +177,13 @@ func main() {
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
 		defer drainCancel()
-		if drainErr := drainKubernetesDeployment(drainCtx, client, *drainNamespace, *drainDeployment, *drainHPA, time.Second); drainErr != nil {
+		var drainErr error
+		if *drainRelease {
+			cfg, drainErr = drainKubernetesRelease(drainCtx, client, *drainNamespace, *drainDeployment, *drainHPA, *configPath, time.Second)
+		} else {
+			drainErr = drainKubernetesDeployment(drainCtx, client, *drainNamespace, *drainDeployment, *drainHPA, time.Second)
+		}
+		if drainErr != nil {
 			log.Fatalf("failed to drain Kubernetes API deployment: %v", drainErr)
 		}
 		log.Printf("Kubernetes API deployment %s/%s drained", *drainNamespace, *drainDeployment)
@@ -185,9 +192,12 @@ func main() {
 		}
 	}
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+	var err error
+	if cfg == nil {
+		cfg, err = config.Load(*configPath)
+		if err != nil {
+			log.Fatalf("failed to load config: %v", err)
+		}
 	}
 	if cfg.Workspace.AllowMissingLSMForKind {
 		log.Printf("WARNING: local kind validation is running without AppArmor/SELinux enforcement; production must disable workspace.allow_missing_lsm_for_kind")
