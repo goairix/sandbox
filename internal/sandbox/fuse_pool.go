@@ -894,6 +894,15 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 				return err
 			}
 			if expired {
+				// An in-flight manager cleanup may still own the workspace even
+				// after its pool cleanup lease expires. Preserve this record as
+				// the durable runtime anchor until owner/session inspection proves
+				// it is no longer protected; an uncertain guard result is not
+				// permission to remove the runtime or its recovery record.
+				disposition, _ := p.guard(ctx, record)
+				if disposition != FUSEPoolPristine && disposition != FUSEPoolAbandoned {
+					return nil
+				}
 				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
 					return fmt.Errorf("recover cleanup FUSE sandbox: %w", err)
 				}

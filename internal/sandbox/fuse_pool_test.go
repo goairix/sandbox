@@ -1506,6 +1506,46 @@ func TestFUSEPoolExpiredPreparingRequiresDeletableDisposition(t *testing.T) {
 	}
 }
 
+func TestFUSEPoolExpiredCleanupKeepsOwnerProtectedRecoveryAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		disposition FUSEPoolDisposition
+		guardErr    error
+		retained    bool
+	}{
+		{name: "owner protected", disposition: FUSEPoolProtected, retained: true},
+		{name: "owner check unavailable", disposition: FUSEPoolDispositionUnknown, guardErr: errors.New("owner store unavailable"), retained: true},
+		{name: "unowned", disposition: FUSEPoolPristine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newMemoryFUSEPoolRepository()
+			record := state.FUSEPoolRecord{
+				PreparationID: "cleanup-a", RuntimeID: "runtime-a", RuntimeUID: "uid-a",
+				PoolKey: "pool-key", State: state.FUSEPoolCleanup,
+				MaintainerToken: "api-a", CleanupToken: "cleanup-token",
+				CleanupUntil: repo.now.Add(-time.Second),
+				UpdatedAt:    repo.now.Add(-time.Minute), Revision: 4,
+			}
+			repo.seed(record)
+			rt := newFUSEMockRuntime()
+			rt.sandboxes[record.RuntimeID] = &runtime.SandboxInfo{
+				RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+			}
+			cfg := fusePoolConfig()
+			cfg.MinSize = 0
+			cfg.PristineGuard = func(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error) {
+				return tc.disposition, tc.guardErr
+			}
+			pool := NewFUSEPool(rt, repo, cfg, fixedFUSESpec("pool-key"))
+
+			require.NoError(t, pool.Reconcile(context.Background()))
+			_, exists := repo.record(record.PreparationID)
+			assert.Equal(t, tc.retained, exists, "owner-bound cleanup record is the durable recovery anchor")
+			assert.Equal(t, !tc.retained, rt.wasRemoved(record.RuntimeID))
+		})
+	}
+}
+
 func TestFUSEPoolReleaseConsumedRemovesRuntimeBeforeRecord(t *testing.T) {
 	rt := newFUSEMockRuntime()
 	repo := newMemoryFUSEPoolRepository()
