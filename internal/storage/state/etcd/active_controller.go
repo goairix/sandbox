@@ -180,3 +180,83 @@ func (r *ActiveSandboxRepository) ReleaseController(ctx context.Context, lease s
 	}
 	return nil
 }
+
+// CheckpointController advances cleanup only while the exact controller key
+// remains live. The record and leased holder are read in one etcd snapshot,
+// then both revisions are compared in the write transaction. ExpiresAt is
+// advisory metadata; the server-side lease key determines authority.
+func (r *ActiveSandboxRepository) CheckpointController(ctx context.Context, lease state.ActiveSandboxControllerLease, expectedRevision uint64, checkpoint string) (*state.ActiveSandboxRecord, error) {
+	if !validActiveID(lease.SandboxID) || lease.Token == "" || lease.InstanceID == "" || lease.Generation <= 0 ||
+		expectedRevision == 0 || checkpoint == "" || len(checkpoint) > 1<<20 {
+		return nil, state.ErrActiveSandboxCorrupt
+	}
+
+	requestCtx, cancel := r.store.requestContext(ctx)
+	defer cancel()
+	recordKey := r.recordKey(lease.SandboxID)
+	controllerKey := r.controllerKey(lease.SandboxID)
+	read, err := r.store.client.Txn(requestCtx).
+		Then(clientv3.OpGet(recordKey), clientv3.OpGet(controllerKey)).Commit()
+	if err != nil {
+		return nil, err
+	}
+	if len(read.Responses) != 2 || read.Responses[0].GetResponseRange() == nil || read.Responses[1].GetResponseRange() == nil {
+		return nil, state.ErrActiveSandboxCorrupt
+	}
+	records := read.Responses[0].GetResponseRange().Kvs
+	controllers := read.Responses[1].GetResponseRange().Kvs
+	if len(controllers) == 0 {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	current, err := decodeController(controllers[0].Value, lease.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Token != lease.Token || current.InstanceID != lease.InstanceID || current.PodUID != lease.PodUID || current.Generation != lease.Generation {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	if len(records) == 0 {
+		return nil, state.ErrActiveSandboxConflict
+	}
+	envelope, err := decodeActiveEnvelope(records[0].Value, lease.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if envelope.Record.Generation != lease.Generation {
+		return nil, state.ErrActiveSandboxStaleToken
+	}
+	if envelope.Record.Revision != expectedRevision ||
+		(envelope.Record.Phase != state.ActiveSandboxDestroying && envelope.Record.Phase != state.ActiveSandboxCleanupPending) {
+		return nil, state.ErrActiveSandboxConflict
+	}
+
+	envelope.Record.Phase = state.ActiveSandboxCleanupPending
+	envelope.Record.Revision++
+	envelope.Record.CleanupCheckpoint = checkpoint
+	envelope.Record.UpdatedAt = time.Now().UTC()
+	next, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, err
+	}
+	written, err := r.store.client.Txn(requestCtx).
+		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
+			clientv3.Compare(clientv3.ModRevision(controllerKey), "=", controllers[0].ModRevision)).
+		Then(clientv3.OpPut(recordKey, string(next))).
+		Else(clientv3.OpGet(controllerKey)).Commit()
+	if err != nil {
+		// The commit may have reached etcd. The caller must read back the
+		// record and must not send a second checkpoint blindly.
+		return nil, err
+	}
+	if !written.Succeeded {
+		if len(written.Responses) != 1 || written.Responses[0].GetResponseRange() == nil {
+			return nil, state.ErrActiveSandboxCorrupt
+		}
+		currentControllers := written.Responses[0].GetResponseRange().Kvs
+		if len(currentControllers) == 0 || currentControllers[0].ModRevision != controllers[0].ModRevision {
+			return nil, state.ErrActiveSandboxStaleToken
+		}
+		return nil, state.ErrActiveSandboxConflict
+	}
+	return &envelope.Record, nil
+}
