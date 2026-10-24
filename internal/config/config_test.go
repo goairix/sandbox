@@ -65,6 +65,19 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "", cfg.Security.SeccompProfile)
 }
 
+func TestLoadResourceLimitsFromEnvironmentWithoutConfigFile(t *testing.T) {
+	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-api-key")
+	t.Setenv("SANDBOX_SECURITY_MAX_MEMORY_REQUEST", "128Mi")
+	t.Setenv("SANDBOX_SECURITY_MAX_CPU", "500m")
+	t.Setenv("SANDBOX_SECURITY_MAX_CPU_REQUEST", "100m")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	assert.Equal(t, "128Mi", cfg.Security.MaxMemoryRequest)
+	assert.Equal(t, "500m", cfg.Security.MaxCPU)
+	assert.Equal(t, "100m", cfg.Security.MaxCPURequest)
+}
+
 func TestRedisHAConfigurationValidation(t *testing.T) {
 	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-api-key")
 	t.Setenv("SANDBOX_RUNTIME_TYPE", "kubernetes")

@@ -1133,6 +1133,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.max_exec_timeout_seconds", 600)
 	v.SetDefault("security.sandbox_timeout_seconds", 3600)
 	v.SetDefault("security.max_memory", "256Mi")
+	// Keep optional resource keys in Viper's key set so environment-only
+	// deployments bind them before unmarshalling. An empty value preserves
+	// their existing unset semantics.
+	v.SetDefault("security.max_memory_request", "")
+	v.SetDefault("security.max_cpu", "")
+	v.SetDefault("security.max_cpu_request", "")
 	v.SetDefault("security.max_disk", "100Mi")
 	v.SetDefault("security.max_tmp_disk", "50Mi")
 	v.SetDefault("security.max_pids", 100)
