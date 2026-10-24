@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -199,8 +198,14 @@ func (s *Supervisor) validateBootstrap(b fuseprotocol.BootstrapConfig, expectedU
 	if !validHexDigest(b.PoolKey) || !validBucket(b.Bucket) {
 		return fmt.Errorf("bootstrap storage identity is invalid")
 	}
-	endpoint, err := url.Parse(b.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+	// Only the verified private MinIO profile permits HTTP. A test or future
+	// custom profile with an unset descriptor must still default to HTTPS;
+	// both helpers enforce the same canonical endpoint shape.
+	endpointErr := requireHTTPS(b.Endpoint)
+	if b.Profile == "minio-sigv4-path-style-private-http-v1" && !profile.Descriptor.TLSRequired {
+		endpointErr = requireHTTP(b.Endpoint)
+	}
+	if endpointErr != nil {
 		return fmt.Errorf("bootstrap endpoint is invalid")
 	}
 	if !boundedTimeout(b.MountTimeoutSeconds) || !boundedTimeout(b.FlushTimeoutSeconds) || !boundedTimeout(b.UnmountTimeoutSeconds) {

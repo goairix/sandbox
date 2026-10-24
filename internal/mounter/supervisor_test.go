@@ -272,6 +272,46 @@ func TestBootstrapCanonicalizesRuntimeUIDAndAllowsCacheRoot(t *testing.T) {
 	assert.Equal(t, "uid-a", persisted.RuntimeUID)
 }
 
+func TestBootstrapEndpointSchemeMatchesCompiledProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		profile  string
+		endpoint string
+		wantOK   bool
+	}{
+		{"private HTTP", "minio-sigv4-path-style-private-http-v1", "http://minio.internal:9000", true},
+		{"private profile rejects HTTPS", "minio-sigv4-path-style-private-http-v1", "https://minio.internal:9000", false},
+		{"public HTTPS", "minio-sigv4-path-style-v1", "https://minio.internal:9000", true},
+		{"public profile rejects HTTP", "minio-sigv4-path-style-v1", "http://minio.internal:9000", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, dir := range []string{"secrets", "run", "cache/tmp", "workspace"} {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o700))
+			}
+
+			bootstrap := validBootstrap(root)
+			bootstrap.Profile = tc.profile
+			bootstrap.Endpoint = tc.endpoint
+			s := NewSupervisor(Config{
+				RunDir: filepath.Join(root, "run"), CredentialRoot: filepath.Join(root, "secrets"),
+				CacheRoot: bootstrap.CacheDir, MountPath: bootstrap.MountPath,
+				CheckFuse: func() error { return nil }, CheckAnchor: func(string) error { return nil },
+				MountInfo: func() (Mount, error) { return Mount{MountPoint: bootstrap.MountPath, FilesystemType: "tmpfs"}, nil },
+			}, &fakeRunner{})
+
+			err := s.Bootstrap(context.Background(), bootstrap, "uid-a")
+			if tc.wantOK {
+				require.NoError(t, err)
+				assert.Equal(t, StatePrepared, s.State())
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, StateLocked, s.State())
+			}
+		})
+	}
+}
+
 func TestBootstrapSecuresRootOwnedEmptyDirCache(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"secrets", "run", "cache", "workspace"} {
