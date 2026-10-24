@@ -597,7 +597,7 @@ func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUS
 		return fmt.Errorf("delete cleanup record: %w", err)
 	}
 	if err != nil || !deleted {
-		records, verifyErr := p.repo.ListByPoolKey(ctx, claimed.PoolKey)
+		current, verifyErr := readFUSEPoolRecord(ctx, p.repo, claimed.PoolKey, claimed.PreparationID)
 		if verifyErr != nil {
 			primary := state.ErrFUSEPoolConflict
 			if err != nil {
@@ -605,11 +605,9 @@ func (p *FUSEPool) CompleteClaimedCleanup(ctx context.Context, claimed state.FUS
 			}
 			return errors.Join(primary, fmt.Errorf("verify cleanup record deletion: %w", verifyErr))
 		}
-		for _, current := range records {
-			if current.PreparationID != claimed.PreparationID {
-				continue
-			}
-			if current.State != state.FUSEPoolCleanup || current.CleanupToken != claimed.CleanupToken || current.Revision != claimed.Revision {
+		if current != nil {
+			if current.PoolKey != claimed.PoolKey || current.State != state.FUSEPoolCleanup ||
+				current.CleanupToken != claimed.CleanupToken || current.Revision != claimed.Revision {
 				return state.ErrFUSEPoolConflict
 			}
 			if err != nil {

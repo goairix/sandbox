@@ -26,6 +26,10 @@ func (exactPoolReaderNoList) ListByPoolKey(context.Context, string) ([]state.FUS
 	return nil, errors.New("whole-pool read is forbidden for a point check")
 }
 
+func (exactPoolReaderNoList) DeleteCleanup(context.Context, string, string, uint64) (bool, error) {
+	return false, nil
+}
+
 func TestReturnPreparedTerminalUsesExactRecordRead(t *testing.T) {
 	original := state.FUSEPoolRecord{
 		PreparationID: "preparation", RuntimeID: "runtime", RuntimeUID: "runtime-uid",
@@ -36,4 +40,16 @@ func TestReturnPreparedTerminalUsesExactRecordRead(t *testing.T) {
 	terminal, err := pool.verifyReturnPreparedTerminal(original)
 	require.NoError(t, err)
 	require.False(t, terminal)
+}
+
+func TestCleanupDeleteConflictUsesExactRecordRead(t *testing.T) {
+	claimed := state.FUSEPoolRecord{
+		PreparationID: "preparation", RuntimeID: "runtime", RuntimeUID: "runtime-uid",
+		PoolKey: "shared-pool", MaintainerToken: "maintainer", CleanupToken: "cleanup",
+		State: state.FUSEPoolCleanup, Revision: 7,
+	}
+	pool := &FUSEPool{repo: exactPoolReaderNoList{record: claimed}}
+	err := pool.CompleteClaimedCleanup(context.Background(), claimed)
+	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	require.NotContains(t, err.Error(), "whole-pool read")
 }
