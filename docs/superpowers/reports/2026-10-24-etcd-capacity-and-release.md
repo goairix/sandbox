@@ -1,6 +1,10 @@
 # etcd 状态容量与发布验收（进行中）
 
-当前结论：**未通过 10 万存活沙盒容量验收，也未完成新部署切换**。以下仅是活跃仓库的元数据测量，用于定位高 N 维护成本；不包含真实 sandbox、Pod、FUSE、配额、HTTP 或 Redis 对照。
+当前结论：**未通过 10 万存活沙盒容量、真实 FUSE 和完整发布验收**。
+DS 测试命名空间已运行 revision 12 的双 API、副本数为 3 的 etcd 和测试 MinIO；
+普通沙盒、sync 文件往返、单成员重建及 API 重启 TTL 均有单次真实正例。
+下面第一节仅是本机元数据测量，不包含真实 sandbox、Pod、FUSE、配额、HTTP
+或 Redis 对照，不能与后续 DS 功能烟测混同。
 
 ## 已测范围
 
@@ -127,13 +131,13 @@ SHA-256 为 `d823ea2c27536f26cb712cb5ad2c1c8f1f8202c96cf9d9f67bd01296dd2f33c4`�
 渲染检查还发现旧 Chart 把对象存储 AK/SK 直接写成 Deployment 环境值；
 第一组测试凭据曾进入检查输出和 Helm revision 1。立即轮换 MinIO 测试凭据、
 重启 MinIO，并以提交 `5ac0f58` 增加 Secret 引用及禁止与明文值混用的模板校验。
-删除含旧值的本地渲染文件和已废弃的 Helm revision 1 Secret；当前 revision 2
+删除含旧值的本地渲染文件和已废弃的 Helm revision 1 Secret；当时 revision 2
 的 API 环境只含 `ds-minio-client` 的 `secretKeyRef`，未写明文凭据。
 `ds-ai-research.yaml` kubeconfig 和本地新凭据文件权限均已收紧为 0600。
 
 Helm overlay `.superpowers/sdd/2026-10-24-etcd-state-replacement/ds-api-values.yaml`
 SHA-256 为 `755ef4252d2fe375c7810cbdfebf4cd4f80d70dff6c2394e4712943a4ef8d9fc`。
-当前正确 DS 上 Helm release `sandbox` 为 revision 2、`deployed`；
+该阶段正确 DS 上 Helm release `sandbox` 为 revision 2、`deployed`；
 API 1/1，etcd 3/3，MinIO 1/1。经端口转发，`GET /ready` 和 `/health` 均为 200，
 未认证的沙盒查询为 401，带测试 API key 查询不存在的沙盒为 404。
 Helm 配置使用 etcd 三 endpoint、独立 `/sandbox/ds-reset/` 前缀、无认证连接，
