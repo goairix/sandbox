@@ -1,0 +1,7 @@
+# Only select the new deployment's state backend here. Kubernetes runtime,
+# endpoints, namespace and credentials are supplied by the Helm environment.
+# The legacy sample config explicitly sets Redis keys and cannot be bundled
+# into an etcd image, even when environment variables choose etcd.
+storage:
+  state:
+    backend: etcd

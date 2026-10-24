@@ -8,7 +8,7 @@ WORKDIR /app
 RUN apk add --no-cache ca-certificates docker-cli
 
 COPY --chmod=0755 sandbox /app/sandbox
-COPY config.yaml /etc/sandbox/config.yaml
+COPY config.etcd.yaml /etc/sandbox/config.yaml
 
 # A Docker platform label does not convert a host-built Mach-O binary into
 # Linux ELF. Check both the format and ELF machine before publishing a tag.
