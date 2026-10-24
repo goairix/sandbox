@@ -107,3 +107,31 @@ func TestBeginDestroyLostReplyIsResolvedByReadingCurrentPhase(t *testing.T) {
 	require.Equal(t, state.ActiveSandboxDestroying, current.Phase)
 	require.Equal(t, uint64(3), current.Revision)
 }
+
+func TestMutationOperationUsesOneExpiringExclusiveLock(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-mutation")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, data, err := repository.BeginOperation(ctx, record.SandboxID, "data", state.ActiveOperationData, 5*time.Second)
+	require.NoError(t, err)
+	_, first, err := repository.BeginOperation(ctx, record.SandboxID, "first", state.ActiveOperationMutation, time.Second)
+	require.NoError(t, err)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "second", state.ActiveOperationMutation, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxConflict)
+	require.Eventually(t, func() bool {
+		live, err := repository.LiveOperations(ctx, record.SandboxID)
+		return err == nil && live == 1
+	}, 4*time.Second, 50*time.Millisecond)
+	_, second, err := repository.BeginOperation(ctx, record.SandboxID, "second", state.ActiveOperationMutation, 5*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, repository.EndOperation(ctx, *first))
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "third", state.ActiveOperationMutation, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxConflict)
+	require.NoError(t, repository.EndOperation(ctx, *second))
+	require.NoError(t, repository.EndOperation(ctx, *data))
+}

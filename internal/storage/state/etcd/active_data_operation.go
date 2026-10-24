@@ -12,7 +12,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-var errOperationKindPending = errors.New("etcd state: mutation and exclusive operations are not yet implemented")
+var errOperationKindPending = errors.New("etcd state: exclusive operations are not yet implemented")
 
 func (r *ActiveSandboxRepository) operationPrefix(id string) string {
 	return r.recordKey(id) + "/operation/"
@@ -23,7 +23,15 @@ func (r *ActiveSandboxRepository) operationKey(id, token string) string {
 	return r.operationPrefix(id) + hex.EncodeToString(sum[:])
 }
 
-// BeginOperation admits one data operation only while the durable lifecycle
+func (r *ActiveSandboxRepository) mutationKey(id string) string {
+	return r.recordKey(id) + "/mutation"
+}
+
+func (r *ActiveSandboxRepository) exclusiveKey(id string) string {
+	return r.recordKey(id) + "/exclusive"
+}
+
+// BeginOperation admits data or mutation operations while the durable lifecycle
 // record is active. The operation key is attached to an etcd lease, and the
 // transaction compares the record revision so BeginDestroy closes admission.
 // ExpiresAt is advisory; all future effects must recheck the live lease key.
@@ -31,7 +39,7 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 	if !validActiveID(id) || token == "" || state.ValidateActiveSandboxTTL(ttl) != nil {
 		return nil, nil, state.ErrActiveSandboxCorrupt
 	}
-	if kind != state.ActiveOperationData {
+	if kind != state.ActiveOperationData && kind != state.ActiveOperationMutation {
 		return nil, nil, errOperationKindPending
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
@@ -65,10 +73,18 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 		return nil, nil, err
 	}
 	opKey := r.operationKey(id, token)
+	compares := []clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
+		clientv3.Compare(clientv3.Version(opKey), "=", 0),
+		clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0),
+	}
+	writes := []clientv3.Op{clientv3.OpPut(opKey, string(raw), clientv3.WithLease(lease))}
+	if kind == state.ActiveOperationMutation {
+		compares = append(compares, clientv3.Compare(clientv3.Version(r.mutationKey(id)), "=", 0))
+		writes = append(writes, clientv3.OpPut(r.mutationKey(id), token, clientv3.WithLease(lease)))
+	}
 	response, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
-			clientv3.Compare(clientv3.Version(opKey), "=", 0)).
-		Then(clientv3.OpPut(opKey, string(raw), clientv3.WithLease(lease))).
+		If(compares...).Then(writes...).
 		Else(clientv3.OpGet(recordKey)).Commit()
 	if err != nil {
 		return nil, nil, err
@@ -109,14 +125,14 @@ func (r *ActiveSandboxRepository) LiveOperations(ctx context.Context, id string)
 	return response.Count, nil
 }
 
-// EndOperation drops an exact live data operation. A lease already expired is
+// EndOperation drops an exact live data or mutation operation. A lease already expired is
 // idempotently absent, as in the Redis baseline, provided the generation still
 // belongs to the same sandbox record.
 func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation state.ActiveSandboxOperation) error {
 	if !validActiveID(operation.SandboxID) || operation.Token == "" || operation.Generation <= 0 {
 		return state.ErrActiveSandboxCorrupt
 	}
-	if operation.Kind != state.ActiveOperationData {
+	if operation.Kind != state.ActiveOperationData && operation.Kind != state.ActiveOperationMutation {
 		return errOperationKindPending
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
@@ -137,9 +153,17 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 	if json.Unmarshal(read.Kvs[0].Value, &stored) != nil || stored.Token != operation.Token || stored.Generation != operation.Generation || stored.Kind != operation.Kind {
 		return state.ErrActiveSandboxStaleToken
 	}
+	compares := []clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(opKey), "=", read.Kvs[0].ModRevision)}
+	writes := []clientv3.Op{clientv3.OpDelete(opKey)}
+	if operation.Kind == state.ActiveOperationMutation {
+		// Only the matching holder may remove the shared mutation lock.
+		// A prior expired token cannot unlock a successor's lease.
+		mutationKey := r.mutationKey(operation.SandboxID)
+		compares = append(compares, clientv3.Compare(clientv3.Value(mutationKey), "=", operation.Token))
+		writes = append(writes, clientv3.OpDelete(mutationKey))
+	}
 	response, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(opKey), "=", read.Kvs[0].ModRevision)).
-		Then(clientv3.OpDelete(opKey)).Commit()
+		If(compares...).Then(writes...).Commit()
 	if err != nil {
 		return err
 	}
