@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/storage"
+	"github.com/goairix/sandbox/internal/storage/state"
 	etcdstate "github.com/goairix/sandbox/internal/storage/state/etcd"
 )
 
@@ -73,13 +75,74 @@ func TestManagerFUSETimeoutCleanupWithEtcdState(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, inventory.Consumed)
 	time.Sleep(1100 * time.Millisecond)
-	manager.reapOnce()
-	record, err := active.Load(ctx, sb.ID)
-	require.NoError(t, err)
-	require.Nil(t, record)
+	require.NoError(t, manager.reconcileActiveLifecycleControllers(ctx))
+	require.Eventually(t, func() bool {
+		record, loadErr := active.Load(ctx, sb.ID)
+		return loadErr == nil && record == nil
+	}, 10*time.Second, 50*time.Millisecond)
 	require.True(t, manager.runtime.(*fuseManagerRuntime).wasRemoved(sb.RuntimeID))
 	inventory, err = poolRepo.ReadInventory(ctx, "pool-key")
 	require.NoError(t, err)
 	require.Zero(t, inventory.Consumed)
 	require.Zero(t, inventory.Cleanup)
+}
+
+func TestManagerFUSEDurableTimeoutClosesAdmissionOnEtcd(t *testing.T) {
+	manager, active := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	sb, err := manager.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/durable-ttl", Timeout: 1})
+	require.NoError(t, err)
+
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, manager.reconcileActiveLifecycleControllers(ctx))
+	record, err := active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.True(t, record == nil || record.Phase != state.ActiveSandboxActive,
+		"durable TTL must close admission without relying on the process-local reaper")
+}
+
+func TestManagerFUSEOldTTLScanCannotDestroyRenewedSandboxOnEtcd(t *testing.T) {
+	manager, active := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	sb, err := manager.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/renewed-ttl", Timeout: 1})
+	require.NoError(t, err)
+	old, err := active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.NotNil(t, old)
+
+	_, err = manager.UpdateTTL(ctx, sb.ID, 60)
+	require.NoError(t, err)
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, manager.reconcileActiveLifecycle(ctx, old))
+	current, err := active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxActive, current.Phase)
+}
+
+func TestManagerFUSETimeoutKeepsOccupationUntilRemovalOnEtcd(t *testing.T) {
+	manager, active := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	sb, err := manager.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/blocked-ttl", Timeout: 1})
+	require.NoError(t, err)
+	rt := manager.runtime.(*fuseManagerRuntime)
+	rt.mockRuntime.mu.Lock()
+	rt.removeFailures[sb.RuntimeID] = errors.New("runtime removal unavailable")
+	rt.mockRuntime.mu.Unlock()
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, manager.reconcileActiveLifecycleControllers(ctx))
+	record, err := active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.True(t, record != nil, "failed physical removal must retain durable cleanup state")
+	inventory, err := manager.fusePool.repo.(*etcdstate.FUSEPoolRepository).ReadInventory(ctx, "pool-key")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, inventory.Consumed+inventory.Cleanup,
+		"failure must not refund the sandbox's occupied pool capacity")
+
+	rt.mockRuntime.mu.Lock()
+	delete(rt.removeFailures, sb.RuntimeID)
+	rt.mockRuntime.mu.Unlock()
+	require.NoError(t, manager.Destroy(ctx, sb.ID))
+	record, err = active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.Nil(t, record)
 }

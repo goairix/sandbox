@@ -307,6 +307,27 @@ func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.Ac
 	if err != nil {
 		return err
 	}
+	if record.Phase == state.ActiveSandboxActive && sb.Timeout > 0 &&
+		!sb.CreatedAt.Add(sb.Timeout).After(time.Now()) {
+		// The scan reads durable state, so expiry survives a replica restart.
+		// Fence the inspected snapshot: a concurrent TTL renewal must win over
+		// this old observation instead of losing a live sandbox.
+		conditional, ok := m.activeSandboxes.(state.ActiveSandboxConditionalDestroyRepository)
+		if !ok {
+			return state.ErrActiveSandboxCorrupt
+		}
+		closed, closeErr := conditional.BeginDestroyExpected(ctx, *record)
+		if errors.Is(closeErr, state.ErrActiveSandboxConflict) {
+			return nil
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if closed == nil {
+			return nil
+		}
+		record = closed
+	}
 	// A live local sync worker may already have checkpointed final output
 	// while waiting for Pod termination. Schedule it before crash recovery,
 	// which must never release that worker's controller capability.

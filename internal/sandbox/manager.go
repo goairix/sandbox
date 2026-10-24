@@ -422,8 +422,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		go m.runActiveLifecycleCoordinator()
 	}
 
-	m.wg.Add(1)
-	go m.reapExpiredSandboxes()
+	// Distributed TTL is evaluated from durable snapshots by the lifecycle
+	// coordinator. A process-local timer cannot safely fence a peer's renewal.
+	if !m.distributedStateEnabled() {
+		m.wg.Add(1)
+		go m.reapExpiredSandboxes()
+	}
 
 	if m.config.AutoSyncIntervalSeconds > 0 {
 		m.wg.Add(1)
@@ -2964,8 +2968,8 @@ func (m *Manager) UpdateTTL(ctx context.Context, id string, timeoutSeconds int) 
 	return &result, nil
 }
 
-// reapExpiredSandboxes periodically checks for sandboxes that have exceeded
-// their timeout and destroys them.
+// reapExpiredSandboxes handles process-local timeouts. Distributed managers
+// use durable records in runActiveLifecycleCoordinator instead.
 func (m *Manager) reapExpiredSandboxes() {
 	defer m.wg.Done()
 	ticker := time.NewTicker(10 * time.Second)
