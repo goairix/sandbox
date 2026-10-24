@@ -117,3 +117,21 @@ func TestPoolClaimCleanupLostReplyIsResolvedBySameToken(t *testing.T) {
 	require.Equal(t, consumed.Revision+1, again.Revision)
 	require.Equal(t, state.FUSEPoolCleanup, again.State)
 }
+
+func TestPoolRepeatedCleanupClaimRejectsMissingUIDOwner(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	consumed := consumedPoolRecord(t, repository)
+	ctx := context.Background()
+	claimed, err := repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	_, err = s.client.Delete(ctx, repository.uidOwnerKey(consumed.RuntimeUID))
+	require.NoError(t, err)
+	again, err := repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolCleanup,
+		consumed.MaintainerToken, consumed.ReservationToken, claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.Nil(t, again)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+}

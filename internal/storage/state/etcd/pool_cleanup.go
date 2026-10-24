@@ -45,6 +45,11 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, id string, from s
 		return nil, state.ErrFUSEPoolConflict
 	}
 	if record.State == state.FUSEPoolCleanup {
+		// Idempotent readback must validate the same ownership facts as a
+		// new claim. Otherwise a damaged index could look like success.
+		if err := r.validateCleanupOwnership(requestCtx, record, read.Header.Revision); err != nil {
+			return nil, err
+		}
 		if record.CleanupToken == cleanupToken {
 			// A retry with the same token observes the original claim. It
 			// never lengthens the lease or advances the revision.
@@ -105,6 +110,22 @@ func (r *FUSEPoolRepository) ClaimCleanup(ctx context.Context, id string, from s
 		return nil, state.ErrFUSEPoolCASMismatch
 	}
 	return &record, nil
+}
+
+func (r *FUSEPoolRepository) validateCleanupOwnership(ctx context.Context, record state.FUSEPoolRecord, revision int64) error {
+	index, err := r.store.client.Get(ctx, r.cleanupKey(record.PoolKey, record.PreparationID), clientv3.WithRev(revision))
+	if err != nil {
+		return err
+	}
+	owner, err := r.store.client.Get(ctx, r.uidOwnerKey(record.RuntimeUID), clientv3.WithRev(revision))
+	if err != nil {
+		return err
+	}
+	if len(index.Kvs) != 1 || string(index.Kvs[0].Value) != record.PreparationID ||
+		len(owner.Kvs) != 1 || string(owner.Kvs[0].Value) != record.PreparationID {
+		return state.ErrFUSEPoolCorrupt
+	}
+	return nil
 }
 
 // reclaimExpiredCleanup replaces only a server-expired cleanup holder. The
