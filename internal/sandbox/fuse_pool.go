@@ -425,19 +425,16 @@ func (p *FUSEPool) ReturnPrepared(ctx context.Context, record state.FUSEPoolReco
 func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fusePoolCleanupTimeout)
 	defer cancel()
-	records, err := p.repo.ListByPoolKey(ctx, original.PoolKey)
+	current, err := readFUSEPoolRecord(ctx, p.repo, original.PoolKey, original.PreparationID)
 	if err != nil {
 		return false, fmt.Errorf("verify returned FUSE sandbox: %w", err)
 	}
-	for _, current := range records {
-		if current.PreparationID != original.PreparationID {
-			continue
-		}
+	if current != nil {
 		if current.RuntimeID != original.RuntimeID || current.RuntimeUID != original.RuntimeUID || current.PoolKey != original.PoolKey || current.MaintainerToken != original.MaintainerToken {
 			return true, ErrFUSEPoolReturnFenced
 		}
 		if current.State == state.FUSEPoolPrepared && current.Revision == original.Revision+1 && current.ReservationToken == "" {
-			return true, p.confirmReturnPreparedTerminal(ctx, original.PreparationID, &current)
+			return true, p.confirmReturnPreparedTerminal(ctx, original.PreparationID, current)
 		}
 		if current.State == state.FUSEPoolCleanup {
 			return false, nil
@@ -448,6 +445,25 @@ func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (
 		return false, nil
 	}
 	return true, p.confirmReturnPreparedTerminal(ctx, original.PreparationID, nil)
+}
+
+// readFUSEPoolRecord keeps Redis's original full-list contract as a fallback;
+// an etcd repository can provide an exact key read for the common per-sandbox
+// recovery path. The caller still verifies identity and transition evidence.
+func readFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey, id string) (*state.FUSEPoolRecord, error) {
+	if reader, ok := repo.(state.FUSEPoolRecordReader); ok {
+		return reader.ReadByPreparationID(ctx, id)
+	}
+	records, err := repo.ListByPoolKey(ctx, poolKey)
+	if err != nil {
+		return nil, err
+	}
+	for i := range records {
+		if records[i].PreparationID == id {
+			return &records[i], nil
+		}
+	}
+	return nil, nil
 }
 
 func (p *FUSEPool) confirmReturnPreparedTerminal(ctx context.Context, id string, expected *state.FUSEPoolRecord) error {

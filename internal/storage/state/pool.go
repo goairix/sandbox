@@ -77,3 +77,10 @@ type FUSEPoolRepository interface {
 	RenewRefillLock(ctx context.Context, poolKey, token string, ttl time.Duration) (bool, error)
 	UnlockRefill(ctx context.Context, poolKey, token string) error
 }
+
+// FUSEPoolRecordReader is an optional exact lookup for request paths that
+// already know a preparation ID. It avoids materializing every consumed
+// sandbox sharing the same PoolKey. Nil means the record is absent.
+type FUSEPoolRecordReader interface {
+	ReadByPreparationID(ctx context.Context, preparationID string) (*FUSEPoolRecord, error)
+}
