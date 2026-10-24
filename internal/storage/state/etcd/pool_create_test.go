@@ -126,3 +126,45 @@ func TestPoolRefillRenewKeepsOneLiveHolder(t *testing.T) {
 	require.ErrorIs(t, repository.UnlockRefill(ctx, "shared-pool", "other"), state.ErrFUSEPoolTokenMismatch)
 	require.NoError(t, repository.UnlockRefill(ctx, "shared-pool", "holder"))
 }
+
+func TestPoolBindPreparingRuntimeFencesUIDOwner(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	for _, id := range []string{"preparation-a", "preparation-b"} {
+		require.NoError(t, repository.CreatePreparingWithAdmission(ctx, preparingPoolRecord(id), "holder", 2, 10*time.Second))
+	}
+	_, err = repository.BindPreparingRuntime(ctx, "preparation-a", "runtime-a", "uid-a", "wrong", 1)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	bound, err := repository.BindPreparingRuntime(ctx, "preparation-a", "runtime-a", "uid-a", "holder", 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), bound.Revision)
+	require.Equal(t, "uid-a", bound.RuntimeUID)
+	_, err = repository.BindPreparingRuntime(ctx, "preparation-a", "runtime-a", "uid-a", "holder", 1)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+	_, err = repository.BindPreparingRuntime(ctx, "preparation-b", "runtime-b", "uid-a", "holder", 1)
+	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	stillUnbound, err := repository.ReadByPreparationID(ctx, "preparation-b")
+	require.NoError(t, err)
+	require.Empty(t, stillUnbound.RuntimeUID)
+}
+
+func TestPoolBindRejectsExpiredPreparationLease(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("expiring-preparation"), "holder", 1, time.Second))
+	require.Eventually(t, func() bool {
+		read, err := s.client.Get(ctx, repository.prepareDeadlineKey("expiring-preparation"))
+		return err == nil && len(read.Kvs) == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	_, err = repository.BindPreparingRuntime(ctx, "expiring-preparation", "runtime", "uid", "holder", 1)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+}

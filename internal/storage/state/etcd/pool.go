@@ -62,6 +62,10 @@ func (r *FUSEPoolRepository) recordKey(id string) string {
 	return r.store.prefix + "fusepool/v1/record/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) uidOwnerKey(uid string) string {
+	return r.store.prefix + "fusepool/v1/uid-owner/" + poolDigest(uid)
+}
+
 func (r *FUSEPoolRepository) prepareDeadlineKey(id string) string {
 	return r.store.prefix + "fusepool/v1/deadline/prepare/" + poolDigest(id)
 }
