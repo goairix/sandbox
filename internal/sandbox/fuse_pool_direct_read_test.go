@@ -170,3 +170,16 @@ func TestFUSEPoolReconcileUsesPagesAndAggregateWithResidentSandbox(t *testing.T)
 	require.True(t, ran)
 	require.NotContains(t, repo.states, state.FUSEPoolConsumed)
 }
+
+func TestPoolAllStateTraversalPagesWithoutWholeList(t *testing.T) {
+	repo := &maintenancePagePoolNoList{}
+	err := forEachFUSEPoolRecord(context.Background(), repo, "pool", func(state.FUSEPoolRecord) error {
+		t.Fatal("unexpected record")
+		return nil
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []state.FUSEPoolState{
+		state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved,
+		state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup,
+	}, repo.states)
+}

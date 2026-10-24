@@ -542,6 +542,32 @@ func forEachFUSEPoolMaintenanceRecord(ctx context.Context, repo state.FUSEPoolRe
 	return nil
 }
 
+// forEachFUSEPoolRecord is reserved for explicit global release and orphan
+// audits that must inspect consumed records too. Each etcd page stays bounded.
+func forEachFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey string, visit func(state.FUSEPoolRecord) error) error {
+	if _, ok := repo.(state.FUSEPoolStatePageReader); ok {
+		for _, poolState := range []state.FUSEPoolState{
+			state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved,
+			state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup,
+		} {
+			if err := forEachFUSEPoolState(ctx, repo, poolKey, poolState, visit); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	records, err := repo.ListByPoolKey(ctx, poolKey)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := visit(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func readFUSEPoolInventory(ctx context.Context, repo state.FUSEPoolRepository, poolKey string) (state.FUSEPoolInventory, error) {
 	if reader, ok := repo.(state.FUSEPoolInventoryReader); ok {
 		return reader.ReadInventory(ctx, poolKey)
@@ -1037,12 +1063,7 @@ func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 		return errors.Join(result, err)
 	}
 	for _, poolKey := range poolKeys {
-		records, listErr := p.repo.ListByPoolKey(ctx, poolKey)
-		if listErr != nil {
-			result = errors.Join(result, listErr)
-			continue
-		}
-		for _, record := range records {
+		listErr := forEachFUSEPoolRecord(ctx, p.repo, poolKey, func(record state.FUSEPoolRecord) error {
 			disposition, guardErr := p.guard(ctx, record)
 			switch disposition {
 			case FUSEPoolPristine, FUSEPoolAbandoned:
@@ -1052,6 +1073,10 @@ func (p *FUSEPool) DrainRelease(ctx context.Context) error {
 			default:
 				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
 			}
+			return nil
+		})
+		if listErr != nil {
+			result = errors.Join(result, listErr)
 		}
 	}
 	result = errors.Join(result, p.repo.DrainRefillLocks(ctx))

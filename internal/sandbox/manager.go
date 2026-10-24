@@ -490,17 +490,17 @@ func (m *Manager) reconcileFUSEOrphansWithExclusivity(ctx context.Context, relea
 	for uid := range ownerUIDs {
 		protected[uid] = struct{}{}
 	}
-	records, err := m.fusePool.repo.ListByPoolKey(ctx, m.fusePool.poolKey)
-	if err != nil {
-		return fmt.Errorf("list protected FUSE pool records: %w", err)
-	}
-	for _, record := range records {
+	err = forEachFUSEPoolRecord(ctx, m.fusePool.repo, m.fusePool.poolKey, func(record state.FUSEPoolRecord) error {
 		if record.RuntimeUID != "" {
 			if validateOpaqueText(record.RuntimeUID, false) != nil {
 				return state.ErrFUSEPoolCorrupt
 			}
 			protected[record.RuntimeUID] = struct{}{}
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("list protected FUSE pool records: %w", err)
 	}
 	return reconciler.ReconcileOrphanedResources(ctx, protected)
 }
