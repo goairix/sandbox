@@ -332,3 +332,29 @@ DS 同后端 Helm 升级到 revision 12 后，API 2/2、etcd 3/3、MinIO 1/1。
 上限及分区数量。单独把 5 秒间隔调大、并发扫全库、或只增加 etcd
 成员，都不能消除每个副本的 O(N) 读取与每条 workspace 的续租成本。
 目前没有完成两类存量的真实容量验收，也没有可靠的 10 万单 cell 承诺。
+
+## 有界到期索引的本机存量测量（尚未发布）
+
+提交 `eb4cd1a` 把普通到期和 workspace 发现键与原生命周期记录放在同一
+etcd 事务里；`a5fac67` 保留 API 启动时的一次完整恢复扫描，后续 tick
+按两个索引各最多读取 8 页、每页 128 条，并在做任何效果前重新加载权威
+记录。`ce41f5b` 验证独立客户端重建后仍能读出到期索引。完整 etcd
+存储包、sandbox 包、重点 race 和 vet 已通过；真实 etcd 的普通 TTL 与
+FUSE TTL 清理正例通过。DS 当前 revision 12 **尚未部署这些新提交**。
+
+本机 Docker Desktop 单节点 etcd v3.6.14、loopback 明文、独立前缀；
+16 个固定 writer，每条记录先 Publish 再 Activate。合成 JSON 包含
+`created_at`、两小时 TTL、运行时标识及非空配置，但仍远小于完整真实
+沙盒快照。以下是仓库 `TestActiveResidentIndexScale` 的原始测量：
+
+| 合成普通存量 | 键数 | 两次写入总耗时 | 空闲到期查询 | 全部同时到期候选遍历 | 单节点 DB 增量 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 30,000 | 2.765 秒 | 0.773 毫秒 | 0.241 秒 | 27.55 MB |
+| 100,000 | 300,000 | 26.001 秒 | 6.437 毫秒 | 4.754 秒 | 275.56 MB |
+
+命令为 `TEST_ETCD_ENDPOINT=127.0.0.1:64106 TEST_ETCD_INDEX_SCALE_N=<N> go test -v ./internal/storage/state/etcd -run '^TestActiveResidentIndexScale$' -count=1 -timeout=240s`，使用主仓库共享 Go 缓存。1,000 条的同一测试在 race 下通过。上表的“同时到期”只读取候选，**没有**创建 Pod、终止进程、回收资源或退款；它已接近 5 秒 tick 间隔，不能据此宣布集中到期容量通过。
+
+本轮只说明大量远期普通记录的空闲查询不再读取全部记录。两 API 副本、
+三成员故障、真实沙盒和集中 TTL 效果、p95/p99、sync/FUSE 大量续租尚未
+测完，因而 **10 万存活沙盒容量门继续保持未通过**。sync/FUSE 的单条
+controller 五秒续租成本仍在；本索引不降低那部分 RPC 量。
