@@ -34,19 +34,19 @@
 
 **Interface:** Add `state.ActiveSandboxDuePage{Records []ActiveSandboxRecord, Cursor string}` and optional `state.ActiveSandboxLifecycleIndexRepository` with `ScanDue(ctx context.Context, dueBefore time.Time, cursor string, count int64) (ActiveSandboxDuePage, error)` and `ScanWorkspace(ctx context.Context, cursor uint64, count int64) (ActiveSandboxPage, error)`. The string cursor is an opaque, ordered due-index key; an empty cursor starts or completes a pass. Keep the existing `Scan` contract unchanged for release drain and other administrative callers.
 
-- [ ] RED with a real etcd: publish/activate, TTL shorten/extend, BeginDestroy, checkpoint, workspace attach/detach, delete, lost ACK, competing revision, and restart all preserve the correct candidate set.
-- [ ] Derive the candidate time from the persisted snapshot and phase in one small storage helper. The helper parses only fields needed for scheduling; it never decides whether an effect is authorized.
-- [ ] Move old/new due and workspace keys in the same existing record transaction. Keep a unique tie-breaker and bounded pages; compare old keys before deletion. A record may be in the workspace index or the ordinary due index, according to its current snapshot/phase, but never silently absent from both when recovery work is due.
-- [ ] GREEN, race, vet, comments/package review, then commit this repository change before touching the coordinator.
+- [x] RED with a real etcd: publish/activate, TTL shorten/extend, BeginDestroy, checkpoint, workspace attach/detach, delete, lost ACK, competing revision, and restart all preserve the correct candidate set. (`eb4cd1a`, `ce41f5b`)
+- [x] Derive the candidate time from the persisted snapshot and phase in one small storage helper. The helper parses only fields needed for scheduling; it never decides whether an effect is authorized.
+- [x] Move old/new due and workspace keys in the same existing record transaction. Keep a unique tie-breaker and bounded pages; compare old keys before deletion. A record may be in the workspace index or the ordinary due index, according to its current snapshot/phase, but never silently absent from both when recovery work is due.
+- [x] GREEN, race, vet, comments/package review, then commit this repository change before touching the coordinator.
 
 ### Task 2: Coordinator uses due candidates without losing recovery
 
 **Files:** `internal/sandbox/lifecycle_coordinator.go` and focused tests. No new service or goroutine per sandbox.
 
-- [ ] RED: 10k far-future ordinary records require no full record scan on a normal tick; an expired record, a durable destroying record, and a lost workspace controller still reach the existing `reconcileActiveLifecycle` path.
-- [ ] Process due pages with a bounded fair cursor so one repeatedly failing cleanup cannot starve later IDs. Reload each candidate and retain `BeginDestroyExpected` and controller fencing.
-- [ ] Preserve one full startup scan for recovery and use the workspace index on later ticks. A repository missing the optional lifecycle-index interface keeps the baseline periodic full scan behavior.
-- [ ] GREEN against real etcd, restart/ACK-loss and existing sandbox regressions, then commit.
+- [x] RED: far-future ordinary records require no full record scan on a normal tick; an expired record, a durable destroying record, and a lost workspace controller still reach the existing `reconcileActiveLifecycle` path. (`a5fac67`)
+- [x] Process due pages with a bounded fair cursor so one repeatedly failing cleanup cannot starve later IDs. Reload each candidate and retain `BeginDestroyExpected` and controller fencing.
+- [x] Preserve one full startup scan for recovery and use the workspace index on later ticks. A repository missing the optional lifecycle-index interface keeps the baseline periodic full scan behavior.
+- [x] GREEN against real etcd, restart/ACK-loss and existing sandbox regressions, then commit.
 
 ### Task 3: Measure and set a truthful cell limit
 
