@@ -2,12 +2,23 @@
 # inside Docker. The build context contains only the binary and this config.
 ARG API_BASE_IMAGE=registry.i.huaxisy.com/library/alpine:3.22
 FROM ${API_BASE_IMAGE}
+ARG TARGETARCH
 
 WORKDIR /app
 RUN apk add --no-cache ca-certificates docker-cli
 
 COPY --chmod=0755 sandbox /app/sandbox
 COPY config.yaml /etc/sandbox/config.yaml
+
+# A Docker platform label does not convert a host-built Mach-O binary into
+# Linux ELF. Check both the format and ELF machine before publishing a tag.
+RUN test "$(od -An -tx1 -N4 /app/sandbox | tr -d ' \n')" = "7f454c46" && \
+    case "$TARGETARCH" in \
+      arm64) expected_machine=183 ;; \
+      amd64) expected_machine=62 ;; \
+      *) exit 1 ;; \
+    esac && \
+    test "$(od -An -tu2 -j18 -N2 /app/sandbox | tr -d ' \n')" = "$expected_machine"
 
 EXPOSE 8080
 ENTRYPOINT ["/app/sandbox"]
