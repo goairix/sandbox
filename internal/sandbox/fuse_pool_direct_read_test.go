@@ -109,3 +109,55 @@ func TestPoolOwnedStopUsesStatePages(t *testing.T) {
 	pool := NewFUSEPool(newFUSEMockRuntime(), emptyPagePoolNoList{}, fusePoolConfig(), fixedFUSESpec("pool-key"))
 	require.NoError(t, pool.drainOwned(context.Background()))
 }
+
+type maintenancePagePoolNoList struct {
+	emptyPagePoolNoList
+	states []state.FUSEPoolState
+}
+
+func (r *maintenancePagePoolNoList) ListStatePage(_ context.Context, _ string, poolState state.FUSEPoolState, _ string, _ int) ([]state.FUSEPoolRecord, string, error) {
+	r.states = append(r.states, poolState)
+	return nil, "", nil
+}
+
+func TestPoolMaintenanceDoesNotReadResidentConsumedRecords(t *testing.T) {
+	repo := &maintenancePagePoolNoList{}
+	err := forEachFUSEPoolMaintenanceRecord(context.Background(), repo, "pool", func(state.FUSEPoolRecord) error {
+		t.Fatal("unexpected record")
+		return nil
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []state.FUSEPoolState{
+		state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved,
+		state.FUSEPoolBinding, state.FUSEPoolCleanup,
+	}, repo.states)
+}
+
+type pagedReconcileNoList struct {
+	*memoryFUSEPoolRepository
+	states []state.FUSEPoolState
+}
+
+func (r *pagedReconcileNoList) ListByPoolKey(context.Context, string) ([]state.FUSEPoolRecord, error) {
+	return nil, errors.New("reconcile must not list resident consumed records")
+}
+
+func (r *pagedReconcileNoList) ListStatePage(_ context.Context, _ string, poolState state.FUSEPoolState, _ string, _ int) ([]state.FUSEPoolRecord, string, error) {
+	r.states = append(r.states, poolState)
+	return nil, "", nil
+}
+
+func (*pagedReconcileNoList) ReadInventory(context.Context, string) (state.FUSEPoolInventory, error) {
+	return state.FUSEPoolInventory{Consumed: 1}, nil
+}
+
+func TestFUSEPoolReconcileUsesPagesAndAggregateWithResidentSandbox(t *testing.T) {
+	repo := &pagedReconcileNoList{memoryFUSEPoolRepository: newMemoryFUSEPoolRepository()}
+	cfg := fusePoolConfig()
+	cfg.MinSize = 0
+	pool := NewFUSEPool(newFUSEMockRuntime(), repo, cfg, fixedFUSESpec("pool-key"))
+	ran, err := pool.reconcileOnce(context.Background())
+	require.NoError(t, err)
+	require.True(t, ran)
+	require.NotContains(t, repo.states, state.FUSEPoolConsumed)
+}

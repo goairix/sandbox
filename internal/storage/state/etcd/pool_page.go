@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"encoding/hex"
+	"math"
 	"strings"
 
 	"github.com/goairix/sandbox/internal/storage/state"
@@ -12,6 +13,31 @@ import (
 const maxPoolStatePage = 64
 
 var _ state.FUSEPoolStatePageReader = (*FUSEPoolRepository)(nil)
+var _ state.FUSEPoolInventoryReader = (*FUSEPoolRepository)(nil)
+
+// ReadInventory reads only the pool's fixed-size aggregate. The six counts
+// move with state indexes under the same transaction; a missing aggregate is
+// an empty fresh pool, while a malformed or overflowing one fails closed.
+func (r *FUSEPoolRepository) ReadInventory(ctx context.Context, poolKey string) (state.FUSEPoolInventory, error) {
+	if r == nil || r.store == nil || !validPoolID(poolKey) {
+		return state.FUSEPoolInventory{}, state.ErrFUSEPoolInvalidRecord
+	}
+	requestCtx, cancel := r.store.requestContext(ctx)
+	defer cancel()
+	read, err := r.store.client.Get(requestCtx, r.metadataKey(poolKey))
+	if err != nil || len(read.Kvs) == 0 {
+		return state.FUSEPoolInventory{}, err
+	}
+	metadata, err := decodePoolMetadata(read.Kvs[0].Value, poolKey)
+	if err != nil || metadata.Total > math.MaxInt64 {
+		return state.FUSEPoolInventory{}, state.ErrFUSEPoolCorrupt
+	}
+	return state.FUSEPoolInventory{
+		Preparing: int64(metadata.Preparing), Prepared: int64(metadata.Prepared),
+		Reserved: int64(metadata.Reserved), Binding: int64(metadata.Binding),
+		Consumed: int64(metadata.Consumed), Cleanup: int64(metadata.Cleanup),
+	}, nil
+}
 
 // ListStatePage reads at most 64 records from one pool state. The index and
 // records are read at one MVCC revision; a mutation between pages may move a

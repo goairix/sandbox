@@ -55,3 +55,23 @@ func TestPoolMetadataCountsEveryStateTransition(t *testing.T) {
 	require.True(t, deleted)
 	assertCounts(poolMetadata{})
 }
+
+func TestPoolInventoryIsConstantSizeAndReflectsResidentCount(t *testing.T) {
+	store := testStore(t)
+	repo := NewFUSEPoolRepository(store)
+	ctx := context.Background()
+	empty, err := repo.ReadInventory(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolInventory{}, empty)
+	consumed := consumedPoolRecord(t, repo)
+	inventory, err := repo.ReadInventory(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolInventory{Consumed: 1}, inventory)
+	_, err = repo.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", time.Minute)
+	require.NoError(t, err)
+	inventory, err = repo.ReadInventory(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolInventory{Cleanup: 1}, inventory)
+}

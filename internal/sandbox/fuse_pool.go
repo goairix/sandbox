@@ -514,6 +514,64 @@ func forEachFUSEPoolState(ctx context.Context, repo state.FUSEPoolRepository, po
 	return nil
 }
 
+// forEachFUSEPoolMaintenanceRecord skips resident consumed records when the
+// repository has state pages. Consumed runtimes are owned by their published
+// lifecycle and are not candidates for periodic pool cleanup.
+func forEachFUSEPoolMaintenanceRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey string, visit func(state.FUSEPoolRecord) error) error {
+	if _, ok := repo.(state.FUSEPoolStatePageReader); ok {
+		for _, poolState := range []state.FUSEPoolState{
+			state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved,
+			state.FUSEPoolBinding, state.FUSEPoolCleanup,
+		} {
+			if err := forEachFUSEPoolState(ctx, repo, poolKey, poolState, visit); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	records, err := repo.ListByPoolKey(ctx, poolKey)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := visit(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readFUSEPoolInventory(ctx context.Context, repo state.FUSEPoolRepository, poolKey string) (state.FUSEPoolInventory, error) {
+	if reader, ok := repo.(state.FUSEPoolInventoryReader); ok {
+		return reader.ReadInventory(ctx, poolKey)
+	}
+	records, err := repo.ListByPoolKey(ctx, poolKey)
+	if err != nil {
+		return state.FUSEPoolInventory{}, err
+	}
+	var inventory state.FUSEPoolInventory
+	for _, record := range records {
+		switch record.State {
+		case state.FUSEPoolPreparing:
+			inventory.Preparing++
+		case state.FUSEPoolPrepared:
+			inventory.Prepared++
+		case state.FUSEPoolReserved:
+			inventory.Reserved++
+		case state.FUSEPoolBinding:
+			inventory.Binding++
+		case state.FUSEPoolConsumed:
+			inventory.Consumed++
+		case state.FUSEPoolCleanup:
+			inventory.Cleanup++
+		default:
+			return state.FUSEPoolInventory{}, state.ErrFUSEPoolCorrupt
+		}
+	}
+	return inventory, nil
+}
+
 func (p *FUSEPool) confirmReturnPreparedTerminal(ctx context.Context, id string, expected *state.FUSEPoolRecord) error {
 	if repo, ok := p.repo.(interface {
 		ConfirmReturnPreparedTerminal(context.Context, string, *state.FUSEPoolRecord) error
@@ -734,22 +792,18 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		return true, errors.Join(inspectionErr, fmt.Errorf("refresh Redis server time: %w", err))
 	}
 
-	records, err := p.repo.ListByPoolKey(ctx, p.poolKey)
-	if err != nil {
-		return true, fmt.Errorf("list FUSE pool inventory: %w", err)
-	}
 	active := make([]state.FUSEPoolRecord, 0)
-	for _, record := range records {
+	err = forEachFUSEPoolMaintenanceRecord(ctx, p.repo, p.poolKey, func(record state.FUSEPoolRecord) error {
 		switch record.State {
 		case state.FUSEPoolPreparing:
 			if record.PrepareUntil.IsZero() || !record.PrepareUntil.After(now) {
 				disposition, _ := p.guard(ctx, record)
 				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
 					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
-						return true, fmt.Errorf("clean expired preparing FUSE sandbox: %w", err)
+						return fmt.Errorf("clean expired preparing FUSE sandbox: %w", err)
 					}
 				}
-				continue
+				return nil
 			}
 			active = append(active, record)
 		case state.FUSEPoolPrepared:
@@ -761,7 +815,7 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 				disposition, _ := p.guard(ctx, record)
 				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
 					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
-						return true, fmt.Errorf("clean expired reserved FUSE sandbox: %w", err)
+						return fmt.Errorf("clean expired reserved FUSE sandbox: %w", err)
 					}
 				}
 			}
@@ -769,7 +823,7 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 			disposition, _ := p.guard(ctx, record)
 			if disposition == FUSEPoolAbandoned {
 				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
-					return true, fmt.Errorf("clean abandoned binding FUSE sandbox: %w", err)
+					return fmt.Errorf("clean abandoned binding FUSE sandbox: %w", err)
 				}
 			}
 		case state.FUSEPoolConsumed:
@@ -777,12 +831,16 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		case state.FUSEPoolCleanup:
 			if record.CleanupUntil.IsZero() || !record.CleanupUntil.After(now) {
 				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
-					return true, fmt.Errorf("recover cleanup FUSE sandbox: %w", err)
+					return fmt.Errorf("recover cleanup FUSE sandbox: %w", err)
 				}
 			}
 		default:
-			return true, state.ErrFUSEPoolCorrupt
+			return state.ErrFUSEPoolCorrupt
 		}
+		return nil
+	})
+	if err != nil {
+		return true, fmt.Errorf("scan FUSE pool maintenance inventory: %w", err)
 	}
 
 	activeCount, err := p.repo.CountPreparingAndPrepared(ctx, p.poolKey)
@@ -818,18 +876,13 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		return true, fmt.Errorf("recount active FUSE pool inventory: %w", err)
 	}
 
-	prepared := 0
-	current, err := p.repo.ListByPoolKey(ctx, p.poolKey)
+	inventory, err := readFUSEPoolInventory(ctx, p.repo, p.poolKey)
 	if err != nil {
 		return true, fmt.Errorf("refresh FUSE pool inventory: %w", err)
 	}
-	p.recordInventoryMetrics(ctx, current)
-	for _, record := range current {
-		if record.State == state.FUSEPoolPrepared {
-			prepared++
-		}
-	}
-	for prepared < p.config.MinSize && activeCount < p.config.MaxSize {
+	p.recordInventoryMetrics(ctx, inventory)
+	prepared := inventory.Prepared
+	for prepared < int64(p.config.MinSize) && activeCount < p.config.MaxSize {
 		_, err := p.prepareOne(ctx, "", lockToken)
 		if err != nil {
 			return true, fmt.Errorf("prepare FUSE pool sandbox: %w", err)
@@ -847,16 +900,23 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 	return true, inspectionErr
 }
 
-func (p *FUSEPool) recordInventoryMetrics(ctx context.Context, records []state.FUSEPoolRecord) {
+func (p *FUSEPool) recordInventoryMetrics(ctx context.Context, inventory state.FUSEPoolInventory) {
 	if p == nil || p.spec.WorkspaceFUSE == nil {
 		return
 	}
-	counts := make(map[state.FUSEPoolState]int64)
-	for _, record := range records {
-		counts[record.State]++
+	counts := []struct {
+		poolState state.FUSEPoolState
+		count     int64
+	}{
+		{state.FUSEPoolPreparing, inventory.Preparing},
+		{state.FUSEPoolPrepared, inventory.Prepared},
+		{state.FUSEPoolReserved, inventory.Reserved},
+		{state.FUSEPoolBinding, inventory.Binding},
+		{state.FUSEPoolConsumed, inventory.Consumed},
+		{state.FUSEPoolCleanup, inventory.Cleanup},
 	}
-	for _, poolState := range []state.FUSEPoolState{state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved, state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup} {
-		metrics.RecordWorkspacePoolSize(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, p.poolKey, string(poolState), counts[poolState])
+	for _, item := range counts {
+		metrics.RecordWorkspacePoolSize(ctx, p.spec.WorkspaceFUSE.RuntimeType, p.spec.WorkspaceFUSE.Provider, p.poolKey, string(item.poolState), item.count)
 	}
 }
 

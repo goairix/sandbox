@@ -92,3 +92,21 @@ type FUSEPoolRecordReader interface {
 type FUSEPoolStatePageReader interface {
 	ListStatePage(ctx context.Context, poolKey string, poolState FUSEPoolState, after string, limit int) ([]FUSEPoolRecord, string, error)
 }
+
+// FUSEPoolInventory is a fixed-size snapshot of one pool's state counts.
+// Counts are observations for maintenance and metrics, never authorization
+// for checkout or cleanup; those transitions still compare exact records.
+type FUSEPoolInventory struct {
+	Preparing int64
+	Prepared  int64
+	Reserved  int64
+	Binding   int64
+	Consumed  int64
+	Cleanup   int64
+}
+
+// FUSEPoolInventoryReader avoids traversing resident sandboxes to report
+// pool size or decide whether more prepared shells are needed.
+type FUSEPoolInventoryReader interface {
+	ReadInventory(ctx context.Context, poolKey string) (FUSEPoolInventory, error)
+}
