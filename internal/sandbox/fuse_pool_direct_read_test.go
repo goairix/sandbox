@@ -92,3 +92,20 @@ func TestPoolStateTraversalUsesBoundedPages(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"first", "second"}, ids)
 }
+
+type emptyPagePoolNoList struct {
+	state.FUSEPoolRepository
+}
+
+func (emptyPagePoolNoList) ListByPoolKey(context.Context, string) ([]state.FUSEPoolRecord, error) {
+	return nil, errors.New("whole-pool read is forbidden during stop")
+}
+
+func (emptyPagePoolNoList) ListStatePage(context.Context, string, state.FUSEPoolState, string, int) ([]state.FUSEPoolRecord, string, error) {
+	return nil, "", nil
+}
+
+func TestPoolOwnedStopUsesStatePages(t *testing.T) {
+	pool := NewFUSEPool(newFUSEMockRuntime(), emptyPagePoolNoList{}, fusePoolConfig(), fixedFUSESpec("pool-key"))
+	require.NoError(t, pool.drainOwned(context.Background()))
+}

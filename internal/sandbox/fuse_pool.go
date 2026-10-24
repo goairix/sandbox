@@ -1003,36 +1003,53 @@ func (p *FUSEPool) drainOwned(ctx context.Context) error {
 	if err := p.validate(); err != nil {
 		return err
 	}
-	records, err := p.repo.ListByPoolKey(ctx, p.poolKey)
-	if err != nil {
-		return err
-	}
-	errs := make(chan error, len(records))
+	// Only this owner's preparing and prepared shells are eligible. Bound the
+	// number of cleanup goroutines independently of resident consumed N.
+	const maxConcurrentCleanup = 16
+	sem := make(chan struct{}, maxConcurrentCleanup)
 	var wg sync.WaitGroup
-	for _, record := range records {
+	var result error
+	var resultMu sync.Mutex
+	visit := func(record state.FUSEPoolRecord) error {
 		if record.MaintainerToken != p.config.MaintainerToken || (record.State != state.FUSEPoolPreparing && record.State != state.FUSEPoolPrepared) {
-			continue
+			return nil
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 		wg.Add(1)
 		go func(record state.FUSEPoolRecord) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			disposition, guardErr := p.guard(ctx, record)
+			var cleanupErr error
 			switch disposition {
 			case FUSEPoolPristine, FUSEPoolAbandoned:
-				errs <- p.claimAndDestroy(ctx, record)
+				cleanupErr = p.claimAndDestroy(ctx, record)
 			case FUSEPoolProtected:
-				errs <- errors.Join(ErrFUSEPoolProtected, guardErr)
+				cleanupErr = errors.Join(ErrFUSEPoolProtected, guardErr)
 			default:
-				errs <- errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
+				cleanupErr = errors.Join(ErrFUSEPoolReturnUnproven, guardErr)
+			}
+			if cleanupErr != nil {
+				resultMu.Lock()
+				result = errors.Join(result, cleanupErr)
+				resultMu.Unlock()
 			}
 		}(record)
+		return nil
+	}
+	for _, poolState := range []state.FUSEPoolState{state.FUSEPoolPreparing, state.FUSEPoolPrepared} {
+		if err := forEachFUSEPoolState(ctx, p.repo, p.poolKey, poolState, visit); err != nil {
+			resultMu.Lock()
+			result = errors.Join(result, err)
+			resultMu.Unlock()
+			break
+		}
 	}
 	wg.Wait()
-	close(errs)
-	var result error
-	for err := range errs {
-		result = errors.Join(result, err)
-	}
 	return result
 }
 
