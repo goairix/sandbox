@@ -98,6 +98,35 @@ func (r *FUSEPoolRepository) cleanupDeadlineKey(id string) string {
 	return r.store.prefix + "fusepool/v1/deadline/cleanup/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) stateKey(poolKey, id string, poolState state.FUSEPoolState) string {
+	switch poolState {
+	case state.FUSEPoolPreparing:
+		return r.preparingKey(poolKey, id)
+	case state.FUSEPoolPrepared:
+		return r.preparedKey(poolKey, id)
+	case state.FUSEPoolReserved:
+		return r.reservedKey(poolKey, id)
+	case state.FUSEPoolBinding:
+		return r.bindingKey(poolKey, id)
+	case state.FUSEPoolConsumed:
+		return r.consumedKey(poolKey, id)
+	case state.FUSEPoolCleanup:
+		return r.cleanupKey(poolKey, id)
+	default:
+		return ""
+	}
+}
+
+func validPoolState(poolState state.FUSEPoolState) bool {
+	switch poolState {
+	case state.FUSEPoolPreparing, state.FUSEPoolPrepared, state.FUSEPoolReserved,
+		state.FUSEPoolBinding, state.FUSEPoolConsumed, state.FUSEPoolCleanup:
+		return true
+	default:
+		return false
+	}
+}
+
 func decodePoolMetadata(raw []byte, poolKey string) (poolMetadata, error) {
 	var metadata poolMetadata
 	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 ||

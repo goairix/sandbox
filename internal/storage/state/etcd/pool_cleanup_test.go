@@ -236,3 +236,137 @@ func TestPoolDeleteCleanupLostReplyDoesNotDecrementTwice(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, metadata.Total)
 }
+
+func TestPoolClaimUnboundPreparingThenAttachExactRuntimeEvidence(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	claimed, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolPreparing,
+		"maintainer", "", 1, "", "", "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanup, claimed.State)
+	require.Empty(t, claimed.RuntimeID)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
+
+	attached, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolCleanup,
+		"maintainer", "", claimed.Revision, "runtime", "uid", "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, claimed.Revision+1, attached.Revision)
+	require.Equal(t, "uid", attached.RuntimeUID)
+	owner, err := s.client.Get(ctx, repository.uidOwnerKey("uid"))
+	require.NoError(t, err)
+	require.Len(t, owner.Kvs, 1)
+	require.Equal(t, "preparation", string(owner.Kvs[0].Value))
+}
+
+func TestPoolClaimPreparedReleasesOnlyAvailableCount(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	prepared, err := repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	claimed, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolPrepared,
+		"maintainer", "", prepared.Revision, "runtime", "uid", "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanup, claimed.State)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestPoolExpiredUnboundCleanupCanBeTakenOverWithRuntimeEvidence(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	first, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolPreparing,
+		"maintainer", "", 1, "", "", "cleanup-a", time.Second)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		read, err := s.client.Get(ctx, repository.cleanupDeadlineKey("preparation"))
+		return err == nil && len(read.Kvs) == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	second, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolCleanup,
+		"maintainer", "", first.Revision, "runtime", "uid", "cleanup-b", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "cleanup-b", second.CleanupToken)
+	require.Equal(t, "uid", second.RuntimeUID)
+	owner, err := s.client.Get(ctx, repository.uidOwnerKey("uid"))
+	require.NoError(t, err)
+	require.Equal(t, "preparation", string(owner.Kvs[0].Value))
+}
+
+func TestPoolDeleteUnboundCleanupAfterNoRuntimeIsFound(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	claimed, err := repository.ClaimCleanup(ctx, "preparation", state.FUSEPoolPreparing,
+		"maintainer", "", 1, "", "", "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	deleted, err := repository.DeleteCleanup(ctx, "preparation", "cleanup", claimed.Revision)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	read, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.NoError(t, err)
+	require.Nil(t, read)
+}
+
+func TestPoolClaimReservedAndBindingAfterReservationLeaseExpires(t *testing.T) {
+	for _, targetState := range []state.FUSEPoolState{state.FUSEPoolReserved, state.FUSEPoolBinding} {
+		t.Run(string(targetState), func(t *testing.T) {
+			s := testStore(t)
+			repository := NewFUSEPoolRepository(s)
+			ctx := context.Background()
+			won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+			require.NoError(t, err)
+			require.True(t, won)
+			require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+				preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+			_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+			require.NoError(t, err)
+			_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+			require.NoError(t, err)
+			current, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Second)
+			require.NoError(t, err)
+			if targetState == state.FUSEPoolBinding {
+				current, err = repository.Transition(ctx, "preparation", state.FUSEPoolReserved,
+					state.FUSEPoolBinding, "reservation", current.Revision)
+				require.NoError(t, err)
+			}
+			require.Eventually(t, func() bool {
+				read, err := s.client.Get(ctx, repository.reservationDeadlineKey("preparation"))
+				return err == nil && len(read.Kvs) == 0
+			}, 4*time.Second, 50*time.Millisecond)
+			claimed, err := repository.ClaimCleanup(ctx, "preparation", targetState,
+				"maintainer", "reservation", current.Revision, "runtime", "uid", "cleanup", 5*time.Second)
+			require.NoError(t, err)
+			require.Equal(t, state.FUSEPoolCleanup, claimed.State)
+			owner, err := s.client.Get(ctx, repository.uidOwnerKey("uid"))
+			require.NoError(t, err)
+			require.Equal(t, "preparation", string(owner.Kvs[0].Value))
+		})
+	}
+}

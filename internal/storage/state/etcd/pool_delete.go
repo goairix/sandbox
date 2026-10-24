@@ -34,7 +34,7 @@ func (r *FUSEPoolRepository) DeleteCleanup(ctx context.Context, id, token string
 	if err != nil {
 		return false, err
 	}
-	if record.State != state.FUSEPoolCleanup || !validPoolID(record.RuntimeUID) {
+	if record.State != state.FUSEPoolCleanup {
 		return false, state.ErrFUSEPoolConflict
 	}
 	if record.Revision != expectedRevision {
@@ -72,22 +72,25 @@ func (r *FUSEPoolRepository) DeleteCleanup(ctx context.Context, id, token string
 		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
 		clientv3.Compare(clientv3.ModRevision(metaKey), "=", metaRead.Kvs[0].ModRevision),
 		clientv3.Compare(clientv3.Value(r.cleanupKey(record.PoolKey, id)), "=", id),
-		clientv3.Compare(clientv3.Value(r.uidOwnerKey(record.RuntimeUID)), "=", id),
 		clientv3.Compare(clientv3.Version(r.preparingKey(record.PoolKey, id)), "=", 0),
 		clientv3.Compare(clientv3.Version(r.preparedKey(record.PoolKey, id)), "=", 0),
 		clientv3.Compare(clientv3.Version(r.reservedKey(record.PoolKey, id)), "=", 0),
 		clientv3.Compare(clientv3.Version(r.bindingKey(record.PoolKey, id)), "=", 0),
 		clientv3.Compare(clientv3.Version(r.consumedKey(record.PoolKey, id)), "=", 0),
 	}
-	written, err := r.store.client.Txn(requestCtx).
-		If(conditions...).
-		Then(clientv3.OpPut(metaKey, string(encodedMetadata)),
-			clientv3.OpDelete(recordKey),
-			clientv3.OpDelete(r.cleanupKey(record.PoolKey, id)),
-			clientv3.OpDelete(r.uidOwnerKey(record.RuntimeUID)),
-			clientv3.OpDelete(r.cleanupDeadlineKey(id)),
-			clientv3.OpDelete(r.prepareDeadlineKey(id)),
-			clientv3.OpDelete(r.reservationDeadlineKey(id))).Commit()
+	operations := []clientv3.Op{
+		clientv3.OpPut(metaKey, string(encodedMetadata)),
+		clientv3.OpDelete(recordKey),
+		clientv3.OpDelete(r.cleanupKey(record.PoolKey, id)),
+		clientv3.OpDelete(r.cleanupDeadlineKey(id)),
+		clientv3.OpDelete(r.prepareDeadlineKey(id)),
+		clientv3.OpDelete(r.reservationDeadlineKey(id)),
+	}
+	if record.RuntimeUID != "" {
+		conditions = append(conditions, clientv3.Compare(clientv3.Value(r.uidOwnerKey(record.RuntimeUID)), "=", id))
+		operations = append(operations, clientv3.OpDelete(r.uidOwnerKey(record.RuntimeUID)))
+	}
+	written, err := r.store.client.Txn(requestCtx).If(conditions...).Then(operations...).Commit()
 	if err != nil {
 		return false, err
 	}
