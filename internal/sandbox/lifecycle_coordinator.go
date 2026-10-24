@@ -20,6 +20,9 @@ const (
 	activeLifecycleScanInterval    = 5 * time.Second
 	activeLifecycleScanPageSize    = 128
 	activePublishingRecoveryGrace  = time.Minute
+	// Wakeups are an optimization for local destroys, not a durable queue.
+	// Overflow is recovered by the existing periodic scan.
+	activeCleanupWakeQueueSize = 256
 )
 
 // activeController is a generation-fenced capability. Every lifecycle side
@@ -237,10 +240,24 @@ func (m *Manager) runActiveLifecycleCoordinator() {
 			// independently, so a transient scan failure does not interrupt them.
 			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)
 			timer.Reset(activeLifecycleScanInterval + lifecycleScanDelay(m.config.InstanceID))
-		case <-m.cleanupWake:
-			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)
+		case id := <-m.cleanupWake:
+			if err := m.reconcileActiveLifecycleID(m.controlCtx, id); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Warn(m.controlCtx, "scheduled sandbox lifecycle reconciliation deferred",
+					logger.AddField("sandbox_id", id), logger.ErrorField(err))
+			}
 		}
 	}
+}
+
+// A request already supplied the durable sandbox ID. Load and reconcile only
+// that record; the periodic scan remains the fallback for a full wake queue,
+// another replica's writes, process restarts, and lost notifications.
+func (m *Manager) reconcileActiveLifecycleID(ctx context.Context, id string) error {
+	record, err := m.activeSandboxes.Load(ctx, id)
+	if err != nil || record == nil {
+		return err
+	}
+	return m.reconcileActiveLifecycle(ctx, record)
 }
 
 func lifecycleScanDelay(instanceID string) time.Duration {

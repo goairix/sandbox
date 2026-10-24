@@ -31,8 +31,10 @@ func (m *Manager) ScheduleDestroy(ctx context.Context, id string) error {
 		return state.ErrActiveSandboxConflict
 	}
 	select {
-	case m.cleanupWake <- struct{}{}:
+	case m.cleanupWake <- id:
 	default:
+		// The bounded queue avoids request-path backpressure. The durable
+		// record remains discoverable by the periodic recovery scan.
 	}
 	return nil
 }

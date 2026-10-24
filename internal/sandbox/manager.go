@@ -207,7 +207,7 @@ type Manager struct {
 	stopping      bool
 	controlCtx    context.Context
 	cancelControl context.CancelFunc
-	cleanupWake   chan struct{}
+	cleanupWake   chan string
 }
 
 // NewManager creates a new SandboxManager.
@@ -235,7 +235,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		shutdownDone:    make(chan struct{}),
 		controlCtx:      controlCtx,
 		cancelControl:   cancelControl,
-		cleanupWake:     make(chan struct{}, 1),
+		cleanupWake:     make(chan string, activeCleanupWakeQueueSize),
 	}
 	if m.fusePool != nil {
 		m.fusePool.config.PristineGuard = m.guardFUSEPoolRecord
