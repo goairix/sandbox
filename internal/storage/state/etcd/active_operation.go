@@ -1,6 +1,7 @@
 package etcd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -282,6 +283,36 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 // the phase changes, no new BeginOperation transaction can pass its revision
 // comparison, so the count can only fall while cleanup waits for drain.
 func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (*state.ActiveSandboxRecord, int64, bool, error) {
+	return r.beginDestroy(ctx, id, nil)
+}
+
+// BeginDestroyExpected closes admission only if the inspected lifecycle and
+// opaque snapshot still match. The comparison is repeated after every failed
+// CAS, so a concurrent update cannot silently turn this into an unconditional
+// destroy of a newer workspace owner.
+func (r *ActiveSandboxRepository) BeginDestroyExpected(ctx context.Context, expected state.ActiveSandboxRecord) (*state.ActiveSandboxRecord, error) {
+	if expected.Validate() != nil || !validActiveID(expected.SandboxID) || !json.Valid(expected.Snapshot) {
+		return nil, state.ErrActiveSandboxCorrupt
+	}
+	record, _, _, err := r.beginDestroy(ctx, expected.SandboxID, &expected)
+	return record, err
+}
+
+// Compare the owner-bearing fields and the opaque JSON snapshot without
+// treating insignificant JSON whitespace as a lifecycle change.
+func sameExpectedActiveRecord(current, expected state.ActiveSandboxRecord) bool {
+	if current.Revision != expected.Revision || current.Generation != expected.Generation ||
+		current.RuntimeID != expected.RuntimeID || current.RuntimeUID != expected.RuntimeUID || current.Phase != expected.Phase {
+		return false
+	}
+	var currentSnapshot, expectedSnapshot bytes.Buffer
+	if json.Compact(&currentSnapshot, current.Snapshot) != nil || json.Compact(&expectedSnapshot, expected.Snapshot) != nil {
+		return false
+	}
+	return bytes.Equal(currentSnapshot.Bytes(), expectedSnapshot.Bytes())
+}
+
+func (r *ActiveSandboxRepository) beginDestroy(ctx context.Context, id string, expected *state.ActiveSandboxRecord) (*state.ActiveSandboxRecord, int64, bool, error) {
 	if !validActiveID(id) {
 		return nil, 0, false, state.ErrActiveSandboxCorrupt
 	}
@@ -296,6 +327,9 @@ func (r *ActiveSandboxRepository) BeginDestroy(ctx context.Context, id string) (
 		envelope, err := decodeActiveEnvelope(read.Kvs[0].Value, id)
 		if err != nil {
 			return nil, 0, false, err
+		}
+		if expected != nil && !sameExpectedActiveRecord(envelope.Record, *expected) {
+			return nil, 0, false, state.ErrActiveSandboxConflict
 		}
 		recordRevision := read.Kvs[0].ModRevision
 		won := false
