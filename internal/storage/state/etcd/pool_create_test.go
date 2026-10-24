@@ -414,3 +414,62 @@ func TestPoolReturnPreparedClearsReservationAtomically(t *testing.T) {
 	_, err = repository.ReturnPreparedWithAdmission(ctx, "preparation", "reservation", reserved.Revision, 1)
 	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
 }
+
+func TestPoolCheckoutFencesReservationThenAllowsBoundCompletion(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	reserved, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Second)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolReserved, state.FUSEPoolBinding, "wrong", reserved.Revision)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	binding, err := repository.Transition(ctx, "preparation", state.FUSEPoolReserved, state.FUSEPoolBinding, "reservation", reserved.Revision)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolBinding, binding.State)
+	require.Equal(t, reserved.Revision+1, binding.Revision)
+	require.Eventually(t, func() bool {
+		read, err := s.client.Get(ctx, repository.reservationDeadlineKey("preparation"))
+		return err == nil && len(read.Kvs) == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	consumed, err := repository.Transition(ctx, "preparation", state.FUSEPoolBinding, state.FUSEPoolConsumed, "reservation", binding.Revision)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolConsumed, consumed.State)
+	require.Equal(t, binding.Revision+1, consumed.Revision)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolBinding, state.FUSEPoolConsumed, "reservation", binding.Revision)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+}
+
+func TestPoolExpiredReservationCannotBeginCheckout(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	reserved, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Second)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		read, err := s.client.Get(ctx, repository.reservationDeadlineKey("preparation"))
+		return err == nil && len(read.Kvs) == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolReserved, state.FUSEPoolBinding, "reservation", reserved.Revision)
+	require.ErrorIs(t, err, state.ErrFUSEPoolInvalidTransition)
+	stored, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolReserved, stored.State)
+}

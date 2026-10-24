@@ -82,6 +82,14 @@ func (r *FUSEPoolRepository) reservedKey(poolKey, id string) string {
 	return r.poolBase(poolKey) + "state/reserved/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) bindingKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "state/binding/" + poolDigest(id)
+}
+
+func (r *FUSEPoolRepository) consumedKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "state/consumed/" + poolDigest(id)
+}
+
 func decodePoolMetadata(raw []byte, poolKey string) (poolMetadata, error) {
 	var metadata poolMetadata
 	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 ||

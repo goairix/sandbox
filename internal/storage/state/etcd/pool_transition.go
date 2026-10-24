@@ -9,13 +9,17 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// Transition currently publishes only the preparing→prepared production edge.
-// Later edges must add their reservation lease and counter changes before they
-// are admitted; unsupported transitions fail explicitly without a partial
-// record update.
+// Transition publishes the preparation and checkout edges implemented here.
+// Unsupported edges fail explicitly without a partial record update.
 func (r *FUSEPoolRepository) Transition(ctx context.Context, id string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
-	if r == nil || r.store == nil || !validPoolID(id) || !validPoolID(token) || expectedRevision == 0 ||
-		from != state.FUSEPoolPreparing || to != state.FUSEPoolPrepared {
+	if r == nil || r.store == nil || !validPoolID(id) || !validPoolID(token) || expectedRevision == 0 {
+		return nil, state.ErrFUSEPoolInvalidTransition
+	}
+	if (from == state.FUSEPoolReserved && to == state.FUSEPoolBinding) ||
+		(from == state.FUSEPoolBinding && to == state.FUSEPoolConsumed) {
+		return r.transitionCheckout(ctx, id, from, to, token, expectedRevision)
+	}
+	if from != state.FUSEPoolPreparing || to != state.FUSEPoolPrepared {
 		return nil, state.ErrFUSEPoolInvalidTransition
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
