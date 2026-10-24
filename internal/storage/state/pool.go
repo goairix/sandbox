@@ -30,6 +30,8 @@ var (
 	ErrFUSEPoolInvalidTransition = errors.New("invalid fuse pool state transition")
 	ErrFUSEPoolInvalidRecord     = errors.New("invalid fuse pool record")
 	ErrFUSEPoolCorrupt           = errors.New("corrupt fuse pool state")
+	ErrFUSEPoolUnboundedRead     = errors.New("unbounded fuse pool read is unsupported")
+	ErrFUSEPoolNoServerTime      = errors.New("fuse pool server time is unavailable")
 )
 
 type FUSEPoolTerminationEvidence struct {

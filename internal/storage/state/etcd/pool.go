@@ -20,6 +20,8 @@ type FUSEPoolRepository struct {
 	store *Store
 }
 
+var _ state.FUSEPoolRepository = (*FUSEPoolRepository)(nil)
+
 // poolMetadata is the fixed-size per-PoolKey inventory aggregate. Its six
 // state counts sum to Total and move with each record/index transaction. A
 // fresh namespace starts with this format; an incomplete aggregate fails
@@ -87,6 +89,10 @@ func (r *FUSEPoolRepository) poolBase(poolKey string) string {
 
 func (r *FUSEPoolRepository) metadataKey(poolKey string) string {
 	return r.poolBase(poolKey) + "meta"
+}
+
+func (r *FUSEPoolRepository) directoryKey(poolKey string) string {
+	return r.store.prefix + "fusepool/v1/pool-index/" + poolDigest(poolKey)
 }
 
 func (r *FUSEPoolRepository) refillKey(poolKey string) string {
@@ -196,14 +202,40 @@ func (r *FUSEPoolRepository) TryRefillLock(ctx context.Context, poolKey, token s
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
+	directoryKey := r.directoryKey(poolKey)
+	read, err := r.store.client.Txn(requestCtx).
+		Then(clientv3.OpGet(directoryKey), clientv3.OpGet(r.metadataKey(poolKey))).Commit()
+	if err != nil {
+		return false, err
+	}
+	if len(read.Responses) != 2 || read.Responses[0].GetResponseRange() == nil ||
+		read.Responses[1].GetResponseRange() == nil {
+		return false, state.ErrFUSEPoolCorrupt
+	}
+	directory := read.Responses[0].GetResponseRange().Kvs
+	metadata := read.Responses[1].GetResponseRange().Kvs
+	conditions := []clientv3.Cmp{clientv3.Compare(clientv3.Version(r.refillKey(poolKey)), "=", 0)}
+	operations := make([]clientv3.Op, 0, 2)
+	if len(directory) == 0 {
+		if len(metadata) != 0 {
+			return false, state.ErrFUSEPoolCorrupt
+		}
+		conditions = append(conditions, clientv3.Compare(clientv3.Version(directoryKey), "=", 0))
+		operations = append(operations, clientv3.OpPut(directoryKey, poolKey))
+	} else {
+		if len(directory) != 1 || string(directory[0].Value) != poolKey {
+			return false, state.ErrFUSEPoolCorrupt
+		}
+		conditions = append(conditions, clientv3.Compare(clientv3.Value(directoryKey), "=", poolKey))
+	}
 	lease, err := r.store.leaseFor(requestCtx, ttl)
 	if err != nil {
 		return false, err
 	}
 	key := r.refillKey(poolKey)
+	operations = append(operations, clientv3.OpPut(key, token, clientv3.WithLease(lease)))
 	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.Version(key), "=", 0)).
-		Then(clientv3.OpPut(key, token, clientv3.WithLease(lease))).Commit()
+		If(conditions...).Then(operations...).Commit()
 	if err != nil {
 		return false, err
 	}
@@ -402,16 +434,25 @@ func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, r
 	recordKey := r.recordKey(record.PreparationID)
 	indexKey := r.preparingKey(record.PoolKey, record.PreparationID)
 	deadlineKey := r.prepareDeadlineKey(record.PreparationID)
+	directoryKey := r.directoryKey(record.PoolKey)
+	conditions := []clientv3.Cmp{
+		metaCompare,
+		clientv3.Compare(clientv3.Value(lockKey), "=", refillToken),
+		clientv3.Compare(clientv3.Version(recordKey), "=", 0),
+		clientv3.Compare(clientv3.Version(indexKey), "=", 0),
+		clientv3.Compare(clientv3.Version(deadlineKey), "=", 0),
+	}
+	operations := []clientv3.Op{
+		clientv3.OpPut(metaKey, string(encodedMetadata)),
+		clientv3.OpPut(recordKey, string(encodedRecord)),
+		clientv3.OpPut(indexKey, record.PreparationID),
+		clientv3.OpPut(deadlineKey, record.PreparationID, clientv3.WithLease(lease)),
+	}
+	// The refill holder created the permanent pool directory before any
+	// record existed. A release-wide drain can find even a lock with no shell.
+	conditions = append(conditions, clientv3.Compare(clientv3.Value(directoryKey), "=", record.PoolKey))
 	written, err := r.store.client.Txn(requestCtx).
-		If(metaCompare,
-			clientv3.Compare(clientv3.Value(lockKey), "=", refillToken),
-			clientv3.Compare(clientv3.Version(recordKey), "=", 0),
-			clientv3.Compare(clientv3.Version(indexKey), "=", 0),
-			clientv3.Compare(clientv3.Version(deadlineKey), "=", 0)).
-		Then(clientv3.OpPut(metaKey, string(encodedMetadata)),
-			clientv3.OpPut(recordKey, string(encodedRecord)),
-			clientv3.OpPut(indexKey, record.PreparationID),
-			clientv3.OpPut(deadlineKey, record.PreparationID, clientv3.WithLease(lease))).
+		If(conditions...).Then(operations...).
 		Else(clientv3.OpGet(lockKey), clientv3.OpGet(metaKey), clientv3.OpGet(recordKey)).Commit()
 	if err != nil {
 		return err
