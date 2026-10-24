@@ -239,10 +239,9 @@ func (r *FUSEPoolRepository) ReadByPreparationID(ctx context.Context, id string)
 	if err != nil || len(read.Kvs) == 0 {
 		return nil, err
 	}
-	var record state.FUSEPoolRecord
-	if json.Unmarshal(read.Kvs[0].Value, &record) != nil || record.PreparationID != id ||
-		!validPoolID(record.PoolKey) || record.Revision == 0 {
-		return nil, state.ErrFUSEPoolCorrupt
+	record, err := decodePoolRecord(read.Kvs[0].Value, id)
+	if err != nil {
+		return nil, err
 	}
 	return &record, nil
 }

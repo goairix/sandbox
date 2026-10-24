@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -472,4 +473,27 @@ func TestPoolExpiredReservationCannotBeginCheckout(t *testing.T) {
 	stored, err := repository.ReadByPreparationID(ctx, "preparation")
 	require.NoError(t, err)
 	require.Equal(t, state.FUSEPoolReserved, stored.State)
+}
+
+func TestPoolExactReadRejectsCorruptPreparedRuntime(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	prepared, err := repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	prepared.RuntimeID = ""
+	raw, err := json.Marshal(prepared)
+	require.NoError(t, err)
+	_, err = s.client.Put(ctx, repository.recordKey("preparation"), string(raw))
+	require.NoError(t, err)
+	read, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.Nil(t, read)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 }
