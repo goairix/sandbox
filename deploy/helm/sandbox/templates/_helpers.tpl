@@ -9,7 +9,10 @@
 {{- define "sandbox.metadataPrefix" -}}goairix.github.io{{- end -}}
 
 {{- define "sandbox.backend.profile" -}}
-{{- if eq .Values.config.storage.filesystem.preset "minio" -}}minio-sigv4-path-style-v1
+{{- if eq .Values.config.storage.filesystem.preset "minio" -}}
+{{- if .Values.config.storage.filesystem.useSSL -}}minio-sigv4-path-style-v1
+{{- else -}}minio-sigv4-path-style-private-http-v1
+{{- end -}}
 {{- else if eq .Values.config.storage.filesystem.preset "huawei-obs-public" -}}huawei-obs-public-v1
 {{- else if eq .Values.config.storage.filesystem.preset "huawei-obs-private" -}}huawei-obs-private-2023-v1
 {{- else -}}{{ fail (printf "unsupported config.storage.filesystem.preset %q" .Values.config.storage.filesystem.preset) }}
