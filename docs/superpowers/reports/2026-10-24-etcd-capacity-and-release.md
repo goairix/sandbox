@@ -102,4 +102,41 @@ etcd 服务采用集群内明文、无账号模式，并以同命名空间 ingre
 删除 etcd-2 Pod 并等待 StatefulSet 重建；etcd-2 在原 worker3 上从其原卷读回同一键，
 随后删除该探针键。这只证明单成员 Pod 重建与三成员基本读写，
 **不证明**节点故障恢复、备份恢复、持续吞吐量或 10 万存活沙盒容量。
-MinIO 和 API Deployment 尚未安装，发布切换未完成。
+MinIO 和 API Deployment 在该状态层检查时尚未安装，发布切换未完成。
+
+## 正确 DS 集群的对象存储与 API 首次启动
+
+在同一新命名空间独立创建测试 MinIO：镜像为此前固定源码版本构建的
+`sandbox-fuse-etcd-minio:v1-9e49d5e7-arm64`，其内部仓库 arm64 manifest digest 为
+`sha256:e03aba1afec13d5f8676d4e68f962121f793d5dd004ca3c97f239cc23fb73d21`。
+部署输入 `.superpowers/sdd/2026-10-24-etcd-state-replacement/ds-minio.yaml`
+SHA-256 为 `d823ea2c27536f26cb712cb5ad2c1c8f1f8202c96cf9d9f67bd01296dd2f33c4`；
+它使用 worker4 的独立 Retain PV、单副本、同命名空间 ingress 策略，
+并以 Kubernetes Secret 提供本次随机生成的测试凭据。Deployment 为 1/1，
+经本地端口转发检查 `/minio/health/ready` 为 200。这是测试对象存储，
+没有执行 S3 数据或持久化故障恢复验收。
+
+首次 Helm 安装的 API 镜像虽为 Linux ELF，却把仓库的 Redis 示例
+`configs/config.yaml` 打包进了容器。API 按预期拒绝 Redis 与 etcd 同时配置，
+因此该首次启动失败；不得把 Helm 安装的资源创建当作服务就绪。
+提交 `ba30229` 改为专用 `docker/config.etcd.yaml`，只声明 etcd backend，
+由 Helm 环境提供实际端点、运行时和 Secret。修复镜像标签是
+`sandbox-fuse-etcd-api:v1-reset-ba30229-arm64`，registry digest
+`sha256:5a3fe325a4c676746dba2e0d5b8f5917d6c5c7ff21432f1a3dd1f10d225aa89d`。
+
+渲染检查还发现旧 Chart 把对象存储 AK/SK 直接写成 Deployment 环境值；
+第一组测试凭据曾进入检查输出和 Helm revision 1。立即轮换 MinIO 测试凭据、
+重启 MinIO，并以提交 `5ac0f58` 增加 Secret 引用及禁止与明文值混用的模板校验。
+删除含旧值的本地渲染文件和已废弃的 Helm revision 1 Secret；当前 revision 2
+的 API 环境只含 `ds-minio-client` 的 `secretKeyRef`，未写明文凭据。
+`ds-ai-research.yaml` kubeconfig 和本地新凭据文件权限均已收紧为 0600。
+
+Helm overlay `.superpowers/sdd/2026-10-24-etcd-state-replacement/ds-api-values.yaml`
+SHA-256 为 `755ef4252d2fe375c7810cbdfebf4cd4f80d70dff6c2394e4712943a4ef8d9fc`。
+当前正确 DS 上 Helm release `sandbox` 为 revision 2、`deployed`；
+API 1/1，etcd 3/3，MinIO 1/1。经端口转发，`GET /ready` 和 `/health` 均为 200，
+未认证的沙盒查询为 401，带测试 API key 查询不存在的沙盒为 404。
+Helm 配置使用 etcd 三 endpoint、独立 `/sandbox/ds-reset/` 前缀、无认证连接，
+普通池最小值 0、仅启用 sync mount，渲染检查没有 Redis 资源。
+这仅是 Kubernetes 内服务启动与只读 HTTP 烟测；**尚未**实际创建或销毁沙盒、
+完成自然 TTL 退款、启用 FUSE、验证大量存活 N 或进行生产容量验收。
