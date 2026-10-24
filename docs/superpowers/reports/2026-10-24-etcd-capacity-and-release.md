@@ -381,3 +381,13 @@ NetworkPolicy 均为空；验证脚本 SHA-256 为
 `0e04b72cc0e8bdd06bda1686793a2c33847aa1d37e06e6f8cf6186cc29d2e599`。
 这些是新索引版本的单次业务正例，**不证明**高并发、10 万存量、同时
 大量到期、三成员压力故障、配额流水或 FUSE 物理清理。
+
+同一 revision 13 下，另一条 600 秒普通沙盒
+`sandbox-pcc7b935vz` 存活时重建 etcd-2 Pod，其 UID 从
+`2f7933eb-546a-4a07-ab2d-20ac70b5847b` 变为
+`585a5292-b419-49b1-aca6-79553ecd2499`。成员重新 Ready 后公开
+GET、Python Exec、DELETE 均返回 200；etcd 3/3 Ready，受管 Pod 与
+NetworkPolicy 为空。验证脚本 SHA-256 为
+`accce55800755ba839bd8f6cc4e6ba6522dd6d1d05ef52cb82a4e7065e479ef6`。
+这只覆盖单成员重建时的一条活跃记录，不覆盖三成员负载、节点掉线、
+长时间分区或大量同时到期。
