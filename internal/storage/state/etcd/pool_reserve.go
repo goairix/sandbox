@@ -87,7 +87,9 @@ func (r *FUSEPoolRepository) ReservePrepared(ctx context.Context, poolKey, token
 		if len(owner.Kvs) != 1 || string(owner.Kvs[0].Value) != id {
 			return nil, state.ErrFUSEPoolCorrupt
 		}
-		metadata.Prepared--
+		if err := metadata.moveState(state.FUSEPoolPrepared, state.FUSEPoolReserved); err != nil {
+			return nil, err
+		}
 		encodedMetadata, err := json.Marshal(metadata)
 		if err != nil {
 			return nil, err

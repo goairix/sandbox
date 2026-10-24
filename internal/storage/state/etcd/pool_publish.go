@@ -61,12 +61,11 @@ func (r *FUSEPoolRepository) transitionPreparing(ctx context.Context, id string,
 		return nil, state.ErrFUSEPoolCorrupt
 	}
 	metadata, err := decodePoolMetadata(metaRead.Kvs[0].Value, record.PoolKey)
-	if err != nil || metadata.Preparing == 0 {
+	if err != nil {
 		return nil, state.ErrFUSEPoolCorrupt
 	}
-	metadata.Preparing--
-	if to == state.FUSEPoolPrepared {
-		metadata.Prepared++
+	if err := metadata.moveState(state.FUSEPoolPreparing, to); err != nil {
+		return nil, err
 	}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {

@@ -20,12 +20,51 @@ type FUSEPoolRepository struct {
 	store *Store
 }
 
+// poolMetadata is the fixed-size per-PoolKey inventory aggregate. Its six
+// state counts sum to Total and move with each record/index transaction. A
+// fresh namespace starts with this format; an incomplete aggregate fails
+// closed instead of reporting a misleading resident count.
 type poolMetadata struct {
 	PoolKey    string `json:"pool_key"`
 	Generation uint64 `json:"generation"`
 	Total      uint64 `json:"total"`
 	Preparing  uint64 `json:"preparing"`
 	Prepared   uint64 `json:"prepared"`
+	Reserved   uint64 `json:"reserved"`
+	Binding    uint64 `json:"binding"`
+	Consumed   uint64 `json:"consumed"`
+	Cleanup    uint64 `json:"cleanup"`
+}
+
+// stateCount points only into the fixed-size per-pool aggregate. Every
+// transition changes its source and destination under the record/index CAS.
+func (m *poolMetadata) stateCount(poolState state.FUSEPoolState) *uint64 {
+	switch poolState {
+	case state.FUSEPoolPreparing:
+		return &m.Preparing
+	case state.FUSEPoolPrepared:
+		return &m.Prepared
+	case state.FUSEPoolReserved:
+		return &m.Reserved
+	case state.FUSEPoolBinding:
+		return &m.Binding
+	case state.FUSEPoolConsumed:
+		return &m.Consumed
+	case state.FUSEPoolCleanup:
+		return &m.Cleanup
+	default:
+		return nil
+	}
+}
+
+func (m *poolMetadata) moveState(from, to state.FUSEPoolState) error {
+	source, destination := m.stateCount(from), m.stateCount(to)
+	if source == nil || destination == nil || source == destination || *source == 0 || *destination == ^uint64(0) {
+		return state.ErrFUSEPoolCorrupt
+	}
+	*source = *source - 1
+	*destination = *destination + 1
+	return nil
 }
 
 // NewFUSEPoolRepository binds pool state to the Store's isolated namespace.
@@ -129,10 +168,18 @@ func validPoolState(poolState state.FUSEPoolState) bool {
 
 func decodePoolMetadata(raw []byte, poolKey string) (poolMetadata, error) {
 	var metadata poolMetadata
-	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 ||
-		metadata.Total < metadata.Preparing || metadata.Total < metadata.Prepared ||
-		metadata.Preparing+metadata.Prepared < metadata.Preparing ||
-		metadata.Preparing+metadata.Prepared > metadata.Total {
+	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 {
+		return poolMetadata{}, state.ErrFUSEPoolCorrupt
+	}
+	remaining := metadata.Total
+	for _, count := range []uint64{metadata.Preparing, metadata.Prepared, metadata.Reserved,
+		metadata.Binding, metadata.Consumed, metadata.Cleanup} {
+		if count > remaining {
+			return poolMetadata{}, state.ErrFUSEPoolCorrupt
+		}
+		remaining -= count
+	}
+	if remaining != 0 {
 		return poolMetadata{}, state.ErrFUSEPoolCorrupt
 	}
 	return metadata, nil

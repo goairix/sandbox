@@ -46,9 +46,29 @@ func (r *FUSEPoolRepository) transitionCheckout(ctx context.Context, id string, 
 		fromKey = toKey
 		toKey = r.consumedKey(record.PoolKey, id)
 	}
+	metaKey := r.metadataKey(record.PoolKey)
+	metaRead, err := r.store.client.Get(requestCtx, metaKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(metaRead.Kvs) != 1 {
+		return nil, state.ErrFUSEPoolCorrupt
+	}
+	metadata, err := decodePoolMetadata(metaRead.Kvs[0].Value, record.PoolKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := metadata.moveState(from, to); err != nil {
+		return nil, err
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
 
 	conditions := []clientv3.Cmp{
 		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
+		clientv3.Compare(clientv3.ModRevision(metaKey), "=", metaRead.Kvs[0].ModRevision),
 		clientv3.Compare(clientv3.Value(fromKey), "=", id),
 		clientv3.Compare(clientv3.Version(toKey), "=", 0),
 		clientv3.Compare(clientv3.Value(r.uidOwnerKey(record.RuntimeUID)), "=", id),
@@ -77,7 +97,8 @@ func (r *FUSEPoolRepository) transitionCheckout(ctx context.Context, id string, 
 	}
 	written, err := r.store.client.Txn(requestCtx).
 		If(conditions...).
-		Then(clientv3.OpPut(recordKey, string(raw)),
+		Then(clientv3.OpPut(metaKey, string(encodedMetadata)),
+			clientv3.OpPut(recordKey, string(raw)),
 			clientv3.OpDelete(fromKey), clientv3.OpPut(toKey, id)).Commit()
 	if err != nil {
 		return nil, err

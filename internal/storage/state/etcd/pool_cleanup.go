@@ -99,37 +99,27 @@ func (r *FUSEPoolRepository) claimFromState(ctx context.Context, recordKey strin
 		operations = append(operations, clientv3.OpPut(r.uidOwnerKey(runtimeUID), record.PreparationID))
 		record.RuntimeID, record.RuntimeUID = runtimeID, runtimeUID
 	}
-	if record.State == state.FUSEPoolPreparing || record.State == state.FUSEPoolPrepared {
-		metaKey := r.metadataKey(record.PoolKey)
-		metaRead, err := r.store.client.Get(ctx, metaKey)
-		if err != nil {
-			return nil, err
-		}
-		if len(metaRead.Kvs) != 1 {
-			return nil, state.ErrFUSEPoolCorrupt
-		}
-		metadata, err := decodePoolMetadata(metaRead.Kvs[0].Value, record.PoolKey)
-		if err != nil {
-			return nil, err
-		}
-		if record.State == state.FUSEPoolPreparing {
-			if metadata.Preparing == 0 {
-				return nil, state.ErrFUSEPoolCorrupt
-			}
-			metadata.Preparing--
-		} else {
-			if metadata.Prepared == 0 {
-				return nil, state.ErrFUSEPoolCorrupt
-			}
-			metadata.Prepared--
-		}
-		encodedMetadata, err := json.Marshal(metadata)
-		if err != nil {
-			return nil, err
-		}
-		conditions = append(conditions, clientv3.Compare(clientv3.ModRevision(metaKey), "=", metaRead.Kvs[0].ModRevision))
-		operations = append(operations, clientv3.OpPut(metaKey, string(encodedMetadata)))
+	metaKey := r.metadataKey(record.PoolKey)
+	metaRead, err := r.store.client.Get(ctx, metaKey)
+	if err != nil {
+		return nil, err
 	}
+	if len(metaRead.Kvs) != 1 {
+		return nil, state.ErrFUSEPoolCorrupt
+	}
+	metadata, err := decodePoolMetadata(metaRead.Kvs[0].Value, record.PoolKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := metadata.moveState(record.State, state.FUSEPoolCleanup); err != nil {
+		return nil, err
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
+	conditions = append(conditions, clientv3.Compare(clientv3.ModRevision(metaKey), "=", metaRead.Kvs[0].ModRevision))
+	operations = append(operations, clientv3.OpPut(metaKey, string(encodedMetadata)))
 	lease, err := r.store.leaseFor(ctx, ttl)
 	if err != nil {
 		return nil, err

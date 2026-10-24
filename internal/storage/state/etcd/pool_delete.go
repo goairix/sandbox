@@ -53,14 +53,12 @@ func (r *FUSEPoolRepository) DeleteCleanup(ctx context.Context, id, token string
 		return false, state.ErrFUSEPoolCorrupt
 	}
 	metadata, err := decodePoolMetadata(metaRead.Kvs[0].Value, record.PoolKey)
-	if err != nil || metadata.Total == 0 || metadata.Generation == ^uint64(0) {
+	if err != nil || metadata.Total == 0 || metadata.Cleanup == 0 || metadata.Generation == ^uint64(0) {
 		return false, state.ErrFUSEPoolCorrupt
 	}
 	metadata.Total--
+	metadata.Cleanup--
 	metadata.Generation++
-	if metadata.Preparing+metadata.Prepared > metadata.Total {
-		return false, state.ErrFUSEPoolCorrupt
-	}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {
 		return false, err

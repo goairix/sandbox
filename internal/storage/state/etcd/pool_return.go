@@ -76,10 +76,9 @@ func (r *FUSEPoolRepository) ReturnPreparedWithAdmission(ctx context.Context, id
 	if metadata.Preparing+metadata.Prepared >= uint64(maxSize) {
 		return nil, state.ErrFUSEPoolConflict
 	}
-	if metadata.Prepared == ^uint64(0) {
-		return nil, state.ErrFUSEPoolCorrupt
+	if err := metadata.moveState(state.FUSEPoolReserved, state.FUSEPoolPrepared); err != nil {
+		return nil, err
 	}
-	metadata.Prepared++
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {
 		return nil, err
