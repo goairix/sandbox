@@ -79,3 +79,64 @@ func TestWorkspaceRequestRealEtcdConcurrencyAcrossReplicas(t *testing.T) {
 	require.Zero(t, rt.removed)
 	rt.mu.Unlock()
 }
+
+func TestWorkspaceOwnerReadAfterEtcdClientRestart(t *testing.T) {
+	endpoint := os.Getenv("TEST_ETCD_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("TEST_ETCD_ENDPOINT is not set")
+	}
+	ctx := context.Background()
+	options := etcdstate.Options{
+		Endpoints: []string{endpoint}, Prefix: "/workspace-restart-test/" + uuid.NewString() + "/",
+		Timeout: 3 * time.Second,
+	}
+	store, err := etcdstate.New(ctx, options)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	repository, err := etcdstate.NewActiveSandboxRepository(store, "workspace-test")
+	require.NoError(t, err)
+	managers, _, _ := distributedSyncManagers(t)
+	for _, manager := range managers[:2] {
+		manager.activeSandboxes = repository
+		manager.config.ActiveSandboxes = repository
+		manager.config.WorkspaceCoordinator = NewWorkspaceCoordinator(store, time.Minute, 10*time.Second)
+		manager.SetSessionStore(NewSessionStore(store, time.Hour))
+		manager.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	}
+	root := "workspace-" + uuid.NewString()
+	require.NoError(t, managers[0].filesystem.MakeDir(ctx, root, 0o755))
+	created, err := managers[0].Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: root})
+	require.NoError(t, err)
+
+	// A new client and a Manager with no local sandbox cache model a new API
+	// replica after restart. Read-only lookup must not mint a fresh owner.
+	reopened, err := etcdstate.New(ctx, options)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	reopenedRepository, err := etcdstate.NewActiveSandboxRepository(reopened, "workspace-test")
+	require.NoError(t, err)
+	peer := managers[2]
+	peer.activeSandboxes = reopenedRepository
+	peer.config.ActiveSandboxes = reopenedRepository
+	peer.config.WorkspaceCoordinator = NewWorkspaceCoordinator(reopened, time.Minute, 10*time.Second)
+	peer.SetSessionStore(NewSessionStore(reopened, time.Hour))
+	peer.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(reopened))
+	require.Empty(t, peer.sandboxes)
+	got, err := peer.GetByWorkspace(ctx, root)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, got.ID)
+	keys, err := workspaceStateKeysFromOwner(created.Workspace.Owner)
+	require.NoError(t, err)
+	ownerBefore, err := store.Get(ctx, keys.owner)
+	require.NoError(t, err)
+	require.NoError(t, store.Delete(ctx, keys.lease))
+	got, err = peer.GetByWorkspace(ctx, root)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, got.ID)
+	ownerAfter, err := reopened.Get(ctx, keys.owner)
+	require.NoError(t, err)
+	require.Equal(t, ownerBefore, ownerAfter)
+	lease, err := reopened.Get(ctx, keys.lease)
+	require.NoError(t, err)
+	require.Nil(t, lease)
+}
