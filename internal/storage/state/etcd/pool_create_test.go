@@ -497,3 +497,51 @@ func TestPoolExactReadRejectsCorruptPreparedRuntime(t *testing.T) {
 	require.Nil(t, read)
 	require.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 }
+
+func TestPoolPublishColdReservationRequiresRefillLock(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.TransitionWithRefillLock(ctx, "preparation", state.FUSEPoolPreparing,
+		state.FUSEPoolReserved, "reservation", "wrong", 2, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	reserved, err := repository.TransitionWithRefillLock(ctx, "preparation", state.FUSEPoolPreparing,
+		state.FUSEPoolReserved, "reservation", "holder", 2, 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolReserved, reserved.State)
+	require.Equal(t, "reservation", reserved.ReservationToken)
+	require.False(t, reserved.ReservedUntil.IsZero())
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
+	deadline, err := s.client.Get(ctx, repository.reservationDeadlineKey("preparation"))
+	require.NoError(t, err)
+	require.Len(t, deadline.Kvs, 1)
+}
+
+func TestPoolPublishPreparedRejectsLostRefillLock(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	require.NoError(t, repository.UnlockRefill(ctx, "shared-pool", "holder"))
+	_, err = repository.TransitionWithRefillLock(ctx, "preparation", state.FUSEPoolPreparing,
+		state.FUSEPoolPrepared, "maintainer", "holder", 2, 0)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	stored, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolPreparing, stored.State)
+}
