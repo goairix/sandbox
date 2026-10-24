@@ -470,6 +470,50 @@ func readFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, pool
 	return nil, nil
 }
 
+// forEachFUSEPoolState bounds etcd maintenance memory to one state page.
+// Redis keeps its original list fallback until production wiring is switched.
+// A record moved behind the cursor during traversal is handled on the next
+// maintenance pass; callers must not treat this as a frozen global snapshot.
+func forEachFUSEPoolState(ctx context.Context, repo state.FUSEPoolRepository, poolKey string, poolState state.FUSEPoolState, visit func(state.FUSEPoolRecord) error) error {
+	if pager, ok := repo.(state.FUSEPoolStatePageReader); ok {
+		cursor := ""
+		for {
+			page, next, err := pager.ListStatePage(ctx, poolKey, poolState, cursor, 64)
+			if err != nil {
+				return err
+			}
+			if len(page) > 64 || (next != "" && (next == cursor || len(page) == 0)) {
+				return state.ErrFUSEPoolCorrupt
+			}
+			for _, record := range page {
+				if record.PoolKey != poolKey || record.State != poolState {
+					return state.ErrFUSEPoolCorrupt
+				}
+				if err := visit(record); err != nil {
+					return err
+				}
+			}
+			if next == "" {
+				return nil
+			}
+			cursor = next
+		}
+	}
+
+	records, err := repo.ListByPoolKey(ctx, poolKey)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.State == poolState {
+			if err := visit(record); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (p *FUSEPool) confirmReturnPreparedTerminal(ctx context.Context, id string, expected *state.FUSEPoolRecord) error {
 	if repo, ok := p.repo.(interface {
 		ConfirmReturnPreparedTerminal(context.Context, string, *state.FUSEPoolRecord) error
@@ -868,25 +912,20 @@ func (p *FUSEPool) Drain(ctx context.Context, poolKey string) error {
 	if poolKey == "" || poolKey != p.poolKey {
 		return ErrFUSEPoolKeyMismatch
 	}
-	records, err := p.repo.ListByPoolKey(ctx, poolKey)
-	if err != nil {
-		return err
-	}
 	var result error
-	for _, record := range records {
-		if record.State == state.FUSEPoolPrepared {
-			disposition, guardErr := p.guard(ctx, record)
-			switch disposition {
-			case FUSEPoolPristine, FUSEPoolAbandoned:
-				result = errors.Join(result, p.claimAndDestroy(ctx, record))
-			case FUSEPoolProtected:
-				result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
-			default:
-				result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
-			}
+	err := forEachFUSEPoolState(ctx, p.repo, poolKey, state.FUSEPoolPrepared, func(record state.FUSEPoolRecord) error {
+		disposition, guardErr := p.guard(ctx, record)
+		switch disposition {
+		case FUSEPoolPristine, FUSEPoolAbandoned:
+			result = errors.Join(result, p.claimAndDestroy(ctx, record))
+		case FUSEPoolProtected:
+			result = errors.Join(result, ErrFUSEPoolProtected, guardErr)
+		default:
+			result = errors.Join(result, ErrFUSEPoolReturnUnproven, guardErr)
 		}
-	}
-	return result
+		return nil
+	})
+	return errors.Join(result, err)
 }
 
 // DrainRelease stops this pool and removes every unprotected record in the

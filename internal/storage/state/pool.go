@@ -84,3 +84,11 @@ type FUSEPoolRepository interface {
 type FUSEPoolRecordReader interface {
 	ReadByPreparationID(ctx context.Context, preparationID string) (*FUSEPoolRecord, error)
 }
+
+// FUSEPoolStatePageReader is an optional bounded maintenance reader. The
+// cursor is opaque to callers and names the last index entry returned. Each
+// page is internally consistent, but mutations between pages require the
+// next maintenance pass to revisit records that moved behind the cursor.
+type FUSEPoolStatePageReader interface {
+	ListStatePage(ctx context.Context, poolKey string, poolState FUSEPoolState, after string, limit int) ([]FUSEPoolRecord, string, error)
+}

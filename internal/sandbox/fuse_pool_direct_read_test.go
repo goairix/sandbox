@@ -62,3 +62,33 @@ func TestExactPoolRecordReadRemainsScopedToPoolKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, record)
 }
+
+type pagePoolReaderNoList struct {
+	exactPoolReaderNoList
+	pages map[string][]state.FUSEPoolRecord
+}
+
+func (r pagePoolReaderNoList) ListStatePage(_ context.Context, _ string, _ state.FUSEPoolState, after string, limit int) ([]state.FUSEPoolRecord, string, error) {
+	if limit != 64 {
+		return nil, "", errors.New("maintenance page size changed")
+	}
+	page := r.pages[after]
+	if after == "" {
+		return page, "next", nil
+	}
+	return page, "", nil
+}
+
+func TestPoolStateTraversalUsesBoundedPages(t *testing.T) {
+	repo := pagePoolReaderNoList{pages: map[string][]state.FUSEPoolRecord{
+		"":     {{PreparationID: "first", PoolKey: "pool", State: state.FUSEPoolPrepared}},
+		"next": {{PreparationID: "second", PoolKey: "pool", State: state.FUSEPoolPrepared}},
+	}}
+	var ids []string
+	err := forEachFUSEPoolState(context.Background(), repo, "pool", state.FUSEPoolPrepared, func(record state.FUSEPoolRecord) error {
+		ids = append(ids, record.PreparationID)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first", "second"}, ids)
+}
