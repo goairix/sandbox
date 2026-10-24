@@ -358,3 +358,26 @@ FUSE TTL 清理正例通过。DS 当前 revision 12 **尚未部署这些新提�
 三成员故障、真实沙盒和集中 TTL 效果、p95/p99、sync/FUSE 大量续租尚未
 测完，因而 **10 万存活沙盒容量门继续保持未通过**。sync/FUSE 的单条
 controller 五秒续租成本仍在；本索引不降低那部分 RPC 量。
+
+## DS 双副本索引版本的单次业务回归
+
+索引版本的 Linux arm64 ELF SHA-256 为
+`52333ed42a579c6ff19471034ded4f5b3252ae48c86e0c245d751e821c043d74`；
+镜像 `sandbox-fuse-etcd-api:v1-reset-6c17a7f-arm64` 的 registry digest 为
+`sha256:8c2d72892c0a05a45c4730a59fd3b8eb70cee30025f307fe1477a469628c6da8`。
+升级前在**明确的** `ds-ai-research` context、`sandbox-fuse-etcd`
+命名空间检查原业务 active 前缀的键数为 0；旧部署为 API 2/2、etcd
+3/3、MinIO 1/1。专用 Helm 值 SHA-256 为
+`7b9ef13767456f6b728687d5c793533330fa8f751d031fcfa642ab8ce2791219`，
+`helm lint` 通过，Helm revision 13 状态 `deployed`，API 2/2，etcd
+3/3，MinIO 1/1。FUSE 仍关闭。
+
+公开一次性 Python 执行返回 200、退出码 0，随后受管 Pod 与
+NetworkPolicy 均为空；验证脚本 SHA-256 为
+`aecf915d1d08c69f5d6419f1adb58c0b5bb32ccffad33ec6938dd4b22b3094cd`。
+另一条 90 秒 TTL 沙盒 `sandbox-u8wzx3lv94` 在两个 API 副本滚动重启后，
+公开 GET 依次返回 200、503、404，受管 Pod 与 NetworkPolicy 清空；
+脚本 SHA-256 为
+`0e04b72cc0e8bdd06bda1686793a2c33847aa1d37e06e6f8cf6186cc29d2e599`。
+这些是新索引版本的单次业务正例，**不证明**高并发、10 万存量、同时
+大量到期、三成员压力故障、配额流水或 FUSE 物理清理。
