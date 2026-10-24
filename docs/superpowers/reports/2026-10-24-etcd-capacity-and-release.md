@@ -40,19 +40,44 @@
 **不证明** Kubernetes 分布式生命周期、实际沙盒创建、FUSE 物理清理、
 配额退款、三成员故障或大量存活沙盒容量。集群安装仍未执行。
 
-## 当前源码的 arm64 发布镜像打包检查
+## arm64 发布镜像纠错与 DS 启动探针
 
-另以共享 Go 缓存编译 `-trimpath` 的 `./cmd/sandbox`，SHA-256 为
+首次以共享 Go 缓存编译 `-trimpath` 的 `./cmd/sandbox`，SHA-256 为
 `cd7818a7f9d7faf712ff0fce620fcd1a2e9179e978fbe65db8fffc67064248d5`。
-将该二进制与 `configs/config.yaml` 单独放入临时构建上下文，使用
+该二进制实际是 **macOS Mach-O arm64**。将其与 `configs/config.yaml` 放入临时构建上下文，使用
 `docker/Dockerfile.prebuilt` 打包，没有在 Docker 内重新下载 Go 工具链或
 模块。镜像 `sandbox-etcd-reset:local-smoke` 的 ID 为
 `sha256:a13b5797d82e7c263e481265b979472d5ab9332d359c4de094e2faacac340cc4`，
 架构为 `linux/arm64`，大小 163,316,128 字节；容器内 `/app/sandbox`
-的 SHA-256 与构建输入完全一致。
+的 SHA-256 与构建输入完全一致。镜像平台标签及内容哈希都未验证可执行文件格式，
+因此该镜像不可运行。错误标签
+`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-reset-33620a9-arm64`
+已推送，但不得部署；它在错误 kubeconfig 下的单个探针 Pod 返回 `exec format error`，
+该 Pod 已删除。该配置的 context 是 `internal`，API 为 `172.16.30.240:5443`；
+不能将它称为 `ds-ai-research`。
 
 首次使用 Docker Hub `alpine:3.22` 时，匿名令牌请求连接被重置，构建失败。
 核验内部镜像仓库的 `library/alpine:3.22` 同时提供 arm64 和 amd64
 清单后，改用该明确基础镜像，完整构建和不带覆盖参数的重复构建均通过。
-这仅验证镜像打包和内容，尚未运行该镜像的 Kubernetes Pod，也未推送
-到发布仓库。
+纠错提交 `5579225` 在镜像构建时检查 Linux ELF 魔数及目标架构的 ELF machine。
+原 Mach-O 输入实际构建失败；用 `CGO_ENABLED=0 GOOS=linux GOARCH=arm64`
+重新编译后，ELF 二进制 SHA-256 为
+`f6e59b7ef5ae8581874e3538573203d3829f3140a6f2d9bec9ce0c70f5dbad39`，
+构建通过且容器中运行 `/app/sandbox --help` 退出 0。新标签
+`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-reset-5579225-arm64`
+的 registry digest 为 `sha256:6e65df74f0a63aaa07bb54adf2d8b07ec1e3a5d7b6d999db47f01721d6cb0e57`。
+
+正确的 DS kubeconfig 为 `var/tmp/k8s-test/ds-ai-research.yaml`，context 为
+`ds-ai-research`，API 是 `https://kube.i.huaxisy.com/k8s/clusters/c-dx2c8`。
+按已授权的全新部署要求，删除其旧 `sandbox-fuse-etcd` 命名空间；仅从已处于
+Succeeded/Failed 且正在删除的旧 Pod 移除阻塞 finalizer，再删除绑定旧 namespace
+且处于 Released/Retain 的 13 个 PV 对象。确认没有 Pod 引用旧宿主目录后，
+仅删除 worker1/2/3 上旧 namespace UID
+`4570b61f-eeaa-420b-94dc-f9e6df620805` 对应的宿主目录。重建 namespace 后 UID 为
+`d6757bda-154f-46c6-bdb1-31f1bcb1eddd`，旧 Helm release 和工作负载均已不存在。
+
+在 **正确 DS** 命名空间运行新镜像的 `--help` 探针，Pod 被调度至
+`ds-ai-worker-1`，镜像成功拉取，进程退出 0；探针 Pod 和对应事件已删除。
+最终仅保留 Kubernetes 自动创建的 `kube-root-ca.crt` ConfigMap、`secret-edge`
+拉取凭据和默认 ServiceAccount。此检查只证明镜像可在 DS arm64 节点启动，
+**没有**安装 etcd、MinIO 或 API Deployment，也没有证明实际沙盒创建和容量。
