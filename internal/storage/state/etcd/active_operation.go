@@ -43,6 +43,7 @@ func workspaceTransition(snapshot json.RawMessage) (bool, error) {
 // etcd has removed its leased holder. A persisted workspace transition keeps
 // admission closed so cleanup can inspect the incomplete physical effect.
 func (r *ActiveSandboxRepository) recoverAbandonedExclusive(ctx context.Context, id string, envelope activeEnvelope, revision int64) (bool, error) {
+	previous := envelope
 	hasTransition, err := workspaceTransition(envelope.Record.Snapshot)
 	if err != nil {
 		return false, err
@@ -54,14 +55,20 @@ func (r *ActiveSandboxRepository) recoverAbandonedExclusive(ctx context.Context,
 		envelope.Record.Phase = state.ActiveSandboxActive
 	}
 	envelope.Record.Revision++
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+	if err != nil {
+		return false, err
+	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {
 		return false, err
 	}
-	response, err := r.store.client.Txn(ctx).
-		If(clientv3.Compare(clientv3.ModRevision(r.recordKey(id)), "=", revision),
-			clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0)).
-		Then(clientv3.OpPut(r.recordKey(id), string(raw))).Commit()
+	compares := append([]clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(r.recordKey(id)), "=", revision),
+		clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0),
+	}, indexCompares...)
+	writes := append([]clientv3.Op{clientv3.OpPut(r.recordKey(id), string(raw))}, indexWrites...)
+	response, err := r.store.client.Txn(ctx).If(compares...).Then(writes...).Commit()
 	if err != nil {
 		return false, err
 	}
@@ -136,15 +143,24 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 		writes = append(writes, clientv3.OpPut(r.mutationKey(id), token, clientv3.WithLease(lease)))
 	}
 	if kind == state.ActiveOperationExclusive {
+		previous := envelope
 		envelope.Record.Phase = state.ActiveSandboxExclusive
 		envelope.Record.Revision++
+		indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+		if err != nil {
+			_, _ = r.store.client.Revoke(requestCtx, lease)
+			return nil, nil, err
+		}
+		compares = append(compares, indexCompares...)
 		updated, err := json.Marshal(envelope)
 		if err != nil {
+			_, _ = r.store.client.Revoke(requestCtx, lease)
 			return nil, nil, err
 		}
 		writes = append(writes,
 			clientv3.OpPut(r.exclusiveKey(id), token, clientv3.WithLease(lease)),
 			clientv3.OpPut(recordKey, string(updated)))
+		writes = append(writes, indexWrites...)
 	}
 	response, err := r.store.client.Txn(requestCtx).
 		If(compares...).Then(writes...).
@@ -249,6 +265,7 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 			return state.ErrActiveSandboxStaleToken
 		}
 		if envelope.Record.Phase == state.ActiveSandboxExclusive {
+			previous := envelope
 			hasTransition, err := workspaceTransition(envelope.Record.Snapshot)
 			if err != nil {
 				return err
@@ -260,12 +277,18 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 				envelope.Record.Phase = state.ActiveSandboxActive
 			}
 			envelope.Record.Revision++
+			indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+			if err != nil {
+				return err
+			}
 			next, err := json.Marshal(envelope)
 			if err != nil {
 				return err
 			}
 			compares = append(compares, clientv3.Compare(clientv3.ModRevision(recordKey), "=", recordRead.Kvs[0].ModRevision))
+			compares = append(compares, indexCompares...)
 			writes = append(writes, clientv3.OpPut(recordKey, string(next)))
+			writes = append(writes, indexWrites...)
 		}
 	}
 	response, err := r.store.client.Txn(requestCtx).
@@ -335,16 +358,21 @@ func (r *ActiveSandboxRepository) beginDestroy(ctx context.Context, id string, e
 		won := false
 		switch envelope.Record.Phase {
 		case state.ActiveSandboxActive, state.ActiveSandboxPublishing, state.ActiveSandboxExclusive:
+			previous := envelope
 			envelope.Record.Phase = state.ActiveSandboxDestroying
 			envelope.Record.Revision++
 			envelope.Record.UpdatedAt = time.Now().UTC()
+			indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+			if err != nil {
+				return nil, 0, false, err
+			}
 			next, err := json.Marshal(envelope)
 			if err != nil {
 				return nil, 0, false, err
 			}
-			written, err := r.store.client.Txn(requestCtx).
-				If(clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)).
-				Then(clientv3.OpPut(key, string(next))).Commit()
+			compares := append([]clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)}, indexCompares...)
+			writes := append([]clientv3.Op{clientv3.OpPut(key, string(next))}, indexWrites...)
+			written, err := r.store.client.Txn(requestCtx).If(compares...).Then(writes...).Commit()
 			if err != nil {
 				return nil, 0, false, err
 			}

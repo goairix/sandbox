@@ -37,15 +37,22 @@ func (r *ActiveSandboxRepository) Delete(ctx context.Context, id string, expecte
 	// admission precedes this call, so no new operation may enter after the
 	// drain check; expired leases are absent at the server's revision.
 	indexKey := r.indexKey(envelope.Cursor)
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&envelope, nil)
+	if err != nil {
+		return err
+	}
 	operationAbsent := clientv3.Compare(clientv3.Version(r.operationPrefix(id)), "=", 0).WithPrefix()
-	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
-			clientv3.Compare(clientv3.Value(indexKey), "=", id),
-			operationAbsent,
-			clientv3.Compare(clientv3.Version(r.mutationKey(id)), "=", 0),
-			clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0)).
-		Then(clientv3.OpDelete(recordKey), clientv3.OpDelete(indexKey),
-			clientv3.OpDelete(r.controllerKey(id))).Commit()
+	compares := append([]clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
+		clientv3.Compare(clientv3.Value(indexKey), "=", id),
+		operationAbsent,
+		clientv3.Compare(clientv3.Version(r.mutationKey(id)), "=", 0),
+		clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0),
+	}, indexCompares...)
+	writes := append([]clientv3.Op{
+		clientv3.OpDelete(recordKey), clientv3.OpDelete(indexKey), clientv3.OpDelete(r.controllerKey(id)),
+	}, indexWrites...)
+	written, err := r.store.client.Txn(requestCtx).If(compares...).Then(writes...).Commit()
 	if err != nil {
 		return err
 	}

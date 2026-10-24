@@ -63,15 +63,22 @@ func (r *ActiveSandboxRepository) DeleteControllerWithResult(ctx context.Context
 	// remains at the commit revision. BeginDestroy already closed admission,
 	// so no new operation can slip between this drain check and deletion.
 	indexKey := r.indexKey(envelope.Cursor)
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&envelope, nil)
+	if err != nil {
+		return false, err
+	}
 	operationAbsent := clientv3.Compare(clientv3.Version(r.operationPrefix(lease.SandboxID)), "=", 0).WithPrefix()
+	compares := append([]clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
+		clientv3.Compare(clientv3.ModRevision(controllerKey), "=", controllers[0].ModRevision),
+		clientv3.Compare(clientv3.Value(indexKey), "=", lease.SandboxID),
+		operationAbsent,
+		clientv3.Compare(clientv3.Version(r.mutationKey(lease.SandboxID)), "=", 0),
+		clientv3.Compare(clientv3.Version(r.exclusiveKey(lease.SandboxID)), "=", 0),
+	}, indexCompares...)
+	writes := append([]clientv3.Op{clientv3.OpDelete(recordKey), clientv3.OpDelete(controllerKey), clientv3.OpDelete(indexKey)}, indexWrites...)
 	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
-			clientv3.Compare(clientv3.ModRevision(controllerKey), "=", controllers[0].ModRevision),
-			clientv3.Compare(clientv3.Value(indexKey), "=", lease.SandboxID),
-			operationAbsent,
-			clientv3.Compare(clientv3.Version(r.mutationKey(lease.SandboxID)), "=", 0),
-			clientv3.Compare(clientv3.Version(r.exclusiveKey(lease.SandboxID)), "=", 0)).
-		Then(clientv3.OpDelete(recordKey), clientv3.OpDelete(controllerKey), clientv3.OpDelete(indexKey)).
+		If(compares...).Then(writes...).
 		Else(clientv3.OpGet(controllerKey)).Commit()
 	if err != nil {
 		return false, err

@@ -119,6 +119,21 @@ type ActiveSandboxPage struct {
 	Cursor  uint64
 }
 
+// ActiveSandboxDuePage contains one bounded page of time-ordered lifecycle
+// candidates. Cursor is storage-owned and is valid only for the next page.
+type ActiveSandboxDuePage struct {
+	Records []ActiveSandboxRecord
+	Cursor  string
+}
+
+// ActiveSandboxLifecycleIndexRepository optionally narrows periodic discovery.
+// The returned records are scheduling hints: callers must reload and fence the
+// authoritative record before changing lifecycle state or external resources.
+type ActiveSandboxLifecycleIndexRepository interface {
+	ScanDue(ctx context.Context, dueBefore time.Time, cursor string, count int64) (ActiveSandboxDuePage, error)
+	ScanWorkspace(ctx context.Context, cursor uint64, count int64) (ActiveSandboxPage, error)
+}
+
 // ActiveSandboxCheckpointRepository atomically fences durable cleanup progress
 // with the current controller capability, not merely a previously read revision.
 type ActiveSandboxCheckpointRepository interface {

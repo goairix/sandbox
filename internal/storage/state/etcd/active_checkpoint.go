@@ -31,17 +31,22 @@ func (r *ActiveSandboxRepository) Checkpoint(ctx context.Context, id string, exp
 		(envelope.Record.Phase != state.ActiveSandboxDestroying && envelope.Record.Phase != state.ActiveSandboxCleanupPending) {
 		return nil, state.ErrActiveSandboxConflict
 	}
+	previous := envelope
 	envelope.Record.Phase = state.ActiveSandboxCleanupPending
 	envelope.Record.Revision++
 	envelope.Record.CleanupCheckpoint = checkpoint
 	envelope.Record.UpdatedAt = time.Now().UTC()
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+	if err != nil {
+		return nil, err
+	}
 	next, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
 	}
-	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)).
-		Then(clientv3.OpPut(key, string(next))).Commit()
+	compares := append([]clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)}, indexCompares...)
+	writes := append([]clientv3.Op{clientv3.OpPut(key, string(next))}, indexWrites...)
+	written, err := r.store.client.Txn(requestCtx).If(compares...).Then(writes...).Commit()
 	if err != nil {
 		return nil, err
 	}

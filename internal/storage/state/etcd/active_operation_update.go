@@ -90,9 +90,14 @@ func (r *ActiveSandboxRepository) UpdateOperation(ctx context.Context, operation
 		}
 	}
 
+	previous := envelope
 	envelope.Record.Revision++
 	envelope.Record.Snapshot = append(json.RawMessage(nil), snapshot...)
 	envelope.Record.UpdatedAt = time.Now().UTC()
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+	if err != nil {
+		return nil, err
+	}
 	next, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
@@ -103,10 +108,12 @@ func (r *ActiveSandboxRepository) UpdateOperation(ctx context.Context, operation
 		clientv3.Compare(clientv3.ModRevision(opKey), "=", opRead.Kvs[0].ModRevision),
 		clientv3.Compare(clientv3.Value(mutationKey), "=", operation.Token),
 	}
+	compares = append(compares, indexCompares...)
 	if operation.Kind == state.ActiveOperationExclusive {
 		compares = append(compares, clientv3.Compare(clientv3.Value(r.exclusiveKey(operation.SandboxID)), "=", operation.Token))
 	}
 	writes := []clientv3.Op{clientv3.OpPut(recordKey, string(next))}
+	writes = append(writes, indexWrites...)
 	if revokeController {
 		// Detaching a workspace revokes its old background controller in
 		// the same atomic write, matching the original Redis Lua boundary.

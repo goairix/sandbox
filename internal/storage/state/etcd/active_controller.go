@@ -230,18 +230,26 @@ func (r *ActiveSandboxRepository) CheckpointController(ctx context.Context, leas
 		return nil, state.ErrActiveSandboxConflict
 	}
 
+	previous := envelope
 	envelope.Record.Phase = state.ActiveSandboxCleanupPending
 	envelope.Record.Revision++
 	envelope.Record.CleanupCheckpoint = checkpoint
 	envelope.Record.UpdatedAt = time.Now().UTC()
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+	if err != nil {
+		return nil, err
+	}
 	next, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
 	}
+	compares := append([]clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
+		clientv3.Compare(clientv3.ModRevision(controllerKey), "=", controllers[0].ModRevision),
+	}, indexCompares...)
+	writes := append([]clientv3.Op{clientv3.OpPut(recordKey, string(next))}, indexWrites...)
 	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
-			clientv3.Compare(clientv3.ModRevision(controllerKey), "=", controllers[0].ModRevision)).
-		Then(clientv3.OpPut(recordKey, string(next))).
+		If(compares...).Then(writes...).
 		Else(clientv3.OpGet(controllerKey)).Commit()
 	if err != nil {
 		// The commit may have reached etcd. The caller must read back the

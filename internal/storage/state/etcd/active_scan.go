@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -17,6 +18,16 @@ const activeScanBatch = 64 // Below etcd's 128-operation transaction limit.
 // concurrent new index below that cursor may appear in a later scan pass;
 // callers must not treat one traversal as a frozen global inventory.
 func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
+	return r.scanCursorIndex(ctx, r.indexPrefix(), cursor, count, false)
+}
+
+// ScanWorkspace reads only records carrying a workspace or an unfinished
+// workspace transition. The caller still reloads before any lifecycle effect.
+func (r *ActiveSandboxRepository) ScanWorkspace(ctx context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
+	return r.scanCursorIndex(ctx, r.workspaceIndexPrefix(), cursor, count, true)
+}
+
+func (r *ActiveSandboxRepository) scanCursorIndex(ctx context.Context, prefix string, cursor uint64, count int64, workspace bool) (state.ActiveSandboxPage, error) {
 	if count <= 0 || count > 1000 {
 		return state.ActiveSandboxPage{}, state.ErrActiveSandboxCorrupt
 	}
@@ -25,10 +36,9 @@ func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
-	prefix := r.indexPrefix()
 	start := prefix
 	if cursor != 0 {
-		start = r.indexKey(cursor + 1)
+		start = fmt.Sprintf("%s%016x", prefix, cursor+1)
 	}
 	indexes, err := r.store.client.Get(requestCtx, start,
 		clientv3.WithRange(clientv3.GetPrefixRangeEnd(prefix)), clientv3.WithLimit(count+1))
@@ -77,6 +87,12 @@ func (r *ActiveSandboxRepository) Scan(ctx context.Context, cursor uint64, count
 			envelope, err := decodeActiveEnvelope(get.Kvs[0].Value, ids[i])
 			if err != nil || envelope.Cursor != cursors[i] {
 				return state.ActiveSandboxPage{}, state.ErrActiveSandboxCorrupt
+			}
+			if workspace {
+				key, err := r.lifecycleIndexKey(envelope)
+				if err != nil || key != fmt.Sprintf("%s%016x", prefix, cursors[i]) {
+					return state.ActiveSandboxPage{}, state.ErrActiveSandboxCorrupt
+				}
 			}
 			page.Records = append(page.Records, envelope.Record)
 			page.Cursor = cursors[i]

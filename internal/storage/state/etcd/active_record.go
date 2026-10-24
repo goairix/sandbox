@@ -27,6 +27,7 @@ type ActiveSandboxRepository struct {
 
 var (
 	_ state.ActiveSandboxRepository                   = (*ActiveSandboxRepository)(nil)
+	_ state.ActiveSandboxLifecycleIndexRepository     = (*ActiveSandboxRepository)(nil)
 	_ state.ActiveSandboxCheckpointRepository         = (*ActiveSandboxRepository)(nil)
 	_ state.ActiveSandboxCleanupCompletionRepository  = (*ActiveSandboxRepository)(nil)
 	_ state.ActiveSandboxConditionalDestroyRepository = (*ActiveSandboxRepository)(nil)
@@ -98,14 +99,21 @@ func (r *ActiveSandboxRepository) Publish(ctx context.Context, record state.Acti
 			continue
 		}
 		index := r.indexKey(cursor)
-		raw, err := json.Marshal(activeEnvelope{Cursor: cursor, Record: record})
+		envelope := activeEnvelope{Cursor: cursor, Record: record}
+		indexCompares, indexWrites, err := r.lifecycleIndexMutation(nil, &envelope)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(envelope)
 		if err != nil {
 			return err
 		}
 		requestCtx, cancel := r.store.requestContext(ctx)
+		compares := append([]clientv3.Cmp{clientv3.Compare(clientv3.Version(key), "=", 0), clientv3.Compare(clientv3.Version(index), "=", 0)}, indexCompares...)
+		writes := append([]clientv3.Op{clientv3.OpPut(key, string(raw)), clientv3.OpPut(index, record.SandboxID)}, indexWrites...)
 		response, err := r.store.client.Txn(requestCtx).
-			If(clientv3.Compare(clientv3.Version(key), "=", 0), clientv3.Compare(clientv3.Version(index), "=", 0)).
-			Then(clientv3.OpPut(key, string(raw)), clientv3.OpPut(index, record.SandboxID)).
+			If(compares...).
+			Then(writes...).
 			Else(clientv3.OpGet(key), clientv3.OpGet(index)).Commit()
 		cancel()
 		if err != nil {
@@ -181,18 +189,24 @@ func (r *ActiveSandboxRepository) changeRecord(ctx context.Context, id string, e
 	if envelope.Record.Revision != expectedRevision || envelope.Record.Phase != from {
 		return nil, state.ErrActiveSandboxConflict
 	}
+	previous := envelope
 
 	envelope.Record.Phase = to
 	envelope.Record.Revision++
 	envelope.Record.Snapshot = append(json.RawMessage(nil), snapshot...)
 	envelope.Record.UpdatedAt = time.Now().UTC()
+	indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
+	if err != nil {
+		return nil, err
+	}
 	next, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
 	}
+	compares := append([]clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)}, indexCompares...)
+	writes := append([]clientv3.Op{clientv3.OpPut(key, string(next))}, indexWrites...)
 	written, err := r.store.client.Txn(requestCtx).
-		If(clientv3.Compare(clientv3.ModRevision(key), "=", read.Kvs[0].ModRevision)).
-		Then(clientv3.OpPut(key, string(next))).Commit()
+		If(compares...).Then(writes...).Commit()
 	if err != nil {
 		return nil, err
 	}
