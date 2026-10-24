@@ -452,7 +452,11 @@ func (p *FUSEPool) verifyReturnPreparedTerminal(original state.FUSEPoolRecord) (
 // recovery path. The caller still verifies identity and transition evidence.
 func readFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey, id string) (*state.FUSEPoolRecord, error) {
 	if reader, ok := repo.(state.FUSEPoolRecordReader); ok {
-		return reader.ReadByPreparationID(ctx, id)
+		record, err := reader.ReadByPreparationID(ctx, id)
+		if err != nil || record == nil || record.PoolKey != poolKey {
+			return nil, err
+		}
+		return record, nil
 	}
 	records, err := repo.ListByPoolKey(ctx, poolKey)
 	if err != nil {

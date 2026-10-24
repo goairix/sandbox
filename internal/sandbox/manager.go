@@ -3352,17 +3352,9 @@ func (m *Manager) restoreFUSELifecycleWithController(ctx context.Context, sb *Sa
 		return ErrSandboxNotReady
 	}
 
-	records, err := m.fusePool.repo.ListByPoolKey(ctx, workspace.FUSEPoolKey)
+	record, err := readFUSEPoolRecord(ctx, m.fusePool.repo, workspace.FUSEPoolKey, workspace.FUSEPreparationID)
 	if err != nil {
-		return fmt.Errorf("list FUSE pool records: %w", err)
-	}
-	var record *state.FUSEPoolRecord
-	for i := range records {
-		candidate := records[i]
-		if candidate.PreparationID == workspace.FUSEPreparationID {
-			record = &candidate
-			break
-		}
+		return fmt.Errorf("read FUSE pool record: %w", err)
 	}
 	if record == nil || record.State != state.FUSEPoolConsumed || record.RuntimeID != sb.RuntimeID ||
 		record.RuntimeUID != sb.RuntimeUID || record.PoolKey != workspace.FUSEPoolKey ||

@@ -150,45 +150,33 @@ func (m *Manager) restoreCheckpointedFUSECleanup(ctx context.Context, sb *Sandbo
 		cp.Claimed.CleanupToken == "" || cp.Claimed.Revision <= cp.Consumed.Revision) {
 		return ErrSandboxNotReady
 	}
-	records, err := m.fusePool.repo.ListByPoolKey(ctx, sb.Workspace.FUSEPoolKey)
+	record, err := readFUSEPoolRecord(ctx, m.fusePool.repo, sb.Workspace.FUSEPoolKey, sb.Workspace.FUSEPreparationID)
 	if err != nil {
 		return err
 	}
 	var claimed *state.FUSEPoolRecord
-	for _, record := range records {
-		if record.PreparationID != sb.Workspace.FUSEPreparationID {
-			continue
-		}
-		if !sameFUSECleanupIdentity(record, sb) {
+	if record != nil {
+		if !sameFUSECleanupIdentity(*record, sb) {
 			return ErrSandboxNotReady
 		}
 		if record.State == state.FUSEPoolConsumed && record.Revision == cp.Consumed.Revision {
 			if cp.Claimed != nil {
 				return ErrSandboxNotReady
 			}
-			break
-		}
-		if record.State != state.FUSEPoolCleanup || record.CleanupToken == "" || record.Revision <= cp.Consumed.Revision ||
+		} else if record.State != state.FUSEPoolCleanup || record.CleanupToken == "" || record.Revision <= cp.Consumed.Revision ||
 			(cp.Claimed != nil && record.CleanupToken != cp.Claimed.CleanupToken) {
 			return ErrSandboxNotReady
+		} else {
+			claimed = record
 		}
-		copy := record
-		claimed = &copy
-		break
 	}
 	poolRemoved := false
-	if claimed == nil {
-		foundConsumed := false
-		for _, record := range records {
-			foundConsumed = foundConsumed || (record.PreparationID == cp.Consumed.PreparationID && record.State == state.FUSEPoolConsumed)
+	if record == nil {
+		if cp.Claimed == nil || !sameFUSECleanupIdentity(*cp.Claimed, sb) || cp.Claimed.State != state.FUSEPoolCleanup || cp.Claimed.CleanupToken == "" {
+			return ErrSandboxNotReady
 		}
-		if !foundConsumed {
-			if cp.Claimed == nil || !sameFUSECleanupIdentity(*cp.Claimed, sb) || cp.Claimed.State != state.FUSEPoolCleanup || cp.Claimed.CleanupToken == "" {
-				return ErrSandboxNotReady
-			}
-			claimed = cp.Claimed
-			poolRemoved = true
-		}
+		claimed = cp.Claimed
+		poolRemoved = true
 	}
 	var evidence runtime.TerminationEvidence
 	confirmed := false

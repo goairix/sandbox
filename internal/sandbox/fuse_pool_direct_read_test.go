@@ -53,3 +53,12 @@ func TestCleanupDeleteConflictUsesExactRecordRead(t *testing.T) {
 	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
 	require.NotContains(t, err.Error(), "whole-pool read")
 }
+
+func TestExactPoolRecordReadRemainsScopedToPoolKey(t *testing.T) {
+	repo := exactPoolReaderNoList{record: state.FUSEPoolRecord{
+		PreparationID: "preparation", PoolKey: "other-pool",
+	}}
+	record, err := readFUSEPoolRecord(context.Background(), repo, "expected-pool", "preparation")
+	require.NoError(t, err)
+	require.Nil(t, record)
+}

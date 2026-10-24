@@ -458,20 +458,12 @@ func (m *Manager) finalizeRecoveredEphemeralFUSE(ctx context.Context, record *Ep
 	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || record == nil {
 		return ErrSandboxCleanupPending
 	}
-	records, err := m.fusePool.repo.ListByPoolKey(ctx, record.PoolKey)
+	poolRecord, err := readFUSEPoolRecord(ctx, m.fusePool.repo, record.PoolKey, record.PreparationID)
 	if err != nil {
 		return errors.Join(ErrSandboxCleanupPending, err)
 	}
-	var poolRecord *state.FUSEPoolRecord
-	for i := range records {
-		candidate := records[i]
-		if candidate.PreparationID == record.PreparationID && candidate.RuntimeID == record.RuntimeID && candidate.RuntimeUID == record.RuntimeUID &&
-			candidate.ReservationToken == record.ReservationToken {
-			poolRecord = &candidate
-			break
-		}
-	}
-	if poolRecord == nil {
+	if poolRecord == nil || poolRecord.RuntimeID != record.RuntimeID || poolRecord.RuntimeUID != record.RuntimeUID ||
+		poolRecord.ReservationToken != record.ReservationToken {
 		return errors.Join(ErrSandboxCleanupPending, state.ErrFUSEPoolCorrupt)
 	}
 	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, record.Owner)
@@ -519,20 +511,12 @@ func (m *Manager) finalizeRecoveredPersistentFUSE(ctx context.Context, sb *Sandb
 		return ErrSandboxCleanupPending
 	}
 	workspace := sb.Workspace
-	records, err := m.fusePool.repo.ListByPoolKey(ctx, workspace.FUSEPoolKey)
+	poolRecord, err := readFUSEPoolRecord(ctx, m.fusePool.repo, workspace.FUSEPoolKey, workspace.FUSEPreparationID)
 	if err != nil {
 		return errors.Join(ErrSandboxCleanupPending, err)
 	}
-	var poolRecord *state.FUSEPoolRecord
-	for i := range records {
-		candidate := records[i]
-		if candidate.PreparationID == workspace.FUSEPreparationID && candidate.RuntimeID == sb.RuntimeID && candidate.RuntimeUID == sb.RuntimeUID &&
-			candidate.ReservationToken == workspace.FUSEReservationToken {
-			poolRecord = &candidate
-			break
-		}
-	}
-	if poolRecord == nil {
+	if poolRecord == nil || poolRecord.RuntimeID != sb.RuntimeID || poolRecord.RuntimeUID != sb.RuntimeUID ||
+		poolRecord.ReservationToken != workspace.FUSEReservationToken {
 		return errors.Join(ErrSandboxCleanupPending, state.ErrFUSEPoolCorrupt)
 	}
 	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, workspace.Owner)
