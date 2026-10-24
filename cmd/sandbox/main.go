@@ -30,7 +30,6 @@ import (
 	"github.com/goairix/sandbox/internal/sandbox"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
-	redisstate "github.com/goairix/sandbox/internal/storage/state/redis"
 	"github.com/goairix/sandbox/internal/telemetry"
 	telemetrylog "github.com/goairix/sandbox/internal/telemetry/log"
 	"github.com/goairix/sandbox/internal/telemetry/metrics"
@@ -213,8 +212,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := waitForRedisBootstrap(ctx, cfg.Storage.State.Redis, *drainRelease || *auditOwners || *recoverOwnerHash != ""); err != nil {
-		log.Fatalf("Redis initialization gate failed: %v", err)
+	if cfg.Storage.State.Backend != "etcd" {
+		if err := waitForRedisBootstrap(ctx, cfg.Storage.State.Redis, *drainRelease || *auditOwners || *recoverOwnerHash != ""); err != nil {
+			log.Fatalf("Redis initialization gate failed: %v", err)
+		}
 	}
 
 	fuseEnabled := cfg.Workspace.MountModeEnabled("fuse")
@@ -224,22 +225,16 @@ func main() {
 	}
 	defer fuseCredentials.Zero()
 
-	// Keep the Redis Store concrete so exactly one production FUSE repository
-	// wrapper owns its Lua state machine. The compile-time assertion documents
-	// the only broader capability the coordinator/session code relies on.
-	var redisStore *redisstate.Store
-	if cfg.Storage.State.Redis.Addr != "" || len(cfg.Storage.State.Redis.Addrs) > 0 {
-		redisStore, err = redisstate.New(ctx, redisOptionsFromConfig(cfg.Storage.State.Redis))
-		if err != nil {
-			log.Fatalf("failed to create redis state store: %v", err)
-		}
-		defer func() {
-			if closeErr := redisStore.Close(); closeErr != nil {
-				log.Print("Redis state store cleanup failed")
-			}
-		}()
-		var _ state.AtomicStore = redisStore
+	backend, err := openStateBackend(ctx, cfg)
+	if err != nil {
+		log.Fatalf("failed to open state backend: %v", err)
 	}
+	defer func() {
+		if closeErr := backend.close(); closeErr != nil {
+			log.Printf("%s state store cleanup failed: %v", backend.kind, closeErr)
+		}
+	}()
+	stateStore := backend.store
 
 	// Initialize the runtime with its own in-memory credential copy. Prepared
 	// containers and Pods remain credential-free until one-shot authorization.
@@ -269,15 +264,12 @@ func main() {
 		if fuseEnabled {
 			options = append(options, k8sruntime.WithFUSECredentials(fuseCredentials))
 			if !inspectOwners {
-				if redisStore == nil {
-					log.Fatal("FUSE workspace control requires Redis")
-				}
 				scope := os.Getenv("SANDBOX_STATE_SCOPE")
 				if scope == "" {
 					scope = cfg.Runtime.Kubernetes.Namespace
 				}
 				keyCtx, cancelKey := context.WithTimeout(ctx, 30*time.Second)
-				controlKey, keyErr := k8sruntime.LoadWorkspaceControlKey(keyCtx, redisStore, scope)
+				controlKey, keyErr := k8sruntime.LoadWorkspaceControlKey(keyCtx, stateStore, scope)
 				cancelKey()
 				if keyErr != nil {
 					log.Fatalf("failed to initialize workspace control authority: %v", keyErr)
@@ -341,14 +333,11 @@ func main() {
 		EnabledMountModes:       make(map[sandbox.WorkspaceMountType]bool, len(cfg.Workspace.EnabledMountModes)),
 	}
 	if cfg.Runtime.Type == "kubernetes" {
-		if redisStore == nil {
-			log.Fatal("Kubernetes runtime requires Redis for stateless multi-replica sandbox state")
-		}
 		stateScope := os.Getenv("SANDBOX_STATE_SCOPE")
 		if stateScope == "" {
 			stateScope = cfg.Runtime.Kubernetes.Namespace
 		}
-		activeRepository, repositoryErr := redisstate.NewActiveSandboxRepository(redisStore, stateScope)
+		activeRepository, repositoryErr := backend.activeRepository(stateScope)
 		if repositoryErr != nil {
 			log.Fatalf("failed to create active sandbox repository: %v", repositoryErr)
 		}
@@ -366,10 +355,7 @@ func main() {
 		managerConfig.InstanceID = instanceID
 	}
 	if cfg.Runtime.Type == "kubernetes" && cfg.Pool.MinSize > 0 {
-		if redisStore == nil {
-			log.Fatal("Kubernetes ordinary pool requires Redis for shared multi-replica inventory")
-		}
-		managerConfig.PoolStateStore = redisStore
+		managerConfig.PoolStateStore = stateStore
 		managerConfig.PoolScope = os.Getenv("SANDBOX_STATE_SCOPE")
 		if managerConfig.PoolScope == "" {
 			managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
@@ -379,18 +365,12 @@ func main() {
 		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
 	}
 	if fsMeta != nil && fsMeta.Provider != storage.ProviderLocal {
-		if redisStore == nil {
-			log.Fatal("remote workspace modes require Redis for cross-mode ownership")
-		}
-		managerConfig.WorkspaceCoordinator = sandbox.NewWorkspaceCoordinator(redisStore,
+		managerConfig.WorkspaceCoordinator = sandbox.NewWorkspaceCoordinator(stateStore,
 			time.Duration(cfg.Workspace.LeaseTTLSeconds)*time.Second,
 			time.Duration(cfg.Workspace.LeaseRenewIntervalSeconds)*time.Second,
 		)
 	}
 	if fuseEnabled {
-		if redisStore == nil {
-			log.Fatal("FUSE mode requires Redis")
-		}
 		fuseSpec, specErr := buildFUSESpec(cfg, sandboxImage)
 		if specErr != nil {
 			log.Fatalf("failed to build FUSE pool spec: %v", specErr)
@@ -398,7 +378,7 @@ func main() {
 		var fuseInventoryStore state.AtomicStore
 		var fuseInventoryScope string
 		if cfg.Runtime.Type == "kubernetes" {
-			fuseInventoryStore = redisStore
+			fuseInventoryStore = stateStore
 			fuseInventoryScope = os.Getenv("SANDBOX_STATE_SCOPE")
 			if fuseInventoryScope == "" {
 				fuseInventoryScope = cfg.Runtime.Kubernetes.Namespace
@@ -415,8 +395,7 @@ func main() {
 		if tokenErr != nil {
 			log.Fatalf("failed to create FUSE pool ownership token: %v", tokenErr)
 		}
-		poolRepo := redisstate.NewFUSEPoolRepository(redisStore)
-		managerConfig.FUSEPool = sandbox.NewFUSEPool(rt, poolRepo, sandbox.FUSEPoolConfig{
+		managerConfig.FUSEPool = sandbox.NewFUSEPool(rt, backend.fuseRepository, sandbox.FUSEPoolConfig{
 			MinSize: cfg.Workspace.FUSEPool.MinSize, MaxSize: cfg.Workspace.FUSEPool.MaxSize,
 			RefillInterval:  time.Duration(cfg.Workspace.FUSEPool.RefillIntervalSeconds) * time.Second,
 			PrepareTimeout:  time.Duration(cfg.Workspace.FUSEPool.PrepareTimeoutSeconds) * time.Second,
@@ -435,14 +414,13 @@ func main() {
 	}
 	mgr := sandbox.NewManager(rt, fsys, fsMeta, managerConfig)
 
-	// Initialize session store for persistent sandbox state
-	if redisStore != nil {
-		ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
-		mgr.SetSessionStore(sandbox.NewSessionStore(redisStore, ttl))
-		mgr.SetEphemeralLifecycleStore(sandbox.NewEphemeralLifecycleStore(redisStore))
-		mgr.SetMultipartStore(redisStore)
-		log.Printf("session store connected to redis mode=%s endpoints=%d", cfg.Storage.State.Redis.Mode, max(1, len(cfg.Storage.State.Redis.Addrs)))
-	}
+	// Sessions, cleanup checkpoints, and multipart uploads share the same
+	// backend as ownership and pools, including on Kubernetes replicas.
+	ttl := time.Duration(cfg.Security.SandboxTimeoutSeconds) * time.Second
+	mgr.SetSessionStore(sandbox.NewSessionStore(stateStore, ttl))
+	mgr.SetEphemeralLifecycleStore(sandbox.NewEphemeralLifecycleStore(stateStore))
+	mgr.SetMultipartStore(stateStore)
+	log.Printf("session store connected to %s", backend.kind)
 	if *auditOwners || *recoverOwnerHash != "" {
 		auditCtx, cancelAudit := context.WithTimeout(ctx, 45*time.Second)
 		defer cancelAudit()
