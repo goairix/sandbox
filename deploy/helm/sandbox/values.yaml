@@ -39,6 +39,8 @@ image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
   tag: v0.2.12
   pullPolicy: IfNotPresent
+  # 可选：私有仓库拉取凭据，API 与清理 Job 共用此 ServiceAccount。
+  pullSecretName: ""
 
 service:
   type: ClusterIP
