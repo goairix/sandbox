@@ -1,0 +1,11 @@
+# Build the mounter from this checkout and stage only that Linux ELF in the
+# context. The pinned base supplies the verified s3fs and FUSE 2 libraries;
+# the release self-check below rejects a mismatched profile bundle or binary.
+FROM registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:08ea7821ddb4b5fbd65a4492e85bf2e3d0a92fc195eb6d1d324931e0e11a7d78
+
+COPY --chmod=0755 workspace-mounter /usr/local/bin/workspace-mounter
+
+RUN /usr/local/bin/workspace-mounter health prepared --self-check-image \
+ && /usr/local/bin/workspace-mounter health prepared --release-check-image
+
+ENTRYPOINT ["/usr/local/bin/workspace-mounter", "supervise"]
