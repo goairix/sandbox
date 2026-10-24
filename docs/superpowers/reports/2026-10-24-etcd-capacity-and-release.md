@@ -225,7 +225,7 @@ NetworkPolicy 消失。再次在另一副本申请相同路径，返回新的逻
 这是一次两副本、单路径并发正例，尚未覆盖 ACK 丢失、节点故障、
 大量不同 workspace 或对象存储文件内容的完整性。
 
-当前 DS Helm revision 10 为 `deployed`，API 2/2、etcd 3/3、MinIO 1/1；
+该轮结束时 DS Helm revision 10 为 `deployed`，API 2/2、etcd 3/3、MinIO 1/1；
 值文件保留发布运行时的 arm64 digest 与两副本设置。上述单项成功不能
 替代 10 万存活沙盒容量、完整 FUSE 或生产发布验收。
 
@@ -239,3 +239,22 @@ NetworkPolicy 消失。再次在另一副本申请相同路径，返回新的逻
 的该专用前缀中，未触碰其他工作区。
 这是单文件、单次同步的正例，不证明并发写入、对象存储故障恢复或
 FUSE 挂载链。
+
+## 升级排空前的配置校验
+
+revision 8 曾先将 API Deployment 缩到 0，再读取旧模板中的错误 MinIO
+profile，造成短暂不可用。根因是 `--drain-release` 在配置加载之前执行
+Kubernetes 缩容。提交 `fe18eee` 将现有配置的解析和校验放在任何 HPA 删除、
+Deployment 缩容之前；配置无效时，fake Kubernetes 测试确认副本数保持 2，
+且没有 update/delete 操作。`go test ./cmd/sandbox -count=1`、
+`go vet ./cmd/sandbox` 和 `git diff --check` 均通过。
+
+修复版 Linux arm64 ELF SHA-256 为
+`e3f924f82d092d0c50389253b4659d1208ccac7f262dcde57b9ea10464998179`；
+内部仓库标签 `sandbox-fuse-etcd-api:v1-reset-fe18eee-arm64` 的 digest 为
+`sha256:e75b75f5890b1e91cbe172e4de5423c16106a29396a8b2fab1b712371dd477c4`。
+仅使用 `ds-ai-research` kubeconfig/context 以同后端 Helm upgrade 发布到
+revision 11；release 为 `deployed`，API 2/2 Ready，端口转发的
+`/ready`、`/health` 均返回 200。此升级没有触发 release drain，
+因此还没有在真实集群人为制造错误配置来测试新拒绝分支；容量和 FUSE
+仍按前述未验收处理。
