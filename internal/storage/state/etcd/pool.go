@@ -90,6 +90,14 @@ func (r *FUSEPoolRepository) consumedKey(poolKey, id string) string {
 	return r.poolBase(poolKey) + "state/consumed/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) cleanupKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "state/cleanup/" + poolDigest(id)
+}
+
+func (r *FUSEPoolRepository) cleanupDeadlineKey(id string) string {
+	return r.store.prefix + "fusepool/v1/deadline/cleanup/" + poolDigest(id)
+}
+
 func decodePoolMetadata(raw []byte, poolKey string) (poolMetadata, error) {
 	var metadata poolMetadata
 	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 ||
