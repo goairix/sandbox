@@ -391,3 +391,25 @@ NetworkPolicy 为空。验证脚本 SHA-256 为
 `accce55800755ba839bd8f6cc4e6ba6522dd6d1d05ef52cb82a4e7065e479ef6`。
 这只覆盖单成员重建时的一条活跃记录，不覆盖三成员负载、节点掉线、
 长时间分区或大量同时到期。
+
+## 新部署状态入口与 FUSE 发布门复核
+
+当前 DS Helm revision 13 的安装清单中 `sandbox-redis`/`REDIS_`
+匹配数为 0；命名空间中的 Redis StatefulSet、Service、Deployment
+匹配数也为 0。API Deployment 只暴露 `SANDBOX_STORAGE_STATE_BACKEND`
+和 etcd endpoints/prefix/timeout 等状态环境项，未暴露 Redis 环境项。
+代码 `openStateBackend` 只创建所选的一种 Store，并将同一个 Store
+交给 session、ephemeral、multipart 与 workspace，同时用同后端的
+active/FUSE pool 仓库；因此**本次 DS 新环境**没有暗中混用 Redis。
+仓库仍保留显式 Redis 旧模式和 Chart 旧默认值，不能把本次部署核对
+表述为全仓库 Redis 代码已移除。
+
+FUSE 发布门仍未通过。Chart 默认的 `sandbox-fuse-mounter:v0.2.12`、
+`sandbox-fuse-docker:v0.2.12` 在内部仓库缺失；只读清单检查发现
+`sandbox-fuse-mounter:v0.3.35` 有 arm64 digest
+`sha256:08ea7821ddb4b5fbd65a4492e85bf2e3d0a92fc195eb6d1d324931e0e11a7d78`，
+而 `sandbox-fuse-docker:v0.3.35` 不存在。较早的
+`sandbox-fuse-docker:v0.3.4` 有 arm64 digest
+`sha256:5f21852681a0ad10ded73952fc4bc19d46cea5200832c7fc80abb04da6da2130`，
+但尚未证明其 helper 协议与当前源码相同，不能混搭声明验收。
+本轮没有启用 FUSE，也没有使用旧迁移分支镜像替代当前源码构建。
