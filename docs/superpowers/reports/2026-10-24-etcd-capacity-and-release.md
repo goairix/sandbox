@@ -275,3 +275,19 @@ SHA-256 为 `accce55800755ba839bd8f6cc4e6ba6522dd6d1d05ef52cb82a4e7065e479ef6`�
 API key 只从本地受保护文件读取，未写入输出。此结果只覆盖三成员集群中
 一个成员的 Pod 重建；没有使节点失联、丢失 quorum、恢复卷或验证多成员
 故障，更没有解决 10 万存量记录的周期扫描瓶颈。
+
+## DS 双 API 重启期间的自然 TTL
+
+在 revision 11 的 DS 环境中创建 90 秒普通沙盒
+`sandbox-lherr55e2t`，公开 POST 返回 201。沙盒存活时滚动重启
+`sandbox-api` Deployment，等待两个新副本都 Ready；随后公开 GET
+依次观察到 200、503（关闭中）、404。确认该命名空间没有受管 Pod
+或 NetworkPolicy，API Deployment 最终为 2/2 Ready。运行脚本
+`.superpowers/sdd/2026-10-24-etcd-state-replacement/ds_api_restart_ttl_smoke.py`
+的 SHA-256 为
+`0e04b72cc0e8bdd06bda1686793a2c33847aa1d37e06e6f8cf6186cc29d2e599`；
+测试密钥仅从本地受保护文件读取。
+
+这是一次重启与自然 TTL 交错的正例，补充前述“重启后手工销毁”和
+“无重启自然 TTL”实验。它未模拟 etcd ACK 丢失或物理删除失败，
+也未独立核对配额退款流水，不能将其判为完整故障恢复或退款验收。
