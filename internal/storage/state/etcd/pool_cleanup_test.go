@@ -135,3 +135,40 @@ func TestPoolRepeatedCleanupClaimRejectsMissingUIDOwner(t *testing.T) {
 	require.Nil(t, again)
 	require.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
 }
+
+func TestPoolConfirmCleanupTerminationPersistsExactEvidence(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	consumed := consumedPoolRecord(t, repository)
+	ctx := context.Background()
+	claimed, err := repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	bad := state.FUSEPoolTerminationEvidence{RuntimeUID: consumed.RuntimeUID}
+	_, err = repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "cleanup", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, bad)
+	require.ErrorIs(t, err, state.ErrFUSEPoolInvalidRecord)
+	evidence := state.FUSEPoolTerminationEvidence{RuntimeUID: consumed.RuntimeUID, ProcessExited: true}
+	_, err = repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "wrong", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, evidence)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	terminated, err := repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "cleanup", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, evidence)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanupTerminated, terminated.CleanupPhase)
+	require.Equal(t, &evidence, terminated.TerminationEvidence)
+	require.Equal(t, claimed.Revision+1, terminated.Revision)
+	again, err := repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "cleanup", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, evidence)
+	require.NoError(t, err)
+	require.Equal(t, terminated.Revision, again.Revision)
+	other := evidence
+	other.GracefulUnmount = true
+	_, err = repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "cleanup", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, other)
+	require.ErrorIs(t, err, state.ErrFUSEPoolConflict)
+	read, err := repository.ReadByPreparationID(ctx, consumed.PreparationID)
+	require.NoError(t, err)
+	require.Equal(t, terminated.Revision, read.Revision)
+}
