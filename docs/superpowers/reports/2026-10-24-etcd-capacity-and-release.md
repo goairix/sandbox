@@ -291,3 +291,24 @@ API key 只从本地受保护文件读取，未写入输出。此结果只覆盖
 这是一次重启与自然 TTL 交错的正例，补充前述“重启后手工销毁”和
 “无重启自然 TTL”实验。它未模拟 etcd ACK 丢失或物理删除失败，
 也未独立核对配额退款流水，不能将其判为完整故障恢复或退款验收。
+
+## 已知 ID 的一次性执行清理
+
+`ScheduleDestroy` 已知精确 sandbox ID，旧实现却仅发一个无 ID 唤醒信号，
+协调器收到后再次遍历全部活跃记录。提交 `63ebccc` 将本地有界唤醒队列改为
+精确 ID：直接 Load 并走原有 `reconcileActiveLifecycle`；队列满、跨副本写入、
+重启及通知丢失仍由原周期扫描恢复。测试先因类型不匹配呈红，再确认一次
+ScheduleDestroy 只加载该 ID、不调用全量 Scan；`internal/sandbox` 全包测试、
+该测试的 race、`go vet ./internal/sandbox` 均通过。这没有改变每 5 秒一次的
+周期扫描，**不能**消除 10 万存量沙盒的常态扫描瓶颈。
+
+Linux arm64 构建输入 ELF SHA-256 为
+`b652ca351f6c5f52cd3976da2b04fde2780fe4ca4abcbc1d70fd90ce9e5b767c`；
+内部仓库镜像 `sandbox-fuse-etcd-api:v1-reset-63ebccc-arm64` digest 为
+`sha256:8ebf209e34e19745754adff79417557f8597b6309ee8ed278c19b228b18059a3`。
+DS 同后端 Helm 升级到 revision 12 后，API 2/2、etcd 3/3、MinIO 1/1。
+公开 `POST /api/v1/execute` 返回 200、退出码 0、预期 Python 输出；
+随后确认受管 Pod 和 NetworkPolicy 为空。忽略目录验证脚本
+`ds_one_shot_smoke.py` SHA-256 为
+`aecf915d1d08c69f5d6419f1adb58c0b5bb32ccffad33ec6938dd4b22b3094cd`。
+这只是单次正常 one-shot 正例，未测高并发、通知溢出或 ACK 丢失。
