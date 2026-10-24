@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/goairix/sandbox/internal/storage/state"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
+
+// reserveLostReplyKV arms the existing commit-reply fault after candidate
+// selection. The selection itself is read-only and must not consume it.
+type reserveLostReplyKV struct {
+	*lostReplyKV
+}
+
+func (kv *reserveLostReplyKV) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+	read, err := kv.lostReplyKV.Get(ctx, key, opts...)
+	if err == nil && strings.Contains(key, "/fusepool/v1/record/") {
+		kv.drop.Store(true)
+	}
+	return read, err
+}
 
 func preparingPoolRecord(id string) state.FUSEPoolRecord {
 	return state.FUSEPoolRecord{
@@ -191,4 +207,146 @@ func TestPoolPreparingToPreparedMovesCapacityWithinOnePool(t *testing.T) {
 	require.Equal(t, 1, count)
 	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
 	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+}
+
+func TestPoolReservePreparedConsumesOneAvailableSlot(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+
+	reserved, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolReserved, reserved.State)
+	require.Equal(t, "reservation", reserved.ReservationToken)
+	require.Equal(t, uint64(4), reserved.Revision)
+	require.False(t, reserved.ReservedUntil.IsZero())
+
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
+	again, err := repository.ReservePrepared(ctx, "shared-pool", "other", time.Second)
+	require.NoError(t, err)
+	require.Nil(t, again)
+	require.Eventually(t, func() bool {
+		read, err := s.client.Get(ctx, repository.reservationDeadlineKey("preparation"))
+		return err == nil && len(read.Kvs) == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	stored, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolReserved, stored.State)
+}
+
+func TestPoolReservePreparedConcurrentClientsChooseDistinctRecords(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	otherStore, err := New(context.Background(), Options{
+		Endpoints: []string{os.Getenv("TEST_ETCD_ENDPOINT")}, Prefix: s.prefix, Timeout: 3 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, otherStore.Close()) })
+	otherRepository := NewFUSEPoolRepository(otherStore)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	for _, id := range []string{"preparation-a", "preparation-b"} {
+		require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+			preparingPoolRecord(id), "holder", 2, 10*time.Second))
+		_, err := repository.BindPreparingRuntime(ctx, id, id+"-runtime", id+"-uid", "holder", 1)
+		require.NoError(t, err)
+		_, err = repository.Transition(ctx, id, state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+		require.NoError(t, err)
+	}
+
+	results := make(chan *state.FUSEPoolRecord, 2)
+	errors := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, client := range []*FUSEPoolRepository{repository, otherRepository} {
+		wg.Add(1)
+		go func(client *FUSEPoolRepository) {
+			defer wg.Done()
+			reserved, err := client.ReservePrepared(ctx, "shared-pool", "reservation", 5*time.Second)
+			results <- reserved
+			errors <- err
+		}(client)
+	}
+	wg.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
+	}
+	ids := make(map[string]bool)
+	for reserved := range results {
+		require.NotNil(t, reserved)
+		ids[reserved.PreparationID] = true
+	}
+	require.Len(t, ids, 2)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestPoolReservePreparedRejectsMissingUIDOwner(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	_, err = s.client.Delete(ctx, repository.uidOwnerKey("uid"))
+	require.NoError(t, err)
+
+	reserved, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Minute)
+	require.Nil(t, reserved)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCorrupt)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+func TestPoolReservePreparedLostReplyRequiresExactReadback(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+
+	realKV := s.client.KV
+	fault := &reserveLostReplyKV{lostReplyKV: &lostReplyKV{KV: realKV}}
+	s.client.KV = fault
+	reserved, err := repository.ReservePrepared(ctx, "shared-pool", "reservation", time.Minute)
+	s.client.KV = realKV
+	require.Nil(t, reserved)
+	require.ErrorContains(t, err, "reply lost after commit")
+
+	stored, err := repository.ReadByPreparationID(ctx, "preparation")
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolReserved, stored.State)
+	require.Equal(t, "reservation", stored.ReservationToken)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Zero(t, count)
 }

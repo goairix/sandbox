@@ -74,6 +74,14 @@ func (r *FUSEPoolRepository) prepareDeadlineKey(id string) string {
 	return r.store.prefix + "fusepool/v1/deadline/prepare/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) reservationDeadlineKey(id string) string {
+	return r.store.prefix + "fusepool/v1/deadline/reservation/" + poolDigest(id)
+}
+
+func (r *FUSEPoolRepository) reservedKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "state/reserved/" + poolDigest(id)
+}
+
 func decodePoolMetadata(raw []byte, poolKey string) (poolMetadata, error) {
 	var metadata poolMetadata
 	if json.Unmarshal(raw, &metadata) != nil || metadata.PoolKey != poolKey || metadata.Generation == 0 ||
