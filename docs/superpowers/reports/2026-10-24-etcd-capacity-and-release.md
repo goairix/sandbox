@@ -19,7 +19,7 @@
 
 下一步须让周期维护只读取待处理状态和到期项，且到期索引与原记录更新保持同一事务和相同栅栏。索引发布、续期、删除、ACK 丢失和重启恢复均需真实 etcd 反例验证；不能靠本地时钟或进程缓存直接授权退款。完成后再测真实 TTL 分布、集中到期、多副本、三成员故障及业务 Pod/FUSE。当前没有这些数据，也没有可声明的单 cell 上限。
 
-新部署方面，Chart 已有可选明文或 mTLS 的 etcd 模式，渲染不包含 Redis 资源或环境变量；尚未执行集群安装、真实运行时启动、物理 TTL 退款和 Redis 退役验收。
+新部署方面，Chart 已有可选明文或 mTLS 的 etcd 模式，渲染不包含 Redis 资源或环境变量；下面的 DS 状态层安装不等于 API 与业务切换，真实运行时启动、物理 TTL 退款和 Redis 退役仍未验收。
 
 ## 本机明文 etcd 整进程启动（2026-10-25）
 
@@ -81,3 +81,25 @@ Succeeded/Failed 且正在删除的旧 Pod 移除阻塞 finalizer，再删除绑
 最终仅保留 Kubernetes 自动创建的 `kube-root-ca.crt` ConfigMap、`secret-edge`
 拉取凭据和默认 ServiceAccount。此检查只证明镜像可在 DS arm64 节点启动，
 **没有**安装 etcd、MinIO 或 API Deployment，也没有证明实际沙盒创建和容量。
+
+## 正确 DS 集群的独立 etcd 状态层
+
+在上述镜像探针之后，于 `ds-ai-research` 的新 `sandbox-fuse-etcd` 命名空间
+安装 etcd v3.6.14 三成员集群。实际使用的隔离部署输入为
+`.superpowers/sdd/2026-10-24-etcd-state-replacement/ds-etcd.yaml`，
+SHA-256 `a9285cd4f62a0a888cf7e25e1b1660bb29ffc9d3dae8d8e41e8c2457c5fc7ce8`。
+来源镜像 `quay.io/coreos/etcd:v3.6.14` 的 arm64 manifest digest 为
+`sha256:cbbd3719e2760b0d4d87dada77f5a2f5869acec9b57e44efcc308f8a49e2f4b9`，
+镜像已镜像到内部仓库的 `sandbox-fuse-etcd-etcd:v3.6.14-arm64`。
+采用 [etcd 官方 StatefulSet 静态引导方案](https://etcd.io/docs/v3.6/op-guide/kubernetes/)；
+DS 仅有的默认 StorageClass 是 NFS，因此为本次测试将三个独立 Retain PV
+固定到 worker1/2/3 的不同宿主目录，未把三个成员的数据写到同一 NFS 卷。
+etcd 服务采用集群内明文、无账号模式，并以同命名空间 ingress NetworkPolicy 限制访问。
+
+三个 Pod 均 Ready、重启数 0，分别运行在 `ds-ai-worker-1/2/3`，
+三个 PVC 均 Bound 到对应 PV；成员列表显示三位 started，三个 endpoint
+健康检查均为 true。经 etcd-0 写入一条隔离探针键、etcd-1 读回后，
+删除 etcd-2 Pod 并等待 StatefulSet 重建；etcd-2 在原 worker3 上从其原卷读回同一键，
+随后删除该探针键。这只证明单成员 Pod 重建与三成员基本读写，
+**不证明**节点故障恢复、备份恢复、持续吞吐量或 10 万存活沙盒容量。
+MinIO 和 API Deployment 尚未安装，发布切换未完成。
