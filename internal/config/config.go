@@ -105,9 +105,10 @@ type StateStorageConfig struct {
 	redisExplicit bool
 }
 
-// EtcdConfig names one isolated state namespace and its mutually authenticated
-// client connection. Prefix is persistent and must stay fixed across replicas
-// and restarts; TimeoutMS bounds each storage request in milliseconds.
+// EtcdConfig names one isolated state namespace. TLS is optional; a CA can
+// authenticate the server without a client identity, while a client
+// certificate and key must be supplied together. Prefix must stay fixed
+// across replicas and restarts; TimeoutMS bounds each request in milliseconds.
 type EtcdConfig struct {
 	Endpoints []string `mapstructure:"endpoints"`
 	Prefix    string   `mapstructure:"prefix"`
@@ -546,9 +547,12 @@ func validateEtcdConfig(etcd EtcdConfig) error {
 	for _, file := range []struct{ name, value string }{
 		{"ca_file", etcd.CAFile}, {"cert_file", etcd.CertFile}, {"key_file", etcd.KeyFile},
 	} {
-		if file.value == "" || !filepath.IsAbs(file.value) || filepath.Clean(file.value) != file.value {
+		if file.value != "" && (!filepath.IsAbs(file.value) || filepath.Clean(file.value) != file.value) {
 			return fmt.Errorf("config: storage.state.etcd.%s must be a canonical absolute path", file.name)
 		}
+	}
+	if (etcd.CertFile == "") != (etcd.KeyFile == "") {
+		return fmt.Errorf("config: storage.state.etcd.cert_file and key_file must be configured together")
 	}
 	if etcd.TimeoutMS <= 0 || etcd.TimeoutMS > 60000 {
 		return fmt.Errorf("config: storage.state.etcd.timeout_ms must be within 1..60000")

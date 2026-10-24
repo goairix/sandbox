@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEtcdStateConfigurationRequiresIsolatedTLSNamespace(t *testing.T) {
+func TestEtcdStateConfigurationAllowsUnauthenticatedConnection(t *testing.T) {
 	t.Setenv("SANDBOX_SECURITY_API_KEY", "test-api-key")
 	t.Setenv("SANDBOX_STORAGE_STATE_BACKEND", "etcd")
 
@@ -19,14 +19,24 @@ func TestEtcdStateConfigurationRequiresIsolatedTLSNamespace(t *testing.T) {
 	require.ErrorContains(t, err, "storage.state.etcd.prefix")
 
 	t.Setenv("SANDBOX_STORAGE_STATE_ETCD_PREFIX", "/sandbox/test-cell/")
-	_, err = config.Load("")
-	require.ErrorContains(t, err, "storage.state.etcd.ca_file")
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Storage.State.Etcd.CAFile)
+	require.Empty(t, cfg.Storage.State.Etcd.CertFile)
+	require.Empty(t, cfg.Storage.State.Etcd.KeyFile)
+	require.Empty(t, cfg.Storage.State.Redis.Addr)
 
 	t.Setenv("SANDBOX_STORAGE_STATE_ETCD_CA_FILE", "/etc/sandbox/etcd-ca.pem")
+	cfg, err = config.Load("")
+	require.NoError(t, err, "server CA can be configured without a client identity")
+
 	t.Setenv("SANDBOX_STORAGE_STATE_ETCD_CERT_FILE", "/etc/sandbox/etcd-client.pem")
+	_, err = config.Load("")
+	require.ErrorContains(t, err, "cert_file and key_file")
+
 	t.Setenv("SANDBOX_STORAGE_STATE_ETCD_KEY_FILE", "/etc/sandbox/etcd-client-key.pem")
 	t.Setenv("SANDBOX_STORAGE_STATE_ETCD_TIMEOUT_MS", "3000")
-	cfg, err := config.Load("")
+	cfg, err = config.Load("")
 	require.NoError(t, err)
 	require.Equal(t, "etcd", cfg.Storage.State.Backend)
 	require.Equal(t, []string{"etcd-a:2379", "etcd-b:2379"}, cfg.Storage.State.Etcd.Endpoints)

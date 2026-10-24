@@ -44,3 +44,18 @@ func TestEtcdOptionsFromConfigLoadsMutualTLS(t *testing.T) {
 	_, err = etcdOptionsFromConfig(config.EtcdConfig{CAFile: ca, CertFile: cert, KeyFile: key})
 	require.ErrorContains(t, err, "CA")
 }
+
+func TestEtcdOptionsFromConfigAllowsNoTLS(t *testing.T) {
+	options, err := etcdOptionsFromConfig(config.EtcdConfig{
+		Endpoints: []string{"etcd-a:2379"}, Prefix: "/sandbox/cell-a/", TimeoutMS: 3000,
+	})
+	require.NoError(t, err)
+	require.Nil(t, options.TLS)
+
+	options, err = etcdOptionsFromConfig(config.EtcdConfig{
+		Endpoints: []string{"etcd-a:2379"}, Prefix: "/sandbox/cell-a/", TimeoutMS: 3000,
+		CAFile: "/missing/ca.pem",
+	})
+	require.ErrorContains(t, err, "load etcd CA")
+	require.Nil(t, options.TLS)
+}
