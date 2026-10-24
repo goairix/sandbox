@@ -108,10 +108,27 @@ func TestActiveResidentIndexScale(t *testing.T) {
 	require.Equal(t, count, dueCount)
 	dueDuration := time.Since(dueStart)
 
+	// The indexed coordinator still performs one complete recovery inventory
+	// before accepting traffic after process startup.
+	startupStart := time.Now()
+	var startupCount int
+	var startupCursor uint64
+	for {
+		page, scanErr := repository.Scan(ctx, startupCursor, 128)
+		require.NoError(t, scanErr)
+		startupCount += len(page.Records)
+		if page.Cursor == 0 {
+			break
+		}
+		startupCursor = page.Cursor
+	}
+	require.Equal(t, count, startupCount)
+	startupDuration := time.Since(startupStart)
+
 	after, err := store.client.Status(ctx, os.Getenv("TEST_ETCD_ENDPOINT"))
 	require.NoError(t, err)
 	keys, err := store.client.Get(ctx, store.prefix, clientv3.WithPrefix(), clientv3.WithCountOnly())
 	require.NoError(t, err)
-	t.Logf("residents=%d keys=%d write=%s idle_due_scan=%s concentrated_due_scan=%s db_delta_bytes=%d",
-		count, keys.Count, writeDuration, idleDuration, dueDuration, after.DbSize-before.DbSize)
+	t.Logf("residents=%d keys=%d write=%s idle_due_scan=%s concentrated_due_scan=%s startup_full_scan=%s db_delta_bytes=%d",
+		count, keys.Count, writeDuration, idleDuration, dueDuration, startupDuration, after.DbSize-before.DbSize)
 }
