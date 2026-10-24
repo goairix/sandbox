@@ -58,6 +58,10 @@ func (r *FUSEPoolRepository) preparingKey(poolKey, id string) string {
 	return r.poolBase(poolKey) + "state/preparing/" + poolDigest(id)
 }
 
+func (r *FUSEPoolRepository) preparedKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "state/prepared/" + poolDigest(id)
+}
+
 func (r *FUSEPoolRepository) recordKey(id string) string {
 	return r.store.prefix + "fusepool/v1/record/" + poolDigest(id)
 }

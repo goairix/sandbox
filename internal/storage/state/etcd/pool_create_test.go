@@ -168,3 +168,27 @@ func TestPoolBindRejectsExpiredPreparationLease(t *testing.T) {
 	_, err = repository.BindPreparingRuntime(ctx, "expiring-preparation", "runtime", "uid", "holder", 1)
 	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
 }
+
+func TestPoolPreparingToPreparedMovesCapacityWithinOnePool(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	ctx := context.Background()
+	won, err := repository.TryRefillLock(ctx, "shared-pool", "holder", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, repository.CreatePreparingWithAdmission(ctx,
+		preparingPoolRecord("preparation"), "holder", 1, 10*time.Second))
+	_, err = repository.BindPreparingRuntime(ctx, "preparation", "runtime", "uid", "holder", 1)
+	require.NoError(t, err)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "wrong", 2)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	prepared, err := repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolPrepared, prepared.State)
+	require.Equal(t, uint64(3), prepared.Revision)
+	count, err := repository.CountPreparingAndPrepared(ctx, "shared-pool")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	_, err = repository.Transition(ctx, "preparation", state.FUSEPoolPreparing, state.FUSEPoolPrepared, "maintainer", 2)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+}
