@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -94,7 +96,25 @@ type StorageConfig struct {
 
 // StateStorageConfig holds state storage settings.
 type StateStorageConfig struct {
-	Redis RedisConfig `mapstructure:"redis"`
+	Backend string      `mapstructure:"backend"`
+	Redis   RedisConfig `mapstructure:"redis"`
+	Etcd    EtcdConfig  `mapstructure:"etcd"`
+
+	// redisExplicit records source configuration, since Redis defaults must
+	// not make an etcd-only deployment appear to request both backends.
+	redisExplicit bool
+}
+
+// EtcdConfig names one isolated state namespace and its mutually authenticated
+// client connection. Prefix is persistent and must stay fixed across replicas
+// and restarts; TimeoutMS bounds each storage request in milliseconds.
+type EtcdConfig struct {
+	Endpoints []string `mapstructure:"endpoints"`
+	Prefix    string   `mapstructure:"prefix"`
+	TimeoutMS int      `mapstructure:"timeout_ms"`
+	CAFile    string   `mapstructure:"ca_file"`
+	CertFile  string   `mapstructure:"cert_file"`
+	KeyFile   string   `mapstructure:"key_file"`
 }
 
 // RedisConfig holds Redis connection settings.
@@ -345,6 +365,23 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: bind env for %q: %w", key, err)
 		}
 	}
+	redisExplicit := false
+	for _, key := range []string{
+		"addr", "addrs", "mode", "master_name", "username", "password",
+		"sentinel_username", "sentinel_password", "bootstrap_state_directory",
+		"bootstrap_public_keys_file", "db", "durability", "require_ha",
+		"ack_replicas", "ack_timeout_ms", "pool_size", "min_idle_conns",
+		"dial_timeout_ms", "read_timeout_ms", "write_timeout_ms", "max_retries",
+	} {
+		configKey := "storage.state.redis." + key
+		_, inEnvironment := os.LookupEnv("SANDBOX_" + strings.ToUpper(strings.ReplaceAll(configKey, ".", "_")))
+		redisExplicit = redisExplicit || v.InConfig(configKey) || inEnvironment
+	}
+	if v.GetString("storage.state.backend") == "etcd" {
+		// Keep the legacy Redis default for old deployments, but do not
+		// manufacture a Redis address for a new etcd-only deployment.
+		v.SetDefault("storage.state.redis.addr", "")
+	}
 
 	// ------------------------------------------------------------ unmarshal
 	selector, err := readKubernetesNodeSelector(path, v)
@@ -363,6 +400,7 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.Storage.State.redisExplicit = redisExplicit
 	cfg.Runtime.Kubernetes.NodeSelector = selector
 	cfg.Runtime.Kubernetes.DisableNodeLocalDNSInjection = disableDNSInjection
 	cfg.Runtime.Kubernetes.DNSOptions = dnsOptions
@@ -461,8 +499,20 @@ func (c *Config) Validate() error {
 	if c.Security.MaxUploadBytes <= 0 {
 		return fmt.Errorf("config: security.max_upload_bytes must be > 0, got %d", c.Security.MaxUploadBytes)
 	}
-	if err := validateRedisConfig(c.Storage.State.Redis, c.Runtime.Type == "kubernetes"); err != nil {
-		return err
+	switch c.Storage.State.Backend {
+	case "", "redis":
+		if err := validateRedisConfig(c.Storage.State.Redis, c.Runtime.Type == "kubernetes"); err != nil {
+			return err
+		}
+	case "etcd":
+		if c.Storage.State.redisExplicit || c.Storage.State.Redis.Addr != "" || len(c.Storage.State.Redis.Addrs) != 0 {
+			return fmt.Errorf("config: Redis and etcd cannot be configured together")
+		}
+		if err := validateEtcdConfig(c.Storage.State.Etcd); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("config: storage.state.backend must be redis or etcd")
 	}
 
 	// Workspace auto-sync
@@ -475,6 +525,33 @@ func (c *Config) Validate() error {
 	}
 	if c.Workspace.MountModeEnabled("fuse") {
 		return c.validateFUSE()
+	}
+	return nil
+}
+
+func validateEtcdConfig(etcd EtcdConfig) error {
+	if len(etcd.Endpoints) == 0 {
+		return fmt.Errorf("config: storage.state.etcd.endpoints must not be empty")
+	}
+	seen := make(map[string]bool, len(etcd.Endpoints))
+	for _, endpoint := range etcd.Endpoints {
+		if endpoint == "" || strings.TrimSpace(endpoint) != endpoint || seen[endpoint] {
+			return fmt.Errorf("config: storage.state.etcd.endpoints must be distinct nonempty addresses")
+		}
+		seen[endpoint] = true
+	}
+	if etcd.Prefix == "/" || !strings.HasPrefix(etcd.Prefix, "/") || path.Clean(etcd.Prefix)+"/" != etcd.Prefix {
+		return fmt.Errorf("config: storage.state.etcd.prefix must be a canonical isolated namespace ending in /, excluding root")
+	}
+	for _, file := range []struct{ name, value string }{
+		{"ca_file", etcd.CAFile}, {"cert_file", etcd.CertFile}, {"key_file", etcd.KeyFile},
+	} {
+		if file.value == "" || !filepath.IsAbs(file.value) || filepath.Clean(file.value) != file.value {
+			return fmt.Errorf("config: storage.state.etcd.%s must be a canonical absolute path", file.name)
+		}
+	}
+	if etcd.TimeoutMS <= 0 || etcd.TimeoutMS > 60000 {
+		return fmt.Errorf("config: storage.state.etcd.timeout_ms must be within 1..60000")
 	}
 	return nil
 }
@@ -698,7 +775,7 @@ func (c *Config) validateFUSE() error {
 	}
 	providerPath := "workspace.backend"
 	provider := workspace.Backend
-	if c.Storage.State.Redis.Addr == "" {
+	if c.Storage.State.Backend != "etcd" && c.Storage.State.Redis.Addr == "" {
 		return fmt.Errorf("config: storage.state.redis.addr must not be empty when workspace.mode is \"fuse\"")
 	}
 	if workspace.SecretName == "" && (filesystem.CAFile != "" || provider.CASecretKey != "") {
@@ -971,7 +1048,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("images.sandbox", "sandbox:latest")
 	v.SetDefault("images.gateway", "sandbox-gateway:latest")
 
-	// Storage — Redis
+	// Storage state backend. Redis remains the legacy default until the new
+	// deployment explicitly selects etcd.
+	v.SetDefault("storage.state.backend", "redis")
+	v.SetDefault("storage.state.etcd.endpoints", []string{})
+	v.SetDefault("storage.state.etcd.prefix", "")
+	v.SetDefault("storage.state.etcd.timeout_ms", 3000)
+	v.SetDefault("storage.state.etcd.ca_file", "")
+	v.SetDefault("storage.state.etcd.cert_file", "")
+	v.SetDefault("storage.state.etcd.key_file", "")
 	v.SetDefault("storage.state.redis.addr", "localhost:6379")
 	v.SetDefault("storage.state.redis.mode", "standalone")
 	v.SetDefault("storage.state.redis.addrs", []string{})
