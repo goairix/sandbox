@@ -206,7 +206,8 @@ config:
         endpoints: []
         prefix: ""
         timeoutMs: 3000
-        # 已存在的 Secret 必须提供 ca.crt、client.crt、client.key。
+        # 可选。留空使用无 TLS 连接；填入时 Secret 提供
+        # ca.crt、client.crt、client.key 三个键。
         existingSecret: ""
     filesystem:
       # 整个 release 只选择一个后端预设，预设固定存储提供商及协议配置，

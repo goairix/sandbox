@@ -205,8 +205,8 @@
 {{- if or (not (kindIs "string" $etcd.prefix)) (not (regexMatch "^/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/$" $etcd.prefix)) -}}
 {{- fail "etcd state prefix must be an isolated canonical path ending in /" -}}
 {{- end -}}
-{{- if or (not (kindIs "string" $etcd.existingSecret)) (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" $etcd.existingSecret)) -}}
-{{- fail "etcd state requires an existing TLS Secret name" -}}
+{{- if or (not (kindIs "string" $etcd.existingSecret)) (and (ne $etcd.existingSecret "") (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" $etcd.existingSecret))) -}}
+{{- fail "etcd state TLS Secret name must be empty or a valid name" -}}
 {{- end -}}
 {{- if or (kindIs "string" $etcd.timeoutMs) (lt (int $etcd.timeoutMs) 1) (gt (int $etcd.timeoutMs) 60000) -}}
 {{- fail "etcd state timeoutMs must be within 1..60000" -}}
@@ -462,12 +462,14 @@
   value: {{ .Values.config.storage.state.etcd.prefix | quote }}
 - name: SANDBOX_STORAGE_STATE_ETCD_TIMEOUT_MS
   value: {{ .Values.config.storage.state.etcd.timeoutMs | quote }}
+{{- if .Values.config.storage.state.etcd.existingSecret }}
 - name: SANDBOX_STORAGE_STATE_ETCD_CA_FILE
   value: /etc/sandbox-etcd/ca.crt
 - name: SANDBOX_STORAGE_STATE_ETCD_CERT_FILE
   value: /etc/sandbox-etcd/client.crt
 - name: SANDBOX_STORAGE_STATE_ETCD_KEY_FILE
   value: /etc/sandbox-etcd/client.key
+{{- end }}
 {{- else -}}
 {{ include "sandbox.redisEnv" . }}
 {{- end -}}

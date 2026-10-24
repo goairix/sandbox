@@ -4,6 +4,7 @@
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" }}
 {{- $etcdState := eq (include "sandbox.stateBackend" .) "etcd" }}
+{{- $etcdTLS := and $etcdState (ne .Values.config.storage.state.etcd.existingSecret "") }}
 {{- $startupProbe := include "sandbox.apiStartupProbe" . | fromJson }}
 {{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
@@ -266,9 +267,9 @@ spec:
             - name: SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT
               value: "{{ .Values.config.telemetry.log.otlpEndpoint }}"
             {{- end }}
-          {{- if or $builtinSentinel $etcdState }}
+          {{- if or $builtinSentinel $etcdTLS }}
           volumeMounts:
-            {{- if $etcdState }}
+            {{- if $etcdTLS }}
             - name: etcd-client-tls
               mountPath: /etc/sandbox-etcd
               readOnly: true
@@ -305,9 +306,9 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
-      {{- if or $builtinSentinel $etcdState }}
+      {{- if or $builtinSentinel $etcdTLS }}
       volumes:
-        {{- if $etcdState }}
+        {{- if $etcdTLS }}
         - name: etcd-client-tls
           secret:
             secretName: {{ .Values.config.storage.state.etcd.existingSecret | quote }}

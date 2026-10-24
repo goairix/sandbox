@@ -36,13 +36,13 @@ spec:
             - name: SANDBOX_STATE_SCOPE
               value: {{ printf "%s/%s" (.Values.config.runtime.kubernetes.namespace | default .Release.Namespace) .Release.Name | quote }}
 {{ include "sandbox.drainEnv" . | nindent 12 }}
-          {{- if eq (include "sandbox.stateBackend" .) "etcd" }}
+          {{- if and (eq (include "sandbox.stateBackend" .) "etcd") .Values.config.storage.state.etcd.existingSecret }}
           volumeMounts:
             - name: etcd-client-tls
               mountPath: /etc/sandbox-etcd
               readOnly: true
           {{- end }}
-      {{- if eq (include "sandbox.stateBackend" .) "etcd" }}
+      {{- if and (eq (include "sandbox.stateBackend" .) "etcd") .Values.config.storage.state.etcd.existingSecret }}
       volumes:
         - name: etcd-client-tls
           secret:
