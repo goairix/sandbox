@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -149,6 +150,14 @@ func (r *pagedReconcileNoList) ListStatePage(_ context.Context, _ string, poolSt
 
 func (*pagedReconcileNoList) ReadInventory(context.Context, string) (state.FUSEPoolInventory, error) {
 	return state.FUSEPoolInventory{Consumed: 1}, nil
+}
+
+func (*pagedReconcileNoList) ServerTime(context.Context) (time.Time, error) {
+	return time.Time{}, errors.New("etcd has no Redis server TIME")
+}
+
+func (*pagedReconcileNoList) DeadlineLive(context.Context, state.FUSEPoolRecord) (bool, error) {
+	return false, nil
 }
 
 func TestFUSEPoolReconcileUsesPagesAndAggregateWithResidentSandbox(t *testing.T) {

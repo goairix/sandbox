@@ -110,3 +110,10 @@ type FUSEPoolInventory struct {
 type FUSEPoolInventoryReader interface {
 	ReadInventory(ctx context.Context, poolKey string) (FUSEPoolInventory, error)
 }
+
+// FUSEPoolDeadlineReader checks the server-owned deadline key for an exact
+// record snapshot. Local timestamps remain scheduling hints and never grant
+// cleanup authority when this interface is available.
+type FUSEPoolDeadlineReader interface {
+	DeadlineLive(ctx context.Context, record FUSEPoolRecord) (bool, error)
+}

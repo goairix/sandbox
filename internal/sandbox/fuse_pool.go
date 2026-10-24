@@ -572,6 +572,26 @@ func readFUSEPoolInventory(ctx context.Context, repo state.FUSEPoolRepository, p
 	return inventory, nil
 }
 
+// poolDeadlineExpired uses etcd lease existence when available. Redis keeps
+// its original server TIME comparison. A timestamp alone cannot authorize an
+// etcd cleanup after clock skew or a lost lease response.
+func poolDeadlineExpired(ctx context.Context, repo state.FUSEPoolRepository, record state.FUSEPoolRecord, now time.Time) (bool, error) {
+	if reader, ok := repo.(state.FUSEPoolDeadlineReader); ok {
+		live, err := reader.DeadlineLive(ctx, record)
+		return !live, err
+	}
+	switch record.State {
+	case state.FUSEPoolPreparing:
+		return record.PrepareUntil.IsZero() || !record.PrepareUntil.After(now), nil
+	case state.FUSEPoolReserved:
+		return record.ReservedUntil.IsZero() || !record.ReservedUntil.After(now), nil
+	case state.FUSEPoolCleanup:
+		return record.CleanupUntil.IsZero() || !record.CleanupUntil.After(now), nil
+	default:
+		return false, state.ErrFUSEPoolInvalidTransition
+	}
+}
+
 func (p *FUSEPool) confirmReturnPreparedTerminal(ctx context.Context, id string, expected *state.FUSEPoolRecord) error {
 	if repo, ok := p.repo.(interface {
 		ConfirmReturnPreparedTerminal(context.Context, string, *state.FUSEPoolRecord) error
@@ -783,20 +803,30 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 	lease := p.startRefillLease(ctx, lockToken)
 	defer lease.stop()
 	ctx = lease.ctx
-	if _, err := p.repo.ServerTime(ctx); err != nil {
-		return true, fmt.Errorf("read Redis server time: %w", err)
+	_, leaseDeadlines := p.repo.(state.FUSEPoolDeadlineReader)
+	if !leaseDeadlines {
+		if _, err := p.repo.ServerTime(ctx); err != nil {
+			return true, fmt.Errorf("read Redis server time: %w", err)
+		}
 	}
 	inspectionErr := p.inspectPrepared(ctx)
-	now, err := p.repo.ServerTime(ctx)
-	if err != nil {
-		return true, errors.Join(inspectionErr, fmt.Errorf("refresh Redis server time: %w", err))
+	var now time.Time
+	if !leaseDeadlines {
+		now, err = p.repo.ServerTime(ctx)
+		if err != nil {
+			return true, errors.Join(inspectionErr, fmt.Errorf("refresh Redis server time: %w", err))
+		}
 	}
 
 	active := make([]state.FUSEPoolRecord, 0)
 	err = forEachFUSEPoolMaintenanceRecord(ctx, p.repo, p.poolKey, func(record state.FUSEPoolRecord) error {
 		switch record.State {
 		case state.FUSEPoolPreparing:
-			if record.PrepareUntil.IsZero() || !record.PrepareUntil.After(now) {
+			expired, err := poolDeadlineExpired(ctx, p.repo, record, now)
+			if err != nil {
+				return err
+			}
+			if expired {
 				disposition, _ := p.guard(ctx, record)
 				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
 					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
@@ -811,7 +841,11 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 			// returned here after the manager and runtime proved it pristine.
 			active = append(active, record)
 		case state.FUSEPoolReserved:
-			if record.ReservedUntil.IsZero() || !record.ReservedUntil.After(now) {
+			expired, err := poolDeadlineExpired(ctx, p.repo, record, now)
+			if err != nil {
+				return err
+			}
+			if expired {
 				disposition, _ := p.guard(ctx, record)
 				if disposition == FUSEPoolPristine || disposition == FUSEPoolAbandoned {
 					if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
@@ -829,7 +863,11 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 		case state.FUSEPoolConsumed:
 			// Persistent session teardown owns consumed instances.
 		case state.FUSEPoolCleanup:
-			if record.CleanupUntil.IsZero() || !record.CleanupUntil.After(now) {
+			expired, err := poolDeadlineExpired(ctx, p.repo, record, now)
+			if err != nil {
+				return err
+			}
+			if expired {
 				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
 					return fmt.Errorf("recover cleanup FUSE sandbox: %w", err)
 				}

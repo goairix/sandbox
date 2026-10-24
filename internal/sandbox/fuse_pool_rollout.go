@@ -129,17 +129,11 @@ func (p *sharedFUSEPool) retire(ctx context.Context) error {
 		if string(own) != p.pool.config.MaintainerToken {
 			return errors.New("FUSE rollout owner lease is absent")
 		}
-		current, err := p.pool.repo.ListByPoolKey(ctx, p.pool.poolKey)
+		inventory, err := readFUSEPoolInventory(ctx, p.pool.repo, p.pool.poolKey)
 		if err != nil {
 			return err
 		}
-		prepared := 0
-		for _, r := range current {
-			if r.State == state.FUSEPoolPrepared {
-				prepared++
-			}
-		}
-		if prepared < p.pool.config.MinSize {
+		if inventory.Prepared < int64(p.pool.config.MinSize) {
 			return nil
 		}
 		keys, err := p.store.Keys(ctx, p.base+"generation:*")
@@ -177,40 +171,48 @@ func (p *sharedFUSEPool) retireGeneration(ctx context.Context, poolKey string) (
 	defer func() { result = errors.Join(result, old.unlockRefill(ctx, token)) }()
 	lease := old.startRefillLease(ctx, token)
 	defer lease.stop()
-	records, err := old.repo.ListByPoolKey(lease.ctx, poolKey)
-	if err != nil {
-		return err
+	var now time.Time
+	if _, leaseDeadlines := old.repo.(state.FUSEPoolDeadlineReader); !leaseDeadlines {
+		now, err = old.repo.ServerTime(lease.ctx)
+		if err != nil {
+			return err
+		}
 	}
-	now, err := old.repo.ServerTime(lease.ctx)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
+	err = forEachFUSEPoolMaintenanceRecord(lease.ctx, old.repo, poolKey, func(record state.FUSEPoolRecord) error {
 		// Business reservations/bindings/consumed records never become cleanup
 		// merely because their contract is no longer current.
-		eligible := record.State == state.FUSEPoolPrepared ||
-			(record.State == state.FUSEPoolPreparing && !record.PrepareUntil.After(now)) ||
-			(record.State == state.FUSEPoolCleanup && !record.CleanupUntil.After(now))
+		eligible := record.State == state.FUSEPoolPrepared
+		if record.State == state.FUSEPoolPreparing || record.State == state.FUSEPoolCleanup {
+			expired, err := poolDeadlineExpired(lease.ctx, old.repo, record, now)
+			if err != nil {
+				return err
+			}
+			eligible = expired
+		}
 		if !eligible {
-			continue
+			return nil
 		}
 		disposition, err := old.guard(lease.ctx, record)
 		if err != nil {
 			result = errors.Join(result, fmt.Errorf("inspect obsolete FUSE record %s: %w", record.PreparationID, err))
-			continue
+			return nil
 		}
 		if disposition != FUSEPoolPristine && disposition != FUSEPoolAbandoned {
-			continue
+			return nil
 		}
 		if err := old.claimAndDestroy(lease.ctx, record); err != nil && !isStalePoolMutation(err) {
 			return fmt.Errorf("retire obsolete FUSE pool %s: %w", poolKey, err)
 		}
-	}
-	remaining, err := old.repo.ListByPoolKey(lease.ctx, poolKey)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if len(remaining) == 0 {
+	remaining, err := readFUSEPoolInventory(lease.ctx, old.repo, poolKey)
+	if err != nil {
+		return err
+	}
+	if remaining == (state.FUSEPoolInventory{}) {
 		_, err = p.store.CompareAndDelete(lease.ctx, p.base+"generation:"+poolKey, []byte(poolKey))
 	}
 	return errors.Join(result, err)
