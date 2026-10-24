@@ -172,3 +172,67 @@ func TestPoolConfirmCleanupTerminationPersistsExactEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, terminated.Revision, read.Revision)
 }
+
+func TestPoolDeleteCleanupRemovesExactUIDOwnership(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	consumed := consumedPoolRecord(t, repository)
+	ctx := context.Background()
+	claimed, err := repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	evidence := state.FUSEPoolTerminationEvidence{RuntimeUID: consumed.RuntimeUID, ProcessExited: true}
+	terminated, err := repository.ConfirmCleanupTermination(ctx, consumed.PreparationID, "cleanup", claimed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, evidence)
+	require.NoError(t, err)
+	deleted, err := repository.DeleteCleanup(ctx, consumed.PreparationID, "wrong", terminated.Revision)
+	require.False(t, deleted)
+	require.ErrorIs(t, err, state.ErrFUSEPoolTokenMismatch)
+	deleted, err = repository.DeleteCleanup(ctx, consumed.PreparationID, "cleanup", claimed.Revision)
+	require.False(t, deleted)
+	require.ErrorIs(t, err, state.ErrFUSEPoolCASMismatch)
+	deleted, err = repository.DeleteCleanup(ctx, consumed.PreparationID, "cleanup", terminated.Revision)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	read, err := repository.ReadByPreparationID(ctx, consumed.PreparationID)
+	require.NoError(t, err)
+	require.Nil(t, read)
+	owner, err := s.client.Get(ctx, repository.uidOwnerKey(consumed.RuntimeUID))
+	require.NoError(t, err)
+	require.Empty(t, owner.Kvs)
+	deleted, err = repository.DeleteCleanup(ctx, consumed.PreparationID, "cleanup", terminated.Revision)
+	require.NoError(t, err)
+	require.True(t, deleted)
+}
+
+func TestPoolDeleteCleanupLostReplyDoesNotDecrementTwice(t *testing.T) {
+	s := testStore(t)
+	repository := NewFUSEPoolRepository(s)
+	consumed := consumedPoolRecord(t, repository)
+	ctx := context.Background()
+	claimed, err := repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	fault := &lostReplyKV{KV: s.client.KV}
+	realKV := s.client.KV
+	fault.drop.Store(true)
+	s.client.KV = fault
+	deleted, err := repository.DeleteCleanup(ctx, consumed.PreparationID, "cleanup", claimed.Revision)
+	s.client.KV = realKV
+	require.False(t, deleted)
+	require.ErrorContains(t, err, "reply lost after commit")
+	read, err := repository.ReadByPreparationID(ctx, consumed.PreparationID)
+	require.NoError(t, err)
+	require.Nil(t, read)
+	deleted, err = repository.DeleteCleanup(ctx, consumed.PreparationID, "cleanup", claimed.Revision)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	metadataRead, err := s.client.Get(ctx, repository.metadataKey(consumed.PoolKey))
+	require.NoError(t, err)
+	require.Len(t, metadataRead.Kvs, 1)
+	metadata, err := decodePoolMetadata(metadataRead.Kvs[0].Value, consumed.PoolKey)
+	require.NoError(t, err)
+	require.Zero(t, metadata.Total)
+}
