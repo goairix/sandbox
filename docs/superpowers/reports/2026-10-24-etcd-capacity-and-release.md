@@ -258,3 +258,20 @@ revision 11；release 为 `deployed`，API 2/2 Ready，端口转发的
 `/ready`、`/health` 均返回 200。此升级没有触发 release drain，
 因此还没有在真实集群人为制造错误配置来测试新拒绝分支；容量和 FUSE
 仍按前述未验收处理。
+
+## DS 三成员中的单成员重建
+
+在 revision 11 的双 API 副本下，以公开 POST 创建 600 秒普通沙盒
+`sandbox-sbq2hz6kgk`，返回 201。保持该沙盒存活时，仅删除 etcd-2 Pod
+让 StatefulSet 原位重建；其 UID 从
+`20ef2f6f-d9eb-43f5-85f0-a41db5e8a750` 变为
+`2f7933eb-546a-4a07-ab2d-20ac70b5847b`，恢复 Ready 后 StatefulSet
+为 3/3。随后公开 GET 返回 200、Python Exec 返回 200 且输出固定探针值、
+DELETE 返回 200；受管 Pod 和 NetworkPolicy 均为空。
+
+脚本位于忽略目录
+`.superpowers/sdd/2026-10-24-etcd-state-replacement/ds_etcd_member_restart_smoke.py`，
+SHA-256 为 `accce55800755ba839bd8f6cc4e6ba6522dd6d1d05ef52cb82a4e7065e479ef6`。
+API key 只从本地受保护文件读取，未写入输出。此结果只覆盖三成员集群中
+一个成员的 Pod 重建；没有使节点失联、丢失 quorum、恢复卷或验证多成员
+故障，更没有解决 10 万存量记录的周期扫描瓶颈。
