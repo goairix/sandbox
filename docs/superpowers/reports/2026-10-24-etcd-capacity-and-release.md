@@ -140,3 +140,25 @@ Helm 配置使用 etcd 三 endpoint、独立 `/sandbox/ds-reset/` 前缀、无�
 普通池最小值 0、仅启用 sync mount，渲染检查没有 Redis 资源。
 这仅是 Kubernetes 内服务启动与只读 HTTP 烟测；**尚未**实际创建或销毁沙盒、
 完成自然 TTL 退款、启用 FUSE、验证大量存活 N 或进行生产容量验收。
+
+## 正确 DS 集群的单个普通沙盒创建销毁烟测
+
+内部仓库的 Chart 默认 `sandbox-runtime:v0.2.12` 与
+`sandbox-gateway:v0.2.12` 均不存在，因此本次只将普通运行时镜像临时设为
+内部仓库 Alpine 3.22 的 arm64 不可变 digest，验证最短的 etcd 状态与
+Kubernetes 创建销毁路径。该镜像缺少正式沙盒依赖，不能用于执行、文件、
+网络网关或 FUSE 验收。测试时命名空间默认 ServiceAccount 显式引用已有
+`secret-edge` 拉取凭据；Helm revision 3 使用临时镜像，测试后将 Helm 值
+恢复为默认配置，不能把临时镜像留作业务运行时。
+
+在 `ds-ai-research`、`sandbox-fuse-etcd` 中，以测试 API key 对
+`POST /api/v1/sandboxes` 发送 `ephemeral`、120 秒、网络关闭的请求，
+返回 201，逻辑 ID `sandbox-4wp1zo7jjh`，状态 `ready`，运行时 Pod
+`sandbox-pool-qmtyr6i44s`。随后 GET 返回 200/ready；DELETE 返回
+200；再次 GET 返回 404。经 Kubernetes API 检查，该次请求的 Pod 和
+NetworkPolicy 均已删除。API key 未写入报告或请求日志。
+
+这证明本次配置下单个普通沙盒的公开创建、查询和销毁路径能够跨越 API、
+etcd 和 Kubernetes。它不证明正式运行时镜像、自然 TTL、配额退款、
+FUSE、同时大量存活沙盒、三成员故障或容量目标。默认正式运行时镜像
+在仓库中缺失，仍是后续业务验证的明确阻塞项。
