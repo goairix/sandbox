@@ -1,7 +1,7 @@
 # etcd 状态容量与发布验收（进行中）
 
 当前结论：**未通过 10 万存活沙盒容量、真实 FUSE 和完整发布验收**。
-DS 测试命名空间已运行 revision 12 的双 API、副本数为 3 的 etcd 和测试 MinIO；
+DS 测试命名空间已运行 revision 15 的双 API、副本数为 3 的 etcd 和测试 MinIO；
 普通沙盒、sync 文件往返、单成员重建及 API 重启 TTL 均有单次真实正例。
 下面第一节仅是本机元数据测量，不包含真实 sandbox、Pod、FUSE、配额、HTTP
 或 Redis 对照，不能与后续 DS 功能烟测混同。
@@ -418,3 +418,35 @@ FUSE 发布门仍未通过。Chart 默认的 `sandbox-fuse-mounter:v0.2.12`、
 包均通过；该轮没有设置 `TEST_ETCD_ENDPOINT`，因此真实 etcd 断言以
 前述单独设置环境变量的存储和 sandbox 回归为准。全仓通过不能替代
 FUSE 镜像、对象存储物理挂载或容量发布门。
+
+## 当前源码 mounter 与 DS FUSE 灰度失败
+
+代码核对纠正了一个发布门判断：Kubernetes FUSE Pod 需要普通 runtime
+镜像和独立 mounter，缺失的 `sandbox-fuse-docker` 镜像只供 Docker 运行时，
+不是 DS Kubernetes 路径的拉取依赖。原 Dockerfile 因 Docker Hub 匿名
+token 连接重置未进入编译；没有把这次构建记为通过。提交 `fdef93f`
+改用固定 digest 的已有 mounter 基础镜像，只替换当前分支编译的
+Linux arm64 mounter。二进制 SHA-256 为
+`01be1f42037c5bdeb6731bad1bce5da79260e5f6212671b6a02c58402c9704ad`；
+镜像构建和容器内的 package/release 自检均通过。推送标签
+`sandbox-fuse-etcd-mounter:v1-reset-fdef93f-arm64` 的 digest 为
+`sha256:c5fe653022ffac4baee0264e965d99f7655306082f3282ef39b8233bfcdd8064`。
+基础镜像提供 s3fs 和 FUSE 库，镜像内 profile bundle 哈希检查通过；
+这仍不是 DS 的物理挂载证明。
+
+启用 `[sync, fuse]` 的 DS 专用 Helm 灰度先通过 `helm lint`，且该命名
+空间活跃沙盒记录数为 0。升级时两个 API 启动均失败，实际日志为
+`unsupported root marker profile "minio-sigv4-path-style-private-http-v1"`。
+测试 MinIO 当前是 HTTP，而当前 FUSE 根标记器不接受这个 profile；
+失败发生在 API 启动，尚未创建 FUSE Pod，也没有完成挂载。没有通过
+更换旧分支镜像或放宽标记器规则掩盖失败。
+
+中断的 `--atomic` 回滚又被 Chart 的跨后端指纹保护拒绝，留下两条
+`pending-rollback` Helm 修订。先将两个 Helm Secret 原样备份到忽略目录
+`helm-recovery-20261025`，再移除这两条未完成元数据；DS 专用 values
+恢复到原 SHA-256
+`7b9ef13767456f6b728687d5c793533330fa8f751d031fcfa642ab8ce2791219`，
+随后正常 `helm upgrade` 完成 revision 15。最终 `sandbox` 状态
+`deployed`、API 2/2、活跃沙盒记录 0，FUSE 仍关闭。当前依赖另一命名空间
+已安装的同 digest AppArmor profile 做测试预检；独立部署和 HTTPS
+MinIO/FUSE 物理验收仍未完成。
