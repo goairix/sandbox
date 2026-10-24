@@ -19,12 +19,18 @@ import (
 var activeIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // ActiveSandboxRepository owns durable lifecycle records within one scope.
-// This first slice implements publication and snapshot transitions; operation
-// and controller leases are added before it can be wired into the manager.
+// Production wiring follows separate business-path verification.
 type ActiveSandboxRepository struct {
 	store *Store
 	scope string
 }
+
+var (
+	_ state.ActiveSandboxRepository                   = (*ActiveSandboxRepository)(nil)
+	_ state.ActiveSandboxCheckpointRepository         = (*ActiveSandboxRepository)(nil)
+	_ state.ActiveSandboxCleanupCompletionRepository  = (*ActiveSandboxRepository)(nil)
+	_ state.ActiveSandboxConditionalDestroyRepository = (*ActiveSandboxRepository)(nil)
+)
 
 type activeEnvelope struct {
 	Cursor uint64                    `json:"cursor"`
@@ -45,7 +51,11 @@ func (r *ActiveSandboxRepository) recordKey(id string) string {
 }
 
 func (r *ActiveSandboxRepository) indexKey(cursor uint64) string {
-	return fmt.Sprintf("%sactive/%s/index/%016x", r.store.prefix, r.scope, cursor)
+	return fmt.Sprintf("%s%016x", r.indexPrefix(), cursor)
+}
+
+func (r *ActiveSandboxRepository) indexPrefix() string {
+	return r.store.prefix + "active/" + r.scope + "/index/"
 }
 
 func validActiveID(id string) bool {
