@@ -529,3 +529,10 @@ workspace hash `d0cf08d0ebb860011ace178322413027ef03c93083c5c18a33c099674ed86f86
 恢复入口按设计拒绝在缺少 namespace/release 绑定时删除；没有直接删 etcd 键。
 正式 API 保持 revision 15 的 sync-only 2/2，etcd 3/3，MinIO 1/1；
 此残留和产品网络策略是下一次 FUSE 灰度前必须解决的阻塞项。
+
+源码进一步定位到 FUSE 池对过期 `cleanup` 记录的自动恢复未调用已有的
+owner 保护检查；它可能先删除池记录，使仍持久化的 workspace owner
+失去清理锚点。提交 `714e011` 增加保护和失败回归：owner 受保护或检查
+结果不确定时保留池记录；无 owner 的原清理路径继续执行。受影响包完整
+测试、针对性 race 和 vet 通过。该提交尚未部署到 DS，也不能追溯修复
+上述已失去池记录的 owner；其审计状态仍为不可自动恢复。
