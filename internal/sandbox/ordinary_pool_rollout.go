@@ -7,7 +7,23 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage/state"
 )
+
+// obsoleteOwnerPresent uses one exact-scope read for fresh etcd namespaces.
+// New ordinary-pool fingerprints include the scope digest, so another scope
+// cannot own this generation. The Redis branch retains the cross-scope scan
+// for historical unscoped fingerprints in existing installations.
+func (p *sharedOrdinaryPool) obsoleteOwnerPresent(ctx context.Context, poolKey string) (bool, error) {
+	if reader, ok := p.store.(state.ScopedOrdinaryPoolOwnerReader); ok {
+		return reader.HasScopedOrdinaryPoolOwner(ctx, p.scopeDigest, poolKey)
+	}
+	owners, err := p.store.Keys(ctx, "ordinarypool:v1:*:"+poolKey+":owner:*")
+	if err != nil {
+		return false, err
+	}
+	return len(owners) != 0, nil
+}
 
 // retireObsolete runs under the release-wide refill lock, after replacement
 // capacity is prepared. Claims use record CAS, so an Acquire winning the race
@@ -66,11 +82,11 @@ func (p *sharedOrdinaryPool) retireObsolete(ctx context.Context, target int) err
 		if !checked {
 			// Old, unscoped fingerprints could be shared by releases. A live
 			// owner anywhere using that exact key fences legacy retirement.
-			owners, err := p.store.Keys(ctx, "ordinarypool:v1:*:"+r.PoolKey+":owner:*")
+			present, err := p.obsoleteOwnerPresent(ctx, r.PoolKey)
 			if err != nil {
 				return err
 			}
-			free = len(owners) == 0
+			free = !present
 			ownerFree[r.PoolKey] = free
 		}
 		if !free || (r.State == ordinaryPoolPreparing && time.Since(r.UpdatedAt) < ordinaryPoolStaleTTL) {

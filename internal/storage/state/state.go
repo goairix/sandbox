@@ -37,3 +37,11 @@ type AtomicStore interface {
 	// ErrIncrementOverflow without mutation at the backend's upper bound.
 	Increment(ctx context.Context, key string) (int64, error)
 }
+
+// ScopedOrdinaryPoolOwnerReader checks whether a live ordinary-pool owner
+// exists for one exact scope and pool fingerprint. It is suitable for a fresh
+// deployment whose pool fingerprints include the scope; legacy unscoped pool
+// fingerprints must keep their cross-scope owner check.
+type ScopedOrdinaryPoolOwnerReader interface {
+	HasScopedOrdinaryPoolOwner(ctx context.Context, scopeDigest, poolKey string) (bool, error)
+}

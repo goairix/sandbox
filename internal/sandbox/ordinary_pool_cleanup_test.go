@@ -8,8 +8,35 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
+	"github.com/goairix/sandbox/internal/storage/state"
 	"github.com/stretchr/testify/require"
 )
+
+type scopedOwnerProbeStore struct {
+	state.AtomicStore
+	scope, pool string
+	present     bool
+}
+
+func (s *scopedOwnerProbeStore) Keys(context.Context, string) ([]string, error) {
+	return nil, errors.New("whole-pool owner pattern must not be queried")
+}
+
+func (s *scopedOwnerProbeStore) HasScopedOrdinaryPoolOwner(_ context.Context, scope, pool string) (bool, error) {
+	s.scope, s.pool = scope, pool
+	return s.present, nil
+}
+
+func TestOrdinaryPoolRetirementUsesExactScopedOwnerRead(t *testing.T) {
+	pool, _ := seedOrdinaryCleanupRecord(t, newSharedPoolRuntime(), false)
+	probe := &scopedOwnerProbeStore{AtomicStore: pool.store, present: true}
+	pool.store = probe
+	found, err := pool.obsoleteOwnerPresent(context.Background(), pool.poolKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, pool.scopeDigest, probe.scope)
+	require.Equal(t, pool.poolKey, probe.pool)
+}
 
 // Model the interruption after Pod deletion but before policy cleanup.
 type interruptedOrdinaryCleanupRuntime struct {
