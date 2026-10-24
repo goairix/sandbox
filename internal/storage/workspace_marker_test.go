@@ -72,6 +72,7 @@ func (f *fakeWorkspaceObjects) DeleteObject(_ context.Context, key string) error
 func TestRootMarkerProfilesHaveIndependentImmutableOptions(t *testing.T) {
 	profileIDs := []string{
 		RootMarkerProfileMinIO,
+		RootMarkerProfileMinIOPrivateHTTP,
 		RootMarkerProfileHuaweiOBSPublic,
 		RootMarkerProfileHuaweiOBSPrivate2023,
 	}

@@ -21,7 +21,10 @@ import (
 )
 
 const (
-	RootMarkerProfileMinIO                = "minio-sigv4-path-style-v1"
+	RootMarkerProfileMinIO = "minio-sigv4-path-style-v1"
+	// RootMarkerProfileMinIOPrivateHTTP uses the same directory marker as
+	// HTTPS MinIO. Transport policy remains with the selected mounter profile.
+	RootMarkerProfileMinIOPrivateHTTP     = "minio-sigv4-path-style-private-http-v1"
 	RootMarkerProfileHuaweiOBSPublic      = "huawei-obs-public-v1"
 	RootMarkerProfileHuaweiOBSPrivate2023 = "huawei-obs-private-2023-v1"
 )
@@ -53,6 +56,14 @@ type RootMarkerProfile struct {
 var rootMarkerProfiles = map[string]RootMarkerProfile{
 	RootMarkerProfileMinIO: {
 		ID:    RootMarkerProfileMinIO,
+		Style: RootMarkerTrailingSlash,
+		options: RootMarkerOptions{
+			ContentType: "application/x-directory",
+			Metadata:    map[string]string{},
+		},
+	},
+	RootMarkerProfileMinIOPrivateHTTP: {
+		ID:    RootMarkerProfileMinIOPrivateHTTP,
 		Style: RootMarkerTrailingSlash,
 		options: RootMarkerOptions{
 			ContentType: "application/x-directory",
