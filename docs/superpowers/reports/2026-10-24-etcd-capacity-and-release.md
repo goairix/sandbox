@@ -413,3 +413,8 @@ FUSE 发布门仍未通过。Chart 默认的 `sandbox-fuse-mounter:v0.2.12`、
 `sha256:5f21852681a0ad10ded73952fc4bc19d46cea5200832c7fc80abb04da6da2130`，
 但尚未证明其 helper 协议与当前源码相同，不能混搭声明验收。
 本轮没有启用 FUSE，也没有使用旧迁移分支镜像替代当前源码构建。
+
+随后在干净工作树以主仓库共享 Go 缓存执行 `go test ./...`，所有返回的
+包均通过；该轮没有设置 `TEST_ETCD_ENDPOINT`，因此真实 etcd 断言以
+前述单独设置环境变量的存储和 sandbox 回归为准。全仓通过不能替代
+FUSE 镜像、对象存储物理挂载或容量发布门。
