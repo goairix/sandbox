@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -215,4 +216,30 @@ func TestActiveDueIndexResolvesLostReplyAndRejectsStaleRevision(t *testing.T) {
 	near, err = repo.ScanDue(ctx, now.Add(2*time.Second), "", 10)
 	require.NoError(t, err)
 	require.Empty(t, near.Records)
+}
+
+func TestActiveDueIndexSurvivesRepositoryRestart(t *testing.T) {
+	store := testStore(t)
+	first, err := NewActiveSandboxRepository(store, "due-restart-cell")
+	require.NoError(t, err)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	record := validActiveRecord("sandbox-due-restart")
+	record.Snapshot = activeDueSnapshot(t, now, time.Minute, false)
+	require.NoError(t, first.Publish(ctx, record))
+	_, err = first.Activate(ctx, record.SandboxID, record.Revision, record.Snapshot)
+	require.NoError(t, err)
+
+	reopened, err := New(ctx, Options{
+		Endpoints: []string{os.Getenv("TEST_ETCD_ENDPOINT")},
+		Prefix:    store.prefix, Timeout: 3 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	second, err := NewActiveSandboxRepository(reopened, "due-restart-cell")
+	require.NoError(t, err)
+	page, err := second.ScanDue(ctx, now.Add(2*time.Minute), "", 10)
+	require.NoError(t, err)
+	require.Len(t, page.Records, 1)
+	require.Equal(t, record.SandboxID, page.Records[0].SandboxID)
 }
