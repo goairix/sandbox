@@ -1,0 +1,14 @@
+# Package a verified static sandbox binary without rebuilding Go dependencies
+# inside Docker. The build context contains only the binary and this config.
+ARG API_BASE_IMAGE=registry.i.huaxisy.com/library/alpine:3.22
+FROM ${API_BASE_IMAGE}
+
+WORKDIR /app
+RUN apk add --no-cache ca-certificates docker-cli
+
+COPY --chmod=0755 sandbox /app/sandbox
+COPY config.yaml /etc/sandbox/config.yaml
+
+EXPOSE 8080
+ENTRYPOINT ["/app/sandbox"]
+CMD ["--config", "/etc/sandbox/config.yaml"]

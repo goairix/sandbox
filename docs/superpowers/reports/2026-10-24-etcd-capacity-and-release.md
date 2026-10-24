@@ -39,3 +39,20 @@
 这证明当前可选无认证配置能穿过真实主程序启动、HTTP 就绪和重启路径，
 **不证明** Kubernetes 分布式生命周期、实际沙盒创建、FUSE 物理清理、
 配额退款、三成员故障或大量存活沙盒容量。集群安装仍未执行。
+
+## 当前源码的 arm64 发布镜像打包检查
+
+另以共享 Go 缓存编译 `-trimpath` 的 `./cmd/sandbox`，SHA-256 为
+`cd7818a7f9d7faf712ff0fce620fcd1a2e9179e978fbe65db8fffc67064248d5`。
+将该二进制与 `configs/config.yaml` 单独放入临时构建上下文，使用
+`docker/Dockerfile.prebuilt` 打包，没有在 Docker 内重新下载 Go 工具链或
+模块。镜像 `sandbox-etcd-reset:local-smoke` 的 ID 为
+`sha256:a13b5797d82e7c263e481265b979472d5ab9332d359c4de094e2faacac340cc4`，
+架构为 `linux/arm64`，大小 163,316,128 字节；容器内 `/app/sandbox`
+的 SHA-256 与构建输入完全一致。
+
+首次使用 Docker Hub `alpine:3.22` 时，匿名令牌请求连接被重置，构建失败。
+核验内部镜像仓库的 `library/alpine:3.22` 同时提供 arm64 和 amd64
+清单后，改用该明确基础镜像，完整构建和不带覆盖参数的重复构建均通过。
+这仅验证镜像打包和内容，尚未运行该镜像的 Kubernetes Pod，也未推送
+到发布仓库。
