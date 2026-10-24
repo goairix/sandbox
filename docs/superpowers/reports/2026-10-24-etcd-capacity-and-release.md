@@ -476,3 +476,26 @@ requests`，**该次健康检查失败**；随后三成员 Raft applied index
 单副本每轮最多发现 1,024 条，尚未计候选逐条重新读取、销毁、
 Kubernetes 调用和配额处理。10 万同时到期的清理延迟不能从上述
 5.527 秒候选遍历推断。当前仍没有可信的单 cell 支持上限。
+
+## 隔离 API canary 的 FUSE 创建失败
+
+没有改动正式 API Service 或 revision 15 的 sync-only 配置。另建一个
+`sandbox-api-fuse-canary` Deployment，固定当前源码 API 和 mounter 镜像，
+只通过端口转发发送测试 FUSE 创建。首次请求在准备 Pod 前返回
+`workspace FUSE sandbox CPU limit must not be empty`。Pod 环境变量中的
+`SANDBOX_SECURITY_MAX_CPU=500m` 实际存在；无配置文件键时，Viper 的
+`AllKeys` 不包含三个可选资源键，环境变量因而未绑定。提交 `e203f94`
+加入失败回归并补齐空值默认键，保持原来的未设置语义。配置和启动包
+测试、针对性 race、vet 均通过。修复镜像
+`sandbox-fuse-etcd-api:v1-reset-e203f94-arm64` 的 digest 为
+`sha256:7245e81e707a5c18385f6c35b3a01e620ca2012de4e64bd50808c003ede9afb9`。
+新准备 Pod 已显示 CPU limit `500m`、request `100m`，说明此故障已越过。
+
+随后 kubelet 首次拒绝 `sandbox-fuse` AppArmor 名称。已存在的节点 loader
+实际装载 `sandbox-fuse-37d5cf8ed9c5decd5c13aa61c97d0c91183cbb0214d61769c8430dfd0090724d`；
+仅将隔离 canary 的 LSM 配置对齐后，mounter 镜像可以拉取、容器可以启动。
+新的创建仍返回 500：准备 Pod 的 mounter 很快以 exit 1 终止，容器日志
+只有通用 `workspace-mounter: request failed`，尚未确认内部启动失败原因。
+没有将这一失败解释为 etcd 状态层问题，也没有将镜像自检称为实际挂载。
+失败的准备 Pod 均由原清理路径删除；隔离 canary Deployment 随后删除。
+复核正式 API 仍为 2/2，etcd 3/3，MinIO 1/1，FUSE 关闭。
