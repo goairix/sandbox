@@ -197,6 +197,11 @@ func (tx *lostReplyTxn) Then(operations ...clientv3.Op) clientv3.Txn {
 	return tx
 }
 
+func (tx *lostReplyTxn) Else(operations ...clientv3.Op) clientv3.Txn {
+	tx.Txn.Else(operations...)
+	return tx
+}
+
 func (tx *lostReplyTxn) Commit() (*clientv3.TxnResponse, error) {
 	response, err := tx.Txn.Commit()
 	if err == nil && tx.owner.drop.CompareAndSwap(true, false) {
