@@ -135,3 +135,76 @@ func TestMutationOperationUsesOneExpiringExclusiveLock(t *testing.T) {
 	require.NoError(t, repository.EndOperation(ctx, *second))
 	require.NoError(t, repository.EndOperation(ctx, *data))
 }
+
+func TestExclusiveOperationClosesAdmissionAndReopensAfterEnd(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-exclusive")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, data, err := repository.BeginOperation(ctx, record.SandboxID, "data", state.ActiveOperationData, 5*time.Second)
+	require.NoError(t, err)
+	exclusiveRecord, exclusive, err := repository.BeginOperation(ctx, record.SandboxID, "exclusive", state.ActiveOperationExclusive, 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxExclusive, exclusiveRecord.Phase)
+	require.Equal(t, uint64(3), exclusiveRecord.Revision)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "late", state.ActiveOperationData, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxAdmissionClosed)
+	live, err := repository.LiveOperations(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), live)
+	require.NoError(t, repository.EndOperation(ctx, *data))
+	require.NoError(t, repository.EndOperation(ctx, *exclusive))
+	active, err := repository.Load(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxActive, active.Phase)
+	require.Equal(t, uint64(4), active.Revision)
+}
+
+func TestExpiredExclusiveWithWorkspaceTransitionClosesForCleanup(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-abandoned-exclusive")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"workspace_transition":"mounting"}`))
+	require.NoError(t, err)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "exclusive", state.ActiveOperationExclusive, time.Second)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		live, err := repository.LiveOperations(ctx, record.SandboxID)
+		return err == nil && live == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "late", state.ActiveOperationData, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxAdmissionClosed)
+	current, err := repository.Load(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActiveSandboxCleanupPending, current.Phase)
+	require.Equal(t, "workspace_transition_abandoned", current.CleanupCheckpoint)
+}
+
+func TestExpiredExclusiveWithoutTransitionCanRecoverAdmission(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-abandoned-clean-exclusive")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "exclusive", state.ActiveOperationExclusive, time.Second)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		live, err := repository.LiveOperations(ctx, record.SandboxID)
+		return err == nil && live == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	current, next, err := repository.BeginOperation(ctx, record.SandboxID, "new-data", state.ActiveOperationData, 5*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, state.ActiveSandboxActive, current.Phase)
+	require.Equal(t, uint64(4), current.Revision)
+}

@@ -5,14 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
-
-var errOperationKindPending = errors.New("etcd state: exclusive operations are not yet implemented")
 
 func (r *ActiveSandboxRepository) operationPrefix(id string) string {
 	return r.recordKey(id) + "/operation/"
@@ -31,7 +28,46 @@ func (r *ActiveSandboxRepository) exclusiveKey(id string) string {
 	return r.recordKey(id) + "/exclusive"
 }
 
-// BeginOperation admits data or mutation operations while the durable lifecycle
+func workspaceTransition(snapshot json.RawMessage) (bool, error) {
+	var payload struct {
+		WorkspaceTransition string `json:"workspace_transition"`
+	}
+	if err := json.Unmarshal(snapshot, &payload); err != nil {
+		return false, state.ErrActiveSandboxCorrupt
+	}
+	return payload.WorkspaceTransition != "", nil
+}
+
+// recoverAbandonedExclusive changes a stranded exclusive record only after
+// etcd has removed its leased holder. A persisted workspace transition keeps
+// admission closed so cleanup can inspect the incomplete physical effect.
+func (r *ActiveSandboxRepository) recoverAbandonedExclusive(ctx context.Context, id string, envelope activeEnvelope, revision int64) (bool, error) {
+	hasTransition, err := workspaceTransition(envelope.Record.Snapshot)
+	if err != nil {
+		return false, err
+	}
+	if hasTransition {
+		envelope.Record.Phase = state.ActiveSandboxCleanupPending
+		envelope.Record.CleanupCheckpoint = "workspace_transition_abandoned"
+	} else {
+		envelope.Record.Phase = state.ActiveSandboxActive
+	}
+	envelope.Record.Revision++
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return false, err
+	}
+	response, err := r.store.client.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision(r.recordKey(id)), "=", revision),
+			clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0)).
+		Then(clientv3.OpPut(r.recordKey(id), string(raw))).Commit()
+	if err != nil {
+		return false, err
+	}
+	return response.Succeeded, nil
+}
+
+// BeginOperation admits data, mutation or exclusive operations while the durable lifecycle
 // record is active. The operation key is attached to an etcd lease, and the
 // transaction compares the record revision so BeginDestroy closes admission.
 // ExpiresAt is advisory; all future effects must recheck the live lease key.
@@ -39,19 +75,34 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 	if !validActiveID(id) || token == "" || state.ValidateActiveSandboxTTL(ttl) != nil {
 		return nil, nil, state.ErrActiveSandboxCorrupt
 	}
-	if kind != state.ActiveOperationData && kind != state.ActiveOperationMutation {
-		return nil, nil, errOperationKindPending
+	if kind != state.ActiveOperationData && kind != state.ActiveOperationMutation && kind != state.ActiveOperationExclusive {
+		return nil, nil, state.ErrActiveSandboxCorrupt
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
 	recordKey := r.recordKey(id)
-	read, err := r.store.client.Get(requestCtx, recordKey)
-	if err != nil || len(read.Kvs) == 0 {
-		return nil, nil, err
-	}
-	envelope, err := decodeActiveEnvelope(read.Kvs[0].Value, id)
-	if err != nil {
-		return nil, nil, err
+	var envelope activeEnvelope
+	var revision int64
+	for {
+		read, err := r.store.client.Get(requestCtx, recordKey)
+		if err != nil || len(read.Kvs) == 0 {
+			return nil, nil, err
+		}
+		envelope, err = decodeActiveEnvelope(read.Kvs[0].Value, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		revision = read.Kvs[0].ModRevision
+		if envelope.Record.Phase != state.ActiveSandboxExclusive {
+			break
+		}
+		recovered, err := r.recoverAbandonedExclusive(requestCtx, id, envelope, revision)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !recovered {
+			return nil, nil, state.ErrActiveSandboxAdmissionClosed
+		}
 	}
 	if envelope.Record.Phase != state.ActiveSandboxActive {
 		return nil, nil, state.ErrActiveSandboxAdmissionClosed
@@ -74,14 +125,25 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 	}
 	opKey := r.operationKey(id, token)
 	compares := []clientv3.Cmp{
-		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", revision),
 		clientv3.Compare(clientv3.Version(opKey), "=", 0),
 		clientv3.Compare(clientv3.Version(r.exclusiveKey(id)), "=", 0),
 	}
 	writes := []clientv3.Op{clientv3.OpPut(opKey, string(raw), clientv3.WithLease(lease))}
-	if kind == state.ActiveOperationMutation {
+	if kind == state.ActiveOperationMutation || kind == state.ActiveOperationExclusive {
 		compares = append(compares, clientv3.Compare(clientv3.Version(r.mutationKey(id)), "=", 0))
 		writes = append(writes, clientv3.OpPut(r.mutationKey(id), token, clientv3.WithLease(lease)))
+	}
+	if kind == state.ActiveOperationExclusive {
+		envelope.Record.Phase = state.ActiveSandboxExclusive
+		envelope.Record.Revision++
+		updated, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, nil, err
+		}
+		writes = append(writes,
+			clientv3.OpPut(r.exclusiveKey(id), token, clientv3.WithLease(lease)),
+			clientv3.OpPut(recordKey, string(updated)))
 	}
 	response, err := r.store.client.Txn(requestCtx).
 		If(compares...).Then(writes...).
@@ -125,15 +187,15 @@ func (r *ActiveSandboxRepository) LiveOperations(ctx context.Context, id string)
 	return response.Count, nil
 }
 
-// EndOperation drops an exact live data or mutation operation. A lease already expired is
+// EndOperation drops an exact live operation. A lease already expired is
 // idempotently absent, as in the Redis baseline, provided the generation still
 // belongs to the same sandbox record.
 func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation state.ActiveSandboxOperation) error {
 	if !validActiveID(operation.SandboxID) || operation.Token == "" || operation.Generation <= 0 {
 		return state.ErrActiveSandboxCorrupt
 	}
-	if operation.Kind != state.ActiveOperationData && operation.Kind != state.ActiveOperationMutation {
-		return errOperationKindPending
+	if operation.Kind != state.ActiveOperationData && operation.Kind != state.ActiveOperationMutation && operation.Kind != state.ActiveOperationExclusive {
+		return state.ErrActiveSandboxCorrupt
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
@@ -155,12 +217,55 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 	}
 	compares := []clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(opKey), "=", read.Kvs[0].ModRevision)}
 	writes := []clientv3.Op{clientv3.OpDelete(opKey)}
-	if operation.Kind == state.ActiveOperationMutation {
+	if operation.Kind == state.ActiveOperationMutation || operation.Kind == state.ActiveOperationExclusive {
 		// Only the matching holder may remove the shared mutation lock.
 		// A prior expired token cannot unlock a successor's lease.
 		mutationKey := r.mutationKey(operation.SandboxID)
 		compares = append(compares, clientv3.Compare(clientv3.Value(mutationKey), "=", operation.Token))
 		writes = append(writes, clientv3.OpDelete(mutationKey))
+	}
+	if operation.Kind == state.ActiveOperationExclusive {
+		exclusiveKey := r.exclusiveKey(operation.SandboxID)
+		compares = append(compares, clientv3.Compare(clientv3.Value(exclusiveKey), "=", operation.Token))
+		writes = append(writes, clientv3.OpDelete(exclusiveKey))
+
+		// Closing the exclusive operation resumes normal admission only if
+		// its snapshot has no incomplete workspace transition. Destroying
+		// records stay closed while their remaining operations drain.
+		recordKey := r.recordKey(operation.SandboxID)
+		recordRead, err := r.store.client.Get(requestCtx, recordKey)
+		if err != nil {
+			return err
+		}
+		if len(recordRead.Kvs) == 0 {
+			return state.ErrActiveSandboxStaleToken
+		}
+		envelope, err := decodeActiveEnvelope(recordRead.Kvs[0].Value, operation.SandboxID)
+		if err != nil {
+			return err
+		}
+		if envelope.Record.Generation != operation.Generation {
+			return state.ErrActiveSandboxStaleToken
+		}
+		if envelope.Record.Phase == state.ActiveSandboxExclusive {
+			hasTransition, err := workspaceTransition(envelope.Record.Snapshot)
+			if err != nil {
+				return err
+			}
+			if hasTransition {
+				envelope.Record.Phase = state.ActiveSandboxCleanupPending
+				envelope.Record.CleanupCheckpoint = "workspace_transition_incomplete"
+			} else {
+				envelope.Record.Phase = state.ActiveSandboxActive
+			}
+			envelope.Record.Revision++
+			next, err := json.Marshal(envelope)
+			if err != nil {
+				return err
+			}
+			compares = append(compares, clientv3.Compare(clientv3.ModRevision(recordKey), "=", recordRead.Kvs[0].ModRevision))
+			writes = append(writes, clientv3.OpPut(recordKey, string(next)))
+		}
 	}
 	response, err := r.store.client.Txn(requestCtx).
 		If(compares...).Then(writes...).Commit()
