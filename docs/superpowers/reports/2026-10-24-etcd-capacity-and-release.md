@@ -190,7 +190,41 @@ GET 读回 ready 和原运行时 ID，Python Exec 返回 200、退出码 0、
 这验证了单副本进程重启后的普通沙盒恢复，不等于两个 API 副本并发竞争
 或 etcd 成员/节点故障恢复。
 
-DS 当前 etcd 3/3、MinIO 1/1、API 1/1；测试结束后没有受管沙盒 Pod
+该阶段 DS 的 etcd 3/3、MinIO 1/1、API 1/1；测试结束后没有受管沙盒 Pod
 或其 NetworkPolicy。FUSE、实际对象存储文件操作、配额退款故障矩阵、
 大量存活 N 和三成员故障仍未通过验收；上文的 10 万记录全量扫描瓶颈
 仍是容量阻塞。
+
+## DS 双 API 副本的跨实例与同 workspace 申请
+
+将 API 扩至两个就绪副本，并分别端口转发到明确的两个 Pod，避免经 Service
+负载均衡时无法判定请求实际落点。A 副本创建普通沙盒
+`sandbox-twqhevjsa1` 返回 201；创建后 2.48 秒 B 副本查询返回
+200/ready，2.92 秒在 B 执行 Python 返回 200/退出码 0；7.42 秒
+B 销毁返回 200，随即查询 404，受管 Pod 和 NetworkPolicy 均消失。
+先前一次 180 秒 TTL 的实验在 B 查询时已过期，返回 404；Kubernetes
+事件显示 Pod 正按 TTL 退出，因此该次不计入跨副本失败或成功。
+
+随后在两个副本同时申请同一个 sync workspace。首次部署值的 FUSE-only
+模板未向 sync-only API 提供 `storageIdentity`，两个请求均在创建 Pod 前
+返回 503/invalid workspace lease。提交 `58f349b` 添加 sync-only 的
+backend identity、preset 和 profile 渲染测试与模板接线；第一次真实升级
+又发现 HTTP MinIO 的 profile 仍按 HTTPS 输出，API 以固定映射校验拒绝启动。
+该错误升级 revision 7 超时，后续 revision 8 的 drain hook 读取错误模板
+失败，短暂将 API 缩至 0。使用 Helm revision 6 成功回滚，恢复两个旧 API；
+提交 `5f66c28` 修正 HTTP MinIO profile 选择，完整 Helm 测试与 lint 通过，
+再升级到 revision 10，API 2/2 就绪。没有放宽配置校验或在失败升级期间
+发起业务请求。
+
+修复后，同时向两个不同 API Pod 申请
+`etcd-reset/ds-workspace-race-02`，均返回 201，同一逻辑 ID
+`sandbox-8tzt4cgkof` 和同一运行时 Pod；一个 `reused=false`，另一个
+`reused=true`。公开 DELETE 返回 200、GET 返回 404，受管 Pod 和
+NetworkPolicy 消失。再次在另一副本申请相同路径，返回新的逻辑 ID
+`sandbox-hwm8df6atm`、`reused=false`；再次销毁返回 200，资源清空。
+这是一次两副本、单路径并发正例，尚未覆盖 ACK 丢失、节点故障、
+大量不同 workspace 或对象存储文件内容的完整性。
+
+当前 DS Helm revision 10 为 `deployed`，API 2/2、etcd 3/3、MinIO 1/1；
+值文件保留发布运行时的 arm64 digest 与两副本设置。上述单项成功不能
+替代 10 万存活沙盒容量、完整 FUSE 或生产发布验收。
