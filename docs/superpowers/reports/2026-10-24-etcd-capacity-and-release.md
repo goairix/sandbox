@@ -228,3 +228,14 @@ NetworkPolicy 消失。再次在另一副本申请相同路径，返回新的逻
 当前 DS Helm revision 10 为 `deployed`，API 2/2、etcd 3/3、MinIO 1/1；
 值文件保留发布运行时的 arm64 digest 与两副本设置。上述单项成功不能
 替代 10 万存活沙盒容量、完整 FUSE 或生产发布验收。
+
+同一环境又验证了一次 sync 文件往返：公开创建
+`etcd-reset/ds-file-roundtrip-03` 对应的沙盒 `sandbox-roaex7ylj1`，
+在运行时 `/workspace/probe.txt` 写入 `ds-etcd-sync-roundtrip-03`；
+`POST /workspace/sync` 的 `from_container` 返回 200，销毁返回 200。
+重新申请同一路径得到新的沙盒 `sandbox-3r9x55itbb` 和运行时 Pod，
+其 Python Exec 从该文件读回相同内容；最后再次销毁返回 200，
+受管 Pod 与 NetworkPolicy 为空。测试对象保留在独立 DS MinIO
+的该专用前缀中，未触碰其他工作区。
+这是单文件、单次同步的正例，不证明并发写入、对象存储故障恢复或
+FUSE 挂载链。
