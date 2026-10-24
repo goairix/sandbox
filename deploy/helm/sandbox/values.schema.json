@@ -118,6 +118,7 @@
                 "endpoint": {"type": "string", "minLength": 1},
                 "accessKey": {"type": "string"},
                 "secretKey": {"type": "string"},
+                "credentialsSecretName": {"type": "string"},
                 "storageIdentity": {"type": "string", "minLength": 1},
                 "credentialGeneration": {"type": "string", "minLength": 1},
                 "region": {"type": "string"},

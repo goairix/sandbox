@@ -1,4 +1,7 @@
 {{- include "sandbox.validateState" . }}
+{{- if and .Values.config.storage.filesystem.credentialsSecretName (or .Values.config.storage.filesystem.accessKey .Values.config.storage.filesystem.secretKey) }}
+{{- fail "filesystem credentials Secret cannot be combined with inline accessKey or secretKey" }}
+{{- end }}
 {{- include "sandbox.validateAppArmorLoader" . }}
 {{- include "sandbox.validateNetworkCIDRs" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
@@ -145,9 +148,23 @@ spec:
             - name: SANDBOX_STORAGE_FILESYSTEM_USE_SSL
               value: "{{ .Values.config.storage.filesystem.useSSL }}"
             - name: SANDBOX_STORAGE_FILESYSTEM_ACCESS_KEY
+              {{- if .Values.config.storage.filesystem.credentialsSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.storage.filesystem.credentialsSecretName | quote }}
+                  key: access-key
+              {{- else }}
               value: {{ .Values.config.storage.filesystem.accessKey | quote }}
+              {{- end }}
             - name: SANDBOX_STORAGE_FILESYSTEM_SECRET_KEY
+              {{- if .Values.config.storage.filesystem.credentialsSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.storage.filesystem.credentialsSecretName | quote }}
+                  key: secret-key
+              {{- else }}
               value: {{ .Values.config.storage.filesystem.secretKey | quote }}
+              {{- end }}
             - name: SANDBOX_WORKSPACE_DEFAULT_MOUNT_MODE
               value: {{ .Values.config.workspace.defaultMountMode | quote }}
             - name: SANDBOX_WORKSPACE_ENABLED_MOUNT_MODES

@@ -223,6 +223,9 @@ config:
       # authorize 标准输入通道传给挂载器。
       accessKey: ""
       secretKey: ""
+      # 可选：引用同命名空间 Secret 中的 access-key 和 secret-key，
+      # 避免在 Helm values 与渲染清单中保存凭据明文。
+      credentialsSecretName: ""
       storageIdentity: production-object-store
       credentialGeneration: rotation-1
       subPath: ""
