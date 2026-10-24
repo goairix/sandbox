@@ -208,3 +208,73 @@ func TestExpiredExclusiveWithoutTransitionCanRecoverAdmission(t *testing.T) {
 	require.Equal(t, state.ActiveSandboxActive, current.Phase)
 	require.Equal(t, uint64(4), current.Revision)
 }
+
+func TestRenewOperationReplacesLeaseWithoutRevivingOldToken(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-renew")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, old, err := repository.BeginOperation(ctx, record.SandboxID, "mutation", state.ActiveOperationMutation, time.Second)
+	require.NoError(t, err)
+	renewed, err := repository.RenewOperation(ctx, *old, 5*time.Second)
+	require.NoError(t, err)
+	require.Greater(t, renewed.ExpiresAt, old.ExpiresAt)
+	time.Sleep(2200 * time.Millisecond)
+	live, err := repository.LiveOperations(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), live)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "new-mutation", state.ActiveOperationMutation, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxConflict)
+	require.NoError(t, repository.EndOperation(ctx, *renewed))
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "new-mutation", state.ActiveOperationMutation, 5*time.Second)
+	require.NoError(t, err)
+}
+
+func TestRenewExpiredOperationIsStale(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-renew-expired")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, operation, err := repository.BeginOperation(ctx, record.SandboxID, "short", state.ActiveOperationData, time.Second)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		live, err := repository.LiveOperations(ctx, record.SandboxID)
+		return err == nil && live == 0
+	}, 4*time.Second, 50*time.Millisecond)
+	_, err = repository.RenewOperation(ctx, *operation, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxStaleToken)
+}
+
+func TestRenewLostReplyKeepsOneQueryableOperation(t *testing.T) {
+	s := testStore(t)
+	repository, err := NewActiveSandboxRepository(s, "cell-a")
+	require.NoError(t, err)
+	ctx := context.Background()
+	record := validActiveRecord("sandbox-renew-lost-reply")
+	require.NoError(t, repository.Publish(ctx, record))
+	_, err = repository.Activate(ctx, record.SandboxID, 1, json.RawMessage(`{"ready":true}`))
+	require.NoError(t, err)
+	_, operation, err := repository.BeginOperation(ctx, record.SandboxID, "mutation", state.ActiveOperationMutation, time.Second)
+	require.NoError(t, err)
+	realKV := s.client.KV
+	fault := &lostReplyKV{KV: realKV}
+	fault.drop.Store(true)
+	s.client.KV = fault
+	_, err = repository.RenewOperation(ctx, *operation, 5*time.Second)
+	s.client.KV = realKV
+	require.ErrorContains(t, err, "reply lost after commit")
+	time.Sleep(2200 * time.Millisecond)
+	live, err := repository.LiveOperations(ctx, record.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), live)
+	_, _, err = repository.BeginOperation(ctx, record.SandboxID, "successor", state.ActiveOperationMutation, 5*time.Second)
+	require.ErrorIs(t, err, state.ErrActiveSandboxConflict)
+}
