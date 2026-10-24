@@ -499,3 +499,33 @@ Kubernetes 调用和配额处理。10 万同时到期的清理延迟不能从上
 没有将这一失败解释为 etcd 状态层问题，也没有将镜像自检称为实际挂载。
 失败的准备 Pod 均由原清理路径删除；隔离 canary Deployment 随后删除。
 复核正式 API 仍为 2/2，etcd 3/3，MinIO 1/1，FUSE 关闭。
+
+### 后续隔离验证与未关闭风险
+
+提交 `2715939` 修正 mounter 的 bootstrap 校验：仅对已验证的
+`minio-sigv4-path-style-private-http-v1` 私有 MinIO profile 接受 HTTP，
+其他 profile 仍要求 HTTPS。修复镜像
+`sandbox-fuse-etcd-mounter:v1-reset-2715939-arm64` 的 digest 为
+`sha256:d35348068bbe2b59a6ffc8f431f30eaf8ab7f94747729d99ac6c999caec8794a`。
+再次以隔离 canary 申请 FUSE 时，受管 Pod 的两个容器达到 Running，mounter
+的 health 报告实际 `mount_type=fuse`、`generation=1`；公开创建请求仍在
+180 秒后超时，**不能记为 FUSE 创建通过**。
+
+同一受管 Pod 标签的临时探针无法查询集群 DNS，也无法访问 MinIO Service
+VIP。只给该实例增加精确后端 Pod 选择器的临时策略后，探针的 DNS 查询和
+MinIO `/minio/health/ready` 均成功。DS 的 CNI 在该路径按 Service 转换后的
+后端 Pod 地址执行策略；当前系统策略只放行 DNS/MinIO 的 Service VIP CIDR，
+不足以保证此集群的实际连通性。临时策略及探针 Pod 已删除，产品策略尚未修正。
+
+超时创建的 FUSE 清理先因运行时终止未证实而拒绝释放，随后受管 Pod
+两容器均到终态、原清理记录达到 `terminated` 并移除了 finalizer。
+Pod API 对象在删除宽限期后仍未自然消失；确认两个容器终态后执行强制
+API 删除，原 FUSEPool 记录和实例策略随之消失。强制 API 删除不能证明
+节点 FUSE 挂载已物理清理，故物理清理验收仍未通过。
+
+`--audit-workspace-owners` 的只读审计仍发现该申请的一条 FUSE owner：
+workspace hash `d0cf08d0ebb860011ace178322413027ef03c93083c5c18a33c099674ed86f86`，
+状态 `runtime_scope_unconfirmed`、`recoverable=false`。现有 Kubernetes owner
+恢复入口按设计拒绝在缺少 namespace/release 绑定时删除；没有直接删 etcd 键。
+正式 API 保持 revision 15 的 sync-only 2/2，etcd 3/3，MinIO 1/1；
+此残留和产品网络策略是下一次 FUSE 灰度前必须解决的阻塞项。
