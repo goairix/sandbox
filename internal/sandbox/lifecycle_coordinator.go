@@ -19,9 +19,13 @@ const (
 	defaultControllerRenewInterval = 5 * time.Second
 	activeLifecycleScanInterval    = 5 * time.Second
 	activeLifecycleScanPageSize    = 128
-	activePublishingRecoveryGrace  = time.Minute
+	// Each tick processes at most this many pages per index. Cursors carry
+	// progress across ticks so one repeatedly failing cleanup cannot starve
+	// candidates with later keys; the next pass wraps at the end.
+	activeLifecycleIndexedPagesPerTick = 8
+	activePublishingRecoveryGrace      = time.Minute
 	// Wakeups are an optimization for local destroys, not a durable queue.
-	// Overflow is recovered by the existing periodic scan.
+	// Overflow is recovered from the durable due index or legacy full scan.
 	activeCleanupWakeQueueSize = 256
 )
 
@@ -223,9 +227,9 @@ func (c *activeController) deleteRecordWithResult(ctx context.Context, revision 
 	return false, repository.DeleteController(ctx, lease, revision)
 }
 
-// runActiveLifecycleCoordinator discovers durable workspace lifecycles. The
-// scan is deliberately off the request path and jittered per replica; the
-// controller lease remains the final single-writer arbitration mechanism.
+// runActiveLifecycleCoordinator discovers due and workspace lifecycles after
+// Start's full recovery pass. Work is off the request path and jittered per
+// replica; the controller lease remains the final single-writer fence.
 func (m *Manager) runActiveLifecycleCoordinator() {
 	defer m.wg.Done()
 	delay := lifecycleScanDelay(m.config.InstanceID)
@@ -236,8 +240,8 @@ func (m *Manager) runActiveLifecycleCoordinator() {
 		case <-m.controlCtx.Done():
 			return
 		case <-timer.C:
-			// The next bounded pass retries. Existing controllers keep renewing
-			// independently, so a transient scan failure does not interrupt them.
+			// Start completed the one full recovery pass before accepting
+			// requests. Subsequent ticks only discover indexed candidates.
 			_ = m.reconcileActiveLifecycleControllers(m.controlCtx)
 			timer.Reset(activeLifecycleScanInterval + lifecycleScanDelay(m.config.InstanceID))
 		case id := <-m.cleanupWake:
@@ -266,7 +270,9 @@ func lifecycleScanDelay(instanceID string) time.Duration {
 	return time.Duration(h.Sum32()%1000) * time.Millisecond
 }
 
-func (m *Manager) reconcileActiveLifecycleControllers(ctx context.Context) error {
+// scanActiveLifecycleInventory is the one full startup recovery pass for an
+// indexed repository. Legacy repositories also use it on later ticks.
+func (m *Manager) scanActiveLifecycleInventory(ctx context.Context) error {
 	var cursor uint64
 	for {
 		page, err := m.activeSandboxes.Scan(ctx, cursor, activeLifecycleScanPageSize)
@@ -286,6 +292,71 @@ func (m *Manager) reconcileActiveLifecycleControllers(ctx context.Context) error
 		}
 		cursor = page.Cursor
 	}
+}
+
+// reconcileActiveLifecycleControllers uses bounded durable indexes when the
+// repository provides them. A legacy repository retains its full-scan path.
+// Each candidate is reloaded: an index entry does not establish current TTL,
+// controller ownership, runtime identity or permission to release resources.
+func (m *Manager) reconcileActiveLifecycleControllers(ctx context.Context) error {
+	indexed, ok := m.activeSandboxes.(state.ActiveSandboxLifecycleIndexRepository)
+	if !ok {
+		return m.scanActiveLifecycleInventory(ctx)
+	}
+
+	m.lifecycleIndexMu.Lock()
+	defer m.lifecycleIndexMu.Unlock()
+
+	now := time.Now()
+	for range activeLifecycleIndexedPagesPerTick {
+		page, err := indexed.ScanDue(ctx, now, m.lifecycleDueCursor, activeLifecycleScanPageSize)
+		if err != nil {
+			return err
+		}
+		if err := m.reconcileActiveLifecycleCandidates(ctx, page.Records); err != nil {
+			return err
+		}
+		m.lifecycleDueCursor = page.Cursor
+		if page.Cursor == "" {
+			break
+		}
+	}
+	for range activeLifecycleIndexedPagesPerTick {
+		page, err := indexed.ScanWorkspace(ctx, m.lifecycleWorkspaceCursor, activeLifecycleScanPageSize)
+		if err != nil {
+			return err
+		}
+		if err := m.reconcileActiveLifecycleCandidates(ctx, page.Records); err != nil {
+			return err
+		}
+		m.lifecycleWorkspaceCursor = page.Cursor
+		if page.Cursor == 0 {
+			break
+		}
+	}
+	return nil
+}
+
+func (m *Manager) reconcileActiveLifecycleCandidates(ctx context.Context, candidates []state.ActiveSandboxRecord) error {
+	for _, candidate := range candidates {
+		current, err := m.activeSandboxes.Load(ctx, candidate.SandboxID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return err
+			}
+			logger.Warn(ctx, "active sandbox lifecycle candidate read deferred",
+				logger.AddField("sandbox_id", candidate.SandboxID), logger.ErrorField(err))
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if err := m.reconcileActiveLifecycle(ctx, current); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Warn(ctx, "active sandbox lifecycle reconciliation deferred",
+				logger.AddField("sandbox_id", current.SandboxID), logger.ErrorField(err))
+		}
+	}
+	return nil
 }
 
 func (m *Manager) reconcileActiveLifecycle(ctx context.Context, record *state.ActiveSandboxRecord) error {

@@ -87,6 +87,25 @@ func TestManagerFUSETimeoutCleanupWithEtcdState(t *testing.T) {
 	require.Zero(t, inventory.Cleanup)
 }
 
+func TestManagerOrdinaryTimeoutViaEtcdDueIndex(t *testing.T) {
+	manager, active := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	sb, err := manager.Create(ctx, SandboxConfig{Mode: ModeEphemeral, Timeout: 1})
+	require.NoError(t, err)
+	require.Nil(t, sb.Workspace)
+
+	page, err := active.ScanDue(ctx, time.Now().Add(2*time.Second), "", 10)
+	require.NoError(t, err)
+	require.Len(t, page.Records, 1)
+	require.Equal(t, sb.ID, page.Records[0].SandboxID)
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, manager.reconcileActiveLifecycleControllers(ctx))
+	require.Eventually(t, func() bool {
+		record, loadErr := active.Load(ctx, sb.ID)
+		return loadErr == nil && record == nil
+	}, 10*time.Second, 50*time.Millisecond)
+}
+
 func TestManagerFUSEDurableTimeoutClosesAdmissionOnEtcd(t *testing.T) {
 	manager, active := newEtcdFUSEManager(t)
 	ctx := context.Background()

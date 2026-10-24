@@ -208,6 +208,12 @@ type Manager struct {
 	controlCtx    context.Context
 	cancelControl context.CancelFunc
 	cleanupWake   chan string
+
+	// Indexed discovery cursors are shared by periodic ticks and explicit
+	// reconciliation calls. They are hints only; record fences remain durable.
+	lifecycleIndexMu         sync.Mutex
+	lifecycleDueCursor       string
+	lifecycleWorkspaceCursor uint64
 }
 
 // NewManager creates a new SandboxManager.
@@ -415,7 +421,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 	if m.distributedStateEnabled() {
-		if err := m.reconcileActiveLifecycleControllers(spanCtx); err != nil {
+		if err := m.scanActiveLifecycleInventory(spanCtx); err != nil {
 			return fmt.Errorf("reconcile active lifecycle controllers: %w", err)
 		}
 		m.wg.Add(1)
