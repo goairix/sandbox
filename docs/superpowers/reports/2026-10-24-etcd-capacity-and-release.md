@@ -160,5 +160,37 @@ NetworkPolicy 均已删除。API key 未写入报告或请求日志。
 
 这证明本次配置下单个普通沙盒的公开创建、查询和销毁路径能够跨越 API、
 etcd 和 Kubernetes。它不证明正式运行时镜像、自然 TTL、配额退款、
-FUSE、同时大量存活沙盒、三成员故障或容量目标。默认正式运行时镜像
-在仓库中缺失，仍是后续业务验证的明确阻塞项。
+FUSE、同时大量存活沙盒、三成员故障或容量目标。Chart 默认的
+`v0.2.12` 标签在仓库中缺失；后续发现有曾用于 DS 的发布版本，见下一节。
+
+## DS 发布运行时的执行、自然 TTL 和 API 重启验证
+
+内部仓库存在 `sandbox-runtime:v0.3.39` 的 arm64 清单，digest 为
+`sha256:a90d72055cf7b2e57d822d68cb4e3e4b42c302b4ac09f8f00592d569946f34c9`。
+将 DS 专用 Helm 值中的普通沙盒镜像固定到该 digest，Helm revision 5
+部署成功；值文件 SHA-256 为
+`e5c803448b91f77375040bbb0b5a25b62f9f8c90397d600a4d45ee866d58e285`。
+本次沿用此前已有的 `secret-edge` 拉取凭据，不修改镜像内容。
+
+第一条普通沙盒 `sandbox-pkpwn9dlfi` 经公开 POST 返回 201/ready，
+运行时 Pod `sandbox-pool-2colw0qp04` 实际使用上述 digest。
+公开 Python Exec 返回 200、退出码 0、标准输出 `etcd-ds-runtime-ok`；
+DELETE 返回 200，随后 GET 404，Pod 和 NetworkPolicy 不再存在。
+
+第二条普通沙盒 `sandbox-l3f4r5txgk` 配置 30 秒 TTL。创建返回 201；
+到期附近公开 GET 先返回 503（关闭中），随后返回 404，
+Pod 和 NetworkPolicy 均消失。这是一次自然到期正例，未单独核对
+持久配额流水或模拟 ACK 丢失，不能概括成完整退款验收。
+
+第三条普通沙盒 `sandbox-vmtxo2jvzi` 存活时，API Deployment 进行一次
+滚动重启，Pod UID 从 `a8296bbe-eb4e-4888-b480-2141f41d760f`
+变为 `4f9d0863-cc70-45d9-a7b0-ec7369287d2f`。新 API Pod 经公开
+GET 读回 ready 和原运行时 ID，Python Exec 返回 200、退出码 0、
+输出 `after-restart`；DELETE 返回 200，随后 GET 404，资源消失。
+这验证了单副本进程重启后的普通沙盒恢复，不等于两个 API 副本并发竞争
+或 etcd 成员/节点故障恢复。
+
+DS 当前 etcd 3/3、MinIO 1/1、API 1/1；测试结束后没有受管沙盒 Pod
+或其 NetworkPolicy。FUSE、实际对象存储文件操作、配额退款故障矩阵、
+大量存活 N 和三成员故障仍未通过验收；上文的 10 万记录全量扫描瓶颈
+仍是容量阻塞。
