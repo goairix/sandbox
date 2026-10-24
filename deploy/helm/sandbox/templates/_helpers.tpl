@@ -187,6 +187,43 @@
 {{- $probe | toJson -}}
 {{- end -}}
 
+{{- define "sandbox.stateBackend" -}}
+{{- .Values.config.storage.state.backend | default "redis" -}}
+{{- end -}}
+
+{{- define "sandbox.validateState" -}}
+{{- $backend := include "sandbox.stateBackend" . -}}
+{{- if eq $backend "redis" -}}
+{{- include "sandbox.validateRedis" . -}}
+{{- else if eq $backend "etcd" -}}
+{{- $etcd := .Values.config.storage.state.etcd -}}
+{{- if .Values.redis.enabled -}}{{ fail "etcd state requires redis.enabled=false" }}{{- end -}}
+{{- if or (not (kindIs "slice" $etcd.endpoints)) (eq (len $etcd.endpoints) 0) -}}{{ fail "etcd state requires at least one endpoint" }}{{- end -}}
+{{- range $endpoint := $etcd.endpoints -}}
+{{- if or (not (kindIs "string" $endpoint)) (empty $endpoint) -}}{{ fail "etcd state endpoints must be nonempty strings" }}{{- end -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $etcd.prefix)) (not (regexMatch "^/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/$" $etcd.prefix)) -}}
+{{- fail "etcd state prefix must be an isolated canonical path ending in /" -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $etcd.existingSecret)) (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" $etcd.existingSecret)) -}}
+{{- fail "etcd state requires an existing TLS Secret name" -}}
+{{- end -}}
+{{- if or (kindIs "string" $etcd.timeoutMs) (lt (int $etcd.timeoutMs) 1) (gt (int $etcd.timeoutMs) 60000) -}}
+{{- fail "etcd state timeoutMs must be within 1..60000" -}}
+{{- end -}}
+{{- if and .Values.productionSafetyChecks .Values.config.workspace.allowMissingLSMForKind -}}
+{{- fail "productionSafetyChecks forbids allowMissingLSMForKind" -}}
+{{- end -}}
+{{- if .Values.productionSafetyChecks -}}
+{{- $lsm := lower (trim (include "sandbox.effectiveLSMProfile" .)) -}}
+{{- if or (empty $lsm) (eq $lsm "unconfined") (eq $lsm "label=disable") -}}
+{{- fail "productionSafetyChecks requires a confined config.workspace.lsmProfile" -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}{{ fail "state backend must be redis or etcd" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sandbox.validateRedis" -}}
 {{- if .Values.redis.enabled -}}
 {{- if not (has .Values.redis.mode (list "standalone" "sentinel")) -}}{{ fail "redis.mode must be standalone or sentinel" }}{{- end -}}
@@ -228,7 +265,7 @@
 {{- end -}}
 
 {{- define "sandbox.builtinSentinel" -}}
-{{- if and .Values.redis.enabled (eq .Values.redis.mode "sentinel") -}}true{{- else -}}false{{- end -}}
+{{- if and (eq (include "sandbox.stateBackend" .) "redis") .Values.redis.enabled (eq .Values.redis.mode "sentinel") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{- define "sandbox.sentinelName" -}}{{ printf "%s-redis-sentinel" .Release.Name }}{{- end -}}
@@ -413,6 +450,29 @@
   value: {{ ternary (int $sentinelConfig.ackTimeoutMs) (ternary 100 (int $ext.ackTimeoutMs) .Values.redis.enabled) $sentinel | quote }}
 {{- end -}}
 
+{{/* A fresh etcd deployment reads TLS material from one pre-existing Secret.
+     No Redis environment name may be present: config.Load rejects mixed state. */}}
+{{- define "sandbox.stateEnv" -}}
+{{- if eq (include "sandbox.stateBackend" .) "etcd" -}}
+- name: SANDBOX_STORAGE_STATE_BACKEND
+  value: etcd
+- name: SANDBOX_STORAGE_STATE_ETCD_ENDPOINTS
+  value: {{ join "," .Values.config.storage.state.etcd.endpoints | quote }}
+- name: SANDBOX_STORAGE_STATE_ETCD_PREFIX
+  value: {{ .Values.config.storage.state.etcd.prefix | quote }}
+- name: SANDBOX_STORAGE_STATE_ETCD_TIMEOUT_MS
+  value: {{ .Values.config.storage.state.etcd.timeoutMs | quote }}
+- name: SANDBOX_STORAGE_STATE_ETCD_CA_FILE
+  value: /etc/sandbox-etcd/ca.crt
+- name: SANDBOX_STORAGE_STATE_ETCD_CERT_FILE
+  value: /etc/sandbox-etcd/client.crt
+- name: SANDBOX_STORAGE_STATE_ETCD_KEY_FILE
+  value: /etc/sandbox-etcd/client.key
+{{- else -}}
+{{ include "sandbox.redisEnv" . }}
+{{- end -}}
+{{- end -}}
+
 {{- define "sandbox.sentinelProcessEnv" -}}
 - name: POD_ORDINAL
   valueFrom:
@@ -530,6 +590,10 @@ seccompProfile:
   "lsmProfile" (include "sandbox.effectiveLSMProfile" .)
   "nodeSelector" (include "sandbox.effectiveNodeSelector" . | fromJson)
 -}}
+{{- if eq (include "sandbox.stateBackend" .) "etcd" -}}
+{{- $_ := set $contract "stateBackend" "etcd" -}}
+{{- $_ := set $contract "statePrefix" .Values.config.storage.state.etcd.prefix -}}
+{{- end -}}
 {{- $dns := include "sandbox.dnsAdmissionConfig" . | fromJson -}}
 {{- if or $dns.disableNodeLocalDNSInjection (gt (len $dns.dnsOptions) 0) -}}
 {{- $_ := set $contract "dnsAdmission" $dns -}}
@@ -559,7 +623,7 @@ seccompProfile:
   value: {{ .Values.config.images.sandbox | quote }}
 - name: SANDBOX_IMAGES_GATEWAY
   value: {{ .Values.config.images.gateway | quote }}
-{{ include "sandbox.redisEnv" . }}
+{{ include "sandbox.stateEnv" . }}
 - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
   value: {{ include "sandbox.backend.provider" . | quote }}
 - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET

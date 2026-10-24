@@ -1,8 +1,9 @@
-{{- include "sandbox.validateRedis" . }}
+{{- include "sandbox.validateState" . }}
 {{- include "sandbox.validateAppArmorLoader" . }}
 {{- include "sandbox.validateNetworkCIDRs" . }}
 {{- $sandboxNs := .Values.config.runtime.kubernetes.namespace | default .Release.Namespace }}
 {{- $builtinSentinel := eq (include "sandbox.builtinSentinel" .) "true" }}
+{{- $etcdState := eq (include "sandbox.stateBackend" .) "etcd" }}
 {{- $startupProbe := include "sandbox.apiStartupProbe" . | fromJson }}
 {{- $apparmorConfig := include "sandbox.apparmorLoaderConfig" . | fromJson }}
 {{- $fuseEnabled := eq (include "sandbox.fuseEnabled" .) "true" }}
@@ -40,7 +41,7 @@ spec:
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       serviceAccountName: {{ .Release.Name }}-api
-      {{- if and .Values.redis.enabled (not $builtinSentinel) }}
+      {{- if and (not $etcdState) .Values.redis.enabled (not $builtinSentinel) }}
       initContainers:
         - name: wait-for-redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
@@ -115,7 +116,8 @@ spec:
               value: "{{ .Values.config.images.sandbox }}"
             - name: SANDBOX_IMAGES_GATEWAY
               value: "{{ .Values.config.images.gateway }}"
-{{ include "sandbox.redisEnv" . | nindent 12 }}
+{{ include "sandbox.stateEnv" . | nindent 12 }}
+            {{- if not $etcdState }}
             - name: SANDBOX_STORAGE_STATE_REDIS_POOL_SIZE
               value: {{ ternary 0 (.Values.redis.external.poolSize | int) .Values.redis.enabled | quote }}
             - name: SANDBOX_STORAGE_STATE_REDIS_MIN_IDLE_CONNS
@@ -128,6 +130,7 @@ spec:
               value: {{ ternary 3000 (.Values.redis.external.writeTimeoutMs | int) .Values.redis.enabled | quote }}
             - name: SANDBOX_STORAGE_STATE_REDIS_MAX_RETRIES
               value: {{ ternary 2 (.Values.redis.external.maxRetries | int) .Values.redis.enabled | quote }}
+            {{- end }}
             - name: SANDBOX_STORAGE_FILESYSTEM_PROVIDER
               value: {{ $provider | quote }}
             - name: SANDBOX_STORAGE_FILESYSTEM_BUCKET
@@ -263,14 +266,21 @@ spec:
             - name: SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT
               value: "{{ .Values.config.telemetry.log.otlpEndpoint }}"
             {{- end }}
-          {{- if $builtinSentinel }}
+          {{- if or $builtinSentinel $etcdState }}
           volumeMounts:
+            {{- if $etcdState }}
+            - name: etcd-client-tls
+              mountPath: /etc/sandbox-etcd
+              readOnly: true
+            {{- end }}
+            {{- if $builtinSentinel }}
             - name: redis-bootstrap
               mountPath: /bootstrap
               readOnly: true
             - name: redis-public
               mountPath: /identity-public
               readOnly: true
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -295,8 +305,22 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
-      {{- if $builtinSentinel }}
+      {{- if or $builtinSentinel $etcdState }}
       volumes:
+        {{- if $etcdState }}
+        - name: etcd-client-tls
+          secret:
+            secretName: {{ .Values.config.storage.state.etcd.existingSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: ca.crt
+                path: ca.crt
+              - key: client.crt
+                path: client.crt
+              - key: client.key
+                path: client.key
+        {{- end }}
+        {{- if $builtinSentinel }}
         - name: redis-bootstrap
           configMap:
             name: {{ include "sandbox.sentinelName" . }}-state
@@ -306,4 +330,5 @@ spec:
             items:
               - key: public-keys.json
                 path: public-keys.json
+        {{- end }}
       {{- end }}

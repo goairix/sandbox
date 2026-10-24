@@ -199,6 +199,15 @@ config:
     sandbox: "registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12"
     gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12"
   storage:
+    state:
+      # 旧安装保留 redis；全新部署显式选择 etcd，并关闭 redis.enabled。
+      backend: redis
+      etcd:
+        endpoints: []
+        prefix: ""
+        timeoutMs: 3000
+        # 已存在的 Secret 必须提供 ca.crt、client.crt、client.key。
+        existingSecret: ""
     filesystem:
       # 整个 release 只选择一个后端预设，预设固定存储提供商及协议配置，
       # API 请求不能覆盖该选择。

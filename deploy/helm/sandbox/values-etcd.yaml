@@ -1,0 +1,16 @@
+# Fresh installation only. Supply a reachable etcd cluster and an existing
+# Secret containing ca.crt, client.crt and client.key. This overlay never
+# creates or migrates etcd data, and must use an empty dedicated prefix.
+redis:
+  enabled: false
+
+config:
+  storage:
+    state:
+      backend: etcd
+      etcd:
+        endpoints:
+          - etcd.example.internal:2379
+        prefix: /sandbox/new-cell/
+        timeoutMs: 3000
+        existingSecret: sandbox-etcd-client

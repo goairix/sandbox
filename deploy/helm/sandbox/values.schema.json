@@ -92,6 +92,22 @@
           "type": "object",
           "required": ["filesystem"],
           "properties": {
+            "state": {
+              "type": "object",
+              "properties": {
+                "backend": {"enum": ["redis", "etcd"]},
+                "etcd": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "endpoints": {"type": "array", "minItems": 0, "items": {"type": "string", "minLength": 1}},
+                    "prefix": {"type": "string"},
+                    "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 60000},
+                    "existingSecret": {"type": "string"}
+                  }
+                }
+              }
+            },
             "filesystem": {
               "type": "object",
               "additionalProperties": false,
