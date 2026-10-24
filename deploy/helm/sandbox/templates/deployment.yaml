@@ -173,6 +173,16 @@ spec:
               value: {{ .Values.config.workspace.allowMissingLSMForKind | default false | quote }}
             - name: SANDBOX_WORKSPACE_AUTO_SYNC_INTERVAL_SECONDS
               value: "{{ .Values.config.workspace.autoSyncIntervalSeconds }}"
+          {{- if not $fuseEnabled }}
+            # Sync-only object storage still needs the backend identity for
+            # its distributed workspace lease. Keep the FUSE template order.
+            - name: SANDBOX_WORKSPACE_BACKEND_PRESET
+              value: {{ .Values.config.storage.filesystem.preset | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_PROFILE
+              value: {{ include "sandbox.backend.profile" . | quote }}
+            - name: SANDBOX_WORKSPACE_BACKEND_STORAGE_IDENTITY
+              value: {{ .Values.config.storage.filesystem.storageIdentity | quote }}
+          {{- end }}
           {{- if $fuseEnabled }}
             - name: SANDBOX_WORKSPACE_CACHE_SIZE
               value: {{ .Values.config.workspace.cacheSize | quote }}
