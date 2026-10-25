@@ -102,6 +102,7 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 		controller.mu.Unlock()
 	}
 	setupDuration := time.Since(setupStart)
+	setupCompletedAt := time.Now().UTC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 	setupGoroutines := runtime.NumGoroutine()
@@ -109,20 +110,27 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	// Holding beyond two product intervals observes the actual staggered
 	// controller.run loops, not a synthetic synchronized renewal burst.
 	time.Sleep(12 * time.Second)
-	var advanced, lost int
+	observedAt := time.Now()
+	var advanced, live, lost int
 	for index, controller := range controllers {
 		controller.mu.Lock()
 		if controller.lease.ExpiresAt.After(initialExpiries[index]) {
 			advanced++
+		}
+		if controller.lease.ExpiresAt.After(observedAt) {
+			live++
 		}
 		if controller.lost != nil {
 			lost++
 		}
 		controller.mu.Unlock()
 	}
-	t.Logf("controllers=%d snapshot_bytes=%d setup=%s hold=12s advanced=%d lost=%d goroutines_after_setup=%d heap_alloc_delta_bytes=%d",
-		count, snapshotBytes, setupDuration, advanced, lost, setupGoroutines,
+	t.Logf("controllers=%d snapshot_bytes=%d setup=%s setup_completed_utc=%s observed_utc=%s "+
+		"hold=12s advanced=%d live=%d lost=%d goroutines_after_setup=%d heap_alloc_delta_bytes=%d",
+		count, snapshotBytes, setupDuration, setupCompletedAt.Format(time.RFC3339Nano),
+		observedAt.UTC().Format(time.RFC3339Nano), advanced, live, lost, setupGoroutines,
 		int64(after.HeapAlloc)-int64(before.HeapAlloc))
 	require.Equal(t, count, advanced)
+	require.Equal(t, count, live)
 	require.Zero(t, lost)
 }
