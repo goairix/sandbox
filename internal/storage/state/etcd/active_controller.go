@@ -220,7 +220,9 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 		if kept == nil || kept.TTL <= 0 {
 			return nil, state.ErrActiveSandboxLeaseExpired
 		}
-		lease.ExpiresAt = time.Now().Add(ttl)
+		// The local start precedes the server's renewal, so this advisory
+		// deadline never assumes time gained during the RPC round trip.
+		lease.ExpiresAt = started.Add(ttl)
 		return &lease, nil
 	}
 	if oldLeaseID != 0 {
