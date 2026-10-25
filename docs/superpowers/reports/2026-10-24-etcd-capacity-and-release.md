@@ -6,6 +6,13 @@ DS 测试命名空间已运行 revision 15 的双 API、副本数为 3 的 etcd 
 下面第一节仅是本机元数据测量，不包含真实 sandbox、Pod、FUSE、配额、HTTP
 或 Redis 对照，不能与后续 DS 功能烟测混同。
 
+| 发布门 | 当前证据 | 结论 |
+| --- | --- | --- |
+| 新部署的 Redis→etcd 接线 | DS 正式 sync-only API 2/2、etcd 3/3；普通创建/执行/TTL、API 重启与单成员重建有真实正例 | 该范围可继续验收 |
+| FUSE | 隔离 canary 最新镜像两次创建/删除 201→200→200；DS 专用后端策略必须额外安装，两个旧测试 owner 未安全回收 | 不可切正式入口 |
+| 大量存活 N | 10 万普通元数据的闲时索引查询已测；完整 Pod/FUSE、周期续租、集中到期、双副本故障负载未测 | 10 万门未通过 |
+| 远端成果 | `feat/etcd-state-management` 已快进推送至内部 `hxsy` 远端；GitHub SSH 远端仍不可用 | 可在内部远端审查，尚未合并 |
+
 ## 已测范围
 
 环境为本机 Docker Desktop 中的单节点 etcd v3.6.14，loopback 明文连接，独立测试前缀。每个合成沙盒写一条 publishing 记录，再激活；16 个固定写入 worker。快照只有 `{"ready":true}`，远小于真实业务快照。扫描使用生产仓库的 `Scan(cursor, 128)`，定点读取抽样 100 次。
