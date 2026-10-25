@@ -19,13 +19,14 @@
 | 跨副本与删除 | 另一 API Pod GET 同一沙盒返回 200/ready；由该 Pod DELETE 返回 200，约 2.01 秒；两个 API 入口随后均返回 404，原运行时 Pod 消失。 |
 | 自然 TTL | 45 秒 FUSE 沙盒到期后公开 GET 返回 404，原运行时 Pod 消失。 |
 | API 重启 | 第三个存活 FUSE 沙盒先写入 `/workspace/restart.txt`；API Deployment 滚动重启完成后，新 API Pod GET 仍为 200/ready，Exec 读回原内容，公开 DELETE 返回 200，运行时 Pod 消失。 |
+| 跨节点实际挂载 | 另建三个 FUSE 沙盒，运行时依次落在 `.35`、`.29`、`.35`。`.29` 的 `sandbox-pool-wl69339j4x` 通过 Python Exec 在 `/workspace/cce-node-check.txt` 写入并读回 `cce-cross-node-ok`，HTTP 200、退出码 0；三个公开 DELETE 均返回 200，原三个运行时 Pod 随后均不存在。 |
 
-本轮三个测试沙盒均已释放，自己创建的三个对象前缀已删除，bucket 的 `workspaces` 前缀已无对象；端口转发与 AppArmor/PVC 探针均已结束。临时 etcd、MinIO、API、Secret 和准备池仍保留在专用 namespace，供后续 CCE 测试；清理时只处理本轮拥有的资源，不能触碰 `aiadp-sandbox-fuse`。
+六个测试沙盒均已公开释放，并确认对应运行时 Pod 消失。沙盒 DELETE 不删除工作区对象；跨节点补测后，MinIO 仍有三个本轮测试前缀及其中一个 17 字节文件。随后只删除这三个测试专用前缀，再次递归列举 `workspaces/` 为 0 个对象；首轮三个测试前缀也已单独清理。端口转发与 AppArmor/PVC 探针均已结束。临时 etcd、MinIO、API、Secret 和准备池仍保留在专用 namespace，供后续 CCE 测试；清理时只处理本轮拥有的资源，不能触碰 `aiadp-sandbox-fuse`。
 
 ## 尚未验收
 
 - emptyDir 依赖不能证明 API/etcd/MinIO 的持久卷恢复、etcd 成员重建或备份恢复。下一轮须使用明确持久化方案后再测。
-- 实际 FUSE 业务沙盒本轮主要调度在 `.35`；另两节点只完成 CRI profile 启动预检，不等于跨节点真实挂载、flush 和卸载全部通过。
+- `.29` 与 `.35` 已有实际 FUSE 创建和 `/workspace` 读写正例；`.66` 仍只有 CRI profile 启动预检。跨节点正例没有逐节点覆盖 flush、卸载故障或 AppArmor 越权拒绝，不能外推为全节点验收。
 - 未测大量存活沙盒、集中 TTL、持续吞吐、CNI 隔离执行或真实业务流量。此前 DS 的 20 个驻留正例与本轮 CCE 单沙盒正例均不能外推为 10 万容量。
 - 性能代码审查仍见 `guardFUSEPoolRecord` 对每次候选检查逐个列出/读取 session、ephemeral 与 workspace owner；按存活 N 增长的远端读取会影响补池和申请。需要保持原子发布与保守清理语义，再改为可验证的定点索引；本轮没有宣称性能提升。周期活跃扫描与到期调度也需独立大存量验收。
 
