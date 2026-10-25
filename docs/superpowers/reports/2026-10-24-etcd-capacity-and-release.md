@@ -1438,3 +1438,15 @@ SHA-256 为
 位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/ds-revision4-ttl-api-restart.log`。
 这证明本轮重启跨过 TTL 后最终完成安全回收；不区分旧副本或新副本
 执行了最后一步，也不覆盖多条同时到期。
+
+最后用 revision 4 的正式 Service 对一条新 FUSE 沙盒做公开 API
+子集回归：创建 201；ID 查询、按 workspace 查询、workspace info、
+普通 Bash 执行、skills 列表、TTL 更新均为 200。TTL 从 300 秒更新
+到 360 秒后再查 ID，返回的 `timeout` 为 360；公开删除 200，最终
+GET 404。测试退出 0，API 2/2、etcd 3/3 Ready，受管 Pod 和
+NetworkPolicy 为 0。脚本与结果日志 SHA-256 分别为
+`9aa649525676947311a205bc55f66c2b53daf26630841b7159c4fed811d7f847`
+和 `04d5853293ae959690dc2ba58ee979427d829f29a31e9249fd8413c83df67480`，
+位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/`。
+这补充验证了这些具体路径，不代表 network、所有文件变体、multipart、
+stream、workspace 动态操作等其余路由均已经过 DS 现场验证。
