@@ -333,6 +333,8 @@ spec:
               port: {{ .Values.config.server.port }}
             initialDelaySeconds: 10
             periodSeconds: 5
+            # The handler bounds its durable-state check at two seconds.
+            timeoutSeconds: 3
       {{- if or $builtinSentinel $etcdTLS }}
       volumes:
         {{- if $etcdTLS }}

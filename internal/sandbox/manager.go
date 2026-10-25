@@ -328,9 +328,12 @@ func (m *Manager) SetMultipartStore(s state.Store) {
 	m.multipartStore = s
 }
 
-// Ready reports whether this replica can safely accept Kubernetes requests.
-// Liveness intentionally remains independent so dependency outages do not
-// cause restart storms.
+// Ready reports whether this replica can serve requests from its durable state.
+// Liveness remains independent so dependency outages do not cause restart
+// storms. Kubernetes operations check their own control-plane calls; a Pod
+// List in this probe would share the client's rate limiter with creation and
+// cleanup and could withdraw every API endpoint precisely when cleanup is
+// needed under load.
 func (m *Manager) Ready(ctx context.Context) error {
 	m.lifecycleMu.Lock()
 	stopping := m.stopping
@@ -347,11 +350,6 @@ func (m *Manager) Ready(ctx context.Context) error {
 	if m.distributedStateEnabled() {
 		if err := m.activeSandboxes.Ping(ctx); err != nil {
 			return fmt.Errorf("active sandbox state: %w", err)
-		}
-	}
-	if checker, ok := m.runtime.(interface{ Ping(context.Context) error }); ok {
-		if err := checker.Ping(ctx); err != nil {
-			return fmt.Errorf("runtime: %w", err)
 		}
 	}
 	return nil
