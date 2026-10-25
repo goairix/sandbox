@@ -803,3 +803,31 @@ GET 200、DELETE 200 和最终 GET 404；测试进程退出码 0。其日志是
 链在该规则下可闭合；旧 cleanup owner 仍占用池容量，故整个环境、
 20 并发和长期容量依然没有验收通过。下一步先保存该 owner 的失败
 证据并重建专用测试命名空间，再从零执行并发 FUSE 创建和清理。
+
+### 干净命名空间的 20 请求复测：服务端完成、响应交付失败
+
+旧测试 namespace 经用户授权重建。残留 FUSE Pod 的精确宿主挂载先在
+worker 节点核对为 1 条，并在宿主 mount namespace 对该路径执行普通
+`umount`，再次核对为 0 后 Kubernetes 才完成 Pod/namespace 删除；
+没有将一次 mountinfo 缺失当作产品卸载回执。新 namespace 使用独立
+etcd/MinIO 数据和上述 MinIO Pod 选择器出站策略。单条 FUSE 请求
+`53897883` 完成 POST 201、GET 200、DELETE 200、GET 404。
+
+随后批次 `d512cc44` 发起 20 条 FUSE POST、最多 4 条并发。
+17 条客户端收到 201；编号 00、13、14 的连接抛出
+`RemoteDisconnected`，因此原测试进程以退出码 1 结束，**本轮 FAIL**。
+公开 GET 与工作区路径核对证明这 3 条实际也已创建，对应沙盒 ID
+`sandbox-mq6gku0vkh`、`sandbox-63vpl8bwsx`、
+`sandbox-755uvqgc7n`。原脚本仅删除收到 201 的 17 条，
+其中 DELETE 立即 200 一条、清理中 503 十六条，最终 17/17
+公开 GET 404。随后对断连的 3 个精确 ID 分别执行公开 DELETE，
+三条均返回 200，最终公开 GET 均为 404。受管 Pod、实例策略和
+etcd 池的 record/state/uid-owner 均为 0；池 index/meta 保留。
+
+API 两副本未重启。测试请求经单个 `kubectl port-forward` 转发，
+本轮证据尚不能区分转发连接故障与产品响应交付问题。服务端实际完成
+20 次创建和 20 次清理不能改判客户端验收失败；下一轮须从集群内
+直连 Service，记录响应与清理，并验证 20 个同时驻留的健康状态。
+原始日志位于忽略目录
+`reset-rebuild/fuse-twenty-clean-egress.log`，SHA-256 为
+`d576edfdbcfdbeebfacfd982c1a56cf33cf2b31f985c6f017f8c34c1d1af652b`。
