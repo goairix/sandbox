@@ -131,4 +131,88 @@ func TestActiveResidentIndexScale(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("residents=%d keys=%d write=%s idle_due_scan=%s concentrated_due_scan=%s startup_full_scan=%s db_delta_bytes=%d",
 		count, keys.Count, writeDuration, idleDuration, dueDuration, startupDuration, after.DbSize-before.DbSize)
+
+	if os.Getenv("TEST_ETCD_INDEX_SCALE_DUAL_READER") == "1" {
+		measureActiveResidentDualReaders(t, store, repository, count)
+	}
+}
+
+// measureActiveResidentDualReaders measures two independent etcd clients
+// reading the same resident set at once. It has no Manager, Pod, or cleanup
+// effects, so the result remains a storage-only observation.
+func measureActiveResidentDualReaders(t *testing.T, store *Store, first *ActiveSandboxRepository, count int) {
+	t.Helper()
+	secondStore, err := New(context.Background(), Options{
+		Endpoints: []string{os.Getenv("TEST_ETCD_ENDPOINT")},
+		Prefix:    store.prefix,
+		Timeout:   3 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, secondStore.Close()) })
+	second, err := NewActiveSandboxRepository(secondStore, "resident-index-scale")
+	require.NoError(t, err)
+
+	type result struct {
+		due     time.Duration
+		startup time.Duration
+		err     error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	dueBefore := time.Now().Add(3 * time.Hour)
+	for _, repository := range []*ActiveSandboxRepository{first, second} {
+		go func() {
+			<-start
+			var measured result
+			dueStart := time.Now()
+			var cursor string
+			var dueCount int
+			for {
+				page, scanErr := repository.ScanDue(context.Background(), dueBefore, cursor, 128)
+				if scanErr != nil {
+					measured.err = scanErr
+					break
+				}
+				dueCount += len(page.Records)
+				if page.Cursor == "" {
+					break
+				}
+				cursor = page.Cursor
+			}
+			measured.due = time.Since(dueStart)
+			if measured.err == nil && dueCount != count {
+				measured.err = fmt.Errorf("due records: got %d, want %d", dueCount, count)
+			}
+
+			startupStart := time.Now()
+			var pageCursor uint64
+			var startupCount int
+			for measured.err == nil {
+				page, scanErr := repository.Scan(context.Background(), pageCursor, 128)
+				if scanErr != nil {
+					measured.err = scanErr
+					break
+				}
+				startupCount += len(page.Records)
+				if page.Cursor == 0 {
+					break
+				}
+				pageCursor = page.Cursor
+			}
+			measured.startup = time.Since(startupStart)
+			if measured.err == nil && startupCount != count {
+				measured.err = fmt.Errorf("startup records: got %d, want %d", startupCount, count)
+			}
+			results <- measured
+		}()
+	}
+	startTime := time.Now()
+	close(start)
+	firstResult := <-results
+	secondResult := <-results
+	require.NoError(t, firstResult.err)
+	require.NoError(t, secondResult.err)
+	t.Logf("dual_readers=%d residents=%d wall=%s due=%s/%s startup=%s/%s",
+		2, count, time.Since(startTime), firstResult.due, secondResult.due,
+		firstResult.startup, secondResult.startup)
 }
