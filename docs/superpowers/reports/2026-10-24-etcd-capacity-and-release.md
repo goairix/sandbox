@@ -920,3 +920,14 @@ etcd 池 meta 的 total/prepared/reserved/binding/consumed/cleanup
 `04478886a216e7f6caac977f8bd5165d960c4ab28fcb7b08aec2b31fbe52b455`。
 该轮只覆盖 20 条、分布在创建窗口内的到期，不是 20 条同一秒到期，
 也不能推出更大 cell 的容量或故障恢复能力。
+
+同一正式 Service 再做一次存活 FUSE 沙盒与 etcd 单成员重启纵切：
+`sandbox-jftii0tp8o` 创建 201、公开文件上传 200；删除 `etcd-2`
+Pod，确认 StatefulSet 以新 UID 重建且 Ready。随后公开下载 200，
+55 字节与上传内容相同，SHA-256 为
+`747038a1cf9d579df7e562120346e51346999a59c1d1a2f79ab8704b1298f451`；
+公开 DELETE 200、最终 GET 404，测试退出码 0。三个 etcd 成员
+最终均 Ready、受管 Pod 为 0。原始日志 SHA-256 为
+`9aa0359f4583aa72cdafc479ce2cab2d40c55429e1b93dc57b7e892d5157572c`。
+这是一个成员重启的存活读写正例，不证明 leader 重选、两成员故障、
+在故障窗口内提交新事务或大存量恢复吞吐。
