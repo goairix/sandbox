@@ -520,6 +520,41 @@ requests`，**该次健康检查失败**；随后三成员 Raft applied index
 Kubernetes 调用和配额处理。10 万同时到期的清理延迟不能从上述
 5.527 秒候选遍历推断。当前仍没有可信的单 cell 支持上限。
 
+## 活跃 workspace controller 续期的本机测量
+
+新增 opt-in `TestActiveControllerRenewScale`，在独立、已清理的本机
+etcd v3.6.14 单成员容器上，为每条记录写入 629 字节的合成 FUSE
+workspace 形状快照、取得 controller，再以 16 个 worker 各续一次。
+测试使用五分钟 lease，以免顺序建样本时提前过期；产品默认仍为
+15 秒 lease、每 5 秒续一次。本表只测一次并发续期，不模拟五秒周期、
+API 副本、真实 Pod/FUSE 或持续后台负载。
+
+| controller 数 | 顺序建样本 | 一轮续期 | 一轮吞吐 | 单次 p95 | 单次 p99 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 0.096 秒 | 0.013 秒 | 1,488 次/秒 | 9.76 毫秒 | 9.76 毫秒 |
+| 100 | 0.346 秒 | 0.073 秒 | 1,365 次/秒 | 14.97 毫秒 | 15.78 毫秒 |
+| 1,000 | 3.304 秒 | 0.737 秒 | 1,357 次/秒 | 18.62 毫秒 | 22.41 毫秒 |
+| 10,000 | 32.263 秒 | 6.532 秒 | 1,531 次/秒 | 15.39 毫秒 | 24.14 毫秒 |
+
+命令为 `TEST_ETCD_ENDPOINT=127.0.0.1:53461
+TEST_ETCD_CONTROLLER_SCALE_N=<N> go test -v ./internal/storage/state/etcd
+-run '^TestActiveControllerRenewScale$' -count=1 -timeout=180s`；共享主仓库
+Go 缓存，四轮原始日志位于忽略目录
+`.superpowers/sdd/2026-10-25-etcd-resident-lifecycle/controller-renew-<N>.log`。
+其 SHA-256 按 20/100/1,000/10,000 顺序为
+`901ccf1913b44edc8006934f3bfdfbb9af3abdbbe608b2b1acf49dffa7c4a9eb`、
+`6c2a872d4c1f7c73617d5bc05fe0ab332f317f6a39f178d0b3cc01bfef3d68c6`、
+`3d0206a1f2f55cbdeb49f799511a67958dd2d83391a786d9fe7a4db2e81132bf`、
+`2c1cb40d79661e4ce05d3288268930bd080046c266576ba995e6fc1dfd14f926`。
+etcd 存储包测试和 vet 通过；专用容器已删除。
+
+按默认五秒间隔，10 万活跃 workspace 需要约 20,000 次 controller
+续期调用/秒。当前一次正常续期还含两次定点读、一次 lease grant、
+一次事务和一次旧 lease revoke。10,000 条的同步突发一轮已超过五秒，
+但真实续期会错峰，这个单成员合成实验不能直接确定 DS 每 cell 上限。
+10 万 FUSE/workspace 的容量门仍未通过；继续扩大实验前还须计入真实
+快照、API 内存与 goroutine、周期 QPS、FUSE 物理负载和故障恢复。
+
 ## 隔离 API canary 的 FUSE 创建失败
 
 没有改动正式 API Service 或 revision 15 的 sync-only 配置。另建一个
