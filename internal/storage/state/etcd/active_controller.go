@@ -17,6 +17,21 @@ func decodeController(raw []byte, id string) (state.ActiveSandboxControllerLease
 	return lease, nil
 }
 
+// observeControllerStage reports one completed RPC. The observer receives no
+// record keys or lease data and cannot change the transaction outcome.
+func (s *Store) observeControllerStage(ctx context.Context, operation, stage, result string, started time.Time) {
+	if s.controllerStageObserver != nil {
+		s.controllerStageObserver(ctx, operation, stage, result, time.Since(started))
+	}
+}
+
+func controllerStageResult(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
+}
+
 // AcquireController claims the lifecycle controller only while no leased
 // controller key exists. Its record generation is compared in the same
 // transaction so an old controller cannot attach to a replacement sandbox.
@@ -27,7 +42,9 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
 	recordKey := r.recordKey(lease.SandboxID)
+	started := time.Now()
 	recordRead, err := r.store.client.Get(requestCtx, recordKey)
+	r.store.observeControllerStage(requestCtx, "acquire", "read", controllerStageResult(err), started)
 	if err != nil {
 		return nil, false, err
 	}
@@ -43,6 +60,7 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 	}
 	grantedAt := time.Now()
 	leaseID, err := r.store.leaseFor(requestCtx, ttl)
+	r.store.observeControllerStage(requestCtx, "acquire", "grant", controllerStageResult(err), grantedAt)
 	if err != nil {
 		return nil, false, err
 	}
@@ -52,18 +70,26 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 		return nil, false, err
 	}
 	key := r.controllerKey(lease.SandboxID)
+	started = time.Now()
 	response, err := r.store.client.Txn(requestCtx).
 		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", recordRead.Kvs[0].ModRevision),
 			clientv3.Compare(clientv3.Version(key), "=", 0)).
 		Then(clientv3.OpPut(key, string(raw), clientv3.WithLease(leaseID))).
 		Else(clientv3.OpGet(recordKey), clientv3.OpGet(key)).Commit()
+	result := controllerStageResult(err)
+	if err == nil && !response.Succeeded {
+		result = "conflict"
+	}
+	r.store.observeControllerStage(requestCtx, "acquire", "commit", result, started)
 	if err != nil {
 		return nil, false, err
 	}
 	if response.Succeeded {
 		return &lease, true, nil
 	}
-	_, _ = r.store.client.Revoke(requestCtx, leaseID)
+	started = time.Now()
+	_, revokeErr := r.store.client.Revoke(requestCtx, leaseID)
+	r.store.observeControllerStage(requestCtx, "acquire", "revoke", controllerStageResult(revokeErr), started)
 	if len(response.Responses) != 2 || response.Responses[0].GetResponseRange() == nil || response.Responses[1].GetResponseRange() == nil {
 		return nil, false, state.ErrActiveSandboxCorrupt
 	}
@@ -96,8 +122,10 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 	defer cancel()
 	recordKey := r.recordKey(lease.SandboxID)
 	key := r.controllerKey(lease.SandboxID)
+	started := time.Now()
 	read, err := r.store.client.Txn(requestCtx).
 		Then(clientv3.OpGet(recordKey), clientv3.OpGet(key)).Commit()
+	r.store.observeControllerStage(requestCtx, "renew", "read", controllerStageResult(err), started)
 	if err != nil {
 		return nil, err
 	}
@@ -128,6 +156,7 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 	}
 	grantedAt := time.Now()
 	leaseID, err := r.store.leaseFor(requestCtx, ttl)
+	r.store.observeControllerStage(requestCtx, "renew", "grant", controllerStageResult(err), grantedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -136,19 +165,29 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 	if err != nil {
 		return nil, err
 	}
+	started = time.Now()
 	response, err := r.store.client.Txn(requestCtx).
 		If(clientv3.Compare(clientv3.ModRevision(recordKey), "=", records[0].ModRevision),
 			clientv3.Compare(clientv3.ModRevision(key), "=", controllers[0].ModRevision)).
 		Then(clientv3.OpPut(key, string(raw), clientv3.WithLease(leaseID))).Commit()
+	result := controllerStageResult(err)
+	if err == nil && !response.Succeeded {
+		result = "conflict"
+	}
+	r.store.observeControllerStage(requestCtx, "renew", "commit", result, started)
 	if err != nil {
 		return nil, err
 	}
 	if !response.Succeeded {
-		_, _ = r.store.client.Revoke(requestCtx, leaseID)
+		started = time.Now()
+		_, revokeErr := r.store.client.Revoke(requestCtx, leaseID)
+		r.store.observeControllerStage(requestCtx, "renew", "revoke", controllerStageResult(revokeErr), started)
 		return nil, state.ErrActiveSandboxStaleToken
 	}
 	if oldLease := clientv3.LeaseID(controllers[0].Lease); oldLease != 0 {
-		_, _ = r.store.client.Revoke(requestCtx, oldLease)
+		started = time.Now()
+		_, revokeErr := r.store.client.Revoke(requestCtx, oldLease)
+		r.store.observeControllerStage(requestCtx, "renew", "revoke", controllerStageResult(revokeErr), started)
 	}
 	return &lease, nil
 }

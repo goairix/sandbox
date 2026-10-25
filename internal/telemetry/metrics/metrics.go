@@ -51,6 +51,9 @@ var (
 	// Session restore (persistent sandbox restore on startup / multi-replica)
 	SandboxSessionRestoreTotal metric.Int64Counter
 
+	// Controller RPC labels are fixed; sandbox and lease identities are excluded.
+	SandboxControllerStageDuration metric.Float64Histogram
+
 	// FUSE workspace instruments. Attribute keys are intentionally bounded to
 	// runtime/provider/pool_key/state/result/reason/operation.
 	SandboxWorkspaceMountDuration       metric.Float64Histogram
@@ -245,6 +248,10 @@ func initInstruments() (err error) {
 	if err != nil {
 		return fmt.Errorf("metrics: sandbox_session_restore_total: %w", err)
 	}
+	SandboxControllerStageDuration, err = meter.Float64Histogram("sandbox.controller.stage.duration", metric.WithUnit("s"))
+	if err != nil {
+		return fmt.Errorf("metrics: controller stage duration: %w", err)
+	}
 
 	SandboxWorkspaceMountDuration, err = meter.Float64Histogram("sandbox.workspace.mount.duration", metric.WithUnit("s"))
 	if err != nil {
@@ -346,9 +353,10 @@ func InitNoop() error {
 	return initInstruments()
 }
 
-// ResetForTest clears FUSE instruments so registration tests can assert that
-// Init installs every required handle. It must not be used by production code.
+// ResetForTest clears selected instruments so registration tests can assert
+// that Init installs every required handle. It must not be used in production.
 func ResetForTest() {
+	SandboxControllerStageDuration = nil
 	SandboxWorkspacePoolSize = nil
 	SandboxWorkspacePoolAcquire = nil
 	SandboxWorkspacePoolCleanupTotal = nil
@@ -356,6 +364,19 @@ func ResetForTest() {
 	SandboxWorkspaceMountDuration = nil
 	SandboxWorkspaceStageDuration = nil
 	SandboxWorkspaceLeaseLost = nil
+}
+
+// RecordControllerStage records one etcd controller RPC stage in seconds.
+// Callers must use fixed labels so series count does not grow with N.
+func RecordControllerStage(ctx context.Context, operation, stage, result string, duration time.Duration) {
+	if SandboxControllerStageDuration == nil {
+		return
+	}
+	SandboxControllerStageDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+		attribute.String("operation", operation),
+		attribute.String("stage", stage),
+		attribute.String("result", result),
+	))
 }
 
 // RecordWorkspaceStage uses fixed stage names, never sandbox IDs, prefixes or

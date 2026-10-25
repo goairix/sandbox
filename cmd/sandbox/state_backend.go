@@ -8,6 +8,7 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 	etcdstate "github.com/goairix/sandbox/internal/storage/state/etcd"
 	redisstate "github.com/goairix/sandbox/internal/storage/state/redis"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 )
 
 // stateBackend keeps every production state consumer on one backend. An etcd
@@ -53,6 +54,7 @@ func openStateBackend(ctx context.Context, cfg *config.Config) (stateBackend, er
 		if err != nil {
 			return stateBackend{}, err
 		}
+		options.ControllerStageObserver = metrics.RecordControllerStage
 		store, err := etcdstate.New(ctx, options)
 		if err != nil {
 			return stateBackend{}, fmt.Errorf("open etcd state: %w", err)

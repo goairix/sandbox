@@ -27,15 +27,20 @@ type Options struct {
 	Prefix    string
 	Timeout   time.Duration
 	TLS       *tls.Config
+
+	// ControllerStageObserver receives only fixed operation, stage, and result
+	// labels. It must not block controller RPCs or record sandbox identifiers.
+	ControllerStageObserver func(context.Context, string, string, string, time.Duration)
 }
 
 // Store owns an etcd client and implements the ordinary atomic state contract.
 // Each method uses linearizable reads or a single etcd transaction; errors on
 // writes may mean that the server committed after the caller lost its reply.
 type Store struct {
-	client  *clientv3.Client
-	prefix  string
-	timeout time.Duration
+	client                  *clientv3.Client
+	prefix                  string
+	timeout                 time.Duration
+	controllerStageObserver func(context.Context, string, string, string, time.Duration)
 }
 
 var _ state.AtomicStore = (*Store)(nil)
@@ -57,7 +62,10 @@ func New(ctx context.Context, options Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{client: client, prefix: options.Prefix, timeout: options.Timeout}
+	s := &Store{
+		client: client, prefix: options.Prefix, timeout: options.Timeout,
+		controllerStageObserver: options.ControllerStageObserver,
+	}
 	requestCtx, cancel := s.requestContext(ctx)
 	defer cancel()
 	if _, err := client.Get(requestCtx, options.Prefix, clientv3.WithCountOnly()); err != nil {
