@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,89 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 	etcdstate "github.com/goairix/sandbox/internal/storage/state/etcd"
 )
+
+// controllerStageSamples keeps a fixed-size, lock-free summary. Logging every
+// RPC or retaining one sample per controller would change the load under test.
+type controllerStageSamples struct {
+	count       atomic.Int64
+	errors      atomic.Int64
+	conflicts   atomic.Int64
+	totalNanos  atomic.Int64
+	maxNanos    atomic.Int64
+	over100ms   atomic.Int64
+	over1Second atomic.Int64
+}
+
+var controllerStageNames = [...]string{
+	"acquire/read", "acquire/grant", "acquire/commit", "acquire/revoke",
+	"renew/read", "renew/grant", "renew/commit", "renew/revoke",
+}
+
+func controllerStageSlot(operation, stage string) int {
+	base := 0
+	switch operation {
+	case "acquire":
+	case "renew":
+		base = 4
+	default:
+		return -1
+	}
+	switch stage {
+	case "read":
+		return base
+	case "grant":
+		return base + 1
+	case "commit":
+		return base + 2
+	case "revoke":
+		return base + 3
+	}
+	return -1
+}
+
+func observeControllerStage(samples *[len(controllerStageNames)]controllerStageSamples) func(context.Context, string, string, string, time.Duration) {
+	return func(_ context.Context, operation, stage, result string, duration time.Duration) {
+		index := controllerStageSlot(operation, stage)
+		if index < 0 {
+			return
+		}
+		sample := &samples[index]
+		nanos := duration.Nanoseconds()
+		sample.count.Add(1)
+		sample.totalNanos.Add(nanos)
+		for current := sample.maxNanos.Load(); nanos > current; current = sample.maxNanos.Load() {
+			if sample.maxNanos.CompareAndSwap(current, nanos) {
+				break
+			}
+		}
+		if duration >= 100*time.Millisecond {
+			sample.over100ms.Add(1)
+		}
+		if duration >= time.Second {
+			sample.over1Second.Add(1)
+		}
+		if result == "error" {
+			sample.errors.Add(1)
+		} else if result == "conflict" {
+			sample.conflicts.Add(1)
+		}
+	}
+}
+
+func logControllerStageSamples(t *testing.T, phase string, samples *[len(controllerStageNames)]controllerStageSamples) {
+	t.Helper()
+	for index, name := range controllerStageNames {
+		sample := &samples[index]
+		count := sample.count.Load()
+		if count == 0 {
+			continue
+		}
+		t.Logf("phase=%s stage=%s count=%d errors=%d conflicts=%d avg=%s max=%s over_100ms=%d over_1s=%d",
+			phase, name, count, sample.errors.Load(), sample.conflicts.Load(),
+			time.Duration(sample.totalNanos.Load()/count), time.Duration(sample.maxNanos.Load()),
+			sample.over100ms.Load(), sample.over1Second.Load())
+	}
+}
 
 // TestActiveControllerSchedulerScale measures the production per-controller
 // goroutine and ticker against real etcd. The optional second Manager has its
@@ -45,11 +129,14 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	repositories := make([]state.ActiveSandboxRepository, 0, replicas)
 	managers := make([]*Manager, 0, replicas)
 	cancels := make([]context.CancelFunc, 0, replicas)
+	var stageSamples [len(controllerStageNames)]controllerStageSamples
+	t.Cleanup(func() { logControllerStageSamples(t, "after_stop", &stageSamples) })
 	// Clients share only the persisted prefix. Each sandbox is assigned one
 	// Manager so this measures load distribution, not a takeover race.
 	for replica := range replicas {
 		store, storeErr := etcdstate.New(context.Background(), etcdstate.Options{
 			Endpoints: []string{endpoint}, Prefix: prefix, Timeout: 3 * time.Second,
+			ControllerStageObserver: observeControllerStage(&stageSamples),
 		})
 		require.NoError(t, storeErr)
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
@@ -112,10 +199,23 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 			Revision: 1, Generation: 1, RuntimeID: runtimeID, RuntimeUID: runtimeUID,
 			Snapshot: snapshot, CreatedAt: now, UpdatedAt: now,
 		}
-		require.NoError(t, repository.Publish(context.Background(), record))
+		publishErr := repository.Publish(context.Background(), record)
+		if publishErr != nil {
+			t.Logf("controller setup failed at index=%d phase=publish", index)
+			logControllerStageSamples(t, "setup_failure", &stageSamples)
+		}
+		require.NoError(t, publishErr)
 		_, err = repository.Activate(context.Background(), id, record.Revision, snapshot)
+		if err != nil {
+			t.Logf("controller setup failed at index=%d phase=activate", index)
+			logControllerStageSamples(t, "setup_failure", &stageSamples)
+		}
 		require.NoError(t, err)
 		controller, acquired, acquireErr := manager.acquireActiveController(context.Background(), &Sandbox{ID: id, activeGeneration: 1})
+		if acquireErr != nil {
+			t.Logf("controller setup failed at index=%d phase=acquire", index)
+			logControllerStageSamples(t, "setup_failure", &stageSamples)
+		}
 		require.NoError(t, acquireErr)
 		require.True(t, acquired)
 		controllers = append(controllers, controller)
@@ -154,6 +254,7 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 		count, replicas, snapshotBytes, setupDuration, setupCompletedAt.Format(time.RFC3339Nano),
 		observedAt.UTC().Format(time.RFC3339Nano), advanced, live, lost, setupGoroutines,
 		int64(after.HeapAlloc)-int64(before.HeapAlloc))
+	logControllerStageSamples(t, "hold_observation", &stageSamples)
 	require.Equal(t, count, advanced)
 	require.Equal(t, count, live)
 	require.Zero(t, lost)
