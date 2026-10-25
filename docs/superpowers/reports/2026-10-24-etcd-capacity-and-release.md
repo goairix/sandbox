@@ -1512,3 +1512,35 @@ MinIO PVC 为 8 GiB 且 Bound。只读 `etcdctl endpoint status`
 或可支持的大存量上限。Helm 的 `fusePool.maxSize=20` 限制准备池，
 **不是**存活沙盒数的硬上限；此前用户已接受本轮受控灰度不在产品内
 增加第 21 个存活沙盒的拒绝门。
+
+### DS FUSE 预热池启用与真实领取
+
+用户现场指出没有看到 sandbox pool。核对 revision 4 的 Helm values
+发现普通池及 FUSE 池的 `minSize` 都为 0，因此先前的 FUSE 请求走冷
+创建，确实没有常驻 prepared Pod。基于本次 20 个 FUSE 沙盒灰度，
+只把 FUSE `minSize` 调到 1，普通池保持 0、FUSE `maxSize` 保持 20。
+Helm lint 与带现有 values 的 dry-run 通过，随后用 `--atomic --wait`
+升级到 revision 5；API 2/2、etcd 3/3 Ready。同步将新 etcd 安装
+示例 `values-etcd.yaml` 改为 FUSE 预热 1、普通预热 0，避免下一次
+照该文件安装又变回全冷池。
+
+revision 5 首个 prepared Pod 为 `sandbox-pool-8lde3hdrt6`，UID
+`315d3c68-5e42-451d-9836-d62497b8ad41`。一条独立的公开 FUSE
+请求创建 201、驻留 GET 200、删除后 404；创建耗时 0.65 秒，池在
+该轮后补出新的 prepared Pod。第二条请求前确认唯一 prepared Pod
+是 `sandbox-pool-hbyqosf8qd`；公开 POST 201 与紧接着的 GET 200
+都报告 `runtime_id=sandbox-pool-hbyqosf8qd`，证明领取了同一个
+预热 Pod。公开 DELETE 200、最终 GET 404 后，池再补出唯一新的
+prepared Pod `sandbox-pool-2t38q4rao2`。测试客户端已精确删除，
+现场没有遗留 consumed Pod。两条原始日志 SHA-256 分别为
+`4fd7db260f08741ecec01c2ef7c96a33aa7766a68618da4c41e07cc21770c705`
+和 `14c22f5ca872e5a0df8d5b5f7957f47fd29f2004d753708c98272aea18695d33`，
+第二条脚本 SHA-256 为
+`580a9ffa710c2d2f69a96b5339469e1c1f61f98d4de38133d1a4d4699f4abf5d`；
+均在忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/`。
+
+prepared FUSE Pod 在 Kubernetes 中显示 `1/2 Ready`：未挂载时
+mounter 的 readiness probe 不通过；产品的 `PreparedSandboxHealth`
+另行检查两进程运行、mounter 的 prepared 状态和未挂载不变量，
+公开领取正例已验证该 prepared Pod 可用。不能将 `1/2` 直接解释
+为池未启动，也不能将池预热正例推导为大存量可预热。
