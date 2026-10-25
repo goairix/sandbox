@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -384,7 +385,7 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 		return status, err
 	}
 	if err, exited := s.processExitErrorLocked(); exited {
-		s.state = StateUnhealthy
+		s.failReadinessLocked("s3fs-exit")
 		return s.statusLocked(), err
 	}
 	if (s.state != StateMounting && s.state != StateReady) || s.process == nil || s.config.MountInfo == nil {
@@ -393,7 +394,7 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 	var mount Mount
 	if s.state == StateReady {
 		if err := s.verifyActiveMountLocked(s.mountID); err != nil {
-			s.state = StateUnhealthy
+			s.failReadinessLocked("active-mount")
 			return s.statusLocked(), err
 		}
 		mount = Mount{ID: s.mountID}
@@ -402,13 +403,13 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 		mount, err = s.waitForMountLocked(ctx)
 		if err != nil {
 			if ctx.Err() == nil || !time.Now().Before(s.mountDeadline) {
-				s.state = StateUnhealthy
+				s.failReadinessLocked("mount-wait")
 			}
 			return s.statusLocked(), err
 		}
 	}
 	if err := s.verifyActiveMountLocked(mount.ID); err != nil {
-		s.state = StateUnhealthy
+		s.failReadinessLocked("mount-identity")
 		return s.statusLocked(), err
 	}
 	s.mountID = mount.ID
@@ -421,19 +422,29 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 		if ctx.Err() != nil {
 			return status, ctx.Err()
 		}
-		s.state = StateUnhealthy
+		s.failReadinessLocked("cache-inspection")
 		status.State = string(s.state)
 		status.MountType = ""
 		return status, err
 	}
 	if status.CacheExceeded {
-		s.state = StateUnhealthy
+		s.failReadinessLocked("cache-limit")
 		status.State = string(s.state)
 		status.MountType = ""
 		_ = s.process.Signal(syscall.SIGTERM)
 		return status, fmt.Errorf("workspace cache soft limit reached")
 	}
 	return status, nil
+}
+
+// failReadinessLocked records only a fixed stage name on the first permanent
+// readiness failure. Kernel and s3fs error text can contain storage details,
+// so neither the request nor the underlying error is written to container logs.
+func (s *Supervisor) failReadinessLocked(stage string) {
+	if s.state != StateUnhealthy {
+		log.Printf("workspace mounter readiness failed: stage=%s", stage)
+	}
+	s.state = StateUnhealthy
 }
 
 func (s *Supervisor) waitForMountLocked(ctx context.Context) (Mount, error) {
