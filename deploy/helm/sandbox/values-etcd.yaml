@@ -12,6 +12,11 @@ config:
     enabledMountModes:
       - fuse
       - sync
+    # Start new cells cold. The prepared-shell ownership guard still scans
+    # resident owners, so prewarming is held back until that path is indexed.
+    fusePool:
+      minSize: 0
+      maxSize: 20
   storage:
     state:
       backend: etcd
