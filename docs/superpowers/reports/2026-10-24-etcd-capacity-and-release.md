@@ -893,3 +893,11 @@ Ready 且重启数 0。脚本退出码 0，原始日志 SHA-256 为
 `ff095f30dc4a7cb4dbb6a888d110b982f5eec775b38312fe52bb2d367daf45d3`。
 该测试证明一条已挂载 FUSE 工作区的文件内容跨 API 滚动重启可读，
 并未模拟节点或 etcd 成员故障。
+
+同一正式 Service 的自然 TTL 正例 `sandbox-jewcjxmb5m` 配置 45 秒：
+POST 201（5.30 秒），GET 200；创建后约 51.38 秒 GET 503
+正在清理，53.48 秒 GET 404。测试没有调用兜底 DELETE，进程
+退出码 0。受管 Pod、实例策略、active/session/workspace owner 与
+FUSE 池 record 前缀均为 0。原始日志 SHA-256 为
+`3736e8ebb9d71337b881a3b61d760584b7d9de2b437a1fa01556847a1ec91de5`。
+这是一条自然到期释放正例，不证明 20 条同时到期或故障恢复。
