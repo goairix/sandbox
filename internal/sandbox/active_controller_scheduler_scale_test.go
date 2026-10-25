@@ -127,6 +127,13 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, replicas, 1)
 	require.LessOrEqual(t, replicas, 2)
+	holdDuration := 12 * time.Second
+	if rawHold := os.Getenv("TEST_ETCD_PRODUCT_CONTROLLER_SCALE_HOLD"); rawHold != "" {
+		holdDuration, err = time.ParseDuration(rawHold)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, holdDuration, 12*time.Second)
+		require.LessOrEqual(t, holdDuration, 2*time.Minute)
+	}
 
 	rawEndpoints := os.Getenv("TEST_ETCD_ENDPOINT")
 	require.NotEmpty(t, rawEndpoints)
@@ -244,8 +251,9 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	setupGoroutines := runtime.NumGoroutine()
 
 	// Holding beyond two product intervals observes the actual staggered
-	// controller.run loops, not a synthetic synchronized renewal burst.
-	time.Sleep(12 * time.Second)
+	// controller.run loops, not a synthetic synchronized renewal burst. The
+	// opt-in longer hold is bounded so CI cannot accidentally run indefinitely.
+	time.Sleep(holdDuration)
 	observedAt := time.Now()
 	var advanced, live, lost int
 	for index, controller := range controllers {
@@ -262,9 +270,9 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 		controller.mu.Unlock()
 	}
 	t.Logf("controllers=%d replicas=%d snapshot_bytes=%d setup=%s setup_completed_utc=%s observed_utc=%s "+
-		"hold=12s advanced=%d live=%d lost=%d goroutines_after_setup=%d heap_alloc_delta_bytes=%d",
+		"hold=%s advanced=%d live=%d lost=%d goroutines_after_setup=%d heap_alloc_delta_bytes=%d",
 		count, replicas, snapshotBytes, setupDuration, setupCompletedAt.Format(time.RFC3339Nano),
-		observedAt.UTC().Format(time.RFC3339Nano), advanced, live, lost, setupGoroutines,
+		observedAt.UTC().Format(time.RFC3339Nano), holdDuration, advanced, live, lost, setupGoroutines,
 		int64(after.HeapAlloc)-int64(before.HeapAlloc))
 	logControllerStageSamples(t, "hold_observation", &stageSamples)
 	require.Equal(t, count, advanced)
