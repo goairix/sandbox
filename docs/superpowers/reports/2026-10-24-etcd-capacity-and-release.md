@@ -1387,3 +1387,43 @@ API key 查询不存在的 ID 返回 404，未输出密钥。
 且一次性执行路径可用；不等于所有 HTTP 接口、真实生产集群、长期
 运行或大存量容量验收。
 本轮容量分支的 controller 优化尚未进入 DS revision 3 镜像。
+
+### DS 容量分支候选镜像与 20 个 FUSE 灰度复核（2026-10-25）
+
+从 `feat/etcd-resident-capacity` 的 `68f98b9` 构建 Linux/arm64 API，
+可执行文件 SHA-256 为
+`b585abe331d9ec1241d72d4480798990cb46afcf072f582fc60a30d4624729ba`。
+镜像 `registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-capacity-68f98b9-arm64`
+的远端 digest 为
+`sha256:600a948960a65d09811e5a3ffe069143de7e00af94b62e06a6adca5dfd9fd409`。
+Helm lint、复用现有 values 且仅替换镜像 tag 的 dry-run 通过；
+在 **DS 测试集群** `ds-ai-research/sandbox-fuse-etcd` 使用 `--atomic --wait`
+升级到 release revision 4。升级后 API 2/2、etcd 3/3、MinIO 1/1 Ready。
+经正式 API Service 的单条默认 FUSE 创建、文件上传/下载哈希一致、
+公开删除和最终 404 通过；一次性执行返回 200、退出码 0，受管资源归零。
+
+同一 revision 4 的首轮 20 个 FUSE 创建使用**本机端口转发**：
+19 条返回 201，一条连接被远端断开；该 workspace 随后的公开
+by-workspace 查询为 404，故整轮为 **FAIL**。19 个已创建 ID 经公开
+DELETE 后最终全部 404。原始日志 SHA-256 为
+`4b76d7a4cc78b143648a8219c2954cc4221e3fc22ff54e227aff36aa2da33157`，
+位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/ds-revision4-fuse-20.log`。
+断连发生在本机转发链路或 API 处理链的哪一段，单靠该日志不能确定。
+
+为区分转发链路，在相同镜像和正式 ClusterIP Service 上，改用集群内
+独立测试 Pod 直接请求 `sandbox-api:8080`，仍为 20 个独立 workspace、
+最多 4 个并发 POST、300 秒 TTL。此轮 20/20 创建返回 201，
+20/20 驻留 GET 返回 200；创建耗时最小 4.52 秒、中位 14.24 秒、
+最大 64.49 秒。公开 DELETE 有 10 条立即 200、10 条返回异步 503，
+最终 20/20 GET 均为 404，测试进程退出 0。客户端 Pod 已精确删除；
+API 2/2、etcd 3/3 Ready，受管 Pod 与 NetworkPolicy 均为 0。
+原始日志 SHA-256 为
+`a645e4fb09c71ad8da2dcfac9cc8c78123dd2817826fb2bc7619a779adbd0b3d`，
+位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/ds-revision4-incluster-fuse-20.log`。
+
+集群内正例说明该候选版本在本轮受控 20 个驻留场景可创建和安全释放，
+不能抹去首轮断连，也不证明断连必然只由端口转发造成。64.49 秒的创建
+长尾需要在扩大灰度前继续观察。这些是 DS 测试环境结果；全部 HTTP
+接口、生产部署和大量存活容量仍未验收。当前源码的
+`go test ./internal/api/... -count=1` 通过，属于处理器回归，不能替代
+31 条路由逐条经 DS 正式入口的现场验收。
