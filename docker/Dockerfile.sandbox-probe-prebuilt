@@ -1,0 +1,16 @@
+# Stage only the probe built from this checkout on top of the pinned runtime.
+# Existing Pods retain their original image; this recipe is for new Pods.
+FROM registry.i.huaxisy.com/library/ai-infra/sandbox-runtime@sha256:a90d72055cf7b2e57d822d68cb4e3e4b42c302b4ac09f8f00592d569946f34c9
+
+ARG TARGETARCH
+COPY --chown=root:root --chmod=0755 workspace-probe /usr/local/bin/workspace-probe
+
+# Reject a host executable or a binary for the wrong CPU before publication.
+RUN test "$(od -An -tx1 -N4 /usr/local/bin/workspace-probe | tr -d ' \n')" = "7f454c46" && \
+    case "$TARGETARCH" in \
+      arm64) expected_machine=183 ;; \
+      amd64) expected_machine=62 ;; \
+      *) exit 1 ;; \
+    esac && \
+    test "$(od -An -tu2 -j18 -N2 /usr/local/bin/workspace-probe | tr -d ' \n')" = "$expected_machine" && \
+    /usr/local/bin/workspace-probe self-check
