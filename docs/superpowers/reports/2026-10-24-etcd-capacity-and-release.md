@@ -1463,3 +1463,33 @@ CCE 同名 namespace 当前没有应用资源，本轮没有向 CCE 安装。
 `sandbox-api` 是 `ClusterIP:8080`，本次灰度可由集群内客户端访问，
 尚未向现有业务客户端切换入口。集群中另有多个旧 sandbox Service，
 不能凭名称相似就把它们改指向本测试 namespace。
+
+### DS revision 4 的 FUSE 业务路由矩阵
+
+在 DS `sandbox-fuse-etcd` namespace 的独立客户端 Pod 内，直接经
+`sandbox-api:8080` 对新 FUSE 沙盒运行公开 HTTP 路由矩阵。
+`internal/api/router.go` 注册的 31 条 `/api/v1` 路由均被本轮或上述
+同 revision 4 的单条烟测调用到。创建/ID 查询/按 workspace 查询/
+删除、TTL 更新、网络禁用同值更新、普通与 SSE 流式执行、直接文件
+上传/下载/读取/列举/递归列举/glob/按行读取/编辑/按行编辑、分片
+初始化/两块上传/状态/合并/取消、workspace info、to/from container
+同步、skills 列举/读取/附件读取及一次性普通/流式执行均得到预期
+2xx。两个 FUSE 动态 mount/unmount 路由按现有 immutable 合同返回
+409；这是预期拒绝，不记为动态挂载能力。
+
+第一轮矩阵原始日志 SHA-256
+`e7b66cdd47762980b181c9f5711994b4330998a9ec4bdff2995846117d86045f`，
+脚本 SHA-256
+`5945d88c77ecb212dcec188c7b0482acdb3104f23faff6f2ea0e6c68244f2684`；
+第二轮正向 skill 附件与一次性流式执行日志 SHA-256
+`5b807cf93668a3b998af1ff381a8acfe5cc990801b82f4f4db4152103d936f6f`，
+脚本 SHA-256
+`3efed45ee5e1538574ef5dc247e29a03b4e9847ea2cda4a39fce9dcad6ac2b7f`。
+脚本和日志均在忽略目录
+`2026-10-25-etcd-resident-lifecycle/release-candidate/`。两条新沙盒
+最终经公开 DELETE 到达 404，测试客户端已精确删除；受管 Pod、实例
+NetworkPolicy 为 0，API 2/2、etcd 3/3 Ready。
+
+该矩阵是**每路一个代表性 FUSE 请求**，不能推导所有参数组合、
+权限负例、网络启用后的实际连通性、异常断线重试或大存量容量通过。
+其中 network 只验证已禁用状态的同值更新；分片取消只验证未完成上传。
