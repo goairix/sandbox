@@ -588,3 +588,21 @@ Linux arm64 静态 ELF、镜像格式检查和容器 `--help` 均通过，Deploy
 及实例 NetworkPolicy 仍只剩旧失败请求的三项。旧的两条 owner 分别为
 `runtime_scope_unconfirmed` 与 `lease_live`，均不可自动恢复；本次正例没有
 改变其结论，也不替代 TTL、故障和大量存活验收。
+
+### 最新 canary 的 FUSE 自动 TTL 与文件读写
+
+同一组最新 API/运行时镜像上，独立 FUSE 请求 `sandbox-71n1mtj4h2`
+使用 45 秒 TTL：POST 201（7.10 秒）、GET 200，创建后约 53.77 秒
+GET 503（正在关闭）、约 60.06 秒 GET 404。验证脚本没有调用兜底
+DELETE。后续只读核对中，该请求的受管 Pod、实例 NetworkPolicy 和
+workspace owner 均已消失。FUSE 池各元数据汇总中仅旧失败请求所在池
+保留 `total=1, consumed=1`，其余池均为 `total=0`。这是一次真实
+TTL 自动释放正例，尚不是大量存活、同时到期或故障恢复验收。
+
+另一条独立请求 `sandbox-qfdemprq9m` 在 FUSE 挂载上通过公开文件 API
+上传 55 字节（HTTP 200）、下载相同内容（HTTP 200，SHA-256
+`3e17a6b4835e1e7b4abbb0f09f30d784b591c2093efa33ed1f9e883c62e8c0c7`），
+然后公开 DELETE 200。删除后只剩旧失败请求的 Pod 与两条实例策略；
+池汇总仍只有旧请求占用 1 个 consumed。这证明当前隔离 canary 的一轮
+真实文件路径读写和释放，未证明长期稳定性或正式 API 发布。正式 API
+仍为 sync-only 2/2；旧 probe Pod 仍运行，不能强删或虚报退款。
