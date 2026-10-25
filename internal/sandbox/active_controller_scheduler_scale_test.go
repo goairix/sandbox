@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ type controllerStageSamples struct {
 
 var controllerStageNames = [...]string{
 	"acquire/read", "acquire/grant", "acquire/commit", "acquire/revoke",
-	"renew/read", "renew/grant", "renew/commit", "renew/revoke",
+	"renew/read", "renew/grant", "renew/commit", "renew/revoke", "renew/keepalive",
 }
 
 func controllerStageSlot(operation, stage string) int {
@@ -53,6 +54,10 @@ func controllerStageSlot(operation, stage string) int {
 		return base + 2
 	case "revoke":
 		return base + 3
+	case "keepalive":
+		if operation == "renew" {
+			return base + 4
+		}
 	}
 	return -1
 }
@@ -123,8 +128,15 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	require.GreaterOrEqual(t, replicas, 1)
 	require.LessOrEqual(t, replicas, 2)
 
-	endpoint := os.Getenv("TEST_ETCD_ENDPOINT")
-	require.NotEmpty(t, endpoint)
+	rawEndpoints := os.Getenv("TEST_ETCD_ENDPOINT")
+	require.NotEmpty(t, rawEndpoints)
+	// A comma-separated list mirrors the production API's three-member etcd
+	// client. A single endpoint remains useful for isolated storage tests.
+	endpoints := strings.Split(rawEndpoints, ",")
+	for index, endpoint := range endpoints {
+		endpoints[index] = strings.TrimSpace(endpoint)
+		require.NotEmpty(t, endpoints[index])
+	}
 	prefix := "/controller-scheduler-scale/" + uuid.NewString() + "/"
 	repositories := make([]state.ActiveSandboxRepository, 0, replicas)
 	managers := make([]*Manager, 0, replicas)
@@ -135,7 +147,7 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	// Manager so this measures load distribution, not a takeover race.
 	for replica := range replicas {
 		store, storeErr := etcdstate.New(context.Background(), etcdstate.Options{
-			Endpoints: []string{endpoint}, Prefix: prefix, Timeout: 3 * time.Second,
+			Endpoints: endpoints, Prefix: prefix, Timeout: 3 * time.Second,
 			ControllerStageObserver: observeControllerStage(&stageSamples),
 		})
 		require.NoError(t, storeErr)
