@@ -27,6 +27,8 @@ etcd **不要求证书或用户名密码**。`existingSecret: ""` 时客户端�
 
 AppArmor loader Ready 只证明策略装载，**不证明 CRI 能启动受该策略约束的 FUSE 容器**。先在目标节点做实际容器创建与 FUSE 挂载验收；不能通过设 `allowMissingLSMForKind=true` 或关闭 LSM 来代替生产验收。CCE 曾出现 loader Ready 但 CRI 报 `apparmor is not supported`；不要据此推断另一套或当前节点的状态，逐节点复核。
 
+部分 CCE 的 NodeLocal DNS 准入会改写 loader Pod 的 DNSPolicy、nameservers 和 searches，使严格启动门禁等待超时。若现场观察到这类改写，按 [Kubernetes DNS 准入兼容说明](kubernetes-dns-admission.md) 在环境 values 的 `config.runtime.kubernetes` 下显式设置 `disableNodeLocalDNSInjection: true`，并声明该文档限定的两项 `dnsOptions`；重渲染后确认 loader 与受管 Pod 都带预期标签和选项。不要通过放宽 Pod 身份匹配来绕过它。
+
 ## 2. 创建 namespace 与引用的 Secret
 
 示例变量只在当前 shell 使用；`KUBECONFIG` 指向**目标集群**，不要依赖默认 context。创建前检查同名 namespace 是否已有资源，避免覆盖业务对象。
