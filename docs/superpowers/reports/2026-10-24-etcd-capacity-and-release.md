@@ -972,3 +972,23 @@ FUSE `record`、`uid-owner`、各状态索引以及 active/session/workspace
 最后一条 404 明显晚于其余 19 条。它验收当前 DS 单 cell 上限 20
 的这一轮自动回收，不证明更大 N、100k 存活、持续维护负载或节点
 故障期间集中清理。
+
+### 存活 FUSE 文件写入跨真实 etcd leader 重建
+
+在 DS revision 3 上，公开创建沙盒 `sandbox-011f4so3jp` 并上传首个
+55 字节文件。只读 `etcdctl endpoint status` 证明当时 leader 是
+`etcd-1`，随后删除该 Pod，剩余成员选出了不同 leader。在旧成员
+仍未 Ready 时，经正式 API Service 上传第二个文件返回 200、下载
+返回 200 且字节一致；完成写入后再次核对旧成员仍未 Ready。
+旧成员以新 Pod UID 恢复并 Ready 后，首文件下载返回 200，55 字节
+哈希与原上传一致。公开 DELETE 返回 200，最终 GET 404；测试进程
+退出码 0。三个 etcd 成员、两个 API、MinIO 最终均 Ready；受管
+Pod、实例 NetworkPolicy、etcd FUSE record/uid-owner/state 索引和
+active/session/workspace 相关键均为 0。
+
+原始日志位于忽略目录 `reset-rebuild/fuse-file-etcd-leader-failover.log`，
+SHA-256 为
+`a978d227b9102747e5c7c3955cd0f69ecd8624f84929eeafd6a9a5bb4ae54c46`。
+这证明当前三成员部署在**一次 leader Pod 重建**时有 quorum 的单条
+FUSE 文件写入和安全清理；没有覆盖双成员故障、故障窗口的大并发
+提交、长时间分区、节点 FUSE 故障或大量存活沙盒恢复。
