@@ -1397,7 +1397,8 @@ API key 查询不存在的 ID 返回 404，未输出密钥。
 的远端 digest 为
 `sha256:600a948960a65d09811e5a3ffe069143de7e00af94b62e06a6adca5dfd9fd409`。
 Helm lint、复用现有 values 且仅替换镜像 tag 的 dry-run 通过；
-在 **DS 测试集群** `ds-ai-research/sandbox-fuse-etcd` 使用 `--atomic --wait`
+在 **DS 线上集群的隔离灰度 namespace** `ds-ai-research/sandbox-fuse-etcd`
+使用 `--atomic --wait`
 升级到 release revision 4。升级后 API 2/2、etcd 3/3、MinIO 1/1 Ready。
 经正式 API Service 的单条默认 FUSE 创建、文件上传/下载哈希一致、
 公开删除和最终 404 通过；一次性执行返回 200、退出码 0，受管资源归零。
@@ -1423,8 +1424,9 @@ API 2/2、etcd 3/3 Ready，受管 Pod 与 NetworkPolicy 均为 0。
 
 集群内正例说明该候选版本在本轮受控 20 个驻留场景可创建和安全释放，
 不能抹去首轮断连，也不证明断连必然只由端口转发造成。64.49 秒的创建
-长尾需要在扩大灰度前继续观察。这些是 DS 测试环境结果；全部 HTTP
-接口、生产部署和大量存活容量仍未验收。当前源码的
+长尾需要在扩大灰度前继续观察。这些是 DS **线上集群的隔离 namespace**
+灰度结果；全部 HTTP 接口、真实业务流量切换和大量存活容量仍未验收。
+当前源码的
 `go test ./internal/api/... -count=1` 通过，属于处理器回归，不能替代
 31 条路由逐条经 DS 正式入口的现场验收。
 
@@ -1450,6 +1452,11 @@ NetworkPolicy 为 0。脚本与结果日志 SHA-256 分别为
 位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/`。
 这补充验证了这些具体路径，不代表 network、所有文件变体、multipart、
 stream、workspace 动态操作等其余路由均已经过 DS 现场验证。
+
+用户已明确环境定位：DS 是线上集群，CCE 是类生产环境。本次应用已在
+DS 的 `sandbox-fuse-etcd` namespace 按正常 Helm release 部署，业务
+入口切换由用户随后执行；因此不要把“未切流量”误写成“未在线上部署”。
+CCE 同名 namespace 当前没有应用资源，本轮没有向 CCE 安装。
 
 当前 DS revision 4 的 Helm values 明确关闭 `redis.enabled` 和 Ingress；
 渲染清单里 API 使用上述 etcd 候选镜像，没有 Redis Deployment/Service。
