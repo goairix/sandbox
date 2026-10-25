@@ -1568,3 +1568,39 @@ Kubernetes `1/2 Ready` 含义同上。
 prepared Pod。测试客户端已删除。此验证证明预热领取与补充工作；
 `maxSize=20` 约束的是准备池规模，不是存活 sandbox 总数上限，
 也不等于大存量容量验收。
+
+### DS Cilium 提供方修正与云元数据隔离
+
+运行中的 FUSE 沙盒 `sandbox-ugu5lbhsa4` 在 `/workspace` 生成安全报告。
+复核时只读取报告，不改动 agent 工作区。报告所述两个出站路径均经
+同一沙盒的直连 socket 复现：云元数据 HTTP 返回 200，user-data
+包含明文 root 凭据条目；`172.16.0.1:22` TCP 建连成功。验证时仅
+输出状态及是否含凭据字段，未打印或提交凭据值。不能由端口连通
+直接推断该凭据能够登录 SSH，但凭据已向沙盒暴露，必须轮换。
+
+排查发现 `feat/workspace-fuse-mount` 已实现按 FUSE 实例创建
+Cilium `egressDeny`，当前分支该实现未改动。DS 真正的问题是本轮
+Helm values 把 `config.runtime.kubernetes.networkPolicyProvider` 误设为
+`standard`，从而关闭了已有的 Cilium 用户拒绝策略；标准
+NetworkPolicy 的 `IPBlock.Except` 在此处没有形成预期的拒绝边界。
+revision 7 曾短暂部署一条通用 Cilium 拒绝策略止血，未提交对应
+Chart 改动；revision 8 将原配置切为 `cilium`，保留临时策略期间，
+用公开 API 对原活跃沙盒重申其**已持久化**的 `enabled=true`、
+`block_private=true`、空白名单，原实现成功安装绑定 Pod UID 的
+实例级 Cilium 策略。revision 9 删除临时策略，最终 Helm Chart
+没有新增网络策略或配置项。
+
+移除临时策略后，原活跃沙盒的实例级策略仍为 Valid；从同一沙盒
+新建到 `169.254.169.254:80`、`172.16.0.1:22` 的连接均超时，
+MinIO Service 9000/TCP 可达，原 `/workspace` PDF 可读。
+另建一条 `network.enabled=true`、`block_private=true` 的 FUSE
+沙盒，原代码自动创建实例级 Cilium 策略；相同两个目标不可达，
+MinIO 可达；公开 DELETE 后终态 404。先前一条默认网络禁用的
+FUSE 对照也创建、清理成功，不应把它当作 Cilium 策略正例。
+两条测试沙盒与测试客户端均已删除，原 agent 的沙盒持续 Ready，
+API 2/2、etcd 3/3、MinIO 1/1 Ready。此验证覆盖报告中的两个
+目标，不等于所有内网地址、协议或节点都已验收。
+
+**运维待办：** user-data 中的 root 凭据必须在云主机或镜像管理侧
+轮换并从 cloud-init 配置移除；仅阻断 sandbox 出站不能撤销已
+发生的凭据暴露。不要把报告中的原密码写入工单、提交或日志。
