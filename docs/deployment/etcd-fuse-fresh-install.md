@@ -53,7 +53,14 @@ kubectl --context "$CTX" -n "$NS" create secret generic sandbox-api-key \
   --from-file=api-key=/secure/path/to/api-key
 ```
 
-如果已有 Secret，先核对名称、键名和轮换计划，不重复 `create`。私有镜像仓库的拉取 Secret 也必须位于这个 namespace。启用 etcd mTLS 时，另外创建只含上述三个证书键的 Secret，并把名称填入下一节 `existingSecret`；明文 etcd 不需该 Secret。
+如果已有 Secret，先核对名称、键名和轮换计划，不重复 `create`。私有镜像仓库的拉取 Secret 也必须位于这个 namespace。`image.pullSecretName` 供 API ServiceAccount 使用；当前受管 sandbox Pod 使用本 namespace 的 `default` ServiceAccount，因此还要给它设置同一个拉取 Secret，并确认后续 Pod 能拉取 runtime 和 mounter 镜像：
+
+```sh
+kubectl --context "$CTX" -n "$NS" patch serviceaccount default \
+  --type=merge -p '{"imagePullSecrets":[{"name":"<镜像拉取Secret>"}]}'
+```
+
+启用 etcd mTLS 时，另外创建只含上述三个证书键的 Secret，并把名称填入下一节 `existingSecret`；明文 etcd 不需该 Secret。
 
 ## 3. 环境 values
 
