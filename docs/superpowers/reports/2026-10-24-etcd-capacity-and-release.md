@@ -1450,3 +1450,9 @@ NetworkPolicy 为 0。脚本与结果日志 SHA-256 分别为
 位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/`。
 这补充验证了这些具体路径，不代表 network、所有文件变体、multipart、
 stream、workspace 动态操作等其余路由均已经过 DS 现场验证。
+
+当前 DS revision 4 的 Helm values 明确关闭 `redis.enabled` 和 Ingress；
+渲染清单里 API 使用上述 etcd 候选镜像，没有 Redis Deployment/Service。
+`sandbox-api` 是 `ClusterIP:8080`，本次灰度可由集群内客户端访问，
+尚未向现有业务客户端切换入口。集群中另有多个旧 sandbox Service，
+不能凭名称相似就把它们改指向本测试 namespace。
