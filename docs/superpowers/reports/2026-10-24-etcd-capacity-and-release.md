@@ -770,3 +770,36 @@ finalizer 保留 Pod 写入签名回执，并确定读回；重启实例校验�
 这是**预防性代码验证，尚未构建部署，也未修复当前残留 owner**；
 20 个 FUSE 并发清理与发布门仍为 FAIL。现有残留需额外的产品认可
 的节点隔离/卸载证明，不能用 mountinfo 的一次 0 匹配代替。
+
+### DS 测试命名空间重建与 MinIO Pod 出站规则
+
+用户批准清空并重建专用 `sandbox-fuse-etcd` 测试命名空间，包括测试
+MinIO 和 etcd 数据。旧残留 Pod 消失且节点精确挂载检查为 0 后，重建
+了独立命名空间、三节点 etcd、MinIO 和两副本 API；没有改写旧环境的
+etcd owner，也没有触及 CCE。`4212869` 的持久签名卸载回执和
+`8c10e2f` 的有限失败日志已包含在 API 镜像
+`v1-reset-8c10e2f-arm64` 中。第一次新环境单条 FUSE 创建仍在
+180 秒后超时，池记录停在 binding，随后进入 cleanup；这轮为 FAIL。
+
+节点只读检查显示对应 `fuse.s3fs` 挂载和进程曾存在。进一步在同一
+Pod 网络命名空间实测，MinIO Service 与后端 Pod 的健康请求均超时；
+仅增加后端 IP 的 CIDR 放行仍超时。改为同命名空间 MinIO Pod 标签、
+9000/TCP 的 NetworkPolicy 后，两种地址均可访问。DS 的 CNI 按
+后端 Pod 身份匹配该流量，原产品只放行 Service IP 的 CIDR 规则
+无法提供实际通路。这个诊断策略仅用于证明原因，随后删除；专用 DS
+测试规则按相同 Pod 身份范围保留。它不是对其他集群网络策略的验收。
+
+另有确定的健康探针取消竞态：挂载身份已校验后，客户端断开使缓存
+扫描返回取消，原 supervisor 会永久转入 unhealthy。`cc73b6a`
+先红后绿修复此状态转换，`4dc5b13` 仅记录固定失败阶段，不写入
+请求、凭据或原始错误。新 ARM64 mounter 镜像 digest 为
+`sha256:7f76e479ac75cbc3b29298fedeafe253355ab91da7125695a9811d824137cfa1`。
+这两项代码测试通过，但不能单独解释或改判第一次新环境超时。
+
+专用 Pod 出站规则就位后，在仍保留那条旧 cleanup owner 的环境中，
+新单条 FUSE 批次 `bdb0910a` 完成 POST 201（8.17 秒）、20 秒驻留
+GET 200、DELETE 200 和最终 GET 404；测试进程退出码 0。其日志是
+忽略目录 `reset-rebuild/fuse-one-with-pod-egress.log`。这证明一条新建
+链在该规则下可闭合；旧 cleanup owner 仍占用池容量，故整个环境、
+20 并发和长期容量依然没有验收通过。下一步先保存该 owner 的失败
+证据并重建专用测试命名空间，再从零执行并发 FUSE 创建和清理。
