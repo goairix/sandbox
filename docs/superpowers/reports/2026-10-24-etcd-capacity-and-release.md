@@ -1623,3 +1623,40 @@ Ready。随后通过公开 API 创建 FUSE 沙盒 `sandbox-jmeleq0mik`；
 公开 DELETE 返回 200，后续 GET 返回 404，临时对象已删除。
 本次 Helm 排空删除了之前正在使用的沙盒，符合用户明确要求的
 全量切换；旧测试 MinIO 资源和数据未删除。
+
+### DS 挂载器缓存检查导致的 503 与修复
+
+业务 MinIO 切换后，`sandbox-5nf97nbqrk` 的 GET 返回 503。
+其 Pod `sandbox-pool-vyeqwt67a4` 的挂载器在 14:09:36 UTC 首次记录
+`cache-inspection` 就绪失败；API 随后的安全清理在 `durable-flush`
+阶段反复收到控制命令退出码 1。Pod 内 `s3fs` 挂载仍存在，节点上
+只读检查缓存目录时目录为空、无符号链接。原始检查错误的 errno 未
+记录，因此不能断言当时一定是文件消失竞态；可以确定的是，现有
+状态机把一次缓存检查错误永久锁为不健康，阻断后续 flush。
+
+提交 `3b08b92` 仅在 `WalkDir` 已列出的嵌套缓存项随后消失时跳过
+该项；缓存根目录缺失、符号链接、非普通文件和其他错误仍失败。
+定向 RED、mounter 包测试、race、vet 均闭合。arm64 镜像
+`sandbox-fuse-etcd-mounter@sha256:74a5ad95553e2b1c2d2d60ba7cc6f909ca56ff590e55d8034d1cc8cd463f239b`
+通过镜像自检。在同一命名空间、独立 etcd 前缀的隔离 release 中，
+FUSE 创建、实际 `s3fs` 挂载、业务 MinIO 文件读回以及 300 秒自然
+TTL 到期后的 404/Pod 删除通过。最初跨命名空间 canary 因既有
+`etcd-same-namespace-only` 策略无法连接 etcd，已删除，未改网络策略。
+
+用户明确允许放弃失败沙盒尚未同步的数据。切换前确认旧前缀仅有
+上述一条活跃记录；旧 API 缩至零后，删除了原池的 7 个 Pod。
+4 个 FUSE Pod 的容器均终止后，按 Pod UID 核验并移除其清理
+finalizer；实例级旧策略也已按精确 Pod 名删除。由于安全排空无法
+通过，revision 11 明确使用 `--no-hooks`，同时更换挂载器镜像和
+etcd 前缀为 `/sandbox/ds-rotation-20261025/`。**旧前缀仍保留故障
+状态作证据，不由新 API 接管；这不是旧数据的安全迁移或退款证明。**
+
+revision 11 为 `deployed`，API 2/2 Ready，普通与 FUSE 准备池各 3 个。
+正式 API 新建的 FUSE 沙盒 `sandbox-riwfeeruhh` 使用修复镜像，
+`/workspace` 为实际 `fuse.s3fs`；写入文件可从业务 bucket 读回。
+90 秒自然 TTL 后 GET 为 404、Pod 已删除，API 无新的 flush/teardown
+错误，测试对象已删除。隔离 release 也已卸载，专属 Pod、策略及
+11 个专属 etcd 键已清理。隔离 release 的常规卸载钩子因未传入
+Secret 凭据而失败；在确认无活跃记录后以 `--no-hooks` 卸载。
+上述是单次隔离和正式短 TTL 回归，不能证明所有缓存 I/O 错误或
+长期大存量容量均已验收。
