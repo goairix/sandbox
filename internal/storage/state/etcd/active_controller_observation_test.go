@@ -35,10 +35,10 @@ func TestControllerStagesObserveAcquireAndRenew(t *testing.T) {
 	_, err = repository.RenewController(context.Background(), *acquired, 15*time.Second)
 	require.NoError(t, err)
 
-	require.Len(t, observed, 7)
+	require.Len(t, observed, 6)
 	for index, want := range [][2]string{
 		{"acquire", "read"}, {"acquire", "grant"}, {"acquire", "commit"},
-		{"renew", "read"}, {"renew", "grant"}, {"renew", "commit"}, {"renew", "revoke"},
+		{"renew", "read"}, {"renew", "commit"}, {"renew", "keepalive"},
 	} {
 		require.Equal(t, want[0], observed[index].operation)
 		require.Equal(t, want[1], observed[index].stage)

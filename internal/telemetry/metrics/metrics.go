@@ -51,7 +51,8 @@ var (
 	// Session restore (persistent sandbox restore on startup / multi-replica)
 	SandboxSessionRestoreTotal metric.Int64Counter
 
-	// Controller RPC labels are fixed; sandbox and lease identities are excluded.
+	// Controller RPC labels are fixed (including keepalive); sandbox and lease
+	// identities are excluded.
 	SandboxControllerStageDuration metric.Float64Histogram
 
 	// FUSE workspace instruments. Attribute keys are intentionally bounded to

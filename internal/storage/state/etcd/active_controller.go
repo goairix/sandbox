@@ -9,12 +9,27 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-func decodeController(raw []byte, id string) (state.ActiveSandboxControllerLease, error) {
-	var lease state.ActiveSandboxControllerLease
-	if json.Unmarshal(raw, &lease) != nil || lease.SandboxID != id || lease.Token == "" || lease.InstanceID == "" || lease.Generation <= 0 {
-		return state.ActiveSandboxControllerLease{}, state.ErrActiveSandboxCorrupt
+// controllerRecord stores the requested TTL in nanoseconds alongside the
+// public lease. Old records omit it and retain the grant-and-swap path; a
+// changed TTL also needs a new server lease because KeepAlive preserves the
+// original lease duration.
+type controllerRecord struct {
+	state.ActiveSandboxControllerLease
+	RequestedTTL time.Duration `json:"requested_ttl_ns,omitempty"`
+}
+
+func decodeControllerRecord(raw []byte, id string) (controllerRecord, error) {
+	var record controllerRecord
+	if json.Unmarshal(raw, &record) != nil || record.SandboxID != id || record.Token == "" ||
+		record.InstanceID == "" || record.Generation <= 0 || record.RequestedTTL < 0 {
+		return controllerRecord{}, state.ErrActiveSandboxCorrupt
 	}
-	return lease, nil
+	return record, nil
+}
+
+func decodeController(raw []byte, id string) (state.ActiveSandboxControllerLease, error) {
+	record, err := decodeControllerRecord(raw, id)
+	return record.ActiveSandboxControllerLease, err
 }
 
 // observeControllerStage reports one completed RPC. The observer receives no
@@ -65,7 +80,7 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 		return nil, false, err
 	}
 	lease.ExpiresAt = grantedAt.Add(ttl)
-	raw, err := json.Marshal(lease)
+	raw, err := json.Marshal(controllerRecord{ActiveSandboxControllerLease: lease, RequestedTTL: ttl})
 	if err != nil {
 		return nil, false, err
 	}
@@ -110,10 +125,10 @@ func (r *ActiveSandboxRepository) AcquireController(ctx context.Context, lease s
 	return nil, false, state.ErrActiveSandboxConflict
 }
 
-// RenewController atomically moves the exact current holder to a new lease.
-// It reads the record and controller at one etcd revision before comparing
-// both revisions in the write transaction. An unknown transaction result never
-// triggers a second renewal.
+// RenewController compares the exact record and holder at one revision before
+// updating the controller key. An unchanged TTL reuses its server lease; old
+// records and changed TTLs grant a replacement lease. An unknown write or
+// keepalive result never triggers a second renewal.
 func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease state.ActiveSandboxControllerLease, ttl time.Duration) (*state.ActiveSandboxControllerLease, error) {
 	if !validActiveID(lease.SandboxID) || lease.Token == "" || lease.InstanceID == "" || lease.Generation <= 0 || state.ValidateActiveSandboxTTL(ttl) != nil {
 		return nil, state.ErrActiveSandboxCorrupt
@@ -147,21 +162,27 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 	if len(controllers) == 0 {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
-	old, err := decodeController(controllers[0].Value, lease.SandboxID)
+	oldRecord, err := decodeControllerRecord(controllers[0].Value, lease.SandboxID)
 	if err != nil {
 		return nil, err
 	}
+	old := oldRecord.ActiveSandboxControllerLease
 	if old.Token != lease.Token || old.Generation != lease.Generation || old.InstanceID != lease.InstanceID || old.PodUID != lease.PodUID {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
+	oldLeaseID := clientv3.LeaseID(controllers[0].Lease)
+	reuseLease := oldLeaseID != 0 && oldRecord.RequestedTTL == ttl
 	grantedAt := time.Now()
-	leaseID, err := r.store.leaseFor(requestCtx, ttl)
-	r.store.observeControllerStage(requestCtx, "renew", "grant", controllerStageResult(err), grantedAt)
-	if err != nil {
-		return nil, err
+	leaseID := oldLeaseID
+	if !reuseLease {
+		leaseID, err = r.store.leaseFor(requestCtx, ttl)
+		r.store.observeControllerStage(requestCtx, "renew", "grant", controllerStageResult(err), grantedAt)
+		if err != nil {
+			return nil, err
+		}
 	}
 	lease.ExpiresAt = grantedAt.Add(ttl)
-	raw, err := json.Marshal(lease)
+	raw, err := json.Marshal(controllerRecord{ActiveSandboxControllerLease: lease, RequestedTTL: ttl})
 	if err != nil {
 		return nil, err
 	}
@@ -179,14 +200,32 @@ func (r *ActiveSandboxRepository) RenewController(ctx context.Context, lease sta
 		return nil, err
 	}
 	if !response.Succeeded {
-		started = time.Now()
-		_, revokeErr := r.store.client.Revoke(requestCtx, leaseID)
-		r.store.observeControllerStage(requestCtx, "renew", "revoke", controllerStageResult(revokeErr), started)
+		if !reuseLease {
+			started = time.Now()
+			_, revokeErr := r.store.client.Revoke(requestCtx, leaseID)
+			r.store.observeControllerStage(requestCtx, "renew", "revoke", controllerStageResult(revokeErr), started)
+		}
 		return nil, state.ErrActiveSandboxStaleToken
 	}
-	if oldLease := clientv3.LeaseID(controllers[0].Lease); oldLease != 0 {
+	if reuseLease {
+		// The CAS establishes the holder before renewal. If keepalive fails or
+		// its reply is unknown, the caller fails closed; persisted ExpiresAt is
+		// advisory and the server-side leased key remains authoritative.
 		started = time.Now()
-		_, revokeErr := r.store.client.Revoke(requestCtx, oldLease)
+		kept, keepErr := r.store.client.KeepAliveOnce(requestCtx, oldLeaseID)
+		r.store.observeControllerStage(requestCtx, "renew", "keepalive", controllerStageResult(keepErr), started)
+		if keepErr != nil {
+			return nil, keepErr
+		}
+		if kept == nil || kept.TTL <= 0 {
+			return nil, state.ErrActiveSandboxLeaseExpired
+		}
+		lease.ExpiresAt = time.Now().Add(ttl)
+		return &lease, nil
+	}
+	if oldLeaseID != 0 {
+		started = time.Now()
+		_, revokeErr := r.store.client.Revoke(requestCtx, oldLeaseID)
 		r.store.observeControllerStage(requestCtx, "renew", "revoke", controllerStageResult(revokeErr), started)
 	}
 	return &lease, nil
