@@ -22,6 +22,8 @@ type FUSEPoolRepository struct {
 
 var _ state.FUSEPoolRepository = (*FUSEPoolRepository)(nil)
 
+var errPoolAdmissionMetadataContention = errors.New("fuse pool admission aggregate changed independently")
+
 // poolMetadata is the fixed-size per-PoolKey inventory aggregate. Its six
 // state counts sum to Total and move with each record/index transaction. A
 // fresh namespace starts with this format; an incomplete aggregate fails
@@ -370,6 +372,29 @@ func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, r
 	if r == nil || r.store == nil {
 		return errors.New("fuse pool repository: nil store")
 	}
+	requestCtx, cancel := r.store.requestContext(ctx)
+	defer cancel()
+
+	// A concurrent record transition can change the shared aggregate without
+	// changing this candidate or its live refill lock. Retry only that proven
+	// no-write conflict; an uncertain commit reply never gets a new attempt.
+	const maxAggregateAttempts = 16
+	for attempt := 0; attempt < maxAggregateAttempts; attempt++ {
+		err := r.createPreparingWithAdmissionOnce(requestCtx, record, refillToken, maxSize, prepareTTL)
+		if !errors.Is(err, errPoolAdmissionMetadataContention) {
+			return err
+		}
+		if err := requestCtx.Err(); err != nil {
+			return err
+		}
+	}
+	return state.ErrFUSEPoolCASMismatch
+}
+
+func (r *FUSEPoolRepository) createPreparingWithAdmissionOnce(ctx context.Context, record state.FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error {
+	if r == nil || r.store == nil {
+		return errors.New("fuse pool repository: nil store")
+	}
 	if !validPoolID(record.PreparationID) || !validPoolID(record.PoolKey) || !validPoolID(record.MaintainerToken) ||
 		!validPoolID(refillToken) || record.State != state.FUSEPoolPreparing || record.Revision != 1 ||
 		record.RuntimeID != "" || record.RuntimeUID != "" || record.ReservationToken != "" ||
@@ -453,7 +478,8 @@ func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, r
 	conditions = append(conditions, clientv3.Compare(clientv3.Value(directoryKey), "=", record.PoolKey))
 	written, err := r.store.client.Txn(requestCtx).
 		If(conditions...).Then(operations...).
-		Else(clientv3.OpGet(lockKey), clientv3.OpGet(metaKey), clientv3.OpGet(recordKey)).Commit()
+		Else(clientv3.OpGet(lockKey), clientv3.OpGet(metaKey), clientv3.OpGet(recordKey),
+			clientv3.OpGet(indexKey), clientv3.OpGet(deadlineKey), clientv3.OpGet(directoryKey)).Commit()
 	if err != nil {
 		return err
 	}
@@ -461,9 +487,13 @@ func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, r
 		return nil
 	}
 	_, _ = r.store.client.Revoke(requestCtx, lease)
-	if len(written.Responses) != 3 || written.Responses[0].GetResponseRange() == nil ||
-		written.Responses[1].GetResponseRange() == nil || written.Responses[2].GetResponseRange() == nil {
+	if len(written.Responses) != 6 {
 		return state.ErrFUSEPoolCorrupt
+	}
+	for _, response := range written.Responses {
+		if response.GetResponseRange() == nil {
+			return state.ErrFUSEPoolCorrupt
+		}
 	}
 	currentLocks := written.Responses[0].GetResponseRange().Kvs
 	if len(currentLocks) == 0 || string(currentLocks[0].Value) != refillToken {
@@ -471,6 +501,15 @@ func (r *FUSEPoolRepository) CreatePreparingWithAdmission(ctx context.Context, r
 	}
 	if len(written.Responses[2].GetResponseRange().Kvs) != 0 {
 		return state.ErrFUSEPoolConflict
+	}
+	currentMeta := written.Responses[1].GetResponseRange().Kvs
+	metaChanged := len(currentMeta) == 1 &&
+		(len(metaRead.Kvs) == 0 || currentMeta[0].ModRevision != metaRead.Kvs[0].ModRevision)
+	currentDirectory := written.Responses[5].GetResponseRange().Kvs
+	if metaChanged && len(written.Responses[3].GetResponseRange().Kvs) == 0 &&
+		len(written.Responses[4].GetResponseRange().Kvs) == 0 &&
+		len(currentDirectory) == 1 && string(currentDirectory[0].Value) == record.PoolKey {
+		return errPoolAdmissionMetadataContention
 	}
 	return state.ErrFUSEPoolConflict
 }

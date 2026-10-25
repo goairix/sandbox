@@ -15,23 +15,24 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
-// checkoutBarrierKV lets two independent records read the same pool aggregate
-// revision before either transaction commits. Only their first commits wait;
-// a later retry can proceed against the new aggregate revision.
-type checkoutBarrierKV struct {
+// poolAggregateBarrierKV lets two independent operations read the same pool
+// aggregate revision before either conditional transaction commits. Only their
+// first commits wait; a later retry can proceed against the new revision.
+type poolAggregateBarrierKV struct {
 	clientv3.KV
 	arrivals atomic.Int32
 	gate     chan struct{}
 }
 
-func (kv *checkoutBarrierKV) Txn(ctx context.Context) clientv3.Txn {
-	return &checkoutBarrierTxn{Txn: kv.KV.Txn(ctx), owner: kv, ctx: ctx}
+func (kv *poolAggregateBarrierKV) Txn(ctx context.Context) clientv3.Txn {
+	return &poolAggregateBarrierTxn{Txn: kv.KV.Txn(ctx), owner: kv, ctx: ctx}
 }
 
-type checkoutBarrierTxn struct {
+type poolAggregateBarrierTxn struct {
 	clientv3.Txn
-	owner *checkoutBarrierKV
-	ctx   context.Context
+	owner       *poolAggregateBarrierKV
+	ctx         context.Context
+	conditional bool
 }
 
 // checkoutLostReplyKV simulates a committed transaction whose reply is lost.
@@ -47,10 +48,12 @@ func (kv *checkoutLostReplyKV) Txn(ctx context.Context) clientv3.Txn {
 
 type checkoutLostReplyTxn struct {
 	clientv3.Txn
-	owner *checkoutLostReplyKV
+	owner       *checkoutLostReplyKV
+	conditional bool
 }
 
 func (tx *checkoutLostReplyTxn) If(conditions ...clientv3.Cmp) clientv3.Txn {
+	tx.conditional = true
 	tx.Txn.If(conditions...)
 	return tx
 }
@@ -70,26 +73,33 @@ func (tx *checkoutLostReplyTxn) Commit() (*clientv3.TxnResponse, error) {
 	if err != nil {
 		return result, err
 	}
+	if !tx.conditional {
+		return result, nil
+	}
 	tx.owner.commits.Add(1)
 	return nil, errors.New("reply lost after commit")
 }
 
-func (tx *checkoutBarrierTxn) If(conditions ...clientv3.Cmp) clientv3.Txn {
+func (tx *poolAggregateBarrierTxn) If(conditions ...clientv3.Cmp) clientv3.Txn {
+	tx.conditional = true
 	tx.Txn.If(conditions...)
 	return tx
 }
 
-func (tx *checkoutBarrierTxn) Then(operations ...clientv3.Op) clientv3.Txn {
+func (tx *poolAggregateBarrierTxn) Then(operations ...clientv3.Op) clientv3.Txn {
 	tx.Txn.Then(operations...)
 	return tx
 }
 
-func (tx *checkoutBarrierTxn) Else(operations ...clientv3.Op) clientv3.Txn {
+func (tx *poolAggregateBarrierTxn) Else(operations ...clientv3.Op) clientv3.Txn {
 	tx.Txn.Else(operations...)
 	return tx
 }
 
-func (tx *checkoutBarrierTxn) Commit() (*clientv3.TxnResponse, error) {
+func (tx *poolAggregateBarrierTxn) Commit() (*clientv3.TxnResponse, error) {
+	if !tx.conditional {
+		return tx.Txn.Commit()
+	}
 	arrival := tx.owner.arrivals.Add(1)
 	if arrival == 2 {
 		close(tx.owner.gate)
@@ -135,7 +145,7 @@ func TestPoolCheckoutRetriesOnlyIndependentAggregateContention(t *testing.T) {
 	// the shared count. Both transitions must succeed, without weakening any
 	// record, token, owner, or reservation-deadline comparison.
 	realKV := store.client.KV
-	barrier := &checkoutBarrierKV{KV: realKV, gate: make(chan struct{})}
+	barrier := &poolAggregateBarrierKV{KV: realKV, gate: make(chan struct{})}
 	store.client.KV = barrier
 	t.Cleanup(func() { store.client.KV = realKV })
 
