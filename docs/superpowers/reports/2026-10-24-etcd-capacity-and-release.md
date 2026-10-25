@@ -949,3 +949,26 @@ GET 明确返回 `workspace_mount_mode=fuse`。同一沙盒上传 55 字节返�
 FUSE 默认、保留显式 sync 兼容入口，Helm lint 和渲染已核对。
 其他环境不会因本次 DS 升级自动改变。大量存活 FUSE、集中到期和
 故障期间写入的容量门仍未完成。
+
+### DS 20 个 FUSE 沙盒的对齐到期
+
+在 revision 3 上，集群内客户端对 20 个独立 workspace 最多并发发起
+4 个 POST。每条请求在发送前以同一个目标 Unix 时间
+`1792908511.077` 计算自己的整数秒 TTL（实际请求 208–300 秒）；
+不修改产品时钟或 etcd 状态。20/20 创建收到 201，创建耗时最小
+4.97 秒、中位 19.32 秒、最大 88.76 秒；到期前 20/20 公开 GET
+返回 200。随后客户端**没有主动 DELETE**，公开 GET 逐步观察到
+5、12、16、19、最终 20 条返回 404；测试进程退出码 0。
+
+结束后按实际 `sandbox.managed=true` 标签核对受管 Pod 为 0，实例
+NetworkPolicy 为 0，两个 API 副本 Ready。只读 etcd keys-only 核对
+FUSE `record`、`uid-owner`、各状态索引以及 active/session/workspace
+相关键均为 0；常驻配置和池目录等键仍存在。测试客户端 Pod 也已
+删除并等待退出。原始日志 SHA-256 为
+`26593e3ef02013f4c7ce130f227ca7b595ad86546e0b1890e1b7d06cb86f62a3`，
+路径为忽略目录 `reset-rebuild/fuse-twenty-aligned-expiry.log`。
+
+该轮把请求的**目标到期时间**对齐，不保证运行时实际到期精确到同一秒；
+最后一条 404 明显晚于其余 19 条。它验收当前 DS 单 cell 上限 20
+的这一轮自动回收，不证明更大 N、100k 存活、持续维护负载或节点
+故障期间集中清理。
