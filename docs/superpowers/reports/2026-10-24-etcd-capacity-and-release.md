@@ -1493,3 +1493,22 @@ NetworkPolicy 为 0，API 2/2、etcd 3/3 Ready。
 该矩阵是**每路一个代表性 FUSE 请求**，不能推导所有参数组合、
 权限负例、网络启用后的实际连通性、异常断线重试或大存量容量通过。
 其中 network 只验证已禁用状态的同值更新；分片取消只验证未完成上传。
+
+### DS 切流前只读基线
+
+Helm release `sandbox` revision 4 仍为 `deployed`，API 2/2、etcd
+3/3、MinIO 1/1 Ready；API 两个 Pod 重启数均为 0，受管 Pod/实例
+NetworkPolicy 为 0。`sandbox-api.sandbox-fuse-etcd.svc.cluster.local:8080`
+是本次新安装的集群内入口，API key 由同 namespace 的
+`ds-sandbox-api-key` Secret 提供；没有输出密钥。旧业务 Service
+未改变，切流由用户执行。三个 etcd 数据 PVC 各 4 GiB 且 Bound，
+MinIO PVC 为 8 GiB 且 Bound。只读 `etcdctl endpoint status`
+显示三成员同为 Raft term 4、applied index 268227，无 endpoint error，
+单成员 DB 约 19 MB、in-use 约 7.3 MB、quota 2.1 GB。
+
+本次 `kubectl top` 瞬时值：两个 API 分别为 4m/15Mi、3m/21Mi；
+三个 etcd 分别为 37m/56Mi、28m/56Mi、25m/55Mi；MinIO 为
+5m/121Mi。这些只是切流前空闲基线，不代表负载下的 p95/p99
+或可支持的大存量上限。Helm 的 `fusePool.maxSize=20` 限制准备池，
+**不是**存活沙盒数的硬上限；此前用户已接受本轮受控灰度不在产品内
+增加第 21 个存活沙盒的拒绝门。
