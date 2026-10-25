@@ -5,6 +5,12 @@ FROM registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter@sha256:08ea782
 
 COPY --chmod=0755 workspace-mounter /usr/local/bin/workspace-mounter
 
+# The pinned slim image has no mime.types. s3fs otherwise uploads HTML as
+# application/octet-stream, so direct MinIO URLs download instead of rendering.
+RUN printf 'text/html html htm\ntext/css css\napplication/javascript js mjs\n' > /etc/mime.types \
+ && chown root:root /etc/mime.types \
+ && chmod 0444 /etc/mime.types
+
 RUN /usr/local/bin/workspace-mounter health prepared --self-check-image \
  && /usr/local/bin/workspace-mounter health prepared --release-check-image
 

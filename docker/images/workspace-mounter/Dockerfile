@@ -40,6 +40,12 @@ COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-pro
 COPY --from=s3fs-builder /out/usr/bin/s3fs /usr/bin/s3fs
 COPY --from=workspace-tools-builder /out/workspace-mounter /usr/local/bin/workspace-mounter
 
+# s3fs loads this file to set S3 Content-Type on direct FUSE writes. The slim
+# runtime image does not include one; keep common HTML assets renderable.
+RUN printf 'text/html html htm\ntext/css css\napplication/javascript js mjs\n' > /etc/mime.types \
+ && chown root:root /etc/mime.types \
+ && chmod 0444 /etc/mime.types
+
 RUN install -o root -g root -m 0755 /usr/local/bin/workspace-mounter /usr/local/bin/workspace-mounter.checked \
  && mv /usr/local/bin/workspace-mounter.checked /usr/local/bin/workspace-mounter \
  && install -d -o root -g root -m 0555 /workspace \
