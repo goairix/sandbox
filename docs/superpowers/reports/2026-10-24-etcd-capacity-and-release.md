@@ -745,3 +745,14 @@ revision 冲突。没有强删 owner、改写终止证据或退款。
 集群证明该精确 Pod 的卸载与进程域终态，并定位优雅卸载证据缺失的
 原因及恢复路径；同时处理冷创建锁等待导致的失败和高尾延迟。
 12 个驻留正例及前面的单条 FUSE 功能正例均不能覆盖这条失败路径。
+
+补充只读核查：该精确 Pod UID
+`8d5b9974-3a4f-4b08-9c97-40decefd6db2` 在 worker3 的
+`/host/proc/1/mountinfo` 匹配数为 0；节点调试 Pod 已退出并删除。
+Kubernetes 事件显示其启动后有一次 mounter readiness 请求失败，删除时
+两容器收到 Killing 事件；事件不能证明卸载 ACK 曾成功。etcd 终止证据
+仍是 `process_exited=true, graceful_unmount=false,
+infrastructure_fenced=false`，故即使当前宿主挂载只读检查为 0，产品
+仍不能把它自动升级成已签发的卸载或基础设施隔离证明。该 owner 和
+配额占用保持，需独立安全恢复；不能靠重复 DELETE 或直接改 etcd
+字段消除失败。
