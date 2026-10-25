@@ -5,6 +5,13 @@ redis:
   enabled: false
 
 config:
+  workspace:
+    # New etcd installations use FUSE for requests with a workspace path.
+    # Keep sync selectable explicitly while its compatibility path remains.
+    defaultMountMode: fuse
+    enabledMountModes:
+      - fuse
+      - sync
   storage:
     state:
       backend: etcd

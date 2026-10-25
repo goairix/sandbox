@@ -945,6 +945,7 @@ GET 明确返回 `workspace_mount_mode=fuse`。同一沙盒上传 55 字节返�
 `24ccdbebd7adefcef6bc253f2c61057880f5c1883b48389cc13675511df19da3`。
 
 这只验证 DS revision 3 的一条默认 FUSE 业务路径。Chart 的通用默认值
-仍为 `sync`，其他环境不会因本次 DS 配置切换自动改变；显式 sync 的
-兼容合同也未被移除。大量存活 FUSE、集中到期和故障期间写入的容量门
-仍未完成。
+仍为 `sync`；全新 etcd 安装的 `values-etcd.yaml` 示例现在明确选择
+FUSE 默认、保留显式 sync 兼容入口，Helm lint 和渲染已核对。
+其他环境不会因本次 DS 升级自动改变。大量存活 FUSE、集中到期和
+故障期间写入的容量门仍未完成。
