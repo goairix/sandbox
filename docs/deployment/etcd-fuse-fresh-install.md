@@ -171,6 +171,8 @@ kubectl --context "$CTX" -n "$NS" get svc "$RELEASE"-api
 
 测试环境可以用 `kubectl port-forward -n "$NS" svc/"$RELEASE"-api 18080:8080` 访问 ClusterIP；正式入口和切流由部署者配置。**不要把 `/health` 200、Helm `deployed`、loader Ready 或准备池 Pod Ready 单独当作业务通过。**
 
+空闲 FUSE 准备池 Pod 可能显示 `1/2 Running`：其 mounter 已处于 `prepared`，而容器探针检查领取并挂载后的 `ready` 状态。结合 Pod 的 `sandbox.pool.state=prepared` 标签、API 补池状态和实际创建后的读写结果判断；若已领取的业务 Pod 仍未 Ready，再检查 mounter 事件与挂载日志。
+
 ## 5. 升级、停止和恢复
 
 - 小版本升级先固定镜像 tag/digest，备份环境 values 和 etcd snapshot，检查活跃沙盒，再执行 `helm upgrade`。存储身份、凭据代次、mounter 镜像或 LSM 策略改变会触发池/清理契约变化；安排排空窗口，不能只重启 Pod。
