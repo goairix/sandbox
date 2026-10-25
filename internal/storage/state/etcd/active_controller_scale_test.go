@@ -16,8 +16,10 @@ import (
 	"github.com/goairix/sandbox/internal/storage/state"
 )
 
-// TestActiveControllerRenewScale measures one burst of real etcd controller
-// renewals. It is opt-in and does not represent Pod, FUSE, or API capacity.
+// TestActiveControllerRenewScale measures real etcd controller renewals. The
+// optional repeated rounds share the same controllers and start five seconds
+// apart when the preceding round fits. This opt-in test does not represent
+// Pod, FUSE, or API capacity.
 func TestActiveControllerRenewScale(t *testing.T) {
 	rawCount := os.Getenv("TEST_ETCD_CONTROLLER_SCALE_N")
 	if rawCount == "" {
@@ -27,6 +29,13 @@ func TestActiveControllerRenewScale(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, count, 0)
 	require.LessOrEqual(t, count, 10000)
+	rounds := 1
+	if rawRounds := os.Getenv("TEST_ETCD_CONTROLLER_SCALE_ROUNDS"); rawRounds != "" {
+		rounds, err = strconv.Atoi(rawRounds)
+		require.NoError(t, err)
+	}
+	require.Greater(t, rounds, 0)
+	require.LessOrEqual(t, rounds, 5)
 
 	store := testStore(t)
 	repository, err := NewActiveSandboxRepository(store, "controller-renew-scale")
@@ -71,55 +80,85 @@ func TestActiveControllerRenewScale(t *testing.T) {
 			Generation: record.Generation,
 		}
 		// The five-minute lease keeps sequential setup from expiring before
-		// the measured round. Production's five-second renewal interval is
-		// not simulated by this burst experiment.
+		// measurement. The optional five-second pacing is a load model; it
+		// does not use production's per-workspace renewal goroutines.
 		acquired, ok, acquireErr := repository.AcquireController(ctx, lease, 5*time.Minute)
 		require.NoError(t, acquireErr)
 		require.True(t, ok)
 		leases = append(leases, *acquired)
 	}
 	setupDuration := time.Since(setupStart)
+	firstStart := time.Now()
+	for round := range rounds {
+		scheduled := firstStart.Add(time.Duration(round) * 5 * time.Second)
+		if delay := time.Until(scheduled); delay > 0 {
+			time.Sleep(delay)
+		}
+		started := time.Now()
+		latencies, renewed, err := runControllerRenewRound(ctx, repository, leases)
+		require.NoError(t, err)
+		leases = renewed
+		finished := time.Now()
+		duration := finished.Sub(started)
+		// A successful RPC round can still miss the next five-second tick.
+		// Test leases are deliberately longer and do not make this pass.
+		periodMet := !finished.After(scheduled.Add(5 * time.Second))
+		t.Logf("controllers=%d snapshot_bytes=%d setup=%s round=%d/%d start_lag=%s renew_round=%s period_met=%t renew_per_second=%.1f p50=%s p95=%s p99=%s",
+			count, snapshotBytes, setupDuration, round+1, rounds, started.Sub(scheduled), duration, periodMet,
+			float64(count)/duration.Seconds(), latencies[(count-1)*50/100],
+			latencies[(count-1)*95/100], latencies[(count-1)*99/100])
+	}
+}
 
-	jobs := make(chan state.ActiveSandboxControllerLease)
-	durations := make(chan time.Duration, count)
-	errors := make(chan error, count)
+func runControllerRenewRound(ctx context.Context, repository *ActiveSandboxRepository, leases []state.ActiveSandboxControllerLease) ([]time.Duration, []state.ActiveSandboxControllerLease, error) {
+	jobs := make(chan int)
+	durations := make(chan time.Duration, len(leases))
+	errors := make(chan error, len(leases))
+	// Each index is sent once; workers write distinct slots, then the next
+	// round reads the completed slice only after workers.Wait returns.
+	renewed := make([]state.ActiveSandboxControllerLease, len(leases))
 	var workers sync.WaitGroup
 	const workerCount = 16
 	for range workerCount {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for lease := range jobs {
+			for index := range jobs {
+				lease := leases[index]
 				started := time.Now()
-				_, renewErr := repository.RenewController(ctx, lease, 5*time.Minute)
+				current, renewErr := repository.RenewController(ctx, lease, 5*time.Minute)
 				durations <- time.Since(started)
 				if renewErr != nil {
 					errors <- fmt.Errorf("renew %s: %w", lease.SandboxID, renewErr)
+					continue
 				}
+				if current == nil {
+					errors <- fmt.Errorf("renew %s returned no controller", lease.SandboxID)
+					continue
+				}
+				renewed[index] = *current
 			}
 		}()
 	}
-	renewStart := time.Now()
-	for _, lease := range leases {
-		jobs <- lease
+	for index := range leases {
+		jobs <- index
 	}
 	close(jobs)
 	workers.Wait()
-	renewDuration := time.Since(renewStart)
 	close(durations)
 	close(errors)
 	for renewErr := range errors {
-		require.NoError(t, renewErr)
+		if renewErr != nil {
+			return nil, nil, renewErr
+		}
 	}
-	latencies := make([]time.Duration, 0, count)
+	latencies := make([]time.Duration, 0, len(leases))
 	for duration := range durations {
 		latencies = append(latencies, duration)
 	}
-	require.Len(t, latencies, count)
+	if len(latencies) != len(leases) {
+		return nil, nil, fmt.Errorf("measured %d renewals, expected %d", len(latencies), len(leases))
+	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-
-	t.Logf("controllers=%d snapshot_bytes=%d setup=%s renew_round=%s renew_per_second=%.1f p50=%s p95=%s p99=%s",
-		count, snapshotBytes, setupDuration, renewDuration, float64(count)/renewDuration.Seconds(),
-		latencies[(len(latencies)-1)*50/100], latencies[(len(latencies)-1)*95/100],
-		latencies[(len(latencies)-1)*99/100])
+	return latencies, renewed, nil
 }
