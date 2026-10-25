@@ -784,6 +784,19 @@ revision 做 CAS Put，再对该租约 `KeepAliveOnce`。换 TTL 或旧格式记
 故障、同时创建/销毁和 10 万存活。因此 DS 的 20 个 FUSE 功能灰度与
 大存量容量验收仍是两个独立发布门；后者保持未通过。
 
+`34a43ea` 给可选产品测试增加有界驻留时间（12 秒至两分钟，默认仍为
+12 秒）。又在全新的本机三成员集群用双客户端、全部三个 endpoint、
+原 15 秒 TTL/五秒周期/三秒 RPC 超时测 10,000 条，建样 141.801 秒后
+驻留 60 秒：观察点 10,000/10,000 已续期且存活、lost 0；完整测试
+PASS，219.20 秒。续租 read/commit/keepalive 在观察点各约有
+297,108/297,099/297,095 次调用，错误均为零；最长分别约
+1.227/1.149/0.882 秒。日志
+`controller-three-endpoint-10000-hold60.log` 的 SHA-256 为
+`15e34e627161a7b65477e80aba1510d62fa8b0fea577e0c1b865fc91f9738d02`。
+停止时取消中的 RPC 单独计在 `after_stop`；三个成员结束后健康，专用
+容器和网络已删除。这比 12 秒观察更有力，但仍只是一次本机无 Pod/FUSE
+的 60 秒短测，不能外推到长期运行、节点故障或 10 万存活。
+
 ### FUSE 池安全判定仍随存活数量增长
 
 代码复核发现 `Manager.guardFUSEPoolRecord` 在取得或归还准备池记录时，
@@ -795,6 +808,14 @@ revision 做 CAS Put，再对该租约 `KeepAliveOnce`。换 TTL 或旧格式记
 因此未提前命中占用者的判定会经过多个随存活数量增长的列表或读取，现有
 10,000 条 controller 续期测试**没有**覆盖这一成本。`fusePool.maxSize`
 限制的是准备池规模，不能把这条检查或活跃沙盒数量变成常数。
+DS 灰度配置的 `fusePool.minSize=0`，正常冷创建在 `ReservePrepared` 没有
+候选时直接走 `prepareCold`，不执行这条 guard；它仍用于预备记录返回、
+检查、回收和 release drain，启用预热池时也会影响命中路径。因此不能
+把它归因为本轮 controller `Publish` 超时，也不能把未测的这些路径认定
+为大存量已通过。通用 `state.AtomicStore` 只有单键 CAS，没有跨键原子
+索引维护能力；用进程内缓存或单独写反向索引直接跳过扫描会存在漏判
+持久 owner 的风险。大存量 FUSE 池验收前需单独设计并验证同事务的
+反向保护索引或明确限制该路径，不能让缺索引时返回“可复用”。
 
 现有会话键按 sandbox ID、临时生命周期键按 sandbox ID、workspace
 owner 键按 workspace 身份组织；准备池记录只持有 preparation ID 与
