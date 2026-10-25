@@ -555,6 +555,15 @@ etcd 存储包测试和 vet 通过；专用容器已删除。
 10 万 FUSE/workspace 的容量门仍未通过；继续扩大实验前还须计入真实
 快照、API 内存与 goroutine、周期 QPS、FUSE 物理负载和故障恢复。
 
+随后把 `RenewController` 对 record 和 controller 的两次独立 GET 合成
+同一 etcd 快照中的两次读取，写入时仍比较两者 revision，并保留原
+lease grant、旧 lease revoke 和未知结果不重发规则。真实 etcd 存储包
+回归及 vet 通过。在另一独立本机单成员容器、相同合成快照和 16 个
+worker 下，新实现的单轮 1,000 条为 0.755 秒（原轮 0.737 秒），
+10,000 条为 5.781 秒（原轮 6.532 秒）。这是不同容器上的单次观察，
+没有受控多轮 A/B，**不能据此宣称吞吐提升**；减少一次客户端往返是
+代码事实。10,000 条突发仍超过产品默认五秒续期间隔，专用容器已删除。
+
 ### FUSE 池安全判定仍随存活数量增长
 
 代码复核发现 `Manager.guardFUSEPoolRecord` 在取得或归还准备池记录时，
