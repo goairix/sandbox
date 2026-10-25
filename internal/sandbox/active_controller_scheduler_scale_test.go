@@ -30,7 +30,7 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	count, err := strconv.Atoi(rawCount)
 	require.NoError(t, err)
 	require.Greater(t, count, 0)
-	require.LessOrEqual(t, count, 3000)
+	require.LessOrEqual(t, count, 10000)
 	replicas := 1
 	if rawReplicas := os.Getenv("TEST_ETCD_PRODUCT_CONTROLLER_SCALE_REPLICAS"); rawReplicas != "" {
 		replicas, err = strconv.Atoi(rawReplicas)
@@ -72,7 +72,9 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 		// Stop joins every goroutine and releases its exact leased key before
 		// the client closes. The isolated namespace is deleted with the test
 		// container, so a timeout remains a test failure rather than a retry.
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// A large sample needs time to release distinct leased keys. This
+		// cleanup budget does not extend any controller's renewal deadline.
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer stopCancel()
 		for _, controller := range controllers {
 			require.NoError(t, controller.Stop(stopCtx))
