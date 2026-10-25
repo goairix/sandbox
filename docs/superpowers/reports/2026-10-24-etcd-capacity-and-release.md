@@ -667,3 +667,21 @@ UID1000 调试容器无权删除而保留失败结论，随后由 root 调试容
 这些是 DS 正式 Service 的有界功能正例。它们不证明实际 10 万 FUSE
 Pod 容量、集中到期、节点/etcd 故障下的尾延迟或长期稳定性；当前集群
 的 DS 专用网络策略和外部 AppArmor DaemonSet 仍是部署依赖。
+
+### 配置上限内的 FUSE 驻留批次：失败且已回收
+
+对正式 Service 发起 20 个独立 FUSE 工作区创建，最多 4 个请求并发，
+每条 TTL 600 秒、池配置 `maxSize=20`。最终 17 次 POST 201、3 次
+POST 500；成功请求中已有超过 80 秒才返回的实例。日志确认两次
+`publish FUSE binding: fuse pool revision mismatch`，另一次为
+`acquire FUSE sandbox: FUSE pool is at active preparation capacity`。
+Kubernetes 客户端日志同时记录 GET 在本地限速队列等待约 2–3 秒，
+且有一次 API readiness 503。**此批次判 FAIL，不能把配置值 20
+称作已验收驻留容量。**
+
+清理阶段 17 条中 5 条立即 DELETE 200、12 条返回 503（清理仍在进行）；
+稍后对 17 个精确 ID 的公开 GET 全为 404，受管 Pod/实例策略为 0，
+workspace owner 审计为 `[]`，池汇总回到 `total=0, consumed=0,
+cleanup=0`，API 再次 2/2 ready。503 不改判为立即删除成功；
+它证明这轮失败后的异步回收最终完成。并发 CAS 冲突与准备中容量
+拒绝的 HTTP 映射需修复或明确限流，再重新测有界驻留和创建延迟。
