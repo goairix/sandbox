@@ -14,8 +14,8 @@ config:
       - sync
     # Start new cells cold. The prepared-shell ownership guard still scans
     # resident owners, so prewarming is held back until that path is indexed.
-    # maxSize bounds preparing and prepared shells only. Limit live FUSE
-    # sandboxes separately at the rollout traffic entrypoint.
+    # maxSize bounds preparing and prepared shells only. It is not a limit
+    # on live FUSE sandboxes; larger live populations need separate testing.
     fusePool:
       minSize: 0
       maxSize: 20
