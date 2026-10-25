@@ -536,3 +536,30 @@ owner 保护检查；它可能先删除池记录，使仍持久化的 workspace 
 结果不确定时保留池记录；无 owner 的原清理路径继续执行。受影响包完整
 测试、针对性 race 和 vet 通过。该提交尚未部署到 DS，也不能追溯修复
 上述已失去池记录的 owner；其审计状态仍为不可自动恢复。
+
+### DS 后端策略与运行时 probe 版本核对
+
+在 `ds-ai-research/sandbox-fuse-etcd` 中只对标签为受管 FUSE/MinIO 的 Pod
+加测试策略 `ds-fuse-backend-egress`，允许到 `kube-system` 中 `k8s-app=kube-dns`
+的 53/UDP、53/TCP，以及同命名空间 `app=ds-minio-reset` 的 9000/TCP。
+正式 Helm release 仍为 revision 15、sync-only；此策略尚非产品 Chart 的
+通用网络修复。隔离的 `sandbox-api-fuse-canary` 用已发布的 API/mounter digest
+创建 `sandbox-8dmg89anng`：POST 201（4.76 秒），GET 200 且 mount mode 为
+`fuse`。DELETE 503；日志中的 `quiesce` 执行命令退出 2。该沙盒的 Pod
+`sandbox-pool-mbos4yc70j` 仍在运行、租约仍有效，未强制删除或退款。
+
+源码调用 `workspace-probe quiesce ... --cleanup`，而当前
+`sandbox-runtime:v0.3.39` 的在场 probe 对该命令直接返回
+`unsupported workspace-probe command`、退出 2。提交 `ab10cea` 新增可复现的
+运行时叠加镜像构建配方，以固定的旧基础镜像和当前源码编译的 arm64 probe
+构建；构建时校验 Linux ELF 架构并运行 probe 自检。新镜像
+`sandbox-fuse-etcd-runtime:v1-reset-ab10cea-arm64` 的 registry digest 为
+`sha256:ec108aeee183c1cb0f3a5c481bf38038626fde8da96ae5a4624df396d5f6d7d8`。
+只更新隔离 canary 的 `SANDBOX_IMAGES_SANDBOX` 为这个 digest，正式 API 不变。
+
+新镜像下另一条独立 FUSE 请求 `sandbox-dkgfu3hayb` 公开 POST 201
+（7.21 秒）、GET 200、DELETE 200。删除后受管 Pod/NetworkPolicy 列表只剩
+上一条失败请求的 `sandbox-pool-mbos4yc70j` 及其两条策略；新请求的 Pod 和
+实例策略已自然消失。这证明新镜像下的一次创建/删除正例，**不证明**旧 Pod
+已修复、无残留的完整回收、产品通用网络策略、长期 TTL/大量存活容量或生产
+FUSE 发布。旧 owner 与旧 Pod 均保持占用，直到能通过安全证据链回收。
