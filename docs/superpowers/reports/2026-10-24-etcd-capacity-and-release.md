@@ -685,3 +685,38 @@ workspace owner 审计为 `[]`，池汇总回到 `total=0, consumed=0,
 cleanup=0`，API 再次 2/2 ready。503 不改判为立即删除成功；
 它证明这轮失败后的异步回收最终完成。并发 CAS 冲突与准备中容量
 拒绝的 HTTP 映射需修复或明确限流，再重新测有界驻留和创建延迟。
+
+### 共享池 CAS 修复与 12 个 FUSE 驻留重测
+
+`6f20463` 修复 Reserved→Binding 等 checkout 转换：只有原记录未变、
+共享池汇总独立变化时，才在原请求期限内有界重读和重试。真实 etcd 的
+双记录并发测试先红后绿；提交成功但回复丢失时不重试的测试、整包测试、
+定向 race 和 vet 均通过。该 ARM64 API 镜像
+`v1-reset-6f20463-arm64` 的 registry digest 是
+`sha256:1d9cc117ec9cfacc88b22e1cbdbb2049e4dc440bafc76fb33362a971f962b97c`。
+DS revision 2 升级后，12 个、最多 4 并发的同类批次中，10 个创建成功，
+2 个返回 500；日志不再出现 pool revision mismatch，但两次均为
+`active preparation capacity`。该轮 10 个精确 ID 最终 GET 全为 404，
+受管 Pod/实例策略为 0。**该批次仍为 FAIL。**
+
+`d66b6e1` 进一步区分冷创建准入的真实满额与独立汇总 CAS 冲突：原
+refill 锁、候选 record/index/deadline 和目录均须经失败事务读回确认未变，
+只有共享汇总变化才有界重试；真正的 `maxSize=1` 并发测试仍只允许一个
+成功，提交回复丢失不补发。真实 etcd 双创建先红后绿、整包测试、
+定向 race、vet 均通过。新 ARM64 镜像的二进制 SHA-256 为
+`afe4c6a5c64884e9fcd511314681f43da9c5b1f4f388cef770d989552b2cc170`，
+registry digest 为
+`sha256:8f752d054fdb0c9cfd870cefe2c617c7d19928a46f453764b1e0c5745cbf23ad`。
+DS revision 3 API 2/2 就绪后，用此镜像重测：12/12 POST 201，
+20 秒后 12/12 公开 GET 200；创建耗时最小 4.85 秒、中位 21.29 秒、
+最大 72.69 秒。并发 DELETE 中 6 条立即 200，另 6 条依 API 合同
+返回 `SANDBOX_CLEANUP_PENDING` 503。随后 12 个精确 ID 全部 GET 404，
+受管 Pod 和实例策略均为 0；etcd FUSE 池元数据的 total、六个状态计数
+全部为 0，runtime UID owner 前缀 Count 为 0。两条 rollout API owner
+租约键仍在，属于两个活跃 API 实例，并非沙盒 owner。
+
+因此该轮证明**12 个同时存活的 FUSE 沙盒创建与最终回收**，但原试验
+脚本要求所有 DELETE 立即 200，仍以退出码 1 保留失败结论。503 不改判
+为同步删除成功。创建尾延迟很高，尚未完成更大存量、吞吐、集中到期、
+节点故障及十万 FUSE Pod 容量验收。DS 上的实际 AppArmor、对象存储和
+网络依赖仍需持续监控。
