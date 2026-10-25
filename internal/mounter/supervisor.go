@@ -415,6 +415,12 @@ func (s *Supervisor) ReadyStatus(ctx context.Context) (fuseprotocol.MounterStatu
 	s.state = StateReady
 	status = s.statusLocked()
 	if err := s.populateCacheStatusLocked(ctx, &status); err != nil {
+		// The mount identity is already verified. A short-lived health client
+		// may disconnect while the cache walk is in progress; its canceled
+		// observation cannot permanently poison the mounted supervisor.
+		if ctx.Err() != nil {
+			return status, ctx.Err()
+		}
 		s.state = StateUnhealthy
 		status.State = string(s.state)
 		status.MountType = ""

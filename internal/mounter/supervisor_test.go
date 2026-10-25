@@ -730,6 +730,28 @@ func TestReadyCallerCancellationDoesNotPoisonOrExtendMountDeadline(t *testing.T)
 	assert.Equal(t, StateReady, s.State())
 }
 
+func TestReadyCallerCancellationAfterMountVerificationDoesNotPoisonMount(t *testing.T) {
+	runner := &fakeRunner{}
+	s, bootstrap := newTestSupervisor(t, runner)
+	require.NoError(t, s.Authorize(context.Background(), validAuthorization()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	s.config.MountInfo = func() (Mount, error) {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return Mount{ID: 42, MountPoint: bootstrap.MountPath, FilesystemType: "fuse.s3fs"}, nil
+	}
+	_, err := s.ReadyStatus(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, StateReady, s.State(), "a canceled health probe must not poison a verified live mount")
+
+	_, err = s.ReadyStatus(context.Background())
+	require.NoError(t, err)
+}
+
 func TestRecoverRestartedIdentityNeverRestartsS3FS(t *testing.T) {
 	runner := &fakeRunner{}
 	s, bootstrap := newTestSupervisor(t, runner)
