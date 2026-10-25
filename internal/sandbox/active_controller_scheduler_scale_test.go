@@ -18,8 +18,10 @@ import (
 )
 
 // TestActiveControllerSchedulerScale measures the production per-controller
-// goroutine and ticker against real etcd. It is opt-in and excludes Pod,
-// workspace renewal, FUSE health, API traffic, and cleanup effects.
+// goroutine and ticker against real etcd. The optional second Manager has its
+// own client and instance identity, but does not start another API process.
+// The test excludes Pod, workspace renewal, FUSE health, API traffic, and
+// cleanup effects.
 func TestActiveControllerSchedulerScale(t *testing.T) {
 	rawCount := os.Getenv("TEST_ETCD_PRODUCT_CONTROLLER_SCALE_N")
 	if rawCount == "" {
@@ -29,27 +31,44 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, count, 0)
 	require.LessOrEqual(t, count, 3000)
+	replicas := 1
+	if rawReplicas := os.Getenv("TEST_ETCD_PRODUCT_CONTROLLER_SCALE_REPLICAS"); rawReplicas != "" {
+		replicas, err = strconv.Atoi(rawReplicas)
+		require.NoError(t, err)
+	}
+	require.GreaterOrEqual(t, replicas, 1)
+	require.LessOrEqual(t, replicas, 2)
 
 	endpoint := os.Getenv("TEST_ETCD_ENDPOINT")
 	require.NotEmpty(t, endpoint)
-	store, err := etcdstate.New(context.Background(), etcdstate.Options{
-		Endpoints: []string{endpoint}, Prefix: "/controller-scheduler-scale/" + uuid.NewString() + "/",
-		Timeout: 3 * time.Second,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	repository, err := etcdstate.NewActiveSandboxRepository(store, "controller-scheduler-scale")
-	require.NoError(t, err)
-
-	controlCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{
-		config: ManagerConfig{RuntimeType: "kubernetes", InstanceID: "api-a",
-			ControllerTTL: 15 * time.Second, ControllerRenewInterval: 5 * time.Second},
-		activeSandboxes: repository, controlCtx: controlCtx,
+	prefix := "/controller-scheduler-scale/" + uuid.NewString() + "/"
+	repositories := make([]state.ActiveSandboxRepository, 0, replicas)
+	managers := make([]*Manager, 0, replicas)
+	cancels := make([]context.CancelFunc, 0, replicas)
+	// Clients share only the persisted prefix. Each sandbox is assigned one
+	// Manager so this measures load distribution, not a takeover race.
+	for replica := range replicas {
+		store, storeErr := etcdstate.New(context.Background(), etcdstate.Options{
+			Endpoints: []string{endpoint}, Prefix: prefix, Timeout: 3 * time.Second,
+		})
+		require.NoError(t, storeErr)
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+		repository, repoErr := etcdstate.NewActiveSandboxRepository(store, "controller-scheduler-scale")
+		require.NoError(t, repoErr)
+		controlCtx, cancel := context.WithCancel(context.Background())
+		repositories = append(repositories, repository)
+		managers = append(managers, &Manager{
+			config: ManagerConfig{RuntimeType: "kubernetes", InstanceID: fmt.Sprintf("api-%d", replica),
+				ControllerTTL: 15 * time.Second, ControllerRenewInterval: 5 * time.Second},
+			activeSandboxes: repository, controlCtx: controlCtx,
+		})
+		cancels = append(cancels, cancel)
 	}
 	controllers := make([]*activeController, 0, count)
 	t.Cleanup(func() {
-		cancel()
+		for _, cancel := range cancels {
+			cancel()
+		}
 		// Stop joins every goroutine and releases its exact leased key before
 		// the client closes. The isolated namespace is deleted with the test
 		// container, so a timeout remains a test failure rather than a retry.
@@ -66,6 +85,9 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 	initialExpiries := make([]time.Time, 0, count)
 	var snapshotBytes int
 	for index := range count {
+		replica := index % replicas
+		repository := repositories[replica]
+		manager := managers[replica]
 		id := fmt.Sprintf("sandbox-scheduler-%06d", index)
 		runtimeID := "pod-" + id
 		runtimeUID := "uid-" + id
@@ -125,9 +147,9 @@ func TestActiveControllerSchedulerScale(t *testing.T) {
 		}
 		controller.mu.Unlock()
 	}
-	t.Logf("controllers=%d snapshot_bytes=%d setup=%s setup_completed_utc=%s observed_utc=%s "+
+	t.Logf("controllers=%d replicas=%d snapshot_bytes=%d setup=%s setup_completed_utc=%s observed_utc=%s "+
 		"hold=12s advanced=%d live=%d lost=%d goroutines_after_setup=%d heap_alloc_delta_bytes=%d",
-		count, snapshotBytes, setupDuration, setupCompletedAt.Format(time.RFC3339Nano),
+		count, replicas, snapshotBytes, setupDuration, setupCompletedAt.Format(time.RFC3339Nano),
 		observedAt.UTC().Format(time.RFC3339Nano), advanced, live, lost, setupGoroutines,
 		int64(after.HeapAlloc)-int64(before.HeapAlloc))
 	require.Equal(t, count, advanced)
