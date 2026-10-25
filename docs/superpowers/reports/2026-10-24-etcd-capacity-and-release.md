@@ -1,15 +1,16 @@
 # etcd 状态容量与发布验收（进行中）
 
-当前结论：**未通过 10 万存活沙盒容量、真实 FUSE 和完整发布验收**。
-DS 测试命名空间已运行 revision 15 的双 API、副本数为 3 的 etcd 和测试 MinIO；
-普通沙盒、sync 文件往返、单成员重建及 API 重启 TTL 均有单次真实正例。
-下面第一节仅是本机元数据测量，不包含真实 sandbox、Pod、FUSE、配额、HTTP
-或 Redis 对照，不能与后续 DS 功能烟测混同。
+当前结论：**DS 全新部署的 FUSE 功能主链已有真实正例；10 万存活容量、
+集中到期与完整发布验收仍未通过**。`ds-ai-research/sandbox-fuse-etcd`
+已重建为全新 namespace，正式 Helm release revision 1 为双 API、三成员
+etcd 和独立测试 MinIO，启用 `sync,fuse`。下文历史故障与旧 revision 状态
+按发生顺序保留，不能覆盖本节当前状态。下面第一节仅是本机元数据测量，
+不能与后续 DS 真实 FUSE 功能烟测混同。
 
 | 发布门 | 当前证据 | 结论 |
 | --- | --- | --- |
-| 新部署的 Redis→etcd 接线 | DS 正式 sync-only API 2/2、etcd 3/3；普通创建/执行/TTL、API 重启与单成员重建有真实正例 | 该范围可继续验收 |
-| FUSE | 隔离 canary 最新镜像两次创建/删除 201→200→200；DS 专用后端策略必须额外安装，两个旧测试 owner 未安全回收 | 不可切正式入口 |
+| 新部署的 Redis→etcd 接线 | DS 全新 namespace 正式 revision 1：FUSE 双 API 2/2、etcd 3/3、MinIO 1/1；新前缀无旧状态，Chart 不安装 Redis | DS 功能接线通过，未形成大规模容量结论 |
+| FUSE | 正式 Service 上文件读写/删除、跨副本、自然 TTL、API 滚动重启均有独立真实正例；owner/Pod/实例策略和池汇总回到 0 | 有界功能主链通过；集中到期、故障与长期容量未验收 |
 | 大量存活 N | 10 万普通元数据的闲时索引查询已测；完整 Pod/FUSE、周期续租、集中到期、双副本故障负载未测 | 10 万门未通过 |
 | 远端成果 | `feat/etcd-state-management` 已快进推送至内部 `hxsy` 远端；GitHub SSH 远端仍不可用 | 可在内部远端审查，尚未合并 |
 
@@ -30,7 +31,9 @@ DS 测试命名空间已运行 revision 15 的双 API、副本数为 3 的 etcd 
 
 下一步须让周期维护只读取待处理状态和到期项，且到期索引与原记录更新保持同一事务和相同栅栏。索引发布、续期、删除、ACK 丢失和重启恢复均需真实 etcd 反例验证；不能靠本地时钟或进程缓存直接授权退款。完成后再测真实 TTL 分布、集中到期、多副本、三成员故障及业务 Pod/FUSE。当前没有这些数据，也没有可声明的单 cell 上限。
 
-新部署方面，Chart 已有可选明文或 mTLS 的 etcd 模式，渲染不包含 Redis 资源或环境变量；下面的 DS 状态层安装不等于 API 与业务切换，真实运行时启动、物理 TTL 退款和 Redis 退役仍未验收。
+新部署方面，Chart 已有可选明文或 mTLS 的 etcd 模式，渲染不包含 Redis
+资源或环境变量。下文早期 DS 状态层安装当时不等于 API 与业务切换；
+正式 FUSE revision 1 的新证据见文末，不能从早期状态推断当前部署。
 
 ## 本机明文 etcd 整进程启动（2026-10-25）
 
@@ -624,3 +627,43 @@ Pod UID `b93c0d9d-d51e-47c7-908d-c5fb1f6ad529` 的挂载记录为 0。
 删除其两条实例 NetworkPolicy。再次列举受管 Pod/实例策略为空。
 该旧 owner 在 etcd 中仍不可自动恢复，不把手工终止记为产品退款通过；
 它将在已批准的测试命名空间全新重建时随旧测试数据一起退役。
+
+## DS 全新 FUSE release 与正式 Service 验证（2026-10-25）
+
+在旧测试 Pod 退出、宿主机对其 UID 的挂载数为 0 后，以 `--no-hooks`
+卸载旧 Helm revision 15；删除旧 namespace 及四个 `Retain` PV 对象，
+创建新 namespace（UID `10a43f3f-2dfa-4565-a205-3f4651744f51`）。
+四个新 PV 绑定到新 UID 的独立 hostPath；新 etcd 前缀查询 revision 1、
+无旧键。四个必要 Secret 仅以本地 0600 文件短暂转存再恢复，恢复后
+删除该转存文件。独立 MinIO 新 PVC 就绪，`sandbox-storage` bucket 已创建。
+DS 专用 FUSE 后端网络策略继续按精确选择器安装。
+
+FUSE 发布候选固定 API `v1-reset-658db78-arm64`、runtime digest
+`sha256:ec108aeee183c1cb0f3a5c481bf38038626fde8da96ae5a4624df396d5f6d7d8`、
+mounter digest
+`sha256:d35348068bbe2b59a6ffc8f431f30eaf8ab7f94747729d99ac6c999caec8794a`，
+以及 DS 已实际装载的 AppArmor profile
+`sandbox-fuse-37d5cf8ed9c5decd5c13aa61c97d0c91183cbb0214d61769c8430dfd0090724d`。
+Helm lint 通过、渲染 SHA-256 为
+`a6bef95d40453ae2ef439cdf98e54a9b9e8cf450b1672254af8c708d2a7afd51`；
+正式 release revision 1 `deployed`，API 2/2、etcd 3/3、MinIO 1/1。
+AppArmor 装载当前依赖集群既有 DaemonSet，仍须明确长期归属与节点重启恢复。
+
+- `sandbox-2dpvtseieb`：正式 Service 上 FUSE POST 201、文件上传 200、
+  下载 200 且 55 字节哈希一致、DELETE 200。
+- `sandbox-8ojjo1pwt6`：正式 API A POST 201，B GET 200 和上传 200，
+  A 下载 200 且 48 字节哈希一致，B DELETE 200，A GET 404。
+- `sandbox-rvbfa67zxs`：45 秒 TTL，POST 201、约 53 秒 GET 503、
+  约 55 秒 GET 404；未调用兜底 DELETE。
+- `sandbox-qtvsbb8oim`：FUSE POST 201 与上传 200 后滚动重启正式
+  双 API，2/2 重新就绪；下载 200 且原 55 字节内容一致，DELETE 200。
+
+最后只读核对：workspace owner 为 `[]`，受管 Pod 与实例策略数为 0，
+FUSE 池汇总 `total=0, consumed=0, cleanup=0`。旧 namespace hostPath
+检查中 worker1–3 的旧 UID 路径已不存在；worker4 残留 8 KiB 因首个
+UID1000 调试容器无权删除而保留失败结论，随后由 root 调试容器在无旧
+挂载、旧 PV 已消失的条件下精确删除。所有调试 Pod 均已删除。
+
+这些是 DS 正式 Service 的有界功能正例。它们不证明实际 10 万 FUSE
+Pod 容量、集中到期、节点/etcd 故障下的尾延迟或长期稳定性；当前集群
+的 DS 专用网络策略和外部 AppArmor DaemonSet 仍是部署依赖。
