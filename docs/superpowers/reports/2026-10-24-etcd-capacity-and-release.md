@@ -569,3 +569,10 @@ FUSE 发布。旧 owner 与旧 Pod 均保持占用，直到能通过安全证据
 DS 测试策略已按现有对象的精确选择器和端口保存于
 `deploy/k8s/ds-ai-research-fuse-backend-egress.yaml`（提交 `d8dc7ab`），
 server dry-run 通过；它不随 Helm 自动安装。
+
+隔离 canary 随后升级到包含 `714e011` 清理锚点保护的 API 镜像
+`sandbox-fuse-etcd-api:v1-reset-658db78-arm64`，registry digest
+`sha256:81865e9d7e757df17b0da9c53e8213d4fc1c03576b396f63542cadd86239c49e`；
+Linux arm64 静态 ELF、镜像格式检查和容器 `--help` 均通过，Deployment 1/1。
+正式 API 仍为 sync-only 2/2。旧 `sandbox-pool-mbos4yc70j` Pod 仍 Running，
+清理仍因旧 probe 退出 2 而失败，不能把保护修复记成既有 Pod 的回收完成。
