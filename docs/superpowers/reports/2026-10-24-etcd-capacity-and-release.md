@@ -39,6 +39,14 @@ owner 做随存活数增长的检查；周期维护与启动恢复也有按 N �
 灰度正例不能外推到 10 万存活。大存量单独验收需要先改为有界索引/到期
 调度，再测周期维护、集中到期、恢复与多副本负载。
 
+### 分支交付核对
+
+当前 `feat/etcd-state-management` 从 `feat/workspace-fuse-mount` 分出；
+基分支没有尚待合入的新提交。当前树的 `go test ./...`、`go vet ./...`、
+`go test -tags helmtests ./internal/helmtest` 和 fresh-install Helm overlay
+的 `helm lint` 均退出 0。DS release revision 3 仍为 API 2/2、etcd 3/3、
+MinIO 1/1 Ready；当前无受管 sandbox Pod。以上验证不替代大存量验收。
+
 ## 已测范围
 
 环境为本机 Docker Desktop 中的单节点 etcd v3.6.14，loopback 明文连接，独立测试前缀。每个合成沙盒写一条 publishing 记录，再激活；16 个固定写入 worker。快照只有 `{"ready":true}`，远小于真实业务快照。扫描使用生产仓库的 `Scan(cursor, 128)`，定点读取抽样 100 次。
