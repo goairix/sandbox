@@ -5,6 +5,9 @@ redis:
   enabled: false
 
 config:
+  pool:
+    # The FUSE gray rollout does not prewarm unused sync sandboxes.
+    minSize: 0
   workspace:
     # New etcd installations use FUSE for requests with a workspace path.
     # Keep sync selectable explicitly while its compatibility path remains.
@@ -12,12 +15,13 @@ config:
     enabledMountModes:
       - fuse
       - sync
-    # Start new cells cold. The prepared-shell ownership guard still scans
-    # resident owners, so prewarming is held back until that path is indexed.
+    # Keep one prepared FUSE shell for the 20-sandbox gray rollout. The
+    # ownership guard still scans resident owners; this is not a large-N
+    # prewarming or capacity setting.
     # maxSize bounds preparing and prepared shells only. It is not a limit
     # on live FUSE sandboxes; larger live populations need separate testing.
     fusePool:
-      minSize: 0
+      minSize: 1
       maxSize: 20
   storage:
     state:
