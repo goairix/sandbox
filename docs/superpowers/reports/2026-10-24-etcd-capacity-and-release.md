@@ -992,3 +992,20 @@ SHA-256 为
 这证明当前三成员部署在**一次 leader Pod 重建**时有 quorum 的单条
 FUSE 文件写入和安全清理；没有覆盖双成员故障、故障窗口的大并发
 提交、长时间分区、节点 FUSE 故障或大量存活沙盒恢复。
+
+### FUSE 自然 TTL 清理跨 API 滚动重启
+
+正式 Service 创建一条 45 秒 TTL 的 FUSE 沙盒
+`sandbox-8fpm35f271`，POST 返回 201，用时 5.29 秒，随后公开
+GET 返回 200。在创建计时约 35.00 秒时滚动重启两个 API 副本；
+Deployment 在约 57.48 秒时恢复就绪，重新连接正式 Service 后
+公开 GET 在约 57.54 秒返回 404。客户端没有调用兜底 DELETE，
+测试进程退出码 0。最终受管 Pod、实例 NetworkPolicy、etcd 池
+record/uid-owner/state 索引及 active/session/workspace 键均为 0，
+API 2/2、etcd 3/3 Ready。原始日志在忽略目录
+`reset-rebuild/fuse-ttl-api-rollout-overlap.log`，SHA-256 为
+`778f30c909d5bb44b43334d392ceaf56edae73dae6bc43600864f2500f519948`。
+
+重启时间窗口覆盖了请求的 TTL 时间；公开结果证明最终安全回收，
+但本轮没有逐事务证据区分清理由旧副本完成还是由新副本恢复执行。
+它也不覆盖多条同时过期或重启时的节点 FUSE 故障。
