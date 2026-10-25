@@ -18,7 +18,10 @@ import (
 func TestDNSAdmissionDefaultHelmBaseline(t *testing.T) {
 	docs := render(t, "apparmorLoader.enabled=true")
 	for _, tc := range []struct{ kind, name, want string }{
-		{"Deployment", "sandbox-api", "3712cacefd2364528b4e61e858901570b0ec1674cac4f15af14c20a395771bcf"},
+		// The API readiness handler has a two-second state deadline; its probe
+		// now allows three seconds so Kubernetes control-plane contention does
+		// not withdraw both otherwise healthy API endpoints.
+		{"Deployment", "sandbox-api", "bc87fec1f117d82eddc83a92b4e1ab893393f8b3c027d50caeb966ee3fabc76b"},
 		{"DaemonSet", "sandbox-apparmor-loader", "d12941e36702f546e509e3fe066deb979b998d5cae582932f97eac9fafdba19d"},
 		{"StatefulSet", "sandbox-redis", "c287ff99b6ff26d718585fcafa9ba5d61754452e08c6065b30a4b0e6a4948fac"},
 	} {
