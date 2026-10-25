@@ -931,3 +931,20 @@ Pod，确认 StatefulSet 以新 UID 重建且 Ready。随后公开下载 200，
 `9aa0359f4583aa72cdafc479ce2cab2d40c55429e1b93dc57b7e892d5157572c`。
 这是一个成员重启的存活读写正例，不证明 leader 重选、两成员故障、
 在故障窗口内提交新事务或大存量恢复吞吐。
+
+### DS 以 FUSE 为默认挂载模式
+
+首发优先 FUSE 后，将 DS 全新测试部署的 `config.workspace.defaultMountMode`
+从 `sync` 改为 `fuse`；显式 `sync` 入口仍保留。Helm lint 通过，
+revision 3 升级完成，两个 API 副本均 Ready。正式 Service 的公开
+创建请求故意**不传** `workspace_mount_mode`，返回 201；随后的公开
+GET 明确返回 `workspace_mount_mode=fuse`。同一沙盒上传 55 字节返回
+200，下载返回 200 且内容哈希一致；DELETE 返回 200，最终 GET 404。
+测试进程退出码 0，受管 FUSE Pod 为 0。原始日志位于忽略目录
+`reset-rebuild/fuse-default-mode-smoke.log`，SHA-256 为
+`24ccdbebd7adefcef6bc253f2c61057880f5c1883b48389cc13675511df19da3`。
+
+这只验证 DS revision 3 的一条默认 FUSE 业务路径。Chart 的通用默认值
+仍为 `sync`，其他环境不会因本次 DS 配置切换自动改变；显式 sync 的
+兼容合同也未被移除。大量存活 FUSE、集中到期和故障期间写入的容量门
+仍未完成。
