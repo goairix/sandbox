@@ -1381,6 +1381,9 @@ API key 查询不存在的 ID 返回 404，未输出密钥。
 上传 55 字节返回 200，下载返回 200 且字节哈希一致；公开 DELETE 200，
 最终 GET 404。测试进程退出 0，之后按 `sandbox.managed=true` 标签
 核对无残留 Pod 或实例 NetworkPolicy，API/etcd/MinIO 就绪副本数未变。
+同一正式 Service 的公开一次性 Python 执行返回 200、退出码 0、预期输出；
+其受管 Pod 和实例 NetworkPolicy 随后归零。
 这证明当前 DS 测试部署的一条 FUSE 创建、文件读写和删除路径可用，
-不等于所有 HTTP 接口、真实生产集群、长期运行或大存量容量验收。
+且一次性执行路径可用；不等于所有 HTTP 接口、真实生产集群、长期
+运行或大存量容量验收。
 本轮容量分支的 controller 优化尚未进入 DS revision 3 镜像。
