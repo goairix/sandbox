@@ -641,6 +641,25 @@ runtime 身份，无法从这些字段安全地直接定位全部三类持久占
 这项改造超出本轮普通记录到期索引的职责，当前按容量阻塞项保留，
 没有声称已有可靠的 10 万 FUSE 单 cell 支持上限。
 
+### FUSE 常态健康检查的逐沙盒成本
+
+产品启动路径给每条 FUSE lifecycle 建立一个 watcher goroutine 和
+五秒 ticker。分布式健康检查先通过 `beginDistributedOperation` 取得
+操作许可并检查运行中 Pod 身份，再用 `WorkspaceHealth` 对确切 UID
+读取 Pod 和 mounter 状态。原路径在这两步之间又执行一次
+`GetSandbox`；这与入场检查重复。定点回归先实际失败，观察到每次健康
+检查调用两次 Manager 层 `GetSandbox`；去重后为一次，并额外校验入场
+持久快照的 runtime ID/UID 与当前 lifecycle 相同。非分布式路径仍保留
+其原有运行时检查，`WorkspaceHealth` 的确切 UID 和重启检测也保留。
+`internal/sandbox` 全包测试 11.601 秒、相关 race 1.893 秒及 vet 通过。
+
+这只删除一项重复 Pod 读取，没有削弱原操作许可，也没有证明真实
+Kubernetes QPS 改善。按固定五秒间隔，假设一个 cell 持有 10 万条
+活跃 FUSE lifecycle，名义上仍要调度约 20,000 次健康检查/秒，
+每条还包括持久操作许可、确切 Pod 和 mounter 状态；每条 lifecycle
+仍持有自己的 watcher。真实错峰、API 内存、Kubernetes 限流和故障
+下的尾延迟尚未测量，不能以此改判大存量容量门。
+
 ## 隔离 API canary 的 FUSE 创建失败
 
 没有改动正式 API Service 或 revision 15 的 sync-only 配置。另建一个

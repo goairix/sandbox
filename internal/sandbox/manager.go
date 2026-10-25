@@ -1483,8 +1483,9 @@ func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLi
 }
 
 func (m *Manager) checkFUSELifecycle(ctx context.Context, lifecycle *fuseSandboxLifecycle) error {
-	if m.distributedStateEnabled() {
-		_, operationCtx, release, err := m.beginDistributedOperation(ctx, lifecycle.sandboxID, state.ActiveOperationData)
+	distributed := m.distributedStateEnabled()
+	if distributed {
+		sandbox, operationCtx, release, err := m.beginDistributedOperation(ctx, lifecycle.sandboxID, state.ActiveOperationData)
 		if errors.Is(err, ErrSandboxNotReady) || errors.Is(err, state.ErrActiveSandboxAdmissionClosed) || errors.Is(err, state.ErrActiveSandboxConflict) {
 			// Runtime inspection can also return NotReady. Only authoritative
 			// closed admission proves that this health check should be skipped.
@@ -1501,13 +1502,21 @@ func (m *Manager) checkFUSELifecycle(ctx context.Context, lifecycle *fuseSandbox
 		}
 		defer release()
 		ctx = operationCtx
+		// Admission already inspected the running Pod. Match that durable
+		// snapshot to this lifecycle before the exact-UID health operation;
+		// a second GetSandbox would repeat the same Kubernetes read.
+		if sandbox == nil || sandbox.RuntimeID != lifecycle.record.RuntimeID || sandbox.RuntimeUID != lifecycle.record.RuntimeUID {
+			return ErrSandboxNotReady
+		}
 	}
-	info, err := m.runtime.GetSandbox(ctx, lifecycle.record.RuntimeID)
-	if err != nil {
-		return err
-	}
-	if info == nil || info.RuntimeUID != lifecycle.record.RuntimeUID || info.State != "running" {
-		return ErrSandboxNotReady
+	if !distributed {
+		info, err := m.runtime.GetSandbox(ctx, lifecycle.record.RuntimeID)
+		if err != nil {
+			return err
+		}
+		if info == nil || info.RuntimeUID != lifecycle.record.RuntimeUID || info.State != "running" {
+			return ErrSandboxNotReady
+		}
 	}
 	health, err := m.runtime.WorkspaceHealth(ctx, runtime.RuntimeRef{ID: lifecycle.record.RuntimeID, UID: lifecycle.record.RuntimeUID})
 	if err != nil {
