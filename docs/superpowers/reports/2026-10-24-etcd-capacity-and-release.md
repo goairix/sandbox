@@ -831,3 +831,54 @@ API 两副本未重启。测试请求经单个 `kubectl port-forward` 转发，
 原始日志位于忽略目录
 `reset-rebuild/fuse-twenty-clean-egress.log`，SHA-256 为
 `d576edfdbcfdbeebfacfd982c1a56cf33cf2b31f985c6f017f8c34c1d1af652b`。
+
+### DS 集群内直连复测与 API readiness 修复
+
+为移除端口转发的不确定性，在同一 DS namespace 启动独立 ARM64
+测试客户端 Pod；它通过 Secret 文件读取 API key，直接访问
+`sandbox-api:8080`。单条对照完整通过。首轮 20 条批次 `81cfffd3`
+的 POST 全部收到 201，20 个受管 Pod 同时 Ready。驻留 GET 前，
+两个 API Pod 的 Kubernetes readiness 同时为 False，Service
+EndpointSlice 两个地址的 `ready/serving` 均为 false；测试客户端
+新建 TCP 连接得到 `EPERM`，删除阶段无法进入 API，**整轮 FAIL**。
+直接按精确 Pod 转发仍能取得 `/health=200`，而 `/ready=503`。
+因此这不是端口转发导致的创建响应失败；旧请求阶段的三次断连与
+Service 端点撤销相符，但没有逐连接追踪，不能断言原因完全相同。
+
+原 readiness 每次调用 Kubernetes Pod List，和创建/清理共用
+client-go 限流器；负载期间日志记录多次 1 秒以上的请求前等待，
+而 kubelet 探针默认只有 1 秒超时。这是端点全部撤销的可解释路径。
+提交 `e89c3c5` 使 readiness 只核对持久状态与两个池 owner，
+运行时操作仍逐次检查 Kubernetes 并返回自己的错误；Helm 探针
+超时设为 3 秒，覆盖处理器的 2 秒有界状态检查。该变更的定向
+RED/GREEN、`internal/sandbox` 与 `internal/api` 完整测试、定向 race、
+vet 和 Helm lint/渲染通过。首轮遗留的 20 个精确 ID 经 API Pod
+直连公开 DELETE 清理：10 条立即 200、10 条清理中 503，最终
+20/20 公开 GET 404；受管 Pod 和实例策略为 0。
+
+另一个部署缺口是 DS CNI 对 MinIO Service 流量按后端 Pod 身份
+执行策略。提交 `235b88f` 在原 Helm 网络策略模板增加默认关闭的
+FUSE 专用同命名空间存储 Pod selector 与 TCP 端口；空 selector、
+非法端口拒绝渲染。启用后的策略通过 DS API Server dry-run。
+DS Helm revision 2 使用该策略并删除旧临时同义策略。API 镜像
+`v1-reset-e89c3c5-arm64` 的 Linux ARM64 ELF 输入 SHA-256 为
+`1a0efc87102dc6eadf50d4850f99f0357574011c07adef1917e4ba67b4d6d300`，
+registry digest 为
+`sha256:af61b80720b31e7e8fc39f20f85e436adc56676c1c4d8ae9ca7a552839d6eedc`。
+两个 API Pod 在滚动升级后均 Ready，重启数为 0。
+
+在此部署上，新的集群内直连批次 `24abde8c`、20 个独立 FUSE
+workspace、最多 4 个并发，**测试进程退出码 0**：20/20 POST 201，
+20 秒驻留后 20/20 公开 GET 200，创建耗时最小 5.05 秒、中位
+20.63 秒、最大 52.05 秒；并发 DELETE 13 条立即 200、7 条清理中
+503，最终 20/20 公开 GET 404。两个 API Pod 在满池及删除阶段
+的抽检均为 Ready。受管 Pod、实例策略为 0；etcd FUSE 池 meta 的
+total/prepared/reserved/binding/consumed/cleanup 均为 0，
+active、session、workspace owner/lease 前缀键数也均为 0。
+原始日志在忽略目录 `reset-rebuild/fuse-twenty-incluster-readinessfix.log`，
+SHA-256 为
+`a3175ff37b6ac628a77aca451c415b942f03c95ad4062d91e78af09d4d1b1a78`。
+
+该结果只验收 **20 个 DS FUSE 沙盒的本轮驻留与清理**。先前 FAIL
+不改判；它没有验证十万存量、集中到期、节点故障、持续吞吐或
+另一套 CCE 集群，也不把测试 MinIO 规则推论为任意对象存储部署可用。
