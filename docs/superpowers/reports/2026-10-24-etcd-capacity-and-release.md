@@ -11,15 +11,19 @@ etcd 和独立测试 MinIO，以 FUSE 为默认挂载模式，保留显式 sync 
 | 发布门 | 当前证据 | 结论 |
 | --- | --- | --- |
 | 新部署的 Redis→etcd 接线 | DS 全新 namespace 正式 revision 3：FUSE 双 API 2/2、etcd 3/3、MinIO 1/1；新前缀无旧状态，Chart 不安装 Redis | DS 功能接线通过，未形成大规模容量结论 |
-| FUSE 20 个灰度 | 正式 Service 上 20/20 驻留及公开删除、20/20 自然 TTL 回收；文件读写、API 重启和单次 etcd leader 重建有独立正例；结束后 owner/Pod/实例策略和池汇总回到 0 | DS 有界功能验收通过；须由灰度入口控制同时存活数，尚未证明自动硬上限 |
+| FUSE 20 个灰度 | 正式 Service 上 20/20 驻留及公开删除、20/20 自然 TTL 回收；文件读写、API 重启和单次 etcd leader 重建有独立正例；结束后 owner/Pod/实例策略和池汇总回到 0 | DS 有界功能测试通过；灰度入口尚未接入，未开始持续放量 |
 | 大量存活 N | 10 万普通元数据的闲时索引查询已测；完整 Pod/FUSE、周期续租、集中到期、双副本故障负载未测 | 10 万门未通过 |
 | 远端成果 | `feat/etcd-state-management` 已快进推送至内部 `hxsy` 远端；GitHub SSH 远端仍不可用 | 可在内部远端审查，尚未合并 |
 
 ### 首发灰度边界（2026-10-25）
 
-本轮只放行 DS 的单 cell、同时最多 20 个 FUSE 沙盒，由受控灰度客户端和
-发布流量入口限制申请量。DS 的 API Service 当前是 ClusterIP，没有对外
-Ingress。Helm 的 `workspace.fusePool.maxSize=20` **只限制准备中及已准备的
+本轮目标是 DS 的单 cell、同时最多 20 个 FUSE 沙盒。用户明确选择由
+灰度入口限量、只放行受控客户端，不新增产品内的存活数计数器。当前只有
+受控测试批次完成，持续灰度流量尚未接入。DS 的 API Service 是
+ClusterIP，没有对外 Ingress；但现有 `sandbox-api-ingress` NetworkPolicy
+的 `ingress: [{}]` 允许集群内任意来源连接，**不能**充当客户端白名单
+或数量限制。API key 认证也不限制同时存活数。Helm 的
+`workspace.fusePool.maxSize=20` **只限制准备中及已准备的
 FUSE 池记录**；已消费的沙盒不计入此值，不能把它当作 20 个存活沙盒的
 产品准入硬限制。`pool.maxSize=20` 也只是普通预热池配置。灰度期间应以
 公开创建/查询结果及受管 Pod、owner、池记录的实际数量持续核对上限；
