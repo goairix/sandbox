@@ -756,3 +756,17 @@ infrastructure_fenced=false`，故即使当前宿主挂载只读检查为 0，�
 仍不能把它自动升级成已签发的卸载或基础设施隔离证明。该 owner 和
 配额占用保持，需独立安全恢复；不能靠重复 DELETE 或直接改 etcd
 字段消除失败。
+
+后续定位发现 API 首次对该 runtime 的 `remove-runtime` 在 03:57:56 UTC
+返回 `runtime termination is unconfirmed`；稍后 pool 保存了仅
+`process_exited=true` 的弱证明。现有日志不能区分 mounter shutdown 从未
+成功、响应丢失，还是成功后遇到并发删除，不能据此补签 ACK。原流程的
+确定缺口是已校验的 ACK 只在 API 进程内保存，直到 Pod 删除后才作为
+终止证明进入池记录；另一实例先观察终态 Pod 时会看不到优雅卸载。
+提交 `4212869` 在 ACK 校验后、Pod DELETE 前向同 UID/准备尝试的
+finalizer 保留 Pod 写入签名回执，并确定读回；重启实例校验后才恢复
+`graceful_unmount`。假回执、准备尝试替换、写入失败不放行，写入回包
+丢失只作精确读回。Kubernetes runtime 完整包、定向 race、vet 均通过。
+这是**预防性代码验证，尚未构建部署，也未修复当前残留 owner**；
+20 个 FUSE 并发清理与发布门仍为 FAIL。现有残留需额外的产品认可
+的节点隔离/卸载证明，不能用 mountinfo 的一次 0 匹配代替。
