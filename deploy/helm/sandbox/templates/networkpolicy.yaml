@@ -35,4 +35,40 @@ spec:
     - Egress
   ingress: []
   egress: []
+{{- with .Values.networkPolicy.fuseStoragePodEgress }}
+{{- if .enabled }}
+{{- if or (not (kindIs "map" .podLabels)) (empty .podLabels) }}
+{{- fail "networkPolicy.fuseStoragePodEgress.podLabels must be a nonempty label map" }}
+{{- end }}
+{{- $port := int .port }}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail "networkPolicy.fuseStoragePodEgress.port must be a TCP port from 1 to 65535" }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-fuse-storage-egress
+  namespace: {{ $sandboxNs }}
+  labels:
+    app: sandbox-runtime
+    release: {{ $.Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      sandbox.managed: "true"
+      sandbox.workspace.mode: fuse
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # podSelector without namespaceSelector is confined to this namespace.
+        - podSelector:
+            matchLabels:
+{{ toYaml .podLabels | indent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+{{- end }}
+{{- end }}
 {{- end }}

@@ -298,3 +298,9 @@ config:
 
 networkPolicy:
   enabled: true
+  # 可选：同命名空间对象存储 Pod 的出站通路。部分 CNI 在 Service
+  # 转发后按目标 Pod 身份执行策略，Service IPBlock 本身不足以放行。
+  fuseStoragePodEgress:
+    enabled: false
+    podLabels: {}
+    port: 9000
