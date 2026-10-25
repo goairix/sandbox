@@ -1292,7 +1292,8 @@ func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtime
 					return runtime.TerminationEvidence{}, deleteErr
 				}
 			}
-			proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, NodeName: nodeName, ProcessExited: true}
+			proof = &runtime.TerminationEvidence{RuntimeUID: ref.UID, NodeName: nodeName,
+				GracefulUnmount: r.validShutdownReceipt(pod), ProcessExited: true}
 		} else if preparedPodCanRequestNormalDeletion(pod) {
 			proof = r.confirmUnstartedPodTermination(ctx, ref, pod)
 		} else {
@@ -1314,6 +1315,9 @@ func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtime
 				}
 			}
 			if shutdownErr == nil {
+				if receiptErr := r.persistShutdownReceipt(ctx, ref, pod, generation); receiptErr != nil {
+					return runtime.TerminationEvidence{}, receiptErr
+				}
 				deleteSucceeded := pod.DeletionTimestamp != nil
 				if !deleteSucceeded {
 					deleteErr := r.deleteExactPod(ctx, pod)

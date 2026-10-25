@@ -2010,6 +2010,7 @@ func TestPreparedSandboxTerminationSurvivesRuntimeRestartBeforeFinalize(t *testi
 	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
 	require.NoError(t, err)
 	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	setWorkspaceNodeForTest(t, rt, client, ref.ID, "node-a")
 	installFinalizerAwarePodDeletion(t, client)
 
 	evidence, err := rt.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
@@ -2024,13 +2025,101 @@ func TestPreparedSandboxTerminationSurvivesRuntimeRestartBeforeFinalize(t *testi
 		client: rt.client, dynClient: rt.dynClient, namespace: rt.namespace,
 		hasCilium: rt.hasCilium, controlExecutor: rt.controlExecutor,
 		pollInterval: rt.pollInterval, terminationTimeout: rt.terminationTimeout,
+		workspaceControlKey: append(ed25519.PrivateKey(nil), rt.workspaceControlKey...),
 	}
 	recovered, err := restarted.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
 	require.NoError(t, err)
 	require.True(t, recovered.ProcessExited)
+	require.True(t, recovered.GracefulUnmount, "a confirmed shutdown must survive API restart before finalization")
 	require.NoError(t, restarted.FinalizePreparedSandboxRemoval(context.Background(), ref.ID, ref.UID, recovered))
 	_, err = client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestPreparedSandboxTerminationRejectsCopiedShutdownReceipt(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	setWorkspaceNodeForTest(t, rt, client, ref.ID, "node-a")
+	installFinalizerAwarePodDeletion(t, client)
+
+	proof, err := rt.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.NoError(t, err)
+	require.True(t, proof.GracefulUnmount)
+	retained, err := client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, retained.Annotations[fuseShutdownReceiptAnnotation])
+
+	// The same receipt cannot authorize a different preparation of this Pod.
+	retained.Annotations[fusePrepareAttemptAnnotation] = fmt.Sprintf("%064x", 1)
+	require.NoError(t, client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), retained, "runtime"))
+	restarted := &Runtime{client: client, dynClient: rt.dynClient, namespace: rt.namespace,
+		pollInterval: rt.pollInterval, terminationTimeout: rt.terminationTimeout,
+		workspaceControlKey: append(ed25519.PrivateKey(nil), rt.workspaceControlKey...)}
+	recovered, err := restarted.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.NoError(t, err)
+	require.True(t, recovered.ProcessExited)
+	require.False(t, recovered.GracefulUnmount)
+}
+
+func TestPreparedSandboxTerminationDoesNotDeleteBeforeShutdownReceipt(t *testing.T) {
+	rt, client := newFakeKubernetesRuntime(t, preparedScript())
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	setWorkspaceNodeForTest(t, rt, client, ref.ID, "node-a")
+	deleted := false
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		pod := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+		if pod.Annotations[fuseShutdownReceiptAnnotation] == "" {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewConflict(corev1.Resource("pods"), pod.Name, errors.New("receipt was not written"))
+	})
+	client.PrependReactor("delete", "pods", func(ktesting.Action) (bool, k8sruntime.Object, error) {
+		deleted = true
+		return false, nil, nil
+	})
+
+	_, err = rt.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.Error(t, err)
+	require.False(t, deleted)
+	retained, err := client.CoreV1().Pods("runtime").Get(context.Background(), ref.ID, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Empty(t, retained.Annotations[fuseShutdownReceiptAnnotation])
+}
+
+func TestPreparedSandboxTerminationResolvesCommittedShutdownReceiptReplyLoss(t *testing.T) {
+	script := preparedScript()
+	rt, client := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	installFinalizerAwarePodDeletion(t, client)
+	committed := false
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, k8sruntime.Object, error) {
+		pod := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+		if pod.Annotations[fuseShutdownReceiptAnnotation] == "" || committed {
+			return false, nil, nil
+		}
+		committed = true
+		require.NoError(t, client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), pod, "runtime"))
+		return true, nil, errors.New("receipt update reply lost")
+	})
+
+	proof, err := rt.ConfirmPreparedSandboxTermination(context.Background(), ref.ID, ref.UID)
+	require.NoError(t, err)
+	require.True(t, proof.GracefulUnmount)
+	require.True(t, proof.ProcessExited)
+	require.True(t, committed)
+	shutdowns := 0
+	for _, command := range script.commands {
+		if len(command.argv) == 2 && command.argv[1] == "shutdown" {
+			shutdowns++
+		}
+	}
+	require.Equal(t, 1, shutdowns)
 }
 
 func TestPreparedSandboxTerminationAdoptsOnlyLiveLegacyPod(t *testing.T) {
