@@ -3,17 +3,41 @@ package etcd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// transitionCheckout separates the two checkout edges from preparation's
+var errCheckoutMetadataContention = errors.New("fuse pool aggregate changed independently")
+
+// transitionCheckout touches one record and the shared pool aggregate. Another
+// sandbox can change only the aggregate between our reads and commit; retry
+// that proven no-write conflict within the existing request deadline. A lost
+// commit reply or a changed record is never retried as a fresh effect.
+func (r *FUSEPoolRepository) transitionCheckout(ctx context.Context, id string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
+	requestCtx, cancel := r.store.requestContext(ctx)
+	defer cancel()
+
+	const maxAggregateAttempts = 16
+	for attempt := 0; attempt < maxAggregateAttempts; attempt++ {
+		record, err := r.transitionCheckoutOnce(requestCtx, id, from, to, token, expectedRevision)
+		if !errors.Is(err, errCheckoutMetadataContention) {
+			return record, err
+		}
+		if err := requestCtx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, state.ErrFUSEPoolCASMismatch
+}
+
+// transitionCheckoutOnce separates the two checkout edges from preparation's
 // count-changing transaction. Starting a bind requires a live reservation
 // lease; finishing an already-bound checkout remains possible after expiry so
 // a slow runtime handoff does not become an unresolvable partial effect.
-func (r *FUSEPoolRepository) transitionCheckout(ctx context.Context, id string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
+func (r *FUSEPoolRepository) transitionCheckoutOnce(ctx context.Context, id string, from, to state.FUSEPoolState, token string, expectedRevision uint64) (*state.FUSEPoolRecord, error) {
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
 	recordKey := r.recordKey(id)
@@ -99,11 +123,24 @@ func (r *FUSEPoolRepository) transitionCheckout(ctx context.Context, id string, 
 		If(conditions...).
 		Then(clientv3.OpPut(metaKey, string(encodedMetadata)),
 			clientv3.OpPut(recordKey, string(raw)),
-			clientv3.OpDelete(fromKey), clientv3.OpPut(toKey, id)).Commit()
+			clientv3.OpDelete(fromKey), clientv3.OpPut(toKey, id)).
+		Else(clientv3.OpGet(recordKey), clientv3.OpGet(metaKey)).Commit()
 	if err != nil {
 		return nil, err
 	}
 	if !written.Succeeded {
+		if len(written.Responses) != 2 ||
+			written.Responses[0].GetResponseRange() == nil ||
+			written.Responses[1].GetResponseRange() == nil {
+			return nil, state.ErrFUSEPoolCorrupt
+		}
+		records := written.Responses[0].GetResponseRange().Kvs
+		metas := written.Responses[1].GetResponseRange().Kvs
+		if len(records) == 1 && len(metas) == 1 &&
+			records[0].ModRevision == read.Kvs[0].ModRevision &&
+			metas[0].ModRevision != metaRead.Kvs[0].ModRevision {
+			return nil, errCheckoutMetadataContention
+		}
 		return nil, state.ErrFUSEPoolCASMismatch
 	}
 	return &record, nil
