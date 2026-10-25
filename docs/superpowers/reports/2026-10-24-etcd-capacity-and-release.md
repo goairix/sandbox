@@ -1,18 +1,40 @@
 # etcd 状态容量与发布验收（进行中）
 
-当前结论：**DS 全新部署的 FUSE 功能主链已有真实正例；10 万存活容量、
-集中到期与完整发布验收仍未通过**。`ds-ai-research/sandbox-fuse-etcd`
-已重建为全新 namespace，正式 Helm release revision 1 为双 API、三成员
-etcd 和独立测试 MinIO，启用 `sync,fuse`。下文历史故障与旧 revision 状态
-按发生顺序保留，不能覆盖本节当前状态。下面第一节仅是本机元数据测量，
-不能与后续 DS 真实 FUSE 功能烟测混同。
+当前结论：**DS 全新部署的 20 个 FUSE 沙盒灰度功能验收已有真实正例；
+10 万存活容量与大存量发布验收另设门槛，尚未通过**。用户确定首发先按
+每 cell 20 个 FUSE 沙盒灰度，大存量单独验收。`ds-ai-research/sandbox-fuse-etcd`
+已重建为全新 namespace；当前 Helm release revision 3 为双 API、三成员
+etcd 和独立测试 MinIO，以 FUSE 为默认挂载模式，保留显式 sync 入口。
+下文历史故障与旧 revision 状态按发生顺序保留，不能覆盖本节当前状态。
+下面第一节仅是本机元数据测量，不能与后续 DS 真实 FUSE 功能烟测混同。
 
 | 发布门 | 当前证据 | 结论 |
 | --- | --- | --- |
-| 新部署的 Redis→etcd 接线 | DS 全新 namespace 正式 revision 1：FUSE 双 API 2/2、etcd 3/3、MinIO 1/1；新前缀无旧状态，Chart 不安装 Redis | DS 功能接线通过，未形成大规模容量结论 |
-| FUSE | 正式 Service 上文件读写/删除、跨副本、自然 TTL、API 滚动重启均有独立真实正例；owner/Pod/实例策略和池汇总回到 0 | 有界功能主链通过；集中到期、故障与长期容量未验收 |
+| 新部署的 Redis→etcd 接线 | DS 全新 namespace 正式 revision 3：FUSE 双 API 2/2、etcd 3/3、MinIO 1/1；新前缀无旧状态，Chart 不安装 Redis | DS 功能接线通过，未形成大规模容量结论 |
+| FUSE 20 个灰度 | 正式 Service 上 20/20 驻留及公开删除、20/20 自然 TTL 回收；文件读写、API 重启和单次 etcd leader 重建有独立正例；结束后 owner/Pod/实例策略和池汇总回到 0 | DS 有界功能验收通过；须由灰度入口控制同时存活数，尚未证明自动硬上限 |
 | 大量存活 N | 10 万普通元数据的闲时索引查询已测；完整 Pod/FUSE、周期续租、集中到期、双副本故障负载未测 | 10 万门未通过 |
 | 远端成果 | `feat/etcd-state-management` 已快进推送至内部 `hxsy` 远端；GitHub SSH 远端仍不可用 | 可在内部远端审查，尚未合并 |
+
+### 首发灰度边界（2026-10-25）
+
+本轮只放行 DS 的单 cell、同时最多 20 个 FUSE 沙盒，由受控灰度客户端和
+发布流量入口限制申请量。DS 的 API Service 当前是 ClusterIP，没有对外
+Ingress。Helm 的 `workspace.fusePool.maxSize=20` **只限制准备中及已准备的
+FUSE 池记录**；已消费的沙盒不计入此值，不能把它当作 20 个存活沙盒的
+产品准入硬限制。`pool.maxSize=20` 也只是普通预热池配置。灰度期间应以
+公开创建/查询结果及受管 Pod、owner、池记录的实际数量持续核对上限；
+如果流量入口无法限制同时存活数，就不能扩大该灰度流量。
+
+停止放量并调查的条件是：任一创建、文件读写或释放持续失败；到期或
+公开删除后受管 Pod、owner、池记录不能归零；API/etcd 失去健康多数；
+或者同时存活数超过 20。对不确定状态保持占用，不通过手工删除状态键
+或强制退款来恢复容量。恢复发布须重新验证同一业务主链。
+
+独立审查发现 `guardFUSEPoolRecord` 仍对 session、ephemeral 和 workspace
+owner 做随存活数增长的检查；周期维护与启动恢复也有按 N 增长的路径。
+`minSize=0` 避开常规预热，但不消除清理时的这些扫描。因此本次 20 个
+灰度正例不能外推到 10 万存活。大存量单独验收需要先改为有界索引/到期
+调度，再测周期维护、集中到期、恢复与多副本负载。
 
 ## 已测范围
 
