@@ -615,3 +615,12 @@ B 公开 DELETE 200，A 随后 GET 404。只读复核中受管 Pod/实例策略
 仍只剩旧失败请求，池汇总也仍只有旧请求 `total=1, consumed=1`。
 这验证了两个 API 实例间共享 etcd 状态的一条真实 FUSE 业务路径；
 它不等于双副本并发容量、故障切换或正式服务已切换。
+
+在准备全新部署前，对旧 probe 请求 `sandbox-8dmg89anng` 的唯一旧 Pod
+`sandbox-pool-mbos4yc70j` 执行 Kubernetes 90 秒宽限删除。其 sandbox
+容器终止、mounter 以 0 退出；`ds-ai-worker-1` 宿主机 mountinfo 对精确
+Pod UID `b93c0d9d-d51e-47c7-908d-c5fb1f6ad529` 的挂载记录为 0。
+随后仅对该 UID、`Failed` 状态和原 finalizer 的精确条件移除 finalizer，
+删除其两条实例 NetworkPolicy。再次列举受管 Pod/实例策略为空。
+该旧 owner 在 etcd 中仍不可自动恢复，不把手工终止记为产品退款通过；
+它将在已批准的测试命名空间全新重建时随旧测试数据一起退役。
