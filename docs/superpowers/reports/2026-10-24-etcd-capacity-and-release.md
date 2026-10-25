@@ -576,3 +576,8 @@ server dry-run 通过；它不随 Helm 自动安装。
 Linux arm64 静态 ELF、镜像格式检查和容器 `--help` 均通过，Deployment 1/1。
 正式 API 仍为 sync-only 2/2。旧 `sandbox-pool-mbos4yc70j` Pod 仍 Running，
 清理仍因旧 probe 退出 2 而失败，不能把保护修复记成既有 Pod 的回收完成。
+在这组最新 API/运行时镜像下再跑独立请求 `sandbox-n9h2zfkzjf`：POST 201
+（6.82 秒）、GET 200、DELETE 200；只读 owner 审计不含该 ID，受管 Pod
+及实例 NetworkPolicy 仍只剩旧失败请求的三项。旧的两条 owner 分别为
+`runtime_scope_unconfirmed` 与 `lease_live`，均不可自动恢复；本次正例没有
+改变其结论，也不替代 TTL、故障和大量存活验收。
