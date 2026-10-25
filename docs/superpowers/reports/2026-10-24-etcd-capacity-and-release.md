@@ -1427,3 +1427,14 @@ API 2/2、etcd 3/3 Ready，受管 Pod 与 NetworkPolicy 均为 0。
 接口、生产部署和大量存活容量仍未验收。当前源码的
 `go test ./internal/api/... -count=1` 通过，属于处理器回归，不能替代
 31 条路由逐条经 DS 正式入口的现场验收。
+
+在同一 revision 4 上，再经正式 Service 创建一条 45 秒 TTL 的 FUSE
+沙盒，POST 201 用时 4.88 秒。创建计时第 35 秒滚动重启两个 API
+副本；第 63.97 秒 Deployment 重新就绪，第 64.01 秒公开 GET
+返回 404，没有客户端兜底 DELETE。测试退出 0，API 2/2、etcd 3/3、
+MinIO 1/1 Ready，受管 Pod 和实例 NetworkPolicy 均为 0。原始日志
+SHA-256 为
+`5c560e6df80c2565292f57e190bbda9e6b4a0415040338bbd6cd6558b7bc2c06`，
+位于忽略目录 `2026-10-25-etcd-resident-lifecycle/release-candidate/ds-revision4-ttl-api-restart.log`。
+这证明本轮重启跨过 TTL 后最终完成安全回收；不区分旧副本或新副本
+执行了最后一步，也不覆盖多条同时到期。
