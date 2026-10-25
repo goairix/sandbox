@@ -9,7 +9,7 @@ profile __SANDBOX_PROFILE_NAME__ flags=(attach_disconnected,mediate_deleted) {
   /usr/lib/** mr,
   /etc/ld.so.cache r,
   /etc/ld.so.preload r,
-  /etc/{hosts,resolv.conf,nsswitch.conf,passwd,group,gai.conf,fuse.conf} r,
+  /etc/{hosts,resolv.conf,nsswitch.conf,passwd,group,gai.conf,fuse.conf,mime.types} r,
   /etc/ssl/** r,
   /etc/workspace-fuse/** r,
   /run/secrets/workspace/** r,
