@@ -1544,3 +1544,27 @@ mounter 的 readiness probe 不通过；产品的 `PreparedSandboxHealth`
 另行检查两进程运行、mounter 的 prepared 状态和未挂载不变量，
 公开领取正例已验证该 prepared Pod 可用。不能将 `1/2` 直接解释
 为池未启动，也不能将池预热正例推导为大存量可预热。
+
+### DS revision 6：两种预热池均为 3–20
+
+用户要求普通池与 FUSE 池都使用 `minSize=3`、`maxSize=20`。先将
+`ds-sandbox-api-key` Secret 更新为用户指定的密钥，并通过精确读回
+比对；密钥值未写入仓库或验收日志。随后在同一次 Helm 升级中将
+两个池都调为 3–20，使 API Pod 重启加载新 Secret。Helm revision
+6 `deployed`，API 2/2、etcd 3/3、MinIO 1/1 Ready。新客户端挂载
+该 Secret 后，带密钥访问不存在的 sandbox 返回认证后的 404，
+匿名访问返回 401。
+
+稳定时有 3 个 FUSE prepared Pod 和 3 个普通 prepared Pod。普通
+Pod 的 `sandbox.pool.state` label 仍为 `preparing`，其 UID 绑定的
+`sandbox.pool.state=prepared` annotation 才是正式发布状态；不能
+只看 label 误判普通池未准备好。FUSE prepared Pod 未挂载时的
+Kubernetes `1/2 Ready` 含义同上。
+
+从公开 API 各创建一个 FUSE 与普通沙盒：FUSE 的 `runtime_id` 为
+原 prepared Pod `sandbox-pool-yvlq9a54n7`，普通沙盒的 `runtime_id`
+为原 prepared Pod `sandbox-pool-lg4rpmd0nj`。两者 POST 201、GET
+200、DELETE 200，最终 GET 404；随后两个池各补回 3 个
+prepared Pod。测试客户端已删除。此验证证明预热领取与补充工作；
+`maxSize=20` 约束的是准备池规模，不是存活 sandbox 总数上限，
+也不等于大存量容量验收。
