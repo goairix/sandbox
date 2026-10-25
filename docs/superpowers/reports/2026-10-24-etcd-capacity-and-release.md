@@ -720,3 +720,28 @@ DS revision 3 API 2/2 就绪后，用此镜像重测：12/12 POST 201，
 为同步删除成功。创建尾延迟很高，尚未完成更大存量、吞吐、集中到期、
 节点故障及十万 FUSE Pod 容量验收。DS 上的实际 AppArmor、对象存储和
 网络依赖仍需持续监控。
+
+### 20 个 FUSE 创建与并发清理：安全残留，验收失败
+
+在 revision 3 镜像和同一个 `maxSize=20` 配置下，用批次 `d0867e56`
+再次发起 20 个请求、最多 4 个并发。19 个 POST 201，另一个请求在
+长时间等待后连接断开；API 日志中该工作区的失败原因为
+`FUSE pool refill is already in progress`。创建最慢的已返回请求约
+103 秒。中途只读池快照曾为 `total=14, consumed=13, preparing=1`，
+同刻受管 Pod 数 14。因为并非全部创建成功，脚本没有执行 20 秒后的
+逐个健康读回，不能声称 19 个同时健康。
+
+对 19 个已知 ID 并发删除，7 条立即 200、12 条返回清理中 503。
+3 分钟有界读回只有 18/19 到达公开 GET 404。剩余
+`sandbox-ogmpe9c9wa` 对应的 Pod 已不在 API 中，受管 Pod 数 0；
+etcd 池汇总仍有 `total=1, cleanup=1`，精确 runtime UID owner 键仍在。
+持久化终止证据仅有 `process_exited=true`，没有
+`graceful_unmount` 或 `infrastructure_fenced`。原 workspace owner
+释放合同因此正确拒绝，日志持续报告 `runtime exit is not confirmed`；
+另有控制器 `active sandbox stale token`，以及一次其他请求的清理池
+revision 冲突。没有强删 owner、改写终止证据或退款。
+
+**整轮 FAIL，DS 当前不具备并发 FUSE 清理发布验收。** 后续须在真实
+集群证明该精确 Pod 的卸载与进程域终态，并定位优雅卸载证据缺失的
+原因及恢复路径；同时处理冷创建锁等待导致的失败和高尾延迟。
+12 个驻留正例及前面的单条 FUSE 功能正例均不能覆盖这条失败路径。
