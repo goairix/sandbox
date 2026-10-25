@@ -563,3 +563,9 @@ owner 保护检查；它可能先删除池记录，使仍持久化的 workspace 
 实例策略已自然消失。这证明新镜像下的一次创建/删除正例，**不证明**旧 Pod
 已修复、无残留的完整回收、产品通用网络策略、长期 TTL/大量存活容量或生产
 FUSE 发布。旧 owner 与旧 Pod 均保持占用，直到能通过安全证据链回收。
+只读 `--audit-workspace-owners` 在新删除后仅列出两条旧失败请求的 owner，
+不含 `sandbox-dkgfu3hayb`；其中 `sandbox-8dmg89anng` 变为
+`active_record_present`、`recoverable=false`，不能据此直接删键。
+DS 测试策略已按现有对象的精确选择器和端口保存于
+`deploy/k8s/ds-ai-research-fuse-backend-egress.yaml`（提交 `d8dc7ab`），
+server dry-run 通过；它不随 Helm 自动安装。
