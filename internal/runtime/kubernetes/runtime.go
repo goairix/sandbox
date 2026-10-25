@@ -1314,6 +1314,13 @@ func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtime
 					gracefulUnmount = true
 				}
 			}
+			if shutdownErr != nil {
+				// The pool may later observe a terminal Pod without this ACK. Keep
+				// the bounded, sanitized control error visible for that diagnosis.
+				logger.Warn(ctx, "FUSE workspace shutdown was not confirmed",
+					logger.Field{Key: "runtime_id", Value: ref.ID},
+					logger.Field{Key: "error", Value: shutdownErr.Error()})
+			}
 			if shutdownErr == nil {
 				if receiptErr := r.persistShutdownReceipt(ctx, ref, pod, generation); receiptErr != nil {
 					return runtime.TerminationEvidence{}, receiptErr
