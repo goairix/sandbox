@@ -668,6 +668,34 @@ func TestCacheUsageHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestCacheEntryBytesIgnoresFileRemovedDuringInspection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "temporary-s3fs-cache")
+	require.NoError(t, os.WriteFile(path, []byte("pending"), 0o600))
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.NoError(t, os.Remove(path))
+
+	bytes, err := cacheEntryBytes(root, path, entries[0], nil)
+	require.NoError(t, err)
+	assert.Zero(t, bytes)
+}
+
+func TestCacheEntryBytesRetainsUnsafeCacheFailures(t *testing.T) {
+	root := t.TempDir()
+	_, err := cacheEntryBytes(root, root, nil, os.ErrNotExist)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	path := filepath.Join(root, "unexpected-link")
+	require.NoError(t, os.Symlink("target", path))
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	_, err = cacheEntryBytes(root, path, entries[0], nil)
+	require.ErrorContains(t, err, "symbolic link")
+}
+
 type contextRecordingRunner struct {
 	fakeRunner
 	startContext context.Context

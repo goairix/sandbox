@@ -742,26 +742,46 @@ func cacheUsageBytes(ctx context.Context, root string) (int64, error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == root || entry.IsDir() {
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("cache contains a symbolic link")
-		}
-		info, err := entry.Info()
+		bytes, err := cacheEntryBytes(root, path, entry, walkErr)
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() || info.Size() < 0 || total > int64(^uint64(0)>>1)-info.Size() {
+		if total > int64(^uint64(0)>>1)-bytes {
 			return fmt.Errorf("cache contains an unsupported entry")
 		}
-		total += info.Size()
+		total += bytes
 		return nil
 	})
 	return total, err
+}
+
+// cacheEntryBytes ignores only a cache entry that disappeared after WalkDir
+// listed it. s3fs owns this directory and may remove temporary files during a
+// readiness scan. A missing root or an unsafe entry still fails the scan.
+func cacheEntryBytes(root, path string, entry os.DirEntry, walkErr error) (int64, error) {
+	if walkErr != nil {
+		if path != root && errors.Is(walkErr, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, walkErr
+	}
+	if path == root || entry.IsDir() {
+		return 0, nil
+	}
+	if entry.Type()&os.ModeSymlink != 0 {
+		return 0, fmt.Errorf("cache contains a symbolic link")
+	}
+	info, err := entry.Info()
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 {
+		return 0, fmt.Errorf("cache contains an unsupported entry")
+	}
+	return info.Size(), nil
 }
 
 func (s *Supervisor) Status() fuseprotocol.MounterStatus {
