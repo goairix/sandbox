@@ -555,6 +555,27 @@ etcd 存储包测试和 vet 通过；专用容器已删除。
 10 万 FUSE/workspace 的容量门仍未通过；继续扩大实验前还须计入真实
 快照、API 内存与 goroutine、周期 QPS、FUSE 物理负载和故障恢复。
 
+### FUSE 池安全判定仍随存活数量增长
+
+代码复核发现 `Manager.guardFUSEPoolRecord` 在取得或归还准备池记录时，
+先遍历本副本的 `fuseLifecycles`，再 `SessionStore.List` 并逐条 `Load`，
+然后 `EphemeralLifecycleStore.List` 并逐条 `Load`，最后调用
+`WorkspaceCoordinator.HasRuntimeOwner` 遍历全部持久 owner。每段都在
+寻找与该池记录的 runtime UID 或 preparation ID 相同的占用者；任何
+存储或解码错误都使判定保持 Unknown，而不是把记录当作可复用。
+因此未提前命中占用者的判定会经过多个随存活数量增长的列表或读取，现有
+10,000 条 controller 续期测试**没有**覆盖这一成本。`fusePool.maxSize`
+限制的是准备池规模，不能把这条检查或活跃沙盒数量变成常数。
+
+现有会话键按 sandbox ID、临时生命周期键按 sandbox ID、workspace
+owner 键按 workspace 身份组织；准备池记录只持有 preparation ID 与
+runtime 身份，无法从这些字段安全地直接定位全部三类持久占用。
+仅在某个副本缓存扫描结果会漏掉其他副本的写入。要改成定点判定，
+须先设计与原发布、释放事务同步维护的持久反向关系，并证明丢失 ACK、
+重启和旧记录不会产生“假空闲”；不能为提速跳过任一安全来源。
+这项改造超出本轮普通记录到期索引的职责，当前按容量阻塞项保留，
+没有声称已有可靠的 10 万 FUSE 单 cell 支持上限。
+
 ## 隔离 API canary 的 FUSE 创建失败
 
 没有改动正式 API Service 或 revision 15 的 sync-only 配置。另建一个
