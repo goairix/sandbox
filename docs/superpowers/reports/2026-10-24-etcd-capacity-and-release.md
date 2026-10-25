@@ -1367,3 +1367,20 @@ API 2/2、etcd 3/3 Ready。原始日志在忽略目录
 重启时间窗口覆盖了请求的 TTL 时间；公开结果证明最终安全回收，
 但本轮没有逐事务证据区分清理由旧副本完成还是由新副本恢复执行。
 它也不覆盖多条同时过期或重启时的节点 FUSE 故障。
+
+### DS 当前部署现场核对（2026-10-25）
+
+对 `ds-ai-research/sandbox-fuse-etcd` 只读查询：Helm release `sandbox`
+revision 3 为 `deployed`；`sandbox-api` 2/2、etcd 3/3、MinIO 1/1，
+所有对应 Pod Ready。经正式 `sandbox-api` ClusterIP Service 端口转发，
+`/health` 和 `/ready` 均返回 200；未认证沙盒查询返回 401，带测试
+API key 查询不存在的 ID 返回 404，未输出密钥。
+
+随后经该正式 Service 运行一条当前默认 FUSE 业务烟测：公开 POST 201
+创建 `sandbox-bw486aywlp`，GET 200 且 `workspace_mount_mode=fuse`；
+上传 55 字节返回 200，下载返回 200 且字节哈希一致；公开 DELETE 200，
+最终 GET 404。测试进程退出 0，之后按 `sandbox.managed=true` 标签
+核对无残留 Pod 或实例 NetworkPolicy，API/etcd/MinIO 就绪副本数未变。
+这证明当前 DS 测试部署的一条 FUSE 创建、文件读写和删除路径可用，
+不等于所有 HTTP 接口、真实生产集群、长期运行或大存量容量验收。
+本轮容量分支的 controller 优化尚未进入 DS revision 3 镜像。
