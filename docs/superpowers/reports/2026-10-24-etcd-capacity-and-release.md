@@ -882,3 +882,14 @@ SHA-256 为
 该结果只验收 **20 个 DS FUSE 沙盒的本轮驻留与清理**。先前 FAIL
 不改判；它没有验证十万存量、集中到期、节点故障、持续吞吐或
 另一套 CCE 集群，也不把测试 MinIO 规则推论为任意对象存储部署可用。
+
+同一 Helm revision 2 又对正式 Service 做一条 FUSE 文件和重启
+纵切：`sandbox-l3tbjjjzw1` 创建 201，公开文件上传 200；沙盒仍
+存活时滚动重启两个 API 副本并等 Deployment 就绪，随后公开下载
+返回 200、55 字节与上传内容完全一致，SHA-256 为
+`67ed759d304488ede63a43db5dfb03adcac7c789368e40e6f6b061cf73da7399`。
+公开 DELETE 200、最终 GET 404；受管 Pod 为 0，两个 API Pod
+Ready 且重启数 0。脚本退出码 0，原始日志 SHA-256 为
+`ff095f30dc4a7cb4dbb6a888d110b982f5eec775b38312fe52bb2d367daf45d3`。
+该测试证明一条已挂载 FUSE 工作区的文件内容跨 API 滚动重启可读，
+并未模拟节点或 etcd 成员故障。
