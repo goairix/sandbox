@@ -1604,3 +1604,22 @@ API 2/2、etcd 3/3、MinIO 1/1 Ready。此验证覆盖报告中的两个
 **运维待办：** user-data 中的 root 凭据必须在云主机或镜像管理侧
 轮换并从 cloud-init 配置移除；仅阻断 sandbox 出站不能撤销已
 发生的凭据暴露。不要把报告中的原密码写入工单、提交或日志。
+
+### DS 业务 MinIO 全量切换
+
+按用户要求，DS 的 `sandbox` release 从测试 MinIO 全量切换到业务存储：
+`minio.huaxisy.com`、HTTPS、bucket `aiadp-workspace-dev`、空 region、
+`workspaces` 前缀。凭据仅存于命名空间内的 `business-minio-client`
+Secret，Helm values 和本报告均不保存明文。新的存储身份为
+`aiadp-workspace-dev-minio`，凭据代次为 `business-20261025-1`。
+原 Cilium 网络策略提供方及两个池的 3–20 配置保持不变。
+
+切换前，使用新 Secret 对业务 bucket 完成只读校验，并在
+`workspaces/` 下完成临时对象的写入、读回与删除。Helm revision 10
+执行 Chart 自带的后端变更排空与恢复，最终为 `deployed`，API 2/2
+Ready。随后通过公开 API 创建 FUSE 沙盒 `sandbox-jmeleq0mik`；
+运行时 `/workspace` 显示 `fuse.s3fs` 挂载，写入文件后可从业务 bucket
+的 `workspaces/minio-cutover-probe-20261025-2205/` 前缀读回相同内容。
+公开 DELETE 返回 200，后续 GET 返回 404，临时对象已删除。
+本次 Helm 排空删除了之前正在使用的沙盒，符合用户明确要求的
+全量切换；旧测试 MinIO 资源和数据未删除。
