@@ -1,0 +1,40 @@
+# DS test-cluster overlay. Its CNI evaluates egress against backend Pods after
+# Service translation, so the service CIDRs in the per-sandbox system policy
+# alone do not reach kube-dns or the dedicated test MinIO. Keep this selector
+# restricted to managed FUSE/MinIO Pods; it is not a portable production rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ds-fuse-backend-egress
+  namespace: sandbox-fuse-etcd
+  labels:
+    sandbox.test-scope: ds-reset
+    sandbox.policy.role: backend-egress
+spec:
+  podSelector:
+    matchLabels:
+      sandbox.managed: "true"
+      sandbox.workspace.mode: fuse
+      sandbox.workspace.provider: minio
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: ds-minio-reset
+      ports:
+        - protocol: TCP
+          port: 9000
