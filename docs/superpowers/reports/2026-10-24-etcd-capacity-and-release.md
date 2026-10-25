@@ -620,6 +620,34 @@ lease；计划起点相隔五秒，上一轮超时则下一轮立即开始并记
 `ba61e67a752b274504934d23a451f7d24a59c329f6fc83352bf85b3812bc080f`。
 三个专用成员及其 Docker 网络已删除。
 
+### 产品 controller 续期器的短时驻留测量
+
+另用 opt-in `TestActiveControllerSchedulerScale` 调用真实的
+`Manager.acquireActiveController`，让每个 sandbox 持有产品的一条
+`activeController.run` goroutine 和五秒 ticker。隔离的本机单成员 etcd
+保存 356 字节 FUSE 形状快照；controller TTL 为产品默认的 15 秒。
+建样本后保持 12 秒，检查每条租约已续期且 controller 未丢失。
+
+| controller 数 | 顺序建样本 | 续期成功 | 丢失 | 建样本后 goroutine 数 |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | 0.090 s | 20/20 | 0 | 27 |
+| 1,000 | 2.857 s | 1,000/1,000 | 0 | 1,007 |
+| 3,000 | 11.461 s | 3,000/3,000 | 0 | 3,007 |
+
+原始日志在忽略目录 `2026-10-25-etcd-resident-lifecycle/` 下的
+`product-controller-{20,1000,3000}.log`，SHA-256 依次为
+`4863e4a74164f47600d8de6825a784256b6a58b7602613821e1e419148d764da`、
+`add2a62f1475048c6db2e8cc3ca204794b11b1006b59469e2c22b403cd2da86b`、
+`6c285fd60c246c725564772887088fff525b301c388c4c9178eb`。
+定点 race 首轮发现新测试读取初始租约时未持有 controller 锁，修正后
+20 条 race 及 `internal/sandbox` 全包回归通过；首轮失败记录保留。
+
+这只证明一个本机成员上短时、无 Pod/FUSE 的续期器能维持至 3,000
+条。goroutine 数随活跃 sandbox 线性增长；测试中的堆分配差值受 GC
+影响，不能当成每沙盒 RSS。尚未覆盖更长时间、两个 API 副本、三成员
+故障、真实 workspace 健康检查与集中到期。此前三成员同步 10,000 条
+续期的五秒周期失败仍有效，**大存量容量门仍未通过**。
+
 ### FUSE 池安全判定仍随存活数量增长
 
 代码复核发现 `Manager.guardFUSEPoolRecord` 在取得或归还准备池记录时，
