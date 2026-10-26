@@ -1844,3 +1844,13 @@ revision 7 上独立 workspace 的集群内 Job 测得：FUSE POST 201、文件
 返回同一 ID、flush 200、DELETE 200 后 GET 404。Job 与 ConfigMap
 已删除；只读 etcd owner 前缀查询无键，API 仍为 2/2 Ready。此为
 单沙盒常规接口冒烟，不是并发故障注入、真实 CNI 效果或大容量验收。
+
+revision 7 上还将两个公开 POST 同时发往两只指定的 `sandbox-api`
+Pod，申请同一条新的 FUSE workspace。两边均返回 201 和同一逻辑 ID
+`sandbox-zqarz9gea0`，响应分别为 `reused=false` 与 `reused=true`；
+Service GET 返回该 ID。公开 DELETE 200、最终 GET 404，受管 Pod
+消失，etcd workspace owner 前缀无键，API 2/2 Ready。原始 Job 日志
+`/tmp/cce-fuse-dual-create-0cb9a9e.log` SHA-256
+`917d4078f344155de6ada93a1d37fee72e92ea7333f609be05d4921eddb4513b`；
+Job 与 ConfigMap 已删除。这验证常规双副本同路径去重，仍未注入
+发布中断、cleanup lease 失效或 etcd 成员故障。
