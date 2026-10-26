@@ -2089,6 +2089,22 @@ PVC etcd 3/3，DS API 2/2。该项验证**全体成员停机再启动时的
 存活 owner 与文件连续性**；它没有对存活 owner 执行快照回滚，
 不能用来证明跨时间点回滚后的所有租约与清理行为。
 
-这验证了 CCE 测试 namespace 中的**三成员 PVC 快照恢复与新建 FUSE
-主链**。它没有验证恢复时仍存活的业务沙盒、自动备份、跨可用区
-磁盘全损或 10 万存活容量。本机快照只是演练恢复点，不是持久备份。
+这验证了 CCE 测试 namespace 中的三成员 PVC 快照恢复、新建 FUSE
+主链，以及存活沙盒经历三成员停机再启动。尚未验证存活沙盒的快照
+回滚、自动备份、跨可用区磁盘全损或 10 万存活容量。本机快照只是
+演练恢复点，不是持久备份。
+
+### DS 排空修复镜像滚动升级（2026-10-26）
+
+CCE 的新镜像与 `minSize=0` 排空验收通过后，核对 DS 仍在 Helm
+revision 14、API 2/2、etcd 后端及两个池 `minSize=3/maxSize=20`；
+当时没有活跃的非池 sandbox Pod。仅修改 API image tag，Helm
+revision 15 部署
+`sandbox-fuse-etcd-api:v1-pool-drain-d27fc8ac-arm64`，其他 etcd、
+MinIO、池与网络值沿用原 release。升级后 API 2/2；以现有 Secret
+引用执行独立的临时 FUSE workspace 公开烟测：创建 201、挂载信息
+200、`/workspace` 文件写入及读回 200、flush 200、删除 200、
+最终 GET 404，`pass=true`。烟测日志 SHA-256 为
+`0b527059f0082138aeb52b2064a00a66a7b152fb11094c0e1d837c6019878b2e`；
+临时 Job 和 ConfigMap 已删除。没有在承载业务的 DS 上重放
+`minSize=0` 排空；该故障路径的实际验证来自使用同一镜像的 CCE。
