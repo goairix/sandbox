@@ -474,6 +474,94 @@ func TestDistributedFUSEQuiescedFlushRecoveredByUncachedPeer(t *testing.T) {
 	verifyQuiescedFUSEPeerCleanup(t, m, rt, store)
 }
 
+func TestDistributedFUSEClaimedCleanupWithoutActiveCheckpointRecoversTerminalPod(t *testing.T) {
+	for _, persisted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "signed terminal pod", true: "persisted termination after pod removal"}[persisted], func(t *testing.T) {
+			ctx := context.Background()
+			m, rt, store := newDistributedFUSERecoveryManager(t)
+			sb, err := m.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/claimed-terminal"})
+			require.NoError(t, err)
+			active, _, _, err := m.activeSandboxes.BeginDestroy(ctx, sb.ID)
+			require.NoError(t, err)
+			snapshot, err := decodeActiveSandboxPhase(active, sb.ID, state.ActiveSandboxDestroying)
+			require.NoError(t, err)
+			record, err := readFUSEPoolRecord(ctx, m.fusePool.repo, sb.Workspace.FUSEPoolKey, sb.Workspace.FUSEPreparationID)
+			require.NoError(t, err)
+			claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, *record)
+			require.NoError(t, err)
+			require.Equal(t, state.FUSEPoolCleanupTerminating, claimed.CleanupPhase)
+			if persisted {
+				_, err = m.fusePool.repo.ConfirmCleanupTermination(ctx, claimed.PreparationID, claimed.CleanupToken,
+					claimed.Revision, claimed.RuntimeID, claimed.RuntimeUID, state.FUSEPoolTerminationEvidence{
+						RuntimeUID: claimed.RuntimeUID, GracefulUnmount: true, ProcessExited: true,
+					})
+				require.NoError(t, err)
+			}
+			rt.mockRuntime.mu.Lock()
+			rt.sandboxes[sb.RuntimeID].State = "failed"
+			rt.mockRuntime.mu.Unlock()
+			require.NoError(t, m.Stop(ctx))
+			cfg := m.config
+			cfg.InstanceID = "peer"
+			peer := NewManager(rt, m.filesystem, m.fsMeta, cfg)
+			if persisted {
+				peer.runtime = absentCheckpointedFUSERuntime{rt}
+				peer.fusePool.runtime = peer.runtime
+			}
+			peer.SetSessionStore(NewSessionStore(store, time.Hour))
+			t.Cleanup(func() { require.NoError(t, peer.Stop(ctx)) })
+			controller, acquired, err := peer.acquireActiveController(ctx, snapshot)
+			require.NoError(t, err)
+			require.True(t, acquired)
+			t.Cleanup(func() { require.NoError(t, controller.Stop(ctx)) })
+			require.NoError(t, peer.restoreFUSECleanupWithController(ctx, snapshot, controller))
+			require.NoError(t, peer.Destroy(ctx, sb.ID))
+			active, err = peer.activeSandboxes.Load(ctx, sb.ID)
+			require.NoError(t, err)
+			require.Nil(t, active)
+			require.True(t, rt.wasRemoved(sb.RuntimeID))
+		})
+	}
+}
+
+func TestDistributedFUSEClaimedCleanupWithoutTerminalProofRetainsOwner(t *testing.T) {
+	ctx := context.Background()
+	m, rt, store := newDistributedFUSERecoveryManager(t)
+	sb, err := m.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/claimed-unproven"})
+	require.NoError(t, err)
+	active, _, _, err := m.activeSandboxes.BeginDestroy(ctx, sb.ID)
+	require.NoError(t, err)
+	snapshot, err := decodeActiveSandboxPhase(active, sb.ID, state.ActiveSandboxDestroying)
+	require.NoError(t, err)
+	record, err := readFUSEPoolRecord(ctx, m.fusePool.repo, sb.Workspace.FUSEPoolKey, sb.Workspace.FUSEPreparationID)
+	require.NoError(t, err)
+	_, err = m.fusePool.ClaimSingleUseCleanup(ctx, *record)
+	require.NoError(t, err)
+	rt.mockRuntime.mu.Lock()
+	rt.sandboxes[sb.RuntimeID].State = "failed"
+	rt.mockRuntime.mu.Unlock()
+	require.NoError(t, m.Stop(ctx))
+	cfg := m.config
+	cfg.InstanceID = "peer"
+	peer := NewManager(unconfirmedFailedCreateRuntime{rt}, m.filesystem, m.fsMeta, cfg)
+	peer.SetSessionStore(NewSessionStore(store, time.Hour))
+	t.Cleanup(func() { require.NoError(t, peer.Stop(ctx)) })
+	controller, acquired, err := peer.acquireActiveController(ctx, snapshot)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	t.Cleanup(func() { require.NoError(t, controller.Stop(ctx)) })
+	require.Error(t, peer.restoreFUSECleanupWithController(ctx, snapshot, controller))
+	active, err = peer.activeSandboxes.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.Empty(t, active.CleanupCheckpoint)
+	require.False(t, rt.wasRemoved(sb.RuntimeID))
+	keys, err := workspaceStateKeysFromOwner(sb.Workspace.Owner)
+	require.NoError(t, err)
+	owner, err := store.Get(ctx, keys.owner)
+	require.NoError(t, err)
+	require.NotEmpty(t, owner)
+}
+
 func TestDistributedFUSEQuiescedFlushRecoveredWithRealRedis(t *testing.T) {
 	addr := os.Getenv("TEST_REDIS_ADDR")
 	if addr == "" {

@@ -3505,6 +3505,15 @@ func (m *Manager) restoreFUSECleanupWithController(ctx context.Context, sb *Sand
 	if strings.HasPrefix(record.CleanupCheckpoint, fuseCleanupCheckpointPrefix) {
 		return m.restoreCheckpointedFUSECleanup(ctx, sb, controller, record)
 	}
+	if record.CleanupCheckpoint == "" && sb.Workspace != nil && m.fusePool != nil && m.fusePool.repo != nil {
+		claimed, err := readFUSEPoolRecord(ctx, m.fusePool.repo, sb.Workspace.FUSEPoolKey, sb.Workspace.FUSEPreparationID)
+		if err != nil {
+			return err
+		}
+		if claimed != nil && claimed.State == state.FUSEPoolCleanup {
+			return m.restoreClaimedFUSECleanup(ctx, sb, controller, record, *claimed)
+		}
+	}
 	return m.restoreFUSELifecycleWithController(ctx, sb, controller, true)
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
@@ -117,6 +118,88 @@ func (c *WorkspaceCoordinator) restoreFUSECleanupLease(ctx context.Context, owne
 		return lease, true, nil
 	}
 	return lease, false, nil
+}
+
+// A failed create can claim the pool shell just after active publication and
+// before the active cleanup checkpoint is written. Recover only the exact
+// claimed shell after independent terminal proof; then use the ordinary
+// checkpointed teardown path for all remaining effects.
+func (m *Manager) restoreClaimedFUSECleanup(ctx context.Context, sb *Sandbox, controller *activeController, active *state.ActiveSandboxRecord, claimed state.FUSEPoolRecord) error {
+	w := sb.Workspace
+	if w == nil || m.fusePool.spec.WorkspaceFUSE == nil || m.fsMeta == nil || m.config.WorkspaceCoordinator == nil ||
+		active.CleanupCheckpoint != "" || (sb.State != StateReady && sb.State != StateDestroying) ||
+		w.MountType != WorkspaceMountFUSE || w.MountState != WorkspaceMountReady ||
+		!sameFUSECleanupIdentity(claimed, sb) || claimed.State != state.FUSEPoolCleanup || claimed.CleanupToken == "" ||
+		w.FUSERecordRevision == 0 || claimed.Revision <= w.FUSERecordRevision || claimed.Revision-w.FUSERecordRevision > 2 {
+		return ErrSandboxNotReady
+	}
+	prefix, err := storage.BuildWorkspacePrefix(m.fsMeta.SubPath, w.RootPath)
+	spec, owner := m.fusePool.spec.WorkspaceFUSE, w.Owner
+	if err != nil || owner.SandboxID != sb.ID || owner.RuntimeID != sb.RuntimeID || owner.RuntimeUID != sb.RuntimeUID ||
+		owner.Generation != w.LeaseGeneration || owner.Generation <= 0 || owner.MountAttempt != 1 ||
+		owner.Provider != spec.Provider || owner.StorageIdentityHash != storageIdentityHash(spec.StorageIdentity) ||
+		owner.Bucket != spec.Bucket || owner.Prefix != prefix || owner.Runtime != spec.RuntimeType {
+		return ErrSandboxNotReady
+	}
+	evidence, persisted := poolTerminationEvidence(claimed)
+	if claimed.Revision == w.FUSERecordRevision+1 && (claimed.CleanupPhase != state.FUSEPoolCleanupTerminating || persisted) {
+		return ErrSandboxNotReady
+	}
+	if claimed.Revision == w.FUSERecordRevision+2 && !persisted {
+		return ErrSandboxNotReady
+	}
+	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
+	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return err
+	}
+	if info != nil && (info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID || info.State == "running") {
+		return ErrSandboxNotReady
+	}
+	if !persisted {
+		cleaner, ok := m.runtime.(runtime.PreparedSandboxCleanup)
+		if !ok {
+			return ErrSandboxNotReady
+		}
+		evidence, err = cleaner.ConfirmPreparedSandboxTermination(ctx, sb.RuntimeID, sb.RuntimeUID)
+		if err != nil {
+			return err
+		}
+	}
+	if evidence.RuntimeUID != sb.RuntimeUID || !evidence.GracefulUnmount || !evidence.ProcessExited {
+		return ErrSandboxNotReady
+	}
+	if !persisted {
+		claimedRecord, err := m.fusePool.repo.ConfirmCleanupTermination(ctx, claimed.PreparationID, claimed.CleanupToken,
+			claimed.Revision, claimed.RuntimeID, claimed.RuntimeUID, stateTerminationEvidence(evidence))
+		if err != nil || claimedRecord == nil {
+			return errors.Join(ErrSandboxCleanupPending, err)
+		}
+		claimed = *claimedRecord
+	}
+	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, owner)
+	if err != nil {
+		return err
+	}
+	// ClaimCleanup preserves immutable pool fields and advances the revision
+	// once; ConfirmCleanupTermination may advance it once more. This prior
+	// record is only a checkpoint identity, never used to issue a new claim.
+	consumed := claimed
+	consumed.State = state.FUSEPoolConsumed
+	consumed.Revision = w.FUSERecordRevision
+	consumed.CleanupToken = ""
+	consumed.CleanupUntil = time.Time{}
+	consumed.CleanupPhase = ""
+	consumed.TerminationEvidence = nil
+	cp := fuseCleanupCheckpoint{Consumed: consumed, Claimed: &claimed, LeaseValue: append([]byte(nil), lease.Value...)}
+	raw, err := json.Marshal(cp)
+	if err != nil || len(raw)+len(fuseCleanupCheckpointPrefix) > 64<<10 {
+		return ErrSandboxNotReady
+	}
+	updated, err := controller.checkpoint(ctx, active.Revision, fuseCleanupCheckpointPrefix+string(raw))
+	if err != nil || updated == nil {
+		return errors.Join(ErrSandboxCleanupPending, err)
+	}
+	return m.restoreCheckpointedFUSECleanup(ctx, sb, controller, updated)
 }
 
 func (m *Manager) restoreCheckpointedFUSECleanup(ctx context.Context, sb *Sandbox, controller *activeController, active *state.ActiveSandboxRecord) error {
