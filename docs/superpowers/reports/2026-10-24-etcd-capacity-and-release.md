@@ -1805,3 +1805,19 @@ Deployment 滚动完成后，`workspace/info` 仍为 mounted、同一文件
 Job/ConfigMap 删除后 API 2/2 Ready、owner 审计 `[]`。该实验验证
 已发布存活沙盒跨 API 重启，不覆盖失败创建进程在发布途中被杀、
 cleanup lease 过期后竞态或大量存活 N 的重启耗时。
+
+### CCE 正式 Service 接口矩阵（2026-10-26）
+
+在 revision 6 的 `sandbox-api` ClusterIP 上，用集群内 Job 和 Secret
+引用测试凭据创建独立持久 FUSE 沙盒。两轮均得到 POST 201、文件上传
+200、下载原字节一致、文件列表可见、TTL 改为 900 秒返回 200、网络
+配置更新 200、按 workspace 查询同一 ID、flush 200、DELETE 200 且
+最终 GET 404。第二轮还在沙盒内创建真实 `SKILL.md`，`GET /skills`
+从空列表变为包含 `cce-check`，覆盖此前用户遇到的 skills 列表入口。
+原始日志为 `/tmp/cce-api-matrix-5030ab4-empty-skills.log`（SHA-256
+`0a3a9998229701d47e08d4514f6f6e4eb2cf0933291c786cbff7a346a182dfea`）
+与 `/tmp/cce-api-matrix-skills-5030ab4.log`（SHA-256
+`1133568f73406723703b18d7fafcd5a38a98ca19b42a41c433d8f05db093b0a2`）。
+两轮 Job/ConfigMap 已删除；结束后 API 2/2 Ready，owner 审计 `[]`。
+这覆盖列出的接口与一条实际 skill，不等于全部 API、并发故障注入或
+大容量验收；网络更新返回成功不证明 CNI 策略在任意外部流量下生效。
