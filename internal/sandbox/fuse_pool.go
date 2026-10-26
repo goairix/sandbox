@@ -53,9 +53,9 @@ const (
 // error or Unknown is fail-closed and never authorizes physical deletion.
 type PristineGuardFunc func(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error)
 
-// ProtectedCleanupRecoveryFunc may finish an expired cleanup whose sole
-// protection is a failed create's persistent workspace owner. It must claim
-// the cleanup record and prove termination before releasing that owner.
+// ProtectedCleanupRecoveryFunc may finish an orphaned binding or expired
+// cleanup whose sole protection is a failed create's persistent workspace
+// owner. It must claim the exact record and prove termination before release.
 type ProtectedCleanupRecoveryFunc func(context.Context, state.FUSEPoolRecord) (bool, error)
 
 // FUSEPoolConfig configures the sandbox-api-owned FUSE shell pool.
@@ -890,6 +890,16 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 			}
 		case state.FUSEPoolBinding:
 			disposition, _ := p.guard(ctx, record)
+			if disposition == FUSEPoolProtected && p.config.RecoverProtectedCleanup != nil {
+				recovered, recoverErr := p.config.RecoverProtectedCleanup(ctx, record)
+				if recoverErr != nil && !isStalePoolMutation(recoverErr) {
+					logger.Error(ctx, "owner-bound FUSE binding cleanup will retry",
+						logger.AddField("preparation_id", record.PreparationID), logger.ErrorField(recoverErr))
+				}
+				if recovered || recoverErr != nil {
+					return nil
+				}
+			}
 			if disposition == FUSEPoolAbandoned {
 				if err := p.claimAndDestroy(ctx, record); err != nil && !isStalePoolMutation(err) {
 					return fmt.Errorf("clean abandoned binding FUSE sandbox: %w", err)

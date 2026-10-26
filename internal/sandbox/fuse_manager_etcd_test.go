@@ -226,3 +226,60 @@ func TestManagerRecoversExpiredFailedFUSECreateAfterManagerRestartWithEtcd(t *te
 	}, 12*time.Second, 100*time.Millisecond,
 		"a restarted manager must finish the exact cleanup only after the old lease expires")
 }
+
+func TestManagerRecoversOrphanedFUSEBindingAfterManagerRestartWithEtcd(t *testing.T) {
+	manager, _ := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	store := manager.sessions.store.(*etcdstate.Store)
+	repository := manager.fusePool.repo.(*etcdstate.FUSEPoolRepository)
+	rt := manager.runtime.(*fuseManagerRuntime)
+	manager.config.WorkspaceCoordinator = NewWorkspaceCoordinator(store, 2*time.Second, 500*time.Millisecond)
+
+	record, err := manager.fusePool.Acquire(ctx, "pool-key")
+	require.NoError(t, err)
+	request := validLeaseRequest()
+	request.Runtime = "kubernetes"
+	request.RuntimeID = record.RuntimeID
+	request.StorageIdentity = manager.fsMeta.StorageIdentity
+	lease, err := manager.config.WorkspaceCoordinator.Acquire(ctx, request)
+	require.NoError(t, err)
+	require.NoError(t, manager.config.WorkspaceCoordinator.BindRuntime(ctx, lease, record.RuntimeUID))
+	_, err = manager.config.WorkspaceCoordinator.ConsumeMountAttempt(ctx, lease, record.PoolKey)
+	require.NoError(t, err)
+	bound, err := repository.Transition(ctx, record.PreparationID, state.FUSEPoolReserved,
+		state.FUSEPoolBinding, record.ReservationToken, record.Revision)
+	require.NoError(t, err)
+	require.NoError(t, manager.Stop(ctx))
+
+	poolConfig := fusePoolConfig()
+	poolConfig.MinSize = 0
+	poolConfig.MaintainerToken = "api-b"
+	restartedConfig := manager.config
+	restartedConfig.InstanceID = "api-b"
+	restartedConfig.FUSEPool = NewFUSEPool(rt, repository, poolConfig, fixedFUSESpec("pool-key"))
+	restarted := NewManager(rt, manager.filesystem, manager.fsMeta, restartedConfig)
+	restarted.SetSessionStore(NewSessionStore(store, time.Hour))
+	restarted.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	t.Cleanup(func() { require.NoError(t, restarted.Stop(context.Background())) })
+
+	require.NoError(t, restarted.fusePool.Reconcile(ctx))
+	require.False(t, rt.wasRemoved(record.RuntimeID), "a live workspace lease must retain binding")
+	ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		leaseRaw, readErr := store.Get(ctx, lease.Key)
+		if readErr != nil || leaseRaw != nil {
+			return false
+		}
+		if err := restarted.fusePool.Reconcile(ctx); err != nil {
+			return false
+		}
+		remaining, err := repository.ReadByPreparationID(ctx, bound.PreparationID)
+		if err != nil || remaining != nil || !rt.wasRemoved(record.RuntimeID) {
+			return false
+		}
+		ownerRaw, err := store.Get(ctx, ownerKey.owner)
+		return err == nil && ownerRaw == nil
+	}, 6*time.Second, 100*time.Millisecond,
+		"an expired orphan binding must be claimed and safely released")
+}

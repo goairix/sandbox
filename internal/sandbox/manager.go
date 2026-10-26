@@ -1472,13 +1472,15 @@ func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPool
 }
 
 // recoverProtectedFUSECleanup finishes a failed create after its original API
-// process disappears. The pool's server-expired cleanup lease and the absence
-// of a workspace lease, session and active record are all required; the
-// persistent owner alone never authorizes deleting a running sandbox.
+// process disappears. A binding can be claimed only after its workspace lease
+// expires; a cleanup also requires its server-side cleanup lease to expire.
+// The absence of every lifecycle reference is required in either case.
 func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.FUSEPoolRecord) (bool, error) {
 	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.fsMeta == nil ||
-		record.State != state.FUSEPoolCleanup || record.PoolKey != m.fusePool.poolKey ||
-		record.CleanupToken == "" || record.RuntimeID == "" || record.RuntimeUID == "" {
+		(record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolCleanup) ||
+		record.PoolKey != m.fusePool.poolKey ||
+		(record.State == state.FUSEPoolCleanup && record.CleanupToken == "") ||
+		record.RuntimeID == "" || record.RuntimeUID == "" {
 		return false, nil
 	}
 	protected, err := m.fuseCleanupHasRuntimeReferences(ctx, record)
@@ -1507,8 +1509,8 @@ func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.
 		return false, err
 	}
 
-	// ClaimCleanup CAS-replaces only an expired cleanup holder. A competing
-	// process or a newly published lifecycle must never share this token.
+	// ClaimCleanup CAS-fences the exact binding, or replaces an expired cleanup
+	// holder. A competing transition or publication must not share this token.
 	claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, record)
 	if err != nil {
 		return false, err
