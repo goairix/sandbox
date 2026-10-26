@@ -165,3 +165,64 @@ func TestManagerFUSETimeoutKeepsOccupationUntilRemovalOnEtcd(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, record)
 }
+
+func TestManagerRecoversExpiredFailedFUSECreateAfterManagerRestartWithEtcd(t *testing.T) {
+	manager, _ := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	store := manager.sessions.store.(*etcdstate.Store)
+	repository := manager.fusePool.repo.(*etcdstate.FUSEPoolRepository)
+	rt := manager.runtime.(*fuseManagerRuntime)
+	manager.config.WorkspaceCoordinator = NewWorkspaceCoordinator(store, 2*time.Second, 500*time.Millisecond)
+
+	prepared, next, err := repository.ListStatePage(ctx, "pool-key", state.FUSEPoolPrepared, "", 10)
+	require.NoError(t, err)
+	require.Empty(t, next)
+	require.Len(t, prepared, 1)
+	record := prepared[0]
+	request := validLeaseRequest()
+	request.Runtime = "kubernetes"
+	request.RuntimeID, request.RuntimeUID = record.RuntimeID, record.RuntimeUID
+	request.StorageIdentity = manager.fsMeta.StorageIdentity
+	lease, err := manager.config.WorkspaceCoordinator.Acquire(ctx, request)
+	require.NoError(t, err)
+	_, err = manager.config.WorkspaceCoordinator.ConsumeMountAttempt(ctx, lease, record.PoolKey)
+	require.NoError(t, err)
+	claimed, err := repository.ClaimCleanup(ctx, record.PreparationID, state.FUSEPoolPrepared,
+		record.MaintainerToken, record.ReservationToken, record.Revision,
+		record.RuntimeID, record.RuntimeUID, "failed-create-cleanup", time.Second)
+	require.NoError(t, err)
+	require.Equal(t, state.FUSEPoolCleanup, claimed.State)
+	require.NoError(t, manager.Stop(ctx))
+
+	poolConfig := fusePoolConfig()
+	poolConfig.MinSize = 0
+	poolConfig.MaintainerToken = "api-b"
+	restartedConfig := manager.config
+	restartedConfig.InstanceID = "api-b"
+	restartedConfig.FUSEPool = NewFUSEPool(rt, repository, poolConfig, fixedFUSESpec("pool-key"))
+	restarted := NewManager(rt, manager.filesystem, manager.fsMeta, restartedConfig)
+	restarted.SetSessionStore(NewSessionStore(store, time.Hour))
+	restarted.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	t.Cleanup(func() { require.NoError(t, restarted.Stop(context.Background())) })
+
+	require.NoError(t, restarted.fusePool.Reconcile(ctx))
+	require.False(t, rt.wasRemoved(record.RuntimeID), "live workspace lease must retain the runtime")
+	ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		leaseRaw, readErr := store.Get(ctx, lease.Key)
+		if readErr != nil || leaseRaw != nil {
+			return false
+		}
+		if err := restarted.fusePool.Reconcile(ctx); err != nil {
+			return false
+		}
+		remaining, err := repository.ReadByPreparationID(ctx, record.PreparationID)
+		if err != nil || remaining != nil || !rt.wasRemoved(record.RuntimeID) {
+			return false
+		}
+		ownerRaw, err := store.Get(ctx, ownerKey.owner)
+		return err == nil && ownerRaw == nil
+	}, 12*time.Second, 100*time.Millisecond,
+		"a restarted manager must finish the exact cleanup only after the old lease expires")
+}
