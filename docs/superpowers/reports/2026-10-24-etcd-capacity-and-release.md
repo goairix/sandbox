@@ -1918,3 +1918,33 @@ Helm revision 14 已部署 CCE 验证过的
 ID 与 workspace/info 查询 200、删除 200，最终 ID 与按 workspace
 查询均为 404。此为在线升级后的单沙盒正例，未重跑全部 31 路矩阵，
 也不替代存量沙盒的文件级重启验收或大容量验证。
+
+### CCE revision 12 补充公开接口与网络实测（2026-10-26）
+
+经 `sandbox-api` Service 的本地 port-forward，凭 CCE namespace 原有
+API key 对三个独立 FUSE workspace 发起公开请求，未输出凭据。
+`sandbox-fd29lf06oj` 创建 201，普通 Exec 200 且退出码 0，SSE Exec
+200 且包含 `done` 事件；在 `/workspace/.agent/skills/cce-gap` 写入
+`SKILL.md` 和附件后，skills 列表、详情、附件读取各 200，附件字节
+一致；workspace/info 返回 mounted FUSE，to_container sync 返回 200。
+公开 DELETE 200，最终 GET 404。本轮十项检查均符合预期。
+
+`sandbox-a6ay4k5idk` 创建 201；动态 mount/unmount 各返回现有
+immutable FUSE 合同的 409，不能记为动态挂载成功。分片上传的 init、
+两块上传、status（已收两块）、complete 均返回 200，下载字节为
+`hello-CCE`；另一个未完成上传取消返回 204。公开 DELETE 200，最终
+GET 404。本轮十三项检查均符合预期。另对 `/execute` 与
+`/execute/stream` 各执行一次普通临时沙盒命令，均为 200，后者包含
+SSE `done`；这两项不是 FUSE 模式请求。
+
+网络正例 `sandbox-9xagegf3er` 以 FUSE、`enabled=true`、
+`block_private=true` 创建 201。带 `requires_network=true` 的真实
+Python socket 命令返回 200/退出码 0：连接
+`169.254.169.254:80` 与 `172.16.0.1:22` 均超时，连接 namespace
+内测试 MinIO Service 的 9000 端口成功；对应 runtime 的实例级
+Cilium deny policy 当时存在。公开 DELETE 200、最终 GET 404 后，
+该 Pod 不存在，匹配的 Cilium policy 也已消失。CCE 与 DS API 此后
+均为 2/2 Ready。
+
+这些是所列路径的代表性正例和两个私网目标的连通性观察，不等于 CCE
+全部 31 路、所有网络目的地、故障矩阵或大存量容量验收。
