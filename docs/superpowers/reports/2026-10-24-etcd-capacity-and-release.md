@@ -1887,3 +1887,15 @@ POST 201、GET 200、DELETE 200、最终 GET 404。DS 未改。
 这次故障注入验证了“进程在并行创建中被删除”及其恢复；没有验证
 每个精确写入点的断连、etcd 成员故障、完整 API 矩阵或大存量容量。
 大容量仍按用户要求单独验收，不能用上述单沙盒冒烟替代。
+
+revision 12 上再次向同一 API Pod 并行发送六个 FUSE 创建请求并强制
+删除该 Pod，删除命令成功；三个请求返回 503，三个连接断开。API
+恢复 2/2 Ready 后，三个 workspace 通过公开 by-workspace 查询返回
+原 ID，另三个为 404；三个可恢复 ID 经公开 DELETE 均返回 200，
+最终 GET 均为 404，精确 owner 审计为空。原始中断日志
+`/tmp/cce-fuse-publication-interruption-85b2b98.log` SHA-256
+`b546e6034f98b9e3604cb23741a2f52f35cce130559f274b2f4cd216a8b29097`。
+这证明本次进程中断没有留下已观察到的占用残留；三个 503 请求仍
+实际完成了创建，客户端须按同一 workspace 查询后决定是否删除或复用。
+该实验不能证明精确命中“active 已提交、claim 尚未标记发布”的每个
+微小时序；对应时序有独立确定性 RED→GREEN 回归测试。
