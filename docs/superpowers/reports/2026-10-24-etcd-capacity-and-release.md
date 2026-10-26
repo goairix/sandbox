@@ -1660,3 +1660,44 @@ revision 11 为 `deployed`，API 2/2 Ready，普通与 FUSE 准备池各 3 个�
 Secret 凭据而失败；在确认无活跃记录后以 `--no-hooks` 卸载。
 上述是单次隔离和正式短 TTL 回归，不能证明所有缓存 I/O 错误或
 长期大存量容量均已验收。
+
+### CCE 实际 FUSE 生命周期与安全回收复核（2026-10-26）
+
+CCE `sandbox-fuse-etcd` 的隔离 Helm release 升至 revision 3，API
+2/2 Ready，镜像为 `v1-capacity-shutdown-1270394-arm64`。提交
+`1270394` 修复授权请求在送达挂载器前被拒绝时，清理错误地只用
+已持久化的正代次关闭仍处于零代次的挂载器；修复后仅对原 Pod
+身份和 ready 状态确定匹配的挂载器尝试零代次关闭，仍要求强
+unmount ACK 才能签署终止证明。包测试、定向 race 和 vet 通过。
+
+通过集群内客户端直接访问 `sandbox-api` Service，依次运行 8 个
+目标/并发 2、16 个目标/并发 4、24 个目标/并发 4：三轮分别
+8/8、16/16、24/24 收到创建 201，驻留查询均为 200，公开
+DELETE 均为 200，最终 ID 查询均为 404。24 个目标的创建耗时
+中位数 17.225 秒、P95 110.48 秒、最大 113.248 秒；这是一次
+完成的样本，不是稳定性或 10 万存活容量结论。三轮原始日志分别在
+`/tmp/cce-capacity-1270394-p2.log`、`/tmp/cce-capacity-1270394-p4.log`、
+`/tmp/cce-capacity-1270394-n24.log`，SHA-256 分别为
+`48136bcc3cabd1a81f40e4a7344206718b604924c855f68e819a75a3210fff78`、
+`9fe1d49f7261b6d35379ade4f0a0177786a7b4a363308ce0ecbf181547862581`、
+`6421fa5d14a40d710995172de3c16bf64736fc130489163a651bc0cf950fae2a`。
+对应测试 Job、ConfigMap 均已删除。
+
+另用公开 API 单独创建 FUSE 沙盒，`workspace/info` 确认 mounted、
+`mount_type=fuse`；在沙盒内执行 Python 写入 `/workspace`、`fsync`、
+读回一致，`from_container` 同步返回 200 且再次查询 `flushed=true`。
+公开 DELETE 后 ID 查询 404。原始日志
+`/tmp/cce-fuse-api-1270394-smoke.log` 的 SHA-256 为
+`3e93d3f74a345e87c7bdf6096dbe4ad2a2df73da187e3c9f62da059e22926fe4`。
+该轮未独立从对象存储读取文件，不能把本次 API 结果写成对象端
+持久化验收。
+
+旧镜像测试中有一次授权失败留下 Pod `sandbox-pool-18a49v9rcz`、
+持久 owner 和 cleanup record。新镜像升级不会续跑旧进程内的失败
+创建清理协程。按精确 Pod UID、owner、record revision 和原签名
+权限只读预检后，调用产品的强终止/签名证明、owner release、
+cleanup record CAS 删除流程回收；未直接删除 finalizer 或原始 etcd
+键。复查 Pod 不存在、owner 审计为 `[]`、原 workspace 查询 404。
+**旧进程中断后的自动恢复仍有缺口**，此次为单条运维回收，不能
+据此宣称自动恢复已通过。CCE 仍需重复容量、故障恢复以及更大
+存活规模测试；本轮未触及 DS 线上 release。
