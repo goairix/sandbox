@@ -2061,8 +2061,23 @@ FUSE 烟测通过 `6c731dfd4507787ca71991d9a9b790087962d629bfeadc7583d97b6e92b9a
 标记已从集群移除。末次检查 API 2/2、新旧 etcd 各 3/3，准备池
 6 个 Pod、无非池 sandbox Pod，两个池的 `minSize` 均恢复为 3。
 上述 `minSize=0` 排空缺陷已在源码提交 `d27fc8ac` 修复并通过
-`cmd/sandbox`、池/排空相关测试及 `go vet`；CCE 当前 API 镜像仍是
-演练前版本，后续镜像升级才会包含此修复。
+`cmd/sandbox`、池/排空相关测试及 `go vet`；到 revision 15 为止，
+CCE API 镜像仍是演练前版本。
+
+随后从同一已验收 API 镜像底座仅替换 arm64 API 二进制，推送
+`sandbox-fuse-etcd-api:v1-pool-drain-d27fc8ac-arm64`（manifest digest
+`sha256:7e18a0c12acd3a741db12edd7a9a35ba97b0af3add29cd2191f66858d63ea48e`）。
+镜像内二进制与构建产物 SHA-256 均为
+`9dcb3ba71e982585d1ba5bb316226443b628e5570be802397cece24fcd7c25e4`。
+CCE Helm revision 16 仅更新 API tag，公开 FUSE 创建、挂载、文件读写、
+flush、删除到 404 再次通过。接着 revision 17 将两个池最小值设为 0，
+使用**新镜像且继承真实 `POOL_MIN_SIZE=0`** 的 release drain Job：
+API 0 副本、池 Pod 0、普通池键 0，Job 报告零受管状态，日志 SHA-256
+`bd6bf8f158260b48a55dc64ea675d5eeabdb05b0d8a6fbbc53bbed1d2c478fbe`。
+revision 18 将两池最小值恢复为 3，API 2/2，公开 FUSE 主链复验
+`pass=true`，日志 SHA-256
+`40afd175e4fc1e18560987ef6245a7a04c5a1989538b2184738a974f0b29aa00`。
+测试 Job 和 ConfigMap 已清理，DS 未升级。
 
 这验证了 CCE 测试 namespace 中的**三成员 PVC 快照恢复与新建 FUSE
 主链**。它没有验证恢复时仍存活的业务沙盒、自动备份、跨可用区

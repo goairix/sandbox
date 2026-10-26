@@ -81,7 +81,7 @@ redis:
 
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api
-  tag: v1-publication-guard-85b2b98-arm64
+    tag: v1-pool-drain-d27fc8ac-arm64
   pullSecretName: <同命名空间的镜像拉取Secret；不需要时删除本行>
 
 apparmorLoader:
