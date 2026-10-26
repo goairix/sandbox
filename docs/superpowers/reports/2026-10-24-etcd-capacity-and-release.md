@@ -1795,3 +1795,13 @@ ephemeral/active 发布没有跨存储的原子栅栏；etcd active 分页也不
 并发全局快照。现有清理租约 CAS、失租取消与终止证明缩小此窗口，
 但尚不能作为跨进程延迟发布竞态验收。需要发布与回收共用的持久化
 fence 和故障注入正反例后才关闭该风险。
+
+在 revision 6 上另做单条存活 FUSE 沙盒的真实 API 双副本滚动重启：
+重启前通过公开接口创建并写入/fsync/读回 workspace 文件；API
+Deployment 滚动完成后，`workspace/info` 仍为 mounted、同一文件
+通过 Exec 读回一致、flush 200，公开 DELETE 200 至 GET 404。
+日志 `/tmp/cce-live-restart-c62f5f9.log` SHA-256
+`897b70fcfa633505777d52c99a078015043724693fcb71566bc349b83d86ec31`。
+Job/ConfigMap 删除后 API 2/2 Ready、owner 审计 `[]`。该实验验证
+已发布存活沙盒跨 API 重启，不覆盖失败创建进程在发布途中被杀、
+cleanup lease 过期后竞态或大量存活 N 的重启耗时。
