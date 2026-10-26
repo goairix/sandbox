@@ -48,6 +48,14 @@ import (
 
 const defaultKubernetesControlTimeout = 60 * time.Second
 
+const (
+	// Four concurrent FUSE claims can each poll Pod readiness while the pool
+	// refills. Keep this client budget above that bounded polling demand so
+	// client-side throttling does not consume the preparation deadline.
+	kubernetesClientQPS   = 20
+	kubernetesClientBurst = 40
+)
+
 // Bump this when Pod construction or the runtime control/security contract
 // changes incompatibly. Ordinary and FUSE pool identities both include it.
 const warmPoolTemplateVersion = "kubernetes-sandbox-pod/v6"
@@ -211,6 +219,8 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 	if err != nil {
 		return nil, fmt.Errorf("build k8s config: %w", err)
 	}
+	restConfig.QPS = kubernetesClientQPS
+	restConfig.Burst = kubernetesClientBurst
 
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -229,7 +239,7 @@ func New(kubeconfig string, namespace string, options ...Option) (*Runtime, erro
 		restConfig:         restConfig,
 		namespace:          namespace,
 		hasCilium:          hasCilium,
-		pollInterval:       250 * time.Millisecond,
+		pollInterval:       500 * time.Millisecond,
 		prepareTimeout:     defaultKubernetesControlTimeout,
 		readyTimeout:       defaultKubernetesControlTimeout,
 		terminationTimeout: defaultKubernetesControlTimeout,
