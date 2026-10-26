@@ -29,6 +29,99 @@ func newDistributedFUSERecoveryManager(t *testing.T) (*Manager, *fuseManagerRunt
 	return m, rt, store
 }
 
+func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		expireLease bool
+		session     bool
+		unconfirmed bool
+		checkpoint  bool
+	}{
+		{name: "live workspace lease stays protected"},
+		{name: "expired workspace lease is recovered", expireLease: true},
+		{name: "published session stays protected", expireLease: true, session: true},
+		{name: "missing termination proof retains owner", expireLease: true, unconfirmed: true},
+		{name: "checkpointed termination resumes after Pod absence", expireLease: true, checkpoint: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			rt := newFUSEManagerRuntime()
+			m, _, repo, store := newFUSETestManager(t, rt)
+			m.config.RuntimeType = "kubernetes"
+			prepared, err := repo.ListByPoolKey(ctx, "pool-key")
+			require.NoError(t, err)
+			require.Len(t, prepared, 1)
+			record := prepared[0]
+
+			req := validLeaseRequest()
+			req.Runtime = "kubernetes"
+			req.RuntimeID, req.RuntimeUID = record.RuntimeID, record.RuntimeUID
+			req.StorageIdentity = m.fsMeta.StorageIdentity
+			lease, err := m.config.WorkspaceCoordinator.Acquire(ctx, req)
+			require.NoError(t, err)
+			_, err = m.config.WorkspaceCoordinator.ConsumeMountAttempt(ctx, lease, record.PoolKey)
+			require.NoError(t, err)
+			claimed, err := repo.ClaimCleanup(ctx, record.PreparationID, state.FUSEPoolPrepared,
+				record.MaintainerToken, record.ReservationToken, record.Revision,
+				record.RuntimeID, record.RuntimeUID, "failed-create-cleanup", time.Second)
+			require.NoError(t, err)
+			if tc.checkpoint {
+				_, err = repo.ConfirmCleanupTermination(ctx, claimed.PreparationID, claimed.CleanupToken,
+					claimed.Revision, claimed.RuntimeID, claimed.RuntimeUID, state.FUSEPoolTerminationEvidence{
+						RuntimeUID: claimed.RuntimeUID, GracefulUnmount: true, ProcessExited: true,
+					})
+				require.NoError(t, err)
+			}
+			repo.mu.Lock()
+			repo.now = repo.now.Add(2 * time.Second)
+			repo.mu.Unlock()
+			if tc.expireLease {
+				store.expireKey(lease.Key)
+			}
+			if tc.session {
+				require.NoError(t, m.sessions.Save(ctx, &Sandbox{
+					ID: req.SandboxID, RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+				}))
+			}
+			restartedPool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
+			restartedPool.config.MinSize = 0
+			restartedConfig := m.config
+			restartedConfig.FUSEPool = restartedPool
+			restarted := NewManager(rt, m.filesystem, m.fsMeta, restartedConfig)
+			restarted.SetSessionStore(NewSessionStore(store, time.Hour))
+			if tc.unconfirmed {
+				unconfirmed := unconfirmedFailedCreateRuntime{rt}
+				restarted.runtime = unconfirmed
+				restarted.fusePool.runtime = unconfirmed
+			} else if tc.checkpoint {
+				missing := absentCheckpointedFUSERuntime{rt}
+				restarted.runtime = missing
+				restarted.fusePool.runtime = missing
+			}
+
+			require.NoError(t, restarted.fusePool.Reconcile(ctx))
+			_, exists := repo.record(record.PreparationID)
+			if !tc.expireLease || tc.session || tc.unconfirmed {
+				require.True(t, exists)
+				require.False(t, rt.wasRemoved(record.RuntimeID))
+				ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
+				require.NoError(t, err)
+				ownerRaw, err := store.Get(ctx, ownerKey.owner)
+				require.NoError(t, err)
+				require.NotEmpty(t, ownerRaw)
+				return
+			}
+			require.False(t, exists, "restart must finish the durable cleanup after the original owner is gone")
+			require.True(t, rt.wasRemoved(record.RuntimeID))
+			ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
+			require.NoError(t, err)
+			ownerRaw, err := store.Get(ctx, ownerKey.owner)
+			require.NoError(t, err)
+			require.Nil(t, ownerRaw)
+		})
+	}
+}
+
 type failClaimReplyRepository struct {
 	state.FUSEPoolRepository
 	failed    bool
@@ -48,6 +141,18 @@ type failRemovalReplyRuntime struct {
 	*fuseManagerRuntime
 	failed    bool
 	targetUID string
+}
+
+type unconfirmedFailedCreateRuntime struct{ *fuseManagerRuntime }
+
+func (r unconfirmedFailedCreateRuntime) ConfirmPreparedSandboxTermination(context.Context, string, string) (runtime.TerminationEvidence, error) {
+	return runtime.TerminationEvidence{}, runtime.ErrTerminationUnconfirmed
+}
+
+type absentCheckpointedFUSERuntime struct{ *fuseManagerRuntime }
+
+func (r absentCheckpointedFUSERuntime) GetSandbox(context.Context, string) (*runtime.SandboxInfo, error) {
+	return nil, runtime.ErrNotFound
 }
 
 func (r *failRemovalReplyRuntime) FinalizePreparedSandboxRemoval(ctx context.Context, id, uid string, evidence runtime.TerminationEvidence) error {

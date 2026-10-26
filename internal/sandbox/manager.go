@@ -245,6 +245,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 	}
 	if m.fusePool != nil {
 		m.fusePool.config.PristineGuard = m.guardFUSEPoolRecord
+		m.fusePool.config.RecoverProtectedCleanup = m.recoverProtectedFUSECleanup
 	}
 	return m
 }
@@ -1449,6 +1450,81 @@ func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPool
 		return FUSEPoolAbandoned, nil
 	}
 	return FUSEPoolPristine, nil
+}
+
+// recoverProtectedFUSECleanup finishes a failed create after its original API
+// process disappears. The pool's server-expired cleanup lease and the absence
+// of a workspace lease, session and active record are all required; the
+// persistent owner alone never authorizes deleting a running sandbox.
+func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.FUSEPoolRecord) (bool, error) {
+	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.fsMeta == nil ||
+		record.State != state.FUSEPoolCleanup || record.PoolKey != m.fusePool.poolKey ||
+		record.CleanupToken == "" || record.RuntimeID == "" || record.RuntimeUID == "" {
+		return false, nil
+	}
+	m.mu.RLock()
+	if m.fuseInFlight[record.PreparationID] != nil {
+		m.mu.RUnlock()
+		return false, nil
+	}
+	for _, lifecycle := range m.fuseLifecycles {
+		if lifecycle.record.RuntimeUID == record.RuntimeUID || lifecycle.record.PreparationID == record.PreparationID {
+			m.mu.RUnlock()
+			return false, nil
+		}
+	}
+	m.mu.RUnlock()
+
+	coordinator := m.config.WorkspaceCoordinator
+	owner, err := coordinator.runtimeOwner(ctx, record.RuntimeID, record.RuntimeUID)
+	if err != nil || owner == nil {
+		return false, err
+	}
+	if owner.MountType != WorkspaceMountFUSE || owner.MountAttempt != 1 {
+		return false, nil
+	}
+	canRecover := func(status string, cleanup state.FUSEPoolRecord) bool {
+		if status == "runtime_present" {
+			return true
+		}
+		evidence, confirmed := poolTerminationEvidence(cleanup)
+		return status == "runtime_scope_unconfirmed" && confirmed &&
+			evidence.GracefulUnmount && evidence.ProcessExited
+	}
+	status, err := m.workspaceOwnerRecoveryStatus(ctx, *owner)
+	if err != nil || !canRecover(status, record) {
+		return false, err
+	}
+
+	// ClaimCleanup CAS-replaces only an expired cleanup holder. A competing
+	// process or a newly published lifecycle must never share this token.
+	claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, record)
+	if err != nil {
+		return false, err
+	}
+	status, err = m.workspaceOwnerRecoveryStatus(ctx, *owner)
+	if err != nil || !canRecover(status, *claimed) {
+		return false, err
+	}
+	terminated, err := m.fusePool.RemoveClaimedRuntime(ctx, *claimed)
+	if err != nil {
+		return false, err
+	}
+	evidence, confirmed := poolTerminationEvidence(*terminated)
+	if !confirmed || !evidence.GracefulUnmount || !evidence.ProcessExited {
+		return false, ErrRuntimeExitUnconfirmed
+	}
+	lease, err := coordinator.Restore(ctx, *owner)
+	if err != nil {
+		return false, err
+	}
+	if err := coordinator.Release(ctx, lease, evidence); err != nil {
+		return false, err
+	}
+	if err := m.fusePool.CompleteClaimedCleanup(ctx, *terminated); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLifecycle) {

@@ -53,15 +53,21 @@ const (
 // error or Unknown is fail-closed and never authorizes physical deletion.
 type PristineGuardFunc func(context.Context, state.FUSEPoolRecord) (FUSEPoolDisposition, error)
 
+// ProtectedCleanupRecoveryFunc may finish an expired cleanup whose sole
+// protection is a failed create's persistent workspace owner. It must claim
+// the cleanup record and prove termination before releasing that owner.
+type ProtectedCleanupRecoveryFunc func(context.Context, state.FUSEPoolRecord) (bool, error)
+
 // FUSEPoolConfig configures the sandbox-api-owned FUSE shell pool.
 type FUSEPoolConfig struct {
-	MinSize         int
-	MaxSize         int
-	RefillInterval  time.Duration
-	PrepareTimeout  time.Duration
-	ReservationTTL  time.Duration
-	MaintainerToken string
-	PristineGuard   PristineGuardFunc
+	MinSize                 int
+	MaxSize                 int
+	RefillInterval          time.Duration
+	PrepareTimeout          time.Duration
+	ReservationTTL          time.Duration
+	MaintainerToken         string
+	PristineGuard           PristineGuardFunc
+	RecoverProtectedCleanup ProtectedCleanupRecoveryFunc
 	// Shared Kubernetes inventory outlives individual API processes.
 	InventoryStore state.AtomicStore
 	InventoryScope string
@@ -900,6 +906,18 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 				// it is no longer protected; an uncertain guard result is not
 				// permission to remove the runtime or its recovery record.
 				disposition, _ := p.guard(ctx, record)
+				if disposition == FUSEPoolProtected && p.config.RecoverProtectedCleanup != nil {
+					recovered, recoverErr := p.config.RecoverProtectedCleanup(ctx, record)
+					if recoverErr != nil && !isStalePoolMutation(recoverErr) {
+						// An unavailable proof source keeps the owner and tombstone;
+						// it must not withdraw the entire API during startup.
+						logger.Error(ctx, "owner-bound FUSE cleanup will retry",
+							logger.AddField("preparation_id", record.PreparationID), logger.ErrorField(recoverErr))
+					}
+					if recovered || recoverErr != nil {
+						return nil
+					}
+				}
 				if disposition != FUSEPoolPristine && disposition != FUSEPoolAbandoned {
 					return nil
 				}

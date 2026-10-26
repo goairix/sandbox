@@ -210,6 +210,45 @@ func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, r
 	return false, nil
 }
 
+// runtimeOwner resolves an exceptional failed-create cleanup to exactly one
+// persistent owner. The full scan is confined to expired, owner-protected
+// cleanup records; ordinary acquisition never pays for this recovery lookup.
+func (c *WorkspaceCoordinator) runtimeOwner(ctx context.Context, runtimeID, runtimeUID string) (*WorkspaceOwner, error) {
+	if c == nil || c.configErr != nil || runtimeID == "" || runtimeUID == "" {
+		return nil, ErrInvalidWorkspaceLease
+	}
+	keys, err := c.store.Keys(ctx, workspaceOwnerKeyPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("list workspace owners for cleanup: %w", err)
+	}
+	var matched *WorkspaceOwner
+	for _, key := range keys {
+		raw, err := c.store.Get(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("load workspace owner for cleanup: %w", err)
+		}
+		if raw == nil {
+			continue
+		}
+		var owner WorkspaceOwner
+		if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
+			return nil, ErrWorkspaceOwnerLost
+		}
+		ownerKeys, err := workspaceStateKeysFromOwner(owner)
+		if err != nil || ownerKeys.owner != key {
+			return nil, ErrWorkspaceOwnerLost
+		}
+		if owner.RuntimeID == runtimeID && owner.RuntimeUID == runtimeUID {
+			if matched != nil {
+				return nil, ErrWorkspaceOwnerLost
+			}
+			copy := owner
+			matched = &copy
+		}
+	}
+	return matched, nil
+}
+
 // ProtectedRuntimeUIDs returns every immutable runtime referenced by valid
 // persistent owner state. One malformed record aborts the scan so an orphan
 // reconciler can never delete resources based on an incomplete protection set.
