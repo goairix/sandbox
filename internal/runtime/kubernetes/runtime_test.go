@@ -1440,6 +1440,79 @@ func TestAuthorizeResponseLossRetainsAttemptedGenerationForRemoval(t *testing.T)
 	assert.Equal(t, int64(7), request.Generation)
 }
 
+func TestAuthorizeRejectedBeforeDeliveryShutsDownExactPreparedGeneration(t *testing.T) {
+	base := preparedScript()
+	var shutdownGeneration int64 = -1
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		switch fmt.Sprint(command.argv) {
+		case fmt.Sprint([]string{mounterBinary, "authorize"}):
+			return nil, errors.New("client rate limiter rejected authorize before delivery")
+		case fmt.Sprint([]string{mounterBinary, "health", "ready"}):
+			return nil, errors.New("mounter is still prepared")
+		case fmt.Sprint([]string{mounterBinary, "shutdown"}):
+			var request controlRequestWire
+			if err := json.Unmarshal(command.stdin, &request); err != nil {
+				return nil, err
+			}
+			shutdownGeneration = request.Generation
+			if request.Generation != 0 {
+				return nil, errors.New("shutdown generation does not match prepared mounter")
+			}
+			return []byte(`{"version":1,"runtime_uid":"pod-uid-a","generation":0,"graceful_unmount":true}`), nil
+		default:
+			return base.handler(command)
+		}
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.Error(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	require.NoError(t, rt.RemovePreparedSandbox(context.Background(), ref.ID, ref.UID))
+	assert.Equal(t, int64(0), shutdownGeneration)
+}
+
+func TestAuthorizeRejectedBeforeDeliveryRecoversStoppedGenerationZero(t *testing.T) {
+	base := preparedScript()
+	var shutdownGenerations []int64
+	stopped := false
+	script := &commandScript{handler: func(command recordedPodCommand) ([]byte, error) {
+		switch fmt.Sprint(command.argv) {
+		case fmt.Sprint([]string{mounterBinary, "authorize"}):
+			return nil, errors.New("authorize was not delivered")
+		case fmt.Sprint([]string{mounterBinary, "health", "ready"}):
+			return nil, errors.New("mounter already stopped after strong generation-zero shutdown")
+		case fmt.Sprint([]string{mounterBinary, "health", "prepared"}):
+			if stopped {
+				return nil, errors.New("mounter already stopped after strong generation-zero shutdown")
+			}
+			return base.handler(command)
+		case fmt.Sprint([]string{mounterBinary, "shutdown"}):
+			var request controlRequestWire
+			if err := json.Unmarshal(command.stdin, &request); err != nil {
+				return nil, err
+			}
+			shutdownGenerations = append(shutdownGenerations, request.Generation)
+			if request.Generation != 0 {
+				return nil, errors.New("shutdown generation mismatch")
+			}
+			return []byte(`{"version":1,"runtime_uid":"pod-uid-a","generation":0,"graceful_unmount":true}`), nil
+		default:
+			return base.handler(command)
+		}
+	}}
+	rt, _ := newFakeKubernetesRuntime(t, script)
+	info, err := rt.PrepareSandbox(context.Background(), preparedFUSESpecForTest())
+	require.NoError(t, err)
+	stopped = true
+	ref := sandboxruntime.RuntimeRef{ID: info.RuntimeID, UID: info.RuntimeUID}
+	auth := sandboxruntime.WorkspaceMountAuthorization{RuntimeUID: ref.UID, PoolKey: preparedFUSESpecForTest().WorkspaceFUSE.PoolKey, WorkspaceHash: "hash", Prefix: "p/", LeaseGeneration: 7, MountAttempt: 1}
+	require.Error(t, rt.AuthorizeWorkspaceMount(context.Background(), ref, auth))
+	require.NoError(t, rt.RemovePreparedSandbox(context.Background(), ref.ID, ref.UID))
+	assert.Equal(t, []int64{7, 0}, shutdownGenerations)
+}
+
 func TestWaitReadyChecksGenerationAndRunsFixedExactUIDProbe(t *testing.T) {
 	script := preparedScript()
 	rt, client := newFakeKubernetesRuntime(t, script)

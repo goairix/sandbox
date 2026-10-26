@@ -1297,23 +1297,29 @@ func (r *Runtime) ConfirmPreparedSandboxTermination(ctx context.Context, runtime
 		} else if preparedPodCanRequestNormalDeletion(pod) {
 			proof = r.confirmUnstartedPodTermination(ctx, ref, pod)
 		} else {
+			bootstrap, bootstrapErr := exactFUSEPodBootstrap(pod, ref)
+			if bootstrapErr != nil {
+				return runtime.TerminationEvidence{}, bootstrapErr
+			}
 			if generation == 0 {
 				status, statusErr := r.readMounterStatus(ctx, ref, "ready")
-				if statusErr == nil && status.Generation >= 0 {
+				if statusErr == nil && status.Generation > 0 &&
+					len(kubernetesReadyStatusMismatches(status, ref.UID, bootstrap.PoolKey, status.Generation, bootstrap.CacheLimitBytes)) == 0 {
 					generation = status.Generation
 				}
 			}
-			request, _ := json.Marshal(controlRequestWire{Version: controlWireVersion, RuntimeUID: ref.UID, Generation: generation})
-			raw, shutdownErr := r.execControl(ctx, ref.ID, workspaceMounterContainer, []string{mounterBinary, "shutdown"}, request)
-			gracefulUnmount := false
-			if shutdownErr == nil {
-				ack, decodeErr := decodeShutdownAck(raw)
-				if decodeErr != nil || ack.RuntimeUID != ref.UID || ack.Generation != generation || !ack.GracefulUnmount {
-					shutdownErr = fmt.Errorf("workspace shutdown acknowledgement is invalid")
-				} else {
-					gracefulUnmount = true
+			shutdownErr := r.requestVerifiedMounterShutdown(ctx, ref, generation)
+			if shutdownErr != nil && generation > 0 && ctx.Err() == nil {
+				// A rejected authorize may have left the sidecar at generation zero,
+				// including after an earlier zero-generation shutdown lost its
+				// receipt. The sidecar rejects a mismatched generation before any
+				// shutdown effect. Only its exact strong ACK permits this fallback.
+				if zeroErr := r.requestVerifiedMounterShutdown(ctx, ref, 0); zeroErr == nil {
+					generation = 0
+					shutdownErr = nil
 				}
 			}
+			gracefulUnmount := shutdownErr == nil
 			if shutdownErr != nil {
 				// The pool may later observe a terminal Pod without this ACK. Keep
 				// the bounded, sanitized control error visible for that diagnosis.
@@ -2542,6 +2548,19 @@ func (r *Runtime) readMounterStatus(ctx context.Context, ref runtime.RuntimeRef,
 		return mounterStatusWire{}, runtime.ErrInvalidRuntimeRef
 	}
 	return status, nil
+}
+
+func (r *Runtime) requestVerifiedMounterShutdown(ctx context.Context, ref runtime.RuntimeRef, generation int64) error {
+	request, _ := json.Marshal(controlRequestWire{Version: controlWireVersion, RuntimeUID: ref.UID, Generation: generation})
+	raw, err := r.execControl(ctx, ref.ID, workspaceMounterContainer, []string{mounterBinary, "shutdown"}, request)
+	if err != nil {
+		return err
+	}
+	ack, err := decodeShutdownAck(raw)
+	if err != nil || ack.RuntimeUID != ref.UID || ack.Generation != generation || !ack.GracefulUnmount {
+		return fmt.Errorf("workspace shutdown acknowledgement is invalid")
+	}
+	return nil
 }
 
 func mounterRestartCount(pod *corev1.Pod) (int32, error) {
