@@ -131,6 +131,25 @@ func (r *ActiveSandboxRepository) publish(ctx context.Context, record state.Acti
 			compares = append(compares, poolConditions...)
 		}
 		writes := append([]clientv3.Op{clientv3.OpPut(key, string(raw)), clientv3.OpPut(index, record.SandboxID)}, indexWrites...)
+		if binding != nil {
+			// The active record and removal of the orphan scan marker commit
+			// together. A lost reply cannot leave an unprotected runtime.
+			pool := NewFUSEPoolRepository(r.store)
+			pendingKey := pool.unpublishedKey(binding.PoolKey, binding.PreparationID)
+			pending, readErr := r.store.client.Get(requestCtx, pendingKey)
+			if readErr != nil {
+				cancel()
+				return readErr
+			}
+			if len(pending.Kvs) != 0 {
+				if len(pending.Kvs) != 1 || string(pending.Kvs[0].Value) != binding.PreparationID {
+					cancel()
+					return state.ErrFUSEPoolCorrupt
+				}
+				compares = append(compares, clientv3.Compare(clientv3.ModRevision(pendingKey), "=", pending.Kvs[0].ModRevision))
+				writes = append(writes, clientv3.OpDelete(pendingKey))
+			}
+		}
 		response, err := r.store.client.Txn(requestCtx).
 			If(compares...).
 			Then(writes...).

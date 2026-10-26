@@ -13,6 +13,7 @@ import (
 const maxPoolStatePage = 64
 
 var _ state.FUSEPoolStatePageReader = (*FUSEPoolRepository)(nil)
+var _ state.FUSEPoolUnpublishedPageReader = (*FUSEPoolRepository)(nil)
 var _ state.FUSEPoolInventoryReader = (*FUSEPoolRepository)(nil)
 
 // ReadInventory reads only the pool's fixed-size aggregate. The six counts
@@ -94,6 +95,63 @@ func (r *FUSEPoolRepository) ListStatePage(ctx context.Context, poolKey string, 
 		}
 		record, err := decodePoolRecord(rangeResult.Kvs[0].Value, string(entries[i].Value))
 		if err != nil || record.PoolKey != poolKey || record.State != poolState {
+			return nil, "", state.ErrFUSEPoolCorrupt
+		}
+		records = append(records, record)
+	}
+	if !more {
+		return records, "", nil
+	}
+	return records, strings.TrimPrefix(string(entries[len(entries)-1].Key), prefix), nil
+}
+
+// ListUnpublishedPage uses the same MVCC snapshot for marker and record. A
+// publication or cleanup between pages is handled by the next scan.
+func (r *FUSEPoolRepository) ListUnpublishedPage(ctx context.Context, poolKey, after string, limit int) ([]state.FUSEPoolRecord, string, error) {
+	if r == nil || r.store == nil || !validPoolID(poolKey) ||
+		limit < 1 || limit > maxPoolStatePage || !validPoolPageCursor(after) {
+		return nil, "", state.ErrFUSEPoolInvalidRecord
+	}
+	requestCtx, cancel := r.store.requestContext(ctx)
+	defer cancel()
+	prefix := r.poolBase(poolKey) + "unpublished/"
+	start := prefix
+	if after != "" {
+		start += after + "\x00"
+	}
+	index, err := r.store.client.Get(requestCtx, start,
+		clientv3.WithRange(clientv3.GetPrefixRangeEnd(prefix)), clientv3.WithLimit(int64(limit+1)))
+	if err != nil || len(index.Kvs) == 0 {
+		return nil, "", err
+	}
+	entries := index.Kvs
+	more := len(entries) > limit
+	if more {
+		entries = entries[:limit]
+	}
+	reads := make([]clientv3.Op, 0, len(entries))
+	for _, entry := range entries {
+		id := string(entry.Value)
+		if !validPoolID(id) || string(entry.Key) != r.unpublishedKey(poolKey, id) {
+			return nil, "", state.ErrFUSEPoolCorrupt
+		}
+		reads = append(reads, clientv3.OpGet(r.recordKey(id), clientv3.WithRev(index.Header.Revision)))
+	}
+	result, err := r.store.client.Txn(requestCtx).Then(reads...).Commit()
+	if err != nil {
+		return nil, "", err
+	}
+	if len(result.Responses) != len(entries) {
+		return nil, "", state.ErrFUSEPoolCorrupt
+	}
+	records := make([]state.FUSEPoolRecord, 0, len(entries))
+	for i, response := range result.Responses {
+		rangeResult := response.GetResponseRange()
+		if rangeResult == nil || len(rangeResult.Kvs) != 1 {
+			return nil, "", state.ErrFUSEPoolCorrupt
+		}
+		record, decodeErr := decodePoolRecord(rangeResult.Kvs[0].Value, string(entries[i].Value))
+		if decodeErr != nil || record.PoolKey != poolKey || record.State != state.FUSEPoolConsumed {
 			return nil, "", state.ErrFUSEPoolCorrupt
 		}
 		records = append(records, record)

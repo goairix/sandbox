@@ -91,6 +91,20 @@ func (r *FUSEPoolRepository) claimFromState(ctx context.Context, recordKey strin
 		clientv3.Compare(clientv3.Version(r.cleanupDeadlineKey(record.PreparationID)), "=", 0),
 	}
 	operations := make([]clientv3.Op, 0, 8)
+	if record.State == state.FUSEPoolConsumed {
+		pendingKey := r.unpublishedKey(record.PoolKey, record.PreparationID)
+		pending, err := r.store.client.Get(ctx, pendingKey)
+		if err != nil {
+			return nil, err
+		}
+		if len(pending.Kvs) != 0 {
+			if len(pending.Kvs) != 1 || string(pending.Kvs[0].Value) != record.PreparationID {
+				return nil, state.ErrFUSEPoolCorrupt
+			}
+			conditions = append(conditions, clientv3.Compare(clientv3.ModRevision(pendingKey), "=", pending.Kvs[0].ModRevision))
+			operations = append(operations, clientv3.OpDelete(pendingKey))
+		}
+	}
 	if record.RuntimeUID != "" {
 		conditions = append(conditions,
 			clientv3.Compare(clientv3.Value(r.uidOwnerKey(record.RuntimeUID)), "=", record.PreparationID))

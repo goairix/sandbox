@@ -141,6 +141,12 @@ func (r *FUSEPoolRepository) consumedKey(poolKey, id string) string {
 	return r.poolBase(poolKey) + "state/consumed/" + poolDigest(id)
 }
 
+// unpublishedKey identifies a consumed runtime that has not yet published
+// its active lifecycle. Only this small set needs orphan recovery scans.
+func (r *FUSEPoolRepository) unpublishedKey(poolKey, id string) string {
+	return r.poolBase(poolKey) + "unpublished/" + poolDigest(id)
+}
+
 func (r *FUSEPoolRepository) cleanupKey(poolKey, id string) string {
 	return r.poolBase(poolKey) + "state/cleanup/" + poolDigest(id)
 }

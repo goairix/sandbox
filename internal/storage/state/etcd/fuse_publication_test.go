@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -124,4 +125,48 @@ func TestFUSEBoundActivePublicationStopsAfterCleanupClaim(t *testing.T) {
 	after, err := active.Load(ctx, "sandbox-after")
 	require.NoError(t, err)
 	require.Nil(t, after)
+}
+
+func TestUnpublishedFUSEIndexEndsWithActivePublicationOrCleanupClaim(t *testing.T) {
+	for _, publish := range []bool{true, false} {
+		t.Run(fmt.Sprintf("publish=%t", publish), func(t *testing.T) {
+			store := testStore(t)
+			pool := NewFUSEPoolRepository(store)
+			consumed := consumedPoolRecord(t, pool)
+			ctx := context.Background()
+			page, next, err := pool.ListUnpublishedPage(ctx, consumed.PoolKey, "", 1)
+			require.NoError(t, err)
+			require.Empty(t, next)
+			require.Len(t, page, 1)
+			require.Equal(t, *consumed, page[0])
+			if publish {
+				active, err := NewActiveSandboxRepository(store, "unpublished-test")
+				require.NoError(t, err)
+				now := time.Now().UTC()
+				record := state.ActiveSandboxRecord{
+					Version: 1, SandboxID: "published", Phase: state.ActiveSandboxPublishing,
+					Revision: 1, Generation: 1, RuntimeID: consumed.RuntimeID, RuntimeUID: consumed.RuntimeUID,
+					Snapshot: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
+				}
+				binding := state.FUSEPoolPublication{
+					PoolKey: consumed.PoolKey, PreparationID: consumed.PreparationID,
+					RuntimeID: consumed.RuntimeID, RuntimeUID: consumed.RuntimeUID,
+					ReservationToken: consumed.ReservationToken,
+				}
+				require.NoError(t, active.PublishFUSEBound(ctx, record, binding))
+				loaded, err := active.Load(ctx, record.SandboxID)
+				require.NoError(t, err)
+				require.NotNil(t, loaded)
+			} else {
+				_, err := pool.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+					consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+					consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+				require.NoError(t, err)
+			}
+			page, next, err = pool.ListUnpublishedPage(ctx, consumed.PoolKey, "", 1)
+			require.NoError(t, err)
+			require.Empty(t, page)
+			require.Empty(t, next)
+		})
+	}
 }

@@ -119,6 +119,13 @@ type FUSEPoolStatePageReader interface {
 	ListStatePage(ctx context.Context, poolKey string, poolState FUSEPoolState, after string, limit int) ([]FUSEPoolRecord, string, error)
 }
 
+// FUSEPoolUnpublishedPageReader scans only consumed runtimes whose active
+// lifecycle publication has not committed. Resident consumed records never
+// enter this maintenance path.
+type FUSEPoolUnpublishedPageReader interface {
+	ListUnpublishedPage(ctx context.Context, poolKey, after string, limit int) ([]FUSEPoolRecord, string, error)
+}
+
 // FUSEPoolInventory is a fixed-size snapshot of one pool's state counts.
 // Counts are observations for maintenance and metrics, never authorization
 // for checkout or cleanup; those transitions still compare exact records.

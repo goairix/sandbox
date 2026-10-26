@@ -111,6 +111,9 @@ func (r *FUSEPoolRepository) transitionCheckoutOnce(ctx context.Context, id stri
 		}
 		conditions = append(conditions, clientv3.Compare(clientv3.ModRevision(deadlineKey), "=", deadline.Kvs[0].ModRevision))
 	}
+	if to == state.FUSEPoolConsumed {
+		conditions = append(conditions, clientv3.Compare(clientv3.Version(r.unpublishedKey(record.PoolKey, id)), "=", 0))
+	}
 
 	record.State = to
 	record.Revision++
@@ -119,11 +122,17 @@ func (r *FUSEPoolRepository) transitionCheckoutOnce(ctx context.Context, id stri
 	if err != nil {
 		return nil, err
 	}
+	operations := []clientv3.Op{
+		clientv3.OpPut(metaKey, string(encodedMetadata)),
+		clientv3.OpPut(recordKey, string(raw)),
+		clientv3.OpDelete(fromKey), clientv3.OpPut(toKey, id),
+	}
+	if to == state.FUSEPoolConsumed {
+		operations = append(operations, clientv3.OpPut(r.unpublishedKey(record.PoolKey, id), id))
+	}
 	written, err := r.store.client.Txn(requestCtx).
 		If(conditions...).
-		Then(clientv3.OpPut(metaKey, string(encodedMetadata)),
-			clientv3.OpPut(recordKey, string(raw)),
-			clientv3.OpDelete(fromKey), clientv3.OpPut(toKey, id)).
+		Then(operations...).
 		Else(clientv3.OpGet(recordKey), clientv3.OpGet(metaKey)).Commit()
 	if err != nil {
 		return nil, err
