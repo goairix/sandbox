@@ -233,6 +233,42 @@ func (r absentCheckpointedFUSERuntime) GetSandbox(context.Context, string) (*run
 	return nil, runtime.ErrNotFound
 }
 
+type cancelAfterFUSEActivationRepository struct {
+	*memoryActiveRepository
+	cancel context.CancelFunc
+	id     string
+}
+
+func (r *cancelAfterFUSEActivationRepository) Activate(ctx context.Context, id string, revision uint64, snapshot json.RawMessage) (*state.ActiveSandboxRecord, error) {
+	record, err := r.memoryActiveRepository.Activate(ctx, id, revision, snapshot)
+	if err == nil {
+		r.id = id
+		r.cancel()
+	}
+	return record, err
+}
+
+func TestDistributedFUSECreateCancellationAfterActivePublicationUsesActiveCleanup(t *testing.T) {
+	m, rt, store := newDistributedFUSERecoveryManager(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	repository := &cancelAfterFUSEActivationRepository{memoryActiveRepository: newMemoryActiveRepository(), cancel: cancel}
+	m.activeSandboxes = repository
+	m.config.ActiveSandboxes = repository
+	prepared, err := m.fusePool.repo.ListByPoolKey(context.Background(), "pool-key")
+	require.NoError(t, err)
+	require.Len(t, prepared, 1)
+	_, err = m.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/post-publication-cancel"})
+	require.Error(t, err)
+	require.NotEmpty(t, repository.id)
+	require.Eventually(t, func() bool {
+		active, loadErr := repository.Load(context.Background(), repository.id)
+		return loadErr == nil && active == nil && rt.wasRemoved(prepared[0].RuntimeID)
+	}, 5*time.Second, 20*time.Millisecond)
+	ownerKeys, err := store.Keys(context.Background(), workspaceOwnerKeyPrefix+"*")
+	require.NoError(t, err)
+	require.Empty(t, ownerKeys)
+}
+
 func (r *failRemovalReplyRuntime) FinalizePreparedSandboxRemoval(ctx context.Context, id, uid string, evidence runtime.TerminationEvidence) error {
 	if err := r.fuseManagerRuntime.FinalizePreparedSandboxRemoval(ctx, id, uid, evidence); err != nil {
 		return err

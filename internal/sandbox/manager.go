@@ -1235,6 +1235,9 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	m.mu.Unlock()
 	nextStage("publish")
 	if err = m.publishSandboxLifecycle(txnCtx, sb, gate, lifecycle, claim); err != nil {
+		m.mu.RLock()
+		published = claim.published
+		m.mu.RUnlock()
 		cancelLifecycle()
 		return nil, err
 	}
@@ -1275,20 +1278,21 @@ func (m *Manager) publishSandboxLifecycle(ctx context.Context, sb *Sandbox, gate
 		m.bindFUSEController(lifecycle, controller)
 	}
 	m.mu.Lock()
+	var abortErr error
 	if ctx.Err() != nil || claim.lost {
-		m.mu.Unlock()
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
-		defer cancel()
-		return errors.Join(ErrWorkspaceLeaseLost, m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
+		abortErr = ErrWorkspaceLeaseLost
 	}
 	m.lifecycleMu.Lock()
 	stopping := m.stopping
 	m.lifecycleMu.Unlock()
 	if stopping {
+		abortErr = errors.Join(abortErr, ErrSandboxNotReady)
+	}
+	if abortErr != nil && !m.distributedStateEnabled() {
 		m.mu.Unlock()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceCleanupTimeout)
 		defer cancel()
-		return errors.Join(ErrSandboxNotReady, m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
+		return errors.Join(abortErr, m.removeWorkspaceLifecycle(cleanupCtx, sb, ephemeralRecord))
 	}
 	m.sandboxes[sb.ID] = sb
 	m.operationGates[sb.ID] = gate
@@ -1297,6 +1301,12 @@ func (m *Manager) publishSandboxLifecycle(ctx context.Context, sb *Sandbox, gate
 	claim.published = true
 	claim.lifecycle = lifecycle
 	m.mu.Unlock()
+	if abortErr != nil {
+		// The active record now owns cleanup. Claiming the pool from the
+		// failed-create defer would bypass its durable cleanup checkpoint.
+		m.scheduleFUSETeardown(lifecycle, abortErr)
+		return abortErr
+	}
 	return nil
 }
 
