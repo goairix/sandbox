@@ -176,6 +176,7 @@ kubectl --context "$CTX" -n "$NS" get svc "$RELEASE"-api
 ## 5. 升级、停止和恢复
 
 - 小版本升级先固定镜像 tag/digest，备份环境 values 和 etcd snapshot，检查活跃沙盒，再执行 `helm upgrade`。存储身份、凭据代次、mounter 镜像或 LSM 策略改变会触发池/清理契约变化；安排排空窗口，不能只重启 Pod。
+- 三成员 PVC 整体恢复时，先停止新申请并安全排空业务与准备池，确认 API 已停机、受管状态归零；保存并校验最新 etcd 快照。将 StatefulSet 缩为 0 且确认三个 Pod 都退出后，分别挂载三块原 PVC，用**同一快照**及固定的三成员 peer 列表恢复到各 PVC 的暂存目录。三个暂存目录都验证通过后才替换各自的 `member`，原目录先改名保留；卸载临时 Pod，再启动三成员。必须核对三个 endpoint 的 cluster ID、member ID、revision 和快照标记，最后恢复 API/池并执行公开 FUSE 创建、读写、flush、删除到 404。不要把三个 PVC 分别从不同时间点的快照恢复，也不要在 etcd 或 API 仍写入时替换目录。CCE 实测记录见 [容量与发布报告](../superpowers/reports/2026-10-24-etcd-capacity-and-release.md)。
 - API 多副本重启后需验证既有沙盒的 GET/exec 与 TTL；etcd 故障恢复应验证原 owner 仍占用。无法确认清理完成的状态保持 Unknown，不手删 etcd 键、finalizer 或 PVC 来“归还”配额。
 - 不再需要测试安装时，先停止业务申请并完成公开 DELETE/TTL 排空，核对受管 Pod 与状态，再执行 `helm uninstall`。**卸载 Chart 不会删除外部 etcd、对象存储数据和它们的 PVC**；是否保留或销毁由部署者按各自备份策略决定。
 - 本次 DS 验收是 20 个 FUSE 驻留及若干故障用例；它不是 10 万存活、大量同时到期、跨节点或业务流量的容量验收。上线前按目标存量单独测申请尾延迟、维护写入、etcd 磁盘/延迟、Pool 补充和故障恢复。

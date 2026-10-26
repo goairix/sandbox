@@ -2024,3 +2024,46 @@ fsync、公开文件读取 200/原字节一致、flush 200。
 仍不能声称 Kubernetes 全损切回、定期备份和目标存量容量验收完成。
 快照文件只在本机权限为 0700 的临时目录内，文件为 0600；不是长期
 备份方案。
+
+### CCE 三成员 PVC 全损恢复与公开 FUSE 验证（2026-10-26）
+
+经用户授权，仅对 CCE `sandbox-fuse-etcd` 的新 `cce-pvc-etcd` 做真实
+停机恢复；DS 和 CCE 的 `aiadp-sandbox-fuse` 未改。先将两个池的
+`minSize` 设为 0（Helm revision 14），确认没有活跃的非池沙盒。
+第一次 release drain 将 API 停为 0 且移除了池 Pod，但审计仍发现
+3 条普通池记录。根因是 `minSize=0` 时 API 未连接共享普通池状态，
+导致排空进程无法删除旧记录。保持 API 停机，用同一镜像、后端和
+作用域，仅将排空 Job 的 `POOL_MIN_SIZE` 设为 3 再执行；Job 完成，
+普通池键和池 Pod 均为 0。第一次失败不记作排空成功。
+
+在新 etcd 写入独立测试标记后，保存最终快照到本机权限受限目录。
+快照 SHA-256 为
+`5ab9226804956085c4b1477ba334e78099d57db8755714293d3ab4a6bfd7f6a8`，
+`etcdutl` 检查为 revision 12227、5 个 key、12 MB。随后同时停掉
+三个新 etcd Pod，PVC 保持 Bound。三个临时 Pod 分别挂载一块 PVC，
+先将同一快照恢复到各自的 `/data/restored/member`；逐一确认快照与
+工具 SHA、恢复目录和原目录均有效后，把原目录改名为
+`/data/member-before-recovery-20261026`，再将恢复目录移入运行路径。
+没有删除三个原 member 目录。临时 Pod 删除、卷卸载后重启 StatefulSet。
+
+恢复后的三端均 Ready，endpoint status 无错误，cluster ID 一致且
+与恢复前不同，三个 member ID 各异，revision 均为 12227；快照内
+标记读回。Helm revision 15 恢复两个池的 `minSize=3`，API 2/2
+Ready。公开 FUSE 烟测返回创建 201、挂载信息 200、`/workspace`
+文件写入及读回 200、flush 200、删除 200、最终 GET 404，Job
+`cce-pvc-full-restore-smoke` 完成且 `pass=true`。旧 `cce-test-etcd`
+emptyDir 集群仍为 3/3，Helm revision 12 保留回退基线。
+三份 Job 日志的 SHA-256 分别为初次失败
+`42ad8ac0e1271b8326c71e61a1d7cdff8755edd9591148fdadb45f7cd2457b76`、
+重试通过 `a5f255af1a08e466ae409a3caff59012e7d81e93e200f1178126f4b8d87e7a4d`、
+FUSE 烟测通过 `6c731dfd4507787ca71991d9a9b790087962d629bfeadc7583d97b6e92b9a7ea`。
+日志保存在本机权限受限目录；三个临时 Job、烟测 ConfigMap 和快照
+标记已从集群移除。末次检查 API 2/2、新旧 etcd 各 3/3，准备池
+6 个 Pod、无非池 sandbox Pod，两个池的 `minSize` 均恢复为 3。
+上述 `minSize=0` 排空缺陷已在源码提交 `d27fc8ac` 修复并通过
+`cmd/sandbox`、池/排空相关测试及 `go vet`；CCE 当前 API 镜像仍是
+演练前版本，后续镜像升级才会包含此修复。
+
+这验证了 CCE 测试 namespace 中的**三成员 PVC 快照恢复与新建 FUSE
+主链**。它没有验证恢复时仍存活的业务沙盒、自动备份、跨可用区
+磁盘全损或 10 万存活容量。本机快照只是演练恢复点，不是持久备份。
