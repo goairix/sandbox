@@ -1961,5 +1961,43 @@ FUSE 动态 mount/unmount 的预期 409，而非把拒绝称为成功挂载。
 实例级 Cilium policy 已消失。
 
 这些代表性请求不覆盖所有参数组合、权限负例、所有网络目的地、
-故障矩阵或大存量容量验收。CCE 测试 etcd 仍为 `emptyDir`，也不能
-用这组 API 结果替代持久卷重建验收。
+故障矩阵或大存量容量验收。该接口矩阵运行时 CCE 测试 etcd 仍为
+`emptyDir`，不能用这组 API 结果替代下述持久卷重建验收。
+
+### CCE 独立 PVC 后端与单成员重建（2026-10-26）
+
+在用户批准新增云盘后，仅在 CCE 的 `sandbox-fuse-etcd` 安装另一套
+`cce-pvc-etcd` 三成员集群；旧 `cce-test-etcd` 保持运行作为回退点。
+新集群使用三块独立 `csi-disk` 10Gi RWO PVC，三个 Pod 分别位于
+`172.16.30.29`、`.66`、`.35`，新状态前缀为
+`/sandbox/cce-pvc-20261026/`。切换前旧测试 etcd 快照已保存到本机
+受限目录，SHA-256 为
+`dbe309edca6e72ecd50365659915faa58088a9609cb69d699b63d70abdcaa27a`；
+它不在仓库中，也未从旧前缀迁移数据。
+
+安装过程保留两条失败证据：首版新 StatefulSet 漏了旧镜像必需的
+`/usr/local/bin/etcd` command，Pod 报 `exec: --name=... not found`；
+补上后又因默认 `OrderedReady` 与三成员首次形成 quorum 相互等待。
+修正为原版的 `Parallel` 后，新集群三 PVC Bound、三 Pod Ready，
+endpoint status 无错误且 cluster ID 一致，member list 为三成员。
+这些失败发生在尚未承载 API 的新集群，旧 API 与旧 etcd 未改。
+
+Helm 升级前对照 19 个常驻资源：没有资源增删；只修改
+`sandbox-backend-fingerprint` 注解及 `sandbox-api` 的 etcd endpoint、
+prefix 环境变量和后端指纹。Helm revision 13 已切到新集群，API
+2/2 Ready，原 revision 12 与旧集群仍可作为回退路径。独立 FUSE
+沙盒 `sandbox-uflsm1ld9y` 公开创建 201，在 `/workspace` 写入并
+fsync、公开文件读取 200/原字节一致、flush 200。
+
+确认 `cce-pvc-etcd-0` 是 leader 后，仅重建 follower
+`cce-pvc-etcd-1`：Pod UID 从
+`a41a19fc-fb38-4df6-89b9-a8abd3167b75` 变为
+`e369fa77-9da9-4a8d-81b0-c38e34f80c43`，所挂 PVC UID 保持
+`b8cfbe5d-b103-461a-bdde-6b65021606ae`，etcd member ID 仍为
+`6900624117189025140`。三个 endpoint 再次无错误；原沙盒 GET
+200/同 ID，文件读取 200/原字节一致，DELETE 200 后 GET 404，
+原运行时 Pod 不在，新前缀内没有该逻辑 ID 的残留键。
+
+这关闭了 CCE **单成员 Pod 重建继续使用同一持久卷**的功能验收。
+旧 emptyDir 集群暂保留回退；未验三成员同时丢失后的 snapshot restore、
+跨可用区磁盘故障、备份自动化或大存量容量。

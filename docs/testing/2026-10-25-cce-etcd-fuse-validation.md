@@ -42,7 +42,9 @@
 两个私网目标的网络观察；逐次
 证据与限制见 [发布与容量报告](../superpowers/reports/2026-10-24-etcd-capacity-and-release.md)。
 
-CCE 的三个测试 etcd Pod 当前仍使用 `emptyDir`，namespace 内没有
-etcd PVC。它们可用于上述功能测试，不能作为持久卷重建或全员数据
-丢失后的恢复验收。自己部署时应按部署手册提供独立持久卷与备份方案；
-大存量容量仍单独验收。
+revision 12 的三个测试 etcd Pod 使用 `emptyDir`，不能据此证明持久
+恢复。2026-10-26 另建三块 `csi-disk` PVC 的 `cce-pvc-etcd`，并将
+测试 release 升至 revision 13；单个 follower Pod 重建后保持原
+PVC 与 member 身份，存活 FUSE 沙盒和文件可读，详情见上述报告。
+旧 emptyDir 集群暂保留回退。全员数据丢失后的 snapshot restore
+和大存量容量仍未验收。

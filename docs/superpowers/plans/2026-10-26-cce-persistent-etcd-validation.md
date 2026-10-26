@@ -19,28 +19,28 @@
 
 ## Task 1: Establish a safe cutover baseline
 
-- [ ] Record CCE Helm revision, API image/readiness, existing endpoints/prefix, active sandbox Pods and owner state.
-- [ ] Confirm `csi-disk` supports the three intended nodes; capture a snapshot of the old test etcd before the backend change.
-- [ ] Render the proposed Helm upgrade and review every changed resource; expect API backend settings and upgrade hooks, not unrelated network or storage changes.
+- [x] Record CCE Helm revision, API image/readiness, existing endpoints/prefix, and active non-pool sandbox Pods.
+- [x] Confirm `csi-disk` supports the three intended nodes; capture a snapshot of the old test etcd before the backend change.
+- [x] Render the proposed Helm upgrade and review every changed resource; expect API backend settings and upgrade hooks, not unrelated network or storage changes.
 
 ## Task 2: Create the isolated persistent etcd cluster
 
-- [ ] Install a headless Service and `cce-pvc-etcd` StatefulSet with three `10Gi` `csi-disk` claims, one member per node when schedulable, and the existing etcd image/probes/resources.
-- [ ] Wait for all three claims Bound and members Ready; verify endpoint status and member list agree on one cluster ID and three members.
-- [ ] Stop if placement, PVC attachment, or quorum fails; leave the original backend serving.
+- [x] Install a headless Service and `cce-pvc-etcd` StatefulSet with three `10Gi` `csi-disk` claims, one member per node when schedulable, and the existing etcd image/probes/resources.
+- [x] Wait for all three claims Bound and members Ready; verify endpoint status and member list agree on one cluster ID and three members.
+- [x] Stop if placement, PVC attachment, or quorum fails; leave the original backend serving. The first two startup errors were corrected before cutover.
 
 ## Task 3: Cut over only the CCE test release
 
-- [ ] Upgrade `sandbox` with the new three endpoints and fresh prefix while reusing all other installed values; check the pre-upgrade drain result.
-- [ ] Verify API 2/2 Ready, pool refill, and a public FUSE create/read/write/delete to final 404.
-- [ ] On failure, Helm rollback to revision 12 and verify the old API 2/2 Ready; do not delete either etcd cluster.
+- [x] Upgrade `sandbox` with the new three endpoints and fresh prefix while reusing all other installed values; the pre-upgrade hook completed.
+- [x] Verify API 2/2 Ready, pool refill, and a public FUSE create/read/write/delete to final 404.
+- [x] Keep revision 12 and the old backend available for rollback; the successful cutover did not invoke rollback.
 
 ## Task 4: Prove persistent member recovery
 
-- [ ] Create and hold a test FUSE sandbox with a workspace file; read it back through the public API.
-- [ ] Recreate exactly one follower etcd Pod, then verify its PVC UID and member identity are retained and all three endpoints regain health.
-- [ ] Verify the held sandbox ID, file bytes, and public DELETE to final 404; audit test Pod and owner residue.
-- [ ] Record evidence and remaining limits. One-member PVC recovery is not whole-cluster restore or large-capacity acceptance.
+- [x] Create and hold a test FUSE sandbox with a workspace file; read it back through the public API.
+- [x] Recreate exactly one follower etcd Pod, then verify its PVC UID and member identity are retained and all three endpoints regain health.
+- [x] Verify the held sandbox ID, file bytes, and public DELETE to final 404; audit test Pod and logical-ID key residue.
+- [x] Record evidence and remaining limits. One-member PVC recovery is not whole-cluster restore or large-capacity acceptance.
 
 ## Review Focus
 
