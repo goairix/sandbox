@@ -364,13 +364,7 @@ func main() {
 		managerConfig.ActiveSandboxes = activeRepository
 		managerConfig.InstanceID = instanceID
 	}
-	if cfg.Runtime.Type == "kubernetes" && cfg.Pool.MinSize > 0 {
-		managerConfig.PoolStateStore = stateStore
-		managerConfig.PoolScope = os.Getenv("SANDBOX_STATE_SCOPE")
-		if managerConfig.PoolScope == "" {
-			managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
-		}
-	}
+	attachKubernetesPoolState(&managerConfig, cfg, stateStore, os.Getenv("SANDBOX_STATE_SCOPE"))
 	for _, mode := range cfg.Workspace.EnabledMountModes {
 		managerConfig.EnabledMountModes[sandbox.WorkspaceMountType(mode)] = true
 	}
@@ -534,6 +528,19 @@ func main() {
 	// Wait for graceful shutdown to complete (signal-triggered path)
 	<-shutdownDone
 	log.Println("shutdown complete")
+}
+
+func attachKubernetesPoolState(managerConfig *sandbox.ManagerConfig, cfg *config.Config, store state.AtomicStore, scope string) {
+	if cfg.Runtime.Type != "kubernetes" {
+		return
+	}
+	// A zero minimum stops refill but release drain still needs the shared
+	// store to discover and remove records from the previous pool size.
+	managerConfig.PoolStateStore = store
+	managerConfig.PoolScope = scope
+	if managerConfig.PoolScope == "" {
+		managerConfig.PoolScope = cfg.Runtime.Kubernetes.Namespace
+	}
 }
 
 func loadRuntimeFUSECredentials(cfg *config.Config) (runtime.FUSECredentials, error) {
