@@ -1946,5 +1946,20 @@ Cilium deny policy 当时存在。公开 DELETE 200、最终 GET 404 后，
 该 Pod 不存在，匹配的 Cilium policy 也已消失。CCE 与 DS API 此后
 均为 2/2 Ready。
 
-这些是所列路径的代表性正例和两个私网目标的连通性观察，不等于 CCE
-全部 31 路、所有网络目的地、故障矩阵或大存量容量验收。
+再用独立 FUSE workspace `sandbox-di9znnun6q` 补测文件接口：Exec 写入
+两行文本后，read、list、list-recursive、glob、read-lines、edit、
+edit-lines 均为 200，下载读回第二次编辑的内容；DELETE 200、最终
+GET 404。该轮十二项检查均符合预期。
+
+最后用 `sandbox-7ih52xb067` 补齐同一 revision 12 的公开
+by-workspace 查询 200/同 ID、TTL 更新 200/1200 秒、网络禁用同值
+更新 200、普通 multipart 上传 200 和下载原字节一致；DELETE 200，
+最终 GET 404。至此 `internal/api/router.go` 注册的 **31 条**
+`/api/v1` 路由均在 revision 12 上得到至少一个代表性请求：包括两条
+FUSE 动态 mount/unmount 的预期 409，而非把拒绝称为成功挂载。
+最终检查未见本轮活跃 sandbox Pod，API 2/2 Ready；前述网络沙盒的
+实例级 Cilium policy 已消失。
+
+这些代表性请求不覆盖所有参数组合、权限负例、所有网络目的地、
+故障矩阵或大存量容量验收。CCE 测试 etcd 仍为 `emptyDir`，也不能
+用这组 API 结果替代持久卷重建验收。

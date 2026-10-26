@@ -38,7 +38,8 @@
 `sandbox` 已升级到 revision 12，API 2/2 Ready，镜像为
 `sandbox-fuse-etcd-api:v1-publication-guard-85b2b98-arm64`。后续测试
 覆盖了真实 FUSE 文件读写、公开创建与删除、API 重启、创建中断后的
-占用恢复，以及执行、技能、分片文件与两个私网目标的网络观察；逐次
+占用恢复，以及当前 revision 12 上 31 条公开路由的代表性请求与
+两个私网目标的网络观察；逐次
 证据与限制见 [发布与容量报告](../superpowers/reports/2026-10-24-etcd-capacity-and-release.md)。
 
 CCE 的三个测试 etcd Pod 当前仍使用 `emptyDir`，namespace 内没有
