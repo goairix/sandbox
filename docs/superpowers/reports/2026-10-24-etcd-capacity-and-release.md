@@ -1768,3 +1768,30 @@ Pod 验收环境。代码中 `guardFUSEPoolRecord` 仍会列举 session 与
 workspace owner，申请路径在大量存活 N 下可能增加扫描成本，
 需要单独做精确索引或等效有界证明，并在有足够物理容量的多 cell
 环境中验证。旧元数据子集的 10 万试验不能替代这一验收。
+
+### CCE 失败创建恢复的交叉引用防护（2026-10-26）
+
+独立审查发现：失败创建的持久 owner 只按自身 SandboxID 排除 session、
+ephemeral 和 active 记录，而池保护规则按 RuntimeUID/PreparationID
+识别引用。`c62f5f9` 在过期清理 CAS 前后重新检查全部引用；状态库缺失、
+读取失败或分页不完整均保留运行时。外部 session、ephemeral、active
+记录及缺失状态库的负例先真实失败，修复后通过；额外覆盖空页与第 129
+条 active 记录。`internal/sandbox` 全包、定向及全包 race、相关 runtime/
+命令包测试和 vet 均通过。该扫描只用于过期失败创建的恢复，仍随存活
+记录数增长，不能算 10 万容量优化。
+
+CCE Helm revision 6 使用 arm64 镜像
+`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-capacity-safety-c62f5f9-arm64`
+（digest `sha256:74da73a39c6cf47aca8c894f5bd5ee0661db9ed02e98a15f0d8e87cc573dc8ea`），
+API 2/2 Ready。公开 API 烟测为 POST 201、mounted info 200、workspace
+写入/fsync/读回及 Exec 200、flush 200、DELETE 200 至 GET 404；日志
+`/tmp/cce-safety-smoke-c62f5f9.log` SHA-256
+`cd7e4104c1745c6b59db57e8c20e095e105a1c6c44efd01cc6deacbfa6716b9e`。
+测试 Job/ConfigMap 已删除，随后只读 owner 审计为 `[]`。本轮未做 CCE
+失败创建中断注入，也未重跑超过 30 个同时存活的容量试验。
+
+审查仍留一项并发边界：第二次只读扫描与实际删除之间，session/
+ephemeral/active 发布没有跨存储的原子栅栏；etcd active 分页也不提供
+并发全局快照。现有清理租约 CAS、失租取消与终止证明缩小此窗口，
+但尚不能作为跨进程延迟发布竞态验收。需要发布与回收共用的持久化
+fence 和故障注入正反例后才关闭该风险。
