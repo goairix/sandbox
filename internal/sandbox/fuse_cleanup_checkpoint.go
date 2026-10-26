@@ -220,6 +220,19 @@ func (m *Manager) restoreCheckpointedFUSECleanup(ctx context.Context, sb *Sandbo
 		owner.Bucket != spec.Bucket || owner.Prefix != prefix || owner.Runtime != spec.RuntimeType {
 		return ErrSandboxNotReady
 	}
+	if sb.Config.Mode == ModePersistent {
+		session, sessionErr := m.sessions.LoadReadOnly(ctx, sb.ID)
+		if errors.Is(sessionErr, ErrSandboxNotFound) {
+			if err := m.sessions.confirmSessionAbsence(ctx, sb.ID); err != nil {
+				return err
+			}
+		} else if sessionErr != nil || session == nil || session.ID != sb.ID ||
+			session.RuntimeID != sb.RuntimeID || session.RuntimeUID != sb.RuntimeUID ||
+			session.Workspace == nil || session.Workspace.FUSEPreparationID != w.FUSEPreparationID ||
+			session.Workspace.LeaseGeneration != w.LeaseGeneration {
+			return ErrSessionPublicationConflict
+		}
+	}
 	if len(active.CleanupCheckpoint) > 64<<10 {
 		return ErrSandboxNotReady
 	}
@@ -295,7 +308,8 @@ func (m *Manager) restoreCheckpointedFUSECleanup(ctx context.Context, sb *Sandbo
 	}
 	lifecycle := &fuseSandboxLifecycle{sandboxID: sb.ID, sandbox: sb, gate: newOperationGate(false), lease: lease, record: cp.Consumed,
 		claimed: claimed, cancel: func() {}, ephemeralRecord: ephemeral, gateClosed: true, renewalStopped: true,
-		quiesceAttempted: true, quiesced: true, flushAttempted: true, evidence: evidence, leaseReleased: released, poolRemoved: poolRemoved,
+		finalizingPersisted: sb.Config.Mode == ModePersistent,
+		quiesceAttempted:    true, quiesced: true, flushAttempted: true, evidence: evidence, leaseReleased: released, poolRemoved: poolRemoved,
 		runtimeRemoved: false}
 	m.bindFUSEController(lifecycle, controller)
 	if err := controller.Fence(ctx); err != nil {

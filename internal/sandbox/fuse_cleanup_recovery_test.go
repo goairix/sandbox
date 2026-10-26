@@ -475,8 +475,16 @@ func TestDistributedFUSEQuiescedFlushRecoveredByUncachedPeer(t *testing.T) {
 }
 
 func TestDistributedFUSEClaimedCleanupWithoutActiveCheckpointRecoversTerminalPod(t *testing.T) {
-	for _, persisted := range []bool{false, true} {
-		t.Run(map[bool]string{false: "signed terminal pod", true: "persisted termination after pod removal"}[persisted], func(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persisted      bool
+		missingSession bool
+	}{
+		{name: "signed terminal pod"},
+		{name: "signed terminal pod with removed session", missingSession: true},
+		{name: "persisted termination after pod removal", persisted: true, missingSession: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			m, rt, store := newDistributedFUSERecoveryManager(t)
 			sb, err := m.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/claimed-terminal"})
@@ -490,7 +498,7 @@ func TestDistributedFUSEClaimedCleanupWithoutActiveCheckpointRecoversTerminalPod
 			claimed, err := m.fusePool.ClaimSingleUseCleanup(ctx, *record)
 			require.NoError(t, err)
 			require.Equal(t, state.FUSEPoolCleanupTerminating, claimed.CleanupPhase)
-			if persisted {
+			if tc.persisted {
 				_, err = m.fusePool.repo.ConfirmCleanupTermination(ctx, claimed.PreparationID, claimed.CleanupToken,
 					claimed.Revision, claimed.RuntimeID, claimed.RuntimeUID, state.FUSEPoolTerminationEvidence{
 						RuntimeUID: claimed.RuntimeUID, GracefulUnmount: true, ProcessExited: true,
@@ -500,11 +508,14 @@ func TestDistributedFUSEClaimedCleanupWithoutActiveCheckpointRecoversTerminalPod
 			rt.mockRuntime.mu.Lock()
 			rt.sandboxes[sb.RuntimeID].State = "failed"
 			rt.mockRuntime.mu.Unlock()
+			if tc.missingSession {
+				require.NoError(t, m.sessions.RemoveExact(ctx, sb))
+			}
 			require.NoError(t, m.Stop(ctx))
 			cfg := m.config
 			cfg.InstanceID = "peer"
 			peer := NewManager(rt, m.filesystem, m.fsMeta, cfg)
-			if persisted {
+			if tc.persisted {
 				peer.runtime = absentCheckpointedFUSERuntime{rt}
 				peer.fusePool.runtime = peer.runtime
 			}
@@ -515,8 +526,18 @@ func TestDistributedFUSEClaimedCleanupWithoutActiveCheckpointRecoversTerminalPod
 			require.True(t, acquired)
 			t.Cleanup(func() { require.NoError(t, controller.Stop(ctx)) })
 			require.NoError(t, peer.restoreFUSECleanupWithController(ctx, snapshot, controller))
-			require.NoError(t, peer.Destroy(ctx, sb.ID))
-			active, err = peer.activeSandboxes.Load(ctx, sb.ID)
+			finisher := peer
+			if tc.missingSession {
+				// The first peer wrote the checkpoint, then stopped before it
+				// could finish. A later peer must not recreate a deleted session.
+				require.NoError(t, peer.Stop(ctx))
+				cfg.InstanceID = "second-peer"
+				finisher = NewManager(rt, m.filesystem, m.fsMeta, cfg)
+				finisher.SetSessionStore(NewSessionStore(store, time.Hour))
+				t.Cleanup(func() { require.NoError(t, finisher.Stop(ctx)) })
+			}
+			require.NoError(t, finisher.Destroy(ctx, sb.ID))
+			active, err = finisher.activeSandboxes.Load(ctx, sb.ID)
 			require.NoError(t, err)
 			require.Nil(t, active)
 			require.True(t, rt.wasRemoved(sb.RuntimeID))
