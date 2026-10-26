@@ -1899,3 +1899,22 @@ revision 12 上再次向同一 API Pod 并行发送六个 FUSE 创建请求并�
 实际完成了创建，客户端须按同一 workspace 查询后决定是否删除或复用。
 该实验不能证明精确命中“active 已提交、claim 尚未标记发布”的每个
 微小时序；对应时序有独立确定性 RED→GREEN 回归测试。
+
+### DS 对齐 CCE 已验证的恢复镜像（2026-10-26）
+
+DS 原 Helm revision 13、API 镜像 `v1-capacity-68f98b9-arm64`。
+DS 与 CCE 当前容器内 `/etc/sandbox/config.yaml` SHA-256 同为
+`a3b8e90dbff5dcd387804cb1fe54c66c45490680c620190212277a253ce10040`；
+集群差异仍由原 Helm env/Secret 提供。升级前对照已安装 manifest 与
+当前 Chart 渲染结果，常驻资源只有 `sandbox-api` 镜像一处变化；后端
+fingerprint 和 cleanup protocol 分别保持
+`1c6e144e3d83118b5aa789c5c021b2dcc33595d131c561ac0fc7a562b98ef588`
+与 `v3`，pre-upgrade drain 钩子按该相等条件跳过 release drain。
+Deployment 原滚动策略 `maxUnavailable: 0`，revision 13 为回退点。
+
+Helm revision 14 已部署 CCE 验证过的
+`v1-publication-guard-85b2b98-arm64`，API 2/2 Ready；升级前的池 Pod
+仍在。独立 DS FUSE 沙盒 `sandbox-18jckdp8sj` 经公开 API 创建 201、
+ID 与 workspace/info 查询 200、删除 200，最终 ID 与按 workspace
+查询均为 404。此为在线升级后的单沙盒正例，未重跑全部 31 路矩阵，
+也不替代存量沙盒的文件级重启验收或大容量验证。
