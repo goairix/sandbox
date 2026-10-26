@@ -2,6 +2,7 @@ package etcd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -90,4 +91,37 @@ func TestFUSEBoundCreateRejectsCleanupAndExistingKey(t *testing.T) {
 	value, err := store.Get(ctx, "sandbox:ephemeral:v1:bound")
 	require.NoError(t, err)
 	require.Equal(t, []byte("first"), value)
+}
+
+func TestFUSEBoundActivePublicationStopsAfterCleanupClaim(t *testing.T) {
+	store := testStore(t)
+	repository := NewFUSEPoolRepository(store)
+	consumed := consumedPoolRecord(t, repository)
+	active, err := NewActiveSandboxRepository(store, "fuse-publication")
+	require.NoError(t, err)
+	binding := state.FUSEPoolPublication{
+		PoolKey: consumed.PoolKey, PreparationID: consumed.PreparationID,
+		RuntimeID: consumed.RuntimeID, RuntimeUID: consumed.RuntimeUID,
+		ReservationToken: consumed.ReservationToken,
+	}
+	now := time.Now().UTC()
+	record := state.ActiveSandboxRecord{
+		Version: 1, SandboxID: "sandbox-before", Phase: state.ActiveSandboxPublishing,
+		Revision: 1, Generation: 1, RuntimeID: consumed.RuntimeID, RuntimeUID: consumed.RuntimeUID,
+		Snapshot: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
+	}
+	ctx := context.Background()
+	require.NoError(t, active.PublishFUSEBound(ctx, record, binding))
+	_, err = repository.ClaimCleanup(ctx, consumed.PreparationID, state.FUSEPoolConsumed,
+		consumed.MaintainerToken, consumed.ReservationToken, consumed.Revision,
+		consumed.RuntimeID, consumed.RuntimeUID, "cleanup", 5*time.Second)
+	require.NoError(t, err)
+	record.SandboxID = "sandbox-after"
+	require.ErrorIs(t, active.PublishFUSEBound(ctx, record, binding), state.ErrFUSEPoolConflict)
+	before, err := active.Load(ctx, "sandbox-before")
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	after, err := active.Load(ctx, "sandbox-after")
+	require.NoError(t, err)
+	require.Nil(t, after)
 }

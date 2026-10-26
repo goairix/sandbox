@@ -50,6 +50,15 @@ func (s *SessionStore) Save(ctx context.Context, sb *Sandbox) error {
 		}
 	}
 
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		if bound, ok := s.store.(state.FUSEPoolBoundStore); ok {
+			return bound.SetFUSEBound(ctx, sandboxSessionKeyPrefix+sb.ID, data, ttl, state.FUSEPoolPublication{
+				PoolKey: sb.Workspace.FUSEPoolKey, PreparationID: sb.Workspace.FUSEPreparationID,
+				RuntimeID: sb.RuntimeID, RuntimeUID: sb.RuntimeUID,
+				ReservationToken: sb.Workspace.FUSEReservationToken,
+			})
+		}
+	}
 	return s.store.Set(ctx, sandboxSessionKeyPrefix+sb.ID, data, ttl)
 }
 

@@ -31,6 +31,7 @@ var (
 	_ state.ActiveSandboxCheckpointRepository         = (*ActiveSandboxRepository)(nil)
 	_ state.ActiveSandboxCleanupCompletionRepository  = (*ActiveSandboxRepository)(nil)
 	_ state.ActiveSandboxConditionalDestroyRepository = (*ActiveSandboxRepository)(nil)
+	_ state.FUSEPoolBoundActiveRepository             = (*ActiveSandboxRepository)(nil)
 )
 
 type activeEnvelope struct {
@@ -86,8 +87,19 @@ func randomActiveCursor() (uint64, error) {
 // 64-bit cursor avoids a shared increment hot key when many sandboxes publish.
 // The cursor is private storage metadata and never grants lifecycle authority.
 func (r *ActiveSandboxRepository) Publish(ctx context.Context, record state.ActiveSandboxRecord) error {
+	return r.publish(ctx, record, nil)
+}
+
+func (r *ActiveSandboxRepository) PublishFUSEBound(ctx context.Context, record state.ActiveSandboxRecord, binding state.FUSEPoolPublication) error {
+	return r.publish(ctx, record, &binding)
+}
+
+func (r *ActiveSandboxRepository) publish(ctx context.Context, record state.ActiveSandboxRecord, binding *state.FUSEPoolPublication) error {
 	if record.Validate() != nil || record.Phase != state.ActiveSandboxPublishing || !validActiveID(record.SandboxID) {
 		return state.ErrActiveSandboxCorrupt
+	}
+	if binding != nil && (record.RuntimeID != binding.RuntimeID || record.RuntimeUID != binding.RuntimeUID) {
+		return state.ErrFUSEPoolConflict
 	}
 	key := r.recordKey(record.SandboxID)
 	for range 4 {
@@ -110,6 +122,14 @@ func (r *ActiveSandboxRepository) Publish(ctx context.Context, record state.Acti
 		}
 		requestCtx, cancel := r.store.requestContext(ctx)
 		compares := append([]clientv3.Cmp{clientv3.Compare(clientv3.Version(key), "=", 0), clientv3.Compare(clientv3.Version(index), "=", 0)}, indexCompares...)
+		if binding != nil {
+			poolConditions, _, conditionErr := r.store.fusePublicationConditions(requestCtx, *binding)
+			if conditionErr != nil {
+				cancel()
+				return conditionErr
+			}
+			compares = append(compares, poolConditions...)
+		}
 		writes := append([]clientv3.Op{clientv3.OpPut(key, string(raw)), clientv3.OpPut(index, record.SandboxID)}, indexWrites...)
 		response, err := r.store.client.Txn(requestCtx).
 			If(compares...).

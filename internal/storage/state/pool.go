@@ -77,6 +77,13 @@ type FUSEPoolBoundStore interface {
 	SetNXFUSEBound(ctx context.Context, key string, value []byte, ttl time.Duration, binding FUSEPoolPublication) (bool, error)
 }
 
+// FUSEPoolBoundPublicationRequired marks a pool repository whose cleanup
+// claim relies on atomic lifecycle publications. Managers must reject FUSE
+// creation if a configured store or active repository hides that capability.
+type FUSEPoolBoundPublicationRequired interface {
+	RequiresFUSEPublicationFence()
+}
+
 type FUSEPoolRepository interface {
 	CreatePreparingWithAdmission(ctx context.Context, record FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error
 	BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*FUSEPoolRecord, error)

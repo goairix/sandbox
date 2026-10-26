@@ -22,6 +22,10 @@ type FUSEPoolRepository struct {
 
 var _ state.FUSEPoolRepository = (*FUSEPoolRepository)(nil)
 
+var _ state.FUSEPoolBoundPublicationRequired = (*FUSEPoolRepository)(nil)
+
+func (*FUSEPoolRepository) RequiresFUSEPublicationFence() {}
+
 var errPoolAdmissionMetadataContention = errors.New("fuse pool admission aggregate changed independently")
 
 // poolMetadata is the fixed-size per-PoolKey inventory aggregate. Its six

@@ -172,6 +172,13 @@ type ActiveSandboxRepository interface {
 	Ping(ctx context.Context) error
 }
 
+// FUSEPoolBoundActiveRepository couples the first active publication to the
+// same consumed pool record compared by failed-create cleanup. Ordinary
+// active records continue to use Publish.
+type FUSEPoolBoundActiveRepository interface {
+	PublishFUSEBound(ctx context.Context, record ActiveSandboxRecord, binding FUSEPoolPublication) error
+}
+
 // ActiveSandboxConditionalDestroyRepository closes admission only for the
 // exact lifecycle snapshot whose workspace ownership was checked.
 type ActiveSandboxConditionalDestroyRepository interface {

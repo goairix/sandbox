@@ -407,12 +407,13 @@ func main() {
 		}
 		managerConfig.FUSEPool = sandbox.NewFUSEPool(rt, backend.fuseRepository, sandbox.FUSEPoolConfig{
 			MinSize: cfg.Workspace.FUSEPool.MinSize, MaxSize: cfg.Workspace.FUSEPool.MaxSize,
-			RefillInterval:  time.Duration(cfg.Workspace.FUSEPool.RefillIntervalSeconds) * time.Second,
-			PrepareTimeout:  time.Duration(cfg.Workspace.FUSEPool.PrepareTimeoutSeconds) * time.Second,
-			ReservationTTL:  time.Duration(cfg.Workspace.LeaseTTLSeconds) * time.Second,
-			MaintainerToken: ownershipToken,
-			InventoryStore:  fuseInventoryStore,
-			InventoryScope:  fuseInventoryScope,
+			RefillInterval:           time.Duration(cfg.Workspace.FUSEPool.RefillIntervalSeconds) * time.Second,
+			PrepareTimeout:           time.Duration(cfg.Workspace.FUSEPool.PrepareTimeoutSeconds) * time.Second,
+			ReservationTTL:           time.Duration(cfg.Workspace.LeaseTTLSeconds) * time.Second,
+			MaintainerToken:          ownershipToken,
+			PublicationFenceRequired: backend.kind == "etcd",
+			InventoryStore:           fuseInventoryStore,
+			InventoryScope:           fuseInventoryScope,
 		}, fuseSpec)
 		managerConfig.WorkspaceObjectClient = objectClient
 		profile, profileErr := storage.RootMarkerProfileByID(cfg.Workspace.Backend.Profile)

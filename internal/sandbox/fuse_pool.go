@@ -60,14 +60,17 @@ type ProtectedCleanupRecoveryFunc func(context.Context, state.FUSEPoolRecord) (b
 
 // FUSEPoolConfig configures the sandbox-api-owned FUSE shell pool.
 type FUSEPoolConfig struct {
-	MinSize                 int
-	MaxSize                 int
-	RefillInterval          time.Duration
-	PrepareTimeout          time.Duration
-	ReservationTTL          time.Duration
-	MaintainerToken         string
-	PristineGuard           PristineGuardFunc
-	RecoverProtectedCleanup ProtectedCleanupRecoveryFunc
+	MinSize         int
+	MaxSize         int
+	RefillInterval  time.Duration
+	PrepareTimeout  time.Duration
+	ReservationTTL  time.Duration
+	MaintainerToken string
+	// PublicationFenceRequired comes from backend selection, not a type
+	// assertion on the repository: decorators must not hide this safety gate.
+	PublicationFenceRequired bool
+	PristineGuard            PristineGuardFunc
+	RecoverProtectedCleanup  ProtectedCleanupRecoveryFunc
 	// Shared Kubernetes inventory outlives individual API processes.
 	InventoryStore state.AtomicStore
 	InventoryScope string

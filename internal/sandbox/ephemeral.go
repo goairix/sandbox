@@ -65,7 +65,20 @@ func (s *EphemeralLifecycleStore) Create(ctx context.Context, record EphemeralLi
 	if err != nil {
 		return fmt.Errorf("marshal ephemeral lifecycle: %w", err)
 	}
-	created, err := s.store.SetNX(ctx, ephemeralLifecycleKeyPrefix+record.SandboxID, raw, 0)
+	var created bool
+	if record.MountType == WorkspaceMountFUSE {
+		if bound, ok := s.store.(state.FUSEPoolBoundStore); ok {
+			created, err = bound.SetNXFUSEBound(ctx, ephemeralLifecycleKeyPrefix+record.SandboxID, raw, 0, state.FUSEPoolPublication{
+				PoolKey: record.PoolKey, PreparationID: record.PreparationID,
+				RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+				ReservationToken: record.ReservationToken,
+			})
+		} else {
+			created, err = s.store.SetNX(ctx, ephemeralLifecycleKeyPrefix+record.SandboxID, raw, 0)
+		}
+	} else {
+		created, err = s.store.SetNX(ctx, ephemeralLifecycleKeyPrefix+record.SandboxID, raw, 0)
+	}
 	if err != nil {
 		current, verifyErr := s.store.Get(context.WithoutCancel(ctx), ephemeralLifecycleKeyPrefix+record.SandboxID)
 		if verifyErr == nil && bytes.Equal(current, raw) {

@@ -1021,6 +1021,25 @@ func (m *Manager) createFUSESandbox(ctx context.Context, cfg SandboxConfig) (_ *
 	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.config.WorkspaceObjectClient == nil || m.fsMeta == nil || m.sessions == nil || m.fusePool.spec.WorkspaceFUSE == nil {
 		return nil, ErrInvalidFUSEPoolConfig
 	}
+	_, repositoryRequiresFence := m.fusePool.repo.(state.FUSEPoolBoundPublicationRequired)
+	if m.fusePool.config.PublicationFenceRequired || repositoryRequiresFence {
+		if _, ok := m.sessions.store.(state.FUSEPoolBoundStore); !ok {
+			return nil, ErrInvalidFUSEPoolConfig
+		}
+		if cfg.Mode == ModeEphemeral {
+			if m.ephemeral == nil {
+				return nil, ErrInvalidFUSEPoolConfig
+			}
+			if _, ok := m.ephemeral.store.(state.FUSEPoolBoundStore); !ok {
+				return nil, ErrInvalidFUSEPoolConfig
+			}
+		}
+		if m.distributedStateEnabled() {
+			if _, ok := m.activeSandboxes.(state.FUSEPoolBoundActiveRepository); !ok {
+				return nil, ErrInvalidFUSEPoolConfig
+			}
+		}
+	}
 	mountStarted := time.Now()
 	stage, stageStarted := "prefix", time.Now()
 	recordStage := func(result string) {

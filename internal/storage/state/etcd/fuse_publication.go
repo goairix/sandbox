@@ -24,11 +24,6 @@ func (s *Store) SetNXFUSEBound(ctx context.Context, key string, value []byte, tt
 }
 
 func (s *Store) writeFUSEBound(ctx context.Context, key string, value []byte, ttl time.Duration, binding state.FUSEPoolPublication, create bool) (bool, error) {
-	if !validPoolID(binding.PoolKey) || !validPoolID(binding.PreparationID) ||
-		!validPoolID(binding.RuntimeID) || !validPoolID(binding.RuntimeUID) ||
-		!validPoolID(binding.ReservationToken) {
-		return false, state.ErrFUSEPoolInvalidRecord
-	}
 	fullKey, err := s.key(key)
 	if err != nil {
 		return false, err
@@ -37,30 +32,13 @@ func (s *Store) writeFUSEBound(ctx context.Context, key string, value []byte, tt
 	defer cancel()
 	repository := NewFUSEPoolRepository(s)
 	recordKey := repository.recordKey(binding.PreparationID)
-	read, err := s.client.Get(requestCtx, recordKey)
+	conditions, poolRevision, err := s.fusePublicationConditions(requestCtx, binding)
 	if err != nil {
 		return false, err
-	}
-	if len(read.Kvs) != 1 {
-		return false, state.ErrFUSEPoolConflict
-	}
-	record, err := decodePoolRecord(read.Kvs[0].Value, binding.PreparationID)
-	if err != nil {
-		return false, err
-	}
-	if record.State != state.FUSEPoolConsumed || record.PoolKey != binding.PoolKey ||
-		record.RuntimeID != binding.RuntimeID || record.RuntimeUID != binding.RuntimeUID ||
-		record.ReservationToken != binding.ReservationToken {
-		return false, state.ErrFUSEPoolConflict
 	}
 	lease, err := s.leaseFor(requestCtx, ttl)
 	if err != nil {
 		return false, err
-	}
-	conditions := []clientv3.Cmp{
-		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
-		clientv3.Compare(clientv3.Value(repository.uidOwnerKey(binding.RuntimeUID)), "=", binding.PreparationID),
-		clientv3.Compare(clientv3.Value(repository.consumedKey(binding.PoolKey, binding.PreparationID)), "=", binding.PreparationID),
 	}
 	if create {
 		conditions = append(conditions, clientv3.Compare(clientv3.Version(fullKey), "=", 0))
@@ -83,11 +61,42 @@ func (s *Store) writeFUSEBound(ctx context.Context, key string, value []byte, tt
 		return false, state.ErrFUSEPoolConflict
 	}
 	current := response.Responses[0].GetResponseRange().Kvs
-	if len(current) != 1 || current[0].ModRevision != read.Kvs[0].ModRevision {
+	if len(current) != 1 || current[0].ModRevision != poolRevision {
 		return false, state.ErrFUSEPoolConflict
 	}
 	if create && len(response.Responses[1].GetResponseRange().Kvs) != 0 {
 		return false, nil
 	}
 	return false, state.ErrFUSEPoolConflict
+}
+
+func (s *Store) fusePublicationConditions(ctx context.Context, binding state.FUSEPoolPublication) ([]clientv3.Cmp, int64, error) {
+	if !validPoolID(binding.PoolKey) || !validPoolID(binding.PreparationID) ||
+		!validPoolID(binding.RuntimeID) || !validPoolID(binding.RuntimeUID) ||
+		!validPoolID(binding.ReservationToken) {
+		return nil, 0, state.ErrFUSEPoolInvalidRecord
+	}
+	repository := NewFUSEPoolRepository(s)
+	recordKey := repository.recordKey(binding.PreparationID)
+	read, err := s.client.Get(ctx, recordKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(read.Kvs) != 1 {
+		return nil, 0, state.ErrFUSEPoolConflict
+	}
+	record, err := decodePoolRecord(read.Kvs[0].Value, binding.PreparationID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if record.State != state.FUSEPoolConsumed || record.PoolKey != binding.PoolKey ||
+		record.RuntimeID != binding.RuntimeID || record.RuntimeUID != binding.RuntimeUID ||
+		record.ReservationToken != binding.ReservationToken {
+		return nil, 0, state.ErrFUSEPoolConflict
+	}
+	return []clientv3.Cmp{
+		clientv3.Compare(clientv3.ModRevision(recordKey), "=", read.Kvs[0].ModRevision),
+		clientv3.Compare(clientv3.Value(repository.uidOwnerKey(binding.RuntimeUID)), "=", binding.PreparationID),
+		clientv3.Compare(clientv3.Value(repository.consumedKey(binding.PoolKey, binding.PreparationID)), "=", binding.PreparationID),
+	}, read.Kvs[0].ModRevision, nil
 }

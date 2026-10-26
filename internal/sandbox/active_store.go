@@ -91,7 +91,21 @@ func (m *Manager) publishActiveSandboxState(ctx context.Context, sb *Sandbox, cl
 		RuntimeID: sb.RuntimeID, RuntimeUID: sb.RuntimeUID, Snapshot: snapshot,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := m.activeSandboxes.Publish(ctx, record); err != nil {
+	var publishErr error
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		if bound, ok := m.activeSandboxes.(state.FUSEPoolBoundActiveRepository); ok {
+			publishErr = bound.PublishFUSEBound(ctx, record, state.FUSEPoolPublication{
+				PoolKey: sb.Workspace.FUSEPoolKey, PreparationID: sb.Workspace.FUSEPreparationID,
+				RuntimeID: sb.RuntimeID, RuntimeUID: sb.RuntimeUID,
+				ReservationToken: sb.Workspace.FUSEReservationToken,
+			})
+		} else {
+			publishErr = m.activeSandboxes.Publish(ctx, record)
+		}
+	} else {
+		publishErr = m.activeSandboxes.Publish(ctx, record)
+	}
+	if err := publishErr; err != nil {
 		if errors.Is(err, state.ErrDurabilityUnconfirmed) {
 			return nil, err
 		}
