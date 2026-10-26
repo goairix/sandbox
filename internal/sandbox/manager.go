@@ -1477,7 +1477,7 @@ func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPool
 // The absence of every lifecycle reference is required in either case.
 func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.FUSEPoolRecord) (bool, error) {
 	if m.fusePool == nil || m.config.WorkspaceCoordinator == nil || m.fsMeta == nil ||
-		(record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolCleanup) ||
+		(record.State != state.FUSEPoolBinding && record.State != state.FUSEPoolConsumed && record.State != state.FUSEPoolCleanup) ||
 		record.PoolKey != m.fusePool.poolKey ||
 		(record.State == state.FUSEPoolCleanup && record.CleanupToken == "") ||
 		record.RuntimeID == "" || record.RuntimeUID == "" {

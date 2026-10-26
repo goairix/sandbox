@@ -228,6 +228,15 @@ func TestManagerRecoversExpiredFailedFUSECreateAfterManagerRestartWithEtcd(t *te
 }
 
 func TestManagerRecoversOrphanedFUSEBindingAfterManagerRestartWithEtcd(t *testing.T) {
+	testManagerRecoversOrphanedFUSEPublication(t, state.FUSEPoolBinding)
+}
+
+func TestManagerRecoversOrphanedFUSEConsumedAfterManagerRestartWithEtcd(t *testing.T) {
+	testManagerRecoversOrphanedFUSEPublication(t, state.FUSEPoolConsumed)
+}
+
+func testManagerRecoversOrphanedFUSEPublication(t *testing.T, orphanState state.FUSEPoolState) {
+	t.Helper()
 	manager, _ := newEtcdFUSEManager(t)
 	ctx := context.Background()
 	store := manager.sessions.store.(*etcdstate.Store)
@@ -249,6 +258,11 @@ func TestManagerRecoversOrphanedFUSEBindingAfterManagerRestartWithEtcd(t *testin
 	bound, err := repository.Transition(ctx, record.PreparationID, state.FUSEPoolReserved,
 		state.FUSEPoolBinding, record.ReservationToken, record.Revision)
 	require.NoError(t, err)
+	if orphanState == state.FUSEPoolConsumed {
+		bound, err = repository.Transition(ctx, bound.PreparationID, state.FUSEPoolBinding,
+			state.FUSEPoolConsumed, bound.ReservationToken, bound.Revision)
+		require.NoError(t, err)
+	}
 	require.NoError(t, manager.Stop(ctx))
 
 	poolConfig := fusePoolConfig()
@@ -263,7 +277,7 @@ func TestManagerRecoversOrphanedFUSEBindingAfterManagerRestartWithEtcd(t *testin
 	t.Cleanup(func() { require.NoError(t, restarted.Stop(context.Background())) })
 
 	require.NoError(t, restarted.fusePool.Reconcile(ctx))
-	require.False(t, rt.wasRemoved(record.RuntimeID), "a live workspace lease must retain binding")
+	require.False(t, rt.wasRemoved(record.RuntimeID), "a live workspace lease must retain the runtime")
 	ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
@@ -281,5 +295,5 @@ func TestManagerRecoversOrphanedFUSEBindingAfterManagerRestartWithEtcd(t *testin
 		ownerRaw, err := store.Get(ctx, ownerKey.owner)
 		return err == nil && ownerRaw == nil
 	}, 6*time.Second, 100*time.Millisecond,
-		"an expired orphan binding must be claimed and safely released")
+		"an expired orphan publication must be claimed and safely released")
 }

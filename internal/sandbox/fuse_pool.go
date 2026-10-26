@@ -551,6 +551,38 @@ func forEachFUSEPoolMaintenanceRecord(ctx context.Context, repo state.FUSEPoolRe
 	return nil
 }
 
+// Only consumed records that have not atomically published an active
+// lifecycle are candidates for process-crash recovery. Never scan all live
+// consumed runtimes on the periodic maintenance path.
+func forEachUnpublishedFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey string, visit func(state.FUSEPoolRecord) error) error {
+	pager, ok := repo.(state.FUSEPoolUnpublishedPageReader)
+	if !ok {
+		return nil
+	}
+	cursor := ""
+	for {
+		page, next, err := pager.ListUnpublishedPage(ctx, poolKey, cursor, 64)
+		if err != nil {
+			return err
+		}
+		if len(page) > 64 || (next != "" && (next == cursor || len(page) == 0)) {
+			return state.ErrFUSEPoolCorrupt
+		}
+		for _, record := range page {
+			if record.PoolKey != poolKey || record.State != state.FUSEPoolConsumed {
+				return state.ErrFUSEPoolCorrupt
+			}
+			if err := visit(record); err != nil {
+				return err
+			}
+		}
+		if next == "" {
+			return nil
+		}
+		cursor = next
+	}
+}
+
 // forEachFUSEPoolRecord is reserved for explicit global release and orphan
 // audits that must inspect consumed records too. Each etcd page stays bounded.
 func forEachFUSEPoolRecord(ctx context.Context, repo state.FUSEPoolRepository, poolKey string, visit func(state.FUSEPoolRecord) error) error {
@@ -945,6 +977,25 @@ func (p *FUSEPool) reconcileOnce(ctx context.Context) (ran bool, returnErr error
 	})
 	if err != nil {
 		return true, fmt.Errorf("scan FUSE pool maintenance inventory: %w", err)
+	}
+	if err := forEachUnpublishedFUSEPoolRecord(ctx, p.repo, p.poolKey, func(record state.FUSEPoolRecord) error {
+		disposition, guardErr := p.guard(ctx, record)
+		if guardErr != nil {
+			// Unavailable proof preserves the runtime for a later pass. It
+			// must not make the entire pool unavailable during startup.
+			return nil
+		}
+		if disposition != FUSEPoolProtected || p.config.RecoverProtectedCleanup == nil {
+			return nil
+		}
+		_, recoverErr := p.config.RecoverProtectedCleanup(ctx, record)
+		if recoverErr != nil && !isStalePoolMutation(recoverErr) {
+			logger.Error(ctx, "unpublished FUSE runtime cleanup will retry",
+				logger.AddField("preparation_id", record.PreparationID), logger.ErrorField(recoverErr))
+		}
+		return nil
+	}); err != nil {
+		return true, fmt.Errorf("scan unpublished FUSE runtimes: %w", err)
 	}
 
 	activeCount, err := p.repo.CountPreparingAndPrepared(ctx, p.poolKey)
