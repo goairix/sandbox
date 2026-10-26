@@ -1821,3 +1821,26 @@ cleanup lease 过期后竞态或大量存活 N 的重启耗时。
 两轮 Job/ConfigMap 已删除；结束后 API 2/2 Ready，owner 审计 `[]`。
 这覆盖列出的接口与一条实际 skill，不等于全部 API、并发故障注入或
 大容量验收；网络更新返回成功不证明 CNI 策略在任意外部流量下生效。
+
+### CCE 发布栅栏修复上线与常规 API 验证（2026-10-26）
+
+提交 `7e26c14`、`0cb9a9e` 为 etcd FUSE 创建的 session、ephemeral、
+active 写入增加同事务的池 consumed 状态与 runtime UID 比较；生产
+etcd FUSE 入口要求这些 bound 接口，缺失即拒绝创建。真实本地 etcd
+测试覆盖清理先赢和发布先赢，相关 Go 包、race 与 vet 通过；独立审查
+对当前生产接线无未关闭的 P1/P2。该机制不替代 CCE 上的进程中断
+故障注入，也不改变失败创建扫描随存活 N 增长的容量问题。
+
+Linux arm64 镜像
+`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-publication-fence-0cb9a9e-arm64`
+内 `/app/sandbox` 与本地静态构建 SHA-256 一致，均为
+`3bb11dabfad35d5b57f9a56ab685b4d6ecd9f755953caddbdbcb906331f49167`；
+仓库 digest 为 `sha256:f5716bc98e402adfb1618e4680c4175655815e3a625b8aa97393875a0f9a6f4b`。
+CCE `sandbox` Helm revision 7 已部署，`sandbox-api` 2/2 Ready，DS 未改。
+
+revision 7 上独立 workspace 的集群内 Job 测得：FUSE POST 201、文件
+上传 200、下载原字节一致、列表可见、Exec 写入 `SKILL.md` 后 skills
+列表包含新项、TTL 900 更新 200、网络配置更新 200、by-workspace
+返回同一 ID、flush 200、DELETE 200 后 GET 404。Job 与 ConfigMap
+已删除；只读 etcd owner 前缀查询无键，API 仍为 2/2 Ready。此为
+单沙盒常规接口冒烟，不是并发故障注入、真实 CNI 效果或大容量验收。
