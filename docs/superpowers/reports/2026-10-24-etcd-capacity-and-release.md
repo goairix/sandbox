@@ -1854,3 +1854,36 @@ Service GET 返回该 ID。公开 DELETE 200、最终 GET 404，受管 Pod
 `917d4078f344155de6ada93a1d37fee72e92ea7333f609be05d4921eddb4513b`；
 Job 与 ConfigMap 已删除。这验证常规双副本同路径去重，仍未注入
 发布中断、cleanup lease 失效或 etcd 成员故障。
+
+### CCE 创建中断后的清理恢复（2026-10-26）
+
+先增加 `Binding→Consumed` 到 active 发布完成前的 unpublished 索引，避免
+维护循环扫描全部存活沙盒；提交 `9898ae15`、`b23bdbc3` 的本地 etcd
+回归通过。本轮 CCE 进程中断没有命中该索引：第一次容器内 `kill -9 1`
+未使 Pod 重启，因此作废；第二次在八个并行 POST 期间强制删除指定 API
+Pod，七个连接断开、一个返回 503，属于有效中断注入。五条后续公开
+查询为 404，另三条曾为 409，不能将八条计为创建成功。
+
+三条遗留记录的 active 已处于 destroying、池记录已先进入 Cleanup，
+因此原本只接受 Consumed 的重启恢复返回 503。两只失败 Pod 有签名
+shutdown receipt、已终态；第三条池记录已有持久化终止证明且 Pod 不在。
+提交 `7c1324e7` 增加终态证明入口，`509e5d37` 对精确 active/池/owner
+身份及终止证明重建原清理检查点，`3a7a9764` 允许已有 active 清理阶段
+在会话已删除时继续，且验证同身份会话或其持久缺席。无终止证明的负例
+保持 owner 与占用，不释放。提交 `85b2b989` 修复 active 发布成功后
+请求取消的竞争窗口：已发布生命周期统一走 active 清理，失败创建路径
+不再越过检查点直接认领池；非分布式路径维持原行为。以上变更的
+`internal/sandbox`、`internal/storage/state/etcd`、Kubernetes runtime
+测试、目标 race 和 vet 均通过。
+
+CCE revision 11 实测上述三条旧记录完成清理：池记录、active 记录、
+workspace owner 均不存在，公开 GET 均返回 404；两个 Error Pod 消失。
+revision 12 部署最终镜像
+`registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api:v1-publication-guard-85b2b98-arm64`
+（digest `sha256:9b1275188c9211430cde245c049c340f24ef671e536fcfa5c3bf487ecb2646b2`），
+API 2/2 Ready。新独立 FUSE 沙盒 `sandbox-ev5nyrkt6r` 经公开接口
+POST 201、GET 200、DELETE 200、最终 GET 404。DS 未改。
+
+这次故障注入验证了“进程在并行创建中被删除”及其恢复；没有验证
+每个精确写入点的断连、etcd 成员故障、完整 API 矩阵或大存量容量。
+大容量仍按用户要求单独验收，不能用上述单沙盒冒烟替代。
