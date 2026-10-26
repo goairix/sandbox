@@ -2,7 +2,7 @@
 
 本手册对应 `feat/etcd-state-management`，供运维人员在**新命名空间、新 etcd 前缀**独立安装。Helm Chart 安装 sandbox API、权限、网络策略和可选 AppArmor 加载器；**etcd 集群和 S3/MinIO 对象存储是前置依赖，不由该 Chart 创建**。本手册不迁移 Redis 数据，也不接管旧沙盒。
 
-下文的 `sandbox-fuse-etcd`、镜像 tag 和端点是示例。DS 上的同名 namespace 是一次独立测试安装；不要复制其 etcd 前缀、PVC、Secret 或对象存储账号。首次安装保留独立前缀和凭据，确认 API 后再由业务侧切流。
+下文的 `sandbox-fuse-etcd`、镜像 tag 和端点是示例。API tag 更新为 2026-10-26 在 DS 与 CCE 验证过的恢复版本；安装前仍须核对仓库摘要和目标架构。不要复制 DS/CCE 的 etcd 前缀、PVC、Secret 或对象存储账号。首次安装保留独立前缀和凭据，确认 API 后再由业务侧切流。
 
 ## 1. 准备与边界
 
@@ -81,7 +81,7 @@ redis:
 
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-etcd-api
-  tag: v1-capacity-68f98b9-arm64
+  tag: v1-publication-guard-85b2b98-arm64
   pullSecretName: <同命名空间的镜像拉取Secret；不需要时删除本行>
 
 apparmorLoader:

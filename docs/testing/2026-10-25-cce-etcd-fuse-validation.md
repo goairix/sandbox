@@ -31,3 +31,17 @@
 - 性能代码审查仍见 `guardFUSEPoolRecord` 对每次候选检查逐个列出/读取 session、ephemeral 与 workspace owner；按存活 N 增长的远端读取会影响补池和申请。需要保持原子发布与保守清理语义，再改为可验证的定点索引；本轮没有宣称性能提升。周期活跃扫描与到期调度也需独立大存量验收。
 
 独立安装步骤见 [etcd + FUSE 全新部署手册](../deployment/etcd-fuse-fresh-install.md)。
+
+## 2026-10-26 后续状态
+
+上文记录的是 revision 2 当时的安装结果，不代表当前集群版本。CCE
+`sandbox` 已升级到 revision 12，API 2/2 Ready，镜像为
+`sandbox-fuse-etcd-api:v1-publication-guard-85b2b98-arm64`。后续测试
+覆盖了真实 FUSE 文件读写、公开创建与删除、API 重启、创建中断后的
+占用恢复，以及执行、技能、分片文件与两个私网目标的网络观察；逐次
+证据与限制见 [发布与容量报告](../superpowers/reports/2026-10-24-etcd-capacity-and-release.md)。
+
+CCE 的三个测试 etcd Pod 当前仍使用 `emptyDir`，namespace 内没有
+etcd PVC。它们可用于上述功能测试，不能作为持久卷重建或全员数据
+丢失后的恢复验收。自己部署时应按部署手册提供独立持久卷与备份方案；
+大存量容量仍单独验收。
