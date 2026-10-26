@@ -176,12 +176,31 @@ type WorkspaceCoordinator struct {
 	configErr     error
 }
 
+// workspaceOwnerValueScanner is an optional storage optimization. It visits a
+// bounded page of key/value pairs at a time; stores without it keep the
+// original conservative owner scan.
+type workspaceOwnerValueScanner interface {
+	VisitPrefixValues(context.Context, string, func(string, []byte) (bool, error)) error
+}
+
 // HasRuntimeOwner reports whether any valid persistent owner references the
 // exact runtime identity. Malformed owner state is an error so callers can
 // fail closed instead of declaring a runtime abandoned.
 func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, runtimeUID string) (bool, error) {
 	if c == nil || c.configErr != nil {
 		return false, ErrInvalidWorkspaceLease
+	}
+	if scanner, ok := c.store.(workspaceOwnerValueScanner); ok {
+		protected := false
+		err := scanner.VisitPrefixValues(ctx, workspaceOwnerKeyPrefix, func(key string, raw []byte) (bool, error) {
+			owner, err := decodeScannedWorkspaceOwner(key, raw)
+			if err != nil {
+				return false, err
+			}
+			protected = owner.RuntimeID == runtimeID && owner.RuntimeUID == runtimeUID
+			return protected, nil
+		})
+		return protected, err
 	}
 	keys, err := c.store.Keys(ctx, workspaceOwnerKeyPrefix+"*")
 	if err != nil {
@@ -208,6 +227,18 @@ func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, r
 		}
 	}
 	return false, nil
+}
+
+func decodeScannedWorkspaceOwner(key string, raw []byte) (WorkspaceOwner, error) {
+	var owner WorkspaceOwner
+	if strictDecodeFlatJSONObject(raw, &owner) != nil || validateStoredOwner(owner) != nil {
+		return WorkspaceOwner{}, ErrWorkspaceOwnerLost
+	}
+	keys, err := workspaceStateKeysFromOwner(owner)
+	if err != nil || keys.owner != key {
+		return WorkspaceOwner{}, ErrWorkspaceOwnerLost
+	}
+	return owner, nil
 }
 
 // runtimeOwner resolves an exceptional failed-create cleanup to exactly one
