@@ -60,6 +60,23 @@ type FUSEPoolRecord struct {
 	Revision            uint64                       `json:"revision"`
 }
 
+// FUSEPoolPublication names the consumed shell that must still own a runtime
+// when a user-visible lifecycle reference is first written. Storage backends
+// that support this contract compare the pool record in the same transaction
+// as the publication, closing the cleanup-claim/publication race.
+type FUSEPoolPublication struct {
+	PoolKey          string
+	PreparationID    string
+	RuntimeID        string
+	RuntimeUID       string
+	ReservationToken string
+}
+
+type FUSEPoolBoundStore interface {
+	SetFUSEBound(ctx context.Context, key string, value []byte, ttl time.Duration, binding FUSEPoolPublication) error
+	SetNXFUSEBound(ctx context.Context, key string, value []byte, ttl time.Duration, binding FUSEPoolPublication) (bool, error)
+}
+
 type FUSEPoolRepository interface {
 	CreatePreparingWithAdmission(ctx context.Context, record FUSEPoolRecord, refillToken string, maxSize int, prepareTTL time.Duration) error
 	BindPreparingRuntime(ctx context.Context, preparationID, runtimeID, runtimeUID, refillToken string, expectedRevision uint64) (*FUSEPoolRecord, error)
