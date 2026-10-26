@@ -3553,22 +3553,44 @@ func (m *Manager) restoreFUSELifecycleWithController(ctx context.Context, sb *Sa
 		return ErrSandboxNotReady
 	}
 
-	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
-	if err != nil || info == nil || info.State != "running" || info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID {
-		return ErrSandboxNotReady
-	}
 	ref, err := runtime.NewRuntimeRef(sb.RuntimeID, sb.RuntimeUID)
 	if err != nil {
 		return ErrSandboxNotReady
 	}
-	health, err := m.runtime.WorkspaceHealth(ctx, ref)
-	if !cleanup && (err != nil || health == nil || !health.Ready || health.MountType != "fuse" ||
-		health.RuntimeUID != sb.RuntimeUID || health.Generation != owner.Generation ||
-		health.RestartCount != 0 || health.RestartDetected) {
+	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
+	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return ErrSandboxNotReady
 	}
-	if cleanup && health != nil && (health.MountType != "fuse" || health.RuntimeUID != sb.RuntimeUID || health.Generation != owner.Generation) {
+	if info != nil && (info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID) {
 		return ErrSandboxNotReady
+	}
+	var health *runtime.WorkspaceHealth
+	var terminalEvidence runtime.TerminationEvidence
+	terminalProof := false
+	if info == nil || info.State != "running" {
+		// A persisted strong shutdown receipt and exact process exit can
+		// resume the original cleanup after the API process disappears.
+		// Missing or unsigned runtimes keep their owner and occupation.
+		cleaner, ok := m.runtime.(runtime.PreparedSandboxCleanup)
+		if !cleanup || !ok {
+			return ErrSandboxNotReady
+		}
+		terminalEvidence, err = cleaner.ConfirmPreparedSandboxTermination(ctx, sb.RuntimeID, sb.RuntimeUID)
+		if err != nil || terminalEvidence.RuntimeUID != sb.RuntimeUID ||
+			!terminalEvidence.GracefulUnmount || !terminalEvidence.ProcessExited {
+			return ErrSandboxNotReady
+		}
+		terminalProof = true
+	} else {
+		health, err = m.runtime.WorkspaceHealth(ctx, ref)
+		if !cleanup && (err != nil || health == nil || !health.Ready || health.MountType != "fuse" ||
+			health.RuntimeUID != sb.RuntimeUID || health.Generation != owner.Generation ||
+			health.RestartCount != 0 || health.RestartDetected) {
+			return ErrSandboxNotReady
+		}
+		if cleanup && health != nil && (health.MountType != "fuse" || health.RuntimeUID != sb.RuntimeUID || health.Generation != owner.Generation) {
+			return ErrSandboxNotReady
+		}
 	}
 
 	lease, err := m.config.WorkspaceCoordinator.Restore(ctx, owner)
@@ -3609,14 +3631,18 @@ func (m *Manager) restoreFUSELifecycleWithController(ctx context.Context, sb *Sa
 		}
 	}
 	lifecycle = &fuseSandboxLifecycle{
-		sandboxID:       sb.ID,
-		sandbox:         sb,
-		gate:            gate,
-		lease:           lease,
-		renewal:         renewal,
-		record:          *record,
-		cancel:          cancelLifecycle,
-		ephemeralRecord: ephemeralRecord,
+		sandboxID:        sb.ID,
+		sandbox:          sb,
+		gate:             gate,
+		lease:            lease,
+		renewal:          renewal,
+		record:           *record,
+		cancel:           cancelLifecycle,
+		ephemeralRecord:  ephemeralRecord,
+		quiesceAttempted: terminalProof,
+		quiesced:         terminalProof,
+		flushAttempted:   terminalProof,
+		evidence:         terminalEvidence,
 	}
 	m.bindFUSEController(lifecycle, controller)
 	restoreMu.Unlock()

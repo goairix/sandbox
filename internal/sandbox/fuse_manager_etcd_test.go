@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
 	"github.com/goairix/sandbox/internal/storage/state"
 	etcdstate "github.com/goairix/sandbox/internal/storage/state/etcd"
@@ -164,6 +165,59 @@ func TestManagerFUSETimeoutKeepsOccupationUntilRemovalOnEtcd(t *testing.T) {
 	record, err = active.Load(ctx, sb.ID)
 	require.NoError(t, err)
 	require.Nil(t, record)
+}
+
+func TestManagerRecoversTerminatedFUSEWithStrongShutdownProofOnEtcd(t *testing.T) {
+	testManagerRecoversTerminatedFUSEWithProof(t, true)
+}
+
+func TestManagerRetainsTerminatedFUSEWithoutShutdownProofOnEtcd(t *testing.T) {
+	testManagerRecoversTerminatedFUSEWithProof(t, false)
+}
+
+func testManagerRecoversTerminatedFUSEWithProof(t *testing.T, confirmed bool) {
+	t.Helper()
+	manager, active := newEtcdFUSEManager(t)
+	ctx := context.Background()
+	sb, err := manager.Create(ctx, SandboxConfig{Mode: ModePersistent, WorkspacePath: "team/terminal-proof"})
+	require.NoError(t, err)
+	store := manager.sessions.store.(*etcdstate.Store)
+	poolRepo := manager.fusePool.repo.(*etcdstate.FUSEPoolRepository)
+	rt := manager.runtime.(*fuseManagerRuntime)
+	require.NoError(t, manager.Stop(ctx))
+
+	rt.mockRuntime.mu.Lock()
+	rt.mockRuntime.sandboxes[sb.RuntimeID].State = "exited"
+	rt.mockRuntime.mu.Unlock()
+	poolConfig := fusePoolConfig()
+	poolConfig.MinSize = 0
+	poolConfig.MaintainerToken = "api-b"
+	var recoveryRuntime runtime.Runtime = rt
+	if !confirmed {
+		recoveryRuntime = unconfirmedFailedCreateRuntime{rt}
+	}
+	config := manager.config
+	config.InstanceID = "api-b"
+	config.FUSEPool = NewFUSEPool(recoveryRuntime, poolRepo, poolConfig, fixedFUSESpec("pool-key"))
+	restarted := NewManager(recoveryRuntime, manager.filesystem, manager.fsMeta, config)
+	restarted.SetSessionStore(NewSessionStore(store, time.Hour))
+	restarted.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	t.Cleanup(func() { require.NoError(t, restarted.Stop(context.Background())) })
+
+	err = restarted.Destroy(ctx, sb.ID)
+	if !confirmed {
+		require.ErrorIs(t, err, ErrSandboxNotReady)
+		record, loadErr := active.Load(ctx, sb.ID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, record)
+		require.False(t, rt.wasRemoved(sb.RuntimeID))
+		return
+	}
+	require.NoError(t, err)
+	record, err := active.Load(ctx, sb.ID)
+	require.NoError(t, err)
+	require.Nil(t, record)
+	require.True(t, rt.wasRemoved(sb.RuntimeID))
 }
 
 func TestManagerRecoversExpiredFailedFUSECreateAfterManagerRestartWithEtcd(t *testing.T) {
