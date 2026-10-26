@@ -1462,18 +1462,10 @@ func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.
 		record.CleanupToken == "" || record.RuntimeID == "" || record.RuntimeUID == "" {
 		return false, nil
 	}
-	m.mu.RLock()
-	if m.fuseInFlight[record.PreparationID] != nil {
-		m.mu.RUnlock()
-		return false, nil
+	protected, err := m.fuseCleanupHasRuntimeReferences(ctx, record)
+	if err != nil || protected {
+		return false, err
 	}
-	for _, lifecycle := range m.fuseLifecycles {
-		if lifecycle.record.RuntimeUID == record.RuntimeUID || lifecycle.record.PreparationID == record.PreparationID {
-			m.mu.RUnlock()
-			return false, nil
-		}
-	}
-	m.mu.RUnlock()
 
 	coordinator := m.config.WorkspaceCoordinator
 	owner, err := coordinator.runtimeOwner(ctx, record.RuntimeID, record.RuntimeUID)
@@ -1502,6 +1494,10 @@ func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.
 	if err != nil {
 		return false, err
 	}
+	protected, err = m.fuseCleanupHasRuntimeReferences(ctx, *claimed)
+	if err != nil || protected {
+		return false, err
+	}
 	status, err = m.workspaceOwnerRecoveryStatus(ctx, *owner)
 	if err != nil || !canRecover(status, *claimed) {
 		return false, err
@@ -1525,6 +1521,87 @@ func (m *Manager) recoverProtectedFUSECleanup(ctx context.Context, record state.
 		return false, err
 	}
 	return true, nil
+}
+
+// A cleanup owner is not proof that it is the only live reference. This scan
+// runs only for an expired failed-create cleanup; missing inventories and
+// unreadable records retain the runtime rather than authorize deletion.
+func (m *Manager) fuseCleanupHasRuntimeReferences(ctx context.Context, record state.FUSEPoolRecord) (bool, error) {
+	if m.sessions == nil || m.ephemeral == nil || m.activeSandboxes == nil {
+		return true, nil
+	}
+	m.mu.RLock()
+	if m.fuseInFlight[record.PreparationID] != nil {
+		m.mu.RUnlock()
+		return true, nil
+	}
+	for _, lifecycle := range m.fuseLifecycles {
+		if lifecycle.record.RuntimeUID == record.RuntimeUID || lifecycle.record.PreparationID == record.PreparationID {
+			m.mu.RUnlock()
+			return true, nil
+		}
+	}
+	for _, sandbox := range m.sandboxes {
+		if sandbox.RuntimeUID == record.RuntimeUID || sandbox.Workspace != nil && sandbox.Workspace.FUSEPreparationID == record.PreparationID {
+			m.mu.RUnlock()
+			return true, nil
+		}
+	}
+	m.mu.RUnlock()
+
+	ids, err := m.sessions.ListReadOnly(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		sandbox, err := m.sessions.LoadReadOnly(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		if sandbox.RuntimeUID == record.RuntimeUID || sandbox.Workspace != nil && sandbox.Workspace.FUSEPreparationID == record.PreparationID {
+			return true, nil
+		}
+	}
+	ephemeral, err := m.ephemeral.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, lifecycle := range ephemeral {
+		if lifecycle.RuntimeUID == record.RuntimeUID || lifecycle.PreparationID == record.PreparationID {
+			return true, nil
+		}
+	}
+
+	var cursor uint64
+	for {
+		page, err := m.activeSandboxes.Scan(ctx, cursor, 128)
+		if err != nil {
+			return false, err
+		}
+		for _, active := range page.Records {
+			if active.RuntimeUID == record.RuntimeUID {
+				return true, nil
+			}
+			var snapshot struct {
+				Workspace *struct {
+					FUSEPreparationID string `json:"fuse_preparation_id"`
+				} `json:"workspace"`
+			}
+			if err := json.Unmarshal(active.Snapshot, &snapshot); err != nil {
+				return false, err
+			}
+			if snapshot.Workspace != nil && snapshot.Workspace.FUSEPreparationID == record.PreparationID {
+				return true, nil
+			}
+		}
+		if page.Cursor == 0 {
+			return false, nil
+		}
+		if page.Cursor == cursor {
+			return false, fmt.Errorf("active sandbox scan did not advance")
+		}
+		cursor = page.Cursor
+	}
 }
 
 func (m *Manager) startFUSEWatcher(ctx context.Context, lifecycle *fuseSandboxLifecycle) {

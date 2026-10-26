@@ -31,15 +31,25 @@ func newDistributedFUSERecoveryManager(t *testing.T) (*Manager, *fuseManagerRunt
 
 func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		expireLease bool
-		session     bool
-		unconfirmed bool
-		checkpoint  bool
+		name             string
+		expireLease      bool
+		session          bool
+		foreignSession   bool
+		foreignEphemeral bool
+		foreignActive    bool
+		missingStore     string
+		unconfirmed      bool
+		checkpoint       bool
 	}{
 		{name: "live workspace lease stays protected"},
 		{name: "expired workspace lease is recovered", expireLease: true},
 		{name: "published session stays protected", expireLease: true, session: true},
+		{name: "foreign session with the same runtime stays protected", expireLease: true, foreignSession: true},
+		{name: "foreign ephemeral with the same runtime stays protected", expireLease: true, foreignEphemeral: true},
+		{name: "foreign active record with the same runtime stays protected", expireLease: true, foreignActive: true},
+		{name: "missing session inventory stays protected", expireLease: true, missingStore: "session"},
+		{name: "missing ephemeral inventory stays protected", expireLease: true, missingStore: "ephemeral"},
+		{name: "missing active inventory stays protected", expireLease: true, missingStore: "active"},
 		{name: "missing termination proof retains owner", expireLease: true, unconfirmed: true},
 		{name: "checkpointed termination resumes after Pod absence", expireLease: true, checkpoint: true},
 	} {
@@ -48,6 +58,9 @@ func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t 
 			rt := newFUSEManagerRuntime()
 			m, _, repo, store := newFUSETestManager(t, rt)
 			m.config.RuntimeType = "kubernetes"
+			m.activeSandboxes = newMemoryActiveRepository()
+			m.config.ActiveSandboxes = m.activeSandboxes
+			m.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
 			prepared, err := repo.ListByPoolKey(ctx, "pool-key")
 			require.NoError(t, err)
 			require.Len(t, prepared, 1)
@@ -80,7 +93,26 @@ func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t 
 			}
 			if tc.session {
 				require.NoError(t, m.sessions.Save(ctx, &Sandbox{
-					ID: req.SandboxID, RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+					ID: req.SandboxID, RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID, CreatedAt: time.Now(),
+				}))
+			}
+			if tc.foreignSession {
+				require.NoError(t, m.sessions.Save(ctx, &Sandbox{
+					ID: "sandbox-foreign", RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID, CreatedAt: time.Now(),
+				}))
+			}
+			if tc.foreignEphemeral {
+				foreign := validEphemeralRecord()
+				foreign.RuntimeID, foreign.Owner.RuntimeID = record.RuntimeID, record.RuntimeID
+				foreign.RuntimeUID, foreign.Owner.RuntimeUID = record.RuntimeUID, record.RuntimeUID
+				require.NoError(t, m.ephemeral.Create(ctx, foreign))
+			}
+			if tc.foreignActive {
+				now := time.Now()
+				require.NoError(t, m.activeSandboxes.Publish(ctx, state.ActiveSandboxRecord{
+					Version: 1, SandboxID: "sandbox-foreign", Phase: state.ActiveSandboxActive,
+					Revision: 1, Generation: 1, RuntimeID: record.RuntimeID, RuntimeUID: record.RuntimeUID,
+					Snapshot: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
 				}))
 			}
 			restartedPool := NewFUSEPool(rt, repo, fusePoolConfig(), fixedFUSESpec("pool-key"))
@@ -89,6 +121,15 @@ func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t 
 			restartedConfig.FUSEPool = restartedPool
 			restarted := NewManager(rt, m.filesystem, m.fsMeta, restartedConfig)
 			restarted.SetSessionStore(NewSessionStore(store, time.Hour))
+			restarted.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+			switch tc.missingStore {
+			case "session":
+				restarted.SetSessionStore(nil)
+			case "ephemeral":
+				restarted.SetEphemeralLifecycleStore(nil)
+			case "active":
+				restarted.activeSandboxes = nil
+			}
 			if tc.unconfirmed {
 				unconfirmed := unconfirmedFailedCreateRuntime{rt}
 				restarted.runtime = unconfirmed
@@ -101,7 +142,7 @@ func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t 
 
 			require.NoError(t, restarted.fusePool.Reconcile(ctx))
 			_, exists := repo.record(record.PreparationID)
-			if !tc.expireLease || tc.session || tc.unconfirmed {
+			if !tc.expireLease || tc.session || tc.foreignSession || tc.foreignEphemeral || tc.foreignActive || tc.missingStore != "" || tc.unconfirmed {
 				require.True(t, exists)
 				require.False(t, rt.wasRemoved(record.RuntimeID))
 				ownerKey, err := workspaceStateKeysFromOwner(lease.OwnerSnapshot())
@@ -120,6 +161,43 @@ func TestExpiredFailedFUSECreateCleanupRecoversOnlyAfterWorkspaceLeaseExpires(t 
 			require.Nil(t, ownerRaw)
 		})
 	}
+}
+
+type pagedRecoveryActiveRepository struct {
+	state.ActiveSandboxRepository
+	records []state.ActiveSandboxRecord
+}
+
+func (r pagedRecoveryActiveRepository) Scan(_ context.Context, cursor uint64, count int64) (state.ActiveSandboxPage, error) {
+	if cursor == 0 {
+		// A scan may yield an empty page while its cursor still advances.
+		return state.ActiveSandboxPage{Cursor: 1}, nil
+	}
+	start := int(cursor - 1)
+	end := min(start+int(count), len(r.records))
+	page := state.ActiveSandboxPage{Records: r.records[start:end]}
+	if end < len(r.records) {
+		page.Cursor = uint64(end + 1)
+	}
+	return page, nil
+}
+
+func TestFailedFUSERecoveryChecksEveryActiveInventoryPage(t *testing.T) {
+	ctx := context.Background()
+	m, _, repo, store := newFUSETestManager(t, newFUSEManagerRuntime())
+	m.SetEphemeralLifecycleStore(NewEphemeralLifecycleStore(store))
+	prepared, err := repo.ListByPoolKey(ctx, "pool-key")
+	require.NoError(t, err)
+	require.Len(t, prepared, 1)
+	active := make([]state.ActiveSandboxRecord, 129)
+	for i := range active {
+		active[i] = state.ActiveSandboxRecord{RuntimeUID: "unrelated", Snapshot: json.RawMessage(`{}`)}
+	}
+	active[128].RuntimeUID = prepared[0].RuntimeUID
+	m.activeSandboxes = pagedRecoveryActiveRepository{ActiveSandboxRepository: newMemoryActiveRepository(), records: active}
+	protected, err := m.fuseCleanupHasRuntimeReferences(ctx, prepared[0])
+	require.NoError(t, err)
+	require.True(t, protected, "a reference after an empty page and 128 records must retain the runtime")
 }
 
 type failClaimReplyRepository struct {
