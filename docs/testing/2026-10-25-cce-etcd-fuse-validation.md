@@ -47,5 +47,5 @@ revision 12 的三个测试 etcd Pod 使用 `emptyDir`，不能据此证明持�
 测试 release 升至 revision 13；单个 follower Pod 重建后保持原
 PVC 与 member 身份，存活 FUSE 沙盒和文件可读，详情见上述报告。
 旧 emptyDir 集群暂保留回退。当前 PVC 集群的快照已在本机隔离的
-单成员进程中恢复并读回测试标记；全员数据丢失后重建三成员并重新
-接入 API 的恢复流程，以及大存量容量，仍未验收。
+单成员和三成员进程中恢复并读回测试标记；全员数据丢失后在
+Kubernetes 重建并重新接入 API 的流程，以及大存量容量，仍未验收。
