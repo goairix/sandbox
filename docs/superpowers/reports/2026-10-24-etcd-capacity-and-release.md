@@ -1701,3 +1701,70 @@ cleanup record CAS 删除流程回收；未直接删除 finalizer 或原始 etcd
 **旧进程中断后的自动恢复仍有缺口**，此次为单条运维回收，不能
 据此宣称自动恢复已通过。CCE 仍需重复容量、故障恢复以及更大
 存活规模测试；本轮未触及 DS 线上 release。
+
+### CCE 失败创建恢复补丁与实机容量边界（2026-10-26）
+
+`6c96f29` 给过期的 FUSE failed-create cleanup 增加原 owner 身份绑定的
+恢复入口：只在原 cleanup lease 已过期、原 workspace lease 不在、
+session/active/ephemeral 记录均不在、存储身份与 Pod UID 精确匹配时，
+通过原清理 token CAS 续接强终止、owner release 与 cleanup record 删除。
+缺少终止证明时保留 owner 和 occupation。定向 RED→GREEN、
+`internal/sandbox` 与 Kubernetes runtime 包测试、定向 race 和 vet
+通过。**本轮尚未在 CCE 人为中断 failed-create 的 API 进程，自动
+重启恢复只通过了代码测试，不能称为 CCE 故障验收。**
+
+CCE Helm revision 4 部署 `6c96f29`，API 2/2 Ready。集群内客户端经
+正式 Service 完成一条 FUSE POST 201、挂载信息 200、容器内 Python
+写入/fsync/读回、`from_container` 200 且 `flushed=true`、公开
+DELETE 200 和最终 GET 404。测试日志
+`/tmp/cce-recovery-smoke-6c96f29.log` SHA-256 为
+`bebcd1c6f8ddb9bc4da2a474b6f380baefb0832fa1c3c399000fb10751b40453`。
+事后只读 owner 审计 `[]`；该烟测没有触发上述失败创建恢复分支。
+
+随后在相同 CCE release 上以最多并发 4、目标 48 个存活 FUSE 沙盒
+进行实测。第一轮在取得 26 个申请结果时停止：23 个 POST 201，
+3 个连接在约 120–124 秒断开，故**48 目标失败**。API 日志有
+Kubernetes 客户端 `client-side throttling`、FUSE 池补充锁竞争、
+`get exact Pod` 因客户端 rate limiter 超出上下文期限而失败；
+HTTP 服务写超时为 120 秒。此处是现场相关证据，不把连接断开
+误说成 etcd 事务失败。部分公开 DELETE 当时返回 503，但原 ID
+随后查询为 404。停止新申请后，用测试 workspace 路径精确查询、
+公开 DELETE 清理 23 条，49 个候选路径连续两轮均不存在；只读 owner
+审计 `[]`、受管 Pod 回到普通/FUSE 准备池各 3 个。原始失败日志
+`/tmp/cce-resident-48-6c96f29-partial.log` SHA-256
+`222ecf184c7dee9ec5bb0192d4948a204d3235a9d8b56ef371940eb194bdf7ba`，
+清理日志 `/tmp/cce-resident-48-cleanup-6c96f29.log` SHA-256
+`2b2fa8fa17d39e2a9a5efabd6b2fe1222642fa1890b61685e26fd450eb62cfa4`。
+
+`1f98a5a` 将现有 Kubernetes 客户端预算设为 20 QPS/40 burst，
+Pod 轮询间隔从 250ms 调至 500ms；不改状态授权、终止证明或超时。
+Kubernetes runtime 包测试、vet、ELF 架构检查通过。CCE revision 5
+部署 arm64 镜像 digest
+`sha256:44d9d8efb66b9c946a46fab3a5564fc5dfb7a4363864ff518b9a6a83f91b9b9f`，
+API 2/2 Ready。单条 FUSE 业务烟测再次完成同样的创建、执行、flush、
+删除链，日志 `/tmp/cce-poll-smoke-1f98a5a.log` SHA-256
+`6ff357ac4948e0b5087ad503c0522947c5431405b72446a3937e4f50f5de1273`。
+
+revision 5 的 48 目标试验改为每批最多 4 个申请，首个失败批次后
+停止新增，故与前一轮持续补位的驱动**并非严格 A/B 对照**。
+前 30 个申请 POST 201、30/30 驻留 GET 200；其创建耗时中位
+8.339 秒、P95 17.614 秒、最大 18.347 秒。本轮未再看到
+`client-side throttling`，但池补充出现 `wait for prepared containers`
+超时；调度器明确报 `0/3 nodes are available: 3 Insufficient cpu`。
+第 31、32 个申请在约 120 秒断连，试验最终为 **FAIL（30/32，
+未达到 48）**，第 49 个申请未启动。三个节点各有 3920m 可调度
+CPU；边界时 CPU requests 分别为 3845m、3540m、3645m，
+即 98%、90%、92%。30 个已创建沙盒经公开 DELETE 均到 GET 404；
+owner 审计 `[]`，受管 Pod 回到 6 个准备池实例，API 2/2 Ready。
+原始日志 `/tmp/cce-resident-48-1f98a5a.log` SHA-256
+`24adc852f4aa2cbe3a9a8fa29ea1a7b5d74b6db2c920dc2d576618f7e2ac1a30`。
+两个试验 Job 和脚本 ConfigMap 均已删除。结果说明该 CCE 三节点
+环境在当前其他工作负载和资源请求下**未能完成超过 30 个同时存活
+的本轮测试**；30 是本轮已证实值，不是精确容量上限。
+
+10 万存活 FUSE 沙盒仍未验收。当前三节点的 Pod 上限合计仅 180，
+而实际在 CPU 请求上先碰到调度边界；该集群无法作为 10 万实际
+Pod 验收环境。代码中 `guardFUSEPoolRecord` 仍会列举 session 与
+workspace owner，申请路径在大量存活 N 下可能增加扫描成本，
+需要单独做精确索引或等效有界证明，并在有足够物理容量的多 cell
+环境中验证。旧元数据子集的 10 万试验不能替代这一验收。
