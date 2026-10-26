@@ -2119,3 +2119,72 @@ MinIO、池与网络值沿用原 release。升级后 API 2/2；以现有 Secret
 `0b527059f0082138aeb52b2064a00a66a7b152fb11094c0e1d837c6019878b2e`；
 临时 Job 和 ConfigMap 已删除。没有在承载业务的 DS 上重放
 `minSize=0` 排空；该故障路径的实际验证来自使用同一镜像的 CCE。
+
+### DS 与 CCE 双 cell 的有界 FUSE 驻留验证（2026-10-26）
+
+按资源边界分别在 DS 和 CCE 的 `sandbox-fuse-etcd` namespace 使用公开
+API 测试两个独立 cell。两边继续使用各自的 etcd、对象存储和 API
+Secret；没有部署跨 cell 路由，也没有修改 DS 业务入口。先在两边各自完成
+创建、挂载、`/workspace` 写入和读回、flush、公开删除到 GET 404 的
+完整烟测。DS、CCE 日志 SHA-256 分别为
+`be480455d47a2c19d67dd01cbfd3f72a5c9d6296d3f55389b0b2def90862b14e`、
+`6592eab22e590341ae3bcebb6b5e6f03941f345d7901d788e41d3b083fcbc65e`。
+
+随后每 cell 独立以 2 个并发申请建立 5、10、20 个 FUSE 驻留沙盒，
+保持 20 秒后逐个 GET 验证，再申请 1 个额外沙盒，最终对所有测试
+ID 执行公开 DELETE 并轮询到 GET 404。两边三档均 `pass=true`、
+无申请失败、无测试 owner 遗留：
+
+| cell | 驻留档 | 创建中位数 | 创建样本 p95 | 总耗时 | 日志 SHA-256 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| DS | 5 | 1.767 s | 4.479 s | 47.117 s | `7587743589af4e5413f197c463c9346638e93c249ceba5fea38c30bc31efbf6d` |
+| CCE | 5 | 1.367 s | 4.678 s | 43.806 s | `11ba9b642e65fb0fe440c0d239af0acdf6ff516200cd8b5a190ac89551223dc8` |
+| DS | 10 | 5.204 s | 9.688 s | 83.044 s | `5ef7814b188e78de39e0627efacc8bac345879f429c6ceb5349daf8d3afc9e1d` |
+| CCE | 10 | 4.636 s | 9.158 s | 78.910 s | `c245256dc5733e55757e77e0b84846b80213b2280f756db6f160576f18c8fab8` |
+| DS | 20 | 5.415 s | 10.406 s | 153.131 s | `d2383640bb62f76f45ee5a327d9c0856886140dcbddc6cbaaa7c669764406171` |
+| CCE | 20 | 5.099 s | 9.409 s | 140.542 s | `13ae6b4d9b6491fdb92fe3292d05f686d0d4b5b474369239d747bd205013939a` |
+
+这些是各档独立测试，不是 5+10+20 同时存活；创建延迟包括 Pod
+准备和 FUSE 挂载，样本量也不足以代表稳定 p95。资源可用时仍需
+独立验收更大的存量、周期维护、同时到期与故障下的吞吐。每轮临时
+Job/ConfigMap 已删除，日志保存在本机 `/tmp/dualcell-*`。
+
+分页读取优化 `4ace9ffa`、`18dd9e90` 将原 workspace owner 与
+ephemeral 安全检查中的逐条 etcd Get 改为同 revision 的有界范围页；
+它降低读取请求数和单页内存峰值，仍保留 O(N) 全量安全扫描。基于
+`d27fc8ac` 已验收镜像只替换 Linux/arm64 API 二进制，镜像 tag 为
+`v1-paged-owner-18dd9e90-arm64`，manifest digest 为
+`sha256:9aa9f93216e8c6a0e1707acf54a9587bab42fc67fa667d3a9dae6cd538adbe11`，
+镜像内二进制 SHA-256 与构建产物均为
+`d2287e8ebe6a61f1b281de6d300e62cf78a0482a214bff4859c86b10152f93b8`。
+CCE Helm revision 19 只更新 API image tag，API 2/2 Ready，升级后的
+完整 FUSE 烟测 `pass=true`，日志 SHA-256 为
+`b8ff52a7b447a114c0542ef06f590bf8e2cab5fe2b18d54ddc702f5cc4f2d57e`。
+此项证明功能未回退；是否改善申请延迟需要同负载测量，不能仅凭
+代码结构推断。
+
+CCE 在该镜像上再以相同 2 个并发、20 个驻留、20 秒保持和 1 个额外
+申请复测：20/20 创建与保持、额外申请 201、21/21 删除到 404，
+`pass=true`，总耗时 134.119 秒，创建中位数 4.703 秒、样本 p95
+9.443 秒。日志 SHA-256 为
+`a2741c59490629a42ea2b1abd3e376965d709a64392d651127b99a552135eab2`；
+临时 Job 和 ConfigMap 已删除。相对旧镜像 20 档的 5.099 秒中位数，
+这是两次小样本且受 Pod 调度影响的观测，不能作为严格 A/B 提速结论。
+
+DS Helm revision 16 随后仅更新为相同镜像，API 2/2 Ready；升级后的
+完整 FUSE 烟测 `pass=true`，日志 SHA-256 为
+`24f3f6971321c5bbecf3243f68bd18a3e5bcc65bb50364a71a487acdfb486eec`。
+同样的 20 驻留复测为 20/20 创建与保持、额外申请 201、21/21 删除
+到 404，`pass=true`；总耗时 149.374 秒，创建中位数 5.346 秒、
+样本 p95 10.309 秒，日志 SHA-256 为
+`61b4dc016599712f47a807f54dd1bd64cc8ad3f7cab82258581493915239d735`。
+相对旧镜像 20 档的 5.415 秒中位数，同样不能归因为分页优化。
+
+两套集群的本轮临时 Job/ConfigMap 均已删除；按六个本轮专用 workspace
+前缀，各从对象存储删除 63 个测试对象，并逐一确认前缀为空。CCE
+MinIO 的临时端口转发已停止。未删除其他业务对象、Pod、PVC 或 etcd
+数据。此轮有界验收的结论是：DS、CCE 各自的 FUSE 主链在 20 个
+同时存活的实际 Pod 下可用，分页优化镜像未见该负载下的功能回退。
+两集群目前是**独立 cell**；没有实现统一入口的跨 cell 路由或故障
+转移。物理 Pod 配额、CCE 已观察到的 CPU 调度边界和仍为 O(N) 的
+安全扫描，均不允许据此声称 10 万存活已验收。
