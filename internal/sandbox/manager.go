@@ -1456,14 +1456,12 @@ func (m *Manager) guardFUSEPoolRecord(ctx context.Context, record state.FUSEPool
 		}
 	}
 	if m.ephemeral != nil {
-		records, err := m.ephemeral.List(ctx)
+		protected, err := m.ephemeral.HasRuntimeReference(ctx, record.RuntimeUID, record.PreparationID)
 		if err != nil {
 			return FUSEPoolDispositionUnknown, err
 		}
-		for _, lifecycle := range records {
-			if lifecycle.RuntimeUID == record.RuntimeUID || lifecycle.PreparationID == record.PreparationID {
-				return FUSEPoolProtected, nil
-			}
+		if protected {
+			return FUSEPoolProtected, nil
 		}
 	}
 	if m.config.WorkspaceCoordinator != nil {
@@ -1593,14 +1591,12 @@ func (m *Manager) fuseCleanupHasRuntimeReferences(ctx context.Context, record st
 			return true, nil
 		}
 	}
-	ephemeral, err := m.ephemeral.List(ctx)
+	protected, err := m.ephemeral.HasRuntimeReference(ctx, record.RuntimeUID, record.PreparationID)
 	if err != nil {
 		return false, err
 	}
-	for _, lifecycle := range ephemeral {
-		if lifecycle.RuntimeUID == record.RuntimeUID || lifecycle.PreparationID == record.PreparationID {
-			return true, nil
-		}
+	if protected {
+		return true, nil
 	}
 
 	var cursor uint64

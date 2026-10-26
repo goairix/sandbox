@@ -176,10 +176,10 @@ type WorkspaceCoordinator struct {
 	configErr     error
 }
 
-// workspaceOwnerValueScanner is an optional storage optimization. It visits a
-// bounded page of key/value pairs at a time; stores without it keep the
-// original conservative owner scan.
-type workspaceOwnerValueScanner interface {
+// statePrefixValueScanner is an optional storage optimization. It visits a
+// bounded page of key/value pairs at a time; stores without it keep their
+// original conservative key and point-read traversal.
+type statePrefixValueScanner interface {
 	VisitPrefixValues(context.Context, string, func(string, []byte) (bool, error)) error
 }
 
@@ -190,7 +190,7 @@ func (c *WorkspaceCoordinator) HasRuntimeOwner(ctx context.Context, runtimeID, r
 	if c == nil || c.configErr != nil {
 		return false, ErrInvalidWorkspaceLease
 	}
-	if scanner, ok := c.store.(workspaceOwnerValueScanner); ok {
+	if scanner, ok := c.store.(statePrefixValueScanner); ok {
 		protected := false
 		err := scanner.VisitPrefixValues(ctx, workspaceOwnerKeyPrefix, func(key string, raw []byte) (bool, error) {
 			owner, err := decodeScannedWorkspaceOwner(key, raw)

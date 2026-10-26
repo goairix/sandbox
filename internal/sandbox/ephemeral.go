@@ -133,6 +133,41 @@ func (s *EphemeralLifecycleStore) List(ctx context.Context) ([]EphemeralLifecycl
 	return records, nil
 }
 
+// HasRuntimeReference checks one runtime against every current lifecycle.
+// The optional etcd path reads bounded, revision-consistent value pages and
+// stops at the first match. Other stores keep the original conservative list.
+func (s *EphemeralLifecycleStore) HasRuntimeReference(ctx context.Context, runtimeUID, preparationID string) (bool, error) {
+	if s == nil || s.store == nil {
+		return false, ErrEphemeralLifecycleInvalid
+	}
+	if scanner, ok := s.store.(statePrefixValueScanner); ok {
+		found := false
+		err := scanner.VisitPrefixValues(ctx, ephemeralLifecycleKeyPrefix, func(key string, raw []byte) (bool, error) {
+			id := strings.TrimPrefix(key, ephemeralLifecycleKeyPrefix)
+			if id == key || validateOpaqueText(id, false) != nil {
+				return false, ErrEphemeralLifecycleInvalid
+			}
+			record, err := decodeEphemeralLifecycle(raw)
+			if err != nil || record.SandboxID != id {
+				return false, ErrEphemeralLifecycleInvalid
+			}
+			found = record.RuntimeUID == runtimeUID || record.PreparationID == preparationID
+			return found, nil
+		})
+		return found, err
+	}
+	records, err := s.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, record := range records {
+		if record.RuntimeUID == runtimeUID || record.PreparationID == preparationID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *EphemeralLifecycleStore) Transition(ctx context.Context, sandboxID string, expectedRevision uint64, nextState EphemeralFinalizationState) (*EphemeralLifecycleRecord, error) {
 	if s == nil || s.store == nil || expectedRevision == 0 {
 		return nil, ErrEphemeralLifecycleInvalid
