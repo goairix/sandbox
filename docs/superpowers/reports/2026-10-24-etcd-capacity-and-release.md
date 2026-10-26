@@ -2079,6 +2079,16 @@ revision 18 将两池最小值恢复为 3，API 2/2，公开 FUSE 主链复验
 `40afd175e4fc1e18560987ef6245a7a04c5a1989538b2184738a974f0b29aa00`。
 测试 Job 和 ConfigMap 已清理，DS 未升级。
 
+另建一个独立的存活 FUSE 测试沙盒，在 `/workspace` 写入并 fsync
+专用标记后，将 `cce-pvc-etcd` StatefulSet 从 3 缩到 0，确认三个
+etcd Pod 均退出；不替换 PVC 数据。再扩回 3，三端 Ready、endpoint
+status 无错误且 cluster ID 保持恢复后的同一个值。原沙盒 ID 的公开
+GET 200、挂载信息 200、Exec 读回原标记 200；公开 DELETE 200，
+最终 GET 404。测试后无活跃非池 sandbox Pod，CCE API 2/2、
+PVC etcd 3/3，DS API 2/2。该项验证**全体成员停机再启动时的
+存活 owner 与文件连续性**；它没有对存活 owner 执行快照回滚，
+不能用来证明跨时间点回滚后的所有租约与清理行为。
+
 这验证了 CCE 测试 namespace 中的**三成员 PVC 快照恢复与新建 FUSE
 主链**。它没有验证恢复时仍存活的业务沙盒、自动备份、跨可用区
 磁盘全损或 10 万存活容量。本机快照只是演练恢复点，不是持久备份。
