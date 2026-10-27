@@ -4,7 +4,11 @@
 !cmd/
 !cmd/workspace-probe/
 !cmd/workspace-probe/**
+!cmd/sandbox-file-op/
+!cmd/sandbox-file-op/**
 !internal/
+!internal/filev2/
+!internal/filev2/**
 !internal/fuseprotocol/
 !internal/fuseprotocol/**
 !internal/workspaceprobe/
