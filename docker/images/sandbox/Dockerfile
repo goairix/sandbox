@@ -5,10 +5,14 @@ WORKDIR /src
 ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 COPY cmd/workspace-probe ./cmd/workspace-probe
+COPY cmd/sandbox-file-op ./cmd/sandbox-file-op
 COPY internal/fuseprotocol ./internal/fuseprotocol
+COPY internal/filev2 ./internal/filev2
 COPY internal/workspaceprobe ./internal/workspaceprobe
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
-    -o /out/workspace-probe ./cmd/workspace-probe
+    -o /out/workspace-probe ./cmd/workspace-probe \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/sandbox-file-op ./cmd/sandbox-file-op
 
 FROM python:3.13-slim-bookworm
 
@@ -22,8 +26,9 @@ ENV NODE_PATH=/opt/sandbox-libs/node_modules
 # Non-privileged fixed-path workspace health/quiesce probe. The ordinary image
 # intentionally does not contain s3fs or the root workspace supervisor.
 COPY --from=workspace-probe-builder /out/workspace-probe /usr/local/bin/workspace-probe
-RUN chown root:root /usr/local/bin/workspace-probe \
- && chmod 0755 /usr/local/bin/workspace-probe
+COPY --from=workspace-probe-builder /out/sandbox-file-op /usr/local/bin/sandbox-file-op
+RUN chown root:root /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op \
+ && chmod 0755 /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op
 
 WORKDIR /workspace
 USER sandbox
