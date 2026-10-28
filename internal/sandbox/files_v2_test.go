@@ -22,9 +22,10 @@ type fileV2Runtime struct {
 	stat    string
 	listing string
 	stream  io.ReadCloser
+	written string
 }
 
-func (r *fileV2Runtime) RunFileOp(_ context.Context, _ string, argv []string, _ io.Reader) (io.ReadCloser, error) {
+func (r *fileV2Runtime) RunFileOp(_ context.Context, _ string, argv []string, stdin io.Reader) (io.ReadCloser, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string(nil), argv...))
@@ -37,7 +38,27 @@ func (r *fileV2Runtime) RunFileOp(_ context.Context, _ string, argv []string, _ 
 	if argv[0] == "read" {
 		return io.NopCloser(strings.NewReader("abcdef")), nil
 	}
+	if argv[0] == "write" {
+		body, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, err
+		}
+		r.written = string(body)
+		return io.NopCloser(strings.NewReader("")), nil
+	}
 	return io.NopCloser(strings.NewReader(r.listing)), nil
+}
+
+func TestFileV2Write(t *testing.T) {
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	mgr, _ := newGatedManager(rt)
+	err := mgr.WriteFileV2(context.Background(), "sandbox-test", "nested/a.txt", 3, true, strings.NewReader("abc"))
+	require.NoError(t, err)
+	require.Equal(t, "abc", rt.written)
+	require.Equal(t, []string{"write", "/workspace/nested/a.txt", "3", "create-parents"}, rt.calls[0])
+	err = mgr.WriteFileV2(context.Background(), "sandbox-test", "/workspace/a.txt", -1, false, strings.NewReader(""))
+	require.ErrorIs(t, err, runtime.ErrInvalidUploadSize)
+	require.Len(t, rt.calls, 1)
 }
 
 func TestFileV2ReadRangeHoldsGateUntilClose(t *testing.T) {

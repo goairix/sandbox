@@ -239,3 +239,43 @@ func (m *Manager) ReadFileRangeV2(ctx context.Context, id, filePath string, star
 	}
 	return &fileV2GatedStream{reader: rc, release: release}, nil
 }
+
+// WriteFileV2 sends raw bytes to one helper process. Its empty stdout and
+// successful terminal status are both required before the gate is released.
+func (m *Manager) WriteFileV2(ctx context.Context, id, filePath string, size int64, createParents bool, src io.Reader) error {
+	canonical, err := normalizeFileV2Path(filePath)
+	if err != nil {
+		return err
+	}
+	if size < 0 || src == nil {
+		return runtime.ErrInvalidUploadSize
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		return err
+	}
+	argv := []string{"write", canonical, strconv.FormatInt(size, 10)}
+	if createParents {
+		argv = append(argv, "create-parents")
+	}
+	rc, err := transport.RunFileOp(operationCtx, m.sandboxRuntimeID(sb), argv, src)
+	if err != nil {
+		return err
+	}
+	if rc == nil {
+		return errors.New("file helper returned no reader")
+	}
+	output, readErr := io.ReadAll(io.LimitReader(rc, 4097))
+	closeErr := rc.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	if len(output) != 0 {
+		return errors.New("file helper returned unexpected write output")
+	}
+	return nil
+}
