@@ -54,4 +54,14 @@ diff 工具在编辑前最多读取 256 KiB；文件过大或不是 UTF-8 时直
 
 在此目录运行 `go test ./...`，即可在不连接模型或集群的情况下验证 Eino 工具注册、编辑结果，以及 SDK 到 Files v2 的 HTTP 调用。
 
+不使用 ChatModel 的直接验证入口在 `cmd/main.go`。将业务 API 地址和密钥放入环境变量，然后从本目录运行：
+
+```bash
+export EINO_FILES_LIVE_BASE_URL=http://127.0.0.1:18081
+export EINO_FILES_LIVE_API_KEY='从安全来源读取的 API key'
+go run ./cmd
+```
+
+入口创建独立 FUSE 沙盒，直接调用 Eino 的 `write_file`、`read_file`、`edit_file`、`ls`、`glob`、`grep`，再分别调用同步和流式 `execute`。它会打印各工具的实际结果与 unified diff，并检查命令输出和退出码；任一步失败会以非零状态退出。结束时删除测试文件并请求销毁测试沙盒，即使前面的验证失败也会尝试清理。API key 不会打印；不要把真实密钥写进命令历史或仓库文件。若 API 只提供 ClusterIP，可先在另一个终端对目标 Service 做端口转发，再填写本地地址。
+
 真实集群验证可设置 `EINO_FILES_LIVE_BASE_URL`、`EINO_FILES_LIVE_API_KEY` 后运行 `go test -run '^TestLiveEino(Filesystem|Shell)$' -v -count=1`。这两个 opt-in 测试分别创建独立的 FUSE 沙盒，直接调用 Eino 文件工具或同步/流式 `execute`，并通过公开 API 删除沙盒；不要把密钥写进命令历史或测试日志。
