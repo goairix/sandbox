@@ -1,6 +1,6 @@
 # Eino filesystem 对接 Sandbox Files v2
 
-这个独立模块把 Files v2 适配成 Eino v0.9.22 的六个文件工具，不修改服务端或现有 Files v1 接口。Eino 中的 `/a.txt` 映射到沙盒内的 `/workspace/a.txt`。
+这个独立模块把 Files v2 适配成 Eino v0.9.22 的六个文件工具，并可选接入沙盒内的 `execute` 工具，不修改服务端或现有 Files v1 接口。Eino 中的 `/a.txt` 映射到沙盒内的 `/workspace/a.txt`。
 
 ```go
 import (
@@ -13,9 +13,22 @@ middleware, err := einofiles.NewDiffMiddleware(ctx, sandboxHandle.Files())
 if err != nil { return err }
 agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
     Model: chatModel,
+    Instruction: "文件工具的 /a.txt 对应 execute 中的 /workspace/a.txt；命令当前目录是 /workspace。",
     Handlers: []adk.ChatModelAgentMiddleware{middleware},
 })
 ```
+
+要让 Eino 的 `execute` 在同一个沙盒内运行 Bash 命令，选择同步或流式模式之一：
+
+```go
+commands := einofiles.NewCommandBackend(sandboxHandle)
+middleware, err := einofiles.NewDiffMiddleware(ctx, sandboxHandle.Files(),
+    einofiles.WithStreamingShell(commands)) // 或 einofiles.WithShell(commands)
+```
+
+两个模式均保留原六个文件工具，额外注册 `execute`。`Shell` 汇总标准输出、标准错误和退出码；`StreamingShell` 按服务端 SSE 事件输出，并在 `done` 事件中返回退出码。当前 Kubernetes 执行流把非零退出码发成固定格式的 `error` 事件，适配器也会将这个精确格式还原为退出码；其他 `error` 仍报错。标准输出和标准错误由不同管道读取，其交错顺序以实际 SSE 到达顺序为准。空命令和后台模式被拒绝；输出最多展示 1 MiB，超出时标记截断。流缺少可识别的终止事件会报错。命令复用现有沙盒执行 API，不在运行 Eino 的进程里启动 shell。
+
+命令的当前目录是沙盒的 `/workspace`，相对路径可直接访问文件工具创建的文件。文件工具使用虚拟根 `/`，所以它报告的绝对路径 `/a.txt` 在命令里应写成 `/workspace/a.txt`；接入 Agent 时应将这一映射写入 Agent 指令。
 
 `NewMiddleware` 保持 Eino 标准 `edit_file` 的返回值。`NewDiffMiddleware` 只替换这个工具：Files v2 完成精确文本替换后，再读一次文件并返回观察到的 unified diff，例如：
 
@@ -41,4 +54,4 @@ diff 工具在编辑前最多读取 256 KiB；文件过大或不是 UTF-8 时直
 
 在此目录运行 `go test ./...`，即可在不连接模型或集群的情况下验证 Eino 工具注册、编辑结果，以及 SDK 到 Files v2 的 HTTP 调用。
 
-真实集群验证可设置 `EINO_FILES_LIVE_BASE_URL`、`EINO_FILES_LIVE_API_KEY` 后运行 `go test -run '^TestLiveEinoFilesystem$' -v -count=1`。该 opt-in 测试会创建一个有独立 workspace 的 FUSE 沙盒，直接调用 Eino 六个文件工具，并通过公开 API 删除沙盒；不要把密钥写进命令历史或测试日志。
+真实集群验证可设置 `EINO_FILES_LIVE_BASE_URL`、`EINO_FILES_LIVE_API_KEY` 后运行 `go test -run '^TestLiveEino(Filesystem|Shell)$' -v -count=1`。这两个 opt-in 测试分别创建独立的 FUSE 沙盒，直接调用 Eino 文件工具或同步/流式 `execute`，并通过公开 API 删除沙盒；不要把密钥写进命令历史或测试日志。
