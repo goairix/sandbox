@@ -15,6 +15,10 @@ type fileV2SearchInfo struct {
 	Size    int64     `json:"size"`
 	IsDir   bool      `json:"is_dir"`
 	ModTime time.Time `json:"mod_time"`
+	Mode    string    `json:"mode"`
+	Nlink   uint64    `json:"nlink"`
+	UID     uint32    `json:"uid"`
+	GID     uint32    `json:"gid"`
 }
 
 // GlobFilesV2 returns a bounded path search. Truncated is part of the public

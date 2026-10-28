@@ -30,12 +30,17 @@ type fileV2WireInfo struct {
 	Size    int64     `json:"size"`
 	IsDir   bool      `json:"is_dir"`
 	ModTime time.Time `json:"mod_time"`
+	Mode    string    `json:"mode"`
+	Nlink   uint64    `json:"nlink"`
+	UID     uint32    `json:"uid"`
+	GID     uint32    `json:"gid"`
 }
 
 func (info fileV2WireInfo) runtimeInfo() runtime.FileInfo {
 	return runtime.FileInfo{
 		Name: info.Name, Path: info.Path, Size: info.Size,
-		IsDir: info.IsDir, ModTime: info.ModTime,
+		IsDir: info.IsDir, ModTime: info.ModTime, Mode: info.Mode,
+		Nlink: info.Nlink, UID: info.UID, GID: info.GID,
 	}
 }
 

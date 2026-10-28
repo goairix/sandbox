@@ -289,6 +289,10 @@ type FileInfo struct {
 	Size    int64
 	IsDir   bool
 	ModTime time.Time
+	Mode    string
+	Nlink   uint64
+	UID     uint32
+	GID     uint32
 }
 
 // FileListResult holds the result of a recursive file listing.

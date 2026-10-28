@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -23,6 +24,10 @@ type fileInfo struct {
 	Size    int64     `json:"size"`
 	IsDir   bool      `json:"is_dir"`
 	ModTime time.Time `json:"mod_time"`
+	Mode    string    `json:"mode"`
+	Nlink   uint64    `json:"nlink"`
+	UID     uint32    `json:"uid"`
+	GID     uint32    `json:"gid"`
 }
 
 // Run executes one file request. The command and path are separate argv
@@ -318,10 +323,18 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 }
 
 func toFileInfo(fullPath string, info os.FileInfo) fileInfo {
-	return fileInfo{
+	result := fileInfo{
 		Name: info.Name(), Path: fullPath, Size: info.Size(),
-		IsDir: info.IsDir(), ModTime: info.ModTime(),
+		IsDir: info.IsDir(), ModTime: info.ModTime(), Mode: info.Mode().String(),
 	}
+	// os.FileInfo supplies the stable metadata for all Files v2 runtimes.
+	// Numeric IDs are retained because container user/group names differ by image.
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		result.Nlink = uint64(stat.Nlink)
+		result.UID = stat.Uid
+		result.GID = stat.Gid
+	}
+	return result
 }
 
 // Metadata calls currently have no body fields. Accept an empty body or an

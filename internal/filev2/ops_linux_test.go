@@ -61,6 +61,45 @@ func TestRunFileOperations(t *testing.T) {
 	}
 }
 
+func TestRunStatAndListExposeUnixMetadata(t *testing.T) {
+	root := t.TempDir()
+	name := filepath.Join(root, ".private")
+	if err := os.WriteFile(name, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	type metadata struct {
+		Path  string `json:"path"`
+		Mode  string `json:"mode"`
+		Nlink uint64 `json:"nlink"`
+		UID   uint32 `json:"uid"`
+		GID   uint32 `json:"gid"`
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"stat", name}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	var stat metadata
+	if err := json.Unmarshal(output.Bytes(), &stat); err != nil {
+		t.Fatal(err)
+	}
+	if stat.Mode != "-rw-------" || stat.Nlink != 1 || stat.UID != uint32(os.Getuid()) || stat.GID != uint32(os.Getgid()) {
+		t.Fatalf("stat metadata = %+v", stat)
+	}
+	output.Reset()
+	if err := Run(context.Background(), []string{"list", root, "", "100"}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Files []metadata `json:"files"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Files) != 1 || page.Files[0].Path != name || page.Files[0].Mode != stat.Mode || page.Files[0].Nlink != 1 {
+		t.Fatalf("list metadata = %+v", page.Files)
+	}
+}
+
 func TestRunReadRange(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "range.txt")
 	if err := os.WriteFile(filePath, []byte("abcdef"), 0600); err != nil {

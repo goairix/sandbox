@@ -188,13 +188,13 @@ func TestFileV2StatList(t *testing.T) {
 	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
 	stat, err := json.Marshal(map[string]any{
 		"name": "a.txt", "path": "/workspace/a.txt", "size": 7, "is_dir": false,
-		"mod_time": "2026-01-01T00:00:00Z",
+		"mod_time": "2026-01-01T00:00:00Z", "mode": "-rw-r-----", "nlink": 1, "uid": 1000, "gid": 1000,
 	})
 	require.NoError(t, err)
 	listing, err := json.Marshal(map[string]any{
 		"files": []map[string]any{
 			{"name": "!.txt", "path": "/workspace/!.txt", "size": 7, "is_dir": false, "mod_time": "2026-01-01T00:00:00Z"},
-			{"name": "a.txt", "path": "/workspace/a.txt", "size": 1, "is_dir": false, "mod_time": "2026-01-01T00:00:00Z"},
+			{"name": "a.txt", "path": "/workspace/a.txt", "size": 1, "is_dir": false, "mod_time": "2026-01-01T00:00:00Z", "mode": "-rw-r-----", "nlink": 1, "uid": 1000, "gid": 1000},
 		},
 		"next_cursor": "/workspace/a.txt",
 	})
@@ -204,12 +204,14 @@ func TestFileV2StatList(t *testing.T) {
 
 	info, err := mgr.StatFileV2(context.Background(), "sandbox-test", "/workspace/a.txt")
 	require.NoError(t, err)
-	require.Equal(t, runtime.FileInfo{Name: "a.txt", Path: "/workspace/a.txt", Size: 7, ModTime: info.ModTime}, info)
+	require.Equal(t, runtime.FileInfo{Name: "a.txt", Path: "/workspace/a.txt", Size: 7, ModTime: info.ModTime, Mode: "-rw-r-----", Nlink: 1, UID: 1000, GID: 1000}, info)
 
 	page, err := mgr.ListFilesV2(context.Background(), "sandbox-test", "/workspace", "", 0)
 	require.NoError(t, err)
 	require.Len(t, page.Files, 2)
 	require.Equal(t, "/workspace/!.txt", page.Files[0].Path)
+	require.Equal(t, "-rw-r-----", page.Files[1].Mode)
+	require.Equal(t, uint32(1000), page.Files[1].UID)
 	require.Equal(t, "/workspace/a.txt", page.NextCursor)
 	require.Equal(t, []string{"list", "/workspace", "", "200", "hide-reserved"}, rt.calls[1])
 	rt.listing = `{"files":[{"name":"` + reserved + `","path":"/workspace/` + reserved + `","size":1,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z"}],"next_cursor":"/workspace/` + reserved + `"}`

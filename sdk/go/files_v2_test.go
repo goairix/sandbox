@@ -31,7 +31,7 @@ func TestFilesV2SDK(t *testing.T) {
 			if r.URL.Query().Get("path") != "/workspace/a.txt" {
 				t.Errorf("stat path: %s", r.URL.RawQuery)
 			}
-			_, _ = io.WriteString(w, `{"name":"a.txt","path":"/workspace/a.txt","size":3,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z"}`)
+			_, _ = io.WriteString(w, `{"name":"a.txt","path":"/workspace/a.txt","size":3,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z","mode":"-rw-r--r--","nlink":1,"uid":1000,"gid":1000}`)
 		case "/api/v2/sandboxes/sandbox-a/files/list":
 			_, _ = io.WriteString(w, `{"files":[],"next_cursor":""}`)
 		case "/api/v2/sandboxes/sandbox-a/files/glob":
@@ -64,7 +64,7 @@ func TestFilesV2SDK(t *testing.T) {
 	}
 	files := handle.Files()
 	info, err := files.Stat(context.Background(), "/workspace/a.txt")
-	if err != nil || info.Path != "/workspace/a.txt" || info.Size != 3 {
+	if err != nil || info.Path != "/workspace/a.txt" || info.Size != 3 || info.Mode != "-rw-r--r--" || info.Nlink != 1 || info.UID != 1000 {
 		t.Fatalf("stat = %+v, %v", info, err)
 	}
 	if _, err := files.List(context.Background(), "/workspace", "", 10); err != nil {

@@ -13,7 +13,8 @@ import (
 func fileV2PublicInfo(info runtime.FileInfo) fileV2SearchInfo {
 	return fileV2SearchInfo{
 		Name: info.Name, Path: info.Path, Size: info.Size,
-		IsDir: info.IsDir, ModTime: info.ModTime,
+		IsDir: info.IsDir, ModTime: info.ModTime, Mode: info.Mode,
+		Nlink: info.Nlink, UID: info.UID, GID: info.GID,
 	}
 }
 

@@ -34,11 +34,11 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		if args[1] == "/workspace/missing" {
 			return nil, runtime.ErrFileNotFound
 		}
-		body, err := json.Marshal(map[string]any{"name": "a.txt", "path": args[1], "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()})
+		body, err := json.Marshal(map[string]any{"name": "a.txt", "path": args[1], "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC(), "mode": "-rw-r--r--", "nlink": 1, "uid": 1000, "gid": 1000})
 		return io.NopCloser(bytes.NewReader(body)), err
 	case "list":
 		body, err := json.Marshal(map[string]any{
-			"files":       []map[string]any{{"name": "a.txt", "path": "/workspace/a.txt", "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()}},
+			"files":       []map[string]any{{"name": "a.txt", "path": "/workspace/a.txt", "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC(), "mode": "-rw-r--r--", "nlink": 1, "uid": 1000, "gid": 1000}},
 			"next_cursor": "/workspace/a.txt",
 		})
 		return io.NopCloser(bytes.NewReader(body)), err
