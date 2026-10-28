@@ -13,6 +13,8 @@
 | 检查 | 结果 |
 | --- | --- |
 | 新 FUSE 镜像独立 Pod | UID 1000 可执行新 `sandbox-file-op` 和固定 `rg 14.1.1`；write/read/glob/grep 成功；越界软链接读取被拒；测试 Pod 已删除。 |
+| 普通镜像本地容器 | `docker/images/sandbox/Dockerfile` 完整构建出 `linux/arm64` 镜像 `sandbox-files-v2-plain:local`（image ID `sha256:f0ea5e02f29bee9c77960c02cc5a4f38f04740f47b0432ec158fc212fea4a1c3`，3,300,667,976 字节）。UID 1000 实测 write/read/stat 和越界软链接拒绝；没有部署到 Kubernetes。 |
+| 两镜像工具一致性 | 普通/FUSE 镜像内 `sandbox-file-op` SHA-256 都为 `0eff0af22eb8f06d810048dfe8a92484230ae446941df85531a08683f6a4063e`，`rg` SHA-256 都为 `e07d5c85fa9ca740ff4ab8bbac60a1e11c7a5ce242435f7820a03f7c20ef6276`；两边报告 `ripgrep 14.1.1`。 |
 | API 认证 | `/health` 200；未带 Bearer 的 v2 stat 为 401。 |
 | 沙盒 `sandbox-99tkx0zu65` | 公开创建 201；v2 PUT 204、stat/list/glob/grep/GET 200，原始字节读回一致。其 180 秒 TTL 在后续 read-lines/edit 前到期，两个后续请求返回 503；公开 GET 转为 404，Pod 消失。该轮不能证明 read-lines/edit。 |
 | 沙盒 `sandbox-wmf7hrre4y` | 公开创建 201；v2 PUT 204、ReadLines 第 2 行 200、Edit `world` 为 `etcd` 204、v2 GET 得到 `hello\netcd\n` 200；v1 download 同字节 200。公开 DELETE 200，随后 GET 404，Pod 消失。 |
@@ -28,7 +30,7 @@
 
 ## 未覆盖
 
-- 普通非 FUSE sandbox 镜像尚未完成本次完整构建验收；本次新镜像实测的是 ARM64 FUSE 路径。
+- 普通镜像已完成本地 ARM64 构建与容器内 helper 检查，但没有推送或在 CCE/DS 的普通 sandbox 上运行公开 API 纵切；本次集群纵切是 FUSE 路径。
 - 较早的七包 race 构建因本机 ENOSPC 失败；清理 24 小时前未使用的 Docker build cache 后，在 macOS 主机重新运行 `go test -race -p 2 ./internal/filev2 ./internal/runtime ./internal/runtime/docker ./internal/runtime/kubernetes ./internal/sandbox ./internal/api/handler ./internal/api`，七包全部通过。核心七包非 race 测试与 vet、SDK 与独立 Eino 示例的测试/vet 也通过；这不是 Linux 或整个仓库的 race 验收。
 - 尚未在 DS 部署新 API；CCE 仅隔离验证。未做生产流量切换、容量或长期故障恢复测试，也未直接核验 MinIO 对象 HEAD。
 - v2 missing sandbox 的 stat 返回 503 `FILE_OUTCOME_UNKNOWN`；本次未改变状态管理器的 fail-closed 语义。
