@@ -103,6 +103,8 @@ for {
 
 `done` always carries the process exit code, including nonzero exits; `error` means execution or transport failed. A stream that ends without either terminal event returns an error. Cancel the context or call `Close` to stop reading early. stdout and stderr arrive in their observed order; they are read from separate pipes, so their cross-stream ordering is not guaranteed.
 
+`RunStream`、`ExecStream` 和 `ExecuteStream` 现在返回 `EventStream`。旧代码中的 `for ev := range ch` 需改为上面的 `Recv` 循环，并在结束时调用 `Close`；这样取消、解析错误和异常断流才会显式返回。
+
 Supported languages: `python`, `nodejs`, `bash`.
 
 ### File operations

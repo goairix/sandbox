@@ -52,7 +52,7 @@ print("Task completed!", flush=True)
 `
 
 	fmt.Println("\nExecuting long-running task with silent periods...")
-	fmt.Println("Watch for ping events every 30 seconds to keep connection alive")
+	fmt.Println("Watch for ping events every 10 seconds to keep connection alive")
 
 	stream, err := client.ExecStream(ctx, sb.ID, sandbox.ExecRequest{
 		Language: "python",
