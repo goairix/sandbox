@@ -28,6 +28,12 @@ func fileV2Error(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "FILE_TYPE_MISMATCH", Message: "file type mismatch"})
 	case errors.Is(err, runtime.ErrInvalidUploadSize):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "FILE_INVALID", Message: "invalid file size"})
+	case errors.Is(err, runtime.ErrFileInvalidText):
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "FILE_INVALID", Message: "invalid file text"})
+	case errors.Is(err, runtime.ErrFileConflict):
+		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "FILE_CONFLICT", Message: "file edit conflict"})
+	case errors.Is(err, runtime.ErrFileLimitExceeded):
+		c.JSON(http.StatusRequestEntityTooLarge, types.ErrorResponse{Code: "FILE_LIMIT_EXCEEDED", Message: "file limit exceeded"})
 	case errors.Is(err, sandbox.ErrSandboxNotReady), errors.Is(err, sandbox.ErrFileV2Unsupported):
 		c.JSON(http.StatusServiceUnavailable, types.ErrorResponse{Code: "SANDBOX_NOT_READY", Message: "sandbox file operation is unavailable"})
 	default:

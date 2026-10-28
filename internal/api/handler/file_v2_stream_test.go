@@ -57,6 +57,25 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		}
 		r.content = body
 		return io.NopCloser(bytes.NewReader(nil)), nil
+	case "read-lines":
+		body, err := json.Marshal(map[string]any{"content": string(r.content)})
+		return io.NopCloser(bytes.NewReader(body)), err
+	case "edit":
+		var request struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		}
+		if err := json.NewDecoder(input).Decode(&request); err != nil {
+			return nil, err
+		}
+		matches := strings.Count(string(r.content), request.OldString)
+		if matches == 0 || (!request.ReplaceAll && matches != 1) {
+			return nil, runtime.ErrFileConflict
+		}
+		r.content = []byte(strings.ReplaceAll(string(r.content), request.OldString, request.NewString))
+		body, err := json.Marshal(map[string]any{"replacements": matches})
+		return io.NopCloser(bytes.NewReader(body)), err
 	}
 	return nil, nil
 }
@@ -119,6 +138,8 @@ func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {
 	router := gin.New()
 	router.GET("/sandboxes/:id/files/content", h.ReadFileContentV2)
 	router.PUT("/sandboxes/:id/files/content", h.WriteFileContentV2)
+	router.POST("/sandboxes/:id/files/text/read-lines", h.ReadFileLinesV2)
+	router.POST("/sandboxes/:id/files/text/edit", h.EditFileTextV2)
 	return router, rt, sb.ID
 }
 

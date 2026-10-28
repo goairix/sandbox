@@ -158,6 +158,8 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	}
 	v2.GET("/sandboxes/:id/files/content", h.ReadFileContentV2)
 	v2.PUT("/sandboxes/:id/files/content", h.WriteFileContentV2)
+	v2.POST("/sandboxes/:id/files/text/read-lines", h.ReadFileLinesV2)
+	v2.POST("/sandboxes/:id/files/text/edit", h.EditFileTextV2)
 
 	return r
 }
