@@ -105,6 +105,27 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		if !info.Mode().IsRegular() {
 			return errors.New("file is not regular")
 		}
+		if len(argv) == 4 {
+			start, startErr := strconv.ParseInt(argv[2], 10, 64)
+			length, lengthErr := strconv.ParseInt(argv[3], 10, 64)
+			if startErr != nil || lengthErr != nil || start < 0 || length < -1 {
+				return errors.New("invalid read range")
+			}
+			if start > info.Size() {
+				return errors.New("read range starts after EOF")
+			}
+			if length == -1 {
+				length = info.Size() - start
+			}
+			if length > info.Size()-start {
+				return errors.New("read range exceeds EOF")
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			_, err := io.CopyN(&contextWriter{ctx: ctx, writer: stdout}, io.NewSectionReader(file, start, length), length)
+			return err
+		}
 		return copyWithContext(ctx, stdout, file)
 	case "write":
 		size, err := strconv.ParseInt(argv[2], 10, 64)
@@ -138,6 +159,9 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	want := 2
 	if operation == "write" {
 		want = 3
+	}
+	if operation == "read" && len(argv) == 4 {
+		want = 4
 	}
 	if operation == "list" && (len(argv) == 4 || len(argv) == 5) {
 		want = len(argv)

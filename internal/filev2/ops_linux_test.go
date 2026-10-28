@@ -61,6 +61,37 @@ func TestRunFileOperations(t *testing.T) {
 	}
 }
 
+func TestRunReadRange(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "range.txt")
+	if err := os.WriteFile(filePath, []byte("abcdef"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		start, length string
+		want          string
+		fail          bool
+	}{
+		{start: "2", length: "3", want: "cde"},
+		{start: "6", length: "0", want: ""},
+		{start: "0", length: "-1", want: "abcdef"},
+		{start: "7", length: "0", fail: true},
+		{start: "5", length: "2", fail: true},
+		{start: "-1", length: "1", fail: true},
+	} {
+		var output bytes.Buffer
+		err := Run(context.Background(), []string{"read", filePath, tc.start, tc.length}, nil, &output)
+		if tc.fail {
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("range %s:%s returned %q, %v", tc.start, tc.length, output.String(), err)
+			}
+			continue
+		}
+		if err != nil || output.String() != tc.want {
+			t.Fatalf("range %s:%s returned %q, %v; want %q", tc.start, tc.length, output.String(), err, tc.want)
+		}
+	}
+}
+
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return 1, nil }
