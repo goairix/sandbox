@@ -132,7 +132,16 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		if err != nil || size < 0 {
 			return errors.New("invalid write size")
 		}
-		fd, err := openBeneath(rootFD, relative, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NONBLOCK, 0644)
+		createParents := len(argv) == 4
+		if createParents && argv[3] != "create-parents" {
+			return errors.New("invalid write option")
+		}
+		var fd int
+		if createParents {
+			fd, err = openWriteWithParents(rootFD, relative)
+		} else {
+			fd, err = openBeneath(rootFD, relative, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NONBLOCK, 0644)
+		}
 		if err != nil {
 			return err
 		}
@@ -159,6 +168,9 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	want := 2
 	if operation == "write" {
 		want = 3
+		if len(argv) == 4 {
+			want = 4
+		}
 	}
 	if operation == "read" && len(argv) == 4 {
 		want = 4

@@ -92,6 +92,29 @@ func TestRunReadRange(t *testing.T) {
 	}
 }
 
+func TestRunWriteCreateParents(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "one", "two", "file.txt")
+	if err := Run(context.Background(), []string{"write", target, "3", "create-parents"}, strings.NewReader("abc"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "abc" {
+		t.Fatalf("written file = %q, %v", content, err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	err = Run(context.Background(), []string{"write", filepath.Join(root, "escape", "bad"), "1", "create-parents"}, strings.NewReader("x"), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("followed symlink while creating parents")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "bad")); !os.IsNotExist(err) {
+		t.Fatalf("created file outside root: %v", err)
+	}
+}
+
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return 1, nil }
