@@ -99,8 +99,10 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.Auth(apiKey))
+	var sharedRateLimiter gin.HandlerFunc
 	if rateLimit > 0 {
-		v1.Use(middleware.RateLimit(rateLimit))
+		sharedRateLimiter = middleware.RateLimit(rateLimit)
+		v1.Use(sharedRateLimiter)
 	}
 
 	// Sandbox management
@@ -151,8 +153,8 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	// Files v2 is independent of the existing v1 file contract.
 	v2 := r.Group("/api/v2")
 	v2.Use(middleware.Auth(apiKey))
-	if rateLimit > 0 {
-		v2.Use(middleware.RateLimit(rateLimit))
+	if sharedRateLimiter != nil {
+		v2.Use(sharedRateLimiter)
 	}
 	v2.GET("/sandboxes/:id/files/content", h.ReadFileContentV2)
 	v2.PUT("/sandboxes/:id/files/content", h.WriteFileContentV2)

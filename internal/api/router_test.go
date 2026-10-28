@@ -164,3 +164,22 @@ func TestFilesV2ContentRouteAuthAndBodyLimit(t *testing.T) {
 	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 	require.Contains(t, response.Body.String(), "FILE_LIMIT_EXCEEDED")
 }
+
+func TestFilesV2SharesV1RateLimit(t *testing.T) {
+	initRouterMetrics.Do(func() { require.NoError(t, metrics.InitNoop()) })
+	rt := &streamingUploadRuntime{}
+	mgr := sandbox.NewManager(rt, nil, nil, sandbox.ManagerConfig{})
+	sb, err := mgr.Create(context.Background(), sandbox.SandboxConfig{Mode: sandbox.ModePersistent})
+	require.NoError(t, err)
+	router := SetupRouter(handler.NewHandler(mgr), "secret", 1, "test")
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+sb.ID, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	first := httptest.NewRecorder()
+	router.ServeHTTP(first, request)
+	require.Equal(t, http.StatusOK, first.Code)
+	request = httptest.NewRequest(http.MethodGet, "/api/v2/sandboxes/"+sb.ID+"/files/content?path=/workspace/a", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, request)
+	require.Equal(t, http.StatusTooManyRequests, second.Code)
+}
