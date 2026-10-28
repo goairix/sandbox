@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 func TestRunFileOperations(t *testing.T) {
@@ -127,6 +129,40 @@ func TestRunPagedList(t *testing.T) {
 	var output bytes.Buffer
 	if err := Run(context.Background(), []string{"list", root, "/tmp/other/file", "2"}, nil, &output); err == nil {
 		t.Fatal("accepted cursor for another directory")
+	}
+}
+
+func TestRunPagedListHidesReservedBeforeCursor(t *testing.T) {
+	root := t.TempDir()
+	reserved := fuseprotocol.ProbeObjectBasenamePrefix + strings.Repeat("a", 64)
+	for _, name := range []string{"!.txt", reserved, "a.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"list", root, "", "1", "hide-reserved"}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), reserved) {
+		t.Fatal("reserved basename leaked into page or cursor")
+	}
+	var page struct {
+		Files      []fileInfo `json:"files"`
+		NextCursor string     `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Files) != 1 || page.Files[0].Name != "!.txt" || page.NextCursor != filepath.Join(root, "!.txt") {
+		t.Fatalf("unexpected first page: %+v", page)
+	}
+	output.Reset()
+	if err := Run(context.Background(), []string{"list", root, page.NextCursor, "1", "hide-reserved"}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), reserved) {
+		t.Fatal("reserved basename leaked into following page")
 	}
 }
 

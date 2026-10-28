@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/goairix/sandbox/internal/fuseprotocol"
 )
 
 type fileListPage struct {
@@ -33,7 +35,7 @@ func (h *directoryMaxHeap) Pop() any {
 	return value
 }
 
-func listPage(ctx context.Context, dir *os.File, absolute, cursor, limitText string, output io.Writer) error {
+func listPage(ctx context.Context, dir *os.File, absolute, cursor, limitText string, hideReserved bool, output io.Writer) error {
 	limit, err := strconv.Atoi(limitText)
 	if err != nil || limit < 1 || limit > 1000 {
 		return errors.New("invalid list limit")
@@ -56,6 +58,9 @@ func listPage(ctx context.Context, dir *os.File, absolute, cursor, limitText str
 			return readErr
 		}
 		for _, entry := range entries {
+			if hideReserved && fuseprotocol.IsReservedProbeObjectName(entry.Name()) {
+				continue
+			}
 			if entry.Name() <= nameAfter {
 				continue
 			}

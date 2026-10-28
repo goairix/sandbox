@@ -68,8 +68,12 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		}
 		dir := os.NewFile(uintptr(fd), absolute)
 		defer dir.Close()
-		if len(argv) == 4 {
-			return listPage(ctx, dir, absolute, argv[2], argv[3], stdout)
+		if len(argv) == 4 || len(argv) == 5 {
+			hideReserved := len(argv) == 5
+			if hideReserved && argv[4] != "hide-reserved" {
+				return errors.New("invalid list filter")
+			}
+			return listPage(ctx, dir, absolute, argv[2], argv[3], hideReserved, stdout)
 		}
 		entries, err := dir.Readdir(1001)
 		if err != nil && err != io.EOF {
@@ -135,8 +139,8 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	if operation == "write" {
 		want = 3
 	}
-	if operation == "list" && len(argv) == 4 {
-		want = 4
+	if operation == "list" && (len(argv) == 4 || len(argv) == 5) {
+		want = len(argv)
 	}
 	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write") {
 		err = errors.New("invalid file operation arguments")
