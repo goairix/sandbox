@@ -34,7 +34,29 @@ func (r *fileV2Runtime) RunFileOp(_ context.Context, _ string, argv []string, _ 
 	if argv[0] == "stat" {
 		return io.NopCloser(strings.NewReader(r.stat)), nil
 	}
+	if argv[0] == "read" {
+		return io.NopCloser(strings.NewReader("abcdef")), nil
+	}
 	return io.NopCloser(strings.NewReader(r.listing)), nil
+}
+
+func TestFileV2ReadRangeHoldsGateUntilClose(t *testing.T) {
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	mgr, gate := newGatedManager(rt)
+	stream, err := mgr.ReadFileRangeV2(context.Background(), "sandbox-test", "/workspace/a", 2, 3)
+	require.NoError(t, err)
+	require.Equal(t, []string{"read", "/workspace/a", "2", "3"}, rt.calls[0])
+	drained := make(chan error, 1)
+	go func() { drained <- gate.CloseAndWait(context.Background()) }()
+	select {
+	case <-drained:
+		t.Fatal("operation gate drained before read stream closed")
+	default:
+	}
+	require.NoError(t, stream.Close())
+	require.NoError(t, <-drained)
+	_, err = mgr.ReadFileRangeV2(context.Background(), "sandbox-test", "/workspace/a", -1, 1)
+	require.Error(t, err)
 }
 
 type fileV2CloseBarrier struct {

@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
@@ -181,4 +182,60 @@ func (m *Manager) ListFilesV2(ctx context.Context, id, dirPath, cursor string, l
 	}
 	page.Files = hideReservedFUSEFileInfos(sb, page.Files)
 	return page, nil
+}
+
+type fileV2GatedStream struct {
+	reader  io.ReadCloser
+	release func()
+	once    sync.Once
+	err     error
+}
+
+func (s *fileV2GatedStream) Read(p []byte) (int, error) {
+	n, err := s.reader.Read(p)
+	if err != nil {
+		if closeErr := s.Close(); closeErr != nil {
+			return n, errors.Join(err, closeErr)
+		}
+	}
+	return n, err
+}
+
+func (s *fileV2GatedStream) Close() error {
+	s.once.Do(func() {
+		s.err = s.reader.Close()
+		s.release()
+	})
+	return s.err
+}
+
+// ReadFileRangeV2 starts a raw byte stream. The caller must close it; EOF
+// also closes the helper and only then releases the existing operation gate.
+func (m *Manager) ReadFileRangeV2(ctx context.Context, id, filePath string, start, length int64) (io.ReadCloser, error) {
+	canonical, err := normalizeFileV2Path(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if start < 0 || length < -1 {
+		return nil, errors.New("invalid file range")
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		release()
+		return nil, err
+	}
+	argv := []string{"read", canonical, strconv.FormatInt(start, 10), strconv.FormatInt(length, 10)}
+	rc, err := transport.RunFileOp(operationCtx, m.sandboxRuntimeID(sb), argv, nil)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	if rc == nil {
+		release()
+		return nil, errors.New("file helper returned no reader")
+	}
+	return &fileV2GatedStream{reader: rc, release: release}, nil
 }
