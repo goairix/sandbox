@@ -63,6 +63,31 @@ type FileV2SearchPage struct {
 	Truncated bool       `json:"truncated"`
 }
 
+type FileV2GrepRequest struct {
+	Path          string   `json:"path"`
+	Pattern       string   `json:"pattern"`
+	Glob          string   `json:"glob,omitempty"`
+	FileTypes     []string `json:"file_types,omitempty"`
+	IgnoreCase    bool     `json:"ignore_case,omitempty"`
+	Multiline     bool     `json:"multiline,omitempty"`
+	BeforeContext int      `json:"before_context,omitempty"`
+	AfterContext  int      `json:"after_context,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+}
+
+type FileV2Match struct {
+	Path       string   `json:"path"`
+	LineNumber int      `json:"line_number"`
+	Content    string   `json:"content"`
+	Before     []string `json:"before,omitempty"`
+	After      []string `json:"after,omitempty"`
+}
+
+type FileV2GrepResult struct {
+	Matches   []FileV2Match `json:"matches"`
+	Truncated bool          `json:"truncated"`
+}
+
 type fileOpStream struct {
 	reader   io.ReadCloser
 	cancel   context.CancelFunc

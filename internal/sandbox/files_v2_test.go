@@ -95,6 +95,25 @@ func TestFileV2GlobManager(t *testing.T) {
 	require.Error(t, err, "helper result escaped search root")
 }
 
+func TestFileV2GrepManager(t *testing.T) {
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	rt.listing = `{"matches":[{"path":"/workspace/a.go","line_number":2,"content":"hello\n"}],"truncated":false}`
+	mgr, _ := newGatedManager(rt)
+	result, err := mgr.GrepFilesV2(context.Background(), "sandbox-test", runtime.FileV2GrepRequest{Path: "/workspace", Pattern: "hello", Glob: "**/*.go", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, result.Matches, 1)
+	require.Equal(t, "/workspace/a.go", result.Matches[0].Path)
+	require.Equal(t, 2, result.Matches[0].LineNumber)
+	require.Equal(t, []string{"grep", "/workspace", "hide-reserved"}, rt.calls[0])
+
+	_, err = mgr.GrepFilesV2(context.Background(), "sandbox-test", runtime.FileV2GrepRequest{Path: "/workspace", Pattern: "hello", Glob: "../*"})
+	require.Error(t, err)
+	require.Len(t, rt.calls, 1)
+	rt.listing = `{"matches":[{"path":"/etc/passwd","line_number":1,"content":"x"}],"truncated":false}`
+	_, err = mgr.GrepFilesV2(context.Background(), "sandbox-test", runtime.FileV2GrepRequest{Path: "/workspace", Pattern: "x"})
+	require.Error(t, err, "accepted grep result outside root")
+}
+
 func TestFileV2Write(t *testing.T) {
 	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
 	mgr, _ := newGatedManager(rt)

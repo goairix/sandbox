@@ -254,6 +254,87 @@ func (m *Manager) GlobFilesV2(ctx context.Context, id string, request runtime.Fi
 	return page, nil
 }
 
+// GrepFilesV2 searches through the same operation gate as all other file
+// methods. Its sandbox-side helper owns the directory scan and fixed rg call.
+func (m *Manager) GrepFilesV2(ctx context.Context, id string, request runtime.FileV2GrepRequest) (runtime.FileV2GrepResult, error) {
+	if request.Path == "" {
+		request.Path = "/workspace"
+	}
+	canonical, err := normalizeFileV2Path(request.Path)
+	if err != nil {
+		return runtime.FileV2GrepResult{}, err
+	}
+	if request.Pattern == "" || len(request.Pattern) > 4096 || strings.IndexByte(request.Pattern, 0) >= 0 ||
+		request.BeforeContext < 0 || request.BeforeContext > 10 || request.AfterContext < 0 || request.AfterContext > 10 ||
+		request.Limit < 0 || request.Limit > 1000 {
+		return runtime.FileV2GrepResult{}, runtime.ErrFileInvalidText
+	}
+	if request.Glob != "" {
+		if err := filev2.ValidateGlobPattern(request.Glob); err != nil {
+			return runtime.FileV2GrepResult{}, runtime.ErrFileInvalidText
+		}
+	}
+	if request.Limit == 0 {
+		request.Limit = 1000
+	}
+	control, err := json.Marshal(struct {
+		Pattern       string   `json:"pattern"`
+		Glob          string   `json:"glob,omitempty"`
+		Types         []string `json:"file_types,omitempty"`
+		IgnoreCase    bool     `json:"ignore_case,omitempty"`
+		Multiline     bool     `json:"multiline,omitempty"`
+		BeforeContext int      `json:"before_context,omitempty"`
+		AfterContext  int      `json:"after_context,omitempty"`
+		Limit         int      `json:"limit"`
+	}{request.Pattern, request.Glob, request.FileTypes, request.IgnoreCase, request.Multiline, request.BeforeContext, request.AfterContext, request.Limit})
+	if err != nil || len(control) > 8192 {
+		return runtime.FileV2GrepResult{}, runtime.ErrFileInvalidText
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return runtime.FileV2GrepResult{}, err
+	}
+	defer release()
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		return runtime.FileV2GrepResult{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(operationCtx, 6*time.Second)
+	defer cancel()
+	argv := []string{"grep", canonical}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		argv = append(argv, "hide-reserved")
+	}
+	rc, err := transport.RunFileOp(searchCtx, m.sandboxRuntimeID(sb), argv, bytes.NewReader(control))
+	if err != nil {
+		return runtime.FileV2GrepResult{}, err
+	}
+	var result runtime.FileV2GrepResult
+	if err := readFileV2Metadata(rc, &result); err != nil {
+		return runtime.FileV2GrepResult{}, err
+	}
+	if len(result.Matches) > request.Limit {
+		return runtime.FileV2GrepResult{}, errors.New("file helper returned oversized grep result")
+	}
+	lastPath, lastLine := "", 0
+	for _, match := range result.Matches {
+		if !strings.HasPrefix(match.Path, canonical+"/") || path.Clean(match.Path) != match.Path ||
+			match.LineNumber < 1 || match.Path < lastPath || (match.Path == lastPath && match.LineNumber < lastLine) ||
+			!utf8.ValidString(match.Content) || len(match.Before) > request.BeforeContext || len(match.After) > request.AfterContext {
+			return runtime.FileV2GrepResult{}, errors.New("file helper returned invalid grep result")
+		}
+		if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE && fuseprotocol.IsReservedProbeObjectName(path.Base(match.Path)) {
+			return runtime.FileV2GrepResult{}, errors.New("file helper returned reserved grep result")
+		}
+		for _, line := range append(append([]string(nil), match.Before...), match.After...) {
+			if !utf8.ValidString(line) {
+				return runtime.FileV2GrepResult{}, errors.New("file helper returned invalid grep context")
+			}
+		}
+		lastPath, lastLine = match.Path, match.LineNumber
+	}
+	return result, nil
+}
+
 type fileV2GatedStream struct {
 	reader  io.ReadCloser
 	release func()
