@@ -99,18 +99,17 @@ func matchGlob(pattern, relative string) bool {
 	return match(0, 0)
 }
 
-type globScanner struct {
+type pinnedSearchWalker struct {
 	ctx          context.Context
 	deadline     time.Time
-	pattern      string
 	hideReserved bool
 	seen         int
 	bytes        int
 	truncated    bool
-	files        searchFilesMaxHeap
+	visit        func(*os.File, string, string, os.FileInfo) error
 }
 
-func (s *globScanner) stop() (bool, error) {
+func (s *pinnedSearchWalker) stop() (bool, error) {
 	if err := s.ctx.Err(); err != nil {
 		return true, err
 	}
@@ -123,7 +122,7 @@ func (s *globScanner) stop() (bool, error) {
 
 // walk uses a pinned directory descriptor and opens each child with
 // O_NOFOLLOW. Even a concurrent symlink swap cannot escape the search root.
-func (s *globScanner) walk(dir *os.File, absolute, relative string, depth int) error {
+func (s *pinnedSearchWalker) walk(dir *os.File, absolute, relative string, depth int) error {
 	if depth >= maxSearchDepth {
 		s.truncated = true
 		return nil
@@ -171,17 +170,8 @@ func (s *globScanner) walk(dir *os.File, absolute, relative string, depth int) e
 			}
 			if info.IsDir() {
 				err = s.walk(child, childPath, childRelative, depth+1)
-			} else if info.Mode().IsRegular() && matchGlob(s.pattern, childRelative) {
-				candidate := toFileInfo(childPath, info)
-				if s.files.Len() < maxSearchResults {
-					heap.Push(&s.files, candidate)
-				} else {
-					s.truncated = true
-					if candidate.Path < s.files[0].Path {
-						s.files[0] = candidate
-						heap.Fix(&s.files, 0)
-					}
-				}
+			} else if info.Mode().IsRegular() {
+				err = s.visit(child, childPath, childRelative, info)
 			}
 			closeErr := child.Close()
 			if err != nil || closeErr != nil {
@@ -204,10 +194,27 @@ func runGlob(ctx context.Context, rootFD int, relative, absolute, pattern string
 	}
 	dir := os.NewFile(uintptr(fd), absolute)
 	defer dir.Close()
-	scanner := globScanner{ctx: ctx, deadline: time.Now().Add(searchDeadline), pattern: pattern, hideReserved: hideReserved, files: make(searchFilesMaxHeap, 0)}
+	files := make(searchFilesMaxHeap, 0)
+	scanner := pinnedSearchWalker{ctx: ctx, deadline: time.Now().Add(searchDeadline), hideReserved: hideReserved}
+	scanner.visit = func(_ *os.File, childPath, childRelative string, info os.FileInfo) error {
+		if !matchGlob(pattern, childRelative) {
+			return nil
+		}
+		candidate := toFileInfo(childPath, info)
+		if files.Len() < maxSearchResults {
+			heap.Push(&files, candidate)
+		} else {
+			scanner.truncated = true
+			if candidate.Path < files[0].Path {
+				files[0] = candidate
+				heap.Fix(&files, 0)
+			}
+		}
+		return nil
+	}
 	if err := scanner.walk(dir, absolute, "", 0); err != nil {
 		return err
 	}
-	sort.Slice(scanner.files, func(i, j int) bool { return scanner.files[i].Path < scanner.files[j].Path })
-	return json.NewEncoder(output).Encode(fileSearchPage{Files: scanner.files, Truncated: scanner.truncated})
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return json.NewEncoder(output).Encode(fileSearchPage{Files: files, Truncated: scanner.truncated})
 }
