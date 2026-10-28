@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	sandbox "github.com/goairix/sandbox/sdk/go"
 )
@@ -97,6 +98,58 @@ func TestFilesV2SDK(t *testing.T) {
 		t.Fatalf("lines = %q, %v", text, err)
 	}
 	if err := files.Edit(context.Background(), "/workspace/a.txt", "abc", "ABC", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilesV2StreamingTransferOutlivesUnaryHTTPTimeout(t *testing.T) {
+	server, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes":
+			_, _ = io.WriteString(w, `{"id":"sandbox-a","reused":false}`)
+		case r.Method == http.MethodGet:
+			w.Header().Set("Content-Length", "2")
+			_, _ = io.WriteString(w, "a")
+			w.(http.Flusher).Flush()
+			time.Sleep(80 * time.Millisecond)
+			_, _ = io.WriteString(w, "b")
+		case r.Method == http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil || string(body) != "ab" {
+				t.Errorf("upload = %q, %v", body, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	client := sandbox.NewClient(server.URL, "test-key", sandbox.WithTimeout(25*time.Millisecond))
+	handle, err := client.NewSandbox(context.Background(), sandbox.SandboxOptions{Mode: sandbox.ModePersistent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := handle.Files()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream, err := files.Read(ctx, "/workspace/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, readErr := io.ReadAll(stream)
+	closeErr := stream.Close()
+	if readErr != nil || closeErr != nil || string(content) != "ab" {
+		t.Fatalf("read = %q, %v, close %v", content, readErr, closeErr)
+	}
+	reader, writer := io.Pipe()
+	go func() {
+		_, _ = io.WriteString(writer, "a")
+		time.Sleep(80 * time.Millisecond)
+		_, _ = io.WriteString(writer, "b")
+		_ = writer.Close()
+	}()
+	defer reader.Close()
+	if err := files.Write(ctx, "/workspace/a.txt", reader, 2, false); err != nil {
 		t.Fatal(err)
 	}
 }

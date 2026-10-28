@@ -96,6 +96,7 @@ func (f *Files) Grep(ctx context.Context, request FileV2GrepRequest) (FileV2Grep
 
 // Read returns a raw byte stream. The caller must close it, including when
 // decoding stops early, so the HTTP connection and server-side gate can join.
+// Streaming duration is controlled by ctx rather than the unary HTTP timeout.
 func (f *Files) Read(ctx context.Context, path string) (io.ReadCloser, error) {
 	query := url.Values{"path": {path}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.client.baseURL+f.base()+"/content?"+query.Encode(), nil)
@@ -103,7 +104,9 @@ func (f *Files) Read(ctx context.Context, path string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("sandbox: build file read: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+f.client.apiKey)
-	resp, err := f.client.httpClient.Do(req)
+	streamClient := *f.client.httpClient
+	streamClient.Timeout = 0
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: file read: %w", err)
 	}
@@ -116,6 +119,7 @@ func (f *Files) Read(ctx context.Context, path string) (io.ReadCloser, error) {
 
 // Write sends exactly the declared byte count as a raw request body. The
 // source and size must be supplied by the caller; no base64 buffer is built.
+// Streaming duration is controlled by ctx rather than the unary HTTP timeout.
 func (f *Files) Write(ctx context.Context, path string, source io.Reader, size int64, createParents bool) error {
 	if source == nil || size < 0 {
 		return errors.New("sandbox: invalid file source or size")
@@ -131,7 +135,9 @@ func (f *Files) Write(ctx context.Context, path string, source io.Reader, size i
 	req.Header.Set("Authorization", "Bearer "+f.client.apiKey)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = size
-	resp, err := f.client.httpClient.Do(req)
+	streamClient := *f.client.httpClient
+	streamClient.Timeout = 0
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("sandbox: file write: %w", err)
 	}
