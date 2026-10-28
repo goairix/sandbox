@@ -65,7 +65,20 @@ func (r *Runtime) RunFileOp(ctx context.Context, id string, argv []string, stdin
 		stderr := &limitedControlBuffer{limit: 4096}
 		copyErr := copyDockerExecFrames(pw, stderr, attached.Reader)
 		if inputDone != nil {
-			copyErr = errors.Join(copyErr, <-inputDone)
+			select {
+			case inputErr := <-inputDone:
+				copyErr = errors.Join(copyErr, inputErr)
+			default:
+				// The helper closed its output while upload input is still
+				// pending. Fail the operation and release a blocked body reader
+				// instead of waiting forever for a process that has exited.
+				copyErr = errors.Join(copyErr, errors.New("file helper ended before upload completed"))
+				cancel()
+				attached.Close()
+				if closer, ok := stdin.(io.Closer); ok {
+					_ = closer.Close()
+				}
+			}
 		}
 		if copyErr == nil {
 			if err := streamCtx.Err(); err != nil {

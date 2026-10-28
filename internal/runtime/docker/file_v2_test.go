@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -23,6 +24,7 @@ type fileV2DockerAPI struct {
 	rawFrame []byte
 	exitCode int
 	running  bool
+	earlyEOF bool
 }
 
 func (f *fileV2DockerAPI) ContainerExecAttach(_ context.Context, _ string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
@@ -33,6 +35,9 @@ func (f *fileV2DockerAPI) ContainerExecAttach(_ context.Context, _ string, _ con
 		_, _ = stdcopy.NewStdWriter(&framed, stdcopy.Stdout).Write(f.output)
 	}
 	conn := newFakeHijackConn(func([]byte) []byte { return framed.Bytes() })
+	if f.earlyEOF {
+		_ = conn.CloseWrite()
+	}
 	return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
 }
 
@@ -94,4 +99,31 @@ func TestFileV2DockerTransportRejectsTruncatedOutput(t *testing.T) {
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, stream)
 	require.Error(t, stream.Close(), "a truncated Docker frame cannot be accepted as file content")
+}
+
+func TestFileV2DockerTransportJoinsEarlyHelperExitWithoutWaitingForUpload(t *testing.T) {
+	rt, base := newFakeDockerRuntime(t)
+	base.containers["runtime-a"] = &fakeContainer{config: &container.Config{Labels: map[string]string{"sandbox.managed": "true", "sandbox.role": "fuse-runtime"}}, running: true}
+	rt.cli = &fileV2DockerAPI{fakeDockerAPI: base, earlyEOF: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	stream, err := rt.RunFileOp(ctx, "runtime-a", []string{"write", "/workspace/a", "1024"}, reader)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, readErr := io.Copy(io.Discard, stream)
+		done <- errors.Join(readErr, stream.Close())
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err, "an exited helper cannot wait indefinitely for the caller's unread upload")
+	case <-time.After(300 * time.Millisecond):
+		cancel()
+		_ = reader.Close()
+		<-done
+		t.Fatal("file helper output ended but its input writer blocked the result")
+	}
 }
