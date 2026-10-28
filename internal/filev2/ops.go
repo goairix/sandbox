@@ -232,6 +232,12 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		return json.NewEncoder(stdout).Encode(struct {
 			Replacements int `json:"replacements"`
 		}{replacements})
+	case "glob":
+		hideReserved := len(argv) == 4
+		if hideReserved && argv[3] != "hide-reserved" {
+			return errors.New("invalid glob filter")
+		}
+		return runGlob(ctx, rootFD, relative, absolute, argv[2], hideReserved, stdout)
 	default:
 		return errors.New("unknown file operation")
 	}
@@ -252,10 +258,16 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	if operation == "read-lines" {
 		want = 4
 	}
+	if operation == "glob" {
+		want = 3
+		if len(argv) == 4 {
+			want = 4
+		}
+	}
 	if operation == "list" && (len(argv) == 4 || len(argv) == 5) {
 		want = len(argv)
 	}
-	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write" && operation != "read-lines" && operation != "edit") {
+	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write" && operation != "read-lines" && operation != "edit" && operation != "glob") {
 		err = errors.New("invalid file operation arguments")
 		return
 	}
