@@ -46,7 +46,34 @@ func (r *fileV2Runtime) RunFileOp(_ context.Context, _ string, argv []string, st
 		r.written = string(body)
 		return io.NopCloser(strings.NewReader("")), nil
 	}
+	if argv[0] == "read-lines" {
+		return io.NopCloser(strings.NewReader(`{"content":"line one\r\nline two\n"}`)), nil
+	}
+	if argv[0] == "edit" {
+		body, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, err
+		}
+		r.written = string(body)
+		return io.NopCloser(strings.NewReader(`{"replacements":1}`)), nil
+	}
 	return io.NopCloser(strings.NewReader(r.listing)), nil
+}
+
+func TestFilesV2TextManager(t *testing.T) {
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	mgr, _ := newGatedManager(rt)
+	content, err := mgr.ReadLinesV2(context.Background(), "sandbox-test", "a.txt", 1, 0)
+	require.NoError(t, err)
+	require.Equal(t, "line one\r\nline two\n", content)
+	require.Equal(t, []string{"read-lines", "/workspace/a.txt", "1", "0"}, rt.calls[0])
+	err = mgr.EditTextV2(context.Background(), "sandbox-test", "a.txt", "line one", "new", false)
+	require.NoError(t, err)
+	require.Contains(t, rt.written, `"old_string":"line one"`)
+	require.Equal(t, []string{"edit", "/workspace/a.txt"}, rt.calls[1])
+	err = mgr.EditTextV2(context.Background(), "sandbox-test", "a.txt", "", "new", false)
+	require.Error(t, err)
+	require.Len(t, rt.calls, 2)
 }
 
 func TestFileV2Write(t *testing.T) {

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
@@ -276,6 +278,80 @@ func (m *Manager) WriteFileV2(ctx context.Context, id, filePath string, size int
 	}
 	if len(output) != 0 {
 		return errors.New("file helper returned unexpected write output")
+	}
+	return nil
+}
+
+func (m *Manager) ReadLinesV2(ctx context.Context, id, filePath string, start, count int) (string, error) {
+	canonical, err := normalizeFileV2Path(filePath)
+	if err != nil {
+		return "", err
+	}
+	if start < 1 || count < 0 {
+		return "", runtime.ErrFileInvalidText
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		return "", err
+	}
+	argv := []string{"read-lines", canonical, strconv.Itoa(start), strconv.Itoa(count)}
+	rc, err := transport.RunFileOp(operationCtx, m.sandboxRuntimeID(sb), argv, nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Content string `json:"content"`
+	}
+	if err := readFileV2Metadata(rc, &result); err != nil {
+		return "", err
+	}
+	if len(result.Content) > 1<<20 || !utf8.ValidString(result.Content) {
+		return "", runtime.ErrFileLimitExceeded
+	}
+	return result.Content, nil
+}
+
+func (m *Manager) EditTextV2(ctx context.Context, id, filePath, oldText, newText string, replaceAll bool) error {
+	canonical, err := normalizeFileV2Path(filePath)
+	if err != nil {
+		return err
+	}
+	if oldText == "" || oldText == newText || len(oldText) > 8<<20 || len(newText) > 8<<20 ||
+		!utf8.ValidString(oldText) || !utf8.ValidString(newText) {
+		return runtime.ErrFileInvalidText
+	}
+	body, err := json.Marshal(struct {
+		OldString  string `json:"old_string"`
+		NewString  string `json:"new_string"`
+		ReplaceAll bool   `json:"replace_all"`
+	}{oldText, newText, replaceAll})
+	if err != nil || len(body) > 16<<20 {
+		return runtime.ErrFileLimitExceeded
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		return err
+	}
+	rc, err := transport.RunFileOp(operationCtx, m.sandboxRuntimeID(sb), []string{"edit", canonical}, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Replacements int `json:"replacements"`
+	}
+	if err := readFileV2Metadata(rc, &result); err != nil {
+		return err
+	}
+	if result.Replacements < 1 {
+		return errors.New("file helper returned invalid edit result")
 	}
 	return nil
 }
