@@ -2,8 +2,10 @@ package einofiles
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +78,39 @@ func TestLiveEinoFilesystem(t *testing.T) {
 			t.Fatalf("ls did not report the observed 11-byte file size: %q", result)
 		}
 	}
+
+	// Exercise -a and -h against the mounted filesystem, not the fake SDK.
+	hiddenInput, err := json.Marshal(map[string]string{
+		"file_path": "/.eino-hidden",
+		"content":   strings.Repeat("x", 1536),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tools["write_file"].InvokableRun(ctx, string(hiddenInput)); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+	listing, err := tools["ls"].InvokableRun(ctx, `{"path":"/"}`)
+	if err != nil {
+		t.Fatalf("list hidden file: %v", err)
+	}
+	t.Logf("ls -alh with hidden 1536-byte file:\n%s", listing)
+	for _, line := range strings.Split(listing, "\n") {
+		if !strings.HasSuffix(line, " /.eino-hidden") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 10 || len(fields[0]) != 10 || fields[0][0] != '-' || strings.Contains(fields[0], "?") || fields[4] != "1.5K" {
+			t.Fatalf("hidden file lacks long listing or human size: %q", line)
+		}
+		for _, value := range fields[1:4] {
+			if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+				t.Fatalf("hidden file lacks numeric links/owner/group: %q", line)
+			}
+		}
+		return
+	}
+	t.Fatalf("ls omitted hidden file: %q", listing)
 }
 
 func liveFilesystemTools(t *testing.T, ctx context.Context, middleware adk.ChatModelAgentMiddleware) map[string]tool.InvokableTool {
