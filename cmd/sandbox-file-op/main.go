@@ -11,6 +11,6 @@ import (
 func main() {
 	if err := filev2.Run(context.Background(), os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(filev2.ExitStatus(err))
 	}
 }

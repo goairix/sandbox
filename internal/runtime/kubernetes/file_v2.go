@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -70,6 +71,10 @@ func streamFileV2Pod(ctx context.Context, executor remotecommand.Executor, stdin
 		err := executor.StreamWithContext(streamCtx, remotecommand.StreamOptions{
 			Stdin: stdin, Stdout: pw, Stderr: stderr,
 		})
+		var exitErr utilexec.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			err = runtime.FileV2ExitError(exitErr.ExitStatus())
+		}
 		finished <- err
 		_ = pw.CloseWithError(err)
 	}()

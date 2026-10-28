@@ -76,7 +76,7 @@ func (r *Runtime) RunFileOp(ctx context.Context, id string, argv []string, stdin
 				if err != nil {
 					copyErr = fmt.Errorf("inspect file helper: %w", err)
 				} else if inspected.ExitCode != 0 {
-					copyErr = fmt.Errorf("file helper exited with code %d", inspected.ExitCode)
+					copyErr = runtime.FileV2ExitError(inspected.ExitCode)
 				}
 			}
 		}

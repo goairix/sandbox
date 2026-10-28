@@ -12,6 +12,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/stretchr/testify/require"
+
+	"github.com/goairix/sandbox/internal/runtime"
 )
 
 type fileV2DockerAPI struct {
@@ -55,6 +57,11 @@ func TestFileV2DockerTransport(t *testing.T) {
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, stream)
 	require.ErrorContains(t, stream.Close(), "exited with code 7")
+	fake.exitCode = 2
+	stream, err = rt.RunFileOp(context.Background(), "runtime-a", []string{"stat", "/workspace/missing"}, nil)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, stream)
+	require.ErrorIs(t, stream.Close(), runtime.ErrFileNotFound)
 	_, err = rt.RunFileOp(context.Background(), "runtime-a", []string{"stat", strings.Repeat("x", 4097)}, nil)
 	require.Error(t, err)
 }

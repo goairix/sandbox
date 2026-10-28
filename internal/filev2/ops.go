@@ -103,7 +103,7 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return errors.New("file is not regular")
+			return ErrTypeMismatch
 		}
 		if len(argv) == 4 {
 			start, startErr := strconv.ParseInt(argv[2], 10, 64)
@@ -152,7 +152,7 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return errors.New("file is not regular")
+			return ErrTypeMismatch
 		}
 		if err := copyExactly(ctx, file, stdin, size); err != nil {
 			return err
@@ -274,7 +274,7 @@ func copyExactly(ctx context.Context, dst io.Writer, src io.Reader, size int64) 
 	var extra [1]byte
 	n, err := io.ReadFull(src, extra[:])
 	if n != 0 || err != io.EOF {
-		return errors.New("write body exceeds declared size")
+		return ErrInvalidWriteSize
 	}
 	return ctx.Err()
 }

@@ -20,10 +20,12 @@ func fileV2Error(c *gin.Context, err error) {
 	switch {
 	case errors.As(err, &tooLarge):
 		c.JSON(http.StatusRequestEntityTooLarge, types.ErrorResponse{Code: "FILE_LIMIT_EXCEEDED", Message: "file exceeds upload limit"})
-	case errors.Is(err, sandbox.ErrFileV2InvalidPath), errors.Is(err, sandbox.ErrReservedFUSEWorkspacePath):
+	case errors.Is(err, sandbox.ErrFileV2InvalidPath), errors.Is(err, sandbox.ErrReservedFUSEWorkspacePath), errors.Is(err, runtime.ErrFilePathForbidden):
 		c.JSON(http.StatusForbidden, types.ErrorResponse{Code: "FILE_PATH_FORBIDDEN", Message: "file path is forbidden"})
 	case errors.Is(err, runtime.ErrFileNotFound):
 		c.JSON(http.StatusNotFound, types.ErrorResponse{Code: "FILE_NOT_FOUND", Message: "file not found"})
+	case errors.Is(err, runtime.ErrFileTypeMismatch):
+		c.JSON(http.StatusConflict, types.ErrorResponse{Code: "FILE_TYPE_MISMATCH", Message: "file type mismatch"})
 	case errors.Is(err, runtime.ErrInvalidUploadSize):
 		c.JSON(http.StatusBadRequest, types.ErrorResponse{Code: "FILE_INVALID", Message: "invalid file size"})
 	case errors.Is(err, sandbox.ErrSandboxNotReady), errors.Is(err, sandbox.ErrFileV2Unsupported):

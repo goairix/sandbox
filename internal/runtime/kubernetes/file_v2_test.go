@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -9,10 +10,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
+
+	"github.com/goairix/sandbox/internal/runtime"
 )
 
 type fileV2Executor struct {
 	finished chan struct{}
+	exitCode int
 }
 
 func (e *fileV2Executor) Stream(remotecommand.StreamOptions) error {
@@ -21,9 +26,20 @@ func (e *fileV2Executor) Stream(remotecommand.StreamOptions) error {
 
 func (e *fileV2Executor) StreamWithContext(ctx context.Context, opts remotecommand.StreamOptions) error {
 	defer close(e.finished)
+	if e.exitCode != 0 {
+		return utilexec.CodeExitError{Err: errors.New("helper failed"), Code: e.exitCode}
+	}
 	_, _ = io.WriteString(opts.Stdout, "payload")
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func TestFileV2KubernetesExitStatus(t *testing.T) {
+	executor := &fileV2Executor{finished: make(chan struct{}), exitCode: 2}
+	stream := streamFileV2Pod(context.Background(), executor, nil)
+	_, err := io.ReadAll(stream)
+	require.ErrorIs(t, err, runtime.ErrFileNotFound)
+	require.ErrorIs(t, stream.Close(), runtime.ErrFileNotFound)
 }
 
 func TestFileV2KubernetesTransportCloseJoins(t *testing.T) {

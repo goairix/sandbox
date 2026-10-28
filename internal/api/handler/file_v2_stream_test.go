@@ -29,6 +29,9 @@ type fileV2HTTPRuntime struct {
 func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string, input io.Reader) (io.ReadCloser, error) {
 	switch args[0] {
 	case "stat":
+		if args[1] == "/workspace/missing" {
+			return nil, runtime.ErrFileNotFound
+		}
 		body, err := json.Marshal(map[string]any{"name": "a.txt", "path": args[1], "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()})
 		return io.NopCloser(bytes.NewReader(body)), err
 	case "read":
@@ -113,4 +116,9 @@ func TestFilesV2Content(t *testing.T) {
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, url, nil))
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Empty(t, response.Body.String())
+
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/sandboxes/"+id+"/files/content?path=/workspace/missing", nil))
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.Contains(t, response.Body.String(), "FILE_NOT_FOUND")
 }

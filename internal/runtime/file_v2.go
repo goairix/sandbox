@@ -3,9 +3,31 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
+
+	"github.com/goairix/sandbox/internal/filev2"
 )
+
+var ErrFilePathForbidden = errors.New("file path is forbidden")
+var ErrFileTypeMismatch = errors.New("file type mismatch")
+
+// FileV2ExitError maps the helper's numeric status without parsing its stderr.
+func FileV2ExitError(code int) error {
+	switch code {
+	case filev2.ExitMissing:
+		return fmt.Errorf("%w: helper exit %d", ErrFileNotFound, code)
+	case filev2.ExitForbidden:
+		return fmt.Errorf("%w: helper exit %d", ErrFilePathForbidden, code)
+	case filev2.ExitTypeMismatch:
+		return fmt.Errorf("%w: helper exit %d", ErrFileTypeMismatch, code)
+	case filev2.ExitInvalidSize:
+		return fmt.Errorf("%w: helper exit %d", ErrInvalidUploadSize, code)
+	default:
+		return fmt.Errorf("file helper exited with code %d", code)
+	}
+}
 
 // FileV2Transport runs one sandbox-side helper process without shell-joining
 // user fields. Close on the result must join that process before returning.
