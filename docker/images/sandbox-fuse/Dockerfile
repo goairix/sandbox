@@ -1,6 +1,8 @@
 ARG GO_BUILDER_IMAGE=golang:1.25-alpine
 FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder
 
+ARG TARGETARCH
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -11,6 +13,7 @@ COPY internal/fuseprotocol ./internal/fuseprotocol
 COPY internal/filev2 ./internal/filev2
 COPY internal/mounter ./internal/mounter
 COPY internal/workspaceprobe ./internal/workspaceprobe
+COPY docker/images/common/install-ripgrep-14.1.1.sh /usr/local/bin/install-ripgrep
 RUN mkdir -p /out \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/workspace-mounter ./cmd/workspace-mounter \
@@ -18,6 +21,8 @@ RUN mkdir -p /out \
     -o /out/workspace-probe ./cmd/workspace-probe \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/sandbox-file-op ./cmd/sandbox-file-op
+RUN apk add --no-cache curl \
+ && TARGETARCH="$TARGETARCH" sh /usr/local/bin/install-ripgrep
 
 FROM debian:bookworm-slim AS s3fs-builder
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
@@ -55,14 +60,15 @@ COPY --from=s3fs-builder /out/usr/bin/s3fs /usr/bin/s3fs
 COPY --from=workspace-tools-builder /out/workspace-mounter /usr/local/bin/workspace-mounter
 COPY --from=workspace-tools-builder /out/workspace-probe /usr/local/bin/workspace-probe
 COPY --from=workspace-tools-builder /out/sandbox-file-op /usr/local/bin/sandbox-file-op
+COPY --from=workspace-tools-builder /out/rg /usr/local/bin/rg
 
 RUN command -v python3 >/dev/null \
  && command -v node >/dev/null \
  && test -x /usr/sbin/ip \
  && test "$(id -u sandbox)" = 1000 \
  && test "$(id -g sandbox)" = 1000 \
- && chown root:root /usr/local/bin/workspace-mounter /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op \
- && chmod 0755 /usr/local/bin/workspace-mounter /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op \
+ && chown root:root /usr/local/bin/workspace-mounter /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op /usr/local/bin/rg \
+ && chmod 0755 /usr/local/bin/workspace-mounter /usr/local/bin/workspace-probe /usr/local/bin/sandbox-file-op /usr/local/bin/rg \
  && install -d -o root -g root -m 0555 /workspace \
  && install -d -o root -g root -m 0700 /run/s3fs /var/cache/s3fs /var/cache/s3fs/tmp \
  && install -d -o root -g root -m 0755 /etc/workspace-fuse \

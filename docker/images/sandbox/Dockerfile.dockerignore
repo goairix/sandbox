@@ -17,3 +17,5 @@
 !docker/images/
 !docker/images/sandbox/
 !docker/images/sandbox/install-runtime.sh
+!docker/images/common/
+!docker/images/common/install-ripgrep-14.1.1.sh
