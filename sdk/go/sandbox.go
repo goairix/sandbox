@@ -30,6 +30,9 @@ func (s *Sandbox) ID() string { return s.id }
 // Reused reports whether NewSandbox reused an existing sandbox for that request.
 func (s *Sandbox) Reused() bool { return s.reused }
 
+// Files returns the independent v2 file API without changing v1 methods.
+func (s *Sandbox) Files() *Files { return &Files{client: s.client, id: s.id} }
+
 // NewSandbox creates or reuses a sandbox and returns a high-level handle.
 // If opts.Mode is empty, ModeEphemeral is used.
 func (c *Client) NewSandbox(ctx context.Context, opts SandboxOptions) (*Sandbox, error) {
