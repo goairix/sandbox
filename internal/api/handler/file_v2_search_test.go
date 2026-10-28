@@ -30,3 +30,19 @@ func TestFilesV2GlobHTTP(t *testing.T) {
 		require.True(t, response.Code >= 400, "accepted %s: %s", body, response.Body.String())
 	}
 }
+
+func TestFilesV2GrepHTTP(t *testing.T) {
+	router, _, id := fileV2HTTPRouter(t)
+	endpoint := "/sandboxes/" + id + "/files/grep"
+	request := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(`{"path":"/workspace","pattern":"hello","glob":"**/*.go","file_types":["go"],"before_context":1,"after_context":1}`))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Contains(t, response.Body.String(), `"line_number":2`)
+	require.Contains(t, response.Body.String(), `"content":"hello world\n"`)
+
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(`{"pattern":"hello","glob":"../*"}`)))
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	require.Contains(t, response.Body.String(), "FILE_INVALID")
+}

@@ -36,3 +36,17 @@ func (h *Handler) GlobFilesV2(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"files": files, "truncated": page.Truncated})
 }
+
+func (h *Handler) GrepFilesV2(c *gin.Context) {
+	var request runtime.FileV2GrepRequest
+	if err := decodeFileV2JSON(c.Request.Body, 8192, &request); err != nil {
+		fileV2Error(c, err)
+		return
+	}
+	result, err := h.manager.GrepFilesV2(c.Request.Context(), c.Param("id"), request)
+	if err != nil {
+		fileV2Error(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}

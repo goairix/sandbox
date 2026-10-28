@@ -91,6 +91,8 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 			"truncated": false,
 		})
 		return io.NopCloser(bytes.NewReader(body)), err
+	case "grep":
+		return io.NopCloser(strings.NewReader(`{"matches":[{"path":"/workspace/a.go","line_number":2,"content":"hello world\n","before":["before\n"],"after":["after\n"]}],"truncated":false}`)), nil
 	}
 	return nil, nil
 }
@@ -156,6 +158,7 @@ func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {
 	router.POST("/sandboxes/:id/files/text/read-lines", h.ReadFileLinesV2)
 	router.POST("/sandboxes/:id/files/text/edit", h.EditFileTextV2)
 	router.POST("/sandboxes/:id/files/glob", h.GlobFilesV2)
+	router.POST("/sandboxes/:id/files/grep", h.GrepFilesV2)
 	router.GET("/sandboxes/:id/files/stat", h.StatFileV2)
 	router.GET("/sandboxes/:id/files/list", h.ListFilesV2)
 	return router, rt, sb.ID
