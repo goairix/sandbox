@@ -32,10 +32,7 @@ func (h *Handler) GlobFilesV2(c *gin.Context) {
 	}
 	files := make([]fileV2SearchInfo, 0, len(page.Files))
 	for _, file := range page.Files {
-		files = append(files, fileV2SearchInfo{
-			Name: file.Name, Path: file.Path, Size: file.Size,
-			IsDir: file.IsDir, ModTime: file.ModTime,
-		})
+		files = append(files, fileV2PublicInfo(file))
 	}
 	c.JSON(http.StatusOK, gin.H{"files": files, "truncated": page.Truncated})
 }

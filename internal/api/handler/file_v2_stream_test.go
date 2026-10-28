@@ -36,6 +36,12 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		}
 		body, err := json.Marshal(map[string]any{"name": "a.txt", "path": args[1], "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()})
 		return io.NopCloser(bytes.NewReader(body)), err
+	case "list":
+		body, err := json.Marshal(map[string]any{
+			"files":       []map[string]any{{"name": "a.txt", "path": "/workspace/a.txt", "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()}},
+			"next_cursor": "/workspace/a.txt",
+		})
+		return io.NopCloser(bytes.NewReader(body)), err
 	case "read":
 		if r.readStream != nil {
 			return r.readStream, nil
@@ -150,6 +156,8 @@ func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {
 	router.POST("/sandboxes/:id/files/text/read-lines", h.ReadFileLinesV2)
 	router.POST("/sandboxes/:id/files/text/edit", h.EditFileTextV2)
 	router.POST("/sandboxes/:id/files/glob", h.GlobFilesV2)
+	router.GET("/sandboxes/:id/files/stat", h.StatFileV2)
+	router.GET("/sandboxes/:id/files/list", h.ListFilesV2)
 	return router, rt, sb.ID
 }
 
