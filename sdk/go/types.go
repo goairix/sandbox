@@ -247,6 +247,15 @@ type SSEEvent struct {
 	Timestamp int64   // Unix timestamp, set when Type == SSEEventPing
 }
 
+// EventStream owns one streaming execution response. Recv returns output
+// events as they arrive, io.EOF after a terminal done/error event or Close,
+// and a non-EOF error for an interrupted or malformed response. Close cancels
+// the HTTP request and should be called even when reading to completion.
+type EventStream interface {
+	Recv() (SSEEvent, error)
+	Close() error
+}
+
 // ListFilesRecursiveRequest is the request body for POST /api/v1/sandboxes/:id/files/list-recursive.
 type ListFilesRecursiveRequest struct {
 	Path     string `json:"path"`

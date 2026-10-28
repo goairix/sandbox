@@ -68,7 +68,8 @@ func (s *Sandbox) Run(ctx context.Context, language, code string) (ExecResponse,
 }
 
 // RunStream executes code in the sandbox and streams output as SSE events.
-func (s *Sandbox) RunStream(ctx context.Context, language, code string) (<-chan SSEEvent, error) {
+// The caller must Close the returned stream.
+func (s *Sandbox) RunStream(ctx context.Context, language, code string) (EventStream, error) {
 	return s.client.ExecStream(ctx, s.id, ExecRequest{Language: language, Code: code})
 }
 

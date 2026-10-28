@@ -75,14 +75,19 @@ sb, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
 result, err := sb.Run(ctx, "python", `print("hello")`)
 // result.Stdout, result.Stderr, result.ExitCode, result.Duration
 
-// Streaming (SSE)
-ch, err := sb.RunStream(ctx, "python", `
+// Streaming (SSE). A silent command opens the stream immediately.
+stream, err := sb.RunStream(ctx, "python", `
 import time
 for i in range(5):
-    print(i)
+    print(i, flush=True)
     time.sleep(0.1)
 `)
-for ev := range ch {
+if err != nil { return err }
+defer stream.Close() // also cancels a command when stopping early
+for {
+    ev, err := stream.Recv()
+    if err == io.EOF { break }
+    if err != nil { return err } // interrupted or malformed stream
     switch ev.Type {
     case sandbox.SSEEventStdout:
         fmt.Print(ev.Content)
@@ -91,10 +96,12 @@ for ev := range ch {
     case sandbox.SSEEventDone:
         fmt.Printf("exit %d (%.2fs)\n", ev.ExitCode, ev.Elapsed)
     case sandbox.SSEEventError:
-        fmt.Println("error:", ev.Content)
+        return fmt.Errorf("execution failed: %s", ev.Content)
     }
 }
 ```
+
+`done` always carries the process exit code, including nonzero exits; `error` means execution or transport failed. A stream that ends without either terminal event returns an error. Cancel the context or call `Close` to stop reading early. stdout and stderr arrive in their observed order; they are read from separate pipes, so their cross-stream ordering is not guaranteed.
 
 Supported languages: `python`, `nodejs`, `bash`.
 

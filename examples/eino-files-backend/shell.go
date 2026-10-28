@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -18,7 +19,7 @@ const maxShellOutputBytes = 1 << 20
 // *sandbox.Sandbox implements it; no command can run on the API host.
 type CommandClient interface {
 	Run(context.Context, string, string) (sandbox.ExecResponse, error)
-	RunStream(context.Context, string, string) (<-chan sandbox.SSEEvent, error)
+	RunStream(context.Context, string, string) (sandbox.EventStream, error)
 }
 
 // CommandBackend adapts sandbox execution to both Eino shell interfaces.
@@ -79,55 +80,58 @@ func (b *CommandBackend) ExecuteStreaming(ctx context.Context, input *filesystem
 	return reader, nil
 }
 
-func forwardCommandEvents(ctx context.Context, events <-chan sandbox.SSEEvent, writer *schema.StreamWriter[*filesystem.ExecuteResponse]) {
+func forwardCommandEvents(ctx context.Context, events sandbox.EventStream, writer *schema.StreamWriter[*filesystem.ExecuteResponse]) {
 	defer writer.Close()
+	defer events.Close()
 	remaining := maxShellOutputBytes
 	truncationReported := false
 	for {
-		select {
-		case <-ctx.Done():
-			writer.Send(nil, ctx.Err())
+		if err := ctx.Err(); err != nil {
+			writer.Send(nil, err)
 			return
-		case event, ok := <-events:
-			if !ok {
+		}
+		event, recvErr := events.Recv()
+		if recvErr != nil {
+			if errors.Is(recvErr, io.EOF) {
 				writer.Send(nil, errors.New("sandbox command stream ended without a terminal event"))
-				return
+			} else {
+				writer.Send(nil, recvErr)
 			}
-			switch event.Type {
-			case sandbox.SSEEventStdout, sandbox.SSEEventStderr:
-				output := event.Content
-				if len(output) > remaining {
-					output = output[:remaining]
-				}
-				remaining -= len(output)
-				truncated := len(output) < len(event.Content) && !truncationReported
-				if truncated {
-					truncationReported = true
-				}
-				if output != "" || truncated {
-					if writer.Send(&filesystem.ExecuteResponse{Output: output, Truncated: truncated}, nil) {
-						return
-					}
-				}
-			case sandbox.SSEEventDone:
-				code := event.ExitCode
-				writer.Send(&filesystem.ExecuteResponse{ExitCode: &code}, nil)
-				return
-			case sandbox.SSEEventError:
-				// The Kubernetes stream endpoint reports a nonzero process exit
-				// as this exact error message instead of a done event. Recognize
-				// only that form; transport and runtime errors remain errors.
-				if raw, ok := strings.CutPrefix(event.Content, "command terminated with exit code "); ok {
-					if code, err := strconv.Atoi(raw); err == nil && code > 0 && code <= 255 {
-						writer.Send(&filesystem.ExecuteResponse{ExitCode: &code}, nil)
-						return
-					}
-				}
-				writer.Send(nil, fmt.Errorf("sandbox command: %s", event.Content))
-				return
-			case sandbox.SSEEventPing:
-				// Heartbeats have no command output.
+			return
+		}
+		switch event.Type {
+		case sandbox.SSEEventStdout, sandbox.SSEEventStderr:
+			output := event.Content
+			if len(output) > remaining {
+				output = output[:remaining]
 			}
+			remaining -= len(output)
+			truncated := len(output) < len(event.Content) && !truncationReported
+			if truncated {
+				truncationReported = true
+			}
+			if output != "" || truncated {
+				if writer.Send(&filesystem.ExecuteResponse{Output: output, Truncated: truncated}, nil) {
+					return
+				}
+			}
+		case sandbox.SSEEventDone:
+			code := event.ExitCode
+			writer.Send(&filesystem.ExecuteResponse{ExitCode: &code}, nil)
+			return
+		case sandbox.SSEEventError:
+			// Older servers report a nonzero process exit in this exact form.
+			// New servers send done(exit_code); other errors remain errors.
+			if raw, ok := strings.CutPrefix(event.Content, "command terminated with exit code "); ok {
+				if code, err := strconv.Atoi(raw); err == nil && code > 0 && code <= 255 {
+					writer.Send(&filesystem.ExecuteResponse{ExitCode: &code}, nil)
+					return
+				}
+			}
+			writer.Send(nil, fmt.Errorf("sandbox command: %s", event.Content))
+			return
+		case sandbox.SSEEventPing:
+			// Heartbeats have no command output.
 		}
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -51,9 +52,9 @@ print("Task completed!", flush=True)
 `
 
 	fmt.Println("\nExecuting long-running task with silent periods...")
-	fmt.Println("Watch for ping events every 30 seconds to keep connection alive\n")
+	fmt.Println("Watch for ping events every 30 seconds to keep connection alive")
 
-	ch, err := client.ExecStream(ctx, sb.ID, sandbox.ExecRequest{
+	stream, err := client.ExecStream(ctx, sb.ID, sandbox.ExecRequest{
 		Language: "python",
 		Code:     code,
 		Timeout:  120,
@@ -61,11 +62,19 @@ print("Task completed!", flush=True)
 	if err != nil {
 		log.Fatalf("Failed to start execution: %v", err)
 	}
+	defer stream.Close()
 
 	start := time.Now()
 	pingCount := 0
 
-	for event := range ch {
+	for {
+		event, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("Execution stream failed: %v", err)
+		}
 		elapsed := time.Since(start).Seconds()
 
 		switch event.Type {

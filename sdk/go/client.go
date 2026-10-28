@@ -2,7 +2,6 @@
 package sandbox
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -466,26 +465,28 @@ func (c *Client) CancelMultipartUpload(ctx context.Context, id, uploadID string)
 }
 
 // ExecStream executes code in a sandbox and streams output as SSE events.
-// The returned channel is closed when the stream ends or ctx is cancelled.
-func (c *Client) ExecStream(ctx context.Context, id string, req ExecRequest) (<-chan SSEEvent, error) {
+// The caller must Close the stream, especially when stopping before done.
+func (c *Client) ExecStream(ctx context.Context, id string, req ExecRequest) (EventStream, error) {
 	return c.doStream(ctx, http.MethodPost, c.sandboxBase(id)+"/exec/stream", req)
 }
 
 // ExecuteStream runs a one-shot execution and streams output as SSE events.
-// The returned channel is closed when the stream ends or ctx is cancelled.
-func (c *Client) ExecuteStream(ctx context.Context, req ExecuteRequest) (<-chan SSEEvent, error) {
+// The caller must Close the stream, especially when stopping before done.
+func (c *Client) ExecuteStream(ctx context.Context, req ExecuteRequest) (EventStream, error) {
 	return c.doStream(ctx, http.MethodPost, "/api/v1/execute/stream", req)
 }
 
-// doStream sends a POST request and returns a channel of SSE events parsed from the response body.
-func (c *Client) doStream(ctx context.Context, method, path string, body any) (<-chan SSEEvent, error) {
+// doStream sends a POST request and returns an owned, cancellable SSE stream.
+func (c *Client) doStream(ctx context.Context, method, path string, body any) (EventStream, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(b))
+	streamCtx, cancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(streamCtx, method, c.baseURL+path, bytes.NewReader(b))
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("sandbox: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -497,101 +498,13 @@ func (c *Client) doStream(ctx context.Context, method, path string, body any) (<
 
 	resp, err := streamClient.Do(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("sandbox: http: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
+		defer cancel()
 		return nil, c.decodeError(resp)
 	}
-
-	ch := make(chan SSEEvent, 16)
-	go func() {
-		defer resp.Body.Close()
-		defer close(ch)
-		parseSSE(resp.Body, ch, ctx)
-	}()
-	return ch, nil
-}
-
-// parseSSE reads an SSE stream and sends parsed SSEEvents to ch until the stream ends or ctx is done.
-func parseSSE(r io.Reader, ch chan<- SSEEvent, ctx context.Context) {
-	scanner := bufio.NewScanner(r)
-	var eventType string
-	var dataLines []string
-
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		line := scanner.Text()
-
-		if line == "" {
-			// Blank line = dispatch event
-			if eventType != "" && len(dataLines) > 0 {
-				raw := strings.Join(dataLines, "\n")
-				if ev, ok := parseSandboxSSEEvent(eventType, raw); ok {
-					select {
-					case ch <- ev:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-			eventType = ""
-			dataLines = dataLines[:0]
-			continue
-		}
-
-		if strings.HasPrefix(line, "event:") {
-			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		}
-	}
-}
-
-// parseSandboxSSEEvent converts a raw SSE event+data pair into an SSEEvent.
-func parseSandboxSSEEvent(eventType, data string) (SSEEvent, bool) {
-	switch SSEEventType(eventType) {
-	case SSEEventStdout:
-		var d struct {
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(data), &d); err == nil {
-			return SSEEvent{Type: SSEEventStdout, Content: d.Content}, true
-		}
-	case SSEEventStderr:
-		var d struct {
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(data), &d); err == nil {
-			return SSEEvent{Type: SSEEventStderr, Content: d.Content}, true
-		}
-	case SSEEventDone:
-		var d struct {
-			ExitCode int     `json:"exit_code"`
-			Elapsed  float64 `json:"elapsed"`
-		}
-		if err := json.Unmarshal([]byte(data), &d); err == nil {
-			return SSEEvent{Type: SSEEventDone, ExitCode: d.ExitCode, Elapsed: d.Elapsed}, true
-		}
-	case SSEEventError:
-		var d struct {
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal([]byte(data), &d); err == nil {
-			return SSEEvent{Type: SSEEventError, Content: d.Message}, true
-		}
-	case SSEEventPing:
-		var d struct {
-			Timestamp int64 `json:"timestamp"`
-		}
-		if err := json.Unmarshal([]byte(data), &d); err == nil {
-			return SSEEvent{Type: SSEEventPing, Timestamp: d.Timestamp}, true
-		}
-	}
-	return SSEEvent{}, false
+	return newEventStream(streamCtx, cancel, resp.Body), nil
 }

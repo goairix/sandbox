@@ -25,18 +25,29 @@ func (r *recordingCommands) Run(_ context.Context, language, code string) (sandb
 	return r.response, r.runErr
 }
 
-func (r *recordingCommands) RunStream(_ context.Context, language, code string) (<-chan sandbox.SSEEvent, error) {
+func (r *recordingCommands) RunStream(_ context.Context, language, code string) (sandbox.EventStream, error) {
 	r.language, r.code = language, code
 	if r.runErr != nil {
 		return nil, r.runErr
 	}
-	ch := make(chan sandbox.SSEEvent, len(r.events))
-	for _, event := range r.events {
-		ch <- event
-	}
-	close(ch)
-	return ch, nil
+	return &recordingEventStream{events: r.events}, nil
 }
+
+type recordingEventStream struct {
+	events []sandbox.SSEEvent
+	index  int
+}
+
+func (s *recordingEventStream) Recv() (sandbox.SSEEvent, error) {
+	if s.index == len(s.events) {
+		return sandbox.SSEEvent{}, io.EOF
+	}
+	event := s.events[s.index]
+	s.index++
+	return event, nil
+}
+
+func (s *recordingEventStream) Close() error { return nil }
 
 func TestShellExecutesInSandbox(t *testing.T) {
 	runner := &recordingCommands{response: sandbox.ExecResponse{Stdout: "out\n", Stderr: "err\n", ExitCode: 7}}

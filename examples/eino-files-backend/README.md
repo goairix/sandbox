@@ -26,7 +26,7 @@ middleware, err := einofiles.NewDiffMiddleware(ctx, sandboxHandle.Files(),
     einofiles.WithStreamingShell(commands)) // 或 einofiles.WithShell(commands)
 ```
 
-两个模式均保留原六个文件工具，额外注册 `execute`。`Shell` 汇总标准输出、标准错误和退出码；`StreamingShell` 按服务端 SSE 事件输出，并在 `done` 事件中返回退出码。当前 Kubernetes 执行流把非零退出码发成固定格式的 `error` 事件，适配器也会将这个精确格式还原为退出码；其他 `error` 仍报错。标准输出和标准错误由不同管道读取，其交错顺序以实际 SSE 到达顺序为准。空命令和后台模式被拒绝；输出最多展示 1 MiB，超出时标记截断。流缺少可识别的终止事件会报错。命令复用现有沙盒执行 API，不在运行 Eino 的进程里启动 shell。
+两个模式均保留原六个文件工具，额外注册 `execute`。`Shell` 汇总标准输出、标准错误和退出码；`StreamingShell` 按服务端 SSE 事件逐块输出，并在 `done` 事件中返回退出码，包括非零退出码。适配器也兼容旧服务端把非零退出码放入固定格式 `error` 事件的情况；其他 `error` 仍报错。标准输出和标准错误由不同管道读取，其交错顺序以实际 SSE 到达顺序为准。空命令和后台模式被拒绝；输出最多展示 1 MiB，超出时标记截断。流缺少终止事件、解析失败或传输中断会报错。命令复用现有沙盒执行 API，不在运行 Eino 的进程里启动 shell。
 
 命令的当前目录是沙盒的 `/workspace`，相对路径可直接访问文件工具创建的文件。文件工具使用虚拟根 `/`，所以它报告的绝对路径 `/a.txt` 在命令里应写成 `/workspace/a.txt`；接入 Agent 时应将这一映射写入 Agent 指令。
 
