@@ -68,6 +68,9 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		}
 		dir := os.NewFile(uintptr(fd), absolute)
 		defer dir.Close()
+		if len(argv) == 4 {
+			return listPage(ctx, dir, absolute, argv[2], argv[3], stdout)
+		}
 		entries, err := dir.Readdir(1001)
 		if err != nil && err != io.EOF {
 			return err
@@ -131,6 +134,9 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	want := 2
 	if operation == "write" {
 		want = 3
+	}
+	if operation == "list" && len(argv) == 4 {
+		want = 4
 	}
 	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write") {
 		err = errors.New("invalid file operation arguments")

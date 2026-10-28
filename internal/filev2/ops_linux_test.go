@@ -89,6 +89,47 @@ func TestRunListFailsClosedWhenUnpagedDirectoryExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestRunPagedList(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cursor := ""
+	for _, want := range [][]string{{"a", "b"}, {"c", "d"}, {"e"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), []string{"list", root, cursor, "2"}, nil, &output); err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Files []struct {
+				Name string `json:"name"`
+			} `json:"files"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(output.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Files) != len(want) {
+			t.Fatalf("got %d entries, want %v", len(page.Files), want)
+		}
+		for i, name := range want {
+			if page.Files[i].Name != name {
+				t.Fatalf("entry %d = %q, want %q", i, page.Files[i].Name, name)
+			}
+		}
+		cursor = page.NextCursor
+	}
+	if cursor != "" {
+		t.Fatalf("last page has cursor %q", cursor)
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"list", root, "/tmp/other/file", "2"}, nil, &output); err == nil {
+		t.Fatal("accepted cursor for another directory")
+	}
+}
+
 func TestRunRejectsInvalidControlAndPath(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "file")
