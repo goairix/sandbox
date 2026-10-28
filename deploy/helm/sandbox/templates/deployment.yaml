@@ -294,8 +294,14 @@ spec:
             - name: SANDBOX_TELEMETRY_LOG_OTLP_ENDPOINT
               value: "{{ .Values.config.telemetry.log.otlpEndpoint }}"
             {{- end }}
-          {{- if or $builtinSentinel $etcdTLS }}
+          {{- if or $builtinSentinel $etcdState }}
           volumeMounts:
+            {{- if $etcdState }}
+            - name: etcd-config
+              mountPath: /etc/sandbox/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            {{- end }}
             {{- if $etcdTLS }}
             - name: etcd-client-tls
               mountPath: /etc/sandbox-etcd
@@ -335,8 +341,13 @@ spec:
             periodSeconds: 5
             # The handler bounds its durable-state check at two seconds.
             timeoutSeconds: 3
-      {{- if or $builtinSentinel $etcdTLS }}
+      {{- if or $builtinSentinel $etcdState }}
       volumes:
+        {{- if $etcdState }}
+        - name: etcd-config
+          configMap:
+            name: {{ .Release.Name }}-etcd-config
+        {{- end }}
         {{- if $etcdTLS }}
         - name: etcd-client-tls
           secret:

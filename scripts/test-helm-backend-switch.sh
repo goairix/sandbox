@@ -18,6 +18,11 @@ test "$base_fingerprint" = "$image_only_fingerprint"
 test "$base_fingerprint" != "$changed_fingerprint"
 
 rendered="$(helm template sandbox "$chart")"
+etcd_rendered="$(helm template sandbox "$chart" --values "$chart/values-etcd.yaml" --set preDeleteDrain.enabled=true)"
+grep -Fq 'name: sandbox-etcd-config' <<<"$etcd_rendered"
+grep -Fq 'backend: etcd' <<<"$etcd_rendered"
+test "$(grep -Fc 'mountPath: /etc/sandbox/config.yaml' <<<"$etcd_rendered")" -eq 2
+! grep -Fq 'name: sandbox-etcd-config' <<<"$rendered"
 grep -Fq '"helm.sh/hook": pre-upgrade' <<<"$rendered"
 grep -Fq '"helm.sh/hook": pre-rollback' <<<"$rendered"
 grep -Fq '"helm.sh/hook": post-install,post-upgrade,post-rollback' <<<"$rendered"
@@ -27,9 +32,9 @@ grep -Fq -- '--kubernetes-backend-fingerprint-deployment=sandbox-api' <<<"$rende
 grep -Fq -- '--verify-kubernetes-backend-fingerprint' <<<"$rendered"
 grep -Fq -- '--resume-kubernetes-deployment=sandbox-api' <<<"$rendered"
 grep -Fq 'goairix.github.io/sandbox-drain-protocol: "v1"' <<<"$rendered"
-grep -Fq 'goairix.github.io/sandbox-cleanup-protocol: "v2"' <<<"$rendered"
+grep -Fq 'goairix.github.io/sandbox-cleanup-protocol: "v3"' <<<"$rendered"
 ! grep -Fq 'sandbox.huaxisy.com/' <<<"$rendered"
-grep -Fq -- '--kubernetes-cleanup-protocol=v2' <<<"$rendered"
+grep -Fq -- '--kubernetes-cleanup-protocol=v3' <<<"$rendered"
 if helm template sandbox "$chart" --set autoscaling.enabled=true --show-only templates/deployment.yaml | grep -Eq '^  replicas:'; then
   printf 'HPA-managed Deployment unexpectedly renders spec.replicas\n' >&2
   exit 1

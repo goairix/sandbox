@@ -1,0 +1,17 @@
+{{- if eq (include "sandbox.stateBackend" .) "etcd" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-etcd-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox
+    release: {{ .Release.Name }}
+data:
+  config.yaml: |
+    # State connection and runtime settings come from the release environment.
+    # The image's legacy sample config explicitly sets Redis fields.
+    storage:
+      state:
+        backend: etcd
+{{- end }}
