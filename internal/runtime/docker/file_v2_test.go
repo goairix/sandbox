@@ -56,7 +56,7 @@ func TestFileV2DockerTransport(t *testing.T) {
 	stream, err = rt.RunFileOp(context.Background(), "runtime-a", []string{"stat", "/workspace/a"}, nil)
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, stream)
-	require.ErrorContains(t, stream.Close(), "exited with code 7")
+	require.ErrorIs(t, stream.Close(), runtime.ErrFileConflict)
 	fake.exitCode = 2
 	stream, err = rt.RunFileOp(context.Background(), "runtime-a", []string{"stat", "/workspace/missing"}, nil)
 	require.NoError(t, err)
