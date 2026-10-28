@@ -82,6 +82,24 @@ func convertInfo(info sandbox.FileInfo) (filesystem.FileInfo, error) {
 }
 
 func (b *Backend) LsInfo(ctx context.Context, req *filesystem.LsInfoRequest) ([]filesystem.FileInfo, error) {
+	listed, err := b.listDetailed(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]filesystem.FileInfo, 0, len(listed))
+	for _, info := range listed {
+		converted, err := convertInfo(info)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, converted)
+	}
+	return result, nil
+}
+
+// listDetailed preserves metadata that Eino's Backend.FileInfo omits, while
+// retaining the same bounded pagination and path checks as LsInfo.
+func (b *Backend) listDetailed(ctx context.Context, req *filesystem.LsInfoRequest) ([]sandbox.FileInfo, error) {
 	if req == nil {
 		return nil, errors.New("missing list request")
 	}
@@ -89,7 +107,7 @@ func (b *Backend) LsInfo(ctx context.Context, req *filesystem.LsInfoRequest) ([]
 	if err != nil {
 		return nil, err
 	}
-	result := make([]filesystem.FileInfo, 0)
+	result := make([]sandbox.FileInfo, 0)
 	cursor := ""
 	seen := make(map[string]struct{})
 	for pageNumber := 0; pageNumber < maxListPages; pageNumber++ {
@@ -98,11 +116,10 @@ func (b *Backend) LsInfo(ctx context.Context, req *filesystem.LsInfoRequest) ([]
 			return nil, err
 		}
 		for _, info := range page.Files {
-			converted, err := convertInfo(info)
-			if err != nil {
+			if _, err := virtualPath(info.Path); err != nil {
 				return nil, err
 			}
-			result = append(result, converted)
+			result = append(result, info)
 		}
 		if page.NextCursor == "" {
 			return result, nil

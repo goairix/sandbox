@@ -98,7 +98,7 @@ func TestEinoLsAndGrepShowNativeStyleResults(t *testing.T) {
 			}
 
 			ls, err := namedToolFromMiddleware(t, middleware, "ls").InvokableRun(context.Background(), `{"path":"/"}`)
-			if err != nil || !strings.Contains(ls, "3 2026-01-01") || !strings.Contains(ls, "/a.txt") || !strings.Contains(ls, "/dir/") {
+			if err != nil || !strings.Contains(ls, "-????????? ? ? ? 3 Jan  1 00:00 2026 /a.txt") || !strings.Contains(ls, "d????????? ? ? ? 0 - /dir/") {
 				t.Fatalf("ls=%q err=%v", ls, err)
 			}
 
@@ -151,6 +151,20 @@ func TestEinoGrepModesAndContext(t *testing.T) {
 	}
 }
 
+func TestLsHumanSize(t *testing.T) {
+	for _, tc := range []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0"}, {1023, "1023"}, {1024, "1.0K"},
+		{1025, "1.1K"}, {1536, "1.5K"}, {2 << 20, "2.0M"},
+	} {
+		if got := humanSize(tc.bytes); got != tc.want {
+			t.Errorf("humanSize(%d) = %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
+}
+
 func TestEinoMiddlewareEditDiff(t *testing.T) {
 	files := &diffFiles{recordingFiles: &recordingFiles{}, content: "alpha\nworld\n"}
 	middleware, err := NewDiffMiddleware(context.Background(), files)
@@ -190,7 +204,7 @@ func TestEinoMiddlewareUsesSDKFilesV2(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			_, _ = io.WriteString(w, `{"files":[{"path":"/workspace/a.txt","size":11,"mod_time":"2026-10-29T12:00:00Z"}]}`)
+			_, _ = io.WriteString(w, `{"files":[{"path":"/workspace/a.txt","size":11,"mod_time":"2026-10-29T12:00:00Z","mode":"-rw-r--r--","nlink":1,"uid":1000,"gid":1000},{"path":"/workspace/.env","size":1536,"mod_time":"2026-10-29T12:00:00Z","mode":"-rw-------","nlink":1,"uid":1000,"gid":1000}]}`)
 		case "/api/v2/sandboxes/sandbox-test/files/grep":
 			var input sandbox.FileV2GrepRequest
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Path != "/workspace" || input.Pattern != "etcd" {
@@ -248,9 +262,10 @@ func TestEinoMiddlewareUsesSDKFilesV2(t *testing.T) {
 		t.Fatalf("result=%q err=%v reads=%d edits=%d", result, err, reads, edits)
 	}
 	ls, err := namedToolFromMiddleware(t, middleware, "ls").InvokableRun(ctx, `{"path":"/"}`)
-	if err != nil || ls != "- 11 2026-10-29T12:00:00Z /a.txt" {
+	if err != nil || ls != "-rw------- 1 1000 1000 1.5K Oct 29 12:00 2026 /.env\n-rw-r--r-- 1 1000 1000   11 Oct 29 12:00 2026 /a.txt" {
 		t.Fatalf("SDK ls=%q err=%v", ls, err)
 	}
+	t.Logf("ls -alh:\n%s", ls)
 	grep, err := namedToolFromMiddleware(t, middleware, "grep").InvokableRun(ctx, `{"pattern":"etcd"}`)
 	if err != nil || grep != "/a.txt:2:etcd" {
 		t.Fatalf("SDK grep=%q err=%v", grep, err)

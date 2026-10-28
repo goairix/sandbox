@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	einoFS "github.com/cloudwego/eino/adk/middlewares/filesystem"
@@ -40,7 +42,7 @@ type nativeGrepArgs struct {
 
 func nativeToolConfigs(backend *Backend) (*einoFS.ToolConfig, *einoFS.ToolConfig, error) {
 	ls, err := utils.InferTool(einoFS.ToolNameLs,
-		"List files like ls -l: type, byte size, modification time, and path.",
+		"List files like ls -alh: mode, links, numeric owner/group, human-readable size, UTC modification time, and path. Hidden entries are included.",
 		func(ctx context.Context, input nativeLsArgs) (string, error) {
 			return nativeLs(ctx, backend, input)
 		})
@@ -59,26 +61,80 @@ func nativeToolConfigs(backend *Backend) (*einoFS.ToolConfig, *einoFS.ToolConfig
 }
 
 func nativeLs(ctx context.Context, backend *Backend, input nativeLsArgs) (string, error) {
-	infos, err := backend.LsInfo(ctx, &filesystem.LsInfoRequest{Path: input.Path})
+	infos, err := backend.listDetailed(ctx, &filesystem.LsInfoRequest{Path: input.Path})
 	if err != nil {
 		return "", err
 	}
-	// Files v2 exposes type, size, and mtime, but no Unix mode or ownership.
-	// A single type marker keeps the output familiar without inventing fields.
+	// Keep the virtual absolute path so an agent can use it in the next tool
+	// call. SDK responses from older servers lack Unix details and show ?.
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Path < infos[j].Path })
-	lines := make([]string, 0, len(infos))
+	type row struct {
+		mode, links, owner, group, size, modified, name string
+	}
+	rows := make([]row, 0, len(infos))
+	linkWidth, ownerWidth, groupWidth, sizeWidth := 0, 0, 0, 0
 	for _, info := range infos {
+		name, err := virtualPath(info.Path)
+		if err != nil {
+			return "", err
+		}
 		if info.IsDir {
-			lines = append(lines, "d - - "+strings.TrimSuffix(info.Path, "/")+"/")
-			continue
+			name = strings.TrimSuffix(name, "/") + "/"
 		}
-		modified := info.ModifiedAt
-		if modified == "" || strings.HasPrefix(modified, "0001-") {
-			modified = "-"
+		if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+			name = strconv.Quote(name)
 		}
-		lines = append(lines, fmt.Sprintf("- %d %s %s", info.Size, modified, info.Path))
+		links, owner, group := "?", "?", "?"
+		if info.Nlink > 0 {
+			links = strconv.FormatUint(info.Nlink, 10)
+			owner = strconv.FormatUint(uint64(info.UID), 10)
+			group = strconv.FormatUint(uint64(info.GID), 10)
+		}
+		modified := "-"
+		if !info.ModTime.IsZero() {
+			modified = info.ModTime.UTC().Format("Jan _2 15:04 2006")
+		}
+		entry := row{lsMode(info), links, owner, group, humanSize(info.Size), modified, name}
+		rows = append(rows, entry)
+		linkWidth = max(linkWidth, len(links))
+		ownerWidth = max(ownerWidth, len(owner))
+		groupWidth = max(groupWidth, len(group))
+		sizeWidth = max(sizeWidth, len(entry.size))
+	}
+	lines := make([]string, 0, len(rows))
+	for _, entry := range rows {
+		lines = append(lines, fmt.Sprintf("%s %*s %-*s %-*s %*s %s %s",
+			entry.mode, linkWidth, entry.links, ownerWidth, entry.owner,
+			groupWidth, entry.group, sizeWidth, entry.size, entry.modified, entry.name))
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func lsMode(info sandbox.FileInfo) string {
+	if len(info.Mode) == 10 && strings.IndexFunc(info.Mode, unicode.IsControl) < 0 {
+		if info.Mode[0] == 'L' {
+			return "l" + info.Mode[1:]
+		}
+		return info.Mode
+	}
+	if info.IsDir {
+		return "d?????????"
+	}
+	return "-?????????"
+}
+
+func humanSize(size int64) string {
+	if size < 1024 {
+		return strconv.FormatInt(size, 10)
+	}
+	value := float64(size)
+	for _, unit := range []string{"K", "M", "G", "T", "P", "E"} {
+		value /= 1024
+		if value < 1024 || unit == "E" {
+			return fmt.Sprintf("%.1f%s", math.Ceil(value*10)/10, unit)
+		}
+	}
+	return strconv.FormatInt(size, 10)
 }
 
 func nativeGrep(ctx context.Context, backend *Backend, input nativeGrepArgs) (string, error) {

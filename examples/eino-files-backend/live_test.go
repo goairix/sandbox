@@ -72,7 +72,7 @@ func TestLiveEinoFilesystem(t *testing.T) {
 		if step.name == "edit_file" && (!strings.Contains(result, "-world") || !strings.Contains(result, "+etcd")) {
 			t.Fatalf("edit_file did not return the expected unified diff: %q", result)
 		}
-		if step.name == "ls" && !strings.Contains(result, "- 11 ") {
+		if step.name == "ls" && (!strings.Contains(result, " 11 ") || !strings.Contains(result, "/eino-demo.txt")) {
 			t.Fatalf("ls did not report the observed 11-byte file size: %q", result)
 		}
 	}
