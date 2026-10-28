@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +24,8 @@ import (
 
 type fileV2HTTPRuntime struct {
 	uploadRuntime
-	content []byte
+	content    []byte
+	readStream io.ReadCloser
 }
 
 func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string, input io.Reader) (io.ReadCloser, error) {
@@ -35,6 +37,9 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		body, err := json.Marshal(map[string]any{"name": "a.txt", "path": args[1], "size": len(r.content), "is_dir": false, "mod_time": time.Unix(0, 0).UTC()})
 		return io.NopCloser(bytes.NewReader(body)), err
 	case "read":
+		if r.readStream != nil {
+			return r.readStream, nil
+		}
 		start, _ := strconv.Atoi(args[2])
 		length, _ := strconv.Atoi(args[3])
 		if length < 0 {
@@ -54,6 +59,53 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
 	return nil, nil
+}
+
+type fileV2CancelledReader struct {
+	ctx     context.Context
+	entered chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (r *fileV2CancelledReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.ctx.Done()
+	return 0, r.ctx.Err()
+}
+
+func (r *fileV2CancelledReader) Close() error {
+	close(r.closed)
+	return nil
+}
+
+func TestFilesV2ContentCancelClosesStream(t *testing.T) {
+	router, rt, id := fileV2HTTPRouter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &fileV2CancelledReader{ctx: ctx, entered: make(chan struct{}), closed: make(chan struct{})}
+	rt.readStream = reader
+	request := httptest.NewRequest(http.MethodGet, "/sandboxes/"+id+"/files/content?path=/workspace/a.txt", nil).WithContext(ctx)
+	finished := make(chan struct{})
+	go func() {
+		router.ServeHTTP(httptest.NewRecorder(), request)
+		close(finished)
+	}()
+	select {
+	case <-reader.entered:
+	case <-time.After(time.Second):
+		t.Fatal("read never reached stream")
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled HTTP read did not finish")
+	}
+	select {
+	case <-reader.closed:
+	default:
+		t.Fatal("cancelled HTTP read did not close stream")
+	}
 }
 
 func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {
