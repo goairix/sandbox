@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -111,6 +112,97 @@ func TestLiveEinoFilesystem(t *testing.T) {
 		return
 	}
 	t.Fatalf("ls omitted hidden file: %q", listing)
+}
+
+// TestLiveEinoShell exercises both Eino execute variants in a real FUSE
+// sandbox. It is separate from Files v2 so the running API need not include
+// unreleased file-list metadata changes.
+func TestLiveEinoShell(t *testing.T) {
+	baseURL, apiKey := os.Getenv("EINO_FILES_LIVE_BASE_URL"), os.Getenv("EINO_FILES_LIVE_API_KEY")
+	if baseURL == "" || apiKey == "" {
+		t.Skip("set EINO_FILES_LIVE_BASE_URL and EINO_FILES_LIVE_API_KEY for a live cluster test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	client := sandbox.NewClient(baseURL, apiKey, sandbox.WithTimeout(3*time.Minute))
+	running, err := client.NewSandbox(ctx, sandbox.SandboxOptions{
+		Mode: sandbox.ModePersistent, Timeout: 600,
+		WorkspacePath:      fmt.Sprintf("eino-shell-live/%d", time.Now().UnixNano()),
+		WorkspaceMountMode: sandbox.WorkspaceMountFUSE,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("created shell test sandbox %s", running.ID())
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cleanupCancel()
+		if err := running.Close(cleanupCtx); err != nil {
+			t.Errorf("destroy sandbox %s: %v", running.ID(), err)
+		}
+	}()
+
+	commands := NewCommandBackend(running)
+	for _, variant := range []struct {
+		name   string
+		option MiddlewareOption
+	}{
+		{"shell", WithShell(commands)},
+		{"streaming", WithStreamingShell(commands)},
+	} {
+		middleware, err := NewMiddleware(ctx, running.Files(), variant.option)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, run, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var execute tool.BaseTool
+		for _, candidate := range run.Tools {
+			info, err := candidate.Info(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Name == "execute" {
+				execute = candidate
+				break
+			}
+		}
+		if execute == nil {
+			t.Fatal("Eino execute tool missing")
+		}
+		if variant.name == "shell" {
+			result, err := execute.(tool.InvokableTool).InvokableRun(ctx, `{"command":"printf shell-ok; exit 7"}`)
+			t.Logf("Eino shell: %s", result)
+			if err != nil || !strings.Contains(result, "shell-ok") || !strings.Contains(result, "exit code 7") {
+				t.Fatalf("shell result=%q err=%v", result, err)
+			}
+			continue
+		}
+		stream, err := execute.(tool.StreamableTool).StreamableRun(ctx, `{"command":"printf stream-out; printf stream-err >&2; exit 4"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var chunks strings.Builder
+		for {
+			chunk, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				stream.Close()
+				t.Fatal(err)
+			}
+			chunks.WriteString(chunk)
+		}
+		stream.Close()
+		result := chunks.String()
+		t.Logf("Eino streaming shell: %s", result)
+		if !strings.Contains(result, "stream-out") || !strings.Contains(result, "stream-err") || !strings.Contains(result, "exit code 4") {
+			t.Fatalf("streaming shell result=%q", result)
+		}
+	}
 }
 
 func liveFilesystemTools(t *testing.T, ctx context.Context, middleware adk.ChatModelAgentMiddleware) map[string]tool.InvokableTool {

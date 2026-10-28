@@ -27,9 +27,45 @@ type DiffFileClient interface {
 	Read(context.Context, string) (io.ReadCloser, error)
 }
 
+// MiddlewareOption adds one execution mode to the six existing file tools.
+// Eino exposes a single execute tool, so Shell and StreamingShell are exclusive.
+type MiddlewareOption func(*einoFS.MiddlewareConfig) error
+
+func WithShell(shell filesystem.Shell) MiddlewareOption {
+	return func(config *einoFS.MiddlewareConfig) error {
+		if shell == nil || config.StreamingShell != nil || config.Shell != nil {
+			return errors.New("invalid or duplicate shell configuration")
+		}
+		config.Shell = shell
+		return nil
+	}
+}
+
+func WithStreamingShell(shell filesystem.StreamingShell) MiddlewareOption {
+	return func(config *einoFS.MiddlewareConfig) error {
+		if shell == nil || config.Shell != nil || config.StreamingShell != nil {
+			return errors.New("invalid or duplicate streaming shell configuration")
+		}
+		config.StreamingShell = shell
+		return nil
+	}
+}
+
+func applyMiddlewareOptions(config *einoFS.MiddlewareConfig, options []MiddlewareOption) error {
+	for _, option := range options {
+		if option == nil {
+			return errors.New("nil middleware option")
+		}
+		if err := option(config); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // NewMiddleware exposes Eino's six filesystem tools through Files v2. The ls
 // and grep tools include native-style metadata and matching lines by default.
-func NewMiddleware(ctx context.Context, files FileClient) (adk.ChatModelAgentMiddleware, error) {
+func NewMiddleware(ctx context.Context, files FileClient, options ...MiddlewareOption) (adk.ChatModelAgentMiddleware, error) {
 	if files == nil {
 		return nil, errors.New("missing sandbox files client")
 	}
@@ -38,13 +74,17 @@ func NewMiddleware(ctx context.Context, files FileClient) (adk.ChatModelAgentMid
 	if err != nil {
 		return nil, err
 	}
-	return einoFS.New(ctx, &einoFS.MiddlewareConfig{Backend: backend, LsToolConfig: ls, GrepToolConfig: grep})
+	config := &einoFS.MiddlewareConfig{Backend: backend, LsToolConfig: ls, GrepToolConfig: grep}
+	if err := applyMiddlewareOptions(config, options); err != nil {
+		return nil, err
+	}
+	return einoFS.New(ctx, config)
 }
 
 // NewDiffMiddleware replaces only Eino's edit_file tool. Eino's default tool
 // returns a fixed success sentence; this variant returns a bounded unified
 // diff after a successful Files v2 edit and an independent readback.
-func NewDiffMiddleware(ctx context.Context, files DiffFileClient) (adk.ChatModelAgentMiddleware, error) {
+func NewDiffMiddleware(ctx context.Context, files DiffFileClient, options ...MiddlewareOption) (adk.ChatModelAgentMiddleware, error) {
 	if files == nil {
 		return nil, errors.New("missing sandbox files client")
 	}
@@ -61,12 +101,16 @@ func NewDiffMiddleware(ctx context.Context, files DiffFileClient) (adk.ChatModel
 	if err != nil {
 		return nil, err
 	}
-	return einoFS.New(ctx, &einoFS.MiddlewareConfig{
+	config := &einoFS.MiddlewareConfig{
 		Backend:            backend,
 		LsToolConfig:       ls,
 		GrepToolConfig:     grep,
 		EditFileToolConfig: &einoFS.ToolConfig{CustomTool: edit},
-	})
+	}
+	if err := applyMiddlewareOptions(config, options); err != nil {
+		return nil, err
+	}
+	return einoFS.New(ctx, config)
 }
 
 type diffEditRequest struct {
