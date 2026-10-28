@@ -2322,6 +2322,32 @@ func TestManagerExecStreamNonzeroExitIsCompleted(t *testing.T) {
 	assert.Equal(t, StateIdle, sb.State)
 }
 
+func TestManagerExecStreamPreservesBufferedOutputBeforeTerminal(t *testing.T) {
+	rt := newMockRuntime()
+	events := make(chan runtime.StreamEvent, 65)
+	for i := 0; i < 64; i++ {
+		events <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: fmt.Sprintf("chunk-%d", i)}
+	}
+	events <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
+	close(events)
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return events, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 30, MaxExecTimeoutSeconds: 600})
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "printf output"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(out) == 64 }, time.Second, time.Millisecond)
+	var got []runtime.StreamEvent
+	for event := range out {
+		got = append(got, event)
+	}
+	require.Len(t, got, 65)
+	for i := 0; i < 64; i++ {
+		assert.Equal(t, fmt.Sprintf("chunk-%d", i), got[i].Content)
+	}
+	assert.Equal(t, runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}, got[64])
+}
+
 func TestManagerExecStreamMissingTerminalFailsClosed(t *testing.T) {
 	rt := newMockRuntime()
 	runtimeEvents := make(chan runtime.StreamEvent, 1)

@@ -2612,7 +2612,18 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			sb.UpdatedAt = time.Now()
 			m.mu.Unlock()
 			if terminal != nil {
-				sendStreamTerminal(outCh, *terminal)
+				// Preserve every output chunk on a completed stream. A canceled
+				// consumer may stop draining, so only that path may discard one
+				// buffered chunk to publish the terminal and release the gate.
+				if context.Cause(execCtx) == nil {
+					select {
+					case outCh <- *terminal:
+					case <-execCtx.Done():
+						sendStreamTerminal(outCh, *terminal)
+					}
+				} else {
+					sendStreamTerminal(outCh, *terminal)
+				}
 			}
 			metrics.RecordExec(execCtx, "stream", status, time.Since(streamStart).Seconds())
 		}
