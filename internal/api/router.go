@@ -30,7 +30,13 @@ func BodySizeLimit(maxBytes int64) gin.HandlerFunc {
 func routeAwareBodySizeLimit(defaultMaxBytes, uploadMaxBytes int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		limit := defaultMaxBytes
-		if directUploadRoute(c.Request.Method, c.Request.URL.Path) {
+		if directV2ContentWriteRoute(c.Request.Method, c.Request.URL.Path) {
+			limit = uploadMaxBytes
+			if c.Request.ContentLength > limit {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"code": "FILE_LIMIT_EXCEEDED", "message": "file exceeds upload limit"})
+				return
+			}
+		} else if directUploadRoute(c.Request.Method, c.Request.URL.Path) {
 			// Permit bounded multipart framing in addition to the configured file
 			// payload. The handler separately enforces the exact declared size.
 			if uploadMaxBytes > math.MaxInt64-(1<<20) {
@@ -41,6 +47,15 @@ func routeAwareBodySizeLimit(defaultMaxBytes, uploadMaxBytes int64) gin.HandlerF
 		}
 		BodySizeLimit(limit)(c)
 	}
+}
+
+func directV2ContentWriteRoute(method, requestPath string) bool {
+	if method != http.MethodPut || strings.HasSuffix(requestPath, "/") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(requestPath, "/"), "/")
+	return len(parts) == 6 && parts[0] == "api" && parts[1] == "v2" && parts[2] == "sandboxes" &&
+		parts[3] != "" && parts[4] == "files" && parts[5] == "content"
 }
 
 func directUploadRoute(method, requestPath string) bool {
@@ -132,6 +147,15 @@ func SetupRouter(h *handler.Handler, apiKey string, rateLimit int, serviceName s
 	// One-shot execution
 	v1.POST("/execute", h.ExecuteOneShot)
 	v1.POST("/execute/stream", h.ExecuteOneShotStream)
+
+	// Files v2 is independent of the existing v1 file contract.
+	v2 := r.Group("/api/v2")
+	v2.Use(middleware.Auth(apiKey))
+	if rateLimit > 0 {
+		v2.Use(middleware.RateLimit(rateLimit))
+	}
+	v2.GET("/sandboxes/:id/files/content", h.ReadFileContentV2)
+	v2.PUT("/sandboxes/:id/files/content", h.WriteFileContentV2)
 
 	return r
 }

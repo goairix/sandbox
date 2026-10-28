@@ -137,3 +137,30 @@ func TestNonUploadRouteRetainsDefault64MiBBodyLimit(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }
+
+func TestFilesV2ContentRouteAuthAndBodyLimit(t *testing.T) {
+	initRouterMetrics.Do(func() { require.NoError(t, metrics.InitNoop()) })
+	rt := &streamingUploadRuntime{}
+	mgr := sandbox.NewManager(rt, nil, nil, sandbox.ManagerConfig{})
+	sb, err := mgr.Create(context.Background(), sandbox.SandboxConfig{Mode: sandbox.ModePersistent})
+	require.NoError(t, err)
+	router := SetupRouter(handler.NewHandler(mgr, 4), "secret", 0, "test")
+	url := "/api/v2/sandboxes/" + sb.ID + "/files/content?path=/workspace/a"
+	unauthorized := httptest.NewRecorder()
+	router.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, url, nil))
+	require.Equal(t, http.StatusUnauthorized, unauthorized.Code)
+
+	authorized := httptest.NewRequest(http.MethodGet, url, nil)
+	authorized.Header.Set("Authorization", "Bearer secret")
+	missingTransport := httptest.NewRecorder()
+	router.ServeHTTP(missingTransport, authorized)
+	require.Equal(t, http.StatusServiceUnavailable, missingTransport.Code)
+	require.Contains(t, missingTransport.Body.String(), "SANDBOX_NOT_READY")
+
+	tooLarge := httptest.NewRequest(http.MethodPut, url, strings.NewReader("abcde"))
+	tooLarge.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, tooLarge)
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
+	require.Contains(t, response.Body.String(), "FILE_LIMIT_EXCEEDED")
+}
