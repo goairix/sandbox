@@ -3,6 +3,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -188,6 +189,7 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 	execConfig := container.ExecOptions{
 		Cmd:          cmd,
 		User:         user,
+		AttachStdin:  req.Stdin != "",
 		AttachStdout: true,
 		AttachStderr: true,
 		Tty:          req.LineBuffered,
@@ -217,6 +219,16 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		defer attachResp.Close()
 		stopWatch := watchDockerAttachContext(ctx, attachResp.Close)
 		defer stopWatch()
+		var stdinDone <-chan error
+		if req.Stdin != "" {
+			result := make(chan error, 1)
+			stdinDone = result
+			go func() {
+				_, writeErr := io.Copy(attachResp.Conn, strings.NewReader(req.Stdin))
+				result <- errors.Join(writeErr, attachResp.CloseWrite())
+			}()
+		}
+		var outputErr error
 
 		if req.LineBuffered {
 			// TTY mode: stdout and stderr are merged into a single raw stream.
@@ -233,20 +245,25 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 					}
 				}
 				if readErr != nil {
+					if !errors.Is(readErr, io.EOF) {
+						outputErr = fmt.Errorf("read Docker exec output: %w", readErr)
+					}
 					break
 				}
 			}
 		} else {
-			// Non-TTY mode: use stdcopy to demux stdout/stderr.
+			// Non-TTY mode: decode Docker's multiplexed stdout/stderr frames.
 			stdoutPR, stdoutPW := io.Pipe()
 			stderrPR, stderrPW := io.Pipe()
 			defer func() { _ = stdoutPR.Close() }()
 			defer func() { _ = stderrPR.Close() }()
 
+			demuxDone := make(chan error, 1)
 			go func() {
-				_, _ = stdcopy.StdCopy(stdoutPW, stderrPW, attachResp.Reader)
-				_ = stdoutPW.Close()
-				_ = stderrPW.Close()
+				copyErr := copyDockerExecFrames(stdoutPW, stderrPW, attachResp.Reader)
+				_ = stdoutPW.CloseWithError(copyErr)
+				_ = stderrPW.CloseWithError(copyErr)
+				demuxDone <- copyErr
 			}()
 
 			done := make(chan struct{})
@@ -286,9 +303,28 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			}
 
 			<-done
+			if copyErr := <-demuxDone; copyErr != nil {
+				outputErr = fmt.Errorf("decode Docker exec output: %w", copyErr)
+			}
 		}
 
+		if stdinDone != nil {
+			// Output EOF means the attach session has ended. Closing its
+			// connection releases a stdin writer if the process did not read
+			// the complete input before exiting.
+			select {
+			case writeErr := <-stdinDone:
+				outputErr = errors.Join(outputErr, writeErr)
+			default:
+				attachResp.Close()
+				outputErr = errors.Join(outputErr, <-stdinDone)
+			}
+		}
 		if ctx.Err() != nil {
+			return
+		}
+		if outputErr != nil {
+			_ = sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{Type: runtime.StreamError, Content: outputErr.Error()})
 			return
 		}
 		inspectResp, inspectErr := r.cli.ContainerExecInspect(ctx, execResp.ID)
@@ -296,6 +332,12 @@ func (r *Runtime) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 			_ = sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
 				Type:    runtime.StreamError,
 				Content: inspectErr.Error(),
+			})
+			return
+		}
+		if inspectResp.Running {
+			_ = sendDockerStreamEvent(ctx, ch, runtime.StreamEvent{
+				Type: runtime.StreamError, Content: "Docker exec stream closed before process exit",
 			})
 			return
 		}

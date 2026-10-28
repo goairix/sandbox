@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -64,7 +63,7 @@ func (r *Runtime) RunFileOp(ctx context.Context, id string, argv []string, stdin
 			}()
 		}
 		stderr := &limitedControlBuffer{limit: 4096}
-		_, copyErr := stdcopy.StdCopy(pw, stderr, attached.Reader)
+		copyErr := copyDockerExecFrames(pw, stderr, attached.Reader)
 		if inputDone != nil {
 			copyErr = errors.Join(copyErr, <-inputDone)
 		}
@@ -75,6 +74,8 @@ func (r *Runtime) RunFileOp(ctx context.Context, id string, argv []string, stdin
 				inspected, err := r.cli.ContainerExecInspect(streamCtx, created.ID)
 				if err != nil {
 					copyErr = fmt.Errorf("inspect file helper: %w", err)
+				} else if inspected.Running {
+					copyErr = errors.New("file helper stream closed before process exit")
 				} else if inspected.ExitCode != 0 {
 					copyErr = runtime.FileV2ExitError(inspected.ExitCode)
 				}
