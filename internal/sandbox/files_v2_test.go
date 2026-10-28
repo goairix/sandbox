@@ -76,6 +76,25 @@ func TestFilesV2TextManager(t *testing.T) {
 	require.Len(t, rt.calls, 2)
 }
 
+func TestFileV2GlobManager(t *testing.T) {
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	rt.listing = `{"files":[{"name":"a.go","path":"/workspace/a.go","size":1,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z"},{"name":"b.go","path":"/workspace/b.go","size":2,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z"}],"truncated":false}`
+	mgr, _ := newGatedManager(rt)
+	page, err := mgr.GlobFilesV2(context.Background(), "sandbox-test", runtime.FileV2GlobRequest{Path: "/workspace", Pattern: "**/*.go", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page.Files, 1)
+	require.Equal(t, "/workspace/a.go", page.Files[0].Path)
+	require.True(t, page.Truncated, "client limit must not claim a full search")
+	require.Equal(t, []string{"glob", "/workspace", "**/*.go", "hide-reserved"}, rt.calls[0])
+
+	_, err = mgr.GlobFilesV2(context.Background(), "sandbox-test", runtime.FileV2GlobRequest{Path: "/workspace", Pattern: "../*.go"})
+	require.Error(t, err)
+	require.Len(t, rt.calls, 1, "invalid pattern reached runtime")
+	rt.listing = `{"files":[{"name":"a.go","path":"/tmp/a.go","size":1,"is_dir":false,"mod_time":"2026-01-01T00:00:00Z"}],"truncated":false}`
+	_, err = mgr.GlobFilesV2(context.Background(), "sandbox-test", runtime.FileV2GlobRequest{Path: "/workspace", Pattern: "*.go"})
+	require.Error(t, err, "helper result escaped search root")
+}
+
 func TestFileV2Write(t *testing.T) {
 	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
 	mgr, _ := newGatedManager(rt)

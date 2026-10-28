@@ -50,6 +50,19 @@ type FileListPage struct {
 	NextCursor string     `json:"next_cursor"`
 }
 
+type FileV2GlobRequest struct {
+	Path    string `json:"path"`
+	Pattern string `json:"pattern"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+// Truncated means the result is partial because a scan or caller limit was
+// reached. Clients must not treat it as a complete directory search.
+type FileV2SearchPage struct {
+	Files     []FileInfo `json:"files"`
+	Truncated bool       `json:"truncated"`
+}
+
 type fileOpStream struct {
 	reader   io.ReadCloser
 	cancel   context.CancelFunc

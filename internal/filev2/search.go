@@ -44,11 +44,17 @@ func (h *searchFilesMaxHeap) Pop() any {
 	return v
 }
 
-func validateGlobPattern(pattern string) error {
-	if pattern == "" || len(pattern) > 4096 || strings.HasPrefix(pattern, "/") || strings.IndexByte(pattern, 0) >= 0 {
+// ValidateGlobPattern rejects traversal and malformed classes before an
+// operation reaches the sandbox runtime.
+func ValidateGlobPattern(pattern string) error {
+	if pattern == "" || len(pattern) > 1024 || strings.HasPrefix(pattern, "/") || strings.IndexByte(pattern, 0) >= 0 {
 		return ErrTextInvalid
 	}
-	for _, part := range strings.Split(pattern, "/") {
+	parts := strings.Split(pattern, "/")
+	if len(parts) > maxSearchDepth {
+		return ErrTextInvalid
+	}
+	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
 			return ErrTextInvalid
 		}
@@ -189,7 +195,7 @@ func (s *globScanner) walk(dir *os.File, absolute, relative string, depth int) e
 }
 
 func runGlob(ctx context.Context, rootFD int, relative, absolute, pattern string, hideReserved bool, output io.Writer) error {
-	if err := validateGlobPattern(pattern); err != nil {
+	if err := ValidateGlobPattern(pattern); err != nil {
 		return err
 	}
 	fd, err := openBeneath(rootFD, relative, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK, 0)

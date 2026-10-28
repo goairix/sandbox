@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/goairix/sandbox/internal/filev2"
 	"github.com/goairix/sandbox/internal/fuseprotocol"
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -183,6 +184,73 @@ func (m *Manager) ListFilesV2(ctx context.Context, id, dirPath, cursor string, l
 		return runtime.FileListPage{}, errors.New("file helper returned invalid cursor")
 	}
 	page.Files = hideReservedFUSEFileInfos(sb, page.Files)
+	return page, nil
+}
+
+// GlobFilesV2 searches paths in one sandbox operation. The helper's bounded
+// result is revalidated before it becomes public metadata.
+func (m *Manager) GlobFilesV2(ctx context.Context, id string, request runtime.FileV2GlobRequest) (runtime.FileV2SearchPage, error) {
+	if request.Path == "" {
+		request.Path = "/workspace"
+	}
+	canonical, err := normalizeFileV2Path(request.Path)
+	if err != nil {
+		return runtime.FileV2SearchPage{}, err
+	}
+	if err := filev2.ValidateGlobPattern(request.Pattern); err != nil {
+		return runtime.FileV2SearchPage{}, runtime.ErrFileInvalidText
+	}
+	if request.Limit == 0 {
+		request.Limit = 1000
+	}
+	if request.Limit < 1 || request.Limit > 1000 {
+		return runtime.FileV2SearchPage{}, runtime.ErrFileLimitExceeded
+	}
+	sb, operationCtx, release, transport, err := m.fileV2Operation(ctx, id)
+	if err != nil {
+		return runtime.FileV2SearchPage{}, err
+	}
+	defer release()
+	if err := validatePublicFUSEFilePath(sb, canonical); err != nil {
+		return runtime.FileV2SearchPage{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(operationCtx, 6*time.Second)
+	defer cancel()
+	argv := []string{"glob", canonical, request.Pattern}
+	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE {
+		argv = append(argv, "hide-reserved")
+	}
+	rc, err := transport.RunFileOp(searchCtx, m.sandboxRuntimeID(sb), argv, nil)
+	if err != nil {
+		return runtime.FileV2SearchPage{}, err
+	}
+	var wire struct {
+		Files     []fileV2WireInfo `json:"files"`
+		Truncated bool             `json:"truncated"`
+	}
+	if err := readFileV2Metadata(rc, &wire); err != nil {
+		return runtime.FileV2SearchPage{}, err
+	}
+	if len(wire.Files) > 1000 {
+		return runtime.FileV2SearchPage{}, errors.New("file helper returned oversized search")
+	}
+	page := runtime.FileV2SearchPage{Files: make([]runtime.FileInfo, 0, min(len(wire.Files), request.Limit)), Truncated: wire.Truncated}
+	last := ""
+	for _, info := range wire.Files {
+		if !strings.HasPrefix(info.Path, canonical+"/") || path.Clean(info.Path) != info.Path ||
+			info.Name != path.Base(info.Path) || info.Path <= last || info.Size < 0 || info.IsDir {
+			return runtime.FileV2SearchPage{}, errors.New("file helper returned invalid search result")
+		}
+		if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountFUSE && fuseprotocol.IsReservedProbeObjectName(info.Name) {
+			return runtime.FileV2SearchPage{}, errors.New("file helper returned reserved search result")
+		}
+		if len(page.Files) < request.Limit {
+			page.Files = append(page.Files, info.runtimeInfo())
+		} else {
+			page.Truncated = true
+		}
+		last = info.Path
+	}
 	return page, nil
 }
 
