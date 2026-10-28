@@ -115,6 +115,38 @@ func TestRunWriteCreateParents(t *testing.T) {
 	}
 }
 
+func TestRunTextOperations(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "text.txt")
+	if err := os.WriteFile(filePath, []byte("α one\r\nβ two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"read-lines", filePath, "2", "0"}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	var readResult struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &readResult); err != nil || readResult.Content != "β two\n" {
+		t.Fatalf("read-lines = %+v, %v", readResult, err)
+	}
+	output.Reset()
+	if err := Run(context.Background(), []string{"edit", filePath}, strings.NewReader(`{"old_string":"one","new_string":"ONE","replace_all":false}`), &output); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filePath)
+	if err != nil || string(content) != "α ONE\r\nβ two\n" {
+		t.Fatalf("edited file = %q, %v", content, err)
+	}
+	output.Reset()
+	if err := Run(context.Background(), []string{"edit", filePath}, strings.NewReader(`{"old_string":"not found","new_string":"x"}`), &output); err == nil {
+		t.Fatal("accepted missing edit match")
+	}
+	if content, err = os.ReadFile(filePath); err != nil || string(content) != "α ONE\r\nβ two\n" {
+		t.Fatalf("failed edit changed file = %q, %v", content, err)
+	}
+}
+
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return 1, nil }

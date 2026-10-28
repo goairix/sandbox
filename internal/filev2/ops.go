@@ -1,6 +1,7 @@
 package filev2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,13 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 	}
 	if op == "write" && stdin == nil {
 		return errors.New("missing write body")
+	}
+	var editRequest fileEditRequest
+	if op == "edit" {
+		editRequest, err = decodeEditRequest(stdin)
+		if err != nil {
+			return err
+		}
 	}
 	if op == "stat" || op == "list" {
 		if err := readMetadataControl(stdin); err != nil {
@@ -158,6 +166,72 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 			return err
 		}
 		return file.Sync()
+	case "read-lines":
+		start, startErr := strconv.Atoi(argv[2])
+		count, countErr := strconv.Atoi(argv[3])
+		if startErr != nil || countErr != nil || start < 1 || count < 0 {
+			return ErrTextInvalid
+		}
+		fd, err := openBeneath(rootFD, relative, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		file := os.NewFile(uintptr(fd), absolute)
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return ErrTypeMismatch
+		}
+		content, err := readLines(ctx, file, start, count)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(struct {
+			Content string `json:"content"`
+		}{content})
+	case "edit":
+		fd, err := openBeneath(rootFD, relative, unix.O_RDWR|unix.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		file := os.NewFile(uintptr(fd), absolute)
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return ErrTypeMismatch
+		}
+		original, err := io.ReadAll(io.LimitReader(file, maxEditFileBytes+1))
+		if err != nil {
+			return err
+		}
+		edited, replacements, err := editText(original, editRequest.OldString, editRequest.NewString, editRequest.ReplaceAll)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := file.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := copyWithContext(ctx, file, bytes.NewReader(edited)); err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(struct {
+			Replacements int `json:"replacements"`
+		}{replacements})
 	default:
 		return errors.New("unknown file operation")
 	}
@@ -175,10 +249,13 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 	if operation == "read" && len(argv) == 4 {
 		want = 4
 	}
+	if operation == "read-lines" {
+		want = 4
+	}
 	if operation == "list" && (len(argv) == 4 || len(argv) == 5) {
 		want = len(argv)
 	}
-	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write") {
+	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write" && operation != "read-lines" && operation != "edit") {
 		err = errors.New("invalid file operation arguments")
 		return
 	}

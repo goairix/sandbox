@@ -18,6 +18,9 @@ func TestFileV2ExitStatus(t *testing.T) {
 		{err: unix.EACCES, code: 3},
 		{err: ErrTypeMismatch, code: 4},
 		{err: io.ErrUnexpectedEOF, code: 5},
+		{err: ErrTextInvalid, code: 6},
+		{err: ErrEditConflict, code: 7},
+		{err: ErrTextLimit, code: 8},
 		{err: errors.New("unknown"), code: 1},
 	} {
 		if got := ExitStatus(tc.err); got != tc.code {

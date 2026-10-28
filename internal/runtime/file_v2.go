@@ -12,6 +12,9 @@ import (
 
 var ErrFilePathForbidden = errors.New("file path is forbidden")
 var ErrFileTypeMismatch = errors.New("file type mismatch")
+var ErrFileInvalidText = errors.New("invalid file text")
+var ErrFileConflict = errors.New("file edit conflict")
+var ErrFileLimitExceeded = errors.New("file limit exceeded")
 
 // FileV2ExitError maps the helper's numeric status without parsing its stderr.
 func FileV2ExitError(code int) error {
@@ -24,6 +27,12 @@ func FileV2ExitError(code int) error {
 		return fmt.Errorf("%w: helper exit %d", ErrFileTypeMismatch, code)
 	case filev2.ExitInvalidSize:
 		return fmt.Errorf("%w: helper exit %d", ErrInvalidUploadSize, code)
+	case filev2.ExitInvalidText:
+		return fmt.Errorf("%w: helper exit %d", ErrFileInvalidText, code)
+	case filev2.ExitEditConflict:
+		return fmt.Errorf("%w: helper exit %d", ErrFileConflict, code)
+	case filev2.ExitTextLimit:
+		return fmt.Errorf("%w: helper exit %d", ErrFileLimitExceeded, code)
 	default:
 		return fmt.Errorf("file helper exited with code %d", code)
 	}

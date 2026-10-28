@@ -16,6 +16,9 @@ const (
 	ExitForbidden    = 3
 	ExitTypeMismatch = 4
 	ExitInvalidSize  = 5
+	ExitInvalidText  = 6
+	ExitEditConflict = 7
+	ExitTextLimit    = 8
 )
 
 // ExitStatus is the helper's bounded error protocol. Transports inspect only
@@ -31,6 +34,12 @@ func ExitStatus(err error) int {
 		return ExitTypeMismatch
 	case errors.Is(err, ErrInvalidWriteSize), errors.Is(err, io.ErrUnexpectedEOF):
 		return ExitInvalidSize
+	case errors.Is(err, ErrTextInvalid):
+		return ExitInvalidText
+	case errors.Is(err, ErrEditConflict):
+		return ExitEditConflict
+	case errors.Is(err, ErrTextLimit):
+		return ExitTextLimit
 	default:
 		return ExitUnknown
 	}
