@@ -76,6 +76,15 @@ func (r *fileV2HTTPRuntime) RunFileOp(_ context.Context, _ string, args []string
 		r.content = []byte(strings.ReplaceAll(string(r.content), request.OldString, request.NewString))
 		body, err := json.Marshal(map[string]any{"replacements": matches})
 		return io.NopCloser(bytes.NewReader(body)), err
+	case "glob":
+		body, err := json.Marshal(map[string]any{
+			"files": []map[string]any{
+				{"name": "a.go", "path": "/workspace/a.go", "size": 1, "is_dir": false, "mod_time": time.Unix(0, 0).UTC()},
+				{"name": "b.go", "path": "/workspace/b.go", "size": 2, "is_dir": false, "mod_time": time.Unix(0, 0).UTC()},
+			},
+			"truncated": false,
+		})
+		return io.NopCloser(bytes.NewReader(body)), err
 	}
 	return nil, nil
 }
@@ -140,6 +149,7 @@ func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {
 	router.PUT("/sandboxes/:id/files/content", h.WriteFileContentV2)
 	router.POST("/sandboxes/:id/files/text/read-lines", h.ReadFileLinesV2)
 	router.POST("/sandboxes/:id/files/text/edit", h.EditFileTextV2)
+	router.POST("/sandboxes/:id/files/glob", h.GlobFilesV2)
 	return router, rt, sb.ID
 }
 
