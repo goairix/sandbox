@@ -48,6 +48,10 @@ func (f *diffFiles) Edit(_ context.Context, _ string, oldText, newText string, r
 }
 
 func editToolFromMiddleware(t *testing.T, middleware adk.ChatModelAgentMiddleware) tool.InvokableTool {
+	return namedToolFromMiddleware(t, middleware, "edit_file")
+}
+
+func namedToolFromMiddleware(t *testing.T, middleware adk.ChatModelAgentMiddleware, name string) tool.InvokableTool {
 	t.Helper()
 	ctx := context.Background()
 	_, run, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
@@ -62,16 +66,89 @@ func editToolFromMiddleware(t *testing.T, middleware adk.ChatModelAgentMiddlewar
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Name == "edit_file" {
+		if info.Name == name {
 			invokable, ok := candidate.(tool.InvokableTool)
 			if !ok {
-				t.Fatal("edit_file is not invokable")
+				t.Fatalf("%s is not invokable", name)
 			}
 			return invokable
 		}
 	}
-	t.Fatal("edit_file tool missing")
+	t.Fatalf("%s tool missing", name)
 	return nil
+}
+
+func TestEinoLsAndGrepShowNativeStyleResults(t *testing.T) {
+	for _, makeMiddleware := range []struct {
+		name string
+		new  func(context.Context, *diffFiles) (adk.ChatModelAgentMiddleware, error)
+	}{
+		{"standard", func(ctx context.Context, files *diffFiles) (adk.ChatModelAgentMiddleware, error) {
+			return NewMiddleware(ctx, files)
+		}},
+		{"diff", func(ctx context.Context, files *diffFiles) (adk.ChatModelAgentMiddleware, error) {
+			return NewDiffMiddleware(ctx, files)
+		}},
+	} {
+		t.Run(makeMiddleware.name, func(t *testing.T) {
+			files := &diffFiles{recordingFiles: &recordingFiles{}}
+			middleware, err := makeMiddleware.new(context.Background(), files)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ls, err := namedToolFromMiddleware(t, middleware, "ls").InvokableRun(context.Background(), `{"path":"/"}`)
+			if err != nil || !strings.Contains(ls, "3 2026-01-01") || !strings.Contains(ls, "/a.txt") || !strings.Contains(ls, "/dir/") {
+				t.Fatalf("ls=%q err=%v", ls, err)
+			}
+
+			grep, err := namedToolFromMiddleware(t, middleware, "grep").InvokableRun(context.Background(), `{"path":"/","pattern":"match"}`)
+			if err != nil || grep != "/a.txt:2:match" {
+				t.Fatalf("grep=%q err=%v", grep, err)
+			}
+		})
+	}
+}
+
+func TestEinoGrepModesAndContext(t *testing.T) {
+	files := &diffFiles{recordingFiles: &recordingFiles{grepMatches: []sandbox.FileV2Match{
+		{Path: "/workspace/z.go", LineNumber: 5, Content: "match\n", Before: []string{"before\n"}, After: []string{"after\n"}},
+		{Path: "/workspace/a.go", LineNumber: 2, Content: "match\n"},
+	}}}
+	middleware, err := NewMiddleware(context.Background(), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grep := namedToolFromMiddleware(t, middleware, "grep")
+	ctx := context.Background()
+
+	content, err := grep.InvokableRun(ctx, `{"path":"/","pattern":"match","output_mode":"content","-C":1}`)
+	if err != nil || content != "/a.go:2:match\n/z.go-4-before\n/z.go:5:match\n/z.go-6-after" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+	if files.grepRequest.BeforeContext != 1 || files.grepRequest.AfterContext != 1 {
+		t.Fatalf("context was not forwarded: %+v", files.grepRequest)
+	}
+
+	paths, err := grep.InvokableRun(ctx, `{"pattern":"match","output_mode":"files_with_matches"}`)
+	if err != nil || paths != "/a.go\n/z.go" {
+		t.Fatalf("paths=%q err=%v", paths, err)
+	}
+	counts, err := grep.InvokableRun(ctx, `{"pattern":"match","output_mode":"count"}`)
+	if err != nil || counts != "/a.go:1\n/z.go:1" {
+		t.Fatalf("counts=%q err=%v", counts, err)
+	}
+	page, err := grep.InvokableRun(ctx, `{"pattern":"match","offset":1,"head_limit":1,"-n":false}`)
+	if err != nil || page != "/z.go:match" {
+		t.Fatalf("page=%q err=%v", page, err)
+	}
+	if _, err := grep.InvokableRun(ctx, `{"pattern":"match","head_limit":-1}`); err == nil {
+		t.Fatal("negative head_limit accepted")
+	}
+	files.truncated = true
+	if _, err := grep.InvokableRun(ctx, `{"pattern":"match"}`); !errors.Is(err, ErrIncompleteSearch) {
+		t.Fatalf("truncated grep error=%v", err)
+	}
 }
 
 func TestEinoMiddlewareEditDiff(t *testing.T) {
@@ -107,6 +184,21 @@ func TestEinoMiddlewareUsesSDKFilesV2(t *testing.T) {
 		case "/api/v1/sandboxes":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"id":"sandbox-test","reused":false}`)
+		case "/api/v2/sandboxes/sandbox-test/files/list":
+			if r.Method != http.MethodGet || r.URL.Query().Get("path") != "/workspace" {
+				t.Errorf("unexpected list %s %s", r.Method, r.URL)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, `{"files":[{"path":"/workspace/a.txt","size":11,"mod_time":"2026-10-29T12:00:00Z"}]}`)
+		case "/api/v2/sandboxes/sandbox-test/files/grep":
+			var input sandbox.FileV2GrepRequest
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Path != "/workspace" || input.Pattern != "etcd" {
+				t.Errorf("unexpected grep %+v: %v", input, err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, `{"matches":[{"path":"/workspace/a.txt","line_number":2,"content":"etcd\n"}]}`)
 		case "/api/v2/sandboxes/sandbox-test/files/content":
 			if r.Method != http.MethodGet || r.URL.Query().Get("path") != "/workspace/a.txt" {
 				t.Errorf("unexpected read %s %s", r.Method, r.URL)
@@ -154,6 +246,14 @@ func TestEinoMiddlewareUsesSDKFilesV2(t *testing.T) {
 	result, err := editToolFromMiddleware(t, middleware).InvokableRun(ctx, `{"file_path":"/a.txt","old_string":"world","new_string":"etcd"}`)
 	if err != nil || !strings.Contains(result, "+etcd") || reads != 2 || edits != 1 {
 		t.Fatalf("result=%q err=%v reads=%d edits=%d", result, err, reads, edits)
+	}
+	ls, err := namedToolFromMiddleware(t, middleware, "ls").InvokableRun(ctx, `{"path":"/"}`)
+	if err != nil || ls != "- 11 2026-10-29T12:00:00Z /a.txt" {
+		t.Fatalf("SDK ls=%q err=%v", ls, err)
+	}
+	grep, err := namedToolFromMiddleware(t, middleware, "grep").InvokableRun(ctx, `{"pattern":"etcd"}`)
+	if err != nil || grep != "/a.txt:2:etcd" {
+		t.Fatalf("SDK grep=%q err=%v", grep, err)
 	}
 }
 

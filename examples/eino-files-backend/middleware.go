@@ -27,13 +27,18 @@ type DiffFileClient interface {
 	Read(context.Context, string) (io.ReadCloser, error)
 }
 
-// NewMiddleware exposes the six standard Eino filesystem tools through the
-// generic Files v2 SDK. It does not require a ChatModel or change service code.
+// NewMiddleware exposes Eino's six filesystem tools through Files v2. The ls
+// and grep tools include native-style metadata and matching lines by default.
 func NewMiddleware(ctx context.Context, files FileClient) (adk.ChatModelAgentMiddleware, error) {
 	if files == nil {
 		return nil, errors.New("missing sandbox files client")
 	}
-	return einoFS.New(ctx, &einoFS.MiddlewareConfig{Backend: NewBackend(files)})
+	backend := NewBackend(files)
+	ls, grep, err := nativeToolConfigs(backend)
+	if err != nil {
+		return nil, err
+	}
+	return einoFS.New(ctx, &einoFS.MiddlewareConfig{Backend: backend, LsToolConfig: ls, GrepToolConfig: grep})
 }
 
 // NewDiffMiddleware replaces only Eino's edit_file tool. Eino's default tool
@@ -44,6 +49,10 @@ func NewDiffMiddleware(ctx context.Context, files DiffFileClient) (adk.ChatModel
 		return nil, errors.New("missing sandbox files client")
 	}
 	backend := NewBackend(files)
+	ls, grep, err := nativeToolConfigs(backend)
+	if err != nil {
+		return nil, err
+	}
 	edit, err := utils.InferTool(einoFS.ToolNameEditFile,
 		"Replace exact text in a file and show a unified diff of the observed change.",
 		func(ctx context.Context, input diffEditRequest) (string, error) {
@@ -54,6 +63,8 @@ func NewDiffMiddleware(ctx context.Context, files DiffFileClient) (adk.ChatModel
 	}
 	return einoFS.New(ctx, &einoFS.MiddlewareConfig{
 		Backend:            backend,
+		LsToolConfig:       ls,
+		GrepToolConfig:     grep,
 		EditFileToolConfig: &einoFS.ToolConfig{CustomTool: edit},
 	})
 }

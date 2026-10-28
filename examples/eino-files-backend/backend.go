@@ -136,12 +136,26 @@ func (b *Backend) Read(ctx context.Context, req *filesystem.ReadRequest) (*files
 }
 
 func (b *Backend) GrepRaw(ctx context.Context, req *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
+	page, err := b.grepDetailed(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]filesystem.GrepMatch, 0, len(page.Matches))
+	for _, match := range page.Matches {
+		result = append(result, filesystem.GrepMatch{Path: match.Path, Line: match.LineNumber, Content: match.Content})
+	}
+	return result, nil
+}
+
+// grepDetailed retains Files v2 context lines for the richer Eino grep tool.
+// The standard Backend interface has no fields for that context.
+func (b *Backend) grepDetailed(ctx context.Context, req *filesystem.GrepRequest) (sandbox.FileV2GrepResult, error) {
 	if req == nil {
-		return nil, errors.New("missing grep request")
+		return sandbox.FileV2GrepResult{}, errors.New("missing grep request")
 	}
 	root, err := sandboxPath(req.Path)
 	if err != nil {
-		return nil, err
+		return sandbox.FileV2GrepResult{}, err
 	}
 	fileTypes := []string(nil)
 	if req.FileType != "" {
@@ -157,20 +171,22 @@ func (b *Backend) GrepRaw(ctx context.Context, req *filesystem.GrepRequest) ([]f
 		BeforeContext: req.BeforeLines, AfterContext: req.AfterLines,
 	})
 	if err != nil {
-		return nil, err
+		return sandbox.FileV2GrepResult{}, err
 	}
 	if page.Truncated {
-		return nil, ErrIncompleteSearch
+		return sandbox.FileV2GrepResult{}, ErrIncompleteSearch
 	}
-	result := make([]filesystem.GrepMatch, 0, len(page.Matches))
-	for _, match := range page.Matches {
-		virtual, err := virtualPath(match.Path)
+	// Do not mutate a client-owned result: test doubles and SDK wrappers may
+	// reuse the same slice across calls.
+	page.Matches = append([]sandbox.FileV2Match(nil), page.Matches...)
+	for i := range page.Matches {
+		virtual, err := virtualPath(page.Matches[i].Path)
 		if err != nil {
-			return nil, err
+			return sandbox.FileV2GrepResult{}, err
 		}
-		result = append(result, filesystem.GrepMatch{Path: virtual, Line: match.LineNumber, Content: match.Content})
+		page.Matches[i].Path = virtual
 	}
-	return result, nil
+	return page, nil
 }
 
 func (b *Backend) GlobInfo(ctx context.Context, req *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {

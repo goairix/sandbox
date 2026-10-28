@@ -19,6 +19,7 @@ type recordingFiles struct {
 	written     string
 	createDirs  bool
 	grepRequest sandbox.FileV2GrepRequest
+	grepMatches []sandbox.FileV2Match
 	globRequest sandbox.FileV2GlobRequest
 	truncated   bool
 }
@@ -45,7 +46,20 @@ func (f *recordingFiles) Glob(_ context.Context, req sandbox.FileV2GlobRequest) 
 
 func (f *recordingFiles) Grep(_ context.Context, req sandbox.FileV2GrepRequest) (sandbox.FileV2GrepResult, error) {
 	f.grepRequest = req
-	return sandbox.FileV2GrepResult{Matches: []sandbox.FileV2Match{{Path: "/workspace/a.txt", LineNumber: 2, Content: "match\n"}}, Truncated: f.truncated}, nil
+	matches := f.grepMatches
+	if matches == nil {
+		matches = []sandbox.FileV2Match{{Path: "/workspace/a.txt", LineNumber: 2, Content: "match\n"}}
+	}
+	matches = append([]sandbox.FileV2Match(nil), matches...)
+	for i := range matches {
+		if req.BeforeContext == 0 {
+			matches[i].Before = nil
+		}
+		if req.AfterContext == 0 {
+			matches[i].After = nil
+		}
+	}
+	return sandbox.FileV2GrepResult{Matches: matches, Truncated: f.truncated}, nil
 }
 
 func (f *recordingFiles) Read(context.Context, string) (io.ReadCloser, error) {

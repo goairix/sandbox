@@ -59,7 +59,7 @@ func TestLiveEinoFilesystem(t *testing.T) {
 		{"read_file", `{"file_path":"/eino-demo.txt"}`, "etcd"},
 		{"ls", `{"path":"/"}`, "/eino-demo.txt"},
 		{"glob", `{"path":"/","pattern":"*.txt"}`, "/eino-demo.txt"},
-		{"grep", `{"path":"/","pattern":"etcd"}`, "/eino-demo.txt"},
+		{"grep", `{"path":"/","pattern":"etcd"}`, "/eino-demo.txt:2:etcd"},
 	} {
 		result, err := tools[step.name].InvokableRun(ctx, step.input)
 		if err != nil {
@@ -71,6 +71,9 @@ func TestLiveEinoFilesystem(t *testing.T) {
 		}
 		if step.name == "edit_file" && (!strings.Contains(result, "-world") || !strings.Contains(result, "+etcd")) {
 			t.Fatalf("edit_file did not return the expected unified diff: %q", result)
+		}
+		if step.name == "ls" && !strings.Contains(result, "- 11 ") {
+			t.Fatalf("ls did not report the observed 11-byte file size: %q", result)
 		}
 	}
 }
