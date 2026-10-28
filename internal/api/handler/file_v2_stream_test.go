@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +143,55 @@ func TestFilesV2ContentCancelClosesStream(t *testing.T) {
 	default:
 		t.Fatal("cancelled HTTP read did not close stream")
 	}
+}
+
+func TestFilesV2ContentReachesClientBeforeHelperFinishes(t *testing.T) {
+	router, rt, id := fileV2HTTPRouter(t)
+	rt.content = []byte("ab")
+	reader, writer := io.Pipe()
+	rt.readStream = reader
+	release := make(chan struct{})
+	go func() {
+		_, _ = io.WriteString(writer, "a")
+		<-release
+		_, _ = io.WriteString(writer, "b")
+		_ = writer.Close()
+	}()
+	server := httptest.NewServer(router)
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/sandboxes/"+id+"/files/content?path=/workspace/a.txt", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "the first file byte should be visible while the helper is still reading")
+	defer resp.Body.Close()
+	var first [1]byte
+	_, err = io.ReadFull(resp.Body, first[:])
+	require.NoError(t, err)
+	require.Equal(t, "a", string(first[:]))
+}
+
+type fileV2FailingCloseReader struct{ io.Reader }
+
+func (fileV2FailingCloseReader) Close() error { return errors.New("helper exited unsuccessfully") }
+
+func TestFilesV2ContentDoesNotCompleteWhenHelperFailsAfterBytes(t *testing.T) {
+	router, rt, id := fileV2HTTPRouter(t)
+	rt.content = []byte("ab")
+	rt.readStream = fileV2FailingCloseReader{Reader: strings.NewReader("ab")}
+	server := httptest.NewServer(router)
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/sandboxes/" + id + "/files/content?path=/workspace/a.txt")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(resp.Body)
+	require.ErrorIs(t, readErr, io.ErrUnexpectedEOF, "a failed helper cannot complete the declared response body")
+	require.Equal(t, "a", string(data))
 }
 
 func fileV2HTTPRouter(t *testing.T) (*gin.Engine, *fileV2HTTPRuntime, string) {

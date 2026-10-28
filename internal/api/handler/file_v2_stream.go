@@ -81,6 +81,38 @@ func parseFileV2Range(header string, size int64) (start, length int64, partial b
 	return start, end - start + 1, true, nil
 }
 
+type fileV2FlushWriter struct {
+	writer io.Writer
+	flush  func() error
+}
+
+// A successful helper exit is required before sending the final byte. If the
+// helper fails after producing the advertised content, leaving one byte out
+// makes the HTTP Content-Length mismatch visible to the client.
+func verifyFileV2StreamEnd(stream io.ReadCloser) error {
+	var extra [1]byte
+	n, readErr := stream.Read(extra[:])
+	closeErr := stream.Close()
+	if n != 0 {
+		return errors.Join(errors.New("file helper produced extra bytes"), closeErr)
+	}
+	if !errors.Is(readErr, io.EOF) {
+		if readErr == nil {
+			readErr = io.ErrNoProgress
+		}
+		return errors.Join(readErr, closeErr)
+	}
+	return closeErr
+}
+
+func (w fileV2FlushWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 && err == nil {
+		err = w.flush()
+	}
+	return n, err
+}
+
 // ReadFileContentV2 streams raw bytes. A one-byte preflight catches helper
 // failures before HTTP headers are sent; later transport errors truncate the
 // declared Content-Length so the client cannot mistake a partial body for OK.
@@ -122,6 +154,22 @@ func (h *Handler) ReadFileContentV2(c *gin.Context) {
 		fileV2Error(c, io.ErrUnexpectedEOF)
 		return
 	}
+	if length == 0 {
+		if n != 0 {
+			_ = stream.Close()
+			fileV2Error(c, errors.New("file helper produced extra bytes"))
+			return
+		}
+		if err := stream.Close(); err != nil {
+			fileV2Error(c, err)
+			return
+		}
+	} else if length == 1 {
+		if err := verifyFileV2StreamEnd(stream); err != nil {
+			fileV2Error(c, err)
+			return
+		}
+	}
 	c.Header("Accept-Ranges", "bytes")
 	c.Header("Content-Type", "application/octet-stream")
 	c.Header("Content-Length", strconv.FormatInt(length, 10))
@@ -131,17 +179,29 @@ func (h *Handler) ReadFileContentV2(c *gin.Context) {
 	} else {
 		c.Status(http.StatusOK)
 	}
+	output := fileV2FlushWriter{writer: c.Writer, flush: http.NewResponseController(c.Writer).Flush}
 	if n > 0 {
-		if _, err := c.Writer.Write(first[:n]); err != nil {
+		if _, err := output.Write(first[:n]); err != nil {
 			_ = stream.Close()
 			return
 		}
 	}
-	if _, err := io.CopyN(c.Writer, stream, length-int64(n)); err != nil {
+	if length <= 1 {
+		return
+	}
+	if _, err := io.CopyN(output, stream, length-int64(n)-1); err != nil {
 		_ = stream.Close()
 		return
 	}
-	_ = stream.Close()
+	var last [1]byte
+	if _, err := io.ReadFull(stream, last[:]); err != nil {
+		_ = stream.Close()
+		return
+	}
+	if err := verifyFileV2StreamEnd(stream); err != nil {
+		return
+	}
+	_, _ = output.Write(last[:])
 }
 
 func (h *Handler) WriteFileContentV2(c *gin.Context) {
