@@ -100,18 +100,22 @@ func matchGlob(pattern, relative string) bool {
 }
 
 type pinnedSearchWalker struct {
-	ctx          context.Context
-	deadline     time.Time
-	hideReserved bool
-	seen         int
-	bytes        int
-	truncated    bool
-	visit        func(*os.File, string, string, os.FileInfo) error
+	ctx           context.Context
+	deadline      time.Time
+	hideReserved  bool
+	seen          int
+	bytes         int
+	truncated     bool
+	stopRequested bool
+	visit         func(*os.File, string, string, os.FileInfo) error
 }
 
 func (s *pinnedSearchWalker) stop() (bool, error) {
 	if err := s.ctx.Err(); err != nil {
 		return true, err
+	}
+	if s.stopRequested {
+		return true, nil
 	}
 	if time.Now().After(s.deadline) {
 		s.truncated = true

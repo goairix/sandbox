@@ -39,8 +39,15 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 		return errors.New("missing write body")
 	}
 	var editRequest fileEditRequest
+	var grepControl grepRequest
 	if op == "edit" {
 		editRequest, err = decodeEditRequest(stdin)
+		if err != nil {
+			return err
+		}
+	}
+	if op == "grep" {
+		grepControl, err = decodeGrepRequest(stdin)
 		if err != nil {
 			return err
 		}
@@ -238,6 +245,12 @@ func Run(ctx context.Context, argv []string, stdin io.Reader, stdout io.Writer) 
 			return errors.New("invalid glob filter")
 		}
 		return runGlob(ctx, rootFD, relative, absolute, argv[2], hideReserved, stdout)
+	case "grep":
+		hideReserved := len(argv) == 3
+		if hideReserved && argv[2] != "hide-reserved" {
+			return ErrTextInvalid
+		}
+		return runGrepWithBinary(ctx, rootFD, relative, absolute, grepControl, hideReserved, "/usr/local/bin/rg", stdout)
 	default:
 		return errors.New("unknown file operation")
 	}
@@ -264,10 +277,13 @@ func parseRequest(argv []string) (operation, root, relative, absolute string, er
 			want = 4
 		}
 	}
+	if operation == "grep" && len(argv) == 3 {
+		want = 3
+	}
 	if operation == "list" && (len(argv) == 4 || len(argv) == 5) {
 		want = len(argv)
 	}
-	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write" && operation != "read-lines" && operation != "edit" && operation != "glob") {
+	if len(argv) != want || (operation != "stat" && operation != "list" && operation != "read" && operation != "write" && operation != "read-lines" && operation != "edit" && operation != "glob" && operation != "grep") {
 		err = errors.New("invalid file operation arguments")
 		return
 	}
