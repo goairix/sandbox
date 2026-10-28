@@ -36,6 +36,8 @@ func TestFilesV2SDK(t *testing.T) {
 			_, _ = io.WriteString(w, `{"files":[],"next_cursor":""}`)
 		case "/api/v2/sandboxes/sandbox-a/files/glob":
 			_, _ = io.WriteString(w, `{"files":[],"truncated":true}`)
+		case "/api/v2/sandboxes/sandbox-a/files/grep":
+			_, _ = io.WriteString(w, `{"matches":[{"path":"/workspace/a.txt","line_number":1,"content":"abc\n"}],"truncated":false}`)
 		case "/api/v2/sandboxes/sandbox-a/files/content":
 			if r.Method == http.MethodPut {
 				if r.ContentLength != 3 || r.URL.Query().Get("create_parents") != "true" {
@@ -71,6 +73,10 @@ func TestFilesV2SDK(t *testing.T) {
 	page, err := files.Glob(context.Background(), sandbox.FileV2GlobRequest{Pattern: "**/*.go"})
 	if err != nil || !page.Truncated {
 		t.Fatalf("glob = %+v, %v", page, err)
+	}
+	grep, err := files.Grep(context.Background(), sandbox.FileV2GrepRequest{Pattern: "abc"})
+	if err != nil || len(grep.Matches) != 1 || grep.Matches[0].LineNumber != 1 {
+		t.Fatalf("grep = %+v, %v", grep, err)
 	}
 	if err := files.Write(context.Background(), "/workspace/a.txt", strings.NewReader("abc"), 3, true); err != nil {
 		t.Fatal(err)

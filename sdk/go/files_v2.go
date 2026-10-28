@@ -33,6 +33,31 @@ type FileV2SearchPage struct {
 	Truncated bool       `json:"truncated"`
 }
 
+type FileV2GrepRequest struct {
+	Path          string   `json:"path,omitempty"`
+	Pattern       string   `json:"pattern"`
+	Glob          string   `json:"glob,omitempty"`
+	FileTypes     []string `json:"file_types,omitempty"`
+	IgnoreCase    bool     `json:"ignore_case,omitempty"`
+	Multiline     bool     `json:"multiline,omitempty"`
+	BeforeContext int      `json:"before_context,omitempty"`
+	AfterContext  int      `json:"after_context,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+}
+
+type FileV2Match struct {
+	Path       string   `json:"path"`
+	LineNumber int      `json:"line_number"`
+	Content    string   `json:"content"`
+	Before     []string `json:"before,omitempty"`
+	After      []string `json:"after,omitempty"`
+}
+
+type FileV2GrepResult struct {
+	Matches   []FileV2Match `json:"matches"`
+	Truncated bool          `json:"truncated"`
+}
+
 func (f *Files) base() string {
 	return "/api/v2/sandboxes/" + url.PathEscape(f.id) + "/files"
 }
@@ -61,6 +86,12 @@ func (f *Files) Glob(ctx context.Context, request FileV2GlobRequest) (FileV2Sear
 	var page FileV2SearchPage
 	err := f.client.do(ctx, http.MethodPost, f.base()+"/glob", request, &page)
 	return page, err
+}
+
+func (f *Files) Grep(ctx context.Context, request FileV2GrepRequest) (FileV2GrepResult, error) {
+	var result FileV2GrepResult
+	err := f.client.do(ctx, http.MethodPost, f.base()+"/grep", request, &result)
+	return result, err
 }
 
 // Read returns a raw byte stream. The caller must close it, including when
