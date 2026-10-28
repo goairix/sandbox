@@ -189,6 +189,9 @@ func (h *Handler) ExecuteOneShotStream(c *gin.Context) {
 
 	// Extend write deadline before first wait
 	_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
+	if err := rc.Flush(); err != nil {
+		return
+	}
 
 	for {
 		select {

@@ -3,9 +3,11 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	kubeexec "k8s.io/client-go/util/exec"
 
 	"github.com/goairix/sandbox/internal/runtime"
 )
@@ -192,7 +195,9 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 			for {
 				n, readErr := stdoutPR.Read(buf)
 				if n > 0 {
-					ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}
+					if !sendKubernetesStreamEvent(ctx, ch, runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}) {
+						return
+					}
 				}
 				if readErr != nil {
 					break
@@ -200,11 +205,7 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 			}
 
 			execErr := <-execDone
-			if execErr != nil {
-				ch <- runtime.StreamEvent{Type: runtime.StreamError, Content: execErr.Error()}
-			} else {
-				ch <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
-			}
+			_ = sendKubernetesStreamEvent(ctx, ch, streamExecTerminal(execErr))
 		}()
 	} else {
 		// Non-TTY mode: separate stdout and stderr pipes.
@@ -234,7 +235,9 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 				for {
 					n, readErr := stderrPR.Read(buf)
 					if n > 0 {
-						ch <- runtime.StreamEvent{Type: runtime.StreamStderr, Content: string(buf[:n])}
+						if !sendKubernetesStreamEvent(ctx, ch, runtime.StreamEvent{Type: runtime.StreamStderr, Content: string(buf[:n])}) {
+							return
+						}
 					}
 					if readErr != nil {
 						break
@@ -246,7 +249,9 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 			for {
 				n, readErr := stdoutPR.Read(buf)
 				if n > 0 {
-					ch <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}
+					if !sendKubernetesStreamEvent(ctx, ch, runtime.StreamEvent{Type: runtime.StreamStdout, Content: string(buf[:n])}) {
+						return
+					}
 				}
 				if readErr != nil {
 					break
@@ -256,13 +261,29 @@ func execStreamInPod(ctx context.Context, client kubernetes.Interface, restConfi
 			<-done
 
 			execErr := <-execDone
-			if execErr != nil {
-				ch <- runtime.StreamEvent{Type: runtime.StreamError, Content: execErr.Error()}
-			} else {
-				ch <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
-			}
+			_ = sendKubernetesStreamEvent(ctx, ch, streamExecTerminal(execErr))
 		}()
 	}
 
 	return ch, nil
+}
+
+func streamExecTerminal(err error) runtime.StreamEvent {
+	if err == nil {
+		return runtime.StreamEvent{Type: runtime.StreamDone, Content: "0"}
+	}
+	var exitErr kubeexec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitStatus() >= 0 {
+		return runtime.StreamEvent{Type: runtime.StreamDone, Content: strconv.Itoa(exitErr.ExitStatus())}
+	}
+	return runtime.StreamEvent{Type: runtime.StreamError, Content: err.Error()}
+}
+
+func sendKubernetesStreamEvent(ctx context.Context, ch chan<- runtime.StreamEvent, event runtime.StreamEvent) bool {
+	select {
+	case ch <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

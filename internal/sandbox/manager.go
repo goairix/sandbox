@@ -2632,7 +2632,11 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 		finishEvent := func(event runtime.StreamEvent) bool {
 			switch event.Type {
 			case runtime.StreamDone:
-				finalize(StateIdle, "success", &event)
+				status := "success"
+				if event.Content != "0" {
+					status = "non_zero_exit"
+				}
+				finalize(StateIdle, status, &event)
 				return true
 			case runtime.StreamError:
 				finalize(StateError, "error", &event)
@@ -2664,7 +2668,8 @@ func (m *Manager) ExecStream(ctx context.Context, id string, req runtime.ExecReq
 					if context.Cause(execCtx) != nil {
 						finishCancelled()
 					} else {
-						finalize(StateIdle, "success", nil)
+						terminal := runtime.StreamEvent{Type: runtime.StreamError, Content: "execution stream closed without a terminal event"}
+						finalize(StateError, "error", &terminal)
 					}
 					return
 				}

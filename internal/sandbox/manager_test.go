@@ -2301,6 +2301,50 @@ func TestManagerExecStreamNormalCompletionSetsIdle(t *testing.T) {
 	assert.Equal(t, StateIdle, sb.State)
 }
 
+func TestManagerExecStreamNonzeroExitIsCompleted(t *testing.T) {
+	rt := newMockRuntime()
+	events := make(chan runtime.StreamEvent, 1)
+	events <- runtime.StreamEvent{Type: runtime.StreamDone, Content: "4"}
+	close(events)
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return events, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 30, MaxExecTimeoutSeconds: 600})
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "exit 4"})
+	require.NoError(t, err)
+	var got []runtime.StreamEvent
+	for event := range out {
+		got = append(got, event)
+	}
+	assert.Equal(t, []runtime.StreamEvent{{Type: runtime.StreamDone, Content: "4"}}, got)
+	sb, err := mgr.Get(context.Background(), "sandbox-test")
+	require.NoError(t, err)
+	assert.Equal(t, StateIdle, sb.State)
+}
+
+func TestManagerExecStreamMissingTerminalFailsClosed(t *testing.T) {
+	rt := newMockRuntime()
+	runtimeEvents := make(chan runtime.StreamEvent, 1)
+	runtimeEvents <- runtime.StreamEvent{Type: runtime.StreamStdout, Content: "partial"}
+	close(runtimeEvents)
+	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {
+		return runtimeEvents, nil
+	}
+	mgr := newExecTestManager(rt, ManagerConfig{ExecTimeoutSeconds: 30, MaxExecTimeoutSeconds: 600})
+	out, err := mgr.ExecStream(context.Background(), "sandbox-test", runtime.ExecRequest{Command: "true"})
+	require.NoError(t, err)
+	var got []runtime.StreamEvent
+	for event := range out {
+		got = append(got, event)
+	}
+	require.Len(t, got, 2)
+	assert.Equal(t, runtime.StreamStdout, got[0].Type)
+	assert.Equal(t, runtime.StreamError, got[1].Type)
+	sb, err := mgr.Get(context.Background(), "sandbox-test")
+	require.NoError(t, err)
+	assert.Equal(t, StateError, sb.State)
+}
+
 func TestManagerExecStreamInitializationFailureCancelsContext(t *testing.T) {
 	rt := newMockRuntime()
 	rt.execStreamFunc = func(context.Context, string, runtime.ExecRequest) (<-chan runtime.StreamEvent, error) {

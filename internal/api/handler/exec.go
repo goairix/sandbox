@@ -128,8 +128,9 @@ func (h *Handler) ExecStream(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	start := time.Now()
-	flusher, _ := c.Writer.(http.Flusher)
 	rc := http.NewResponseController(c.Writer)
+	// net/http writes the final chunk after this handler returns.
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 
 	// Heartbeat ticker to prevent timeout during silent periods
 	heartbeatInterval := 10 * time.Second
@@ -139,6 +140,10 @@ func (h *Handler) ExecStream(c *gin.Context) {
 
 	// Extend write deadline before first wait
 	_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
+	// A silent command must still return an open stream immediately.
+	if err := rc.Flush(); err != nil {
+		return
+	}
 
 	for {
 		select {
@@ -151,9 +156,11 @@ func (h *Handler) ExecStream(c *gin.Context) {
 			// Send heartbeat ping event
 			pingData := types.SSEPingData{Timestamp: time.Now().Unix()}
 			jsonData, _ := json.Marshal(pingData)
-			_, _ = fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData)
-			if flusher != nil {
-				flusher.Flush()
+			if _, err := fmt.Fprintf(c.Writer, "event: ping\ndata: %s\n\n", jsonData); err != nil {
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				return
 			}
 		case event, ok := <-ch:
 			if !ok {
@@ -212,9 +219,11 @@ func (h *Handler) ExecStream(c *gin.Context) {
 				jsonData, _ = json.Marshal(errData)
 				eventType = "error"
 			}
-			_, _ = fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData)
-			if flusher != nil {
-				flusher.Flush()
+			if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, jsonData); err != nil {
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				return
 			}
 		}
 	}
