@@ -29,7 +29,7 @@
 ## 未覆盖
 
 - 普通非 FUSE sandbox 镜像尚未完成本次完整构建验收；本次新镜像实测的是 ARM64 FUSE 路径。
-- 完整 Linux race 套件曾因本机 ENOSPC 在构建阶段失败；本次只确认核心七包非 race 测试与 vet、SDK 与独立 Eino 示例的测试/vet。测试后可用磁盘约 2 GiB，未重跑 race。
+- 较早的七包 race 构建因本机 ENOSPC 失败；清理 24 小时前未使用的 Docker build cache 后，在 macOS 主机重新运行 `go test -race -p 2 ./internal/filev2 ./internal/runtime ./internal/runtime/docker ./internal/runtime/kubernetes ./internal/sandbox ./internal/api/handler ./internal/api`，七包全部通过。核心七包非 race 测试与 vet、SDK 与独立 Eino 示例的测试/vet 也通过；这不是 Linux 或整个仓库的 race 验收。
 - 尚未在 DS 部署新 API；CCE 仅隔离验证。未做生产流量切换、容量或长期故障恢复测试，也未直接核验 MinIO 对象 HEAD。
 - v2 missing sandbox 的 stat 返回 503 `FILE_OUTCOME_UNKNOWN`；本次未改变状态管理器的 fail-closed 语义。
 
