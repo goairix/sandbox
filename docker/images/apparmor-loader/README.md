@@ -5,6 +5,10 @@
 ```sh
 cd "$(git rev-parse --show-toplevel)"
 docker login registry.i.huaxisy.com
+# 基础镜像仓库示例；先同步同名 tag 与目标架构，再执行构建。
+SANDBOX_BASE_REGISTRY=registry.i.huaxisy.com/library
+SANDBOX_LOADER_GO_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25-bookworm"
+SANDBOX_LOADER_BASE_IMAGE="$SANDBOX_BASE_REGISTRY/debian:13-slim"
 
 # 首次创建；同名 builder 已存在时跳过 create
 docker buildx create --name sandbox-apparmor-build --driver docker-container
@@ -13,6 +17,8 @@ docker buildx inspect sandbox-apparmor-build --bootstrap
 docker buildx build \
   --builder sandbox-apparmor-build \
   --platform linux/amd64,linux/arm64 \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_LOADER_GO_IMAGE" \
+  --build-arg APPARMOR_BASE_IMAGE="$SANDBOX_LOADER_BASE_IMAGE" \
   --file docker/images/apparmor-loader/Dockerfile \
   --tag registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0 \
   --push .
@@ -20,6 +26,8 @@ docker buildx build \
 docker buildx imagetools inspect \
   registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0
 ```
+
+使用官方基础镜像时将 `SANDBOX_BASE_REGISTRY` 改为 `docker.io/library`；基础镜像与产物的仓库地址分别设置。Docker Hub 受限时，还需按 [生产手册](../../../docs/deployment/helm-production.md#4-从当前代码构建并发布镜像) 指定 `BUILDKIT_SYNTAX` 的 frontend 地址。
 
 首次镜像版本示例为 `v0.1.0`；后续变更使用新 tag，不覆盖已发布版本。builder 必须支持所选目标架构，单 arm64 部署可将 `--platform` 改为 `linux/arm64`。`--push` 直接推送，不需要再执行 `docker push`，也不要把多架构构建改成 `--load`。构建上下文的 `.` 必须是仓库根目录，不能是本 Dockerfile 的目录。
 

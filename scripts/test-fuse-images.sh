@@ -190,7 +190,7 @@ grep -Fq './cmd/workspace-mounter' "$mounter" || fail "mounter builder omits wor
 grep -Fq 'COPY --from=workspace-tools-builder /out/workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image does not install its self-built probe"
 ! grep -Fxq 'COPY workspace-probe /usr/local/bin/workspace-probe' "$fuse" || fail "special image still requires a host-built probe"
 grep -Fq './cmd/workspace-probe' "$fuse" || fail "special image builder omits workspace-probe source"
-grep -Fq 'FROM python:3.13-slim-bookworm' "$fuse" || fail "special image does not use its concrete sandbox base"
+grep -Fq 'ARG SANDBOX_BASE_IMAGE=python:3.13-slim-bookworm' "$fuse" || fail "special image does not use its concrete sandbox base"
 grep -Fq 'COPY docker/images/sandbox/install-runtime.sh' "$fuse" || fail "special image does not share the sandbox runtime installer"
 grep -Fq 'COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json' "$mounter" || fail "mounter image does not use the fixed repository profile bundle"
 grep -Fq 'COPY docker/images/workspace-mounter/profile-bundle.json /tmp/workspace-fuse-profile-bundle.json' "$fuse" || fail "special image does not use the fixed repository profile bundle"
@@ -201,7 +201,7 @@ grep -Fq 'test "$(id -u sandbox)" = 1000' "$fuse" || fail "special image does no
 
 ! grep -Eq '(workspace-mounter|/usr/bin/s3fs|S3FS_PACKAGE)' "$ordinary" || fail "ordinary image contains privileged FUSE payload"
 grep -Fq 'FROM ${WORKSPACE_PROBE_BUILDER} AS workspace-probe-builder' "$ordinary" || fail "ordinary image does not build the probe from source"
-grep -Fq 'FROM python:3.13-slim-bookworm' "$ordinary" || fail "ordinary image does not use its concrete sandbox base"
+grep -Fq 'ARG SANDBOX_BASE_IMAGE=python:3.13-slim-bookworm' "$ordinary" || fail "ordinary image does not use its concrete sandbox base"
 grep -Fq 'COPY docker/images/sandbox/install-runtime.sh' "$ordinary" || fail "ordinary image does not use the shared runtime installer"
 grep -Fq 'groupadd -g 1000 sandbox' "$runtime_installer" || fail "shared runtime installer does not pin the sandbox GID"
 grep -Fq 'useradd -g sandbox -u 1000' "$runtime_installer" || fail "shared runtime installer does not pin the sandbox UID"

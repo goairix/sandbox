@@ -37,9 +37,17 @@ SANDBOX_BUILD_REGISTRY=registry.i.huaxisy.com/library/ai-infra
 SANDBOX_APPARMOR_TAG=v0.1.0
 SANDBOX_API_TAG=v0.3.24-apparmor.1
 SANDBOX_BUILD_PLATFORMS=linux/amd64,linux/arm64
+# 基础镜像需事先同步到内部仓库；使用官方地址时改为 docker.io/library。
+SANDBOX_BASE_REGISTRY=registry.i.huaxisy.com/library
+SANDBOX_LOADER_GO_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25-bookworm"
+SANDBOX_LOADER_BASE_IMAGE="$SANDBOX_BASE_REGISTRY/debian:13-slim"
+SANDBOX_API_GO_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25.4"
+SANDBOX_API_BASE_IMAGE="$SANDBOX_BASE_REGISTRY/alpine:3.22"
 ```
 
 `ds-ai-research` 当前节点为 arm64，镜像必须包含 `linux/arm64`，不能只构建 amd64。双架构镜像也适用于其它 amd64 集群；若这次只构建当前 arm64 集群，可将 `SANDBOX_BUILD_PLATFORMS` 改为 `linux/arm64`。先核对 builder 的 `Platforms` 支持所选架构；缺少跨架构执行支持时改用已配置的 builder/对应原生构建节点，不在业务节点临时运行 privileged 模拟器安装命令。构建机的 Docker 登录不等于 Kubernetes 节点已获得私有仓库的拉取权限，节点仍须具备原有仓库访问条件。
+
+loader 的 Dockerfile 还声明了 Dockerfile frontend；Docker Hub 受限时，按 [生产手册第 4 节](helm-production.md#4-从当前代码构建并发布镜像) 额外指定 `BUILDKIT_SYNTAX` 的内部镜像地址。
 
 ### 2. 构建并推送加载器
 
@@ -47,6 +55,8 @@ SANDBOX_BUILD_PLATFORMS=linux/amd64,linux/arm64
 docker buildx build \
   --builder sandbox-apparmor-build \
   --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_LOADER_GO_IMAGE" \
+  --build-arg APPARMOR_BASE_IMAGE="$SANDBOX_LOADER_BASE_IMAGE" \
   --file docker/images/apparmor-loader/Dockerfile \
   --tag "$SANDBOX_BUILD_REGISTRY/sandbox-apparmor-loader:$SANDBOX_APPARMOR_TAG" \
   --push .
@@ -62,6 +72,8 @@ docker buildx build \
 docker buildx build \
   --builder sandbox-apparmor-build \
   --platform "$SANDBOX_BUILD_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_API_GO_IMAGE" \
+  --build-arg API_BASE_IMAGE="$SANDBOX_API_BASE_IMAGE" \
   --file docker/Dockerfile \
   --tag "$SANDBOX_BUILD_REGISTRY/sandbox-api:$SANDBOX_API_TAG" \
   --push .

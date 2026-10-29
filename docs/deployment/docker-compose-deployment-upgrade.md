@@ -125,21 +125,50 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml logs --tail=2
 
 ## 6. 镜像怎么构建
 
-使用版本 tag；不要求输入 SHA256，也不需要设置额外 builder/base-image 环境变量。以下命令在仓库根目录执行：
+使用版本 tag；通过 `--build-arg` 显式指定 Dockerfile 中的基础镜像地址，`-t` 指定产物地址。下面使用内部仓库示例，先确认对应 tag/架构已同步；使用官方仓库时将基础镜像前缀改为 `docker.io/library`。完整参数表见 [Helm 生产手册](helm-production.md#4-从当前代码构建并发布镜像)。以下命令在仓库根目录执行：
 
 ```bash
 VERSION=v0.2.13
 REGISTRY=registry.i.huaxisy.com/library/ai-infra
 PLATFORM=linux/arm64
+SANDBOX_BASE_REGISTRY=registry.i.huaxisy.com/library
+SANDBOX_GO_BUILDER_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25.4"
+SANDBOX_GO_ALPINE_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25-alpine"
+SANDBOX_ALPINE_IMAGE="$SANDBOX_BASE_REGISTRY/alpine:3.22"
+SANDBOX_PYTHON_IMAGE="$SANDBOX_BASE_REGISTRY/python:3.13-slim-bookworm"
+SANDBOX_DEBIAN_BOOKWORM_IMAGE="$SANDBOX_BASE_REGISTRY/debian:bookworm-slim"
+SANDBOX_RIPGREP_DOWNLOAD_BASE_URL=https://github.com/BurntSushi/ripgrep/releases/download/14.1.1
 
-docker buildx build -f docker/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-api:$VERSION" .
-docker buildx build -f docker/images/sandbox/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-runtime:$VERSION" .
-docker buildx build -f docker/images/gateway/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-gateway:$VERSION" docker/images/gateway
-docker buildx build -f docker/images/workspace-mounter/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" .
-docker buildx build -f docker/images/sandbox-fuse/Dockerfile --platform "$PLATFORM" -t "$REGISTRY/sandbox-fuse-docker:$VERSION" .
+docker buildx build --platform "$PLATFORM" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_BUILDER_IMAGE" \
+  --build-arg API_BASE_IMAGE="$SANDBOX_ALPINE_IMAGE" \
+  -f docker/Dockerfile -t "$REGISTRY/sandbox-api:$VERSION" .
+docker buildx build --platform "$PLATFORM" \
+  --build-arg WORKSPACE_PROBE_BUILDER="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL="$SANDBOX_RIPGREP_DOWNLOAD_BASE_URL" \
+  -f docker/images/sandbox/Dockerfile -t "$REGISTRY/sandbox-runtime:$VERSION" .
+docker buildx build --platform "$PLATFORM" \
+  --build-arg GATEWAY_BASE_IMAGE="$SANDBOX_ALPINE_IMAGE" \
+  -f docker/images/gateway/Dockerfile -t "$REGISTRY/sandbox-gateway:$VERSION" docker/images/gateway
+docker buildx build --platform "$PLATFORM" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg S3FS_BUILDER_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
+  --build-arg MOUNTER_BASE_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
+  -f docker/images/workspace-mounter/Dockerfile -t "$REGISTRY/sandbox-fuse-mounter:$VERSION" .
+docker buildx build --platform "$PLATFORM" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg S3FS_BUILDER_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL="$SANDBOX_RIPGREP_DOWNLOAD_BASE_URL" \
+  -f docker/images/sandbox-fuse/Dockerfile -t "$REGISTRY/sandbox-fuse-docker:$VERSION" .
 ```
 
-分别构建各 CPU 架构后，可以继续使用现有 `docker manifest` 流程合并成同一个版本 tag。构建完成后只需把这些 tag 更新到 `.env`，然后 `docker compose up -d`。
+构建机需要代理访问外部依赖时，按 [构建代理说明](helm-production.md#构建阶段使用-http-代理) 通过 `--build-arg HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 注入，不在 Dockerfile 内写运行时 ENV。
+
+普通 runtime / Docker FUSE 下载 ripgrep 报 403 时，按 [下载源说明](helm-production.md#ripgrep-下载失败http-403) 指定可访问的 `RIPGREP_DOWNLOAD_BASE_URL`；版本和归档校验保持固定。
+
+分别构建各 CPU 架构并推送后，使用 `docker buildx imagetools create -t "$REGISTRY/sandbox-api:$VERSION" "$REGISTRY/sandbox-api:$VERSION-amd64" "$REGISTRY/sandbox-api:$VERSION-arm64"` 合并，其它组件替换 repository；该命令直接发布，无需再运行 `docker manifest push`。`buildx --push` 的单架构 tag 也可能包含构建证明而成为索引，不能直接沿用旧 `docker manifest create`；两种构建/合并流程及输出选项见 [生产手册](helm-production.md#分别构建两个架构时的合并方式)。构建完成后把最终 tag 更新到 `.env`，然后 `docker compose up -d`。
 
 ## 7. 升级后验证
 

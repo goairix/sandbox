@@ -1,4 +1,6 @@
 ARG GO_BUILDER_IMAGE=golang:1.25-alpine
+ARG S3FS_BUILDER_IMAGE=debian:bookworm-slim
+ARG MOUNTER_BASE_IMAGE=debian:bookworm-slim
 FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder
 
 WORKDIR /src
@@ -11,7 +13,7 @@ RUN mkdir -p /out \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/workspace-mounter ./cmd/workspace-mounter
 
-FROM debian:bookworm-slim AS s3fs-builder
+FROM ${S3FS_BUILDER_IMAGE} AS s3fs-builder
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ENV S3FS_COMMIT=561ce1e20600bab42133b5e51511483800d3ef76
@@ -24,7 +26,7 @@ RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g;
 COPY docker/images/common/build-s3fs.sh /usr/local/bin/build-s3fs
 RUN /usr/local/bin/build-s3fs /out
 
-FROM debian:bookworm-slim
+FROM ${MOUNTER_BASE_IMAGE}
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 

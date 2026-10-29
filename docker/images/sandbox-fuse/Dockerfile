@@ -1,4 +1,6 @@
 ARG GO_BUILDER_IMAGE=golang:1.25-alpine
+ARG S3FS_BUILDER_IMAGE=debian:bookworm-slim
+ARG SANDBOX_BASE_IMAGE=python:3.13-slim-bookworm
 FROM ${GO_BUILDER_IMAGE} AS workspace-tools-builder
 
 ARG TARGETARCH
@@ -21,10 +23,13 @@ RUN mkdir -p /out \
     -o /out/workspace-probe ./cmd/workspace-probe \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/sandbox-file-op ./cmd/sandbox-file-op
+ARG RIPGREP_DOWNLOAD_BASE_URL=https://github.com/BurntSushi/ripgrep/releases/download/14.1.1
 RUN apk add --no-cache curl \
- && TARGETARCH="$TARGETARCH" sh /usr/local/bin/install-ripgrep
+ && TARGETARCH="$TARGETARCH" \
+    RIPGREP_DOWNLOAD_BASE_URL="$RIPGREP_DOWNLOAD_BASE_URL" \
+    sh /usr/local/bin/install-ripgrep
 
-FROM debian:bookworm-slim AS s3fs-builder
+FROM ${S3FS_BUILDER_IMAGE} AS s3fs-builder
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ENV S3FS_COMMIT=561ce1e20600bab42133b5e51511483800d3ef76
@@ -37,7 +42,7 @@ RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g;
 COPY docker/images/common/build-s3fs.sh /usr/local/bin/build-s3fs
 RUN /usr/local/bin/build-s3fs /out
 
-FROM python:3.13-slim-bookworm
+FROM ${SANDBOX_BASE_IMAGE}
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 

@@ -8,7 +8,7 @@
 
 - 新版 `Chart.yaml`、`templates/`、`files/` 和 `values.schema.json` 必须整套同步，不能新旧混搭；推荐保留新版默认 `values.yaml`，用外部环境 values 覆盖。
 - 服务器自己的配置单独放在 Chart 外，例如 `/opt/sandbox/env/values-prod.yaml`。
-- AK/SK 优先通过 `config.storage.filesystem.credentialsSecretName` 引用包含 `access-key` / `secret-key` 的 Secret；inline 字段仅作兼容。
+- AK/SK 优先通过 `config.storage.filesystem.credentialsSecretName` 引用包含 `access-key` / `secret-key` 的 Secret；也支持直接填写 `config.storage.filesystem.accessKey/secretKey`，两种方式择一。
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
 - 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像、有效 LSM/nodeSelector、显式 DNS 准入配置或 cleanup protocol 变化时，Chart 会先排空。
 - AppArmor 加载器需要单独构建、推送镜像，默认关闭；真实隔离验收通过前不能直接开启线上开关。
@@ -306,7 +306,7 @@ standalone/external 的同 backend、同控制契约 rollback 仍可正常执行
 
 ## 6. 镜像怎么构建
 
-所有镜像使用新版本 tag，不覆盖已发布版本，不要求手工填写 SHA256，也不需要设置 `GO_BUILDER_IMAGE` 或 `SANDBOX_BASE_IMAGE`；Dockerfile 已有默认基础镜像。下面命令都在包含本次实现的仓库根目录执行，不从尚未合入功能的旧 main 打包。构建及推送由部署者执行，本文不是镜像发布成功记录。
+所有镜像使用新版本 tag，不覆盖已发布版本，不要求手工填写 SHA256，Dockerfile 保留默认基础镜像。需要指定内部基础镜像地址时，按 [当前生产手册第 4 节](helm-production.md#4-从当前代码构建并发布镜像) 的参数表和 `--build-arg` 命令传入；下文历史示例省略这些可选参数。下面命令都在包含本次实现的仓库根目录执行，不从尚未合入功能的旧 main 打包。构建及推送由部署者执行，本文不是镜像发布成功记录。
 
 ### 构建环境及首次完整镜像准备
 
@@ -339,7 +339,7 @@ docker buildx build --builder sandbox-apparmor-build -f docker/images/sandbox-fu
 
 `ds-ai-research` 当前节点为 arm64，镜像必须包含 `linux/arm64`。只部署这个架构时可将变量改为 `linux/arm64`；其它 amd64 集群需要 amd64 镜像。先核对 builder 支持所选架构，不在业务节点临时安装 privileged 模拟器。`--push` 直接推送目标架构清单和镜像，无需再执行 `docker push`；不能省略输出选项并假设构建结果已经可被集群拉取。多架构发布方式见 [Docker 官方说明](https://docs.docker.com/build/building/multi-platform/)。
 
-Kubernetes FUSE 需要已有兼容的 API/runtime/mounter 镜像，Docker FUSE 还需要 `sandbox-fuse-docker`；按实际部署使用的镜像构建，不因只升级 API 就统一改所有 tag。你也可以沿用现有流程分别构建各架构，再用 `docker manifest` 合并同一个新版本 tag。
+Kubernetes FUSE 需要已有兼容的 API/runtime/mounter 镜像，Docker FUSE 还需要 `sandbox-fuse-docker`；按实际部署使用的镜像构建，不因只升级 API 就统一改所有 tag。也可分别构建并推送各架构，再用 `docker buildx imagetools create` 合并同一个新版本 tag；单架构 `buildx --push` 产物可能已是索引，不能不加检查地使用旧 `docker manifest create`。具体命令见 [当前生产手册](helm-production.md#分别构建两个架构时的合并方式)。
 
 推送 mounter 后，必须在对应架构可运行容器的构建机上检查**最终仓库 tag**，不能只看 `imagetools inspect` 的架构清单。2026-09-20 CCE 测试发现错误的 `sandbox-fuse-mounter:v0.3.30` tag 实际具有 API 入口 `/app/sandbox`，且没有 mounter 二进制，详见 [现场记录](../testing/2026-09-20-hce-apparmor-cri-unix-probe.md)。使用新的不可变 tag 构建，不覆盖该错误 tag：
 

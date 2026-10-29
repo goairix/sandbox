@@ -1,4 +1,5 @@
 ARG WORKSPACE_PROBE_BUILDER=golang:1.25-alpine
+ARG SANDBOX_BASE_IMAGE=python:3.13-slim-bookworm
 FROM ${WORKSPACE_PROBE_BUILDER} AS workspace-probe-builder
 
 ARG TARGETARCH
@@ -16,10 +17,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/workspace-probe ./cmd/workspace-probe \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/sandbox-file-op ./cmd/sandbox-file-op
+ARG RIPGREP_DOWNLOAD_BASE_URL=https://github.com/BurntSushi/ripgrep/releases/download/14.1.1
 RUN apk add --no-cache curl \
- && TARGETARCH="$TARGETARCH" sh /usr/local/bin/install-ripgrep
+ && TARGETARCH="$TARGETARCH" \
+    RIPGREP_DOWNLOAD_BASE_URL="$RIPGREP_DOWNLOAD_BASE_URL" \
+    sh /usr/local/bin/install-ripgrep
 
-FROM python:3.13-slim-bookworm
+FROM ${SANDBOX_BASE_IMAGE}
 
 COPY docker/images/sandbox/install-runtime.sh /usr/local/bin/install-sandbox-runtime
 RUN /usr/local/bin/install-sandbox-runtime \

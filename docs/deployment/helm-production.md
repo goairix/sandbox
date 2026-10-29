@@ -22,7 +22,20 @@
 
 etcd 默认由本 Chart 部署，固定使用官方 `quay.io/coreos/etcd:v3.6.14`，不需要构建项目镜像；对象存储由平台独立维护。若生产节点无法访问 Quay，先将同版本、多架构镜像镜像到内部仓库，并覆盖 `etcd.image.repository`，保持精确 tag `v3.6.14`。Redis 镜像如需内部仓库，保持 `7.4.2` tag 并覆盖 `redis.image.repository`。
 
-本轮统一 tag 是一套待发布基线；以后 API、runtime、mounter、loader、bootstrap 可分别发版。发布过的 tag 不覆盖、不重复打包不同内容；保存 manifest digest 用于核对，不要求把部署引用改成纯 digest。禁止使用 `latest`、`7-alpine`、空 tag 或 `REPLACE_WITH_...`。离线渲染不会验证镜像是否存在。
+本轮统一 tag 是一套待发布基线；以后 API、runtime、mounter、loader、bootstrap 可分别发版。发布过的 tag 不覆盖、不重复打包不同内容；部署引用统一填写 `repository:tag`，不附加 `@sha256:...`；digest 仅在需要时用于核对实际内容，不复制到 values。禁止使用 `latest`、`7-alpine`、空 tag 或 `REPLACE_WITH_...`。离线渲染不会验证镜像是否存在。
+
+例如，API 发布为 arm64 专用 tag 时，在环境 values 中只填写：
+
+```yaml
+image:
+  repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
+  tag: v0.4.0-arm64
+```
+
+实际部署引用就是 `registry.i.huaxisy.com/library/ai-infra/sandbox-api:v0.4.0-arm64`。不要将 `v0.4.0-arm64@sha256:...` 填入 `image.tag`，repository 也不包含 tag/digest。该片段仅示范 API 的单架构版本；其它组件保留各自实际发布的 tag，目标节点须匹配架构。
+
+Docker 镜像的内容摘要仍客观存在，构建/推送日志、仓库页面和镜像检查命令可能显示它；这不意味着 `-t` 设置的 tag 被改名。`imagetools inspect` 的平台明细也可能显示 `tag@sha256:...`。本部署流程使用纯 tag 拉取，无需重建镜像来去掉引用后缀。参见 [Docker 镜像摘要说明](https://docs.docker.com/dhi/explore/security-concepts/digests/)。
+
 
 ## 2. Chart 资源与配置入口
 
@@ -53,7 +66,7 @@ etcd 默认由本 Chart 部署，固定使用官方 `quay.io/coreos/etcd:v3.6.14
 ## 3. 上线前置条件
 
 - 内置 etcd 固定三个成员，至少需要三个可调度的 Linux 节点；默认强制按 hostname 分散。准备可用的 StorageClass，每成员默认 `10Gi`（合计三块卷），支持 `ReadWriteOnce` 和 Pod 的 fsGroup 写权限。`storageClass: ""` 使用默认类，`"-"` 表示显式不指定类、需自行提供匹配 PV。填写本 release 专属 prefix，并落实快照/恢复。内置客户端及 peer 使用内部 HTTP，无用户名/密码和 TLS；NetworkPolicy 只放行同 release 的 etcd 成员、API 与 drain Pod，命名空间写权限及 CNI 策略执行也是安全边界，不对公网暴露。生产安全校验禁止关闭 `networkPolicy.enabled` 或强制反亲和；仍须由平台确认实际 CNI 执行这些策略。需要 mTLS 的环境可采用下文外部 etcd 入口。
-- 对象存储 bucket 已创建，TLS/网络可用，凭据具备所需路径读写权限。每个 cell 使用独立 bucket 或 `subPath`，AK/SK 存在 Secret 中。
+- 对象存储 bucket 已创建，TLS/网络可用，凭据具备所需路径读写权限。每个 cell 使用独立 bucket 或 `subPath`，AK/SK 按第 5 节直接填 values 或引用 Secret。
 - 目标 Linux 节点支持 `/dev/fuse`、mount propagation 和实际 CRI/AppArmor 限制。先完成真实 FUSE 挂载、flush、卸载及越权拒绝验收，再启用生产配置。loader Ready 不代表 CRI/AppArmor 实际可用。
 - 选定节点有足够 CPU、内存与临时磁盘；HPA 需要可用的资源指标 API。至少把 API 的 requests/limits、池大小与节点容量一起核算。`fusePool.maxSize=20` 仅限制准备池，不能用它限制业务存活数；历史 20 个 FUSE 功能测试不能证明更大容量。
 - CNI 实际执行 NetworkPolicy。按真实 CNI 设置 `standard` 或 `cilium`；`auto` 仅按 API 可见性发现。外部 IPAM 无法完整发现时明确填写完整的 `podCIDRs` 和 `serviceCIDRs`，不照抄测试网段。特殊 DNS 准入配置见 [说明](kubernetes-dns-admission.md)。
@@ -61,7 +74,23 @@ etcd 默认由本 Chart 部署，固定使用官方 `quay.io/coreos/etcd:v3.6.14
 
 ## 4. 从当前代码构建并发布镜像
 
-以下命令由发布人员执行。etcd 官方镜像不在项目构建清单中，部署前另外验证 `quay.io/coreos/etcd:v3.6.14` 的目标架构和节点可拉取性。先核对源码提交及工作区，不从尚未包含本轮修改的旧提交构建；构建全部镜像时固定同一份源码。发布前先在镜像仓库确认目标 repository 的 `v0.4.0` 尚未占用；若已占用，停止推送，选择新的精确版本并同步 Chart/values/文档，不能覆盖旧内容。这里只列最终部署镜像的 tag，Dockerfile 的构建基础镜像不会作为 Helm 工作负载部署。
+以下命令由发布人员执行。etcd 官方镜像不在项目构建清单中，部署前另外验证 `quay.io/coreos/etcd:v3.6.14` 的目标架构和节点可拉取性。先核对源码提交及工作区，不从尚未包含本轮修改的旧提交构建；构建全部镜像时固定同一份源码。发布前先在镜像仓库确认目标 repository 的 `v0.4.0` 尚未占用；若已占用，停止推送，选择新的精确版本并同步 Chart/values/文档，不能覆盖旧内容。构建时通过 `--build-arg` 指定 Dockerfile 中每个 `FROM` 的镜像地址；`-t` 单独指定产物地址，两者用途不同。默认基础镜像版本保持原 Dockerfile 配置，下面显式指定内部仓库中的对应地址。
+
+所有基础镜像参数均在首个 `FROM` 前声明，可由构建命令覆盖，语法见 [Docker 构建参数说明](https://docs.docker.com/build/building/variables/)。各 Dockerfile 的参数如下：
+
+| Dockerfile / 产物 | 基础镜像参数 | 保持的上游版本 |
+| --- | --- | --- |
+| `docker/Dockerfile` / API | `GO_BUILDER_IMAGE`、`API_BASE_IMAGE` | `golang:1.25.4`、`alpine:3.22` |
+| `docker/images/sandbox/Dockerfile` / runtime | `WORKSPACE_PROBE_BUILDER`、`SANDBOX_BASE_IMAGE` | `golang:1.25-alpine`、`python:3.13-slim-bookworm` |
+| `docker/images/workspace-mounter/Dockerfile` | `GO_BUILDER_IMAGE`、`S3FS_BUILDER_IMAGE`、`MOUNTER_BASE_IMAGE` | `golang:1.25-alpine`、两个阶段均为 `debian:bookworm-slim` |
+| `docker/images/apparmor-loader/Dockerfile` | `GO_BUILDER_IMAGE`、`APPARMOR_BASE_IMAGE` | `golang:1.25-bookworm`、`debian:13-slim` |
+| `docker/images/gateway/Dockerfile` | `GATEWAY_BASE_IMAGE` | `alpine:3.22` |
+| `docker/images/sandbox-fuse/Dockerfile` | `GO_BUILDER_IMAGE`、`S3FS_BUILDER_IMAGE`、`SANDBOX_BASE_IMAGE` | `golang:1.25-alpine`、`debian:bookworm-slim`、`python:3.13-slim-bookworm` |
+| `docker/images/redis-bootstrap/Dockerfile` | `GO_BUILDER_IMAGE`、`BOOTSTRAP_BASE_IMAGE` | `golang:1.25.4`、`alpine:3.22` |
+
+`SANDBOX_BASE_REGISTRY` 是基础镜像仓库示例；**先确认下面每个同名 tag 已同步到实际仓库，且包含目标架构**，再构建。若使用官方地址，将它改为 `docker.io/library`；不同镜像不在同一目录时，分别修改对应完整地址变量。不要将 Alpine、Bookworm、Debian 13 互换；对应的 apk/apt 和运行库依赖不同。基础镜像参数不改变镜像内 Go/apt/pip/npm 等依赖源。
+
+AppArmor loader 和 Redis bootstrap 的 `# syntax=docker/dockerfile:1` 还会单独拉取 Dockerfile frontend，修改 `FROM` 地址不会覆盖它。Docker Hub 受限时，先同步该 frontend，再给这两个构建命令追加 `--build-arg BUILDKIT_SYNTAX=registry.i.huaxisy.com/library/dockerfile:1`（替换为实际 frontend 地址）。此参数由 BuildKit 识别，无需在 Dockerfile 中再声明 `ARG`，见 [Docker frontend 说明](https://docs.docker.com/build/buildkit/frontend/)。
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
@@ -74,32 +103,135 @@ docker buildx inspect sandbox-release >/dev/null 2>&1 || \
   docker buildx create --name sandbox-release --driver docker-container
 docker buildx inspect sandbox-release --bootstrap
 
+# 构建产物的发布地址与版本。
 SANDBOX_REGISTRY=registry.i.huaxisy.com/library/ai-infra
 SANDBOX_VERSION=v0.4.0
 SANDBOX_PLATFORMS=linux/amd64,linux/arm64
 
+# Dockerfile 各 FROM 使用的基础镜像地址；内部仓库须事先同步这些 tag。
+SANDBOX_BASE_REGISTRY=registry.i.huaxisy.com/library
+SANDBOX_GO_BUILDER_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25.4"
+SANDBOX_GO_ALPINE_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25-alpine"
+SANDBOX_GO_BOOKWORM_IMAGE="$SANDBOX_BASE_REGISTRY/golang:1.25-bookworm"
+SANDBOX_ALPINE_IMAGE="$SANDBOX_BASE_REGISTRY/alpine:3.22"
+SANDBOX_PYTHON_IMAGE="$SANDBOX_BASE_REGISTRY/python:3.13-slim-bookworm"
+SANDBOX_DEBIAN_BOOKWORM_IMAGE="$SANDBOX_BASE_REGISTRY/debian:bookworm-slim"
+SANDBOX_DEBIAN_13_IMAGE="$SANDBOX_BASE_REGISTRY/debian:13-slim"
+# 普通 runtime / Docker FUSE 的固定 ripgrep 14.1.1 归档下载源。
+SANDBOX_RIPGREP_DOWNLOAD_BASE_URL=https://github.com/BurntSushi/ripgrep/releases/download/14.1.1
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_BUILDER_IMAGE" \
+  --build-arg API_BASE_IMAGE="$SANDBOX_ALPINE_IMAGE" \
   -f docker/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-api:$SANDBOX_VERSION" --push .
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg WORKSPACE_PROBE_BUILDER="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL="$SANDBOX_RIPGREP_DOWNLOAD_BASE_URL" \
   -f docker/images/sandbox/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-runtime:$SANDBOX_VERSION" --push .
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg S3FS_BUILDER_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
+  --build-arg MOUNTER_BASE_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
   -f docker/images/workspace-mounter/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-fuse-mounter:$SANDBOX_VERSION" --push .
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_BOOKWORM_IMAGE" \
+  --build-arg APPARMOR_BASE_IMAGE="$SANDBOX_DEBIAN_13_IMAGE" \
   -f docker/images/apparmor-loader/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-apparmor-loader:$SANDBOX_VERSION" --push .
 ```
 
-本主线需构建以上四个项目镜像，另需可拉取的 etcd 官方镜像。准备可选 Docker/内置 Sentinel 发布物时才执行：
+本主线需构建以上四个项目镜像，另需可拉取的 etcd 官方镜像。准备可选 Docker/内置 Sentinel 发布物时，在同一终端继续执行：
 
 ```bash
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GATEWAY_BASE_IMAGE="$SANDBOX_ALPINE_IMAGE" \
   -f docker/images/gateway/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-gateway:$SANDBOX_VERSION" --push docker/images/gateway
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg S3FS_BUILDER_IMAGE="$SANDBOX_DEBIAN_BOOKWORM_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL="$SANDBOX_RIPGREP_DOWNLOAD_BASE_URL" \
   -f docker/images/sandbox-fuse/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-fuse-docker:$SANDBOX_VERSION" --push .
+
 docker buildx build --builder sandbox-release --platform "$SANDBOX_PLATFORMS" \
+  --build-arg GO_BUILDER_IMAGE="$SANDBOX_GO_BUILDER_IMAGE" \
+  --build-arg BOOTSTRAP_BASE_IMAGE="$SANDBOX_ALPINE_IMAGE" \
   -f docker/images/redis-bootstrap/Dockerfile -t "$SANDBOX_REGISTRY/sandbox-redis-bootstrap:$SANDBOX_VERSION" --push .
 ```
 
-核查实际推送 tag 的架构清单和摘要，并保存发布记录。需要单架构时明确修改 `SANDBOX_PLATFORMS`。构建机登录仓库不等于节点具备拉取权限。
+### 构建阶段使用 HTTP 代理
+
+若构建机需要代理访问 GitHub、Go 模块源或软件包源，用 Docker 预定义代理构建参数注入到 `RUN` 阶段，无需在 Dockerfile 中新增 `ARG HTTP_PROXY` 或 `ENV HTTP_PROXY`。下面以 Docker Desktop 宿主机上监听 7890 的 HTTP 代理为例，替换为实际地址/端口；`HTTPS_PROXY` 也可使用 `http://` 代理地址，通过 CONNECT 转发 HTTPS 请求。
+
+```bash
+# 示例：代理运行在当前 Docker Desktop 宿主机；远程 builder 填其能访问的代理地址。
+SANDBOX_BUILD_PROXY=http://host.docker.internal:7890
+SANDBOX_BUILD_NO_PROXY=localhost,127.0.0.1,::1,registry.i.huaxisy.com
+
+docker buildx build --platform linux/amd64 \
+  --build-arg WORKSPACE_PROBE_BUILDER="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL="$SANDBOX_RIPGREP_DOWNLOAD_BASE_URL" \
+  --build-arg HTTP_PROXY="$SANDBOX_BUILD_PROXY" \
+  --build-arg HTTPS_PROXY="$SANDBOX_BUILD_PROXY" \
+  --build-arg NO_PROXY="$SANDBOX_BUILD_NO_PROXY" \
+  -f docker/images/sandbox/Dockerfile \
+  -t "$SANDBOX_REGISTRY/sandbox-runtime:$SANDBOX_VERSION-amd64" --push .
+```
+
+其它组件需要代理时，在各自的构建命令中同样追加这三个代理参数；无需代理时省略。`NO_PROXY` 只填写实际需要直连的地址，不将 GitHub 加进去。构建容器中的 `127.0.0.1` 是它自身；Docker Desktop 访问宿主机代理使用 `host.docker.internal`，并确认宿主机代理允许该连接。远程 builder 的代理地址必须从远程构建节点可达。
+
+这些参数控制 `RUN` 内 curl/apk/apt/go 等程序的出站访问；拉取 `FROM` 或 Dockerfile frontend 镜像、推送最终镜像，以及 CLI 查询/合并仓库 manifest 的代理需在 Docker Desktop/Engine/BuildKit 或 CLI 对应层配置，不能假设仅传 build-arg 就同时配置了所有层。代理参数不作为运行时 `ENV` 写进最终镜像，参见 [Docker 代理构建参数](https://docs.docker.com/build/building/variables/#proxy-arguments)。
+
+### ripgrep 下载失败（HTTP 403）
+
+普通 runtime 和 Docker FUSE 在 Go builder 阶段下载固定版本 ripgrep 14.1.1，用于文件检索。`apk add curl` 成功后，如果 `install-ripgrep` 报 `curl: (22) ... 403`，失败的是归档下载请求，不是 Alpine 包安装或架构选择。旧脚本使用 `api.github.com/.../releases/assets/...`；当前默认改为官方 Release 直链，避免依赖该 GitHub API 下载接口。403 的具体原因仍需结合构建机代理和 HTTP 响应头判断，不能仅凭状态码认定是 API 限流。
+
+构建机经代理才能访问 GitHub 时，先按上一节传入 `HTTP_PROXY` / `HTTPS_PROXY`；仅换基础镜像地址不会给下载请求设置代理。基础镜像仓库与归档下载源独立。需要改用内部文件服务时，将下面两个官方归档原样同步到自己的可访问 HTTP(S) 文件服务，保留文件名；不要解压后重新打包：
+
+- `ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz`：amd64。
+- `ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz`：arm64。
+
+将 `SANDBOX_RIPGREP_DOWNLOAD_BASE_URL` 改为该目录地址，保留构建命令中的 `--build-arg RIPGREP_DOWNLOAD_BASE_URL=...`。例如镜像服务目录为 `https://downloads.example.internal/ripgrep/14.1.1`，脚本会按 `TARGETARCH` 追加上述文件名。普通 runtime 和 Docker FUSE 都支持此参数；mounter/API/loader 不下载该工具。脚本继续使用仓库中固定的 SHA256 校验，下载失败或归档不匹配都会终止构建。
+
+例如仅重建 amd64 普通 runtime（替换镜像服务地址，并在同一终端保留前面定义的镜像变量；已发布 tag 不覆盖）：
+
+```bash
+docker buildx build --platform linux/amd64 \
+  --build-arg WORKSPACE_PROBE_BUILDER="$SANDBOX_GO_ALPINE_IMAGE" \
+  --build-arg SANDBOX_BASE_IMAGE="$SANDBOX_PYTHON_IMAGE" \
+  --build-arg RIPGREP_DOWNLOAD_BASE_URL=https://downloads.example.internal/ripgrep/14.1.1 \
+  -f docker/images/sandbox/Dockerfile \
+  -t "$SANDBOX_REGISTRY/sandbox-runtime:$SANDBOX_VERSION-amd64" --push .
+```
+
+先在构建机确认内部服务可达，再重试构建。这里的 SHA256 是下载包完整性校验，不会把 digest 拼到部署用的镜像 tag 后面。
+
+### 分别构建两个架构时的合并方式
+
+上面设置 `SANDBOX_PLATFORMS=linux/amd64,linux/arm64` 并一次 `--push`，已直接发布最终多架构 tag，不需要手动合并。
+
+如果改为分别构建、分别推送 `v0.4.0-amd64` 和 `v0.4.0-arm64`，统一使用下面的命令合并（示例针对 API，其它组件替换 repository）。两个源 tag 必须事先已推送且确实包含对应架构；目标 tag 按本次新发布版本填写，不覆盖已发布版本：
+
+```bash
+docker buildx imagetools create \
+  -t "$SANDBOX_REGISTRY/sandbox-api:$SANDBOX_VERSION" \
+  "$SANDBOX_REGISTRY/sandbox-api:$SANDBOX_VERSION-amd64" \
+  "$SANDBOX_REGISTRY/sandbox-api:$SANDBOX_VERSION-arm64"
+```
+
+该命令接受单镜像 manifest 或 image index 作为源，并直接发布目标 tag，无需再执行 `docker manifest push`，见 [命令说明](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/)。不要将当前 `buildx --push` 的产物直接套入旧的 `docker manifest create` 流程：单架构 tag 也可能指向索引，这时会报 `is a manifest list`。
+
+`--platform` 选择目标 CPU/系统架构，不承诺输出为单镜像 manifest。当前 BuildKit 默认附带最小 provenance；`--push` 可保留该证明，证明与可运行镜像一起存放于 index。旧版本、不同 exporter 或经典本地 image store 的流程可能只留下单镜像 manifest，因此旧合并方式曾经可用。具体旧流程需结合原命令和版本判断，不能仅凭 `--platform` 推断，见 [Docker 构建证明说明](https://docs.docker.com/build/metadata/attestations/)。
+
+若今后必须兼容旧的 `docker manifest create` 流程，每次只构建一个平台，并在各自构建命令中显式增加 `--provenance=false --sbom=false`，关闭这些构建证明；推送后先检查源 tag 为单镜像 manifest，再使用旧合并命令。不要对已经是索引的 tag 仅重跑合并命令期待类型改变。已经推送的两个索引可直接用上面的 `imagetools create` 合并，无需为了合并重建。关闭构建证明不会消除镜像本身的内容摘要，部署仍使用纯 tag。
+
+以下 `imagetools inspect` 用于核查 tag 的架构和实际内容，输出中的 Digest 或 `tag@sha256:...` 是元数据，不作为部署地址复制到 values；values 始终使用上面的纯 tag。保存实际发布记录。需要单架构时明确修改 `SANDBOX_PLATFORMS`。构建机登录仓库不等于节点具备拉取权限。
 
 ```bash
 for component in sandbox-api sandbox-runtime sandbox-fuse-mounter sandbox-apparmor-loader; do
@@ -242,9 +374,12 @@ kubectl --context "$CTX" -n "$NS" rollout status deployment/"$RELEASE-api" --tim
 kubectl --context "$CTX" -n "$NS" rollout status daemonset/"$RELEASE-apparmor-loader" --timeout=5m
 kubectl --context "$CTX" -n "$NS" get pod,hpa,pdb,job -o wide
 kubectl --context "$CTX" -n "$NS" logs deployment/"$RELEASE-api" --tail=200
-kubectl --context "$CTX" -n "$NS" get pods \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.containerStatuses[*]}{.image}{" "}{.imageID}{" "}{end}{"\n"}{end}'
+# 查看实际写入 Deployment 的镜像地址；本流程应显示 repository:tag。
+kubectl --context "$CTX" -n "$NS" get deployment "$RELEASE-api" \
+  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\t"}{.image}{"\n"}{end}'
 ```
+
+上面的 Deployment `spec` 表示配置的部署地址；运行时的 `status.containerStatuses[].imageID` 则用于标识实际镜像，通常含 SHA256，不能用来判断 values 是否被追加了 digest。若集群准入工具主动改写 Deployment/Pod 镜像引用，则需另外检查该工具策略。
 
 外部 etcd 安装跳过本 Chart 的 StatefulSet/PVC 检查；关闭 loader 的安装跳过 DaemonSet 命令。确认 API 的 `/ready` 返回 200；用带 API key 的业务请求完成以下验收后再切流：
 
