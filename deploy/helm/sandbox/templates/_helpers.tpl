@@ -37,7 +37,7 @@
 {{- $imageInput := get $input "image" -}}
 {{- if or (not (hasKey $input "image")) (kindIs "invalid" $imageInput) -}}{{- $imageInput = dict -}}{{- end -}}
 {{- if not (kindIs "map" $imageInput) -}}{{ fail "apparmorLoader.image 必须是配置映射" }}{{- end -}}
-{{- $image := dict "repository" "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader" "tag" "v0.1.0" "pullPolicy" "IfNotPresent" -}}
+{{- $image := dict "repository" "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader" "tag" "v0.4.0" "pullPolicy" "IfNotPresent" -}}
 {{- range $key, $value := $imageInput -}}
 {{- if not (kindIs "invalid" $value) -}}{{- $_ := set $image $key $value -}}{{- end -}}
 {{- end -}}
@@ -194,15 +194,70 @@
 {{- .Values.config.storage.state.backend | default "redis" -}}
 {{- end -}}
 
+{{- define "sandbox.builtinEtcd" -}}
+{{- $etcd := .Values.etcd | default dict -}}
+{{- if and (eq (include "sandbox.stateBackend" .) "etcd") (get $etcd "enabled") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "sandbox.etcdName" -}}{{ printf "%s-etcd" .Release.Name }}{{- end -}}
+
+{{- define "sandbox.etcdEndpoints" -}}
+{{- if eq (include "sandbox.builtinEtcd" .) "true" -}}
+{{- $name := include "sandbox.etcdName" . -}}
+{{- $endpoints := list -}}
+{{- range $ordinal := until 3 -}}
+{{- $endpoints = append $endpoints (printf "%s-%d.%s-headless.%s.svc.%s:2379" $name $ordinal $name $.Release.Namespace $.Values.etcd.clusterDomain) -}}
+{{- end -}}
+{{- $endpoints | toJson -}}
+{{- else -}}{{ .Values.config.storage.state.etcd.endpoints | toJson }}{{- end -}}
+{{- end -}}
+
+{{- define "sandbox.etcdInitialCluster" -}}
+{{- $name := include "sandbox.etcdName" . -}}
+{{- $members := list -}}
+{{- range $ordinal := until 3 -}}
+{{- $members = append $members (printf "%s-%d=http://%s-%d.%s-headless.%s.svc.%s:2380" $name $ordinal $name $ordinal $name $.Release.Namespace $.Values.etcd.clusterDomain) -}}
+{{- end -}}
+{{- join "," $members -}}
+{{- end -}}
+
+{{- define "sandbox.etcdClusterIdentity" -}}
+{{- printf "%s/%s/%s" .Release.Namespace .Release.Name (include "sandbox.etcdInitialCluster" .) | sha256sum -}}
+{{- end -}}
+
+{{- define "sandbox.validateBuiltinEtcd" -}}
+{{- if eq (include "sandbox.builtinEtcd" .) "true" -}}
+{{- $etcd := .Values.etcd -}}
+{{- if ne (toString $etcd.replicaCount) "3" -}}{{ fail "built-in etcd requires exactly 3 members; use controlled member replacement instead of scaling" }}{{- end -}}
+{{- if not $etcd.persistence.enabled -}}{{ fail "built-in etcd requires persistent PVCs (etcd.persistence.enabled=true)" }}{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*(Mi|Gi|Ti)$" $etcd.persistence.size) -}}{{ fail "etcd.persistence.size must be a positive Mi/Gi/Ti capacity" }}{{- end -}}
+{{- if or (empty $etcd.image.repository) (not (regexMatch "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?$" $etcd.image.tag)) -}}{{ fail "built-in etcd requires a repository and exact version tag" }}{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" $etcd.clusterDomain) -}}{{ fail "etcd.clusterDomain must be a valid DNS name" }}{{- end -}}
+{{- if gt (len (printf "%s-0.%s-headless.%s.svc.%s" (include "sandbox.etcdName" .) (include "sandbox.etcdName" .) .Release.Namespace $etcd.clusterDomain)) 253 -}}{{ fail "built-in etcd member DNS exceeds 253 characters" }}{{- end -}}
+{{- if gt (len .Release.Name) 41 -}}{{ fail "built-in etcd release name must not exceed 41 characters" }}{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*(m|h)$" $etcd.autoCompactionRetention) -}}{{ fail "etcd.autoCompactionRetention must be a positive minute/hour duration" }}{{- end -}}
+{{- $quota := int64 $etcd.quotaBackendBytes -}}
+{{- $units := dict "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 -}}
+{{- $volumeBytes := mul (int64 (regexFind "^[0-9]+" $etcd.persistence.size)) (get $units (regexFind "(Mi|Gi|Ti)$" $etcd.persistence.size)) -}}
+{{- if or (lt $quota 16777216) (gt $quota 8589934592) (ge $quota $volumeBytes) -}}{{ fail "etcd.quotaBackendBytes must be 16Mi..8Gi and smaller than the member PVC capacity" }}{{- end -}}
+{{- if not (empty .Values.config.storage.state.etcd.endpoints) -}}{{ fail "built-in etcd generates endpoints; set etcd.enabled=false before configuring external endpoints" }}{{- end -}}
+{{- if not (empty .Values.config.storage.state.etcd.existingSecret) -}}{{ fail "built-in etcd uses isolated internal HTTP; client TLS Secret is only supported for external etcd" }}{{- end -}}
+{{- if and .Values.productionSafetyChecks (not $etcd.hardAntiAffinity) -}}{{ fail "productionSafetyChecks requires etcd.hardAntiAffinity=true" }}{{- end -}}
+{{- if and .Values.productionSafetyChecks (not .Values.networkPolicy.enabled) -}}{{ fail "productionSafetyChecks requires networkPolicy.enabled=true for built-in etcd" }}{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sandbox.validateState" -}}
 {{- $backend := include "sandbox.stateBackend" . -}}
 {{- if eq $backend "redis" -}}
 {{- include "sandbox.validateRedis" . -}}
 {{- else if eq $backend "etcd" -}}
 {{- $etcd := .Values.config.storage.state.etcd -}}
+{{- include "sandbox.validateBuiltinEtcd" . -}}
+{{- $endpoints := include "sandbox.etcdEndpoints" . | fromJsonArray -}}
 {{- if .Values.redis.enabled -}}{{ fail "etcd state requires redis.enabled=false" }}{{- end -}}
-{{- if or (not (kindIs "slice" $etcd.endpoints)) (eq (len $etcd.endpoints) 0) -}}{{ fail "etcd state requires at least one endpoint" }}{{- end -}}
-{{- range $endpoint := $etcd.endpoints -}}
+{{- if or (not (kindIs "slice" $endpoints)) (eq (len $endpoints) 0) -}}{{ fail "etcd state requires at least one endpoint" }}{{- end -}}
+{{- range $endpoint := $endpoints -}}
 {{- if or (not (kindIs "string" $endpoint)) (empty $endpoint) -}}{{ fail "etcd state endpoints must be nonempty strings" }}{{- end -}}
 {{- end -}}
 {{- if or (not (kindIs "string" $etcd.prefix)) (not (regexMatch "^/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/$" $etcd.prefix)) -}}
@@ -460,7 +515,7 @@
 - name: SANDBOX_STORAGE_STATE_BACKEND
   value: etcd
 - name: SANDBOX_STORAGE_STATE_ETCD_ENDPOINTS
-  value: {{ join "," .Values.config.storage.state.etcd.endpoints | quote }}
+  value: {{ include "sandbox.etcdEndpoints" . | fromJsonArray | join "," | quote }}
 - name: SANDBOX_STORAGE_STATE_ETCD_PREFIX
   value: {{ .Values.config.storage.state.etcd.prefix | quote }}
 - name: SANDBOX_STORAGE_STATE_ETCD_TIMEOUT_MS
@@ -598,6 +653,9 @@ seccompProfile:
 {{- if eq (include "sandbox.stateBackend" .) "etcd" -}}
 {{- $_ := set $contract "stateBackend" "etcd" -}}
 {{- $_ := set $contract "statePrefix" .Values.config.storage.state.etcd.prefix -}}
+{{- if eq (include "sandbox.builtinEtcd" .) "true" -}}
+{{- $_ := set $contract "builtinEtcdIdentity" (include "sandbox.etcdClusterIdentity" .) -}}
+{{- end -}}
 {{- end -}}
 {{- $dns := include "sandbox.dnsAdmissionConfig" . | fromJson -}}
 {{- if or $dns.disableNodeLocalDNSInjection (gt (len $dns.dnsOptions) 0) -}}

@@ -17,7 +17,7 @@ test -n "$base_fingerprint"
 test "$base_fingerprint" = "$image_only_fingerprint"
 test "$base_fingerprint" != "$changed_fingerprint"
 
-rendered="$(helm template sandbox "$chart")"
+rendered="$(helm template sandbox "$chart" --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true)"
 etcd_rendered="$(helm template sandbox "$chart" --values "$chart/values-etcd.yaml" --set preDeleteDrain.enabled=true)"
 grep -Fq 'name: sandbox-etcd-config' <<<"$etcd_rendered"
 grep -Fq 'backend: etcd' <<<"$etcd_rendered"
@@ -69,6 +69,7 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
 
   kubectl "${kubectl_args[@]}" create namespace "$test_namespace" >/dev/null
   helm "${helm_args[@]}" install "$release" "$chart" --namespace "$test_namespace" \
+    --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true \
     --set replicaCount=0 \
     --set autoscaling.enabled=false \
     --set image.tag="$test_image_tag" >/dev/null
@@ -78,6 +79,7 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
   kubectl "${kubectl_args[@]}" --namespace "$test_namespace" patch deployment "$release-api" --type=merge \
     -p '{"spec":{"template":{"metadata":{"annotations":{"goairix.github.io/sandbox-drain-protocol":null}}}}}' >/dev/null
   if helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \
     --set config.storage.filesystem.storageIdentity=another-physical-store >/dev/null 2>&1; then
     printf 'backend change unexpectedly bypassed missing drain protocol\n' >&2
@@ -85,11 +87,13 @@ if [[ "${HELM_BACKEND_SWITCH_RUN_CLUSTER:-0}" == "1" ]]; then
   fi
 
   helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" >/dev/null
   test "$(kubectl "${kubectl_args[@]}" --namespace "$test_namespace" get deployment "$release-api" \
     -o jsonpath='{.spec.template.metadata.annotations.goairix\.github\.io/sandbox-drain-protocol}')" = "v1"
 
   helm "${helm_args[@]}" upgrade "$release" "$chart" --namespace "$test_namespace" \
+    --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true \
     --set replicaCount=0 --set autoscaling.enabled=false --set image.tag="$test_image_tag" \
     --set config.storage.filesystem.storageIdentity=another-physical-store >/dev/null
 fi

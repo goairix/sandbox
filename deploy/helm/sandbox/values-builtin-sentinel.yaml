@@ -1,10 +1,16 @@
 # 内置 Sentinel 的环境覆盖示例；身份和认证 Secret 自动创建，无需手工建 Secret。
-# 替换当前 API 镜像、StorageClass 和以下两个不同的 32~256 位随机安全 token。
+# 项目镜像 v0.4.0 待构建发布；替换 StorageClass 和两个不同的随机安全 token。
 # 演示 token 不是生产凭据；inline 密码会进入 Helm release 历史。
 # 部署说明：docs/deployment/built-in-redis-sentinel.md。
+etcd:
+  enabled: false
+config:
+  storage:
+    state:
+      backend: redis
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
-  tag: REPLACE_WITH_NEW_SANDBOX_API_TAG
+  tag: v0.4.0
 startupProbe:
   enabled: true # Sentinel 初始化期间必须启用，Chart 自动补足等待预算。
 redis:
@@ -18,7 +24,7 @@ redis:
   sentinel:
     bootstrapImage:
       repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
-      tag: v0.1.0 # 独立固定；仅 cmd/redis-bootstrap 变化时升级。
+      tag: v0.4.0 # 本轮从当前代码构建；以后仅 bootstrap 变化时独立升级。
       pullPolicy: IfNotPresent
     identitySecretName: "" # 留空启用自动身份；填写名称则只读引用外部 Secret。
     existingSecret: "" # 留空使用下方两个不同的 inline 密码创建认证 Secret。

@@ -1,6 +1,8 @@
 # 内置 Redis Sentinel 部署
 
-默认仍为单节点 `standalone`。启用 `redis.mode: sentinel` 后，Chart 部署固定三个成员，每个成员拥有独立 PVC，并运行 Redis、Sentinel 和一个仅做身份核验的原生辅助容器。Sentinel 是唯一选主组件；辅助容器不转发业务、不选主，初始化 Job 验证复制和写入 ACK 后才开放 API。
+当前 Chart `0.4.0` 的项目镜像基线为 `v0.4.0`，待从当前代码构建发布；精确镜像清单见 [生产部署手册](helm-production.md)。已有安装保留身份、PVC 和原认证配置；不要把全部组件默认版本更新当作 API-only 升级。
+
+Chart 默认改为内置 etcd。使用本节 Redis Sentinel 时须显式设置 `config.storage.state.backend: redis`、`etcd.enabled: false` 和 `redis.enabled: true`。启用 `redis.mode: sentinel` 后，Chart 部署固定三个成员，每个成员拥有独立 PVC，并运行 Redis、Sentinel 和一个仅做身份核验的原生辅助容器。Sentinel 是唯一选主组件；辅助容器不转发业务、不选主，初始化 Job 验证复制和写入 ACK 后才开放 API。
 
 从旧内置 standalone 切换时，按本次约定先排空、备份，再由管理员卸载旧 release 后安装新 Chart；本功能不在线迁移旧 Redis 数据。下面的 `upgrade --install` 仅用于全新安装或保留原 Sentinel 卷组的重新部署，不能据此直接切换旧数据库拓扑。
 
@@ -62,12 +64,20 @@ StatefulSet 的 `volumeClaimTemplates`（包括模板 annotations）不可升级
 
 ## 认证与 values
 
+推荐生产使用外部管理的认证 Secret；两套密码的无换行生成、Secret 创建和回读比较见 [Secret 手册第 6、7 节](helm-secrets.md#6-redis-兼容模式的-secret)。已有身份 Secret 和 PVC 必须保留，不能重新随机生成认证来替代恢复。
+
 下面使用两个不同的 inline 安全 token，让 Chart 自动创建认证 Secret，因此无需手工创建任何 Secret。两密码必须不同，各为 32~256 位字母、数字、`_`、`-` 的随机 token；此限制确保 Redis/Sentinel 重写配置后仍能冷恢复。演示 token 必须替换，values 文件应使用受保护的存储与权限。
 
 ```yaml
+etcd:
+  enabled: false
+config:
+  storage:
+    state:
+      backend: redis
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
-  tag: REPLACE_WITH_NEW_SANDBOX_API_TAG # 从本轮提交构建的新 API 镜像
+  tag: v0.4.0 # 待从本轮代码构建发布
 startupProbe:
   enabled: true # 初始化期间必须启用，等待预算由 Chart 自动补足
 redis:
@@ -82,7 +92,7 @@ redis:
     # 独立最小镜像；只在 cmd/redis-bootstrap 改变时使用新的不可变 tag。
     bootstrapImage:
       repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
-      tag: v0.1.0
+      tag: v0.4.0
       pullPolicy: IfNotPresent
     identitySecretName: "" # 默认自动创建/复用安装身份
     existingSecret: "" # 空值使用两个 inline 密码自动创建认证 Secret
@@ -112,14 +122,13 @@ KUBE_VERSION="$(kubectl --context "$CTX" get --raw /version | jq -r '.gitVersion
 # 离线结构检查不会执行现有对象 lookup；丢弃渲染结果，避免 inline Secret 写入终端/日志。
 helm template "$RELEASE" ./deploy/helm/sandbox --namespace "$NS" \
   --kube-version "$KUBE_VERSION" -f /opt/sandbox/env/values-prod.yaml >/dev/null
-test "$(helm show chart ./deploy/helm/sandbox | awk '$1 == "version:" { print $2 }')" = "0.3.0"
+test "$(helm show chart ./deploy/helm/sandbox | awk '$1 == "version:" { print $2 }')" = "0.4.0"
 helm --kube-context "$CTX" upgrade --install "$RELEASE" ./deploy/helm/sandbox \
   --namespace "$NS" -f /opt/sandbox/env/values-prod.yaml \
   --wait --wait-for-jobs --timeout 20m
 ```
 
-不要新旧 Chart 混用。Chart `0.3.0` 仅是 Helm 包版本，当前 `appVersion` 和镜像
-tag 不随之改变。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖
+不要新旧 Chart 混用。Chart `0.4.0` 与 `appVersion: 0.4.0` 是本轮发布元数据，实际镜像由 values 的 tag 决定。身份 Job、状态 CM、StatefulSet 和初始化 Job 都是普通资源，不依赖
 hook 等待顺序，避免 Helm 等 API Ready、API 又等 Job 的死锁。身份 Secret 不存在时
 才渲染 identity Job；state phase 为 `Pending` 时才渲染 initialize Job。已是
 `Initialized` 且身份完整的普通 upgrade 不再创建两个 Job/RBAC。Helm 只会处理当前

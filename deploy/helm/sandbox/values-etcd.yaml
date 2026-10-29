@@ -1,6 +1,11 @@
-# Fresh installation only. Supply a reachable etcd cluster and an empty
-# dedicated prefix. Authentication is optional. Set existingSecret to a
-# Secret with ca.crt, client.crt and client.key when the cluster uses mTLS.
+# Fresh installation with the built-in three-member etcd and persistent PVCs.
+# Set the StorageClass for the target cluster; each member receives its own claim.
+etcd:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
 redis:
   enabled: false
 
@@ -28,8 +33,7 @@ config:
     state:
       backend: etcd
       etcd:
-        endpoints:
-          - etcd.example.internal:2379
+        endpoints: [] # Generated from this release's three stable member DNS names.
         prefix: /sandbox/new-cell/
         timeoutMs: 3000
         existingSecret: ""

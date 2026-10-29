@@ -92,7 +92,7 @@ func TestSentinelLowerVersionSafety(t *testing.T) {
 		{"separate-secret-keys", append(sentinelOverrides(), "redis.sentinel.sentinelPasswordKey=password"), "authentication Secret keys must differ"},
 		{"missing-lsm-bypass", append(sentinelOverrides(), "productionSafetyChecks=true", "config.workspace.lsmProfile=sandbox-production", "config.workspace.allowMissingLSMForKind=true"), "productionSafetyChecks forbids allowMissingLSMForKind"},
 		{"confined-lsm", append(sentinelOverrides(), "productionSafetyChecks=true", "config.workspace.lsmProfile=unconfined"), "productionSafetyChecks requires a confined"},
-		{"standalone-production", []string{"productionSafetyChecks=true", "redis.mode=standalone"}, "productionSafetyChecks requires external HA Redis or built-in Sentinel"},
+		{"standalone-production", []string{"config.storage.state.backend=redis", "etcd.enabled=false", "redis.enabled=true", "productionSafetyChecks=true", "redis.mode=standalone"}, "productionSafetyChecks requires external HA Redis or built-in Sentinel"},
 	}
 	for _, version := range []string{"1.29.0", "1.31.0"} {
 		for _, tc := range cases {

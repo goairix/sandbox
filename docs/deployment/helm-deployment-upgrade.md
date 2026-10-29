@@ -1,4 +1,6 @@
-# Helm 部署与升级
+# Helm 部署与升级（历史升级参考）
+
+当前 Chart `0.4.0` 的全新生产部署、精确镜像 tag、构建发布和安装命令以 [Helm 生产部署手册](helm-production.md) 为准。下文保留旧版本升级/清理协议约束和历史构建示例，其中的历史镜像 tag 不构成本轮发布清单。项目镜像 `v0.4.0` 仍待构建发布。
 
 本文只说明服务器上实际怎么替换 Chart、填写 values、构建镜像和执行升级。FUSE 原理与后端差异见 [Workspace FUSE 运维说明](workspace-fuse.md)。
 
@@ -6,7 +8,7 @@
 
 - 新版 `Chart.yaml`、`templates/`、`files/` 和 `values.schema.json` 必须整套同步，不能新旧混搭；推荐保留新版默认 `values.yaml`，用外部环境 values 覆盖。
 - 服务器自己的配置单独放在 Chart 外，例如 `/opt/sandbox/env/values-prod.yaml`。
-- AK/SK 直接写在环境 values 的 `config.storage.filesystem.accessKey/secretKey`，不再创建 workspace credential Secret。
+- AK/SK 优先通过 `config.storage.filesystem.credentialsSecretName` 引用包含 `access-key` / `secret-key` 的 Secret；inline 字段仅作兼容。
 - 一个 release 只配置一个后端，但同一后端可以同时服务 sync 和 FUSE。
 - 普通升级执行一次 `helm upgrade`；backend、凭据、FUSE 镜像、有效 LSM/nodeSelector、显式 DNS 准入配置或 cleanup protocol 变化时，Chart 会先排空。
 - AppArmor 加载器需要单独构建、推送镜像，默认关闭；真实隔离验收通过前不能直接开启线上开关。
@@ -80,7 +82,7 @@ config:
 
 AK/SK 轮换时同时递增 `credentialGeneration`，例如从 `rotation-1` 改为 `rotation-2`，确保旧 FUSE 空壳不会进入新凭据对应的 Pool。该字段不包含凭据。
 
-因为 AK/SK 直接进入 values，它们也会出现在 Helm release 历史和 `sandbox-api` 环境中。环境 values 文件应限制为运维账号可读，集群 RBAC 也应限制读取 release Secret、Deployment 和 Pod 详情；排障时不要输出完整 values、渲染清单或容器环境。
+使用 inline AK/SK 时，它们会进入 values，也会出现在 Helm release 历史和 `sandbox-api` 环境中。环境 values 文件应限制为运维账号可读，集群 RBAC 也应限制读取 release Secret、Deployment 和 Pod 详情；排障时不要输出完整 values、渲染清单或容器环境。
 
 未启用可选加载器时，`lsmProfile` 是节点上已经加载的 AppArmor localhost profile 名称，Chart
 不会代替节点安装 profile。可选自动加载方案见 [AppArmor 加载器](apparmor-loader.md)。所有可能调度 FUSE Pod 的节点都必须加载同名
@@ -167,7 +169,7 @@ CHART=/opt/sandbox/charts/sandbox-new
 VALUES=/opt/sandbox/env/values-prod.yaml
 
 kubectl --context "$CTX" create namespace "$NS" 2>/dev/null || true
-test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.3.0"
+test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.4.0"
 helm lint "$CHART" -f "$VALUES"
 helm --kube-context "$CTX" upgrade --install "$RELEASE" "$CHART" \
   --namespace "$NS" \
@@ -181,7 +183,7 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" "$CHART" \
 先渲染检查，再升级：
 
 ```bash
-test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.3.0"
+test "$(helm show chart "$CHART" | awk '$1 == "version:" { print $2 }')" = "0.4.0"
 helm lint "$CHART" -f "$VALUES"
 helm --kube-context "$CTX" upgrade "$RELEASE" "$CHART" \
   --namespace "$NS" \

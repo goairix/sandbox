@@ -53,7 +53,10 @@ func partialSentinelChart(t *testing.T, schema bool, configure func(map[string]a
 	if err := yaml.Unmarshal(data, &values); err != nil {
 		t.Fatal(err)
 	}
+	mapping(t, mapping(t, mapping(t, values["config"])["storage"])["state"])["backend"] = "redis"
+	mapping(t, values["etcd"])["enabled"] = false
 	redis := mapping(t, values["redis"])
+	redis["enabled"] = true
 	redis["mode"] = "sentinel"
 	redis["password"] = "fixture_data_012345678901234567890123456789"
 	redis["sentinel"] = map[string]any{

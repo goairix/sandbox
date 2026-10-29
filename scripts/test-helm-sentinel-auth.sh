@@ -25,7 +25,9 @@ sentinel_username = 'sentinel-user "\\值'
 
 def render(overrides):
     command = ["helm", "template", "sandbox", chart]
-    for key, value in overrides.items():
+    effective = {"config.storage.state.backend": "redis", "etcd.enabled": False,
+                 "redis.enabled": True, **overrides}
+    for key, value in effective.items():
         command += ["--set-json", key + "=" + json.dumps(value)]
     return [doc for doc in yaml.safe_load_all(
         subprocess.check_output(command, text=True)) if doc]
@@ -104,6 +106,8 @@ check("built-in data password unchanged", {"redis.password": data_password},
       [secret_ref("PASSWORD", "password")], {"password": data_password})
 for mode in ("standalone", "cluster"):
     result = subprocess.run(["helm", "template", "sandbox", chart,
+                             "--set", "config.storage.state.backend=redis",
+                             "--set", "etcd.enabled=false",
                              "--set", "redis.enabled=false",
                              "--set", "redis.external.mode=" + mode,
                              "--set", "redis.external.masterName=leftover"],

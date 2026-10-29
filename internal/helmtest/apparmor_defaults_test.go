@@ -70,9 +70,9 @@ func TestAppArmorTemplatesSupplyMissingDefaults(t *testing.T) {
 					t.Fatal("loader must explicitly disable service links to match the startup gate contract")
 				}
 				c := container(t, pod, "containers", "apparmor-loader")
-				wantImage := "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.1.0"
+				wantImage := "registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader:v0.4.0"
 				if tc.name == "partial-image" {
-					wantImage = "example.test/loader:v0.1.0"
+					wantImage = "example.test/loader:v0.4.0"
 				}
 				if c["image"] != wantImage || c["imagePullPolicy"] != "IfNotPresent" {
 					t.Fatalf("missing image fields must resolve to documented defaults: %v", c["image"])

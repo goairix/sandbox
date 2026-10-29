@@ -1,0 +1,243 @@
+{{- include "sandbox.validateState" . -}}
+{{- if eq (include "sandbox.builtinEtcd" .) "true" -}}
+{{- $name := include "sandbox.etcdName" . -}}
+{{- $identity := include "sandbox.etcdClusterIdentity" . -}}
+{{- $annotation := "goairix.github.io/etcd-cluster-identity" -}}
+{{- $installed := lookup "apps/v1" "StatefulSet" .Release.Namespace $name -}}
+{{- if and $installed (ne (dig "metadata" "annotations" $annotation "" $installed) $identity) -}}
+{{- fail "installed etcd cluster identity differs; preserve release/namespace/clusterDomain and recover original membership" -}}
+{{- end -}}
+{{- range $ordinal := until 3 -}}
+{{- $claim := lookup "v1" "PersistentVolumeClaim" $.Release.Namespace (printf "data-%s-%d" $name $ordinal) -}}
+{{- if and $claim (ne (dig "metadata" "annotations" $annotation "" $claim) $identity) -}}
+{{- fail "retained etcd PVC identity differs or is missing; restore the original cluster configuration instead of reinitializing retained data" -}}
+{{- end -}}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-etcd
+    release: {{ .Release.Name }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: sandbox-etcd
+    release: {{ .Release.Name }}
+  ports:
+    - name: client
+      port: 2379
+      targetPort: client
+    - name: peer
+      port: 2380
+      targetPort: peer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-etcd
+    release: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-etcd
+    release: {{ .Release.Name }}
+  ports:
+    - name: client
+      port: 2379
+      targetPort: client
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sandbox-etcd
+    release: {{ .Release.Name }}
+  annotations:
+    {{ $annotation }}: {{ $identity | quote }}
+spec:
+  serviceName: {{ $name }}-headless
+  replicas: 3
+  # OrderedReady would wait for member 0 readiness before starting its quorum peers.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: sandbox-etcd
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: sandbox-etcd
+        release: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      {{- if .Values.image.pullSecretName }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecretName | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+{{ toYaml .Values.etcd.nodeSelector | indent 8 }}
+      affinity:
+        podAntiAffinity:
+          {{- if .Values.etcd.hardAntiAffinity }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: sandbox-etcd
+                  release: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sandbox-etcd
+                    release: {{ .Release.Name }}
+                topologyKey: kubernetes.io/hostname
+          {{- end }}
+      containers:
+        - name: etcd
+          image: {{ printf "%s:%s" .Values.etcd.image.repository .Values.etcd.image.tag | quote }}
+          imagePullPolicy: {{ .Values.etcd.image.pullPolicy }}
+          command: ["/usr/local/bin/etcd"]
+          args:
+            - "--name=$(POD_NAME)"
+            - "--data-dir=/var/lib/etcd/data"
+            - "--listen-client-urls=http://0.0.0.0:2379"
+            - "--listen-peer-urls=http://0.0.0.0:2380"
+            - {{ printf "--advertise-client-urls=http://$(POD_NAME).%s-headless.%s.svc.%s:2379" $name .Release.Namespace .Values.etcd.clusterDomain | quote }}
+            - {{ printf "--initial-advertise-peer-urls=http://$(POD_NAME).%s-headless.%s.svc.%s:2380" $name .Release.Namespace .Values.etcd.clusterDomain | quote }}
+            - {{ printf "--initial-cluster=%s" (include "sandbox.etcdInitialCluster" .) | quote }}
+            - {{ printf "--initial-cluster-token=%s" $identity | quote }}
+            - "--initial-cluster-state=new"
+            - "--auto-compaction-mode=periodic"
+            - {{ printf "--auto-compaction-retention=%s" .Values.etcd.autoCompactionRetention | quote }}
+            - {{ printf "--quota-backend-bytes=%d" (int64 .Values.etcd.quotaBackendBytes) | quote }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: client
+              containerPort: 2379
+            - name: peer
+              containerPort: 2380
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+{{ toYaml .Values.etcd.resources | indent 12 }}
+          # Status checks the local process without requiring a healthy quorum.
+          # A quorum loss must not trigger cascading liveness restarts.
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--dial-timeout=2s", "--command-timeout=3s", "endpoint", "status"]
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 120
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--dial-timeout=2s", "--command-timeout=3s", "endpoint", "status"]
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--dial-timeout=2s", "--command-timeout=3s", "endpoint", "health"]
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/etcd
+  # Kubernetes retains StatefulSet claims by default; no auto-delete retention policy.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: sandbox-etcd
+          release: {{ .Release.Name }}
+        annotations:
+          {{ $annotation }}: {{ $identity | quote }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if eq .Values.etcd.persistence.storageClass "-" }}
+        storageClassName: ""
+        {{- else if .Values.etcd.persistence.storageClass }}
+        storageClassName: {{ .Values.etcd.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.etcd.persistence.size | quote }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: sandbox-etcd
+      release: {{ .Release.Name }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-etcd
+      release: {{ .Release.Name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-etcd
+              release: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 2380
+        - protocol: TCP
+          port: 2379
+    - from:
+        - podSelector:
+            matchLabels:
+              release: {{ .Release.Name }}
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [sandbox, sandbox-drain]
+      ports:
+        - protocol: TCP
+          port: 2379
+{{- end }}
+{{- end }}

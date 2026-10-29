@@ -1,24 +1,66 @@
-# Example overlay only: replace addresses/master name and configure credentials
-# through your existing secure deployment mechanism before installing.
+# 全新生产安装：内置三成员 etcd + FUSE。项目镜像 v0.4.0 均待构建发布。
+# 用 Chart 外的环境 values 覆盖端点、前缀、bucket、Secret、节点与网络配置。
+# 不用于直接升级已有 Redis release；不会自动迁移任何状态。
+# 说明：docs/deployment/helm-production.md。
 productionSafetyChecks: true
 replicaCount: 3
 autoscaling:
+  enabled: true
   minReplicas: 3
+  maxReplicas: 10
 podDisruptionBudget:
+  enabled: true
   minAvailable: 2
+etcd:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClass: "" # 按生产集群指定；空值使用默认 StorageClass。
+    size: 10Gi
+  hardAntiAffinity: true
 redis:
   enabled: false
-  external:
-    mode: sentinel
-    addrs:
-      - redis-sentinel-0.example.internal:26379
-      - redis-sentinel-1.example.internal:26379
-      - redis-sentinel-2.example.internal:26379
-    masterName: sandbox-master
-    requireHA: true
-    durability: replica_ack
-    ackReplicas: 1
-    ackTimeoutMs: 500
+apparmorLoader:
+  # 仅用于已完成实际 CRI/AppArmor/FUSE 验收的节点。
+  # 已由节点管理员预加载受限 profile 时，可关闭并填写 workspace.lsmProfile。
+  enabled: true
 config:
+  runtime:
+    type: kubernetes
+    kubernetes:
+      namespace: "" # 与 release 同 namespace，简化 Secret/拉取凭据管理。
+      nodeSelector:
+        kubernetes.io/os: linux
+      networkPolicyProvider: auto # 按真实 CNI 覆盖为 standard 或 cilium。
+  storage:
+    state:
+      backend: etcd
+      etcd:
+        endpoints: [] # 自动连接本 release 的三个 etcd 成员。
+        prefix: /sandbox/production-cell/ # 首次安装必须使用未占用的专属前缀。
+        timeoutMs: 3000
+        existingSecret: "" # 内置 etcd 为 NetworkPolicy 隔离的 HTTP；外部模式支持 mTLS。
+    filesystem:
+      preset: minio
+      endpoint: minio.example.internal
+      bucket: sandbox-production
+      subPath: production-cell
+      useSSL: true
+      accessKey: ""
+      secretKey: ""
+      credentialsSecretName: sandbox-storage-credentials
+      storageIdentity: production-object-store
+      credentialGeneration: rotation-1
   workspace:
+    defaultMountMode: fuse
+    enabledMountModes: [fuse, sync]
     allowMissingLSMForKind: false
+    fusePool:
+      minSize: 3
+      maxSize: 20 # 准备池上限，不是业务存活沙盒数量上限。
+  security:
+    apiKeySecretName: sandbox-api-key
+    networkEnabled: false
+    networkBlockPrivate: true
+networkPolicy:
+  enabled: true

@@ -2,6 +2,35 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "etcd": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "replicaCount", "image", "clusterDomain", "persistence", "autoCompactionRetention", "quotaBackendBytes", "hardAntiAffinity", "nodeSelector", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "replicaCount": {"type": "integer", "enum": [3]},
+        "image": {
+          "type": "object", "additionalProperties": false, "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?$"},
+            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        },
+        "clusterDomain": {"type": "string", "minLength": 1, "maxLength": 253},
+        "persistence": {
+          "type": "object", "additionalProperties": false, "required": ["enabled", "storageClass", "size"],
+          "properties": {
+            "enabled": {"type": "boolean"}, "storageClass": {"type": "string"},
+            "size": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"}
+          }
+        },
+        "autoCompactionRetention": {"type": "string", "pattern": "^[1-9][0-9]*(m|h)$"},
+        "quotaBackendBytes": {"type": "integer", "minimum": 16777216, "maximum": 8589934592},
+        "hardAntiAffinity": {"type": "boolean"},
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+        "resources": {"type": "object"}
+      }
+    },
     "redis": {
       "type": "object",
       "properties": {

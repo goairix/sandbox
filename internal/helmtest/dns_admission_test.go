@@ -18,12 +18,12 @@ import (
 func TestDNSAdmissionDefaultHelmBaseline(t *testing.T) {
 	docs := render(t, "apparmorLoader.enabled=true")
 	for _, tc := range []struct{ kind, name, want string }{
-		// The API readiness handler has a two-second state deadline; its probe
-		// now allows three seconds so Kubernetes control-plane contention does
-		// not withdraw both otherwise healthy API endpoints.
-		{"Deployment", "sandbox-api", "bc87fec1f117d82eddc83a92b4e1ab893393f8b3c027d50caeb966ee3fabc76b"},
-		{"DaemonSet", "sandbox-apparmor-loader", "d12941e36702f546e509e3fe066deb979b998d5cae582932f97eac9fafdba19d"},
-		{"StatefulSet", "sandbox-redis", "c287ff99b6ff26d718585fcafa9ba5d61754452e08c6065b30a4b0e6a4948fac"},
+		// Chart 0.4.0 pins project images to v0.4.0 and Redis to 7.4.2.
+		// The API fingerprint changes with the FUSE image references; DNS and
+		// probe behavior remain unchanged.
+		{"Deployment", "sandbox-api", "4aeb8f98f842765de48352670305016f6027666a1d12dca5c7be6a1bdbad430f"},
+		{"DaemonSet", "sandbox-apparmor-loader", "fb01d2373cbbafe16f89622f8e150caebbcc8602b31b1270faf640d7667979dd"},
+		{"StatefulSet", "sandbox-redis", "6c0a694c5d9871218635382139b61c35a030422df11c6635fc1d201cb7f5326e"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			template := mapping(t, object(t, docs, tc.kind, tc.name)["spec"])["template"]

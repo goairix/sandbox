@@ -181,7 +181,7 @@ curl -X POST http://localhost:8080/api/v1/sandboxes \
 
 **创建带工作空间的沙箱：**
 
-部署、Secret、Pool、后端切换和发布门禁见 [Workspace 存储部署与运维手册](docs/deployment/workspace-fuse.md)；Kubernetes 发布见 [Helm 部署、升级与镜像发布 Runbook](docs/deployment/helm-deployment-upgrade.md)，Docker 发布见 [Docker Compose 部署与升级 Runbook](docs/deployment/docker-compose-deployment-upgrade.md)。
+部署、Secret、Pool、后端切换和发布门禁见 [Workspace 存储部署与运维手册](docs/deployment/workspace-fuse.md)；Kubernetes 正式部署见 [Helm 生产部署手册（0.4.0）](docs/deployment/helm-production.md)，旧部署升级约束见 [Helm 升级参考](docs/deployment/helm-deployment-upgrade.md)，Docker 发布见 [Docker Compose 部署与升级 Runbook](docs/deployment/docker-compose-deployment-upgrade.md)。
 
 ```bash
 # 创建沙箱并挂载工作空间（自动将存储后端的文件同步到容器 /workspace）

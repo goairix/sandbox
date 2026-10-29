@@ -35,7 +35,8 @@ assert fingerprint(default) != fingerprint(render({'config.workspace.lsmProfile'
 assert fingerprint(default) != fingerprint(render({'config.runtime.kubernetes.nodeSelector': {'zone': 'one'}})), 'selector must change backend contract'
 assert fingerprint(render({'config.runtime.kubernetes.nodeSelector': {'zone': 'one', 'pool': 'gpu'}})) == fingerprint(render({'config.runtime.kubernetes.nodeSelector': {'pool': 'gpu', 'zone': 'one'}})), 'selector encoding must be stable'
 production = render({'apparmorLoader.enabled': True, 'config.workspace.lsmProfile': '',
-                     'productionSafetyChecks': True, 'redis.enabled': False,
+                     'productionSafetyChecks': True, 'config.storage.state.backend': 'redis',
+                     'etcd.enabled': False, 'redis.enabled': False,
                      'redis.external.mode': 'sentinel', 'redis.external.masterName': 'sandbox',
                      'redis.external.addrs': ['observer-a:26379', 'observer-b:26379', 'observer-c:26379'],
                      'redis.external.requireHA': True, 'redis.external.durability': 'replica_ack'})

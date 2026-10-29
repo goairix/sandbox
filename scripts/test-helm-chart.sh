@@ -3,10 +3,14 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 chart_metadata="$(helm show chart "$repo_root/deploy/helm/sandbox")"
-test "$(awk '$1 == "version:" { print $2 }' <<<"$chart_metadata")" = "0.3.0"
-test "$(awk '$1 == "appVersion:" { print $2 }' <<<"$chart_metadata")" = "0.2.0"
-rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox")"
+test "$(awk '$1 == "version:" { print $2 }' <<<"$chart_metadata")" = "0.4.0"
+test "$(awk '$1 == "appVersion:" { print $2 }' <<<"$chart_metadata")" = "0.4.0"
+# The legacy assertions below explicitly exercise Redis; Go tests cover new etcd defaults.
+rendered="$(helm template sandbox "$repo_root/deploy/helm/sandbox" --set config.storage.state.backend=redis --set etcd.enabled=false --set redis.enabled=true)"
 sentinel_args=(
+  --set config.storage.state.backend=redis
+  --set etcd.enabled=false
+  --set redis.enabled=true
   --kube-version 1.33.0
   --set redis.mode=sentinel
   --set redis.sentinel.identitySecretName=sandbox-redis-sentinel-identity
@@ -182,11 +186,11 @@ test "$minio_docker" = "$expected_docker"
 grep -A4 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
   | grep -Fq 'repository: redis'
 grep -A5 '^redis:' "$repo_root/deploy/helm/sandbox/values.yaml" \
-  | grep -Fq 'tag: "7-alpine"'
+  | grep -Fq 'tag: "7.4.2"'
 grep -A9 '^  sentinel:' "$repo_root/deploy/helm/sandbox/values.yaml" \
   | grep -Fq 'repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap'
 grep -A9 '^  sentinel:' "$repo_root/deploy/helm/sandbox/values.yaml" \
-  | grep -Fq 'tag: v0.1.0'
+  | grep -Fq 'tag: v0.4.0'
 
 if helm lint "$repo_root/deploy/helm/sandbox" --set config.storage.filesystem.preset=unknown >/dev/null 2>&1; then
   printf 'helm lint unexpectedly accepted an unknown backend preset\n' >&2

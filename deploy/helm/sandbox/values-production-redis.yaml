@@ -1,0 +1,30 @@
+etcd:
+  enabled: false
+# 旧 Redis 安装专用：外部 Sentinel 生产覆盖示例。
+# 不与 values-production.yaml 叠加，不会迁移 Redis 状态。
+# 替换地址/masterName，并通过现有安全发布机制配置两套独立认证。
+productionSafetyChecks: true
+replicaCount: 3
+autoscaling:
+  minReplicas: 3
+podDisruptionBudget:
+  minAvailable: 2
+redis:
+  enabled: false
+  external:
+    mode: sentinel
+    addrs:
+      - redis-sentinel-0.example.internal:26379
+      - redis-sentinel-1.example.internal:26379
+      - redis-sentinel-2.example.internal:26379
+    masterName: sandbox-master
+    requireHA: true
+    durability: replica_ack
+    ackReplicas: 1
+    ackTimeoutMs: 500
+config:
+  storage:
+    state:
+      backend: redis
+  workspace:
+    allowMissingLSMForKind: false

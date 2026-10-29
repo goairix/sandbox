@@ -1,3 +1,6 @@
+# 当前代码的计划发布版本：项目镜像 v0.4.0 均待构建、推送与验收。
+# 默认安装内置三成员 etcd 与独立 PVC；生产配置叠加 values-production.yaml。
+# 操作手册：docs/deployment/helm-production.md。
 replicaCount: 3
 
 # 按需开启生产安全校验，生产配置示例见 values-production.yaml。
@@ -14,7 +17,7 @@ apparmorLoader:
   priorityClassName: ""
   image:
     repository: registry.i.huaxisy.com/library/ai-infra/sandbox-apparmor-loader
-    tag: v0.1.0
+    tag: v0.4.0
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -37,7 +40,7 @@ podDisruptionBudget:
 
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
-  tag: v0.2.12
+  tag: v0.4.0
   pullPolicy: IfNotPresent
   # 可选：私有仓库拉取凭据，API 与清理 Job 共用此 ServiceAccount。
   pullSecretName: ""
@@ -63,7 +66,7 @@ startupProbe:
   timeoutSeconds: 1
   failureThreshold: 120
 
-# Helm 删除 Redis 前，先将 API Deployment 缩容至零，完成所有
+# Helm 删除内置 etcd/Redis 前，先将 API Deployment 缩容至零，完成所有
 # 持久和临时工作区的清理，排空普通池、FUSE 池，并审计确认无遗留状态。
 preDeleteDrain:
   enabled: true
@@ -75,13 +78,41 @@ autoscaling:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
-# Redis 配置
-redis:
-  # 使用 Chart 内置 Redis；设为 false 时使用外部 Redis。
+# 默认内置 etcd：固定三成员，三个独立 PVC；卸载/重建 Pod 均保留 PVC。
+# 至少需要三个可调度节点及可用的默认 StorageClass，或显式指定 storageClass。
+etcd:
   enabled: true
+  replicaCount: 3 # 静态三成员拓扑，不支持直接改副本数扩缩容。
+  image:
+    repository: quay.io/coreos/etcd
+    tag: v3.6.14
+    pullPolicy: IfNotPresent
+  clusterDomain: cluster.local
+  persistence:
+    enabled: true # 内置模式必须持久化，不支持 emptyDir。
+    storageClass: "" # 空值使用集群默认类；"-" 表示显式无 StorageClass。
+    size: 10Gi # 每个成员单独申请，总计三块卷。
+  # 压缩历史 revision；quota 是数据库限制，不等于 PVC 容量，须留出 WAL/维护空间。
+  autoCompactionRetention: 1h
+  quotaBackendBytes: 2147483648 # 2Gi，必须小于单块 PVC 容量。
+  hardAntiAffinity: true # 跨 kubernetes.io/hostname 强制分散；测试才可设 false。
+  nodeSelector:
+    kubernetes.io/os: linux
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Redis 兼容模式：同时显式选择 config.storage.state.backend=redis。
+redis:
+  # Redis backend 下使用 Chart 内置 Redis；设为 false 时使用外部 Redis。
+  enabled: false
   image:
     repository: redis
-    tag: "7-alpine"
+    tag: "7.4.2"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -103,7 +134,7 @@ redis:
     # 不与 sandbox-api tag 绑定，也不会回退使用 API 镜像。
     bootstrapImage:
       repository: registry.i.huaxisy.com/library/ai-infra/sandbox-redis-bootstrap
-      tag: v0.1.0
+      tag: v0.4.0
       pullPolicy: IfNotPresent
     masterName: sandbox
     clusterDomain: cluster.local
@@ -198,15 +229,15 @@ config:
     minSize: 3
     maxSize: 20
   images:
-    sandbox: "registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12"
-    gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12"
+    sandbox: "registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.4.0"
+    gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.4.0"
   storage:
     state:
-      # 旧安装保留 redis；全新部署显式选择 etcd，并关闭 redis.enabled。
-      backend: redis
+      # 旧 Redis 安装必须在环境 values 中显式保留 redis，不会自动迁移。
+      backend: etcd
       etcd:
-        endpoints: []
-        prefix: ""
+        endpoints: [] # 内置时自动生成；外部模式关闭 etcd.enabled 后填写。
+        prefix: /sandbox/default/
         timeoutMs: 3000
         # 可选。留空使用无 TLS 连接；填入时 Secret 提供
         # ca.crt、client.crt、client.key 三个键。
@@ -236,8 +267,8 @@ config:
       - sync
       - fuse
     fuseImages:
-      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.2.12
-      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.2.12
+      mounter: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-mounter:v0.4.0
+      docker: registry.i.huaxisy.com/library/ai-infra/sandbox-fuse-docker:v0.4.0
     # 仅用于 Docker Desktop 上的本地 kind 集群。生产环境必须保持 false，
     # 并配置真实的 AppArmor/SELinux 安全策略。
     allowMissingLSMForKind: false

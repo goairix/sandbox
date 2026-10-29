@@ -1,0 +1,17 @@
+# 可选外部 etcd：可叠加在 values-production.yaml 后，再加载自己的环境 values。
+# 不会将已有内置集群的数据迁移到这里；已有安装切换须另行迁移和验收。
+etcd:
+  enabled: false
+redis:
+  enabled: false
+config:
+  storage:
+    state:
+      backend: etcd
+      etcd:
+        endpoints:
+          - etcd-0.example.internal:2379
+          - etcd-1.example.internal:2379
+          - etcd-2.example.internal:2379
+        prefix: /sandbox/external-cell/
+        existingSecret: "" # mTLS：含 ca.crt、client.crt、client.key 的 Secret。

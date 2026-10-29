@@ -28,7 +28,9 @@ func render(t *testing.T, overrides ...string) []map[string]any {
 		t.Fatal("test location unavailable")
 	}
 	chart := filepath.Join(filepath.Dir(filename), "..", "..", "deploy", "helm", "sandbox")
-	return renderChart(t, chart, overrides...)
+	// Historical Redis tests opt in explicitly; etcd_cluster_test.go tests the real defaults.
+	legacy := []string{"config.storage.state.backend=redis", "etcd.enabled=false", "redis.enabled=true"}
+	return renderChart(t, chart, append(legacy, overrides...)...)
 }
 
 func renderChart(t *testing.T, chart string, overrides ...string) []map[string]any {
@@ -125,11 +127,11 @@ func env(t *testing.T, c map[string]any) map[string]map[string]any {
 }
 
 func sentinelOverrides() []string {
-	return []string{"redis.mode=sentinel", "redis.sentinel.identitySecretName=sandbox-redis-sentinel-identity", "redis.sentinel.existingSecret=sandbox-auth"}
+	return []string{"config.storage.state.backend=redis", "etcd.enabled=false", "redis.enabled=true", "redis.mode=sentinel", "redis.sentinel.identitySecretName=sandbox-redis-sentinel-identity", "redis.sentinel.existingSecret=sandbox-auth"}
 }
 
 func autoSentinelOverrides() []string {
-	return []string{"redis.mode=sentinel", "redis.password=fixture_data_012345678901234567890123456789", "redis.sentinel.password=fixture_sentinel_012345678901234567890123456789"}
+	return []string{"config.storage.state.backend=redis", "etcd.enabled=false", "redis.enabled=true", "redis.mode=sentinel", "redis.password=fixture_data_012345678901234567890123456789", "redis.sentinel.password=fixture_sentinel_012345678901234567890123456789"}
 }
 
 func TestSentinelBootstrapImageIsIndependentFromAPI(t *testing.T) {

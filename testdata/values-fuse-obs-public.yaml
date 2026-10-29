@@ -1,3 +1,5 @@
+etcd:
+  enabled: false
 image:
   repository: registry.i.huaxisy.com/library/ai-infra/sandbox-api
   tag: v0.2.12
@@ -30,6 +32,8 @@ config:
     sandbox: registry.i.huaxisy.com/library/ai-infra/sandbox-runtime:v0.2.12
     gateway: registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.2.12
   storage:
+    state:
+      backend: redis
     filesystem:
       preset: huawei-obs-public
       bucket: sandbox-fuse-workspace
