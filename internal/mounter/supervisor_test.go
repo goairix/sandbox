@@ -251,6 +251,7 @@ func TestAuthorizeBuildsArgvWithoutShellInterpolation(t *testing.T) {
 	assert.Contains(t, runner.argv[0], "url=https://minio.example.com")
 	assert.Contains(t, runner.argv[0], "endpoint=us-east-1")
 	assert.Contains(t, runner.argv[0], "use_path_request_style")
+	assert.Contains(t, runner.argv[0], "multireq_max=1")
 }
 
 func TestBootstrapCanonicalizesRuntimeUIDAndAllowsCacheRoot(t *testing.T) {

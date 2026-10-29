@@ -124,7 +124,15 @@ func minioOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {
 	if !canonicalRegion.MatchString(config.Region) {
 		return nil, fmt.Errorf("minio profile requires a canonical SigV4 region")
 	}
-	return []string{"-o", "url=" + config.Endpoint, "-o", "endpoint=" + config.Region, "-o", "use_path_request_style", "-o", "sigv4"}, nil
+	// Limit cold-directory HEAD fan-out so CPU-limited mounters can reuse
+	// established TLS connections instead of opening a burst of new ones.
+	return []string{
+		"-o", "url=" + config.Endpoint,
+		"-o", "endpoint=" + config.Region,
+		"-o", "use_path_request_style",
+		"-o", "sigv4",
+		"-o", "multireq_max=1",
+	}, nil
 }
 
 func minioPrivateHTTPOptions(config fuseprotocol.BootstrapConfig) ([]string, error) {

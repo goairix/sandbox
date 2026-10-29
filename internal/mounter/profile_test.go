@@ -26,6 +26,7 @@ func TestCompiledMinIOProfileHasExactVerifiedMountContract(t *testing.T) {
 		"-o", "endpoint=us-east-1",
 		"-o", "use_path_request_style",
 		"-o", "sigv4",
+		"-o", "multireq_max=1",
 	}, options)
 	require.NotNil(t, profile.Flush)
 	assert.Equal(t, []string{"/bin/sync", "-f", "--", "/workspace"}, profile.Flush(fuseprotocol.BootstrapConfig{MountPath: "/workspace"}))
