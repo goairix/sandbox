@@ -1215,7 +1215,7 @@ func (m *Manager) restorePersistentSandboxes(ctx context.Context) {
 				m.workspaces[id] = scoped
 				// Re-sync files to the new container (skip for bind mount)
 				if !sbPtr.Workspace.BindMounted {
-					if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID); syncErr != nil {
+					if syncErr := m.syncToContainer(ctx, scoped, sbPtr.RuntimeID, sbPtr.Workspace.SyncExclude...); syncErr != nil {
 						logger.Error(ctx, "workspace re-sync failed",
 							logger.AddField("sandbox_id", id),
 							logger.AddField("runtime_id", sbPtr.RuntimeID),

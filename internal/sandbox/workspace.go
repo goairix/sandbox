@@ -14,6 +14,7 @@ import (
 	"mime"
 
 	"github.com/goairix/fs"
+
 	"github.com/goairix/sandbox/internal/logger"
 	"github.com/goairix/sandbox/internal/runtime"
 	"github.com/goairix/sandbox/internal/storage"
@@ -89,7 +90,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 	}
 
 	// Sync files from storage to container
-	if err := m.syncToContainer(ctx, scoped, runtimeID); err != nil {
+	if err := m.syncToContainer(ctx, scoped, runtimeID, exclude...); err != nil {
 		logger.Error(ctx, "MountWorkspace: sync to container failed",
 			logger.AddField("sandbox_id", sandboxID),
 			logger.AddField("runtime_id", runtimeID),
@@ -105,7 +106,7 @@ func (m *Manager) MountWorkspace(ctx context.Context, sandboxID, rootPath string
 		RootPath:     rootPath,
 		MountedAt:    now,
 		LastSyncedAt: now,
-		SyncExclude:  exclude,
+		SyncExclude:  append([]string(nil), exclude...),
 	}
 	sb.UpdatedAt = now
 	m.mu.Unlock()
@@ -186,6 +187,10 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	}
 	runtimeID := sb.RuntimeID
 	scoped, hasWS := m.workspaces[sandboxID]
+	effectiveExclude := append([]string(nil), exclude...)
+	if sb.Workspace != nil {
+		effectiveExclude = append(effectiveExclude, sb.Workspace.SyncExclude...)
+	}
 	m.mu.RUnlock()
 
 	if !hasWS {
@@ -196,7 +201,7 @@ func (m *Manager) SyncWorkspace(ctx context.Context, sandboxID, direction string
 	syncStart := time.Now()
 	switch direction {
 	case "to_container":
-		err = m.syncToContainer(ctx, scoped, runtimeID)
+		err = m.syncToContainer(ctx, scoped, runtimeID, effectiveExclude...)
 	case "from_container":
 		err = m.syncFromContainer(ctx, sandboxID, runtimeID, exclude)
 	default:
@@ -238,10 +243,10 @@ func (m *Manager) GetWorkspaceInfo(_ context.Context, sandboxID string) (*Worksp
 // into the container via exec pipe. File contents are copied directly from
 // storage, so content memory does not grow with the total workspace byte size;
 // the entries slice still grows with the number of files and directories.
-func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string) error {
+func (m *Manager) syncToContainer(ctx context.Context, scoped storage.ScopedFS, runtimeID string, exclude ...string) error {
 	// Phase 1: walk the directory tree to collect file metadata.
 	var entries []fileEntry
-	if err := m.collectFiles(ctx, scoped, ".", &entries); err != nil {
+	if err := m.collectFiles(ctx, scoped, ".", &entries, exclude...); err != nil {
 		logger.Error(ctx, "syncToContainer: collectFiles failed",
 			logger.AddField("runtime_id", runtimeID),
 			logger.ErrorField(err),
@@ -380,7 +385,7 @@ func (m *Manager) writeTarStream(ctx context.Context, scoped storage.ScopedFS, e
 
 // collectFiles recursively walks the ScopedFS directory tree and appends
 // file/directory metadata to entries. File content is NOT read here.
-func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir string, entries *[]fileEntry) error {
+func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir string, entries *[]fileEntry, exclude ...string) error {
 	files, err := scoped.List(ctx, dir)
 	if err != nil {
 		return err
@@ -398,6 +403,9 @@ func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir
 			relPath = filepath.Join(dir, baseName)
 		}
 
+		if isExcluded(relPath, exclude) {
+			continue
+		}
 		*entries = append(*entries, fileEntry{
 			relPath: relPath,
 			isDir:   fi.IsDir(),
@@ -406,7 +414,7 @@ func (m *Manager) collectFiles(ctx context.Context, scoped storage.ScopedFS, dir
 		})
 
 		if fi.IsDir() {
-			if err := m.collectFiles(ctx, scoped, relPath, entries); err != nil {
+			if err := m.collectFiles(ctx, scoped, relPath, entries, exclude...); err != nil {
 				return err
 			}
 		}
@@ -423,6 +431,12 @@ func (m *Manager) syncFromContainer(ctx context.Context, sandboxID, runtimeID st
 	m.mu.RLock()
 	scoped, ok := m.workspaces[sandboxID]
 	sb := m.sandboxes[sandboxID]
+	// Persisted mount exclusions apply to every write-back, including destroy and callers with nil exclusions.
+	effectiveExclude := append([]string(nil), exclude...)
+	if sb != nil && sb.Workspace != nil {
+		effectiveExclude = append(effectiveExclude, sb.Workspace.SyncExclude...)
+	}
+	exclude = effectiveExclude
 	m.mu.RUnlock()
 	if !ok {
 		logger.Debug(ctx, "syncFromContainer: no workspace found",
