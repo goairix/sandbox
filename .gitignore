@@ -34,3 +34,4 @@ docker/.env
 # miscellaneous
 .DS_Store
 .worktrees/
+.superpowers
