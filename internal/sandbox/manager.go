@@ -129,6 +129,7 @@ type ManagerConfig struct {
 	InstanceID              string
 	ControllerTTL           time.Duration
 	ControllerRenewInterval time.Duration
+	SharedDataOperations    bool
 	ActiveOperationTTL      time.Duration
 	OperationRenewInterval  time.Duration
 	RuntimeType             string
@@ -184,6 +185,8 @@ type Manager struct {
 	ephemeral       *EphemeralLifecycleStore
 	multipartStore  state.Store // optional, for multipart upload state
 	activeSandboxes state.ActiveSandboxRepository
+	sharedData      *sharedDataOperations
+	activeChanges   *activeChangeHub
 
 	pool                *Pool
 	fusePool            *FUSEPool
@@ -242,6 +245,17 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		controlCtx:      controlCtx,
 		cancelControl:   cancelControl,
 		cleanupWake:     make(chan string, activeCleanupWakeQueueSize),
+	}
+	if cfg.SharedDataOperations && m.distributedStateEnabled() {
+		data, dataOK := m.activeSandboxes.(state.ActiveDataOperationRepository)
+		changes, changesOK := m.activeSandboxes.(state.ActiveChangeRepository)
+		if dataOK && changesOK {
+			m.activeChanges = newActiveChangeHub(controlCtx, changes)
+			ttl, interval := m.activeOperationDurations()
+			// Controller cancellation must not remove the protection of HTTP helpers
+			// still joining during shutdown. Shared groups have explicit Stop/join.
+			m.sharedData = newSharedDataOperations(context.WithoutCancel(controlCtx), m.activeSandboxes, data, m.activeChanges, cfg.InstanceID, sharedDataOptions{ttl: ttl, renewInterval: interval})
+		}
 	}
 	if m.fusePool != nil {
 		m.fusePool.config.PristineGuard = m.guardFUSEPoolRecord
@@ -523,6 +537,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.stopOnce.Do(func() {
 		m.lifecycleMu.Lock()
 		m.stopping = true
+		if m.sharedData != nil {
+			m.sharedData.CloseAdmission()
+		}
 		m.cancelControl()
 		close(m.stopCh)
 		m.lifecycleMu.Unlock()
@@ -543,11 +560,20 @@ func (m *Manager) BeginShutdown() {
 	m.lifecycleMu.Lock()
 	m.stopping = true
 	m.lifecycleMu.Unlock()
+	if m.sharedData != nil {
+		m.sharedData.CloseAdmission()
+	}
 }
 
 func (m *Manager) finishShutdown() {
 	defer close(m.shutdownDone)
 	var shutdownErr error
+	if m.sharedData != nil {
+		shutdownErr = errors.Join(shutdownErr, m.sharedData.Stop(context.Background()))
+	}
+	if m.activeChanges != nil {
+		m.activeChanges.Stop()
+	}
 	m.createWG.Wait()
 	m.mu.RLock()
 	lifecycles := make([]*fuseSandboxLifecycle, 0, len(m.fuseLifecycles))
@@ -607,6 +633,9 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		started = true
 		m.lifecycleMu.Lock()
 		m.stopping = true
+		if m.sharedData != nil {
+			m.sharedData.CloseAdmission()
+		}
 		m.cancelControl()
 		close(m.stopCh)
 		m.lifecycleMu.Unlock()
@@ -620,7 +649,15 @@ func (m *Manager) DrainRelease(ctx context.Context) error {
 		}
 	}
 	defer close(m.shutdownDone)
-
+	if m.activeChanges != nil {
+		defer m.activeChanges.Stop()
+	}
+	if m.sharedData != nil {
+		if err := m.sharedData.Stop(ctx); err != nil {
+			m.shutdownErr = err
+			return err
+		}
+	}
 	created := make(chan struct{})
 	go func() {
 		m.createWG.Wait()

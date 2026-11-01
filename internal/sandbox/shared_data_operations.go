@@ -129,3 +129,15 @@ func (r *sharedDataOperations) Stop(ctx context.Context) error {
 	r.cancel()
 	return nil
 }
+
+func (r *sharedDataOperations) invalidate(id string, err error) {
+	r.mu.Lock()
+	g := r.groups[id]
+	r.mu.Unlock()
+	if g != nil {
+		g.mu.Lock()
+		g.failLocked(err)
+		g.mu.Unlock()
+		g.signal()
+	}
+}

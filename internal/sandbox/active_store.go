@@ -160,6 +160,44 @@ func (m *Manager) publishActiveSandboxState(ctx context.Context, sb *Sandbox, cl
 }
 
 func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind state.ActiveOperationKind) (*Sandbox, context.Context, func(), error) {
+	if kind == state.ActiveOperationData && m.sharedData != nil {
+		m.lifecycleMu.Lock()
+		stopping := m.stopping
+		m.lifecycleMu.Unlock()
+		if stopping {
+			return nil, nil, nil, ErrSandboxNotReady
+		}
+		record, opCtx, release, err := m.sharedData.Acquire(ctx, id)
+		if !errors.Is(err, errSharedDataCapacity) {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			sb, err := decodeActiveSandbox(record, id)
+			if err == nil {
+				err = m.validateActiveRuntime(opCtx, sb)
+			}
+			if err != nil {
+				if opCtx.Err() == nil {
+					m.sharedData.invalidate(id, err)
+				}
+				release()
+				return nil, nil, nil, err
+			}
+			return sb, opCtx, release, nil
+		}
+	}
+	return m.beginIndividualDistributedOperation(ctx, id, kind)
+}
+
+func (m *Manager) validateActiveRuntime(ctx context.Context, sb *Sandbox) error {
+	info, err := m.runtime.GetSandbox(ctx, sb.RuntimeID)
+	if err != nil || info == nil || info.State != "running" || info.RuntimeID != sb.RuntimeID || info.RuntimeUID != sb.RuntimeUID {
+		return errors.Join(fmt.Errorf("%w: runtime identity changed for %s", ErrSandboxNotReady, sb.ID), err)
+	}
+	return nil
+}
+
+func (m *Manager) beginIndividualDistributedOperation(ctx context.Context, id string, kind state.ActiveOperationKind) (*Sandbox, context.Context, func(), error) {
 	token := uuid.NewString()
 	ttl, renewInterval := m.activeOperationDurations()
 	record, operation, err := m.activeSandboxes.BeginOperation(ctx, id, token, kind, ttl)
@@ -182,14 +220,7 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 		err = fmt.Errorf("%w: workspace transition pending for %s", ErrSandboxNotReady, id)
 	}
 	if err == nil {
-		var infoRuntimeUID string
-		info, inspectErr := m.runtime.GetSandbox(ctx, sb.RuntimeID)
-		if info != nil {
-			infoRuntimeUID = info.RuntimeUID
-		}
-		if inspectErr != nil || info == nil || info.State != "running" || info.RuntimeID != sb.RuntimeID || infoRuntimeUID != sb.RuntimeUID {
-			err = errors.Join(fmt.Errorf("%w: runtime identity changed for %s", ErrSandboxNotReady, id), inspectErr)
-		}
+		err = m.validateActiveRuntime(ctx, sb)
 	}
 	if err != nil {
 		endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activeOperationEndTimeout)
