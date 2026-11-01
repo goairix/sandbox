@@ -272,3 +272,24 @@ func TestSharedDataGroupKeepAliveResponseLate(t *testing.T) {
 	require.Error(t, err)
 	require.Error(t, context.Cause(ctx))
 }
+
+func TestSharedDataGroupRenewalHonorsConfirmedDeadline(t *testing.T) {
+	repo, r := sharedTestRegistry(t, sharedDataOptions{ttl: 100 * time.Millisecond, renewInterval: time.Hour})
+	_, ctx, release, err := r.Acquire(context.Background(), "s")
+	require.NoError(t, err)
+	defer release()
+	block := make(chan struct{})
+	repo.renewBlock = block
+	defer close(block)
+	r.mu.Lock()
+	g := r.groups["s"]
+	r.mu.Unlock()
+	done := make(chan struct{})
+	go func() { g.renew(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("blocked renewal outlived the locally confirmed protection deadline")
+	}
+	require.Error(t, context.Cause(ctx))
+}

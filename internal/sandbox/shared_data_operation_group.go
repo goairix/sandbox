@@ -168,9 +168,12 @@ func (g *sharedDataOperationGroup) renew() {
 		return
 	}
 	lease := g.lease
+	remaining := g.deadline.Sub(g.registry.options.now())
 	g.mu.Unlock()
 	started := g.registry.options.now()
-	view, ttl, err := g.registry.capability.KeepAliveDataOperation(g.registry.ctx, lease)
+	renewCtx, cancel := context.WithTimeout(g.registry.ctx, max(remaining, time.Nanosecond))
+	defer cancel()
+	view, ttl, err := g.registry.capability.KeepAliveDataOperation(renewCtx, lease)
 	g.mu.Lock()
 	if err != nil || ttl <= 0 || !g.validIdentity(view) {
 		g.failLocked(errors.Join(err, state.ErrActiveSandboxStaleToken))

@@ -78,3 +78,23 @@ func TestActiveChangesCompactionRequestsReset(t *testing.T) {
 	batch := nextActiveChange(t, ch, func(b state.ActiveChangeBatch) bool { return b.Reset })
 	require.True(t, batch.Reset)
 }
+
+func TestActiveChangesFiltersControllerTraffic(t *testing.T) {
+	s, r, _ := sharedDataFixture(t)
+	observed, err := r.ObserveOperations(context.Background(), "shared-sandbox")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := r.WatchActiveChanges(ctx, observed.Revision+1)
+	require.NoError(t, err)
+	for range 100 {
+		_, err = s.client.Put(ctx, r.controllerKey("shared-sandbox"), `{}`)
+		require.NoError(t, err)
+	}
+	_, err = r.Update(ctx, "shared-sandbox", 2, json.RawMessage(`{"ready":true,"marker":true}`))
+	require.NoError(t, err)
+	marker, err := s.client.Get(ctx, r.recordKey("shared-sandbox"))
+	require.NoError(t, err)
+	batch := nextActiveChange(t, ch, func(b state.ActiveChangeBatch) bool { return len(b.Changes) > 0 })
+	require.Equal(t, marker.Kvs[0].ModRevision, batch.Revision, "controller-only updates must not trigger lifecycle rereads")
+}

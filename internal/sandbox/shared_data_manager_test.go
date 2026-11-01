@@ -178,6 +178,15 @@ func TestSharedDataFileStreamReleaseWaitsForJoin(t *testing.T) {
 	r.mu.Lock()
 	require.Zero(t, r.ends)
 	r.mu.Unlock()
+	m.sharedData.mu.Lock()
+	g := m.sharedData.groups["s"]
+	m.sharedData.mu.Unlock()
+	require.NotNil(t, g)
+	g.mu.Lock()
+	refs := g.refs
+	g.mu.Unlock()
+	require.Equal(t, 1, refs, "remote join has not completed, so the protected reference must still exist")
+
 	close(barrier.release)
 	require.NoError(t, <-closed)
 }

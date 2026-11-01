@@ -170,6 +170,9 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 		}
 		record, opCtx, release, err := m.sharedData.Acquire(ctx, id)
 		if !errors.Is(err, errSharedDataCapacity) {
+			if errors.Is(err, state.ErrActiveSandboxNotFound) {
+				return nil, nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+			}
 			if err != nil {
 				return nil, nil, nil, err
 			}

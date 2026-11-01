@@ -9,6 +9,7 @@ import (
 )
 
 var (
+	ErrActiveSandboxNotFound        = errors.New("active sandbox not found")
 	ErrActiveSandboxConflict        = errors.New("active sandbox state conflict")
 	ErrActiveSandboxAdmissionClosed = errors.New("active sandbox admission closed")
 	ErrActiveSandboxLeaseExpired    = errors.New("active sandbox lease expired")

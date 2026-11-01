@@ -19,7 +19,7 @@ func (r *ActiveSandboxRepository) OpenDataOperation(ctx context.Context, id, tok
 		return nil, err
 	}
 	if operation == nil {
-		return nil, state.ErrActiveSandboxStaleToken
+		return nil, state.ErrActiveSandboxNotFound
 	}
 	return r.readDataOperation(ctx, state.ActiveDataLease{Operation: *operation, RequestedTTL: ttl}, true, true, "open")
 }
@@ -50,6 +50,9 @@ func (r *ActiveSandboxRepository) readDataOperation(ctx context.Context, lease s
 		return nil, state.ErrActiveSandboxCorrupt
 	}
 	records, operations := read.Responses[0].GetResponseRange().Kvs, read.Responses[1].GetResponseRange().Kvs
+	if len(records) == 0 {
+		return nil, state.ErrActiveSandboxNotFound
+	}
 	if len(records) != 1 || len(operations) != 1 {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
