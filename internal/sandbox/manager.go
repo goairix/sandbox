@@ -187,6 +187,8 @@ type Manager struct {
 	activeSandboxes state.ActiveSandboxRepository
 	sharedData      *sharedDataOperations
 	activeChanges   *activeChangeHub
+	activeWaitsMu   sync.Mutex
+	activeWaits     map[string]*activeOperationWait
 
 	pool                *Pool
 	fusePool            *FUSEPool
@@ -255,6 +257,8 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 			// Controller cancellation must not remove the protection of HTTP helpers
 			// still joining during shutdown. Shared groups have explicit Stop/join.
 			m.sharedData = newSharedDataOperations(context.WithoutCancel(controlCtx), m.activeSandboxes, data, m.activeChanges, cfg.InstanceID, sharedDataOptions{ttl: ttl, renewInterval: interval})
+		} else {
+			metrics.RecordCoordinationFallback(controlCtx, "unsupported")
 		}
 	}
 	if m.fusePool != nil {

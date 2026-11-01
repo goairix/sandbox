@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 	"github.com/google/uuid"
 
 	"github.com/goairix/sandbox/internal/storage/state"
@@ -185,6 +186,7 @@ func (m *Manager) beginDistributedOperation(ctx context.Context, id string, kind
 			}
 			return sb, opCtx, release, nil
 		}
+		metrics.RecordCoordinationFallback(ctx, "capacity")
 	}
 	return m.beginIndividualDistributedOperation(ctx, id, kind)
 }
@@ -359,22 +361,10 @@ func (m *Manager) finishDistributedSandboxCleanup(ctx context.Context, record *s
 	if err != nil {
 		return false, err
 	}
-	deadline := time.NewTicker(25 * time.Millisecond)
-	defer deadline.Stop()
-	for {
-		live, countErr := m.activeSandboxes.LiveOperations(ctx, id)
-		if countErr != nil {
-			return false, countErr
-		}
-		if live == 0 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-deadline.C:
-		}
+	if err := m.waitDistributedOperations(ctx, id, nil); err != nil {
+		return false, err
 	}
+
 	if sb.Workspace != nil && sb.Workspace.MountType == WorkspaceMountSync &&
 		(record.CleanupCheckpoint == "sync_final_output_done" || record.CleanupCheckpoint == "sync_runtime_removed") {
 		// Final output was durably checkpointed before deletion. Cleanup must

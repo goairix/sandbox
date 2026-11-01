@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
+	"github.com/goairix/sandbox/internal/telemetry/metrics"
 	"github.com/google/uuid"
 )
 
@@ -73,6 +74,7 @@ func (r *sharedDataOperations) Acquire(ctx context.Context, id string) (*state.A
 		groupCtx, cancel := context.WithCancelCause(r.ctx)
 		g = &sharedDataOperationGroup{registry: r, id: id, ready: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1), ctx: groupCtx, cancel: cancel}
 		r.groups[id] = g
+		metrics.RecordCoordinationGroup(r.ctx, 1)
 		go g.create()
 	}
 	r.mu.Unlock()
@@ -88,6 +90,7 @@ func (r *sharedDataOperations) remove(g *sharedDataOperationGroup) {
 	r.mu.Lock()
 	if r.groups[g.id] == g {
 		delete(r.groups, g.id)
+		metrics.RecordCoordinationGroup(r.ctx, -1)
 	}
 	r.mu.Unlock()
 }

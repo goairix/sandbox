@@ -233,6 +233,7 @@ config:
     gateway: "registry.i.huaxisy.com/library/ai-infra/sandbox-gateway:v0.4.0"
   storage:
     state:
+      sharedDataOperations: false # 验收通过后单实例灰度开启。
       # 旧 Redis 安装必须在环境 values 中显式保留 redis，不会自动迁移。
       backend: etcd
       etcd:

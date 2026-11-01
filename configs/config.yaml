@@ -97,6 +97,7 @@ pool:
 storage:
   # State storage (sandbox lifecycle tracking)
   state:
+    shared_data_operations: false
     redis:
       # standalone、sentinel 或 cluster。standalone 支持 API 多副本，但 Redis 仍是单点。
       # FUSE pool 的既有多 key Lua 不支持 Redis Cluster；生产 HA 使用 Sentinel。

@@ -53,3 +53,24 @@ func TestControllerStageMetricUsesBoundedLabels(t *testing.T) {
 		attribute.String("result", "error"),
 	}, histogram.DataPoints[0].Attributes.ToSlice())
 }
+
+func TestCoordinationStageDropsUnboundedLabels(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := SandboxCoordinationStageDuration
+	var err error
+	SandboxCoordinationStageDuration, err = provider.Meter(t.Name()).Float64Histogram("sandbox.coordination.stage.duration")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		SandboxCoordinationStageDuration = previous
+		require.NoError(t, provider.Shutdown(context.Background()))
+	})
+	RecordCoordinationStage(context.Background(), "read", "read", "success", time.Millisecond)
+	RecordCoordinationStage(context.Background(), "sandbox-secret-id", "read", "success", time.Millisecond)
+	var collected metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &collected))
+	histogram := collected.ScopeMetrics[0].Metrics[0].Data.(metricdata.Histogram[float64])
+	require.Len(t, histogram.DataPoints, 1)
+	require.EqualValues(t, 1, histogram.DataPoints[0].Count)
+	require.ElementsMatch(t, []attribute.KeyValue{attribute.String("operation", "read"), attribute.String("stage", "read"), attribute.String("result", "success")}, histogram.DataPoints[0].Attributes.ToSlice())
+}

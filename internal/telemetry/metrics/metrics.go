@@ -339,7 +339,7 @@ func initInstruments() (err error) {
 		return fmt.Errorf("metrics: sandbox_error_total: %w", err)
 	}
 
-	return nil
+	return initCoordinationInstruments()
 }
 
 func Meter() metric.Meter {
@@ -357,6 +357,11 @@ func InitNoop() error {
 // ResetForTest clears selected instruments so registration tests can assert
 // that Init installs every required handle. It must not be used in production.
 func ResetForTest() {
+	SandboxCoordinationStageDuration = nil
+	SandboxCoordinationGroups = nil
+	SandboxCoordinationFallbacks = nil
+	SandboxCoordinationWatchEvents = nil
+	SandboxCoordinationWatchBytes = nil
 	SandboxControllerStageDuration = nil
 	SandboxWorkspacePoolSize = nil
 	SandboxWorkspacePoolAcquire = nil

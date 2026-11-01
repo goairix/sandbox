@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -19,7 +20,9 @@ func (r *ActiveSandboxRepository) ObserveOperations(ctx context.Context, id stri
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
+	started := time.Now()
 	read, err := r.store.client.Get(requestCtx, r.operationPrefix(id), clientv3.WithPrefix(), clientv3.WithCountOnly())
+	r.store.observeCoordinationStage(requestCtx, "observe", "read", err, started)
 	if err != nil {
 		return state.ActiveOperationObservation{}, err
 	}
@@ -48,8 +51,19 @@ func (r *ActiveSandboxRepository) WatchActiveChanges(ctx context.Context, revisi
 		backoff := 100 * time.Millisecond
 		for ctx.Err() == nil {
 			watchCtx, cancel := context.WithCancel(ctx)
-			stream := r.store.client.Watch(watchCtx, prefix, clientv3.WithPrefix(), clientv3.WithRev(next), clientv3.WithProgressNotify())
+			watchStarted := time.Now()
+			stream := r.store.client.Watch(watchCtx, prefix, clientv3.WithPrefix(), clientv3.WithRev(next), clientv3.WithProgressNotify(), clientv3.WithCreatedNotify())
 			for response := range stream {
+				if response.Created {
+					r.store.observeCoordinationStage(ctx, "watch", "stream", nil, watchStarted)
+				}
+				if r.store.coordinationWatchObserver != nil {
+					var bytes int64
+					for _, event := range response.Events {
+						bytes += int64((*mvccpb.Event)(event).Size())
+					}
+					r.store.coordinationWatchObserver(ctx, int64(len(response.Events)), bytes)
+				}
 				if response.Err() != nil {
 					if !send(state.ActiveChangeBatch{Revision: response.CompactRevision, Reset: true}) {
 						cancel()

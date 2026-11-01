@@ -165,3 +165,22 @@ func TestSharedDataDrainKeepsLeaseButClosesAdmission(t *testing.T) {
 	require.Equal(t, state.ActiveSandboxDestroying, got.Record.Phase)
 	require.Positive(t, ttl)
 }
+
+func TestSharedDataObserverCountsActualRPCs(t *testing.T) {
+	s, r, _ := sharedDataFixture(t)
+	var stages [][2]string
+	s.coordinationStageObserver = func(_ context.Context, operation, stage, result string, _ time.Duration) {
+		stages = append(stages, [2]string{operation, stage})
+		require.Equal(t, "success", result)
+	}
+	view, err := r.OpenDataOperation(context.Background(), "shared-sandbox", "observed-token", 30*time.Second)
+	require.NoError(t, err)
+	_, err = r.ReadDataOperation(context.Background(), view.Lease, true)
+	require.NoError(t, err)
+	_, _, err = r.KeepAliveDataOperation(context.Background(), view.Lease)
+	require.NoError(t, err)
+	require.NoError(t, r.EndOperation(context.Background(), view.Lease.Operation))
+	_, err = r.ObserveOperations(context.Background(), "shared-sandbox")
+	require.NoError(t, err)
+	require.Equal(t, [][2]string{{"open", "read"}, {"open", "grant"}, {"open", "commit"}, {"open", "read"}, {"read", "read"}, {"renew", "read"}, {"renew", "keepalive"}, {"end", "read"}, {"end", "read"}, {"end", "commit"}, {"observe", "read"}}, stages)
+}

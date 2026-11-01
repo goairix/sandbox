@@ -92,7 +92,9 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 	var envelope activeEnvelope
 	var revision int64
 	for {
+		readStarted := time.Now()
 		read, err := r.store.client.Get(requestCtx, recordKey)
+		r.store.observeCoordinationStage(requestCtx, "open", "read", err, readStarted)
 		if err != nil || len(read.Kvs) == 0 {
 			return nil, nil, err
 		}
@@ -120,6 +122,7 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 	// after an unknown transaction result it must expire naturally.
 	grantedAt := time.Now()
 	lease, err := r.store.leaseFor(requestCtx, ttl)
+	r.store.observeCoordinationStage(requestCtx, "open", "grant", err, grantedAt)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -148,13 +151,13 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 		envelope.Record.Revision++
 		indexCompares, indexWrites, err := r.lifecycleIndexMutation(&previous, &envelope)
 		if err != nil {
-			_, _ = r.store.client.Revoke(requestCtx, lease)
+			r.store.coordinationRevoke(requestCtx, "open", lease)
 			return nil, nil, err
 		}
 		compares = append(compares, indexCompares...)
 		updated, err := json.Marshal(envelope)
 		if err != nil {
-			_, _ = r.store.client.Revoke(requestCtx, lease)
+			r.store.coordinationRevoke(requestCtx, "open", lease)
 			return nil, nil, err
 		}
 		writes = append(writes,
@@ -162,16 +165,18 @@ func (r *ActiveSandboxRepository) BeginOperation(ctx context.Context, id, token 
 			clientv3.OpPut(recordKey, string(updated)))
 		writes = append(writes, indexWrites...)
 	}
+	commitStarted := time.Now()
 	response, err := r.store.client.Txn(requestCtx).
 		If(compares...).Then(writes...).
 		Else(clientv3.OpGet(recordKey)).Commit()
+	r.store.observeCoordinationCommit(requestCtx, "open", response, err, commitStarted)
 	if err != nil {
 		return nil, nil, err
 	}
 	if response.Succeeded {
 		return &envelope.Record, &operation, nil
 	}
-	_, _ = r.store.client.Revoke(requestCtx, lease)
+	r.store.coordinationRevoke(requestCtx, "open", lease)
 	if len(response.Responses) != 1 || response.Responses[0].GetResponseRange() == nil {
 		return nil, nil, state.ErrActiveSandboxCorrupt
 	}
@@ -216,7 +221,9 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
+	readStarted := time.Now()
 	record, err := r.Load(requestCtx, operation.SandboxID)
+	r.store.observeCoordinationStage(requestCtx, "end", "read", err, readStarted)
 	if err != nil {
 		return err
 	}
@@ -224,7 +231,9 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 		return state.ErrActiveSandboxStaleToken
 	}
 	opKey := r.operationKey(operation.SandboxID, operation.Token)
+	readStarted = time.Now()
 	read, err := r.store.client.Get(requestCtx, opKey)
+	r.store.observeCoordinationStage(requestCtx, "end", "read", err, readStarted)
 	if err != nil || len(read.Kvs) == 0 {
 		return err
 	}
@@ -250,7 +259,9 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 		// its snapshot has no incomplete workspace transition. Destroying
 		// records stay closed while their remaining operations drain.
 		recordKey := r.recordKey(operation.SandboxID)
+		readStarted = time.Now()
 		recordRead, err := r.store.client.Get(requestCtx, recordKey)
+		r.store.observeCoordinationStage(requestCtx, "end", "read", err, readStarted)
 		if err != nil {
 			return err
 		}
@@ -291,8 +302,10 @@ func (r *ActiveSandboxRepository) EndOperation(ctx context.Context, operation st
 			writes = append(writes, indexWrites...)
 		}
 	}
+	commitStarted := time.Now()
 	response, err := r.store.client.Txn(requestCtx).
 		If(compares...).Then(writes...).Commit()
+	r.store.observeCoordinationCommit(requestCtx, "end", response, err, commitStarted)
 	if err != nil {
 		return err
 	}

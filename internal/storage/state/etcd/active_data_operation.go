@@ -21,26 +21,28 @@ func (r *ActiveSandboxRepository) OpenDataOperation(ctx context.Context, id, tok
 	if operation == nil {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
-	return r.readDataOperation(ctx, state.ActiveDataLease{Operation: *operation, RequestedTTL: ttl}, true, true)
+	return r.readDataOperation(ctx, state.ActiveDataLease{Operation: *operation, RequestedTTL: ttl}, true, true, "open")
 }
 
 // ReadDataOperation reads lifecycle and participant at a single authoritative
 // revision. requireActive=false is for draining existing users, not admission.
 func (r *ActiveSandboxRepository) ReadDataOperation(ctx context.Context, lease state.ActiveDataLease, requireActive bool) (*state.ActiveDataView, error) {
-	return r.readDataOperation(ctx, lease, requireActive, false)
+	return r.readDataOperation(ctx, lease, requireActive, false, "read")
 }
 
-func (r *ActiveSandboxRepository) readDataOperation(ctx context.Context, lease state.ActiveDataLease, requireActive, bind bool) (*state.ActiveDataView, error) {
+func (r *ActiveSandboxRepository) readDataOperation(ctx context.Context, lease state.ActiveDataLease, requireActive, bind bool, purpose string) (*state.ActiveDataView, error) {
 	op := lease.Operation
 	if !validActiveID(op.SandboxID) || op.Token == "" || op.Generation <= 0 || op.Kind != state.ActiveOperationData || (!bind && lease.LeaseID == 0) {
 		return nil, state.ErrActiveSandboxStaleToken
 	}
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
+	started := time.Now()
 	read, err := r.store.client.Txn(requestCtx).Then(
 		clientv3.OpGet(r.recordKey(op.SandboxID)),
 		clientv3.OpGet(r.operationKey(op.SandboxID, op.Token)),
 	).Commit()
+	r.store.observeCoordinationStage(requestCtx, purpose, "read", err, started)
 	if err != nil {
 		return nil, err
 	}
@@ -85,16 +87,20 @@ func (r *ActiveSandboxRepository) readDataOperation(ctx context.Context, lease s
 func (r *ActiveSandboxRepository) KeepAliveDataOperation(ctx context.Context, lease state.ActiveDataLease) (*state.ActiveDataView, time.Duration, error) {
 	requestCtx, cancel := r.store.requestContext(ctx)
 	defer cancel()
-	view, err := r.ReadDataOperation(requestCtx, lease, false)
+	view, err := r.readDataOperation(requestCtx, lease, false, false, "renew")
 	if err != nil {
 		return nil, 0, err
 	}
+	started := time.Now()
 	kept, err := r.store.client.KeepAliveOnce(requestCtx, clientv3.LeaseID(lease.LeaseID))
 	if err != nil {
+		r.store.observeCoordinationStage(requestCtx, "renew", "keepalive", err, started)
 		return nil, 0, err
 	}
 	if kept == nil || kept.ID != clientv3.LeaseID(lease.LeaseID) || kept.TTL <= 0 || kept.TTL > int64((1<<63-1)/time.Second) {
+		r.store.observeCoordinationStage(requestCtx, "renew", "keepalive", state.ErrActiveSandboxStaleToken, started)
 		return nil, 0, state.ErrActiveSandboxStaleToken
 	}
+	r.store.observeCoordinationStage(requestCtx, "renew", "keepalive", nil, started)
 	return view, time.Duration(kept.TTL) * time.Second, nil
 }

@@ -55,6 +55,8 @@ func openStateBackend(ctx context.Context, cfg *config.Config) (stateBackend, er
 			return stateBackend{}, err
 		}
 		options.ControllerStageObserver = metrics.RecordControllerStage
+		options.CoordinationStageObserver = metrics.RecordCoordinationStage
+		options.CoordinationWatchObserver = metrics.RecordCoordinationWatch
 		store, err := etcdstate.New(ctx, options)
 		if err != nil {
 			return stateBackend{}, fmt.Errorf("open etcd state: %w", err)

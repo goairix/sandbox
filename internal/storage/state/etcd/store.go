@@ -23,10 +23,12 @@ var (
 // Options identifies one isolated state namespace and bounds each operation.
 // TLS may be nil for a loopback test server; production wiring must supply it.
 type Options struct {
-	Endpoints []string
-	Prefix    string
-	Timeout   time.Duration
-	TLS       *tls.Config
+	CoordinationStageObserver func(context.Context, string, string, string, time.Duration)
+	CoordinationWatchObserver func(context.Context, int64, int64)
+	Endpoints                 []string
+	Prefix                    string
+	Timeout                   time.Duration
+	TLS                       *tls.Config
 
 	// ControllerStageObserver receives only fixed operation, stage, and result
 	// labels. It must not block controller RPCs or record sandbox identifiers.
@@ -37,10 +39,12 @@ type Options struct {
 // Each method uses linearizable reads or a single etcd transaction; errors on
 // writes may mean that the server committed after the caller lost its reply.
 type Store struct {
-	client                  *clientv3.Client
-	prefix                  string
-	timeout                 time.Duration
-	controllerStageObserver func(context.Context, string, string, string, time.Duration)
+	coordinationStageObserver func(context.Context, string, string, string, time.Duration)
+	coordinationWatchObserver func(context.Context, int64, int64)
+	client                    *clientv3.Client
+	prefix                    string
+	timeout                   time.Duration
+	controllerStageObserver   func(context.Context, string, string, string, time.Duration)
 }
 
 var _ state.AtomicStore = (*Store)(nil)
@@ -64,7 +68,9 @@ func New(ctx context.Context, options Options) (*Store, error) {
 	}
 	s := &Store{
 		client: client, prefix: options.Prefix, timeout: options.Timeout,
-		controllerStageObserver: options.ControllerStageObserver,
+		coordinationStageObserver: options.CoordinationStageObserver,
+		coordinationWatchObserver: options.CoordinationWatchObserver,
+		controllerStageObserver:   options.ControllerStageObserver,
 	}
 	requestCtx, cancel := s.requestContext(ctx)
 	defer cancel()

@@ -19,9 +19,9 @@ func TestDNSAdmissionDefaultHelmBaseline(t *testing.T) {
 	docs := render(t, "apparmorLoader.enabled=true")
 	for _, tc := range []struct{ kind, name, want string }{
 		// Chart 0.4.0 pins project images to v0.4.0 and Redis to 7.4.2.
-		// The API fingerprint changes with the FUSE image references; DNS and
-		// probe behavior remain unchanged.
-		{"Deployment", "sandbox-api", "4aeb8f98f842765de48352670305016f6027666a1d12dca5c7be6a1bdbad430f"},
+		// The API template now explicitly disables shared Data operations by default.
+		// DNS, probes and backend identity remain unchanged.
+		{"Deployment", "sandbox-api", "2cf4fb13f786d3be8f296ec2424c0a0bc6ab8255297a0c562355a731837bbff6"},
 		{"DaemonSet", "sandbox-apparmor-loader", "fb01d2373cbbafe16f89622f8e150caebbcc8602b31b1270faf640d7667979dd"},
 		{"StatefulSet", "sandbox-redis", "6c0a694c5d9871218635382139b61c35a030422df11c6635fc1d201cb7f5326e"},
 	} {

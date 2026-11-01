@@ -27,28 +27,20 @@ func (m *Manager) beginDistributedWorkspaceOperation(ctx context.Context, id str
 		return nil, nil, nil, err
 	}
 	opCtx = runtime.WithExactRuntimeRef(opCtx, runtime.RuntimeRef{ID: sb.RuntimeID, UID: sb.RuntimeUID})
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		live, err := m.activeSandboxes.LiveOperations(opCtx, id)
-		if err != nil {
-			release()
-			return nil, nil, nil, err
-		}
-		if live == 1 {
-			if err := m.fenceWorkspaceOperation(opCtx); err != nil {
-				release()
-				return nil, nil, nil, err
-			}
-			return sb, opCtx, release, nil
-		}
-		select {
-		case <-opCtx.Done():
-			release()
-			return nil, nil, nil, context.Cause(opCtx)
-		case <-ticker.C:
-		}
+	operation, ok := opCtx.Value(activeOperationContextKey{}).(state.ActiveSandboxOperation)
+	if !ok {
+		release()
+		return nil, nil, nil, state.ErrActiveSandboxStaleToken
 	}
+	if err := m.waitDistributedOperations(opCtx, id, &operation); err != nil {
+		release()
+		return nil, nil, nil, err
+	}
+	if err := m.fenceWorkspaceOperation(opCtx); err != nil {
+		release()
+		return nil, nil, nil, err
+	}
+	return sb, opCtx, release, nil
 }
 
 func (m *Manager) fenceWorkspaceOperation(ctx context.Context) error {

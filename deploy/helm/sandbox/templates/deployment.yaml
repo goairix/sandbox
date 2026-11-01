@@ -110,6 +110,8 @@ spec:
               value: {{ join "," .Values.config.runtime.kubernetes.podCIDRs | quote }}
             - name: SANDBOX_RUNTIME_KUBERNETES_SERVICE_CIDRS
               value: {{ join "," .Values.config.runtime.kubernetes.serviceCIDRs | quote }}
+            - name: SANDBOX_STORAGE_STATE_SHARED_DATA_OPERATIONS
+              value: {{ .Values.config.storage.state.sharedDataOperations | default false | quote }}
             - name: SANDBOX_STATE_SCOPE
               value: {{ printf "%s/%s" $sandboxNs .Release.Name | quote }}
             - name: SANDBOX_POOL_MIN_SIZE
