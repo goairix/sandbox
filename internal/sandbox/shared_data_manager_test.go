@@ -65,18 +65,42 @@ func (r *sharedManagerRepository) BeginOperation(ctx context.Context, id, token 
 	return v.Record, &v.Lease.Operation, nil
 }
 
-func newSharedManagerTest(t *testing.T, enabled bool) (*Manager, *sharedManagerRepository, *fileV2Runtime) {
+func newSharedManagerTest(t *testing.T, supportsShared bool) (*Manager, *sharedManagerRepository, *fileV2Runtime) {
 	t.Helper()
 	repo := &sharedManagerRepository{sharedDataTestRepository: newSharedDataTestRepository(), snapshotTimeout: time.Hour}
 	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
 	rt.sandboxes["pod"] = &runtime.SandboxInfo{RuntimeID: "pod", RuntimeUID: "uid", State: "running"}
-	m := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repo, InstanceID: "api", SharedDataOperations: enabled})
+	var active state.ActiveSandboxRepository = repo
+	if !supportsShared {
+		active = struct{ state.ActiveSandboxRepository }{repo}
+	}
+	m := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: active, InstanceID: "api"})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, m.Stop(ctx))
 	})
 	return m, repo, rt
+}
+func TestSharedDataManagerAutomaticallySharesWithoutConfiguration(t *testing.T) {
+	repo := &sharedManagerRepository{sharedDataTestRepository: newSharedDataTestRepository(), snapshotTimeout: time.Hour}
+	rt := &fileV2Runtime{mockRuntime: newMockRuntime()}
+	rt.sandboxes["pod"] = &runtime.SandboxInfo{RuntimeID: "pod", RuntimeUID: "uid", State: "running"}
+	m := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repo, InstanceID: "api"})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, m.Stop(ctx))
+	})
+	for range 2 {
+		_, _, release, err := m.beginDistributedOperation(context.Background(), "s", state.ActiveOperationData)
+		require.NoError(t, err)
+		release()
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	require.Equal(t, 1, repo.opens, "ordinary requests must share one participant without a deployment switch")
+	require.Zero(t, repo.ends, "an idle shared participant must remain protected until collection or shutdown")
 }
 func TestSharedDataManagerReadsFreshSnapshot(t *testing.T) {
 	m, r, _ := newSharedManagerTest(t, true)
@@ -110,7 +134,7 @@ func TestSharedDataManagerOnlyCapacityFallsBack(t *testing.T) {
 	require.Equal(t, 1, r.opens, "store failure must not retry on the legacy path")
 	r.mu.Unlock()
 }
-func TestSharedDataManagerDisabledUsesIndividualOperations(t *testing.T) {
+func TestSharedDataManagerUnsupportedRepositoryUsesIndividualOperations(t *testing.T) {
 	m, r, _ := newSharedManagerTest(t, false)
 	for range 2 {
 		_, _, release, err := m.beginDistributedOperation(context.Background(), "s", state.ActiveOperationData)
@@ -148,16 +172,6 @@ func TestSharedDataManagerStopTimeoutKeepsProtection(t *testing.T) {
 	require.Zero(t, r.ends)
 	r.mu.Unlock()
 	release()
-}
-func TestSharedDataManagerNoCapabilityKeepsLegacyPath(t *testing.T) {
-	m, r, _ := newSharedManagerTest(t, false)
-	// Hide optional capabilities without changing the authoritative repository.
-	m.activeSandboxes = struct{ state.ActiveSandboxRepository }{r}
-	m.config.SharedDataOperations = true
-	_, _, release, err := m.beginDistributedOperation(context.Background(), "s", state.ActiveOperationData)
-	require.NoError(t, err)
-	release()
-	require.Nil(t, m.sharedData)
 }
 func TestSharedDataManagerHealthDuringShutdownRejected(t *testing.T) {
 	m, _, _ := newSharedManagerTest(t, true)

@@ -58,7 +58,7 @@ func coordinationEndpoints(t testing.TB) []string {
 	}
 	return strings.Split(raw, ",")
 }
-func newCoordinationEtcdFixture(t testing.TB, shared ...bool) *coordinationEtcdFixture {
+func newCoordinationEtcdFixture(t testing.TB, supportsShared ...bool) *coordinationEtcdFixture {
 	t.Helper()
 	ctx := context.Background()
 	costs := &coordinationCosts{}
@@ -70,8 +70,14 @@ func newCoordinationEtcdFixture(t testing.TB, shared ...bool) *coordinationEtcdF
 	client, err := clientv3.New(clientv3.Config{Endpoints: coordinationEndpoints(t), DialTimeout: 3 * time.Second})
 	require.NoError(t, err)
 	f := &coordinationEtcdFixture{store: store, repo: repo, client: client, prefix: prefix, rt: newSharedPoolRuntime(), costs: costs}
-	for i, enabled := range shared {
-		f.managers = append(f.managers, NewManager(f.rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repo, SharedDataOperations: enabled, InstanceID: fmt.Sprintf("api-%d", i)}))
+	for i, capable := range supportsShared {
+		var active state.ActiveSandboxRepository = repo
+		if !capable {
+			// Model older/unsupported repositories for mixed-version and baseline tests,
+			// without a production configuration switch.
+			active = struct{ state.ActiveSandboxRepository }{repo}
+		}
+		f.managers = append(f.managers, NewManager(f.rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: active, InstanceID: fmt.Sprintf("api-%d", i)}))
 	}
 	t.Cleanup(func() {
 		for _, m := range f.managers {
@@ -255,7 +261,7 @@ func TestSharedDataEtcdCrashProcessChild(t *testing.T) {
 	require.NoError(t, err)
 	rt := newMockRuntime()
 	rt.sandboxes["pod-s"] = &runtime.SandboxInfo{RuntimeID: "pod-s", RuntimeUID: "uid-s", State: "running"}
-	m := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repo, SharedDataOperations: true, ActiveOperationTTL: 2 * time.Second, InstanceID: "crash-child"})
+	m := NewManager(rt, nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: repo, ActiveOperationTTL: 2 * time.Second, InstanceID: "crash-child"})
 	_, _, _, err = m.beginDistributedOperation(context.Background(), "s", state.ActiveOperationData)
 	require.NoError(t, err)
 	fmt.Println("COORDINATION_READY")

@@ -101,9 +101,9 @@ Watch 没有有界到达延迟且不是线性一致读，因此只能通知，�
 
 共享记录仍是原 Data operation，LiveOperations 计数表示存活参与者而非 HTTP 请求数量。当前销毁和独占主要依赖零/唯一性，但必须用测试覆盖旧版实例与新版共享实例混跑，不能仅凭格式相同认定兼容。组的 KeepAlive 不改变原 token，旧版计数及精确删除应保持有效；持久 ExpiresAt 兼容检查是启用条件。
 
-新增一个默认关闭、可部署配置的 `sharedDataOperations` 开关，贯穿配置与 Helm。通过下述验证后才评估默认开启。关闭开关或滚回旧镜像时，既有新版进程先关准入、排空再退出；不得手工清空 etcd key 或把旧组 token 交给新进程接管。单实例灰度期间其余实例继续使用原路径。
+用户在 DS、CCE 实测后明确当前尚未上生产、按全新安装交付，要求不增加配置。因此不保留独立开关：Kubernetes + 具备两项可选能力的 etcd 仓库自动使用共享路径，其它后端保留原实现；容量不足仍回退到独立 operation。回退旧 API 镜像时，既有新版进程先关准入、排空再退出；不得手工清空 etcd key 或把旧组 token 交给新进程接管。历史实测中的开关仅说明当时的对照方法。
 
-本轮实现单位为组 registry/gate、etcd 可选能力、共享 Watch/等待分发和配置接线。后台生命周期扫描、配额、FUSE pool、workspace owner 的协议与 TTL 不作顺手重构。仅测量其基线成本；若其成为主要负载，另立有数据依据的优化项。
+本轮实现单位为组 registry/gate、etcd 可选能力、共享 Watch/等待分发和自动能力选择。后台生命周期扫描、配额、FUSE pool、workspace owner 的协议与 TTL 不作顺手重构。仅测量其基线成本；若其成为主要负载，另立有数据依据的优化项。
 
 ## 验收与测量
 
@@ -116,7 +116,7 @@ Watch 没有有界到达延迟且不是线性一致读，因此只能通知，�
 3. 单请求取消不影响同组；远端 Close 未 join 时组记录不可提前释放。
 4. 进程暂停/崩溃、网络分区、续期结果未知、Lease 删除、Generation/RuntimeUID 更换；旧 token 不复活、不删除后继。
 5. Watch 断线、压缩、缓冲溢出、长时间无通知，最终通过权威复核推进，读取失败保持关闭。
-6. graceful shutdown、旧新格式混跑、开关关闭及镜像回滚；持续流量下没有组记录泄漏。
+6. graceful shutdown、旧新格式混跑、自动能力选择及镜像回滚；持续流量下没有组记录泄漏。
 
 性能报告分别列出业务请求和后台任务的 RPC、读事务、KV 写入、Grant/Revoke/KeepAlive、watch 数量与字节量、活跃组/Lease/key 数、DB 增长，以及 API/etcd p50/p95/p99。指标不以 SandboxID/token 做高基数标签。
 

@@ -96,10 +96,9 @@ type StorageConfig struct {
 
 // StateStorageConfig holds state storage settings.
 type StateStorageConfig struct {
-	SharedDataOperations bool        `mapstructure:"shared_data_operations"`
-	Backend              string      `mapstructure:"backend"`
-	Redis                RedisConfig `mapstructure:"redis"`
-	Etcd                 EtcdConfig  `mapstructure:"etcd"`
+	Backend string      `mapstructure:"backend"`
+	Redis   RedisConfig `mapstructure:"redis"`
+	Etcd    EtcdConfig  `mapstructure:"etcd"`
 
 	// redisExplicit records source configuration, since Redis defaults must
 	// not make an etcd-only deployment appear to request both backends.
@@ -1056,7 +1055,6 @@ func setDefaults(v *viper.Viper) {
 	// Storage state backend. Redis remains the legacy default until the new
 	// deployment explicitly selects etcd.
 	v.SetDefault("storage.state.backend", "redis")
-	v.SetDefault("storage.state.shared_data_operations", false)
 	v.SetDefault("storage.state.etcd.endpoints", []string{})
 	v.SetDefault("storage.state.etcd.prefix", "")
 	v.SetDefault("storage.state.etcd.timeout_ms", 3000)

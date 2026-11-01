@@ -19,17 +19,17 @@ import (
 // or Kubernetes exec latency claims.
 func BenchmarkSharedDataCoordination(b *testing.B) {
 	for _, scenario := range []string{"one_hot", "many_cold", "long_stream", "mixed_replicas"} {
-		for _, enabled := range []bool{false, true} {
+		for _, capable := range []bool{false, true} {
 			name := "legacy"
-			if enabled {
+			if capable {
 				name = "shared"
 			}
 			b.Run(scenario+"/"+name, func(b *testing.B) {
-				flags := []bool{enabled}
+				capabilities := []bool{capable}
 				if scenario == "mixed_replicas" {
-					flags = append(flags, enabled)
+					capabilities = append(capabilities, capable)
 				}
-				f := newCoordinationEtcdFixture(b, flags...)
+				f := newCoordinationEtcdFixture(b, capabilities...)
 				ids := []string{"s"}
 				if scenario == "many_cold" {
 					for i := 1; i < 2048; i++ {
@@ -161,7 +161,7 @@ func BenchmarkSharedDataCoordination(b *testing.B) {
 						m.sharedData.mu.Unlock()
 					}
 				}
-				detail := map[string]any{"scenario": scenario, "shared": enabled, "operations": b.N, "concurrency_limit": 64, "offered_rate": 160, "inflight_peak": peak.Load(), "elapsed_seconds": time.Since(runStarted).Seconds(), "managers": len(f.managers), "stages": stages, "watch_events": f.costs.watchEvents.Load() - eventsBefore, "watch_event_bytes": f.costs.watchBytes.Load() - bytesBefore, "groups_end": groups, "keys_end": keys.Count, "cluster_leases_end": len(leases.Leases), "db_size_delta": statusAfter.DbSize - statusBefore.DbSize, "db_inuse_delta": statusAfter.DbSizeInUse - statusBefore.DbSizeInUse}
+				detail := map[string]any{"scenario": scenario, "shared": capable, "operations": b.N, "concurrency_limit": 64, "offered_rate": 160, "inflight_peak": peak.Load(), "elapsed_seconds": time.Since(runStarted).Seconds(), "managers": len(f.managers), "stages": stages, "watch_events": f.costs.watchEvents.Load() - eventsBefore, "watch_event_bytes": f.costs.watchBytes.Load() - bytesBefore, "groups_end": groups, "keys_end": keys.Count, "cluster_leases_end": len(leases.Leases), "db_size_delta": statusAfter.DbSize - statusBefore.DbSize, "db_inuse_delta": statusAfter.DbSizeInUse - statusBefore.DbSizeInUse}
 				encoded, _ := json.Marshal(detail)
 				b.Logf("COORDINATION_COSTS %s", encoded)
 			})

@@ -35,7 +35,7 @@ func newOperationWaitTest(t *testing.T) (*Manager, *operationWaitTestRepository)
 	t.Helper()
 	r := &operationWaitTestRepository{sharedManagerRepository: &sharedManagerRepository{sharedDataTestRepository: newSharedDataTestRepository()}, events: make(chan state.ActiveChangeBatch, 1)}
 	r.count.Store(2)
-	m := NewManager(newMockRuntime(), nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: r, SharedDataOperations: true})
+	m := NewManager(newMockRuntime(), nil, nil, ManagerConfig{RuntimeType: "kubernetes", ActiveSandboxes: r})
 	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
 	return m, r
 }

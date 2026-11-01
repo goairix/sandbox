@@ -1,5 +1,7 @@
 # etcd 请求协调优化验收记录
 
+> 当前交付修订：DS、CCE 实测后，用户确认尚未上生产并计划全新安装，要求去除额外配置。当前代码根据 Kubernetes 运行时与 etcd 仓库能力自动选择共享协调，不保留 values、原生配置、环境变量或 Manager 开关。下文默认关闭、灰度开关与 `76fe3252` 的测试数据为历史记录；当前安装方式以生产部署文档为准。
+
 日期：2026-11-01。设计与实现计划已获确认。功能基线为 `7cad09a5`，按任务提交 `b64e504d`、`36197efb`、`e5ac1ce2`、`8bc88d71`、`1a3fe840`；本报告同一提交包含最终故障测试及续期 RPC 期限修正。本地验收时镜像未构建发布，生产未部署。后续 DS、CCE 独立测试镜像及实测结果见文末补充。
 
 ## 结果与适用范围
@@ -99,11 +101,11 @@ bash scripts/test-helm-chart.sh
 
 终止该专用测试后，改为相同 160 req/s 提供速率、64-worker 上限、固定 10000 请求，使每条路径运行约 62.5s（不少于 60s）。保持资源限制，未通过提高配额掩盖失败。该选择用于比较健康路径成本，未测绝对饱和点。
 
-## 灰度与回退
+## 当前安装与回退
 
-按 [生产部署文档](../../deployment/helm-production.md#共享-data-operation-协调优化) 构建新的明确 API tag，并在独立环境补齐 Kubernetes 远端隔离验证。然后用单实例灰度 API、相同 state scope 和已有 etcd，对比新旧混跑；开关默认关闭。
+用户确认尚未上生产、将全新安装，当前交付已移除新增开关。按 [生产部署文档](../../deployment/helm-production.md#共享-data-operation-协调优化) 从当前代码构建新的明确 API tag；Kubernetes + etcd 具备共享能力时自动使用优化路径，正常安装不添加额外配置。
 
-关闭灰度时先停新准入，等待 helper Close/join 后正常退出，再关闭开关或回滚镜像。不删 owner/operation key、不清 PVC、不在 etcd 不可用时自动改用 Redis。若远端隔离无法证明，保持开关关闭并单独处理，不将本报告当作生产开启批准。
+回退旧 API 镜像前，先停止新准入，等待 helper Close/join 后正常退出。不删 owner/operation key、不清 PVC、不在 etcd 不可用时自动改用 Redis。DS、CCE 的实测覆盖范围和未验证项仍按后文记录，不把自动选择误写成已验证所有远端故障。
 
 ## 执行取舍
 
@@ -129,3 +131,14 @@ bash scripts/test-helm-chart.sh
 随后在 CCE 的 `sandbox-fuse-etcd` 完成同样的独立 API 实测：201 次热 List 的协调 RPC 为 1206→207，窗口内 KV 写事务为 402→0；真实文件接口、新旧 API 读取、阻塞上传取消、API 崩溃、选择性 API→etcd 断连及 PVC etcd follower 重建均完成成功验证。follower 重建期间 37 次 List 无失败，member ID 与磁盘 PVC 绑定保持一致。
 
 CCE 的旧运行时缺少 v2 helper，测试 API 使用独立版本池及 DS 已验运行时的明确预发布 tag，原 API 镜像未变。NetworkPolicy 注入曾因遗漏集群内 API 5444 端口、以及 20 秒生效等待不足而未通过；独立诊断观察到约 31 秒的策略传播，调整测试器后成功确认仅 etcd 被阻断，再验证 503、远端 helper 退出与恢复。失败尝试、完整方法及清理证据见 [CCE 实测报告](../../testing/2026-11-01-cce-etcd-operation-coordination.md)。临时资源与独立测试数据已清理；原 release 未升级，完整节点分区等生产准入条件仍未全部覆盖。
+
+## 移除交付配置的回归验证（2026-11-01）
+
+按用户新的交付要求，删除 `ManagerConfig` 开关、配置字段/Viper 默认值、示例 YAML、入口接线及 Helm values/Deployment 环境变量；没有替换成另一个配置。Manager 直接根据 Kubernetes 与仓库可选能力选择共享路径，算法、租约、运行时协议及容量回退不变。对照基准和新旧混跑测试通过测试侧隐藏可选仓库能力保留原路径样本，不在产品中保留关闭入口。
+
+- `TestSharedDataManagerAutomaticallySharesWithoutConfiguration` 先在旧代码观察到两次注册而非预期的一次，再在自动选择后通过；Helm 无额外开关的渲染回归也先失败后通过。
+- `go test ./...`、`go vet ./...`、`go test -tags helmtests ./internal/helmtest`、`bash scripts/test-helm-chart.sh` 均通过。基准测试变量重命名时首次 vet 发现 `shared_data_bench_test.go` 的遗留 `enabled` 引用，修正后重新执行全套 Go 测试与 vet 通过。
+- `bash scripts/test-etcd-operation-coordination.sh safety` 在专用三成员 etcd 上执行 race/故障测试通过，包括混合仓库能力、销毁/独占排空、真实进程崩溃、单成员/多数派故障、Watch 与 1024 组容量回退；仅父进程中的 crash child 按预期跳过，脚本会拒绝其它 SKIP。
+- 全新默认行为的源代码与本地测试已更新；本轮未重新构建或发布 API 镜像，DS、CCE 的镜像实测仍对应上文 `76fe3252`，不能把历史测试 tag 当作本次交付镜像。
+
+本轮私有测试日志保存在忽略目录 `var/tmp/etcd-coordination-no-config-tests.log` 与 `var/tmp/etcd-coordination-no-config-safety.log`，不提交运行环境或认证材料。

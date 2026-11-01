@@ -129,7 +129,6 @@ type ManagerConfig struct {
 	InstanceID              string
 	ControllerTTL           time.Duration
 	ControllerRenewInterval time.Duration
-	SharedDataOperations    bool
 	ActiveOperationTTL      time.Duration
 	OperationRenewInterval  time.Duration
 	RuntimeType             string
@@ -248,7 +247,7 @@ func NewManager(rt runtime.Runtime, fsys fs.FileSystem, fsMeta *storage.FileSyst
 		cancelControl:   cancelControl,
 		cleanupWake:     make(chan string, activeCleanupWakeQueueSize),
 	}
-	if cfg.SharedDataOperations && m.distributedStateEnabled() {
+	if m.distributedStateEnabled() {
 		data, dataOK := m.activeSandboxes.(state.ActiveDataOperationRepository)
 		changes, changesOK := m.activeSandboxes.(state.ActiveChangeRepository)
 		if dataOK && changesOK {

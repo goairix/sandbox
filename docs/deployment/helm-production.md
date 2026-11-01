@@ -481,25 +481,16 @@ helm lint "$CHART" -f "$CHART/values-production.yaml" \
 
 ## 共享 Data operation 协调优化
 
-此功能需要使用包含共享 Data operation 实现的新 API 镜像。本文原有 `v0.4.0` 镜像不包含该实现；先将本次代码构建、发布为全新的明确 tag，再在环境 values 中配置对应 `image.tag`。本次代码修改未发布镜像。
+Kubernetes + etcd 自动使用共享 Data operation 协调路径，不需要额外的 values、原生配置或环境变量。Manager 根据运行时和仓库能力选择实现；Redis、Docker 和不支持共享能力的仓库保留原路径。此优化不改变 backend identity，也不触发 etcd/PVC 迁移。
 
-开关默认关闭：
+需从当前代码构建并发布新的明确 API 镜像 tag，再在环境 values 中配置 `image.tag`。本文原有 `v0.4.0` API 镜像不包含本次实现。已有运行时支持 v2 文件 helper 时，本次优化只需更换 API 镜像；旧运行时缺少 helper 的环境，使用 v2 文件接口时仍需同步更新运行时。
 
-```yaml
-config:
-  storage:
-    state:
-      sharedDataOperations: false
-```
+每个 API 实例与沙盒共享一个 Data 使用记录，默认 TTL 30s、约每 10s 维护，最后一个请求结束后空闲保留 15s。本实例最多保留 1024 个组，超限请求使用原独立 operation。普通请求仍做一次权威只读事务和原有运行时 UID 校验；状态修改与工作区独占继续使用各自的事务。etcd 不可用或身份校验失败时拒绝准入，不用回退路径绕过错误。
 
-对应原生配置为 `storage.state.shared_data_operations`，环境变量为 `SANDBOX_STORAGE_STATE_SHARED_DATA_OPERATIONS`。仅 Kubernetes + 支持可选能力的 etcd 仓库使用新路径；Redis、Docker 和不支持该能力的仓库保留原实现。开关不改变 backend identity，也不触发 etcd/PVC 迁移。
-
-开启后，每个 API 实例与沙盒共享一个 Data 使用记录，默认 TTL 30s、约每 10s 维护，最后一个请求结束后空闲保留 15s。本实例最多保留 1024 个组，超限请求使用原独立 operation。普通请求仍做一次权威只读事务和原有运行时 UID 校验；状态修改与工作区独占继续使用各自的事务。
-
-在独立测试环境完成 [验收报告](../superpowers/reports/2026-11-01-etcd-operation-coordination.md) 中的真实 Kubernetes exec/断连隔离验证后，再将单个 API 实例的该环境变量设为 `true` 做灰度；保留其他实例的 `false`，观察多副本混跑。Helm 的这个 values 开关作用于 Deployment 中全部副本。单实例灰度使用独立 API Deployment（replicas=1）和仅匹配该 Deployment 的测试 Service，selector 与主 Deployment 不重叠；从现有应用复制后端连接、凭据引用、运行时配置及 `SANDBOX_STATE_SCOPE`，仅为新实例设置开关和新的 API 镜像 tag。先通过测试 Service 定向访问灰度实例。灰度不安装第二套内置 etcd，不能使用一个新 release 自动生成的不同 state scope。
+[验收报告](../superpowers/reports/2026-11-01-etcd-operation-coordination.md) 及 DS、CCE 记录保留了原先通过开关作对照的测试方法；该开关已按当前交付要求删除，不能再按历史报告配置它。后续全新安装使用当前代码构建的 API 镜像即自动生效。
 
 关注 `sandbox.coordination.stage.duration` 的 operation/stage/result：Data 热请求应主要为 `read/read`，每请求 open/end 写事务减少，renew 与 KeepAlive 按活跃组摊销。`sandbox.coordination.groups`、`sandbox.coordination.fallbacks`、`sandbox.coordination.watch.events`、`sandbox.coordination.watch.bytes` 用于识别组数量、容量回退和 Watch 放大。Controller 指标仍单独统计；Watch 通知量不等于 RPC 数，事务数也不等于总 Raft 工作量。
 
 低频或只访问一次的沙盒未必收益，须同时对比请求 p95/p99、Grant/KeepAlive、KV 写事务、DB 增长和后台维护。Watch 仅触发核实；销毁和独占最终仍由权威读取及既有 fencing 决定。
 
-回退时先停止向灰度实例发送新请求，进入正常 shutdown 并等待文件流和 helper Close/join；再将开关改回 `false`，或按正常应用滚动回退流程部署旧镜像。Stop 超时、客户端断连或租约过期都不能直接证明远端 helper 已停止；保留失败信息并按原有恢复流程处理。不要手工删除 operation/owner 等 etcd key，也不要清空 PVC 来加速排空。
+如需回退，停止向待回退实例发送新请求，进入正常 shutdown 并等待文件流和 helper Close/join，再按正常应用滚动回退流程部署旧 API 镜像。Stop 超时、客户端断连或租约过期都不能直接证明远端 helper 已停止；保留失败信息并按原有恢复流程处理。不要手工删除 operation/owner 等 etcd key，也不要清空 PVC 来加速排空。

@@ -321,8 +321,7 @@ func main() {
 	}
 
 	managerConfig := sandbox.ManagerConfig{
-		SharedDataOperations: cfg.Storage.State.SharedDataOperations,
-		RuntimeType:          cfg.Runtime.Type,
+		RuntimeType: cfg.Runtime.Type,
 		PoolConfig: sandbox.PoolConfig{
 			MinSize:        cfg.Pool.MinSize,
 			MaxSize:        cfg.Pool.MaxSize,
