@@ -58,6 +58,6 @@ if [[ "$mode" == safety ]]; then
     printf 'unexpected skipped acceptance test\n' >&2;exit 1
   fi
 else
-  go test ./internal/sandbox -run '^$' -bench '^BenchmarkSharedDataCoordination$' \
+  go test ./internal/sandbox -run '^$' -bench "${COORDINATION_BENCH_FILTER:-^BenchmarkSharedDataCoordination$}" \
     -benchtime=10000x -count=1 -timeout=30m
 fi

@@ -294,5 +294,86 @@
         "write-txn/op": 0.0
       }
     }
-  ]
+  ],
+  "post_review_results": [
+    {
+      "cluster_leases_end": 1,
+      "concurrency_limit": 64,
+      "db_inuse_delta": 12288,
+      "db_size_delta": 8192,
+      "elapsed_seconds": 62.500850708,
+      "groups_end": 1,
+      "inflight_peak": 7,
+      "keys_end": 4,
+      "managers": 1,
+      "offered_rate": 160,
+      "operations": 10000,
+      "scenario": "one_hot",
+      "shared": true,
+      "stages": {
+        "open/commit/success": 0,
+        "open/grant/success": 0,
+        "open/read/success": 0,
+        "read/read/success": 10000,
+        "renew/keepalive/success": 7,
+        "renew/read/success": 6,
+        "watch/stream/success": 0
+      },
+      "watch_event_bytes": 0,
+      "watch_events": 0,
+      "metrics": {
+        "ns/op": 6249514.0,
+        "grant/op": 0.0,
+        "keepalive/op": 0.0007,
+        "p50-ms": 0.8596,
+        "p95-ms": 1.327,
+        "p99-ms": 2.321,
+        "rpc/op": 1.001,
+        "write-txn/op": 0.0
+      }
+    },
+    {
+      "cluster_leases_end": 3794,
+      "concurrency_limit": 64,
+      "db_inuse_delta": 4325376,
+      "db_size_delta": 4325376,
+      "elapsed_seconds": 62.6063005,
+      "groups_end": 1024,
+      "inflight_peak": 64,
+      "keys_end": 7168,
+      "managers": 1,
+      "offered_rate": 160,
+      "operations": 10000,
+      "scenario": "many_cold",
+      "shared": true,
+      "stages": {
+        "end/commit/success": 4880,
+        "end/read/success": 9760,
+        "open/commit/success": 5904,
+        "open/grant/success": 5904,
+        "open/read/success": 6928,
+        "read/read/success": 5120,
+        "renew/keepalive/success": 6626,
+        "renew/read/success": 6627,
+        "watch/stream/success": 0
+      },
+      "watch_event_bytes": 3110294,
+      "watch_events": 10784,
+      "metrics": {
+        "ns/op": 6258010.0,
+        "grant/op": 0.5904,
+        "keepalive/op": 0.6626,
+        "p50-ms": 3.197,
+        "p95-ms": 26.96,
+        "p99-ms": 351.2,
+        "rpc/op": 5.175,
+        "write-txn/op": 1.078
+      }
+    }
+  ],
+  "post_review_watch_source_sha256": "72ec7bbd6341bd64ce80f490aa3650a89d19380cb5de30aa2d4218325a93fa0d",
+  "watch_limits": {
+    "response_bytes": 4194304,
+    "response_events": 4096
+  }
 }

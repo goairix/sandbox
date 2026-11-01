@@ -8,8 +8,16 @@ import (
 	"time"
 
 	"github.com/goairix/sandbox/internal/storage/state"
-	"go.etcd.io/etcd/api/v3/mvccpb"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	maxActiveWatchBytes  = 4 << 20
+	maxActiveWatchEvents = 4096
 )
 
 var _ state.ActiveChangeRepository = (*ActiveSandboxRepository)(nil)
@@ -40,6 +48,9 @@ func (r *ActiveSandboxRepository) WatchActiveChanges(ctx context.Context, revisi
 	go func() {
 		defer close(out)
 		send := func(batch state.ActiveChangeBatch) bool {
+			if ctx.Err() != nil {
+				return false
+			}
 			select {
 			case out <- batch:
 				return true
@@ -52,24 +63,58 @@ func (r *ActiveSandboxRepository) WatchActiveChanges(ctx context.Context, revisi
 		for ctx.Err() == nil {
 			watchCtx, cancel := context.WithCancel(ctx)
 			watchStarted := time.Now()
-			stream := r.store.client.Watch(watchCtx, prefix, clientv3.WithPrefix(), clientv3.WithRev(next), clientv3.WithProgressNotify(), clientv3.WithCreatedNotify())
-			for response := range stream {
+			// Consume the generated RPC directly. clientv3.Watch has an
+			// unbounded per-watch response buffer even with a bounded output
+			// queue; direct Recv preserves HTTP/2 flow control under backpressure.
+			stream, streamErr := pb.NewWatchClient(r.store.client.ActiveConnection()).Watch(watchCtx, grpc.MaxCallRecvMsgSize(maxActiveWatchBytes))
+			if streamErr == nil {
+				streamErr = stream.Send(&pb.WatchRequest{RequestUnion: &pb.WatchRequest_CreateRequest{CreateRequest: &pb.WatchCreateRequest{Key: []byte(prefix), RangeEnd: []byte(clientv3.GetPrefixRangeEnd(prefix)), StartRevision: next, ProgressNotify: true}}})
+			}
+			created := false
+			resetRevision := int64(0)
+			for streamErr == nil && ctx.Err() == nil {
+				var response *pb.WatchResponse
+				response, streamErr = stream.Recv()
+				if streamErr != nil {
+					if status.Code(streamErr) == codes.ResourceExhausted {
+						next = 0
+					}
+					break
+				}
+				if response.Header == nil || response.Fragment || len(response.Events) > maxActiveWatchEvents {
+					next = 0
+					break
+				}
+				valid := true
+				for _, event := range response.Events {
+					if event == nil || event.Kv == nil {
+						valid = false
+						break
+					}
+				}
+				if !valid {
+					next = 0
+					break
+				}
 				if response.Created {
+					created = true
 					r.store.observeCoordinationStage(ctx, "watch", "stream", nil, watchStarted)
+					// A current-revision watch must remember its creation
+					// revision before its first event, so reconnect cannot skip it.
+					if next == 0 {
+						next = max(1, response.Header.Revision)
+					}
 				}
 				if r.store.coordinationWatchObserver != nil {
 					var bytes int64
 					for _, event := range response.Events {
-						bytes += int64((*mvccpb.Event)(event).Size())
+						bytes += int64(event.Size())
 					}
 					r.store.coordinationWatchObserver(ctx, int64(len(response.Events)), bytes)
 				}
-				if response.Err() != nil {
-					if !send(state.ActiveChangeBatch{Revision: response.CompactRevision, Reset: true}) {
-						cancel()
-						return
-					}
-					if response.CompactRevision > 0 {
+				if response.Canceled {
+					resetRevision = response.CompactRevision
+					if resetRevision > 0 {
 						next = 0
 					}
 					break
@@ -113,16 +158,19 @@ func (r *ActiveSandboxRepository) WatchActiveChanges(ctx context.Context, revisi
 					next = rev + 1
 					start = end
 				}
-				if response.IsProgressNotify() && response.Header.Revision >= next {
+				if !response.Created && len(response.Events) == 0 && response.Header.Revision >= next {
 					next = response.Header.Revision + 1
 				}
+			}
+			if !created && streamErr != nil {
+				r.store.observeCoordinationStage(ctx, "watch", "stream", streamErr, watchStarted)
 			}
 			cancel()
 			if ctx.Err() != nil {
 				return
 			}
 			// Stream closure may have skipped a notification; consumers reread.
-			if !send(state.ActiveChangeBatch{Reset: true}) {
+			if !send(state.ActiveChangeBatch{Revision: resetRevision, Reset: true}) {
 				return
 			}
 			timer := time.NewTimer(backoff + time.Duration(rand.Int64N(int64(backoff/10)+1)))
